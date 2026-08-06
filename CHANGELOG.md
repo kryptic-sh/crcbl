@@ -37,22 +37,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   bindings for it); `crcbl-wgpu`, `crcbl-mtl` and `crcbl-dx12` answer `Unknown`
   and document what their platform would need to do better.
 
-  **The engine reads it, and a run's log now says what the display was doing.**
+  **The engine reads it once, at start-up, and paces on the answer.**
   `GpuContextDesc::default()` asks for `Features::PRESENT_TIMING` beside
   `PRESENT_FEEDBACK`, so the extension chain is negotiated on a device that has
-  it, and `GpuContext::submit_and_present` queries after every present — after,
-  because the platform may report nothing until an image has been presented. The
-  observation is logged at `info` **when it changes**, on a line beginning
-  `hal: display timing `, so a panel dropping to 48 Hz under power saving shows
-  up in the log of any game built on the engine and a steady one costs a single
-  line. A rebuilt swapchain — any resize, mode change or out-of-date present —
-  forgets the last observation, so the first reading after it is reported again
-  rather than a stale panel being claimed. A failed query degrades to `Unknown`
-  and a `debug` line; it never fails a frame that has already been presented.
+  it, and `GpuContext::submit_and_present` queries after its **first** present —
+  after, because the platform may report nothing until an image has been
+  presented; once, because a driver that only ever answers `Unknown` would
+  otherwise be asked again every frame for the life of the process. The outcome
+  is one `info` line beginning `hal: display timing `, naming all three of what
+  was asked, what the display reported and what is in force
+  (`hal: display timing Unknown; asked for Auto, pacing Vsync`), so "asked for
+  `Auto` and the display said `Variable`" is distinguishable in a log from
+  "asked for `Adaptive`". A failed query degrades to `Unknown` and a `debug`
+  line; it never fails a frame that has already been presented. Resizes,
+  display-mode changes and out-of-date presents do **not** re-run it — a window
+  dragged onto a VRR monitor keeps the pacing it started with until the game
+  asks for another.
 
-  **`Pacing` is unchanged.** `Pacing::Adaptive` is still a request that picks a
-  present mode, the default is still `Pacing::Vsync`, and nothing switches
-  pacing on the strength of a reported `DisplayTiming::Variable`.
+- **`Pacing::Auto`, and games can switch pacing at runtime.**
+  `GpuContext::set_pacing(Pacing)` changes how frames are paced mid-run,
+  rebuilding the swapchain **only** when the present mode it resolves to differs
+  from the one presenting — so a settings screen that re-applies every value on
+  every apply costs nothing. `GpuContext::pacing()` reports what was asked for
+  and `GpuContext::effective_pacing()` what is actually in force (never `Auto`),
+  because a caller that asked for `Auto` and got vsync needs to tell that from
+  having asked for vsync. A failed switch rolls both of them and the swapchain's
+  mode back together, leaving the context usable on the pacing it already had.
 
 - **The demo site is served cross-origin isolated, and the browser gate asserts
   it.** `web/tools/serve.mjs` is a new static server that sends
@@ -1188,6 +1198,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   platform has a Vulkan device — `docs/plan/ROADMAP.md` schedules it for P14.
 
 ### Changed
+
+- **Breaking: `Pacing` has a fourth variant and a new default.** `Pacing::Auto`
+  is now `Pacing::default()`; `Pacing::Vsync` is not. Any `match` on `Pacing`
+  must gain an arm, and — the quieter half — **every caller that took
+  `GpuContextDesc::default()` has changed behaviour without changing a line**:
+  such a context now opens on vsync, asks the display once after its first
+  present, and rebuilds itself onto the adaptive present mode if the display
+  reports `DisplayTiming::Variable` or `Stepped`. `Fixed`, `Unknown` and a
+  failed query all stay on vsync, which is what every machine this repo can test
+  on reports.
+
+  **A caller that wants the old behaviour writes `pacing: Pacing::Vsync`** in
+  its `GpuContextDesc` (or calls `set_pacing(Pacing::Vsync)`): a concrete
+  `Vsync`, `Adaptive` or `Off` is never overridden by the observation, which
+  refines `Auto` and nothing else. `Pacing::Auto.preferences()` is the vsync
+  list — the swapchain genuinely opens on `Fifo`, because the present mode is
+  chosen before any present exists and `VK_EXT_present_timing` is specified to
+  report nothing until one has — so `Auto` and `Vsync` differ in what happens
+  after the first present, not before it.
 
 - **`crcbl_hal::ShaderModuleDesc` gained a `dxil` field**, and
   `crcbl_hal::ShaderSources` a matching `DXIL` bit. It is `Option<&'a [u8]>` — a

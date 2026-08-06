@@ -209,7 +209,7 @@ path was NOT exercised, only the absent-capability path" >&2
     #
     # **The assertion is that the engine asked, not what it heard.**
     # "present timing enabled" only says the extension chain was negotiated;
-    # the engine's own line is printed from `observe_display_timing`, after a
+    # the engine's own line is printed from `settle_pacing`, after the first
     # present, so it is there only if the query really reached the device. It is
     # absent the moment the engine goes back to never calling `display_timing`,
     # which is the state this check exists to stop returning.

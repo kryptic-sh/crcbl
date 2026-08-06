@@ -352,21 +352,35 @@ pub enum FrameOutcome {
 /// frame limiter is staying inside the panel's range.
 ///
 /// Which mode is actually running is a separate question, and it is one the
-/// engine now answers: [`GpuContext`] asks [`Device::display_timing`] after
-/// every present and logs the [`DisplayTiming`] whenever it changes, so a
-/// run's log says what the panel was really doing rather than what was asked
-/// of it.
+/// engine answers **once**: [`GpuContext`] asks [`Device::display_timing`]
+/// after its first present, settles [`Auto`](Self::Auto) against the answer,
+/// and never asks again. See [`GpuContext::effective_pacing`] for what that
+/// resolution can and cannot see.
 ///
-/// **Nothing acts on that observation.** [`Adaptive`](Self::Adaptive) is still
-/// a request — it picks a present mode and no more — and the default is still
-/// [`Vsync`](Self::Vsync), because it is the one every surface supports.
-/// Whether a reported [`DisplayTiming::Variable`] should change the pacing the
-/// engine asks for is an open decision, not an oversight.
+/// A caller that names [`Vsync`](Self::Vsync), [`Adaptive`](Self::Adaptive) or
+/// [`Off`](Self::Off) is never overridden by that observation — it refines
+/// [`Auto`](Self::Auto) and nothing else — and any of the four can be switched
+/// mid-run with [`GpuContext::set_pacing`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Pacing {
+    /// Follow the display: adaptive sync where the display is running it,
+    /// vsync where it is not. The default.
+    ///
+    /// **This is not a synonym for [`Vsync`](Self::Vsync), even though the
+    /// swapchain opens on the same present mode.**
+    /// [`preferences`](Self::preferences) is the vsync list here because the
+    /// present mode is chosen when the swapchain is created, which is before
+    /// any present exists and therefore before the display can be asked
+    /// anything — `VK_EXT_present_timing` is specified to report nothing until
+    /// an image has been presented. The difference is what happens *after* that
+    /// first present: the display is read once, and an answer of
+    /// [`DisplayTiming::Variable`] or [`DisplayTiming::Stepped`] rebuilds the
+    /// swapchain on [`Adaptive`](Self::Adaptive)'s present mode. Asking for
+    /// [`Vsync`](Self::Vsync) outright is never rebuilt.
+    #[default]
+    Auto,
     /// Wait for the display. [`PresentMode::Fifo`], which is the only mode
     /// guaranteed to exist — and the only one WebGPU has.
-    #[default]
     Vsync,
     /// Follow the display when it can follow us: [`PresentMode::FifoRelaxed`]
     /// where the surface offers it, otherwise [`PresentMode::Mailbox`].
@@ -392,7 +406,12 @@ impl Pacing {
     #[must_use]
     pub const fn preferences(self) -> &'static [PresentMode] {
         match self {
-            Self::Vsync => &[PresentMode::Fifo],
+            // `Auto` shares the vsync list because that is genuinely what the
+            // swapchain opens with: the mode is picked before the first
+            // present, and the observation that could say otherwise does not
+            // exist yet. The adaptive list is reached from here only through
+            // `resolve`, on the rebuild after that present.
+            Self::Auto | Self::Vsync => &[PresentMode::Fifo],
             Self::Adaptive => &[
                 PresentMode::FifoRelaxed,
                 PresentMode::Mailbox,
@@ -403,6 +422,49 @@ impl Pacing {
                 PresentMode::Immediate,
                 PresentMode::Fifo,
             ],
+        }
+    }
+
+    /// What is actually in force, given what the display turned out to be
+    /// doing. Never [`Auto`](Self::Auto).
+    ///
+    /// The whole policy, in one place, with no device in the signature — which
+    /// is what makes every pair of it checkable on a machine that has no
+    /// display, and that is the only way three of the four [`DisplayTiming`]
+    /// arms are reachable at all (see [`GpuContext::effective_pacing`]).
+    ///
+    /// A concrete request comes back unchanged. Someone who asked for
+    /// [`Vsync`](Self::Vsync) on a VRR panel meant it, and someone who asked
+    /// for [`Off`](Self::Off) is measuring something the display's opinion must
+    /// not disturb.
+    ///
+    /// [`Stepped`](DisplayTiming::Stepped) resolves the same way as
+    /// [`Variable`](DisplayTiming::Variable), because the question the pacing
+    /// asks is whether the cycle is *fixed*, and a quantised cycle is not one:
+    /// a panel that moves between 120, 60 and 40 Hz breaks a fixed-vblank
+    /// assumption in the same way a free-running one does, and
+    /// [`PresentMode::FifoRelaxed`] — wait when the frame is on time, tear
+    /// rather than stall when it is late — is the answer to both. It is the
+    /// narrower case of the two, so if a stepped panel ever turns out to want
+    /// something else, this is the arm to split, not the enum.
+    /// [`Fixed`](DisplayTiming::Fixed) and [`Unknown`](DisplayTiming::Unknown)
+    /// are both vsync: the first because the display really is on a fixed
+    /// cycle, the second because a display that will not say is the fallback
+    /// case rather than a guess.
+    #[must_use]
+    const fn resolve(self, observed: DisplayTiming) -> Self {
+        match (self, observed) {
+            (Self::Auto, DisplayTiming::Variable { .. } | DisplayTiming::Stepped { .. }) => {
+                Self::Adaptive
+            }
+            (Self::Auto, DisplayTiming::Fixed { .. } | DisplayTiming::Unknown) => Self::Vsync,
+            // Every concrete request, unchanged. Written as a binding rather
+            // than a wildcard over `observed` alone so that a new `Pacing`
+            // variant is a decision made here rather than one that silently
+            // lands on "whatever the caller said".
+            (Self::Vsync, _) => Self::Vsync,
+            (Self::Adaptive, _) => Self::Adaptive,
+            (Self::Off, _) => Self::Off,
         }
     }
 }
@@ -451,8 +513,9 @@ pub struct GpuContextDesc<'a> {
     /// How presented frames are paced against the display.
     ///
     /// The swapchain's present mode comes from this. A game that wants to
-    /// change it after start-up reconfigures the context; the mode is a
-    /// swapchain property and cannot be edited in place.
+    /// change it after start-up calls [`GpuContext::set_pacing`], which rebuilds
+    /// the swapchain: the mode is a swapchain property and cannot be edited in
+    /// place.
     pub pacing: Pacing,
 }
 
@@ -501,6 +564,10 @@ pub struct GpuContext {
     device: Box<dyn Device>,
     queue: QueueHandle,
     surface: SurfaceHandle,
+    /// The adapter the surface was matched against, kept so a pacing change can
+    /// ask *this* surface which present modes it offers rather than choosing
+    /// from a list cached at start-up.
+    adapter: crcbl_hal::AdapterId,
     swapchain: SwapchainHandle,
     /// Everything `create_swapchain` was last called with, so a resize
     /// reconfigures with one field changed rather than a fresh guess.
@@ -513,28 +580,36 @@ pub struct GpuContext {
     /// frame, so the frame the display is being asked about and the frame the
     /// timeline is being asked about are the same number.
     submitted: u64,
-    /// What the caller asked for, kept because the resolved
-    /// [`PresentMode`] in `config` cannot answer whether waiting for the
-    /// display is wanted at all — [`Pacing::Off`] says it is not.
+    /// What the caller asked for, [`Pacing::Auto`] included. Kept apart from
+    /// `effective_pacing` because "asked for `Auto` and the display turned out
+    /// fixed" and "asked for `Vsync`" are different facts about a run, and
+    /// because a later [`set_pacing`](Self::set_pacing) back to `Auto` resolves
+    /// from here.
     pacing: Pacing,
+    /// What is actually in force: `pacing` resolved against the one display
+    /// observation, and therefore never [`Pacing::Auto`].
+    ///
+    /// This is the value the loop reads — the resolved [`PresentMode`] in
+    /// `config` cannot answer whether waiting for the display is wanted at all,
+    /// which [`Pacing::Off`] says it is not.
+    effective_pacing: Pacing,
     in_flight: VecDeque<(u64, CommandBufferHandle)>,
     /// The extent the swapchain was last *configured* at, from
     /// [`AcquiredFrame::extent`]. Distinct from what the shell asked for.
     configured_extent: (u32, u32),
-    /// The last cadence [`Device::display_timing`] reported, so the log line
-    /// fires on a change rather than every frame.
+    /// The single cadence [`Device::display_timing`] reported, and the latch
+    /// that stops it being asked twice.
     ///
-    /// **Not a cache.** The seam forbids treating one sample as the answer, and
-    /// nothing reads this to decide anything — it is only the previous sample
-    /// the next one is compared against.
+    /// `None` is "not asked yet", which is a different thing from
+    /// [`DisplayTiming::Unknown`] — "asked, and the display would not say".
+    /// Collapsing them would make the query run every frame forever on every
+    /// driver that answers `Unknown`, which today is every driver this repo can
+    /// reach.
     ///
-    /// `None` is "nothing observed yet", which is a different thing from
-    /// [`DisplayTiming::Unknown`] — "asked, and the display would not say" —
-    /// and keeping them apart is what makes the first observation a change and
-    /// therefore something the log reports. Collapsing them would make a run
-    /// that only ever reads `Unknown` completely silent, which is the one
-    /// outcome nobody could tell from the query never having run.
-    display_timing: Option<DisplayTiming>,
+    /// Kept after the resolution rather than dropped, so that a later
+    /// [`set_pacing`](Self::set_pacing) to [`Pacing::Auto`] can settle against
+    /// the sample already taken instead of taking a second one.
+    observed_timing: Option<DisplayTiming>,
     /// Scratch, reused every frame so a steady-state frame allocates nothing.
     waits: Vec<SemaphoreWait>,
     signals: Vec<SemaphoreSignal>,
@@ -554,6 +629,7 @@ enum OpenStage {
     Device {
         instance: Box<dyn Instance>,
         surface: SurfaceHandle,
+        adapter: crcbl_hal::AdapterId,
         config: SwapchainConfig,
         pending: Box<dyn crcbl_hal::PendingDevice>,
     },
@@ -616,6 +692,7 @@ impl PendingGpuContext {
                 OpenStage::Device {
                     instance,
                     surface,
+                    adapter,
                     config,
                     mut pending,
                 } => match pending.poll()? {
@@ -623,6 +700,7 @@ impl PendingGpuContext {
                         self.stage = OpenStage::Device {
                             instance,
                             surface,
+                            adapter,
                             config,
                             pending,
                         };
@@ -632,6 +710,7 @@ impl PendingGpuContext {
                         return GpuContext::finish(
                             instance,
                             surface,
+                            adapter,
                             config,
                             device,
                             self.extent,
@@ -846,6 +925,7 @@ impl GpuContext {
         Ok(OpenStage::Device {
             instance,
             surface,
+            adapter: adapter.id,
             config,
             pending,
         })
@@ -855,6 +935,7 @@ impl GpuContext {
     fn finish(
         instance: Box<dyn Instance>,
         surface: SurfaceHandle,
+        adapter: crcbl_hal::AdapterId,
         config: SwapchainConfig,
         device: Box<dyn Device>,
         extent: (u32, u32),
@@ -901,16 +982,22 @@ impl GpuContext {
             device,
             queue,
             surface,
+            adapter,
             swapchain,
             config,
             timeline,
             submitted: 0,
             pacing,
+            // Nothing has been presented, so nothing has been observed, and
+            // `Unknown` is exactly what "the display has not said" resolves
+            // through — which for `Auto` is the vsync the swapchain was just
+            // created on. The first present may move it; see `settle_pacing`.
+            effective_pacing: pacing.resolve(DisplayTiming::Unknown),
             in_flight: VecDeque::with_capacity(FRAMES_IN_FLIGHT + 1),
             configured_extent: extent,
-            // Nothing has been presented yet, and the query is only meaningful
-            // after a present — see `observe_display_timing`.
-            display_timing: None,
+            // Not asked yet, and the query is only meaningful after a present —
+            // see `settle_pacing`.
+            observed_timing: None,
             waits: Vec::with_capacity(1),
             signals: Vec::with_capacity(2),
         })
@@ -941,6 +1028,85 @@ impl GpuContext {
         self.configured_extent
     }
 
+    /// What the caller asked for, [`Pacing::Auto`] included.
+    ///
+    /// Pair with [`effective_pacing`](Self::effective_pacing): this one is the
+    /// request, that one is the answer.
+    #[must_use]
+    pub const fn pacing(&self) -> Pacing {
+        self.pacing
+    }
+
+    /// What is actually pacing the frames. Never [`Pacing::Auto`].
+    ///
+    /// Equal to [`pacing`](Self::pacing) unless [`Pacing::Auto`] was asked for,
+    /// in which case it is [`Pacing::Vsync`] or [`Pacing::Adaptive`] depending
+    /// on what the display reported.
+    ///
+    /// # The observation behind it happens once
+    ///
+    /// After the first present — never before it, because
+    /// `VK_EXT_present_timing` is specified to report nothing until an image
+    /// has been presented — the display is asked exactly once, and the answer
+    /// settles this for the life of the context. It is not re-read on a resize,
+    /// a display-mode change, or a window dragged to another monitor, and
+    /// [`set_pacing`](Self::set_pacing) does not re-read it either.
+    ///
+    /// **Once, rather than until it answers**, because a driver that only ever
+    /// reports [`DisplayTiming::Unknown`] would otherwise be re-queried every
+    /// frame for the life of the process — and that is every driver this repo
+    /// has been able to test against. The known cost: a platform that needs
+    /// more than one present before it will answer reads `Unknown` here and
+    /// stays on [`Pacing::Vsync`], which is the documented fallback. A caller
+    /// on such a platform asks for [`Pacing::Adaptive`] by name.
+    ///
+    /// # What has actually been observed
+    ///
+    /// Only [`DisplayTiming::Unknown`] has ever come back from a real driver in
+    /// this repo — see `docs/backlog.md`. The
+    /// [`Variable`](DisplayTiming::Variable), [`Stepped`](DisplayTiming::Stepped)
+    /// and [`Fixed`](DisplayTiming::Fixed) paths through the resolution are
+    /// exercised by unit tests and by nothing else on any machine.
+    #[must_use]
+    pub const fn effective_pacing(&self) -> Pacing {
+        self.effective_pacing
+    }
+
+    /// Changes how presented frames are paced, mid-run.
+    ///
+    /// The present mode is a swapchain property, so this rebuilds the swapchain
+    /// — but **only when the mode it resolves to differs from the one
+    /// presenting**. Setting the pacing already in force costs nothing, which
+    /// is what a settings screen that re-applies every value on every apply
+    /// needs.
+    ///
+    /// # `Auto` here does not re-detect
+    ///
+    /// Detection happens once per context, and this call is not it: `Auto`
+    /// resolves against the sample the first present already took. Before that
+    /// present there is no sample, so `Auto` set here is vsync until the first
+    /// present takes one — the same start-up path a context opened on `Auto`
+    /// follows, and the same single query.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the swapchain could not be rebuilt. The old swapchain is
+    /// still configured when that happens — `reconfigure_swapchain` replaces
+    /// nothing until the new one is built — so the context stays usable, and
+    /// [`pacing`](Self::pacing), [`effective_pacing`](Self::effective_pacing)
+    /// and the swapchain's own mode are rolled back together rather than left
+    /// describing a change that did not take.
+    pub fn set_pacing(&mut self, pacing: Pacing) -> Result<(), GpuError> {
+        let previous = (self.pacing, self.effective_pacing);
+        self.pacing = pacing;
+        self.effective_pacing = pacing.resolve(self.observed_timing.unwrap_or_default());
+        let result = self.apply_present_mode();
+        if result.is_err() {
+            (self.pacing, self.effective_pacing) = previous;
+        }
+        result
+    }
+
     /// Which present the frame about to start should wait for, or `None` if
     /// there is nothing worth waiting on yet.
     ///
@@ -951,6 +1117,10 @@ impl GpuContext {
     /// been submitted, and waiting for `submitted` — the frame just sent —
     /// empties the pipeline every frame, so the CPU sits out a whole display
     /// period doing nothing and the result is worse than not waiting at all.
+    /// `pacing` is the **effective** one — [`Pacing::Auto`] has already been
+    /// resolved by the time a frame is paced, and the `Off` test below would
+    /// otherwise have to guess what `Auto` meant.
+    ///
     /// One `FRAMES_IN_FLIGHT` back is the id whose display leaves exactly
     /// `FRAMES_IN_FLIGHT` presents outstanding, which is the depth
     /// [`retire_to`](Self::retire_to) already holds command buffers to; the
@@ -999,7 +1169,7 @@ impl GpuContext {
         // without holding anything else up. A device without present feedback
         // answers immediately, which is why there is no branch here on which
         // backend is underneath.
-        if let Some(present_id) = Self::present_to_wait_for(self.submitted, self.pacing) {
+        if let Some(present_id) = Self::present_to_wait_for(self.submitted, self.effective_pacing) {
             match self
                 .device
                 .wait_until_presented(self.swapchain, present_id, PRESENT_WAIT_TIMEOUT)
@@ -1115,9 +1285,9 @@ impl GpuContext {
         }
 
         // After the present, never before it — and after *this* present rather
-        // than at the top of the next frame, so the reconfigure below can clear
-        // what was just observed.
-        self.observe_display_timing();
+        // than at the top of the next frame, because the whole question is what
+        // the display did with a frame it has been given.
+        self.settle_pacing()?;
 
         if acquired.suboptimal {
             log::debug!("hal: swapchain suboptimal; reconfiguring after present");
@@ -1126,43 +1296,52 @@ impl GpuContext {
         Ok(FrameOutcome::Presented)
     }
 
-    /// Reads what the display is doing with the frames just presented, and says
-    /// so when the answer has changed.
+    /// Reads what the display is doing with the frame just presented, settles
+    /// [`Pacing::Auto`] against it, and never asks again.
+    ///
+    /// A no-op after the first call, which is the point: see
+    /// [`effective_pacing`](Self::effective_pacing) for why the query is
+    /// one-shot and what that gives up.
     ///
     /// # Why here, and why after the present
     ///
     /// `VK_EXT_present_timing`'s proposal is explicit that
     /// `vkGetSwapchainTimingPropertiesEXT` may answer `VK_NOT_READY` until at
-    /// least one image has been presented to the swapchain, and again after the
-    /// properties change. So a query at acquire time — or anywhere before the
-    /// first present — is expected to report
-    /// [`Unknown`](DisplayTiming::Unknown), and that is the platform working as
-    /// specified rather than a fault to chase.
-    ///
-    /// # Why every present, and what that costs
-    ///
-    /// One driver call per frame: on `crcbl-vk` it is a lock, a handle lookup
-    /// and one `vkGetSwapchainTimingPropertiesEXT`, which reads driver-side
-    /// state and neither allocates nor waits on the GPU. That is the same order
-    /// as the `vkQueuePresentKHR` it follows and far below the frame's own
-    /// submit, so it does not need rationing; every other backend answers
-    /// `Ok(Unknown)` without reaching a driver at all. Sampling less often
-    /// would trade that for a window in which the engine's log is wrong about
-    /// the panel, and the whole point of the query is that the answer moves —
-    /// a laptop entering power-saving mode, a window dragged to another
-    /// monitor.
+    /// least one image has been presented to the swapchain. So a query at
+    /// acquire time — or anywhere before the first present — is expected to
+    /// report [`Unknown`](DisplayTiming::Unknown), and that is the platform
+    /// working as specified rather than a fault to chase. The present mode, on
+    /// the other hand, is chosen when the swapchain is created, which is before
+    /// any present exists: the answer is not available at the moment it is
+    /// needed, and opening on vsync and rebuilding once is the only order that
+    /// can use it at all.
     ///
     /// # Why an error is not a failed frame
     ///
-    /// It degrades to [`Unknown`](DisplayTiming::Unknown) and a `debug!` line.
-    /// The frame has already been presented and is on its way to the display by
-    /// the time this runs, so there is nothing left to abandon; a cadence
-    /// nobody can read is a thing the engine already has an arm for, and
-    /// turning it into a `GpuError` would let a diagnostic kill a loop that is
-    /// working. The failure a caller does care about — the surface going
-    /// out of date or being lost — arrives again on the next acquire or
-    /// present, which are the two calls that handle it.
-    fn observe_display_timing(&mut self) {
+    /// A failed *query* degrades to [`Unknown`](DisplayTiming::Unknown) and a
+    /// `debug!` line, and the pacing falls back to vsync exactly as it would
+    /// for a display that stayed quiet. The frame has already been presented by
+    /// the time this runs, so there is nothing left to abandon, and turning a
+    /// diagnostic into a `GpuError` would let it kill a loop that is working.
+    /// A failed *rebuild* is another matter and is reported: the caller asked
+    /// for a pacing the engine then could not deliver, and
+    /// [`apply_present_mode`](Self::apply_present_mode) leaves the old
+    /// swapchain in place for it.
+    ///
+    /// # The log line
+    ///
+    /// One line, once, saying all three of what was asked, what the display
+    /// reported and what is in force — "asked for `Auto`, display said
+    /// `Variable`, running adaptive" and "asked for `Adaptive`" are different
+    /// runs and a line naming only the result cannot tell them apart. It leads
+    /// with `hal: display timing `, which is what
+    /// `crates/crcbl-shell/tests/run-wayland-e2e.sh` greps for to prove the
+    /// engine really asked the driver; keep that prefix first if the line is
+    /// ever reworded.
+    fn settle_pacing(&mut self) -> Result<(), GpuError> {
+        if self.observed_timing.is_some() {
+            return Ok(());
+        }
         let observed = match self.device.display_timing(self.swapchain) {
             Ok(timing) => timing,
             Err(error) => {
@@ -1170,10 +1349,61 @@ impl GpuContext {
                 DisplayTiming::Unknown
             }
         };
-        if self.display_timing != Some(observed) {
-            log::info!("hal: display timing {observed:?}");
-            self.display_timing = Some(observed);
+        self.observed_timing = Some(observed);
+        let previous = self.effective_pacing;
+        self.effective_pacing = self.pacing.resolve(observed);
+        log::info!(
+            "hal: display timing {observed:?}; asked for {:?}, pacing {:?}",
+            self.pacing,
+            self.effective_pacing
+        );
+        let result = self.apply_present_mode();
+        if result.is_err() {
+            // The same rollback [`set_pacing`](Self::set_pacing) does, and for
+            // the same reason: the swapchain is still the one that was already
+            // configured, so leaving `effective_pacing` on the mode that did
+            // not take would make the accessor describe a swapchain that does
+            // not exist. `observed_timing` is deliberately *not* rolled back —
+            // the display was asked and it answered, and the query is one-shot
+            // whether or not acting on the answer worked.
+            self.effective_pacing = previous;
         }
+        result
+    }
+
+    /// Puts [`effective_pacing`](Self::effective_pacing)'s present mode on the
+    /// swapchain, rebuilding only if the mode actually changes.
+    ///
+    /// The mode comes from the surface's own list rather than from the pacing
+    /// alone, because a preference the surface does not offer falls back — a
+    /// surface with no `FifoRelaxed` and no `Mailbox` runs
+    /// [`Pacing::Adaptive`] on `Fifo`, and rebuilding a swapchain to the mode
+    /// it already has is the no-op this comparison exists to prevent.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the surface could not be queried or the swapchain could
+    /// not be rebuilt. On a failed rebuild the old swapchain is still the
+    /// configured one, so `config` is rolled back to describe it rather than
+    /// the mode that did not take.
+    fn apply_present_mode(&mut self) -> Result<(), GpuError> {
+        let caps = self.instance.surface_caps(self.surface, self.adapter)?;
+        let mode = caps.choose_present_mode(self.effective_pacing.preferences());
+        if mode == self.config.present_mode {
+            return Ok(());
+        }
+        log::info!(
+            "hal: pacing {:?} wants {mode:?}, not {:?}; rebuilding the swapchain",
+            self.effective_pacing,
+            self.config.present_mode
+        );
+        let previous = self.config.present_mode;
+        self.config.present_mode = mode;
+        let result = self.reconfigure();
+        if result.is_err() {
+            self.config.present_mode = previous;
+        }
+        result
     }
 
     /// Waits for and destroys command buffers until at most `keep` are in
@@ -1230,12 +1460,13 @@ impl GpuContext {
         // across a resize storm, which is what the seam promises callers.
         self.device
             .reconfigure_swapchain(self.swapchain, &self.config.desc(self.surface))?;
-        // The swapchain behind the handle is a new one, and a swapchain nothing
-        // has been presented to has no timing to report yet. Forgetting the old
-        // sample is what stops the engine claiming a panel it can no longer see
-        // — a window dragged to a second monitor arrives here — and makes the
-        // first observation after the rebuild a change again, so it is logged.
-        self.display_timing = None;
+        // `observed_timing` is deliberately *not* cleared. A rebuilt swapchain
+        // has had nothing presented to it and would answer `Unknown` again, so
+        // clearing the latch would re-run the whole resolution on every resize
+        // — and on a driver that never says anything but `Unknown`, that is the
+        // per-frame query this design exists to avoid. Detection happens once
+        // per context; a window dragged to a VRR monitor keeps the pacing it
+        // started with until the game asks for another with `set_pacing`.
         Ok(())
     }
 
@@ -4711,7 +4942,7 @@ mod tests {
     /// only one WebGPU has.
     #[test]
     fn every_pacing_ends_in_the_mode_that_always_exists() {
-        for pacing in [Pacing::Vsync, Pacing::Adaptive, Pacing::Off] {
+        for pacing in [Pacing::Auto, Pacing::Vsync, Pacing::Adaptive, Pacing::Off] {
             let modes = pacing.preferences();
             assert!(!modes.is_empty(), "{pacing:?} offers no mode at all");
             assert_eq!(
@@ -4723,14 +4954,19 @@ mod tests {
         }
     }
 
-    /// The three pacings are three different requests.
+    /// The four pacings are four different requests.
     ///
     /// Vsync asks for exactly one mode — it is the one case where a fallback
-    /// would silently give the caller the opposite of what they asked for.
+    /// would silently give the caller the opposite of what they asked for. Auto
+    /// asks for the same one, because the swapchain it opens really is a vsync
+    /// swapchain; what makes it a different request is the resolution after the
+    /// first present, which
+    /// `auto_is_the_only_pacing_the_display_can_change` covers.
     #[test]
     fn vsync_asks_for_vsync_and_nothing_else() {
         assert_eq!(Pacing::Vsync.preferences(), &[PresentMode::Fifo]);
-        assert_eq!(Pacing::default(), Pacing::Vsync);
+        assert_eq!(Pacing::Auto.preferences(), &[PresentMode::Fifo]);
+        assert_eq!(Pacing::default(), Pacing::Auto);
 
         assert_eq!(
             Pacing::Adaptive.preferences().first(),
@@ -4742,6 +4978,149 @@ mod tests {
             Some(&PresentMode::Mailbox),
             "off prefers the untorn uncapped mode before the torn one"
         );
+    }
+
+    /// One 60 Hz cycle, for the observations below. The figures are arbitrary —
+    /// the resolution reads the arm, never the duration — but a plausible one
+    /// keeps the failure messages readable.
+    const OBSERVED_CYCLE: Duration = Duration::from_nanos(16_666_666);
+
+    /// The quantum a [`DisplayTiming::Stepped`] panel moves in — half the cycle
+    /// above, so the pair is the shape the seam's mapping actually produces: a
+    /// cycle that is a whole multiple of its step, and not equal to it, which
+    /// would have been reported as [`DisplayTiming::Fixed`] instead.
+    const OBSERVED_STEP: Duration = Duration::from_nanos(8_333_333);
+
+    /// Every [`DisplayTiming`] arm, for the exhaustive sweeps below.
+    ///
+    /// Written out rather than derived, so that a fifth arm on the enum is a
+    /// compile-time decision here and not a case these tests quietly stop
+    /// covering.
+    const OBSERVATIONS: [DisplayTiming; 4] = [
+        DisplayTiming::Unknown,
+        DisplayTiming::Fixed {
+            cycle: OBSERVED_CYCLE,
+        },
+        DisplayTiming::Variable {
+            shortest: OBSERVED_CYCLE,
+        },
+        DisplayTiming::Stepped {
+            cycle: OBSERVED_CYCLE,
+            step: OBSERVED_STEP,
+        },
+    ];
+
+    /// Every (requested, observed) pair the resolution can be handed.
+    ///
+    /// **This test is the only place three of the four `DisplayTiming` arms
+    /// execute anywhere in this repo.** Every driver reachable from here
+    /// reports `Unknown`, so `Fixed`, `Variable` and `Stepped` reach the
+    /// resolution here and nowhere else, on any machine — which is why the
+    /// policy is a method with no device in its signature.
+    #[test]
+    fn auto_is_the_only_pacing_the_display_can_change() {
+        for observed in OBSERVATIONS {
+            for requested in [Pacing::Vsync, Pacing::Adaptive, Pacing::Off] {
+                assert_eq!(
+                    requested.resolve(observed),
+                    requested,
+                    "{requested:?} was asked for by name; {observed:?} must not overrule it"
+                );
+            }
+            assert_ne!(
+                Pacing::Auto.resolve(observed),
+                Pacing::Auto,
+                "{observed:?} left Auto unresolved, so the loop would be pacing on a request"
+            );
+        }
+
+        // The policy itself, arm by arm, so a change to it has to be written
+        // down here as well as in `resolve`.
+        assert_eq!(
+            Pacing::Auto.resolve(DisplayTiming::Unknown),
+            Pacing::Vsync,
+            "a display that would not say is the fallback case"
+        );
+        assert_eq!(
+            Pacing::Auto.resolve(DisplayTiming::Fixed {
+                cycle: OBSERVED_CYCLE
+            }),
+            Pacing::Vsync,
+            "a fixed cycle is exactly what vsync is for"
+        );
+        assert_eq!(
+            Pacing::Auto.resolve(DisplayTiming::Variable {
+                shortest: OBSERVED_CYCLE
+            }),
+            Pacing::Adaptive,
+            "a free-running display is the case adaptive sync exists for"
+        );
+        assert_eq!(
+            Pacing::Auto.resolve(DisplayTiming::Stepped {
+                cycle: OBSERVED_CYCLE,
+                step: OBSERVED_STEP
+            }),
+            Pacing::Adaptive,
+            "a quantised cycle is not a fixed one, so a fixed-vblank wait is wrong there too"
+        );
+    }
+
+    /// Which of those resolutions costs a swapchain rebuild, decided from the
+    /// surface's own mode list — no device, no display, just the data a
+    /// `SurfaceCaps` carries.
+    ///
+    /// The pairing is the whole point: `Auto` resolving to `Vsync` must leave
+    /// the swapchain alone, because that is the case every machine in CI takes
+    /// and a rebuild there would be a start-up cost paid by every run for
+    /// nothing.
+    #[test]
+    fn only_a_display_that_is_not_fixed_costs_a_rebuild() {
+        use crcbl_hal::{CompositeAlpha, SurfaceCaps};
+
+        let caps = |present_modes: Vec<PresentMode>| SurfaceCaps {
+            formats: vec![Format::Bgra8UnormSrgb],
+            present_modes,
+            composite_alpha: vec![CompositeAlpha::Opaque],
+            min_image_count: 2,
+            max_image_count: 3,
+            current_extent: None,
+        };
+        let vrr_capable = caps(vec![PresentMode::Fifo, PresentMode::FifoRelaxed]);
+        let fifo_only = caps(vec![PresentMode::Fifo]);
+
+        // What a context opened on `Auto` is presenting with when the
+        // resolution runs: `Auto`'s preference list, resolved once by the
+        // surface. Read from the same call the engine uses rather than written
+        // down, so the two cannot drift.
+        let opened = vrr_capable.choose_present_mode(Pacing::Auto.preferences());
+        assert_eq!(opened, PresentMode::Fifo);
+
+        for observed in OBSERVATIONS {
+            let effective = Pacing::Auto.resolve(observed);
+            let wanted = vrr_capable.choose_present_mode(effective.preferences());
+            let rebuilds = wanted != opened;
+            assert_eq!(
+                rebuilds,
+                matches!(
+                    observed,
+                    DisplayTiming::Variable { .. } | DisplayTiming::Stepped { .. }
+                ),
+                "{observed:?} resolved to {effective:?} and wanted {wanted:?}, \
+                 which is the wrong side of a swapchain rebuild"
+            );
+        }
+
+        // The same resolution on a surface that has nothing to rebuild *to*.
+        // `choose_present_mode` falls back to Fifo, so the mode does not change
+        // and no swapchain is spent finding that out.
+        for observed in OBSERVATIONS {
+            let effective = Pacing::Auto.resolve(observed);
+            assert_eq!(
+                fifo_only.choose_present_mode(effective.preferences()),
+                fifo_only.choose_present_mode(Pacing::Auto.preferences()),
+                "{observed:?} rebuilt a Fifo-only surface to the mode it already had"
+            );
+        }
     }
 
     #[test]
@@ -5065,6 +5444,142 @@ mod tests {
                 _ => {}
             }
         }
+
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
+    /// The runtime switch, against a backend that records what the swapchain
+    /// did: a pacing change rebuilds when — and only when — the present mode
+    /// moves.
+    ///
+    /// # What this cannot see
+    ///
+    /// That the display is asked **once** is structural (one
+    /// `observed_timing.is_some()` guard) and is not observable here: the null
+    /// backend answers `DisplayTiming::Unknown` however often it is asked, so a
+    /// run that queried every frame would record exactly the same events. What
+    /// is observable is the consequence — an `Auto` that resolves to vsync
+    /// costs no swapchain, and a later `Auto` settles against the sample
+    /// already taken rather than starting again from a request.
+    #[test]
+    fn a_pacing_switch_rebuilds_the_swapchain_only_when_the_mode_moves() {
+        use crcbl_hal::CommandEncoderDesc;
+        use crcbl_hal::null::{Event, NullInstance, Recorder};
+        use crcbl_shell::{HeadlessShell, WindowDesc};
+
+        let mut shell = HeadlessShell::new();
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("headless always creates a window");
+        let mut shell_events = 0;
+        let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
+
+        let recorder = Recorder::new();
+        let instance: Box<dyn Instance> =
+            Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+        let target = shell
+            .surface_target(window)
+            .expect("the window is still alive");
+        let stage = GpuContext::start_device(
+            instance,
+            &target,
+            extent,
+            "pacing switch test",
+            Features::empty(),
+            Features::empty(),
+            Pacing::default(),
+        )
+        .expect("the null backend opens everywhere");
+        let mut pending = PendingGpuContext {
+            stage,
+            target,
+            extent,
+            label: "pacing switch test".to_string(),
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            pacing: Pacing::default(),
+        };
+        let mut gpu = loop {
+            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
+                break context;
+            }
+        };
+
+        let rebuilds = || {
+            recorder
+                .events()
+                .iter()
+                .filter(|event| matches!(event, Event::Reconfigured { .. }))
+                .count()
+        };
+
+        // Before any present there is no observation, so the request is `Auto`
+        // and the answer is the vsync the swapchain was opened on.
+        assert_eq!(gpu.pacing(), Pacing::Auto, "the default is Auto");
+        assert_eq!(gpu.effective_pacing(), Pacing::Vsync);
+        assert_eq!(gpu.config.present_mode, PresentMode::Fifo);
+
+        let present = |gpu: &mut GpuContext| {
+            let acquired = gpu.acquire().expect("acquire").expect("no resize happened");
+            let encoder = gpu.device().create_command_encoder(&CommandEncoderDesc {
+                label: Some("pacing switch test"),
+                queue: gpu.queue(),
+            });
+            let command_buffer = encoder.finish().expect("an empty command buffer");
+            assert_eq!(
+                gpu.submit_and_present(&acquired, command_buffer)
+                    .expect("present"),
+                FrameOutcome::Presented,
+            );
+        };
+        for _ in 0..3 {
+            present(&mut gpu);
+        }
+
+        // The null display says `Unknown`, which is the fallback arm, so the
+        // resolution changed nothing and spent nothing.
+        assert_eq!(gpu.pacing(), Pacing::Auto, "the request is not rewritten");
+        assert_eq!(gpu.effective_pacing(), Pacing::Vsync);
+        assert_eq!(
+            rebuilds(),
+            0,
+            "an Auto that resolved to vsync rebuilt the swapchain it was already using"
+        );
+
+        // Vsync by name is the mode already presenting: same answer, and a
+        // settings screen re-applying it must not cost a swapchain.
+        gpu.set_pacing(Pacing::Vsync).expect("switching to vsync");
+        assert_eq!(gpu.pacing(), Pacing::Vsync);
+        assert_eq!(gpu.effective_pacing(), Pacing::Vsync);
+        assert_eq!(rebuilds(), 0, "vsync over vsync rebuilt the swapchain");
+
+        // Off is a different mode on this surface — no `FifoRelaxed`, so
+        // `Mailbox` — and that is what a rebuild is for.
+        gpu.set_pacing(Pacing::Off).expect("switching to no sync");
+        assert_eq!(gpu.effective_pacing(), Pacing::Off);
+        assert_eq!(gpu.config.present_mode, PresentMode::Mailbox);
+        assert_eq!(rebuilds(), 1, "the mode moved and the swapchain did not");
+
+        gpu.set_pacing(Pacing::Off)
+            .expect("switching to no sync again");
+        assert_eq!(
+            rebuilds(),
+            1,
+            "re-applying the mode in force rebuilt it again"
+        );
+
+        // Back to Auto: it settles against the observation already taken —
+        // `Unknown`, so vsync — rather than asking the display a second time.
+        gpu.set_pacing(Pacing::Auto)
+            .expect("switching back to auto");
+        assert_eq!(gpu.pacing(), Pacing::Auto);
+        assert_eq!(gpu.effective_pacing(), Pacing::Vsync);
+        assert_eq!(gpu.config.present_mode, PresentMode::Fifo);
+        assert_eq!(rebuilds(), 2);
+
+        // And the loop still runs on the swapchain all of that rebuilt.
+        present(&mut gpu);
 
         gpu.destroy().expect("teardown");
         shell.destroy_window(window).expect("the window goes away");

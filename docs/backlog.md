@@ -230,9 +230,10 @@ have changed appearance. None of them was looked at either.
 
 ## Frame pacing sleeps on the monotonic clock, which is not what a display does
 
-`crcbl::engine::Pacing` chooses a present mode (`Vsync` → `Fifo`, `Adaptive` →
-`FifoRelaxed`/`Mailbox`, `Off` → `Mailbox`/`Immediate`) and `FrameLimit` paces
-the loop by sleeping the difference between the last frame's length and a
+`crcbl::engine::Pacing` chooses a present mode (`Auto`/`Vsync` → `Fifo`,
+`Adaptive` → `FifoRelaxed`/`Mailbox`, `Off` → `Mailbox`/`Immediate`; `Auto` may
+then rebuild onto `Adaptive`'s once the display has been read) and `FrameLimit`
+paces the loop by sleeping the difference between the last frame's length and a
 period, on `std::time` — `Clock::Real` in `crates/crcbl/src/engine.rs`, where
 the `wasm32` arm of `sleep` is deliberately a no-op because the browser paces
 frames itself. That is the whole mechanism, and it is open loop: it never learns
@@ -335,11 +336,12 @@ What is still owed:
   `Features::PRESENT_TIMING` and `Device::display_timing` are the capability-
   named seam; `crcbl_vk::present_timing` is the hand-written FFI (`ash` still
   has no bindings — rechecked against the pinned 0.38.0+1.3.281);
-  `GpuContext::observe_display_timing` in `crates/crcbl/src/engine.rs` is the
-  caller, asking after every present and logging on change. The extension is
-  **ratified**, not provisional as this entry previously said:
-  `supported="vulkan" ratified="vulkan"` in `vk.xml`, revision 3, which is what
-  `/usr/include/vulkan/vulkan_core.h` declares and what RADV exposes here.
+  `GpuContext::settle_pacing` in `crates/crcbl/src/engine.rs` is the caller,
+  asking once after the first present and resolving `Pacing::Auto` against the
+  answer with `Pacing::resolve`. The extension is **ratified**, not provisional
+  as this entry previously said: `supported="vulkan" ratified="vulkan"` in
+  `vk.xml`, revision 3, which is what `/usr/include/vulkan/vulkan_core.h`
+  declares and what RADV exposes here.
 
   Still owed:
   - **Only the `Unknown` arm has ever executed against a driver, and that is now
@@ -348,12 +350,37 @@ What is still owed:
     7900 XTX, Mesa 26.1.6) against a nested headless sway 1.12. The chain
     negotiates —
     `crcbl-vk: present timing enabled (VK_EXT_present_timing + VK_KHR_present_id2)`
-    — the query reaches the driver after a present, and the answer is
-    `hal: display timing Unknown`, every frame, in both display modes. `Fixed`,
-    `Variable` and `Stepped` are still covered by unit tests on the pure mapping
-    and by **nothing else on any machine**. The script asserts only that the
-    engine _asked_; it shouts when the arm is `Unknown` rather than asserting a
-    cadence nobody has seen.
+    — the query reaches the driver after the first present, and the answer is
+    `hal: display timing Unknown; asked for Auto, pacing Vsync`, in both display
+    modes. `Fixed`, `Variable` and `Stepped` are still covered by unit tests on
+    the pure mapping and by **nothing else on any machine**. The script asserts
+    only that the engine _asked_; it shouts when the arm is `Unknown` rather
+    than asserting a cadence nobody has seen.
+  - **The pacing resolution therefore runs on one input everywhere it runs for
+    real.** `Pacing::resolve` in `crates/crcbl/src/engine.rs` maps (requested,
+    observed) to the pacing in force, and
+    `auto_is_the_only_pacing_the_display_can_change` walks all sixteen pairs —
+    but only `(Auto, Unknown)` has ever executed against a driver, on any
+    machine. Everything the `Variable`/`Stepped` branch claims (that the rebuild
+    onto `FifoRelaxed`/`Mailbox` is right, that it improves anything on a real
+    VRR panel, that one rebuild during start-up is not visible as a hitch) is
+    argued, not measured. A VRR panel driven by a compositor that reports a
+    cadence is what would settle it, and that is the same missing machine the
+    entry above needs.
+  - **That `Stepped` resolves to `Adaptive` is a judgement call, not a measured
+    one.** The reasoning is in `Pacing::resolve`'s doc comment: a quantised
+    cycle is not a fixed one, so a fixed-vblank wait is wrong there in the same
+    way it is on a free-running panel. No driver here has ever emitted `Stepped`
+    at all (see the mapping gap below), so nothing distinguishes this from the
+    other choice — pacing a stepped panel on vsync at its current multiple —
+    except the argument.
+  - **`set_pacing`'s failure path is untested.** `GpuContext::set_pacing` rolls
+    the request, the effective pacing and `config.present_mode` back when
+    `reconfigure` fails, on the strength of `crcbl-vk`'s `reconfigure_swapchain`
+    leaving the old swapchain configured until the new one is built. That
+    rollback has never run: the null backend does not fail a reconfigure and
+    nothing else can be made to. A fault-injecting backend, or a recorder knob
+    that fails the next reconfigure, is what would exercise it.
   - **Why RADV answers `Unknown` there is partly determined.** Verified: that
     sway session advertises `wp_presentation` and neither
     `wp_commit_timing_manager_v1` nor `wp_fifo_manager_v1` (`wayland-info` on
@@ -375,28 +402,22 @@ What is still owed:
     shape no driver here has been observed to emit, and the contradictory-input
     arm — an interval that does not divide the duration, mapped conservatively
     to `Unknown` — is a guess about driver bugs rather than a response to one.
-  - **The query's cost has been reasoned about, not measured.** It is one
-    `vkGetSwapchainTimingPropertiesEXT` per present, under the backend's state
-    lock, argued in `observe_display_timing`'s doc comment to be far below the
-    frame's own submit. Nobody has profiled it, and the headless runs above are
-    not a place where it would show.
-
-  **Decision needed from the user: should `Pacing::Adaptive` become the default
-  when `Variable` is reported?** The observation now exists and nothing consumes
-  it; `Pacing::default()` is `Vsync` and `Pacing::preferences()` is unchanged on
-  purpose. For: on a VRR panel `Fifo` makes the display wait for a fixed vblank
-  the panel is not keeping, which is exactly the case `FifoRelaxed` exists for,
-  and the engine can now tell that case from a fixed 60 Hz panel — which is the
-  only reason this was not decidable before. Against: the present mode is a
-  swapchain property, so acting on the observation means _reconfiguring_ a
-  swapchain mid-run, on a value the seam documents as changing underneath a
-  running swapchain (power saving, a window moved between monitors) — that is a
-  rebuild storm waiting for a panel that flaps, and it silently overrides a
-  `Pacing` the caller chose. A middle option: leave the default alone and act
-  only when the caller asked for `Adaptive`, so the observation refines a
-  request instead of replacing one. Whichever way it goes, `Pacing`'s doc
-  comment in `crates/crcbl/src/engine.rs` states the current answer and would
-  need rewriting with it.
+  - **One present may not be enough on some platform, and the engine will never
+    find out.** The query is one-shot by design — the extension may answer
+    `VK_NOT_READY` until an image has been presented, and a driver that answers
+    `Unknown` forever must not be re-queried forever — so a platform that needs
+    _two_ presents before it will speak reads `Unknown` here and stays on
+    `Pacing::Vsync`. No such platform is known; the alternative (retry until it
+    answers, or until some count) was declined because the count would be a
+    number nobody could justify and the failure it guards against has never been
+    seen. A caller on such a platform asks for `Pacing::Adaptive` by name.
+  - **The observation is not refreshed, ever.** A window dragged from a fixed
+    panel to a VRR one, or a laptop entering power saving, keeps the pacing
+    start-up settled on. Declined for this slice: re-reading on every
+    reconfigure is the per-frame query on any driver that answers `Unknown` (it
+    would re-run on every resize), and a panel that flaps between cadences would
+    rebuild the swapchain each time. `GpuContext::set_pacing` is the escape
+    hatch, and a game with a monitor-changed event of its own can call it.
 
   Note that `wait_until_presented` deliberately does **not** return a timestamp
   — a caller that needs one needs a second method, and `VK_EXT_present_timing`'s
