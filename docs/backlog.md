@@ -40,17 +40,6 @@ The two semver-major **crate** bumps were reviewed properly and merged on
   `preserve_order` feature was tried and does not restore the 0.8 output either
   (it fixes within-table key order and leaves the rest). Accepted as cosmetic.
 
-## The `shaders` job still calls itself "committed SPIR-V" while checking four targets
-
-The job's name (`ci.yml`, the `shaders` job) and its last step ("Check the
-committed SPIR-V against its sources") both describe one artifact, but
-`tools/compile-shaders.sh --check` is the anti-rot gate for **four** — SPIR-V,
-WGSL, MSL and DXIL. The rename is a two-word change. The other half of what the
-2026-08-05 slice noted is already recorded in the workflow itself: the pinned
-`dxc` archive is ~492 MiB and dominates the job's wall clock
-(`timeout-minutes: 20` and the install step both say so), so that part is not
-repeated here.
-
 ## Owed
 
 The S1B findings in `docs/plan/ROADMAP.md` were the substantive list — six

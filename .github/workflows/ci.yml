@@ -947,7 +947,7 @@ jobs:
   # builds of `dxc` that abort with an LLVM internal assertion on a trivial
   # shader.
   shaders:
-    name: shaders (committed SPIR-V matches its source)
+    name: shaders (committed artifacts match their sources)
     runs-on: ubuntu-latest
     # Raised from 10 when `dxc` was added: its archive is around 492 MiB and
     # dominates the job's wall clock. See the install step.
@@ -1003,7 +1003,7 @@ jobs:
           tar xzf dxc.tar.gz -C "${RUNNER_TEMP}/dxc" --strip-components=1
           chmod +x "${RUNNER_TEMP}/dxc/bin/dxc"
           echo "CRCBL_DXC=${RUNNER_TEMP}/dxc/bin/dxc" >>"$GITHUB_ENV"
-      - name: Check the committed SPIR-V against its sources
+      - name: Check the committed artifacts against their sources
         run: crates/crcbl-shaders/tools/compile-shaders.sh --check
 
   decoder-fuzz:
