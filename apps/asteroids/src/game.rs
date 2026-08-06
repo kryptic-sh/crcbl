@@ -19,7 +19,7 @@
 //!   `docs/backlog.md`), so [`SHIP_TURN_RATE`] is integrated by hand here and
 //!   written into the [`Transform`] the thrust then reads.
 //! * **Bullets** are segment CCD. A bullet has no collider at all: every tick it
-//!   sweeps `prev → cur` with [`PhysicsSystem::sweep_sphere`], so the fastest
+//!   sweeps `prev → cur` with [`PhysicsSystem::sweep_body`], so the fastest
 //!   bullet the game can produce cannot pass through the thinnest rock. See
 //!   [`sweep_bullets`].
 //! * **The ship against the rocks** is a sphere overlap against the broadphase,
@@ -50,7 +50,7 @@ use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::math::{DQuat, DVec3};
 use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{
-    ColliderComponent, DampingForce, PhysicsSystem, RigidBody, Segment, ThrustForce, Transform,
+    ColliderComponent, DampingForce, PhysicsSystem, RigidBody, ThrustForce, Transform,
 };
 use crcbl::session::Loopback;
 
@@ -1048,12 +1048,11 @@ fn place_ship(
 /// Sweeps every bullet along the path it took this tick and resolves what it
 /// hit.
 ///
-/// **This is the "never miss at any speed" half of the plan, and it is written
-/// by hand.** `crcbl-phys` has the machinery — [`PhysicsSystem::sweep_sphere`]
-/// takes a [`Segment`] and a radius — and no bullet-shaped entry point, so every
-/// game that fires anything writes this same "from where it was to where it is"
-/// itself. `docs/backlog.md` records that; this is the consumer that decided it
-/// is still worth writing rather than worked around.
+/// **This is the "never miss at any speed" half of the plan, and it has a name
+/// now.** [`PhysicsSystem::sweep_body`] reads the bullet's own body and
+/// reconstructs the segment — from where it was (`position − velocity·dt`) to
+/// where it is (`position`) — and this game is its first consumer; the
+/// hand-written `Segment` this function used to build is gone.
 ///
 /// A bullet therefore has **no collider**. It is a query, not a body in the
 /// broadphase: giving it one would put the bullet's own shape at the far end of
@@ -1079,18 +1078,7 @@ fn sweep_bullets(logic: &mut GameLogic, world: &mut World, dt: f64) {
     hits.clear();
     with_physics(world, |phys| {
         for (index, bullet) in logic.bullets.iter().enumerate() {
-            let Some((body, transform)) = phys
-                .body(bullet.entity)
-                .copied()
-                .zip(phys.transform(bullet.entity).copied())
-            else {
-                continue;
-            };
-            let segment = Segment {
-                start: transform.position - body.velocity * dt,
-                end: transform.position,
-            };
-            if let Some((entity, _hit)) = phys.sweep_sphere(&segment, BULLET_RADIUS) {
+            if let Some((entity, _hit)) = phys.sweep_body(bullet.entity, dt, BULLET_RADIUS) {
                 hits.push((index, entity));
             }
         }

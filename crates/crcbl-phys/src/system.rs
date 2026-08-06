@@ -336,6 +336,38 @@ impl PhysicsSystem {
             })
     }
 
+    /// Sweep the body at `entity` along the segment it covers in `dt`: from where
+    /// it was (`position − velocity·dt`) to where it is (`position`), with the
+    /// given `radius`. Returns the closest hit.
+    ///
+    /// This is the "never miss at any speed" half of CCD — a body moving faster
+    /// than its own radius in one tick would tunnel through anything it crossed
+    /// between steps, and the swept volume is what catches it.
+    ///
+    /// # The swept entity must have no collider
+    ///
+    /// The segment starts inside the body's own shape at `t = 0`, so an entity
+    /// that is also in the broadphase reports hitting itself — the caller whose
+    /// bodies carry colliders has to work around that, which is the separate
+    /// exclusion question `overlap_sphere`'s entry in `docs/backlog.md` records.
+    /// The consumer this was written for (asteroids' bullets) is a query, not a
+    /// body in the broadphase, and this method is exactly its shape.
+    #[must_use]
+    pub fn sweep_body(
+        &mut self,
+        entity: Entity,
+        dt: f64,
+        radius: f64,
+    ) -> Option<(Entity, ShapeHit)> {
+        let body = self.body(entity).copied()?;
+        let transform = self.transform(entity).copied()?;
+        let segment = Segment {
+            start: transform.position - body.velocity * dt,
+            end: transform.position,
+        };
+        self.sweep_sphere(&segment, radius)
+    }
+
     /// Overlap query: return all entities whose collider overlaps the sphere.
     #[must_use]
     pub fn overlap_sphere(&mut self, centre: DVec3, radius: f64) -> Vec<(Entity, ShapeHit)> {
@@ -953,6 +985,81 @@ mod tests {
         assert!(result.is_some());
         let (hit_entity, _) = result.unwrap();
         assert_eq!(hit_entity, e);
+    }
+
+    /// **`sweep_body` reads the body's own motion, so it catches a crossing a
+    /// stationary overlap at the body's position would miss.**
+    ///
+    /// The body is at the origin moving at `10 u/s`; one second of that motion
+    /// is the segment from `(-10, 0, 0)` to `(0, 0, 0)`. A rock sits in the
+    /// middle of it, five units from where the body is now — an overlap query
+    /// centred there cannot see it, and the sweep exists precisely to. The
+    /// entity is the assertion that breaks if `dt` is misapplied (the segment
+    /// points the other way and misses the rock entirely); the normal pins the
+    /// segment's *direction*, which is the half a start/end swap corrupts
+    /// without losing the hit — both are silent under the raw geometry, which
+    /// is what this method's tests exist to catch.
+    #[test]
+    fn sweep_body_catches_a_crossing_a_stationary_overlap_would_miss() {
+        let mut phys = PhysicsSystem::new();
+        let bullet = test_entity(0);
+        let rock = test_entity(1);
+
+        // The swept entity: a kinematic body with no collider, moving along +x.
+        let mut body = RigidBody::new_kinematic();
+        body.velocity = DVec3::new(10.0, 0.0, 0.0);
+        phys.set_body(bullet, body);
+        phys.set_transform(bullet, Transform::from_position(DVec3::ZERO));
+
+        // The rock: halfway along the segment `sweep_body` reconstructs as
+        // `position - velocity * dt`, and clear of `position` itself.
+        phys.set_collider(
+            rock,
+            &ColliderComponent::Sphere {
+                offset: DVec3::ZERO,
+                radius: 1.0,
+                is_trigger: false,
+            },
+            &Transform::from_position(DVec3::new(-5.0, 0.0, 0.0)),
+        );
+
+        let (hit_entity, hit) = phys
+            .sweep_body(bullet, 1.0, 0.5)
+            .expect("the sweep crossed the rock");
+        assert_eq!(hit_entity, rock, "the sweep hit the wrong entity");
+        // Struck on the rock's leading side: a start/end swap turns this into
+        // +x without changing which entity is hit.
+        assert_eq!(hit.normal, DVec3::NEG_X, "the sweep ran the wrong way");
+    }
+
+    /// **A stationary body sweeps nothing it does not already touch.**
+    ///
+    /// Zero velocity makes the segment zero-length, which is the degenerate
+    /// overlap branch of the swept-sphere test rather than a ray — so the rock
+    /// sits *beside* the body, close enough that the broadphase offers it (its
+    /// AABB reaches into the radius-inflated query bounds) but far enough that
+    /// the exact shape test rejects it. `None` is then the shape test's answer,
+    /// not the broadphase's.
+    #[test]
+    fn a_stationary_body_sweeps_nothing_it_does_not_already_touch() {
+        let mut phys = PhysicsSystem::new();
+        let bullet = test_entity(0);
+        phys.set_body(bullet, RigidBody::new_kinematic());
+        phys.set_transform(bullet, Transform::from_position(DVec3::ZERO));
+
+        // Diagonally beside the body: inside the broadphase query (1.4 < 0.5 +
+        // the rock's AABB reach) but outside the combined reach of 1.5.
+        phys.set_collider(
+            test_entity(1),
+            &ColliderComponent::Sphere {
+                offset: DVec3::ZERO,
+                radius: 1.0,
+                is_trigger: false,
+            },
+            &Transform::from_position(DVec3::new(1.4, 1.4, 0.0)),
+        );
+
+        assert_eq!(phys.sweep_body(bullet, 1.0, 0.5), None);
     }
 
     /// The `_into` form answers exactly what the owned one does, and reuses
