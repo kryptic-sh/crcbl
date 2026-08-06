@@ -2937,16 +2937,6 @@ it costs is **tree quality**, not answers.
   Either compute a real deepest-point normal or change the return type to entity
   ids. `PhysicsWorld::overlap_sphere` underneath is honest.
 
-- **Segment CCD earns a named method, and still has none.** P6 said "decide when
-  asteroids writes it". Asteroids wrote it (`sweep_bullets`), and the verdict is
-  yes: `Segment { start: pos - vel * dt, end: pos }` then `sweep_sphere` is the
-  same six lines in every game that fires anything, and getting `dt` or the
-  order wrong is silent —
-  `a_bullet_that_crosses_a_rock_within_one_tick_still_hits_it` goes red under
-  exactly that mistake. Wanted: something like
-  `PhysicsSystem::sweep_body(entity, dt, exclude)` that reads the body's own
-  velocity and radius. Not blocking; three samples in, it is a pattern.
-
 - **Rotational dynamics are absent.** `Transform` carries a `DQuat` and
   `ThrustForce` reads it, but there is no angular velocity, no torque and no
   quaternion integration: `RigidBody` has `velocity` and `force_accum` and
