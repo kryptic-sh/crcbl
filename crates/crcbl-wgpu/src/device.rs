@@ -6,10 +6,10 @@ use crcbl_hal::{
     self as hal, AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
     BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, CommandBufferHandle,
     CommandEncoderDesc, ComputePipelineDesc, ComputePipelineHandle, Device, DeviceCaps, DeviceDesc,
-    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageViewDesc,
-    ImageViewHandle, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QuerySetDesc,
-    QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState,
-    SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, ShaderModuleDesc,
+    DisplayTiming, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
+    ImageViewDesc, ImageViewHandle, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo,
+    QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle,
+    ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, ShaderModuleDesc,
     ShaderModuleHandle, ShaderSources, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
 };
 
@@ -1685,6 +1685,34 @@ impl Device for WgpuDevice {
             .get(swapchain.cast())
             .ok_or(SurfaceError::Lost)
             .map(|_| ())
+    }
+
+    /// Always [`DisplayTiming::Unknown`]: this device does not advertise
+    /// [`Features::PRESENT_TIMING`](crcbl_hal::Features::PRESENT_TIMING).
+    ///
+    /// # What it would take, and why nothing here can do it
+    ///
+    /// Nothing in `wgpu` or WebGPU reports the display's cadence. The nearest
+    /// thing, `Surface::get_capabilities`, returns the list of present *modes* —
+    /// which is the request side, and is exactly what
+    /// [`DisplayTiming`] exists to be distinguished from. The browser
+    /// composites the canvas when it composites the page, and
+    /// `requestAnimationFrame` reports when that happened rather than what the
+    /// panel will do next; differencing its timestamps measures the loop this
+    /// backend is already being paced by, which cannot tell a 60 Hz panel from
+    /// a VRR one settled at 60 Hz. There is no query to add here — a better
+    /// answer would have to come from a new WebGPU or `wgpu` API, not from
+    /// this file.
+    ///
+    /// The swapchain is still resolved, so asking about a dead handle is an
+    /// error rather than something nobody looked at — the same reason
+    /// [`wait_until_presented`](Self::wait_until_presented) resolves it.
+    fn display_timing(&self, swapchain: SwapchainHandle) -> Result<DisplayTiming, SurfaceError> {
+        let swapchains = self.pools.swapchains.lock().unwrap();
+        swapchains
+            .get(swapchain.cast())
+            .ok_or(SurfaceError::Lost)
+            .map(|_| DisplayTiming::Unknown)
     }
 }
 

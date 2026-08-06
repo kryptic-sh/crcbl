@@ -189,11 +189,12 @@ use crate::{
     AcquiredFrame, AdapterId, AdapterInfo, BackendKind, BindGroupDesc, BindGroupHandle,
     BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, CommandBufferHandle,
     CommandEncoder, CommandEncoderDesc, ComputePipelineDesc, ComputePipelineHandle, DeviceCaps,
-    Features, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
-    ImageViewDesc, ImageViewHandle, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo,
-    QuerySetDesc, QuerySetHandle, ReadbackDesc, ReadbackHandle, ReadbackState, SamplerDesc,
-    SamplerHandle, SemaphoreDesc, SemaphoreHandle, ShaderModuleDesc, ShaderModuleHandle,
-    SubmitInfo, SurfaceCaps, SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle,
+    DisplayTiming, Features, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc,
+    ImageHandle, ImageViewDesc, ImageViewHandle, PipelineLayoutDesc, PipelineLayoutHandle,
+    PresentInfo, QuerySetDesc, QuerySetHandle, ReadbackDesc, ReadbackHandle, ReadbackState,
+    SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, ShaderModuleDesc,
+    ShaderModuleHandle, SubmitInfo, SurfaceCaps, SurfaceError, SurfaceHandle, SwapchainDesc,
+    SwapchainHandle,
 };
 use crcbl_core::{Handle, SurfaceTarget};
 
@@ -962,6 +963,50 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
         present_id: u64,
         timeout: Duration,
     ) -> Result<(), SurfaceError>;
+
+    /// Asks what the display is **actually** doing with this swapchain's
+    /// frames — fixed refresh, adaptive sync, or nothing it will say.
+    ///
+    /// [`PresentMode`](crate::PresentMode) is the request side of this: it picks a queueing
+    /// discipline and tells you nothing about the panel. This is the answer,
+    /// and it is the only thing in the seam that can tell a 60 Hz panel from a
+    /// VRR one holding steady at 60 Hz. See [`DisplayTiming`] for what each arm
+    /// promises.
+    ///
+    /// # This is a live query; caching it is a bug
+    ///
+    /// The answer changes underneath a swapchain that is running perfectly
+    /// well, with no reconfigure and no error: the proposal's own example is a
+    /// laptop entering power-saving mode and dropping the panel's rate, and
+    /// dragging a window to a second monitor does the same thing. **Ask again**
+    /// — every frame is fine, the query is a read of driver-side state — rather
+    /// than reading it once at start-up as a caller may legitimately do with
+    /// [`DeviceCaps::features`](crate::DeviceCaps::features).
+    ///
+    /// # A device without the capability is not an error
+    ///
+    /// Returns `Ok(DisplayTiming::Unknown)` on a device that does not advertise
+    /// [`Features::PRESENT_TIMING`], exactly as
+    /// [`wait_until_presented`](Self::wait_until_presented) returns `Ok(())`
+    /// without [`Features::PRESENT_FEEDBACK`] — "there is nothing here to
+    /// report", not "this call was wrong". [`DisplayTiming::Unknown`] is
+    /// already an arm every caller must handle, so refusing would buy a second
+    /// spelling of the same answer and a branch on every use.
+    ///
+    /// The same answer covers a swapchain that has never been presented to (the
+    /// platform may not know yet), one that has no display behind it at all
+    /// (an offscreen ring), and a platform that reports a cycle length without
+    /// its dynamics.
+    ///
+    /// # Errors
+    ///
+    /// [`SurfaceError::Hal`] wrapping [`HalError::ForeignObject`] for a
+    /// `swapchain` created by a different device, per obligation 3, and
+    /// [`HalError::InvalidHandle`] for one that has been destroyed —
+    /// **validated before the capability is consulted**, so a backend that
+    /// cannot answer still catches the caller bug. [`SurfaceError::Lost`] if
+    /// the window is gone.
+    fn display_timing(&self, swapchain: SwapchainHandle) -> Result<DisplayTiming, SurfaceError>;
 }
 
 #[cfg(test)]

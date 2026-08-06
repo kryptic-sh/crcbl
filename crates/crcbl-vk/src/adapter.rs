@@ -29,6 +29,8 @@ use ash::{khr, vk};
 
 use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
 
+use crate::present_timing;
+
 /// One enumerated physical device, with everything selection needs.
 #[derive(Clone, Debug)]
 pub(crate) struct AdapterRecord {
@@ -181,6 +183,7 @@ pub(crate) fn features_of(
     families: QueueFamilies,
     debug_utils: bool,
     present_feedback: bool,
+    present_timing: bool,
 ) -> Features {
     let mut features = Features::empty();
 
@@ -266,6 +269,12 @@ pub(crate) fn features_of(
     // name, not that `presentWait` came back `VK_TRUE`.
     if present_feedback {
         features |= Features::PRESENT_FEEDBACK;
+    }
+    // The whole four-extension chain *and* both feature bits, established by
+    // `describe` for the same reason as the pair above. A shorter check would
+    // promise an answer this backend cannot obtain.
+    if present_timing {
+        features |= Features::PRESENT_TIMING;
     }
     // SHADER_DEBUG_PRINTF needs the validation layer's printf feature wired to
     // a message handler; it lands with the debug UI at P7 and is
@@ -359,7 +368,11 @@ fn common_sample_count(limits: &vk::PhysicalDeviceLimits) -> u32 {
 /// Discrete devices are listed first (`docs/plan/02-vulkan-backend.md` §2.1:
 /// "prefer discrete"), so a caller taking `adapters()[0]` gets the right answer
 /// without knowing the rule — which is what `apps/sandbox` does.
-pub(crate) fn enumerate(instance: &ash::Instance, debug_utils: bool) -> Vec<AdapterRecord> {
+pub(crate) fn enumerate(
+    instance: &ash::Instance,
+    debug_utils: bool,
+    surface_caps2: bool,
+) -> Vec<AdapterRecord> {
     // SAFETY: `instance` is live and the call only reads driver-owned tables.
     let physicals = match unsafe { instance.enumerate_physical_devices() } {
         Ok(physicals) => physicals,
@@ -371,7 +384,7 @@ pub(crate) fn enumerate(instance: &ash::Instance, debug_utils: bool) -> Vec<Adap
 
     let mut records: Vec<AdapterRecord> = physicals
         .into_iter()
-        .map(|physical| describe(instance, physical, debug_utils))
+        .map(|physical| describe(instance, physical, debug_utils, surface_caps2))
         .collect();
 
     // **Openability first, speed second.** The crate docs say `apps/sandbox`
@@ -406,6 +419,7 @@ fn describe(
     instance: &ash::Instance,
     physical: vk::PhysicalDevice,
     debug_utils: bool,
+    surface_caps2: bool,
 ) -> AdapterRecord {
     let mut vulkan_1_2_props = vk::PhysicalDeviceVulkan12Properties::default();
     let mut properties2 = vk::PhysicalDeviceProperties2::default().push_next(&mut vulkan_1_2_props);
@@ -431,12 +445,33 @@ fn describe(
     let present_feedback_extensions =
         has_device_extension(&device_extensions, khr::present_id::NAME)
             && has_device_extension(&device_extensions, khr::present_wait::NAME);
+    // All four or none. `vk.xml` declares `VK_EXT_present_timing` as depending
+    // on `VK_KHR_swapchain + VK_KHR_present_id2 +
+    // VK_KHR_get_surface_capabilities2 + VK_KHR_calibrated_timestamps`, and an
+    // extension chain is not partially satisfiable: asking for a dependent
+    // extension without its dependency is invalid usage that a validation layer
+    // flags and a driver may simply not honour. `surface_caps2` is the
+    // instance's half, decided before any device existed, so a headless
+    // instance with no WSI at all reports this absent rather than requesting an
+    // extension whose dependency it never enabled.
+    //
+    // `khr::swapchain::NAME` is in the list even though this backend always
+    // enables it: the point is that the *dependency chain* was checked, not
+    // that this call site happens to know one member is unconditional.
+    let present_timing_extensions = surface_caps2
+        && has_device_extension(&device_extensions, khr::swapchain::NAME)
+        && has_device_extension(&device_extensions, present_timing::PRESENT_ID2_NAME)
+        && has_device_extension(&device_extensions, khr::calibrated_timestamps::NAME)
+        && has_device_extension(&device_extensions, present_timing::PRESENT_TIMING_NAME);
 
     let mut vulkan_1_1 = vk::PhysicalDeviceVulkan11Features::default();
     let mut vulkan_1_2 = vk::PhysicalDeviceVulkan12Features::default();
     let mut vulkan_1_3 = vk::PhysicalDeviceVulkan13Features::default();
     let mut present_id_features = vk::PhysicalDevicePresentIdFeaturesKHR::default();
     let mut present_wait_features = vk::PhysicalDevicePresentWaitFeaturesKHR::default();
+    let mut present_timing_features =
+        present_timing::PhysicalDevicePresentTimingFeaturesEXT::default();
+    let mut present_id2_features = present_timing::PhysicalDevicePresentId2FeaturesKHR::default();
     // Only chained on a device that has the version defining it. A
     // `VkPhysicalDeviceVulkan13Features` in the chain of a 1.2 device is not
     // merely useless — the spec forbids it, and a driver that honours the
@@ -458,6 +493,14 @@ fn describe(
             .push_next(&mut present_id_features)
             .push_next(&mut present_wait_features);
     }
+    // Same rule again, and the structs are this crate's own transcriptions
+    // rather than `ash`'s, because `ash` has no bindings for either extension.
+    // See `crate::present_timing` for what that costs and what checks it.
+    if present_timing_extensions {
+        features2 = features2
+            .push_next(&mut present_timing_features)
+            .push_next(&mut present_id2_features);
+    }
     // SAFETY: as above.
     unsafe { instance.get_physical_device_features2(physical, &mut features2) };
     // Copied out before any chained struct is read: the chain holds a mutable
@@ -466,6 +509,13 @@ fn describe(
     let present_feedback = present_feedback_extensions
         && present_id_features.present_id == vk::TRUE
         && present_wait_features.present_wait == vk::TRUE;
+    // Belt and braces, exactly as for present feedback and for the same
+    // reason: a driver that lists an extension and then answers `VK_FALSE` for
+    // its feature exists, and `Features::PRESENT_TIMING` promises the query
+    // actually works — not that the driver knows the name.
+    let present_timing = present_timing_extensions
+        && present_timing_features.present_timing == vk::TRUE
+        && present_id2_features.present_id2 == vk::TRUE;
 
     // SAFETY: as above.
     let family_properties =
@@ -479,6 +529,7 @@ fn describe(
         families,
         debug_utils,
         present_feedback,
+        present_timing,
     );
     let limits = limits_of(&properties.limits, &vulkan_1_2_props, features);
 
@@ -672,6 +723,7 @@ mod tests {
             QueueFamilies::select(&[family(GRAPHICS, 1)]),
             true,
             false,
+            false,
         );
         let caps = DeviceCaps {
             features,
@@ -705,6 +757,7 @@ mod tests {
                 QueueFamilies::select(&[family(GRAPHICS, 1)]),
                 false,
                 present_feedback,
+                false,
             )
         };
         assert!(device(true).contains(Features::PRESENT_FEEDBACK));
@@ -714,6 +767,75 @@ mod tests {
         assert_eq!(
             device(true).difference(device(false)),
             Features::PRESENT_FEEDBACK
+        );
+    }
+
+    /// `PRESENT_TIMING` is the same shape as `PRESENT_FEEDBACK` above: the
+    /// argument `describe` computes from the four-extension chain **and** both
+    /// feature bits, never from a feature struct.
+    ///
+    /// Its own test rather than a line added to that one, because the two
+    /// capabilities are independent — a driver can have either without the
+    /// other, and the flag that moves must be exactly the one asked for.
+    #[test]
+    fn present_timing_is_reported_only_when_it_was_established() {
+        let device = |present_timing| {
+            features_of(
+                &vk::PhysicalDeviceFeatures::default(),
+                &tier_a_vulkan_1_2(),
+                &desktop_limits(),
+                QueueFamilies::select(&[family(GRAPHICS, 1)]),
+                false,
+                false,
+                present_timing,
+            )
+        };
+        assert!(device(true).contains(Features::PRESENT_TIMING));
+        assert!(!device(false).contains(Features::PRESENT_TIMING));
+        assert_eq!(
+            device(true).difference(device(false)),
+            Features::PRESENT_TIMING
+        );
+        // Not a Tier A feature, so a device without it is not demoted — the
+        // same argument as for present feedback, and the reason neither belongs
+        // in `TIER_A`.
+        assert!(!Features::TIER_A.contains(Features::PRESENT_TIMING));
+        assert_eq!(
+            DeviceCaps {
+                features: device(false),
+                limits: Limits::desktop(),
+            }
+            .tier(),
+            RendererTier::B,
+            "the synthetic device here is deliberately not Tier A; only the \
+             present-timing flag is under test"
+        );
+    }
+
+    /// The two present capabilities are separate bits and separate probes, so
+    /// neither can be granted by the other's answer. A backend that folded them
+    /// into one flag would report timing on every driver with
+    /// `VK_KHR_present_wait`, which is most of them and wrong on all of them.
+    #[test]
+    fn the_two_present_capabilities_are_independent() {
+        let device = |feedback, timing| {
+            features_of(
+                &vk::PhysicalDeviceFeatures::default(),
+                &tier_a_vulkan_1_2(),
+                &desktop_limits(),
+                QueueFamilies::select(&[family(GRAPHICS, 1)]),
+                false,
+                feedback,
+                timing,
+            )
+        };
+        assert!(!device(true, false).contains(Features::PRESENT_TIMING));
+        assert!(!device(false, true).contains(Features::PRESENT_FEEDBACK));
+        assert!(device(true, true).contains(Features::PRESENT_FEEDBACK | Features::PRESENT_TIMING));
+        assert!(
+            device(false, false)
+                .intersection(Features::PRESENT_FEEDBACK | Features::PRESENT_TIMING)
+                .is_empty()
         );
     }
 
@@ -749,6 +871,30 @@ mod tests {
         assert!(!has_device_extension(&successors, khr::present_id::NAME));
         assert!(!has_device_extension(&successors, khr::present_wait::NAME));
         assert!(has_device_extension(&successors, c"VK_KHR_present_id2"));
+
+        // **The premise above is now live in both directions.** This backend
+        // probes for `VK_KHR_present_id` (present feedback) *and*
+        // `VK_KHR_present_id2` (present timing's dependency), so a prefix match
+        // would grant each capability on the other's driver. The predecessor
+        // list must not satisfy the successor name any more than the reverse.
+        let predecessors = [named(khr::present_id::NAME), named(khr::present_wait::NAME)];
+        assert!(!has_device_extension(
+            &predecessors,
+            present_timing::PRESENT_ID2_NAME
+        ));
+        assert!(has_device_extension(
+            &successors,
+            present_timing::PRESENT_ID2_NAME
+        ));
+        // The extension this whole chain exists for, checked the same way.
+        assert!(!has_device_extension(
+            &successors,
+            present_timing::PRESENT_TIMING_NAME
+        ));
+        assert!(has_device_extension(
+            &[named(present_timing::PRESENT_TIMING_NAME)],
+            present_timing::PRESENT_TIMING_NAME
+        ));
     }
 
     /// The half of "honest reporting" that matters: a device missing one
@@ -792,6 +938,7 @@ mod tests {
                 QueueFamilies::select(&[family(GRAPHICS, 1)]),
                 true,
                 false,
+                false,
             );
             assert!(
                 !features.contains(Features::DESCRIPTOR_INDEXING),
@@ -815,6 +962,7 @@ mod tests {
             &tier_a_vulkan_1_2().draw_indirect_count(false),
             &desktop_limits(),
             QueueFamilies::select(&[family(GRAPHICS, 1)]),
+            false,
             false,
             false,
         );
@@ -851,6 +999,7 @@ mod tests {
             &vk::PhysicalDeviceVulkan12Features::default(),
             &raw,
             QueueFamilies::select(&[family(GRAPHICS, 1)]),
+            false,
             false,
             false,
         );

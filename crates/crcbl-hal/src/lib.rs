@@ -253,8 +253,8 @@ pub use shader::{
     ShaderEntry, ShaderModule, ShaderModuleDesc, ShaderModuleHandle, ShaderSources, ShaderStages,
 };
 pub use swapchain::{
-    AcquiredFrame, CompositeAlpha, PresentInfo, PresentMode, Surface, SurfaceCaps, SurfaceHandle,
-    Swapchain, SwapchainDesc, SwapchainHandle,
+    AcquiredFrame, CompositeAlpha, DisplayTiming, PresentInfo, PresentMode, Surface, SurfaceCaps,
+    SurfaceHandle, Swapchain, SwapchainDesc, SwapchainHandle, display_timing_from_refresh_nanos,
 };
 pub use sync::{
     Semaphore, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreSignal, SemaphoreWait,

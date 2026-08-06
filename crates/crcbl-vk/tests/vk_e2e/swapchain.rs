@@ -578,6 +578,87 @@ fn the_offscreen_ring_answers_a_present_wait_with_no_swapchain_to_wait_on() {
     headless.finish();
 }
 
+/// The offscreen counterpart for `display_timing`, and the same guard.
+///
+/// An offscreen ring is `VK_NULL_HANDLE` with no display behind it, so the only
+/// honest answer is [`DisplayTiming::Unknown`] — and reaching for the handle
+/// anyway would hand `vkGetSwapchainTimingPropertiesEXT` a null swapchain,
+/// which is what `Headless::finish`'s `assert_clean` catches.
+///
+/// **What this proves and what it does not.** Where `Features::PRESENT_TIMING`
+/// came back, the whole `VK_EXT_present_timing` chain is *enabled* on this
+/// device — that alone is worth having, because a wrong extension name or an
+/// ungranted feature bit fails `vkCreateDevice` and this test would never
+/// reach its first line. What it cannot reach is any arm other than `Unknown`:
+/// only a real windowed swapchain on a real display returns `Fixed`,
+/// `Variable` or `Stepped`, and this suite is headless by construction. The run
+/// prints which driver it was so a green result is not mistaken for coverage of
+/// the other three arms.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_offscreen_ring_reports_no_display_timing_and_never_takes_a_null_swapchain() {
+    let headless = Headless::open();
+    let device = &headless.device;
+    let timing_enabled = device
+        .caps()
+        .features
+        .contains(crcbl_hal::Features::PRESENT_TIMING);
+    eprintln!(
+        "vk e2e: present timing is {} on this driver; the offscreen suite can only \
+         reach DisplayTiming::Unknown either way",
+        if timing_enabled { "ENABLED" } else { "absent" }
+    );
+
+    // Before any present, and again after one: the extension's own proposal
+    // says some platforms answer `VK_NOT_READY` until an image has been
+    // presented, so both sides of that boundary must be `Unknown` here rather
+    // than one of them erroring.
+    assert_eq!(
+        device
+            .display_timing(headless.swapchain)
+            .expect("an offscreen ring answers rather than failing"),
+        crcbl_hal::DisplayTiming::Unknown,
+        "an offscreen ring has no display, so it can only report Unknown"
+    );
+    device
+        .acquire_next_frame(headless.swapchain)
+        .expect("the ring always has an image");
+    device
+        .present(
+            headless.queue,
+            &PresentInfo {
+                swapchain: headless.swapchain,
+                waits: &[],
+                present_id: Some(1),
+            },
+        )
+        .expect("present");
+    assert_eq!(
+        device
+            .display_timing(headless.swapchain)
+            .expect("an offscreen ring answers rather than failing"),
+        crcbl_hal::DisplayTiming::Unknown,
+        "presenting to a ring does not give it a display"
+    );
+
+    // A destroyed handle is still refused. `Ok(Unknown)` is the answer for a
+    // device without the capability, never for a bad argument — the seam's
+    // obligation 3, which a stub that skipped the lookup would silently drop.
+    let stale = headless.swapchain;
+    device.destroy_swapchain(stale);
+    assert!(
+        matches!(
+            device.display_timing(stale),
+            Err(crcbl_hal::SurfaceError::Hal(
+                crcbl_hal::HalError::InvalidHandle { .. }
+            ))
+        ),
+        "a destroyed swapchain is an invalid handle, not an unknown display"
+    );
+
+    headless.finish();
+}
+
 /// Reconfigure is the resize path, and the seam promises the *handle* survives
 /// it. Doing it in a tight loop is the "resize storm" the promise exists for.
 #[test]

@@ -87,10 +87,20 @@ impl Headless {
                 // `VK_KHR_present_id` and `VK_KHR_present_wait`, and the
                 // offscreen ring then has to keep them *out* of its own path.
                 // Not asking would leave that guard untested on every driver.
+                //
+                // `PRESENT_TIMING` is here for exactly the same reason, and it
+                // buys more: asking is what makes `vkCreateDevice` negotiate
+                // the whole four-extension chain `VK_EXT_present_timing`
+                // depends on, so a mistake in that chain — a name never
+                // enabled, a feature bit never granted — fails device creation
+                // in this suite instead of on a user's machine. The offscreen
+                // ring then has to keep the query out of its own path, which is
+                // the guard the test beside the present-wait one covers.
                 optional_features: Features::TIER_A
                     | Features::TIMESTAMP_QUERY
                     | Features::DEBUG_MARKERS
-                    | Features::PRESENT_FEEDBACK,
+                    | Features::PRESENT_FEEDBACK
+                    | Features::PRESENT_TIMING,
                 compatible_surface: Some(surface),
             })
             .expect("a device opens");

@@ -41,12 +41,12 @@ use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
     BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, CommandBufferHandle,
     CommandEncoder, CommandEncoderDesc, ComputePipelineDesc, ComputePipelineHandle, Device,
-    DeviceCaps, DeviceDesc, Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle,
-    HalError, ImageDesc, ImageHandle, ImageViewDesc, ImageViewHandle, MemoryLocation,
-    PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QueryKind, QuerySetDesc, QuerySetHandle,
-    QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, SamplerDesc,
-    SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait, ShaderModuleDesc,
-    ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
+    DeviceCaps, DeviceDesc, DisplayTiming, Features, Format, GraphicsPipelineDesc,
+    GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageViewDesc, ImageViewHandle,
+    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QueryKind, QuerySetDesc,
+    QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState,
+    SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait,
+    ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc, SwapchainHandle,
 };
 
 use crate::adapter::AdapterRecord;
@@ -59,6 +59,7 @@ use crate::pipeline::{
     BindGroupEntryRecord, BindGroupLayoutEntryRecord, PipelineEntry, PipelineLayoutEntry,
     SamplerEntry, ShaderModuleEntry,
 };
+use crate::present_timing;
 use crate::swapchain::{self, FrameSync, SwapchainEntry};
 
 /// Anything the object tables hold, so one lookup helper serves them all.
@@ -322,6 +323,21 @@ pub(crate) struct DeviceInner {
     /// [`Device::wait_until_presented`] the immediate `Ok(())` the seam
     /// documents, and what keeps `VkPresentIdKHR` off the present chain.
     pub(crate) present_wait_ext: Option<khr::present_wait::Device>,
+    /// `Some` when the whole `VK_EXT_present_timing` chain was enabled and its
+    /// one entry point resolved — that is, when this device advertises
+    /// [`Features::PRESENT_TIMING`]. `None` is what makes
+    /// [`Device::display_timing`] the `Ok(DisplayTiming::Unknown)` the seam
+    /// documents.
+    pub(crate) present_timing_ext: Option<present_timing::Device>,
+    /// Says, once, what the display turned out to be doing.
+    ///
+    /// The same idiom and the same argument as [`first_present_wait`](Self::first_present_wait):
+    /// a device can negotiate the whole extension chain and never be asked, and
+    /// nothing else in a log distinguishes that from a query that ran and
+    /// answered. Carries the resolved [`DisplayTiming`] because the arm is the
+    /// fact worth having — "present timing enabled" is already said at open,
+    /// and it is the *answer* that no amount of frame timing reveals.
+    first_display_timing: Once,
     /// Says, once, that a wait actually reached the driver.
     ///
     /// A second fact from the line `open` logs, and not one that can be
@@ -635,6 +651,14 @@ impl VkDevice {
         // `vkCreateDevice` outright, so this pair must never be asked for on a
         // guess.
         let present_feedback = granted.contains(Features::PRESENT_FEEDBACK);
+        // The same argument, for the four-extension chain `VK_EXT_present_timing`
+        // sits at the end of: `adapter::describe` sets `PRESENT_TIMING` only
+        // when every member of that chain was listed *and* both feature bits
+        // came back true, so this is never a guess either. `VK_KHR_swapchain`
+        // is already unconditional below and
+        // `VK_KHR_get_surface_capabilities2` is an instance extension the
+        // instance enabled, which leaves these two to add here.
+        let present_timing = granted.contains(Features::PRESENT_TIMING);
         // A named local, not a temporary in the chain: the builder stores the
         // pointer, so `&[…]` inline would dangle by the time `vkCreateDevice`
         // reads it.
@@ -643,6 +667,11 @@ impl VkDevice {
             device_extensions.push(khr::present_id::NAME.as_ptr());
             device_extensions.push(khr::present_wait::NAME.as_ptr());
         }
+        if present_timing {
+            device_extensions.push(khr::calibrated_timestamps::NAME.as_ptr());
+            device_extensions.push(present_timing::PRESENT_ID2_NAME.as_ptr());
+            device_extensions.push(present_timing::PRESENT_TIMING_NAME.as_ptr());
+        }
         // The extension names alone enable nothing: chaining a `VkPresentIdKHR`
         // onto a present without `presentId` granted here is a validation
         // error, and `vkWaitForPresentKHR` without `presentWait` is undefined.
@@ -650,6 +679,13 @@ impl VkDevice {
             vk::PhysicalDevicePresentIdFeaturesKHR::default().present_id(true);
         let mut present_wait_features =
             vk::PhysicalDevicePresentWaitFeaturesKHR::default().present_wait(true);
+        // As above, and with the dependency's `presentId2` asked for alongside
+        // the extension's own `presentTiming`: enabling `VK_KHR_present_id2`
+        // without granting its feature would leave the chain half-satisfied.
+        let mut present_timing_features =
+            present_timing::PhysicalDevicePresentTimingFeaturesEXT::enabling_timing();
+        let mut present_id2_features =
+            present_timing::PhysicalDevicePresentId2FeaturesKHR::enabling_present_id2();
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_features(&core_features)
@@ -661,6 +697,11 @@ impl VkDevice {
             create_info = create_info
                 .push_next(&mut present_id_features)
                 .push_next(&mut present_wait_features);
+        }
+        if present_timing {
+            create_info = create_info
+                .push_next(&mut present_timing_features)
+                .push_next(&mut present_id2_features);
         }
 
         // SAFETY: `record.physical` came from `instance`; every pointer in
@@ -678,6 +719,14 @@ impl VkDevice {
         // and every wait branches on it rather than re-reading `caps`.
         let present_wait_ext =
             present_feedback.then(|| khr::present_wait::Device::new(&instance.raw, &raw));
+        // Flattened, unlike the tables above: `ash` generates its own
+        // infallibly, but this one is resolved by hand through
+        // `vkGetDeviceProcAddr` and a null answer is possible in principle. It
+        // degrades to the same `DisplayTiming::Unknown` a device without the
+        // extension gives, rather than to a call through a null pointer.
+        let present_timing_ext = present_timing
+            .then(|| present_timing::Device::load(&instance.raw, &raw))
+            .flatten();
         let debug_ext = instance
             .debug_ext
             .as_ref()
@@ -728,6 +777,8 @@ impl VkDevice {
             physical: record.physical,
             swapchain_ext,
             present_wait_ext,
+            present_timing_ext,
+            first_display_timing: Once::new(),
             first_present_wait: Once::new(),
             debug_ext,
             caps: DeviceCaps {
@@ -749,6 +800,13 @@ impl VkDevice {
                 "crcbl-vk: present feedback enabled ({} + {})",
                 khr::present_id::NAME.to_string_lossy(),
                 khr::present_wait::NAME.to_string_lossy(),
+            );
+        }
+        if inner.present_timing_ext.is_some() {
+            log::info!(
+                "crcbl-vk: present timing enabled ({} + {})",
+                present_timing::PRESENT_TIMING_NAME.to_string_lossy(),
+                present_timing::PRESENT_ID2_NAME.to_string_lossy(),
             );
         }
         log::info!(
@@ -2503,6 +2561,51 @@ impl Device for VkDevice {
             }
             Err(error) => Err(conv::surface_error("vkWaitForPresentKHR", error)),
         }
+    }
+
+    /// `vkGetSwapchainTimingPropertiesEXT`, on a device that has
+    /// [`Features::PRESENT_TIMING`](crcbl_hal::Features::PRESENT_TIMING), and
+    /// `Ok(DisplayTiming::Unknown)` on one that does not.
+    ///
+    /// Two things answer without reaching the driver, and each is the seam's
+    /// documented answer rather than a shortcut: a device without the extension
+    /// chain has nothing to ask, and an offscreen ring is a set of images with
+    /// no `VkSwapchainKHR` to name and no display behind it to have a cadence.
+    /// The handle is resolved before either, so a foreign or destroyed
+    /// swapchain is still the `ForeignObject`/`InvalidHandle` the seam's
+    /// obligation 3 requires.
+    ///
+    /// Read under the state lock and not cached: the answer is driver-side
+    /// state that changes with the panel, so it is queried afresh each call.
+    ///
+    /// **The lock is required, not merely convenient.** `vk.xml` marks this
+    /// command's `swapchain` parameter `externsync="true"`, exactly as it marks
+    /// `vkWaitForPresentKHR`'s, so the swapchain must be externally
+    /// synchronised for the duration of the call — and the state lock is this
+    /// backend's external synchronisation for swapchains. It is also what stops
+    /// a concurrent `destroy_swapchain` or `reconfigure_swapchain` from freeing
+    /// the handle underneath the query.
+    fn display_timing(&self, swapchain: SwapchainHandle) -> Result<DisplayTiming, SurfaceError> {
+        // Held across the driver call below, which is the `externsync`
+        // obligation above; dropping it early would be a data race the compiler
+        // cannot see, because `raw` is a plain `Copy` handle.
+        let mut state = self.inner.state();
+        let inner = Arc::clone(&self.inner);
+        let entry = lookup_mut(&mut state.swapchains, "swapchain", swapchain, &inner)?;
+        let Some(present_timing) = self.inner.present_timing_ext.as_ref() else {
+            return Ok(DisplayTiming::Unknown);
+        };
+        if entry.is_offscreen() {
+            return Ok(DisplayTiming::Unknown);
+        }
+        let raw = entry.raw;
+        let timing = present_timing
+            .swapchain_timing(raw)
+            .map_err(|error| conv::surface_error("vkGetSwapchainTimingPropertiesEXT", error))?;
+        self.inner.first_display_timing.call_once(|| {
+            log::info!("crcbl-vk: vkGetSwapchainTimingPropertiesEXT says {timing:?}");
+        });
+        Ok(timing)
     }
 }
 

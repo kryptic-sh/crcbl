@@ -79,15 +79,15 @@ use crate::{
     BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutHandle, BufferCopy, BufferDesc,
     BufferHandle, BufferImageCopy, CommandBufferHandle, CommandEncoder, CommandEncoderDesc,
     CompositeAlpha, ComputePassDesc, ComputePipelineDesc, ComputePipelineHandle, Device,
-    DeviceCaps, DeviceDesc, DeviceRequestState, DeviceType, DrawIndirect, DrawIndirectCount,
-    Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageCopy, ImageDesc,
-    ImageHandle, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, IndexFormat, Instance,
-    Limits, MemoryLocation, PendingDevice, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo,
-    PresentMode, QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
-    ReadbackHandle, ReadbackState, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
-    SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait, ShaderModuleDesc,
-    ShaderModuleHandle, ShaderSources, ShaderStages, SubmitInfo, SurfaceCaps, SurfaceError,
-    SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
+    DeviceCaps, DeviceDesc, DeviceRequestState, DeviceType, DisplayTiming, DrawIndirect,
+    DrawIndirectCount, Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError,
+    ImageCopy, ImageDesc, ImageHandle, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle,
+    IndexFormat, Instance, Limits, MemoryLocation, PendingDevice, PipelineLayoutDesc,
+    PipelineLayoutHandle, PresentInfo, PresentMode, QueryKind, QuerySetDesc, QuerySetHandle,
+    QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, Rect2d, RenderPassDesc,
+    SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait,
+    ShaderModuleDesc, ShaderModuleHandle, ShaderSources, ShaderStages, SubmitInfo, SurfaceCaps,
+    SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
 };
 
 /// Formats a null surface reports, and therefore the only ones a swapchain on
@@ -1521,6 +1521,20 @@ impl Device for NullDevice {
             present_id,
         });
         Ok(())
+    }
+
+    /// Always [`DisplayTiming::Unknown`], and the handle is checked first.
+    ///
+    /// There is no display under this backend to have a cadence, so this device
+    /// never advertises [`Features::PRESENT_TIMING`] and the seam's answer for
+    /// a device without it is the honest one here. The check is the same
+    /// obligation-3 lookup every other method does: asking about a destroyed or
+    /// foreign swapchain is a caller bug whether or not there was an answer to
+    /// give.
+    fn display_timing(&self, swapchain: SwapchainHandle) -> Result<DisplayTiming, SurfaceError> {
+        self.check(ObjectKind::Swapchain, swapchain.to_bits(), "swapchain")
+            .map_err(SurfaceError::Hal)?;
+        Ok(DisplayTiming::Unknown)
     }
 }
 

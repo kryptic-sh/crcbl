@@ -134,10 +134,10 @@ use std::time::Duration;
 use block2::RcBlock;
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
-    AcquiredFrame, AdapterId, CompositeAlpha, Device as _, Extent3d, Format, HalError, ImageDesc,
-    ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle,
-    ImageViewType, MemoryLocation, PresentInfo, PresentMode, QueueHandle, SurfaceCaps,
-    SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle,
+    AcquiredFrame, AdapterId, CompositeAlpha, Device as _, DisplayTiming, Extent3d, Format,
+    HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
+    ImageViewHandle, ImageViewType, MemoryLocation, PresentInfo, PresentMode, QueueHandle,
+    SurfaceCaps, SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle,
 };
 use objc2::ClassType;
 use objc2::rc::Retained;
@@ -836,6 +836,23 @@ impl MetalDevice {
             });
         }
         Ok(())
+    }
+
+    /// Resolves the handle and answers [`DisplayTiming::Unknown`].
+    ///
+    /// The lookup is the whole of the work, and it is not a formality: it is
+    /// the seam's obligation 3, so a swapchain from another device is a
+    /// `ForeignObject` here exactly as it is on a backend that has a real
+    /// answer to give. See
+    /// [`Device::display_timing`](crcbl_hal::Device::display_timing) on
+    /// [`MetalDevice`](crate::MetalDevice) for why the answer is `Unknown`.
+    pub(crate) fn display_timing_impl(
+        &self,
+        swapchain: SwapchainHandle,
+    ) -> Result<DisplayTiming, SurfaceError> {
+        let state = self.state();
+        lookup(&state.swapchains, "swapchain", swapchain, &*self.inner)?;
+        Ok(DisplayTiming::Unknown)
     }
 
     /// Presents the acquired image.

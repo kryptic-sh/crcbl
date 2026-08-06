@@ -215,6 +215,7 @@ pub(crate) mod device;
 pub(crate) mod instance;
 pub(crate) mod mem;
 pub(crate) mod pipeline;
+pub(crate) mod present_timing;
 pub(crate) mod spirv;
 pub(crate) mod swapchain;
 

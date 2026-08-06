@@ -76,8 +76,8 @@ use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
     BindGroupLayoutDesc, BindGroupLayoutHandle, BindingResource, BufferDesc, BufferHandle,
     CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePipelineDesc,
-    ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, Extent3d, Features, Format,
-    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
+    ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DisplayTiming, Extent3d, Features,
+    Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
     MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, QuerySetDesc,
     QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState,
@@ -2942,6 +2942,41 @@ impl Device for Dx12Device {
             }
         };
         swapchain::wait(waitable, timeout)
+    }
+
+    /// Always [`DisplayTiming::Unknown`]: this backend does not advertise
+    /// [`Features::PRESENT_TIMING`](crcbl_hal::Features::PRESENT_TIMING).
+    ///
+    /// # What DXGI actually offers, which is less than it looks
+    ///
+    /// Three things come close and none of them answers the question:
+    ///
+    /// * `IDXGIOutput::GetFrameStatistics` gives `SyncRefreshCount` and
+    ///   `SyncQPCTime`, so differencing two samples yields an *average* vblank
+    ///   period. That is a measurement of what the display did, which is what
+    ///   [`DisplayTiming::Fixed`] and [`DisplayTiming::Variable`] look
+    ///   identical under whenever the frame rate happens to be steady — and
+    ///   telling those two apart is the whole point of the query.
+    /// * `DXGI_MODE_DESC::RefreshRate`, from `IDXGIOutput::GetDisplayModeList`,
+    ///   gives the mode's nominal rate. On a VRR panel that is the *maximum*,
+    ///   presented as though it were the cadence.
+    /// * `DXGI_FEATURE_PRESENT_ALLOW_TEARING`, which this backend already
+    ///   queries at instance creation, says tearing presents are permitted.
+    ///   That is a precondition for variable refresh, not an observation that
+    ///   it is engaged; it is equally true on a fixed-refresh monitor.
+    ///
+    /// So an honest DXGI implementation could reach
+    /// [`DisplayTiming::Stepped`]/[`Variable`](DisplayTiming::Variable) only by
+    /// inference, and reporting [`Fixed`](DisplayTiming::Fixed) from a steady
+    /// average is precisely the lie this seam exists to prevent. Windows has no
+    /// equivalent of `VK_EXT_present_timing`'s `refreshInterval` — a value that
+    /// states the dynamics rather than letting a caller guess at them.
+    ///
+    /// The handle is resolved first regardless, per the seam's obligation 3.
+    fn display_timing(&self, swapchain: SwapchainHandle) -> Result<DisplayTiming, SurfaceError> {
+        let state = self.state();
+        handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
+        Ok(DisplayTiming::Unknown)
     }
 }
 

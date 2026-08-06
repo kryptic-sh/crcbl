@@ -39,13 +39,13 @@ use crcbl_hal::{
     AcquiredFrame, BackendKind, BindGroupDesc, BindGroupEntry, BindGroupHandle,
     BindGroupLayoutDesc, BindGroupLayoutHandle, BufferDesc, BufferHandle, BufferUsage,
     CommandBufferHandle, CommandEncoder, CommandEncoderDesc, ComputePipelineDesc,
-    ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, Features, Format, GraphicsPipelineDesc,
-    GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageType, ImageViewDesc,
-    ImageViewHandle, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo,
-    QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle,
-    ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind,
-    SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, SurfaceError, SwapchainDesc,
-    SwapchainHandle,
+    ComputePipelineHandle, Device, DeviceCaps, DeviceDesc, DisplayTiming, Features, Format,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageType,
+    ImageViewDesc, ImageViewHandle, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle,
+    PresentInfo, QuerySetDesc, QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc,
+    ReadbackHandle, ReadbackState, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle,
+    SemaphoreKind, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, SubmitInfo, SurfaceError,
+    SwapchainDesc, SwapchainHandle,
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -2141,6 +2141,37 @@ impl Device for MetalDevice {
         timeout: Duration,
     ) -> Result<(), SurfaceError> {
         self.wait_until_presented_impl(swapchain, present_id, timeout)
+    }
+
+    /// Always [`DisplayTiming::Unknown`]: this backend does not advertise
+    /// [`Features::PRESENT_TIMING`](crcbl_hal::Features::PRESENT_TIMING).
+    ///
+    /// # What Metal and Core Animation offer, and why none of it is reachable
+    ///
+    /// `CAMetalLayer` has no refresh-cadence property at all. Its
+    /// `maximumDrawableCount` is the size of the drawable ring — how many
+    /// frames may be in flight — which is a swapchain image count and says
+    /// nothing about the panel. What this backend *does* already have is
+    /// `MTLDrawable`'s `addPresentedHandler:` and the `presentedTime` it
+    /// carries, which is what [`Features::PRESENT_FEEDBACK`] is built on; two
+    /// of those differenced give the interval between frames that were shown,
+    /// which is a measurement of the loop rather than a statement about the
+    /// display, and looks the same on a fixed panel and on a ProMotion one
+    /// holding steady.
+    ///
+    /// The real answers are `CADisplayLink` — whose `targetTimestamp`,
+    /// `duration` and `preferredFrameRateRange` between them do express the
+    /// dynamics — and `NSScreen`'s `maximumFramesPerSecond` /
+    /// `minimumRefreshInterval`. **Both are out of reach by this crate's own
+    /// design, not by omission**: the module docs state that no `NSView`,
+    /// `NSWindow` or `NSScreen` is ever reached from anywhere here, and that
+    /// restriction is what discharges the crate's thread-affinity argument.
+    /// Answering this properly on Metal is therefore a shell-side change that
+    /// hands the timing down, not a query to add in this file.
+    ///
+    /// The handle is resolved first regardless, per the seam's obligation 3.
+    fn display_timing(&self, swapchain: SwapchainHandle) -> Result<DisplayTiming, SurfaceError> {
+        self.display_timing_impl(swapchain)
     }
 }
 

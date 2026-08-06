@@ -195,6 +195,18 @@ bitflags::bitflags! {
         /// without it renders exactly the same frames, it just cannot be paced
         /// by them.
         const PRESENT_FEEDBACK = 1 << 20;
+        /// The device can say what the display is **doing** with the frames we
+        /// present — fixed refresh, adaptive sync, or neither reported —
+        /// through [`Device::display_timing`](crate::Device::display_timing).
+        ///
+        /// Distinct from [`PRESENT_FEEDBACK`](Self::PRESENT_FEEDBACK), which
+        /// says only that a present *finished*. This one is about the display's
+        /// own cadence, which nothing else in the seam can observe: a
+        /// [`PresentMode`](crate::PresentMode) is a request, and a frame time
+        /// measured over a paced loop is the request coming back at you. Also
+        /// optional and also **not** part of [`TIER_A`](Self::TIER_A): a device
+        /// without it renders the same frames and simply cannot be asked.
+        const PRESENT_TIMING = 1 << 21;
 
         /// The capability set that defines **Tier A** (topic 03).
         ///
@@ -443,6 +455,11 @@ mod tests {
         // some Tier A-capable configurations, and the renderer must have a
         // uniform-buffer path regardless.
         assert!(!Features::TIER_A.contains(Features::PUSH_CONSTANTS));
+        // Neither present capability is in Tier A, for the same reason as each
+        // other: a device without them renders identical frames and only loses
+        // the ability to be *asked* about the display.
+        assert!(!Features::TIER_A.contains(Features::PRESENT_FEEDBACK));
+        assert!(!Features::TIER_A.contains(Features::PRESENT_TIMING));
     }
 
     #[test]

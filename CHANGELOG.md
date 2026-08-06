@@ -16,6 +16,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The HAL can be asked what the display is doing with presented frames, not
+  just what was requested.** `crcbl_hal::DisplayTiming` is a new four-state
+  answer — `Unknown`, `Fixed { cycle }`, `Variable { shortest }` and
+  `Stepped { cycle, step }` — returned by the new
+  `Device::display_timing(swapchain)`, and gated by the new
+  `Features::PRESENT_TIMING` (outside `TIER_A`, like `PRESENT_FEEDBACK`). A
+  `PresentMode` is a request; this is the observation, and it is the only thing
+  in the seam that distinguishes a fixed 60 Hz panel from an adaptive one
+  currently sitting at 60 Hz. **It is a live query — the answer changes when a
+  laptop enters power-saving mode or a window moves to another monitor — so
+  callers must not cache it.** A device without the capability answers
+  `Ok(DisplayTiming::Unknown)` rather than erroring, exactly as
+  `wait_until_presented` answers `Ok(())`; a foreign or destroyed swapchain is
+  still `ForeignObject`/`InvalidHandle` on every backend. The free function
+  `display_timing_from_refresh_nanos` is the conversion from a presentation
+  engine's two nanosecond figures, exposed and unit-tested on its own because
+  every subtle mistake in this feature lives there. `crcbl-vk` implements it
+  against `VK_EXT_present_timing` through hand-written FFI (`ash` has no
+  bindings for it); `crcbl-wgpu`, `crcbl-mtl` and `crcbl-dx12` answer `Unknown`
+  and document what their platform would need to do better. **Nothing in
+  `crcbl::engine` consumes this yet** — `Pacing::Adaptive` is still a request
+  with no observation behind it.
+
 - **The demo site is served cross-origin isolated, and the browser gate asserts
   it.** `web/tools/serve.mjs` is a new static server that sends
   `Cross-Origin-Opener-Policy: same-origin` and

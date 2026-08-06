@@ -137,6 +137,8 @@
 //! the P1 golden-image e2e therefore run through the *same* acquire/present
 //! path as a real window, instead of a second, less-exercised one.
 
+use std::time::Duration;
+
 use crcbl_core::Handle;
 
 use crate::{Format, ImageHandle, ImageViewHandle, SemaphoreHandle};
@@ -169,6 +171,126 @@ pub enum PresentMode {
     /// Present immediately; tears. For latency measurement and uncapped
     /// benchmarking.
     Immediate,
+}
+
+/// What the display is **actually** doing with the frames we present.
+///
+/// [`PresentMode`] is a request — it picks a queueing discipline and says
+/// nothing about the panel behind it. This is the observation, read back with
+/// [`Device::display_timing`](crate::Device::display_timing) on a device that
+/// advertises [`Features::PRESENT_TIMING`](crate::Features::PRESENT_TIMING).
+///
+/// The four arms are the four states a presentation engine can be in, not three
+/// with a fallback: a refresh cycle can be fixed, free-running, quantised, or
+/// simply unreported, and collapsing the third into the first is the specific
+/// lie this type exists to prevent.
+///
+/// **Live, never cached.** See
+/// [`Device::display_timing`](crate::Device::display_timing) — the answer
+/// changes underneath a running swapchain.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DisplayTiming {
+    /// The presentation engine did not say.
+    ///
+    /// Covers a device without the capability, a swapchain nothing has been
+    /// presented to yet, and — the case worth naming — **a cycle duration that
+    /// was reported while its dynamics were not**. That last one is deliberately
+    /// not [`Fixed`](Self::Fixed): the platform told us how long the current
+    /// cycle is and refused to say whether it will stay that length, and
+    /// "how long is a cycle" without "will it change" is not an answer to the
+    /// question this type asks. The duration is discarded rather than dressed
+    /// up as a promise.
+    #[default]
+    Unknown,
+    /// Fixed refresh: every cycle is `cycle` long, and will stay that way until
+    /// this query answers differently.
+    Fixed {
+        /// The refresh cycle, e.g. 16.67 ms on a 60 Hz panel.
+        cycle: Duration,
+    },
+    /// Adaptive sync, free-running: the cycle has no fixed length, and
+    /// `shortest` is the shortest one the presentation engine will produce.
+    ///
+    /// The ceiling of the panel's VRR range, in other words — present faster
+    /// than this and the extra frames cannot be shown.
+    Variable {
+        /// The shortest cycle the engine will produce; the reciprocal of the
+        /// panel's maximum rate.
+        shortest: Duration,
+    },
+    /// The cycle can change, but only in whole multiples of `step`.
+    ///
+    /// A panel that can drop from 120 Hz to 60 Hz to 40 Hz but nothing between
+    /// them: `cycle` is what it is right now, and the next one will be some
+    /// other multiple of `step`. Adaptive, so a caller pacing on a fixed
+    /// interval is wrong — but bounded, so it is not [`Variable`](Self::Variable)
+    /// either.
+    Stepped {
+        /// The cycle currently in force. Always a whole multiple of `step`.
+        cycle: Duration,
+        /// The quantum the cycle moves in.
+        step: Duration,
+    },
+}
+
+/// Reads a presentation engine's two refresh figures as a [`DisplayTiming`].
+///
+/// Both arguments are nanosecond counts in the encoding
+/// `VK_EXT_present_timing` defines for `VkSwapchainTimingPropertiesEXT`, which
+/// is the only platform that reports this today. Free-standing, and with no
+/// backend type in its signature, because the mapping is where every subtle
+/// mistake in this seam lives and it is the one part of it that a machine with
+/// no display can check.
+///
+/// The encoding, from the extension proposal:
+///
+/// * `refresh_duration_ns` of zero — the engine cannot report the cycle length.
+/// * `refresh_interval_ns` of zero — the engine cannot report the cycle's
+///   dynamics.
+/// * `refresh_interval_ns` of [`u64::MAX`] — VRR, and `refresh_duration_ns` is
+///   the *minimum* cycle rather than the current one.
+/// * the two equal — fixed refresh.
+/// * otherwise — the cycle varies in quanta of `refresh_interval_ns`, and
+///   `refresh_duration_ns` is a whole multiple of it.
+///
+/// # Contradictory input
+///
+/// A driver that reports an interval which does not divide the duration has
+/// broken the last of those rules, and the pair cannot be believed:
+/// [`DisplayTiming::Stepped`] would hand a caller a `cycle`/`step` whose
+/// quotient is not a whole number, and every other arm would be inventing a
+/// claim the driver did not make. So the answer is
+/// [`DisplayTiming::Unknown`] — the conservative arm, because it is the only
+/// one that promises nothing.
+#[must_use]
+pub fn display_timing_from_refresh_nanos(
+    refresh_duration_ns: u64,
+    refresh_interval_ns: u64,
+) -> DisplayTiming {
+    // Nothing below can say anything without a cycle length, including the VRR
+    // arm — "the shortest cycle is zero" is not a weaker claim than `Unknown`,
+    // it is a false one.
+    if refresh_duration_ns == 0 {
+        return DisplayTiming::Unknown;
+    }
+    match refresh_interval_ns {
+        0 => DisplayTiming::Unknown,
+        // Checked before the equality below, because the two collide when a
+        // driver reports `u64::MAX` for both: the sentinel is an explicit
+        // spelling of "VRR" and the equality is an inference, so the sentinel
+        // wins.
+        u64::MAX => DisplayTiming::Variable {
+            shortest: Duration::from_nanos(refresh_duration_ns),
+        },
+        interval if interval == refresh_duration_ns => DisplayTiming::Fixed {
+            cycle: Duration::from_nanos(refresh_duration_ns),
+        },
+        interval if refresh_duration_ns.is_multiple_of(interval) => DisplayTiming::Stepped {
+            cycle: Duration::from_nanos(refresh_duration_ns),
+            step: Duration::from_nanos(interval),
+        },
+        _ => DisplayTiming::Unknown,
+    }
 }
 
 /// How the surface's alpha channel composites with the desktop.
@@ -563,5 +685,157 @@ mod tests {
         assert_eq!(PresentMode::default(), PresentMode::Fifo);
         assert!(caps().supports_present_mode(PresentMode::Fifo));
         assert_eq!(CompositeAlpha::default(), CompositeAlpha::Opaque);
+    }
+
+    /// 60 Hz, to the nanosecond a presentation engine would actually report.
+    const CYCLE_60HZ_NS: u64 = 16_666_667;
+    /// 120 Hz — half of [`CYCLE_60HZ_NS`] rounded the way a driver would, so
+    /// the two do *not* divide evenly. Used for the contradictory-input case.
+    const CYCLE_120HZ_NS: u64 = 8_333_333;
+
+    /// A device that says nothing says [`DisplayTiming::Unknown`], and so does
+    /// the seam's own default — the arm every backend without the capability
+    /// answers with.
+    #[test]
+    fn nothing_reported_is_unknown() {
+        assert_eq!(DisplayTiming::default(), DisplayTiming::Unknown);
+        assert_eq!(
+            display_timing_from_refresh_nanos(0, 0),
+            DisplayTiming::Unknown
+        );
+    }
+
+    /// A live interval with no duration behind it: the dynamics are known and
+    /// the cycle is not, which is not enough for any arm that carries a
+    /// `Duration`. Every interval encoding must land on `Unknown`, including
+    /// the VRR sentinel — `Variable { shortest: 0 }` would be a false claim,
+    /// not a weak one.
+    #[test]
+    fn a_zero_duration_is_unknown_whatever_the_interval_says() {
+        for interval in [1, CYCLE_60HZ_NS, u64::MAX] {
+            assert_eq!(
+                display_timing_from_refresh_nanos(0, interval),
+                DisplayTiming::Unknown,
+                "interval {interval}"
+            );
+        }
+    }
+
+    /// The case the doc comment calls out: the duration was known, the
+    /// dynamics were not, and the duration is **discarded** rather than
+    /// promoted to `Fixed`.
+    #[test]
+    fn a_known_duration_with_unknown_dynamics_discards_the_duration() {
+        assert_eq!(
+            display_timing_from_refresh_nanos(CYCLE_60HZ_NS, 0),
+            DisplayTiming::Unknown
+        );
+    }
+
+    /// `UINT64_MAX` is the proposal's spelling of "VRR", and the duration
+    /// beside it is the *minimum* cycle.
+    #[test]
+    fn the_max_interval_sentinel_is_free_running_adaptive_sync() {
+        assert_eq!(
+            display_timing_from_refresh_nanos(CYCLE_120HZ_NS, u64::MAX),
+            DisplayTiming::Variable {
+                shortest: Duration::from_nanos(CYCLE_120HZ_NS)
+            }
+        );
+    }
+
+    /// Two ways to read `duration == interval == u64::MAX`, and the sentinel
+    /// wins: it is an explicit statement, where the equality is an inference.
+    #[test]
+    fn the_sentinel_outranks_the_equality_when_both_match() {
+        assert_eq!(
+            display_timing_from_refresh_nanos(u64::MAX, u64::MAX),
+            DisplayTiming::Variable {
+                shortest: Duration::from_nanos(u64::MAX)
+            }
+        );
+    }
+
+    /// Equal figures are fixed refresh — the only arm a frame loop may pace a
+    /// fixed interval against.
+    #[test]
+    fn equal_figures_are_fixed_refresh() {
+        assert_eq!(
+            display_timing_from_refresh_nanos(CYCLE_60HZ_NS, CYCLE_60HZ_NS),
+            DisplayTiming::Fixed {
+                cycle: Duration::from_nanos(CYCLE_60HZ_NS)
+            }
+        );
+        // Nanosecond counts far larger than any real panel still map, and map
+        // to the same arm: `Duration::from_nanos` takes the whole `u64` range,
+        // so there is no overflow to guard and no clamp to get wrong.
+        let huge = u64::MAX - 1;
+        assert_eq!(
+            display_timing_from_refresh_nanos(huge, huge),
+            DisplayTiming::Fixed {
+                cycle: Duration::from_nanos(huge)
+            }
+        );
+    }
+
+    /// A genuine multiple: the cycle is 40 Hz right now and moves in 120 Hz
+    /// quanta. Adaptive, so not `Fixed`; bounded, so not `Variable`.
+    #[test]
+    fn a_multiple_of_the_interval_is_a_stepped_cycle() {
+        let step = 8_333_333;
+        let cycle = step * 3;
+        assert_eq!(
+            display_timing_from_refresh_nanos(cycle, step),
+            DisplayTiming::Stepped {
+                cycle: Duration::from_nanos(cycle),
+                step: Duration::from_nanos(step),
+            }
+        );
+        // The smallest multiple that is not the equal case, so the boundary
+        // between `Fixed` and `Stepped` is pinned rather than assumed.
+        assert_eq!(
+            display_timing_from_refresh_nanos(2, 1),
+            DisplayTiming::Stepped {
+                cycle: Duration::from_nanos(2),
+                step: Duration::from_nanos(1),
+            }
+        );
+    }
+
+    /// A driver contradicting the proposal — an interval that does not divide
+    /// the duration — is not believed. `Unknown` is the conservative arm: it is
+    /// the only one that promises nothing, and in particular it is not `Fixed`,
+    /// which is the answer this whole type exists to stop us guessing.
+    #[test]
+    fn an_interval_that_does_not_divide_the_duration_is_not_believed() {
+        // 16_666_667 is not a multiple of 8_333_333 — one nanosecond out, which
+        // is exactly the shape a rounding bug in a driver takes.
+        assert_eq!(
+            display_timing_from_refresh_nanos(CYCLE_60HZ_NS, CYCLE_120HZ_NS),
+            DisplayTiming::Unknown
+        );
+        // An interval *longer* than the duration breaks the same rule.
+        assert_eq!(
+            display_timing_from_refresh_nanos(CYCLE_120HZ_NS, CYCLE_60HZ_NS),
+            DisplayTiming::Unknown
+        );
+    }
+
+    /// Every arm is reachable, and no two inputs above collide onto one. Driven
+    /// as a table so a fifth arm added without a mapping shows up as a hole
+    /// here rather than as a silent `Unknown` in the field.
+    #[test]
+    fn every_arm_is_reachable_from_some_input() {
+        let step = 8_333_333;
+        let observed = [
+            display_timing_from_refresh_nanos(0, 0),
+            display_timing_from_refresh_nanos(CYCLE_60HZ_NS, CYCLE_60HZ_NS),
+            display_timing_from_refresh_nanos(CYCLE_120HZ_NS, u64::MAX),
+            display_timing_from_refresh_nanos(step * 3, step),
+        ];
+        assert!(matches!(observed[0], DisplayTiming::Unknown));
+        assert!(matches!(observed[1], DisplayTiming::Fixed { .. }));
+        assert!(matches!(observed[2], DisplayTiming::Variable { .. }));
+        assert!(matches!(observed[3], DisplayTiming::Stepped { .. }));
     }
 }

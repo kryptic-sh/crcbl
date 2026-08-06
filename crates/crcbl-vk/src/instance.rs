@@ -467,12 +467,24 @@ impl VkInstance {
             khr::surface::NAME,
             khr::wayland_surface::NAME,
             khr::xcb_surface::NAME,
+            // Not used directly by anything here — it is a *dependency* of the
+            // device-level `VK_EXT_present_timing`, which `vk.xml` declares as
+            // `VK_KHR_swapchain+VK_KHR_present_id2+VK_KHR_get_surface_capabilities2+VK_KHR_calibrated_timestamps`.
+            // An extension chain is not partially satisfiable, so a device that
+            // wants present timing needs this one enabled on the instance under
+            // it, and instance extensions can only be asked for here.
+            khr::get_surface_capabilities2::NAME,
         ] {
             if has_extension(name) {
                 extensions.push(name.as_ptr());
                 enabled_names.push(name);
             }
         }
+        // Enabled exactly when available, by the loop above, so the two are the
+        // same question — and it is the *enabled* one the adapter probe needs,
+        // because a device extension whose instance-level dependency was never
+        // enabled must not be asked for.
+        let surface_caps2 = has_extension(khr::get_surface_capabilities2::NAME);
         let debug_utils = has_extension(ext::debug_utils::NAME);
         if debug_utils {
             extensions.push(ext::debug_utils::NAME.as_ptr());
@@ -612,7 +624,7 @@ impl VkInstance {
         let xcb_ext = has_extension(khr::xcb_surface::NAME)
             .then(|| khr::xcb_surface::Instance::new(&entry, &raw));
 
-        let adapters = adapter::enumerate(&raw, debug_utils);
+        let adapters = adapter::enumerate(&raw, debug_utils, surface_caps2);
         if adapters.is_empty() {
             // Tear the instance down by hand: `InstanceInner` does not exist
             // yet, so there is no `Drop` to do it.
