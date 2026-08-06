@@ -354,8 +354,11 @@ What is still owed:
   since become true. A missing wake-up therefore costs a whole
   `PRESENT_WAIT_TIMEOUT` per frame and raises no error anywhere. The test now
   bounds the elapsed time from above as well as below, which is what catches it.
-  Anywhere else in this workspace that pairs a condvar with a timeout wants the
-  same upper bound; nobody has audited for other instances.
+  Audited for the rest of the workspace on 2026-08-06: the only other condvar is
+  `crcbl-jobs`' pool, and it calls the bare `Condvar::wait` with **no timeout**
+  — a missed wake-up there is throughput, never a reported success — so this is
+  the only `wait_timeout` pairing in the tree and no other instance needs the
+  bound.
 
 - **`SwapchainEntry::presented_id` resets across a reconfigure by construction,
   not by a check.** `reconfigure_swapchain` replaces the whole entry with what
