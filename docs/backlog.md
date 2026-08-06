@@ -46,15 +46,6 @@ phase attached to it.
   Fixing it means a fractional delay per channel inside `Voice::mix_block`, at a
   cost the audio thread has not been measured for.
 
-- **`Mixer::stop` cuts a voice dead rather than fading it.** It removes the
-  voice from the list immediately — which is what makes `voice_count` and
-  `is_playing` answer without an audio thread to reap, and what horde's cap
-  needs — but a loud voice stopped mid-cycle is a click. Asteroids' engine is
-  the only caller and it is quiet enough not to matter. A short release ramp
-  (mark stopped, fade over one block, then drop) is the fix and it would have to
-  keep the immediate accounting: `stop` must still make room in the cap on the
-  spot.
-
 - **Nothing has listened to the migrated cues on a real device.** Every sample's
   audio was rewritten onto `crcbl_audio::mixer` and the checks are all
   structural: buffer shapes, pan ordering, voice counts, loop seams. Two
