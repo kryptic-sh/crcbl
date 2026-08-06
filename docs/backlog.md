@@ -2895,13 +2895,6 @@ ancestor on the way to the root and a stretched ancestor is a conservative
 _superset_ — bigger than it should be, never smaller, so it prunes nothing. What
 it costs is **tree quality**, not answers.
 
-- **A consumer cannot see the cost it is being asked to avoid.** `Bvh::depth` is
-  public; `PhysicsWorld` exposes no `depth()`, no node count and no `&Bvh`, so a
-  game has no way to measure whether its teleport rule helps. The rule above is
-  therefore chosen on the argument and not on a measurement. Either expose a
-  `PhysicsWorld::broadphase_stats()` or accept that the claim stays unverified.
-  Ties into the missing benchmark below.
-
 - **The per-entity routes exist now, and `PhysicsSystem` still has no per-entity
   providers.** `DampingForce::world_force(velocity, mass, dt)` and
   `DragForce::world_force(velocity)` joined `ThrustForce::world_force`, and
