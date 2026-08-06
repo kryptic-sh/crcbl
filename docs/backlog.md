@@ -5035,29 +5035,6 @@ Metal's last planned slice. **The backend still reports Tier B**, and the reason
 moved rather than went away — the detail is below, because "why not Tier A" is
 now a design answer rather than a to-do.
 
-### Needs the user: two shaders declare their buffers out of binding order
-
-**`ui.slang` and `ui_tier_b.slang` cannot be drawn on Metal**, and the fix is in
-`crcbl-shaders` rather than in the backend.
-
-Metal has no `(set, binding)` pair; a backend must flatten to per-stage argument
-tables. `crcbl-mtl` flattens in **ascending `(set, binding)`, counted per
-table**, which matches the committed MSL for `triangle`, `mesh`, `sprite` and
-`tonemap` exactly. It does not match the two UI shaders, because **Slang assigns
-Metal indices in source declaration order** and both declare their constant
-buffer before the storage buffer while numbering it after — `ui_tier_b.slang`
-has `constants` at binding 3 and `vertices` at binding 2, but its MSL emits
-`constants [[buffer(0)]]`, `vertices [[buffer(1)]]`.
-
-**Nothing below the seam can detect this.** Metal reflection reports the
-_shader's_ parameter names and `BindGroupLayoutEntry` carries no name to match
-them against, so the mismatch is silent: the shader reads the wrong buffer.
-
-The fix is a one-line reorder in each `.slang` source so declaration order
-matches binding order, plus regenerating the artifacts. `ui.slang` is blocked
-twice, since it also uses push constants. Not done here — it is a
-`crcbl-shaders` change and it re-blesses artifacts, so it wants its own commit.
-
 ### Needs the user: `dispatch` is blocked on the seam, not on Metal
 
 `MTLComputeCommandEncoder` is otherwise ready. Metal takes
