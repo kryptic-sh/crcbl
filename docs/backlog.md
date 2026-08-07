@@ -80,14 +80,6 @@ is left is one build-dependency and one file.
   public surface. **Still a decision nobody has made**; the exception is
   defensible and is what ships today.
 
-- **`main.rs` is four near-identical copies.** Measured with comments and blanks
-  stripped: 37 code lines in breakout and flappy, 39 in asteroids, 42 in horde,
-  and `breakout` against `flappy` differs in 8 of the 37 — the crate name, the
-  summary fields printed, the exit code's message. It is what the extraction of
-  `crcbl::args` left behind: the parser is shared, the front end that calls it
-  is not. Smallest remaining copy in the tree and nothing about it is urgent;
-  the count is here so it is not measured a third time.
-
 Everything else that was on this list shipped and is out of it. The one
 non-obvious residue: each sample's `web.rs` still carries its own
 `__crcbl_<sample>_` symbols, which `web/tools/check-exports.mjs` requires to be
