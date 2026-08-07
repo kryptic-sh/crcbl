@@ -683,6 +683,19 @@ mod tests {
             "the overlay starts hidden here: {hidden:?}",
         );
 
+        // **And the HUD reaches the GPU.** `UiRenderer::add_pass` declares
+        // nothing when the draw list is empty, so the pass's presence in the
+        // frame's graph is what separates "the HUD was drawn" from "the HUD was
+        // composited". Unlike the sandbox — which draws no UI at all with the
+        // overlay off — the HUD is on every frame, so the pass is present even
+        // before F3; the claim is that the game's own UI reaches the graph,
+        // not that the overlay is distinguishable in the dump.
+        assert!(
+            engine.gpu().last_dump().contains("ui-composite"),
+            "the HUD's UI pass must be in the frame:\n{}",
+            engine.gpu().last_dump(),
+        );
+
         engine
             .shell_mut()
             .key_press(window, DEBUG_OVERLAY_KEY)

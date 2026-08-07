@@ -140,6 +140,12 @@ pub struct Gpu {
     atlas: FontAtlas,
     draw_list: DrawList,
     dumped: bool,
+    /// The last frame's graph dump, kept only for the loop's own tests: it is
+    /// how a test sees whether the UI pass was in the frame at all. `add_pass`
+    /// declares nothing when the draw list is empty, so the pass's presence in
+    /// this string *is* "the UI reached the GPU".
+    #[cfg(test)]
+    last_dump: String,
 }
 
 /// What both [`Gpu::open`] and [`Gpu::request_open`] ask the engine for.
@@ -269,6 +275,8 @@ impl Gpu {
             atlas: FontAtlas::built_in(),
             draw_list: DrawList::new(),
             dumped: false,
+            #[cfg(test)]
+            last_dump: String::new(),
         })
     }
 
@@ -356,6 +364,12 @@ impl Gpu {
         &self.draw_list
     }
 
+    /// The last frame's render-graph dump, for the loop's own tests.
+    #[cfg(test)]
+    pub fn last_dump(&self) -> &str {
+        &self.last_dump
+    }
+
     /// Records, submits and presents one frame.
     ///
     /// # Errors
@@ -419,6 +433,13 @@ impl Gpu {
             graph.compile(&self.pool)?
         };
 
+        // "The graph must be able to explain itself" — §2.4's debug-tools
+        // principle. The dump is also how a test sees the UI pass was in the
+        // frame at all.
+        #[cfg(test)]
+        {
+            self.last_dump = compiled.dump();
+        }
         if !self.dumped {
             crcbl::log::debug!("render graph for flappy:\n{}", compiled.dump());
             self.dumped = true;
