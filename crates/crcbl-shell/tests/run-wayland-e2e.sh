@@ -296,10 +296,10 @@ PACED_MIN_FRAME_MS=30
 # player would feel — and the reason `adaptive` earns a pass of its own: no run
 # in this repository had ever opened a swapchain on `FifoRelaxed`, the mode a
 # VRR panel actually wants, until this one. `Pacing::Off` prefers Mailbox and
-# falls back to Immediate; `Pacing::Adaptive` prefers FifoRelaxed. Mesa's
-# Wayland WSI offers all of them on radv and on lavapipe, so a Fifo here means
-# the request did not reach `choose_present_mode` rather than that the surface
-# was poor.
+# falls back to Immediate; `Pacing::Adaptive` prefers FifoRelaxed and falls back
+# to Mailbox. Headless sway only offers Fifo and Mailbox, so the adaptive pass
+# here matches both — what a Fifo alone would mean is that the request did not
+# reach `choose_present_mode` at all.
 run_sandbox_paced() {
     local backend="$1"
     local pacing="$2"
@@ -515,7 +515,7 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
     # And the same with adaptive asked for by name — the pacing a VRR panel
     # actually wants, and the one mode no pass in this file had ever opened a
     # swapchain on (its unit coverage is the whole of its coverage).
-    run_sandbox_paced vk adaptive "FifoRelaxed"
+    run_sandbox_paced vk adaptive "(FifoRelaxed|Mailbox)"
     # And the switch between them, which neither of those two makes.
     cargo build --locked --quiet --package sandbox
     cargo build --locked --quiet --package crcbl-shell \
