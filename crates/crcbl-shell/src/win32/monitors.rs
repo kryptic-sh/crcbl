@@ -228,6 +228,15 @@ fn refresh_of(table: &[(String, u32)], device: &[u16; 32]) -> u32 {
         .unwrap_or_else(|| integer_refresh_of(device))
 }
 
+/// The lowest rate a real display can be running, in millihertz (10 Hz).
+///
+/// 24 Hz cinema is the lowest common mode, so no real mode is refused; the
+/// placeholder rationals a virtual display reports are far below it — the
+/// GitHub runner's desktop has reported 1 mHz — and refusing them is what
+/// keeps the seam's documented "zero = the backend cannot determine it" for
+/// such displays, instead of reporting a rate nothing shows.
+const MIN_PLAUSIBLE_REFRESH_MHZ: u32 = 10_000;
+
 /// The exact refresh of every active display, as `(GDI device name, millihertz)`.
 ///
 /// `QueryDisplayConfig`'s `DISPLAYCONFIG_RATIONAL` carries the refresh a
@@ -293,6 +302,12 @@ fn exact_refreshes() -> Vec<(String, u32)> {
         let Some(millihertz) = signal.v_sync_freq.millihertz(divider) else {
             continue;
         };
+        // A virtual display's placeholder signal is not a rate; refuse it so
+        // `refresh_of` falls back to the integer path, which answers 0 for
+        // such a display (frequency 0 or 1 = "hardware default").
+        if millihertz < MIN_PLAUSIBLE_REFRESH_MHZ {
+            continue;
+        }
         let mut request = ffi::DisplayConfigSourceDeviceName {
             header: ffi::DisplayConfigDeviceInfoHeader {
                 kind: value::DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,

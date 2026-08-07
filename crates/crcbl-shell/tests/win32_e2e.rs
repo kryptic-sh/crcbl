@@ -1463,11 +1463,14 @@ fn the_monitors_tile_the_virtual_screen_the_system_reports() {
     for monitor in monitors {
         assert!(!monitor.size().is_empty(), "{}", monitor.name);
         assert!(monitor.scale_factor > 0.0, "{}", monitor.name);
-        // Refresh is populated and plausible. The unit is millihertz: a value
-        // in whole hertz here (59 instead of 59940) would fail this band as
-        // loudly as a zero would.
+        // Refresh is either the documented zero — "the backend cannot
+        // determine it", which is what a virtual output like this runner's
+        // desktop honestly reports — or a plausible rate. The unit is
+        // millihertz: a value in whole hertz here (59 instead of 59940) would
+        // fail this band as loudly as a nonsense rate would.
         assert!(
-            (10_000..=1_000_000).contains(&monitor.refresh_millihertz),
+            monitor.refresh_millihertz == 0
+                || (10_000..=1_000_000).contains(&monitor.refresh_millihertz),
             "{}'s refresh {} mHz is not a plausible display rate",
             monitor.name,
             monitor.refresh_millihertz,
