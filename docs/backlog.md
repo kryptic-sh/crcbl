@@ -312,15 +312,6 @@ the logged limit and the measured frame time. What that leaves:
   entry point builds `Clock::manual` and `requestAnimationFrame` is the pacing.
   The wayland pass is the only place it is real.
 
-- **Nothing in the repository changes either value while running.**
-  `Loop::clock_source_mut` (new) and `GpuContext::set_pacing` are what a
-  settings screen would call, a game reaches its own `Gpu` — and therefore its
-  `GpuContext` — from `HostedGame::tick`, and the `crcbl new` template documents
-  both routes. But no sample has a settings menu, so the mid-run path is covered
-  by `a_hosted_loop_takes_its_frame_limit_from_the_config_and_can_be_changed` in
-  `crates/crcbl/src/engine.rs` and by no running game. A pacing/fps row in
-  `apps/sandbox`'s pause menu is the obvious thing that would exercise it.
-
 - **`apps/sandbox` now duplicates eight shared flags rather than six.** Its
   parser is deliberately its own (`crates/crcbl/src/args.rs`'s module docs make
   the case, and it is a real one: the sandbox takes `--camera` and `--title` and
