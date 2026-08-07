@@ -118,18 +118,18 @@ What is still owed:
   Closing this needs a CI leg with a driver that has the pair; nothing else will
   do it.
 
-- **Two guards on `wait_until_presented` have no automated check that would
-  catch losing one of them.** `VkDevice::wait_until_presented` in `crcbl-vk`
-  returns early for an offscreen ring _and_ for an id the swapchain object was
-  never given, and the vk e2e
+- **The windowed half of the `wait_until_presented` id check now has a check.**
+  `run-wayland-e2e.sh` runs the sandbox with `--wait-unpresented`: on its first
+  tick the sandbox calls `Device::wait_until_presented` with `u64::MAX` on its
+  real swapchain and logs whether the device answered at once, and the
+  present-feedback block asserts the success line. Falsified on radv: with the
+  id guard removed, the wait blocks the whole 60 s timeout and the pass goes
+  red; with it, it answers in microseconds. What is still not independently
+  checkable is the offscreen guard alone — an offscreen entry never records an
+  id, so the id guard answers for it, and the vk e2e
   (`the_offscreen_ring_answers_a_present_wait_with_no_swapchain_to_wait_on`)
-  only goes red when **both** are removed — verified: removing both segfaults
-  radv on a `VK_NULL_HANDLE` swapchain, removing the offscreen one alone still
-  passes because an offscreen entry never records an id. The windowed half of
-  the id check has no test at all: the suite that has a real `VkSwapchainKHR` is
-  the sandbox, and it never asks for an id it did not present. A `crcbl-shell`
-  wayland-e2e test that built a Vulkan swapchain on a real `wl_surface` and
-  waited for an unpresented id would cover it.
+  only goes red when **both** are removed (removing both segfaults radv on a
+  `VK_NULL_HANDLE` swapchain).
 
 - **Metal's `addPresentedHandler:` path is verified by nothing, on any
   machine.** This is the wider of the two coverage holes in present feedback,
