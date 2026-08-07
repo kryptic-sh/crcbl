@@ -32,7 +32,7 @@ use crcbl::engine::{FIRST_GAME_ID, FrameLimit, Pacing};
 pub enum SandboxAction {
     /// Cycle the display pacing: Auto → Vsync → Adaptive → Off.
     CyclePacing,
-    /// Cycle the frame limit up the ladder in [`crate::app::next_limit`],
+    /// Cycle the frame limit up the ladder in `crate::app::next_limit`,
     /// wrapping at "unlimited".
     CycleLimit,
 }
