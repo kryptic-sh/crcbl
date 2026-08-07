@@ -39,6 +39,14 @@ its placeholder sits at, and a placeholder alone on a line with an empty value
 takes the line with it. Without that the rendered pages carry the content
 file's indentation into the layout's, and view-source shows markup that looks
 broken even though it parses.
+
+THE BUILD ALSO FAILS ON A LINK OR ASSET THAT WOULD 404. Every `href` and `src`
+in the built pages is resolved against what the finished site will contain —
+the pages this run wrote plus the static half `web/build.sh` still has to copy —
+so a typo'd path or a renamed file fails the build by name instead of shipping
+a broken link. Off-site URLs and in-page fragments are exempt: neither is
+resolvable offline. (The tag-balance half of an HTML validator is deliberately
+not here; it would need a dependency, and `web/` is no-npm.)
 """
 
 from __future__ import annotations
@@ -78,6 +86,16 @@ DOC_COMMENT_RE = re.compile(r"\A\s*<!--.*?-->[ \t]*\n?", re.S)
 # A placeholder that owns its whole line, and one that sits inside other markup.
 SLOT_LINE_RE = re.compile(r"^([ \t]*)\{\{(\w+)\}\}[ \t]*$", re.M)
 SLOT_RE = re.compile(r"\{\{(\w+)\}\}")
+# Every URL a built page can name, in the two attributes that load or navigate.
+HREF_SRC_RE = re.compile(r'\b(?:href|src)="([^"]+)"')
+
+# The static half of the site, pruned exactly as `web/build.sh`'s `find` prunes
+# it, so this list and the copy that ships the files cannot disagree about what
+# the site will contain. The resolution check below runs before the copy does,
+# which is why it resolves against the sources rather than the site directory.
+STATIC_EXCLUDED_DIRS = {"tools", "pages", "templates"}
+STATIC_EXCLUDED_SUFFIXES = {".sh", ".py"}
+STATIC_EXCLUDED_NAMES = {"README.md"}
 
 
 def die(msg: str) -> NoReturn:
@@ -176,6 +194,59 @@ def substitute(text: str, subs: dict[str, str], where: str) -> str:
     if leftover:
         die(f"{where}: unsubstituted template vars: {sorted(set(leftover))}")
     return text
+
+
+def static_site_files() -> list[str]:
+    """Every file the static half of the build will copy, site-root-absolute.
+
+    The same set `web/build.sh`'s `find` ships, pruned by the same rules, so
+    the resolution check can run before the copy does and still know what the
+    finished site will contain.
+    """
+    files = []
+    for path in sorted(ROOT.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(ROOT)
+        if any(part in STATIC_EXCLUDED_DIRS for part in relative.parts):
+            continue
+        if path.suffix in STATIC_EXCLUDED_SUFFIXES or path.name in STATIC_EXCLUDED_NAMES:
+            continue
+        files.append("/" + relative.as_posix())
+    return files
+
+
+def _skip_link(target: str) -> bool:
+    """A URL the resolution check can neither resolve nor be expected to: off-site,
+    an in-page fragment, or a scheme that names no file at all."""
+    lowered = target.lower()
+    return (
+        lowered.startswith(("http://", "https://", "//", "mailto:", "tel:", "data:"))
+        or target.startswith("#")
+    )
+
+
+def check_links(rendered: list[tuple[str, str]]) -> None:
+    """Every `href` and `src` in the built pages resolves to something the site
+    will contain: a page this run wrote, a file the static half will provide,
+    or a directory whose `index.html` this run wrote. A link that names no such
+    thing is a 404 waiting for a visitor, so it fails the build by name."""
+    written = {"/" + out for out, _ in rendered}
+    static = set(static_site_files())
+    for out, html in rendered:
+        base = "/" + out.removesuffix("index.html")
+        for target in HREF_SRC_RE.findall(html):
+            if _skip_link(target):
+                continue
+            # A fragment or query on a resolvable path still has to resolve.
+            path = target.split("#", 1)[0].split("?", 1)[0]
+            resolved = path if path.startswith("/") else base + path
+            if resolved.endswith("/"):
+                ok = resolved + "index.html" in written
+            else:
+                ok = resolved in written or resolved in static
+            if not ok:
+                die(f"{out}: {target} names no page, static file or directory index")
 
 
 def siblings_html(slug: str) -> str:
@@ -277,6 +348,7 @@ def main() -> None:
 
     written = set()
     includes_by_slug: dict[str, list[str]] = {}
+    rendered: list[tuple[str, str]] = []
     for page in pages:
         meta, head_extra, body = parse(page)
         html, used = render(layout, partials, meta, head_extra, body)
@@ -284,6 +356,7 @@ def main() -> None:
         if meta["out"] in written:
             die(f"{page}: two pages both write {meta['out']}")
         written.add(meta["out"])
+        rendered.append((meta["out"], html))
         includes_by_slug[meta.get("slug", "")] = used
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(html)
@@ -306,6 +379,11 @@ def main() -> None:
                 f"the {slug} demo page does not <!--include--> {', '.join(missing)}; "
                 "every demo renders the same window from templates/"
             )
+
+    # The site's own links and assets, resolved against what the finished site
+    # will contain (the pages just written plus the static half still to be
+    # copied) — see [`check_links`].
+    check_links(rendered)
 
     print(f"rendered {len(written)} page(s)")
 
