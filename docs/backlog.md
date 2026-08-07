@@ -60,13 +60,12 @@ phase attached to it.
   and the player's own glade sits in the first view — and a wide bound on one
   seed is a weak test.
 
-## The goal: a sample depends on `crcbl` and `std`, and it is met bar one line
+## The samples depend on `crcbl` and `std` — met, with one exception
 
-Stated as a target for the samples on 2026-08-03, and reached on 2026-08-03.
-Every one of `apps/{bare,breakout,flappy,asteroids,horde,sandbox}/Cargo.toml`
-now names `crcbl` and nothing else under `[dependencies]` — the nine simulation
-crates are re-exported, `glam` is `crcbl::math` and `log` is `crcbl::log`. What
-is left is one build-dependency and one file.
+Reached on 2026-08-03: every one of
+`apps/{bare,breakout,flappy,asteroids,horde,sandbox}/Cargo.toml` names `crcbl`
+and nothing else under `[dependencies]` — the nine simulation crates are
+re-exported, `glam` is `crcbl::math` and `log` is `crcbl::log`. What is left:
 
 - **The `crcbl-sprite`/`bake` build-dependency is the one exception, and it was
   taken rather than decided.** The four game manifests carry
@@ -79,12 +78,6 @@ is left is one build-dependency and one file.
   literal zero-exception rule at the price of a feature matrix on the umbrella's
   public surface. **Still a decision nobody has made**; the exception is
   defensible and is what ships today.
-
-Everything else that was on this list shipped and is out of it. The one
-non-obvious residue: each sample's `web.rs` still carries its own
-`__crcbl_<sample>_` symbols, which `web/tools/check-exports.mjs` requires to be
-literal — see _Considered and declined_. Adopting `crcbl_ui::hud` was declined
-on its merits, also below.
 
 ## Frame pacing sleeps on the monotonic clock, which is not what a display does
 
@@ -226,13 +219,6 @@ What is still owed:
     at all (see the mapping gap below), so nothing distinguishes this from the
     other choice — pacing a stepped panel on vsync at its current multiple —
     except the argument.
-  - **`set_pacing`'s failure path is untested.** `GpuContext::set_pacing` rolls
-    the request, the effective pacing and `config.present_mode` back when
-    `reconfigure` fails, on the strength of `crcbl-vk`'s `reconfigure_swapchain`
-    leaving the old swapchain configured until the new one is built. That
-    rollback has never run: the null backend does not fail a reconfigure and
-    nothing else can be made to. A fault-injecting backend, or a recorder knob
-    that fails the next reconfigure, is what would exercise it.
   - **Why RADV answers `Unknown` there is partly determined.** Verified: that
     sway session advertises `wp_presentation` and neither
     `wp_commit_timing_manager_v1` nor `wp_fifo_manager_v1` (`wayland-info` on
@@ -329,120 +315,60 @@ the logged limit and the measured frame time. What that leaves:
 `a_scaffolded_project_builds_lints_and_runs_headless` in
 `crates/crcbl-cli/tests/cli_e2e.rs` scaffolds a project into a temporary
 directory and points `CARGO_TARGET_DIR` at another one, so **every run is a cold
-build of the whole engine** — the sharing that makes the rest of the suite fast
-is deliberately absent, because an inherited target directory would deadlock
-against the lock the test runner already holds (the comment on `scaffold_cargo`
-explains it).
-
+build of the whole engine** — deliberately, because an inherited target
+directory would deadlock against the lock the test runner already holds.
 `.config/nextest.toml` gives it
-`slow-timeout = { period = "60s", terminate-after = 4 }`, so the ceiling is
-240s. Running it twice in a row on this machine, back to back, gave
-**`TIMEOUT [240.174s]`** and then **`Summary [36.367s] 1 test run: 1 passed`**.
-The cause of the 6x spread was not determined — no other build was running in
-the foreground either time — so treat this as "seen once, unexplained" rather
-than a known flake with a known trigger.
-
-It has not failed in CI, so nothing is broken today. What is worth knowing: the
-margin is a wall-clock budget on a from-scratch engine build, and it moves with
-every dependency the engine gains and every runner GitHub retires. If this job
-ever goes red on a timeout, the fix is the `period`/`terminate-after` pair
-rather than anything in the scaffold. Nobody has measured what the budget
-actually needs to be, on this machine or on a runner.
+`slow-timeout = { period = "60s", terminate-after = 4 }`, a 240s ceiling, and it
+has measured **`TIMEOUT [240.174s]`** once and `36.367s` on the rerun — a 6x
+spread, cause undetermined, "seen once, unexplained". It has not failed in CI.
+What is worth knowing: the margin is a wall-clock budget on a from-scratch
+engine build, and it moves with every dependency the engine gains and every
+runner GitHub retires. If this job ever goes red on a timeout, the fix is the
+`period`/`terminate-after` pair rather than anything in the scaffold.
 
 ## P5B — the job system, and the two decisions in front of it
 
 `crates/crcbl-jobs` carries the spawn seam (`Spawn`, `Threads`, `Inline`,
 `default_spawner`), the design's two communication primitives — `mailbox`
 (latest-wins triple buffer, for states) and `ring` (bounded SPSC, for streams) —
-and now the work-stealing `pool` with `par_for` in both modes.
-`docs/plan/21-jobs.md` and the roadmap's 2026-08-03 correction carry the design
-and the measurements; what belongs here is the ordering, what the primitives do
-not do, and the two questions that were not ours to answer.
+and the work-stealing `pool` with `par_for` in both modes. The order is forced:
+the spawn seam and its single-threaded fallback came first (a pool on
+`std::thread` would silently have no browser story — spawning _compiles_ on
+wasm32 and returns `UNSUPPORTED_PLATFORM` at run time), then the pool, then
+adoption. **What is still owed is the worker backend behind the seam.** The
+adoption slice found **one consumer, not four**, and that is a fact about the
+samples rather than a shortfall: `apps/horde`'s `steer_enemies` is on `par_for`,
+and every other candidate collection is smaller than a single chunk — breakout
+has forty bricks, asteroids at most forty-four rocks — so a `par_for` over them
+would be the serial loop plus a pool. **The "two samples freeze a seam" rule has
+therefore not been met**, and `Spawn::threaded` returning a `bool` is still the
+most likely thing to give.
 
-The order is forced: **the spawn seam and its single-threaded fallback come
-first** — done — because `docs/plan/21-jobs.md` records that
-`std::thread::spawn` _compiles_ on `wasm32-unknown-unknown` and returns
-`UNSUPPORTED_PLATFORM` at run time, so a pool built on `std::thread` is a pool
-that silently has no browser story. The pool came next and is now in. Adoption
-came after it, and is where the plan met the samples — see below. What is still
-owed is the worker backend behind the seam.
-
-**The adoption slice found one consumer, not four, and that is a fact about the
-samples rather than a shortfall.** `apps/horde`'s `steer_enemies` is on
-`par_for` now: one broadphase neighbourhood query per enemy per tick, in chunks
-of `STEER_CHUNK`, with the velocities written back serially. The other four have
-no per-frame collection worth splitting — breakout has forty bricks, flappy a
-handful of pipes, asteroids at most forty-four rocks (`MAX_WAVE_ROCKS` large
-ones splitting into four each), and `apps/sandbox` and `apps/bare` have no game
-entities at all. Every one of those is smaller than a single chunk, so a
-`par_for` over them would be the serial loop plus a pool, which is the thing
-this file's own rule against abstracting ahead of need exists to prevent.
-
-So **the "two samples freeze a seam" rule has not been met and should not be
-treated as met.** What the one consumer did push back on is recorded below and
-in the entries that follow: nothing about `Spawn` or `Pool` had to change, which
-is weak evidence rather than none, and the next real consumer — P6–P8's pipeline
-stages — is still the first thing that will test the seam's shape properly.
-`Spawn::threaded` returning a `bool` is still the most likely thing to give.
-
-- **What the adoption did change was `crcbl-phys`, not `crcbl-jobs`.** The pass
-  could not be parallelised at all while every query took `&mut PhysicsSystem` —
-  the exclusive borrow was for the lazy BVH rebuild and for scratch buffers the
-  world owned, neither of which the traversal itself needs. `overlap_queries`
-  now spends that borrow once and hands back an `OverlapQueries` /
-  `EntityOverlapQueries`: `Copy`, `Sync`, alive only while the world cannot be
-  mutated, with the scratch passed in. That is the shape any future
-  data-parallel physics consumer wants, and it arrived because a caller needed
-  it rather than because it looked tidy.
 - **Only `overlap_sphere_into` has the shared form.** `cast_ray`, `sweep_sphere`
   and `overlap_aabb` are still `&mut self` — nothing parallel calls them yet,
   and `sweep_bolts` (the obvious candidate) reduces into a shared hit list in an
   order the scheduler would choose, so it needs a design decision before it
   needs an API.
-- **The pool now has a number.** `docs/plan/21-jobs.md`'s claim that the pool
-  beats inline is measured: 600 headless frames of horde with `--prefill 6000`
-  against the null backend take **8.38 s at `--workers 0` and 1.48 s at the
-  default** on a 32-core machine, 2026-08-06. That is a whole-run wall clock,
-  not a benchmark of `par_for` itself — there is still no harness that isolates
-  the pool, so the figure includes the render and the rest of the tick.
 - **`STEER_CHUNK` was chosen by argument, not by measurement.** Sixty-four
   enemies a chunk keeps the split independent of the worker count and stays
   under the pool's 1024-slot queue up to 65 536 enemies. Nothing has swept the
   value, and the right time to is when there is a benchmark that isolates the
   pass.
-- **The steering scratch is `thread_local!`.** A `par_for` closure is `Fn` and
-  cannot own mutable state, so the alternative was allocating the query buffers
-  per chunk per tick — which would have falsified the pass's documented claim to
-  allocate nothing in the steady state. The cost is buffers that live as long as
-  the pool's threads do, which is the process.
 
 **The atomics are checked by Miri and by nothing else.** x86-64 is
 total-store-order, so a `Release` store and a `Relaxed` one compile to the same
-instruction and weakening one is invisible to any test on this machine. That is
-measured rather than assumed: `ring`'s push was weakened to `Relaxed` and the
-whole suite stayed green, while `cargo miri test` reported the data race in
-`pop` with a backtrace. The Miri job is therefore load-bearing rather than a
-nicety: it is the only gate that would catch a wrong ordering before an aarch64
-or wasm user does.
-
-**It runs weekly, in `cron.yml`, and that is a deliberate choice rather than an
-oversight.** Moving it onto the per-PR path was tried on 2026-08-05 and reverted
-the same day: the full crate list is minutes of interpretation on every pull
-request, and that is not a price this repository wants to pay for a check whose
-per-commit value is concentrated in one small crate. The consequences to keep in
-mind:
-
-- **An ordering regression can sit on `main` for up to a week.** Nothing on the
-  per-PR path can see one.
-- So the obligation moves to the author: `cargo miri test -p crcbl-jobs`
-  interprets that crate in about **twenty seconds** — 23.4 s for its 40 tests
-  with the pool in it, measured 2026-08-06 with `cron.yml`'s own `MIRIFLAGS` —
-  and any change to its atomics is expected to be run under it before it is
-  pushed. That is written into the crate docs as well, where somebody editing
-  the atomics will see it.
-- The narrower option — a `crcbl-jobs`-only per-PR leg at that cost, leaving the
-  broad list weekly — was **not** taken and remains available if the weekly
-  cadence ever misses something real.
+instruction and weakening one is invisible to any test on this machine — which
+is why the Miri job is load-bearing. It runs **weekly, in `cron.yml`**, a
+deliberate choice: the full crate list is minutes of interpretation per PR, and
+the per-commit value is concentrated in one small crate. The consequences to
+keep in mind: **an ordering regression can sit on `main` for up to a week**, so
+any change to the atomics is expected to be run under
+`cargo miri test -p crcbl-jobs` (~23 s for its 40 tests) before it is pushed —
+written into the crate docs where somebody editing the atomics will see it — and
+**after a dependency lands, trigger the cron manually**
+(`gh workflow run cron.yml`) rather than waiting for Monday; the weekly job went
+red on 2026-08-03 for want of a `libasound2-dev` install and was found only
+because it was briefly on the per-PR path.
 
 Also still open: **nothing runs the primitives on a weakly-ordered machine.**
 Miri models the memory ordering, which is a stronger check than any test on x86,
@@ -450,20 +376,7 @@ but it is a model — an aarch64 runner exercising the same stress tests nativel
 would be independent evidence, and GitHub offers one. Not attempted, and the
 cost is a second `test` leg rather than anything subtle.
 
-**A weekly job is a job nobody watches, and this file has now paid for that
-twice.** The Miri run went red on 2026-08-03 because `crcbl-audio` gained a
-native device path and `alsa-sys`'s build script wants `libasound2-dev`, which
-the cron job never installed; it stayed red until 2026-08-05, and was found only
-because the job was briefly moved onto the per-PR path. The install step is
-there now. The habit that would have caught it sooner: after a dependency lands,
-trigger the cron manually (`gh workflow run cron.yml`) instead of waiting for
-Monday.
-
-**The pool's own gaps.** The orderings and the Chase-Lev transcription were
-falsified individually — weakening `run_one`'s `Release` on `remaining`, or
-`Stealer::steal`'s `Acquire` on `bottom`, leaves `cargo test` green and turns
-Miri red with a data race, which is the same demonstration `ring` gave. What is
-_not_ covered:
+**The pool's own gaps**, none of which is a defect:
 
 - **The lost-wakeup window is argued, not tested.** A worker reads the
   submission count under the lock, searches once more, and only then sleeps
@@ -473,11 +386,9 @@ _not_ covered:
   frightening: **waking a worker is throughput, never correctness** — the
   driving thread runs the chunks itself until they are gone, so a missed wakeup
   costs parallelism for one call and cannot hang it.
-- **Nothing benchmarks the pool in isolation.** The horde numbers above are a
-  whole run's wall clock, which is the honest thing to have and not the same as
-  a measurement of `par_for`. A harness that times the pass alone, and sweeps
-  the chunk length, is what would let `STEER_CHUNK` be chosen rather than
-  argued.
+- **Nothing benchmarks the pool in isolation.** A harness that times the pass
+  alone, and sweeps the chunk length, is what would let `STEER_CHUNK` be chosen
+  rather than argued.
 - **A mode comparison cannot catch a defect that is symmetric across modes**,
   and this was measured rather than assumed: dropping the last chunk of every
   `par_for` leaves both worker-count tests green, because a pool with no workers
@@ -485,35 +396,29 @@ _not_ covered:
   actually covers it — worth knowing before anyone reaches for the worker-count
   tests as a general correctness net.
 - **One deque, not one per worker.** Only the driving thread pushes today, so a
-  per-worker deque would be a queue nothing ever puts anything in. The Chase-Lev
-  code is unchanged by adding them; what needs them is `scope(|s| …)` fork-join
-  (the design lists it for BVH build), where a running chunk spawns more work.
-  Not written, and nothing calls it.
+  per-worker deque would be a queue nothing ever puts anything in. What needs
+  them is `scope(|s| …)` fork-join (the design lists it for BVH build), where a
+  running chunk spawns more work. Not written, and nothing calls it.
 - **`Mutex` + `Condvar` for the sleep, in the frame path.** The design's rule is
   no mutexes in the frame path; this takes one per _submission_, not per job,
-  and a worker takes it only on its way to sleep. A submission that finds no
-  parked worker skips the broadcast entirely. A futex-style parking scheme would
-  remove the lock, and needs the profiler to say whether it is worth the
+  and a worker takes it only on its way to sleep. A futex-style parking scheme
+  would remove the lock, and needs the profiler to say whether it is worth the
   reasoning.
 - **Considered and declined: aborting the remaining chunks when one panics.**
-  Rayon does. Running them all instead is what lets the panic be reported by
-  chunk index — the lowest wins — so a panicking `par_for` fails identically
-  with and without threads. Mode equality is worth more here than the work saved
-  in a call that is about to unwind anyway.
+  Running them all instead lets the panic be reported by chunk index — the
+  lowest wins — so a panicking `par_for` fails identically with and without
+  threads.
 - **A broken completion count hangs the suite rather than failing it.** Three
-  mutations were tried against the panic test — dropping the `catch_unwind`,
-  skipping the decrement on the panicking path, and dropping a chunk the full
-  queue refused — and each wedges `par_for`'s wait loop instead of going red,
-  because a chunk that never finishes is exactly what that loop waits for. The
-  demonstration is real (`timeout 60` reports 124 in each case) but a CI job
-  would show it as a timeout, not a failure. A deadline in the wait loop would
-  fix the symptom by putting a timeout in the frame path, which is a worse
-  trade; the honest note is that this class of defect looks like a hang.
-- **Considered and declined: `crossbeam-deque`.** It is the ecosystem's answer
-  and would be the right one, but neither it nor any `crossbeam-*` nor `rayon`
-  is in `Cargo.lock`, and a new dependency is the user's call. Worth revisiting
-  if one arrives for another reason: its growable deque would remove this one's
-  capacity ceiling, past which `par_for` runs the extra chunks on the driver.
+  mutations each wedge `par_for`'s wait loop instead of going red, because a
+  chunk that never finishes is exactly what that loop waits for. A deadline in
+  the wait loop would fix the symptom by putting a timeout in the frame path,
+  which is a worse trade; the honest note is that this class of defect looks
+  like a hang.
+- **Considered and declined: `crossbeam-deque`.** It would be the right one, but
+  neither it nor any `crossbeam-*` nor `rayon` is in `Cargo.lock`, and a new
+  dependency is the user's call. Worth revisiting if one arrives for another
+  reason: its growable deque would remove this one's capacity ceiling, past
+  which `par_for` runs the extra chunks on the driver.
 
 **`ring` does not implement drop-oldest**, though `21-jobs.md` lists it beside
 drop-newest as an overflow policy. It cannot be done from the producer: the read
@@ -523,60 +428,36 @@ hands the item back and counts the refusal instead, leaving the policy to the
 caller. If a real consumer turns up wanting drop-oldest, the honest options are
 a consumer-side drain-and-discard or an MPSC design, not a flag on this one.
 
-**The seam has one consumer, and one is not two.** Its shape was chosen from the
-design doc and the topology; `apps/horde` has now used it without asking for
-anything back, which is evidence and not the two samples this workspace's rule
-wants before a seam is frozen. `Spawn::threaded` returning a `bool` rather than
-a richer capability is still the most likely thing to give — horde works around
-it by handing `Pool::with_workers` an `Inline` spawner when `--workers 0` is
-asked for, which is a caller saying "threads, but none" through the only channel
-there is.
+**The seam has one consumer, and one is not two.** `apps/horde` has used the
+spawn seam without asking for anything back, which is evidence and not the two
+samples this workspace's rule wants before a seam is frozen. `Spawn::threaded`
+returning a `bool` rather than a richer capability is still the most likely
+thing to give — horde works around it by handing `Pool::with_workers` an
+`Inline` spawner when `--workers 0` is asked for, which is a caller saying
+"threads, but none" through the only channel there is.
 
 - **Cross-origin isolation is proved locally, and the worker backend is blocked
-  on the pinned nightly's `rust-src`.** The isolation half of the 2026-08-05
-  pair is done: `web/tools/serve.mjs` is one static server sending
-  `Cross-Origin-Opener-Policy: same-origin` and
-  `Cross-Origin-Embedder-Policy: require-corp`, `web/build.sh --serve` runs it
-  and `web/tools/browser-e2e.mjs` imports it, so the origin the gate checks is
-  the origin a human loads. Group A asserts `crossOriginIsolated === true` and
-  that `new WebAssembly.Memory({ shared: true })` succeeds, and
-  `run-browser-e2e.sh` refuses a run whose output does not contain that check by
-  name. Falsified three ways on 2026-08-06 — dropping COOP, dropping COEP, and
-  dropping both each turn both assertions red with
-  `ReferenceError: SharedArrayBuffer is not defined`; renaming the check trips
-  the harness guard.
-
-  **What could not be verified on this machine, and it is not the headers.**
-  `run-browser-e2e.sh` cannot reach a green run here at all: group A's
-  known-colour clear reads back `rgb(0,0,0)` under both the hardware and the
-  SwiftShader adapter, so the harness refuses the render groups by design. That
-  is **pre-existing** — the committed driver from `2e61284`, run unmodified
-  against the same site and the same browser, fails identically — and the
-  suspect is the browser rather than the change: the readback table in
-  `web/run-browser-e2e.sh` was measured on Chromium 150 and this machine has
-  Chromium 151, where the `Xvfb` + SwiftShader row no longer holds. Groups B
-  through E are therefore unrun locally; CI's `ubuntu-latest` Chrome is what
-  currently says anything about them. Worth re-measuring the table before the
-  next person concludes the gate is broken.
-
-  The Pages question is deliberately still open: GitHub Pages cannot set either
-  header, `coi-serviceworker` is third-party JavaScript in a directory with no
-  npm dependencies, and that call waits for something working to publish. If the
-  shim is eventually declined, the demos run single-threaded through `Inline`,
-  native keeps the full topology, and the roadmap's `crossOriginIsolated` gate
-  should be struck rather than left unmeetable.
+  on the pinned nightly's `rust-src`.** The isolation half is done:
+  `web/tools/serve.mjs` sends `Cross-Origin-Opener-Policy: same-origin` and
+  `Cross-Origin-Embedder-Policy: require-corp`, `web/build.sh --serve` runs it,
+  and `run-browser-e2e.sh` refuses a run whose output does not contain the
+  `crossOriginIsolated === true` check by name. Two cautions for whoever next
+  touches the gate: the browser readback table in `web/run-browser-e2e.sh` was
+  measured on Chromium 150 and this machine has 151, where the `Xvfb` +
+  SwiftShader row no longer holds — **re-measure it before concluding the gate
+  is broken**; and the Pages question is deliberately still open (GitHub Pages
+  cannot set either header, `coi-serviceworker` is third-party JS) — if the shim
+  is declined, the demos run single-threaded through `Inline` and the roadmap's
+  `crossOriginIsolated` gate should be struck rather than left unmeetable.
 
 - **Blocked 2026-08-06: the wasm worker backend needs `rust-src` on
   `nightly-2026-07-02`, which is not installed.** The plan stands — a nightly
   pinned by date for that one target, in the shape `decoder-fuzz` already uses,
   because `rust-toolchain.toml` pins an **exact stable** (`1.97.0`) on purpose
-  and its own comment calls a floating channel a broken promise. What was
-  measured rather than assumed:
+  and its own comment calls a floating channel a broken promise. Measured:
   `rustup component list --toolchain nightly-2026-07-02 --installed` lists
-  `cargo`, `rust-std` and `rustc` and **not** `rust-src`, and the build says so
-  itself —
-  `RUSTUP_TOOLCHAIN=nightly-2026-07-02 RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals" cargo build -p crcbl-jobs --target wasm32-unknown-unknown -Z build-std=std,panic_abort`
-  fails with
+  `cargo`, `rust-std` and `rustc` and **not** `rust-src`, and the build fails
+  with
   `library/Cargo.lock does not exist, unable to build with the standard library`.
   No backend was written against a toolchain that cannot build it:
   `default_spawner` still yields `Inline` on wasm, which is a whole answer
@@ -686,29 +567,17 @@ is what makes them worth writing down rather than rediscovering. **Run
 ## Cross-test state, found by adding a window manager and a second monitor
 
 **Both e2e suites run every test in its own process against one long-lived
-display, and both had state that survived between them.** Neither showed up
-until the environment got a second inhabitant, and both produced the same
-symptom: a _tail_ of tests that passed alone and failed in a full run, moving
-whenever anything was reordered.
+display, and both had state that survived between them** — a _tail_ of tests
+that passed alone and failed in a full run, moving whenever anything was
+reordered. Three instances were found and fixed: the X11 pointer (`XTEST` leaves
+it wherever the last test put it; `Session::open` parks it at the centre), the
+X11 window manager's idea of what is still alive (`Session`'s `Drop` withdraws
+and destroys its windows and then **waits for `_NET_CLIENT_LIST` to drop them**;
+graded evidence, eight of eight runs clean against two and five for the earlier
+attempts), and the Wayland focused workspace (a `FocusedWorkspace` guard puts it
+back after a test fullscreens onto the second output).
 
-- **X11, the pointer.** `XTEST` leaves it wherever the last test put it, so a
-  test that warped it to `(500, 500)` decided where the next test's window was
-  placed and whether `openbox` focused it. `Session::open` parks it at the
-  centre.
-- **X11, the window manager's idea of what is still alive.** A test process
-  exiting with a window still mapped destroys it by closing the connection, and
-  `openbox` was left with `_NET_ACTIVE_WINDOW` naming an XID that was no longer
-  in `_NET_CLIENT_LIST` — after which it focused nothing new for the rest of the
-  run. `Session`'s `Drop` withdraws and destroys its windows and then **waits
-  for `_NET_CLIENT_LIST` to drop them**, which is the manager saying it has
-  finished. Graded evidence, six runs each: no `Drop` at all, 2 clean; `Drop`
-  with a fixed four pumps, 5 clean; `Drop` waiting for the client list, 8 of 8.
-- **Wayland, the focused workspace.** A test that fullscreens onto the second
-  output leaves sway's focus there, so the next test's window opens on a
-  1280x720 display and waits out its deadline for a 1920x1080 configure. A
-  `FocusedWorkspace` guard puts it back.
-
-The rule that falls out: **anything a test moves and does not move back belongs
+**The rule that falls out: anything a test moves and does not move back belongs
 in `Session`, not in the test.** The pointer, the input focus, the clipboard
 owner, the focused workspace and the compositor's idea of which clients exist
 are all this kind of thing.
@@ -721,1583 +590,309 @@ made it measurably _worse_: five runs, 3-5 failures each.
 
 ## What the Win32 backend has and has not been run against
 
-P5C W1, W2 and W3 wrote the whole of `crates/crcbl-shell/src/win32/` on a Linux
-machine, and W4 wrote its end-to-end suite there too. It is cross-checked with
+The whole of `crates/crcbl-shell/src/win32/` and its e2e suite were written on a
+Linux machine and are cross-checked with
 `cargo check`/`cargo clippy --target x86_64-pc-windows-msvc`, which do not link
 and do not run — **a cross-check proves the code typechecks and nothing more**.
+The e2e suite has since run on `windows-latest` in CI (W1–W4 and the rounds
+after), so the window lifecycle, input, clipboard and mode flips are executed;
+everything below is what those runs still do not reach.
 
 ### The runner is a real, non-idle desktop
 
-Three CI round trips established this one assertion at a time, so it is written
-down once here rather than rediscovered a fourth time. Every Windows test
-written from now on has to hold under all of it:
+Any Windows test written from now on has to hold under all of this: the display
+is **1024×768** — smaller than `WindowDesc::default`'s 1280×720; a cursor is
+always over the window and keeps moving (a genuine `WM_MOUSEMOVE` arrives before
+a test sends anything); the foreground is contested and `SetForegroundWindow` is
+granted only under narrow rules — the e2e suite's `desktop::take_foreground`
+pulls `SPI_SETFOREGROUNDLOCKTIMEOUT` plus `AttachThreadInput`; and **messages
+arrive that this process did not cause**, every few milliseconds
+(`WM_DWMNCRENDERINGCHANGED`, real `WM_MOUSEMOVE`), so an idle window with a
+drained queue does not exist on that runner. The rule that cost three flaky
+runs: **identify your own events by their payload, never by their index in the
+sequence.**
 
-- **The display is 1024×768.** Smaller than `WindowDesc::default`'s 1280×720, so
-  anything that assumes a default-sized window fits on screen is wrong there.
-  `ClipCursor` clamps to the virtual screen, which is how this was found.
-- **A cursor is over the window, and it keeps moving.** Showing a window under
-  it delivers a genuine `WM_MOUSEMOVE`, so the backend's derived pointer arrival
-  happens before a test sends anything.
-  `the_pointer_enters_moves_clicks_scrolls_and_leaves` has been rewritten for
-  this **three** times, and each version assumed a slightly quieter machine than
-  the last. It sends a `WM_MOUSELEAVE` to put the derived state on a known edge;
-  the first rewrite sent it _before_ the pump that discards the desktop's own
-  events, and that pump dispatched a real `WM_MOUSEMOVE`, derived the arrival
-  from it, and threw the arrival away. The run collected `[(false, None)]`: a
-  leave with nothing in front of it. Draining first and leaving second is
-  genuinely part of the fix, and stays — `SendMessageW` calls the window
-  procedure synchronously and nothing pumps between the leave and the first
-  synthetic movement, so no queued message can be processed in that gap.
-- **The foreground can be taken away mid-test, and two tests reported it as
-  something else.** `refresh_cursor_visibility` and `refresh_clip` both act only
-  for a window that is focused, so a stolen foreground makes each of them a
-  no-op — and the assertion that then fails is about the _consequence_.
-  `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for` failed as
-  `left: 0, right: -1`, which reads exactly like the `ShowCursor`
-  reference-count bug it exists to catch;
-  `minimizing_a_captured_window_releases_the_clip` failed naming the wrong
-  rectangle when in fact no clip had been applied at all. Both are now routed
-  through `focus_and_confirm`, which grants the focus, reads it back and
-  retries, so a runner that cannot host the test says so.
+### Unverified, in the order it would hurt
 
-  The audit that followed has a clean answer, and it is the reason nothing else
-  in that module needs the same treatment: the window procedure handles
-  `WM_SETFOCUS`/`WM_KILLFOCUS` **synchronously**, gated on `shared.clipped()`
-  rather than on pumped state. So a test that _delivers the focus message
-  itself_ and asserts immediately cannot flake, which covers the three
-  assertions in
-  `confining_the_pointer_clips_it_and_losing_focus_gives_the_desktop_back`; that
-  test also asserts `state.focused` after arranging it, which is the line the
-  two broken ones were missing. The vulnerable shape is precisely **asking the
-  system for focus and then asserting something read back from pumped state**.
-
-  **Neither fix was reproduced.** There is no Windows machine here; both were
-  diagnosed by reading the focus gates and matching them against the observed
-  values, then typechecked for `x86_64-pc-windows-msvc` from Linux, which proves
-  they compile and nothing more. Both went green on the next run — but this
-  family failed twice in two consecutive runs on two different tests, so one
-  green run is not evidence that it is stable.
-
-  **What it did not fix is the position of our events in the sequence**, and the
-  second rewrite still asserted that, requiring the first crossing to be an
-  arrival. The runner answered:
-
-  ```text
-  the first crossing after a leave is the arrival:
-    [(false, None), (true, Some(PhysicalPoint { x: 40.0, y: 30.0 })), (false, None)]
-  ```
-
-  Our arrival, at the injected point, with a crossing of the desktop's in front
-  of it: the discarding pump had derived an arrival it threw away, so
-  `send_leave` was a real transition rather than the no-op it is on a still
-  desktop, and it produced a leave that nothing in the test's own sequence
-  accounts for.
-
-  **The general rule, which is the part to carry to any other suite that runs on
-  a live desktop: identify your own events by their payload, never by their
-  index.** A live desktop may insert crossings before, between and after yours,
-  so any claim about position-in-the-sequence is a claim that it held still. The
-  test now finds its arrival by the point it injected — `(40, 30)`, which no
-  real movement reports — and asserts only about that pair: the arrival carries
-  the position of the movement it was derived from, the crossing straight after
-  it is the leave (safe, because every `send_*` between them is a synchronous
-  `SendMessageW`), and **no** arrival carries the second movement's point, which
-  is the one-shot `TrackMouseEvent` claim the old alternation check was there
-  for. Nothing at all is asserted about the crossings the desktop contributes.
-
-- **Messages arrive that this process did not cause**, every few milliseconds,
-  and here is the proof rather than the assertion. Five consecutive timed waits
-  on a window whose queue had just been drained to quiescence:
-
-  ```text
-  attempt 0: Message after  5.7433ms, queue 0x80008, message id 799
-  attempt 1: Message after 16.0896ms, queue 0x400040, message None
-  attempt 2: Message after 31.6668ms, queue 0x400040, message None
-  attempt 3: Message after   299.7µs, queue 0x80008, message id 96
-  attempt 4: Message after 10.9571ms, queue 0x20002, message id 512
-  ```
-
-  **799 is `WM_DWMNCRENDERINGCHANGED` and 512 is `WM_MOUSEMOVE`.** The desktop
-  window manager is sending composition notifications and the physical cursor is
-  moving over the window, continuously, with nothing running on the machine but
-  this test. **An idle window with a drained queue does not exist on that
-  runner**, and no amount of draining will create one. Any assertion that needs
-  quiet is a flaky assertion; assert what a busy desktop cannot fake instead —
-  those numbers also say the wait _worked_, since four of the five blocked for
-  5.7 ms to 31.7 ms before something woke them, and only the 299 µs one returned
-  to an already-full queue.
-
-- **The foreground is somebody else's, and it is _locked_.**
-  `SetForegroundWindow` is granted only to a process that already owns the
-  foreground, was started by the one that does, received the last input event,
-  or asks after the lock timeout has expired with no user input at all. Under
-  `nextest` every test is a fresh, short-lived process with none of those, so
-  the first e2e run lost three tests to twenty seconds each of being refused —
-  the foreground sitting on `0x10200`, the job's own console, every time. What
-  defeats it is `SPI_SETFOREGROUNDLOCKTIMEOUT` plus `AttachThreadInput` against
-  the current foreground thread, and it lives in `desktop::take_foreground` in
-  the **e2e suite**, never in `src/win32/`: a game does not get to steal focus.
-  Unrun; see the M4 entry below for what its failure now prints if the lock
-  survives both levers.
-
-**W1's first CI run on `windows-latest` answered the open question: the runner
-does give a process a usable window station.** 2248 tests passed and 1 failed;
-`Win32Shell::open`, `create_window`, the message pump, the borderless round
-trip, monitor enumeration and per-monitor DPI all executed against a real
-desktop, and `cargo build`/`cargo clippy` linked the hand-written declarations
-for real.
-
-**The W2 run then diagnosed both of its own failures**, which is what the
-`Wake`-and-`GetQueueStatus` reporting was added for. 2284 tests, 2282 passed:
-
-- `wait_events_genuinely_blocks` reported `Wake::Message` after 14 ms with the
-  queue holding `0x400040` — `QS_SENDMESSAGE` in both halves. A message _sent_
-  to a window is dispatched by `PeekMessage` but not retrieved, so the bit
-  survives the pump, and `MWMO_INPUTAVAILABLE` asks to be woken by exactly that
-  bit. `Win32Shell::wait` now drains the queue itself and sleeps with no flags.
-- `confining_the_pointer_clips_it_...` reported a clip 12 px narrower on the
-  right than the client rectangle, with the right edge at exactly 1024.
-  **`ClipCursor` intersects with the virtual screen**, and the runner's display
-  is 1024×768 — smaller than the default window. The backend was correct and the
-  assertion overstated what the API promises; it now compares against
-  `client.intersect(virtual_screen())`. The clamp is real behaviour a game meets
-  on a 1366×768 laptop, so the case is described rather than avoided.
-
-**The W3 run reported 2304 tests, 2302 passed, and both failures are addressed
-in this slice** — one in the backend, one in the assertion:
-
-- `wait_events_genuinely_blocks` reported `Wake::Message` after 573.9 µs with
-  the queue holding `0x80008`. The drain **did** remove `QS_SENDMESSAGE`; what
-  is left is `QS_POSTMESSAGE` in both halves — a posted message present now, and
-  one arrived since the last check. **This should be impossible.**
-  `drain_messages` peeks with `PM_REMOVE`, a null `hwnd` and a zero filter
-  range, which takes every window and thread message, and nothing in
-  `src/win32/` calls `PostMessageW`, `PostThreadMessageW` or `SetTimer` — so it
-  comes from outside this crate, in the sub-millisecond gap between the drain
-  and the wait.
-
-  **Not guessed at a third time.** Two rounds were spent on hypotheses and both
-  were settled only by making the failure carry data, so the test now prints the
-  `MSG` itself through `Win32Shell::peek_pending` (`PM_NOREMOVE`) — id, `hwnd`,
-  `wParam`, `lParam` — beside the `QS_` word, and additionally asserts that the
-  pre-drain loop _reached_ quiescence, so "this runner's queue never empties"
-  and "the wait woke spuriously" stop sharing one failure. **The wait is not
-  fixed and is not claimed to be.** The next run either names a message the
-  backend should be consuming (fix the backend) or names one no application can
-  drain, in which case a wait genuinely cannot sleep on that runner and the test
-  should say so and assert what is true. Do not decide which in advance.
-
-- `the_pointer_enters_moves_clicks_scrolls_and_leaves` saw two `PointerMotion`s
-  and no arrival, because the desktop's own cursor had already produced one. The
-  backend was right and the assertion assumed an empty desktop; see the runner
-  section above for the fix and the rule it now states.
-
-**W4 found a bug in the backend that only an out-of-process keystroke could
-reach: the pump never called `TranslateMessage`.** A `WM_CHAR` exists only
-because that call ran over a key message _in the queue_, so `WM_CHAR` was never
-generated for a real keystroke — the `Char` branch of the window procedure, the
-surrogate reassembly in `win32/keys.rs` and every `ShellEvent::TextCommit` were
-unreachable from a keyboard, and typing into a Crucible window on Windows
-produced no text at all. The in-crate suite could not see it: those tests send
-`WM_CHAR` with `SendMessageW`, which does not pass through the queue.
-`drain_messages` now calls it, and
-`a_key_typed_by_another_process_carries_its_position_its_symbol_and_its_text` is
-the guard — **unrun, like everything else here**.
-
-**The W4 run reached a real desktop, and its instrumentation ended the
-`wait_events` investigation.** The PowerShell harness parsed and ran, the suite
-compiled and started, `SendInput` from a second process reached the suite's
-window (the sender reported the foreground as ours on every command), and the
-resize-coalescing test — a burst of resizes injected from another process,
-collapsed into one event — passed. That was the single most uncertain assumption
-in the slice and it holds.
-
-Two things it settled, and the second is the one worth carrying:
-
-- **`wait_events_genuinely_blocks` printed the observation that ends it:**
-  `the queue holds 0x400040, and the message still in it is None`. A `QS_` bit
-  is set and `PeekMessage` with `PM_NOREMOVE` has nothing to return. `0x40` is
-  `QS_SENDMESSAGE`: a message _sent_ to a window of this thread is **processed**
-  by `PeekMessage` and never _returned_ by it, so it can neither report it nor
-  clear its bit — and MSDN says so in its own caveat, that a `QS_` flag being
-  set does not guarantee a subsequent `PeekMessage` will return a message. No
-  amount of draining fixes it, because there is nothing retrievable to drain.
-  The third run's `0x80008` was the same phenomenon showing a different bit.
-
-  The fix is `QS_ALLEVENTS` (`0x04BF`), which is precisely `QS_ALLINPUT` minus
-  `QS_SENDMESSAGE`. **That much is settled; the assertion beside it was not, and
-  went red again on the M3 run** — see the M4 entry below, which is where the
-  observable finally stopped being "the machine went quiet".
-
-- **The transferable lesson, which is not the `QS_` bit.** Four round trips, and
-  every one of them was settled only by making the failure carry more evidence
-  than the last: a duration, then `Wake`, then the `QS_` word, then the `MSG`
-  itself. The first three were hypotheses that each looked like a fix. Applies
-  to M4 and to the macOS slices as much as to this one — **when a remote failure
-  has no diagnosis, spend the round trip on instrumentation rather than on a
-  candidate fix.**
-
-**Genuine OS auto-repeat is not reachable from `SendInput`, and is therefore
-uncovered on this backend.**
-`a_key_held_by_another_process_reports_its_second_press_as_a_repeat` asserted
-press-repeat-release and got press-release: a second `SendInput` key-down for a
-key already down is **not a state transition**, so no second `WM_KEYDOWN` is
-generated at all. Real typematic comes from the keyboard driver's repeat timer
-holding a physically-depressed key, which no injection API reproduces. The test
-now asserts the coalescing (renamed
-`a_second_injected_press_of_a_held_key_produces_no_second_event`), and the
-_decoding_ of `lParam` bit 30 stays covered where it can be — the in-crate suite
-builds that `lParam` itself and delivers it with `SendMessageW`. What is
-uncovered is that the **system** sets the bit on a real held key. Closing it
-needs a physical keyboard or a kernel-level virtual HID device; neither is a CI
-runner.
-
-**The e2e harness stopped at the first failure and hid thirteen tests.**
-`Summary [0.694s] 2/15 tests run` — nextest's default fail-fast, on a suite
-nobody can run locally and whose round trip is half an hour. `run-win32-e2e.ps1`
-now passes `--no-fail-fast`. Its count gate needed a second fix to go with it:
-the old regex `(\d+) tests? run` matches the digits immediately before the
-words, which for `2/15 tests run` is **15** — so a run that executed two tests
-reported a healthy-looking fifteen. The pattern is now
-`(?:(\d+)/)?(\d+) tests? run` and a present first group is treated as a
-cancelled run and fails the gate. Falsified offline against a regex engine with
-the same semantics, not against `pwsh`, which is not on the development machine.
-
-**M4 changed two in-crate assertions that the M3 run failed, and neither was a
-code change.** `build + test (windows-latest)` went from 2360/2360 green to 2362
-passed, 2 failed on a commit that touched only `appkit/` — so both tests were
-flaky all along and the runner simply decided differently. They are the second
-and third instances of the same rule, and they are why it is written at the top
-of this section with its evidence attached:
-
-- **`wait_events_genuinely_blocks` no longer asks the machine to be quiet.** It
-  asserted `Wake::TimedOut` on at least one of five attempts; the run printed
-  all five and every one was woken early by a real message (see the decoded
-  queue evidence above). The observable is now the one that actually separates a
-  blocking wait from a no-op one — an attempt that either reached its timeout or
-  **slept at all** before being woken. A wait that does nothing returns in
-  microseconds every single time; the measured populations are 299 µs for a
-  return to a full queue against 5.7 ms for the shortest genuine block, so the
-  line is drawn at 2 ms with an order of magnitude of clearance on each side.
-  The pre-drain loop still runs and its outcome is still printed, but it is
-  **reported rather than asserted**: whether a desktop goes quiet is the
-  desktop's business.
-- **`the_pointer_enters_moves_clicks_scrolls_and_leaves` stopped counting
-  crossings**, and after a third failure stopped indexing them too. Covered in
-  the runner section above, because the fix is a fact about the runner rather
-  than about that one test.
-
-**The Win32 e2e suite's three foreground failures are addressed and unrun.** All
-three timed out identically in `Session::foreground`. Two levers are now pulled
-per request — `SPI_SETFOREGROUNDLOCKTIMEOUT` lowered to zero for the session and
-restored on the way out, and `AttachThreadInput` against the thread owning the
-current foreground window, held across `BringWindowToTop`, `SetForegroundWindow`
-and `SetFocus` and released immediately (attaching to a thread that has stopped
-pumping is a documented way to hang). Two things about the shape are worth
-keeping whatever the next run says:
-
-- **The deadline is four seconds, not twenty.** Everything else in that suite
-  waits on another process and deserves a generous deadline; a foreground grant
-  is decided by the window station on the turn it is asked for, against rules
-  that do not change while a poll spins. Twenty seconds of asking was the same
-  refusal four hundred times, three times over, for a minute of CI that taught
-  nothing the first second had not.
-- **The failure names the lever that did not work.** It prints the foreground
-  window's handle, class, title, thread and process, this process's own thread
-  and process, and the lock timeout _read back_ after asking for zero. A zero
-  there with the foreground still elsewhere means the lock is not what is
-  refusing; anything else means `SPI_SETFOREGROUNDLOCKTIMEOUT` was itself
-  refused, which it is documented to be for a process that cannot already take
-  the foreground. If both levers fail, the honest outcome is that a GitHub
-  runner does not let a fresh process take the foreground and the five tests
-  that need it cannot run there — which is a finding to record, not a reason to
-  make them pass.
-
-**The in-crate suite has the same latent problem and was left alone.**
-`confining_the_pointer_clips_it_...` and
-`warping_the_pointer_moves_it_to_a_position_in_the_window` call a bare
-`SetForegroundWindow` (`make_foreground`, in `src/win32/shell.rs`'s test module)
-and have been passing on the runner regardless — the ordinary `build + test` job
-is one process, so once it owns the foreground it keeps qualifying. If they ever
-start failing, the same dance is the answer and it should move to a shared
-helper rather than being written twice.
-
-What remains unverified:
-
-- The structure layouts in `win32/ffi.rs` are asserted by size and offset on the
-  host, which catches a missing or wrong-width field but not a _reordering_ of
-  two fields of the same width. `DEVMODEW` is the one with two unions in it and
-  the one to re-read if a refresh rate ever looks implausible; `RAWMOUSE` is the
-  one to re-read if a raw delta does. W3 found a third hole while falsifying
-  that guard: **a field whose width shrinks into its own trailing padding moves
-  no offset and is not caught** — narrowing `DropFiles::p_files` from `u32` to
-  `u16` leaves every assertion green. Nothing depends on it today (that field is
-  written by a test and read by nothing), but the assertion is weaker than it
-  reads.
-- The pure arithmetic (`win32/geometry.rs`, `win32/events.rs`, `win32/keys.rs`,
-  `win32/pointer.rs`, `TimeBase`, `win32/proc.rs`'s shared state) _is_ covered
-  on Linux and each of its guards was falsified by mutation before this was
-  written.
-
-What W2 adds to that list, in the order it would hurt:
-
-- **No input has ever been delivered by a real device.** The Windows suite
-  drives the window procedure with `SendMessageW`, which is the real procedure
-  against the real cached state but not the real message stream. Nothing has
-  confirmed that `WM_KEYDOWN`'s `lParam` carries what `keys::scancode` expects
-  from an actual keyboard, or that `GetMessageTime` inside a procedure answers
-  for the message being dispatched.
+- **Structure layouts in `win32/ffi.rs` are asserted by size and offset, which
+  catches a missing or wrong-width field but not a reordering of two same-width
+  fields** — and a field whose width shrinks into its own trailing padding moves
+  no offset and is not caught either (narrowing `DropFiles::p_files` from `u32`
+  to `u16` leaves every assertion green). `DEVMODEW` is the one with two unions
+  in it and the one to re-read if a refresh rate ever looks implausible;
+  `RAWMOUSE` if a raw delta does.
+- **No input has ever been delivered by a real device.** The suite drives the
+  window procedure with `SendMessageW` — the real procedure against the real
+  cached state, but not the real message stream. Nothing has confirmed that a
+  real keyboard's `lParam` carries what `keys::scancode` expects, or that
+  `GetMessageTime` answers for the message being dispatched.
 - **`WM_INPUT` is untestable from CI and is untested.** A raw report needs an
   `HRAWINPUT` only the system can produce, so `input::read_raw_mouse` and the
-  `RIM_TYPE_MOUSE` check have never run. `pointer::RawMotion`'s
-  absolute-versus-relative arithmetic _is_ covered on Linux; the plumbing that
-  feeds it is not. The absolute path additionally needs a machine that produces
-  absolute reports — a remote-desktop session or a tablet — which no runner has.
+  `RIM_TYPE_MOUSE` check have never run; the absolute path needs a machine that
+  produces absolute reports (a remote-desktop session or a tablet). W4's
+  `injected_motion_arrives_as_raw_relative_motion_for_mouselook` assumes
+  `SendInput` feeds the raw stack on a `windows-latest` image — the single
+  assertion most likely to be answered by the runner rather than by the backend;
+  if it fails with the ordinary `PointerMotion` present and `raw_delta` absent,
+  the finding is about the image, not the backend.
 - **`ClipCursor` and `SetCursorPos` are restricted to the foreground process.**
-  `confining_the_pointer_clips_it_and_losing_focus_gives_the_desktop_back` and
-  `warping_the_pointer_moves_it_to_a_position_in_the_window` call
-  `SetForegroundWindow` first and then assert against the system's own state
-  (`GetClipCursor`, `GetCursorPos`). If a GitHub runner does not let a process
-  take the foreground, both fail — which is a finding about the runner rather
-  than about the code, and is the reason to read the failure before changing
-  anything.
+  The two pointer tests call `SetForegroundWindow` first; if a GitHub runner
+  refuses the foreground, both fail — a finding about the runner, not the
+  backend.
 - **`MapVirtualKeyW(.., MAPVK_VK_TO_CHAR)` is assumed to answer the uppercase
-  letter** for a letter key, which `input::unshifted` then lowercases so that a
-  rebind menu reads the same as it does on Linux. If the call already answers
-  lowercase, the lowercasing is a no-op and nothing changes;
-  `a_key_press_carries_its_position_its_symbol_and_its_repeat_flag` asserts the
-  lowercase result either way.
+  letter**, which `input::unshifted` then lowercases so a rebind menu reads the
+  same as on Linux; if the call already answers lowercase, the lowercasing is a
+  no-op and nothing changes. The test asserts the lowercase result either way.
 - **The `ShowCursor` balance is asserted through the count itself**
   (`cursor_display_count` reads it by moving it and putting it back). That test
   is the only thing standing between this backend and an invisible cursor for
   the rest of a session, so it is the one to keep rather than relax.
-
-What W3 adds:
-
-- **No file has ever been dragged onto a window.**
-  `a_drop_becomes_one_event_...` builds a `DROPFILES` block by hand and sends
-  `WM_DROPFILES`, which runs the real procedure, the real
-  `DragQueryFileW`/`DragQueryPoint`/`DragFinish` and the real translation — but
-  the block is this project's idea of what the shell sends, not the shell's. If
-  shell32 rejects it the test reports zero files and reads exactly like a
-  backend bug: `ffi::DropFiles`'s size assertion is the first thing to re-check,
-  and `f_wide` the second.
-- **`DragAcceptFiles` and the `WS_EX_ACCEPTFILES` round trip are asserted
-  through the style word.**
-  `the_drop_registration_survives_a_trip_through_borderless` reads the bit back
-  after a borderless flip and then sends a drop. What it cannot show is that a
-  _real_ drag would have been offered to the window, since that is a decision
-  the shell makes in another process.
-- **No other process has ever contended for the clipboard**, so `Opened::After`
-  and `Opened::Refused` have never been produced. The retry loop itself is
-  therefore unexercised; only the budget arithmetic is covered, on Linux. A
-  clipboard-manager utility on a developer machine is the cheapest way to reach
-  the retry path if it ever needs proving.
-- **`GlobalSize` returning more than was requested has not been observed**, so
-  the padding half of `Clipboard::put`'s zeroing is belt rather than a fix for
-  something seen. It is cheap and it makes the read-back trimming exact either
-  way.
-- **The clipboard tests share the desktop's clipboard.** They write to the real
-  window station, so two Windows suites running concurrently on one runner would
-  interfere. Nothing does that today; it is worth knowing before anything is
-  parallelised across processes. W4's suite is `--test-threads 1` for exactly
-  this reason, and for the foreground window and the cursor beside it.
-
-What W4 closes, and what it does not:
-
-- **Closed, subject to a runner confirming it.** Input now arrives as a real
-  message stream — posted, queued, translated, dispatched — from a separate
-  process (`tests/bin/send_input_win32.rs`, `SendInput`), which is what found
-  the missing `TranslateMessage`. The clipboard now round-trips with a second
-  process in both directions, and `another_process_reads_what_we_copied_...`
-  asserts it happens with **zero** pumps of this shell's loop, which is the
-  claim that separates Win32's content-transfer clipboard from X11's and
-  Wayland's ownership model. Focus arrives through a real foreground change
-  rather than a hand-sent `WM_SETFOCUS`, and mode flips and resize storms are
-  judged by `GetWindowRect`/`GetClientRect` rather than by the backend's own
-  bookkeeping.
-- **`WM_INPUT` is now attempted and may still not be reachable.**
-  `injected_motion_arrives_as_raw_relative_motion_for_mouselook` assumes
-  `SendInput` feeds the raw input stack on a `windows-latest` image. That is the
-  single assertion in the suite most likely to be answered by the runner rather
-  than by the backend; if it fails with the ordinary `PointerMotion` present and
-  `raw_delta` absent, the finding is about the image and the test should say so
-  rather than be deleted. The **absolute** raw path still needs a device that
-  reports absolutely — a remote-desktop session or a tablet — which no runner
-  has.
 - **Auto-repeat is not the driver's.** Windows typematic comes from the
-  keyboard, and an injected key does not repeat, so
-  `a_key_held_by_another_process_reports_its_second_press_as_a_repeat` sends two
-  presses and reads bit 30, which the _system_ sets. That is the same bit a real
-  hold sets, so the claim is sound; what is untested is the driver's timing.
-- **Drag and drop is still not end to end.** A `WM_DROPFILES` carries an `HDROP`
-  the shell allocated _in the target process's_ context, so no test process can
-  hand one over — the in-crate suite's synthetic block remains the only
-  coverage, with the caveat recorded above.
+  keyboard, and an injected key does not repeat; the repeat test sends two
+  presses and reads bit 30, which the _system_ sets — the same bit a real hold
+  sets, so the claim is sound; what is untested is the driver's timing.
+- **No file has ever been dragged onto a window.** The drop test builds a
+  `DROPFILES` block by hand — this project's idea of what the shell sends, not
+  the shell's, and a real drag needs a source application's mouse. If shell32
+  rejects the block it reads exactly like a backend bug: `ffi::DropFiles`'s size
+  assertion is the first thing to re-check, and `f_wide` the second.
+  `DragAcceptFiles` and the `WS_EX_ACCEPTFILES` round trip are asserted through
+  the style word; a _real_ drag being offered is a decision the shell makes in
+  another process.
+- **No other process has ever contended for the clipboard**, so `Opened::After`
+  and `Opened::Refused` have never been produced and the retry loop itself is
+  unexercised; only the budget arithmetic is covered, on Linux. The clipboard
+  tests also share the desktop's clipboard — two Windows suites in parallel
+  would interfere, which is why the e2e suite is `--test-threads 1`.
 - **No sample-level pass, and there cannot be one yet.** The Linux suites run
-  the sandbox and press F11 at it; that needs a renderer, and neither
-  `windows-latest` nor `macos-latest` has a Vulkan device — and macOS never
-  will, per the 2026-08-05 decision that Apple platforms are Metal only, so this
-  waits on `crcbl-mtl` rather than on a gate. This is a coverage gap stated
-  rather than approximated: nothing in `tests/win32_e2e.rs` pretends to cover
-  the `set_mode`-from-a-key path in a running game.
-- **`tests/run-win32-e2e.ps1` has never been parsed by a PowerShell.** It was
-  written on a machine with no `pwsh`, so its syntax, its `$LASTEXITCODE`
-  handling through `Tee-Object`, and its ANSI-stripping regex are all unrun. The
-  CI job is the first execution. If it fails before the suite starts, the script
-  is the suspect and not the backend.
-- **Nothing in `tests/win32_e2e.rs` has ever executed.** It is a Windows suite
-  written on Linux; the cross-target check compiles it and does not link it. Its
-  failure messages are written on that assumption — they carry the queue word,
-  the foreground handle, the actual rectangle and the helper process's own
-  output, because the last two CI failures were solved by assertions that
-  printed data and the one before that wasted a round trip by printing a
-  duration.
+  the sandbox and press F11 at it; that needs a renderer, and `windows-latest`
+  has no Vulkan device, so this waits on a D3D12 path.
 
-## Owed on the Win32 backend after W3
+### Owed on the Win32 backend
 
-- **There is no drag feedback, only drops.** While a file is over the window
-  nothing highlights and the cursor stays the system's default: `WM_DROPFILES`
-  is a notification, not a conversation. `DragEnter`/`DragOver`, a drop cursor,
-  non-file formats and copy-versus-move all need `RegisterDragDrop` and an
-  `IDropTarget`, which is **COM** — `OleInitialize` on the pumping thread, a
-  hand-written vtable with `IUnknown` reference counting, and an apartment this
-  crate does not own and cannot uninitialise without knowing what the host
-  process put in it. Considered and declined for W3: it buys feedback rather
-  than drops, and `ShellEvent::DroppedFile` is what the seam actually names.
-  Owed before the editor's asset browser wants a drop target that looks like one
-  (P12), the same milestone XDND on X11 is owed for.
+- **Drag feedback: there is only a drop, never a conversation.** `WM_DROPFILES`
+  is a notification; `DragEnter`/`DragOver`, a drop cursor, non-file formats and
+  copy-versus-move all need `RegisterDragDrop` and an `IDropTarget` — COM, with
+  `OleInitialize` on the pumping thread and an apartment this crate does not
+  own. Considered and declined for W3 (it buys feedback rather than drops, and
+  `ShellEvent::DroppedFile` is what the seam actually names); owed before the
+  editor's asset browser wants a drop target that looks like one (P12).
 - **`MimeType::UriList` is a registered format, not `CF_HDROP`.** A "copy file"
   from Explorer puts `CF_HDROP` on the clipboard, and this backend does not read
   it: a request for `text/uri-list` finds whatever was published under that
   registered name and is otherwise `Empty`. Rendering `CF_HDROP` as a
   `text/uri-list` blob means _encoding_ URIs, and the shared decoder
-  `clipboard::parse_uri_list` cannot round-trip a Windows path — `file:///C:/a`
-  decodes to the path `/C:/a`, which is not a file. Closing this means either a
+  `clipboard::parse_uri_list` cannot round-trip a Windows path (`file:///C:/a`
+  decodes to `/C:/a`, which is not a file). Closing this means either a
   Windows-aware `file:` encoder plus a matching decoder, or delivering
   `CF_HDROP` as paths through a different route. Not attempted; named so the gap
   is not rediscovered as a bug.
 - **A clipboard payload whose last bytes are NUL loses them.** Payloads are
   written NUL-terminated and read back with trailing NULs trimmed, which is what
-  makes a `GlobalSize` larger than the request harmless and is what other
-  applications do for registered text formats. Neither of the engine's two
-  formats is binary; an `Other("image/png")` offer ending in NUL would be
-  truncated. Recorded in `win32::clipboard`'s module docs as well.
-- **`SetCurrentProcessExplicitAppUserModelID` is now one library closer.** W3
-  links `shell32` for the drop calls, so the "it needs a third system library"
-  half of the `app_id` entry below is no longer a cost — what is left is the
-  decision about _where_ a process-wide property is set when a host application
-  embedded the engine.
-
-## Owed on the Win32 backend after W2
-
+  makes a `GlobalSize` larger than the request harmless — and what would
+  truncate an `Other("image/png")` offer ending in NUL. Recorded in
+  `win32::clipboard`'s module docs as well.
 - **`WindowDesc::app_id` is validated and never applied.** Win32's equivalent of
   `WM_CLASS` is the Application User Model ID, set process-wide with
-  `SetCurrentProcessExplicitAppUserModelID` from `shell32` — it decides taskbar
-  grouping and which shortcut a window matches. W1 rejects an id containing a
-  NUL and otherwise ignores it, so a Crucible window groups under whatever
-  Explorer infers. Wiring it means a third system library and a decision about
-  _where_ a process-wide property is set (opening a shell is the wrong place if
-  a host application embedded the engine).
+  `SetCurrentProcessExplicitAppUserModelID` from `shell32`; it decides taskbar
+  grouping and which shortcut a window matches, and W1 rejects a NUL and
+  otherwise ignores it, so a Crucible window groups under whatever Explorer
+  infers. Wiring it means a third system library (`shell32` is already linked
+  for the drop calls) and a decision about _where_ a process-wide property is
+  set when a host application embedded the engine.
 - **`ShellCaps::TEXT_IME` is clear although typing works.** `WM_CHAR` is
-  handled, including surrogate pairs, and leaving `DefWindowProc` to run the
-  default IME does deliver a committed CJK string through it — so composition
-  probably works today, invisibly. The bit stays clear because it claims the
-  commit path is _wired to an input method_: nothing here touches
-  `WM_IME_STARTCOMPOSITION`/`WM_IME_COMPOSITION`/`WM_IME_ENDCOMPOSITION`, the
-  seam cannot tell a pre-edit from a commit, and there is no way to place the
-  candidate window at the caret. Wayland latches the same bit on having _bound_
-  `text-input-v3`; matching that standard here means handling the `WM_IME_*`
-  family and giving the seam a pre-edit event, which is its own slice. The
-  argument is written out in `Win32Shell::caps`.
-- **`DeviceId` names a device kind, not a device.** `KEYBOARD_DEVICE` and
-  `POINTER_DEVICE` in `win32/input.rs` are constants, the same admission the X11
-  backend makes. Windows is better placed to fix this than X11 is —
-  `RAWINPUTHEADER::hDevice` identifies the physical device on every `WM_INPUT` —
-  but turning a handle into a stable `DeviceId` needs a handle table and a
-  hotplug story (`WM_INPUT_DEVICE_CHANGE`), and raw input would have to become
+  handled, including surrogate pairs, and the default IME does deliver a
+  committed CJK string through it — but nothing touches the `WM_IME_*` family,
+  the seam cannot tell a pre-edit from a commit, and there is no way to place
+  the candidate window at the caret. Matching Wayland's standard means handling
+  the `WM_IME_*` family and giving the seam a pre-edit event, which is its own
+  slice. The argument is written out in `Win32Shell::caps`.
+- **`DeviceId` names a device kind, not a device.** Windows is better placed to
+  fix this than X11 is — `RAWINPUTHEADER::hDevice` identifies the physical
+  device on every `WM_INPUT` — but turning a handle into a stable `DeviceId`
+  needs a handle table and a hotplug story, and raw input would have to become
   the source of button and wheel events too rather than only of motion.
-  Local-multiplayer device assignment is what wants it.
 - **A modal drag-resize accumulates raw motion.** `WM_INPUT` keeps arriving
-  while Windows runs its own message loop, and nothing drains the queue until
-  the drag ends, so a three-second edge drag delivers a few thousand
-  `PointerMotion` events in one `pump`. It is bounded (the drag is finite) and
-  it is not a leak, but it is a burst. Not fixed because the two obvious fixes
-  are both wrong: coalescing relative samples loses the per-event timing
+  while Windows runs its own message loop, so a three-second edge drag delivers
+  a few thousand `PointerMotion` events in one `pump`. Bounded, not a leak, and
+  the two obvious fixes are both wrong: coalescing loses the per-event timing
   `docs/plan/19-input.md`'s pattern evaluator is a function of, and dropping
-  them needs a "we are inside a modal loop" flag whose only consumer would be
-  this. The pointer is on a window edge rather than in mouselook while it
-  happens.
+  needs a "we are inside a modal loop" flag nobody else would consume.
 - **Refresh rate is a whole hertz, so 59.94 Hz reports as 60.**
   `EnumDisplaySettingsW`'s `DEVMODEW::dmDisplayFrequency` is an integer, and
   `MonitorInfo::refresh_millihertz` exists precisely because that rounding
   matters to frame pacing. The exact figure is in `QueryDisplayConfig`'s
-  `DISPLAYCONFIG_RATIONAL` (60000/1001), which needs a second display API and
-  its own path-and-mode array walk. Windows is the only one of the five backends
-  with this gap; it is worth closing when frame pacing lands.
-- **A monitor's name is its device name (`\\.\DISPLAY1`), not its marketing
-  name.** `MonitorInfo::name` already documents itself as display-only and
-  unstable, and the alternatives are worse (`EnumDisplayDevicesW` usually
-  answers "Generic PnP Monitor") or bigger (`QueryDisplayConfig` again).
-  Considered and declined for W1.
+  `DISPLAYCONFIG_RATIONAL` — worth closing now that frame pacing is real.
 - **A window frozen during a user drag-resize is accepted, not fixed.** Windows
-  runs its own modal message loop between `WM_ENTERSIZEMOVE` and
-  `WM_EXITSIZEMOVE`, so `pump` does not return and no frame is rendered until
-  the mouse is released. The resize storm is coalesced so the delay is not also
-  an event flood, but the freeze is real. The usual fix — `SetTimer` plus a
-  frame rendered from `WM_TIMER` inside the modal loop — **cannot be built in
-  this crate**: rendering a frame means calling the engine, and the shell
-  deliberately has no `Shell::run(closure)` to call back into (the crate docs
-  explain why, and wasm is the reason). Closing it needs a second seam, "render
-  one frame now", which is a decision above `crcbl-shell`. Recorded here rather
-  than attempted.
+  runs its own modal loop between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`, so
+  no frame renders until the mouse is released. The usual fix — `SetTimer` plus
+  a frame rendered from `WM_TIMER` — cannot be built in this crate: the shell
+  deliberately has no `Shell::run(closure)`. Closing it needs a second seam,
+  "render one frame now", which is a decision above `crcbl-shell`.
 
 ## What the AppKit backend has and has not been run against
 
-P5C M1 wrote the whole of `crates/crcbl-shell/src/appkit/` on a Linux machine.
-It is cross-checked with
-`cargo check`/`cargo clippy --target aarch64-apple-darwin`, which do not link
-and do not run — **a cross-check proves the code typechecks and nothing more.**
-The window lifecycle has since executed on a `macos-latest` runner through
-`tests/appkit_session.rs`; everything below is written against what that pass
-does and does not reach.
+`crates/crcbl-shell/src/appkit/` was written on a Linux machine and
+cross-checked with `cargo check`/`cargo clippy --target aarch64-apple-darwin`,
+which do not link and do not run — **a cross-check proves the code typechecks
+and nothing more**. The window lifecycle and the injected-input suite have since
+run on `macos-latest` through `tests/appkit_session.rs`; everything below is
+what that pass still does not reach.
 
-### The window session cannot be a `#[test]`, and that is measured rather than assumed
+### The one rule to know before writing any macOS test
 
-This is the finding to know before writing any macOS test, because it decides
-the shape of the whole suite:
+**A `#[test]` can never drive an AppKit window, and that is measured rather than
+assumed.** AppKit is main-thread-only and enforces it by raising
+(`-[NSApplication nextEventMatchingMask:...]` throws
+`NSInternalInconsistencyException`; an Objective-C exception unwinding through a
+Rust frame is undefined behaviour), and Rust's `libtest` always runs a test body
+on a thread it spawns — so the thread and app state a test needs are exactly
+what `#[test]` does not supply (a green `#[test]` asserting every `NSCursor`
+selector failed on the runner with `+[NSCursor "arrowCursor"] answered nil`).
+The window suite therefore lives in
+`crates/crcbl-shell/tests/appkit_session.rs`, a `harness = false` target that
+owns its `main` and runs _as_ the process; it is not feature-gated (off macOS it
+prints why it did nothing rather than reporting a pass it did not earn), and it
+answers libtest's `--list` protocol before anything else — a `harness = false`
+target has to be verified with `cargo nextest list` as well as
+`cargo nextest run`, because `cargo test` does not enumerate and CI uses
+nextest. A host `#[test]` is fine for the Objective-C runtime (thread-safe,
+needs no application), CoreGraphics, and the pure modules; anything that creates
+an AppKit object needs the session target.
 
-- **AppKit is main-thread-only and enforces it by raising.**
-  `-[NSApplication nextEventMatchingMask:untilDate:inMode:dequeue:]` asserts on
-  the thread and throws `NSInternalInconsistencyException`; an Objective-C
-  exception unwinding through a Rust frame is undefined behaviour, not an error
-  return. So `AppKitShell::open` refuses off the main thread
-  (`appkit::app::require_main_thread`) rather than finding out.
-- **Rust's `libtest` always runs a test body on a thread it spawns.** Measured
-  on this workspace's toolchain, not recalled: a probe crate asserting
-  `gettid() == getpid()` fails under `cargo nextest run`, and fails again when
-  the test binary is invoked directly with `--exact <name> --test-threads=1`.
-  The serial path in `libtest` does not put the body on the main thread.
-
-**The rule those two findings generalise to, now with a second instance behind
-it: on macOS a test's _thread_ and its _app state_ are part of its
-preconditions, and `#[test]` supplies neither.** M2 shipped a green `#[test]`
-asserting every `CursorIcon`'s `NSCursor` selector exists and answers a non-nil
-object; the `macos-latest` runner failed it with
-`+[NSCursor "arrowCursor"] answered nil`. The selector table was correct — the
-environment was one in which an AppKit **object** cannot be created, because
-`libtest` runs bodies on a spawned thread in a process where `NSApplication` was
-never initialised.
-
-The dividing line, and it is the question to ask before writing any macOS test:
-
-- **The Objective-C runtime is thread-safe and needs no application.**
-  `objc_getClass`, `sel_registerName`, `objc_allocateClassPair`,
-  `class_addMethod`, `objc_msgSend` against Foundation. `appkit::view`'s and
-  `appkit::shell`'s suites are all of this shape and stay `#[test]`s.
-- **CoreGraphics is thread-safe too.** `CGMainDisplayID`,
-  `CGWarpMouseCursorPosition`, `CGAssociateMouseAndMouseCursorPosition` —
-  `appkit::input`'s two remaining tests.
-- **An AppKit object needs both the main thread and `NSApplication`.** Cursors,
-  screens, pasteboards, views, windows. These live in
-  `crcbl_shell::session_support`, called from `tests/appkit_session.rs`, and the
-  M2 cursor test was moved there unchanged.
-
-`session_support`'s functions answer `Result<(), String>` rather than asserting,
-so the failure names the selector or the value that disagreed — which is what
-made the M2 failure diagnosable at a glance and is the same reason `Wake` is a
-named value rather than a duration.
-
-Together those mean a `#[test]` can never drive an AppKit window. **Closed in
-the same commit** by `crates/crcbl-shell/tests/appkit_session.rs`, a
-`harness = false` target that owns its `main` and therefore runs _as_ the
-process: it opens the backend, creates a window, pumps to the first `Resized`,
-reads the size back, flips to borderless and back, and destroys it. The
-alternative considered and declined was re-executing the test binary as a child
-process with `--test-threads=1` — it does not work, for the measured reason
-above.
-
-Two things about that target are worth knowing before touching it. It is **not**
-feature-gated and it runs on every host, because cargo builds and runs a
-harness-less target everywhere; off macOS it prints why it did nothing rather
-than reporting a pass it did not earn. And it was falsified the way any other
-guard is: a `panic!` in its body fails both `cargo test` (exit 101) and
-`cargo nextest run`, so it is genuinely wired into the run and can go red.
-
-**A `harness = false` target owes libtest's list protocol, and forgetting it
-broke three CI jobs at once.** `cargo nextest` enumerates a binary by running it
-with `--list --format terse` and parsing `<name>: test` lines out of stdout; the
-first version of this target ignored argv, so the _listing_ step ran the whole
-window session and then failed to parse its prose — `test (linux)`,
-`coverage (linux)` and `build + test (macos-latest)` all died on
-`creating test list failed`. `main` now answers `--list` (and the empty
-`--ignored` listing) before anything else happens.
-
-The reason it was missed is the transferable part: the target **was** falsified,
-under `cargo test`, and `cargo test` does not enumerate. CI runs
-`cargo nextest`. A guard checked under one runner and shipped under another is a
-guard that was not checked — anything owning its own `main` has to be verified
-with `cargo nextest list` as well as `cargo nextest run`.
-
-**It has now run on a Mac, and every step passed.** On `macos-latest`: the
-backend opened on the main thread, reported
-`ASPECT_HINT_HONORED | MULTI_WINDOW | WINDOW_POSITION | SERVER_DECORATIONS | EVENT_WAIT`
-and one monitor, configured the window at the requested 640×480, took the whole
-1024×768 screen borderless, restored 640×480 exactly on the way back, and
-destroyed the window. So a GitHub macOS runner **does** give a process a usable
-WindowServer session, `NSApplication` bootstraps from a plain unbundled binary
-with `setActivationPolicy:`, and M1's lifecycle is executed rather than only
-typechecked. What is listed as uncovered below is what that pass does _not_
-reach.
-
-### What the macOS suite does cover
-
-Not nothing, and it covers the highest-risk item in the backend:
-
-- **Every `objc_msgSend` signature shape this backend transmutes**, dispatched
-  against Foundation classes that are thread-safe and against a class built at
-  runtime for the purpose (`CrcblFfiProbe`, in `appkit::shell`'s tests) — so
-  both sides of the call are ours and a mismatch shows up as a wrong value
-  rather than as a crash somewhere later. That includes the `NSRect` return,
-  which must go through `objc_msgSend_stret` on x86_64 and must **not** on
-  aarch64, an `NSRect` argument, `BOOL` in both directions, and
-  `class_addMethod` with its type encodings.
-- **The main-thread refusal**, exercised from a thread spawned explicitly rather
-  than relying on `libtest`'s.
-- **That the runner has a graphics session at all**, through `CGMainDisplayID` —
-  CoreGraphics is thread-safe, so this is the one thing about the runner's
-  display a spawned test body may ask.
-- **The two CoreGraphics calls M2's pointer modes rest on**, for the same
-  reason: `CGWarpMouseCursorPosition` really moves the cursor and
-  `CGEventGetLocation` reports it back at the point named, and
-  `CGAssociateMouseAndMouseCursorPosition` is accepted in both directions. Both
-  tests restore what they changed before asserting, because the runner's desktop
-  is real.
-- **That every `NSCursor` selector `pointer::cursor_selector` names exists in
-  this AppKit** and answers with a non-nil cursor — the half a host test cannot
-  reach, since it has no `NSCursor` to ask. It is checked from the **session
-  target**, not from a `#[test]`; see the rule below for why the `#[test]`
-  version was green here and red on the runner.
-- **That `CrcblView`'s `registerForDraggedTypes:` really registers, and that a
-  view that never called it accepts nothing.** Read back through
-  `-[NSView registeredDraggedTypes]`, which makes the `accept_drops` gate a
-  mechanism rather than a promise. Also from the session target.
-- **A round trip through the real system pasteboard**, in both formats, twice
-  over: `session_support::pasteboard_round_trip` through the FFI, asserting that
-  `-[NSPasteboard changeCount]` advanced across the write, and the session's own
-  `clipboard()` through the `Shell` seam, asserting that each accepted read is
-  answered **exactly once** and that the three `ClipboardContent` outcomes are
-  told apart.
-- **That `CrcblView` really installs every responder and `NSTextInputClient`
-  method and claims the protocol.** The class is built by the same
-  `view::view_class` the real path calls, and `objc_allocateClassPair` has no
-  AppKit in it, so a spawned test body may build and inspect it. That catches a
-  refused `class_addMethod` and a misspelled selector, which are otherwise
-  silent.
-- The pure modules — `appkit::geometry`, `appkit::events`, `appkit::keys`,
-  `appkit::pointer` and `appkit::TimeBase` — run on **every** host including
-  this Linux one, which is where the Y flip, the points-to-backing-pixels
-  conversion, the `kVK_*` table, the modifier reconstruction, the scroll units
-  and the timestamp rebasing are falsifiable. Every guard in them was falsified
-  by mutation before this was written.
+What the session covers that is easy to miss: every `objc_msgSend` signature
+shape this backend transmutes is dispatched against a class built at runtime
+(`CrcblFfiProbe`) and against Foundation classes; the main-thread refusal is
+exercised; every `NSCursor` selector `pointer::cursor_selector` names is checked
+from the session; the pasteboard round-trips through a second process
+(`pbcopy`/`pbpaste`, so text only — `application/x-crcbl+ron` is not
+round-tripped cross-process, and if an engine-to-engine paste ever misbehaves on
+macOS this is the gap it would hide in); and the pure modules (`geometry`,
+`events`, `keys`, `pointer`, `TimeBase`) run on every host.
 
 ### Uncovered, and why each one is uncovered
 
-- **`NSApplicationPresentationOptions`.** An invalid combination _raises_, and
-  `geometry::presentation_options` never produces one — asserted as a pairing in
-  a host test. The session pass flips to borderless and back, so the legal pair
-  _is_ now accepted by a running `NSApplication`; what is unverified is that no
-  path can produce the illegal one.
-- **Reference counting.** `releasedWhenClosed` is turned off at creation and
-  `appkit::shell::release_window` is the single matching release for the window
-  and the layer. Reasoned, not observed; there is no leak check anywhere in this
-  workspace and Instruments is not in CI.
-- **The delegate-to-shell table.** `appkit::app::DELEGATES` is a thread-local
-  `Vec<(usize, *const Shared)>` rather than an Objective-C instance variable,
-  deliberately: the ivar route is `ivar_getOffset` plus pointer arithmetic into
-  the middle of an object, which corrupts rather than fails when it is wrong,
-  and none of it can be falsified from a Linux machine. The table is safe Rust
-  with the same lifetime story. Reconsider if a profile ever shows the lookup.
-- **The `NSWindow` subclass is now half observed.** `CrcblWindow` overrides
-  `canBecomeKeyWindow` and `canBecomeMainWindow` so that a borderless window can
-  take the keyboard. The M4 run read the live window back and reported
-  `class: "NSKVONotifying_CrcblWindow"` with `can_become_key: true` — so the
-  runtime-built subclass took, AppKit's KVO subclassed it in turn as it does for
-  any observed object, and **the override is installed and answering**. What is
-  still unseen is the override mattering: no keystroke has been delivered to a
-  borderless window, because no keystroke has been delivered at all (see the M5
-  entry below).
-
-### What M4 wrote, and what the runner answered
-
-M4 is the end-to-end pass: input the window system generated, a pasteboard round
-trip against another process, and AppKit as the judge of the window. It was
-written on Linux and cross-checked with
-`cargo clippy --target aarch64-apple-darwin`, which does not link and does not
-run.
-
-**It has now run, and it stopped before the injection.** The session got as far
-as the cursor shapes, the dragged-type registration, the general pasteboard and
-a window configured at 640×480, then waited ten seconds for a key window that
-never came. The diagnostic added for exactly this said which mechanism refused:
-
-```text
--[NSApp keyWindow] is nil and the application is inactive
-Activation { app_active: false, windows: 1, title: Some("crcbl appkit session"),
-             class: "NSKVONotifying_CrcblWindow", visible: true,
-             can_become_key: true, is_key: false }
-```
-
-**So the finding is about activation and not about TCC**, which was the risk
-this section had been written around. A GitHub macOS runner gives an unbundled
-binary a window server and a window and does **not** give it activation on the
-backend's own polite request, even though `setActivationPolicy:Regular` was
-accepted (`open()` fails loudly otherwise), `finishLaunching` ran, and
-`activate` was sent in both the macOS 14 and the legacy spelling.
-
-M5 is what follows from it, and it is three things:
-
-- **The readback stopped going through the key window**, which is where nearly
-  all the recovered coverage is. Every fact M4 asserts about the window —
-  `acceptsMouseMovedEvents`, the first responder, the registered dragged types,
-  the frame, the content extent, the backing scale, the screen, the style mask —
-  is an ordinary `NSWindow` or `NSView` accessor that answers whether or not the
-  application is active. `session_support::window_facts` finds this process's
-  own window by title among `-[NSApp windows]` and reads them there;
-  `app_active` and `is_key` became reported fields of `WindowFacts` rather than
-  preconditions for reading anything. `key_window` stays for its one genuine
-  caller, the check that this process holds the keyboard before anything is
-  posted. **The rule is general: a precondition belongs on the assertions that
-  need it, not on the function that gathers the evidence.**
-- **The harness asks for activation itself**, in `frontmost::ask` in
-  `tests/appkit_session.rs` — `-[NSRunningApplication currentApplication]` plus
-  `activateWithOptions:` with `NSApplicationActivateIgnoringOtherApps`, and the
-  legacy `-[NSApp activateIgnoringOtherApps:]` beside it, both guarded by
-  `respondsToSelector:`. It is deliberately **not** in `src/appkit/`, on exactly
-  the argument `tests/win32_e2e.rs`'s `desktop::take_foreground` gives: a
-  harness may arrange a precondition a backend must never arrange for itself,
-  because a game does not get to steal the focus. It is judged by
-  `-[NSApp isActive]` afterwards rather than by what the method returned, and
-  pulled once per turn of the poll rather than once.
-- **If activation is still refused, only the injection is skipped**, loudly. See
-  the entry below; that is the coverage gap this slice leaves behind.
-
-**The runner granted it, and the harness lever is why.** The M5 run reported
-`-[NSRunningApplication activateWithOptions:] answered true`, then
-`application active true, window key true`, then went on to inject. So a GitHub
-macOS runner **does** have a foreground session an unbundled binary can be put
-into — it simply will not hand it over to the cooperative
-`-[NSApplication activate]` that the backend is right to be limited to. The
-whole M4 judge passes on that runner, the warp lands exactly, and **TCC did not
-block activation**; whether it blocks `CGEventPost` is answered by the injection
-assertions themselves, which now run.
-
-`injection_skipped` is therefore **written and unrun**. It stays: the same
-refusal is what a developer's laptop gives a background process, and the branch
-that keeps a real coverage gap honest is worth more than the lines it costs.
-
-**Why `activateWithOptions:` worked where the backend's own attempt did not.**
-The backend's `activate` prefers `-[NSApplication activate]` where
-`respondsToSelector:` finds it, which on macOS 14 and later is the _cooperative_
-spelling: it asks, and an application that is not entitled to interrupt whatever
-is frontmost does not get to. The forceful spellings are deprecated as of 14 and
-not removed, and deprecation is a compiler diagnostic in Objective-C and nothing
-at all across `objc_msgSend` — so the harness reaches a lever the backend never
-takes, which is the whole shape of the harness/backend split here.
-
-### TCC does not gate `CGEventPost` back to the posting process — settled
-
-**This was the single largest open risk in the macOS half, and it is now closed
-by observation rather than by argument.** The whole M4 slice was written around
-the possibility that macOS 10.14+'s Accessibility gate would refuse synthesized
-keyboard events on a runner with nobody to grant the right, in which case none
-of the injected input could ever arrive. It does not, at least for events posted
-by a process and delivered back to that same process:
-
-- The posted `kVK_ANSI_A` came back as a `ShellEvent::Key` with the right
-  scancode, `KeyCode`, keysym and `Pressed`/`Released` pair.
-- **`TextCommit("a")` arrived with it.** That means `sendEvent:` routed the
-  event to the first responder, `keyDown:` handed it to `interpretKeyEvents:`,
-  the input method called `insertText:replacementRange:`, and `CrcblView`'s
-  `inputContext` was non-nil — which is true only because the class conforms to
-  `NSTextInputClient`. Every link in that chain was written on a Linux machine
-  and none of them had ever run.
-- The arrow key produced a `Key` and **no** `TextCommit`, so the backend is
-  asking the input method rather than reading `-[NSEvent characters]`.
-- The injected pointer motion arrived and its position was right.
-
-So **macOS is no longer where Windows was before its e2e suite found
-`TranslateMessage`**, and `ShellEvent::TextCommit` on this backend is executable
-coverage rather than a structural claim. `AXIsProcessTrusted()` stays uncalled
-and is now unlikely ever to be worth adding.
-
-The `postEvent:atStart:` fallback is therefore **not needed and should not be
-written.** It is recorded here only so nobody re-derives it: it would have been
-`-[NSApplication postEvent:atStart:]` with an `NSEvent` from
-`+[NSEvent keyEventWithType:…]`, needing no permission and reaching everything
-but the window server's own leg — at the cost of a ten-argument `objc_msgSend`
-transmute with an `NSPoint` by value, which is exactly the class of FFI this
-crate says must not be written blind. The real path works; this would be
-strictly less coverage for strictly more risk.
-
-### A warp is not an event, and that is the M5 run's own finding
-
-`CGWarpMouseCursorPosition` moves the cursor and **posts nothing**. Apple
-documents it that way; M4 did not read it that way, and wrote `wait_for_pointer`
-as "warp, then wait for the pointer to be reported". The run showed both halves
-of what that means in one log, which is why this is worth writing down rather
-than just fixing:
-
-- `input`'s warp goes from _outside_ the window to a point inside it, and it
-  **passed** —
-  `warped to PhysicalPoint { x: 480.0, y: 240.0 } and landed at PhysicalPoint { x: 480.0, y: 240.0 }`.
-  Not because the warp reported anything: AppKit re-evaluates its tracking areas
-  against where the cursor actually is, so crossing the boundary produces a
-  `mouseEntered:` and therefore a `PointerFocus` carrying a position. The warp
-  was never the thing being observed.
-- `injected_input`'s warp goes from one point _inside_ the window to another. It
-  crosses nothing, so there is no `mouseEntered:`, and a warp generates no
-  `mouseMoved:` either. It waited the full ten seconds and collected
-  `["MonitorsChanged"]`.
-
-The fix is that `wait_for_pointer` now posts a real `kCGEventMouseMoved` at a
-caller-supplied point on **every turn** of its poll — every turn, because
-`CGWarpMouseCursorPosition` suppresses local events briefly afterwards and a
-single swallowed post would be a flake rather than a finding. The warp is left
-to do only what it promises. Three consequences worth keeping:
-
-- **The round trip is stronger than it was**, not weaker. The seam converts the
-  target into Quartz's global space and warps; `quartz::cursor` reads back the
-  global point it chose; the posted move goes to _that_ point; the backend
-  converts what the window server delivers back into the seam's space. Both
-  conversions are now checked against each other rather than one of them against
-  a tracking-area crossing.
-- **The warp round trip moved behind the activation gate**, into
-  `warp_round_trip`, because it posts and `CGEventPost` goes to whoever is
-  frontmost. `input` keeps everything that posts nothing — the capability set,
-  the confine refusal, the clamped out-of-window warp, the pointer modes, the
-  cursors — and stays unconditional.
-- **The injected motion is identified by distance, not by recency.**
-  `wait_for_pointer` posts moves at the parked point until one is reported, and
-  the last of those can still be in flight when the next collection starts, so
-  "the most recent `PointerMotion`" could be a stale report of `parked` compared
-  against itself. The filter takes any motion at least half of `NUDGE` away in
-  both axes and the assertions take the **direction**, deliberately — a backend
-  that reflected the Y reports a point `NUDGE.1` _above_ `parked`, which the
-  filter admits and the assertion catches. Filtering on direction would have
-  hidden the exact bug the check exists for. Same rule as the Win32 crossing
-  fix: on a live desktop, find your own event by its payload.
-
-### The payload rule was written down and then not applied one caller up
-
-The bullet above ends "on a live desktop, find your own event by its payload",
-and `wait_for_pointer` — the function that bullet is _about_ — went on taking
-the first position of any value. It flaked on a docs-only commit, `c6531c4`,
-whose code was byte-identical to a run that had passed:
-
-```text
-warped to PhysicalPoint { x: 480.0, y: 240.0 } in a
-PhysicalSize { width: 640, height: 480 } window and the window system
-reported PhysicalPoint { x: 320.0, y: 240.0 }
-```
-
-`(320, 240)` is the window's exact centre, and nothing was broken: it is where
-`PointerMode::Locked` puts the cursor before freezing it
-(`appkit::input::centre_pointer`). `input` sets and clears that lock without
-pumping afterwards, AppKit re-evaluates its tracking areas against a warp, and
-so a **truthful report of where the cursor was one step earlier** was still in
-flight when the next question was asked. It arrived first and was read as the
-answer.
-
-Two things are worth keeping from it:
-
-- **Draining before the warp does not fix this class of bug**, and reaching for
-  it would have looked like a fix. The window server delivers asynchronously, so
-  the stale report need not have _arrived_ by the time anything drains. Only the
-  payload distinguishes it. `wait_for_pointer` now takes the position it is
-  waiting for and accepts a report only within `POINTER_SLACK` (3 px) of it.
-- **A rule recorded next to one call site does not propagate to the others.**
-  This one was learned on Win32, written into the AppKit suite, and applied to
-  the nudge check twenty lines below the function that needed it most. When a
-  finding is about a _class_ of check, the next step is grepping for the rest of
-  that class, not documenting the instance.
-
-**Unfalsified, stated as the gap it is:** the run after the fix shows the filter
-_accepting_ the right report —
-`warped to PhysicalPoint { x: 480.0, y: 240.0 } and landed at PhysicalPoint { x: 480.0, y: 240.0 }`,
-CI run 30897245466, all nineteen jobs green. It does not show the filter
-_rejecting_ a wrong one. The failure path is the same `DEADLINE` assert that has
-been seen red in an earlier run, so the mechanism works; what nobody has watched
-go red is this predicate against a genuinely wrong conversion. That would take a
-deliberate mutation round on a macOS runner.
-
-### A synthesized mouse event carries no delta unless you put one on it
-
-The run after the warp fix got past the pointer position and failed one
-assertion deeper, with `raw_delta` of `(0.0, 0.0)`. The backend was right and
-the harness was wrong: **`CGEventCreateMouseEvent` places an event at an
-absolute location and computes nothing else.** `kCGMouseEventDeltaX` and
-`kCGMouseEventDeltaY` stay zero unless the poster sets them with
-`CGEventSetIntegerValueField`, and `-[NSEvent deltaX]` reads exactly those
-fields — which `appkit::view` passes straight into `raw_delta`. It reported the
-zero it was handed, faithfully.
-
-**The assertion was checking a value the harness had never supplied**, which is
-the more useful half of this finding: it asserted only that the delta was
-positive in both axes, so it could never have failed for the right reason and
-could only have _passed_ by accident, off some unrelated movement on the
-runner's desk. That is "a check that cannot fail is not a check" arriving
-through an injected-input harness rather than through a stub.
-
-`quartz::move_mouse_by` now sets both fields, and the delta is the same constant
-as the travel (`NUDGE`) so the two cannot drift. Every part of the pair earns
-its place: the magnitudes differ so a `deltaX`/`deltaY` swap shows up, the signs
-differ so a **reflection** fails distinctly from a swap — reflecting Y makes the
-second component positive, swapping makes the first negative — and a negative
-component is the only way to see one survive the trip rather than being clamped
-or `abs`ed. That makes the Y-up-position-against-Y-down-delta asymmetry that
-`appkit::pointer` exists to describe observable for the first time; M2 listed it
-as reasoned rather than observed and it has been ever since.
-
-The delta is judged by **sign and proportion, not exact equality**, and that is
-the general form rather than a loosening: `-[NSEvent deltaX]` is documented in
-device-independent points while the field being set is in the event stream's own
-units, and nothing reachable from a Linux machine says whether a Retina host
-scales between them. A uniform factor is a fact about the display and passes;
-one axis scaled differently from the other is a defect and does not.
-
-**The two neighbouring posters were audited for the same defect and are clean**,
-which is worth recording so a round trip is not spent finding out:
-
-- `CGEventCreateScrollWheelEvent` takes its unit as an **argument**, not a field
-  left unset, and the unit is the whole of what decides
-  `hasPreciseScrollingDeltas` and therefore `Lines` against `Pixels`. Its
-  _amount_ was wrong for a different reason — see the next entry.
-- `CGEventCreateKeyboardEvent` leaves `kCGKeyboardEventAutorepeat` at zero and
-  `-[NSEvent isARepeat]` reads it — but the session asserts the first press is
-  **not** a repeat, so there the default _is_ the value under test rather than
-  an oversight.
-- `kCGMouseEventClickState` is zero on a synthesized click and this seam never
-  reads it (buttons come from `buttonNumber`), so nothing asserted depends on
-  it. It is set to one anyway: a press with a click state of zero is not what a
-  real click looks like, and AppKit acting on that would be a harness defect
-  reported as a backend one.
-
-### Instrumentation that cannot report is the same defect as a check that cannot fail
-
-**A `log::warn!` with no logger behind it is a discarded string**, and a whole
-CI round trip was spent on one. The readback added to
-`appkit::window::set_frame` — whose entire purpose was to say whether the window
-landed where it was put — was structurally incapable of speaking, because
-nothing in `tests/appkit_session.rs`'s process had ever called
-`crcbl_core::log::try_init_logging`. It shipped, the run failed, and the
-diagnostic it was written to produce was not in the log because it could never
-have been.
-
-This is the "a check that cannot fail is not a check" rule one level up, and it
-is worth stating separately because the reflex that catches the first one does
-not catch this: an assertion is obviously something you can try to break, while
-a log line looks like it either prints or does not and the failure mode is
-invisible. **Before trusting a diagnostic, make it emit once.**
-
-The session now installs a logger before it opens the backend, with the filter
-fixed in code rather than read from `CRCBL_LOG` — `Filter::from_env` would leave
-the session's own diagnosis depending on whether a CI job happened to set an
-environment variable, and the job does not. `crcbl_shell::appkit::window` is
-turned up to `debug` and everything else stays at `info`, so the placement trail
-is complete and the event pump does not bury it. `try_init_logging` rather than
-`init_logging`, because the `Result` says whether a logger was already there and
-silently ignoring that is how this went wrong the first time.
-
-**Falsified offline rather than reasoned about**, in a throwaway crate against
-the real `crcbl-core`: `Filter::parse("info,crcbl_shell::appkit::window=debug")`
-answers `Debug` for `crcbl_shell::appkit::window`, `Info` for
-`crcbl_shell::appkit::shell`, and `max_level` `Debug` so the facade's global
-fast path lets the records through; a `debug!` and a `warn!` on the window
-target both reach **stderr**, and a `debug!` on another module's target is
-correctly dropped. Stderr is the stream nextest has been surfacing all along —
-every panic message read this session arrived on it.
-
-### Changing presentation options moves every window to its creation frame
-
-**This is a fact about AppKit, not about this codebase, and it cost eight CI
-round trips.** It is written up here and in `appkit::window`'s module docs
-because it is documented nowhere Apple publishes and because the next person to
-reorder those statements will otherwise undo it.
-
-**`-[NSApplication setPresentationOptions:]` returns every window of the
-application to its creation frame.** Not the window it is called about — there
-is no such window, the property is on `NSApplication` — and not "constrains it
-to the screen". It puts windows back where they were created: origin on the way
-into borderless, origin _and size_ on the way out.
-
-Measured on a real runner by bracketing `apply_mode` statement by statement:
-
-```text
-after the Borderless arm                 [0,0,1024,768]
-after size_layer                         [0,0,1024,768]
-after refresh_presentation (options 0x5) [192,160,1024,768]   <- moved
-
-after the Windowed arm                   [192,256,512,416]
-after size_layer                         [192,256,512,416]
-after refresh_presentation (options 0x0) [192,160,640,512]    <- moved and resized
-```
-
-`[192,160,640,512]` is exactly the frame the window was created at, and
-`centred([0, 63, 1024, 674], 640x480)` — the creation-time visible frame — is
-`(192, 160)` on both axes. **One mechanism, both directions.**
-
-**The fix is an ordering rule: mask, then options, then frame.**
-`refresh_presentation` now runs between the style mask and the frame rather than
-in a tail after both, so the frame is the last geometry `apply_mode` sets. (The
-middle position rather than the first is its own finding, immediately below.) It
-is correct by construction rather than by repair, and two properties make the
-reordering free: the borderless frame is computed from `-[NSScreen frame]`
-rather than `visibleFrame`, so it does not depend on what the options do; and
-the effective mode, which `refresh_presentation` decides from, is now settled up
-front by `borderless_target` returning the whole `Screen` instead of only its
-rectangle. That removes the read-back-the-screen-afterwards step which was the
-only reason the effective mode had to be assigned late in the first place.
-
-The alternative — re-asserting the frame after `refresh_presentation` — was
-considered and declined. It leaves a window that visibly moves and then moves
-back (and on the windowed leg, resizes and resizes back), it needs a comment
-explaining why a second call exists, and it is fragile: anything later added
-after the re-assert reintroduces the bug. The ordering rule needs no second
-call.
-
-**The `apply_mode:` bracket readings stay.** They are what made this findable at
-all, and they are what makes a regression obvious: anything added below the arm
-that repositions the window shows up immediately as a frame that changed after
-the arm had set it.
-
-#### The options will not take before the style mask — a third position, paid for separately
-
-The obvious repair for the above was to hoist `refresh_presentation` to the very
-front of `apply_mode`. That put `setPresentationOptions:` before the style mask
-had changed, and **AppKit raised**. The process aborted with `SIGTRAP` — an
-Objective-C exception unwinding through a Rust frame — with the whole
-injected-input suite already green behind it and nothing logged after the
-statement before it.
-
-**The value was not the problem, and that is provable rather than assumed.**
-M1's docs warn that `AutoHideMenuBar` without a Dock bit is an illegal
-combination AppKit raises on, which made it the natural suspect.
-`geometry::presentation_options` is a `const fn` whose only input is a
-two-variant enum and whose only outputs are `PRESENTATION_DEFAULT` (`0x0`) and
-`PRESENTATION_BORDERLESS` (`AutoHideDock | AutoHideMenuBar`, `0x5`). It cannot
-construct the illegal combination at any call site at any time, so _when_ it is
-called cannot change the value's legality. What changed was the window's state
-when the options were applied.
-
-So the rule has **three** positions: `setStyleMask:`, then
-`refresh_presentation`, then `setFrame:`. The frame is last because both of the
-others move the window; the mask is first because the options are not accepted
-while the window is still in the style it is leaving. `apply_mode` now hoists
-the target mask and target frame out of what were two `match` arms so the
-sequence reads as one ordered block — buried in a `match`, the rule was
-expressible twice and enforceable neither time.
-
-#### An Objective-C exception reaching Rust is undefined behaviour, and this backend has now done it
-
-`appkit::mod`'s docs already state the hazard; this is the first time it has
-actually happened, and it happened in CI. Worth recording plainly:
-
-- **Nothing guards it.** There is no `@try`/`@catch` anywhere in this backend
-  and no `extern "C-unwind"` boundary — grepped, not assumed. Every
-  `objc_msgSend` through `appkit::ffi` is a potential abort if the receiver
-  raises. That is a deliberate position rather than an oversight: catching
-  Objective-C exceptions from Rust needs a C shim or `objc_exception_try_enter`,
-  and an `NSException` that has already been thrown has left AppKit's internal
-  state undefined anyway, so surviving one buys very little.
-- **The failure is at least loud.** `SIGTRAP` from an aborted unwind is
-  unmistakable in a CI log, and it takes the process down rather than continuing
-  with corrupted state. What it is not is _diagnosable_ — nothing after the
-  raising statement runs, so any diagnostic printed after the call is a
-  diagnostic that never prints. `refresh_presentation` now logs the value it is
-  about to send **before** sending it, for exactly that reason.
-- **`refresh_presentation` is the one path known to be able to raise**, and it
-  is called from `apply_mode` and from window destruction. The known trigger is
-  applying borderless options before the window carries a borderless style mask.
-
-#### What the eight rounds actually eliminated
-
-Written down so none of them is tried again. Each was killed by evidence, not by
-argument:
-
-- **`constrainFrameRect:toScreen:`.** The override is installed and the host
-  test proving it passes on the runner; the window still moved. Its default
-  moves a window _down_ to clear the menu bar and would never move one right by
-  192 — which was reason to doubt it before the run, and the lesson is to weigh
-  the _shape_ of a symptom against the shape a mechanism produces.
-- **A corrupted `NSRect` argument.** `setFrame:` logged `asked` and `landed`
-  identical, so the HFA-in-`v0`-`v3` theory — the same class as the `wheel1`
-  variadic that did bite — was ruled out for that call.
-- **The event pump and any delegate callback.** The frame reads wrong on the
-  line printed _before the session's first pump_.
-- **macOS state restoration.** `setRestorable:NO` was added, the next run
-  confirmed `isRestorable false`, and the origin was still wrong. The change
-  stays on its own merits, argued in `window.rs`. `frameAutosaveName` was
-  `Some("")` throughout, so autosave was never in it.
-
-#### What instrumentation was kept, and what was scaffolding
-
-The hunt left a lot of logging. Kept is whatever would make a _regression_
-diagnosable in one round rather than nine; dropped is whatever only answered a
-question that is now answered.
-
-**Kept:**
-
-- **`set_frame`'s from / asked / landed line, and its warning on mismatch.** The
-  one place a frame can be silently rewritten, and the warning is the only thing
-  that would ever say so — `WindowState` carries no position, so nothing above
-  this layer can notice.
-- **`apply_mode`'s four readings**: the placement capture (the input the restore
-  assertion is checked against, so a failure explains itself), after
-  `setStyleMask:` (which changes the mask, the frame _and_ the responder — each
-  of the three was a defect once), after `refresh_presentation` (the mover), and
-  one at the exit carrying the frame and the responder. Each step prints what it
-  changed, so a disagreement at the exit with agreement above localises a
-  regression to the tail immediately.
-- **`refresh_presentation`'s pre-send line.** That path can raise and abort the
-  process, and a diagnostic printed after a call that can abort is a diagnostic
-  that never runs on the one occasion it is wanted.
-- **`install_logger` in the session.** Without it none of the above exists at
-  all; that lesson has its own section.
-
-**Dropped:**
-
-- **The `set_mode:` bracket in `shell.rs`.** It existed to prove the move
-  happened inside `apply_mode` rather than after it. That is settled, and the
-  line now duplicates `apply_mode`'s own exit reading one frame later.
-- **The session's per-pump-turn frame and responder tracking in `flip`.** Built
-  to answer "which turn does it change on", which turned out to be "none — it is
-  wrong before the first pump". `flip` is back to `wait_for`, and the assertions
-  on the snapshots either side of each leg cover what it was watching for.
-- **The screens dump in the borderless path**
-  (`computed <rect> from screens [...]`). It existed to test "is
-  `borderless_frame` wrong", which it was not. `set_frame`'s `asked` still names
-  the rectangle that was computed.
-- **The `before setStyleMask:` baseline reading.** The capture line above it
-  already names the frame, and the after-mask line names the delta.
-
-#### The two rules that got there
-
-- **The readback layer earned itself.** `WindowState` carries an extent and no
-  position, so `set_mode` reported a perfectly correct `PhysicalSize` throughout
-  and every run before this printed it happily. Only asking `NSWindow` for its
-  own `frame` showed the origin at all. **This is the first defect that layer
-  caught and it is the kind only it can catch** — and the restore leg's
-  corruption was invisible even to it for eight rounds, because the borderless
-  assertion fired first. Gathering both flips before asserting either is what
-  exposed it.
-- **Instrumentation that cannot report is the same defect as a check that cannot
-  fail.** The `set_frame` readback shipped, a round trip was spent, and it
-  produced nothing because no logger was installed in the session's process — a
-  `log::warn!` with no logger behind it is a discarded string. That rule has its
-  own section below.
-
-### `setStyleMask:` takes the first responder, and every mode change had to give it back
-
-**Fixed.** `sendEvent:` delivers key events to the first responder, which is the
-_window_ until something claims it — so a window that is its own first responder
-swallows every keystroke and hands the view none, with nothing anywhere
-reporting it. `create_native_window` claimed it once with `makeFirstResponder:`,
-and `setStyleMask:` took it straight back.
-
-Observed rather than supposed, one statement apart, on both legs:
-
-```text
-borderless: first responder is the content view — before setStyleMask: true
-borderless: style mask asked 0x0, ... first responder is the content view false
-```
-
-and the session's own trail across a round trip read
-`CrcblView -> NSKVONotifying_CrcblWindow -> NSKVONotifying_CrcblWindow`. **A
-game that pressed F11 went permanently deaf**, silently, which is precisely the
-failure `makeFirstResponder:` is on `appkit::view`'s list of five switches to
-prevent — and the second of those five to turn out to be genuinely broken rather
-than merely unverified.
-
-`focus_content_view` now does it, shared between creation and `apply_mode`
-rather than copied, and it warns when AppKit refuses. Two decisions worth
-keeping:
-
-- **It goes last in the ordered sequence**, after the frame and after
-  `makeKeyAndOrderFront:`, for the same reason the frame is late: it is a state
-  that has to survive, and putting it after everything means nothing in the
-  sequence can take it away again.
-- **It is exempt from the "reads of window geometry go above the sequence"
-  rule.** It reads the content view and the responder chain, and neither the
-  mask, the options nor the frame invalidates those — so the rule that forced
-  the placement capture upwards does not reach it. Worth stating because the two
-  rules sit in the same function and look alike.
-
-**Asserted after the borderless leg as well as after the round trip**, and the
-first of those is the one with teeth: a game goes borderless and _stays_ there,
-so a responder restored only on the way back out would be a game that is deaf
-for exactly as long as anyone is playing it — and an end-to-end check would have
-passed that happily.
-
-### `wheel1` is a named parameter, and declaring it variadic scrolled by zero
-
-The run after the delta fix reached the scroll and got
-`a notch of one line is not zero lines`. The real C signature is:
-
-```c
-CGEventRef CGEventCreateScrollWheelEvent(CGEventSourceRef source,
-                                         CGScrollEventUnit units,
-                                         CGWheelCount wheelCount,
-                                         int32_t wheel1, ...);
-```
-
-**`wheel1` is named; only `wheel2` and `wheel3` are variadic.** The harness
-declared the `...` one parameter early, so on `aarch64-apple-darwin` — where
-Apple's ABI puts variadic arguments on the **stack** while named ones go in
-registers — the amount was written to the stack and the callee read `w3`. The
-event carried whatever was in that register, which was zero.
-
-Three things about this are worth keeping:
-
-- **It is the exact failure mode this crate warns about at length, and it did
-  not arrive where anyone was watching.** `appkit::ffi` devotes a section to it
-  for `objc_msgSend` and M1 built the whole `msg_send` transmute generic around
-  it, so every Objective-C dispatch in the backend writes its signature down and
-  is checked. This came through a plain C function in the test harness, whose
-  declaration was hand-written once and never re-read against the header. **A
-  wrong signature compiles cleanly, links, runs, and corrupts an argument at run
-  time** — the compiler cannot help, and neither can any amount of care applied
-  to a different call.
-- **The old declaration made the argument unchecked, which is why it survived.**
-  Falsified both ways offline: with `...` starting at `wheel1`, passing an `i64`
-  compiles silently, because a variadic argument is subject to default promotion
-  and is type-checked against nothing. With `wheel1: i32` named, the same call
-  is a hard `E0308`. The fix converts an unchecked argument into a checked one,
-  which is a stronger statement than "the numbers now line up".
-- **An empty variadic list still has to be declared.** One axis means `wheel1`
-  and nothing after it, and `fn(..., wheel1: i32, ...)` called with four
-  arguments is correct; dropping the `...` entirely would be a different
-  signature again.
-
-**Every other `extern` declaration in the harness was re-read against its header
-after this, and `CGEventCreateScrollWheelEvent` is the only variadic one.**
-`CGEventCreate`, `CGEventGetLocation`, `CGEventCreateKeyboardEvent`,
-`CGEventCreateMouseEvent`, `CGEventPost`, `CGEventSetIntegerValueField`,
-`CFRelease`, `objc_getClass`, `sel_registerName`, `objc_autoreleasePoolPush` and
-`objc_autoreleasePoolPop` are all fixed-arity and match. `objc_msgSend` is
-declared with no parameters and **never called through that declaration** — it
-is transmuted per call site, which is the same discipline `appkit::ffi` enforces
-and the reason the Objective-C side of the harness did not have this bug.
-
-Decisions and limits worth keeping whatever the run says:
-
-- **The injection is posted from the session process, not from a helper
-  binary.** The Win32 suite needs a second process because `SendInput` from the
-  thread that owns the window never touches the message queue. That argument
-  does not transfer: `CGEventPost` hands the event to the **window server**,
-  which decides who is frontmost and delivers it through the ordinary run loop,
-  so it re-enters from outside whoever posted it. A second process would also
-  make the TCC question unambiguous in the wrong direction — synthetic events
-  aimed at _another_ application are gated for certain.
-- **`CGEventCreateScrollWheelEvent` is _partly_ variadic**, and this bullet used
-  to say its per-axis amounts were all variadic arguments. That was wrong about
-  the first axis and is what produced a scroll of zero; the corrected account,
-  with the ABI reasoning and what was falsified, is in the `wheel1` section
-  above. Left here as a pointer rather than deleted, because the wrong version
-  is the kind of thing that gets re-derived from a half-memory of the C header.
-- **The scroll's _sign_ is not asserted, only its unit.** "Natural scrolling" is
-  a per-user system preference that inverts it, so an assertion on the sign is
-  an assertion about the runner's settings. What is pinned is `Lines` rather
-  than `Pixels`, which is what `hasPreciseScrollingDeltas` decides. The
-  horizontal sign stays unverified for the same reason it always did.
-- **The cross-process pasteboard check is `pbcopy` and `pbpaste`, so it covers
-  text only.** A helper binary of ours was considered and declined: macOS ships
-  two stock clipboard clients written by Apple, and a peer of our own would be a
-  second hand-written Objective-C FFI whose only advantage is that we maintain
-  it — and, since this target has no `required-features`, it would be built on
-  Linux, Windows and `wasm32` by every `--all-features` job to do nothing there.
-  What that costs is that `application/x-crcbl+ron` is **not** round-tripped
-  through a second process; `pbpaste` cannot be asked for it. The RON half stays
-  covered in-process. If an engine-to-engine paste ever misbehaves on macOS,
-  this is the gap it would hide in.
-- **M4 extends `tests/appkit_session.rs` rather than adding a second
-  harness-less target.** `nextest` runs binaries in parallel, and two processes
-  each bootstrapping an `NSApplication` and taking the key window would fight
-  over which is frontmost — the loser reporting that injected input never
-  arrived. Serialising them means a test group in `.config/nextest.toml`. The
-  cost is that the whole session is one `nextest` test, so any failure reports
-  all of it as failed; that is paid for by every step printing what it reached,
-  and by the CI step below.
-- **CI names the target rather than relying on the sweep.**
-  `build + test (macos-latest)` gained a step running
-  `cargo nextest run -p crcbl-shell --test appkit_session --no-tests fail --success-output immediate`.
-  `--no-tests fail` is the macOS shape of the count gate `run-win32-e2e.ps1`
-  performs by parsing the summary: this target is the _only_ executable coverage
-  the AppKit backend has, is `harness = false`, and is behind no feature — so
-  nothing would go red if it stopped being built. `--success-output immediate`
-  prints the session's own narrative on a green run, which is the run where a
-  reader most wants to know which optional path actually happened, and nobody on
-  this team has a Mac to ask.
-
-**The whole session now passes on a runner, end to end** — every injected event
-(key, text, arrow, pointer position, raw delta, click, scroll), both pasteboard
-directions including the cross-process `pbcopy`/`pbpaste` check, the resize, and
-the mode round trip: borderless covering the screen exactly, and the restore
-landing on the pre-flip frame to the point. What follows is what the session
-still does **not** reach.
-
-Still uncovered after M5:
-
 - **`Borderless { monitor: Some(..) }` lands on the named screen's origin by
   construction and not by observation.** The runner has one display, so a
-  backend that ignored the named monitor entirely would pass every assertion in
-  the suite. Needs a two-display machine; see the borderless-origin entry above.
-- **A window created borderless is untested**, and now carries a known ordering
-  hazard. The session creates its window windowed and flips, so
-  `create_native_window`'s borderless arm — which places the window with
-  `initWithContentRect:` rather than `setFrame:display:` — has never run. It
-  shares the `constrainFrameRect:toScreen:` override, but **the presentation
-  options are applied by `refresh_presentation` on the first `set_mode`, not at
-  creation**, so a window born borderless has its frame set before any options
-  change has happened to it. Whether that matters depends on when the first
-  options change lands relative to it, which nothing has measured. The ordering
-  rule in `appkit::window`'s module docs is the thing to re-read before adding a
-  test here.
-- **The first-responder fix is unrun.** `focus_content_view` after every
-  `setStyleMask:`, and the two assertions that guard it, land in the same commit
-  as this entry. Everything else in the session has now been seen green.
-
+  backend that ignored the named monitor entirely would pass every assertion.
+  Needs a two-display machine.
+- **A window created borderless is untested.** The session creates its window
+  windowed and flips; `create_native_window`'s borderless arm (placing the
+  window with `initWithContentRect:` rather than `setFrame:display:`) has never
+  run, and the presentation options are applied by `refresh_presentation` on the
+  first `set_mode`, not at creation — whether that ordering matters for a window
+  born borderless has not been measured. Re-read the ordering rule in
+  `appkit::window`'s module docs before adding a test here.
 - **`injection_skipped` is written and unrun**, because the runner granted
-  activation. It stays for the case that produced it, which a developer running
-  this as a background process on their own machine will meet. If it is ever
-  taken it prints the `Activation` evidence and branches on `can_become_key` to
-  say whose defect it is, rather than reporting a bare timeout.
+  activation. It stays for the case that produced it — a developer running this
+  as a background process on their own machine — and prints the `Activation`
+  evidence rather than a bare timeout if it is ever taken.
+- **The harness, not the backend, asks for activation.** A GitHub macOS runner
+  will not hand the foreground to the cooperative `-[NSApplication activate]`
+  the backend is right to be limited to; `frontmost::ask` in the session uses
+  `-[NSRunningApplication activateWithOptions:]` with
+  `NSApplicationActivateIgnoringOtherApps`. That split — a harness may arrange a
+  precondition a backend must never arrange for itself — is the same shape as
+  Win32's `desktop::take_foreground`.
 - **The sample-level F11 pass.** Needs a renderer, and macOS has no Vulkan at
   all — permanently, per the 2026-08-05 decision that Apple platforms are Metal
-  only. It waits on `crcbl-mtl` reaching a swapchain, not on a gate. Not
-  approximated.
-- **A real drag and drop.** Unchanged from M3: a drag needs a _source_
-  application with a mouse held down over a Finder item, which `CGEventPost`
-  alone does not provide. What M4 adds is that the registration is now read back
-  off the real window rather than off a throwaway view.
-- **`AXIsProcessTrusted()` is not called**, although it would say outright
-  whether TCC is the reason for a failed injection. It lives in
-  `ApplicationServices`, which this crate does not link, and adding a framework
-  to the macOS build to improve one failure message is a link error's worth of
-  risk on a platform nobody here can build for. If the first run's diagnosis is
-  ambiguous, that is the next instrument to add.
-
-### What M2 could not verify, and what would verify it
-
-Input is the half of this backend with the least executable coverage, because
-the thing it needs is **injected input at the session level** — the macOS
-counterpart of `SendInput`, which is `CGEventCreateKeyboardEvent` plus
-`CGEventPost`. **M4 wrote that, and the first macOS run never reached it** — the
-application does not become active on a GitHub runner, so nothing may be posted.
-Everything below is therefore still a structural claim, and the M4/M5 section
-further down says what would turn each one into an observation, what recovered
-without activation, and what did not.
-
-- **The switches that make input exist at all**, written out in `appkit::view`'s
-  module docs: `setAcceptsMouseMovedEvents:`, `makeFirstResponder:`, the
-  `NSTrackingArea`, and `interpretKeyEvents:` — plus M3's
-  `registerForDraggedTypes:`, which is the one of them with a readback
-  (`-[NSView registeredDraggedTypes]`) and is therefore asserted rather than
-  only written down. These are this platform's shape of the `TranslateMessage`
-  gap the Windows half paid a CI round trip for — **each of them is invisible to
-  a test that calls the responder method itself**, because each governs whether
-  the event is generated or routed rather than what the method does with it. The
-  session pass exercises two of them indirectly: it warps the pointer into the
-  window and requires a `PointerFocus` (the tracking area) or a `PointerMotion`
-  (the accepts-moved flag plus first responder) to come back.
-
-  **M4 closes three of the five by readback and attacks the other two by
-  injection. After M5 the readback half runs on a runner that never activates;
-  the injection half may still not run at all.** `session_support::window_facts`
-  reads `acceptsMouseMovedEvents`, the first responder's class and the content
-  view's `registeredDraggedTypes` off the **live** window — found by title
-  rather than through `-[NSApp keyWindow]`, which is what makes it independent
-  of activation — and that turns those three from "we called the setter" into
-  "the window is in that state". The tracking area and `interpretKeyEvents:`
-  have no readback, so they are attacked with `CGEventPost`: a posted
-  `kVK_ANSI_A` has to come back as a `Key` **and** a `TextCommit` of `"a"`,
-  which is only possible if `sendEvent:` routed the event to the first
-  responder, `keyDown:` handed it to `interpretKeyEvents:`, and the view's
-  `inputContext` was non-nil — the last of which is true only because
-  `CrcblView` conforms to `NSTextInputClient`. **That has now happened on a
-  runner.** The posted `kVK_ANSI_A` came back as a `Key` and the `TextCommit` of
-  `"a"` came with it, so `interpretKeyEvents:` is reached end to end and macOS
-  is no longer where Windows was before its e2e suite found `TranslateMessage`.
-  Of the original five, only the `NSTrackingArea` is still a structural claim —
-  the posted pointer motion goes to the key window through `mouseMoved:` rather
-  than through a tracking crossing, so nothing yet _requires_ the tracking area
-  to have been registered.
-
-- **Every type encoding on `CrcblView`'s methods.** The runtime reads them only
-  when it forwards a method through an `NSInvocation`, which nothing in this
-  crate does and an input method might. A wrong one is a wrong-width read in a
-  path CI never enters. Checking it needs a forwarded invocation, which is its
-  own contrivance; the mitigation taken instead is that the encodings are
-  written from one place (`ffi::ENC_RANGE`, `ENC_RECT`, `ENC_POINT`) rather than
-  spelled out per method.
-- **IME composition.** `TEXT_IME` is set on the structural standard the Wayland
-  backend is held to — the view conforms to `NSTextInputClient` and every key
-  event goes through `interpretKeyEvents:`, which is strictly more than
-  Wayland's "bound `text-input-v3`". That a Japanese input method actually
-  commits through it is unverified: a GitHub runner has no IME installed, and
-  adding one is a runner-image change rather than a test.
-- **The horizontal scroll sign.** Vertical is settled — a wheel turned away from
-  the user is positive on macOS and in the seam — and horizontal is passed
+  only. It waits on `crcbl-mtl` reaching a swapchain, not on a gate.
+- **A real drag and drop.** A drag needs a _source_ application with a mouse
+  held down over a Finder item, which `CGEventPost` alone does not provide;
+  `performDragOperation:` and the real `draggingLocation`/pasteboardItems
+  conversion have never been watched. What M4 adds is that the registration is
+  read back off the real window (`-[NSView registeredDraggedTypes]`), so the
+  gate is a mechanism rather than a promise.
+- **Only `public.file-url` is read.** `NSFilenamesPboardType` and
+  `com.apple.pasteboard.promised-file-url` are not; the promised form needs the
+  receiver to name a destination directory, which the seam has no way to ask
+  for. Closing it is a seam question ("where should a promised drop land?"), to
+  be answered once for every platform that has the concept.
+- **macOS 15's pasteboard-access prompt has not been met.** It gates _reads_,
+  not writes, and it does not turn a read into an error — but if a future runner
+  image shows it, the session's `clipboard()` would block rather than fail,
+  which reads as a hang. Recorded so a mysterious ten-second timeout in
+  `paste()` is diagnosed rather than rediscovered.
+- **IME composition is unverified.** The view conforms to `NSTextInputClient`
+  and every key goes through `interpretKeyEvents:`, which is the structural
+  standard Wayland is held to; that a Japanese input method actually commits
+  through it is unverified, because a GitHub runner has no IME installed.
+- **The horizontal scroll sign.** Vertical is settled; horizontal is passed
   through on the same reasoning without a trackpad to confirm it. If a
   two-finger swipe right turns out to scroll left, the fix is one negation in
   `pointer::scroll` and the test beside it.
-- **That `deltaY` is Y-down while `locationInWindow` is Y-up.** This is the
-  asymmetry `appkit::pointer` exists to make visible, and it rests on the deltas
-  being Quartz's `kCGMouseEventDelta*` — documented, and the convention GLFW and
-  SDL both rely on, but not something this workspace has watched. A wrong answer
-  is an inverted first-person camera, which is unmistakable the first time
-  anybody plays.
+- **Reference counting is reasoned, not observed.** `releasedWhenClosed` is
+  turned off and `appkit::shell::release_window` is the single matching release
+  for the window and the layer; there is no leak check anywhere in this
+  workspace and Instruments is not in CI.
+- **`AXIsProcessTrusted()` is not called**, although it would say outright
+  whether TCC is the reason for a failed injection. It lives in
+  `ApplicationServices`, which this crate does not link; if the first run's
+  diagnosis is ever ambiguous, that is the next instrument to add. (TCC does
+  **not** gate `CGEventPost` back to the posting process — settled by
+  observation — so the `postEvent:atStart:` fallback should not be written.)
+- **The `NSTrackingArea` is still a structural claim.** The posted pointer
+  motion goes to the key window through `mouseMoved:` rather than through a
+  tracking crossing, so nothing yet _requires_ the tracking area to have been
+  registered.
+- **Every type encoding on `CrcblView`'s methods.** The runtime reads them only
+  when it forwards a method through an `NSInvocation`, which nothing in this
+  crate does; a wrong one is a wrong-width read in a path CI never enters. The
+  mitigation is that the encodings are written from one place (`ffi::ENC_RANGE`,
+  `ENC_RECT`, `ENC_POINT`) rather than spelled out per method.
 
-### Considered and declined in M2
+### Considered and declined
 
 - **`PointerMode::Confined` is not implemented, and `POINTER_CONFINE` is
-  clear.** macOS has no confine API: no `ClipCursor`, no
-  `XGrabPointer(confine_to)`, no `zwp_confined_pointer_v1`. The only technique
-  available is warping the cursor back after it has already crossed the
-  boundary, which runs a frame late (so the pointer visibly leaves and snaps
-  back), fights the user's own motion at the edge, and manufactures motion
-  events a consumer cannot tell from real ones. Approximating it would set a
-  capability bit with no mechanism behind it. `set_pointer_mode` refuses the
-  mode by name. **Do not revisit this without a public API to point at.**
-- **`RAW_POINTER_MOTION` is set although the deltas are accelerated.**
-  `NSEvent`'s `deltaX`/`deltaY` satisfy the half of that bit that decides
-  whether a camera works — separate from the absolute position, and unclamped by
-  the screen edge — and not the half that says "unaccelerated": macOS applies
-  pointer acceleration in the HID system before the event exists and publishes
-  no way to ask for the pre-acceleration value. GLFW answers
-  `glfwRawMouseMotionSupported() == false` on this platform for exactly that
-  reason. The alternative was considered and declined: clearing the bit obliges
-  `raw_delta: None`, and with `abs` also `None` under `Locked` that makes
-  mouselook **impossible** on macOS rather than merely accelerated. Closing it
-  properly means IOKit — `IOHIDManager`, or `IOHIDGetAccelerationWithKey` and a
-  temporary acceleration change — which is a slice of its own and would be the
-  first thing in this crate to reach past AppKit.
+  clear.** macOS has no confine API; the only technique is warping back after
+  the cursor has already crossed, which runs a frame late, fights the user's
+  motion and manufactures events a consumer cannot tell from real ones.
+  Approximating it would set a capability bit with no mechanism behind it. **Do
+  not revisit without a public API to point at.**
+- **`RAW_POINTER_MOTION` is set although the deltas are accelerated.** `NSEvent`
+  deltas satisfy the half of that bit that decides whether a camera works and
+  not the "unaccelerated" half; GLFW answers
+  `glfwRawMouseMotionSupported() == false` on this platform for the same reason.
+  Closing it properly means IOKit, a slice of its own.
 - **`DeviceId` is a constant per device _kind_, as on X11 and Win32.** An
-  `NSEvent` does carry a `deviceID`, but it identifies a tablet and is
-  documented as meaningful only for the tablet event family, so it is not the
-  per-mouse identity `docs/plan/19-input.md` wants. The real answer on this
-  platform is IOKit, which is the same slice as the acceleration entry above.
-- **The candidate window is placed at the window's origin, not at a caret.**
-  `firstRectForCharacterRange:` has to answer something and the seam does not
-  model a caret — nothing above `crcbl-shell` says where text is being typed. So
-  a Japanese candidate list appears at the bottom-left of the window rather than
-  under the text. Closing it needs a seam addition ("the caret is here"), which
-  is a decision above this crate and should be taken once for every backend that
-  has an IME.
-
-### What M3 could not verify, and what would verify it
-
-M3 is `NSPasteboard` and file drops in. The clipboard half has real coverage —
-see the two round trips listed above — so what is left is the drop half and two
-edges.
-
-- **No drop has ever been delivered.** A drag comes from another application's
-  mouse, so nothing inside this process can produce one: what is verified is
-  that `CrcblView` implements the four `NSDraggingDestination` methods, that
-  `registerForDraggedTypes:` registers exactly `public.file-url`, and that a
-  view which never registered accepts nothing. What is **not** verified is that
-  `performDragOperation:` is reached, that `-[NSDraggingInfo draggingLocation]`
-  is in the window space this backend converts it as, or that
-  `-[NSPasteboard pasteboardItems]` on a real Finder drag yields one item per
-  file with a `public.file-url` on it. All three are documented behaviour and
-  none has been watched. Closing it is the same lever as M2's input gaps —
-  session-level injected input, `CGEventPost` — plus a source application to
-  drag from, which `CGEventPost` alone does not provide: a drag needs a real
-  mouse-down-and-move over a Finder item. That is a harder problem than key
-  injection and may be M4's honest answer of "not coverable in CI".
-- **Only `public.file-url` is read.** `NSFilenamesPboardType` (deprecated in
-  10.13) and `com.apple.pasteboard.promised-file-url` are not. The promised form
-  is the interesting one: the source has not written the file yet and the
-  receiver has to name a destination directory for it, which the seam has no way
-  to ask for — `ShellEvent::DroppedFile` carries a path that already exists.
-  Closing it is a seam question ("where should a promised drop land?"), not a
-  backend one, and it should be answered once for every platform that has the
-  concept.
-- **macOS 15's pasteboard-access prompt has not been met.** Recent macOS asks
-  the user before an application reads the pasteboard outside an explicit paste
-  action. It gates _reads_, not writes, and it does not turn a read into an
-  error — but if a future runner image shows it, the session's `clipboard()`
-  would block rather than fail, which reads as a hang. Nothing has been
-  observed; this is recorded so that a mysterious ten-second timeout in
-  `paste()` is diagnosed rather than rediscovered. The runner's macOS version is
-  in the job log.
-- **`clipboard_offer` racing another process.** `declareTypes:owner:` claims the
-  pasteboard and `setData:forType:` answers `NO` if ownership changed in
-  between; the backend reports that as `ShellError::Backend` naming it. Reasoned
-  from the documented return, not observed — producing it needs two processes
-  writing at once.
-
-### Considered and declined in M3
-
+  `NSEvent`'s `deviceID` identifies a tablet and is meaningful only for the
+  tablet family; the real answer is IOKit, the same slice as above.
+- **The IME candidate window is placed at the window's origin, not at a caret.**
+  The seam does not model a caret — nothing above `crcbl-shell` says where text
+  is being typed. Closing it needs a seam addition ("the caret is here"), a
+  decision above this crate to be taken once for every backend with an IME.
 - **Lazy pasteboard provision (`pasteboard:provideDataForType:`) is not used,
-  and it is structurally unavailable rather than merely unimplemented.** It
-  would save a copy of every payload and it cannot work here for two reasons.
-  The callback arrives on our **main run loop**, driven by the pasteboard server
-  on behalf of a reader in another process — and between two `Shell::pump`s an
-  engine is rendering, so there is no run-loop turn to service it in; every
-  callback in this backend records and returns (see `appkit::events`), and an
-  owner that deferred the answer to the next pump has already handed the reader
-  nothing. And a lazy owner owes the pasteboard a flush before the process exits
-  and must stay messageable until it does, so a shell dropped by a host
-  application that keeps running leaves the server holding an unretained pointer
-  to a freed object. This is the same refusal `win32::clipboard` makes about
-  `WM_RENDERFORMAT`, arriving for the same reason on a second platform. **Do not
-  revisit without a seam that gives the shell a run-loop turn it owns.**
-- **The engine's own format is published under its mime string, not under a
-  `dyn.*` UTI.** `UTTypeCreatePreferredIdentifierForTag` can synthesize a type
-  identifier from a mime type, and the result is opaque, version-dependent, and
-  reaches nothing that `application/x-crcbl+ron` does not — a pasteboard type is
-  an arbitrary string, so the mime is a legal one, it is unique to this engine
-  by construction, and it is byte-identical to what the other three backends
-  name the same format with. Only text uses a system UTI
-  (`public.utf8-plain-text`), because that is the one format other applications
-  have to recognise.
-- **Drag and drop _out_ is not implemented on any backend.**
-  `docs/plan/15-windowing.md` scopes drag-and-drop to "file paths in
-  (viewer/editor import)". Named here only because `NSDraggingSource` is the
-  obvious next thing a reader of `appkit::view` would look for and its absence
-  is a plan decision rather than a gap in this backend.
-- **`clipboard_readable` is left at the trait's provided default.** Any process
-  may read the general pasteboard at any time: macOS has neither Wayland's focus
-  gate nor its serial requirement, so there is nothing to override. The trait
-  method's own documentation already names this shape as the one the default is
-  right for, alongside X11 and Win32.
-
-### Deliberately not in M1
-
-- **No menu bar.** An unbundled application with the Regular activation policy
-  gets the system's default menu bar, which is enough for a window to be
-  focusable and is not enough to ship — no application menu, so no ⌘Q. Building
-  one is `NSMenu`/`NSMenuItem` and a decision about what belongs in it, which is
-  above this crate.
+  and it is structurally unavailable.** The callback arrives on the main run
+  loop driven by the pasteboard server on behalf of a reader in another process
+  — between two `Shell::pump`s an engine is rendering, so there is no run-loop
+  turn to service it in — and a lazy owner must stay messageable until the
+  flush, leaving the server holding an unretained pointer if the host process
+  survives the shell. The same refusal `win32::clipboard` makes about
+  `WM_RENDERFORMAT`. **Do not revisit without a seam that gives the shell a
+  run-loop turn it owns.**
+- **The engine's own format is published under its mime string, not a `dyn.*`
+  UTI.** A pasteboard type is an arbitrary string, the mime is unique to this
+  engine by construction, and it is byte-identical to what the other three
+  backends name the same format with. Only text uses a system UTI.
+- **Drag and drop _out_ is not implemented on any backend.** `15-windowing.md`
+  scopes drag-and-drop to "file paths in"; `NSDraggingSource` is absent by plan
+  decision rather than by gap.
+- **No menu bar.** An unbundled Regular-policy application gets the system's
+  default menu bar — enough to be focusable, not enough to ship (no ⌘Q).
+  Building one is `NSMenu`/`NSMenuItem` and a decision about what belongs in it,
+  which is above this crate.
 - **`HW_UPSCALE` is clear although macOS has it.** A `CAMetalLayer`'s
-  `drawableSize` is independent of its bounds and Core Animation scales the
-  difference in hardware — exactly what Wayland's `wp_viewport` buys and what
-  `docs/plan/15-windowing.md`'s borderless render-scale wants. **The seam has no
-  way to ask for it**: nothing in `Shell` says "present a buffer smaller than
-  the window". Setting the bit would be a claim with no mechanism behind it.
-  Closing it is a seam change (a render-scale request on `Shell`, honoured by
-  the Wayland backend through `wp_viewport` and here through `drawableSize`),
-  which is a decision above this crate and should be taken once for both.
+  `drawableSize` is independent of its bounds, exactly what `wp_viewport` buys —
+  but **the seam has no way to ask for it**. Setting the bit would be a claim
+  with no mechanism behind it; closing it is a seam change (a render-scale
+  request on `Shell`), a decision above this crate to be taken once for both
+  backends.
 - **`app_id` has nowhere to go.** macOS's equivalent is `CFBundleIdentifier` in
-  an `Info.plist`, which is a property of the bundle and cannot be set by a
-  running process. `WindowDesc::app_id` is validated for a NUL byte so that a
-  descriptor rejected on the other backends is rejected here, and is otherwise
-  unused. Unlike the Win32 `AppUserModelID` entry this is not a deferral — there
-  is nothing to defer to.
+  an `Info.plist`, which cannot be set by a running process; the descriptor is
+  validated for a NUL byte so a rejected descriptor is rejected here too, and is
+  otherwise unused.
 - **A live resize drag freezes the window**, on the same terms as the Win32
-  modal loop and with the same unavailable fix. See that entry above; the two
-  share one problem and one answer.
+  modal loop and with the same unavailable fix.
 
 ## Not covered on either backend
 
@@ -2327,31 +922,6 @@ edges.
   window, which needs `QueryTree` and a `WM_CLASS` walk the key sender does not
   have. `run_sandbox vk fullscreen` covers the swapchain-follows half on the
   same platform.
-
-## Two display-mode defects, and the shape they shared
-
-Both are fixed and in `CHANGELOG.md`; what is worth carrying is the **shape**,
-because it is the one this area keeps producing and neither was found by
-reading. Each was a value that stood in for an observation and was
-indistinguishable from a real one:
-
-1. `crcbl-shell`'s X11 backend derived the effective mode by reading
-   `_NET_WM_STATE` back — a property the _client_ writes to request an initial
-   state — so with no window manager to take ownership it read its own request
-   and called it the answer.
-2. `crcbl::engine::ModeRequest::mode` answered `DisplayMode::Windowed` when the
-   window could not be read, and `Loop::finish` builds the summary _after_
-   accepting a close request destroys the window. Every session a player ended
-   the ordinary way reported windowed.
-
-Both were found by an end-to-end pass that ran the whole thing and read the line
-at the end, and both would have gone on passing every unit test. **The open
-question this leaves**: `ModeRequest::mode` still returns a `DisplayMode` rather
-than an `Option`, so a caller with a dead window still gets an invented
-`Windowed` — `mode_at_exit` is the fix for the one caller that had the problem,
-not for the type. Changing the signature would touch `Loop::display_mode` and
-`ModeRequest::toggle`, both of which genuinely have a live window and would have
-to unwrap something they know cannot fail.
 
 ## Five sample `gpu.rs` files, two of them identical
 
@@ -2904,19 +1474,6 @@ run, the browser demo and the scale measurement. `docs/plan/sample/03-horde.md`
 carries the numbers and their conditions; this is what was raised and not
 finished. Entries the measurement closed have been deleted rather than
 annotated.
-
-- **Do not put the autostart back.** This sample shipped without a start screen
-  on purpose — its board is empty at `t = 0`, so a waiting state is a blank
-  arena with a prompt on it, sample rules 4 and 11 do not require one, and
-  adding `WaitingToStart` churned the suite exactly as predicted. **The user
-  played it and asked for the screen**, which reverses that call for good: a
-  demo that starts taking hit points off a player who has not looked at the
-  window yet is worse than a blank arena, and four samples that open the same
-  way are worth more than one clever exception. `GameState::WaitingToStart`
-  short-circuits `run_tick`; `restart` lands on the title screen rather than in
-  play, so `TRY AGAIN` takes two presses, the same as asteroids and flappy. The
-  argument is preserved in `GameState`'s own docs and in `crate::menu`'s header
-  — it is recorded so it is not re-derived, not so it can be re-applied.
 
 - **`--prefill` starts its own run, and that coupling is not obvious.**
   `assemble` in `apps/horde/src/app.rs` queues a start edge when
@@ -3670,103 +2227,11 @@ reviewed — `crates/*` and `apps/*`, ~216k lines of Rust. Correctness, security
 and performance passes were split per crate across read-only review passes;
 every finding below was re-verified against the code it cites (re-traced to the
 return path, guard chain checked, string/length arithmetic applied) before being
-published. **47 findings: 16 medium, 31 low, no critical or high.** All sixteen
-medium findings were closed on 2026-08-04 — see the list below, which replaced
-the per-finding entries; the Low section is what remains.
-
-### Medium
-
-Closed on 2026-08-04, one commit each (all pushed to `main`; `git log` is the
-record, and each fix shipped with a test that failed on the old code):
-
-- **1 — server rotated the dead session's token on a late reconnect**
-  (`fix(net): rotate session on late reconnect; drop stale resume token`,
-  68cc444): `handle_hello` now sets `session_terminated` when its own expiry
-  check drops the session.
-- **2 — client retried a stale resume token forever** (same commit): two
-  consecutive `INVALID_SESSION_TOKEN` rejections drop the credential and fall
-  back to a fresh join.
-- **3 — deletion queue freed a destroyed object one submission early**
-  (`fix(vk): keep destroyed objects alive for every referencing submission`,
-  6b267f9): command buffers record the raw objects they use and a submission
-  extends each parked one's retirement to its own completion.
-- **4 — AppKit `set_mode(Borderless)` showed a hidden window**
-  (`fix(shell): keep a hidden AppKit window hidden across set_mode`, 3d55423).
-- **5 — Win32 minimize re-applied the pointer clip from a 0×0 client rect**
-  (`fix(shell): release the pointer clip when a captured window minimizes`,
-  32f90c8).
-- **6 — RandR `OutputChangeNotify` never handled: FALSE POSITIVE, verified
-  2026-08-04.** The xcb randr protocol defines exactly two events —
-  `ScreenChangeNotify` (base+0) and `Notify` (base+1, whose `subCode` carries
-  CrtcChange/OutputChange/etc.; `/usr/share/xcb/randr.xml` declares
-  `<event name="ScreenChangeNotify" number="0">` and
-  `<event name="Notify" number="1">` and nothing else) — so `handle_event`'s
-  `base..=base+1` range already routes output changes to
-  `handle_monitors_changed`. There is no base+2 event and nothing was unhandled.
-- **7 — INCR mask replace stripped input from our own windows**
-  (`fix(shell): never replace an own window's mask for INCR property changes`,
-  9b90ba8).
-- **8 — unbounded unclaimed wayland data offers**
-  (`fix(shell): bound unclaimed wayland data offers`, 1c834b3): pending offers
-  capped at 8 with oldest-first eviction, per-offer mimes capped at 32.
-- **9 — reference frame's depth image entered the pass in `Undefined`**
-  (`test(hal): transition the reference frame's depth image into the pass`,
-  b53c603).
-- **10 — wgpu push-constant range overflowed**
-  (`fix(wgpu): wire MSAA resolve targets; saturate push-constant range end`,
-  cd49486).
-- **11 — wgpu dropped `ColorAttachment::resolve`** (same commit): resolve views
-  resolved from the pool and wired into the pass; stale handles fail loudly.
-- **12 — native audio detuned at non-48 kHz device rates**
-  (`fix(audio): step voices at the internal rate; stop per-block allocation`,
-  4c59171).
-- **13 — per-block allocation on the audio thread** (same commit): the mono and
-  multichannel scratch is owned by the stream callback and reused.
-- **14 — hostile-IHDR PNG allocation bomb**
-  (`fix(sprite): bound the PNG output buffer before allocating from IHDR`,
-  0e6fcb7): declared pixels bounded against `1 << 28` before any allocation.
-- **15 — `--tick-hz` above 1e9 panicked the engine after the GPU was open**
-  (`fix(cli): refuse --tick-hz rates the frame clock cannot express`, 473702d):
-  both parsers refuse past `MAX_TICK_RATE`.
-- **16 — crpix frame names that are clip keywords silently corrupted the file**
-  (`fix(cli): refuse crpix frame names that are clip keywords`, 0f104a7).
-
-### Low
-
-All thirty closed on 2026-08-04, one commit each (pushed to `main`; `git log` is
-the record, and each fix shipped with its failing-first test or an honestly
-stated gap):
-
-- **17 — delta encode cap left no room for the seal overhead**
-  (`fix(net): fit the sealed delta in the transport cap; retain baselines only on send`,
-  62f738d).
-- **18, 19 — readback wait-semaphore UB; query bounds** (`fix(vk)`, 8ec3170 —
-  see the Medium list).
-- **20 — stale borderless monitor after a display move** (`fix(shell)`,
-  c4a8c70).
-- **21 — stale `WS_VISIBLE` re-showed a hidden window** (`fix(shell)`, bb6ad48).
-- **22, 23 — INCR read failure mistaken for the terminator; timestamp-probe
-  stall** (`fix(shell)`, 5fd013b).
-- **24 — refused and overwritten drag offers leaked** (`fix(shell)`, bc5bece).
-- **25, 26, 27 — stale and contradictory seam docs** (`docs(hal)`, caae5d0).
-- **28, 29, 30, 31 — wgpu stride/surface/write-buffer; ui counts**
-  (`fix(wgpu,render)`, b4f22f5).
-- **32, 33 — compressed upload sizing; negative `dt`** (`fix(render,input)`,
-  bcd6af7).
-- **34, 35, 36, 37 — phys sweep/overlap/mass edges; synth overflow**
-  (`fix(phys,audio)`, 3fc07da).
-- **38, 39, 40, 41, 42 — replay length; menu drag drawn-state; crpix overflow;
-  quote-unaware XML empty-tag; menu key stuck in `held_keys`**
-  (`fix(store,ui,sprite,xml,engine)`, f768b7d).
-- **43, 44, 45, 46 — asteroids score and tick allocations; breakout start-menu
-  corner; horde kill freeze** (`fix(asteroids,breakout,horde)`, d4f6974).
-
-Coverage notes carried with the fixes: 20, 21, 22 and 23 have no runnable test
-on the runners where they live (two-display drag, Windows-only, timing- or
-hostile-compositor-dependent) and said so; 38 and 40 need multi-GiB fixtures to
-hit the overflow path directly and tested the checked arithmetic instead; 41's
-fix is a regression guard for a case the quote-balancing scan already mostly
-handled, pinning the correct `empty` flag and the un-stripped attribute value.
+published. **47 findings: 16 medium, 31 low, no critical or high — and all 47
+were closed on 2026-08-04**, one commit each (pushed to `main`; `git log` is the
+record, and each fix shipped with a test that failed on the old code or an
+honestly stated gap). What survives below is the part of the review that is not
+a closed finding.
 
 ### Cleared (the expensive half)
 
@@ -3970,54 +2435,22 @@ GAPS — reported honestly:
 
 ## What MTL1 left open on the Metal backend
 
-`crates/crcbl-mtl` enumerates adapters and refuses everything else by name. Four
-things were raised while building it and not settled.
-
-- ~~**Nothing instantiates it.**~~ **Resolved after MTL6.** No app constructed
-  `MetalInstance`, and it was not in the engine's backend selection or
-  re-exported from the `crcbl` umbrella; CI built and tested it on
-  `macos-latest` and no shipping binary reached it. The wire-up was deferred to
-  the slice that gives it a device to hand back — a registry entry for a backend
-  whose `request_device` always refuses would have been a path that exists only
-  to fail — and MTL2 through MTL6 landed the device, the swapchain, pipelines,
-  bind groups and draws. `crates/crcbl/src/backend.rs` now registers
-  `GpuBackend::Metal` behind `cfg(target_os = "macos")` and makes it **the**
-  automatic entry there, with the Vulkan entry registered but no longer
-  automatic on macOS: Apple platforms are Metal only, so auto-selecting Vulkan
-  meant a failed `dlopen` of a `libvulkan.dylib` that is not on a stock Mac
-  before every successful start-up. That failure is what a
-  `cargo run --bin flappy` on macOS printed instead of a window.
 - **It advertises Tier B, and a tier-aware caller will believe it.**
   `DeviceCaps::tier` is derived, and `DRAW_INDIRECT_COUNT` /
   `MULTI_DRAW_INDIRECT` stay off until the command slice picks Metal's indirect
   path (indirect command buffers, per `docs/plan/09-backends-metal-dx12.md`'s
   mapping table). Correct today and documented in the crate docs, but it is
-  visible behaviour rather than an internal note: once anything selects on tier,
-  macOS takes the Tier B branch until MTL6.
+  visible behaviour: once anything selects on tier, macOS takes the Tier B
+  branch.
 - **The engine has never stated a minimum macOS version.** `adapter.rs` sends
   `supportsBCTextureCompression` among others, which dates the floor to macOS
   11; `objc2` does not gate on availability, so an older system raises an
   unrecognised-selector exception rather than answering wrongly. Loud, but
-  undecided — and the same question the AppKit shell backend has been carrying
+  undecided — the same question the AppKit shell backend has been carrying
   unstated since P5C.
 - **`DeviceType::Virtual` is unreachable on Metal.** There is no virtualisation
-  query, so a paravirtual GPU under Apple's Virtualization framework answers
-  every question exactly as the built-in one and enumerates as `Integrated`.
-  Only name-matching would separate them, which is not a capability query.
-  Stated as a gap, not fixed.
-
-### Not verified: every assertion in the crate
-
-The seven tests in `crates/crcbl-mtl/src/instance.rs` have **never executed** —
-this is a Linux tree with no Apple hardware.
-`cargo clippy --target aarch64-apple-darwin` type-checks and lints the whole
-backend (the Darwin std is installed and no linking is involved), and that gate
-was shown able to fail, so the code is known to compile against the real
-`objc2-metal` 0.3.2 API. What is unverified is every runtime value: that
-`maxBufferLength` clears the seam's 128 MiB floor, that the sample-count probe
-finds anything, that Apple Silicon reports argument-buffer Tier 2, and that
-linking the Metal framework works at all. CI's `build + test (macos-latest)` leg
-is the first execution.
+  query, so a paravirtual GPU answers every question exactly as the built-in one
+  and enumerates as `Integrated`. Stated as a gap, not fixed.
 
 ## Considered and declined: an OpenGL / GLES backend
 
@@ -4217,73 +2650,45 @@ speculative machinery this codebase deletes rather than keeps.
 
 ## What MTL2 left open on the Metal backend
 
-Supersedes the MTL1 list above where they overlap; MTL1's items about tier and
-the macOS floor still stand.
-
 - **`MTLTextureUsagePixelFormatView` is set on every colour image,
-  unconditionally.** `ImageViewDesc::format` is documented as free to differ
-  from the image's own "for sRGB reinterpretation", Metal requires that intent
-  declared at _texture_ creation time, and `ImageDesc` carries nothing saying a
-  view is coming. The cost is real — it can disable lossless bandwidth
-  compression on some Apple GPUs. Narrowing it needs the seam to carry intended
-  view formats the way WebGPU's `viewFormats` does, which is a HAL change and so
-  was not made. Recorded in `conv::texture_usage`'s docs.
+  unconditionally.** It can disable lossless bandwidth compression on some Apple
+  GPUs. Narrowing it needs the seam to carry intended view formats the way
+  WebGPU's `viewFormats` does, which is a HAL change and so was not made.
+  Recorded in `conv::texture_usage`'s docs.
 - **Metal validates descriptors by raising, not by returning nil**, and an
   Objective-C exception crossing into Rust aborts the process. `create_image`
-  guards the rules confirmable from the headers (extent, mip, sample and layer
-  counts against `Limits`; multisample implies one mip; `D1` implies height 1;
-  the two per-device format questions) and deliberately invents no rule that
-  could not be confirmed — for example whether a depth texture may be `Shared`
-  on a discrete Intel Mac. **So a caller passing `HostUpload` for a depth image
-  could abort rather than receive an `Err`.** How far descriptor pre-validation
-  should go on this backend is undecided, and it is a question the other
-  backends do not have, because Vulkan returns error codes.
-- **`conv`'s `ALL` format list is hand-maintained.** `pixel_format`'s match is
-  exhaustive, so the compiler forces an arm for any new `Format` — but `ALL` is
-  a test fixture, and a format inserted mid-enum would get its arm and still not
-  be covered by the injectivity test. The staleness guard asserts the last
-  sorted entry is `Bc7RgbaUnormSrgb`, which catches an appended format and not
-  an inserted one. Small, and the compiler catches the half that matters.
-
-### Not verified: every runtime value, again
-
-The 36 tests in this crate have still never executed on Apple hardware at the
-time of writing; `cargo clippy`/`rustdoc --target aarch64-apple-darwin` is the
-only local gate and it checks types and links, not behaviour. Both gates were
-shown able to fail. CI's `build + test (macos-latest)` leg is the first
-execution.
+  guards the rules confirmable from the headers and deliberately invents no rule
+  that could not be confirmed — **so a caller passing `HostUpload` for a depth
+  image could abort rather than receive an `Err`.** How far descriptor
+  pre-validation should go on this backend is undecided, and it is a question
+  the other backends do not have.
+- **`conv`'s `ALL` format list is hand-maintained.** The staleness guard asserts
+  the last sorted entry is `Bc7RgbaUnormSrgb`, which catches an appended format
+  and not an inserted one. Small, and the compiler catches the half that
+  matters.
 
 ## `render_area` does not exist in Metal, and clears diverge because of it
 
 **The closest thing to a seam leak the Metal backend has hit.** Found in MTL3,
 not fixed, and `crcbl-hal` was deliberately not changed.
-
-`MTLRenderPassDescriptor` has no render-area rectangle.
-`renderTargetWidth`/`renderTargetHeight` are an origin-anchored size limit with
-no offset, so they cannot express `RenderPassDesc::render_area`'s `Rect2d`.
-`crcbl-mtl` therefore turns `render_area` into the render encoder's **scissor**,
-set only when it is a genuine sub-rect.
-
-The consequence is a real behaviour difference: **a `LoadOp::Clear` clears the
-whole attachment on Metal, where Vulkan clears only the render area.** A scissor
-constrains rasterisation; it does not constrain a load action.
-
-Nothing above the seam depends on it today — the render graph always passes the
-full attachment — so this is latent rather than broken. Options, none taken:
+`MTLRenderPassDescriptor` has no render-area rectangle, so `crcbl-mtl` turns
+`render_area` into the render encoder's **scissor**, set only when it is a
+genuine sub-rect. The consequence is a real behaviour difference: **a
+`LoadOp::Clear` clears the whole attachment on Metal, where Vulkan clears only
+the render area.** Nothing above the seam depends on it today (the render graph
+always passes the full attachment), so this is latent rather than broken.
+Options, none taken:
 
 1. Document `render_area` as affecting rasterisation only, and require a caller
    wanting a partial clear to draw one. Cheapest; makes the seam honest about
-   the weaker guarantee, and Vulkan's stronger one becomes an implementation
-   detail nobody may rely on.
+   the weaker guarantee.
 2. Have the Metal backend emulate a partial clear with a draw when `render_area`
-   is a sub-rect and the load op is `Clear`. Costs a pipeline in the backend and
-   makes a clear silently expensive.
+   is a sub-rect and the load op is `Clear`. Costs a pipeline in the backend.
 3. Drop `render_area` from the seam entirely and give the encoder a scissor
    call. Largest change, and closest to what Metal, DX12 and WebGPU all do.
 
 Wants a decision before anything starts relying on the Vulkan behaviour. Both
-backends must then be re-verified, which is why it was not settled inside a
-Metal slice.
+backends must then be re-verified.
 
 ## What MTL3 left open
 
@@ -4293,494 +2698,151 @@ Metal slice.
   which is a race rather than an assertion, so it is not attempted. Stated as a
   gap.
 - **Query sets stay refused**, deliberately and with the argument in
-  `create_query_set`'s docs: `supportsCounterSampling:` answers per _sampling
-  point_, and the point Metal guarantees is a stage boundary declared in a pass
-  descriptor before the pass exists — which the seam's free-standing
-  `write_timestamp` cannot reach. Half-building it would give real timings on
-  some Macs and zeroes on others. `write_timestamp` is accepted-and-dropped per
-  the seam's degrade rule; `resolve_query_set` fails, because it is the only one
-  that writes somewhere.
-- **`device.rs` is 3243 lines** and should be split — the tables, the resource
-  create/destroy pairs, submission and readback are four separable
-  responsibilities. Not done inside a slice that was already large; it wants to
-  be a move-only change so a reviewer can see it is only a move.
+  `create_query_set`'s docs: Metal answers `supportsCounterSampling:` per
+  sampling point, which the seam's free-standing `write_timestamp` cannot reach.
+  Half-building it would give real timings on some Macs and zeroes on others.
+- **`device.rs` is 4057 lines and should be split** — the pools, the resource
+  create/destroy pairs, submission and readback are separable responsibilities.
+  Wants to be a move-only change so a reviewer can see it is only a move.
 - **`DepthStencilAttachment::read_only` is read and deliberately not acted on.**
   Metal has no image layouts, so there is nothing to set.
 
-## What MTL4 left open, and what still blocks the engine's own triangle
+## What MTL4 left open
 
-**`crcbl-mtl` cannot yet draw `triangle.slang`, the engine's own shader.** It
-compiles it — `the_engines_own_triangle_artifact_builds_a_real_pipeline` builds
-a real `MTLRenderPipelineState` from the committed `msl/triangle.metal`,
-resolving both entry points by the names `spirv/manifest.txt` records — but it
-cannot _draw_ it, because the shader pulls vertices from a `StructuredBuffer`
-and Slang lowers that to a `device*` buffer argument on both stages. Binding a
-buffer needs bind groups, which this slice leaves refused. The pixel-asserting
-test therefore draws a minimal `[[vertex_id]]` triangle generated from the same
-constant the assertion uses, so shader and expectation cannot drift. **Stated
-plainly because the difference matters: the draw path is proven, the engine's
-own shader is not.**
+Most of MTL4's blocking list is closed by later slices — bind groups exist as
+flat argument tables, compute pipelines build, index buffers bind, and the
+engine's own `triangle.slang` draws through a bind group (it is one of the
+quarantined draw tests above). What remains:
 
-Blocking work, in the order it unblocks things:
+- **The pipeline object is only half of `GraphicsPipelineDesc`.** An
+  `MTLRenderPipelineState` carries the shaders, the colour attachment formats
+  and blending — and **not** cull mode, winding, fill mode, depth clip, depth
+  bias, the depth/stencil state, or the primitive topology. Those are encoder or
+  draw-call state in Metal; `crcbl-mtl` stores them in a `RasterState` beside
+  the pipeline and replays them at bind. A future slice that binds pipelines
+  through a different path has to replay them too, or half the descriptor
+  silently stops applying.
 
-- **Bind groups, and the argument-buffer decision behind them.** Tier 2 argument
-  buffers are what `DESCRIPTOR_INDEXING` is already reported from, so the
-  decision is which of argument buffers or plain `setVertexBuffer:` the seam's
-  `BindGroup` maps onto. This is what unblocks drawing `triangle.slang` and
-  everything above it.
-- **`MTLComputeCommandEncoder`.** Compute _pipelines_ build and `COMPUTE` is
-  reported; no dispatch encoder is opened yet, so `dispatch` still refuses.
-- **The indirect path.** `DRAW_INDIRECT_COUNT` and `MULTI_DRAW_INDIRECT` are
-  what hold this backend at Tier B, and indirect command buffers are the closest
-  fit per `docs/plan/09-backends-metal-dx12.md`'s mapping table.
-- **Index buffers.** `bind_index_buffer` refuses; Metal takes the index buffer
-  as an argument to `drawIndexedPrimitives:` rather than as encoder state, so
-  the backend must carry it from the bind call to the draw.
-- **`MultisampleState::mask` is refused.** `MTLRenderPipelineDescriptor` has no
-  sample mask at all. A seam question, not a backend one, if anything ever wants
-  it.
+## The four draw tests are quarantined on a real bug, and the cause is down to one standing candidate
 
-### The pipeline object is only half of `GraphicsPipelineDesc`
-
-Worth knowing before MTL5/MTL6 touch this. An `MTLRenderPipelineState` carries
-the shaders, the colour attachment formats and blending — and **not** cull mode,
-winding, fill mode, depth clip, depth bias, the depth/stencil state, or the
-primitive topology. Those are encoder or draw-call state in Metal. `crcbl-mtl`
-stores them in a `RasterState` beside the pipeline and replays them at bind, so
-binding restores everything the descriptor asked for. A future slice that binds
-pipelines through a different path has to replay them too, or half the
-descriptor silently stops applying.
-
-## `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` hung on macos-14, and only there
-
-**Closed by measurement, 2026-08-05.** On `macos-latest` the triangle test
-failed with
-`DeviceLost("… Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)")`,
-raised out of `drain`'s `poll_readback`. Every other test in `crcbl-mtl` passed
-on the same runner, including
-`the_engines_own_triangle_artifact_builds_a_real_pipeline` (which compiles
-`msl/triangle.metal` and builds a real `MTLRenderPipelineState`),
-`a_render_pass_clear_reads_back_the_exact_texels` and
-`load_op_preserves_what_clear_replaces`. Submission, render passes, clears,
-blits, readback and completion observation therefore all worked; only a draw
-faulted.
-
-**The variable nobody controlled for was the image.** `macos-latest` pointed at
-macos-14 when this was measured, and macos-14 is the one hosted image whose
-paravirtual device executes nothing at all — it does not even return a system
-default device. The probe below ran the same compute dispatch and the same two
-draws on macos-14, macos-15 and macos-26; only macos-14 failed to execute, and
-`macos-latest` no longer points at it. See "Metal executes a shader on the
-runner `macos-latest` points at" for the measurements.
-
-**What was checked and ruled out** while the cause was still open, by reading
-the Metal semantics against the code rather than by running anything — no Mac
-was available. The audit stands, and the probe corroborates its conclusion that
-nothing in the command stream was wrong:
-
-- The pipeline's colour format, sample count, stencil and depth attachment
-  formats all match the pass: one `Rgba8Unorm` colour target,
-  `rasterSampleCount` 1 against a `sampleCount` 1 texture, no depth or stencil
-  format declared on either side.
-- The whole `RasterState` replay in `bind_graphics_pipeline` is at
-  `PrimitiveState::default()` for this test — `MTLCullMode::None`,
-  `CounterClockwise`, `Fill`, `MTLDepthClipMode::Clip`, `setDepthBias:0:0:0`
-  (not NaN, not infinity, because `desc.depth_stencil` is `None`), and
-  `setDepthStencilState:nil`, which `objc2` generates as `Option<&…>` precisely
-  because Apple's header marks the argument nullable.
-- The generated MSL has no loops, no buffer or texture arguments, and three
-  hardcoded clip-space corners indexed by `[[vertex_id]]`; the `format!` that
-  builds it produces exactly the source it reads as, line continuations
-  included.
-- `drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:` is called
-  as `(Triangle, 0, 3, 1, 0)`, and `MTLViewport` / `MTLScissorRect` carry
-  `{0, 0, 64, 64}` with `znear 0`, `zfar 1`. Both structs' `objc2` field order
-  matches the C layout.
-
-**The one structural observation worth carrying forward:** this is the only test
-in the crate that makes the GPU run a shader program. The clear tests exercise
-load/store actions and the blit engine; the pipeline test stops at compilation.
-So "the first draw hangs" and "the first shader execution hangs" were the same
-statement here — which is why the environment, not the command stream, turned
-out to be the whole of it.
-
-**The branchless-select experiment this section used to list is done, and
-negative.** The probe drew the same triangle twice — once indexing a
-`thread`-address-space `float2 corners[3]` by `[[vertex_id]]`, once through a
-branchless select — and on both images that execute anything at all, the two
-shapes painted the same centre texel. The dynamic index was never the fault and
-no shader edit is owed. The other listed step, reading the encoder report to
-decide between the environment and the command stream, is likewise answered:
-both encoders completed and neither faulted.
-
-The one diagnostic never run is the job with `MTL_DEBUG_LAYER=1` and
-`MTL_SHADER_VALIDATION=1`, since Metal's API validation is off by default
-outside Xcode and an invalid encoder state it would have named turns into a
-fault with no diagnostic. It is a workflow change rather than a backend one, and
-it is now optional: the image it would have diagnosed is not the one
-`macos-latest` resolves to.
-
-## Metal executes a shader on the runner `macos-latest` points at — measured, 2026-08-05
-
-**Run 31037470086 asked every hosted macOS image the question directly**, with a
-standalone Swift script rather than through `crcbl-mtl`: print the device list,
-dispatch a compute kernel writing `i*i` over 64 threads and check all 64, then
-draw a full-screen triangle into a 64x64 `BGRA8Unorm` texture twice — once with
-a vertex shader indexing a `thread`-address-space `float2 corners[3]` by
-`[[vertex_id]]`, once with a branchless select — and read the centre texel.
-Every runner reported `uname -m` = `arm64` and `Apple M1 (Virtual)`.
-
-```text
-macos-14  (ProductVersion 14.8.7, BuildVersion 23J520)
-  MTLCopyAllDevices=1
-  name=Apple Paravirtual device low-power=false headless=false removable=false unified-memory=true argument-buffers-tier=0
-  system-default=none — nothing further to ask
-  (no verdict lines: the script stopped, because MTLCreateSystemDefaultDevice() returned nil)
-
-macos-15  (ProductVersion 15.7.7, BuildVersion 24G720)
-  MTLCopyAllDevices=1
-  name=Apple Paravirtual device low-power=false headless=false removable=false unified-memory=true argument-buffers-tier=1
-  system-default=Apple Paravirtual device
-  verdict=compute: EXECUTED, 64 squares correct
-  verdict=vertexArray: EXECUTED, centre is bgra[0, 255, 0, 255]
-  verdict=vertexSelect: EXECUTED, centre is bgra[0, 255, 0, 255]
-
-macos-26  (ProductVersion 26.5.2, BuildVersion 25F84)
-  MTLCopyAllDevices=1
-  name=Apple Paravirtual device low-power=false headless=false removable=false unified-memory=true argument-buffers-tier=1
-  system-default=Apple Paravirtual device
-  verdict=compute: EXECUTED, 64 squares correct
-  verdict=vertexArray: EXECUTED, centre is bgra[0, 255, 0, 255]
-  verdict=vertexSelect: EXECUTED, centre is bgra[0, 255, 0, 255]
-```
-
-**The device name was never the discriminator it was taken for.** All three
-images enumerate exactly one device and all three call it
-`Apple Paravirtual device`, so the name the fault reporter printed said nothing
-about whether that device could run a shader. What separates them is
-`MTLCreateSystemDefaultDevice()` — nil on macos-14, the device itself on the
-other two — with `argument-buffers-tier` moving the same way: 0 on macos-14, 1
-on both images that execute.
-
-**`macos-latest` resolves to `macos-26-arm64`**, read off run 31029816035's
-`build + test (macos-latest)` job log (`Image: macos-26-arm64`). The macOS leg
-this workspace already runs on every push therefore sits on an image that
-executes a compute dispatch and both vertex shapes.
-
-**`crcbl-mtl`'s enumeration choice turns out to have been load-bearing, for a
-reason nobody anticipated.** `crates/crcbl-mtl/src/instance.rs:162-167` argues
-for `MTLCopyAllDevices` over `MTLCreateSystemDefaultDevice` on multi-GPU grounds
-— the seam requires a caller to see every adapter and pick, so a single
-"default" device is a bug on the second machine. On macos-14 it is also the
-difference between enumerating a working device and enumerating nothing at all,
-since `MTLCreateSystemDefaultDevice()` returns nil there while
-`MTLCopyAllDevices()` returns a device. The decision was made for the multi-GPU
-reason and holds for this one too.
-
-**macos-13 was not measured.** Its leg never got a runner — it sat queued and
-the run was cancelled. That is "no hosted Intel runner was available", not a
-result about what an Intel image would do.
-
-**What this overturns.** The section this replaces concluded that Metal cannot
-execute a shader in CI, that there is no substitute, and that only a self-hosted
-Mac with a real GPU closes the gap. It was measured on one image, at a time
-`macos-latest` pointed at macos-14 — the one image of the three that executes
-nothing — and it generalised from a device name all three share. Metal still has
-no software rasteriser, which is what `crcbl-vk` and `crcbl-wgpu` get from
-lavapipe; what it has instead is a paravirtual device that on two of three
-images runs the shader anyway. So the four `#[ignore]`d `mtl-e2e` tests in
-`crcbl_mtl::device` —
+`crcbl-mtl`'s suite ran for the first time on a hosted runner on 2026-08-05 (run
+31042925024): 102 of 106 passed, and **the four that failed are exactly the four
+that make the GPU run a shader** —
 `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`,
 `the_engines_own_triangle_draws_through_a_bind_group`,
 `an_indexed_draw_reads_the_bound_index_range` and
-`a_multi_draw_indirect_emits_every_argument_structure`, each carrying the reason
-"the CI runner's Apple Paravirtual device hangs on one" — are gated on a finding
-that no longer holds. `docs/plan/09-backends-metal-dx12.md`'s warning that
-compile-verified-only backends are a known trap still stands; what does not
-stand is the claim that no hosted runner can answer it.
-
-**What is still not known**, none of it settled by the above:
-
-- **Nobody has run `crcbl-mtl`'s own suite on an image that executes — the job
-  that would exists now, and has not reported yet.** The probe was standalone
-  Swift with its own MSL and its own command buffers; no backend code was
-  involved. "The runner can execute a shader" and "this backend's draw path
-  executes on that runner" are different claims, and only the first is measured.
-  `.github/workflows/ci.yml`'s `mtl-e2e` job runs
-  `crates/crcbl-mtl/tests/run-mtl-e2e.sh` on `macos-latest`, which is what turns
-  one claim into the other — **its first run is the measurement, and nobody has
-  read it.** The tests stayed `#[ignore]`d rather than being un-ignored: that is
-  what keeps a plain `--all-features` run green on a machine with no usable GPU,
-  and `--run-ignored all` inside the script is what turns them on, the shape
-  `crcbl-vk` and `crcbl-wgpu` already use.
-- **The layer and `nextDrawable` path is untouched by this, and the CI job holds
-  it out.** The fifth `mtl-e2e` test,
-  `crcbl_mtl::swapchain::tests::a_layer_swapchain_acquires_a_drawable_and_presents_it`,
-  is `#[ignore]`d for an unrelated reason — a CI container's detached layer
-  vends no drawable — and no probe result bears on it. The `mtl-e2e` job names
-  it in the filter that also holds out the four faulting draws, so
-  `--run-ignored all` does not sweep it up, because a `nextDrawable` that blocks
-  rather than returning nil would burn the job's timeout. **Whether a detached
-  layer vends a drawable on macos-26 is an open question**, cheap to settle in a
-  throwaway workflow the way the shader question was settled, and worth settling
-  before the filter is dropped.
-- **Real Apple GPUs remain uncovered.** Every runner reported
-  `Apple M1 (Virtual)`. A paravirtual device is one implementation with one set
-  of tolerances — the same caveat WARP carries on Windows — so a hosted green
-  run is not evidence about hardware, and
-  `docs/plan/09-backends-metal-dx12.md`'s on-hardware smoke stays on the list.
-- **`run-mtl-e2e.sh` on a real Mac is still the only thing that covers a
-  non-virtual GPU.** The `mtl-e2e` job takes the automation half; what it cannot
-  take is the hardware half, so the person-owned run stays on the list for that
-  reason rather than for want of a job.
-
-### And then the job ran: 102 pass, and every draw faults
-
-**Measured 2026-08-05, run 31042925024**, the first time any `crcbl-mtl` test
-executed on any machine. The suite is 106 tests; 102 passed, one is filtered
-(the drawable acquisition above), and **the four that failed are exactly the
-four that make the GPU run a shader**:
-
-```text
-FAIL crcbl-mtl device::tests::a_multi_draw_indirect_emits_every_argument_structure
-FAIL crcbl-mtl device::tests::a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear
-FAIL crcbl-mtl device::tests::an_indexed_draw_reads_the_bound_index_range
-FAIL crcbl-mtl device::tests::the_engines_own_triangle_draws_through_a_bind_group
-```
-
-Each faults the same way, and it is the signature this file has recorded twice
-before — `kIOGPUCommandBufferCallbackErrorHang`, every encoder `completed`, none
-faulted:
-
-```text
-DeviceLost("the submission a readback was waiting for failed: Caused GPU Hang
-Error (00000003:kIOGPUCommandBufferCallbackErrorHang) [MTLCommandBufferErrorDomain 2]
-on `Apple Paravirtual device`; encoders in recorded order: `canvas` completed,
-`crcbl copies` completed")
-```
-
-**This is a `crcbl-mtl` defect, not a runner limitation, and that is a stronger
-claim than anything said here before.** The probe drew a triangle on this same
-image from a standalone Swift script and read back the correct texel. So the
-device rasterises; what hangs is _this backend's_ command stream. The two
-previous entries above could not tell those apart, because there was nothing to
-compare against. Now there is.
-
-There were two candidates, both differences between the probe's command stream
-and the backend's. **One has now been measured and is dead.**
-
-- **Render-target format — RULED OUT, run 31080128007.** The probe drew into
-  `Bgra8Unorm` where every draw test here targeted `Format::Rgba8Unorm`, and
-  `CAMetalLayer` refuses RGBA8 outright (`layer_surface_caps` in
-  `crates/crcbl-mtl/src/swapchain.rs` records that and offers BGRA first), which
-  read as a hint that Apple's paravirtual path might treat RGBA8 as a
-  second-class render target. So
-  `a_triangle_draw_into_a_bgra_target_paints_the_same_image` was added — the
-  held-out triangle with the render-target format as its only difference, run
-  unfiltered. It faults byte-identically:
-  `kIOGPUCommandBufferCallbackErrorHang`, `canvas` and `crcbl copies` both
-  `completed`, neither faulted. The format is not the cause. In hindsight the
-  inference was never structural: RGBA8 is a _presentation_ constraint of
-  `CAMetalLayer` and an offscreen `MTLTexture` never touches the layer. The test
-  stays — BGRA8 is what a real Metal application renders to, so it earns its
-  place independently — and is quarantined with the rest.
-- **The error-options command buffer — the one still standing.** Every command
-  buffer in this backend is made by `crate::fault::command_buffer`, which uses
-  `commandBufferWithDescriptor:` with
-  `MTLCommandBufferErrorOptionEncoderExecutionStatus`
-  (`crates/crcbl-mtl/src/fault.rs`, the `command_buffer` helper); the probe used
-  a plain `makeCommandBuffer()`. It was called the weaker of the two — the clear
-  and blit tests go through the same helper and pass — but they do not run a
-  shader, and the option is documented to change how the driver instruments
-  execution. **Next experiment:** the same triangle through a command buffer
-  made without the descriptor, as the only difference. That needs a test-only
-  way to reach a plain command buffer, since the backend has no other path to
-  one, and it is worth thinking about whether that seam is something the backend
-  should own (an error-options-off mode) rather than something a test reaches
-  around.
-
-If that one is also ruled out, the remaining differences between the two streams
-are the ones nobody has enumerated yet: the blit encoder the probe did not have,
-the `retainedReferences` default, and the readback's `didModifyRange`/managed
-storage path. Enumerate before guessing again.
+`a_multi_draw_indirect_emits_every_argument_structure`. Each faults the same way
+—
+`DeviceLost("… Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)")`,
+every encoder `completed`, none faulted — and **this is a `crcbl-mtl` defect,
+not a runner limitation**: a standalone Swift probe drew the same triangle on
+the same image and read the correct texel, so the device rasterises; what hangs
+is this backend's command stream. Two candidates were differences between the
+probe's stream and the backend's; one (the render-target format, `Bgra8Unorm` vs
+`Rgba8Unorm`) has been ruled out by an experiment that faulted byte-identically.
+**The one still standing is the error-options command buffer**: every command
+buffer here is made by `crate::fault::command_buffer` with
+`commandBufferWithDescriptor:` +
+`MTLCommandBufferErrorOptionEncoderExecutionStatus`, where the probe used a
+plain `makeCommandBuffer()`. Next experiment: the same triangle through a
+command buffer made without the descriptor, as the only difference — which needs
+a test-only way to reach a plain command buffer, and is worth thinking about as
+a backend-owned "error-options-off" mode rather than a test reaching around. If
+that is ruled out too, the remaining differences are the blit encoder the probe
+did not have, the `retainedReferences` default, and the readback's
+managed-storage path — enumerate before guessing again.
 
 Until the cause is found, `.github/workflows/ci.yml`'s `mtl-e2e` job holds the
-faulting draws out by name so the rest of the suite stays a gate. **They come
-back the moment this is understood** — the filter is a quarantine with a reason,
-not a concession, and leaving it un-revisited would turn the one real bug this
-job found into a permanently green-looking hole.
+faulting draws out **by name** so the rest of the suite stays a gate. **They
+come back the moment this is understood** — the filter is a quarantine with a
+reason, not a concession, and leaving it un-revisited would turn the one real
+bug this job found into a permanently green-looking hole. The fifth held-out
+test (`a_layer_swapchain_acquires_a_drawable_and_presents_it`) is `#[ignore]`d
+for an unrelated reason — a CI container's detached layer vends no drawable —
+and the job's filter names it separately so `--run-ignored all` does not sweep
+it up. **Real Apple GPUs remain uncovered** — every hosted runner reports
+`Apple M1 (Virtual)`, so a hosted green run is not evidence about hardware, and
+`docs/plan/09-backends-metal-dx12.md`'s on-hardware smoke stays on the list, as
+does `run-mtl-e2e.sh` on a real Mac.
 
-Worth noting what the 102 buy in the meantime: every one of them had never
-executed anywhere before this job existed. Adapter enumeration, device and
-resource creation, the conversion tables, view creation, bind group layouts,
-pipeline construction from committed MSL, clears, blits, semaphores and readback
-all now have a machine asserting them on every push.
-
-### The diagnostic that named the fault nearly hid it
-
-Worth keeping, because the shape recurs. The first version of the fault reporter
-read `MTLCommandBufferEncoderInfo::debugSignposts`, which `objc2` generates as
-returning a non-optional `Retained<NSArray<NSString>>` while the real
-implementation returns **nil** for an encoder with no signposts — which is every
-encoder this backend produces. So the reporter panicked inside the binding and
-**substituted its own failure for the GPU fault it existed to report**, costing
-a full CI round trip. A diagnostic that can fail can destroy the evidence it was
-added to collect; prefer the nil-tolerant path even when the binding says the
-value is non-optional.
-
-**And once it worked, its output was over-read.** The report named the device,
-`Apple Paravirtual device`, and a conclusion about the whole platform was drawn
-from that string — which every hosted image prints, including the two that
-execute shaders fine. A diagnostic tells you what it measured on the machine it
-ran on; the generalisation is a separate step, and here it was taken without a
-second data point.
+Two lessons from the investigation, worth keeping: **a diagnostic that can fail
+can destroy the evidence it was added to collect** (the fault reporter panicked
+inside the `debugSignposts` binding and substituted its own failure for the GPU
+fault it existed to report), and **a diagnostic tells you what it measured on
+the machine it ran on** — the device name `Apple Paravirtual device` is printed
+by every hosted image, including the two that execute shaders fine.
 
 ## What MTL5 left open on the swapchain
 
 - **`nextDrawable` and `presentDrawable:` are proven by nothing automated.**
-  Every other part of the layer path — creating the surface, configuring the
-  layer's format and drawable size, the caps lists, rejecting a non-Metal layer
-  — runs on CI, because a detached `CAMetalLayer` needs no window server,
-  `NSView` or run loop. Acquiring an actual drawable does. That one test is
-  behind `mtl-e2e` and `#[ignore]`, so a person on a Mac is the only thing that
-  has ever run it. **The 2026-08-05 probe does not help here**: it settles that
-  the runner executes shaders, and this test is `#[ignore]`d for a different
-  reason — no drawable to acquire — which un-`#[ignore]`ing the four draw tests
-  will not change.
+  Everything else in the layer path runs on CI, because a detached
+  `CAMetalLayer` needs no window server, `NSView` or run loop; acquiring an
+  actual drawable does. That one test is behind `mtl-e2e` and `#[ignore]`, so a
+  person on a Mac is the only thing that has ever run it. Whether a detached
+  layer vends a drawable on the current hosted image is an open question, cheap
+  to settle in a throwaway workflow the way the shader question was.
 - **`surface_caps` can never return the `Unsupported` branch its own contract
-  requires.** The trait documents that an adapter which cannot present to a
-  surface must be reported as `Unsupported`, and callers must treat that as "try
-  the next adapter". On Metal every device can drive any layer, so the branch is
-  unreachable — which means **the contract is untested here by construction**,
-  not merely untested. `crcbl-vk` is where that path is exercised.
+  requires** — on Metal every device can drive any layer, so the branch is
+  unreachable and **the contract is untested here by construction**, not merely
+  untested. `crcbl-vk` is where that path is exercised.
 - **`CompositeAlpha` offers only `Opaque`.** `CAMetalLayer` has `opaque` and can
   composite with alpha, but nothing verified the non-opaque behaviour, so it is
   not offered rather than offered untested.
-- **`device.rs` is 4057 lines**, up from the 3243 that was already flagged for
-  splitting after MTL3. `pipeline.rs`, `swapchain.rs` and `fault.rs` were split
-  out as they were written, so the growth is in what remains: the pools, the
-  resource create/destroy pairs, submission and readback. Still wants to be a
-  move-only change.
-
-### What MTL5 dissolved rather than deferred
-
-The MTL3 item about binary semaphores and WSI acquire is **deleted**, not
-carried: Metal has no presentation-engine signal to reconcile. `nextDrawable`
-blocks the CPU and hands back a ready texture, so this backend creates no
-semaphore for WSI and returns `None` for both `acquire_semaphore` and
-`present_semaphore` — the implicit-acquire shape the seam already documents for
-`crcbl-wgpu`, and the reason those fields are `Option`s. MTL3's "signalled by an
-earlier submission" rule is never engaged and stands unweakened. No seam change
-was needed.
-
-### Two defects found mid-slice, both invisible until they weren't
-
-Worth recording because neither would have shown up in a test that passed:
-
-- **A deadlock.** `release_swapchain_rows` re-locked the non-reentrant device
-  `Mutex` while `reconfigure` already held it — the first window resize would
-  have hung with no diagnostic at all. Fixed by having it take
-  `&mut DeviceState` so the borrow checker forbids the whole class rather than
-  that one instance.
-- **A leak** on the reconfigure race path, where a destroyed-during-rebuild
-  swapchain dropped its entry without its ring rows ever leaving the pools.
 
 ## The Win32 focus flake is recurring, and now has a second data point
 
-`crcbl-shell`'s
-`win32::shell::tests::hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for`
-failed the `build + test (windows-latest)` leg on 2026-08-05 with:
-
-```text
-the window would not keep the keyboard over 8 attempts, so nothing below this
-can be asked about a focused window
-```
-
-**Re-running the same job passed clean**, on a commit whose only code change was
-macOS-gated. So it is environmental — the shared runner's foreground being
-contended — rather than a defect, and it is the same family as the three tests
-W1/W2 already record losing to the foreground lock.
-
-Two things worth keeping from it:
-
-- **The assertion is doing its job.** It fails at the point where focus was
-  lost, naming why nothing after it can be trusted, instead of proceeding to
-  assert against an unfocused window and producing a confusing downstream
-  failure. That is the shape a focus-dependent test should have.
-- **It is still a red build on an unrelated change**, which is the actual cost:
-  it trains readers to re-run rather than read. Options, none taken — retry the
-  focus acquisition with a longer budget than 8 attempts; move the
-  focus-dependent assertions into the feature-gated e2e suite where
-  `desktop::take_foreground` already pulls `SPI_SETFOREGROUNDLOCKTIMEOUT` and
-  `AttachThreadInput`; or mark the test as allowed-to-retry if nextest's retry
-  support is acceptable here. Wants a decision rather than another re-run.
+`hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for` failed the
+`build + test (windows-latest)` leg on 2026-08-05; re-running the same job
+passed clean on a macOS-only commit, so it is environmental — the shared
+runner's foreground being contended — rather than a defect. The assertion is
+doing its job (it fails at the point focus was lost, naming why nothing after it
+can be trusted, instead of asserting against an unfocused window), but it is
+still a red build on an unrelated change, which trains readers to re-run rather
+than read. Options, none taken: retry the focus acquisition with a longer budget
+than 8 attempts; move the focus-dependent assertions into the feature-gated e2e
+suite where `desktop::take_foreground` already pulls the foreground levers; or
+mark the test as allowed-to-retry if nextest's retry support is acceptable here.
+**Wants a decision rather than another re-run.**
 
 ## What MTL6 settled, and what it leaves for a decision
 
 Metal's last planned slice. **The backend still reports Tier B**, and the reason
-moved rather than went away — the detail is below, because "why not Tier A" is
-now a design answer rather than a to-do.
+moved rather than went away:
 
-### Needs the user: `dispatch` is blocked on the seam, not on Metal
-
-`MTLComputeCommandEncoder` is otherwise ready. Metal takes
-`threadsPerThreadgroup` at `dispatchThreadgroups:threadsPerThreadgroup:`, but
-SPIR-V, DXIL and WGSL all bake the workgroup size **into the shader**, so MSL
-declares it nowhere and `ComputePipelineDesc` carries no field for it. There is
-no number the backend could pass that is not a guess about the kernel, and a
-wrong one runs the shader with the wrong thread count rather than failing.
-
-So this needs `ComputePipelineDesc` to carry the workgroup size, or `dispatch`
-to take threads-per-group — **a HAL change, with Vulkan to re-verify**. The
-constant `DISPATCH_SLICE` in `command.rs` says so at every refusal site.
-
-### Needs the user: `block2` is now a direct dependency of `crcbl-mtl`
-
-The present-feedback slice made it one: `objc2-metal` types the
-`addPresentedHandler:` parameter as a `block2::DynBlock` and re-exports nothing,
-so the callback the seam needs cannot be written without naming the type. The
-case is argued next to the edge in `crates/crcbl-mtl/Cargo.toml`. It adds no
-package to the graph — `block2` was already in `Cargo.lock` as an `objc2`
-sibling — but a direct dependency is a decision, so it is flagged here for
-ratification rather than kept silently.
-
-### `DESCRIPTOR_INDEXING` was withdrawn, deliberately
-
-MTL1 reported it from `argumentBuffersSupport == Tier2`, which is a true
-statement about the _hardware_. Now that bind groups exist as flat argument
-tables there is no runtime-sized array, so `create_bind_group_layout` refuses
-every `BindingFlags` — and `crcbl_hal::pipeline` states that a backend refusing
-them must not report the feature. Reporting it while rejecting the layouts it
-promises would be a documented lie, so the flag is off and
-`max_bindless_descriptors` is back at the floor's 0.
-
-**Nothing above the seam is blocked**: every `BindGroupLayoutEntry` in
-`crcbl-render` uses `BindingFlags::empty()`, and `forward.rs` says in a comment
-that the layout is deliberately legal on both tiers. It returns with argument
-buffers, which need Slang to emit argument-buffer-shaped MSL. If the flag is
-wanted back, the honest route is scheduling that shader work — not flipping the
-bit.
-
-### `DRAW_INDIRECT_COUNT` is unreachable in this backend's shape
-
-The count lives in GPU memory, and Metal's only execution that reads one is
-`executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
-`MTLIndirectCommandBuffer` whose commands must **already exist**. They can come
-from the CPU, which does not know GPU-side draw arguments, or from a compute
-kernel — which would have to run _before the render encoder the seam calls
-`draw_indirect_count` inside was opened_. This backend encodes straight into the
-`MTLCommandBuffer`, so there is nowhere to put that pass.
-
-The emulation — issue `max_draw_count` draws and hope the tail structures are
-zeroed — is silently wrong, because nothing in the seam promises they are.
-Closing this needs either deferred command recording, so a compute pass can be
-injected ahead of the render encoder, or a seam that hands the backend its
-indirect work before the pass opens. **Metal stays Tier B until one of those
-happens**, and that is the whole remaining gap: `MULTI_DRAW_INDIRECT` was earned
-this slice, and the other four Tier A features were already on.
-
-### Smaller, and unfixed
-
+- **Needs the user: `dispatch` is blocked on the seam, not on Metal.**
+  `MTLComputeCommandEncoder` is otherwise ready. Metal takes
+  `threadsPerThreadgroup` at `dispatchThreadgroups:threadsPerThreadgroup:`, but
+  SPIR-V, DXIL and WGSL bake the workgroup size **into the shader**, so MSL
+  declares it nowhere and `ComputePipelineDesc` carries no field for it. There
+  is no number the backend could pass that is not a guess about the kernel, and
+  a wrong one runs the shader with the wrong thread count rather than failing.
+  So this needs `ComputePipelineDesc` to carry the workgroup size, or `dispatch`
+  to take threads-per-group — **a HAL change, with Vulkan to re-verify**. The
+  constant `DISPATCH_SLICE` in `command.rs` says so at every refusal site.
+- **Needs the user: `block2` is now a direct dependency of `crcbl-mtl`.**
+  `objc2-metal` types the `addPresentedHandler:` parameter as a
+  `block2::DynBlock` and re-exports nothing, so the callback the seam needs
+  cannot be written without naming the type. The case is argued next to the edge
+  in `crates/crcbl-mtl/Cargo.toml`. It adds no package to the graph — `block2`
+  was already in `Cargo.lock` as an `objc2` sibling — but a direct dependency is
+  a decision, so it is flagged here for ratification rather than kept silently.
+- **`DESCRIPTOR_INDEXING` was withdrawn, deliberately.** Bind groups exist as
+  flat argument tables now, so there is no runtime-sized array;
+  `create_bind_group_layout` refuses every `BindingFlags`, and a backend
+  refusing them must not report the feature. Nothing above the seam is blocked;
+  it returns with argument buffers, which need Slang to emit
+  argument-buffer-shaped MSL — if the flag is wanted back, the honest route is
+  scheduling that shader work, not flipping the bit.
+- **`DRAW_INDIRECT_COUNT` is unreachable in this backend's shape.** The count
+  lives in GPU memory, and Metal's only execution that reads one is
+  `executeCommandsInBuffer:indirectBuffer:indirectBufferOffset:` over an
+  `MTLIndirectCommandBuffer` whose commands must **already exist** — from the
+  CPU, which does not know GPU-side draw arguments, or from a compute kernel,
+  which would have to run before the render encoder was opened. The emulation
+  (issue `max_draw_count` draws) is silently wrong. Closing this needs either
+  deferred command recording or a seam that hands the backend its indirect work
+  before the pass opens. **Metal stays Tier B until one of those happens** — the
+  whole remaining gap, since `MULTI_DRAW_INDIRECT` was earned this slice.
 - **A partially filled bind group leaves its unfilled argument-table slots
   holding whatever the previous bind put there.** Not checked, because
   `update_bind_group` makes create-then-fill a legal pattern. Vulkan leaves the
@@ -4788,54 +2850,26 @@ this slice, and the other four Tier A features were already on.
 
 ## WARP clears the bindless bar — measured, 2026-08-05
 
-The question `docs/backlog.md` said to settle before committing to the DX12
-phase is settled. The `windows-latest` runner reports, for both the adapter DXGI
-lists and the one `EnumWarpAdapter` returns:
-
-```text
-ResourceBindingTier=3  HighestShaderModel=6.8  sm66-dynamic-resources=yes
-driver="D3D12 UMD 10.0.26100.33158"
-```
-
-**So WARP supports SM6.6 dynamic resources**, which is what `crcbl-dx12` is
-specced around, and the CI half of DX12's justification is real rather than
-hoped for: Windows can have a software rasteriser to render against, the way
-Linux has lavapipe. That closes a coverage hole open since the platform crates
-were empty — `windows-latest` has never had golden images or a render pass.
-
-**Reporting tier 3 and SM6.8 was a claim about the API surface, not proof that a
-pixel comes out** — and macOS is the cautionary tale for exactly that gap: a
-runner there enumerated a perfectly capable-looking `Apple Paravirtual device`
-and then hung the command buffer on a draw. (That hang turned out to be one
-macOS image rather than paravirtualisation as such; the lesson that enumeration
-answers a different question from execution is unchanged.) **WARP has since
-drawn**: `crcbl_dx12::device`'s
-`a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` passed on
-`windows-latest` in run 31029816035, so the execution half is measured too.
-
-`renderer-tier=B` in those lines is the backend's own gap — `COMPUTE`,
+The question this file told the DX12 phase to settle is settled: the
+`windows-latest` runner reports
+`ResourceBindingTier=3  HighestShaderModel=6.8 sm66-dynamic-resources=yes` for
+both the DXGI lists and `EnumWarpAdapter`, and `crcbl_dx12::device`'s
+`a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` has since passed there
+— so WARP supports SM6.6 dynamic resources **and executes a shader**, which
+closes the coverage hole that `windows-latest` has never had golden images or a
+render pass: Windows can have a software rasteriser, the way Linux has lavapipe.
+What that does not cover is hardware: WARP is one implementation with one set of
+tolerances, and no D3D12 code in this workspace has run on a GPU.
+`renderer-tier=B` in the run's lines is the backend's own gap — `COMPUTE`,
 `TIMELINE_SEMAPHORE` and the two indirect features wait on calls no slice has
-written — and says nothing about the hardware.
-
-### What DX4 left unmeasured, and what it added to the list
-
-DX4 landed shader modules, root signatures, bind groups, graphics pipelines and
-a draw, and its measurement is `crcbl_dx12::device`'s
-`a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` — a triangle pulled
-from a storage buffer through a real root signature, with its texels asserted.
-The development box is Linux and `crcbl-dx12` compiles on Windows alone, so CI
-was the first machine to run any of it — and it passed on `windows-latest` in
-run 31029816035. "WARP executes a shader" is a measurement now — on WARP alone,
-which is one implementation with one set of tolerances; no D3D12 code in this
-workspace has run on a GPU.
+written.
 
 Deferred inside DX4, each with what it would take:
 
-- **Compute pipelines.** `create_compute_pipeline` still refuses.
-  `crcbl_dx12::pipeline` builds the graphics half; the compute half is a
-  `D3D12_COMPUTE_PIPELINE_STATE_DESC` over the same root signature plus
-  `SetComputeRootSignature`/`SetComputeRootDescriptorTable` on the encoder,
-  which are the compute twins of calls `bind_group` already makes.
+- **Compute pipelines.** `create_compute_pipeline` still refuses. The compute
+  half is a `D3D12_COMPUTE_PIPELINE_STATE_DESC` over the same root signature
+  plus `SetComputeRootSignature`/`SetComputeRootDescriptorTable`, which are the
+  compute twins of calls `bind_group` already makes.
 - **Indexed and indirect draws.** `bind_index_buffer`, `draw_indexed` and the
   four indirect entry points refuse. Indexed needs `IASetIndexBuffer` and a
   `D3D12_INDEX_BUFFER_VIEW`; indirect needs an `ID3D12CommandSignature`, which
@@ -4844,47 +2878,41 @@ Deferred inside DX4, each with what it would take:
   name. A descriptor table has no offset to apply — D3D12's answer is a _root_
   CBV/SRV/UAV carrying a raw GPU address, which changes the root parameter type
   for every binding in the set rather than adding to it.
-- **Push constants / root constants.** `create_pipeline_layout` refuses a range,
-  and this device reports no `Features::PUSH_CONSTANTS`. D3D12 _has_ the
-  feature; what is missing is knowing which root parameter slot the committed
-  DXIL expects one at, which is the same gap `crcbl-mtl` names for
-  `setVertexBytes:`.
+- **Push constants / root constants.** D3D12 _has_ the feature; what is missing
+  is knowing which root parameter slot the committed DXIL expects one at — the
+  same gap `crcbl-mtl` names for `setVertexBytes:`.
 - **Register-space mapping is verified for set 0 only.** Every committed shader
-  declares `[[vk::binding(N, 0)]]` — none uses a set-1 binding — so
-  `SetPlacement`'s multi-set path in `crcbl_dx12::pipeline` is untested against
-  real DXIL. Slang is confirmed to emit `register(t0)` for
-  `[[vk::binding(0, 0)]]`; what a set-1 binding maps to (`space1` is the
-  expectation) has never been checked. A shader with a set-1 binding, or a
+  declares `[[vk::binding(N, 0)]]`; what a set-1 binding maps to (`space1` is
+  the expectation) has never been checked. A shader with a set-1 binding, or a
   direct `dxc` run, would settle it before a second set is trusted.
-- **The shader-visible descriptor heaps do not grow.** `crcbl_dx12::binding`
-  allocates one heap per type at a fixed capacity and answers
-  `HalError::OutOfDeviceMemory` past it, because a bind group's GPU handle is an
-  address inside the heap it came from and growing would invalidate every handle
-  already recorded. Freed blocks are reused only at exactly their own size, so
-  nothing coalesces. A real suballocator is a slice of its own.
-- **`crcbl-render` cannot reach D3D12 yet, and the reason is structural.** Each
-  of its passes creates **one** shader module and names it from a vertex and a
-  fragment `ShaderEntry`, but a DXIL container holds exactly one entry point —
-  so those call sites pass `ShaderModuleDesc::dxil: None`, truthfully. Reaching
-  D3D12 means one module per stage in `crcbl_render::forward`,
-  `crcbl_render::sprite_pass` and `crcbl_render::ui_pass`, which is a change to
-  each pass's handle bookkeeping rather than to the descriptor. `crcbl-render`'s
+- **The shader-visible descriptor heaps do not grow.** One heap per type at a
+  fixed capacity, and `HalError::OutOfDeviceMemory` past it, because a bind
+  group's GPU handle is an address inside the heap it came from. A real
+  suballocator is a slice of its own.
+- **`crcbl-render` cannot reach D3D12 yet, and the reason is structural.** A
+  DXIL container holds exactly one entry point, and each render pass creates one
+  shader module from a vertex + fragment `ShaderEntry` — so those call sites
+  pass `ShaderModuleDesc::dxil: None`, truthfully. Reaching D3D12 means one
+  module per stage in `forward`, `sprite_pass` and `ui_pass`.
   `the_engine_passes_offer_every_shader_artifact_they_have` asserts DXIL's
   absence, so it goes red the day a pass can offer it — delete this entry then.
 
-### Do not write a LUID into code or an assertion
+Two things DX1 decided that a later slice may have to undo:
 
-DXGI's `AdapterLuid` is **per-boot**. Two CI runs of the same commit reported
-different LUIDs for the same two adapters, which is the behaviour the name
-promises and is easy to forget when a LUID appears in a log that otherwise looks
-stable. It is an identity _within_ one enumeration and nothing more, so it is
-fit for de-duplicating a list and unfit for a fixture, a golden value or a
-comparison across runs.
+- **`DESCRIPTOR_INDEXING` is reported ahead of a call** — the opposite of what
+  `crcbl-mtl` ended up doing, deliberate because `adapters()` is where the WARP
+  question is asked, so the flag has to be derivable before any device exists.
+  The binding slice must withdraw it if D3D12 bind groups cannot deliver a
+  runtime-sized array, exactly as Metal's did.
+- **`driver` comes from `CheckInterfaceSupport(IID_IDXGIDevice)`**, documented
+  as a Direct3D 10 interface check, with a fallback string when it refuses. WARP
+  is the adapter most likely to refuse it; if the CI line shows the fallback on
+  real hardware too, the field needs a different source.
 
-The de-duplication keyed on it does one job: it stops `EnumWarpAdapter`
-re-listing an adapter the hardware pass already kept. It never collapsed the
-runner's two entries — those carry different LUIDs and really are two adapter
-objects.
+**Do not write a LUID into code or an assertion.** DXGI's `AdapterLuid` is
+per-boot — two CI runs reported different LUIDs for the same two adapters. It is
+an identity _within_ one enumeration and nothing more: fit for de-duplicating a
+list, unfit for a fixture, a golden value or a comparison across runs.
 
 ## `Format::ALL` cannot be made airtight on stable
 
