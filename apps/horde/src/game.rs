@@ -3953,6 +3953,17 @@ mod tests {
 
         /// Runs to `ticks` under the autopilot — a player who kites.
         fn play_ticks(&mut self, ticks: u64) {
+            self.play_ticks_into(ticks, |_| {});
+        }
+
+        /// The tick loop behind [`Self::play_ticks`], calling `observe` with the
+        /// game after every tick.
+        ///
+        /// The observer is how the determinism gate records a state hash per
+        /// tick, so a divergence is reported at the tick it happened rather than
+        /// at the end of the run. A no-op closure per tick is the cost every
+        /// other soak pays for the one that wants the record.
+        fn play_ticks_into(&mut self, ticks: u64, mut observe: impl FnMut(&Game)) {
             while self.ticks < ticks {
                 self.time.advance(self.frame_step);
                 self.clock.update(self.time.elapsed());
@@ -3964,6 +3975,7 @@ mod tests {
                     }
                     self.game.tick();
                     self.ticks += 1;
+                    observe(&self.game);
                 }
             }
         }
@@ -6333,6 +6345,51 @@ mod tests {
         (v.x.to_bits(), v.y.to_bits(), v.z.to_bits())
     }
 
+    /// One tick's observable state, folded to a 64-bit hash.
+    ///
+    /// The state the parallel pass can perturb — every movable position plus
+    /// the counters — hashed per tick so a divergence is reported at the tick
+    /// it happened rather than at the end of the run. The fold is
+    /// [`crcbl::core::rand::hash_u64`] over a fixed order, which is integer
+    /// arithmetic identical on every target. A hash can collide and the values
+    /// cannot, so it is a where-not-whether instrument, not a substitute for
+    /// the end-of-run comparison `the_same_script_replays_bit_identically_at_
+    /// every_worker_count` still makes.
+    fn state_hash(game: &Game) -> u64 {
+        let mut h: u64 = 0x5348_4153_4821_21D0;
+        let mut fold = |value: u64| h = crcbl::core::rand::hash_u64(h, value);
+        fold(game.kills);
+        fold(game.player_hp.to_bits());
+        fold(game.player.x.to_bits());
+        fold(game.player.y.to_bits());
+        for position in game.enemy_positions() {
+            fold(position.x.to_bits());
+            fold(position.y.to_bits());
+            fold(position.z.to_bits());
+        }
+        for bolt in game.bolts() {
+            fold(bolt.position.x.to_bits());
+            fold(bolt.position.y.to_bits());
+            fold(bolt.position.z.to_bits());
+        }
+        for (position, kind) in game.pickups_on_the_ground() {
+            fold(position.x.to_bits());
+            fold(position.y.to_bits());
+            fold(position.z.to_bits());
+            match kind {
+                PickupKind::Health => fold(1),
+                // Two folds for the payloaded arm, one for the bare one, so
+                // the kinds fold structurally different sequences and an Xp
+                // of any amount can never hash like a potion.
+                PickupKind::Xp(amount) => {
+                    fold(0);
+                    fold(amount);
+                }
+            }
+        }
+        h
+    }
+
     /// Runs one [`steer_enemies`] over a staged crowd at a chosen worker count,
     /// and hands back the pool it used with the velocities it decided.
     ///
@@ -6461,9 +6518,8 @@ mod tests {
     /// run rather than one pass.**
     ///
     /// `docs/backlog.md` records this as the test the pool did not have because
-    /// nothing was driving it: the same input script at every worker count,
-    /// compared per run rather than per tick. `--workers` is what drives it, and
-    /// horde is the sim it was waiting for.
+    /// nothing was driving it: the same input script at every worker count.
+    /// `--workers` is what drives it, and horde is the sim it was waiting for.
     ///
     /// It is a strictly stronger claim than
     /// [`steering_is_bit_identical_however_many_workers_run_it`] because it
@@ -6472,6 +6528,12 @@ mod tests {
     /// tick's neighbourhoods — so twenty-four hundred ticks of it end
     /// somewhere visibly different, and the kill count and the loot are in the
     /// comparison to say so.
+    ///
+    /// The comparison is **per tick**: a [`state_hash`] recorded after every
+    /// tick, compared by position, so a divergence is reported at the tick it
+    /// happened rather than at the end of the run. The end-of-run state is
+    /// still compared for real afterwards, because a hash can collide and the
+    /// values cannot.
     #[test]
     fn the_same_script_replays_bit_identically_at_every_worker_count() {
         let run = |workers: Option<usize>| {
@@ -6489,7 +6551,11 @@ mod tests {
             // the field faster than it fills. This is the same fixture the scale
             // measurement uses, for the same reason.
             let staged = harness.game.stage_field(300);
-            harness.play_ticks(300);
+            // One hash per tick, so the comparison below can name the tick the
+            // runs first disagreed on. Split at the midway read so the field is
+            // still large when it is sampled — a death and restart wipe it.
+            let mut hashes = Vec::with_capacity(2_700);
+            harness.play_ticks_into(300, |game| hashes.push(state_hash(game)));
             // Read midway as well as at the end, because the field does not
             // survive: three hundred enemies on top of the wizard is a death and
             // a restart, which wipes it. This is the sample taken while the
@@ -6497,7 +6563,7 @@ mod tests {
             // — and the restart it dies into is churn the comparison covers for
             // free.
             let midway = harness.game.enemy_positions();
-            harness.play_ticks(2_400);
+            harness.play_ticks_into(2_700, |game| hashes.push(state_hash(game)));
             (
                 staged,
                 midway,
@@ -6510,10 +6576,12 @@ mod tests {
                 harness.game.enemies_spawned(),
                 harness.game.bolts_fired(),
                 harness.game.pickups_on_the_ground(),
+                hashes,
             )
         };
 
         let serial = run(Some(0));
+        let serial_hashes = &serial.11;
         assert!(
             serial.1.len() > STEER_CHUNK,
             "the reference run was down to {} enemies by tick 300, which is one \
@@ -6524,20 +6592,44 @@ mod tests {
         assert!(serial.9 > 0, "the reference run fired nothing");
 
         for workers in [1_usize, 3] {
+            let candidate = run(Some(workers));
+            let divergence = serial_hashes
+                .iter()
+                .zip(&candidate.11)
+                .position(|(a, b)| a != b);
             assert_eq!(
-                serial,
-                run(Some(workers)),
-                "the run diverged at {workers} workers",
+                divergence,
+                None,
+                "the run at {workers} workers diverged from the serial one at \
+                 tick {tick}: state hash {serial_hash:016x} against \
+                 {candidate_hash:016x}",
+                tick = divergence.unwrap_or(0) + 1,
+                serial_hash = serial_hashes[divergence.unwrap_or(0)],
+                candidate_hash = candidate.11[divergence.unwrap_or(0)],
             );
+            assert_eq!(serial, candidate, "the run diverged at {workers} workers",);
         }
         // And the default, which is whatever this machine had to spare — the
         // configuration every other test in this file, and every CI run, has
         // actually been using.
+        let candidate = run(None);
+        let divergence = serial_hashes
+            .iter()
+            .zip(&candidate.11)
+            .position(|(a, b)| a != b);
         assert_eq!(
-            serial,
-            run(None),
-            "the run diverged at the machine's own \
-             worker count"
+            divergence,
+            None,
+            "the run at the machine's own worker count diverged from the serial \
+             one at tick {tick}: state hash {serial_hash:016x} against \
+             {candidate_hash:016x}",
+            tick = divergence.unwrap_or(0) + 1,
+            serial_hash = serial_hashes[divergence.unwrap_or(0)],
+            candidate_hash = candidate.11[divergence.unwrap_or(0)],
+        );
+        assert_eq!(
+            serial, candidate,
+            "the run diverged at the machine's own worker count"
         );
     }
 
