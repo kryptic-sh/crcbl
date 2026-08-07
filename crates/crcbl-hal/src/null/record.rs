@@ -602,6 +602,9 @@ pub(super) struct State {
     pub(super) shader_modules_created: Vec<(Option<String>, ShaderSources)>,
     /// Queued out-of-band device errors. See [`Recorder::report_device_error`].
     pub(super) device_errors: std::collections::VecDeque<String>,
+    /// How many `reconfigure_swapchain` calls fail before succeeding again. See
+    /// [`Recorder::fail_next_reconfigures`].
+    pub(super) reconfigure_failures: u32,
 }
 
 impl State {
@@ -614,6 +617,7 @@ impl State {
             device_latency: 0,
             shader_modules_created: Vec::new(),
             device_errors: std::collections::VecDeque::new(),
+            reconfigure_failures: 0,
         }
     }
 
@@ -885,6 +889,36 @@ impl Recorder {
     /// [`report_device_error`](Self::report_device_error).
     pub(super) fn take_device_error(&self) -> Option<String> {
         self.lock().device_errors.pop_front()
+    }
+
+    /// Makes the next `reconfigure_swapchain` call(s) fail with
+    /// [`SurfaceError::Hal(HalError::OutOfDeviceMemory)`], as if rebuilding the
+    /// swapchain ran out of memory.
+    ///
+    /// The sibling of [`set_device_latency`](Self::set_device_latency), and
+    /// there for the same reason: the null backend never fails, so a caller's
+    /// **error path** would otherwise never run. A settings screen that applies
+    /// a pacing change mid-run is the caller this exists for — it has to roll
+    /// the request, the effective pacing and the swapchain mode back together
+    /// when the rebuild fails, and a backend that cannot fail makes that
+    /// rollback unobservable.
+    ///
+    /// Consumed one per reconfigure; after `times` failures the backend
+    /// succeeds again. Default `0`.
+    pub fn fail_next_reconfigures(&self, times: u32) {
+        self.lock().reconfigure_failures = times;
+    }
+
+    /// Consumes one reconfigure failure, if any are owed. The backend's half of
+    /// [`fail_next_reconfigures`](Self::fail_next_reconfigures).
+    pub(super) fn take_reconfigure_failure(&self) -> bool {
+        let mut state = self.lock();
+        if state.reconfigure_failures > 0 {
+            state.reconfigure_failures -= 1;
+            true
+        } else {
+            false
+        }
     }
 
     /// Records a validation error. Used by the backend; exposed so a test can

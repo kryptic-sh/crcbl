@@ -5844,6 +5844,110 @@ mod tests {
         shell.destroy_window(window).expect("the window goes away");
     }
 
+    /// The rollback when the swapchain cannot be rebuilt: a settings screen
+    /// whose apply fails must be left describing the swapchain that is still
+    /// configured, not the pacing that did not take.
+    ///
+    /// The null backend never fails on its own, so the fault is injected
+    /// through the recorder — the same knob a reviewer would use to make the
+    /// rollback observable at all.
+    #[test]
+    fn a_failed_pacing_switch_rolls_back_the_request_the_effective_and_the_mode() {
+        use crcbl_hal::null::{Event, NullInstance, Recorder};
+        use crcbl_shell::{HeadlessShell, WindowDesc};
+
+        let mut shell = HeadlessShell::new();
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("headless always creates a window");
+        let mut shell_events = 0;
+        let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
+
+        let recorder = Recorder::new();
+        let instance: Box<dyn Instance> =
+            Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+        let target = shell
+            .surface_target(window)
+            .expect("the window is still alive");
+        let stage = GpuContext::start_device(
+            instance,
+            &target,
+            extent,
+            "pacing rollback test",
+            Features::empty(),
+            Features::empty(),
+            Pacing::default(),
+        )
+        .expect("the null backend opens everywhere");
+        let mut pending = PendingGpuContext {
+            stage,
+            target,
+            extent,
+            label: "pacing rollback test".to_string(),
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            pacing: Pacing::default(),
+        };
+        let mut gpu = loop {
+            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
+                break context;
+            }
+        };
+
+        // The context is on Auto -> vsync -> Fifo, and Off is a different mode
+        // on this surface (no `FifoRelaxed`, so Mailbox), so the switch is the
+        // one that has to rebuild — and therefore the one that can fail.
+        assert_eq!(gpu.pacing(), Pacing::Auto);
+        assert_eq!(gpu.effective_pacing(), Pacing::Vsync);
+        assert_eq!(gpu.config.present_mode, PresentMode::Fifo);
+
+        recorder.fail_next_reconfigures(1);
+        let error = gpu
+            .set_pacing(Pacing::Off)
+            .expect_err("the injected fault must surface as an error");
+
+        assert!(
+            matches!(
+                error,
+                GpuError::Surface(SurfaceError::Hal(HalError::OutOfDeviceMemory))
+            ),
+            "{error}"
+        );
+
+        // The request, the effective pacing and the swapchain mode rolled back
+        // together, rather than any of them describing the change that failed.
+        assert_eq!(gpu.pacing(), Pacing::Auto, "the request is not rewritten");
+        assert_eq!(
+            gpu.effective_pacing(),
+            Pacing::Vsync,
+            "the effective pacing does not describe a swapchain that does not exist"
+        );
+        assert_eq!(
+            gpu.config.present_mode,
+            PresentMode::Fifo,
+            "the swapchain is still the one that was configured"
+        );
+        assert_eq!(
+            recorder
+                .events()
+                .iter()
+                .filter(|event| matches!(event, Event::Reconfigured { .. }))
+                .count(),
+            0,
+            "a failed reconfigure must not record itself as a success"
+        );
+
+        // The fault was consumed, not latched: the same switch succeeds now,
+        // and the context stayed usable throughout.
+        gpu.set_pacing(Pacing::Off)
+            .expect("the fault was injected once, not forever");
+        assert_eq!(gpu.effective_pacing(), Pacing::Off);
+        assert_eq!(gpu.config.present_mode, PresentMode::Mailbox);
+
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
     /// An error the device reported **outside any call** stops the frame.
     ///
     /// This is the failure mode P5.13 found in a browser and could not see from

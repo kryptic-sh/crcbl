@@ -1332,6 +1332,11 @@ impl Device for NullDevice {
         swapchain: SwapchainHandle,
         desc: &SwapchainDesc<'_>,
     ) -> Result<(), SurfaceError> {
+        // First, so a faulted call records nothing and changes nothing — the
+        // property `GpuContext::set_pacing`'s rollback asserts on.
+        if self.recorder.take_reconfigure_failure() {
+            return Err(SurfaceError::Hal(HalError::OutOfDeviceMemory));
+        }
         if desc.extent.0 == 0 || desc.extent.1 == 0 {
             return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
                 "swapchain extent must be non-zero".to_string(),
