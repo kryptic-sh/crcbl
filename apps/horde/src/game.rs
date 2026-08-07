@@ -978,7 +978,7 @@ fn spawn_arc(player: DVec3) -> (f64, f64) {
 /// would be neither.
 ///
 /// The angle is drawn within the arc of the ring that stays inside the arena,
-/// inset by the largest enemy radius — see [`spawn_arc`] — so the clamp in
+/// inset by the largest enemy radius — see `spawn_arc` — so the clamp in
 /// `spawn_enemy` never moves a spawn, however close to a wall the player
 /// stands. Still a pure function of its three arguments: `(seed, counter,
 /// player)`.
@@ -4316,6 +4316,12 @@ mod tests {
     /// them — relocates every enemy of every run the project ships, and the
     /// determinism suites compare one run against another, so they would all
     /// move together. These literals are the anchor that does not.
+    ///
+    /// Compared with a tolerance rather than bit-exactly: the offsets go
+    /// through libm's `cos`/`sin`, which agree across platforms to the last
+    /// ulp or two, not to the bit. The delta is four orders of magnitude below
+    /// the tolerance, and any real change to the arithmetic relocates a spawn
+    /// by far more.
     #[test]
     fn the_shipped_spawn_table_is_pinned_to_literal_values() {
         let offsets = [
@@ -4325,10 +4331,11 @@ mod tests {
         ];
         let kinds = [EnemyKind::Brute, EnemyKind::Grunt, EnemyKind::Runner];
         for (counter, (offset, kind)) in offsets.iter().zip(&kinds).enumerate() {
-            assert_eq!(
-                spawn_offset(DEFAULT_SEED, counter as u64, DVec3::ZERO),
-                *offset,
-                "spawn {counter}"
+            let actual = spawn_offset(DEFAULT_SEED, counter as u64, DVec3::ZERO);
+            let delta = (actual - *offset).abs();
+            assert!(
+                delta.x < 1e-9 && delta.y < 1e-9 && delta.z < 1e-9,
+                "spawn {counter} relocated: {actual:?} is not within 1e-9 of {offset:?}",
             );
             assert_eq!(
                 spawn_kind(DEFAULT_SEED, counter as u64),
