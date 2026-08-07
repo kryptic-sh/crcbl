@@ -723,10 +723,15 @@ sequence.**
   **Closed 2026-08-07**: `win32::monitors` now reads the exact rate from
   `QueryDisplayConfig` (path walk → `DisplayConfigGetDeviceInfo` source name →
   the target mode's `vSyncFreq`, `vSyncFreqDivider` applied), falling back to
-  the integer path when the walk cannot answer. What is still unobserved: the
-  walk resolving on a real Windows machine — the `win32: exact refresh for …`
-  info line is the only record, since a broken walk silently falls back and
-  every test stays green.
+  the integer path when the walk cannot answer. The first CI run on
+  `windows-latest` caught the virtual-display case: the runner's desktop reports
+  a placeholder rational (1 mHz), which the exact path now refuses
+  (`MIN_PLAUSIBLE_REFRESH_MHZ`, so the seam's documented "0 = cannot determine"
+  is what such a display reports); the e2e's refresh band permits that zero.
+  What is still unobserved: the exact rate of a _physical_ display — the
+  `win32: exact refresh for …` info line is the only record of which path a
+  machine took, since a broken walk silently falls back and every test stays
+  green.
 - **A window frozen during a user drag-resize is accepted, not fixed.** Windows
   runs its own modal loop between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`, so
   no frame renders until the mouse is released. The usual fix — `SetTimer` plus
