@@ -2707,16 +2707,6 @@ The modular panel is built and all three samples switch it on with F3 (or
   too. The browser gate (`web/run-browser-e2e.sh --build`) covers the four demos
   end to end, which is the only place that path runs.
 
-- **Nothing checks the demo site's HTML in CI.** The 2026-08-02 audit ran
-  `npx html-validate` (recommended + document + a11y presets) and a stdlib
-  Python parser over the three built pages, plus `curl` over every external link
-  and a headless-Chromium screenshot at 1280 and at 390 wide. All of that was a
-  human running commands; `web/build.sh` runs `check-exports.mjs` and
-  `smoke.mjs` and nothing that reads the HTML it just wrote. What it would take,
-  in the no-npm spirit of `web/`: fold the link-and-asset resolution check into
-  `build-pages.py`, which already knows every page it wrote and every file the
-  site will contain. The tag-balance half is what `html-validate` does better,
-  and that one needs a dependency.
 - **`html-validate` reports `require-sri` on every `<link>` and `<script>`, and
   it is being ignored.** Subresource Integrity guards a resource served by
   someone else; the stylesheet and the demo shims are same-origin files this
