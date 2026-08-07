@@ -48,21 +48,6 @@ phase attached to it.
   property, but nobody has heard whether ten joins a second is inaudible in
   practice. Both want a person with headphones.
 
-- **Horde's render-side scale table has not been re-measured with the ground and
-  the props in it.** `docs/plan/sample/03-horde.md`'s "The render side: flat,
-  and not close to a budget" was taken before `assets/terrain.crpix` and
-  `assets/props.crpix` existed, and the section says so. Every frame now also
-  carries the ground tiles — 300 of them at 960 × 720, which
-  `art::tests::the_visible_ground_is_bounded_by_the_view_and_not_the_arena` pins
-  — as opaque, full-coverage quads under everything else, and the handful of
-  props the view holds. Both are constant additions and neither touches the
-  flat-in-the-horde claim the exit criterion is about, but the `sprites` GPU
-  column and the CPU column are both now understated by whatever those quads
-  cost. Re-running the same `--prefill` series would settle it; the fixture and
-  the conditions are written out in that section. Nobody has, because the
-  measurement needs the reference machine and a release build, and H1 and H4
-  were art slices.
-
 - **How many props a view holds is not pinned by anything.** The count over the
   whole arena is —
   `game::tests::the_scatter_is_sparse_and_never_pens_the_player_in` asserts it

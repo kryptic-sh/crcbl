@@ -181,61 +181,84 @@ field left waiting would time a `run_tick` that returns on its second line and
 report the result as the cost of ten thousand enemies. The loop queues the start
 edge into the same action map a key press goes to, and
 `a_prefilled_run_does_not_wait_at_the_title_screen` is what says so. The numbers
-below were taken before the screen existed, on a build that began playing on
-frame zero, and the fixture is the same either way.
+below are re-measured on the build with the screen: the prefilled rows play (the
+start edge fires), and the `field 0` row never starts — the fixture offers no
+way to start a non-prefilled run — so it measures the title screen, which is why
+its `drawn` is the 305-strong constant and its CPU carries the menu.
 
 ### The render side: flat, and not close to a budget
 
 Conditions: release, headless, `--backend vk` on radv (RX 7900 XTX), 960 × 720
-offscreen ring, `--wall-clock --tick-hz 1 --frames 20000`. The tick rate is one
-hertz so that the run — which takes about two seconds of wall time — contains no
-more than two ticks and the frame being measured is the **render path alone**.
+offscreen ring, `--wall-clock --fps 0 --tick-hz 1 --frames 20000`. The tick rate
+is one hertz so that the run — which takes about two seconds of wall time —
+contains no more than two ticks and the frame being measured is the **render
+path alone**. `--fps 0` is the frame limiter being asked to stay out: it landed
+after the first version of this table, and it sleeps **inside** the measured
+frame, so a paced run's CPU column would read the limiter rather than the frame.
 
 - **CPU** is the debug overlay's own frame-timing module (`FrameStats`), the
   mean over its rolling 120-frame window, driven by the real monotonic clock.
   `--wall-clock` exists for this: a headless run's clock is a fake one stepping
   exactly 1/60 s, so without it the panel reports 16.667 ms at every count and
-  measures nothing.
+  measures nothing. `--fps 0` keeps the limiter out of the same number — a paced
+  run's `render_dt` includes the limiter's sleep, which is why the first
+  re-measurement read 1.050 ms at every count.
 - **GPU** is `PassTimers` — real timestamp queries on the same device. It is
   **one resolved frame's** timestamps (`PassTimers::latest`), not an average,
-  taken from frame 19 997; three repeats of each row agreed to the microsecond.
+  taken from frame 19 997. Three repeats of each row agreed to the microsecond,
+  except the 5000 row: its frame's on-screen state (a bolt in the air or not,
+  the death position) and one noisy run moved the CPU read across 0.109–0.277 ms
+  and the sprites pass across 0.016–0.031 ms, so that row reports the quiet
+  repeat with the range noted beside it.
 - The two columns are not addable. The GPU work overlaps the next frame's CPU.
 
-|  field | drawn | batches | CPU frame | `arena` GPU | `sprites` GPU | `ui-composite` GPU |
-| -----: | ----: | ------: | --------: | ----------: | ------------: | -----------------: |
-|      0 |     1 |       1 |  0.096 ms |    0.005 ms |      0.006 ms |           0.005 ms |
-|  1 000 |   182 |       2 |  0.096 ms |    0.005 ms |      0.009 ms |           0.006 ms |
-|  2 000 |   497 |       2 |  0.107 ms |    0.005 ms |      0.008 ms |           0.004 ms |
-|  5 000 |   852 |       2 |  0.099 ms |    0.005 ms |      0.011 ms |           0.005 ms |
-| 10 000 | 2 446 |       2 |  0.120 ms |    0.005 ms |      0.023 ms |           0.004 ms |
+|  field | drawn | batches | CPU frame | `arena` GPU | `sprites` GPU | `menu` GPU | `ui-composite` GPU |
+| -----: | ----: | ------: | --------: | ----------: | ------------: | ---------: | -----------------: |
+|      0 |   305 |       3 |  0.107 ms |    0.005 ms |      0.009 ms |   0.012 ms |           0.004 ms |
+|  1 000 |   554 |       4 |  0.096 ms |    0.005 ms |      0.009 ms |          — |           0.005 ms |
+|  2 000 |   801 |       4 |  0.109 ms |    0.005 ms |      0.012 ms |   0.009 ms |           0.004 ms |
+|  5 000 | 1 555 |       4 |  0.109 ms |    0.004 ms |      0.016 ms |   0.008 ms |           0.003 ms |
+| 10 000 | 2 750 |       4 |  0.123 ms |    0.005 ms |      0.027 ms |   0.009 ms |           0.004 ms |
+
+Re-measured 2026-08-07 with `assets/terrain.crpix` and `assets/props.crpix` in
+the picture; the first version of this table predates both. Two rows carry a
+second `sprites`-labelled pass, the menu — the run never starts at `--prefill 0`
+(the fixture offers no way to start a non-prefilled run, so the row is the title
+screen), and at 2000 and above the player dies at about a second and the death
+menu is up at the measured frame. The `sprites` column is the field pass alone;
+the `menu` column is the second one. `—` means the pass was empty and skipped.
 
 `drawn` is what survived the CPU view cull and reached the pass — the arena is
 96 × 72 units against a view of about 37 × 28, so most of a large horde is off
 screen and the number on screen is bounded by the **screen** rather than by the
-field. `field`, `culled`, `ground`, `props`, `drawn` and `batches` are a `scene`
-section this sample adds to the debug panel, so they are readable in the running
-game and not only from a test. `ground` and `props` are reported beside `field`
-rather than inside it: the tiles are generated from the view and the scenery is
-a constant of the seed, so folding either into `field` or `culled` would put a
-constant into the two numbers that exist to show what moves with the horde.
+field. It counts the whole 305-strong constant — the 300 ground tiles, the 4
+props and the player, which the view always holds — plus whatever of the horde
+the view shows, which is why it reads 305 at an empty field and why the actor
+count is `drawn − 305`. `field`, `culled`, `ground`, `props`, `drawn` and
+`batches` are a `scene` section this sample adds to the debug panel, so they are
+readable in the running game and not only from a test. `ground` and `props` are
+reported beside `field` rather than inside it: the tiles are generated from the
+view and the scenery is a constant of the seed, so folding either into `field`
+or `culled` would put a constant into the two numbers that exist to show what
+moves with the horde.
 
 **The exit criterion "CPU frame time demonstrably flat 1k → 10k on the render
-side" is met, and by a wide margin.** 0.096 ms at one thousand and 0.120 ms at
-ten thousand: the whole marginal cost of nine thousand more enemies is **24 µs a
-frame**, or 0.14 % of a 16.67 ms budget. The render path carries ten thousand at
-something like 8 300 frames a second and would carry ten times that before the
+side" is met, and by a wide margin.** 0.096 ms at one thousand and 0.123 ms at
+ten thousand: the whole marginal cost of nine thousand more enemies is **27 µs a
+frame**, or 0.16 % of a 16.67 ms budget. The render path carries ten thousand at
+something like 8 100 frames a second and would carry ten times that before the
 frame budget noticed.
 
 The same series with `--backend vk` swapped for `--backend null` isolates the
-game's own CPU from the driver's: **0.005 ms at zero enemies and 0.033 ms at ten
-thousand**, so the game's share is 2.8 ns per field enemy — the `RenderState`
+game's own CPU from the driver's: **0.008 ms at zero enemies and 0.033 ms at ten
+thousand**, so the game's share is 2.5 ns per field enemy — the `RenderState`
 copy, the cull's four comparisons and the instance build — and the other 0.09 ms
 is command recording, submit and present, which does not move with the field at
 all.
 
 ### The batching claim, measured
 
-**It holds.** `batches` is 2 at every populated count in the table above and 1
+**It holds.** `batches` is 4 at every populated count in the table above and 3
 when no bolt happens to be in the air, and it does not move between one thousand
 and ten thousand. Pushed harder than the running game can: the
 ten-thousand-visible-enemies test packs the whole ten thousand _inside_ the view
@@ -244,15 +267,14 @@ leaves behind, and asserts the count over every sprite in the frame — the ten
 thousand, the shots, the player, the whole ground lattice and the scenery. It
 goes red one higher if the shots are moved onto the crowd's layer.
 
-**The number is 4 now, and that is not a regression.** `assets/terrain.crpix`
-and `assets/props.crpix` both landed after this table was taken and each puts
-its subject on a sheet and a layer of its own, so a populated frame is terrain,
-then props, then actors, then the bolt — the table above still reads 2 because
-it was measured before either existed, and it is left as measured. **The claim
-was never the number**: it is that the count is flat in the size of the horde,
-which is why `SceneStats::batches` is in the debug panel at all. A sheet added
-for a new subject adds a constant; what would break the claim is emitting one
-sheet more than once, which is what
+**The number is 4, and the table above reads it.** `assets/terrain.crpix` and
+`assets/props.crpix` each put their subject on a sheet and a layer of its own,
+so a populated frame is terrain, then props, then actors, then the bolt —
+re-measured 2026-08-07 with both in the picture, and the 1000 row agrees with
+the 10000 row. **The claim was never the number**: it is that the count is flat
+in the size of the horde, which is why `SceneStats::batches` is in the debug
+panel at all. A sheet added for a new subject adds a constant; what would break
+the claim is emitting one sheet more than once, which is what
 `an_interleaved_field_of_every_kind_is_four_batches` and
 `ten_thousand_visible_enemies_are_still_four_batches` are there to catch. Ten
 enemies and ten thousand are the same four draws.
@@ -268,20 +290,21 @@ and which this game's own frames cannot distinguish.
 
 ### The fill margin: visible in a pass timing, and irrelevant to the budget
 
-**Visible.** The `sprites` pass goes 0.006 → 0.023 ms from an empty field to a
+**Visible.** The `sprites` pass goes 0.009 → 0.027 ms from an empty field to a
 full screen of the crowd, against a full-screen `arena` clear that is 0.005 ms
 flat. At 960 × 720 a world unit is 25.71 screen pixels, so the shared 34-texel
-quad is 43.7 pixels square, and the 2 445 actor quads at ten thousand are **4.67
-megapixels — 6.8 times the framebuffer** — of blended fill. The pass grows with
-it, which is the answer to "does the transparent margin show up in a GPU pass
-timing": yes. `SpriteRenderer` has no alpha discard, so a transparent fragment
-costs what an opaque one costs.
+quad is 43.7 pixels square, and the 2 445 actor quads at ten thousand (the
+table's 2 750 drawn minus the 305-strong ground/props/player constant) are
+**4.67 megapixels — 6.8 times the framebuffer** — of blended fill. The pass
+grows with it, which is the answer to "does the transparent margin show up in a
+GPU pass timing": yes. `SpriteRenderer` has no alpha discard, so a transparent
+fragment costs what an opaque one costs.
 
 **Irrelevant.** `two_thirds_of_the_shared_frame_is_transparent_margin` measures
 the opaque bounding box of each baked silhouette and weights them by the mix
 `EnemyKind::from_roll` actually deals (62 % grunt at 18 texels, 28 % runner at
 13, 10 % brute at 34): the average enemy fills **31.5 %** of its 34 × 34 quad,
-so 68.5 % of that fill is margin. Applied to the 17 µs the pass costs above an
+so 68.5 % of that fill is margin. Applied to the 18 µs the pass costs above an
 empty field, the whole price of the one-sheet decision at a full screen of the
 crowd is about **12 µs a frame — 0.07 % of the budget**. The alternative — a
 sheet per kind at each kind's own frame size — buys those 12 µs and costs a
@@ -339,7 +362,7 @@ and the plan's single figure was always going to be one or the other.
   criterion as written does not say which, and the difference is a factor of
   six, so it needs rewriting rather than answering.
 - **"CPU frame time demonstrably flat 1k → 10k on the render side."** **Yes**:
-  0.096 → 0.120 ms, and 0.005 → 0.033 ms with the driver taken out.
+  0.096 → 0.123 ms, and 0.008 → 0.033 ms with the driver taken out.
 - **"Playable and mildly fun for 5 minutes."** **No, and not close.** A default
   run — no prefill, the spawner doing its own work — ends in a **death at about
   24 seconds** with 30 kills and 46 things on the field. At `--prefill 5000` and
@@ -374,7 +397,7 @@ very different amounts to it:
   `docs/backlog.md`.
 - **P7 buys this sample almost nothing.** GPU culling replaces a CPU cull that
   costs 28 µs at ten thousand; indirect draws replace two draw calls; instance
-  deltas replace an upload of 2 446 × 64 bytes. The whole render path is 0.12 ms
+  deltas replace an upload of 2 750 × 64 bytes. The whole render path is 0.12 ms
   of a 16.67 ms frame, so the maximum P7 can return here is 0.7 % of the budget.
   It is still worth building — for 3D, for the scenes that are not a flat plane
   of 34-texel quads — but **this sample is not the argument for it**, and the
