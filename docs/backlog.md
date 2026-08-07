@@ -2782,15 +2782,6 @@ The modular panel is built and all three samples switch it on with F3 (or
   Closing this means either a golden through the sprite pass with a sample's own
   sheets, or an offscreen path the samples can drive. It is the same gap for
   breakout as for flappy and is not worth two entries.
-- **The bird sprite is not checked against the bird collider.** It is drawn 0.8
-  world units across against a `2 * BIRD_RADIUS` of 0.7, deliberately, and
-  nothing asserts the relationship — so art that grew to twice the collider
-  would look wrong and pass. Breakout closed the equivalent gap
-  (`every_sprite_covers_the_collider_it_stands_for`, which holds all forty
-  bricks, the paddle and the ball to their colliders exactly); flappy's is
-  harder only because the bird is deliberately _not_ exact, so the assertion has
-  to be a stated ratio rather than an equality.
-
 - **Nothing checks breakout's clear colour against the court's interior.**
   `art::SURROUND` and `field.crpix`'s `f` are two hand-written sRGB values that
   have to read as different surfaces; a change to one is invisible to the tests.
