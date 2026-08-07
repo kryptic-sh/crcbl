@@ -2768,15 +2768,6 @@ The modular panel is built and all three samples switch it on with F3 (or
   the world through the real view-projection at five aspect ratios, which is
   stronger than the hand-written mapping it replaced, and is still not a pixel
   check that would catch the framing drifting.
-- **Only the sandbox asserts that its UI pass reaches the render graph.**
-  `f3_toggles_the_debug_overlay_in_the_sandbox` reads the frame's graph dump and
-  requires `ui-composite` to be present when the overlay is on and absent when
-  it is off, which is what makes "the overlay was drawn" mean "the overlay was
-  composited". Breakout and flappy have no equivalent — their tests stop at the
-  draw list reaching `Gpu` — because neither `Gpu` keeps the dump. This predates
-  the overlay: nothing ever asserted their HUD's pass either. Closing it is a
-  `#[cfg(test)] last_dump: String` in each, the same three lines the sandbox now
-  has.
 - **The overlay has never been looked at.** Every test over it is draw-list
   strings and rectangles; no golden image, and no human has confirmed the panel
   is legible over a lit scene or a bright sprite background. The layout maths
