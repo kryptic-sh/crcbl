@@ -104,7 +104,7 @@
 
 pub use crcbl::engine::{FrameOutcome, GpuError};
 
-use crcbl::engine::{GpuContext, GpuContextDesc, GpuOptions};
+use crcbl::engine::{GpuContext, GpuContextDesc, GpuOptions, Pacing};
 use crcbl::hal::CommandEncoderDesc;
 use crcbl::prelude::*;
 use crcbl::render::{
@@ -419,6 +419,24 @@ impl Gpu {
         self.ctx.resize(extent)?;
         self.dumped = false;
         Ok(())
+    }
+
+    /// Changes how presented frames are paced, mid-run — the settings
+    /// screen's half of the pair [`GpuContext::set_pacing`] documents.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the swapchain could not be rebuilt; the old one stays.
+    pub fn set_pacing(&mut self, pacing: Pacing) -> Result<(), GpuError> {
+        self.ctx.set_pacing(pacing)
+    }
+
+    /// The pacing asked for — what [`set_pacing`](Self::set_pacing) last
+    /// received, before resolution against the display. Test-only.
+    #[cfg(test)]
+    #[must_use]
+    pub const fn pacing(&self) -> Pacing {
+        self.ctx.pacing()
     }
 
     /// Tears everything down in the order the seam requires.

@@ -3179,6 +3179,23 @@ pub trait HostedGame: Sized {
         let _ = panel;
     }
 
+    /// A frame limit this game's settings screen asked for since the loop
+    /// last read it, or `None` on a frame that asked for nothing.
+    ///
+    /// The loop applies it to its own clock — [`Clock::set_limit`] — on the
+    /// frame it is returned, which is what lets a game's pause-menu row
+    /// change the fps cap mid-run without holding the loop. `Some` at most
+    /// once per change: the loop takes the value, so a row that re-applies
+    /// its state every frame does not re-apply the limit every frame.
+    ///
+    /// The empty default is the honest answer for the games with no settings
+    /// screen, in the same way [`debug_sections`](Self::debug_sections) is:
+    /// nothing is verified by this method, and a game that forgets to
+    /// override it has a row that changes its own state and nothing else.
+    fn take_pending_frame_limit(&mut self) -> Option<FrameLimit> {
+        None
+    }
+
     /// Adds this game's own fields to the run's shared ones.
     fn summary(&self, run: RunSummary) -> Self::Summary;
 
@@ -3355,6 +3372,13 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             if let Some(action) = MenuAction::from_id(id, G::menu_action) {
                 self.apply(action)?;
             }
+        }
+
+        // A settings row fired this frame: hand the limit it asked for to the
+        // clock before it is advanced, so the frame about to run is the first
+        // one the new cap paces.
+        if let Some(limit) = self.game.take_pending_frame_limit() {
+            self.clock_source.set_limit(limit);
         }
 
         if pending.toggle_debug_overlay {
@@ -5096,6 +5120,42 @@ mod tests {
         );
     }
 
+    /// A settings row's change reaches the clock: the loop applies what
+    /// [`HostedGame::take_pending_frame_limit`] hands it on the frame the row
+    /// fired, and takes the request so a later frame does not re-apply it.
+    #[test]
+    fn the_loop_applies_a_games_pending_frame_limit_to_its_clock() {
+        let mut shell = crcbl_shell::HeadlessShell::new();
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+        let mut engine: Loop<_, FakeGame> = Loop::new(
+            Booted {
+                shell: Box::new(shell),
+                window,
+                gpu: FakeGpu::at((640, 480)),
+                clock_source: Clock::new(false),
+                events: 0,
+            },
+            FakeGame::default(),
+            hosted_config(None),
+        );
+        // The settings screen asks for a new cap on this frame.
+        engine.game_mut().pending_limit = Some(FrameLimit::fps(30));
+        engine.frame().expect("a frame");
+        assert_eq!(
+            engine.clock_source().limit(),
+            Some(FrameLimit::fps(30)),
+            "the taken request did not reach the clock",
+        );
+        assert_eq!(
+            engine.game().pending_limit,
+            None,
+            "the request was taken, not left for the next frame",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
     /// The limiter actually holds a real clock back.
     ///
     /// The only test here that spends wall time, and the only one that observes
@@ -6061,6 +6121,8 @@ mod tests {
         draws: Vec<FrameInfo>,
         /// Whether the ball has been served.
         served: bool,
+        /// A frame limit a settings screen asked for, taken by the loop.
+        pending_limit: Option<FrameLimit>,
     }
 
     /// This game's own summary: the shared half, plus a count only it kept.
@@ -6158,6 +6220,10 @@ mod tests {
                 glam::Vec2::new(8.0, 8.0),
                 [1.0, 1.0, 1.0, 1.0],
             );
+        }
+
+        fn take_pending_frame_limit(&mut self) -> Option<FrameLimit> {
+            self.pending_limit.take()
         }
 
         fn summary(&self, run: RunSummary) -> FakeSummary {

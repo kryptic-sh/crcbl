@@ -15,11 +15,11 @@
 //! ```
 //!
 //! **That loop is [`crcbl::engine::Loop`]'s now**, and this file is what a game
-//! plugs into it: [`Sandbox`], which has no fields, and the two empty call sites
-//! [`tick`] and [`render`] that everything later grows around. The sandbox is
-//! the honest measure of how much of a frame the engine owns — a game with
-//! nothing in it still runs, pauses, opens a menu, goes fullscreen and reports a
-//! summary.
+//! plugs into it: [`Sandbox`], with the pause menu's two settings rows, and the
+//! two empty call sites [`tick`] and [`render`] that everything later grows
+//! around. The sandbox is the honest measure of how much of a frame the engine
+//! owns — a game with nothing in it still runs, pauses, opens a menu, goes
+//! fullscreen and reports a summary.
 //!
 //! There is still no `Shell::run(closure)` and there never will be: on wasm the
 //! outer loop is `requestAnimationFrame`, which calls the engine and cannot be
@@ -69,7 +69,7 @@ use crcbl::shell::{DisplayMode, LogicalSize, ShellBackend as Backend, open, open
 use crcbl::ui::draw_list::DrawList;
 
 use crate::gpu::Gpu;
-use crate::menu::{self, Menus};
+use crate::menu::{self, Menus, SandboxAction};
 
 /// Which projection the camera uses.
 ///
@@ -263,10 +263,39 @@ pub type SandboxError = crcbl::engine::LoopError;
 /// HUD, no score. What is left is [`tick`] and [`render`], both empty and both
 /// load-bearing — the call sites are what everything later grows around.
 ///
-/// It has no state at all, which is the honest measure of how much of a frame
-/// the engine now owns.
+/// Its only state is the pause menu's two settings rows: the pacing and frame
+/// limit they show, and the copies that have reached the GPU and the clock.
 #[derive(Debug)]
-pub struct Sandbox;
+pub struct Sandbox {
+    /// The pacing the menu's row shows, applied to the GPU on the first tick
+    /// after it changes.
+    pacing: Pacing,
+    /// The pacing already applied to the GPU, so `tick` changes it once per
+    /// press rather than querying the surface every tick.
+    applied: Pacing,
+    /// The frame limit the menu's row shows; a change is handed to the loop
+    /// through [`take_pending_frame_limit`](HostedGame::take_pending_frame_limit).
+    limit: FrameLimit,
+    /// A limit the menu asked for since the loop last read it.
+    pending_limit: Option<FrameLimit>,
+    /// The values the pause panel was last built for — `None` until the
+    /// first pause, so the panel is always rebuilt once with the real values.
+    shown: Option<(Pacing, FrameLimit)>,
+}
+
+impl Sandbox {
+    /// A sandbox starting from the command line's pacing and frame limit.
+    #[must_use]
+    pub fn new(pacing: Pacing, limit: FrameLimit) -> Self {
+        Self {
+            pacing,
+            applied: pacing,
+            limit,
+            pending_limit: None,
+            shown: None,
+        }
+    }
+}
 
 /// The loop the sandbox runs in.
 ///
@@ -365,7 +394,7 @@ pub fn with_shell<S: Shell + ?Sized>(
             clock_source,
             events,
         },
-        Sandbox,
+        Sandbox::new(options.pacing, options.limit),
         LoopConfig {
             tick_hz: options.tick_hz,
             frames: options.frame_budget(),
@@ -390,8 +419,9 @@ impl HostedGame for Sandbox {
     type Gpu = Gpu;
     /// Paused or not, which is the sandbox's whole state machine.
     type MenuKind = bool;
-    /// No menu action is the sandbox's — its three buttons are the loop's.
-    type MenuAction = core::convert::Infallible;
+    /// The pause menu's two settings rows, which are the only actions of its
+    /// own.
+    type MenuAction = SandboxAction;
     type Summary = Summary;
 
     const NAME: &'static str = "sandbox";
@@ -408,24 +438,62 @@ impl HostedGame for Sandbox {
         // it evidence rather than a coincidence.
         #[allow(clippy::cast_possible_truncation)]
         gpu.advance(tick_dt as f32);
+        // The menu's pacing row changes this only while paused; the change
+        // lands on the first tick after resume, and only when it differs —
+        // re-querying the surface every tick is what `set_pacing` costs.
+        if self.pacing != self.applied {
+            if let Err(error) = gpu.set_pacing(self.pacing) {
+                crcbl::log::warn!("sandbox: pacing {:?} refused: {error}", self.pacing);
+            }
+            // One attempt per press either way: a failed rebuild keeps the old
+            // swapchain, and retrying it every tick would be a warn per tick.
+            self.applied = self.pacing;
+        }
     }
 
     /// The sandbox binds no keys of its own: the three the loop reserves are
     /// the three it has.
     fn key_event(&mut self, _key: crcbl::core::input::KeyCode, _pressed: bool) {}
 
-    /// Never called with anything, because nothing above
-    /// [`FIRST_GAME_ID`](crcbl::engine::FIRST_GAME_ID) is in the sandbox's menu.
-    fn menu_action(_id: crcbl::ui::WidgetId) -> Option<core::convert::Infallible> {
-        None
+    /// The action a widget id of this game's names; the mapping lives in the
+    /// menu module, which owns the ids.
+    fn menu_action(id: crcbl::ui::WidgetId) -> Option<SandboxAction> {
+        menu::action_for(id)
     }
 
-    fn apply(&mut self, action: core::convert::Infallible) {
-        match action {}
+    fn apply(&mut self, action: SandboxAction) {
+        match action {
+            SandboxAction::CyclePacing => self.pacing = next_pacing(self.pacing),
+            SandboxAction::CycleLimit => {
+                self.limit = next_limit(self.limit);
+                self.pending_limit = Some(self.limit);
+            }
+        }
     }
 
-    fn menu_kind(&mut self, _menus: &mut Menus, paused: bool) -> bool {
+    fn menu_kind(&mut self, menus: &mut Menus, paused: bool) -> bool {
+        if paused && self.shown != Some((self.pacing, self.limit)) {
+            // A row's label changed (or this is the first pause): rebuild the
+            // panel with the values in force, restoring the selection so a
+            // press on a row does not throw the player back to the top.
+            let selected = menus
+                .current()
+                .and_then(crcbl::ui::menu::Menu::selected_item)
+                .map(|item| item.id);
+            menus.replace(true, menu::pause_menu(self.pacing, self.limit));
+            if let Some(id) = selected {
+                menus
+                    .current_mut()
+                    .expect("the pause menu is in the set")
+                    .select_id(id);
+            }
+            self.shown = Some((self.pacing, self.limit));
+        }
         paused
+    }
+
+    fn take_pending_frame_limit(&mut self) -> Option<FrameLimit> {
+        self.pending_limit.take()
     }
 
     fn draw(&mut self, _gpu: &mut Gpu, _draw_list: &mut DrawList, frame: FrameInfo) {
@@ -477,6 +545,31 @@ fn tick(dt: f64) {
 /// loop — is the ordering P1's renderer inherits.
 fn render(alpha: f32) {
     let _ = alpha;
+}
+
+/// The next pacing a press of the menu's row selects: a cycle through the
+/// four variants, wrapping.
+#[must_use]
+fn next_pacing(pacing: Pacing) -> Pacing {
+    match pacing {
+        Pacing::Auto => Pacing::Vsync,
+        Pacing::Vsync => Pacing::Adaptive,
+        Pacing::Adaptive => Pacing::Off,
+        Pacing::Off => Pacing::Auto,
+    }
+}
+
+/// The next frame limit a press of the menu's row selects, up the ladder and
+/// wrapping at "unlimited". A value the ladder does not contain (a `--fps
+/// 144` start) climbs to the next rung and joins the cycle there.
+#[must_use]
+fn next_limit(limit: FrameLimit) -> FrameLimit {
+    const LADDER: [u32; 5] = [30, 60, 120, 240, 1000];
+    let rate = limit.rate();
+    match LADDER.into_iter().find(|rung| *rung > rate) {
+        Some(rung) => FrameLimit::fps(rung),
+        None => FrameLimit::unlimited(),
+    }
 }
 
 #[cfg(test)]
@@ -876,10 +969,12 @@ mod tests {
         let drawn = ui_text(&engine);
         assert!(drawn.iter().any(|t| t == "PAUSED"), "{drawn:?}");
         assert!(drawn.iter().any(|t| t == "RESUME"), "{drawn:?}");
+        assert!(drawn.iter().any(|t| t == "PACING: AUTO"), "{drawn:?}");
+        assert!(drawn.iter().any(|t| t == "FPS: 1000"), "{drawn:?}");
         // And the picture reached the *other* pass: the scrim, the nine-slice
-        // frame, and nine quads for each of three buttons.
+        // frame, and nine quads for each of five buttons.
         let sprites = engine.gpu().menu_sprites();
-        assert_eq!(sprites.len(), 1 + 9 + 9 * 3, "{}", sprites.len());
+        assert_eq!(sprites.len(), 1 + 9 + 9 * 5, "{}", sprites.len());
         let extent = engine.gpu().extent();
         assert_eq!(
             sprites[0].rect,
@@ -938,6 +1033,116 @@ mod tests {
             .expect("the window is live");
         engine.frame().expect("a frame");
         assert!(!engine.is_paused(), "Enter on RESUME did not resume");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// The pause menu's PACING row cycles the pacing, and the change reaches
+    /// the GPU on the first tick after resume.
+    #[test]
+    fn the_pacing_row_cycles_and_reaches_the_gpu_on_resume() {
+        let mut engine = scripted(&headless(200));
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+        assert_eq!(engine.gpu().pacing(), Pacing::default());
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+
+        // Down three items to the PACING row; Enter cycles Auto → Vsync.
+        for _ in 0..3 {
+            engine
+                .shell_mut()
+                .key_press(window, MENU_DOWN_KEY)
+                .expect("the window is live");
+        }
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .key_press(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .key_release(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+
+        assert_eq!(engine.game().pacing, Pacing::Vsync);
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "PACING: VSYNC"),
+            "the row's label must show the new value",
+        );
+        // Still paused, no tick has run yet — the change lands on resume.
+        assert_eq!(engine.gpu().pacing(), Pacing::default());
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        run_frames(&mut engine, 3);
+        assert!(!engine.is_paused());
+        assert_eq!(
+            engine.gpu().pacing(),
+            Pacing::Vsync,
+            "the first tick after resume must apply the new pacing",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// The pause menu's FPS row changes the loop's frame limit mid-run, on a
+    /// *real* clock — the limiter lives on that one, so a headless run's
+    /// manual clock is swapped for a real one the way the engine's own test
+    /// does.
+    #[test]
+    fn the_fps_row_changes_the_loops_frame_limit_mid_run() {
+        let mut engine = scripted(&headless(200));
+        // The limiter lives on Clock::Real by construction; a headless run
+        // gets a manual clock that takes no limit, so swap a real one in to
+        // make the row's effect observable the way it is on a desktop.
+        *engine.clock_source_mut() = Clock::new(false);
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+
+        // Down four items to the FPS row; Enter cycles 1000 → unlimited.
+        for _ in 0..4 {
+            engine
+                .shell_mut()
+                .key_press(window, MENU_DOWN_KEY)
+                .expect("the window is live");
+        }
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .key_press(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .key_release(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+
+        assert_eq!(engine.game().limit, FrameLimit::unlimited());
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "FPS: UNLIMITED"),
+            "the row's label must show the new value",
+        );
+        assert_eq!(
+            engine.clock_source().limit(),
+            Some(FrameLimit::unlimited()),
+            "the loop must apply the row's change to its clock",
+        );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

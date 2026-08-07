@@ -24,6 +24,77 @@
 
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
 
+use crcbl::engine::{FIRST_GAME_ID, FrameLimit, Pacing};
+
+/// The two settings rows the sandbox's pause menu offers — the only actions
+/// this game's menus have.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SandboxAction {
+    /// Cycle the display pacing: Auto → Vsync → Adaptive → Off.
+    CyclePacing,
+    /// Cycle the frame limit up the ladder in [`crate::app::next_limit`],
+    /// wrapping at "unlimited".
+    CycleLimit,
+}
+
+/// The id carrying [`SandboxAction::CyclePacing`]. The first id a game may
+/// use, per [`FIRST_GAME_ID`].
+pub const PACING_ID: crcbl::ui::WidgetId = FIRST_GAME_ID;
+
+/// The id carrying [`SandboxAction::CycleLimit`].
+pub const LIMIT_ID: crcbl::ui::WidgetId = FIRST_GAME_ID + 1;
+
+/// The action a widget id names, or `None` for an id this game's menus do
+/// not use.
+#[must_use]
+pub const fn action_for(id: crcbl::ui::WidgetId) -> Option<SandboxAction> {
+    match id {
+        PACING_ID => Some(SandboxAction::CyclePacing),
+        LIMIT_ID => Some(SandboxAction::CycleLimit),
+        _ => None,
+    }
+}
+
+/// The pause panel, its two settings rows labelled with the values in force.
+///
+/// Rebuilt by the game when either value changes; the initial set is built
+/// from the defaults so a run that never touches them draws the right labels
+/// with no rebuild.
+#[must_use]
+pub fn pause_menu(pacing: Pacing, limit: FrameLimit) -> Menu {
+    use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};
+    Menu::new(
+        "PAUSED",
+        vec![
+            MenuItem::new(RESUME_ID, "RESUME", "ESC"),
+            MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
+            MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
+            MenuItem::new(PACING_ID, pacing_label(pacing), "ENTER"),
+            MenuItem::new(LIMIT_ID, limit_label(limit), "ENTER"),
+        ],
+    )
+}
+
+/// The label of the pacing row, naming the value it is set to.
+fn pacing_label(pacing: Pacing) -> String {
+    let name = match pacing {
+        Pacing::Auto => "AUTO",
+        Pacing::Vsync => "VSYNC",
+        Pacing::Adaptive => "ADAPTIVE",
+        Pacing::Off => "OFF",
+    };
+    format!("PACING: {name}")
+}
+
+/// The label of the fps row, naming the value it is set to.
+fn limit_label(limit: FrameLimit) -> String {
+    if limit.rate() == 0 {
+        "FPS: UNLIMITED".to_string()
+    } else {
+        format!("FPS: {}", limit.rate())
+    }
+}
+
 /// The sandbox's menus, keyed by whether it is paused.
 pub type Menus = MenuSet<bool>;
 
@@ -33,20 +104,9 @@ pub type Menus = MenuSet<bool>;
 /// that a running frame draws no menu.
 #[must_use]
 pub fn menus() -> Menus {
-    use crcbl::engine::{DEBUG_OVERLAY_ID, FULLSCREEN_ID, RESUME_ID};
     MenuSet::new(
         false,
-        vec![(
-            true,
-            Menu::new(
-                "PAUSED",
-                vec![
-                    MenuItem::new(RESUME_ID, "RESUME", "ESC"),
-                    MenuItem::new(FULLSCREEN_ID, "FULLSCREEN", "F11"),
-                    MenuItem::new(DEBUG_OVERLAY_ID, "DEBUG PANEL", "F3"),
-                ],
-            ),
-        )],
+        vec![(true, pause_menu(Pacing::default(), FrameLimit::default()))],
     )
 }
 
@@ -56,16 +116,10 @@ pub fn menus() -> Menus {
 mod tests {
     use super::*;
 
-    /// The sandbox's whole menu vocabulary, which is the loop's three and
-    /// nothing else — [`core::convert::Infallible`] as the game half makes
-    /// [`crcbl::engine::MenuAction::Game`] uninhabited, which is the type
-    /// system saying "this game's menus do nothing only this game can do".
-    type MenuAction = crcbl::engine::MenuAction<core::convert::Infallible>;
+    /// The sandbox's whole menu vocabulary: the loop's three, plus the two
+    /// settings rows of its own.
+    type MenuAction = crcbl::engine::MenuAction<SandboxAction>;
 
-    /// This game answers about no id of its own.
-    const fn no_game_action(_: crcbl::ui::WidgetId) -> Option<core::convert::Infallible> {
-        None
-    }
     use crcbl::math::Vec2;
     use crcbl::ui::text::FontAtlas;
     use crcbl::ui::{ButtonState, PointerInput};
@@ -78,14 +132,14 @@ mod tests {
     fn activate(menus: &mut Menus) -> Option<MenuAction> {
         menus
             .activate()
-            .and_then(|id| MenuAction::from_id(id, no_game_action))
+            .and_then(|id| MenuAction::from_id(id, action_for))
     }
 
     /// The action a frame of pointer input fired, if any.
     fn point(menus: &mut Menus, extent: (u32, u32), pointer: PointerInput) -> Option<MenuAction> {
         menus
             .point(extent, &FontAtlas::built_in(), pointer)
-            .and_then(|id| MenuAction::from_id(id, no_game_action))
+            .and_then(|id| MenuAction::from_id(id, action_for))
     }
 
     /// **A running sandbox shows no menu, and a paused one shows exactly the
@@ -116,11 +170,11 @@ mod tests {
             .items()
             .iter()
             .map(|item| {
-                MenuAction::from_id(item.id, no_game_action)
+                MenuAction::from_id(item.id, action_for)
                     .unwrap_or_else(|| panic!("{} names no action", item.label))
             })
             .collect();
-        assert_eq!(actions.len(), 3);
+        assert_eq!(actions.len(), 5);
         for (index, action) in actions.iter().enumerate() {
             assert!(
                 !actions[..index].contains(action),
@@ -144,9 +198,55 @@ mod tests {
         menus.select_next();
         assert_eq!(activate(&mut menus), Some(MenuAction::DebugOverlay));
         menus.select_next();
+        assert_eq!(
+            activate(&mut menus),
+            Some(MenuAction::Game(SandboxAction::CyclePacing)),
+        );
+        menus.select_next();
+        assert_eq!(
+            activate(&mut menus),
+            Some(MenuAction::Game(SandboxAction::CycleLimit)),
+        );
+        menus.select_next();
         assert_eq!(activate(&mut menus), Some(MenuAction::Resume), "it wraps");
         menus.select_previous();
-        assert_eq!(activate(&mut menus), Some(MenuAction::DebugOverlay));
+        assert_eq!(
+            activate(&mut menus),
+            Some(MenuAction::Game(SandboxAction::CycleLimit)),
+            "previous from the top wraps to the last row",
+        );
+    }
+
+    /// The settings rows label themselves with the values they are set to,
+    /// so a player can read the current pacing and cap off the panel.
+    #[test]
+    fn the_settings_rows_label_the_values_they_are_set_to() {
+        let menu = pause_menu(Pacing::default(), FrameLimit::default());
+        let labels: Vec<&str> = menu
+            .items()
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                "RESUME",
+                "FULLSCREEN",
+                "DEBUG PANEL",
+                "PACING: AUTO",
+                "FPS: 1000",
+            ],
+        );
+
+        // And a changed value shows up in the label.
+        let menu = pause_menu(Pacing::Off, FrameLimit::unlimited());
+        let labels: Vec<&str> = menu
+            .items()
+            .iter()
+            .map(|item| item.label.as_str())
+            .collect();
+        assert_eq!(labels[3], "PACING: OFF");
+        assert_eq!(labels[4], "FPS: UNLIMITED");
     }
 
     /// Holding the commit key presses the highlighted button and nothing else,

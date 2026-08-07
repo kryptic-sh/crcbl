@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The sandbox's pause menu can change pacing and the frame cap mid-run.** Two
+  new rows — `PACING: AUTO` and `FPS: 1000`, each labelled with the value it is
+  set to — cycle on Enter: pacing through `Auto` → `Vsync` → `Adaptive` → `Off`,
+  the cap up 30 → 60 → 120 → 240 → 1000 → unlimited. The pacing change lands on
+  the GPU on the first tick after resume, through the sample's own `Gpu` and
+  `GpuContext::set_pacing`; the cap change is handed to the loop through the new
+  `HostedGame::take_pending_frame_limit`, which applies it to its clock with
+  `Clock::set_limit` and takes it so it is not re-applied every frame. This is
+  the first code in the workspace to exercise either mid-run route from a
+  running game; the games without a settings screen use the method's default
+  `None` and are untouched.
+
 - **`NineSliceSource` carries its own texels-per-unit scale.**
   `with_texels_per_unit` (default 1) makes the fixed bands of `expand` and
   `minimum_size` come back in the caller's units, so a game whose world is not
