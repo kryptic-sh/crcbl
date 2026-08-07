@@ -1547,6 +1547,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `--fullscreen` flag takes. Every WM-less X session, kiosk and CI runner would
   have had a summary line claiming a fullscreen it did not have.
 
+- **horde**: `--wall-clock` stopped reaching the clock. Hosting the game in the
+  engine's loop changed the wiring from `Clock::new(!real_clock())` to
+  `Clock::new(headless)`, so a headless run with the flag read the fake
+  fixed-step clock and the debug panel's frame timing reported the step rather
+  than the frame — every headless scale measurement since was measuring nothing.
+  The wiring is restored, and a regression test pins a headless `--wall-clock`
+  run on the real clock while a headless run without it keeps the fixed step.
+
 ### Added
 
 - **crcbl** (`args::Common`): `--fullscreen`, and `Common::display_mode()` that

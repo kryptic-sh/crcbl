@@ -214,7 +214,13 @@ pub fn with_shell<S: Shell + ?Sized>(
     mut shell: Box<S>,
     options: &Options,
 ) -> Result<Loop<S>, HordeError> {
-    let clock_source = Clock::new(options.common.headless);
+    // **`--wall-clock` is why this is not `Clock::new(options.common.headless)`.**
+    // A headless run's clock is a fake one stepping exactly 1/60 s, which is
+    // what makes a scripted run reproducible and what makes the debug panel's
+    // frame timing report the step rather than the frame. The scale measurement
+    // needs the second of those to be a real number; every other headless run
+    // needs the first. See `crate::args`.
+    let clock_source = Clock::new(!options.real_clock());
     let window = open_the_window(shell.as_mut(), &clock_source, options.common.display_mode())?;
 
     let mut events = 0;
@@ -729,6 +735,28 @@ mod tests {
                 "the loop stopped early",
             );
         }
+    }
+
+    /// **`--wall-clock` is a wiring fact, not a parser fact.** The parser test
+    /// (`crate::args`) proves the flag is *read*; this proves the loop's clock
+    /// obeys it. The wiring used to be `Clock::new(options.common.headless)`,
+    /// which silently ignored the flag and left every headless measurement
+    /// reporting the fixed step — the regression this test exists to catch.
+    #[test]
+    fn a_headless_run_reads_the_real_clock_when_wall_clock_asked_for_it() {
+        let fixed = at_the_title_screen(&headless(8));
+        assert!(
+            matches!(fixed.clock_source(), Clock::Manual { .. }),
+            "a headless run without --wall-clock must keep the fixed step"
+        );
+
+        let mut options = headless(8);
+        options.wall_clock = true;
+        let real = at_the_title_screen(&options);
+        assert!(
+            matches!(real.clock_source(), Clock::Real(_)),
+            "--wall-clock must hand the loop the real clock"
+        );
     }
 
     /// Every string the UI pass will draw this frame.
