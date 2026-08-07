@@ -1279,6 +1279,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`ModeRequest::mode` answers `None` when there is no window to read, instead
+  of an invented `Windowed`.** The `DisplayMode` it returned for a dead window
+  read exactly like a genuinely windowed run — the defect the `mode_at_exit`
+  fallback exists to paper over for summaries. Callers with a live window
+  (`Loop::display_mode`, `ModeRequest::toggle`) unwrap it; a run that ended
+  still reports through `mode_at_exit`, which keeps the last mode the window was
+  seen in rather than inventing one.
+
 - **Breaking: `FrameLimit` stores the rate it was asked for and derives the
   period.** `FrameLimit::fps` is now `const` and `FrameLimit::period` is not;
   `rate()` is new, and `Display` prints `1000 fps` or `unlimited`. Nothing about

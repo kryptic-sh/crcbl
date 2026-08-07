@@ -2251,17 +2251,23 @@ impl ModeRequest {
         }
     }
 
-    /// The mode the window system actually has the window in.
+    /// The mode the window system actually has the window in, or `None` when
+    /// there is no window to read.
     ///
     /// **Not the one that was last asked for.** A summary that reported the
     /// request would say "borderless" for every compositor that refused, which
     /// is the difference this whole type exists to keep visible.
-    pub fn mode<S: Shell + ?Sized>(shell: &S, window: WindowId) -> DisplayMode {
+    ///
+    /// `None` is the honest answer for a window that is gone: a caller with
+    /// nothing to read must not be handed an invented `Windowed`, because it
+    /// reads exactly like the truth. [`mode_at_exit`](Self::mode_at_exit) is the
+    /// caller that wants a *mode* for a run that ended, and it keeps the last
+    /// mode the window was seen in rather than inventing one.
+    pub fn mode<S: Shell + ?Sized>(shell: &S, window: WindowId) -> Option<DisplayMode> {
         shell
             .window_state(window)
-            .map_or(DisplayMode::Windowed, |state| {
-                state.effective_mode().unwrap_or(state.requested_mode)
-            })
+            .ok()
+            .map(|state| state.effective_mode().unwrap_or(state.requested_mode))
     }
 
     /// Asks for the opposite of whatever the window is in now.
@@ -2276,7 +2282,10 @@ impl ModeRequest {
     /// accepts it and then does not honour it is not an error — see
     /// [`Self::check`].
     pub fn toggle<S: Shell + ?Sized>(shell: &mut S, window: WindowId) -> Result<(), ShellError> {
-        let target = if Self::mode(shell, window).is_borderless() {
+        let target = if Self::mode(shell, window)
+            .expect("toggle is only ever called on a window the loop owns")
+            .is_borderless()
+        {
             DisplayMode::Windowed
         } else {
             DisplayMode::Borderless { monitor: None }
@@ -2288,12 +2297,13 @@ impl ModeRequest {
 
     /// The mode to report for a run that has **ended**.
     ///
-    /// [`mode`](Self::mode) reads the window, and answers `Windowed` when there
-    /// is no window to read — which is every run a player ended by closing the
-    /// window, because accepting a close destroys it before teardown gets to
-    /// ask. A summary built that way says "windowed" for a session that spent
-    /// all of itself fullscreen, and says it in the same words a genuinely
-    /// windowed run uses, so nothing downstream can tell the two apart.
+    /// [`mode`](Self::mode) reads the window and answers `None` when there is no
+    /// window to read — which is every run a player ended by closing the window,
+    /// because accepting a close destroys it before teardown gets to ask. A
+    /// summary that unwrapped that `None` into a `Windowed` would say "windowed"
+    /// for a session that spent all of itself fullscreen, in the same words a
+    /// genuinely windowed run uses, so nothing downstream could tell the two
+    /// apart.
     ///
     /// So this prefers the live answer and falls back to the last one
     /// [`check`](Self::check) saw. A loop that never called `check` reports
@@ -2348,7 +2358,7 @@ impl ModeRequest {
             log::warn!(
                 "shell: asked for {} and got {}",
                 state.requested_mode,
-                Self::mode(shell, window),
+                Self::mode(shell, window).expect("check just read this window's state"),
             );
         }
     }
@@ -3622,6 +3632,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     #[must_use]
     pub fn display_mode(&self) -> DisplayMode {
         ModeRequest::mode(self.shell.as_ref(), self.window)
+            .expect("the loop's window is live while the loop runs")
     }
 
     /// The window this loop is driving.
@@ -4381,24 +4392,31 @@ mod tests {
     #[test]
     fn toggling_the_mode_asks_for_the_opposite_of_what_the_window_is_in() {
         let (mut shell, window) = shell();
-        assert_eq!(ModeRequest::mode(&shell, window), DisplayMode::Windowed);
+        assert_eq!(
+            ModeRequest::mode(&shell, window),
+            Some(DisplayMode::Windowed)
+        );
 
         ModeRequest::toggle(&mut shell, window).expect("the window is live");
         assert!(
-            ModeRequest::mode(&shell, window).is_borderless(),
+            ModeRequest::mode(&shell, window)
+                .expect("the window is live")
+                .is_borderless(),
             "the first toggle must ask for borderless",
         );
 
         ModeRequest::toggle(&mut shell, window).expect("the window is live");
         assert_eq!(
             ModeRequest::mode(&shell, window),
-            DisplayMode::Windowed,
+            Some(DisplayMode::Windowed),
             "the second must come back",
         );
 
         ModeRequest::toggle(&mut shell, window).expect("the window is live");
         assert!(
-            ModeRequest::mode(&shell, window).is_borderless(),
+            ModeRequest::mode(&shell, window)
+                .expect("the window is live")
+                .is_borderless(),
             "the third must ask for borderless again",
         );
     }
@@ -4432,7 +4450,7 @@ mod tests {
         );
         assert_eq!(
             ModeRequest::mode(&shell, window),
-            DisplayMode::Windowed,
+            Some(DisplayMode::Windowed),
             "mode() reported the request rather than what the window actually is",
         );
 
@@ -4447,10 +4465,11 @@ mod tests {
     ///
     /// Accepting a close request destroys the window, and the summary is built
     /// afterwards — so [`ModeRequest::mode`] has nothing left to read and
-    /// answers `Windowed`, in the same words a genuinely windowed run uses.
-    /// That is every session a player ended the ordinary way: the whole run
-    /// borderless, the summary line saying windowed, and nothing downstream
-    /// able to tell it from the truth.
+    /// answers `None`, which is the honest shape and not a summary: a caller
+    /// that unwrapped it into `Windowed` would say the same words a genuinely
+    /// windowed run uses. That is every session a player ended the ordinary way:
+    /// the whole run borderless, the summary line saying windowed, and nothing
+    /// downstream able to tell it from the truth.
     #[test]
     fn the_mode_a_finished_run_reports_survives_the_window_it_was_read_from() {
         let (mut shell, window) = shell();
@@ -4470,10 +4489,18 @@ mod tests {
             request.honoured(),
             "the window never went borderless, so the rest of this proves nothing"
         );
-        assert!(ModeRequest::mode(&shell, window).is_borderless());
+        assert!(
+            ModeRequest::mode(&shell, window)
+                .expect("the window is live")
+                .is_borderless()
+        );
 
         // What accepting a close request does, one layer down.
         shell.destroy_window(window).expect("the window is live");
+        assert!(
+            ModeRequest::mode(&shell, window).is_none(),
+            "a dead window must not read as an invented Windowed"
+        );
         assert!(
             request.mode_at_exit(&shell, window).is_borderless(),
             "the summary would have called a fullscreen session windowed"

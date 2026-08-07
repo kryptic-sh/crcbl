@@ -298,7 +298,10 @@ fn the_loops_input_helpers_work_outside_the_engines_loop() {
     let (mut shell, window, _clock) = concrete();
 
     // -- the display-mode request -------------------------------------------
-    assert_eq!(ModeRequest::mode(&shell, window), DisplayMode::Windowed,);
+    assert_eq!(
+        ModeRequest::mode(&shell, window),
+        Some(DisplayMode::Windowed),
+    );
     ModeRequest::toggle(&mut shell, window).expect("the shell accepts the request");
     let mut request = ModeRequest::new();
     request.check(&shell, window);
