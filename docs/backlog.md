@@ -3134,11 +3134,6 @@ not:
   that each cue fires, that it carries the position of the thing that raised it,
   and that the explosion decays and is not a tone. Nobody has listened to the
   result on a real device and no test can tell a good explosion from a bad one.
-- **No visual for a shot hitting a rock.** The explosion is audible and not
-  visible: a rock disappears and two smaller ones appear, with nothing between.
-  Particles are a hard non-goal in `docs/plan/sample/02-asteroids.md`, so
-  whatever this is, it is not that — a two-frame flash sprite at the hit
-  position is the cheapest thing that would read.
 - **The 10-minute soak in the exit criteria was not run.** What runs in CI is
   `hundreds_of_spawns_and_deaths_leak_nothing`: 18,000 ticks (five minutes of
   simulated play), 337 rocks spawned, 1,221 bullets fired, six waves cleared,
