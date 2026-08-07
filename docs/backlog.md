@@ -75,18 +75,6 @@ phase attached to it.
   and the player's own glade sits in the first view — and a wide bound on one
   seed is a weak test.
 
-- **Horde's movement tests now share an arena with the scenery.** Several tests
-  that predate H4 — `a_player_walking_at_a_wall_stops_at_it`,
-  `the_player_moves_at_the_stated_speed_and_a_diagonal_is_no_faster` — walk the
-  player across ground that `scatter_props` has since put trees on. They pass,
-  and they pass deterministically, because the layout is a pure function of
-  `DEFAULT_SEED`. But they pass because that particular layout leaves their
-  paths clear, not because anything arranged it: a change to `PROP_DENSITY`,
-  `PROP_CELL` or `DEFAULT_SEED` could drop a tree in front of one of them, and
-  the failure would look like a movement bug. Two ways out, neither taken: give
-  those tests a seed chosen for a clear corridor, or let `Harness::staged` take
-  a prop-free arena — which would make them tests of a game that does not exist.
-
 ## The goal: a sample depends on `crcbl` and `std`, and it is met bar one line
 
 Stated as a target for the samples on 2026-08-03, and reached on 2026-08-03.
