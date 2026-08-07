@@ -316,14 +316,17 @@ clock. `run_sandbox_paced` in `crates/crcbl-shell/tests/run-wayland-e2e.sh`
 proves the whole path on a real Vulkan swapchain — the flag, the present mode,
 the logged limit and the measured frame time. What that leaves:
 
-- **Only `--pacing off` is covered end to end.** `vsync` is covered incidentally
-  (it is what `auto` resolves to on every machine this repo has run on), and
-  **`adaptive` is covered by unit tests and by nothing else** — no run has ever
-  opened a swapchain on `FifoRelaxed`. It is the one a VRR panel actually wants,
-  so the gap is the same missing machine `Pacing::resolve`'s entry above needs;
-  a second `run_sandbox_paced adaptive` pass would at least prove the present
-  mode is reachable, which is cheap and was left out only because the pass it
-  would copy is the one that had never existed before.
+- **The `adaptive` e2e pass now exists, and its first run is unobserved.**
+  `run_sandbox_paced` takes the pacing and its expected present mode, and the
+  wayland suite opens a second pass with `--pacing adaptive`, asserting
+  `asked for Adaptive, pacing Adaptive` and a `FifoRelaxed` swapchain — the mode
+  a VRR panel wants, which no run had ever opened one on (its coverage was unit
+  tests and nothing else). The engine-side lines the greps match are verified;
+  the pass itself has not executed: sway cannot start in the development
+  sandbox, so the first green run is CI's next wayland pass. What is still a
+  missing machine, tracked in the `Pacing::resolve` entry above, is whether
+  adaptive _improves_ anything on a real VRR panel — this pass proves only that
+  the present mode is reachable.
 
 - **`--fps` is unobservable on every CI leg without a compositor.** The limiter
   lives on `Clock::Real` by construction, so a headless run takes the flag and
