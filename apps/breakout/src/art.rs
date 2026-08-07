@@ -787,6 +787,68 @@ mod tests {
         assert_eq!(centre[1], target[1], "the court has grown a floor");
     }
 
+    /// **The surround and the court interior read as different surfaces.**
+    ///
+    /// `SURROUND` (the clear the swapchain loads with, the "not the game"
+    /// margin around the field) and `field.crpix`'s `f` (the fill the nine-slice
+    /// centre stretches across the whole court) are two hand-written colours and
+    /// nothing held them apart — a change to either that made the court blend
+    /// into the surround was invisible to the tests. Both are sRGB; `SURROUND`
+    /// is stored already linearized, so the fill is converted to linear to
+    /// compare them in one space. The claim is a stated ratio: the court's
+    /// interior must be at least twice as bright, in luminance, as the surround
+    /// it sits on.
+    #[test]
+    fn the_court_interior_reads_against_the_surround() {
+        let field = baked("field", FIELD_PNG, FIELD_JSON);
+        let source = NineSliceSource::from_sheet(&field.sheet, 0)
+            .expect("field.crpix declares a nine-slice over its one frame");
+        // The centre of the nine-slice — the texels `expand` stretches across
+        // the whole court — is the fill. Inset-bounded, so it moves with the
+        // art instead of being an authored coordinate.
+        let cw = source.frame.w - source.nine.left - source.nine.right;
+        let ch = source.frame.h - source.nine.top - source.nine.bottom;
+        assert!(
+            cw > 0 && ch > 0,
+            "the court has a centre: insets {:?} leave no interior texels",
+            (
+                source.nine.left,
+                source.nine.right,
+                source.nine.top,
+                source.nine.bottom
+            ),
+        );
+        let (x, y) = (
+            source.frame.x + source.nine.left,
+            source.frame.y + source.nine.top,
+        );
+        let pixel = (y as usize * field.image.width as usize + x as usize) * 4;
+        let fill = [
+            field.image.pixels[pixel],
+            field.image.pixels[pixel + 1],
+            field.image.pixels[pixel + 2],
+        ];
+
+        // The canonical IEC 61966-2-1 transfer, per component: sRGB 8-bit → linear.
+        let to_linear = |c: u8| {
+            let c = c as f32 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let luma = |rgb: [f32; 3]| rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+        let fill_luma = luma([to_linear(fill[0]), to_linear(fill[1]), to_linear(fill[2])]);
+        let surround_luma = luma([SURROUND[0], SURROUND[1], SURROUND[2]]);
+        assert!(
+            fill_luma > 2.0 * surround_luma,
+            "the court fill ({fill:?}) reads as {}× the surround's luminance; \
+             it must be at least 2× so the two stay different surfaces",
+            fill_luma / surround_luma,
+        );
+    }
+
     /// The row a brick is drawn as is the row the grid put it in, for every
     /// brick in it — the inverse of `game::brick_position`, checked against the
     /// function itself rather than against a repeated constant.
