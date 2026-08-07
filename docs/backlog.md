@@ -5083,11 +5083,13 @@ The device-and-resources slice. Everything below is in `crates/crcbl-dx12`.
   table DX2 added now makes possible — the reason `adapter.rs` gives for
   deferring them no longer holds.
 
-- **`device.rs`'s implementation half is over the size a module should reach**,
-  after `handle.rs`, `conv.rs`, `descriptor.rs` and `view.rs` were already split
-  out of it. The next seam available is the descriptor validation —
-  `check_image`, `check_view_type` and `build_views` — which is a move, not a
-  behaviour change.
+- **`device.rs`'s implementation half is still over the size a module should
+  reach.** The seam DX2 named — the descriptor validation, `check_image`,
+  `check_view_type` and `build_views` — was split into `validate.rs` on
+  2026-08-07 as a move, and the file is still the implementation half of the
+  device. The next seam is not named; `crcbl-mtl`'s device.rs carries the same
+  warning with its own candidates (the pools, the create/destroy pairs,
+  submission, readback).
 
 - **The slice runs on WARP and nowhere else.** Its whole suite passed on
   `windows-latest` on the first attempt, which is a behavioural result and not a
@@ -5154,9 +5156,9 @@ The command-list, render-pass and clear slice. All in `crates/crcbl-dx12`.
   as nextest's SLOW-then-SIGKILL. The test name identifies it; the stage marker
   does not.
 
-- **`device.rs` grew again.** DX2's note about splitting `check_image`,
-  `check_view_type` and `build_views` out of it still stands and is more urgent
-  now, not less.
+- **`device.rs` grew again.** The descriptor-validation split DX3 was waiting
+  for landed on 2026-08-07 (see the DX2 entry above); the file is still the
+  implementation half of the device.
 
 ## What the DX12 swapchain and present-feedback slice left open
 
