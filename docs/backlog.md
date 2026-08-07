@@ -2580,24 +2580,6 @@ The pipeline is joined up end to end for both games: each of `apps/flappy` and
 and an `art::Scene` draws it through `SpriteRenderer` on a layer stack. What is
 left:
 
-- **The menu still works around `NineSliceSource`'s texels-per-unit scale.**
-  Flappy and breakout are migrated: the source carries a `texels_per_unit` scale
-  (`with_texels_per_unit`, default 1), so the fixed bands of `expand` and
-  `minimum_size` come back in the caller's units and both samples' sprite planes
-  are world units — the two `art::TEXELS_PER_UNIT` camera scalings and both
-  `gpu::projection` multiplications are gone, and `crcbl-render`'s own
-  `button_skin` is untouched at the default scale of 1. What is left is the
-  third caller: `crcbl_render::menu_camera` still exists only because the menu
-  is laid out in device pixels, and drawing it through a camera of one unit per
-  pixel would make the window frame's four-texel corner four pixels at every
-  scale, so a menu drawn three times as large would keep a hairline border. The
-  camera divides by the style's scale instead. Migrating it means the menu's
-  world becomes device pixels — `menu_camera`'s division comes out, the menu's
-  sources take `with_texels_per_unit(1 / scale)`, and `crcbl_ui::menu`'s
-  `PANEL_INSETS`/`BUTTON_INSETS` (in texels) and the `MenuStyle` pixels-vs-
-  texels mixed units get resolved. That touches `crcbl-ui` as well as
-  `crcbl-render`, and was left out of the migration slice on purpose.
-
 - **The tick rate is one constant now, and the guard around it is still weak in
   three of the five.** `bake_dir` writes `ART_TICK_HZ` into the generated table,
   so the loader reads the rate the art was actually baked at and the `build.rs`
@@ -3454,17 +3436,6 @@ uncertainty.
   means something here. _Changes it_: breakout gaining a camera that moves — a
   screen-shake on a brick break would be the obvious one, and is currently a
   scope violation under the sample's "no juice" cap.
-
-- **Texels-per-unit: fix the engine, or let each sample pick a scale?** Taken:
-  **let the convention stand through P4B, fix it before the third sample.**
-  `NineSliceSource::expand` takes its insets as target units directly, so a
-  6-texel cap is 6 units tall whatever the caller's world is; flappy scaled its
-  sprite plane by 20 and breakout by 10, chosen independently from the pipe and
-  from the ball. The reason for deferring was scope — the slice was `apps/*` and
-  the fix is in `crcbl-render` — not doubt about the fix. _Changes it_: nothing;
-  this one is already owed. The work item, with the shape the fix should take,
-  is under **The sprite system** above. Recorded here so the deferral itself is
-  on the record and not just its consequence.
 
 - **Commit the baked PNGs beside the `.crpix` text?** Taken: **no.** _(Moved
   here from Considered and declined.)_ It would make the build faster and the
