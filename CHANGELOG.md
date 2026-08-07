@@ -48,6 +48,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `crcbl new` template documents both routes where a scaffolded game would look
   for them.
 
+- **`--size <WxH>`, so a run picks the extent its window opens at.** The value
+  is on `crcbl::args::Common` as `size: Option<PhysicalSize>`, so the four
+  samples that take the shared flag set — and the `crcbl new` template — open
+  their window at the size named instead of their hardcoded default; a `WxH`
+  that is not two positive numbers is refused by name. It exists for the
+  headless measurement the samples were otherwise stuck at one extent for: the
+  offscreen ring takes its extent from the window, and `--size 1920x1080`
+  renders at exactly 1920 × 1080 (the window request is logical at scale 1).
+  `apps/sandbox`, which keeps its own parser, does not take it.
+
 - **The HAL can be asked what the display is doing with presented frames, not
   just what was requested.** `crcbl_hal::DisplayTiming` is a new four-state
   answer — `Unknown`, `Fixed { cycle }`, `Variable { shortest }` and

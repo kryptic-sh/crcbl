@@ -2636,27 +2636,6 @@ The modular panel is built and all three samples switch it on with F3 (or
   worth making deliberately rather than in passing. **What it would take**: the
   transport growing byte and timing counters, then a `DebugModule` impl beside
   them, then one `add` line in each sample that has a connection.
-- **The panel's own cost is measured at 960 × 720 and still not at 1080p.**
-  Horde's scale runs took it: with ten thousand enemies on the field and the
-  panel showing three sections, switching it on moves the `ui-composite` GPU
-  pass from 0.004 ms to 0.005 ms and leaves the CPU frame time inside its own
-  noise (0.107/0.109 ms off against 0.100/0.101 ms on, two runs each — the
-  "with" runs came out _lower_, which is the noise floor rather than a saving).
-  `07-ui-debug.md`'s criterion is **"<0.5 ms GPU at 1080p"** and that extent has
-  not been run, so the criterion is not closed; it is two orders of magnitude
-  the right side of it at three quarters the pixels. **It is blocked on a knob
-  rather than a run**: the headless offscreen ring takes its extent from the
-  window, and the sample's window is a fixed 960 × 720 — nothing in `Common` or
-  horde's own parser sets a size, so 1080p is unreachable headless until a
-  `--size` flag exists (or the criterion is re-stated for the extent that is
-  reachable). Conditions when that lands: release, `--backend vk` on radv (RX
-  7900 XTX), headless offscreen ring,
-  `--wall-clock --fps 0 --tick-hz 1 --frames 900 --prefill 10000` — `--fps 0`
-  because the frame limiter sleeps inside the measured frame, so a paced run's
-  CPU column reads the limiter (see `docs/plan/sample/03-horde.md`'s conditions
-  note; `--wall-clock` also had to be restored first, commit 0fa7674) —
-  `PassTimers::latest` for the GPU number and the panel's own `FrameStats` mean
-  for the CPU one.
 - **The overlay starts hidden in a release wasm build.** The default is
   `cfg!(debug_assertions)`, which is sample rule 4's "on by default in dev
   builds" taken literally; the demos on `crcbl.kryptic.sh` are release builds,

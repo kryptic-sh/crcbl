@@ -150,7 +150,12 @@ pub fn with_shell<S: Shell + ?Sized>(
     options: &Options,
 ) -> Result<Loop<S>, FlappyError> {
     let clock_source = Clock::new(options.common.headless);
-    let window = open_the_window(shell.as_mut(), &clock_source, options.common.display_mode())?;
+    let window = open_the_window(
+        shell.as_mut(),
+        &clock_source,
+        options.common.display_mode(),
+        options.common.size,
+    )?;
 
     let mut events = 0;
     let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
@@ -314,6 +319,7 @@ fn open_the_window<S: Shell + ?Sized>(
     shell: &mut S,
     clock_source: &Clock,
     mode: DisplayMode,
+    size: Option<crcbl::shell::PhysicalSize>,
 ) -> Result<WindowId, FlappyError> {
     Ok(crcbl::engine::open_window(
         shell,
@@ -321,7 +327,9 @@ fn open_the_window<S: Shell + ?Sized>(
         &WindowDesc {
             title: "Flappy",
             app_id: "sh.kryptic.crcbl.flappy",
-            size: LogicalSize::new(960.0, 720.0),
+            // `--size` names pixels; the window request is logical at scale 1,
+            // which is exactly the extent the headless offscreen ring renders at.
+            size: size.map_or(LogicalSize::new(960.0, 720.0), |size| size.to_logical(1.0)),
             // Asked for at creation rather than switched to afterwards, so
             // `--fullscreen` does not show a decorated window first.
             mode,
@@ -357,7 +365,12 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
         options: &Options,
         clock_source: Clock,
     ) -> Result<Self, FlappyError> {
-        let window = open_the_window(shell.as_mut(), &clock_source, options.common.display_mode())?;
+        let window = open_the_window(
+            shell.as_mut(),
+            &clock_source,
+            options.common.display_mode(),
+            options.common.size,
+        )?;
         Ok(Self {
             boot: crcbl::engine::PolledBoot::request(
                 shell,

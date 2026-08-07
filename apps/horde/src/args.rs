@@ -9,7 +9,7 @@
 //! # What is left here after the engine took the shared half
 //!
 //! [`crcbl::args::Common`] owns `--headless`, `--frames`, `--tick-hz`,
-//! `--backend` and the debug-overlay pair. This file is horde's own, and it is
+//! `--backend`, `--size` and the debug-overlay pair. This file is horde's own, and it is
 //! the largest of the four remainders because horde is the sample with the most
 //! to say: a seed, an enemy cap, a prefill for the scale measurement, and the
 //! `--wall-clock` escape hatch that lets a headless run read the real clock.
@@ -44,6 +44,9 @@ OPTIONS:
                          enough to be a runaway guard rather than a cap. 0 is
                          unlimited. Under vsync the display paces the loop and
                          this rarely fires.
+    --size <WxH>         Window size in pixels, WxH (default 960x720). The
+                         headless offscreen ring renders at exactly this extent,
+                         which is what makes a scale measurement reproducible.
     --seed <N>           Run seed. The same seed is the same horde.
     --max-enemies <N>    Ceiling on live enemies (default 1500). The plan's
                          target is 10000; raising it is what the scale

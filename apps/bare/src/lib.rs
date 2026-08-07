@@ -140,7 +140,12 @@ impl<S: Shell + ?Sized> Bare<S> {
             &WindowDesc {
                 title: "crcbl — bare",
                 app_id: "sh.kryptic.crcbl.bare",
-                size: LogicalSize::new(640.0, 480.0),
+                // `--size` names pixels; the window request is logical at
+                // scale 1, which is exactly the extent the headless offscreen
+                // ring renders at.
+                size: options
+                    .size
+                    .map_or(LogicalSize::new(640.0, 480.0), |size| size.to_logical(1.0)),
                 // Asked for at creation rather than switched to afterwards, so
                 // `--fullscreen` does not show a decorated window first.
                 mode: options.display_mode(),
@@ -369,6 +374,9 @@ OPTIONS:
                          enough to be a runaway guard rather than a cap. 0 is
                          unlimited. Under vsync the display paces the loop and
                          this rarely fires.
+    --size <WxH>         Window size in pixels, WxH (default 960x720). The
+                         headless offscreen ring renders at exactly this extent,
+                         which is what makes a scale measurement reproducible.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'

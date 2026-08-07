@@ -179,12 +179,20 @@ fn a_scaffolded_project_builds_lints_and_runs_headless() {
             .current_dir(&project)
             .env("CARGO_TARGET_DIR", &target)
             .args(["run", "--headless", "--"])
-            .args(["--frames", "30", "--backend", &backend]),
+            .args(["--frames", "30", "--backend", &backend, "--size", "320x240"]),
     );
     let output = String::from_utf8_lossy(&ran.stdout).into_owned();
     assert!(
         output.contains("mygame: 30 frames"),
         "the game ran its frame budget on the {backend} backend:\n{output}"
+    );
+    // `--size` is a shared flag, so the generated project has to honour it the
+    // way the samples do: the headless offscreen ring renders at the extent
+    // named. 320x240 is not the template's own default, so this cannot pass by
+    // accident.
+    assert!(
+        output.contains("at 320x240"),
+        "the scaffold ignored --size; the summary reports its extent:\n{output}"
     );
 
     // 6. And the same loop with a window on it, when there is a compositor to

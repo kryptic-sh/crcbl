@@ -221,7 +221,12 @@ pub fn with_shell<S: Shell + ?Sized>(
     // needs the second of those to be a real number; every other headless run
     // needs the first. See `crate::args`.
     let clock_source = Clock::new(!options.real_clock());
-    let window = open_the_window(shell.as_mut(), &clock_source, options.common.display_mode())?;
+    let window = open_the_window(
+        shell.as_mut(),
+        &clock_source,
+        options.common.display_mode(),
+        options.common.size,
+    )?;
 
     let mut events = 0;
     let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
@@ -446,6 +451,7 @@ fn open_the_window<S: Shell + ?Sized>(
     shell: &mut S,
     clock_source: &Clock,
     mode: DisplayMode,
+    size: Option<crcbl::shell::PhysicalSize>,
 ) -> Result<WindowId, HordeError> {
     Ok(crcbl::engine::open_window(
         shell,
@@ -453,7 +459,9 @@ fn open_the_window<S: Shell + ?Sized>(
         &WindowDesc {
             title: "Horde",
             app_id: "sh.kryptic.crcbl.horde",
-            size: LogicalSize::new(960.0, 720.0),
+            // `--size` names pixels; the window request is logical at scale 1,
+            // which is exactly the extent the headless offscreen ring renders at.
+            size: size.map_or(LogicalSize::new(960.0, 720.0), |size| size.to_logical(1.0)),
             // Asked for at creation rather than switched to afterwards, so
             // `--fullscreen` does not show a decorated window first.
             mode,
@@ -489,7 +497,12 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
         options: &Options,
         clock_source: Clock,
     ) -> Result<Self, HordeError> {
-        let window = open_the_window(shell.as_mut(), &clock_source, options.common.display_mode())?;
+        let window = open_the_window(
+            shell.as_mut(),
+            &clock_source,
+            options.common.display_mode(),
+            options.common.size,
+        )?;
         Ok(Self {
             boot: crcbl::engine::PolledBoot::request(
                 shell,
@@ -806,6 +819,20 @@ mod tests {
                 .expect("the window is live");
             engine.frame().expect("a frame");
         }
+    }
+
+    /// `--size` reaches the window: the headless offscreen ring opens at the
+    /// extent named, not at the sample's 960 × 720 default. The default is the
+    /// game's and stays the game's; the flag overrides it.
+    #[test]
+    fn a_size_flag_opens_the_window_at_the_extent_it_names() {
+        let sized = at_the_title_screen(&headless_with(8, |common| {
+            common.size = Some(crcbl::shell::PhysicalSize::new(320, 240));
+        }));
+        assert_eq!(sized.gpu().extent(), (320, 240));
+
+        let default = at_the_title_screen(&headless(8));
+        assert_eq!(default.gpu().extent(), (960, 720));
     }
 
     // -----------------------------------------------------------------------

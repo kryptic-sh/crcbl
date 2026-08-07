@@ -7,7 +7,7 @@
 //! # What is left here after the engine took the shared half
 //!
 //! [`crcbl::args::Common`] owns `--headless`, `--frames`, `--tick-hz`,
-//! `--backend` and the debug-overlay pair, because those are the *engine's*
+//! `--backend`, `--size` and the debug-overlay pair, because those are the *engine's*
 //! vocabulary — a backend names the GPU registry and a tick rate sets the
 //! session's clock — and four games spelling them out was four chances to spell
 //! them differently. This file is flappy's own: its usage prose, its `--seed`,
@@ -49,6 +49,9 @@ OPTIONS:
                          enough to be a runaway guard rather than a cap. 0 is
                          unlimited. Under vsync the display paces the loop and
                          this rarely fires.
+    --size <WxH>         Window size in pixels, WxH (default 960x720). The
+                         headless offscreen ring renders at exactly this extent,
+                         which is what makes a scale measurement reproducible.
     --seed <N>           Course seed. The same seed is the same pipes.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a

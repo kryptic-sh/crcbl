@@ -45,6 +45,9 @@ OPTIONS:
                          enough to be a runaway guard rather than a cap. 0 is
                          unlimited. Under vsync the display paces the loop and
                          this rarely fires.
+    --size <WxH>         Window size in pixels, WxH (default 960x720). The
+                         headless offscreen ring renders at exactly this extent,
+                         which is what makes a scale measurement reproducible.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'

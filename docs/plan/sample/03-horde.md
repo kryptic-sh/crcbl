@@ -228,6 +228,20 @@ screen), and at 2000 and above the player dies at about a second and the death
 menu is up at the measured frame. The `sprites` column is the field pass alone;
 the `menu` column is the second one. `—` means the pass was empty and skipped.
 
+**The `<0.5 ms GPU at 1080p` criterion from `07-ui-debug.md` is now measured,
+not argued.** The 1080p extent was unreachable headless until `--size` landed;
+with it, the same fixture runs at 1920 × 1080: release, `--backend vk` on radv
+(RX 7900 XTX), headless offscreen ring,
+`--wall-clock --fps 0 --tick-hz 1 --frames 900 --prefill 10000 --size 1920x1080 --debug-overlay`.
+Three repeats read a 0.065–0.068 ms total GPU frame (`ui-composite` 0.005 ms —
+the panel's own pass, unchanged from its 0.005 ms at 960 × 720) and a
+0.150–0.153 ms CPU frame mean. The 2.25× pixel increase moved the field sprite
+pass from 0.020 to 0.041 ms, which is where the total's growth from 0.038 to
+0.067 ms comes from; the criterion's budget has two orders of magnitude of
+clearance at the extent it names, and the numbers come from the engine's own
+exit log (`frame timing` / `frame cpu` lines), so the run is reproducible
+without instrumentation. Measured 2026-08-07.
+
 `drawn` is what survived the CPU view cull and reached the pass — the arena is
 96 × 72 units against a view of about 37 × 28, so most of a large horde is off
 screen and the number on screen is bounded by the **screen** rather than by the

@@ -509,7 +509,12 @@ fn start(options: &Common) -> Result<crcbl::engine::Loop<dyn Shell, Game>, Error
         &WindowDesc {
             title: NAME,
             app_id: APP_ID,
-            size: WINDOW_SIZE,
+            // `--size` names pixels; the window request is logical at scale 1,
+            // which is exactly the extent the headless offscreen ring renders
+            // at.
+            size: options
+                .size
+                .map_or(WINDOW_SIZE, |size| size.to_logical(1.0)),
             // Asked for at creation rather than switched to afterwards, so
             // `--fullscreen` does not show a decorated window first.
             mode: options.display_mode(),

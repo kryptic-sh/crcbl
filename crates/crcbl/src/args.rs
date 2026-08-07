@@ -57,7 +57,10 @@ pub const COMMON_OPTIONS_HELP: &str = "\
     --fps <N>            Frame limit, in frames a second. Default: 1000, high
                          enough to be a runaway guard rather than a cap. 0 is
                          unlimited. Under vsync the display paces the loop and
-                         this rarely fires.";
+                         this rarely fires.
+    --size <WxH>         Window size in pixels, WxH (default 960x720). The
+                         headless offscreen ring renders at exactly this extent,
+                         which is what makes a scale measurement reproducible.";
 
 /// The tail of the shared block: the debug overlay pair and `--help`.
 ///
@@ -165,6 +168,13 @@ pub struct Common {
     /// [`Common::new`] parameter because, unlike the tick rate, most games have
     /// no opinion at all.
     pub limit: FrameLimit,
+    /// The window size the sample opens at, or `None` for the sample's default.
+    ///
+    /// Pixels, as a `WxH` value. The window *request* is
+    /// [`crcbl_shell::LogicalSize`] at scale 1, which is what makes `--size
+    /// 1920x1080` produce a 1920 × 1080 headless offscreen ring on every
+    /// machine; on a HiDPI display the compositor scales the request.
+    pub size: Option<crcbl_shell::PhysicalSize>,
 }
 
 impl Common {
@@ -184,6 +194,7 @@ impl Common {
             debug_overlay: None,
             pacing: Pacing::Auto,
             limit: FrameLimit::fps(FrameLimit::DEFAULT_FPS),
+            size: None,
         }
     }
 
@@ -331,6 +342,10 @@ impl Common {
                     }
                 }
             }
+            "--size" => match size(arg, rest) {
+                Ok(size) => self.size = Some(size),
+                Err(message) => return Consumed::Bad(message),
+            },
             _ => return Consumed::No,
         }
         Consumed::Yes
@@ -382,6 +397,37 @@ pub fn number(
     value
         .parse::<u64>()
         .map_err(|_| format!("not a {noun}: {value}"))
+}
+
+/// The value after `--size`, parsed as `WxH`.
+///
+/// `1` is a size a `--frames`-style positive-number parse would also accept,
+/// and it is exactly the value this must *not* accept — "1" is not "1x1", and
+/// accepting it would turn a typo into a tiny window.
+///
+/// # Errors
+///
+/// The message to hand back as `BadUsage`, when the value is missing, is not
+/// `WxH`, or a dimension is zero.
+pub fn size(
+    flag: &str,
+    rest: &mut impl Iterator<Item = String>,
+) -> Result<crcbl_shell::PhysicalSize, String> {
+    let Some(value) = rest.next() else {
+        return Err(format!("{flag} needs a size"));
+    };
+    let (w, h) = match value.split_once('x') {
+        Some(pair) => pair,
+        None => return Err(format!("not a WxH size: {value}")),
+    };
+    let (width, height) = match (w.parse::<u32>(), h.parse::<u32>()) {
+        (Ok(width), Ok(height)) => (width, height),
+        _ => return Err(format!("not a WxH size: {value}")),
+    };
+    if width == 0 || height == 0 {
+        return Err(format!("not a WxH size: {value}"));
+    }
+    Ok(crcbl_shell::PhysicalSize::new(width, height))
 }
 
 #[cfg(test)]
@@ -445,6 +491,10 @@ mod tests {
             "a runaway guard, not a cap",
         );
         assert_eq!(common.limit.rate(), 1000);
+        assert_eq!(
+            common.size, None,
+            "the window size is the sample's default until --size says otherwise",
+        );
     }
 
     /// Both new flags reach the engine, through the two values a sample passes.
@@ -631,6 +681,42 @@ mod tests {
         assert_eq!(run(&["--help"]).1, Consumed::Help);
     }
 
+    /// A `WxH` value parses into the size the window will be opened at, and
+    /// every shape that is not `WxH` is refused rather than guessed at.
+    #[test]
+    fn the_size_flag_takes_a_width_and_a_height() {
+        assert_eq!(
+            parsed(&["--size", "1920x1080"]).size,
+            Some(crcbl_shell::PhysicalSize::new(1920, 1080)),
+        );
+        assert_eq!(
+            parsed(&["--size", "640x360"]).size,
+            Some(crcbl_shell::PhysicalSize::new(640, 360)),
+        );
+        assert_eq!(
+            parsed(&["--size", "1x1"]).size,
+            Some(crcbl_shell::PhysicalSize::new(1, 1))
+        );
+
+        for bad in [
+            "kittens", // not WxH at all
+            "1",       // a typo for "1x1", which the positive-number parse would take
+            "1920x",   // half a size
+            "x1080",   // the other half
+            "0x1080",  // a zero dimension
+            "1920x0",
+            "1920X1080", // the separator is lowercase x
+        ] {
+            let refused = rejected(&["--size", bad]);
+            assert!(refused.contains("WxH"), "--size {bad}: {refused}");
+        }
+        assert!(rejected(&["--size"]).contains("--size"));
+        assert!(
+            rejected(&["--size", "99999999999x1"]).contains("WxH"),
+            "too wide for u32"
+        );
+    }
+
     /// The whole point of `No`: an argument the engine does not know is handed
     /// back rather than rejected, because only the game knows whether it claims
     /// it. A `Bad` here would make `--seed` impossible.
@@ -689,6 +775,7 @@ mod tests {
             "--backend",
             "--pacing",
             "--fps",
+            "--size",
             "--debug-overlay",
             "--no-debug-overlay",
             "-h",
@@ -696,8 +783,13 @@ mod tests {
         ] {
             assert!(help.contains(flag), "{flag} is not in the help");
             // `1` is a legal value for every flag that takes one — a rate, a
-            // count — except `--pacing`, whose values are words.
-            let value = if flag == "--pacing" { "auto" } else { "1" };
+            // count — except `--pacing`, whose values are words, and `--size`,
+            // which wants a `WxH` pair.
+            let value = match flag {
+                "--pacing" => "auto",
+                "--size" => "1x1",
+                _ => "1",
+            };
             let mut rest = [value.to_string()].into_iter();
             assert_ne!(
                 Common::new(60).consume(flag, &mut rest),
