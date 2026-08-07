@@ -69,7 +69,7 @@ use crcbl::shell::{
 use crcbl::ui::draw_list::DrawList;
 
 use crate::art::SceneStats;
-use crate::game::{self, Game, GameState, RenderState, UPGRADE_CHOICES};
+use crate::game::{self, Game, GameState, RenderState, UPGRADE_CHOICES, Upgrade};
 use crate::gpu::Gpu;
 use crate::menu::{self, HordeAction, LevelUpOffer, MenuKind, Menus};
 
@@ -152,6 +152,15 @@ pub struct Horde {
     /// [`LevelUpOffer`], and [`menu_kind`](HostedGame::menu_kind) for when it is
     /// consulted.
     offer: LevelUpOffer,
+    /// The upgrade `--choose` auto-presses at every level-up, zero-based into
+    /// [`UPGRADE_CHOICES`]; `None` when the flag was not given. See
+    /// [`menu_kind`](HostedGame::menu_kind).
+    choose: Option<usize>,
+    /// The offer the auto-choose has already pressed for, so it fires once per
+    /// distinct level-up rather than every frame the screen is up. Mirrors
+    /// `LevelUpOffer::built_from`'s identity on `Horde` itself, because a
+    /// press is an action on the game, not a menu rebuild.
+    choose_taken: Option<(u32, [Upgrade; UPGRADE_CHOICES])>,
     /// What the sprite pass did with the last frame's field.
     ///
     /// Recorded rather than asked for at teardown, because the scene is rebuilt
@@ -265,6 +274,8 @@ fn assemble<S: Shell + ?Sized>(
             render_state: RenderState::default(),
             hud: HudStrings::default(),
             offer: LevelUpOffer::default(),
+            choose: options.choose,
+            choose_taken: None,
             scene: SceneStats::default(),
         },
         options.common.loop_config(),
@@ -342,7 +353,27 @@ impl HostedGame for Horde {
     fn menu_kind(&mut self, menus: &mut Menus, paused: bool) -> MenuKind {
         self.offer
             .refresh(menus, self.render_state.level, self.render_state.offer);
-        MenuKind::of(paused, &self.render_state)
+        let kind = MenuKind::of(paused, &self.render_state);
+        // `--choose <N>`: press the digit for the player once per distinct
+        // level-up offer, so a headless run can reach past the screen without
+        // a hand. The identity is the same pair `LevelUpOffer` rebuilds on —
+        // the level and the offer — and the offer is `Some` exactly on
+        // `LevelUp` frames, so `kind` is what makes the unwrap safe. Runs
+        // every frame, so the `choose_taken` marker is what stops a second
+        // press on the same offer from taking a second upgrade.
+        if let (Some(index), MenuKind::LevelUp, Some(offer)) =
+            (self.choose, kind, self.render_state.offer)
+        {
+            let identity = (self.render_state.level, offer);
+            if Some(identity) != self.choose_taken {
+                if let Some(&key) = CHOOSE_KEYS.get(index) {
+                    self.game.key_event(key, true);
+                    self.game.key_event(key, false);
+                }
+                self.choose_taken = Some(identity);
+            }
+        }
+        kind
     }
 
     fn draw(&mut self, gpu: &mut Gpu, draw_list: &mut DrawList, frame: FrameInfo) {
@@ -1301,6 +1332,79 @@ mod tests {
             .stage_enemy(game::EnemyKind::Grunt, DVec3::ZERO);
         run_frames(&mut engine, 4);
         assert_eq!(engine.menu_kind(), MenuKind::GameOver);
+    }
+
+    /// **`--choose` presses the digit for the player, once per level-up offer**,
+    /// so a headless run reaches past the screen without a hand — the frame the
+    /// screen opens still reports [`MenuKind::LevelUp`], and the next couple of
+    /// frames clear it with nothing injected.
+    ///
+    /// The negative control is the same script with the default `choose: None`:
+    /// the screen opens and stays, which is what says the auto-advance came
+    /// from the flag and not from something else about the loop.
+    #[test]
+    fn a_choose_flag_auto_advances_the_level_up_screen_and_the_default_parks_on_it() {
+        let mut engine = scripted(&Options {
+            choose: Some(0),
+            ..headless(256)
+        });
+        engine.frame().expect("a frame");
+        // The first frame is the title screen, whatever this test's helper
+        // queued — see `each_state_gets_its_own_menu_and_a_playing_frame_gets_none`.
+        assert_eq!(engine.menu_kind(), MenuKind::Start);
+        run_frames(&mut engine, 1);
+        assert_eq!(engine.menu_kind(), MenuKind::None);
+        engine
+            .game_mut()
+            .game_mut()
+            .bank_xp(game::xp_for_next_level(1));
+        run_frames(&mut engine, 1);
+        assert_eq!(
+            engine.menu_kind(),
+            MenuKind::LevelUp,
+            "the screen did not open before the auto-choose could reach it",
+        );
+        run_frames(&mut engine, 2);
+        assert_eq!(
+            engine.menu_kind(),
+            MenuKind::None,
+            "the auto-choose never pressed a digit",
+        );
+        assert_eq!(
+            engine.game_mut().game_mut().state,
+            GameState::Playing,
+            "the auto-choose closed the screen without taking the upgrade",
+        );
+        // The level crossed — the run really levelled up, rather than the
+        // screen closing by some path that skipped it. (`level` increments on
+        // entry to the screen, so the state check above is what proves the
+        // upgrade was *taken*; `level` proves the screen was a real level-up.)
+        assert_eq!(
+            engine.game_mut().game_mut().level,
+            2,
+            "the auto-choose advanced but the level never moved",
+        );
+
+        // The same frames without the flag: parked on the screen, with the
+        // same crossed level — which is what says the auto-advance came from
+        // the flag and not from something else about the loop.
+        let mut parked = scripted(&headless(256));
+        parked.frame().expect("a frame");
+        run_frames(&mut parked, 1);
+        parked
+            .game_mut()
+            .game_mut()
+            .bank_xp(game::xp_for_next_level(1));
+        run_frames(&mut parked, 1);
+        assert_eq!(parked.menu_kind(), MenuKind::LevelUp);
+        run_frames(&mut parked, 2);
+        assert_eq!(
+            parked.menu_kind(),
+            MenuKind::LevelUp,
+            "without --choose the level-up screen still closed",
+        );
+        assert_eq!(parked.game_mut().game_mut().state, GameState::LevelUp);
+        assert_eq!(parked.game_mut().game_mut().level, 2);
     }
 
     /// **The level-up menu's buttons apply the upgrade**, through the whole

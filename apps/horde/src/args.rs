@@ -3,6 +3,7 @@
 //! ```text
 //! horde [--headless] [--frames N] [--tick-hz N] [--backend B] [--seed N]
 //!       [--max-enemies N] [--prefill N] [--workers N] [--wall-clock]
+//!       [--choose N]
 //! ```
 //!
 //! # What is left here after the engine took the shared half
@@ -52,6 +53,8 @@ OPTIONS:
                          measurement's fixture: the spawner would take over ten
                          minutes to reach the plan's target and nothing lives
                          that long.
+    --choose <N>         Choose upgrade N at every level-up (1..=UPGRADE_CHOICES),
+                         so a headless run can reach past it
     --workers <N>        Worker threads for the steering pass (default: one per
                          spare core). 0 runs it on the calling thread, which is
                          what a browser gets and what the determinism gate
@@ -81,6 +84,9 @@ pub struct Options {
     /// Worker threads for the steering pool, or `None` for the machine's
     /// answer. See [`crate::game::Setup::workers`].
     pub workers: Option<usize>,
+    /// The upgrade `--choose` presses at every level-up, zero-based into
+    /// [`crate::game::UPGRADE_CHOICES`]; `None` when the flag was not given.
+    pub choose: Option<usize>,
 }
 
 impl Default for Options {
@@ -92,6 +98,7 @@ impl Default for Options {
             prefill: 0,
             wall_clock: false,
             workers: None,
+            choose: None,
         }
     }
 }
@@ -183,6 +190,28 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                     Ok(count) => options.prefill = count,
                     Err(_) => {
                         return Invocation::BadUsage(format!("not an enemy count: {count}"));
+                    }
+                },
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            // `number`, not `positive`: the digit keys run 1..=UPGRADE_CHOICES,
+            // so the boundary is the game's own, checked here rather than a
+            // shape `positive` could express — and the stored value is the
+            // 0-based index into the offer, which is what the choice actions
+            // and CHOOSE_KEYS are indexed by.
+            "--choose" => match crcbl::args::number("--choose", &mut args, "upgrade number") {
+                Ok(n) => match usize::try_from(n) {
+                    Ok(n) if (1..=crate::game::UPGRADE_CHOICES).contains(&n) => {
+                        options.choose = Some(n - 1);
+                    }
+                    Ok(n) => {
+                        return Invocation::BadUsage(format!(
+                            "not an upgrade number: expected 1..={}, got {n}",
+                            crate::game::UPGRADE_CHOICES
+                        ));
+                    }
+                    Err(_) => {
+                        return Invocation::BadUsage(format!("not an upgrade number: {n}"));
                     }
                 },
                 Err(message) => return Invocation::BadUsage(message),
@@ -343,6 +372,33 @@ mod tests {
         assert!(rejected(&["--workers", "some"]).contains("worker count"));
         assert!(rejected(&["--workers"]).contains("--workers"));
         assert!(USAGE.contains("--workers"));
+    }
+
+    /// **`--choose` reaches the options as the zero-based index the choice
+    /// actions are indexed by**, and the digit the CLI accepts is bounded by
+    /// the game's own offer size rather than a shape `positive` could express:
+    /// zero and anything past `UPGRADE_CHOICES` are rejections naming the
+    /// range, so the flag cannot silently select an offer slot that does not
+    /// exist.
+    #[test]
+    fn the_auto_choose_flag_reaches_the_options_and_rejects_out_of_range_digits() {
+        assert_eq!(parsed(&["--choose", "2"]).choose, Some(1));
+        assert_eq!(parsed(&["--choose", "3"]).choose, Some(2));
+        assert_eq!(
+            parsed(&[]).choose,
+            None,
+            "an unset flag leaves no choice pending"
+        );
+        let range = format!("1..={}", crate::game::UPGRADE_CHOICES);
+        assert!(
+            rejected(&["--choose", "0"]).contains(&range),
+            "{}",
+            rejected(&["--choose", "0"]),
+        );
+        assert!(rejected(&["--choose", "4"]).contains(&range));
+        assert!(rejected(&["--choose", "lots"]).contains("upgrade number"));
+        assert!(rejected(&["--choose"]).contains("--choose"));
+        assert!(USAGE.contains("--choose"));
     }
 
     /// The clock a run reads: real when there is a window, real when the
