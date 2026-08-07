@@ -2,7 +2,7 @@
 //! process.
 //!
 //! ```text
-//! crcbl-e2e-x11-key < a stream of X11 keycodes, one per line
+//! crcbl-e2e-x11-key <pointer-x> <pointer-y> <wm-class> < a stream of X11 keycodes and `close`, one per line
 //! ```
 //!
 //! **Compiled only with the `x11-e2e` feature**, which nothing but
@@ -45,6 +45,16 @@
 //! Keys are **X11 keycodes**, which are evdev codes plus eight — the number
 //! `xev` prints. `KEY_F11` is evdev 87 and X11 95.
 //!
+//! # Closing the game, not killing it
+//!
+//! The line `close` makes the sender find the sandbox's window — the third
+//! argument, the instance half of its `WM_CLASS` — and send it
+//! `WM_DELETE_WINDOW`, exactly as a window manager's close button would. The
+//! sandbox answers the question, tears down, and prints its end-of-run summary,
+//! which is what the harness asserts. That is the difference between a game
+//! that ended on its own terms and a SIGTERM that left the extent after F11
+//! never checked; see `run_sandbox_toggle` in `tests/run-x11-e2e.sh`.
+//!
 //! # Linux only, and it says so out loud
 //!
 //! `x11_test_support` is `#[cfg(target_os = "linux")]` and `--all-features`
@@ -71,8 +81,8 @@ fn main() -> ExitCode {
     crcbl_core::log::init_logging();
 
     let mut args = std::env::args().skip(1);
-    let (Some(x), Some(y)) = (args.next(), args.next()) else {
-        eprintln!("crcbl-e2e-x11-key: usage: crcbl-e2e-x11-key <pointer-x> <pointer-y>");
+    let (Some(x), Some(y), Some(class)) = (args.next(), args.next(), args.next()) else {
+        eprintln!("crcbl-e2e-x11-key: usage: crcbl-e2e-x11-key <pointer-x> <pointer-y> <wm-class>");
         return ExitCode::from(2);
     };
     let (Ok(x), Ok(y)) = (x.parse::<i16>(), y.parse::<i16>()) else {
@@ -80,7 +90,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
-    let Some(peer) = crcbl_shell::x11_test_support::Peer::new() else {
+    let Some(mut peer) = crcbl_shell::x11_test_support::Peer::new() else {
         eprintln!("crcbl-e2e-x11-key: no display, or libxcb-xtest is missing");
         return ExitCode::FAILURE;
     };
@@ -99,6 +109,25 @@ fn main() -> ExitCode {
         };
         let code = line.trim();
         if code.is_empty() {
+            continue;
+        }
+        if code == "close" {
+            // A clean close instead of a SIGTERM: the sandbox answers
+            // `WM_DELETE_WINDOW`, tears down, and prints the summary the
+            // harness asserts. See the module docs.
+            match peer.find_window(&class) {
+                Some(xid) => {
+                    peer.request_close(xid);
+                    say(&format!("closing {xid}"));
+                }
+                None => {
+                    eprintln!(
+                        "crcbl-e2e-x11-key: no window has WM_CLASS instance {class:?}; \
+                         nothing to close"
+                    );
+                    return ExitCode::FAILURE;
+                }
+            }
             continue;
         }
         let Ok(keycode) = code.parse::<u8>() else {

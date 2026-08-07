@@ -282,6 +282,37 @@ pub struct GetPropertyReply {
     pub pad0: [u8; 12],
 }
 
+/// `xcb_query_tree_reply_t`.
+///
+/// The children follow the struct and are reached through
+/// [`Lib::query_tree_children`] rather than by pointer arithmetic here, because
+/// libxcb — not this file — owns where it put them.
+///
+/// Only the harness walks another process's window tree, so this is behind the
+/// `x11-e2e` feature like the [`Lib`] entry points that use it; see
+/// [`Lib::query_tree`].
+#[cfg(feature = "x11-e2e")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct QueryTreeReply {
+    /// `1` for a reply.
+    pub response_type: u8,
+    /// Padding.
+    pub pad0: u8,
+    /// Sequence number.
+    pub sequence: u16,
+    /// Extra length in 4-byte units.
+    pub length: u32,
+    /// The root of the query.
+    pub root: u32,
+    /// The window's parent.
+    pub parent: u32,
+    /// How many child windows follow the struct.
+    pub children_len: u16,
+    /// Padding.
+    pub pad1: [u8; 14],
+}
+
 /// `xcb_get_geometry_reply_t`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -1239,6 +1270,8 @@ const CLOCK_MONOTONIC: c_int = 1;
 /// than `()` because they do — `xcb_void_cookie_t` — and the return value is
 /// what [`Lib::request_check`] needs to turn a request into a checked one.
 mod prototype {
+    #[cfg(feature = "x11-e2e")]
+    use super::QueryTreeReply;
     use super::{
         Connection, Cookie, Extension, GenericError, GenericEvent, GetGeometryReply,
         GetPropertyReply, GetSelectionOwnerReply, GrabPointerReply, InternAtomReply,
@@ -1356,6 +1389,28 @@ mod prototype {
         *mut *mut GenericError,
     )
         -> *mut TranslateCoordinatesReply;
+    /// `xcb_query_tree_cookie_t xcb_query_tree(xcb_connection_t *,
+    /// xcb_window_t window)`
+    ///
+    /// Only the harness walks another process's window tree, so these four are
+    /// behind the `x11-e2e` feature like the [`Lib`] fields that use them;
+    /// see [`super::Lib::query_tree`].
+    #[cfg(feature = "x11-e2e")]
+    pub type QueryTree = unsafe extern "C" fn(*mut Connection, u32) -> Cookie;
+    /// `xcb_query_tree_reply_t *xcb_query_tree_reply(xcb_connection_t *,
+    /// xcb_query_tree_cookie_t, xcb_generic_error_t **)`
+    #[cfg(feature = "x11-e2e")]
+    pub type QueryTreeReplyFn = unsafe extern "C" fn(
+        *mut Connection,
+        Cookie,
+        *mut *mut GenericError,
+    ) -> *mut QueryTreeReply;
+    /// `xcb_window_t *xcb_query_tree_children(const xcb_query_tree_reply_t *)`
+    #[cfg(feature = "x11-e2e")]
+    pub type QueryTreeChildren = unsafe extern "C" fn(*const QueryTreeReply) -> *mut u32;
+    /// `int xcb_query_tree_children_length(const xcb_query_tree_reply_t *)`
+    #[cfg(feature = "x11-e2e")]
+    pub type QueryTreeChildrenLength = unsafe extern "C" fn(*const QueryTreeReply) -> c_int;
     /// `xcb_void_cookie_t xcb_send_event(xcb_connection_t *, uint8_t propagate,
     /// xcb_window_t destination, uint32_t event_mask, const char *event)`
     pub type SendEvent =
@@ -1528,9 +1583,11 @@ mod prototype {
 
 /// Every libxcb entry point this backend uses.
 ///
-/// Forty-four functions. Each one is used; a function that stops being used is
-/// deleted from this struct in the same commit, which is what "audited by use"
-/// means in `docs/plan/15-windowing.md`.
+/// Forty-four functions, plus four behind the `x11-e2e` feature for the
+/// harness that walks another process's window tree. Each one is used; a
+/// function that stops being used is deleted from this struct in the same
+/// commit, which is what "audited by use" means in
+/// `docs/plan/15-windowing.md`.
 pub struct Lib {
     pub connect: prototype::Connect,
     pub disconnect: prototype::Disconnect,
@@ -1555,6 +1612,26 @@ pub struct Lib {
     pub get_property_reply: prototype::GetPropertyReplyFn,
     pub get_property_value: prototype::GetPropertyValue,
     pub get_property_value_length: prototype::GetPropertyValueLength,
+    /// `xcb_query_tree_cookie_t xcb_query_tree(xcb_connection_t *,
+    /// xcb_window_t window)`
+    ///
+    /// Only the harness walks another process's window tree — `find_window`
+    /// in `x11_test_support` descends it to find the sandbox's window and
+    /// close it cleanly. Feature-gated rather than left dead so that the
+    /// reason is visible at the definition.
+    #[cfg(feature = "x11-e2e")]
+    pub query_tree: prototype::QueryTree,
+    /// `xcb_query_tree_reply_t *xcb_query_tree_reply(…)`; see [`query_tree`].
+    #[cfg(feature = "x11-e2e")]
+    pub query_tree_reply: prototype::QueryTreeReplyFn,
+    /// `xcb_window_t *xcb_query_tree_children(const xcb_query_tree_reply_t *)`;
+    /// see [`query_tree`].
+    #[cfg(feature = "x11-e2e")]
+    pub query_tree_children: prototype::QueryTreeChildren,
+    /// `int xcb_query_tree_children_length(const xcb_query_tree_reply_t *)`;
+    /// see [`query_tree`].
+    #[cfg(feature = "x11-e2e")]
+    pub query_tree_children_length: prototype::QueryTreeChildrenLength,
     pub intern_atom: prototype::InternAtom,
     pub intern_atom_reply: prototype::InternAtomReplyFn,
     pub get_geometry: prototype::DrawableRequest,
@@ -1806,6 +1883,17 @@ fn load_uncached() -> Result<Lib, String> {
         get_property_value_length: symbol!(
             "xcb_get_property_value_length",
             prototype::GetPropertyValueLength
+        ),
+        #[cfg(feature = "x11-e2e")]
+        query_tree: symbol!("xcb_query_tree", prototype::QueryTree),
+        #[cfg(feature = "x11-e2e")]
+        query_tree_reply: symbol!("xcb_query_tree_reply", prototype::QueryTreeReplyFn),
+        #[cfg(feature = "x11-e2e")]
+        query_tree_children: symbol!("xcb_query_tree_children", prototype::QueryTreeChildren),
+        #[cfg(feature = "x11-e2e")]
+        query_tree_children_length: symbol!(
+            "xcb_query_tree_children_length",
+            prototype::QueryTreeChildrenLength
         ),
         intern_atom: symbol!("xcb_intern_atom", prototype::InternAtom),
         intern_atom_reply: symbol!("xcb_intern_atom_reply", prototype::InternAtomReplyFn),

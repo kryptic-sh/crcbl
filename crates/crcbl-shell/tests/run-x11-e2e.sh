@@ -406,7 +406,11 @@ run_sandbox_toggle() {
 
     rm -f "$keys_in"
     mkfifo "$keys_in"
-    "${BIN_DIR}/crcbl-e2e-x11-key" "$x" "$y" <"$keys_in" >"$keys_log" 2>&1 &
+    # The third argument is the sandbox's `app_id`, the instance half of the
+    # `WM_CLASS` its window carries — what the `close` line below is matched
+    # against.
+    "${BIN_DIR}/crcbl-e2e-x11-key" "$x" "$y" "sh.kryptic.crcbl.sandbox" \
+        <"$keys_in" >"$keys_log" 2>&1 &
     local keys_pid=$!
     # Holds the write end open, so the sender blocks on an empty stream instead
     # of seeing EOF from the first writer that finishes.
@@ -420,12 +424,16 @@ run_sandbox_toggle() {
     # and the refused case at warn, both naming the modes, so each branch is
     # asserted rather than one being assumed from the other.
     #
-    # What this pass is *for* is the F11 path — key, repeat filter, `set_mode`,
-    # the window system's answer — reaching a running game from another process.
-    # That the swapchain follows a granted mode change is `run_sandbox`'s job
-    # above, which asserts the summary's extent; repeating it here would need a
-    # clean `WM_DELETE_WINDOW`, and finding another process's window to send one
-    # to is a window-manager's job, not a key sender's.
+    # Then the pass closes the sandbox **cleanly**, which is what makes the
+    # extent assertable at all: the key sender finds the sandbox's window by
+    # the instance half of its `WM_CLASS` and sends it `WM_DELETE_WINDOW`,
+    # exactly as a window manager's close button would. The sandbox answers
+    # the question, tears down, and prints its end-of-run summary — and that
+    # summary is the assertion, closing the gap this pass used to leave open:
+    # it asserted only the engine's log line about the mode and then SIGTERMed
+    # the sandbox, so the *extent* after F11 was never checked. A SIGTERM is
+    # not a close request, and the sandbox would not have printed a summary to
+    # assert against.
     if [ -n "${CRCBL_E2E_X11_WM:-}" ]; then
         wait_for_line "F11 to reach the sandbox and be honoured" \
             "$SANDBOX_LOG" "shell: the window is borderless"
@@ -436,12 +444,38 @@ run_sandbox_toggle() {
         local how="F11 was requested, refused, and reported as refused"
     fi
 
-    kill "$sandbox_pid" 2>/dev/null || true
-    wait "$sandbox_pid" 2>/dev/null || true
+    # The summary line is the same one `run_sandbox` asserts — the *effective*
+    # mode and the extent that goes with it, both off the one line the sandbox
+    # prints as it exits.
+    local want_extent="$SANDBOX_WINDOWED"
+    local want_mode="windowed"
+    if [ -n "${CRCBL_E2E_X11_WM:-}" ]; then
+        want_extent="$SANDBOX_BORDERLESS"
+        want_mode="borderless"
+    fi
+
+    echo close >&9
+    wait_for_line "the sandbox's summary after F11" \
+        "$SANDBOX_LOG" "at ${want_extent}, ${want_mode} "
+
+    # The close was a *question*; the sandbox answered it and is exiting on its
+    # own. If it refuses or hangs, the deadline poll fails the script rather
+    # than hanging CI on a bare `wait`.
+    local deadline=$(( $(date +%s) + DISPLAY_TIMEOUT_S ))
+    while kill -0 "$sandbox_pid" 2>/dev/null; do
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "crcbl e2e: the sandbox did not exit after the close request" >&2
+            cat "$SANDBOX_LOG" >&2 || true
+            log_tail
+            exit 1
+        fi
+        sleep "$TOGGLE_POLL_S"
+    done
+    wait "$sandbox_pid"
     exec 9>&-
     wait "$keys_pid" || true
     rm -f "$keys_in"
-    echo "crcbl e2e: $how on x11/$backend"
+    echo "crcbl e2e: $how, and the summary read 'at ${want_extent}, ${want_mode}' on x11/$backend"
 }
 
 # See the equivalent block in `run-wayland-e2e.sh` for why the loader probe is a

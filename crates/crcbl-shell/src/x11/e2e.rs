@@ -933,6 +933,75 @@ impl Peer {
         self.property_on(xid, property).map(|(_, bytes)| bytes)
     }
 
+    /// How deep [`find_window`](Self::find_window) descends before giving up.
+    ///
+    /// A reparenting window manager puts the client window under a frame, so
+    /// the walk has to go at least one level past the root to see a managed
+    /// window at all. The bound exists so a pathological tree cannot make the
+    /// harness walk it forever.
+    const FIND_WINDOW_MAX_DEPTH: usize = 4;
+
+    /// Finds a window by the instance half of its `WM_CLASS`.
+    ///
+    /// How the harness closes the sandbox cleanly instead of SIGTERMing it: a
+    /// `WM_DELETE_WINDOW` has to name the client's window, and that XID is the
+    /// backend's to know, not the harness's. So this walks the tree from the
+    /// root, reading each window's `WM_CLASS` until one matches — the same read
+    /// a desktop environment makes to match a window to its `.desktop` file.
+    ///
+    /// The walk descends: a reparenting window manager puts the client window
+    /// under a frame, so the root's children are frames and the client windows
+    /// are their children. Bounded by `FIND_WINDOW_MAX_DEPTH` (private, so not
+    /// linkable), and `None` when nothing matches or the server answers with an
+    /// error.
+    #[must_use]
+    pub fn find_window(&mut self, wm_class: &str) -> Option<u32> {
+        self.find_window_at(self.root, wm_class, 0)
+    }
+
+    fn find_window_at(&mut self, xid: u32, wm_class: &str, depth: usize) -> Option<u32> {
+        if depth > Self::FIND_WINDOW_MAX_DEPTH {
+            return None;
+        }
+        // SAFETY: the connection and window are live; a null error pointer
+        // discards the error and a null reply is handled below.
+        let reply = unsafe {
+            let cookie = (self.lib.query_tree)(self.connection, xid);
+            (self.lib.query_tree_reply)(self.connection, cookie, ptr::null_mut())
+        };
+        if reply.is_null() {
+            return None;
+        }
+        // The children live inside the reply's allocation, so they are copied
+        // out before the reply is freed below.
+        let mut children = Vec::new();
+        // SAFETY: `reply` is a live reply this call owns, and libxcb guarantees
+        // `query_tree_children_length` readable windows at
+        // `query_tree_children`.
+        unsafe {
+            let list = (self.lib.query_tree_children)(reply);
+            let length = (self.lib.query_tree_children_length)(reply);
+            if length > 0 && !list.is_null() {
+                children.extend_from_slice(core::slice::from_raw_parts(list, length as usize));
+            }
+        }
+        // SAFETY: freed exactly once.
+        unsafe { ffi::free_reply(reply) };
+
+        for child in children {
+            if self
+                .window_property(child, "WM_CLASS")
+                .is_some_and(|bytes| wm_class_instance_is(&bytes, wm_class))
+            {
+                return Some(child);
+            }
+            if let Some(found) = self.find_window_at(child, wm_class, depth + 1) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
     /// Reads a property on the peer's own window, in full.
     fn read_property(&self, property: u32) -> Option<(u32, Vec<u8>)> {
         self.property_on(self.window, property)
@@ -984,3 +1053,15 @@ impl Drop for Peer {
 
 /// The name a harness prints when [`Peer::new`] fails.
 pub const MISSING_XTEST: &CStr = c"libxcb-xtest is required by the X11 e2e harness";
+
+/// Whether a `WM_CLASS` value has `instance` as its first NUL-terminated
+/// segment.
+///
+/// `WM_CLASS` is two NUL-terminated strings — `"instance\0class\0"` — and a
+/// desktop matches the first one against its `.desktop` files, which is the
+/// half [`Peer::find_window`] compares. A value without a terminator is
+/// malformed and matches nothing.
+#[must_use]
+fn wm_class_instance_is(bytes: &[u8], instance: &str) -> bool {
+    CStr::from_bytes_until_nul(bytes).is_ok_and(|class| class.to_bytes() == instance.as_bytes())
+}

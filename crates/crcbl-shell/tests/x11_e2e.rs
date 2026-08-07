@@ -722,6 +722,38 @@ fn the_window_carries_the_properties_a_desktop_reads() {
     });
 }
 
+/// The peer can find another process's window by the instance half of its
+/// `WM_CLASS` — the read `run-x11-e2e.sh`'s toggle pass needs to close the
+/// sandbox cleanly instead of SIGTERMing it, and a `WM_DELETE_WINDOW` has to
+/// name the client's window, whose XID only the backend knows.
+///
+/// **With a window manager the window is reparented into a frame**, so a walk
+/// that only looked at the root's children would find the frame, not the
+/// window — which is why `Peer::find_window` descends. The suite runs under
+/// `Xvfb` both with and without `openbox`, so both shapes are exercised.
+#[test]
+#[ignore = "needs an X server; run tests/run-x11-e2e.sh"]
+fn the_peer_can_find_a_window_by_its_wm_class() {
+    let mut session = Session::open();
+    let window = session.window(&WindowDesc {
+        app_id: "sh.kryptic.crcbl.findme",
+        ..desc("find me")
+    });
+    let xid = session.xid(window);
+
+    assert_eq!(
+        session.peer.find_window("sh.kryptic.crcbl.findme"),
+        Some(xid),
+        "the instance half of WM_CLASS is what a desktop matches a window to"
+    );
+    // And a window that is not there is not invented: `None` is the honest
+    // answer, not the first window with *any* `WM_CLASS`.
+    assert_eq!(
+        session.peer.find_window("sh.kryptic.crcbl.does-not-exist"),
+        None
+    );
+}
+
 /// The aspect lock reaches `WM_NORMAL_HINTS`, which is the property that makes
 /// `ASPECT_HINT_HONORED` possible at all.
 #[test]

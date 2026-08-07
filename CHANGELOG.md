@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The X11 F11 pass now asserts the summary-line extent.** `run-x11-e2e.sh`'s
+  toggle pass used to press F11 at a running sandbox, check the engine's own log
+  line about the mode, and SIGTERM the sandbox — so the _extent_ after F11 was
+  never checked. The key sender (`crcbl-e2e-x11-key`) now walks the X11 tree
+  from the root (`Peer::find_window`, a new QueryTree + `WM_CLASS` binding
+  behind the `x11-e2e` feature), finds the sandbox's window, and asks it to
+  close with `WM_DELETE_WINDOW`; the sandbox tears down cleanly and prints its
+  end-of-run summary, and the script asserts it reads `at 1920x1080, borderless`
+  under a window manager and `at 1280x720, windowed` without one. A new suite
+  test pins the window-finding walk against a unique `WM_CLASS` both with and
+  without `openbox`.
+
 - **A shot that kills a rock now raises a flash where it died.** The rock used
   to vanish and split with only the explosion cue to mark the hit;
   `apps/asteroids` now draws a two-frame burst — a white-hot core for the first
