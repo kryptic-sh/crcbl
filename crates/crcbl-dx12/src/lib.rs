@@ -218,6 +218,8 @@ mod retire;
 #[cfg(target_os = "windows")]
 mod swapchain;
 #[cfg(target_os = "windows")]
+mod validate;
+#[cfg(target_os = "windows")]
 mod view;
 
 #[cfg(target_os = "windows")]
