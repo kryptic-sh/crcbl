@@ -271,7 +271,7 @@ PACED_FPS=30
 # limiter measures around 4 ms here, so the gap this has to resolve is large.
 PACED_MIN_FRAME_MS=30
 
-# `run_sandbox_paced <backend>`
+# `run_sandbox_paced <backend> <pacing> <present-mode-pattern>`
 #
 # The pass that proves `--pacing` and `--fps` are wired to something. Every
 # other run here takes the defaults, so a `Common` field parsed and then dropped
@@ -287,28 +287,36 @@ PACED_MIN_FRAME_MS=30
 #    rather than only in the unit test because this is a real display, a real
 #    swapchain and a real scheduler: bring-up is a few tens of milliseconds and
 #    the paced second is the whole run.
-#  * `asked for Off, pacing Off` comes off the same `settle_pacing` line the
-#    display-timing block above reads. It is the half that says the request
-#    survived: `asked for Auto` — the default, and what every other pass in this
-#    file produces — would still print, and would still name a pacing.
+#  * `asked for <pacing>, pacing <pacing>` comes off the same `settle_pacing`
+#    line the display-timing block above reads. It is the half that says the
+#    request survived: `asked for Auto` — the default, and what every other pass
+#    in this file produces — would still print, and would still name a pacing.
 #
 # And the mode the swapchain actually opened on, which is the difference a
-# player would feel: `Pacing::Off` prefers Mailbox and falls back to Immediate,
-# where the default's Fifo blocks on vblank. Mesa's Wayland WSI offers both on
-# radv and on lavapipe, so a Fifo here means the request did not reach
-# `choose_present_mode` rather than that the surface was poor.
+# player would feel — and the reason `adaptive` earns a pass of its own: no run
+# in this repository had ever opened a swapchain on `FifoRelaxed`, the mode a
+# VRR panel actually wants, until this one. `Pacing::Off` prefers Mailbox and
+# falls back to Immediate; `Pacing::Adaptive` prefers FifoRelaxed. Mesa's
+# Wayland WSI offers all of them on radv and on lavapipe, so a Fifo here means
+# the request did not reach `choose_present_mode` rather than that the surface
+# was poor.
 run_sandbox_paced() {
     local backend="$1"
+    local pacing="$2"
+    local mode_pattern="$3"
+    # The engine spells the pacing with a capital (its `Debug` form); the CLI
+    # takes lowercase. One transform, used by every grep below.
+    local log_pacing="${pacing^}"
     local log="${SWAY_RUNTIME_DIR}/sandbox-paced.log"
 
-    echo "crcbl e2e: running the sandbox on $backend with --pacing off --fps $PACED_FPS"
+    echo "crcbl e2e: running the sandbox on $backend with --pacing $pacing --fps $PACED_FPS"
     set +e
     CRCBL_SHELL=wayland \
     CRCBL_VK_VALIDATION=1 \
     CRCBL_LOG="${CRCBL_E2E_SANDBOX_LOG:-info}" \
         cargo run --locked --quiet --package sandbox -- \
         --backend "$backend" --frames "$PACED_FRAMES" --title "crcbl e2e sandbox" \
-        --pacing off --fps "$PACED_FPS" 2>&1 | tee "$log"
+        --pacing "$pacing" --fps "$PACED_FPS" 2>&1 | tee "$log"
     local status=${PIPESTATUS[0]}
     set -e
     if [ "$status" -ne 0 ]; then
@@ -339,21 +347,21 @@ logged and not obeyed" >&2
         sway_log_tail
         exit 1
     fi
-    if ! grep -qE "hal: display timing [A-Za-z]+; asked for Off, pacing Off" "$log"; then
-        echo "crcbl e2e: --pacing off never reached the swapchain; the engine reported \
-something other than 'asked for Off, pacing Off'" >&2
+    if ! grep -qE "hal: display timing [A-Za-z]+; asked for ${log_pacing}, pacing ${log_pacing}" "$log"; then
+        echo "crcbl e2e: --pacing $pacing never reached the swapchain; the engine reported \
+something other than 'asked for $log_pacing, pacing $log_pacing'" >&2
         cat "$log" >&2
         sway_log_tail
         exit 1
     fi
-    if ! grep -qE "hal: swapchain [0-9]+x[0-9]+ [A-Za-z0-9]+ (Mailbox|Immediate) " "$log"; then
-        echo "crcbl e2e: the run asked for no display sync and still opened its \
-swapchain on a display-synced present mode" >&2
+    if ! grep -qE "hal: swapchain [0-9]+x[0-9]+ [A-Za-z0-9]+ ${mode_pattern} " "$log"; then
+        echo "crcbl e2e: the run asked for ${pacing} pacing and still opened its \
+swapchain on a different present mode" >&2
         cat "$log" >&2
         sway_log_tail
         exit 1
     fi
-    echo "crcbl e2e: the sandbox ran unsynced at $PACED_FPS fps on wayland/$backend, \
+    echo "crcbl e2e: the sandbox ran on ${log_pacing} pacing at $PACED_FPS fps on wayland/$backend, \
 measuring ${mean_ms} ms a frame"
 }
 
@@ -503,7 +511,11 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
     run_sandbox vk fullscreen
     # And with the display sync turned off and a frame cap in its place, which
     # is the one pass where either flag is anything but its default.
-    run_sandbox_paced vk
+    run_sandbox_paced vk off "(Mailbox|Immediate)"
+    # And the same with adaptive asked for by name — the pacing a VRR panel
+    # actually wants, and the one mode no pass in this file had ever opened a
+    # swapchain on (its unit coverage is the whole of its coverage).
+    run_sandbox_paced vk adaptive "FifoRelaxed"
     # And the switch between them, which neither of those two makes.
     cargo build --locked --quiet --package sandbox
     cargo build --locked --quiet --package crcbl-shell \
