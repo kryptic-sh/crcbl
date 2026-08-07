@@ -36,12 +36,15 @@
 //! copied: it comes out of the smallest thing here that has to read as a shape.
 //! See the constant.
 //!
-//! # Every angle is interpolated, and no position is
+//! # Every angle and every position is interpolated — except across a teleport
 //!
 //! [`Scene::build`] takes an `alpha` and [`lerp_angle`]s each rotation from the
-//! previous tick's value to this one. [`RenderState`]'s own docs carry why the
-//! positions are not, and `game::lerp_angle`'s carry why the short way round is
-//! the only correct answer for an angle.
+//! previous tick's value to this one, and lerps each position the same way.
+//! A body the wrap moved that tick is drawn snapped to its current position
+//! instead: interpolating would fly it back across the whole field.
+//! [`RenderState`]'s own docs carry why the wrap needs a teleport flag rather
+//! than a lerp, and `game::lerp_angle`'s carry why the short way round is the
+//! only correct answer for an angle.
 
 use crcbl::hal::{Device, HalError};
 use crcbl::math::DVec3;
@@ -49,7 +52,7 @@ use crcbl::render::{Layer, LayerStack, Parallax, SheetDesc, SheetId, Sprite, Spr
 use crcbl::sprite::Sheet;
 use crcbl::sprite::load::{Loaded, load};
 
-use crate::game::{BulletView, RenderState, RockSize, RockView, lerp_angle};
+use crate::game::{RenderState, RockSize, RockView, lerp_angle};
 
 // `build.rs` writes this: one `*_PNG` and one `*_JSON` per `assets/*.crpix`,
 // with the sidecar `None` for art that needs no metadata.
@@ -226,8 +229,9 @@ impl Scene {
     /// built at the same scale. [`crate::gpu`] applies it in one place.
     ///
     /// `alpha` is how far this frame sits between the last tick and the next,
-    /// from `FrameClock::alpha`. It moves the rotations and nothing else; see
-    /// this module's header.
+    /// from `FrameClock::alpha`. It moves the rotations and the positions,
+    /// except on a tick a body teleported, when it snaps; see this module's
+    /// header.
     ///
     /// **The rocks are emitted largest first**, which is a batching decision and
     /// not an artistic one: [`SpriteRenderer`] starts a new batch — a bind and a
@@ -250,7 +254,10 @@ impl Scene {
                     .filter(move |rock| rock.size == size)
                     .map(move |rock| Sprite {
                         sheet: art.sheet,
-                        rect: rock_rect(rock),
+                        rect: rock_rect(
+                            drawn_centre(rock.prev_position, rock.position, rock.teleported, alpha),
+                            rock,
+                        ),
                         rotation: lerp_angle(rock.prev_angle, rock.angle, alpha) as f32,
                         uv: art.uv,
                         tint: UNTINTED,
@@ -263,7 +270,12 @@ impl Scene {
             self.play,
             render.bullets.iter().map(move |shot| Sprite {
                 sheet: bullet.sheet,
-                rect: bullet_rect(shot),
+                rect: bullet_rect(drawn_centre(
+                    shot.prev_position,
+                    shot.position,
+                    shot.teleported,
+                    alpha,
+                )),
                 // A shot is round and has no attitude of its own; turning it
                 // would be a rotation nobody could see.
                 rotation: 0.0,
@@ -279,7 +291,12 @@ impl Scene {
                 self.play,
                 Sprite {
                     sheet: self.ship.sheet,
-                    rect: ship_rect(render.ship),
+                    rect: ship_rect(drawn_centre(
+                        render.ship_prev_pos,
+                        render.ship,
+                        render.ship_teleported,
+                        alpha,
+                    )),
                     // Straight through, with no offset: `assets/ship.crpix` draws
                     // the nose up the frame and `game::heading_vector` puts a
                     // heading of zero along +Y, so the sprite's angle *is* the
@@ -318,19 +335,30 @@ const fn rock_index(size: RockSize) -> usize {
 
 /// One rock's rectangle, in sprite units: **its collider's bounding square, to
 /// the texel**, which is what the frame sizes were chosen to be.
-fn rock_rect(rock: &RockView) -> [f32; 4] {
+fn rock_rect(centre: DVec3, rock: &RockView) -> [f32; 4] {
     let radius = rock.size.radius();
-    rect(rock.position, radius, radius)
+    rect(centre, radius, radius)
 }
 
 /// A shot's rectangle. See [`BULLET_HALF_EXTENT`] for why it is not the sweep's.
-fn bullet_rect(shot: &BulletView) -> [f32; 4] {
-    rect(shot.position, BULLET_HALF_EXTENT, BULLET_HALF_EXTENT)
+fn bullet_rect(centre: DVec3) -> [f32; 4] {
+    rect(centre, BULLET_HALF_EXTENT, BULLET_HALF_EXTENT)
 }
 
 /// The ship's. See [`SHIP_HALF_EXTENT`].
 fn ship_rect(centre: DVec3) -> [f32; 4] {
     rect(centre, SHIP_HALF_EXTENT, SHIP_HALF_EXTENT)
+}
+
+/// Where a body is drawn on this frame: lerped between the previous and the
+/// current tick's positions, or snapped to the current one on a tick it
+/// teleported — the previous position is a whole field away then.
+fn drawn_centre(prev: DVec3, cur: DVec3, teleported: bool, alpha: f64) -> DVec3 {
+    if teleported {
+        cur
+    } else {
+        prev.lerp(cur, alpha)
+    }
 }
 
 /// A world-space centre and half-extents as a sprite rectangle: `[x, y, w, h]`,
@@ -395,7 +423,7 @@ mod tests {
     use crcbl::hal::null::NullInstance;
     use crcbl::hal::{DeviceDesc, Format, Instance, QueueKind};
 
-    use crate::game::{BULLET_RADIUS, SHIP_RADIUS};
+    use crate::game::{BULLET_RADIUS, BulletView, SHIP_RADIUS};
 
     /// Runs `body` against a scene built on the null backend.
     ///
@@ -429,6 +457,8 @@ mod tests {
     fn rock(size: RockSize, position: DVec3) -> RockView {
         RockView {
             position,
+            prev_position: position,
+            teleported: false,
             size,
             angle: 0.0,
             prev_angle: 0.0,
@@ -658,6 +688,7 @@ mod tests {
         with_scene(|scene| {
             let render = RenderState {
                 ship: DVec3::new(-2.5, 1.25, 0.0),
+                ship_prev_pos: DVec3::new(-2.5, 1.25, 0.0),
                 ship_alive: true,
                 rocks: vec![
                     rock(RockSize::Large, DVec3::new(4.0, -3.0, 0.0)),
@@ -666,6 +697,8 @@ mod tests {
                 ],
                 bullets: vec![BulletView {
                     position: DVec3::new(11.0, -6.5, 0.0),
+                    prev_position: DVec3::new(11.0, -6.5, 0.0),
+                    teleported: false,
                 }],
                 ..RenderState::default()
             };
@@ -717,7 +750,7 @@ mod tests {
             // Anti-vacuity: `covers` can fail. A sprite at its neighbour's
             // position is the right size in the wrong place, and it says so.
             let elsewhere = rock(RockSize::Large, DVec3::new(9.0, -3.0, 0.0));
-            let moved = rock_rect(&elsewhere);
+            let moved = rock_rect(elsewhere.position, &elsewhere);
             assert!(
                 (f64::from(moved[0]) - f64::from(field[0].rect[0])).abs() > 1.0,
                 "two different positions produced the same rectangle",
@@ -746,6 +779,8 @@ mod tests {
                 ],
                 bullets: vec![BulletView {
                     position: DVec3::ZERO,
+                    prev_position: DVec3::ZERO,
+                    teleported: false,
                 }],
                 ..RenderState::default()
             };
@@ -792,6 +827,8 @@ mod tests {
                 ship_alive: false,
                 bullets: vec![BulletView {
                     position: DVec3::ZERO,
+                    prev_position: DVec3::ZERO,
+                    teleported: false,
                 }],
                 ..RenderState::default()
             };
@@ -874,12 +911,16 @@ mod tests {
                 rocks: vec![
                     RockView {
                         position: DVec3::ZERO,
+                        prev_position: DVec3::ZERO,
+                        teleported: false,
                         size: RockSize::Large,
                         prev_angle: 0.2,
                         angle: 0.4,
                     },
                     RockView {
                         position: DVec3::new(5.0, 0.0, 0.0),
+                        prev_position: DVec3::new(5.0, 0.0, 0.0),
+                        teleported: false,
                         size: RockSize::Large,
                         prev_angle: 2.0,
                         angle: 1.6,
@@ -896,6 +937,107 @@ mod tests {
                 "a rock turning the other way drew {}",
                 field[1].rotation,
             );
+        });
+    }
+
+    /// The centre of a sprite rect, back in world units. A rect is
+    /// `[x, y, w, h]`, minimum corner first, in sprite units.
+    fn rect_centre(rect: [f32; 4]) -> DVec3 {
+        let scale = f64::from(TEXELS_PER_UNIT);
+        DVec3::new(
+            (f64::from(rect[0]) + f64::from(rect[2]) / 2.0) / scale,
+            (f64::from(rect[1]) + f64::from(rect[3]) / 2.0) / scale,
+            0.0,
+        )
+    }
+
+    /// **A body is drawn between its previous tick's position and this one**,
+    /// at exactly the frame clock's alpha — the position half of the rotation
+    /// interpolation the tests above pin.
+    #[test]
+    fn a_body_is_drawn_between_its_previous_and_current_position() {
+        with_scene(|scene| {
+            let rock = RockView {
+                position: DVec3::new(10.0, 0.0, 0.0),
+                prev_position: DVec3::ZERO,
+                teleported: false,
+                size: RockSize::Large,
+                angle: 0.0,
+                prev_angle: 0.0,
+            };
+            for (alpha, expected) in [
+                (0.0, DVec3::ZERO),
+                (0.5, DVec3::new(5.0, 0.0, 0.0)),
+                (1.0, DVec3::new(10.0, 0.0, 0.0)),
+            ] {
+                let render = RenderState {
+                    ship: DVec3::new(10.0, 0.0, 0.0),
+                    ship_prev_pos: DVec3::ZERO,
+                    ship_alive: true,
+                    rocks: vec![rock],
+                    ..RenderState::default()
+                };
+                scene.build(&render, alpha);
+
+                let field = scene.stack.sprites(scene.field).to_vec();
+                let rock_centre = rect_centre(field[0].rect);
+                assert!(
+                    (rock_centre - expected).length() < 1e-6,
+                    "a rock at alpha {alpha} was drawn at {rock_centre:?}, not {expected:?}",
+                );
+
+                let play = scene.stack.sprites(scene.play).to_vec();
+                let ship_centre = rect_centre(play[0].rect);
+                assert!(
+                    (ship_centre - expected).length() < 1e-6,
+                    "the ship at alpha {alpha} was drawn at {ship_centre:?}, not {expected:?}",
+                );
+            }
+        });
+    }
+
+    /// **A teleported body is drawn at its current position whatever the
+    /// alpha.** The whole point of the flag: lerping through a wrap would fly
+    /// the body back across the field, so a flagged tick has to snap.
+    #[test]
+    fn a_teleported_body_is_drawn_at_its_current_position_whatever_the_alpha() {
+        with_scene(|scene| {
+            let rock = RockView {
+                position: DVec3::new(10.0, 0.0, 0.0),
+                prev_position: DVec3::new(-10.0, 0.0, 0.0),
+                teleported: true,
+                size: RockSize::Large,
+                angle: 0.0,
+                prev_angle: 0.0,
+            };
+            for alpha in [0.0, 0.5, 1.0] {
+                let render = RenderState {
+                    ship: DVec3::new(10.0, 0.0, 0.0),
+                    ship_prev_pos: DVec3::new(-10.0, 0.0, 0.0),
+                    ship_teleported: true,
+                    ship_alive: true,
+                    rocks: vec![rock],
+                    ..RenderState::default()
+                };
+                scene.build(&render, alpha);
+
+                let here = DVec3::new(10.0, 0.0, 0.0);
+                let field = scene.stack.sprites(scene.field).to_vec();
+                let rock_centre = rect_centre(field[0].rect);
+                assert!(
+                    (rock_centre - here).length() < 1e-6,
+                    "a teleported rock at alpha {alpha} was drawn at {rock_centre:?}, \
+                     not its current position",
+                );
+
+                let play = scene.stack.sprites(scene.play).to_vec();
+                let ship_centre = rect_centre(play[0].rect);
+                assert!(
+                    (ship_centre - here).length() < 1e-6,
+                    "a teleported ship at alpha {alpha} was drawn at {ship_centre:?}, \
+                     not its current position",
+                );
+            }
         });
     }
 }

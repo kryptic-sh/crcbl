@@ -508,6 +508,15 @@ struct Rock {
     prev_angle: f64,
     /// Radians per second, signed. [`RockSize::spin`] is the magnitude.
     spin: f64,
+    /// Where it was at the end of the previous tick. The position half of the
+    /// angle pair above: positions live in physics, so this is advanced by
+    /// [`refresh_views`] at the end of each tick rather than captured at the
+    /// top of [`run_tick`].
+    prev_position: DVec3,
+    /// Whether the wrap teleported it this tick. A teleported body must be
+    /// drawn snapped to its current position, not interpolated — the previous
+    /// one is a whole field away. Cleared by [`refresh_views`].
+    teleported: bool,
 }
 
 /// One bullet. No collider: see [`sweep_bullets`].
@@ -516,6 +525,11 @@ struct Bullet {
     entity: Entity,
     /// Seconds left before it expires.
     life: f64,
+    /// Where it was at the end of the previous tick, advanced by
+    /// [`refresh_views`] like [`Rock::prev_position`].
+    prev_position: DVec3,
+    /// Whether the wrap teleported it this tick. See [`Rock::teleported`].
+    teleported: bool,
 }
 
 /// What the renderer needs for one rock.
@@ -528,12 +542,24 @@ pub struct RockView {
     /// The same at the end of the previous tick. `angle` and this are what
     /// [`lerp_angle`] takes; a rock that has just spawned has them equal.
     pub prev_angle: f64,
+    /// Where it was at the end of the previous tick. `position` and this are
+    /// what the renderer lerps between; a rock that has just spawned has them
+    /// equal.
+    pub prev_position: DVec3,
+    /// Whether the wrap teleported it this tick. When set, the renderer draws
+    /// it at `position` rather than interpolating — the previous position is a
+    /// whole field away on the tick a rock crosses an edge.
+    pub teleported: bool,
 }
 
 /// What the renderer needs for one bullet.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BulletView {
     pub position: DVec3,
+    /// Where it was at the end of the previous tick, for the same lerp.
+    pub prev_position: DVec3,
+    /// Whether the wrap teleported it this tick; the renderer snaps when set.
+    pub teleported: bool,
 }
 
 /// The mutable game state the server-side module owns.
@@ -557,6 +583,21 @@ struct GameLogic {
     /// make the new ship spin through the difference over one tick.
     prev_heading: f64,
     ship_pos: DVec3,
+    /// Where the ship was at the end of the previous tick. The position half
+    /// of [`Self::prev_heading`]: unlike the angles it is captured at the top
+    /// of [`run_tick`] rather than per-writer, but from the *mirror* — physics
+    /// does not touch `ship_pos`, so at tick entry it still holds last tick's
+    /// position, which is exactly what `prev` must be.
+    ///
+    /// Reset alongside [`Self::ship_pos`] wherever the position is *assigned*
+    /// rather than integrated — [`place_ship`] — for the same reason
+    /// [`Self::prev_heading`] is: a respawn must not be drawn sweeping in from
+    /// where the old ship died.
+    ship_prev_pos: DVec3,
+    /// Whether the wrap teleported the ship this tick. The renderer snaps to
+    /// `ship_pos` when set, rather than lerping across the field. Set by
+    /// [`wrap_everything`], cleared at the top of [`run_tick`].
+    ship_teleported: bool,
     ship_vel: DVec3,
     /// Whether the ship is on the field. `false` between a death and a respawn.
     ship_alive: bool,
@@ -713,6 +754,14 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
         rock.prev_angle = rock.angle;
     }
 
+    // The ship's position half of the same capture, from the mirror: physics
+    // stepped *before* this function, so the ship's physics transform already
+    // holds this tick's position — but `logic.ship_pos` is only refreshed by
+    // `read_ship` below, so it still holds last tick's, which is exactly what
+    // `prev` must be. The flag starts cleared; the wrap may set it.
+    logic.ship_prev_pos = logic.ship_pos;
+    logic.ship_teleported = false;
+
     // The integrator has just moved the ship, and everything below places
     // things relative to where it is *now* — the muzzle a shot leaves from, the
     // sphere the overlap query is centred on. Reading it at the end of the last
@@ -864,6 +913,10 @@ fn fire(logic: &mut GameLogic, world: &mut World, intent: Intent, dt: f64) {
     logic.bullets.push(Bullet {
         entity,
         life: BULLET_LIFE,
+        // Equal, the same convention as `prev_angle` in `spawn_rock`: the
+        // first frame a bullet is on screen interpolates to itself.
+        prev_position: position,
+        teleported: false,
     });
     logic.bullets_fired += 1;
     // At the muzzle, not at the ship's centre: the two are a fifth of a unit
@@ -1029,6 +1082,11 @@ fn place_ship(
     // renderer must not interpolate through it.
     logic.prev_heading = heading;
     logic.ship_pos = position;
+    // And the position half of the same rule: a respawn that left `ship_prev_pos`
+    // holding where the old ship died would be drawn sweeping the new one in
+    // from there over one tick.
+    logic.ship_prev_pos = position;
+    logic.ship_teleported = false;
     logic.ship_vel = velocity;
     logic.ship_alive = true;
     logic.respawn_timer = 0.0;
@@ -1116,7 +1174,16 @@ fn expire_bullets(logic: &mut GameLogic, world: &mut World, dt: f64) {
         false
     });
     for entity in dead.drain(..) {
-        despawn_bullet(world, Bullet { entity, life: 0.0 });
+        // The position pair is dead along with it; a zero is as good as any.
+        despawn_bullet(
+            world,
+            Bullet {
+                entity,
+                life: 0.0,
+                prev_position: DVec3::ZERO,
+                teleported: false,
+            },
+        );
     }
     logic.scratch_entities = dead;
 }
@@ -1224,6 +1291,13 @@ fn spawn_rock(
         // rather than sweeping in from wherever the previous tick's value was.
         prev_angle: angle,
         spin,
+        // Same convention for the position half of the pair, and a fresh rock
+        // has not teleported. The position is the wrapped one, matching the
+        // transform above: a wave deals rocks onto the field's *border*, and a
+        // border point wraps to the opposite edge, so the unwrapped spawn
+        // point would not be where the rock is.
+        prev_position: wrap_position(position),
+        teleported: false,
     });
     logic.rocks_spawned += 1;
     entity
@@ -1259,42 +1333,59 @@ fn deal_wave(logic: &mut GameLogic, world: &mut World) {
 // The wrap
 // ---------------------------------------------------------------------------
 
-/// Brings everything that has left the field back in on the other side.
+/// Brings everything that has left the field back in on the other side, and
+/// flags every body the wrap actually moved, so the renderer snaps rather than
+/// interpolates across the field on that tick.
 fn wrap_everything(logic: &mut GameLogic, world: &mut World) {
     let ship = logic.ship;
     let ship_alive = logic.ship_alive;
 
+    // Taken out and put back rather than borrowed through the guard: the
+    // closure below needs the physics system *and* the two lists, and both
+    // live behind the same `&mut logic`. The allocations survive the round
+    // trip, which is the point of reusing them. Nothing spawns during the wrap
+    // — `shatter` runs earlier in the tick — so putting the lists back
+    // restores exactly what was taken.
+    let mut rocks = std::mem::take(&mut logic.rocks);
+    let mut bullets = std::mem::take(&mut logic.bullets);
     with_physics(world, |phys| {
         if ship_alive {
             // `None`: the ship carries no collider (see `check_ship`), so its
             // wrap has nothing to re-place in the tree. The rocks below are
             // where the teleport rule actually bites.
-            teleport_if_outside(phys, ship, None);
+            if teleport_if_outside(phys, ship, None) {
+                logic.ship_teleported = true;
+            }
         }
-        // The lists are borrowed, not snapshotted: the closure only reads
-        // them, so a steady-state tick allocates nothing here.
-        for rock in &logic.rocks {
-            teleport_if_outside(phys, rock.entity, Some(&rock.size.collider()));
+        for rock in &mut rocks {
+            if teleport_if_outside(phys, rock.entity, Some(&rock.size.collider())) {
+                rock.teleported = true;
+            }
         }
-        for bullet in &logic.bullets {
-            teleport_if_outside(phys, bullet.entity, None);
+        for bullet in &mut bullets {
+            if teleport_if_outside(phys, bullet.entity, None) {
+                bullet.teleported = true;
+            }
         }
     });
+    logic.rocks = rocks;
+    logic.bullets = bullets;
 }
 
 /// Wraps `entity` if it has left the field, and does nothing at all if it has
-/// not.
+/// not. Returns whether it teleported.
+#[must_use]
 fn teleport_if_outside(
     phys: &mut PhysicsSystem,
     entity: Entity,
     collider: Option<&ColliderComponent>,
-) {
+) -> bool {
     let Some(transform) = phys.transform(entity).copied() else {
-        return;
+        return false;
     };
     let wrapped = wrap_position(transform.position);
     if wrapped == transform.position {
-        return;
+        return false;
     }
     teleport(
         phys,
@@ -1302,6 +1393,7 @@ fn teleport_if_outside(
         Transform::new(wrapped, transform.rotation),
         collider,
     );
+    true
 }
 
 /// Moves `entity` to `transform` as a **teleport**: its collider comes out of
@@ -1377,36 +1469,50 @@ fn restart(logic: &mut GameLogic, world: &mut World) {
     deal_wave(logic, world);
 }
 
-/// Copies the authoritative state the renderer needs out of the physics world.
+/// Copies the authoritative state the renderer needs out of the physics world,
+/// and advances the position half of each body's `(prev, cur)` pair.
 fn refresh_views(logic: &mut GameLogic, world: &mut World) {
     let ship = logic.ship;
 
     // Taken out and put back rather than borrowed through the guard: the
-    // closure below needs the physics system *and* these two lists, and both
+    // closure below needs the physics system *and* these four lists, and all
     // live behind the same `&mut logic`. The allocations survive the round
-    // trip, which is the point of reusing them. The rocks and bullets being
-    // *read* are borrowed, not cloned — the closure only reads them, so a
-    // steady-state tick allocates nothing here.
+    // trip, which is the point of reusing them. A steady-state tick allocates
+    // nothing here.
     let mut rock_views = std::mem::take(&mut logic.rock_views);
     let mut bullet_views = std::mem::take(&mut logic.bullet_views);
+    let mut rocks = std::mem::take(&mut logic.rocks);
+    let mut bullets = std::mem::take(&mut logic.bullets);
     rock_views.clear();
     bullet_views.clear();
     let ship_state = with_physics(world, |phys| {
-        for rock in &logic.rocks {
+        for rock in &mut rocks {
             if let Some(transform) = phys.transform(rock.entity) {
                 rock_views.push(RockView {
                     position: transform.position,
                     size: rock.size,
                     angle: rock.angle,
                     prev_angle: rock.prev_angle,
+                    prev_position: rock.prev_position,
+                    teleported: rock.teleported,
                 });
+                // Physics holds the positions, so the pair is advanced at the
+                // *end* of the tick: the view just published carries last
+                // tick's position, and the stored `prev` becomes this one.
+                // A wrap is a one-tick fact, so the flag clears here too.
+                rock.prev_position = transform.position;
+                rock.teleported = false;
             }
         }
-        for bullet in &logic.bullets {
+        for bullet in &mut bullets {
             if let Some(transform) = phys.transform(bullet.entity) {
                 bullet_views.push(BulletView {
                     position: transform.position,
+                    prev_position: bullet.prev_position,
+                    teleported: bullet.teleported,
                 });
+                bullet.prev_position = transform.position;
+                bullet.teleported = false;
             }
         }
         let position = phys.transform(ship).map(|t| t.position);
@@ -1416,10 +1522,14 @@ fn refresh_views(logic: &mut GameLogic, world: &mut World) {
     .flatten();
     logic.rock_views = rock_views;
     logic.bullet_views = bullet_views;
+    logic.rocks = rocks;
+    logic.bullets = bullets;
 
     if let Some((position, velocity)) = ship_state {
         logic.ship_pos = position;
         logic.ship_vel = velocity;
+        // `ship_prev_pos` is deliberately not touched: it was captured at the
+        // top of `run_tick`, when the mirror still held last tick's position.
     }
 }
 
@@ -1453,21 +1563,28 @@ fn with_physics<R>(world: &mut World, f: impl FnOnce(&mut PhysicsSystem) -> R) -
 /// Filled through [`Game::render_state`], which reuses the caller's allocations
 /// — this game hands over a fresh rock and bullet list every frame forever.
 ///
-/// # Angles come in pairs and positions do not
+/// # Angles and positions both come in pairs — and positions carry a teleport flag
 ///
 /// Every rotation here is `(previous tick, this tick)`, and
 /// `art::Scene::build` takes the frame clock's alpha and [`lerp_angle`]s
-/// between them. Positions are a single value, deliberately: this playfield
-/// **wraps**, so a rock's previous position and its current one are on opposite
+/// between them. Every position is the same pair, because this playfield
+/// **wraps**: a rock's previous position and its current one are on opposite
 /// sides of the field on the tick it crosses an edge, and interpolating between
-/// them would fly it back across the whole screen. Closing that needs the view
-/// to carry "this one teleported", which is a change to what the simulation
-/// publishes rather than to how it is drawn — `docs/backlog.md` carries it. An
-/// angle has no such case: a wrap of τ is the identity, which is exactly why the
-/// angles could be interpolated first.
+/// them would fly it back across the whole screen. The pair alone cannot
+/// express that, so each body carries `teleported`, set on the tick the wrap
+/// moved it; the renderer draws a teleported body at its current position
+/// rather than between the two. The flag is why positions could be
+/// interpolated at all — without it, "lerp them too" would be a bug, not a
+/// fix. An angle has no such case: a wrap of τ is the identity, which is
+/// exactly why the angles could be interpolated first.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RenderState {
     pub ship: DVec3,
+    /// Where the ship was at the end of the previous tick, for the same lerp.
+    pub ship_prev_pos: DVec3,
+    /// Whether the wrap teleported the ship this tick; the renderer snaps when
+    /// set.
+    pub ship_teleported: bool,
     pub ship_heading: f64,
     /// The ship's heading at the end of the previous tick.
     pub ship_heading_prev: f64,
@@ -1624,6 +1741,8 @@ impl Game {
             heading: 0.0,
             prev_heading: 0.0,
             ship_pos: DVec3::ZERO,
+            ship_prev_pos: DVec3::ZERO,
+            ship_teleported: false,
             ship_vel: DVec3::ZERO,
             ship_alive: false,
             respawn_timer: 0.0,
@@ -1850,6 +1969,8 @@ impl Game {
     pub fn render_state(&self, out: &mut RenderState) {
         let logic = lock(&self.shared);
         out.ship = logic.ship_pos;
+        out.ship_prev_pos = logic.ship_prev_pos;
+        out.ship_teleported = logic.ship_teleported;
         out.ship_heading = logic.heading;
         out.ship_heading_prev = logic.prev_heading;
         out.ship_alive = logic.ship_alive;
@@ -4012,5 +4133,172 @@ mod tests {
             "a fresh ship would be drawn spinning out of the heading the last \
              one was flying",
         );
+    }
+
+    /// The ship's previous position trails by one tick while it moves, and is
+    /// **reset rather than carried** when the ship is placed back at the
+    /// origin — a renderer interpolating from where the last ship died would
+    /// drag the new one across the field over a single frame.
+    #[test]
+    fn the_ships_previous_position_trails_a_tick_and_resets_when_it_is_placed() {
+        let mut harness = Harness::new(60, 60);
+        harness.tap(KeyCode::Space);
+        assert_eq!(harness.game.state, GameState::Playing);
+        // A clean board: the ship at the origin and one rock parked in a far
+        // corner, so the ship can thrust without the field emptying and the
+        // wave machinery running.
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        harness.game.stage_rock(
+            DVec3::new(WORLD_HALF_WIDTH - 2.0, WORLD_HALF_HEIGHT - 2.0, 0.0),
+            DVec3::ZERO,
+            RockSize::Small,
+        );
+
+        harness.game.key_event(KeyCode::ArrowUp, true);
+        // The first thrust tick applies the force; physics steps it at the
+        // start of the *next* tick, so run one tick to arm the engine and then
+        // watch the pair across the tick that actually moves.
+        harness.game.tick();
+        let mut render = RenderState::default();
+        harness.game.render_state(&mut render);
+        let before = render.ship;
+        harness.game.tick();
+        harness.game.render_state(&mut render);
+        assert_eq!(
+            render.ship_prev_pos, before,
+            "prev is not the position from the tick before",
+        );
+        assert_ne!(
+            render.ship, render.ship_prev_pos,
+            "a held thrust left prev and current equal",
+        );
+
+        // A few more ticks of thrust, so the reset below has a distance to
+        // undo rather than a rounding error.
+        for _ in 0..10 {
+            harness.game.tick();
+        }
+        harness.game.render_state(&mut render);
+        assert!(
+            render.ship != DVec3::ZERO,
+            "the ship never moved, so the reset below proves nothing",
+        );
+
+        // A restart runs `place_ship`, which *assigns* the position. Both
+        // halves have to land on it.
+        harness.game.key_event(KeyCode::ArrowUp, false);
+        harness.tap(KeyCode::KeyR);
+        harness.game.render_state(&mut render);
+        assert_eq!(render.ship, DVec3::ZERO);
+        assert_eq!(
+            render.ship_prev_pos,
+            DVec3::ZERO,
+            "a fresh ship would be drawn sweeping in from where the last one died",
+        );
+        assert!(
+            !render.ship_teleported,
+            "a restarted ship inherited a stale teleport flag",
+        );
+    }
+
+    /// **The tick a rock wraps is the tick its view is flagged teleported**,
+    /// and a rock that stayed inside is not — with the unwrapped one's
+    /// previous position trailing by exactly one tick.
+    ///
+    /// The flag is the renderer's whole defence against lerping a wrapped body
+    /// back across the field, so it has to be set on the wrap tick itself and
+    /// clear on the next one.
+    #[test]
+    fn a_wrapped_rock_is_flagged_teleported_on_that_tick_and_unwrapped_ones_are_not() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        // One rock crossing the right edge on the first tick — 8 u/s at 60 Hz
+        // is 0.13 of a unit of travel from 0.1 short of the edge — and one
+        // moving slowly inside the field, which must never be flagged.
+        harness.game.stage_rock(
+            DVec3::new(WORLD_HALF_WIDTH - 0.1, 0.0, 0.0),
+            DVec3::new(8.0, 0.0, 0.0),
+            RockSize::Small,
+        );
+        harness.game.stage_another_rock(
+            DVec3::new(-8.0, -6.0, 0.0),
+            DVec3::new(1.5, 0.0, 0.0),
+            RockSize::Large,
+        );
+
+        harness.game.tick();
+        let first = harness.game.rocks();
+        let wrapped = first
+            .iter()
+            .find(|r| r.teleported)
+            .expect("the rock that crossed the edge was not flagged teleported");
+        assert!(
+            wrapped.position.x < 0.0,
+            "the flagged rock never crossed: {:?}",
+            wrapped.position,
+        );
+        // The pair spans the field on the wrap tick — exactly why the flag,
+        // and not a lerp, is what the renderer has to see.
+        assert_eq!(
+            wrapped.prev_position,
+            DVec3::new(WORLD_HALF_WIDTH - 0.1, 0.0, 0.0),
+            "the flagged rock's previous position is not where it crossed from",
+        );
+        let calm = first
+            .iter()
+            .find(|r| !r.teleported)
+            .expect("every rock on the field was flagged");
+        assert!(
+            calm.position.x.abs() < WORLD_HALF_WIDTH - 1.0,
+            "the 'unwrapped' rock actually crossed: {:?}",
+            calm.position,
+        );
+
+        harness.game.tick();
+        let second = harness.game.rocks();
+        for now in &second {
+            assert!(
+                !now.teleported,
+                "the teleport flag did not clear on the tick after the wrap",
+            );
+        }
+        // And the pair trails: each rock's previous position is the previous
+        // tick's current one, the wrapped rock included.
+        for (before, now) in first.iter().zip(&second) {
+            assert_eq!(
+                now.prev_position, before.position,
+                "a rock's previous position is not the previous tick's",
+            );
+        }
+    }
+
+    /// **A freshly spawned rock and a freshly fired bullet interpolate to
+    /// themselves on the first frame** — `prev == cur`, so the renderer draws
+    /// them where they are rather than sweeping them in from somewhere.
+    #[test]
+    fn a_new_rock_and_bullet_interpolate_to_themselves_on_the_first_frame() {
+        let mut harness = Harness::new(60, 60);
+        // The wave is dealt at construction, before any tick has moved it.
+        let rocks = harness.game.rocks();
+        assert!(!rocks.is_empty(), "no wave was dealt");
+        for rock in &rocks {
+            assert_eq!(
+                rock.prev_position, rock.position,
+                "a fresh rock's previous position is not its own",
+            );
+            assert!(!rock.teleported, "a fresh rock is flagged teleported");
+        }
+
+        harness.tap(KeyCode::Space);
+        let bullets = harness.game.bullets();
+        assert!(!bullets.is_empty(), "the first shot did not fire");
+        for bullet in &bullets {
+            assert_eq!(
+                bullet.prev_position, bullet.position,
+                "a fresh bullet's previous position is not its own",
+            );
+            assert!(!bullet.teleported, "a fresh bullet is flagged teleported");
+        }
     }
 }
