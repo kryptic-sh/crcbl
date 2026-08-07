@@ -471,7 +471,7 @@ mod tests {
     use crcbl::hal::{DeviceDesc, Format, Instance, QueueKind};
     use crcbl::sprite::{Direction, NineSlice};
 
-    use crate::game::{GAP_CENTRE_RANGE, gap_centre};
+    use crate::game::{BIRD_RADIUS, GAP_CENTRE_RANGE, gap_centre};
 
     /// Runs `body` against a scene built on the null backend.
     ///
@@ -981,6 +981,46 @@ mod tests {
                     "the bird sits {fraction} across"
                 );
             }
+        });
+    }
+
+    /// **The drawn bird covers the bird that collides, and not by so much that
+    /// art could drift and nothing notice.**
+    ///
+    /// The bird is deliberately drawn larger than its collider — a circle of
+    /// `BIRD_RADIUS` against a 16×16 frame that lands on 0.8 world units — so
+    /// the assertion is a stated ratio rather than the equality breakout holds
+    /// its bricks to: the sprite's half-extent must be more than the collider's
+    /// radius (a bird smaller than its hitbox is a visible bug) and less than
+    /// 1.5× it (a sprite that grew to twice the collider would read fine, which
+    /// is exactly what this catches).
+    #[test]
+    fn the_bird_sprite_covers_the_collider_within_a_stated_ratio() {
+        with_scene(|scene| {
+            let bird_pos = DVec3::new(3.0, 1.5, 0.0);
+            let (at, half_width) = camera(bird_pos.x, EXTENT);
+            let frame = scene.build(bird_pos, &[], at, half_width);
+            let bird = frame.last().expect("the bird is drawn last");
+            let [x, y, w, h] = bird.rect;
+
+            // The sprite is centred on the collider, not offset from it.
+            let centre = (x + w / 2.0, y + h / 2.0);
+            assert!(
+                (centre.0 - bird_pos.x as f32).abs() < 1e-3
+                    && (centre.1 - bird_pos.y as f32).abs() < 1e-3,
+                "the sprite sits at {centre:?}, the bird at {bird_pos:?}"
+            );
+            assert!(
+                (h - w).abs() < 1e-6,
+                "the frame is square ({w} × {h}), so one axis stands for both"
+            );
+
+            let ratio = (w / 2.0) / BIRD_RADIUS as f32;
+            assert!(
+                ratio > 1.0 && ratio < 1.5,
+                "the bird sprite is {ratio}× its collider's radius: it must be \
+                 larger than the collider and smaller than 1.5× it"
+            );
         });
     }
 
