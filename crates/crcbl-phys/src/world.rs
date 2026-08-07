@@ -214,6 +214,16 @@ impl OverlapQueries<'_> {
 /// is no second copy of the traversal for the two to disagree in — which
 /// matters more than usual, because a caller mixing the two in one pass is
 /// exactly what a `par_for` adoption looks like mid-migration.
+///
+/// # Shape-aware: `radius` is expanded by each collider's own shape
+///
+/// The query sphere is tested against every collider's *shape* (see
+/// `query::sphere_overlaps_*`), not against its centre. A sphere collider of
+/// radius `r_b` is therefore returned iff its centre is within
+/// `radius + r_b` of `centre`, which is what makes `apps/horde`'s
+/// `separation_query_radius` correct without adding the neighbour's radius to
+/// the query. `tests::a_sphere_overlap_is_expanded_by_the_colliders_own_radius`
+/// pins the boundary.
 fn overlap_sphere_core(
     bvh: &Bvh,
     colliders: &[Option<ColliderSlot>],
@@ -825,6 +835,101 @@ mod tests {
             biggest > 4,
             "the widest query in the fixture found {biggest} colliders, so the \
              comparison above was mostly two empty vectors",
+        );
+    }
+
+    /// **A sphere overlap is shape-aware: the query radius is expanded by each
+    /// collider's own radius.**
+    ///
+    /// `overlap_sphere(centre, R)` returns every collider whose *shape* overlaps
+    /// the query sphere, so a sphere collider of radius `r_b` is returned iff
+    /// its centre is within `R + r_b` of the query's — on every axis by the
+    /// broadphase prefilter (whose leaf AABBs carry the collider's own extent),
+    /// and off-axis by the exact shape test, which trims the prefilter's square
+    /// back to the circle. The contract matters to `apps/horde`: its separation
+    /// query passes `r_self + slack` and expects neighbours out to
+    /// `r_self + slack + r_b`, which is only right because of this expansion —
+    /// the guard for that lives here rather than in the consumer.
+    ///
+    /// The two families of cases exercise the two layers separately: the
+    /// on-axis ones are decided by the broadphase, the 45° ones (in the z = 0
+    /// plane) are admitted by the broadphase and decided by the exact shape
+    /// test.
+    #[test]
+    fn a_sphere_overlap_is_expanded_by_the_colliders_own_radius() {
+        let mut world = PhysicsWorld::new();
+        let body = world.add_sphere(Sphere::new(DVec3::ZERO, 0.5));
+        let mut scratch = QueryScratch::new();
+        let mut out = Vec::new();
+        let queries = world.overlap_queries();
+
+        let query_radius = 1.0;
+        let boundary = query_radius + 0.5; // the body's radius
+
+        // On the query's own axis, the broadphase's AABB admission decides.
+        queries.overlap_sphere_into(
+            DVec3::new(boundary - 0.01, 0.0, 0.0),
+            query_radius,
+            &mut scratch,
+            &mut out,
+        );
+        assert_eq!(
+            out,
+            vec![body],
+            "a body whose centre is inside R + r_b is returned"
+        );
+
+        queries.overlap_sphere_into(
+            DVec3::new(boundary + 0.01, 0.0, 0.0),
+            query_radius,
+            &mut scratch,
+            &mut out,
+        );
+        assert!(
+            out.is_empty(),
+            "a body whose centre is outside R + r_b is not returned"
+        );
+
+        // The boundary is R + r_b, not R: a query radius alone, with the body's
+        // centre at R + r_b/2, must still find it.
+        queries.overlap_sphere_into(
+            DVec3::new(query_radius + 0.25, 0.0, 0.0),
+            query_radius,
+            &mut scratch,
+            &mut out,
+        );
+        assert_eq!(
+            out,
+            vec![body],
+            "the query radius is expanded by the collider's own radius, not used raw"
+        );
+
+        // At 45° in the z = 0 plane, the AABB prefilter still admits both
+        // (axis offsets below R + r_b), so the exact shape test decides: the
+        // boundary is the circle of radius R + r_b, not the square.
+        // (R + r_b)/√2 ≈ 1.0607.
+        queries.overlap_sphere_into(
+            DVec3::new(1.05, 1.05, 0.0),
+            query_radius,
+            &mut scratch,
+            &mut out,
+        );
+        assert_eq!(
+            out,
+            vec![body],
+            "a body within the circle of radius R + r_b is returned even off-axis"
+        );
+
+        queries.overlap_sphere_into(
+            DVec3::new(1.07, 1.07, 0.0),
+            query_radius,
+            &mut scratch,
+            &mut out,
+        );
+        assert!(
+            out.is_empty(),
+            "a body outside the circle of radius R + r_b is not returned, \
+             even where the broadphase AABB would admit it"
         );
     }
 

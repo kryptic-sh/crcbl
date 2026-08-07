@@ -369,6 +369,18 @@ impl PhysicsSystem {
     }
 
     /// Overlap query: return all entities whose collider overlaps the sphere.
+    ///
+    /// # The query is shape-aware, and `radius` is expanded by each collider
+    ///
+    /// The query sphere is tested against every collider's *shape*, so a sphere
+    /// collider of radius `r_b` is returned iff its centre is within
+    /// `radius + r_b` of `centre` (and a box or capsule by the extent of its own
+    /// shape). A caller that wants "everything whose centre is within `radius`"
+    /// has to subtract the largest collider radius itself. This is not a corner
+    /// of the API — `apps/horde`'s separation query is only correct because it
+    /// omits the neighbour's radius on purpose and lets this expansion supply
+    /// it; the boundary is pinned by `world::tests`'
+    /// `a_sphere_overlap_is_expanded_by_the_colliders_own_radius`.
     #[must_use]
     pub fn overlap_sphere(&mut self, centre: DVec3, radius: f64) -> Vec<(Entity, ShapeHit)> {
         let mut out = Vec::new();
@@ -378,6 +390,10 @@ impl PhysicsSystem {
 
     /// [`overlap_sphere`](Self::overlap_sphere) writing into a buffer the
     /// caller owns, for a game that queries once per body per tick.
+    ///
+    /// Same shape-aware semantics as [`overlap_sphere`](Self::overlap_sphere):
+    /// a sphere collider of radius `r_b` is returned iff its centre is within
+    /// `radius + r_b` of `centre`.
     ///
     /// `out` is cleared and then filled, so the buffer is hoisted out of the
     /// loop and reused. Nothing below this allocates either: the collider ids
