@@ -1783,6 +1783,17 @@ uncertainty.
   headless `Audio` that opens no stream at all, which would make the render
   check deterministic in every sample.
 
+  **Same race, second test, observed once:** asteroids'
+  `the_engine_is_one_looping_voice_that_outlives_its_buffer` failed on
+  `macos-latest` 2026-08-07 with "the engine's release block was cut" and passed
+  on the immediate rerun and on both the preceding and following CI runs — no
+  macOS-relevant diff separated them. Its release-block check has the same
+  window as the spatial assertions above: a headless `Audio` opens the null
+  stream, whose polling thread can consume the one release fade between
+  `set_thrust(false)` and the test's own `fill`, so the test sees silence and
+  blames the backend. The fix is the same one — a headless `Audio` with no
+  stream — and it is the same decision, per sample.
+
 - **Where does the menu art live?** Taken: **`crates/crcbl-render/assets/`**,
   baked by that crate's own `build.rs`. `apps/*` cannot depend on each other, so
   per-sample art is the same window authored three times and three games that
