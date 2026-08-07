@@ -35,21 +35,18 @@
 //! a second display API for a string [`MonitorInfo::name`] already documents as
 //! unstable and not-for-keying.
 //!
-//! # Decision: refresh comes from `EnumDisplaySettingsW`, and is a whole hertz
+//! # Decision: refresh comes from `QueryDisplayConfig` first, exact when the
+//! path walk can answer
 //!
 //! [`MonitorInfo::refresh_millihertz`] exists because 59.94 Hz is not 60, and
-//! `docs/plan/15-windowing.md`'s frame pacing needs the difference. **Windows
-//! is the one platform of the five that cannot express it here**:
-//! `DEVMODEW::dmDisplayFrequency` is an integer count of hertz and reports 60
-//! for a 59.94 Hz mode. So this backend reports 60_000 millihertz for such a
-//! display — precise-looking and wrong in the third decimal.
-//!
-//! The exact figure exists, in `QueryDisplayConfig`'s
-//! `DISPLAYCONFIG_RATIONAL` (a numerator over a denominator, 60000/1001 for the
-//! mode in question). It is not implemented here: it is a second display API
-//! with its own path-and-mode array walk, and this slice is the window
-//! lifecycle. `docs/backlog.md` carries it with that reasoning, rather than
-//! this module quietly reporting a rounded number as if it were exact.
+//! `docs/plan/15-windowing.md`'s frame pacing needs the difference.
+//! `EnumDisplaySettingsW` cannot express it: `DEVMODEW::dmDisplayFrequency` is
+//! an integer count of hertz and reports 60 for a 59.94 Hz mode. So the exact
+//! figure comes from `QueryDisplayConfig` first: its `DISPLAYCONFIG_RATIONAL`
+//! carries 60000/1001 for that mode, which the integer path rounds away. The
+//! whole hertz `EnumDisplaySettingsW` reports is the fallback, used when the
+//! path walk cannot answer — session 0, a remote session, a driver that
+//! refuses, or a path with no mode.
 
 use core::ptr;
 
@@ -138,6 +135,7 @@ impl Win32Shell {
         }
 
         let mut monitors = Vec::with_capacity(handles.len());
+        let exact_refreshes = exact_refreshes();
         for handle in handles {
             let mut info = MonitorInfoExW::default();
             // SAFETY: as `device_name` — a live, self-describing structure.
@@ -149,7 +147,7 @@ impl Win32Shell {
             monitors.push(MonitorInfo {
                 id: self.monitor_id_for(&device),
                 scale_factor: geometry::scale_from_dpi(dpi_of(handle)),
-                refresh_millihertz: refresh_of(&info.sz_device),
+                refresh_millihertz: refresh_of(&exact_refreshes, &info.sz_device),
                 is_primary: info.dw_flags & value::MONITOR_PRIMARY != 0,
                 bounds,
                 // Unlike X11's `_NET_WORKAREA`, this is already per monitor and
@@ -218,9 +216,111 @@ fn dpi_of(monitor: Handle) -> u32 {
 ///
 /// Zero is documented by [`MonitorInfo::refresh_millihertz`] as "the backend
 /// cannot determine it" rather than as 0 Hz, so a virtual display that reports
-/// nothing is honest rather than broken. See the [module docs](self) for why
-/// the non-zero answer is a whole hertz.
-fn refresh_of(device: &[u16; 32]) -> u32 {
+/// nothing is honest rather than broken. The exact rate from
+/// [`exact_refreshes`] wins; a display the path walk cannot name falls back to
+/// `EnumDisplaySettingsW`'s whole hertz.
+fn refresh_of(table: &[(String, u32)], device: &[u16; 32]) -> u32 {
+    let name = wide_to_string(device);
+    table
+        .iter()
+        .find(|(entry, _)| *entry == name)
+        .map(|(_, millihertz)| *millihertz)
+        .unwrap_or_else(|| integer_refresh_of(device))
+}
+
+/// The exact refresh of every active display, as `(GDI device name, millihertz)`.
+///
+/// `QueryDisplayConfig`'s `DISPLAYCONFIG_RATIONAL` carries the refresh a
+/// `DEVMODEW` cannot: 60000/1001 for a 59.94 Hz mode, which
+/// `EnumDisplaySettingsW` reports as the integer 60. Each path is named through
+/// `DisplayConfigGetDeviceInfo`'s source-name request so it can be matched to
+/// the monitor whose `\\.\DISPLAYn` [`enumerate_monitors`] already keys on.
+/// Empty when the API will not answer at all — a remote session or a driver
+/// that refuses — which is what the caller falls back from.
+fn exact_refreshes() -> Vec<(String, u32)> {
+    let mut path_count = 0u32;
+    let mut mode_count = 0u32;
+    // SAFETY: two live `u32`s the call writes through.
+    let status = unsafe {
+        ffi::GetDisplayConfigBufferSizes(
+            value::QDC_ONLY_ACTIVE_PATHS,
+            &raw mut path_count,
+            &raw mut mode_count,
+        )
+    };
+    if status != value::ERROR_SUCCESS || path_count == 0 {
+        log::warn!(
+            "win32: GetDisplayConfigBufferSizes failed ({status}); monitor refresh falls back to whole hertz"
+        );
+        return Vec::new();
+    }
+    let mut paths = vec![ffi::DisplayConfigPathInfo::default(); path_count as usize];
+    let mut modes = vec![ffi::DisplayConfigModeInfo::default(); mode_count as usize];
+    // SAFETY: both vectors are sized from the call above, the pointers are to
+    // their live buffers, and the counts may only shrink.
+    let status = unsafe {
+        ffi::QueryDisplayConfig(
+            value::QDC_ONLY_ACTIVE_PATHS,
+            &raw mut path_count,
+            paths.as_mut_ptr(),
+            &raw mut mode_count,
+            modes.as_mut_ptr(),
+            core::ptr::null_mut(),
+        )
+    };
+    if status != value::ERROR_SUCCESS {
+        log::warn!(
+            "win32: QueryDisplayConfig failed ({status}); monitor refresh falls back to whole hertz"
+        );
+        return Vec::new();
+    }
+    paths.truncate(path_count as usize);
+    modes.truncate(mode_count as usize);
+
+    let mut refreshes = Vec::new();
+    for path in &paths {
+        let Some(mode_index) = path.target_info.target_mode_index() else {
+            continue;
+        };
+        let Some(mode) = modes.get(mode_index) else {
+            continue;
+        };
+        if mode.info_type != value::DISPLAYCONFIG_MODE_INFO_TYPE_TARGET {
+            continue;
+        }
+        let signal = mode.target_mode.target_video_signal_info;
+        let divider = (signal.additional_signal_info >> 16) & 0x3F;
+        let Some(millihertz) = signal.v_sync_freq.millihertz(divider) else {
+            continue;
+        };
+        let mut request = ffi::DisplayConfigSourceDeviceName {
+            header: ffi::DisplayConfigDeviceInfoHeader {
+                kind: value::DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
+                size: core::mem::size_of::<ffi::DisplayConfigSourceDeviceName>() as u32,
+                adapter_id: path.source_info.adapter_id,
+                id: path.source_info.id,
+            },
+            ..ffi::DisplayConfigSourceDeviceName::default()
+        };
+        // SAFETY: `request` is a live, correctly sized structure; the system
+        // fills `view_gdi_device_name` and reads nothing else.
+        let status = unsafe { ffi::DisplayConfigGetDeviceInfo(&raw mut request.header) };
+        if status != value::ERROR_SUCCESS {
+            continue;
+        }
+        let name = wide_to_string(&request.view_gdi_device_name);
+        if name.is_empty() {
+            continue;
+        }
+        log::info!("win32: exact refresh for {name}: {millihertz} mHz");
+        refreshes.push((name, millihertz));
+    }
+    refreshes
+}
+
+/// The whole-hertz fallback: `EnumDisplaySettingsW`'s integer refresh, which
+/// is what this module reported before `QueryDisplayConfig` was asked first.
+fn integer_refresh_of(device: &[u16; 32]) -> u32 {
     let mut mode = DevModeW::default();
     // SAFETY: `device` is the NUL-padded name out of `MONITORINFOEXW`, which
     // is exactly what this call keys on; `mode` is a live, initialised

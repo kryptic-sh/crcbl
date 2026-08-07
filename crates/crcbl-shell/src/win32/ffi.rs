@@ -49,7 +49,6 @@
 //! | Not used | What it would buy | Why not |
 //! | --- | --- | --- |
 //! | `EnumDisplayDevicesW` | a monitor's marketing name | it usually answers "Generic PnP Monitor", which is worse than the device name for telling two displays apart |
-//! | `QueryDisplayConfig` | exact refresh as a numerator/denominator | the only way to see 59.94 rather than 60 — recorded in `docs/backlog.md`, not implemented |
 //! | `ImmGetContext` and the `WM_IME_*` family | a real input method | W2 leaves [`TEXT_IME`](crate::ShellCaps::TEXT_IME) clear rather than claiming what `WM_CHAR` alone earns; see [`Win32Shell::caps`](super::Win32Shell) |
 //! | `ToUnicode` | the character a key produces | it **consumes** dead-key state, so calling it would eat the accent `WM_CHAR` was about to deliver. [`MapVirtualKeyW`] with `MAPVK_VK_TO_CHAR` answers the same question without side effects |
 //! | `GetAsyncKeyState` | modifier state | it reads the hardware *now*, not at the message's time. [`GetKeyboardState`] is the snapshot that belongs to the message being processed |
@@ -466,6 +465,211 @@ impl Default for DevModeW {
     }
 }
 
+/// `LUID` — a locally unique identifier; here, which adapter (GPU) a
+/// `QueryDisplayConfig` path or mode belongs to.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Luid {
+    /// Low 32 bits.
+    pub low_part: u32,
+    /// High 32 bits.
+    pub high_part: i32,
+}
+
+/// `DISPLAYCONFIG_2DREGION` — a width and height, with no position.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayConfig2dRegion {
+    /// Width in pixels.
+    pub cx: u32,
+    /// Height in pixels.
+    pub cy: u32,
+}
+
+/// `DISPLAYCONFIG_RATIONAL` — a numerator over a denominator, the exact form
+/// `QueryDisplayConfig` reports a signal rate in.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayConfigRational {
+    /// Numerator.
+    pub numerator: u32,
+    /// Denominator.
+    pub denominator: u32,
+}
+
+impl DisplayConfigRational {
+    /// The rate this rational expresses in millihertz, truncated, or `None`
+    /// for a degenerate rational (a zero numerator or denominator).
+    ///
+    /// `divider` is the signal's `vSyncFreqDivider` (0 for a progressive
+    /// mode): when non-zero, the rate is the rational divided by it, which is
+    /// the interlaced case. 60000/1001 → 59940, the 59.94 Hz mode
+    /// `EnumDisplaySettingsW` reports as the integer 60.
+    pub const fn millihertz(self, divider: u32) -> Option<u32> {
+        if self.numerator == 0 || self.denominator == 0 {
+            return None;
+        }
+        let denominator = if divider == 0 {
+            self.denominator
+        } else {
+            self.denominator.saturating_mul(divider)
+        };
+        if denominator == 0 {
+            return None;
+        }
+        Some(self.numerator.saturating_mul(1_000) / denominator)
+    }
+}
+
+/// `DISPLAYCONFIG_VIDEO_SIGNAL_INFO` — the signal a target mode describes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayConfigVideoSignalInfo {
+    /// Pixel clock in hertz.
+    pub pixel_rate: u64,
+    /// Horizontal sync frequency.
+    pub h_sync_freq: DisplayConfigRational,
+    /// Vertical sync frequency — the refresh rate, once
+    /// [`additional_signal_info`](Self::additional_signal_info)'s divider has
+    /// been applied.
+    pub v_sync_freq: DisplayConfigRational,
+    /// The visible region.
+    pub active_size: DisplayConfig2dRegion,
+    /// The whole scan-out region.
+    pub total_size: DisplayConfig2dRegion,
+    /// The `AdditionalSignalInfo` union value: `videoStandard` in the low 16
+    /// bits, `vSyncFreqDivider` in bits 16-21.
+    pub additional_signal_info: u32,
+    /// `DISPLAYCONFIG_SCANLINE_ORDERING`.
+    pub scan_line_ordering: u32,
+}
+
+/// `DISPLAYCONFIG_TARGET_MODE` — the mode a target (a display) is driving.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayConfigTargetMode {
+    /// The signal, including the exact refresh rational.
+    pub target_video_signal_info: DisplayConfigVideoSignalInfo,
+}
+
+/// `DISPLAYCONFIG_MODE_INFO` — one entry of the mode array `QueryDisplayConfig`
+/// fills.
+///
+/// The tail is a union of a 48-byte `DISPLAYCONFIG_TARGET_MODE` and a 20-byte
+/// `DISPLAYCONFIG_SOURCE_MODE`, so [`target_mode`](Self::target_mode) — the
+/// larger arm — determines the layout. This backend only reads target modes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayConfigModeInfo {
+    /// `DISPLAYCONFIG_MODE_INFO_TYPE`: target, source or desktop image.
+    pub info_type: u32,
+    /// The adapter's id for this mode.
+    pub id: u32,
+    /// The adapter this mode belongs to.
+    pub adapter_id: Luid,
+    /// The union's larger arm, and therefore the layout; valid only when
+    /// `info_type` is `DISPLAYCONFIG_MODE_INFO_TYPE_TARGET`.
+    pub target_mode: DisplayConfigTargetMode,
+}
+
+/// `DISPLAYCONFIG_PATH_SOURCE_INFO` — the source half of a path.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayConfigPathSourceInfo {
+    /// The adapter.
+    pub adapter_id: Luid,
+    /// The source's id on that adapter.
+    pub id: u32,
+    /// The `modeInfoIdx` union value: the **source** mode's index in the high
+    /// 16 bits, the clone-group id in the low 16.
+    pub mode_info_idx: u32,
+    /// `DISPLAYCONFIG_SOURCE_IN_USE` and friends.
+    pub status_flags: u32,
+}
+
+/// `DISPLAYCONFIG_PATH_TARGET_INFO` — the target half of a path.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayConfigPathTargetInfo {
+    /// The adapter.
+    pub adapter_id: Luid,
+    /// The target's id on that adapter.
+    pub id: u32,
+    /// The `modeInfoIdx` union value: the **target** mode's index in the high
+    /// 16 bits, the desktop-mode index in the low 16.
+    pub mode_info_idx: u32,
+    /// `DISPLAYCONFIG_VIDEO_OUTPUT_TECHNOLOGY`.
+    pub output_technology: u32,
+    /// `DISPLAYCONFIG_ROTATION`.
+    pub rotation: u32,
+    /// `DISPLAYCONFIG_SCALING`.
+    pub scaling: u32,
+    /// The path's own refresh; the target mode's signal carries the exact one.
+    pub refresh_rate: DisplayConfigRational,
+    /// `DISPLAYCONFIG_SCANLINE_ORDERING`.
+    pub scan_line_ordering: u32,
+    /// Whether the target is present.
+    pub target_available: Bool32,
+    /// `DISPLAYCONFIG_TARGET_IN_USE` and friends.
+    pub status_flags: u32,
+}
+
+impl DisplayConfigPathTargetInfo {
+    /// The target mode's index in the mode array `QueryDisplayConfig` filled:
+    /// the high 16 bits of [`mode_info_idx`](Self::mode_info_idx), whose low 16
+    /// bits are the desktop-mode index and are ignored. `None` for the "no
+    /// mode" sentinel, `DISPLAYCONFIG_PATH_TARGET_MODE_IDX_INVALID`.
+    pub const fn target_mode_index(self) -> Option<usize> {
+        let index = (self.mode_info_idx >> 16) as usize;
+        if index == value::DISPLAYCONFIG_PATH_TARGET_MODE_IDX_INVALID as usize {
+            None
+        } else {
+            Some(index)
+        }
+    }
+}
+
+/// `DISPLAYCONFIG_PATH_INFO` — one path: a source driving a target.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayConfigPathInfo {
+    /// The source half.
+    pub source_info: DisplayConfigPathSourceInfo,
+    /// The target half.
+    pub target_info: DisplayConfigPathTargetInfo,
+    /// `DISPLAYCONFIG_PATH_ACTIVE` and friends.
+    pub flags: u32,
+}
+
+/// `DISPLAYCONFIG_DEVICE_INFO_HEADER` — the request every
+/// `DisplayConfigGetDeviceInfo` call is framed with.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayConfigDeviceInfoHeader {
+    /// `DISPLAYCONFIG_DEVICE_INFO_TYPE`: which request this is.
+    pub kind: u32,
+    /// Size of the request structure, which the system validates.
+    pub size: u32,
+    /// The adapter the request is about.
+    pub adapter_id: Luid,
+    /// The source or target id on that adapter.
+    pub id: u32,
+}
+
+/// `DISPLAYCONFIG_SOURCE_DEVICE_NAME` — the `GET_SOURCE_NAME` request's answer.
+///
+/// [`view_gdi_device_name`](Self::view_gdi_device_name) is the source's
+/// `\\.\DISPLAYn` name — the same string `MONITORINFOEXW::szDevice` carries,
+/// which is the identity this backend maps monitors through.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisplayConfigSourceDeviceName {
+    /// The request header, answered in place.
+    pub header: DisplayConfigDeviceInfoHeader,
+    /// The GDI device name, NUL-padded. `CCHDEVICENAME` = 32.
+    pub view_gdi_device_name: [u16; 32],
+}
+
 /// `TRACKMOUSEEVENT` — what `TrackMouseEvent` is asked to watch for.
 ///
 /// Needed because **Windows has no `WM_MOUSEENTER`**. A window is told when the
@@ -784,6 +988,22 @@ pub mod value {
 
     /// `ENUM_CURRENT_SETTINGS`.
     pub const ENUM_CURRENT_SETTINGS: u32 = 0xFFFF_FFFF;
+
+    /// `QDC_ONLY_ACTIVE_PATHS` — `QueryDisplayConfig` flags: only the paths
+    /// currently driving a display.
+    pub const QDC_ONLY_ACTIVE_PATHS: u32 = 0x0000_0002;
+    /// `DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME` — the
+    /// `DisplayConfigGetDeviceInfo` request that names a path's source.
+    pub const DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME: u32 = 1;
+    /// `DISPLAYCONFIG_MODE_INFO_TYPE_TARGET` — a mode array entry describing a
+    /// target (a display) rather than a source.
+    pub const DISPLAYCONFIG_MODE_INFO_TYPE_TARGET: u32 = 2;
+    /// `DISPLAYCONFIG_PATH_TARGET_MODE_IDX_INVALID` — the "no mode" sentinel in
+    /// the high 16 bits of `DisplayConfigPathTargetInfo::mode_info_idx`.
+    pub const DISPLAYCONFIG_PATH_TARGET_MODE_IDX_INVALID: u32 = 0xffff;
+    /// `ERROR_SUCCESS` — the LONG success code every `LONG`-returning call here
+    /// reports.
+    pub const ERROR_SUCCESS: i32 = 0;
 
     /// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`, which is a pseudo-handle
     /// rather than an enumerator.
@@ -1131,6 +1351,25 @@ unsafe extern "system" {
     ) -> Bool32;
     pub fn GetMonitorInfoW(monitor: Handle, info: *mut MonitorInfoExW) -> Bool32;
     pub fn EnumDisplaySettingsW(device: *const u16, mode: u32, dev_mode: *mut DevModeW) -> Bool32;
+    // The exact refresh rate: `QueryDisplayConfig`'s `DISPLAYCONFIG_RATIONAL`
+    // carries 60000/1001 where `EnumDisplaySettingsW` reports the integer 60.
+    // `GetDisplayConfigBufferSizes` sizes the two arrays the query fills, and
+    // `DisplayConfigGetDeviceInfo` names each path's source so a monitor's
+    // `\\.\DISPLAYn` can be matched to its mode.
+    pub fn GetDisplayConfigBufferSizes(
+        flags: u32,
+        path_count: *mut u32,
+        mode_count: *mut u32,
+    ) -> i32;
+    pub fn QueryDisplayConfig(
+        flags: u32,
+        path_count: *mut u32,
+        paths: *mut DisplayConfigPathInfo,
+        mode_count: *mut u32,
+        modes: *mut DisplayConfigModeInfo,
+        topology: *mut u32,
+    ) -> i32;
+    pub fn DisplayConfigGetDeviceInfo(request: *mut DisplayConfigDeviceInfoHeader) -> i32;
     pub fn GetDpiForWindow(hwnd: Handle) -> u32;
     pub fn SetProcessDpiAwarenessContext(context: isize) -> Bool32;
     pub fn LoadCursorW(instance: Handle, name: usize) -> Handle;
@@ -1337,6 +1576,30 @@ mod tests {
         assert_eq!(core::mem::offset_of!(DevModeW, dm_display_frequency), 184);
         assert_eq!(core::mem::offset_of!(MonitorInfoExW, sz_device), 40);
 
+        // The `QueryDisplayConfig` structures, read for the exact refresh
+        // rate. A wrong one reads a plausible wrong rate: an offset mistake in
+        // `DisplayConfigVideoSignalInfo` would report 59.94 Hz as something
+        // only a CRT ran at, and the whole point of asking `QueryDisplayConfig`
+        // is that `EnumDisplaySettingsW` already rounds.
+        assert_eq!(size_of::<DisplayConfigRational>(), 8);
+        assert_eq!(size_of::<DisplayConfigPathSourceInfo>(), 20);
+        assert_eq!(size_of::<DisplayConfigPathTargetInfo>(), 48);
+        assert_eq!(size_of::<DisplayConfigPathInfo>(), 72);
+        assert_eq!(size_of::<DisplayConfigVideoSignalInfo>(), 48);
+        assert_eq!(size_of::<DisplayConfigTargetMode>(), 48);
+        assert_eq!(size_of::<DisplayConfigModeInfo>(), 64);
+        assert_eq!(size_of::<DisplayConfigDeviceInfoHeader>(), 20);
+        assert_eq!(size_of::<DisplayConfigSourceDeviceName>(), 84);
+        assert_eq!(size_of::<Luid>(), 8);
+        assert_eq!(
+            core::mem::offset_of!(DisplayConfigPathTargetInfo, refresh_rate),
+            28
+        );
+        assert_eq!(
+            core::mem::offset_of!(DisplayConfigVideoSignalInfo, v_sync_freq),
+            16
+        );
+
         // The input structures. `RAWMOUSE` is the one that matters: its
         // `usFlags` is followed by two bytes of union alignment, and reading
         // `lLastX` from offset 6 instead of 12 would produce a delta made of
@@ -1479,5 +1742,49 @@ mod tests {
         assert_eq!(style::OVERLAPPED_WINDOW, 0x00CF_0000);
         assert_eq!(style::CAPTION, 0x00C0_0000);
         assert_eq!(value::CS_REDRAW, 0x0003);
+    }
+
+    /// The conversion from `QueryDisplayConfig`'s rational to millihertz, and
+    /// the target-mode index extraction. These are the two pure pieces of the
+    /// exact-refresh path; `win32::monitors` (Windows-only) only wires them.
+    #[test]
+    fn a_rational_and_a_mode_index_convert_exactly() {
+        // 59.94 Hz — the mode `EnumDisplaySettingsW` reports as the integer 60.
+        let ntsc = DisplayConfigRational {
+            numerator: 60_000,
+            denominator: 1_001,
+        };
+        assert_eq!(ntsc.millihertz(0), Some(59_940));
+        // 60.00 Hz stays exact.
+        let sixty = DisplayConfigRational {
+            numerator: 60_000,
+            denominator: 1_000,
+        };
+        assert_eq!(sixty.millihertz(0), Some(60_000));
+        // A divider halves the rate (interlaced modes), per the structure's
+        // `vSyncFreqDivider` contract.
+        assert_eq!(sixty.millihertz(2), Some(30_000));
+        // Degenerate rationals are "no rate", not zero hertz.
+        assert_eq!(DisplayConfigRational::default().millihertz(0), None);
+        assert_eq!(
+            DisplayConfigRational {
+                numerator: 1,
+                denominator: 0
+            }
+            .millihertz(0),
+            None
+        );
+
+        // The target-mode index is the high 16 bits; 0xffff there is "no mode".
+        let with_mode = DisplayConfigPathTargetInfo {
+            mode_info_idx: 0x0003_0005, // target mode 3, desktop mode 5
+            ..Default::default()
+        };
+        assert_eq!(with_mode.target_mode_index(), Some(3));
+        let without = DisplayConfigPathTargetInfo {
+            mode_info_idx: 0xFFFF_0000, // target half is the invalid sentinel
+            ..Default::default()
+        };
+        assert_eq!(without.target_mode_index(), None);
     }
 }
