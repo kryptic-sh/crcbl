@@ -797,14 +797,13 @@ mod tests {
              centred on a {extent:?} framebuffer",
         );
 
-        let scale = layout.style().scale;
         assert_eq!(
             sprites[0].rect,
             [
-                -(extent.0 as f32) / (2.0 * scale),
-                -(extent.1 as f32) / (2.0 * scale),
-                extent.0 as f32 / scale,
-                extent.1 as f32 / scale,
+                -(extent.0 as f32) / 2.0,
+                -(extent.1 as f32) / 2.0,
+                extent.0 as f32,
+                extent.1 as f32,
             ],
             "the scrim does not cover the framebuffer",
         );

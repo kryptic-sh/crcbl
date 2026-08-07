@@ -74,9 +74,9 @@ use crate::widget::{ButtonState, NATURAL_FONT_SIZE, PointerInput, SkinInsets, Ui
 pub struct MenuStyle {
     /// Device pixels per texel of the menu art.
     pub scale: f32,
-    /// The window frame's fixed corners.
+    /// The window frame's fixed corners, in pixels.
     pub panel: SkinInsets,
-    /// A button skin's fixed corners.
+    /// A button skin's fixed corners, in pixels.
     pub button: SkinInsets,
     /// Space between the panel's frame and its contents.
     pub panel_padding: Vec2,
@@ -102,15 +102,21 @@ pub struct MenuStyle {
     pub scrim_color: [f32; 4],
 }
 
-/// The insets of the window frame `crcbl-render` ships, in texels.
+/// The insets of the window frame `crcbl-render` ships, in **texels**.
 ///
-/// Here rather than only in the art so a menu can be laid out — and the layout
-/// tested — with no renderer and no device. `crcbl_render::menu`'s
-/// `the_shipped_art_has_the_insets_the_layout_assumes` is what stops the two
-/// drifting: it reads them back off the baked sheet and compares.
+/// The source figure the pixel corners come from: [`MenuStyle::pixel_art`] is
+/// the only place texels become pixels, and it multiplies this by the scale
+/// into [`MenuStyle::panel`]. Kept in texels so a menu can be laid out — and
+/// the layout tested — with no renderer and no device, and checked against the
+/// art by `crcbl_render::menu`'s
+/// `the_shipped_art_has_the_insets_the_layout_assumes`, which reads the same
+/// figure back off the baked sheet and compares.
 pub const PANEL_INSETS: SkinInsets = SkinInsets::new(4.0, 4.0, 4.0, 4.0);
 
-/// The insets of the button skin `crcbl-render` ships, in texels.
+/// The insets of the button skin `crcbl-render` ships, in **texels**.
+///
+/// The source figure [`MenuStyle::button`] is pre-multiplied from —
+/// [`MenuStyle::pixel_art`] is the only place texels become pixels.
 ///
 /// **Currently the same four numbers as [`PANEL_INSETS`], and a separate
 /// constant anyway.** A `.crpix` carries one set of insets for the whole sheet
@@ -138,8 +144,8 @@ impl MenuStyle {
         let scale = scale.max(1) as f32;
         Self {
             scale,
-            panel: PANEL_INSETS,
-            button: BUTTON_INSETS,
+            panel: scaled(PANEL_INSETS, scale),
+            button: scaled(BUTTON_INSETS, scale),
             panel_padding: Vec2::new(8.0, 7.0) * scale,
             button_padding: Vec2::new(6.0, 3.0) * scale,
             item_gap: 4.0 * scale,
@@ -159,21 +165,22 @@ impl MenuStyle {
         }
     }
 
-    /// The panel's fixed corners, in device pixels — the insets times the scale.
+    /// The panel's fixed corners, in device pixels.
     ///
-    /// The art's insets are in **texels** and everything else in this type is in
-    /// pixels; this is the one place the two meet, and the reason
-    /// [`MenuStyle::panel`] is not pre-multiplied is that
-    /// `crcbl_render::MenuArt` needs the texel figure to check the art against.
+    /// [`MenuStyle::panel`] itself: `pixel_art` pre-multiplies the texel
+    /// source figure [`PANEL_INSETS`] by the scale, so the layout reads the
+    /// pixel corners through this accessor the same way it always has.
     #[must_use]
     pub fn panel_corners(&self) -> SkinInsets {
-        scaled(self.panel, self.scale)
+        self.panel
     }
 
     /// A button's fixed corners, in device pixels.
+    ///
+    /// [`MenuStyle::button`] itself — see [`panel_corners`](Self::panel_corners).
     #[must_use]
     pub fn button_corners(&self) -> SkinInsets {
-        scaled(self.button, self.scale)
+        self.button
     }
 }
 

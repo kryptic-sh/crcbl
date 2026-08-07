@@ -145,6 +145,21 @@ impl ButtonSkin {
         }
     }
 
+    /// The skin, with its texels-per-unit scale set on all three frames.
+    ///
+    /// The fixed bands [`quads`](Self::quads) emits come back divided by
+    /// `texels_per_unit`, on every state's frame — see
+    /// [`NineSliceSource::with_texels_per_unit`]. Any value is accepted:
+    /// [`quads`](Self::quads) draws nothing when the scale is not a positive
+    /// finite number, the same way it draws nothing for a nonsense target.
+    #[must_use]
+    pub fn with_texels_per_unit(mut self, texels_per_unit: f32) -> Self {
+        self.idle = self.idle.with_texels_per_unit(texels_per_unit);
+        self.hovered = self.hovered.with_texels_per_unit(texels_per_unit);
+        self.pressed = self.pressed.with_texels_per_unit(texels_per_unit);
+        self
+    }
+
     /// The frame `state` draws.
     #[must_use]
     pub const fn source(&self, state: ButtonState) -> &NineSliceSource {
@@ -155,7 +170,7 @@ impl ButtonSkin {
         }
     }
 
-    /// The insets to hand [`crcbl_ui::Button::with_skin`], in pixels.
+    /// The insets to hand [`crcbl_ui::Button::with_skin`], in texels.
     ///
     /// Read off the **idle** frame, and off its trimmed insets rather than its
     /// declared ones, so the layout agrees with the geometry that will actually
@@ -169,8 +184,12 @@ impl ButtonSkin {
     /// because a [`Sheet`] carries one `nine` for all its frames — and
     /// [`ButtonSkin::insets_agree`] is there for a skin built by hand.
     ///
-    /// One world unit per texel, which is the ratio
-    /// [`NineSliceSource::expand`] draws the fixed bands at.
+    /// The raw texel figure, whatever the source's
+    /// [`texels_per_unit`](NineSliceSource::texels_per_unit) — the number
+    /// `crcbl_render::MenuArt::button_insets` reads off the art to compare
+    /// against `crcbl_ui::menu::BUTTON_INSETS`. The bands [`quads`](Self::quads)
+    /// draws come back at `inset / texels_per_unit`, so at the default of one
+    /// caller unit per texel the two numbers are the same.
     #[must_use]
     pub fn insets(&self) -> SkinInsets {
         let nine = self.idle.insets();

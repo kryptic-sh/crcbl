@@ -881,18 +881,13 @@ mod tests {
         let sprites = engine.gpu().menu_sprites();
         assert_eq!(sprites.len(), 1 + 9 + 9 * 3, "{}", sprites.len());
         let extent = engine.gpu().extent();
-        let scale = engine
-            .menu_layout()
-            .expect("a menu is showing")
-            .style()
-            .scale;
         assert_eq!(
             sprites[0].rect,
             [
-                -(extent.0 as f32) / (2.0 * scale),
-                -(extent.1 as f32) / (2.0 * scale),
-                extent.0 as f32 / scale,
-                extent.1 as f32 / scale,
+                -(extent.0 as f32) / 2.0,
+                -(extent.1 as f32) / 2.0,
+                extent.0 as f32,
+                extent.1 as f32,
             ],
             "the scrim does not cover the framebuffer",
         );

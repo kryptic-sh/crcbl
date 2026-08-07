@@ -98,8 +98,8 @@ const UNTINTED: [f32; 4] = [1.0; 4];
 ///
 /// Any value inside the near/far pair works — the sprites are flat at z = 0 —
 /// and it is written down rather than defaulted because
-/// `tests::the_camera_puts_one_texel_on_scale_device_pixels` measures the matrix
-/// this builds.
+/// `tests::the_camera_puts_one_world_unit_on_one_device_pixel` measures the
+/// matrix this builds.
 const MENU_CAMERA_Z: f32 = 1.0;
 
 // ---------------------------------------------------------------------------
@@ -179,9 +179,9 @@ impl MenuArt {
 
     /// The window frame's fixed corners, in **texels**.
     ///
-    /// The number [`crcbl_ui::MenuStyle::panel`] lays out around, read off the
-    /// art rather than repeated — see
-    /// `tests::the_shipped_art_has_the_insets_the_layout_assumes`.
+    /// The texel source figure [`crcbl_ui::menu::PANEL_INSETS`] mirrors — the
+    /// comparison `tests::the_shipped_art_has_the_insets_the_layout_assumes`
+    /// runs to keep the layout's corners and the art's in step.
     #[must_use]
     pub fn panel_insets(&self) -> SkinInsets {
         let nine = self.panel.insets();
@@ -213,19 +213,18 @@ impl MenuArt {
     /// under the game it is supposed to be covering.
     ///
     /// Every rectangle goes through [`screen_rect_to_target`] against a viewport
-    /// of [`MenuLayout::screen`] and a camera centred on the origin, and is then
-    /// **divided by the style's scale** — see [`menu_camera`]. A caller building
-    /// its own pass owes the same camera.
+    /// of [`MenuLayout::screen`] and a camera centred on the origin, so a target
+    /// is measured in the same **device pixels** the camera's world is — see
+    /// [`menu_camera`]. The style's scale enters through the art instead: the
+    /// panel and the button skin are built per call at `1 / scale` texels per
+    /// unit, which is what turns the layout's pixel corners back into the texel
+    /// bands the art refuses to stretch. A caller building its own pass owes the
+    /// same camera and the same scaled sources.
     pub fn extend(&self, menu: &Menu, layout: &MenuLayout, out: &mut Vec<Sprite>) {
         let screen = layout.screen();
         let viewport = (screen.x as u32, screen.y as u32);
         let scale = layout.style().scale.max(1.0);
-        // `screen_rect_to_target`'s mapping is linear about the origin when the
-        // camera is centred there, so dividing all four components is exactly the
-        // same conversion at a different number of pixels to the unit.
-        let target = |min, max| {
-            screen_rect_to_target(min, max, viewport, [0.0, 0.0]).map(|value| value / scale)
-        };
+        let target = |min, max| screen_rect_to_target(min, max, viewport, [0.0, 0.0]);
 
         let (scrim_min, scrim_max) = layout.scrim();
         out.push(Sprite {
@@ -237,9 +236,10 @@ impl MenuArt {
             tint: layout.style().scrim_color,
         });
 
+        let panel = self.panel.with_texels_per_unit(1.0 / scale);
         let (panel_min, panel_max) = layout.panel();
         out.extend(
-            self.panel
+            panel
                 .expand(target(panel_min, panel_max))
                 .sprites(self.sheet, UNTINTED)
                 // `sprites` borrows the `NineQuads` it was called on, which is a
@@ -247,46 +247,42 @@ impl MenuArt {
                 .collect::<Vec<_>>(),
         );
 
+        let skin = self.skin.with_texels_per_unit(1.0 / scale);
         for (index, placed) in layout.items().iter().enumerate() {
             out.extend(
-                self.skin
-                    .quads(menu.state(index), target(placed.min, placed.max))
-                    .sprites(self.skin.sheet, UNTINTED)
+                skin.quads(menu.state(index), target(placed.min, placed.max))
+                    .sprites(skin.sheet, UNTINTED)
                     .collect::<Vec<_>>(),
             );
         }
     }
 }
 
-/// The camera the menu is drawn with: **`scale` device pixels per world unit**,
+/// The camera the menu is drawn with: **one world unit per device pixel**,
 /// centred on the framebuffer, looking down −Z.
 ///
-/// # Why not one unit per pixel
+/// # Why one unit per pixel
 ///
-/// Because [`NineSliceSource::expand`] draws a fixed band as its inset **taken
-/// as one target unit per texel**. At one unit per pixel a four-texel corner is
-/// four device pixels whatever the menu is drawn at, so a panel scaled up three
-/// times would keep a hairline border while everything else tripled — the frame
-/// would stop being a frame.
-///
-/// So the menu's world is texels, and the camera is what turns texels into
-/// pixels. `apps/breakout` and `apps/flappy` reached this convention
-/// independently — `art::TEXELS_PER_UNIT` in each — and this is the third
-/// caller. `docs/backlog.md` carries the real fix: a scale on
-/// [`NineSliceSource`] itself, at which point all three come out.
+/// The menu's world is the framebuffer's own. Every rectangle
+/// [`MenuArt::extend`] lays out is measured in device pixels, so the camera
+/// that projects them needs no scale of its own — the art's texels enter on
+/// the [`NineSliceSource`]s instead, which [`MenuArt::extend`] builds at
+/// `1 / scale` texels per unit. That is what keeps a four-texel corner at
+/// `4 * scale` device pixels whatever scale the menu is drawn at: the layout
+/// asks for pixel corners and the scaled source turns the fixed texel bands
+/// back into those same pixels.
 ///
 /// The width follows for free: [`Projection::Orthographic`] derives it from the
-/// aspect ratio, which is `width / height`, so a half-height of
-/// `height / (2 * scale)` is `scale` pixels per unit on both axes at **every**
-/// aspect ratio.
+/// aspect ratio, which is `width / height`, so a half-height of `height / 2`
+/// is one pixel per unit on both axes at **every** aspect ratio.
 #[must_use]
-pub fn menu_camera(extent: (u32, u32), scale: f32) -> Camera {
+pub fn menu_camera(extent: (u32, u32)) -> Camera {
     Camera {
         eye: Vec3::new(0.0, 0.0, MENU_CAMERA_Z),
         target: Vec3::ZERO,
         up: Vec3::Y,
         projection: Projection::Orthographic {
-            half_height: extent.1.max(1) as f32 * 0.5 / scale.max(1.0),
+            half_height: extent.1.max(1) as f32 * 0.5,
             near: 0.1,
             far: 10.0,
         },
@@ -294,11 +290,11 @@ pub fn menu_camera(extent: (u32, u32), scale: f32) -> Camera {
 }
 
 /// The view-projection [`MenuRenderer`] hands the pass for an `extent`-sized
-/// framebuffer at `scale` pixels per texel.
+/// framebuffer, at one world unit per device pixel.
 #[must_use]
-pub fn menu_view_projection(extent: (u32, u32), scale: f32) -> Mat4 {
+pub fn menu_view_projection(extent: (u32, u32)) -> Mat4 {
     let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
-    menu_camera(extent, scale).view_projection(aspect)
+    menu_camera(extent).view_projection(aspect)
 }
 
 // ---------------------------------------------------------------------------
@@ -316,9 +312,6 @@ pub struct MenuRenderer {
     art: MenuArt,
     /// This frame's sprites, refilled rather than reallocated.
     frame: Vec<Sprite>,
-    /// The scale [`MenuRenderer::set_menu`] read off the layout, which
-    /// [`MenuRenderer::begin_frame`] needs to build the matrix.
-    scale: f32,
 }
 
 impl MenuRenderer {
@@ -346,7 +339,6 @@ impl MenuRenderer {
             sprites,
             art,
             frame: Vec::new(),
-            scale: 1.0,
         })
     }
 
@@ -365,12 +357,6 @@ impl MenuRenderer {
         &self.frame
     }
 
-    /// The scale the last [`set_menu`](Self::set_menu) read off its layout.
-    #[must_use]
-    pub const fn scale(&self) -> f32 {
-        self.scale
-    }
-
     /// Takes this frame's menu, on the CPU only.
     ///
     /// `None` on a frame with no menu on it, which submits nothing and makes
@@ -383,12 +369,7 @@ impl MenuRenderer {
     /// across that would make this type carry the loop's lifetime for no reason.
     pub fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
         self.frame.clear();
-        // 1.0 on a frame with no menu: there are no sprites for the matrix to
-        // place, and a scale read off a layout that does not exist would be a
-        // number invented to fill an argument.
-        self.scale = 1.0;
         if let Some((menu, layout)) = menu {
-            self.scale = layout.style().scale;
             self.art.extend(menu, layout, &mut self.frame);
         }
     }
@@ -399,12 +380,8 @@ impl MenuRenderer {
     ///
     /// [`HalError`] from the instance or constant buffers.
     pub fn begin_frame(&mut self, device: &dyn Device, extent: (u32, u32)) -> Result<(), HalError> {
-        self.sprites.begin_frame(
-            device,
-            &self.frame,
-            menu_view_projection(extent, self.scale),
-            extent,
-        )
+        self.sprites
+            .begin_frame(device, &self.frame, menu_view_projection(extent), extent)
     }
 
     /// Adds the menu pass to `graph`, drawing on top of `target`.
@@ -716,44 +693,36 @@ mod tests {
     // The camera
     // -----------------------------------------------------------------------
 
-    /// **One texel of the menu's art is `scale` device pixels**, at every aspect
-    /// ratio and every scale — which is what makes a nine-slice's four-texel
-    /// corner four *scaled* pixels rather than four pixels, and what makes every
-    /// pixel claim in the golden suite arithmetic rather than a number read off a
-    /// picture.
-    ///
-    /// A scale of 1 alone would pass on a camera that ignored the argument
-    /// entirely, which is why 2 and 3 are here.
+    /// **One world unit of the menu is one device pixel**, at every aspect
+    /// ratio — which is what makes a nine-slice's four-texel corner, at
+    /// `1 / scale` texels per unit on the source, come out four *scaled*
+    /// pixels rather than four pixels, and what makes every pixel claim in the
+    /// golden suite arithmetic rather than a number read off a picture.
     #[test]
-    fn the_camera_puts_one_texel_on_scale_device_pixels() {
+    fn the_camera_puts_one_world_unit_on_one_device_pixel() {
         for extent in EXTENTS {
             let (width, height) = (extent.0 as f32, extent.1 as f32);
-            for scale in [1.0f32, 2.0, 3.0] {
-                let view_projection = menu_view_projection(extent, scale);
-                for world in [
-                    [0.0, 0.0],
-                    [-width / (2.0 * scale), height / (2.0 * scale)],
-                    [width / (2.0 * scale), -height / (2.0 * scale)],
-                    [17.0, -23.0],
-                ] {
-                    let clip = view_projection * glam::Vec4::new(world[0], world[1], 0.0, 1.0);
-                    let ndc = clip.truncate() / clip.w;
-                    // +Y is up in NDC and the backends submit a flipped viewport,
-                    // so the framebuffer row is the negated half.
-                    let pixel = Vec2::new(
-                        0.5f32.mul_add(ndc.x, 0.5) * width,
-                        0.5f32.mul_add(-ndc.y, 0.5) * height,
-                    );
-                    let expected = Vec2::new(
-                        world[0].mul_add(scale, width / 2.0),
-                        (-world[1]).mul_add(scale, height / 2.0),
-                    );
-                    assert!(
-                        (pixel - expected).abs().max_element() < 1e-2,
-                        "{extent:?} at scale {scale}: world {world:?} lands at \
-                         {pixel:?}, not {expected:?}",
-                    );
-                }
+            let view_projection = menu_view_projection(extent);
+            for world in [
+                [0.0, 0.0],
+                [-width / 2.0, height / 2.0],
+                [width / 2.0, -height / 2.0],
+                [17.0, -23.0],
+            ] {
+                let clip = view_projection * glam::Vec4::new(world[0], world[1], 0.0, 1.0);
+                let ndc = clip.truncate() / clip.w;
+                // +Y is up in NDC and the backends submit a flipped viewport,
+                // so the framebuffer row is the negated half.
+                let pixel = Vec2::new(
+                    0.5f32.mul_add(ndc.x, 0.5) * width,
+                    0.5f32.mul_add(-ndc.y, 0.5) * height,
+                );
+                let expected = Vec2::new(world[0] + width / 2.0, -world[1] + height / 2.0);
+                assert!(
+                    (pixel - expected).abs().max_element() < 1e-2,
+                    "{extent:?}: world {world:?} lands at {pixel:?}, not \
+                     {expected:?}",
+                );
             }
         }
     }
@@ -793,13 +762,9 @@ mod tests {
             assert_ne!(sprites[1].uv, sprites[10].uv);
 
             // The scrim covers the whole framebuffer, which is what makes it a
-            // scrim rather than a rectangle behind the panel. In texels, because
+            // scrim rather than a rectangle behind the panel. In pixels, because
             // that is the space the camera projects — see `menu_camera`.
-            let scale = layout.style().scale;
-            assert_eq!(
-                sprites[0].rect,
-                [-480.0 / scale, -360.0 / scale, 960.0 / scale, 720.0 / scale],
-            );
+            assert_eq!(sprites[0].rect, [-480.0, -360.0, 960.0, 720.0],);
         });
     }
 
@@ -809,10 +774,10 @@ mod tests {
     ///
     /// The camera puts the framebuffer's centre at the world origin, so "centred"
     /// is "the union of the nine quads is symmetric about zero". Everything here
-    /// is in **texels** — the space the camera projects — so the framebuffer's
-    /// half-extent is its pixels over the scale, and the tolerance is half a
-    /// device pixel converted the same way, for the whole-pixel rounding
-    /// `crcbl_ui::Menu::layout_with` applies.
+    /// is in **device pixels** — the space the camera projects — so the
+    /// framebuffer's half-extent is its own pixels, and the tolerance is half a
+    /// device pixel, for the whole-pixel rounding `crcbl_ui::Menu::layout_with`
+    /// applies.
     #[test]
     fn the_window_frame_is_centred_on_the_framebuffer_at_every_aspect_ratio() {
         with_art(|art| {
@@ -837,8 +802,7 @@ mod tests {
                     .iter()
                     .fold(f32::NEG_INFINITY, |acc, s| acc.max(s.rect[1] + s.rect[3]));
 
-                let scale = layout.style().scale;
-                let tolerance = 0.5 / scale;
+                let tolerance = 0.5;
                 assert!(
                     ((left + right) / 2.0).abs() <= tolerance,
                     "{extent:?}: the frame runs {left}..{right}, which is not \
@@ -850,7 +814,7 @@ mod tests {
                 );
                 // And it is really on the screen — a "centred" frame twice the
                 // size of the framebuffer is also symmetric about zero.
-                let half = Vec2::new(extent.0 as f32, extent.1 as f32) * 0.5 / scale;
+                let half = Vec2::new(extent.0 as f32, extent.1 as f32) * 0.5;
                 assert!(
                     left >= -half.x && right <= half.x,
                     "{extent:?}: the frame is wider than the framebuffer",
@@ -915,10 +879,13 @@ mod tests {
                     "corner {corner} slid its UVs, so it is sampling different \
                      texels at the two sizes",
                 );
-                // And it is the art's own inset, in texels, rather than a
-                // fraction of the panel — which is the number the camera then
-                // turns into `style.scale` device pixels.
-                assert_eq!(a[corner].rect[2], crcbl_ui::menu::PANEL_INSETS.left);
+                // And it is the art's own inset turned into pixels — the texel
+                // figure at `1 / scale` texels per unit, which is the same
+                // number `pixel_art` pre-multiplies the layout's corners to.
+                assert_eq!(
+                    a[corner].rect[2],
+                    crcbl_ui::menu::PANEL_INSETS.left * style.scale
+                );
             }
             // The edges took the difference — the half without which "the
             // corners are identical" is satisfied by drawing only corners.
