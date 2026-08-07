@@ -3864,7 +3864,23 @@ mod tests {
         /// for. Every mechanism test starts from this, so a change to the spawn
         /// ramp cannot silently move one of them.
         fn staged(frame_hz: u32, tick_hz: u32, player: DVec3) -> Self {
-            let mut harness = Self::new(frame_hz, tick_hz);
+            Self::staged_with_seed(frame_hz, tick_hz, player, DEFAULT_SEED)
+        }
+
+        /// [`Self::staged`] at a seed the caller chooses, for the tests that
+        /// need a particular prop layout — the movement tests stage at
+        /// [`MOVEMENT_CORRIDOR_SEED`] so their corridors are clear by
+        /// arrangement.
+        fn staged_with_seed(frame_hz: u32, tick_hz: u32, player: DVec3, seed: u64) -> Self {
+            let mut harness = Self::with_setup(
+                frame_hz,
+                &Setup {
+                    headless: true,
+                    tick_hz,
+                    seed,
+                    ..Setup::default()
+                },
+            );
             harness.game.freeze_spawns();
             harness.game.clear_enemies();
             harness.game.stage_player(player);
@@ -4128,14 +4144,71 @@ mod tests {
         assert_eq!(corner.y, -(ARENA_HALF_HEIGHT - EnemyKind::Brute.radius()));
     }
 
+    /// The seed the movement tests stage at, chosen so its prop layout clears
+    /// the corridors they walk — pinned by
+    /// [`the_movement_corridors_are_clear_at_the_chosen_seed`]. Found by
+    /// searching `scatter_props`; any seed would do as long as the corridors
+    /// stay clear, and that test is what keeps them clear.
+    const MOVEMENT_CORRIDOR_SEED: u64 = 0x1;
+
+    /// **The movement tests' corridors are clear by arrangement, not by luck.**
+    ///
+    /// `a_player_walking_at_a_wall_stops_at_it` and
+    /// `the_player_moves_at_the_stated_speed_and_a_diagonal_is_no_faster`
+    /// stage at [`MOVEMENT_CORRIDOR_SEED`], whose layout leaves every corridor
+    /// they walk free of props — measured here against [`scatter_props`], with
+    /// each prop's own radius plus the player's. Without this pin, a change to
+    /// `PROP_DENSITY`, `PROP_CELL` or the seed could drop a tree in front of
+    /// one of those paths and the failure would arrive as a movement bug; with
+    /// it, the failure names the layout instead. (A prop-free arena would make
+    /// them tests of a game that does not exist — considered and declined.)
+    #[test]
+    fn the_movement_corridors_are_clear_at_the_chosen_seed() {
+        let diagonal = DVec3::new(
+            ARENA_HALF_WIDTH - PLAYER_RADIUS,
+            ARENA_HALF_HEIGHT - PLAYER_RADIUS,
+            0.0,
+        );
+        let corridors = [
+            // One second of +x, one second of +x+y (PLAYER_SPEED each), and
+            // the wall test's full corner-to-corner diagonal.
+            (DVec3::ZERO, DVec3::new(PLAYER_SPEED, 0.0, 0.0)),
+            (
+                DVec3::ZERO,
+                DVec3::new(PLAYER_SPEED / 2f64.sqrt(), PLAYER_SPEED / 2f64.sqrt(), 0.0),
+            ),
+            (DVec3::ZERO, diagonal),
+        ];
+        let props = scatter_props(MOVEMENT_CORRIDOR_SEED);
+        assert!(
+            !props.is_empty(),
+            "a seed whose layout has no props pins nothing"
+        );
+        for prop in &props {
+            for &(a, b) in &corridors {
+                let distance = distance_to_segment(prop.position, a, b);
+                assert!(
+                    distance >= PLAYER_RADIUS + prop.kind.radius(),
+                    "a {:?} at {:?} is {distance} from the corridor {a:?} → {b:?}, \
+                     inside the {}+{} reach of a walking player",
+                    prop.kind,
+                    prop.position,
+                    PLAYER_RADIUS,
+                    prop.kind.radius(),
+                );
+            }
+        }
+    }
+
     /// **The arena holds the player in**, however long they walk at a wall.
     ///
     /// Asserted at the wall rather than merely "inside the arena": a clamp that
     /// stopped a unit short would pass the weaker version and would still be
-    /// wrong.
+    /// wrong. Staged at [`MOVEMENT_CORRIDOR_SEED`], whose layout leaves the
+    /// walk clear — see [`the_movement_corridors_are_clear_at_the_chosen_seed`].
     #[test]
     fn a_player_walking_at_a_wall_stops_at_it() {
-        let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+        let mut harness = Harness::staged_with_seed(60, 60, DVec3::ZERO, MOVEMENT_CORRIDOR_SEED);
         // Long enough to cross the whole arena twice over at PLAYER_SPEED.
         harness.run_ticks(1_200, &[(0, KeyCode::KeyD, true), (0, KeyCode::KeyW, true)]);
         let player = harness.game.player;
@@ -4384,15 +4457,22 @@ mod tests {
     /// The classic bug this closes is one line of arithmetic — an unnormalised
     /// input vector — and it is invisible in play until somebody notices that
     /// running north-east outruns the runners and running north does not.
+    ///
+    /// Staged at [`MOVEMENT_CORRIDOR_SEED`]: both corridors leave the glade and
+    /// run through prop territory, so a tree on either path would slow the
+    /// player and read as a speed bug — the seed and its pin are in
+    /// [`the_movement_corridors_are_clear_at_the_chosen_seed`].
     #[test]
     fn the_player_moves_at_the_stated_speed_and_a_diagonal_is_no_faster() {
         let straight = {
-            let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+            let mut harness =
+                Harness::staged_with_seed(60, 60, DVec3::ZERO, MOVEMENT_CORRIDOR_SEED);
             harness.run_ticks(60, &[(0, KeyCode::KeyD, true)]);
             harness.game.player
         };
         let diagonal = {
-            let mut harness = Harness::staged(60, 60, DVec3::ZERO);
+            let mut harness =
+                Harness::staged_with_seed(60, 60, DVec3::ZERO, MOVEMENT_CORRIDOR_SEED);
             harness.run_ticks(60, &[(0, KeyCode::KeyD, true), (0, KeyCode::KeyW, true)]);
             harness.game.player
         };
