@@ -401,9 +401,13 @@ impl HostedGame for Horde {
     /// plumbing, and it does not; adding a per-sample *section* is the other
     /// half of the same claim and it is one line. The numbers are the ones this
     /// game's whole argument rests on — how much of the field survived the cull,
-    /// and how many draw calls the survivors cost.
+    /// and how many draw calls the survivors cost. The audio section is the
+    /// silence explained: [`crate::audio::MAX_VOICES`] refuses the newest voice
+    /// on a full mixer, and its refusal count is the only reason a cue that
+    /// happened (the player's death among sixteen kills) was not heard.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.scene);
+        panel.add(&self.game.audio);
     }
 
     fn summary(&self, run: RunSummary) -> Summary {

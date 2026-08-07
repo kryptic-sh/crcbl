@@ -2977,8 +2977,9 @@ annotated.
   the crudest answer that is honest and it is audibly wrong in one case: a
   player's _death_ cue can be refused by sixteen kill cues raised on the same
   tick. Wanted in the crate: a voice budget with a priority, so an important cue
-  steals the oldest cheap one. Nothing shows `dropped()` yet — it is on `Audio`
-  and not on the debug panel.
+  steals the oldest cheap one. The refusal count is on the debug panel now (the
+  `audio` section's `dropped` row), so the pressure is visible while the
+  crate-level budget stays undecided.
 
   One detail changed with the adoption and is worth knowing before anyone moves
   the cap into the crate: horde now reads `Mixer::voice_count` and then calls

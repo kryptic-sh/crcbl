@@ -282,6 +282,21 @@ impl Audio {
     }
 }
 
+/// The panel's audio section: how many cues [`MAX_VOICES`] refused.
+///
+/// The cap refuses the **newest** voice and counts the refusal in
+/// [`Audio::dropped`], and nothing else shows that count — the number lives on
+/// [`Audio`] and no other system reads it. A player whose death cue is refused
+/// by a field of kill cues raised on the same tick hears nothing, and the panel
+/// is the only place the reason exists: one row, so the silence is attributable
+/// rather than a mystery to debug by ear.
+impl crcbl::ui::DebugModule for Audio {
+    fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
+        section.set_title("audio");
+        section.row("dropped", format_args!("{}", self.dropped()));
+    }
+}
+
 /// The seed the kill and death bursts are drawn from. Spells "HORDESEE", and is
 /// the value this game's `DEFAULT_SEED` uses.
 ///
@@ -319,6 +334,7 @@ fn rise(from_hz: f32, to_hz: f32, seconds: f32, sample_rate: u32) -> Vec<AudioSa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crcbl::ui::DebugModule;
 
     /// `rise` produces **interleaved stereo**, which is what the mixer's
     /// playhead assumes: an odd-length or mono buffer would be played at half
@@ -425,6 +441,50 @@ mod tests {
         assert_eq!(audio.voices(), 0, "a whole second did not drain the queue");
         audio.play_at(SOUND_KILL, DVec3::ZERO, DVec3::ZERO);
         assert_eq!(audio.voices(), 1);
+    }
+
+    /// **The debug section reports what [`Audio::dropped`] counts** — the
+    /// refusal number is on [`Audio`] and nowhere else, so this is the row that
+    /// tells a player why a cue (their death, say) was silent: sixteen kill cues
+    /// on one tick refuse the seventeenth, and the panel is the only place that
+    /// says so.
+    #[test]
+    fn the_debug_section_shows_the_refusal_count() {
+        let mut audio = Audio::new(true);
+        for _ in 0..MAX_VOICES + 3 {
+            audio.play_at(SOUND_KILL, DVec3::ZERO, DVec3::ZERO);
+        }
+        assert_eq!(audio.dropped(), 3, "the cap refused the wrong number");
+
+        let mut section = crcbl::ui::DebugSection::new("audio");
+        audio.debug_section(&mut section);
+        assert_eq!(section.title(), "audio");
+        assert_eq!(
+            section.rows(),
+            &[crcbl::ui::DebugRow {
+                label: "dropped".into(),
+                value: "3".into(),
+            }],
+            "the section must contain exactly the dropped row",
+        );
+    }
+
+    /// A fresh [`Audio`] shows the row at zero — nothing refused must still be
+    /// reported, or the panel reads the same for "no cap pressure" and "not
+    /// wired up".
+    #[test]
+    fn a_fresh_audio_reports_zero_dropped() {
+        let audio = Audio::new(true);
+        let mut section = crcbl::ui::DebugSection::new("audio");
+        audio.debug_section(&mut section);
+        assert_eq!(section.title(), "audio");
+        assert_eq!(
+            section.rows(),
+            &[crcbl::ui::DebugRow {
+                label: "dropped".into(),
+                value: "0".into(),
+            }],
+        );
     }
 
     /// The grammar is actually consulted: a cue away from the listener is not
