@@ -510,10 +510,12 @@ is left:
   the sample harnesses could share.
 
 Every combination of {born borderless, toggled with `F11`, imposed by the window
-system} × {honoured, refused} is now executed by a harness on Wayland
-(`run-wayland-e2e.sh`); on X11 only the refusing half is.
-`crates/crcbl-shell/tests/bin/send_key.rs` is what drives `F11` at a running
-sample from outside its process. What is still uncovered:
+system} × {honoured, refused} is now executed by a harness on both Wayland
+(`run-wayland-e2e.sh`) and X11 (`run-x11-e2e.sh`, with and without
+`CRCBL_E2E_X11_WM`) — and the X11 F11 pass asserts the summary line's extent
+after a clean `WM_DELETE_WINDOW` close as well as the engine's own mode line.
+`crates/crcbl-shell/tests/bin/send_key.rs` and `send_key_x11.rs` are what drive
+`F11` at a running sample from outside its process. What is still uncovered:
 
 - **The null GPU backend is excluded from every mode assertion, and correctly.**
   It presents by doing nothing, so no `wl_buffer` is attached, so the surface
@@ -521,13 +523,10 @@ sample from outside its process. What is still uncovered:
   where a Vulkan one lists `sh.kryptic.crcbl.sandbox` — observed, not inferred.
   An unmapped surface gets no fullscreen configure, so any mode assertion there
   would be checking a window the compositor does not have.
-- **X11 under a window manager: the pass exists, the backend does not survive
-  it.** Its own section is below, and it is the largest hole on this list.
-- **`F11` is only pressed at the sandbox, and only under Wayland.** The four
-  games take the same engine-owned path (`crcbl::engine::FULLSCREEN_KEY`), and
-  `run-x11-e2e.sh` starts no key sender: the equivalent there is XTEST through
-  the suite's own peer client, which is in-process and would need the same
-  out-of-process treatment.
+- **`F11` is only pressed at the sandbox, never at one of the four games.** The
+  games take the same engine-owned path (`crcbl::engine::FULLSCREEN_KEY`), but
+  no harness presses the key at a running game — only at the sandbox, on both
+  platforms.
 - **macOS and Windows have shell backends now, and neither has a game-level mode
   pass.** P5C built both, and each has an end-to-end suite that opens a window,
   flips its mode and reports injected input — but that is the _shell_ being
@@ -915,13 +914,6 @@ macOS this is the gap it would hide in); and the pure modules (`geometry`,
 - **Pixels.** Every display-mode assertion on both backends is a summary line, a
   log line, or the compositor's own tree. That a fullscreen frame is _composed_
   at the new extent, rather than merely built at it, is unchecked.
-- **The extent after an `F11`, on X11.** The X11 toggle pass asserts the
-  engine's own account of the mode — honoured under `openbox`, refused without —
-  but not the summary line's extent, because the sandbox is killed rather than
-  asked to close: sending `WM_DELETE_WINDOW` means finding another process's
-  window, which needs `QueryTree` and a `WM_CLASS` walk the key sender does not
-  have. `run_sandbox vk fullscreen` covers the swapchain-follows half on the
-  same platform.
 
 ## Five sample `gpu.rs` files, two of them identical
 
