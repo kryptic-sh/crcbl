@@ -12,49 +12,35 @@
 
 use std::process::ExitCode;
 
-use crcbl_horde::{Invocation, USAGE, parse, run};
+use crcbl_horde::{USAGE, parse, run};
 
 fn main() -> ExitCode {
-    crcbl::core::log::init_logging();
-
-    match parse(std::env::args().skip(1)) {
-        Invocation::Run(options) => match run(&options) {
-            Ok(summary) => {
-                println!(
-                    "horde: {} frames, {} ticks on the {} shell at {}x{}, {} \
-                     (survived {:.1}s, {} kills, level {}, {} enemies left, \
-                     scene {:?}, {:?}, {:?})",
-                    summary.frames,
-                    summary.ticks,
-                    summary.backend,
-                    summary.extent.0,
-                    summary.extent.1,
-                    // What the window system actually did, not what
-                    // `--fullscreen` asked for. It is free to refuse.
-                    summary.mode,
-                    summary.elapsed,
-                    summary.kills,
-                    summary.level,
-                    summary.enemies,
-                    summary.scene,
-                    summary.state,
-                    summary.exit,
-                );
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("horde: {error}");
-                ExitCode::FAILURE
-            }
+    crcbl::args::run_front_end(
+        "horde",
+        USAGE,
+        parse(std::env::args().skip(1)),
+        run,
+        |summary| {
+            format!(
+                "horde: {} frames, {} ticks on the {} shell at {}x{}, {} \
+                 (survived {:.1}s, {} kills, level {}, {} enemies left, \
+                 scene {:?}, {:?}, {:?})",
+                summary.frames,
+                summary.ticks,
+                summary.backend,
+                summary.extent.0,
+                summary.extent.1,
+                // What the window system actually did, not what
+                // `--fullscreen` asked for. It is free to refuse.
+                summary.mode,
+                summary.elapsed,
+                summary.kills,
+                summary.level,
+                summary.enemies,
+                summary.scene,
+                summary.state,
+                summary.exit,
+            )
         },
-        Invocation::Help => {
-            println!("{USAGE}");
-            ExitCode::SUCCESS
-        }
-        Invocation::BadUsage(message) => {
-            eprintln!("horde: {message}");
-            eprintln!("{USAGE}");
-            ExitCode::from(2)
-        }
-    }
+    )
 }

@@ -597,42 +597,27 @@ fn parse(args: impl Iterator<Item = String>) -> Invocation<Common> {
 
 /// Exit codes: 0 ran, 1 it failed, 2 bad arguments.
 fn main() -> ExitCode {
-    // `CRCBL_LOG=debug` turns on per-event logging.
-    crcbl::core::log::init_logging();
-
-    match parse(std::env::args().skip(1)) {
-        Invocation::Run(options) => match start(&options).and_then(drive) {
-            Ok(summary) => {
-                // `summary.mode` is what the window system actually did, not
-                // what `--fullscreen` asked for. A compositor is free to
-                // refuse, and a line that echoed the request would hide it.
-                println!(
-                    "{NAME}: {} frames, {} ticks on the {} shell at {}x{}, {} ({:?})",
-                    summary.frames,
-                    summary.ticks,
-                    summary.backend,
-                    summary.extent.0,
-                    summary.extent.1,
-                    summary.mode,
-                    summary.exit,
-                );
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("{NAME}: {error}");
-                ExitCode::FAILURE
-            }
+    crcbl::args::run_front_end(
+        NAME,
+        &usage(),
+        parse(std::env::args().skip(1)),
+        |options| start(options).and_then(drive),
+        |summary| {
+            // `summary.mode` is what the window system actually did, not
+            // what `--fullscreen` asked for. A compositor is free to
+            // refuse, and a line that echoed the request would hide it.
+            format!(
+                "{NAME}: {} frames, {} ticks on the {} shell at {}x{}, {} ({:?})",
+                summary.frames,
+                summary.ticks,
+                summary.backend,
+                summary.extent.0,
+                summary.extent.1,
+                summary.mode,
+                summary.exit,
+            )
         },
-        Invocation::Help => {
-            println!("{}", usage());
-            ExitCode::SUCCESS
-        }
-        Invocation::BadUsage(message) => {
-            eprintln!("{NAME}: {message}");
-            eprintln!("{}", usage());
-            ExitCode::from(2)
-        }
-    }
+    )
 }
 
 // ---- tests ------------------------------------------------------------------

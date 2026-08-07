@@ -12,44 +12,30 @@
 
 use std::process::ExitCode;
 
-use crcbl_breakout::{Invocation, USAGE, parse, run};
+use crcbl_breakout::{USAGE, parse, run};
 
 fn main() -> ExitCode {
-    crcbl::core::log::init_logging();
-
-    match parse(std::env::args().skip(1)) {
-        Invocation::Run(options) => match run(&options) {
-            Ok(summary) => {
-                println!(
-                    "breakout: {} frames, {} ticks on the {} shell at {}x{}, {} \
-                     (score {}, {:?}, {:?})",
-                    summary.frames,
-                    summary.ticks,
-                    summary.backend,
-                    summary.extent.0,
-                    summary.extent.1,
-                    // What the window system actually did, not what
-                    // `--fullscreen` asked for. It is free to refuse.
-                    summary.mode,
-                    summary.score,
-                    summary.state,
-                    summary.exit,
-                );
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("breakout: {error}");
-                ExitCode::FAILURE
-            }
+    crcbl::args::run_front_end(
+        "breakout",
+        USAGE,
+        parse(std::env::args().skip(1)),
+        run,
+        |summary| {
+            format!(
+                "breakout: {} frames, {} ticks on the {} shell at {}x{}, {} \
+                 (score {}, {:?}, {:?})",
+                summary.frames,
+                summary.ticks,
+                summary.backend,
+                summary.extent.0,
+                summary.extent.1,
+                // What the window system actually did, not what
+                // `--fullscreen` asked for. It is free to refuse.
+                summary.mode,
+                summary.score,
+                summary.state,
+                summary.exit,
+            )
         },
-        Invocation::Help => {
-            println!("{USAGE}");
-            ExitCode::SUCCESS
-        }
-        Invocation::BadUsage(message) => {
-            eprintln!("breakout: {message}");
-            eprintln!("{USAGE}");
-            ExitCode::from(2)
-        }
-    }
+    )
 }

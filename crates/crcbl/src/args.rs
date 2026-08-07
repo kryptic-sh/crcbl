@@ -32,6 +32,9 @@
 //! dropped breakout's assertion that the default backend stays `None`, and
 //! stranded CI on a machine with no driver.
 
+use std::fmt;
+use std::process::ExitCode;
+
 use crate::backend::GpuBackend;
 use crate::engine::{FrameLimit, GpuOptions, LoopConfig, Pacing};
 
@@ -96,6 +99,57 @@ pub enum Invocation<T> {
     Help,
     /// The arguments do not make sense, for this reason.
     BadUsage(String),
+}
+
+/// Runs the native front end every sample shares: logging init, the parsed
+/// [`Invocation`], the run, the summary line, and the exit code.
+///
+/// The exit-code contract is the one each sample's docs state and `crcbl`
+/// itself uses: **0** ran, **1** it failed, **2** the arguments were wrong.
+/// `--help` prints the usage and runs cleanly; a bad invocation prints the
+/// reason and the usage, on stderr, so a wrapper script can read one without
+/// the other.
+///
+/// Everything that is a game's own is passed in — its name (the log and error
+/// prefix), its usage text, its already-parsed [`Invocation`], its `run`, and
+/// the summary line — so the flow below is written once instead of once per
+/// sample. `bare` and the `crcbl new` template are samples too; only
+/// `apps/sandbox` stays out, because its parser and its `Invocation` are
+/// deliberately its own.
+pub fn run_front_end<O, S, E>(
+    name: &str,
+    usage: &str,
+    invocation: Invocation<O>,
+    run: impl FnOnce(&O) -> Result<S, E>,
+    print_summary: impl FnOnce(&S) -> String,
+) -> ExitCode
+where
+    E: fmt::Display,
+{
+    // `CRCBL_LOG=debug` turns on the per-event lines; the default is warnings.
+    crate::core::log::init_logging();
+
+    match invocation {
+        Invocation::Run(options) => match run(&options) {
+            Ok(summary) => {
+                println!("{}", print_summary(&summary));
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{name}: {error}");
+                ExitCode::FAILURE
+            }
+        },
+        Invocation::Help => {
+            println!("{usage}");
+            ExitCode::SUCCESS
+        }
+        Invocation::BadUsage(message) => {
+            eprintln!("{name}: {message}");
+            eprintln!("{usage}");
+            ExitCode::from(2)
+        }
+    }
 }
 
 /// What [`Common::consume`] did with an argument.
@@ -797,5 +851,54 @@ mod tests {
                 "{flag} is documented and not implemented"
             );
         }
+    }
+
+    /// The front end's contract is "argv in, exit code out", and the four
+    /// exit codes are what that contract pins: 0 ran, 1 it failed, 2 bad
+    /// arguments, and `--help` runs cleanly. The printed lines are each
+    /// game's own and are covered by the scaffold e2e, which runs a real
+    /// generated binary and asserts its summary line.
+    #[test]
+    fn the_front_end_returns_the_contract_exit_codes() {
+        assert_eq!(
+            run_front_end::<(), u32, &str>(
+                "sample",
+                "usage",
+                Invocation::Run(()),
+                |_| Ok(7),
+                |n| format!("ran {n}"),
+            ),
+            ExitCode::SUCCESS,
+        );
+        assert_eq!(
+            run_front_end::<(), u32, &str>(
+                "sample",
+                "usage",
+                Invocation::Run(()),
+                |_| Err("boom"),
+                |_| String::new(),
+            ),
+            ExitCode::FAILURE,
+        );
+        assert_eq!(
+            run_front_end::<(), u32, &str>(
+                "sample",
+                "usage",
+                Invocation::Help,
+                |_| unreachable!("help never runs the game"),
+                |_| String::new(),
+            ),
+            ExitCode::SUCCESS,
+        );
+        assert_eq!(
+            run_front_end::<(), u32, &str>(
+                "sample",
+                "usage",
+                Invocation::BadUsage("nonsense".into()),
+                |_| unreachable!("a bad invocation never runs the game"),
+                |_| String::new(),
+            ),
+            ExitCode::from(2),
+        );
     }
 }

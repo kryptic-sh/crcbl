@@ -14,45 +14,29 @@
 
 use std::process::ExitCode;
 
-use bare::{Invocation, USAGE, parse, run};
+use bare::{USAGE, parse, run};
 
 fn main() -> ExitCode {
-    // `CRCBL_LOG=debug` turns on the per-event lines; the default is warnings.
-    crcbl::core::log::init_logging();
-
-    match parse(std::env::args().skip(1)) {
-        Invocation::Run(options) => match run(&options) {
-            Ok(summary) => {
-                println!(
-                    "bare: {} frames, {} ticks, {} events on the {} shell at {}x{}, \
-                     {} ({:?})",
-                    summary.frames,
-                    summary.ticks,
-                    summary.events,
-                    summary.backend,
-                    summary.extent.0,
-                    summary.extent.1,
-                    // What the window system actually did, not what
-                    // `--fullscreen` asked for. It is free to refuse.
-                    summary.mode,
-                    summary.exit,
-                );
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("bare: {error}");
-                ExitCode::FAILURE
-            }
+    crcbl::args::run_front_end(
+        "bare",
+        USAGE,
+        parse(std::env::args().skip(1)),
+        run,
+        |summary| {
+            format!(
+                "bare: {} frames, {} ticks, {} events on the {} shell at {}x{}, \
+                 {} ({:?})",
+                summary.frames,
+                summary.ticks,
+                summary.events,
+                summary.backend,
+                summary.extent.0,
+                summary.extent.1,
+                // What the window system actually did, not what
+                // `--fullscreen` asked for. It is free to refuse.
+                summary.mode,
+                summary.exit,
+            )
         },
-        Invocation::Help => {
-            println!("{USAGE}");
-            ExitCode::SUCCESS
-        }
-        Invocation::BadUsage(message) => {
-            eprintln!("bare: {message}");
-            eprintln!("{USAGE}");
-            // 2 = bad invocation, the same contract `crcbl --help` states.
-            ExitCode::from(2)
-        }
-    }
+    )
 }

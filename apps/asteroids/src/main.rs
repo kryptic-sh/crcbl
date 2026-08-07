@@ -12,46 +12,32 @@
 
 use std::process::ExitCode;
 
-use crcbl_asteroids::{Invocation, USAGE, parse, run};
+use crcbl_asteroids::{USAGE, parse, run};
 
 fn main() -> ExitCode {
-    crcbl::core::log::init_logging();
-
-    match parse(std::env::args().skip(1)) {
-        Invocation::Run(options) => match run(&options) {
-            Ok(summary) => {
-                println!(
-                    "asteroids: {} frames, {} ticks on the {} shell at {}x{}, {} \
-                     (score {}, wave {}, lives {}, {:?}, {:?})",
-                    summary.frames,
-                    summary.ticks,
-                    summary.backend,
-                    summary.extent.0,
-                    summary.extent.1,
-                    // What the window system actually did, not what
-                    // `--fullscreen` asked for. It is free to refuse.
-                    summary.mode,
-                    summary.score,
-                    summary.wave + 1,
-                    summary.lives,
-                    summary.state,
-                    summary.exit,
-                );
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("asteroids: {error}");
-                ExitCode::FAILURE
-            }
+    crcbl::args::run_front_end(
+        "asteroids",
+        USAGE,
+        parse(std::env::args().skip(1)),
+        run,
+        |summary| {
+            format!(
+                "asteroids: {} frames, {} ticks on the {} shell at {}x{}, {} \
+                 (score {}, wave {}, lives {}, {:?}, {:?})",
+                summary.frames,
+                summary.ticks,
+                summary.backend,
+                summary.extent.0,
+                summary.extent.1,
+                // What the window system actually did, not what
+                // `--fullscreen` asked for. It is free to refuse.
+                summary.mode,
+                summary.score,
+                summary.wave + 1,
+                summary.lives,
+                summary.state,
+                summary.exit,
+            )
         },
-        Invocation::Help => {
-            println!("{USAGE}");
-            ExitCode::SUCCESS
-        }
-        Invocation::BadUsage(message) => {
-            eprintln!("asteroids: {message}");
-            eprintln!("{USAGE}");
-            ExitCode::from(2)
-        }
-    }
+    )
 }
