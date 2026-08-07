@@ -510,16 +510,6 @@ _not_ covered:
   a measurement of `par_for`. A harness that times the pass alone, and sweeps
   the chunk length, is what would let `STEER_CHUNK` be chosen rather than
   argued.
-- **The determinism gate now runs a sim, and stops short of per-tick hashing.**
-  `threaded_and_inline_pools_compute_the_same_answer` still compares the split
-  and the bytes at the unit level, and `apps/horde` adds the two the design
-  actually asked for: `steering_is_bit_identical_however_many_workers_run_it`
-  compares one pass at 0, 1, 3 and 7 workers over the raw `f64` bits, and
-  `the_same_script_replays_bit_identically_at_every_worker_count` replays one
-  script to the same state at every worker count including the machine's own.
-  What is still missing is the design's exact shape — a hash **per tick**, so a
-  divergence is reported at the tick it happened rather than at the end of the
-  run. The comparison catches the same defects; it just says less about where.
 - **A mode comparison cannot catch a defect that is symmetric across modes**,
   and this was measured rather than assumed: dropping the last chunk of every
   `par_for` leaves both worker-count tests green, because a pool with no workers
