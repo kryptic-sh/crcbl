@@ -40,19 +40,29 @@ use std::path::PathBuf;
 /// `ART_TICK_HZ`, so the loader reads it rather than declaring its own.
 ///
 /// Nothing asteroids draws is animated: the ship turns and the rocks tumble, and
-/// both are a *rotation* applied to a still frame rather than a clip. So no hold
-/// here is longer than the default of one tick, and the guard in `art.rs` is as
-/// weak as breakout's for the same reason — recorded in `docs/backlog.md`.
+/// both are a *rotation* applied to a still frame rather than a clip. The flash
+/// is the one two-frame sheet, and it is no exception — `art::Scene::build`
+/// swaps its two frames by the game's age counter rather than by a clip. So no
+/// hold here is longer than the default of one tick, and the guard in `art.rs`
+/// is as weak as breakout's for the same reason — recorded in `docs/backlog.md`.
 const ART_TICK_HZ: u32 = 60;
 
 /// The sheets, by file stem. Each is `assets/<stem>.crpix`.
 ///
-/// **Five sheets and not one.** A `.crpix` declares one frame size for the whole
+/// **Six sheets and not one.** A `.crpix` declares one frame size for the whole
 /// file, and the three rocks are 34, 20 and 11 texels square — the collider
 /// bounding box of each size, to the texel. Packing them into one sheet would
 /// mean padding two of the three out to the largest, and a sprite rectangle that
-/// then covers the padding rather than the rock.
-const ASSETS: [&str; 5] = ["ship", "bullet", "rock_large", "rock_medium", "rock_small"];
+/// then covers the padding rather than the rock. The flash is the sixth: its two
+/// frames share one frame size, so it is one sheet.
+const ASSETS: [&str; 6] = [
+    "ship",
+    "bullet",
+    "rock_large",
+    "rock_medium",
+    "rock_small",
+    "flash",
+];
 
 fn main() {
     crcbl_sprite::bake::bake_dir(&crcbl_sprite::bake::BakeDir {

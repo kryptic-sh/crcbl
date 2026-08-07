@@ -1,0 +1,54 @@
+# The hit flash.
+#
+# 13 x 13 texels at `art::TEXELS_PER_UNIT` = 10 is 1.3 x 1.3 world units, but
+# the frame is never drawn at that size: `art::Scene::build` scales the
+# rectangle to the rock that died (twice its collider radius), so the texel
+# size here is the *native* pixel-art size, not the world size. A rock is 34,
+# 20 or 11 texels across, and the flash covers the whole of the one that died —
+# which is what makes it read as the hit rather than as a mark beside one.
+#
+# Two frames, **in this order**: `burst` first, `fade` second, because
+# `art::Scene` looks them up by index. `burst` is a white-hot core with short
+# warm spikes and an orange rim — the instant of the hit; `fade` is the same
+# burst one texel wider and one tone cooler — the flash expanding and fading.
+# `art::Scene::build` picks between them on the game's age counter, exactly as
+# it picks the ship's hull and flame, so no clip is involved.
+crpix: 13 13 2 4 1
+
+palette:
+  . c None
+  w c #fff6d5
+  y c #ffb347
+  r c #ff5e00
+
+frame burst:
+  ......r......
+  .....ryr.....
+  ....ryyyr....
+  ...rywwwyr...
+  ..rywwwwwyr..
+  .rywwwwwwwyr.
+  rywwwwwwwwwyr
+  .rywwwwwwwyr.
+  ..rywwwwwyr..
+  ...rywwwyr...
+  ....ryyyr....
+  .....ryr.....
+  ......r......
+
+frame fade:
+  ......r......
+  .....ryr.....
+  ....ryyyr....
+  ...ryyyyyr...
+  ..ryyyyyyyr..
+  .ryyyyyyyyyr.
+  ryyyyyyyyyyyr
+  .ryyyyyyyyyr.
+  ..ryyyyyyyr..
+  ...ryyyyyr...
+  ....ryyyr....
+  .....ryr.....
+  ......r......
+
+sample: pixel

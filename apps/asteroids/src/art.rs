@@ -63,7 +63,7 @@ use crcbl::sprite::Sheet;
 use crcbl::sprite::load::{Loaded, load};
 
 use crate::game::{
-    RenderState, RockSize, RockView, WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH, lerp_angle,
+    FLASH_LIFE, RenderState, RockSize, RockView, WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH, lerp_angle,
 };
 
 // `build.rs` writes this: one `*_PNG` and one `*_JSON` per `assets/*.crpix`,
@@ -161,6 +161,32 @@ fn ship_art(sheet: SheetId, description: &Sheet) -> ShipArt {
     }
 }
 
+/// The hit flash's two frames, resolved to the UV rectangles they will ever
+/// use.
+///
+/// `first` is the white-hot burst, `second` the wider, dimmer fade.
+/// [`Scene::build`] swaps between them halfway through the flash's life — the
+/// same state-picked swap the ship's flame uses, driven by the game's age
+/// counter rather than by a clip.
+#[derive(Clone, Copy, Debug)]
+struct FlashArt {
+    sheet: SheetId,
+    first: [f32; 4],
+    second: [f32; 4],
+}
+
+/// Resolve the flash's two frames by index, matching `assets/flash.crpix`'s
+/// declared order — `burst` first, `fade` second.
+fn flash_art(sheet: SheetId, description: &Sheet) -> FlashArt {
+    FlashArt {
+        sheet,
+        first: description
+            .uv(0)
+            .expect("the flash sheet has a burst frame"),
+        second: description.uv(1).expect("the flash sheet has a fade frame"),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The scene
 // ---------------------------------------------------------------------------
@@ -179,9 +205,10 @@ pub struct Scene {
     rocks: [StillArt; 3],
     ship: ShipArt,
     bullet: StillArt,
+    flash: FlashArt,
     /// The rocks, behind the game.
     field: Layer,
-    /// The ship and its shots, in front of them.
+    /// The ship, its shots and the hit flashes, in front of them.
     play: Layer,
 }
 
@@ -205,12 +232,14 @@ impl Scene {
         let small = baked("rock_small", ROCK_SMALL_PNG, ROCK_SMALL_JSON);
         let ship = baked("ship", SHIP_PNG, SHIP_JSON);
         let bullet = baked("bullet", BULLET_PNG, BULLET_JSON);
+        let flash = baked("flash", FLASH_PNG, FLASH_JSON);
 
         let large_sheet = register(device, sprites, "rock_large", &large)?;
         let medium_sheet = register(device, sprites, "rock_medium", &medium)?;
         let small_sheet = register(device, sprites, "rock_small", &small)?;
         let ship_sheet = register(device, sprites, "ship", &ship)?;
         let bullet_sheet = register(device, sprites, "bullet", &bullet)?;
+        let flash_sheet = register(device, sprites, "flash", &flash)?;
 
         // Back to front, and this is the only place the depth order is written
         // down: `LayerStack` has no depth field to disagree with it. Both take
@@ -229,6 +258,7 @@ impl Scene {
             ],
             ship: ship_art(ship_sheet, &ship.sheet),
             bullet: still(bullet_sheet, &bullet.sheet),
+            flash: flash_art(flash_sheet, &flash.sheet),
             field,
             play,
         })
@@ -298,6 +328,31 @@ impl Scene {
                 // would be a rotation nobody could see.
                 rotation: 0.0,
                 uv: bullet.uv,
+                tint: UNTINTED,
+            }),
+        );
+
+        let flash = self.flash;
+        self.stack.extend(
+            self.play,
+            render.flashes.iter().map(move |flash_at| Sprite {
+                sheet: flash.sheet,
+                rect: rect(
+                    flash_at.position,
+                    flash_at.size.radius(),
+                    flash_at.size.radius(),
+                ),
+                // A burst has no attitude; turning it would be a rotation
+                // nobody sees.
+                rotation: 0.0,
+                // Frame 1 for the first half of the flash's life, frame 2 for
+                // the second — the same state-picked frame swap the ship's
+                // flame uses, driven by the game's age rather than by a clip.
+                uv: if flash_at.life > FLASH_LIFE * 0.5 {
+                    flash.first
+                } else {
+                    flash.second
+                },
                 tint: UNTINTED,
             }),
         );
@@ -481,7 +536,7 @@ mod tests {
     use crcbl::hal::null::NullInstance;
     use crcbl::hal::{DeviceDesc, Format, Instance, QueueKind};
 
-    use crate::game::{BULLET_RADIUS, BulletView, SHIP_RADIUS};
+    use crate::game::{BULLET_RADIUS, BulletView, Flash, SHIP_RADIUS};
 
     /// Runs `body` against a scene built on the null backend.
     ///
@@ -660,6 +715,29 @@ mod tests {
             "one still frame with no clip and no nine-slice needs no sidecar",
         );
 
+        let flash = baked("flash", FLASH_PNG, FLASH_JSON);
+        // Two frames laid out as a horizontal strip: 26 x 13, both 13 x 13.
+        assert_eq!((flash.image.width, flash.image.height), (26, 13));
+        assert_eq!(
+            flash.sheet.frames.len(),
+            2,
+            "the flash sheet has two frames"
+        );
+        assert!(
+            flash.sheet.clips.is_empty(),
+            "the flash declares a clip; its frames are swapped by the game's \
+             age counter, not by one",
+        );
+        // The fade frame is not a copy of the burst: the baked strip's two
+        // halves differ. A sheet where they matched would pass every structural
+        // check and defeat the field's whole point.
+        let frame_bytes = 13 * 13 * 4;
+        let (burst_pixels, fade_pixels) = flash.image.pixels.split_at(frame_bytes);
+        assert_ne!(
+            burst_pixels, fade_pixels,
+            "the fade frame is a copy of the burst"
+        );
+
         // Anti-blank: every sheet has transparent corners *and* opaque pixels. A
         // sheet of zeroes satisfies every assertion above.
         for (name, loaded) in [
@@ -668,6 +746,7 @@ mod tests {
             ("rock_small", &rock_sheets()[2]),
             ("ship", &ship),
             ("bullet", &bullet),
+            ("flash", &flash),
         ] {
             let clear = loaded
                 .image
@@ -924,6 +1003,65 @@ mod tests {
                 "a thrusting ship drew the hull frame",
             );
             assert_ne!(scene.ship.hull, scene.ship.flame);
+        });
+    }
+
+    /// **A hit flash is drawn on the play layer, over the rocks, covering the
+    /// dead rock** — and its frame follows its age: the burst for the first
+    /// half of [`FLASH_LIFE`], the fade for the second.
+    #[test]
+    fn a_hit_flash_is_drawn_above_the_rocks_with_the_frame_its_age_picks() {
+        with_scene(|scene| {
+            let render = |life| RenderState {
+                ship_alive: false,
+                rocks: vec![rock(RockSize::Large, DVec3::new(1.0, 1.0, 0.0))],
+                flashes: vec![Flash {
+                    position: DVec3::new(1.0, 1.0, 0.0),
+                    size: RockSize::Large,
+                    life,
+                }],
+                ..RenderState::default()
+            };
+
+            // A fresh flash draws the burst frame, at the rock's position and
+            // covering its collider's bounding square.
+            scene.build(&render(FLASH_LIFE), 0.0);
+            let play = scene.stack.sprites(scene.play).to_vec();
+            assert_eq!(play.len(), 1, "only the flash is on the play layer");
+            assert_eq!(play[0].sheet, scene.flash.sheet);
+            assert_eq!(
+                play[0].uv, scene.flash.first,
+                "a fresh flash drew the fade frame",
+            );
+            let radius = RockSize::Large.radius();
+            assert!(
+                (f64::from(play[0].rect[2]) - 2.0 * radius * f64::from(TEXELS_PER_UNIT)).abs()
+                    < 1e-3,
+                "the flash does not cover the rock that died",
+            );
+            assert!(
+                (rect_centre(play[0].rect) - DVec3::new(1.0, 1.0, 0.0)).length() < 1e-6,
+                "the flash is not where the rock died",
+            );
+
+            // Halfway through its life it has swapped to the fade frame.
+            scene.build(&render(FLASH_LIFE * 0.5), 0.0);
+            let play = scene.stack.sprites(scene.play).to_vec();
+            assert_eq!(
+                play[0].uv, scene.flash.second,
+                "an old flash drew the burst frame",
+            );
+            assert_ne!(scene.flash.first, scene.flash.second);
+
+            // And it sits on the play layer: the rock is still on the field
+            // layer beneath it, so the flash reads as the hit, not as a
+            // sprite pasted on top of the rock it replaced.
+            let field = scene.stack.sprites(scene.field).to_vec();
+            assert_eq!(field.len(), 1, "the field layer lost the rock");
+            assert_eq!(
+                field[0].sheet, scene.rocks[0].sheet,
+                "the field layer no longer holds the rock",
+            );
         });
     }
 

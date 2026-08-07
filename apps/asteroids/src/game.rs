@@ -183,6 +183,16 @@ pub const MAX_BULLETS: usize = 4;
 const MUZZLE_OFFSET: f64 = SHIP_RADIUS + BULLET_RADIUS + 0.05;
 
 // ---------------------------------------------------------------------------
+// Hit flashes
+// ---------------------------------------------------------------------------
+
+/// How long a hit flash lives, in seconds.
+///
+/// 0.15 s is nine ticks at 60 Hz: long enough to read, short enough that two
+/// hits near each other do not smear into one.
+pub const FLASH_LIFE: f64 = 0.15;
+
+// ---------------------------------------------------------------------------
 // Rocks
 // ---------------------------------------------------------------------------
 
@@ -562,6 +572,23 @@ pub struct BulletView {
     pub teleported: bool,
 }
 
+/// A hit flash: where a rock died, how big it was, and how long it has left.
+///
+/// The visual twin of the explosion cue — `shatter` pushes both, and the
+/// renderer draws this for [`FLASH_LIFE`] seconds at the dead rock's position
+/// and radius, swapping frames halfway through. In the simulation rather than
+/// on the facade because a replay must reproduce the picture as well as the
+/// score.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Flash {
+    /// Where the rock was when it shattered.
+    pub position: DVec3,
+    /// The size of the rock that died, so the flash covers it.
+    pub size: RockSize,
+    /// Seconds left before the flash goes out.
+    pub life: f64,
+}
+
 /// The mutable game state the server-side module owns.
 #[derive(Debug)]
 struct GameLogic {
@@ -664,6 +691,12 @@ struct GameLogic {
     /// simulation's side of the seam, and a frame that ran two ticks must play
     /// both of their cues rather than only the last one's.
     cues: Vec<(u32, f64, f64)>,
+
+    /// Hit flashes waiting to be drawn, drained by the renderer and aged in
+    /// [`run_tick`]. The visual twin of [`Self::cues`]: `shatter` pushes both,
+    /// and both live in the simulation so a replay reproduces the picture as
+    /// well as the score.
+    flashes: Vec<Flash>,
 
     /// The engine, as a force model rather than as a number. See
     /// [`ThrustForce::world_force`], which exists for exactly this case: a game
@@ -821,6 +854,13 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
     // below centres its overlap query on this value.
     read_ship(logic, world);
     expire_bullets(logic, world, dt);
+    // The flash is the cue's visual twin, aged here the way `expire_bullets`
+    // ages a bullet — and it is the whole pass, because a flash has no entity
+    // to despawn with.
+    logic.flashes.retain_mut(|flash| {
+        flash.life -= dt;
+        flash.life > 0.0
+    });
 
     if logic.state == GameState::Playing {
         if logic.ship_alive {
@@ -1228,6 +1268,13 @@ fn shatter(logic: &mut GameLogic, world: &mut World, index: usize) {
     logic
         .cues
         .push((crate::audio::SOUND_EXPLOSION, position.x, position.y));
+    // The flash is the cue's visual twin: pushed on the same tick, at the
+    // same place, drawn for [`FLASH_LIFE`] at the size of the rock that died.
+    logic.flashes.push(Flash {
+        position,
+        size: rock.size,
+        life: FLASH_LIFE,
+    });
 
     let Some(child) = rock.size.child() else {
         return;
@@ -1457,6 +1504,9 @@ fn restart(logic: &mut GameLogic, world: &mut World) {
     for bullet in std::mem::take(&mut logic.bullets) {
         despawn_bullet(world, bullet);
     }
+    // A flash is a fact about the field it happened on; one still burning from
+    // the last game would smear over the new board.
+    logic.flashes.clear();
     logic.runs = logic.runs.wrapping_add(1);
     logic.state = GameState::WaitingToStart;
     logic.score = 0;
@@ -1598,6 +1648,8 @@ pub struct RenderState {
     pub thrusting: bool,
     pub rocks: Vec<RockView>,
     pub bullets: Vec<BulletView>,
+    /// The hit flashes still burning this frame.
+    pub flashes: Vec<Flash>,
     pub score: u32,
     /// The best score this player has ever reached, across sessions.
     pub best: u32,
@@ -1763,6 +1815,7 @@ impl Game {
             scratch_entities: Vec::new(),
             scratch_hits: Vec::new(),
             cues: Vec::new(),
+            flashes: Vec::new(),
             thrust: ThrustForce::new(SHIP_THRUST, DVec3::Y),
             damping: DampingForce::new(SHIP_DAMPING),
             ticks: 0,
@@ -1979,6 +2032,8 @@ impl Game {
         out.rocks.extend_from_slice(&logic.rock_views);
         out.bullets.clear();
         out.bullets.extend_from_slice(&logic.bullet_views);
+        out.flashes.clear();
+        out.flashes.extend_from_slice(&logic.flashes);
         out.score = logic.score;
         out.lives = logic.lives;
         out.wave = logic.wave;
@@ -2957,6 +3012,131 @@ mod tests {
         harness.tap(KeyCode::Space);
         harness.run_ticks(harness.ticks + 30, &[]);
         assert_eq!(harness.game.score, RockSize::Large.score());
+    }
+
+    /// **A hit raises a flash where the rock died, sized to it, and the flash
+    /// fades out over exactly [`FLASH_LIFE`].**
+    ///
+    /// The visual twin of the explosion cue, and the point of the whole
+    /// feature: a rock that vanishes with only a sound is a rock the game
+    /// forgot to draw. The life is asserted against the tick's own `dt` — and
+    /// the tick count it survives is derived from [`FLASH_LIFE`] and that
+    /// `dt` rather than hardcoded — so a change to either constant updates
+    /// this test.
+    #[test]
+    fn a_hit_raises_a_flash_at_the_dead_rock_that_fades_out() {
+        let mut harness = one_rock_in_the_sights(60, 60, RockSize::Small, 6.0);
+        let dt = harness.game.tick_dt_secs();
+        let life_ticks = (FLASH_LIFE / dt).ceil() as u64;
+        let read = |h: &Harness| {
+            let mut render = RenderState::default();
+            h.game.render_state(&mut render);
+            render.flashes
+        };
+
+        harness.tap(KeyCode::Space);
+        // Step until the shot lands, then read the flash the tick after the
+        // hit: the life assertion below is about its *first* tick.
+        loop {
+            harness.run_ticks(harness.ticks + 1, &[]);
+            assert!(harness.ticks < 40, "the shot never landed");
+            if !read(&harness).is_empty() {
+                break;
+            }
+        }
+        let first = read(&harness);
+        assert_eq!(first.len(), 1, "the hit raised no flash");
+        assert_eq!(
+            first[0].position,
+            DVec3::ZERO,
+            "the flash is not where the rock died",
+        );
+        assert_eq!(
+            first[0].size,
+            RockSize::Small,
+            "the flash is not the rock's size"
+        );
+        assert!(
+            (first[0].life - (FLASH_LIFE - dt)).abs() < 1e-9,
+            "a fresh flash carries {}s of life, not {}",
+            first[0].life,
+            FLASH_LIFE - dt,
+        );
+
+        // One more tick: exactly one tick's dt has come off.
+        harness.run_ticks(harness.ticks + 1, &[]);
+        let aged = read(&harness);
+        assert_eq!(aged.len(), 1, "the flash went out a tick early");
+        assert!(
+            (first[0].life - aged[0].life - dt).abs() < 1e-9,
+            "the flash aged {}s in one tick, not {}",
+            first[0].life - aged[0].life,
+            dt,
+        );
+
+        // The tick before it would run out it is still burning; the tick
+        // after, gone.
+        harness.run_ticks(harness.ticks + (life_ticks - 3), &[]);
+        assert_eq!(read(&harness).len(), 1, "the flash expired before its time");
+        harness.run_ticks(harness.ticks + 1, &[]);
+        assert!(read(&harness).is_empty(), "the flash outlived its life");
+        harness.assert_nothing_leaked();
+    }
+
+    /// **Two hits raise two flashes, and they coexist.** The flash list is a
+    /// list, not a single slot: a second rock dying while the first flash is
+    /// still burning must show both.
+    ///
+    /// Both hits land on the same tick — the only way two can overlap, since a
+    /// flash lives nine ticks at 60 Hz against a ten-tick reload. One shot up
+    /// the +Y line at a far rock, one along +X at a near one, aimed by
+    /// re-staging the ship rather than by holding a key, which would take
+    /// longer than either flash's life.
+    #[test]
+    fn two_hits_raise_two_flashes_that_coexist() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.begin();
+        harness.game.stage_ship(DVec3::ZERO, 0.0, DVec3::ZERO);
+        harness
+            .game
+            .stage_rock(DVec3::new(0.0, 8.0, 0.0), DVec3::ZERO, RockSize::Small);
+        harness
+            .game
+            .stage_another_rock(DVec3::new(4.0, 0.0, 0.0), DVec3::ZERO, RockSize::Small);
+
+        harness.tap(KeyCode::Space); // tick 0: the +Y shot
+        harness.run_ticks(harness.ticks + 9, &[]); // the cooldown
+        harness
+            .game
+            .stage_ship(DVec3::ZERO, -std::f64::consts::FRAC_PI_2, DVec3::ZERO);
+        harness.tap(KeyCode::Space); // tick 10: the +X shot
+        harness.run_ticks(harness.ticks + 7, &[]); // both land on tick 17
+
+        let mut render = RenderState::default();
+        harness.game.render_state(&mut render);
+        assert_eq!(render.flashes.len(), 2, "two hits must raise two flashes");
+        let mut where_: Vec<DVec3> = render.flashes.iter().map(|f| f.position).collect();
+        where_.sort_by(|a, b| a.x.total_cmp(&b.x));
+        assert_eq!(
+            where_,
+            vec![DVec3::new(0.0, 8.0, 0.0), DVec3::new(4.0, 0.0, 0.0)],
+            "the flashes are not where the rocks died",
+        );
+        assert!(
+            render.flashes.iter().all(|f| f.size == RockSize::Small),
+            "a flash is not the size of the rock it marks",
+        );
+        let dt = harness.game.tick_dt_secs();
+        assert!(
+            render
+                .flashes
+                .iter()
+                .all(|f| (f.life - (FLASH_LIFE - dt)).abs() < 1e-9),
+            "a flash did not carry the expected first-tick life of {}s (found {:?})",
+            FLASH_LIFE - dt,
+            render.flashes.iter().map(|f| f.life).collect::<Vec<_>>(),
+        );
+        harness.assert_nothing_leaked();
     }
 
     /// A bullet that hits nothing expires, and takes its entity with it.

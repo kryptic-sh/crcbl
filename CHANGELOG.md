@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A shot that kills a rock now raises a flash where it died.** The rock used
+  to vanish and split with only the explosion cue to mark the hit;
+  `apps/asteroids` now draws a two-frame burst — a white-hot core for the first
+  half of the flash's 0.15 s life, a wider, dimmer fade for the second — scaled
+  to cover the rock that died. The flash lives in the seeded simulation beside
+  the cue, so a recorded script replays the picture as well as the score;
+  particles remain a hard non-goal and this is a sprite, not one.
+
 - **The sandbox's pause menu can change pacing and the frame cap mid-run.** Two
   new rows — `PACING: AUTO` and `FPS: 1000`, each labelled with the value it is
   set to — cycle on Enter: pacing through `Auto` → `Vsync` → `Adaptive` → `Off`,
