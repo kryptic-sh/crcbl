@@ -892,8 +892,8 @@ impl Recorder {
     }
 
     /// Makes the next `reconfigure_swapchain` call(s) fail with
-    /// [`SurfaceError::Hal(HalError::OutOfDeviceMemory)`], as if rebuilding the
-    /// swapchain ran out of memory.
+    /// [`SurfaceError::Hal(HalError::OutOfDeviceMemory)`](crate::SurfaceError::Hal),
+    /// as if rebuilding the swapchain ran out of memory.
     ///
     /// The sibling of [`set_device_latency`](Self::set_device_latency), and
     /// there for the same reason: the null backend never fails, so a caller's
