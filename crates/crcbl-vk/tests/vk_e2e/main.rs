@@ -29,45 +29,28 @@
 
 #![cfg(feature = "vk-e2e")]
 
-// The suite's areas, one module each, all in `tests/vk_e2e/` — because Cargo
-// compiles every top-level `tests/*.rs` as its own test binary, and these are
-// parts of *this* one. `#[path]` is what puts them there: a crate root's
-// modules otherwise resolve beside the root file, which is `tests/` itself.
-#[path = "vk_e2e/button_skin.rs"]
+// The suite's areas, one module each, all in `tests/vk_e2e/`. The root is
+// `tests/vk_e2e/main.rs`, so Cargo compiles the directory as one test binary
+// named `vk_e2e` and every `mod` here resolves beside the root — no `#[path]`
+// needed. (The alternative, a top-level `tests/vk_e2e.rs` root, has to name
+// each file with `#[path]`, because a crate root's modules otherwise resolve
+// beside the root file, which is `tests/` itself.)
 mod button_skin;
-#[path = "vk_e2e/compute.rs"]
 mod compute;
-#[path = "vk_e2e/depth_probe.rs"]
 mod depth_probe;
-#[path = "vk_e2e/device_request.rs"]
 mod device_request;
-#[path = "vk_e2e/frame_loop_sequences.rs"]
 mod frame_loop_sequences;
-#[path = "vk_e2e/harness.rs"]
 mod harness;
-#[path = "vk_e2e/indirect.rs"]
 mod indirect;
-#[path = "vk_e2e/menu.rs"]
 mod menu;
-#[path = "vk_e2e/mesh.rs"]
 mod mesh;
-#[path = "vk_e2e/nine_slice.rs"]
 mod nine_slice;
-#[path = "vk_e2e/pipeline.rs"]
 mod pipeline;
-#[path = "vk_e2e/queries.rs"]
 mod queries;
-#[path = "vk_e2e/recording.rs"]
 mod recording;
-#[path = "vk_e2e/retire.rs"]
 mod retire;
-#[path = "vk_e2e/seam_obligations.rs"]
 mod seam_obligations;
-#[path = "vk_e2e/sprite/mod.rs"]
 mod sprite;
-#[path = "vk_e2e/swapchain.rs"]
 mod swapchain;
-#[path = "vk_e2e/triangle.rs"]
 mod triangle;
-#[path = "vk_e2e/validation_gate.rs"]
 mod validation_gate;

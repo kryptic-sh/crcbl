@@ -36,7 +36,7 @@ crcbl-shaders = { workspace = true }
 glam = { workspace = true }
 
 [features]
-# The suite in `tests/vk_e2e.rs`, which needs a real Vulkan implementation.
+# The suite in `tests/vk_e2e/main.rs`, which needs a real Vulkan implementation.
 # Feature-gated *and* `#[ignore]`d, exactly like `crcbl-shell`'s two
 # window-system suites: a plain `cargo nextest run --all-features` on a machine
 # with no loader must stay green, and `tests/run-vk-e2e.sh` is the only thing

@@ -229,7 +229,7 @@ if [ -z "$REACH" ]; then
     # that silently stopped measuring its own blind spot is the failure this
     # whole section exists to prevent.
     echo "crcbl vk e2e: the suite did not report its sync-validation reach." >&2
-    echo "              crates/crcbl-vk/tests/vk_e2e.rs must print it, and this" >&2
+    echo "              crates/crcbl-vk/tests/vk_e2e/main.rs must print it, and this" >&2
     echo "              script must be able to find it, or a green run here" >&2
     echo "              claims evidence it does not have." >&2
     exit 1
