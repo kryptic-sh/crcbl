@@ -2782,11 +2782,6 @@ The modular panel is built and all three samples switch it on with F3 (or
   Closing this means either a golden through the sprite pass with a sample's own
   sheets, or an offscreen path the samples can drive. It is the same gap for
   breakout as for flappy and is not worth two entries.
-- **Nothing checks breakout's clear colour against the court's interior.**
-  `art::SURROUND` and `field.crpix`'s `f` are two hand-written sRGB values that
-  have to read as different surfaces; a change to one is invisible to the tests.
-  Low stakes — it is a look, not a behaviour — but it is the one number in
-  breakout's art with nothing holding it.
 - **Nobody has _looked_ at a fullscreen window.** The mechanism is gated end to
   end now — see _Display-mode coverage_ — but every assertion is a summary line
   or a compositor's tree, not a picture. That the frame is composed correctly at
