@@ -127,7 +127,7 @@ SANDBOX_FRAMES=120
 run_sandbox() {
     local backend="$1"
     local mode="${2:-windowed}"
-    local flags=(--backend "$backend" --frames "$SANDBOX_FRAMES" --title "crcbl e2e sandbox")
+    local flags=(--backend "$backend" --frames "$SANDBOX_FRAMES" --title "crcbl e2e sandbox" --wait-unpresented)
     local want_mode="windowed"
     local want_extent="$SANDBOX_WINDOWED"
     if [ "$mode" = "fullscreen" ]; then
@@ -183,6 +183,9 @@ run_sandbox() {
     # not show up in a frame time**, because FIFO already paces the loop
     # through `vkQueuePresentKHR`. The backend's own line is emitted from
     # inside the wait, so it is there only if the driver was really asked.
+    # The third check is the `--wait-unpresented` probe's: a wait for a
+    # present id the swapchain was never given can only answer at once
+    # through the id guard, so its success line is the guard's half.
     if grep -q "crcbl-vk: present feedback enabled" "$SANDBOX_LOG"; then
         if ! grep -q "hal: pacing on presents" "$SANDBOX_LOG"; then
             echo "crcbl e2e: the device enabled present feedback and the loop did not pace on it" >&2
@@ -196,7 +199,14 @@ run_sandbox() {
             sway_log_tail
             exit 1
         fi
+        if ! grep -q "sandbox: an unpresented present id was answered at once" "$SANDBOX_LOG"; then
+            echo "crcbl e2e: the loop waited on presents and never probed an unpresented id" >&2
+            cat "$SANDBOX_LOG" >&2
+            sway_log_tail
+            exit 1
+        fi
         echo "crcbl e2e: the sandbox paced $SANDBOX_FRAMES frames on vkWaitForPresentKHR"
+        echo "crcbl e2e: the sandbox's unpresented-id probe answered at once"
     else
         echo "crcbl e2e: no VK_KHR_present_wait on this driver — the present-wait \
 path was NOT exercised, only the absent-capability path" >&2

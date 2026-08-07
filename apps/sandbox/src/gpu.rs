@@ -104,6 +104,8 @@
 
 pub use crcbl::engine::{FrameOutcome, GpuError};
 
+use std::time::{Duration, Instant};
+
 use crcbl::engine::{GpuContext, GpuContextDesc, GpuOptions, Pacing};
 use crcbl::hal::CommandEncoderDesc;
 use crcbl::prelude::*;
@@ -429,6 +431,31 @@ impl Gpu {
     /// [`GpuError`] if the swapchain could not be rebuilt; the old one stays.
     pub fn set_pacing(&mut self, pacing: Pacing) -> Result<(), GpuError> {
         self.ctx.set_pacing(pacing)
+    }
+
+    /// How long a wait for a present id that was never given may block before
+    /// the run is judged to have lost the id guard. Far above the instant an
+    /// intact guard answers; a lost guard runs the whole thing out, which is
+    /// what makes the wayland e2e fail loudly rather than pass slowly.
+    const UNPRESENTED_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// Waits for a present id this swapchain was never given, and returns how
+    /// long the device took to say there was nothing to wait for.
+    ///
+    /// The `--wait-unpresented` probe. On a device with present feedback the
+    /// only thing that makes this answer at once is the "id the swapchain was
+    /// never given" guard in `crcbl-vk`, so the elapsed time is the observable
+    /// that says the guard is still there. A device without the capability
+    /// answers immediately without consulting it, which is why the e2e run
+    /// prints which case it was in.
+    pub fn wait_unpresented(&mut self) -> Result<Duration, crcbl::hal::SurfaceError> {
+        let started = Instant::now();
+        self.ctx.device().wait_until_presented(
+            self.ctx.swapchain(),
+            u64::MAX,
+            Self::UNPRESENTED_WAIT_TIMEOUT,
+        )?;
+        Ok(started.elapsed())
     }
 
     /// The pacing asked for — what [`set_pacing`](Self::set_pacing) last

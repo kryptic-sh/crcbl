@@ -1067,6 +1067,14 @@ impl GpuContext {
         self.device.as_ref()
     }
 
+    /// The swapchain everything renders into, for a caller that wants the
+    /// seam's present-feedback calls directly — `Device::wait_until_presented`
+    /// is how a frame is held for the display.
+    #[must_use]
+    pub const fn swapchain(&self) -> SwapchainHandle {
+        self.swapchain
+    }
+
     /// The graphics queue everything is submitted to.
     #[must_use]
     pub const fn queue(&self) -> QueueHandle {

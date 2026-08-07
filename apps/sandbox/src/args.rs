@@ -43,6 +43,11 @@ OPTIONS:
                           is a runaway guard rather than a cap. 0 is unlimited.
                           Under vsync the display paces the loop and this
                           rarely fires.
+        --wait-unpresented
+                          On the first tick, wait once for a present id the
+                          swapchain was never given and log the outcome. The
+                          wayland e2e harness's probe of the id guard; off by
+                          default.
         --debug-overlay   Start with the debug panel visible. F3 toggles it.
         --no-debug-overlay
                           Start with it hidden. The default is `visible in a
@@ -77,6 +82,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
         match arg.as_str() {
             "--headless" => options.headless = true,
             "--fullscreen" => options.fullscreen = true,
+            "--wait-unpresented" => options.wait_unpresented = true,
             "--debug-overlay" => options.debug_overlay = Some(true),
             "--no-debug-overlay" => options.debug_overlay = Some(false),
             "-h" | "--help" => return Invocation::Help,
@@ -223,6 +229,7 @@ mod tests {
             "adaptive",
             "--fps",
             "144",
+            "--wait-unpresented",
         ]);
         assert_eq!(options.pacing, crcbl::engine::Pacing::Adaptive);
         assert_eq!(options.limit, crcbl::engine::FrameLimit::fps(144));
@@ -230,6 +237,7 @@ mod tests {
         assert_eq!(options.frames, Some(12));
         assert_eq!(options.tick_hz, 30);
         assert!(options.fullscreen);
+        assert!(options.wait_unpresented);
         assert_eq!(
             options.display_mode(),
             crcbl::shell::DisplayMode::Borderless { monitor: None },

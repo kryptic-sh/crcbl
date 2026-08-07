@@ -48,6 +48,8 @@
 //! [`SandboxError::NoWindowSystem`]. `--headless` itself works on every
 //! platform, which is what keeps the cross-platform CI leg meaningful.
 
+use std::time::Duration;
+
 use crcbl::backend::GpuBackend;
 // The loop's scaffolding — the clock, the event sink, the configure wait, the
 // exit vocabulary and the four timing constants — lives in `crcbl::engine`,
@@ -163,6 +165,13 @@ pub struct Options {
     /// The same value [`crcbl::args::Common::limit`] carries. It is the only
     /// pacing there is under [`Pacing::Off`], and under vsync it rarely fires.
     pub limit: FrameLimit,
+    /// After the first tick, wait once for a present id the swapchain was
+    /// never given (`u64::MAX`) and log whether the device answered at once.
+    ///
+    /// The wayland e2e harness's probe of the id guard on
+    /// `wait_until_presented` with a real swapchain. Off by default so an
+    /// ordinary run never blocks.
+    pub wait_unpresented: bool,
 }
 
 impl Default for Options {
@@ -178,6 +187,7 @@ impl Default for Options {
             debug_overlay: None,
             pacing: Pacing::default(),
             limit: FrameLimit::default(),
+            wait_unpresented: false,
         }
     }
 }
@@ -281,18 +291,27 @@ pub struct Sandbox {
     /// The values the pause panel was last built for — `None` until the
     /// first pause, so the panel is always rebuilt once with the real values.
     shown: Option<(Pacing, FrameLimit)>,
+    /// Whether `--wait-unpresented` was asked for: the one-shot probe below
+    /// runs on the first tick and records its outcome here.
+    wait_unpresented: bool,
+    /// The outcome of the probe, once it has run — `Ok` with the time the
+    /// device took, `Err` with the formatted error.
+    unpresented: Option<Result<Duration, String>>,
 }
 
 impl Sandbox {
-    /// A sandbox starting from the command line's pacing and frame limit.
+    /// A sandbox starting from the command line's pacing, frame limit and
+    /// `--wait-unpresented` probe.
     #[must_use]
-    pub fn new(pacing: Pacing, limit: FrameLimit) -> Self {
+    pub fn new(pacing: Pacing, limit: FrameLimit, wait_unpresented: bool) -> Self {
         Self {
             pacing,
             applied: pacing,
             limit,
             pending_limit: None,
             shown: None,
+            wait_unpresented,
+            unpresented: None,
         }
     }
 }
@@ -394,7 +413,7 @@ pub fn with_shell<S: Shell + ?Sized>(
             clock_source,
             events,
         },
-        Sandbox::new(options.pacing, options.limit),
+        Sandbox::new(options.pacing, options.limit, options.wait_unpresented),
         LoopConfig {
             tick_hz: options.tick_hz,
             frames: options.frame_budget(),
@@ -431,6 +450,27 @@ impl HostedGame for Sandbox {
     }
 
     fn tick(&mut self, gpu: &mut Gpu, tick_dt: f64) {
+        // The `--wait-unpresented` probe: one direct wait, on the first tick,
+        // for a present id the swapchain was never given. The wayland e2e
+        // harness asserts the success line on a driver with present feedback;
+        // the outcome is kept for the unit test below.
+        if self.wait_unpresented && self.unpresented.is_none() {
+            self.unpresented = Some(match gpu.wait_unpresented() {
+                Ok(elapsed) => {
+                    crcbl::log::info!(
+                        "sandbox: an unpresented present id was answered at once on a real swapchain (wait took {:.3}s)",
+                        elapsed.as_secs_f64(),
+                    );
+                    Ok(elapsed)
+                }
+                Err(error) => {
+                    crcbl::log::error!(
+                        "sandbox: an unpresented present id was NOT answered at once ({error}); the id guard is gone"
+                    );
+                    Err(error.to_string())
+                }
+            });
+        }
         tick(tick_dt);
         // The cube spins on the **fixed** timestep, not on the frame rate. That
         // is what makes `--headless --frames N` render a bit-reproducible
@@ -612,6 +652,7 @@ mod tests {
             debug_overlay: None,
             pacing: Pacing::default(),
             limit: FrameLimit::default(),
+            wait_unpresented: false,
         }
     }
 
@@ -732,6 +773,29 @@ mod tests {
             ui_text(&engine),
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// The `--wait-unpresented` probe runs once, on the first tick, and every
+    /// backend answers it at once — a null device has no present feedback at
+    /// all, so this pins the *plumbing* (flag → Sandbox → Gpu → Device); the
+    /// guard's half is the wayland e2e's, on a real swapchain.
+    #[test]
+    fn the_unpresented_id_probe_answers_at_once() {
+        let mut engine = scripted(&Options {
+            wait_unpresented: true,
+            ..headless(8)
+        });
+        // The first frame only establishes the clock's baseline — the probe
+        // runs on the first *tick*, which is the second frame.
+        engine.frame().expect("a frame");
+        engine.frame().expect("a frame");
+        match engine.game().unpresented.as_ref() {
+            Some(Ok(elapsed)) => assert!(
+                *elapsed < Duration::from_secs(5),
+                "the probe must not block: {elapsed:?}",
+            ),
+            other => panic!("the probe must have run and answered Ok: {other:?}"),
+        }
     }
 
     /// The CI-visible promise: a headless run terminates, and terminates with
