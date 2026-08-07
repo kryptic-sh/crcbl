@@ -1353,6 +1353,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Asteroids: a rock straddling a field edge was drawn once, so half of it
+  vanished for the whole of a crossing.** The field wraps, and the half past the
+  seam belongs at the opposite edge — now it is drawn there: every rock is
+  emitted at its own position plus a ghost per wrapped offset (`wrapped_offsets`
+  in `apps/asteroids/src/art.rs`), with the corner case (a rock crossing a
+  corner needs the diagonal copy too) covered. A wave spawns its rocks **on**
+  the border, so this was visible at every wave start rather than only during
+  mid-flight crossings. The ship and the shots straddle the same seams and are
+  left single — their crossings are shorter and the missing half less
+  conspicuous.
+
 - **`crcbl-shaders`**: `build.rs`'s byte-for-byte recompile check invoked
   `slangc` with an **absolute** source path while `tools/compile-shaders.sh`
   uses one relative to the crate root. Slang copies the path it was given into

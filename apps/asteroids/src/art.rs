@@ -45,6 +45,16 @@
 //! [`RenderState`]'s own docs carry why the wrap needs a teleport flag rather
 //! than a lerp, and `game::lerp_angle`'s carry why the short way round is the
 //! only correct answer for an angle.
+//!
+//! # A body straddling a seam is drawn at both sides of it
+//!
+//! The field wraps, so while a rock crosses an edge half of it is past the
+//! seam — and that half belongs at the opposite edge. [`wrapped_offsets`] is
+//! the rule, applied to every rock: its own position plus a ghost per wrapped
+//! offset, so a crossing reads as a crossing rather than as a rock losing a
+//! chunk. The ship and the shots straddle the same seams (their crossings are
+//! shorter, so the missing half is briefer and less conspicuous) and are left
+//! single; the rule exists where the entry in `docs/backlog.md` put it.
 
 use crcbl::hal::{Device, HalError};
 use crcbl::math::DVec3;
@@ -52,7 +62,9 @@ use crcbl::render::{Layer, LayerStack, Parallax, SheetDesc, SheetId, Sprite, Spr
 use crcbl::sprite::Sheet;
 use crcbl::sprite::load::{Loaded, load};
 
-use crate::game::{RenderState, RockSize, RockView, lerp_angle};
+use crate::game::{
+    RenderState, RockSize, RockView, WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH, lerp_angle,
+};
 
 // `build.rs` writes this: one `*_PNG` and one `*_JSON` per `assets/*.crpix`,
 // with the sidecar `None` for art that needs no metadata.
@@ -252,15 +264,21 @@ impl Scene {
                     .rocks
                     .iter()
                     .filter(move |rock| rock.size == size)
-                    .map(move |rock| Sprite {
-                        sheet: art.sheet,
-                        rect: rock_rect(
-                            drawn_centre(rock.prev_position, rock.position, rock.teleported, alpha),
-                            rock,
-                        ),
-                        rotation: lerp_angle(rock.prev_angle, rock.angle, alpha) as f32,
-                        uv: art.uv,
-                        tint: UNTINTED,
+                    .flat_map(move |rock| {
+                        let centre =
+                            drawn_centre(rock.prev_position, rock.position, rock.teleported, alpha);
+                        let sprite = move |at: DVec3| Sprite {
+                            sheet: art.sheet,
+                            rect: rock_rect(at, rock),
+                            rotation: lerp_angle(rock.prev_angle, rock.angle, alpha) as f32,
+                            uv: art.uv,
+                            tint: UNTINTED,
+                        };
+                        // The rock, plus a ghost at every wrapped offset for a
+                        // seam it straddles — see [`wrapped_offsets`]. Without
+                        // the ghost, the half past the edge is missing for the
+                        // whole of a crossing.
+                        wrapped_offsets(centre, rock.size.radius()).map(sprite)
                     }),
             );
         }
@@ -340,6 +358,43 @@ fn rock_rect(centre: DVec3, rock: &RockView) -> [f32; 4] {
     rect(centre, radius, radius)
 }
 
+/// Every position a body straddling a seam must be drawn at: its own, plus a
+/// ghost per wrapped offset.
+///
+/// The field wraps, so a body past one edge has its far half on the other
+/// side — one ghost. A body crossing a *corner* has three: the axis copies and
+/// the diagonal one, which is where the corner piece lands. A body past no
+/// edge has just its own position. The offsets are `±2 × half`, exactly what
+/// [`wrap_axis`](crate::game::wrap_axis) does to a coordinate that left the
+/// field; the ghost is the same sprite at the wrapped centre, and the part of
+/// it that lies beyond the opposite edge is clipped by the viewport like any
+/// other off-view sprite.
+///
+/// `pub(crate)` for the same reason as [`drawn_centre`]: the app loop's tests
+/// count copies through the rule rather than beside it.
+pub(crate) fn wrapped_offsets(centre: DVec3, radius: f64) -> impl Iterator<Item = DVec3> {
+    let x_wrap = if centre.x + radius > WORLD_HALF_WIDTH {
+        Some(-2.0 * WORLD_HALF_WIDTH)
+    } else if centre.x - radius < -WORLD_HALF_WIDTH {
+        Some(2.0 * WORLD_HALF_WIDTH)
+    } else {
+        None
+    };
+    let y_wrap = if centre.y + radius > WORLD_HALF_HEIGHT {
+        Some(-2.0 * WORLD_HALF_HEIGHT)
+    } else if centre.y - radius < -WORLD_HALF_HEIGHT {
+        Some(2.0 * WORLD_HALF_HEIGHT)
+    } else {
+        None
+    };
+    // Main first, then the axis ghosts, then the diagonal.
+    std::iter::once(0.0).chain(x_wrap).flat_map(move |dx| {
+        std::iter::once(0.0)
+            .chain(y_wrap)
+            .map(move |dy| centre + DVec3::new(dx, dy, 0.0))
+    })
+}
+
 /// A shot's rectangle. See [`BULLET_HALF_EXTENT`] for why it is not the sweep's.
 fn bullet_rect(centre: DVec3) -> [f32; 4] {
     rect(centre, BULLET_HALF_EXTENT, BULLET_HALF_EXTENT)
@@ -353,7 +408,10 @@ fn ship_rect(centre: DVec3) -> [f32; 4] {
 /// Where a body is drawn on this frame: lerped between the previous and the
 /// current tick's positions, or snapped to the current one on a tick it
 /// teleported — the previous position is a whole field away then.
-fn drawn_centre(prev: DVec3, cur: DVec3, teleported: bool, alpha: f64) -> DVec3 {
+///
+/// `pub(crate)` because the app loop's tests count the copies the scene will
+/// draw, and the count has to come from the same rule the drawing uses.
+pub(crate) fn drawn_centre(prev: DVec3, cur: DVec3, teleported: bool, alpha: f64) -> DVec3 {
     if teleported {
         cur
     } else {
@@ -937,6 +995,77 @@ mod tests {
                 "a rock turning the other way drew {}",
                 field[1].rotation,
             );
+        });
+    }
+
+    /// A rock past no seam is drawn exactly once — the ghost rule must not
+    /// cost a sprite for a rock that has nothing across the edge.
+    #[test]
+    fn a_rock_away_from_the_edges_is_drawn_once() {
+        with_scene(|scene| {
+            let render = RenderState {
+                rocks: vec![rock(RockSize::Large, DVec3::new(10.0, 5.0, 0.0))],
+                ..RenderState::default()
+            };
+            scene.build(&render, 1.0);
+            let field = scene.stack.sprites(scene.field).to_vec();
+            assert_eq!(field.len(), 1, "a rock past no seam needs no ghost");
+            assert_eq!(rect_centre(field[0].rect), DVec3::new(10.0, 5.0, 0.0));
+        });
+    }
+
+    /// A rock straddling an edge is drawn at both sides of the seam: its own
+    /// position, and the same sprite a full field to the wrapped side. That is
+    /// the half that would otherwise be missing for the whole of a crossing.
+    #[test]
+    fn a_rock_straddling_an_edge_is_drawn_at_both_sides_of_the_seam() {
+        with_scene(|scene| {
+            // 15.5 + 1.7 > 16: the large rock's right half is past the seam.
+            let render = RenderState {
+                rocks: vec![rock(RockSize::Large, DVec3::new(15.5, 0.0, 0.0))],
+                ..RenderState::default()
+            };
+            scene.build(&render, 1.0);
+            let field = scene.stack.sprites(scene.field).to_vec();
+            assert_eq!(field.len(), 2, "a straddling rock needs its ghost");
+            let centres: Vec<DVec3> = field.iter().map(|s| rect_centre(s.rect)).collect();
+            assert!(
+                centres.contains(&DVec3::new(15.5, 0.0, 0.0)),
+                "the rock itself is missing from {centres:?}",
+            );
+            assert!(
+                centres.contains(&DVec3::new(-16.5, 0.0, 0.0)),
+                "the wrapped copy is missing from {centres:?}",
+            );
+        });
+    }
+
+    /// A rock crossing a corner straddles both seams, and its corner piece
+    /// lands at the *diagonal* wrapped offset — which neither axis ghost alone
+    /// covers. All four copies have to be on the field.
+    #[test]
+    fn a_rock_crossing_a_corner_is_drawn_at_the_diagonal_too() {
+        with_scene(|scene| {
+            // 15.9 + 1.7 > 16 and 11.9 + 1.7 > 12: past both the right and the
+            // top seams at once.
+            let render = RenderState {
+                rocks: vec![rock(RockSize::Large, DVec3::new(15.9, 11.9, 0.0))],
+                ..RenderState::default()
+            };
+            scene.build(&render, 1.0);
+            let field = scene.stack.sprites(scene.field).to_vec();
+            let centres: Vec<DVec3> = field.iter().map(|s| rect_centre(s.rect)).collect();
+            for expected in [
+                DVec3::new(15.9, 11.9, 0.0),
+                DVec3::new(-16.1, 11.9, 0.0),
+                DVec3::new(15.9, -12.1, 0.0),
+                DVec3::new(-16.1, -12.1, 0.0),
+            ] {
+                assert!(
+                    centres.contains(&expected),
+                    "missing the {expected:?} copy in {centres:?}",
+                );
+            }
         });
     }
 

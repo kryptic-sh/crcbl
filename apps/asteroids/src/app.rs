@@ -639,24 +639,43 @@ mod tests {
     /// wrongly.
     ///
     /// The count is against the board rather than "more than zero": a scene that
-    /// lost the rocks and kept the ship would pass the weaker version.
+    /// lost the rocks and kept the ship would pass the weaker version. A wave
+    /// spawns its rocks **on** the border, so most of them straddle a seam and
+    /// the wrap rule draws each at every wrapped offset — the expected count is
+    /// computed through [`crate::art::wrapped_offsets`], the same rule the scene
+    /// draws with, so the two cannot drift.
     #[test]
     fn the_frame_hands_the_field_to_the_sprite_pass_and_the_hud_to_the_ui_pass() {
         let mut engine = scripted(&headless(4));
         run_frames(&mut engine, 1);
 
-        let rocks = engine.game().render_state().rocks.len();
+        let render = engine.game().render_state();
+        let rocks = render.rocks.len();
         assert_eq!(
             rocks,
             game::wave_rocks(0) as usize,
             "the first wave should be on the field",
         );
-        assert!(engine.game().render_state().ship_alive);
+        assert!(render.ship_alive);
+        let alpha = f64::from(engine.gpu().alpha_for_test());
+        let copies: usize = render
+            .rocks
+            .iter()
+            .map(|rock| {
+                let centre = crate::art::drawn_centre(
+                    rock.prev_position,
+                    rock.position,
+                    rock.teleported,
+                    alpha,
+                );
+                crate::art::wrapped_offsets(centre, rock.size.radius()).count()
+            })
+            .sum();
         let sprites = engine.gpu_mut().scene_sprites();
         assert_eq!(
             sprites.len(),
-            rocks + 1,
-            "every rock and the ship, and nothing else",
+            copies + 1,
+            "every rock copy and the ship, and nothing else",
         );
 
         // Nothing the game draws is a UI rectangle any more: the HUD panel is,

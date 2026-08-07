@@ -3155,12 +3155,6 @@ not:
   Particles are a hard non-goal in `docs/plan/sample/02-asteroids.md`, so
   whatever this is, it is not that — a two-frame flash sprite at the hit
   position is the cheapest thing that would read.
-- **Rocks that straddle an edge are drawn once, not twice.** A large rock is 3.4
-  units across on a 32-unit field, so for about a tenth of a second per crossing
-  half of it is missing rather than appearing on the far side. Drawing a ghost
-  copy at the wrapped offset is a handful of extra sprites and no simulation
-  change; not done because the slice was scoped to the art and this is a
-  rendering rule the other two samples have no precedent for.
 - **The 10-minute soak in the exit criteria was not run.** What runs in CI is
   `hundreds_of_spawns_and_deaths_leak_nothing`: 18,000 ticks (five minutes of
   simulated play), 337 rocks spawned, 1,221 bullets fired, six waves cleared,
