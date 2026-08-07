@@ -1229,6 +1229,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   press F11 at a running game, which needs a renderer, and no runner on this
   platform has a Vulkan device — `docs/plan/ROADMAP.md` schedules it for P14.
 
+- **`apps/horde` takes `--choose <N>`**, so a headless run can reach past the
+  level-up screen. The screen has no way out but a digit key, which parked
+  `horde --headless --frames 600 --prefill 200` at its first level-up at three
+  seconds — no headless invocation could reach a potion, so every measurement of
+  the drop rate came from `game::tests`. The flag presses the digit for the
+  player once per distinct offer, tracked by the same level-and-offer identity
+  the panel rebuilds on. The digit is validated `1..=UPGRADE_CHOICES` at parse
+  time, because a choice out of range is silently ignored by `apply_choice`.
+
+- **asteroids interpolates positions between ticks, snapping across the wrap.**
+  Every angle was lerped across the frame's alpha and every position was the
+  last tick's, so a rock at 60 Hz on a 144 Hz display moved in sixtieths. Each
+  body now publishes `(previous position, current position, teleported)`: the
+  wrap sets the flag on the tick it moves a body, a respawn and every spawn
+  reset the pair, and the renderer lerps between the pair or snaps on a flagged
+  tick — the naive "lerp the positions too" would fly a wrapped body back across
+  the whole field.
+
 ### Changed
 
 - **Breaking: `FrameLimit` stores the rate it was asked for and derives the

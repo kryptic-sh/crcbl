@@ -2941,16 +2941,6 @@ slice was the sample.
   policy that depends on timing — and whoever adds either should read this
   first.
 
-- **A sphere overlap of radius `R` returns everything within `R + r_b`, and
-  horde depends on that exactly.** Not a complaint — it is what makes
-  `separation_query_radius` `r_self + slack` rather than
-  `r_self + max_enemy_radius() + slack`, which at a brute's 0.85 would nearly
-  triple the area a grunt searches. It is written down because it is an
-  undocumented consequence of `overlap_sphere` being shape-aware rather than an
-  AABB test, and nothing in `crcbl-phys` says so.
-  `the_separation_query_radius_is_exactly_the_neighbourhood` is the guard, in
-  the consumer, where it does not belong.
-
 ## What horde still owes
 
 S3 is done — the core loop, the art and progression, and now audio, the longest
@@ -3114,15 +3104,8 @@ annotated.
   while the field is frozen, so this is not a soft-lock, but it does mean a
   browser demo left on the level-up screen looks stopped. `browser-e2e.mjs`
   watches the once-a-second `[HUD]` heartbeat, which keeps firing, so the gate
-  itself is fine.
-
-  **It also caps what a headless run can reach**, which matters now that there
-  is a drop worth watching for: `horde --headless --frames 600 --prefill 200`
-  banks its first level at three seconds and parks, so no headless invocation
-  reaches a potion however many frames it is given. Every measurement of the
-  drop rate therefore comes from `game::tests`, which drives the level-up screen
-  through the autopilot. A `--choose <n>` flag, or an autopilot behind a flag,
-  would give the binary the same reach the tests have.
+  itself is fine. Headless runs reach past the screen with `--choose <N>`, which
+  is what took the potion-drop measurements out of `game::tests`.
 
 - **The upgrade pool is repeatable without limit.** `RapidFire` has a floor
   (`FIRE_COOLDOWN_FLOOR`) and the other five do not, so a very long run has an
@@ -3194,16 +3177,6 @@ not:
   that each cue fires, that it carries the position of the thing that raised it,
   and that the explosion decays and is not a tone. Nobody has listened to the
   result on a real device and no test can tell a good explosion from a bad one.
-- **Positions are not interpolated, and the wrap is why.** Every angle asteroids
-  draws is lerped across the frame's alpha; every _position_ is the last tick's,
-  so a rock at 60 Hz on a 144 Hz display moves in sixtieths. The fix is not
-  "lerp those too": the playfield wraps, so a body that crossed an edge has a
-  previous position a whole field away and interpolating it would fly it back
-  across the screen. What it needs is for `RockView` / `BulletView` / the ship
-  to carry the previous position **and a flag saying it teleported**, set by
-  `teleport_if_outside`, with the renderer snapping rather than lerping on that
-  tick. That is a change to what the simulation publishes, not to how it is
-  drawn, which is why it was not folded into the art slice.
 - **No visual for a shot hitting a rock.** The explosion is audible and not
   visible: a rock disappears and two smaller ones appear, with nothing between.
   Particles are a hard non-goal in `docs/plan/sample/02-asteroids.md`, so
