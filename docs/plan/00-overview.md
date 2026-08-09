@@ -80,18 +80,18 @@ is an orthographic projection with `z` as z-index.
 
 ## Stages
 
-| Stage | Doc                                                      | Theme                                                      |
-| ----- | -------------------------------------------------------- | ---------------------------------------------------------- |
-| 1     | [01-foundations.md](01-foundations.md)                   | Workspace, crates, core types, HAL seam, window/event loop |
-| 2     | [02-vulkan-backend.md](02-vulkan-backend.md)             | Vulkan device, swapchain, render graph, first triangle     |
-| 3     | [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md) | Bindless, geometry pools, indirect draws, GPU culling      |
-| 4     | [04-ecs-server-client.md](04-ecs-server-client.md)       | ECS, tick loop, transport seam, replication                |
-| 5     | [05-physics.md](05-physics.md)                           | From-scratch physics: sector space, forces/orbits, CCD     |
-| 6     | [06-assets-scenes.md](06-assets-scenes.md)               | glTF import, scene format, asset ids, hot reload           |
-| 7     | [07-ui-debug.md](07-ui-debug.md)                         | Immediate-mode GUI, debug draw, profiler, inspector        |
-| 8     | [08-editor.md](08-editor.md)                             | Scene editor built on the engine, gizmos, play-in-editor   |
-| 9     | [09-backends-metal-dx12.md](09-backends-metal-dx12.md)   | Metal and DX12 implementations of the HAL                  |
-| 10    | [10-wasm-webgpu.md](10-wasm-webgpu.md)                   | Wasm target: wgpu backend, WebTransport, browser platform  |
+| Stage | Doc                                                      | Theme                                                        |
+| ----- | -------------------------------------------------------- | ------------------------------------------------------------ |
+| 1     | [01-foundations.md](01-foundations.md)                   | Workspace, crates, core types, HAL seam, window/event loop   |
+| 2     | [02-vulkan-backend.md](02-vulkan-backend.md)             | Vulkan device, swapchain, render graph, first triangle       |
+| 3     | [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md) | Bindless, geometry pools, indirect draws, GPU culling        |
+| 4     | [04-ecs-server-client.md](04-ecs-server-client.md)       | ECS, tick loop, transport seam, replication                  |
+| 5     | [05-physics.md](05-physics.md)                           | From-scratch physics: sector space, forces/orbits, CCD       |
+| 6     | [06-assets-scenes.md](06-assets-scenes.md)               | glTF import, scene format, asset ids, hot reload             |
+| 7     | [07-ui-debug.md](07-ui-debug.md)                         | Immediate-mode GUI, debug draw, profiler, inspector          |
+| 8     | [08-editor.md](08-editor.md)                             | Scene editor built on the engine, gizmos, play-in-editor     |
+| 9     | [09-backends-metal-dx12.md](09-backends-metal-dx12.md)   | Metal and DX12 implementations of the HAL                    |
+| 10    | [10-wasm-webgpu.md](10-wasm-webgpu.md)                   | Wasm target: wgpu backend, browser platform, capability gaps |
 
 Cross-cutting topic docs (identity, no ordering implied):
 
@@ -109,7 +109,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 20    | [20-particles.md](20-particles.md)             | GPU-resident particles/VFX: compute sim, RON effects, workbench           |
 | 21    | [21-jobs.md](21-jobs.md)                       | Threading: pipeline threads + job pool, mailboxes, tick sync              |
 | 22    | [22-replay.md](22-replay.md)                   | State recording: replays, black-box debug, spectating                     |
-| 23    | [23-netcode.md](23-netcode.md)                 | Transports (UDP+own reliability, WebTransport/WS), protocol foundations   |
+| 23    | [23-netcode.md](23-netcode.md)                 | Transports (UDP + own reliability, LAN discovery), protocol foundations   |
 | 24    | [24-navigation.md](24-navigation.md)           | Navmesh gen (Recast-lineage, sector-tiled), A\*+funnel, crowds            |
 | 25    | [25-lod.md](25-lod.md)                         | LOD: hand-first + QEM auto fallback, GPU selection in cull pass           |
 | 26    | [26-prediction.md](26-prediction.md)           | Client prediction/rollback + query-only lag comp, fairness harness        |
@@ -131,8 +131,8 @@ Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
 the first sample; wasm + the GitHub Pages demo site land immediately after the
 first sample (P5). Stages 1–8 + topics 11–14 slices are the MVP; Metal/DX12 (9)
-and the WebTransport half of 10 complete cross-platform. Stage 10's constraints
-(renderer Tier B, async assets, message-shaped transport, `tick(dt)` loop) are
+complete cross-platform. Stage 10's constraints (the browser's reduced
+capability set, async assets, message-shaped transport, `tick(dt)` loop) are
 baked in from the start — wasm is a first-class target, not a port.
 
 Each roadmap S-phase is proven by a **sample project** — small complete
@@ -180,9 +180,9 @@ Every game sample ships as a browser demo on the Pages site.
   post-MVP — see the layer table in [05-physics.md](05-physics.md). L0/L1/CCD
   are MVP.
 - Real network transport for native (QUIC/UDP) — the seam exists from stage 4;
-  single player over the in-memory transport exercises the whole path. Stage 10
-  ships WebTransport/WebSocket for the browser, which becomes the protocol base
-  for native QUIC later.
+  single player over the in-memory transport exercises the whole path. Native
+  sessions are LAN over UDP (P13); browsers have no network transport at all —
+  see topic 23's LAN correction.
 - ~~Ray tracing, mesh shaders (extensions later; keep the HAL open to them).~~
   **Both moved into the MVP on 2026-08-09** — see the ROADMAP correction. Mesh
   shaders are the primary geometry path (topic 3 §3.5); ray-traced lighting is

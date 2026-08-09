@@ -54,8 +54,10 @@ test.
   GPU-driven pipeline don't know skinning exists**.
 - Culling uses conservative animated AABBs (bind pose inflated by clip bounds,
   computed at cook time).
-- Tier B (WebGPU): same compute path — skinning is just a compute shader, no
-  bindless needed. Wasm gets animated characters day one.
+- The browser gets the same compute path — skinning is just a compute shader, no
+  bindless needed — so wasm gets animated characters day one. Skinning is
+  independent of every path selector in
+  [39-capabilities.md](39-capabilities.md).
 - Skinned shadow casters: the skinned output region feeds the topic 18 shadow
   passes for free (same pool).
 

@@ -68,7 +68,7 @@ pathfinding wearing a tree costume, and that is the cap doing its job.
 ## Exit criteria
 
 - 10k enemies at 60 fps render / 60 Hz tick on the reference Linux machine
-  (numbers recorded here, revisited per backend in stages 9–10 — Tier B/wasm
+  (numbers recorded here, revisited per backend in stages 9–10 — the browser
   gets its own smaller recorded budget).
 - CPU frame time demonstrably flat 1k → 10k on the render side (profiler capture
   archived in the doc).
@@ -162,7 +162,7 @@ because they are not the same conditions.
 | GPU     | AMD Radeon RX 7900 XTX, radv (Mesa 26.1.6). `lavapipe` is installed and was not used.                                                                                                                                                                                                                                                                                                                                                                          |
 | Build   | `cargo build --release -p horde`.                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | Window  | **There is none.** The build environment has no `DISPLAY` and no `WAYLAND_DISPLAY`, so every run is `--headless`, which gives `crcbl-vk` an **offscreen image ring** at 960 × 720 rather than a swapchain on a surface. It is the same acquire → record → submit → present code path — `SurfaceTarget::Offscreen` exists so that it is — but it is **not** a windowed present and it is not vsynced. The windowed native path is still compiled and never run. |
-| Browser | A separate measurement was not taken. `web/run-browser-e2e.sh` runs the demo under Chromium's SwiftShader, which measures the software rasteriser rather than the browser. Tier B / wasm gets its own recorded budget when there is a machine with a real browser GPU to take it on; the exit criteria already treat that as a separate number.                                                                                                                |
+| Browser | A separate measurement was not taken. `web/run-browser-e2e.sh` runs the demo under Chromium's SwiftShader, which measures the software rasteriser rather than the browser. The browser gets its own recorded budget when there is a machine with a real browser GPU to take it on; the exit criteria already treat that as a separate number.                                                                                                                  |
 
 The fixture is **`--prefill N`**, which stages `N` enemies over the whole arena
 on a grid before the first frame. The spawner ramps from one enemy every half

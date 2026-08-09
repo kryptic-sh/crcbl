@@ -153,7 +153,7 @@ review shows what the shooter's screen credibly showed.
 - Property: viewmodel derivability — render a viewmodel from replicated state
   alone (spectator path) vs owner path → identical pose hash (cosmetic offsets
   seeded).
-- Perf: PiP budget recorded (frame cost at each RTT tier, native + Tier B); the
+- Perf: PiP budget recorded (frame cost at each RTT tier, native + browser); the
   FPS sample's budget gates include scoped combat.
 - Sight alignment: socket-math property — any optic on any weapon centers its
   reticle on the eye trace at ADS rest.
@@ -178,10 +178,10 @@ review shows what the shooter's screen credibly showed.
 
 ## Risks
 
-- **PiP cost on low-end/Tier B**: the knobs exist from day one (res, LOD bias,
-  post preset) and the budget is a recorded number, not a hope; worst case =
-  magnified optics fall back to zoom-without-PiP (world FOV zoom + overlay) as a
-  quality floor — decided per game, mechanism ships.
+- **PiP cost on low-end hardware and in a browser**: the knobs exist from day
+  one (res, LOD bias, post preset) and the budget is a recorded number, not a
+  hope; worst case = magnified optics fall back to zoom-without-PiP (world FOV
+  zoom + overlay) as a quality floor — decided per game, mechanism ships.
 - **Depth-slice artifacts** (viewmodel vs near-field transparency, particle
   sorting): the pass ordering (after opaque, before transparents) is the
   standard resolution; golden frames pin the corner cases.

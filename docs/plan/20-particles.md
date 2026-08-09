@@ -20,7 +20,7 @@ consumer.
   an emitter is ordinary system data), or UI (screen-space effects).
   Client-side, an effect instance is fire-and-forget.
 
-## Simulation (GPU compute, Tier A + B identical)
+## Simulation (GPU compute, identical on every path)
 
 - **Global particle pool** (SSBO, structure-of-arrays: position, velocity,
   age/lifetime, size, rotation, color seed, atlas frame, emitter id) +

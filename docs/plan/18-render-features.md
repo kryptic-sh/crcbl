@@ -90,8 +90,8 @@ scene (HDR RGBA16F) → bloom (down/upsample chain) → exposure + tonemap → F
   (needs motion vectors in the G-pass + history management + the ghosting fight;
   motion vectors slot into the instance path when TAA lands — the instance
   format reserves the prev-transform slot **now** so TAA is additive later).
-  MSAA rejected (fights deferred-ish/HDR pipelines and Tier B; FXAA→TAA is the
-  path).
+  MSAA rejected (fights deferred-ish/HDR pipelines and the browser; FXAA→TAA is
+  the path).
 - **Bloom (P10)**: physically-plausible threshold-free downsample chain (Karis
   average), 5–6 mips, tent upsample, additive with scalar. Cheap, huge
   perceived-quality win — timed with the UI/debug polish phase so the profiler
@@ -160,7 +160,7 @@ under both paths side by side. Exit criteria of the other samples inherit
 - **CSM artifact whack-a-mole** (peter-panning, acne, cascade seams): budget it;
   stable snapping + slope-scaled bias + debug overlay from day one; artifacts
   are visible in golden frames.
-- **Post-stack perf on Tier B/wasm**: each pass is simple, but measure — the
-  horde web demo budget (S3) includes the stack.
+- **Post-stack perf in a browser**: each pass is simple, but measure — the horde
+  web demo budget (S3) includes the stack.
 - **TAA later ≠ never**: prev-transform slot reserved now is the cheap
   insurance; everything else about TAA stays post-MVP.

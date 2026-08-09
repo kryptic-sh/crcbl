@@ -12,9 +12,11 @@ replication to a rendering client. After this stage the sandbox is a real
 - Server owns all gameplay state; client owns presentation state. Enforced by
   crate boundaries, not discipline.
 - Transport is a trait from day one; in-memory channel is the first impl and the
-  permanent single-player path. Wasm constraint noted: the future network
-  transport must have a WebSocket/WebTransport impl (stage 10), so the trait is
-  message-oriented and async-agnostic — no UDP assumptions in the interface.
+  permanent single-player path. The trait is message-oriented and async-agnostic
+  — no UDP assumptions in the interface. (This was originally motivated by a
+  browser transport; browsers have no network transport at all now — see topic
+  23's LAN correction — but the shape is right regardless and is what lets
+  in-memory and UDP share one interface.)
 
 ## ECS model (`crcbl-ecs`)
 
@@ -69,8 +71,8 @@ crates/crcbl-net      — transport trait, in-memory impl, replication protocol
 - Interest management (per-client visibility) — post-MVP; the snapshot writer
   API takes a client id now so it can be added without resurfacing every system.
 - Transport trait: reliable-ordered channel + unreliable-sequenced channel
-  semantics in the interface (in-memory impl trivially provides both; a future
-  UDP/QUIC/WebTransport impl maps them properly).
+  semantics in the interface (in-memory impl trivially provides both; the UDP
+  impl at P13 maps them properly).
 
 ## Tasks
 

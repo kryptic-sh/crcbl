@@ -29,7 +29,7 @@ the demo. Not a game — the effects are the content.
   embeds in the stage 8 editor), spawn-on-click in a small 3D scene with
   shadowed props (depth-collision demo), overdraw heatmap toggle, freeze/step
   time.
-- Pages web demo — the flashiest bundle on the site; Tier B budget recorded.
+- Pages web demo — the flashiest bundle on the site; browser budget recorded.
 
 ## Non-goals (hard cap)
 
@@ -61,5 +61,5 @@ applies, and a particle workbench without live frame timing is not a workbench.
   text editor (and the saved RON diffs cleanly — deterministic writer proof for
   a new asset type).
 - Hostile-effect budget test green; overdraw heatmap functional.
-- 1k concurrent effect instances at 60 fps native / recorded Tier B budget in
+- 1k concurrent effect instances at 60 fps native / recorded browser budget in
   browser; CPU cost flat vs effect count (profiler capture archived).

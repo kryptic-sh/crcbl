@@ -1,5 +1,15 @@
 # Stage 10 — Wasm + WebGPU
 
+> **Two corrections at the bottom of this file supersede parts of the body, and
+> the body is read first — so, up front: the *networking* half of this stage is
+> **removed** (browsers have no network transport; see
+> [23-netcode.md](23-netcode.md)'s LAN correction), and the **"Tier B"
+> vocabulary throughout is superseded\*\* by
+> [39-capabilities.md](39-capabilities.md) — the reduced capability set belongs
+> to the browser, not to `wgpu`, which on native reports very nearly the full
+> native set. Read "Correction (scope and browser boundary, 2026-08-09)" before
+> relying on anything below.
+
 > **Scheduling note (ROADMAP wins):** this doc's _backend/platform_ half
 > (crcbl-wgpu, canvas/rAF, Slang→WGSL, FetchSource, AudioWorklet) lands
 > **early**, at roadmap phase P5 — right after the first sample — so every

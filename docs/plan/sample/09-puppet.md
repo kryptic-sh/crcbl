@@ -56,6 +56,6 @@ spaces (unless strafing gets added, which it shouldn't — see cap).
   independent — the topic 17 event test, live).
 - Full play-through possible on each device class alone (kb/m, pad, touch),
   swapping any time.
-- Runs shadowed + tonemapped in browser at the Tier B budget.
+- Runs shadowed + tonemapped in a browser at its recorded budget.
 - Character + clips imported from a stock glTF with zero manual fixup — the
   asset-pipeline honesty check.

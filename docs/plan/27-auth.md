@@ -45,9 +45,9 @@ The flow that keeps game servers backend-independent at connect time:
   runbook from day one.
 - **Reconnect** (topic 23 session resume) rides a session-scoped resume token
   derived from the session keys — no backend touch for a net blip.
-- Browsers: TLS already authenticates the _server_ (WebTransport/wss certs); the
-  connect token adds _client_ identity — same token, fetched over HTTPS,
-  presented in the WT handshake. One model, all transports.
+- ~~Browsers: TLS already authenticates the server (WebTransport/wss certs).~~
+  **Moot as of 2026-08-09**: browsers have no network transport, so there is no
+  browser handshake to carry a token through. See this file's LAN correction.
 
 ## Player identity (engine-level)
 

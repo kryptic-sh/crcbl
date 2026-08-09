@@ -76,7 +76,7 @@ deliberately not here.
 
 - **Clustered forward decals**: decal + carve volumes are binned into the view
   froxel grid (SSBO lists); host materials loop only their froxel's entries. No
-  G-buffer requirement — works identically on Tier A and Tier B (topic 3),
+  G-buffer requirement — works identically on every path selector (topic 3),
   consistent with the forward HDR pipeline (18).
 - Projection sanity: surface-normal-vs-decal-axis rejection threshold (the
   classic fix for decals smearing across perpendicular faces), plus per-decal

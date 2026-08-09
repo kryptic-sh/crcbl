@@ -165,10 +165,11 @@ workaround. Recorded in `docs/backlog.md` rather than argued again here.
 2. **Per-target `-D` defines**, passed by the compile script, because Slang
    defines no target macro of its own — probing found only `__SLANG_COMPILER__`.
    Without them the only way to differ per target is to fork the file, which is
-   what `ui_tier_b.slang` is: a twin whose sole substantive difference is
-   `[[vk::push_constant]]` versus a bound binding, held in step by a comment.
-   **Delete that fork** once either mechanism lands — the uniform-buffer form
-   `sprite.slang` already uses is preferred where it is free.
+   what `ui_tier_b.slang` was, before it was deleted: a twin whose sole
+   substantive difference was `[[vk::push_constant]]` versus a bound binding,
+   held in step by a comment. **Delete that fork** once either mechanism lands —
+   the uniform-buffer form `sprite.slang` already uses is preferred where it is
+   free.
 3. **Declaration order must equal binding order**, enforced by a test that
    parses the sources. Slang's Metal target **ignores `[[vk::binding]]`** and
    assigns indices in declaration order, while `crcbl-mtl` binds by ascending
