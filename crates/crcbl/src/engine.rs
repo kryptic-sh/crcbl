@@ -5486,6 +5486,62 @@ mod tests {
         assert!(second >= first);
     }
 
+    /// The start of the frame-limit line [`RealClock::set_limit`] writes — the
+    /// prefix `crates/crcbl-shell/tests/run-wayland-e2e.sh` greps for.
+    const FRAME_LIMIT_LINE: &str = "engine: the frame limit is ";
+
+    fn is_frame_limit_line(record: &crcbl_core::log::CapturedRecord) -> bool {
+        record.message.starts_with(FRAME_LIMIT_LINE)
+    }
+
+    /// **What is capping the loop is only ever said here**, and until now the
+    /// only thing reading it was an e2e script that needs a Wayland compositor,
+    /// so on every other machine the line could have been deleted with the suite
+    /// staying green.
+    ///
+    /// Three claims in one test because they are three parts of one behaviour:
+    /// constructing a real clock is not news, setting a limit is, and a manual
+    /// clock has no limiter to report. The middle one is also this test's
+    /// anti-vacuity anchor — a capture that saw nothing at all would fail it,
+    /// which is what keeps the two silences from passing on an empty buffer.
+    #[test]
+    fn only_a_real_clock_says_what_is_capping_it() {
+        let logs = crcbl_core::log::capture();
+        let mut clock = Clock::new(false);
+        assert!(
+            !logs.records().iter().any(is_frame_limit_line),
+            "constructing a clock at the default limit is not news: {:?}",
+            logs.records()
+        );
+
+        clock.set_limit(FrameLimit::fps(30));
+        clock.set_limit(FrameLimit::unlimited());
+        let records = logs.records();
+        let said: Vec<_> = records.iter().filter(|r| is_frame_limit_line(r)).collect();
+        assert_eq!(said.len(), 2, "one line per call: {records:?}");
+        assert!(said.iter().all(|record| record.level == log::Level::Info));
+        assert_eq!(said[0].message, "engine: the frame limit is 30 fps");
+        assert_eq!(
+            said[1].message, "engine: the frame limit is unlimited",
+            "no limit is a limit worth reporting, not a silence",
+        );
+
+        // A headless run is stepped by its caller and never waits, so there is
+        // nothing to obey and nothing to say.
+        let mut headless = Clock::new(true);
+        headless.set_limit(FrameLimit::fps(30));
+        assert_eq!(headless.limit(), None);
+        assert_eq!(
+            logs.records()
+                .iter()
+                .filter(|r| is_frame_limit_line(r))
+                .count(),
+            said.len(),
+            "the manual clock added a line: {:?}",
+            logs.records()
+        );
+    }
+
     /// The browser's start-up shape, driven on a headless shell with the null
     /// backend: `request_open` never blocks, and polling it produces exactly
     /// the context `open` would have produced.
@@ -5581,6 +5637,7 @@ mod tests {
     fn open_null_context(
         instance: crcbl_hal::null::NullInstance,
         optional_features: Features,
+        pacing: Pacing,
     ) -> (crcbl_shell::HeadlessShell, GpuContext) {
         let (shell, window) = shell();
         let extent = (320, 240);
@@ -5594,7 +5651,7 @@ mod tests {
             "downgrade test",
             Features::empty(),
             optional_features,
-            Pacing::Off,
+            pacing,
         )
         .expect("the null backend opens everywhere");
         let mut pending = PendingGpuContext {
@@ -5604,7 +5661,7 @@ mod tests {
             label: "downgrade test".to_string(),
             required_features: Features::empty(),
             optional_features,
-            pacing: Pacing::Off,
+            pacing,
         };
         let gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
@@ -5630,6 +5687,7 @@ mod tests {
             // default: it has neither bindless nor a GPU-side draw count.
             NullInstance::portable(),
             GpuContextDesc::default().optional_features,
+            Pacing::Off,
         );
 
         let records = logs.records();
@@ -5665,6 +5723,7 @@ mod tests {
             // and `PRESENT_TIMING`, which this preset does not have, and their
             // absence is a real downgrade.
             Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
+            Pacing::Off,
         );
 
         let records = logs.records();
@@ -5685,6 +5744,167 @@ mod tests {
         gpu.drain().expect("nothing was submitted");
         gpu.destroy()
             .expect("teardown is in the seam's stated order");
+    }
+
+    /// The two halves of the present-feedback line [`GpuContext::finish`] logs,
+    /// exactly as it writes them.
+    const FEEDBACK_LINE: &str = "hal: pacing on presents";
+    const NO_FEEDBACK_LINE: &str = "hal: no present feedback";
+
+    /// **Start-up says which of the two pacing stories this run gets.**
+    ///
+    /// `docs/backlog.md` records that a richer `wait_until_presented` return —
+    /// one distinguishing "waited" from "this device cannot observe presents" —
+    /// was declined *because* `caps().features` answers it once here, which is
+    /// what lets `acquire` call the wait with no branch on which backend is
+    /// underneath. Delete this line and the argument for that decision has no
+    /// evidence left.
+    ///
+    /// No `NullInstance` preset advertises [`Features::PRESENT_FEEDBACK`] —
+    /// there is no display under that backend, so `wait_until_presented` returns
+    /// at once and the preset is honest about it — so the adapter is built by
+    /// hand. Nothing here waits on a present: the line reads the device's caps
+    /// and that is the whole of what this exercises.
+    #[test]
+    fn a_device_that_can_observe_presents_says_so() {
+        use crcbl_hal::null::NullInstance;
+        use crcbl_hal::{DeviceCaps, Limits};
+
+        let logs = crcbl_core::log::capture();
+        let (_shell, mut gpu) = open_null_context(
+            NullInstance::new(DeviceCaps {
+                features: Features::PRESENT_FEEDBACK,
+                limits: Limits::minimum(),
+            }),
+            Features::PRESENT_FEEDBACK,
+            Pacing::Off,
+        );
+
+        let records = logs.records();
+        let said: Vec<_> = records
+            .iter()
+            .filter(|record| record.message.starts_with(FEEDBACK_LINE))
+            .collect();
+        assert_eq!(said.len(), 1, "once, at start-up: {records:?}");
+        assert_eq!(said[0].level, log::Level::Info);
+        assert_eq!(
+            said[0].message,
+            format!("hal: pacing on presents, {FRAMES_IN_FLIGHT} frames deep"),
+            "the line names the depth the loop actually runs at",
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|record| record.message.starts_with(NO_FEEDBACK_LINE)),
+            "the other story is not this run's: {records:?}"
+        );
+
+        gpu.drain().expect("nothing was submitted");
+        gpu.destroy()
+            .expect("teardown is in the seam's stated order");
+    }
+
+    /// The other state, and the one every device in this repo is actually in:
+    /// the engine asked for present feedback and the device did not have it, so
+    /// the frame limiter is all that paces the loop.
+    #[test]
+    fn a_device_that_cannot_observe_presents_says_that_instead() {
+        use crcbl_hal::null::NullInstance;
+
+        let logs = crcbl_core::log::capture();
+        let (_shell, mut gpu) = open_null_context(
+            NullInstance::gpu_driven(),
+            // The set every game gets by default, which asks for
+            // `PRESENT_FEEDBACK`; this preset does not have it.
+            GpuContextDesc::default().optional_features,
+            Pacing::Off,
+        );
+
+        let records = logs.records();
+        let said: Vec<_> = records
+            .iter()
+            .filter(|record| record.message.starts_with(NO_FEEDBACK_LINE))
+            .collect();
+        assert_eq!(said.len(), 1, "once, at start-up: {records:?}");
+        assert_eq!(said[0].level, log::Level::Debug);
+        assert_eq!(
+            said[0].message,
+            "hal: no present feedback; the frame limiter is the only pacing",
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|record| record.message.starts_with(FEEDBACK_LINE)),
+            "a line logged on both paths would report every device as pacing on \
+             presents: {records:?}"
+        );
+
+        gpu.drain().expect("nothing was submitted");
+        gpu.destroy()
+            .expect("teardown is in the seam's stated order");
+    }
+
+    /// The prefix `crates/crcbl-shell/tests/run-wayland-e2e.sh` greps for, and
+    /// the start of the line `GpuContext::settle_pacing` writes.
+    const PACING_LINE: &str = "hal: display timing ";
+
+    /// **The engine says which pair it resolved, not just what it landed on.**
+    ///
+    /// `Pacing::resolve`'s own test walks all sixteen (request, observation)
+    /// pairs; what nothing read until now is that a *run* reports the pair it
+    /// took. "Asked for `Auto`, display said nothing, running vsync" and "asked
+    /// for `Off`" are different runs, and a line naming only the result cannot
+    /// tell them apart — so two requests are driven through here and the whole
+    /// line asserted for each.
+    ///
+    /// The observation half is `Unknown` in both, because the null device has no
+    /// display to have a cadence and says so; the other three
+    /// [`DisplayTiming`] arms need a driver that has never answered anything
+    /// else on any machine this repo has run on (see
+    /// [`GpuContext::effective_pacing`]).
+    #[test]
+    fn the_pacing_resolution_says_which_pair_it_took() {
+        use crcbl_hal::CommandEncoderDesc;
+        use crcbl_hal::null::NullInstance;
+
+        let logs = crcbl_core::log::capture();
+        // A present, because the display is only asked after one — see
+        // `settle_pacing` for why that order is the only one that can work.
+        for pacing in [Pacing::Auto, Pacing::Off] {
+            let (_shell, mut gpu) =
+                open_null_context(NullInstance::gpu_driven(), Features::empty(), pacing);
+            let acquired = gpu.acquire().expect("acquire").expect("no resize happened");
+            let encoder = gpu.device().create_command_encoder(&CommandEncoderDesc {
+                label: Some("pacing test"),
+                queue: gpu.queue(),
+            });
+            let command_buffer = encoder.finish().expect("an empty command buffer");
+            assert_eq!(
+                gpu.submit_and_present(&acquired, command_buffer)
+                    .expect("present"),
+                FrameOutcome::Presented,
+            );
+            gpu.drain().expect("the frame was submitted and presented");
+            gpu.destroy()
+                .expect("teardown is in the seam's stated order");
+        }
+
+        let records = logs.records();
+        let said: Vec<_> = records
+            .iter()
+            .filter(|record| record.message.starts_with(PACING_LINE))
+            .collect();
+        assert_eq!(said.len(), 2, "once per context: {records:?}");
+        assert!(said.iter().all(|record| record.level == log::Level::Info));
+        assert_eq!(
+            said[0].message, "hal: display timing Unknown; asked for Auto, pacing Vsync",
+            "a display that will not say is the vsync fallback, and `Auto` is \
+             not the answer it resolved to",
+        );
+        assert_eq!(
+            said[1].message, "hal: display timing Unknown; asked for Off, pacing Off",
+            "a concrete request comes back unchanged, and the line still says so",
+        );
     }
 
     #[test]

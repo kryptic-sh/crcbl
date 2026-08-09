@@ -3384,6 +3384,27 @@ the transport seam over a third transport shape.
 
 ### Owed by the capability work (P7)
 
+- **The null backend cannot express several device states, so the engine's
+  handling of them is untestable without a GPU.** Found while giving the log
+  lines tests. Each is a `crcbl-hal` null limitation rather than an engine one,
+  and closing any of them is a small change to `crates/crcbl-hal/src/null/`:
+  `SurfaceCaps::current_extent` is hardcoded `None`, so the "surface reports X
+  but the shell configured Y" path is unreachable; `NullInstance::adapters`
+  returns exactly one adapter, so "no adapter can serve this surface" is
+  unreachable; `AcquiredFrame::suboptimal` is hardcoded `false`, so the
+  reconfigure-after-present path is unreachable; `wait_until_presented` always
+  returns `Ok`, so the lapsed-timeout path is unreachable; and **neither preset
+  advertises `PRESENT_FEEDBACK`**, so a device that claims it has to be
+  hand-built in the test.
+
+- **The observed half of the pacing line is pinned to `Unknown` in every test.**
+  `NullDevice::display_timing` returns `Unknown` unconditionally, and no driver
+  in this project has ever answered anything else — so `Fixed`, `Variable` and
+  `Stepped` reach `settle_pacing` nowhere. The tests distinguish outcomes by the
+  _requested_ and _resulting_ halves instead, which proves the line is not a
+  constant but leaves three of four observed arms unexercised end to end. Same
+  missing machine as the `VK_EXT_present_timing` entry elsewhere in this file.
+
 - **No local driver reports the mesh/ray capabilities absent, so the degradation
   path is unexercised here.** `crcbl-vk` now reports `MESH_SHADER`,
   `TASK_SHADER`, `RAY_QUERY`, `RAY_TRACING_PIPELINE` and

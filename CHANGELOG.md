@@ -25,9 +25,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stderr still gets exactly what the filter admitted, and a process that never
   calls it behaves as before. `capture` panics rather than capturing nothing if
   this thread is already capturing or if another logger owns the process slot.
-  The first use is the capability downgrade line from
-  `docs/plan/39-capabilities.md`, which `crcbl`'s device-open path emits and
-  which nothing read until now.
+  It is now what holds four `crcbl` log lines to their wording, each of them the
+  only evidence its decision was taken and none of them read by anything before:
+  the capability downgrade line from `docs/plan/39-capabilities.md`, the
+  present-feedback line whose existence is why `wait_until_presented` was left
+  returning `()`, the pacing resolution's
+  `hal: display timing …; asked for …, pacing …`, and
+  `engine: the frame limit is …`. The last two were previously checked only by
+  `crates/crcbl-shell/tests/run-wayland-e2e.sh`, so on a machine without a
+  Wayland compositor they could be deleted with the suite staying green.
 - **`crcbl screenshot --scene`, and a cross-backend comparison that runs every
   scene.** The subcommand takes `cube` (the default, unchanged: the lit cube
   through `ForwardRenderer`), `sprite` — four sprites over three
