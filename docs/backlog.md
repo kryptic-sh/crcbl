@@ -2909,7 +2909,7 @@ by every hosted image, including the two that execute shaders fine.
   composite with alpha, but nothing verified the non-opaque behaviour, so it is
   not offered rather than offered untested.
 
-## The Win32 focus flake is recurring, and now has a second data point
+## The Win32 focus flake is recurring, and now has a third data point
 
 `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for` failed the
 `build + test (windows-latest)` leg on 2026-08-05; re-running the same job
@@ -2922,6 +2922,26 @@ than read. Options, none taken: retry the focus acquisition with a longer budget
 than 8 attempts; move the focus-dependent assertions into the feature-gated e2e
 suite where `desktop::take_foreground` already pulls the foreground levers; or
 mark the test as allowed-to-retry if nextest's retry support is acceptable here.
+**Third instance, 2026-08-09, and it is a _different test_:**
+`win32::shell::tests::confining_the_pointer_clips_it_and_losing_focus_gives_the_desktop_back`
+failed on `assert!(shell.window_state(window).focused)` — the assertion right
+after `make_foreground` + `send_focus`, before the confine is even attempted. So
+this is not one brittle test but the whole class the backlog already names:
+`ClipCursor` and `SetCursorPos` are foreground-only, several tests arrange the
+foreground to use them, and a shared runner does not always grant it.
+
+It failed on a **revert commit**, whose code was green two commits earlier —
+which is about as clean a demonstration as this gets that it is environmental
+rather than a defect. A re-run of the same job was taken to unblock `main`, and
+that is the third time a re-run has stood in for a decision.
+
+**The decision is overdue, and the options have not changed:** retry the
+foreground acquisition with a longer budget; move the focus-dependent assertions
+into the feature-gated e2e suite where `desktop::take_foreground` already pulls
+the levers; or allow this specific test a retry. Doing nothing means every
+unrelated commit carries a chance of a red Windows leg, which trains readers to
+re-run rather than read — the exact habit that makes a real failure invisible.
+
 **Wants a decision rather than another re-run.**
 
 ## What MTL6 settled, and what it leaves for a decision
@@ -3427,11 +3447,11 @@ the transport seam over a third transport shape.
   output.** `233b657` made `mesh_shader.slang` pull its vertices from a buffer
   instead of hardcoding them — correct on Vulkan, bit-identical golden on radv
   and on lavapipe — and Slang then emitted MSL that `xcrun metal` refuses:
-  `variables in the threadgroup address space cannot be declared in a fragment
-function`. The threadgroup variable belongs to the task stage and Slang put it
-  in the fragment function once the shared vertex type became visible to it.
-  Reverted rather than left on `main`, because it fails the macOS leg of every
-  subsequent commit.
+  `variables in the threadgroup address space cannot be declared in a fragment function`.
+  The threadgroup variable belongs to the task stage and Slang put it in the
+  fragment function once the shared vertex type became visible to it. Reverted
+  rather than left on `main`, because it fails the macOS leg of every subsequent
+  commit.
 
   **The `xcrun metal` gate added earlier is what caught it** — nothing else in
   the tree compiles MSL, and every other check was green. That gate paid for
@@ -3441,16 +3461,15 @@ function`. The threadgroup variable belongs to the task stage and Slang put it
   vertex type — a separate fragment input struct is the obvious shape — and
   verify by reading the regenerated `msl/mesh_shader.metal` for a `threadgroup`
   declaration inside the fragment function before pushing, since no local tool
-  compiles MSL. Upstream this looks like the same family as
-  shader-slang#9444.
+  compiles MSL. Upstream this looks like the same family as shader-slang#9444.
 
 - **Not reproduced: a lavapipe SIGSEGV in CI that does not occur locally.**
   `retire::two_submissions_referencing_one_destroyed_buffer_keep_it_alive`
   segfaulted on CI's lavapipe during the same run, in a test unrelated to mesh
   shaders. The same commit runs 62/62 on this machine's lavapipe (Mesa 26.1.6,
   LLVM 22.1.8), so CI's Mesa build differs. Unexplained, seen once. If it recurs
-  it is a real bug and the driver version is the first thing to compare —
-  **CI's lavapipe is as unpinned as its `spirv-val` was.**
+  it is a real bug and the driver version is the first thing to compare — **CI's
+  lavapipe is as unpinned as its `spirv-val` was.**
 
 - **Nothing can bind a descriptor to the mesh stage yet.** `ShaderStages::MESH`
   and `TASK` exist and map correctly, but no bind-group layout or push-constant
