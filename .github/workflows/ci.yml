@@ -1005,7 +1005,8 @@ jobs:
       # different bytes.
       DXC_RELEASE: 'v1.9.2607'
       DXC_ASSET: 'linux_dxc_2026_07_29.x86_x64.tar.gz'
-      VULKAN_SDK_VERSION: '1.4.357.0'
+      SPIRV_TOOLS_VERSION: '2026.1-1'
+      SPIRV_TOOLS_MAJOR: '2026.1'
     steps:
       - uses: actions/checkout@v7
       # `spirv-val` and `spirv-dis`: the script validates every fresh artifact
@@ -1013,35 +1014,39 @@ jobs:
       # trusting the manifest to have been written by hand.
       #
       # **Pinned, for the same reason `slangc` and `dxc` are.** This used to be
-      # `apt-get install spirv-tools`, which takes whatever the runner image
-      # happens to carry — and on 2026-08-09 that validator rejected a mesh
-      # shader over `VUID-PrimitiveTriangleIndicesEXT-…-07054`, claiming the
-      # indices decoration was used without `OutputTrianglesEXT`, on a module
-      # whose disassembly plainly carries that execution mode on both entry
-      # points that read the decorated variable. Two drivers rendered it
-      # correctly and a current validator accepts it, so it was an old
-      # validator's false positive — but the real defect was that CI and a
-      # developer could not agree on whether an artifact was valid, and neither
-      # could reproduce the other. A validator is as much a part of the
-      # artifact's provenance as the compiler that emitted it.
+      # a bare `apt-get install spirv-tools`, which takes whatever the runner
+      # image carries — and on 2026-08-09 that was SPIRV-Tools **v2025.1**,
+      # which rejects a valid mesh shader over
+      # `VUID-PrimitiveTriangleIndicesEXT-…-07054`, claiming the indices
+      # decoration is used without `OutputTrianglesEXT` on a module that plainly
+      # declares it on both entry points reading the decorated variable. It is
+      # an upstream validator bug, fixed between v2025.1 and v2026.x: the same
+      # artifact is accepted by v2026.1 and v2026.3, and rendered correctly by
+      # radv and lavapipe. Both validators were run against it locally to
+      # establish that rather than infer it.
+      #
+      # The `.deb` comes from Ubuntu's own pool at a fixed version, because
+      # LunarG publishes no repository for the SDK this pins to. A validator is
+      # part of an artifact's provenance exactly as much as the compiler that
+      # emitted it, and an unpinned one means CI and a developer can disagree
+      # about whether an artifact is valid with neither able to reproduce the
+      # other — which is what happened.
       - name: Install the pinned spirv-tools
         run: |
-          wget -qO- "https://packages.lunarg.com/lunarg-signing-key-pub.asc" \
-            | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc >/dev/null
-          sudo wget -qO "/etc/apt/sources.list.d/lunarg-vulkan-${VULKAN_SDK_VERSION}-noble.list" \
-            "https://packages.lunarg.com/vulkan/${VULKAN_SDK_VERSION}/lunarg-vulkan-${VULKAN_SDK_VERSION}-noble.list"
+          curl -sSfL -o /tmp/spirv-tools.deb \
+            "http://archive.ubuntu.com/ubuntu/pool/universe/s/spirv-tools/spirv-tools_${SPIRV_TOOLS_VERSION}_amd64.deb"
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends spirv-tools
-          # A version that is not the pin is the thing this step exists to
-          # prevent, so it is checked rather than assumed.
+          sudo apt-get install -y --no-install-recommends /tmp/spirv-tools.deb
+          # A validator that is not the pin is what this step exists to prevent,
+          # so it is checked rather than trusted.
           FOUND="$(spirv-val --version | head -1)"
           echo "crcbl shaders: $FOUND"
           case "$FOUND" in
-          *"vulkan-sdk-${VULKAN_SDK_VERSION}"*) ;;
+          *"SPIRV-Tools v${SPIRV_TOOLS_MAJOR}"*) ;;
           *)
-              echo "crcbl shaders: spirv-val is '$FOUND', which is not the pinned" >&2
-              echo "  vulkan-sdk-${VULKAN_SDK_VERSION}. Two validators disagree about" >&2
-              echo "  mesh-shader modules; that is why this is pinned." >&2
+              echo "crcbl shaders: spirv-val is '$FOUND', not the pinned" >&2
+              echo "  v${SPIRV_TOOLS_MAJOR}. v2025.1 and earlier reject valid" >&2
+              echo "  mesh shaders; that is why this is pinned." >&2
               exit 1
               ;;
           esac

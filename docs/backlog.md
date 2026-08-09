@@ -21,26 +21,29 @@ confirmed; the rest of this file assumes them.
   `cargo deny` is clean. **To override:** drop the dev-dependency and the WGSL
   artifacts go back to being unchecked, or find a validator that is not naga.
 
-- **CI's `spirv-val` pinned to the Vulkan SDK, taken after it broke `main`.**
-  The shader job installed `spirv-tools` from apt, so CI validated with whatever
-  the runner image carried while a developer validated with whatever they had.
-  On 2026-08-09 those disagreed: CI rejected `mesh_shader.spv` over
-  `VUID-PrimitiveTriangleIndicesEXT-…-07054` — the indices decoration used
-  without `OutputTrianglesEXT` — on a module whose disassembly carries that
-  execution mode on **both** entry points that read the decorated variable, and
-  which radv and lavapipe both render correctly. A current validator (v2026.3,
-  vulkan-sdk-1.4.357.0) accepts it.
+- **CI's `spirv-val` is pinned to a fixed `.deb`, after an unpinned one broke
+  `main` twice.** The shader job installed whatever `spirv-tools` the runner
+  image carried. On 2026-08-09 that was **SPIRV-Tools v2025.1**, which rejects a
+  valid mesh shader over `VUID-PrimitiveTriangleIndicesEXT-…-07054` — claiming
+  the indices decoration is used without `OutputTrianglesEXT`, on a module that
+  declares that execution mode on both entry points reading the decorated
+  variable.
 
-  **The judgement:** an old validator's false positive, not a bad artifact. Two
-  drivers and a newer validator against one older validator, with the
-  disassembly readable and unambiguous. But the deeper defect was that CI and a
-  developer could not agree on whether an artifact was valid and **neither could
-  reproduce the other** — so the validator is now pinned the way `slangc` and
-  `dxc` already are, and the step fails if it is not the pinned version.
+  **This was established rather than argued.** Both validators were fetched and
+  run locally against the same artifact: v2025.1 rejects it, v2026.1 and v2026.3
+  accept it, and radv and lavapipe both render it correctly. So it is an
+  upstream validator bug fixed between those releases, and the artifact is
+  sound. The pin is Ubuntu's own `.deb` at a fixed version, because LunarG
+  publishes no repository for the SDK originally reached for — that first
+  attempt 404'd and failed the job a second time, which is its own lesson about
+  pinning to a URL nobody checked.
 
-  **To override:** if you think the artifact is genuinely invalid, the fix is to
-  stop two mesh entry points sharing one `PrimitiveTriangleIndicesEXT` variable
-  — split `amplifiedMeshMain` into its own `.slang` — rather than to unpin.
+  **To override:** if you would rather not depend on a validator version, the
+  alternative is to stop two mesh entry points sharing one
+  `PrimitiveTriangleIndicesEXT` variable — split `amplifiedMeshMain` into its
+  own `.slang` — which makes the artifact acceptable to v2025.1 too. That works
+  around a fixed upstream bug in shader structure, which is why it was not
+  chosen.
 
 - **Metal's `DRAW_INDIRECT_COUNT`: the seam was _not_ reshaped.** This reverses
   an explicit instruction ("update the seam and get all features supported in
