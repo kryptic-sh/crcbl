@@ -41,7 +41,7 @@ impl Headless {
                 label: Some("vk e2e triangle"),
                 adapter: adapter.id,
                 required_features: Features::empty(),
-                optional_features: Features::TIER_A | Features::DEBUG_MARKERS,
+                optional_features: Features::GPU_DRIVEN | Features::DEBUG_MARKERS,
                 compatible_surface: Some(surface),
             })
             .expect("a device opens");

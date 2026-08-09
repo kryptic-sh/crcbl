@@ -173,7 +173,7 @@ fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
         // through a uniform buffer where there are none — see
         // `crcbl::render::ConstantDelivery`. A browser is the second case and
         // always will be, since WebGPU has no push constants at all.
-        optional_features: Features::TIER_A
+        optional_features: Features::GPU_DRIVEN
             | Features::TIMESTAMP_QUERY
             | Features::DEBUG_MARKERS
             | Features::PUSH_CONSTANTS,

@@ -57,7 +57,7 @@ impl Headless {
                 label: Some("vk e2e mesh"),
                 adapter: adapter.id,
                 required_features: Features::empty(),
-                optional_features: Features::TIER_A
+                optional_features: Features::GPU_DRIVEN
                     | Features::TIMESTAMP_QUERY
                     | Features::DEBUG_MARKERS,
                 compatible_surface: Some(surface),

@@ -157,9 +157,10 @@
 //! * **`DeviceDesc::for_adapter` opens a device that cannot be profiled.**
 //!   [`Features::TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) is
 //!   deliberately not part of
-//!   [`TIER_A`](crcbl_hal::Features::TIER_A) — topic 10's browsers may lack it —
-//!   and `for_adapter` asks for no optional features at all, so the constructor
-//!   documented as "the shape a headless render test or `crcbl screenshot` uses"
+//!   [`GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN) — topic 10's browsers may
+//!   lack it — and `for_adapter` asks for nothing beyond that bundle, so the
+//!   constructor documented as "the shape a headless render test or
+//!   `crcbl screenshot` uses"
 //!   silently produces a device on which `PassTimers::new` declines and every
 //!   per-pass timing is blank. It is not a bug: optional features cannot fail,
 //!   so a caller that wants timers asks for them, and `apps/sandbox` and the

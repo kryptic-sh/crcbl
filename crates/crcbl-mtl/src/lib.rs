@@ -200,14 +200,16 @@
 //! handles for the same reason two devices do, and the tag is what separates
 //! them.
 //!
-//! # Tier: this backend reports **Tier B**, and the binding slice moved the
-//! reason rather than removing it
+//! # Paths: this backend selects the **floor** of every axis, and the binding
+//! slice moved the reason rather than removing it
 //!
-//! `docs/plan/09-backends-metal-dx12.md` specs this backend as Tier A, and the
-//! hardware supports it. [`DeviceCaps::tier`](crcbl_hal::DeviceCaps::tier) is
-//! *derived* from [`Features`](crcbl_hal::Features) precisely so that a backend
-//! cannot assert a tier it has not earned. Two of the six Tier A features are
-//! off, and they are **not the two that were off before**:
+//! `docs/plan/09-backends-metal-dx12.md` specs this backend as fully
+//! GPU-driven, and the hardware supports it.
+//! [`GeometryPath`](crcbl_hal::GeometryPath) and its siblings are *derived*
+//! from [`Features`](crcbl_hal::Features) precisely so that a backend cannot
+//! assert a path it has not earned. Two of the six
+//! [`GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN) features are off, and they
+//! are **not the two that were off before**:
 //!
 //! * [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT) is now
 //!   **on**. `crcbl_mtl::draw` explains why a loop over
@@ -241,17 +243,19 @@
 //! [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE) arrived with
 //! the command slice, on `MTLSharedEvent`.
 //!
-//! That has a visible consequence:
-//! [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter) asks for
-//! [`Features::TIER_A`](crcbl_hal::Features::TIER_A), so the seam's own
-//! convenience constructor is **refused** by this backend with
-//! [`UnsupportedFeatures`](crcbl_hal::HalError::UnsupportedFeatures). A caller
-//! that wants a device today asks for the features it actually needs. The
-//! `the_default_device_desc_is_refused_for_the_tier_a_gap` test is what keeps
+//! Those two are also exactly what
+//! [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter) requires, so
+//! the seam's own convenience constructor now **opens** here and asks for
+//! [`Features::GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN) optionally on top.
+//! Until topic 39 it demanded the whole bundle and this backend was refused
+//! with [`UnsupportedFeatures`](crcbl_hal::HalError::UnsupportedFeatures) over
+//! `DRAW_INDIRECT_COUNT`, a flag absent from Metal's API rather than
+//! unimplemented here — the case that argument was made from. The
+//! `the_default_device_desc_opens_and_the_rest_degrades` test is what keeps
 //! that from changing quietly, and it asserts all three flags above rather than
-//! only the missing ones.
+//! only the absent ones.
 //!
-//! The one Tier A feature that is still purely an adapter question —
+//! The one bundled feature that is still purely an adapter question —
 //! [`BUFFER_DEVICE_ADDRESS`](crcbl_hal::Features::BUFFER_DEVICE_ADDRESS) — is
 //! reported from a real query. Every other flag this backend reports is
 //! reported because a call in *this* crate now makes it true, never because

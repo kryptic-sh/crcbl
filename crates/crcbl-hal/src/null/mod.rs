@@ -51,14 +51,15 @@
 //!
 //! ```
 //! use crcbl_hal::null::{NullInstance, Recorder};
-//! use crcbl_hal::{Instance, RendererTier};
+//! use crcbl_hal::{BindingModel, GeometryPath, Instance};
 //!
 //! let recorder = Recorder::new();
 //! let instance: Box<dyn Instance> =
 //!     Box::new(NullInstance::tier_b().with_recorder(recorder.clone()));
 //!
 //! let adapter = instance.adapters()[0].clone();
-//! assert_eq!(adapter.caps.tier(), RendererTier::B);
+//! assert_eq!(adapter.caps.binding_model(), BindingModel::ArrayPages);
+//! assert_eq!(adapter.caps.geometry_path(), GeometryPath::IndirectPerBatch);
 //! assert_eq!(recorder.total_live_objects(), 0);
 //! ```
 
@@ -183,7 +184,7 @@ impl NullInstance {
     #[must_use]
     pub fn tier_a() -> Self {
         Self::new(DeviceCaps {
-            features: Features::TIER_A
+            features: Features::GPU_DRIVEN
                 | Features::INDIRECT_FIRST_INSTANCE
                 | Features::TIMESTAMP_QUERY
                 | Features::PIPELINE_STATISTICS_QUERY

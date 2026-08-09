@@ -376,7 +376,9 @@ impl core::fmt::Debug for DeviceInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DeviceInner")
             .field("id", &self.id)
-            .field("tier", &self.caps.tier())
+            .field("geometry", &self.caps.geometry_path())
+            .field("binding", &self.caps.binding_model())
+            .field("lighting", &self.caps.lighting_path())
             .field("submissions", &self.submissions.load(Ordering::Relaxed))
             .finish_non_exhaustive()
     }
@@ -810,10 +812,12 @@ impl VkDevice {
             );
         }
         log::info!(
-            "crcbl-vk: opened {:?} (tier {:?}), graphics family {graphics_family}, \
-             async compute {:?}, transfer {:?}",
+            "crcbl-vk: opened {:?} (geometry {:?}, binding {:?}, lighting {:?}), \
+             graphics family {graphics_family}, async compute {:?}, transfer {:?}",
             record.info.name,
-            inner.caps.tier(),
+            inner.caps.geometry_path(),
+            inner.caps.binding_model(),
+            inner.caps.lighting_path(),
             record.families.async_compute,
             record.families.transfer,
         );

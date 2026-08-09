@@ -567,12 +567,12 @@ impl Default for GpuContextDesc<'_> {
         Self {
             label: "crcbl",
             backend: None,
-            // Nothing here needs a feature, and demanding `TIER_A` would refuse
-            // to run on the Tier B devices `docs/plan/02-vulkan-backend.md`
-            // requires the engine to support. Ask for everything optionally and
-            // branch on what came back. `TIMESTAMP_QUERY` is deliberately not
-            // part of `TIER_A` — topic 10's browsers may lack it — so the
-            // per-pass timers have to be asked for by name.
+            // Nothing here needs a feature, and demanding `GPU_DRIVEN` would
+            // refuse to run on the lesser devices `docs/plan/39-capabilities.md`
+            // requires the engine to degrade onto. Ask for everything optionally
+            // and branch on what came back. `TIMESTAMP_QUERY` is deliberately
+            // not part of `GPU_DRIVEN` — topic 10's browsers may lack it — so
+            // the per-pass timers have to be asked for by name.
             required_features: Features::empty(),
             // `PRESENT_FEEDBACK` is asked for here because `acquire` already
             // calls `wait_until_presented` every frame: a device that has the
@@ -583,9 +583,9 @@ impl Default for GpuContextDesc<'_> {
             // unasked-for it answers `Unknown` forever, so the engine would
             // report every panel as unreadable and never negotiate the
             // extension chain that could have told it otherwise. Optional like
-            // the rest — neither is in `TIER_A`, and a device without them just
+            // the rest — neither is in `GPU_DRIVEN`, and a device without them just
             // keeps the open-loop frame limiter and the `Unknown` cadence.
-            optional_features: Features::TIER_A
+            optional_features: Features::GPU_DRIVEN
                 | Features::TIMESTAMP_QUERY
                 | Features::DEBUG_MARKERS
                 | Features::PRESENT_FEEDBACK
@@ -938,11 +938,13 @@ impl GpuContext {
             });
         };
         log::info!(
-            "hal: {} adapter {:?} ({:?}), tier {:?}",
+            "hal: {} adapter {:?} ({:?}), geometry {:?}, binding {:?}, lighting {:?}",
             instance.backend(),
             adapter.name,
             adapter.device_type,
-            adapter.caps.tier()
+            adapter.caps.geometry_path(),
+            adapter.caps.binding_model(),
+            adapter.caps.lighting_path()
         );
 
         if let Some(reported) = caps.current_extent

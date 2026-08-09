@@ -219,7 +219,7 @@ impl OffscreenSetup {
                 label: Some("crcbl screenshot"),
                 adapter: adapter.id,
                 required_features: Features::empty(),
-                optional_features: Features::TIER_A | Features::DEBUG_MARKERS,
+                optional_features: Features::GPU_DRIVEN | Features::DEBUG_MARKERS,
                 compatible_surface: Some(surface),
             })
             .map_err(OffscreenError::Hal)?;
@@ -620,7 +620,7 @@ mod tests {
                 label: Some("screenshot test"),
                 adapter: adapter.id,
                 required_features: Features::empty(),
-                optional_features: Features::TIER_A,
+                optional_features: Features::GPU_DRIVEN,
                 compatible_surface: Some(surface),
             })
             .expect("null device");

@@ -20,22 +20,23 @@
 //!    annotations.
 //! 3. **The recorded stream is what the frame asked for**, including pass order.
 //!
-//! It also runs the *same frame function* against both tier presets, which is
-//! the property topic 03 depends on: one renderer, two tiers, differing only in
-//! the draw tail.
+//! It also runs the *same frame function* against both null presets, which is
+//! the property topic 39 depends on: one renderer, two
+//! [`GeometryPath`](crcbl_hal::GeometryPath) values, differing only in the draw
+//! tail.
 
 use crcbl_hal::null::{Command, NullInstance, ObjectKind, Recorder};
 use crcbl_hal::{
     AdapterInfo, Barriers, BufferBarrier, BufferDesc, BufferHandle, BufferUsage, ClearValue,
     ColorAttachment, ColorTargetState, CommandBufferHandle, CommandEncoder, CommandEncoderDesc,
     DepthStencilAttachment, DepthStencilState, Device, DeviceCaps, DeviceDesc, DeviceRequestState,
-    DrawIndirect, DrawIndirectCount, Extent3d, Features, Format, GraphicsPipelineDesc,
-    GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType,
-    ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, Instance, LoadOp, MemoryLocation,
-    MultisampleState, PendingDevice, PresentInfo, PresentMode, PrimitiveState, QueueHandle,
-    QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, Rect2d, RenderPassDesc, RendererTier,
-    ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, StoreOp, SubmitInfo, SurfaceCaps,
-    SurfaceHandle, SurfaceTarget, SwapchainDesc, SwapchainHandle, Viewport, depth,
+    DrawIndirect, DrawIndirectCount, Extent3d, Features, Format, GeometryPath,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType,
+    Instance, LoadOp, MemoryLocation, MultisampleState, PendingDevice, PresentInfo, PresentMode,
+    PrimitiveState, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, Rect2d,
+    RenderPassDesc, ShaderEntry, ShaderModuleDesc, ShaderModuleHandle, StoreOp, SubmitInfo,
+    SurfaceCaps, SurfaceHandle, SurfaceTarget, SwapchainDesc, SwapchainHandle, Viewport, depth,
 };
 
 /// A minimal valid SPIR-V header — magic word plus version.
@@ -57,7 +58,7 @@ struct Frame {
     draw_args: BufferHandle,
     draw_count: BufferHandle,
     pipeline: GraphicsPipelineHandle,
-    tier: RendererTier,
+    geometry: GeometryPath,
 }
 
 /// Builds a device and its per-frame resources from a boxed instance.
@@ -69,11 +70,11 @@ fn setup(instance: &dyn Instance) -> Frame {
     let adapters: Vec<AdapterInfo> = instance.adapters();
     assert_eq!(adapters.len(), 1);
     let caps: DeviceCaps = adapters[0].caps;
-    let tier: RendererTier = caps.tier();
+    let geometry: GeometryPath = caps.geometry_path();
 
-    // Ask only for what the adapter has; the tier decides the rest.
-    let required = if tier.is_a() {
-        Features::TIER_A
+    // Ask only for what the adapter has; everything else degrades.
+    let required = if caps.supports(Features::GPU_DRIVEN) {
+        Features::GPU_DRIVEN
     } else {
         Features::COMPUTE
     };
@@ -86,7 +87,7 @@ fn setup(instance: &dyn Instance) -> Frame {
             compatible_surface: None,
         })
         .expect("the adapter satisfies what we asked for");
-    assert_eq!(device.caps().tier(), tier);
+    assert_eq!(device.caps().geometry_path(), geometry);
 
     let queue: QueueHandle = device
         .queue(QueueKind::Graphics)
@@ -238,7 +239,7 @@ fn setup(instance: &dyn Instance) -> Frame {
         draw_args,
         draw_count,
         pipeline,
-        tier,
+        geometry,
     }
 }
 
@@ -385,19 +386,19 @@ fn render(frame: &Frame) {
     device.destroy_command_buffer(command_buffer);
 }
 
-/// The whole point: one frame function, two tiers, no `#[cfg]` and no backend
-/// type in sight.
+/// The whole point: one frame function, two geometry paths, no `#[cfg]` and no
+/// backend type in sight.
 #[test]
-fn the_same_frame_runs_on_both_tiers_through_trait_objects() {
-    for (preset, expected_tier) in [
-        (NullInstance::tier_a(), RendererTier::A),
-        (NullInstance::tier_b(), RendererTier::B),
+fn the_same_frame_runs_on_both_geometry_paths_through_trait_objects() {
+    for (preset, expected_geometry) in [
+        (NullInstance::tier_a(), GeometryPath::IndirectCount),
+        (NullInstance::tier_b(), GeometryPath::IndirectPerBatch),
     ] {
         let recorder = Recorder::new();
         let instance: Box<dyn Instance> = Box::new(preset.with_recorder(recorder.clone()));
 
         let frame = setup(instance.as_ref());
-        assert_eq!(frame.tier, expected_tier);
+        assert_eq!(frame.geometry, expected_geometry);
 
         recorder.clear();
         render(&frame);
@@ -412,13 +413,16 @@ fn the_same_frame_runs_on_both_tiers_through_trait_objects() {
             "SetScissor",
             "BindGraphicsPipeline",
         ];
-        expected.push(if expected_tier.is_a() {
-            "DrawIndexedIndirectCount"
-        } else {
-            "DrawIndexedIndirect"
+        expected.push(match expected_geometry {
+            GeometryPath::IndirectCount => "DrawIndexedIndirectCount",
+            _ => "DrawIndexedIndirect",
         });
         expected.extend(["EndRenderPass", "EndDebugLabel"]);
-        assert_eq!(recorder.command_names(), expected, "tier {expected_tier:?}");
+        assert_eq!(
+            recorder.command_names(),
+            expected,
+            "geometry {expected_geometry:?}"
+        );
         assert_eq!(recorder.pass_labels(), vec!["opaque".to_string()]);
 
         // The reference frame has to be valid on a strict backend too: the depth
@@ -470,8 +474,8 @@ fn the_same_frame_runs_on_both_tiers_through_trait_objects() {
 /// function accepts `&dyn Device` and a concrete backend alike.
 #[test]
 fn the_seam_is_also_usable_generically() {
-    fn tier_of<D: Device + ?Sized>(device: &D) -> RendererTier {
-        device.caps().tier()
+    fn geometry_of<D: Device + ?Sized>(device: &D) -> GeometryPath {
+        device.caps().geometry_path()
     }
 
     let instance: Box<dyn Instance> = Box::new(NullInstance::tier_a());
@@ -481,9 +485,9 @@ fn the_seam_is_also_usable_generically() {
         .expect("device");
 
     // Through the trait object …
-    assert_eq!(tier_of(device.as_ref()), RendererTier::A);
+    assert_eq!(geometry_of(device.as_ref()), GeometryPath::IndirectCount);
     // … and monomorphised over the boxed type.
-    assert_eq!(tier_of(&*device), RendererTier::A);
+    assert_eq!(geometry_of(&*device), GeometryPath::IndirectCount);
 }
 
 /// A frame that creates transients and destroys them must leave the backend
@@ -541,9 +545,9 @@ fn errors_cross_the_seam_intact() {
     let instance: Box<dyn Instance> = Box::new(NullInstance::tier_b());
     let error: HalError = instance
         .create_device(&DeviceDesc::for_adapter(instance.adapters()[0].id))
-        .expect_err("tier B cannot satisfy TIER_A");
+        .expect_err("tier B has no timeline semaphore");
     let text = error.to_string();
-    assert!(text.contains("DESCRIPTOR_INDEXING"), "{text}");
+    assert!(text.contains("TIMELINE_SEMAPHORE"), "{text}");
     assert!(matches!(error, HalError::UnsupportedFeatures { .. }));
 }
 
@@ -759,7 +763,10 @@ fn a_request_with_no_latency_is_ready_at_once() {
     let state = pending.poll().expect("poll");
     assert!(state.is_ready(), "nothing to wait for, so nothing waits");
     let device: Box<dyn Device> = state.into_device().expect("ready carries the device");
-    assert_eq!(device.caps().tier(), RendererTier::B);
+    assert_eq!(
+        device.caps().geometry_path(),
+        GeometryPath::IndirectPerBatch
+    );
 }
 
 /// The device leaves the request exactly once. A second poll is a caller bug
@@ -795,14 +802,14 @@ fn what_can_fail_immediately_does_fail_immediately() {
         "an unknown adapter is not a deferred failure"
     );
 
-    // Tier B has no buffer device address, and the latency must not delay
-    // *that* answer either.
+    // Tier B has no timeline semaphore, which the headless default requires,
+    // and the latency must not delay *that* answer either.
     let too_much = slow.request_device(&DeviceDesc::for_adapter(slow.adapters()[0].id));
     match too_much {
         Err(HalError::UnsupportedFeatures { missing }) => {
-            assert!(missing.contains(Features::BUFFER_DEVICE_ADDRESS));
+            assert!(missing.contains(Features::TIMELINE_SEMAPHORE));
         }
-        other => panic!("Tier A on a Tier B adapter must be refused up front: {other:?}"),
+        other => panic!("a required feature the adapter lacks must be refused up front: {other:?}"),
     }
 }
 
@@ -817,5 +824,5 @@ fn create_device_still_blocks_through_the_latency() {
     let device: Box<dyn Device> = instance
         .create_device(&DeviceDesc::for_adapter(instance.adapters()[0].id))
         .expect("the wrapper polls until it is ready");
-    assert!(device.caps().tier().is_a());
+    assert_eq!(device.caps().geometry_path(), GeometryPath::IndirectCount);
 }

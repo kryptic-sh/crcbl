@@ -46,7 +46,7 @@ impl Harness {
     fn open(tier: Tier) -> Self {
         let recorder = Recorder::new();
         let (instance, required) = match tier {
-            Tier::A => (NullInstance::tier_a(), Features::TIER_A),
+            Tier::A => (NullInstance::tier_a(), Features::GPU_DRIVEN),
             Tier::B => (NullInstance::tier_b(), Features::COMPUTE),
         };
         let instance = instance.with_recorder(recorder.clone());

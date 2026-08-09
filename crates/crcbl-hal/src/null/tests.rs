@@ -7,9 +7,10 @@
 use super::*;
 
 use crate::{
-    BindGroupLayoutEntry, BindingKind, BufferUsage, ClearValue, ColorAttachment, ColorTargetState,
-    DepthStencilState, ImageSubresourceRange, ImageViewType, LoadOp, MultisampleState,
-    PrimitiveState, PushConstantRange, RendererTier, ResourceState, ShaderEntry, StoreOp, depth,
+    BindGroupLayoutEntry, BindingKind, BindingModel, BufferUsage, ClearValue, ColorAttachment,
+    ColorTargetState, DepthStencilState, GeometryPath, ImageSubresourceRange, ImageViewType,
+    LightingPath, LoadOp, MultisampleState, PrimitiveState, PushConstantRange, ResourceState,
+    ShaderEntry, StoreOp, depth,
 };
 
 /// The SPIR-V magic number, so test modules look like modules.
@@ -27,9 +28,9 @@ fn boxed(instance: NullInstance) -> (Recorder, Box<dyn Instance>) {
 
 /// Opens a device that enables everything the adapter offers.
 ///
-/// `DeviceDesc::for_adapter` alone enables only `TIER_A`; optional features must
-/// be *asked* for, which is the behaviour a real backend has and the reason this
-/// helper spells it out.
+/// `DeviceDesc::for_adapter` alone enables only `GPU_DRIVEN`; optional features
+/// must be *asked* for, which is the behaviour a real backend has and the reason
+/// this helper spells it out.
 fn open(instance: &dyn Instance) -> Box<dyn Device> {
     let adapters = instance.adapters();
     instance
@@ -37,15 +38,22 @@ fn open(instance: &dyn Instance) -> Box<dyn Device> {
             optional_features: Features::all(),
             ..DeviceDesc::for_adapter(adapters[0].id)
         })
-        .expect("tier A adapter satisfies TIER_A")
+        .expect("the tier A adapter has compute and a timeline semaphore")
 }
 
 #[test]
-fn tier_presets_report_the_documented_tiers() {
+fn tier_presets_select_the_documented_paths() {
     let a = NullInstance::tier_a();
     let b = NullInstance::tier_b();
-    assert_eq!(a.adapters()[0].caps.tier(), RendererTier::A);
-    assert_eq!(b.adapters()[0].caps.tier(), RendererTier::B);
+    let (a_caps, b_caps) = (a.adapters()[0].caps, b.adapters()[0].caps);
+    assert_eq!(a_caps.binding_model(), BindingModel::Bindless);
+    assert_eq!(a_caps.geometry_path(), GeometryPath::IndirectCount);
+    assert_eq!(b_caps.binding_model(), BindingModel::ArrayPages);
+    assert_eq!(b_caps.geometry_path(), GeometryPath::IndirectPerBatch);
+    // Neither preset reports ray tracing, so neither may select it. When a
+    // preset grows the flags this is the assertion that has to be revisited.
+    assert_eq!(a_caps.lighting_path(), LightingPath::Rasterised);
+    assert_eq!(b_caps.lighting_path(), LightingPath::Rasterised);
     assert_eq!(a.backend(), BackendKind::Null);
 
     let caps = b.adapters()[0].caps;
@@ -68,18 +76,26 @@ fn tier_presets_report_the_documented_tiers() {
     );
 }
 
+/// `required` has to be able to fail, and it has to name the gap — a
+/// requirement that cannot be refused is not a gate. The tier B preset lacks a
+/// timeline semaphore, which the headless default does require, so this is the
+/// refusal the seam owes with nothing contrived to provoke it.
 #[test]
-fn a_tier_b_device_refuses_a_tier_a_request_and_names_the_gap() {
+fn a_tier_b_device_refuses_the_headless_default_and_names_the_gap() {
     let instance = NullInstance::tier_b();
     let error = instance
         .create_device(&DeviceDesc::for_adapter(AdapterId(0)))
-        .expect_err("tier B cannot satisfy TIER_A");
+        .expect_err("tier B has no timeline semaphore");
     let HalError::UnsupportedFeatures { missing } = error else {
         panic!("expected UnsupportedFeatures, got {error:?}");
     };
-    assert!(missing.contains(Features::DESCRIPTOR_INDEXING));
-    assert!(missing.contains(Features::BUFFER_DEVICE_ADDRESS));
+    assert!(missing.contains(Features::TIMELINE_SEMAPHORE));
     assert!(!missing.contains(Features::COMPUTE), "tier B has compute");
+    // The bindless half is *optional* now: absent, and not a reason to refuse.
+    assert!(
+        !missing.contains(Features::DESCRIPTOR_INDEXING),
+        "an optional feature must never appear in the gap"
+    );
 }
 
 #[test]
@@ -502,7 +518,7 @@ fn a_duplicated_binding_number_is_refused() {
 #[test]
 fn swapchain_acquire_matches_the_tiers_sync_model() {
     for (instance, features, expect_semaphores) in [
-        (NullInstance::tier_a(), Features::TIER_A, true),
+        (NullInstance::tier_a(), Features::GPU_DRIVEN, true),
         (NullInstance::tier_b(), Features::COMPUTE, false),
     ] {
         let device = instance

@@ -332,7 +332,7 @@ impl Gpu {
                 // viewport size through a push constant where there are any and
                 // through a uniform buffer where there are none. A browser is
                 // always the second case — WebGPU has no push constants at all.
-                optional_features: Features::TIER_A
+                optional_features: Features::GPU_DRIVEN
                     | Features::TIMESTAMP_QUERY
                     | Features::DEBUG_MARKERS
                     | Features::PUSH_CONSTANTS,

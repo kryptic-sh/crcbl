@@ -72,15 +72,18 @@
 //! software rasteriser and ships in Windows, so if it supports **SM6.6 dynamic
 //! resources** — the model this backend is specced around — then DX12 buys
 //! Windows the equivalent of lavapipe. If it does not, `crcbl-wgpu` already
-//! covers Tier B there and the CI half of DX12's justification collapses to Xbox
-//! plus tooling.
+//! covers the portable path there and the CI half of DX12's justification
+//! collapses to Xbox plus tooling.
 //!
 //! So enumeration asks DXGI for WARP **by name**, beside whatever hardware is
 //! present, and this crate's tests publish what each adapter actually answered:
 //! its `ResourceBindingTier`, its `HighestShaderModel`, whether the two together
-//! clear SM6.6 dynamic resources, and its derived
-//! [`RendererTier`](crcbl_hal::RendererTier). See `crcbl_dx12::instance`'s tests
-//! for the report line and how to read it out of a run.
+//! clear SM6.6 dynamic resources, and the
+//! [`GeometryPath`](crcbl_hal::GeometryPath),
+//! [`BindingModel`](crcbl_hal::BindingModel) and
+//! [`LightingPath`](crcbl_hal::LightingPath) those features select. See
+//! `crcbl_dx12::instance`'s tests for the report line and how to read it out of
+//! a run.
 //!
 //! **Reporting tier 3 is a claim about the API surface, not about execution.**
 //! That half is now measured too:
@@ -99,22 +102,24 @@
 //! **The answer still comes from a machine, not from this crate.** Nothing here
 //! has ever executed on the development box, which is Linux.
 //!
-//! # Every adapter is Tier B so far, and that is *this backend* speaking
+//! # Every adapter sits at the geometry floor so far, and that is *this backend* speaking
 //!
-//! [`DeviceCaps::tier`](crcbl_hal::DeviceCaps::tier) is derived from
-//! [`Features`](crcbl_hal::Features) precisely so a backend cannot claim a tier
+//! [`GeometryPath`](crcbl_hal::GeometryPath) is derived from
+//! [`Features`](crcbl_hal::Features) precisely so a backend cannot claim a path
 //! it has not earned, and the flags it has not earned are still the majority of
-//! the Tier A set. So the derived tier is **B for every adapter, including a
-//! Tier-A-capable GPU** — because [`COMPUTE`](crcbl_hal::Features::COMPUTE),
+//! [`GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN). So the derived path is
+//! [`IndirectPerBatch`](crcbl_hal::GeometryPath::IndirectPerBatch) **for every
+//! adapter, including one that could run the whole set** — because
+//! [`COMPUTE`](crcbl_hal::Features::COMPUTE),
 //! [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE),
 //! [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT) and
 //! [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) all wait on
 //! calls this crate does not make yet, not because any adapter lacks them.
 //!
-//! **Read the WARP verdict off the SM6.6 line, never off the tier.** The tier is
-//! a statement about how much of this backend is written; the dynamic-resources
-//! answer is the statement about the adapter, and it is the one the backlog
-//! asked for.
+//! **Read the WARP verdict off the SM6.6 line, never off the selected path.**
+//! The path is a statement about how much of this backend is written; the
+//! dynamic-resources answer is the statement about the adapter, and it is the
+//! one the backlog asked for.
 //!
 //! # `DESCRIPTOR_INDEXING` is reported ahead of the call behind it, on purpose
 //!

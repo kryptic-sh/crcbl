@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Five `crcbl_hal::Features` flags for mesh shading and ray tracing.**
+  `MESH_SHADER`, `TASK_SHADER`, `RAY_QUERY`, `RAY_TRACING_PIPELINE` and
+  `ACCELERATION_STRUCTURE`. `MESH_SHADER` is the best `GeometryPath` and
+  `RAY_QUERY` plus `ACCELERATION_STRUCTURE` together select
+  `LightingPath::RayTraced`. **No backend reports any of them yet** — every one
+  is clear on Vulkan, wgpu, Metal, D3D12 and the null presets — so every device
+  still selects the same path it did before; the flags exist so the selectors
+  and the shader permutations can be written against them.
+
 - **The X11 F11 pass now asserts the summary-line extent.** `run-x11-e2e.sh`'s
   toggle pass used to press F11 at a running sandbox, check the engine's own log
   line about the mode, and SIGTERM the sandbox — so the _extent_ after F11 was
@@ -1290,6 +1299,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the whole field.
 
 ### Changed
+
+- **Breaking: the two-valued renderer tier is gone, replaced by device
+  capabilities and three derived path selectors.** `crcbl_hal::RendererTier` and
+  `DeviceCaps::tier` are removed; `Features::TIER_A` is renamed
+  `Features::GPU_DRIVEN` and documented as a named bundle to pass as
+  `optional_features`, never as a requirement. In their place
+  `DeviceCaps::geometry_path`, `DeviceCaps::binding_model` and
+  `DeviceCaps::lighting_path` answer with
+  `GeometryPath::{MeshShader, IndirectCount, IndirectPerBatch}`,
+  `BindingModel::{Bindless, ArrayPages}` and
+  `LightingPath::{RayTraced, Rasterised}` — each ordered best-first, each
+  degrading monotonically, and each also constructible from a bare `Features`
+  through `from_features`. Log lines and `Debug` impls that printed a tier now
+  print the three selected paths. A tier could not express three independent
+  axes, and forcing a device into the wrong bucket is a lie the renderer then
+  acts on.
+
+- **Breaking: `DeviceDesc::for_adapter` requires only what nothing can work
+  without.** `required_features` is now
+  `Features::COMPUTE | Features::TIMELINE_SEMAPHORE`, with
+  `Features::GPU_DRIVEN` moved to `optional_features`. It used to demand the
+  whole GPU-driven bundle, so a device was refused over one absent flag while
+  having the rest — the reason `crcbl-mtl` was refused outright over
+  `DRAW_INDIRECT_COUNT`, which is absent from Metal's API rather than
+  unimplemented. That backend now opens on the seam's own constructor and
+  degrades. A caller that genuinely cannot render without a feature still names
+  it in `required_features` and still gets a named `UnsupportedFeatures`
+  failure.
 
 - **`ModeRequest::mode` answers `None` when there is no window to read, instead
   of an invented `Windowed`.** The `DisplayMode` it returned for a dead window

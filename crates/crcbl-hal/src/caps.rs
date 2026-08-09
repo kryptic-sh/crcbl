@@ -1,27 +1,35 @@
 //! Adapter identification and device capability reporting.
 //!
-//! This module is what makes topic 03's **renderer tiers** expressible. The
-//! renderer never asks "am I on Vulkan?" — it asks [`DeviceCaps::tier`] and
-//! [`Features::contains`], exactly as `crcbl-shell` exposes `ShellCaps` instead
-//! of letting anyone sniff for Wayland.
+//! This module is what makes topic 39's **capability-driven degradation**
+//! expressible. The renderer never asks "am I on Vulkan?" — it asks
+//! [`Features::contains`] or one of the derived path selectors, exactly as
+//! `crcbl-shell` exposes `ShellCaps` instead of letting anyone sniff for
+//! Wayland.
 //!
 //! ```text
-//! Tier A (vk / mtl / dx12) : descriptor indexing + BDA + draw_indirect_count
-//! Tier B (WebGPU via wgpu) : fixed-size arrays, per-batch indirect, SSBO indices
+//! MESH_SHADER, DRAW_INDIRECT_COUNT   -> GeometryPath
+//! DESCRIPTOR_INDEXING                -> BindingModel
+//! RAY_QUERY, ACCELERATION_STRUCTURE  -> LightingPath
 //! ```
 //!
-//! Per topic 03, **Tier B is a constraint on data layout, not a separate
-//! renderer**: both tiers consume the same geometry pools, instance buffers and
-//! material tables, and only the draw-emission tail differs. The flags here are
-//! the seam that lets one renderer make that choice at runtime.
+//! Per topic 39, **a missing feature degrades by default**: each selector is
+//! ordered best-first and resolves downward, every value consumes the same
+//! geometry pools, instance buffers and material tables, and only the
+//! draw-emission tail differs. A caller that genuinely cannot run without a
+//! feature names it in
+//! [`DeviceDesc::required_features`](crate::DeviceDesc::required_features), and
+//! its absence is then a loud, named failure at device creation rather than a
+//! picture that is quietly a different game. There is deliberately no third
+//! behaviour and no single tier value: two buckets cannot hold three
+//! independent axes.
 
 use core::fmt;
 
 /// Which backend implementation is behind the seam.
 ///
 /// For logs, capture-tool selection and bug reports only. Renderer *behaviour*
-/// must key off [`Features`] and [`RendererTier`], never off this — that is the
-/// difference between a capability system and platform sniffing.
+/// must key off [`Features`] and the selectors derived from it, never off this
+/// — that is the difference between a capability system and platform sniffing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BackendKind {
     /// `crcbl-vk` — Vulkan 1.3.
@@ -101,22 +109,25 @@ pub struct AdapterInfo {
 bitflags::bitflags! {
     /// Optional device capabilities.
     ///
-    /// `crcbl-vk` requires the Tier A set as hard requirements and errors out on
-    /// a device that lacks them (`docs/plan/02-vulkan-backend.md`: "no fallback
-    /// paths for missing features in MVP"). The flags still exist as flags
-    /// because `crcbl-wgpu` genuinely varies — WebGPU has no bindless, no
-    /// multi-draw-indirect, no buffer device address and no push constants, and
-    /// timestamp queries are browser-dependent.
+    /// A caller asks for what it needs rather than for a bundle: a flag in
+    /// [`DeviceDesc::required_features`](crate::DeviceDesc::required_features)
+    /// that the adapter lacks is a named failure at device creation, and
+    /// everything else degrades. They are flags rather than a tier because
+    /// devices genuinely vary along independent axes — WebGPU has no bindless,
+    /// no multi-draw-indirect, no buffer device address and no push constants,
+    /// timestamp queries are browser-dependent, and Metal has
+    /// multi-draw-indirect with no GPU-side count at all.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct Features: u64 {
         /// Runtime-sized descriptor arrays with partial binding and
-        /// update-after-bind — the bindless model topic 03's Tier A is built
-        /// on. Vulkan `descriptorIndexing`, DX12 SM6.6 dynamic resources,
+        /// update-after-bind — the bindless model [`BindingModel::Bindless`]
+        /// selects. Vulkan `descriptorIndexing`, DX12 SM6.6 dynamic resources,
         /// Metal argument buffers tier 2. Absent on WebGPU.
         const DESCRIPTOR_INDEXING = 1 << 0;
         /// Shaders can dereference raw GPU pointers. Vulkan
         /// `bufferDeviceAddress`, DX12 GPU virtual addresses, Metal 3
-        /// `gpuAddress`. Absent on WebGPU — Tier B uses indexed SSBO lookups.
+        /// `gpuAddress`. Absent on WebGPU, which uses indexed SSBO lookups
+        /// instead.
         const BUFFER_DEVICE_ADDRESS = 1 << 1;
         /// [`draw_indirect_count`](crate::CommandEncoder::draw_indirect_count)
         /// and its indexed sibling are usable: the draw count itself comes from
@@ -140,8 +151,9 @@ bitflags::bitflags! {
         /// Occlusion queries.
         const OCCLUSION_QUERY = 1 << 7;
         /// Compute shaders. Effectively universal — WebGPU has them, which is
-        /// why GPU culling stays GPU-side even in Tier B — but a GL-ES2-class
-        /// wgpu fallback would not, and the renderer needs somewhere to say so.
+        /// why GPU culling stays GPU-side on every [`GeometryPath`] — but a
+        /// GL-ES2-class wgpu fallback would not, and the renderer needs
+        /// somewhere to say so.
         const COMPUTE = 1 << 8;
         /// Timeline semaphores: monotonic counters usable for both GPU-GPU and
         /// CPU-GPU waits. Vulkan `timelineSemaphore`, DX12 `ID3D12Fence`,
@@ -158,8 +170,8 @@ bitflags::bitflags! {
         const TRANSFER_QUEUE = 1 << 11;
         /// Push constants / root constants are available.
         /// [`Limits::max_push_constant_size`] gives the budget. **Absent on
-        /// WebGPU** — Tier B substitutes a dynamic-offset uniform buffer, which
-        /// is a data-layout consequence the renderer must plan for.
+        /// WebGPU**, which substitutes a dynamic-offset uniform buffer — a
+        /// data-layout consequence the renderer must plan for.
         const PUSH_CONSTANTS = 1 << 12;
         /// Depth clamping (as opposed to clipping) — shadow-map rendering
         /// wants it so caster geometry behind the near plane still writes
@@ -191,9 +203,9 @@ bitflags::bitflags! {
         /// waitable object with no number at all, and one only calls back once
         /// a drawable has been shown. What they share is that the CPU can find
         /// out, which is the whole of what this flag promises. Optional, and
-        /// deliberately **not** part of [`TIER_A`](Self::TIER_A): a device
-        /// without it renders exactly the same frames, it just cannot be paced
-        /// by them.
+        /// deliberately **not** part of [`GPU_DRIVEN`](Self::GPU_DRIVEN): a
+        /// device without it renders exactly the same frames, it just cannot be
+        /// paced by them.
         const PRESENT_FEEDBACK = 1 << 20;
         /// The device can say what the display is **doing** with the frames we
         /// present — fixed refresh, adaptive sync, or neither reported —
@@ -204,16 +216,70 @@ bitflags::bitflags! {
         /// own cadence, which nothing else in the seam can observe: a
         /// [`PresentMode`](crate::PresentMode) is a request, and a frame time
         /// measured over a paced loop is the request coming back at you. Also
-        /// optional and also **not** part of [`TIER_A`](Self::TIER_A): a device
-        /// without it renders the same frames and simply cannot be asked.
+        /// optional and also **not** part of [`GPU_DRIVEN`](Self::GPU_DRIVEN):
+        /// a device without it renders the same frames and simply cannot be
+        /// asked.
         const PRESENT_TIMING = 1 << 21;
-
-        /// The capability set that defines **Tier A** (topic 03).
+        /// Mesh shaders: a compute-shaped stage that emits primitives straight
+        /// into the rasteriser, replacing the vertex-fetch and input-assembly
+        /// front end entirely. Vulkan `VK_EXT_mesh_shader`, DX12 mesh shader
+        /// tier 1, Metal mesh functions. Absent on WebGPU.
         ///
-        /// A device holding all of these can run the full GPU-driven path: one
-        /// bindless descriptor array for every texture, GPU pointers for
-        /// per-draw data, and a single indirect-count call per pass.
-        const TIER_A = Self::DESCRIPTOR_INDEXING.bits()
+        /// The best [`GeometryPath`], because a meshlet cull can run in the
+        /// same dispatch that emits the geometry rather than writing indirect
+        /// arguments for a separate draw to read back.
+        const MESH_SHADER = 1 << 22;
+        /// The amplification stage in front of a mesh shader, which decides how
+        /// many mesh workgroups to launch. Vulkan's task shader, DX12's
+        /// amplification shader, Metal's object function.
+        ///
+        /// Reported separately from [`MESH_SHADER`](Self::MESH_SHADER) because
+        /// the two are separately optional: a mesh shader works on its own with
+        /// a workgroup count computed on the CPU or by an earlier dispatch, and
+        /// this stage is only what moves that decision into the same draw.
+        const TASK_SHADER = 1 << 23;
+        /// Inline ray queries from any shader stage — `RayQuery` in Slang,
+        /// `VK_KHR_ray_query`, DXR 1.1 inline ray tracing. Traversal happens
+        /// inside an otherwise ordinary fragment or compute shader, with no
+        /// separate hit or miss stage and no shader binding table.
+        ///
+        /// Half of what [`LightingPath::RayTraced`] needs; the rays still want
+        /// an [`ACCELERATION_STRUCTURE`](Self::ACCELERATION_STRUCTURE) to
+        /// traverse, which is why neither flag alone selects that path.
+        const RAY_QUERY = 1 << 24;
+        /// Ray generation, closest-hit, any-hit, intersection and miss shader
+        /// stages, dispatched as a pipeline of their own against a shader
+        /// binding table. Vulkan `VK_KHR_ray_tracing_pipeline`, DXR 1.0.
+        ///
+        /// Strictly more than [`RAY_QUERY`](Self::RAY_QUERY) and reported apart
+        /// from it: a device may offer inline queries without the pipeline
+        /// stages, and nothing in the engine's own lighting needs the stages.
+        const RAY_TRACING_PIPELINE = 1 << 25;
+        /// Bottom- and top-level acceleration structures can be built, refit
+        /// and traversed. Vulkan `VK_KHR_acceleration_structure`, DXR
+        /// BLAS/TLAS, Metal `MTLAccelerationStructure`.
+        ///
+        /// The other half of [`LightingPath::RayTraced`], and reported apart
+        /// from the two ray flags because it is the half that costs memory and
+        /// build time whether or not anything traces against it.
+        const ACCELERATION_STRUCTURE = 1 << 26;
+
+        /// The feature set the full GPU-driven path uses.
+        ///
+        /// A **named bundle**, not a tier and not a gate. A device holding all
+        /// of it can run one bindless descriptor array for every texture, GPU
+        /// pointers for per-draw data, and a single indirect-count call per
+        /// pass.
+        ///
+        /// Useful as an
+        /// [`optional_features`](crate::DeviceDesc::optional_features) bundle,
+        /// so a caller enables whatever of it the adapter turns out to have;
+        /// **never as a requirement**. Demanding the whole set is what topic 39
+        /// removed — it refuses a device over one absent flag while it has the
+        /// rest, which is the opposite of degrading. What a caller genuinely
+        /// cannot run without goes in
+        /// [`required_features`](crate::DeviceDesc::required_features) by name.
+        const GPU_DRIVEN = Self::DESCRIPTOR_INDEXING.bits()
             | Self::BUFFER_DEVICE_ADDRESS.bits()
             | Self::DRAW_INDIRECT_COUNT.bits()
             | Self::MULTI_DRAW_INDIRECT.bits()
@@ -343,28 +409,91 @@ impl Limits {
     }
 }
 
-/// Which of topic 03's two renderer tiers a device can run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum RendererTier {
-    /// Full GPU-driven path: bindless arrays, buffer device address,
-    /// multi-draw-indirect with a GPU-side count.
-    A,
-    /// Portable path: fixed-size texture arrays, per-batch indirect draws,
-    /// indexed SSBO lookups instead of pointers. Culling still runs in compute.
-    B,
+/// How the renderer gets geometry in front of the rasteriser.
+///
+/// One shader-permutation axis and one golden-image axis, declared best-first
+/// and resolved downward: every value draws the same meshlets out of the same
+/// pools, and only the submission tail differs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GeometryPath {
+    /// A mesh shader emits primitives directly, so the meshlet cull and the
+    /// geometry it survives live in one dispatch.
+    MeshShader,
+    /// Indirect draws whose *count* is itself read from a GPU buffer, so the
+    /// CPU never learns how many draws a pass emits.
+    IndirectCount,
+    /// Indirect draws with a CPU-known count: one argument per batch, each
+    /// batch's instance count still decided on the GPU. The floor, and what
+    /// WebGPU gets.
+    IndirectPerBatch,
 }
 
-impl RendererTier {
-    /// Whether this is [`RendererTier::A`].
+impl GeometryPath {
+    /// The best path `features` can run.
     #[must_use]
-    pub const fn is_a(self) -> bool {
-        matches!(self, Self::A)
+    pub const fn from_features(features: Features) -> Self {
+        if features.contains(Features::MESH_SHADER) {
+            Self::MeshShader
+        } else if features.contains(Features::DRAW_INDIRECT_COUNT) {
+            Self::IndirectCount
+        } else {
+            Self::IndirectPerBatch
+        }
     }
+}
 
-    /// Whether this is [`RendererTier::B`].
+/// How the renderer addresses textures and per-draw data from a shader.
+///
+/// The data-layout axis: it decides what a material index *means* in shader
+/// source, which is why it is a permutation rather than a branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BindingModel {
+    /// One runtime-sized descriptor array holding every texture, indexed by a
+    /// number that travels in the instance data.
+    Bindless,
+    /// Fixed-size texture arrays, bound a page at a time, with draws sorted so
+    /// one page serves a run of them.
+    ArrayPages,
+}
+
+impl BindingModel {
+    /// The best model `features` can run.
     #[must_use]
-    pub const fn is_b(self) -> bool {
-        matches!(self, Self::B)
+    pub const fn from_features(features: Features) -> Self {
+        if features.contains(Features::DESCRIPTOR_INDEXING) {
+            Self::Bindless
+        } else {
+            Self::ArrayPages
+        }
+    }
+}
+
+/// How the renderer resolves indirect lighting, shadows and reflections.
+///
+/// The raster path exists on every device and is what the browser and Apple
+/// targets get; see topic 39's worked example for why that is a capability
+/// answer and not a platform branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LightingPath {
+    /// Inline ray queries traced against an acceleration structure.
+    RayTraced,
+    /// Shadow maps, screen-space reflections and a probe-based ambient term.
+    Rasterised,
+}
+
+impl LightingPath {
+    /// The best path `features` can run.
+    ///
+    /// Ray tracing needs **both** halves: a device reporting only one of
+    /// [`Features::RAY_QUERY`] and [`Features::ACCELERATION_STRUCTURE`] has
+    /// nothing to trace, or nothing to trace with, and rasterises.
+    #[must_use]
+    pub const fn from_features(features: Features) -> Self {
+        if features.contains(Features::RAY_QUERY.union(Features::ACCELERATION_STRUCTURE)) {
+            Self::RayTraced
+        } else {
+            Self::Rasterised
+        }
     }
 }
 
@@ -378,18 +507,27 @@ pub struct DeviceCaps {
 }
 
 impl DeviceCaps {
-    /// The tier this device can run, derived from [`Features::TIER_A`].
+    /// Which [`GeometryPath`] this device selects.
     ///
-    /// Deriving rather than storing means a backend cannot claim Tier A while
-    /// missing a Tier A feature — the one lie that would silently produce a
-    /// renderer taking the bindless path on a device without bindless.
+    /// Derived rather than stored, here and for the other two selectors: a
+    /// backend cannot claim a path while missing what that path is built on —
+    /// the one lie that would silently produce a renderer taking the bindless
+    /// path on a device without bindless.
     #[must_use]
-    pub fn tier(&self) -> RendererTier {
-        if self.features.contains(Features::TIER_A) {
-            RendererTier::A
-        } else {
-            RendererTier::B
-        }
+    pub const fn geometry_path(&self) -> GeometryPath {
+        GeometryPath::from_features(self.features)
+    }
+
+    /// Which [`BindingModel`] this device selects.
+    #[must_use]
+    pub const fn binding_model(&self) -> BindingModel {
+        BindingModel::from_features(self.features)
+    }
+
+    /// Which [`LightingPath`] this device selects.
+    #[must_use]
+    pub const fn lighting_path(&self) -> LightingPath {
+        LightingPath::from_features(self.features)
     }
 
     /// Which of `required` this device is missing — empty if it satisfies them.
@@ -414,52 +552,160 @@ mod tests {
     use super::*;
     use crate::HalError;
 
+    /// A device with mesh shaders and no GPU-side draw count must still take
+    /// the mesh path. The natural way to write the mapping wrong is to test the
+    /// cheaper flag first, or to require both, and either produces a device
+    /// that has the best path available and does not use it.
     #[test]
-    fn tier_is_derived_from_features_not_asserted() {
-        let a = DeviceCaps {
-            features: Features::TIER_A,
-            limits: Limits::desktop(),
-        };
-        assert_eq!(a.tier(), RendererTier::A);
-        assert!(a.tier().is_a() && !a.tier().is_b());
+    fn mesh_shading_wins_without_a_draw_indirect_count() {
+        let mesh_only = GeometryPath::from_features(Features::MESH_SHADER);
+        assert_eq!(mesh_only, GeometryPath::MeshShader);
+        assert_eq!(
+            GeometryPath::from_features(Features::MESH_SHADER | Features::DRAW_INDIRECT_COUNT),
+            mesh_only,
+            "a draw count must not displace the mesh path"
+        );
+        assert_eq!(
+            GeometryPath::from_features(Features::DRAW_INDIRECT_COUNT),
+            GeometryPath::IndirectCount,
+            "the count alone is the middle path, not the floor"
+        );
+    }
 
-        // Drop exactly one Tier A feature and the tier must fall back. This is
-        // the check that stops "claims Tier A, lacks bindless" from existing.
-        for feature in Features::TIER_A.iter() {
-            let caps = DeviceCaps {
-                features: Features::TIER_A.difference(feature),
-                limits: Limits::desktop(),
-            };
+    /// Ray-traced lighting needs a structure to trace *and* a way to trace it.
+    /// Written as a truth table because the mistake is an `or`, which reads
+    /// identically and lets a device select a path it cannot execute.
+    #[test]
+    fn ray_traced_lighting_needs_both_halves() {
+        for (features, expected) in [
+            (Features::empty(), LightingPath::Rasterised),
+            (Features::RAY_QUERY, LightingPath::Rasterised),
+            (Features::ACCELERATION_STRUCTURE, LightingPath::Rasterised),
+            (
+                Features::RAY_TRACING_PIPELINE | Features::ACCELERATION_STRUCTURE,
+                LightingPath::Rasterised,
+            ),
+            (
+                Features::RAY_QUERY | Features::ACCELERATION_STRUCTURE,
+                LightingPath::RayTraced,
+            ),
+        ] {
             assert_eq!(
-                caps.tier(),
-                RendererTier::B,
-                "missing {feature:?} must demote to tier B"
+                LightingPath::from_features(features),
+                expected,
+                "{features:?}"
             );
         }
     }
 
+    /// The null-device case: a backend reporting nothing at all must still
+    /// select a runnable path on every axis, because there is no fourth answer
+    /// and no `Option` for the renderer to handle.
     #[test]
-    fn tier_a_requires_exactly_the_documented_capabilities() {
-        // Guards the doc table in `docs/plan/03-gpu-driven-rendering.md`. Named
-        // exhaustively, and checked for equality rather than containment: a
-        // feature added to `TIER_A` without a doc update is the thing this
-        // catches, and a `contains` list of a subset never would.
+    fn an_empty_feature_set_lands_on_the_floor_of_every_selector() {
+        let caps = DeviceCaps {
+            features: Features::empty(),
+            limits: Limits::minimum(),
+        };
+        assert_eq!(caps.geometry_path(), GeometryPath::IndirectPerBatch);
+        assert_eq!(caps.binding_model(), BindingModel::ArrayPages);
+        assert_eq!(caps.lighting_path(), LightingPath::Rasterised);
+    }
+
+    /// The accessors must read the device's own features and nothing else — a
+    /// selector wired to a constant would satisfy every assertion above.
+    #[test]
+    fn the_accessors_follow_the_devices_features() {
+        let caps = DeviceCaps {
+            features: Features::MESH_SHADER
+                | Features::DESCRIPTOR_INDEXING
+                | Features::RAY_QUERY
+                | Features::ACCELERATION_STRUCTURE,
+            limits: Limits::desktop(),
+        };
+        assert_eq!(caps.geometry_path(), GeometryPath::MeshShader);
+        assert_eq!(caps.binding_model(), BindingModel::Bindless);
+        assert_eq!(caps.lighting_path(), LightingPath::RayTraced);
+    }
+
+    /// Topic 39's monotonicity rule: **no capability's arrival may select a
+    /// path that needs more than the one it replaced.** Ranked by a table
+    /// written out here rather than by an `Ord` derived from declaration order,
+    /// which would make the assertion circular with the thing it checks.
+    #[test]
+    fn adding_a_feature_never_selects_a_path_that_needs_more() {
+        const AXES: [Features; 5] = [
+            Features::MESH_SHADER,
+            Features::DRAW_INDIRECT_COUNT,
+            Features::DESCRIPTOR_INDEXING,
+            Features::RAY_QUERY,
+            Features::ACCELERATION_STRUCTURE,
+        ];
+
+        fn rank(features: Features) -> [u8; 3] {
+            [
+                match GeometryPath::from_features(features) {
+                    GeometryPath::IndirectPerBatch => 0,
+                    GeometryPath::IndirectCount => 1,
+                    GeometryPath::MeshShader => 2,
+                },
+                match BindingModel::from_features(features) {
+                    BindingModel::ArrayPages => 0,
+                    BindingModel::Bindless => 1,
+                },
+                match LightingPath::from_features(features) {
+                    LightingPath::Rasterised => 0,
+                    LightingPath::RayTraced => 1,
+                },
+            ]
+        }
+
+        for subset in 0..(1u32 << AXES.len()) {
+            let base = AXES
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| subset & (1 << bit) != 0)
+                .fold(Features::empty(), |acc, (_, axis)| acc.union(*axis));
+            let before = rank(base);
+            for axis in AXES {
+                let after = rank(base.union(axis));
+                assert!(
+                    after.iter().zip(&before).all(|(now, then)| now >= then),
+                    "gaining {axis:?} on top of {base:?} went backwards: \
+                     {before:?} -> {after:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpu_driven_is_exactly_the_documented_bundle() {
+        // Guards the flag list against silent growth. Named exhaustively, and
+        // checked for equality rather than containment: a feature added to
+        // `GPU_DRIVEN` without a doc update is the thing this catches, and a
+        // `contains` list of a subset never would.
         let documented = Features::DESCRIPTOR_INDEXING
             | Features::BUFFER_DEVICE_ADDRESS
             | Features::DRAW_INDIRECT_COUNT
             | Features::MULTI_DRAW_INDIRECT
             | Features::COMPUTE
             | Features::TIMELINE_SEMAPHORE;
-        assert_eq!(Features::TIER_A, documented);
-        // Push constants are NOT part of Tier A: WebGPU lacks them, but so do
-        // some Tier A-capable configurations, and the renderer must have a
-        // uniform-buffer path regardless.
-        assert!(!Features::TIER_A.contains(Features::PUSH_CONSTANTS));
-        // Neither present capability is in Tier A, for the same reason as each
+        assert_eq!(Features::GPU_DRIVEN, documented);
+        // Push constants are NOT in the bundle: WebGPU lacks them, but so do
+        // some otherwise fully GPU-driven configurations, and the renderer must
+        // have a uniform-buffer path regardless.
+        assert!(!Features::GPU_DRIVEN.contains(Features::PUSH_CONSTANTS));
+        // Neither present capability is in it, for the same reason as each
         // other: a device without them renders identical frames and only loses
         // the ability to be *asked* about the display.
-        assert!(!Features::TIER_A.contains(Features::PRESENT_FEEDBACK));
-        assert!(!Features::TIER_A.contains(Features::PRESENT_TIMING));
+        assert!(!Features::GPU_DRIVEN.contains(Features::PRESENT_FEEDBACK));
+        assert!(!Features::GPU_DRIVEN.contains(Features::PRESENT_TIMING));
+        // Nor is anything the selectors branch on beyond the draw count: mesh
+        // shading and ray tracing are their own axes, and folding them in here
+        // would make the bundle a tier again.
+        assert!(!Features::GPU_DRIVEN.contains(Features::MESH_SHADER));
+        assert!(!Features::GPU_DRIVEN.contains(Features::RAY_QUERY));
+        assert!(!Features::GPU_DRIVEN.contains(Features::ACCELERATION_STRUCTURE));
     }
 
     #[test]
@@ -468,11 +714,11 @@ mod tests {
             features: Features::COMPUTE | Features::TIMELINE_SEMAPHORE,
             limits: Limits::minimum(),
         };
-        let missing = caps.missing(Features::TIER_A);
+        let missing = caps.missing(Features::GPU_DRIVEN);
         assert!(missing.contains(Features::DESCRIPTOR_INDEXING));
         assert!(missing.contains(Features::BUFFER_DEVICE_ADDRESS));
         assert!(!missing.contains(Features::COMPUTE));
-        assert!(!caps.supports(Features::TIER_A));
+        assert!(!caps.supports(Features::GPU_DRIVEN));
         assert!(caps.supports(Features::COMPUTE));
         assert!(caps.missing(Features::COMPUTE).is_empty());
     }
@@ -543,7 +789,7 @@ mod tests {
     fn every_feature_owns_a_distinct_bit() {
         use bitflags::Flags;
 
-        // `TIER_A` is a named union of other flags, not a bit of its own.
+        // `GPU_DRIVEN` is a named union of other flags, not a bit of its own.
         let single_bit: Vec<&'static str> = Features::FLAGS
             .iter()
             .filter(|flag| flag.value().bits().is_power_of_two())
@@ -559,10 +805,9 @@ mod tests {
     /// Every optional feature must be individually observable: `missing` names
     /// exactly it, and a device without it refuses it.
     ///
-    /// Driven off the flag table, because the `TIER_A` loop above is a good
-    /// self-growing pattern that structurally cannot reach the optional half —
-    /// nine flags had no mention in any test at all, including the two the
-    /// queue selection keys off.
+    /// Driven off the flag table, because a hand-written list structurally
+    /// cannot keep up — nine flags had no mention in any test at all when this
+    /// was written, including the two the queue selection keys off.
     #[test]
     fn every_feature_is_reported_one_at_a_time() {
         use bitflags::Flags;

@@ -24,11 +24,14 @@ pub(crate) fn instance() -> VkInstance {
             eprintln!("vk e2e: loader {major}.{minor}.{patch}");
             for adapter in instance.adapters() {
                 eprintln!(
-                    "vk e2e: adapter {:?} ({:?}) driver {:?} tier {:?}",
+                    "vk e2e: adapter {:?} ({:?}) driver {:?} geometry {:?} binding {:?} \
+                     lighting {:?}",
                     adapter.name,
                     adapter.device_type,
                     adapter.driver,
-                    adapter.caps.tier()
+                    adapter.caps.geometry_path(),
+                    adapter.caps.binding_model(),
+                    adapter.caps.lighting_path()
                 );
             }
             instance
@@ -79,7 +82,7 @@ impl Headless {
             .create_device(&DeviceDesc {
                 label: Some("vk e2e"),
                 adapter: adapter.id,
-                // Never `TIER_A`: lavapipe and radv genuinely differ, and this
+                // Never `GPU_DRIVEN`: lavapipe and radv genuinely differ, and this
                 // suite exists partly to find out how.
                 required_features: Features::empty(),
                 // `PRESENT_FEEDBACK` is asked for here even though nothing
@@ -96,7 +99,7 @@ impl Headless {
                 // in this suite instead of on a user's machine. The offscreen
                 // ring then has to keep the query out of its own path, which is
                 // the guard the test beside the present-wait one covers.
-                optional_features: Features::TIER_A
+                optional_features: Features::GPU_DRIVEN
                     | Features::TIMESTAMP_QUERY
                     | Features::DEBUG_MARKERS
                     | Features::PRESENT_FEEDBACK

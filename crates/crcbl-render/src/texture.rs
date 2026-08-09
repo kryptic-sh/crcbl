@@ -361,7 +361,7 @@ mod tests {
             .create_device(&DeviceDesc {
                 label: None,
                 adapter: adapter.id,
-                required_features: Features::TIER_A,
+                required_features: Features::GPU_DRIVEN,
                 optional_features: Features::empty(),
                 compatible_surface: None,
             })

@@ -618,7 +618,7 @@ mod tests {
         assert_eq!(common_sample_count(&limits), 1);
     }
 
-    use crcbl_hal::RendererTier;
+    use crcbl_hal::{BindingModel, GeometryPath};
 
     fn family(flags: vk::QueueFlags, count: u32) -> vk::QueueFamilyProperties {
         vk::QueueFamilyProperties {
@@ -729,16 +729,18 @@ mod tests {
             features,
             limits: Limits::desktop(),
         };
-        assert_eq!(caps.tier(), RendererTier::A);
-        assert!(caps.missing(Features::TIER_A).is_empty());
+        assert_eq!(caps.geometry_path(), GeometryPath::IndirectCount);
+        assert_eq!(caps.binding_model(), BindingModel::Bindless);
+        assert!(caps.missing(Features::GPU_DRIVEN).is_empty());
         assert!(features.contains(Features::TIMESTAMP_QUERY));
         assert!(features.contains(Features::PUSH_CONSTANTS));
         assert!(features.contains(Features::DEBUG_MARKERS));
         // Present feedback is a device *extension* pair, so nothing in a
-        // feature struct can imply it — and Tier A does not need it, which is
-        // why a fully featured device that lacks it is still Tier A.
+        // feature struct can imply it — and the GPU-driven bundle does not
+        // need it, which is why a fully featured device that lacks it still
+        // satisfies the bundle.
         assert!(!features.contains(Features::PRESENT_FEEDBACK));
-        assert!(!Features::TIER_A.contains(Features::PRESENT_FEEDBACK));
+        assert!(!Features::GPU_DRIVEN.contains(Features::PRESENT_FEEDBACK));
     }
 
     /// `PRESENT_FEEDBACK` comes from the extension probe and the feature query
@@ -762,8 +764,9 @@ mod tests {
         };
         assert!(device(true).contains(Features::PRESENT_FEEDBACK));
         assert!(!device(false).contains(Features::PRESENT_FEEDBACK));
-        // Nothing else moves with it: a capability that changed the tier would
-        // make a Tier A device stop being one on a driver without the pair.
+        // Nothing else moves with it: a capability that dragged another flag
+        // along would change the path a device selects on a driver that merely
+        // lacks the extension pair.
         assert_eq!(
             device(true).difference(device(false)),
             Features::PRESENT_FEEDBACK
@@ -796,20 +799,22 @@ mod tests {
             device(true).difference(device(false)),
             Features::PRESENT_TIMING
         );
-        // Not a Tier A feature, so a device without it is not demoted — the
-        // same argument as for present feedback, and the reason neither belongs
-        // in `TIER_A`.
-        assert!(!Features::TIER_A.contains(Features::PRESENT_TIMING));
-        assert_eq!(
-            DeviceCaps {
-                features: device(false),
+        // Not part of the GPU-driven bundle, so a device without it selects
+        // exactly the same paths — the same argument as for present feedback,
+        // and the reason neither belongs in `GPU_DRIVEN`.
+        assert!(!Features::GPU_DRIVEN.contains(Features::PRESENT_TIMING));
+        let paths = |features| {
+            let caps = DeviceCaps {
+                features,
                 limits: Limits::desktop(),
-            }
-            .tier(),
-            RendererTier::B,
-            "the synthetic device here is deliberately not Tier A; only the \
-             present-timing flag is under test"
-        );
+            };
+            (
+                caps.geometry_path(),
+                caps.binding_model(),
+                caps.lighting_path(),
+            )
+        };
+        assert_eq!(paths(device(true)), paths(device(false)));
     }
 
     /// The two present capabilities are separate bits and separate probes, so
@@ -948,15 +953,16 @@ mod tests {
                 features,
                 limits: Limits::minimum(),
             };
-            assert_eq!(caps.tier(), RendererTier::B, "{name}");
+            assert_eq!(caps.binding_model(), BindingModel::ArrayPages, "{name}");
         }
     }
 
     /// The lavapipe-shaped case the P1 CI matrix exists to catch: a device
-    /// without `drawIndirectCount` or `multiDrawIndirect` is Tier B, and the
-    /// gap is named rather than merely "unsupported".
+    /// without `drawIndirectCount` or `multiDrawIndirect` falls to the
+    /// per-batch geometry path, and the gap is named rather than merely
+    /// "unsupported".
     #[test]
-    fn a_device_without_indirect_count_is_tier_b_and_says_which_feature() {
+    fn a_device_without_indirect_count_falls_back_and_says_which_feature() {
         let features = features_of(
             &vk::PhysicalDeviceFeatures::default(),
             &tier_a_vulkan_1_2().draw_indirect_count(false),
@@ -970,8 +976,8 @@ mod tests {
             features,
             limits: Limits::minimum(),
         };
-        assert_eq!(caps.tier(), RendererTier::B);
-        let missing = caps.missing(Features::TIER_A);
+        assert_eq!(caps.geometry_path(), GeometryPath::IndirectPerBatch);
+        let missing = caps.missing(Features::GPU_DRIVEN);
         assert!(missing.contains(Features::DRAW_INDIRECT_COUNT));
         assert!(missing.contains(Features::MULTI_DRAW_INDIRECT));
         assert!(!missing.contains(Features::DESCRIPTOR_INDEXING));

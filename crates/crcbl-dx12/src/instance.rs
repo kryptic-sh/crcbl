@@ -68,11 +68,11 @@ pub(crate) struct AdapterRecord {
 impl AdapterRecord {
     /// One line carrying everything this slice was written to measure.
     ///
-    /// `docs/backlog.md`'s "Does WARP clear Tier A?" is answered by
-    /// `sm66-dynamic-resources`, **not** by `tier`: the tier is B on every
-    /// adapter in this slice because four Tier A flags wait on calls this crate
-    /// does not make yet, so it says how much of the backend is written and
-    /// nothing about the hardware. See the crate docs.
+    /// `docs/backlog.md`'s "Does WARP clear the GPU-driven set?" is answered by
+    /// `sm66-dynamic-resources`, **not** by the selected paths: those sit at the
+    /// floor on every adapter in this slice because four of the bundle's flags
+    /// wait on calls this crate does not make yet, so they say how much of the
+    /// backend is written and nothing about the hardware. See the crate docs.
     ///
     /// Every test that can fail on an adapter carries this string in its
     /// message, so a red run publishes the measurement whether or not a green
@@ -82,7 +82,8 @@ impl AdapterRecord {
             "crcbl-dx12 adapter {id} \"{name}\" luid={luid:#018x} type={kind:?} \
              vendor={vendor:#06x} device={device:#06x} ResourceBindingTier={tier} \
              HighestShaderModel={model} sm66-dynamic-resources={dynamic} \
-             block-compression={bc} renderer-tier={renderer:?} features={features:?} \
+             block-compression={bc} geometry={geometry:?} binding={binding:?} \
+             lighting={lighting:?} features={features:?} \
              driver=\"{driver}\"",
             id = self.info.id.0,
             luid = self.raw.luid,
@@ -102,7 +103,9 @@ impl AdapterRecord {
             } else {
                 "no"
             },
-            renderer = self.info.caps.tier(),
+            geometry = self.info.caps.geometry_path(),
+            binding = self.info.caps.binding_model(),
+            lighting = self.info.caps.lighting_path(),
             features = self.info.caps.features,
             driver = self.info.driver,
         )
@@ -751,7 +754,7 @@ impl PendingDevice for Dx12PendingDevice {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crcbl_hal::{DeviceType, Features, Limits, RendererTier};
+    use crcbl_hal::{DeviceType, Features, GeometryPath, Limits};
     /// The two constants the bindless rule is written against, named here so the
     /// test compares with D3D12's own numbers rather than through the function
     /// it is checking.
@@ -772,10 +775,10 @@ pub(crate) mod tests {
 
     /// A device request this backend can actually satisfy today.
     ///
-    /// [`DeviceDesc::for_adapter`] asks for [`Features::TIER_A`], which this
-    /// backend does not report until the pipeline and command slices land — see
-    /// `the_default_device_desc_is_refused_for_the_tier_a_gap` below, which is
-    /// the test that pins that.
+    /// [`DeviceDesc::for_adapter`] requires compute and a timeline semaphore,
+    /// neither of which this backend reports until the pipeline and command
+    /// slices land — see `the_default_device_desc_is_refused_for_the_gap` below,
+    /// which is the test that pins that.
     pub(crate) fn desc(adapter: AdapterId) -> DeviceDesc<'static> {
         DeviceDesc {
             label: Some("crcbl-dx12 test device"),
@@ -1122,7 +1125,7 @@ pub(crate) mod tests {
     /// the four: that is a flag added ahead of the call behind it, which is the
     /// mistake `crcbl-mtl` had to reverse.
     #[test]
-    fn every_adapter_is_tier_b_until_the_calls_behind_the_flags_land() {
+    fn every_adapter_sits_at_the_floor_until_the_calls_behind_the_flags_land() {
         let instance = open();
         assert!(!instance.records().is_empty(), "nothing to check");
         let all = report_all(&instance);
@@ -1130,7 +1133,7 @@ pub(crate) mod tests {
 
         for record in instance.records() {
             let line = record.report();
-            let missing = record.info.caps.missing(Features::TIER_A);
+            let missing = record.info.caps.missing(Features::GPU_DRIVEN);
             assert!(
                 !missing.contains(Features::BUFFER_DEVICE_ADDRESS),
                 "every D3D12 device has GPU virtual addresses: {line}"
@@ -1147,9 +1150,9 @@ pub(crate) mod tests {
                 );
             }
             assert_eq!(
-                record.info.caps.tier(),
-                RendererTier::B,
-                "the derived tier moved; the crate docs say why it cannot yet: {line}"
+                record.info.caps.geometry_path(),
+                GeometryPath::IndirectPerBatch,
+                "the derived geometry path moved; the crate docs say why it cannot yet: {line}"
             );
         }
     }
@@ -1181,28 +1184,29 @@ pub(crate) mod tests {
         assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
     }
 
-    /// The seam's convenience constructor asks for Tier A, and this backend is
-    /// Tier B until the pipeline and command slices land — so `for_adapter` is
-    /// refused, by name, on real hardware.
+    /// The seam's convenience constructor requires compute and a timeline
+    /// semaphore, and this backend reports neither until the pipeline and
+    /// command slices land — so `for_adapter` is refused, by name, on real
+    /// hardware.
     ///
-    /// This is the visible consequence of the tier decision the crate docs argue
-    /// for; if the backend ever starts reporting the four waiting features, this
-    /// test says so rather than letting the change go unnoticed.
+    /// This is the visible consequence of the reporting decision the crate docs
+    /// argue for; if the backend ever starts reporting the waiting features,
+    /// this test says so rather than letting the change go unnoticed.
     #[test]
-    fn the_default_device_desc_is_refused_for_the_tier_a_gap() {
+    fn the_default_device_desc_is_refused_for_the_gap() {
         let instance = open();
         let adapters = instance.adapters();
         assert!(!adapters.is_empty(), "nothing to check");
 
         let error = instance
             .request_device(&DeviceDesc::for_adapter(adapters[0].id))
-            .expect_err("this backend does not report Tier A");
+            .expect_err("this backend reports neither compute nor a timeline semaphore");
         let HalError::UnsupportedFeatures { missing } = error else {
             panic!("expected a feature gap, got {error:?}");
         };
         assert!(
             missing.contains(Features::COMPUTE | Features::TIMELINE_SEMAPHORE),
-            "the calls behind these are what keep this backend at Tier B: {missing:?}"
+            "the calls behind these are what this backend still owes: {missing:?}"
         );
     }
 

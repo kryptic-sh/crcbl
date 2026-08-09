@@ -411,7 +411,9 @@ impl core::fmt::Debug for DeviceInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DeviceInner")
             .field("id", &self.id)
-            .field("tier", &self.caps.tier())
+            .field("geometry", &self.caps.geometry_path())
+            .field("binding", &self.caps.binding_model())
+            .field("lighting", &self.caps.lighting_path())
             .finish_non_exhaustive()
     }
 }
@@ -669,9 +671,11 @@ impl MetalDevice {
             state: Mutex::new(DeviceState::default()),
         });
         log::info!(
-            "crcbl-mtl: opened {:?} (tier {:?})",
+            "crcbl-mtl: opened {:?} (geometry {:?}, binding {:?}, lighting {:?})",
             record.info.name,
-            caps.tier()
+            caps.geometry_path(),
+            caps.binding_model(),
+            caps.lighting_path()
         );
         Ok(Self { inner })
     }

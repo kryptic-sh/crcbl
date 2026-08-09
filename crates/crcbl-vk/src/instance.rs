@@ -642,12 +642,14 @@ impl VkInstance {
         }
         for record in &adapters {
             log::info!(
-                "crcbl-vk: adapter {} — {} ({:?}), {}, tier {:?}",
+                "crcbl-vk: adapter {} — {} ({:?}), {}, geometry {:?}, binding {:?}, lighting {:?}",
                 record.info.id.0,
                 record.info.name,
                 record.info.device_type,
                 record.info.driver,
-                record.info.caps.tier()
+                record.info.caps.geometry_path(),
+                record.info.caps.binding_model(),
+                record.info.caps.lighting_path()
             );
         }
 

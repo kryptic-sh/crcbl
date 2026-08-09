@@ -57,12 +57,13 @@ fn a_buffer_from_one_device_is_foreign_to_another() {
     let open = || match instance.create_device(&DeviceDesc::for_adapter(adapter.id)) {
         Ok(device) => device,
         Err(error) => {
-            // `for_adapter` demands Tier A, which lavapipe may not have — but
-            // that is the *only* reason it may fail here, and swallowing any
-            // error would let a genuine one hide behind the fallback.
+            // `for_adapter` requires compute and a timeline semaphore, which a
+            // driver may not have — but that is the *only* reason it may fail
+            // here, and swallowing any error would let a genuine one hide
+            // behind the fallback.
             assert!(
                 matches!(error, crcbl_hal::HalError::UnsupportedFeatures { .. }),
-                "the only permitted refusal of a Tier A request is a named \
+                "the only permitted refusal of the headless default is a named \
                  feature gap: {error}"
             );
             instance

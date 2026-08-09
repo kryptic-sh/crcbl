@@ -235,7 +235,7 @@ pub struct BindGroupDesc<'a> {
 /// [`BindingKind::UniformBuffer`] — which is a *data-layout* decision the
 /// renderer makes up front, not something a backend can paper over per draw.
 /// That is why push constants are deliberately not part of
-/// [`Features::TIER_A`](crate::Features::TIER_A).
+/// [`Features::GPU_DRIVEN`](crate::Features::GPU_DRIVEN).
 ///
 /// # Decision: the name stays
 ///
@@ -243,7 +243,7 @@ pub struct BindGroupDesc<'a> {
 /// DX12's concept under the name *root constants* and Metal's under
 /// `setBytes`, so it is the common cross-API term rather than a vk-only one —
 /// and renaming it would not close the real gap, which is that WebGPU lacks the
-/// feature entirely. That gap is a **tier fact**, and it belongs in
+/// feature entirely. That gap is a **capability fact**, and it belongs in
 /// [`DeviceCaps`](crate::DeviceCaps) where a backend declares it and a caller
 /// branches on it, not in the name of a type that three of four backends
 /// implement natively.

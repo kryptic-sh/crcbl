@@ -636,19 +636,21 @@ mod tests {
     }
 
     /// Nothing wgpu cannot do may be advertised — most importantly buffer
-    /// device address, whose absence is what puts this backend in Tier B.
+    /// device address, which no wgpu backend exposes at all.
     #[test]
-    fn wgpu_never_claims_tier_a() {
+    fn wgpu_never_claims_what_it_cannot_do() {
         let everything = hal_features_for(wgpu::Features::all());
         assert!(!everything.contains(Features::BUFFER_DEVICE_ADDRESS));
         assert!(!everything.contains(Features::TIMESTAMP_QUERY));
-        assert_eq!(
-            DeviceCaps {
-                features: everything,
-                limits: hal_limits_for(&wgpu::Limits::defaults(), wgpu::Features::all()),
-            }
-            .tier(),
-            crcbl_hal::RendererTier::B
+        let caps = DeviceCaps {
+            features: everything,
+            limits: hal_limits_for(&wgpu::Limits::defaults(), wgpu::Features::all()),
+        };
+        assert!(
+            caps.missing(Features::GPU_DRIVEN)
+                .contains(Features::BUFFER_DEVICE_ADDRESS),
+            "even asking wgpu for everything leaves the bundle unsatisfied: {:?}",
+            caps.features
         );
     }
 

@@ -244,9 +244,11 @@ pub struct DeviceDesc<'a> {
     /// [`HalError::UnsupportedFeatures`] naming the exact gap if the adapter
     /// lacks any of them.
     ///
-    /// `crcbl-vk` passes [`Features::TIER_A`] and refuses anything less; there
-    /// are no partial fallback paths in the MVP
-    /// (`docs/plan/02-vulkan-backend.md`).
+    /// Keep this to what the caller genuinely cannot render without. Per topic
+    /// 39 a missing feature degrades by default, and naming one here is how a
+    /// caller opts out of that: a game whose whole look is ray traced puts
+    /// [`Features::RAY_QUERY`] here and gets a named failure rather than a
+    /// picture that is quietly a different game.
     pub required_features: Features,
     /// Features to enable if available. Absent ones are simply not enabled;
     /// check [`Device::caps`] afterwards to find out.
@@ -260,16 +262,23 @@ pub struct DeviceDesc<'a> {
 }
 
 impl DeviceDesc<'_> {
-    /// A Tier A device on `adapter`, with no surface.
+    /// A headless device on `adapter`, asking for as little as possible.
     ///
-    /// The shape a headless render test or `crcbl screenshot` uses.
+    /// The shape a headless render test or `crcbl screenshot` uses. It requires
+    /// only compute and a timeline semaphore — the two nothing in the engine
+    /// can work without, since every pass culls in compute and every frame is
+    /// paced on a monotonic counter — and asks for
+    /// [`Features::GPU_DRIVEN`] on top as *optional*, so the device opens on
+    /// whatever the adapter has and the selectors decide what to record. An
+    /// earlier version required the whole bundle and refused a device over one
+    /// absent flag while it had the rest; topic 39 exists to replace that.
     #[must_use]
     pub const fn for_adapter(adapter: AdapterId) -> Self {
         Self {
             label: None,
             adapter,
-            required_features: Features::TIER_A,
-            optional_features: Features::empty(),
+            required_features: Features::COMPUTE.union(Features::TIMELINE_SEMAPHORE),
+            optional_features: Features::GPU_DRIVEN,
             compatible_surface: None,
         }
     }
@@ -499,8 +508,8 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// Which backend this device belongs to.
     fn backend(&self) -> BackendKind;
 
-    /// What this device can do. Drives the Tier A / Tier B choice; see
-    /// [`DeviceCaps::tier`].
+    /// What this device can do. Drives the path selection; see
+    /// [`DeviceCaps::geometry_path`] and its siblings.
     fn caps(&self) -> DeviceCaps;
 
     /// A queue of the given kind.
@@ -1046,13 +1055,31 @@ mod tests {
     }
 
     #[test]
-    fn default_device_desc_demands_tier_a_and_no_surface() {
+    fn default_device_desc_requires_only_the_unavoidable_and_no_surface() {
         let desc = DeviceDesc::for_adapter(AdapterId(0));
-        assert_eq!(desc.required_features, Features::TIER_A);
+        assert_eq!(
+            desc.required_features,
+            Features::COMPUTE | Features::TIMELINE_SEMAPHORE
+        );
         assert!(
             desc.compatible_surface.is_none(),
             "the headless shape must not require a window"
         );
-        assert!(desc.optional_features.is_empty());
+        assert_eq!(desc.optional_features, Features::GPU_DRIVEN);
+        // The point of the split: everything the GPU-driven path wants beyond
+        // the two above degrades instead of refusing the device. Named one at a
+        // time, because a bundle comparison would still pass if one flag leaked
+        // back across the line.
+        for optional in [
+            Features::DESCRIPTOR_INDEXING,
+            Features::BUFFER_DEVICE_ADDRESS,
+            Features::DRAW_INDIRECT_COUNT,
+            Features::MULTI_DRAW_INDIRECT,
+        ] {
+            assert!(
+                !desc.required_features.contains(optional),
+                "{optional:?} must be optional, not demanded"
+            );
+        }
     }
 }

@@ -1231,7 +1231,7 @@ mod tests {
             .create_device(&DeviceDesc {
                 label: Some("sprite pass"),
                 adapter: adapter.id,
-                required_features: Features::TIER_A,
+                required_features: Features::GPU_DRIVEN,
                 optional_features: Features::empty(),
                 compatible_surface: None,
             })
@@ -2330,7 +2330,7 @@ mod tests {
     fn a_new_that_fails_part_way_leaks_nothing() {
         let recorder = Recorder::new();
         let instance = NullInstance::new(DeviceCaps {
-            features: Features::TIER_A,
+            features: Features::GPU_DRIVEN,
             limits: Limits {
                 max_bind_groups: 1,
                 ..Limits::desktop()
@@ -2342,7 +2342,7 @@ mod tests {
             .create_device(&DeviceDesc {
                 label: Some("one bind group"),
                 adapter: adapter.id,
-                required_features: Features::TIER_A,
+                required_features: Features::GPU_DRIVEN,
                 optional_features: Features::empty(),
                 compatible_surface: None,
             })

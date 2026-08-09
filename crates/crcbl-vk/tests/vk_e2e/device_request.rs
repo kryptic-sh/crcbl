@@ -1,5 +1,8 @@
 use crate::harness::instance;
-use crcbl_hal::{BufferDesc, BufferUsage, DeviceDesc, Features, Instance, MemoryLocation};
+use crcbl_hal::{
+    BindingModel, BufferDesc, BufferUsage, DeviceDesc, Features, GeometryPath, Instance,
+    MemoryLocation,
+};
 
 /// The two `request_device` argument errors, neither of which any vk test
 /// asserted. Both are decided before a `VkDevice` exists, so they need nothing
@@ -109,12 +112,12 @@ fn a_device_request_hands_its_device_over_exactly_once() {
     instance.validation_report().assert_clean();
 }
 
-/// The tier determination, against whatever this machine actually is. The
-/// assertion is not "Tier A" — lavapipe may not be — but that the *report is
-/// consistent*, which is the property a renderer branches on.
+/// The path selection, against whatever this machine actually is. The assertion
+/// is not "the best path" — lavapipe may not reach it — but that the *report is
+/// consistent* with the limits beside it, which is what a renderer branches on.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn the_reported_tier_agrees_with_the_reported_features() {
+fn the_selected_paths_agree_with_the_reported_features() {
     let instance = instance();
     let adapters = instance.adapters();
     // Without this the whole test is a loop over an empty list — every
@@ -128,19 +131,28 @@ fn the_reported_tier_agrees_with_the_reported_features() {
     for adapter in adapters {
         let caps = adapter.caps;
         assert_eq!(
-            caps.tier().is_a(),
-            caps.supports(Features::TIER_A),
-            "{}: tier and features must agree",
+            caps.binding_model() == BindingModel::Bindless,
+            caps.supports(Features::DESCRIPTOR_INDEXING),
+            "{}: the binding model and the feature must agree",
             adapter.name
         );
-        if caps.tier().is_a() {
+        assert_eq!(
+            caps.geometry_path() == GeometryPath::IndirectCount,
+            caps.supports(Features::DRAW_INDIRECT_COUNT) && !caps.supports(Features::MESH_SHADER),
+            "{}: the geometry path and the features must agree",
+            adapter.name
+        );
+        if caps.binding_model() == BindingModel::Bindless {
             assert!(caps.limits.max_bindless_descriptors > 0, "{}", adapter.name);
+        }
+        if caps.geometry_path() == GeometryPath::IndirectCount {
             assert!(caps.limits.max_draw_indirect_count > 1, "{}", adapter.name);
-        } else {
+        }
+        if !caps.supports(Features::GPU_DRIVEN) {
             eprintln!(
-                "vk e2e: {} is Tier B, missing {:?}",
+                "vk e2e: {} degrades, missing {:?}",
                 adapter.name,
-                caps.missing(Features::TIER_A)
+                caps.missing(Features::GPU_DRIVEN)
             );
         }
         if caps.features.contains(Features::TIMESTAMP_QUERY) {

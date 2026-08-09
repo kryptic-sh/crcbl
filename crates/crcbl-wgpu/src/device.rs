@@ -2020,9 +2020,11 @@ mod tests {
             }
         };
         assert_eq!(device.backend(), BackendKind::Wgpu);
-        assert_eq!(
-            device.caps().tier(),
-            hal::RendererTier::B,
+        assert!(
+            device
+                .caps()
+                .missing(hal::Features::GPU_DRIVEN)
+                .contains(hal::Features::BUFFER_DEVICE_ADDRESS),
             "wgpu has no buffer device address"
         );
 

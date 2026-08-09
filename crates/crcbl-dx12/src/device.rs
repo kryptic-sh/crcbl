@@ -365,7 +365,9 @@ impl core::fmt::Debug for DeviceInner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("DeviceInner")
             .field("id", &self.owner.id)
-            .field("tier", &self.caps.tier())
+            .field("geometry", &self.caps.geometry_path())
+            .field("binding", &self.caps.binding_model())
+            .field("lighting", &self.caps.lighting_path())
             .finish_non_exhaustive()
     }
 }
@@ -1016,9 +1018,11 @@ impl Dx12Device {
             state: Mutex::new(state),
         });
         log::info!(
-            "crcbl-dx12: opened \"{}\" (tier {:?})",
+            "crcbl-dx12: opened \"{}\" (geometry {:?}, binding {:?}, lighting {:?})",
             record.info.name,
-            caps.tier()
+            caps.geometry_path(),
+            caps.binding_model(),
+            caps.lighting_path()
         );
         Ok(Self { inner })
     }
@@ -5254,10 +5258,10 @@ pub(crate) mod tests {
     /// argues why it is unconditional here where `crcbl-vk` has to probe.
     ///
     /// Red when the flag stops being reported, and red if it ever creeps into
-    /// [`Features::TIER_A`], which it must not: the seam says a device without
+    /// [`Features::GPU_DRIVEN`], which it must not: the seam says a device without
     /// present feedback renders the same frames.
     #[test]
-    fn every_device_reports_present_feedback_and_it_is_not_a_tier_a_flag() {
+    fn every_device_reports_present_feedback_and_it_is_not_a_gpu_driven_flag() {
         let (_instance, device) = open_device();
         assert!(
             device.caps().features.contains(Features::PRESENT_FEEDBACK),
@@ -5265,8 +5269,8 @@ pub(crate) mod tests {
             device.caps().features
         );
         assert!(
-            !Features::TIER_A.contains(Features::PRESENT_FEEDBACK),
-            "pacing is not part of what makes a device Tier A"
+            !Features::GPU_DRIVEN.contains(Features::PRESENT_FEEDBACK),
+            "pacing is not part of the GPU-driven bundle"
         );
     }
 

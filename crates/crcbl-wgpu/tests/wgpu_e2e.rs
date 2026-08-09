@@ -77,11 +77,13 @@ fn instance() -> WgpuInstance {
     });
     for adapter in instance.adapters() {
         eprintln!(
-            "wgpu e2e: adapter {:?} ({:?}) driver {:?} tier {:?}",
+            "wgpu e2e: adapter {:?} ({:?}) driver {:?} geometry {:?} binding {:?} lighting {:?}",
             adapter.name,
             adapter.device_type,
             adapter.driver,
-            adapter.caps.tier()
+            adapter.caps.geometry_path(),
+            adapter.caps.binding_model(),
+            adapter.caps.lighting_path()
         );
     }
     instance
@@ -135,7 +137,7 @@ impl Headless {
         crcbl_hal::QueueHandle,
         Format,
     ) {
-        Self::open_device_with(Features::TIER_A | Features::DEBUG_MARKERS)
+        Self::open_device_with(Features::GPU_DRIVEN | Features::DEBUG_MARKERS)
     }
 
     /// [`Self::open_device`], with the caller's choice of optional features — a

@@ -140,7 +140,7 @@ fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
         // Optional, not required: the UI pass hands its shader the viewport size
         // through a push constant where there are any and through a uniform
         // buffer where there are none.
-        optional_features: Features::TIER_A
+        optional_features: Features::GPU_DRIVEN
             | Features::TIMESTAMP_QUERY
             | Features::DEBUG_MARKERS
             | Features::PUSH_CONSTANTS,

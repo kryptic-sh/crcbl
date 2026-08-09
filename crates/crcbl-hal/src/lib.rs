@@ -184,13 +184,13 @@
 //!
 //! ```
 //! use crcbl_hal::null::NullInstance;
-//! use crcbl_hal::{BufferDesc, BufferUsage, DeviceDesc, Instance, MemoryLocation};
+//! use crcbl_hal::{BindingModel, BufferDesc, BufferUsage, DeviceDesc, Instance, MemoryLocation};
 //!
 //! let instance: Box<dyn Instance> = Box::new(NullInstance::tier_a());
 //! let adapters = instance.adapters();
 //! let device = instance.create_device(&DeviceDesc::for_adapter(adapters[0].id))?;
 //!
-//! assert!(device.caps().tier().is_a(), "the reference null adapter is Tier A");
+//! assert_eq!(device.caps().binding_model(), BindingModel::Bindless);
 //!
 //! let vertices = device.create_buffer(&BufferDesc {
 //!     label: Some("vertex pool"),
@@ -218,7 +218,8 @@ pub mod sync;
 pub mod threading;
 
 pub use caps::{
-    AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits, RendererTier,
+    AdapterId, AdapterInfo, BackendKind, BindingModel, DeviceCaps, DeviceType, Features,
+    GeometryPath, LightingPath, Limits,
 };
 pub use command::{
     Barriers, BufferBarrier, BufferCopy, BufferImageCopy, ClearValue, ColorAttachment,

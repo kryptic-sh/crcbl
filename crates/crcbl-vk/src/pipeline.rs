@@ -1170,7 +1170,7 @@ mod tests {
             label: Some("vertices"),
             entries: &entries,
         };
-        validate_bind_group_layout(&desc, &caps(Features::TIER_A)).expect("Tier A");
+        validate_bind_group_layout(&desc, &caps(Features::GPU_DRIVEN)).expect("Tier A");
         validate_bind_group_layout(&desc, &caps(Features::empty())).expect("Tier B too");
     }
 
@@ -1194,7 +1194,8 @@ mod tests {
                 matches!(error, HalError::Unsupported { .. }),
                 "{flag:?}: {error}"
             );
-            validate_bind_group_layout(&desc, &caps(Features::TIER_A)).expect("Tier A accepts it");
+            validate_bind_group_layout(&desc, &caps(Features::GPU_DRIVEN))
+                .expect("Tier A accepts it");
         }
     }
 
@@ -1211,7 +1212,7 @@ mod tests {
             label: None,
             entries: &entries,
         };
-        let error = validate_bind_group_layout(&desc, &caps(Features::TIER_A))
+        let error = validate_bind_group_layout(&desc, &caps(Features::GPU_DRIVEN))
             .expect_err("not the last binding");
         assert!(error.to_string().contains("VARIABLE_COUNT"), "{error}");
 
@@ -1225,7 +1226,7 @@ mod tests {
                 label: None,
                 entries: &entries,
             },
-            &caps(Features::TIER_A),
+            &caps(Features::GPU_DRIVEN),
         )
         .expect("last binding is legal");
     }
@@ -1239,7 +1240,7 @@ mod tests {
                     label: None,
                     entries: &zero
                 },
-                &caps(Features::TIER_A)
+                &caps(Features::GPU_DRIVEN)
             )
             .is_err()
         );
@@ -1253,7 +1254,7 @@ mod tests {
                 label: None,
                 entries: &duplicate,
             },
-            &caps(Features::TIER_A),
+            &caps(Features::GPU_DRIVEN),
         )
         .expect_err("a duplicated binding number is a caller bug");
         assert!(error.to_string().contains("twice"), "{error}");
@@ -1268,7 +1269,7 @@ mod tests {
     /// e2e suite on radv, which reports 8 388 606.
     #[test]
     fn the_unbounded_count_clamps_to_the_devices_own_ceiling() {
-        let tier_a = caps(Features::TIER_A);
+        let tier_a = caps(Features::GPU_DRIVEN);
         let unbounded = entry(0, BindingFlags::VARIABLE_COUNT, u32::MAX);
 
         // The sentinel must survive validation, whatever the ceiling is.
@@ -1350,7 +1351,7 @@ mod tests {
     /// refuses. Both halves, now that the seam states both.
     #[test]
     fn variable_count_must_also_be_the_highest_binding_number() {
-        let tier_a = caps(Features::TIER_A);
+        let tier_a = caps(Features::GPU_DRIVEN);
         // Last in the slice, but binding 2 sits below binding 7.
         let entries = [
             entry(7, BindingFlags::empty(), 1),

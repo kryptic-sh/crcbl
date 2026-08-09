@@ -332,7 +332,7 @@ impl PendingDevice for MetalPendingDevice {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crcbl_hal::{Features, Limits};
+    use crcbl_hal::{BindingModel, Features, GeometryPath, LightingPath, Limits};
 
     /// Opening the backend, with the failure loud.
     ///
@@ -347,10 +347,10 @@ pub(crate) mod tests {
 
     /// A device request this backend can actually satisfy today.
     ///
-    /// [`DeviceDesc::for_adapter`] asks for [`Features::TIER_A`], which this
-    /// backend does not report until the command slice picks Metal's indirect
-    /// path — see `the_default_device_desc_is_refused_for_the_tier_a_gap`
-    /// below, which is the test that pins that.
+    /// [`DeviceDesc::for_adapter`] requires compute and a timeline semaphore
+    /// and asks for the rest optionally, so it opens here too — see
+    /// `the_default_device_desc_opens_and_the_rest_degrades` below. This helper
+    /// requires nothing at all, which is what the tests below are checking.
     pub(crate) fn desc(adapter: AdapterId) -> DeviceDesc<'static> {
         DeviceDesc {
             label: Some("crcbl-mtl test device"),
@@ -492,43 +492,59 @@ pub(crate) mod tests {
         assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
     }
 
-    /// The seam's convenience constructor asks for Tier A, and this backend
-    /// still does not report it — so `for_adapter` is refused, by name, on real
-    /// hardware.
+    /// The seam's convenience constructor requires only compute and a timeline
+    /// semaphore, both of which this backend reports — so `for_adapter`
+    /// **opens** on real hardware and everything else it asks for degrades.
     ///
-    /// **The gap moved in the binding slice, and this test is what records
-    /// where it moved to.** [`Features::MULTI_DRAW_INDIRECT`] is now reported,
+    /// This is the case topic 39 was written for: Metal used to be refused
+    /// outright over `DRAW_INDIRECT_COUNT`, a flag absent from the API rather
+    /// than unimplemented, while having the rest of the set.
+    ///
+    /// **The gap is now reported rather than refused, and this test is what
+    /// records where it sits.** [`Features::MULTI_DRAW_INDIRECT`] is reported,
     /// because `crcbl_mtl::draw`'s loop is the call behind it;
     /// [`Features::DESCRIPTOR_INDEXING`] has been *withdrawn*, because bind
     /// groups bind Metal's flat argument tables and refuse every bindless
     /// layout; and [`Features::DRAW_INDIRECT_COUNT`] was never reported and
-    /// still cannot be. All three are asserted rather than only the ones that
-    /// are missing, so a change in either direction fails here.
+    /// still cannot be. All three are asserted rather than only the absent
+    /// ones, so a change in either direction fails here.
     #[test]
-    fn the_default_device_desc_is_refused_for_the_tier_a_gap() {
+    fn the_default_device_desc_opens_and_the_rest_degrades() {
         let instance = open();
         let adapters = instance.adapters();
         assert!(!adapters.is_empty(), "nothing to check");
 
-        let error = instance
+        let mut pending = instance
             .request_device(&DeviceDesc::for_adapter(adapters[0].id))
-            .expect_err("this backend does not report Tier A");
-        let HalError::UnsupportedFeatures { missing } = error else {
-            panic!("expected a feature gap, got {error:?}");
-        };
+            .expect("compute and a timeline semaphore are all the headless default requires");
+        let device = pending
+            .poll()
+            .expect("Metal device creation is synchronous")
+            .into_device()
+            .expect("the first poll must complete a synchronous backend");
+
+        let caps = device.caps();
         assert!(
-            missing.contains(Features::DRAW_INDIRECT_COUNT),
-            "a GPU-side draw count is what Metal cannot express at all: {missing:?}"
+            !caps.supports(Features::DRAW_INDIRECT_COUNT),
+            "a GPU-side draw count is what Metal cannot express at all: {:?}",
+            caps.features
         );
         assert!(
-            missing.contains(Features::DESCRIPTOR_INDEXING),
-            "bind groups are flat argument tables, so bindless is refused rather than reported: \
-             {missing:?}"
+            !caps.supports(Features::DESCRIPTOR_INDEXING),
+            "bind groups are flat argument tables, so bindless stays withdrawn: {:?}",
+            caps.features
         );
         assert!(
-            !missing.contains(Features::MULTI_DRAW_INDIRECT),
-            "the indirect loop earns this one, so it must no longer be part of the gap: {missing:?}"
+            caps.supports(Features::MULTI_DRAW_INDIRECT),
+            "the indirect loop earns this one: {:?}",
+            caps.features
         );
+
+        // The paths those absences select, named rather than implied: this is
+        // what the renderer would record on this device today.
+        assert_eq!(caps.geometry_path(), GeometryPath::IndirectPerBatch);
+        assert_eq!(caps.binding_model(), BindingModel::ArrayPages);
+        assert_eq!(caps.lighting_path(), LightingPath::Rasterised);
     }
 
     /// An out-of-range adapter is a distinct contract from a feature gap, and

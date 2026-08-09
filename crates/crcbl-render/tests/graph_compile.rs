@@ -46,8 +46,8 @@ impl Harness {
             .create_device(&DeviceDesc {
                 label: Some("graph compile"),
                 adapter: adapter.id,
-                required_features: crcbl_hal::Features::TIER_A,
-                // `TIMESTAMP_QUERY` is deliberately *not* in `TIER_A` — topic
+                required_features: crcbl_hal::Features::GPU_DRIVEN,
+                // `TIMESTAMP_QUERY` is deliberately *not* in `GPU_DRIVEN` — topic
                 // 10's browsers may lack it — so a device that wants per-pass
                 // timers has to ask, and `DeviceDesc::for_adapter` does not.
                 optional_features: crcbl_hal::Features::TIMESTAMP_QUERY,
