@@ -3,6 +3,63 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+## User decisions — keep or override
+
+Calls made on judgement during the 2026-08-09 planning session, listed so they
+can be confirmed or reversed without re-deriving anything. **Each says what was
+decided, why, and what reversing it costs.** Delete an entry once it is
+confirmed; the rest of this file assumes them.
+
+- **Metal's `DRAW_INDIRECT_COUNT`: the seam was _not_ reshaped.** This reverses
+  an explicit instruction ("update the seam and get all features supported in
+  all the native backends"), on evidence found after it was given: `wgpu-hal`
+  declines the same feature on Metal — `wgpu-types` documents
+  `MULTI_DRAW_INDIRECT_COUNT` as DX12 and Vulkan only, and its Metal backend
+  contains no multi-draw code at all. Two independent implementations reached
+  the same conclusion, so it is a Metal API fact rather than a gap. With mesh
+  shaders as the primary geometry path, Metal sits on the primary path anyway
+  and the count only affects the fallback. **To override:** the seam grows a
+  "record indirect work before the pass opens" step and Metal builds an ICB from
+  the count buffer in a compute kernel — real work, and it makes the seam less
+  Vulkan-shaped, which `crcbl-hal` has resisted so far.
+- **Shader pipeline: four independent Slang lowerings kept, plus guardrails.**
+  Godot's SPIR-V-as-single-IR model would make the `SV_InstanceID` class of
+  divergence structurally impossible, but costs two vendored C/C++ translators
+  and cannot serve the WGSL leg anyway (naga's SPIR-V frontend rejects
+  `DrawParameters`). Recorded as reopenable in `docs/plan/02-vulkan-backend.md`
+  with a named trigger. **To override:** adopt SPIRV-Cross and spirv-to-dxil for
+  the native targets.
+- **`crcbl-wgpu` should report capabilities honestly rather than pinning to a
+  low tier.** wgpu on native exposes bindless, multi-draw-indirect-count, ray
+  query and mesh shaders; the reduced set belongs to the browser, not the crate.
+  **To override:** keep it deliberately limited as a pure triage backend, and
+  say so in its crate docs so the pinning is not read as a bug.
+- **The editor is native-only.** `10-wasm-webgpu.md` called editor-in-browser a
+  stretch that "should mostly work by construction"; the asset browser, OS
+  drag-drop and the file watcher are all native-shaped and nobody examined it.
+  **To override:** scope what a browser editor would actually do about those
+  three.
+- **`crcbl_ui::hud` gets deleted, not extended.** It has no consumer, and the
+  obvious fix (a `color` on `Label`) builds on the model topic 7's CSS rewrite
+  replaces. **To override:** add the field and have the samples adopt it,
+  knowing it is throwaway.
+- **towers co-op and arena are native LAN**, and arena's prediction work is
+  therefore validated against injected latency only. towers loses its
+  mixed-native/browser marquee session. **To override:** host something.
+- **The `delve` sample was folded into `shard` before it was written.** It was
+  proposed to fill the web-flagship vacancy; shard's web milestone fills it, and
+  two samples in one genre is duplication. **To override:** split them again.
+- **New phase and gate names are inventions**: P7B (raster twin), P7C
+  (ray-traced path), S4B (lumen), S4C (quarry), S6B (shard web slice), S7
+  (bracket). So are the sample names lumen, quarry, shard and bracket.
+- **Point-light shadows moved into MVP.** They were post-MVP; the raster twin
+  has to cover every light type ray-traced shadows cover, so they follow from
+  the parity decision rather than being a separate call.
+- **bracket keeps a single-player web demo** — client and matchmaking server
+  in-process over `InMemoryTransport` — rather than shipping no web build.
+  Preserves sample rule 7 and demonstrates the matchmaker and rating curve; only
+  the transport is absent.
+
 ## Owed
 
 The S1B findings in `docs/plan/ROADMAP.md` were the substantive list — six
@@ -2854,8 +2911,18 @@ moved rather than went away:
   which would have to run before the render encoder was opened. The emulation
   (issue `max_draw_count` draws) is silently wrong. Closing this needs either
   deferred command recording or a seam that hands the backend its indirect work
-  before the pass opens. **Metal stays Tier B until one of those happens** — the
-  whole remaining gap, since `MULTI_DRAW_INDIRECT` was earned this slice.
+  before the pass opens.
+
+  **Superseded 2026-08-09, and independently corroborated.** "Metal stays Tier
+  B" no longer means anything — there are no tiers, per
+  `docs/plan/39-capabilities.md`. Metal reports the flag clear and the renderer
+  selects another `GeometryPath`; with mesh shaders as the primary path this
+  affects only the fallback. And the finding is not a `crcbl-mtl` limitation:
+  `wgpu-types` documents `MULTI_DRAW_INDIRECT_COUNT` as DX12 and Vulkan only,
+  and `wgpu-hal`'s Metal backend contains no multi-draw code at all. Two
+  implementations, one answer. The seam-reshape option stays on the table and is
+  logged under _User decisions_ at the top of this file.
+
 - **A partially filled bind group leaves its unfilled argument-table slots
   holding whatever the previous bind put there.** Not checked, because
   `update_bind_group` makes create-then-fill a legal pattern. Vulkan leaves the
@@ -3198,3 +3265,95 @@ arithmetic (host-testable, and its tests run on any `cargo test`);
   names `Dx12Instance`, so the backend is not in `crcbl`'s registry and no
   `crcbl-shell` window has ever been handed to it. Wiring it up is its own slice
   and would make the win32 shell e2e a real end-to-end D3D12 path.
+
+## Raised 2026-08-09 and not finished
+
+New gaps and deferrals from the planning session. The plan docs carry the
+decisions; these are the things nobody has done.
+
+### Deferred: browser multiplayer over WebRTC
+
+**The only route that survives the no-infrastructure constraint**, and it is
+recorded rather than refused so the decision is reopenable.
+
+Data channels with **manually exchanged connection codes**: peer A creates the
+connection, waits for ICE gathering to complete so candidates are embedded in
+the SDP, and the compressed base64 of that is a "code" pasted to peer B, who
+answers with one of their own. No signalling server. It maps onto topic 23's
+channel semantics **better than WebSocket would have** — DataChannel offers both
+ordered-reliable and unordered-unreliable, so the unreliable channel survives.
+
+Against it: a third transport to maintain; a JS shim owning `RTCPeerConnection`
+(the same `extern "C"` shape `crcbl-audio`'s web module already uses, so no
+`wasm-bindgen` in any crate); a code that is hundreds of characters rather than
+a room code; two round trips of copy-paste with both players in live contact
+elsewhere; two peers realistically, since full mesh is N(N−1) exchanges; STUN
+needed off-LAN and TURN needed behind symmetric NAT, which is the part that
+costs money. Free public STUN is plentiful and the Open Relay Project offers a
+free TURN tier.
+
+**Do not fold it into bracket** — manual pairing is the antithesis of
+matchmaking. If it is ever built it wants its own small sample whose subject is
+the transport seam over a third transport shape.
+
+### Coverage gaps and unbuilt things the plan assumes
+
+- **Persistent mapped buffers are a native-only design principle**, and the
+  browser path had no stated answer until now. `00-overview.md`'s first core
+  principle names them alongside bindless and multi-draw-indirect; `wgpu`
+  exposes `MAPPABLE_PRIMARY_BUFFERS` on native only. Every browser upload is a
+  staging copy. Nobody has measured what that costs.
+- **Wasm modules lose NaN canonicalization and fuel in a browser.** The
+  equivalence gate ("bit-identical native _and in-browser_") is unguarded
+  against NaN payload divergence, and hostile-module containment has no browser
+  equivalent. Survivable because untrusted modules run server-side on native; a
+  browser-hosted single-player game with mods has no containment. See
+  `16-wasm-modules.md`.
+- **MSL is validated by nothing, anywhere.** `spirv-val` runs on the SPIR-V;
+  WGSL, MSL and DXIL are unchecked. MSL cannot be checked off macOS at all —
+  `xcrun metal` is macOS-only, `newLibraryWithSource:` needs a device, and no
+  open-source tool parses MSL. `xcrun metal` on the existing macOS CI leg is the
+  cheap fix and is not done.
+- **`crcbl-render` has no render-scale or upscale path**, though
+  `15-windowing.md` locks borderless as "internal render target upscaled to the
+  native surface" and `18-render-features.md` orders the post chain around it.
+  `ShellCaps::HW_UPSCALE` exists and nothing can ask for it. This is a locked
+  display mode with its renderer half missing.
+- **L0's character controller and static trimesh/heightfield colliders do not
+  exist.** `05-physics.md` puts both in L0 (MVP); the ROADMAP marks "P3 L0" done
+  against a narrower list. towers demands both.
+- **`crcbl-audio` has no bus graph and no limiter**, though `13-audio.md`
+  specifies `master ← sfx/music/ui/voice` with per-bus gain and a soft-knee
+  limiter, and its delivery table puts buses in P4A. Mix snapshots and ducking
+  at P10 depend on them.
+- **No golden audio buffers exist**, though the exit criterion asks for one per
+  sample that emits sound and asteroids and horde both synthesise
+  deterministically from fixed seeds.
+- **The transcendental policy is two conflicting policies.** `05-physics.md`
+  requires the `libm` crate; `13-audio.md` requires own polynomial
+  approximations plus a CI deny. Neither exists. `libm` would be a new
+  dependency and therefore a user decision.
+- **`DeviceId` is per-kind on every backend**, which blocks local-multiplayer
+  device assignment that `19-input.md` says is supported "from day one". A test
+  asserting two devices are distinguishable would pass vacuously.
+- **`21-jobs.md`'s threaded-wasm finding is not reproducible today**: it needs
+  `rust-src` on `nightly-2026-07-02`. Unblock with
+  `rustup component add rust-src --toolchain nightly-2026-07-02-x86_64-unknown-linux-gnu`.
+- **Sample `web.rs` doc comments are stale.** horde, asteroids and flappy still
+  narrate "the fourth copy … four call sites to migrate" though
+  `crates/crcbl/src/web.rs` closed S1B finding 2. Four passages in horde, two in
+  asteroids, one in flappy. Code comments, not docs, so they are not covered by
+  the plan sweep.
+
+### Owed by the capability work (P7)
+
+- **Every path selector value must be executed by something.** A `GeometryPath`,
+  `BindingModel` or `LightingPath` value no device in CI selects is compiled and
+  unrun. The existing instance is the Tier B arm of the indirect-draw tests:
+  lavapipe reports the higher capability, so the fallback has never run
+  anywhere. This is the risk most likely to be realised.
+- **The downgrade log line must be asserted**, not admired — an e2e that forces
+  a feature off has to see the engine say so.
+- **`required` must be shown to fail.** A device request naming a feature the
+  null backend does not report must produce the named error; a `required` that
+  cannot fail is not a gate.

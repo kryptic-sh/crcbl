@@ -2,9 +2,27 @@
 
 Level-of-detail for meshes: **hand-authored LOD chains and automatic
 simplification** (base high-quality mesh programmatically decimated), selected
-**on the GPU** inside the existing culling pass — per-instance LOD with zero CPU
-cost, the stage 3 discipline extended. Mechanism lands with the GPU-driven
-renderer (P7, hand LODs usable immediately); auto-generation lands wave 1.
+**on the GPU** inside the existing culling pass — LOD with zero CPU cost, the
+stage 3 discipline extended. Mechanism lands with the GPU-driven renderer (P7,
+hand LODs usable immediately).
+
+**QEM auto-generation is MVP, not wave 1** (moved 2026-08-09). Mesh shaders
+became the primary geometry path in
+[03-gpu-driven-rendering.md](03-gpu-driven-rendering.md) §3.5, and a
+meshlet-clustered pipeline selects detail **per cluster** rather than per
+instance — which needs a simplified cluster hierarchy to select between. A
+cluster hierarchy with no generated levels is the culling win without the detail
+win, i.e. most of the reason for the path. Hand-authored chains cannot fill that
+role: an artist supplies whole-mesh levels, not per-cluster ones.
+
+Two consequences that follow from the same move:
+
+- **Selection is per cluster on the `MeshShader` path and per instance
+  otherwise.** The error metric, the thresholds and the hysteresis are shared;
+  only the granularity differs. See "Runtime selection" below.
+- **The generator becomes a cluster-hierarchy builder**, not only a decimator:
+  it emits the meshlet clusters, their bounds and normal cones, and the
+  simplified parent levels — one bake step, one content hash, one cache entry.
 
 ## LOD chains
 
@@ -53,8 +71,14 @@ standard under meshoptimizer/Simplygon-class tools):
 - The stage 3 cull shader already reads per-instance bounds; it adds:
   **projected screen-space error** = level error scaled by distance/FOV → pick
   the coarsest level whose error stays under the pixel threshold → emit the
-  indirect draw for that level's range. Per-instance, per-frame, zero CPU, both
-  tiers (it's the same compute; Tier B just emits into its compacted lists).
+  indirect draw for that level's range. Per-frame, zero CPU, on every
+  `GeometryPath` — it is the same maths and the same thresholds throughout.
+- **Granularity follows the path.** On `MeshShader` the selection runs in the
+  amplification stage and is **per cluster**, so one mesh spans several levels
+  across its own surface. On `IndirectCount` and `IndirectPerBatch` it runs in
+  the cull compute pass and is **per instance**, selecting one level for the
+  whole mesh. Same generated hierarchy, same error metric, coarser choice — a
+  visible quality difference on the fallback paths, and an honest one.
 - **Hysteresis** on the threshold (switch-up and switch-down differ) kills
   boundary flicker.
 - **Transitions**: instant swap MVP (correct thresholds make pops sub-pixel by
@@ -103,14 +127,14 @@ standard under meshoptimizer/Simplygon-class tools):
 
 ## Delivery
 
-| Slice                                                                                                                  | Phase                                                                        |
-| ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| LOD table in mesh handles + cull-shader selection + hysteresis + hand-LOD import (naming/`MSFT_lod`)                   | P7 (with GPU-driven rendering — mechanism is a small delta on the cull pass) |
-| Shadow LOD bias                                                                                                        | P7 (with CSM, topic 18)                                                      |
-| Debug overlay + stats; global bias setting                                                                             | P10                                                                          |
-| **QEM auto-generation** (attribute/seam-aware, skinned-aware), sidecar overrides, `crcbl lod` CLI, editor/viewer panel | wave 1 (with the asset-heavy era; orbit/puppet polish are first consumers)   |
-| HLOD per-sector proxies                                                                                                | wave 2                                                                       |
-| Impostors, dithered crossfade                                                                                          | later, on demonstrated need                                                  |
+| Slice                                                                                                                         | Phase                                                                         |
+| ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| LOD table in mesh handles + cull-shader selection + hysteresis + hand-LOD import (naming/`MSFT_lod`)                          | P7 (with GPU-driven rendering — mechanism is a small delta on the cull pass)  |
+| Shadow LOD bias                                                                                                               | P7 (with CSM, topic 18)                                                       |
+| **QEM auto-generation + meshlet cluster hierarchy** (attribute/seam-aware, skinned-aware), sidecar overrides, `crcbl lod` CLI | **P7** (the `MeshShader` path selects per cluster and needs levels to select) |
+| Debug overlay + stats; global bias setting; editor/viewer LOD panel                                                           | P10                                                                           |
+| HLOD per-sector proxies                                                                                                       | wave 2                                                                        |
+| Impostors, dithered crossfade                                                                                                 | later, on demonstrated need                                                   |
 
 ## Risks
 

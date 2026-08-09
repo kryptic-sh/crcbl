@@ -10,9 +10,10 @@ without needing prediction.
 
 - **Everything at once**: the integration test the small samples can't be.
 - **Multiplayer as first-class citizen**: same build runs solo (in-memory
-  transport) and co-op (network transport when it lands; browser client via
-  stage 10 WebTransport). `PlaceTower`/`UpgradeTower`/`StartWave` are commands —
-  server validates, replicates; latency is invisible by genre design.
+  transport) and **LAN co-op** (UDP when it lands at P13, host found by direct
+  address or local-network discovery). `PlaceTower`/`UpgradeTower`/`StartWave`
+  are commands — server validates, replicates; latency is invisible by genre
+  design.
 - **Editor as content pipeline**: maps (path splines, build plots, spawn points,
   props) are authored in the stage 8 editor and shipped as `.scn/` scene dirs.
   The editor's real-world usability is measured by building towers maps in it.
@@ -75,8 +76,12 @@ cosmetics, matchmaking (direct connect only), audio (engine gap).
 
 ## Exit criteria
 
-- 4-player co-op session (2 native, 2 browser) completes 10 waves on a dedicated
-  headless server — the engine's marquee demo, recorded.
+- 4-player **LAN** co-op session completes 10 waves on a dedicated headless
+  server found through the lobby browser — the engine's marquee demo, recorded.
+  All clients native: a browser cannot host, cannot discover LAN hosts, and
+  cannot reach a LAN server from an HTTPS page (topic 23's LAN correction).
+- The **web build ships and is single player**, like every other sample's — same
+  game over `InMemoryTransport`, so the wasm target cannot rot.
 - Map authored 100% in the editor, zero hand-edited scene text.
 - New tower type addable in one sitting by one dev following the sample's own
   docs — extensibility proof.

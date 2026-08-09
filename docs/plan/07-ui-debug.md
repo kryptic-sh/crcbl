@@ -297,3 +297,31 @@ Surfaces for instrumentation that already exists:
   atlas pages, new pages allocated on demand, **LRU eviction** per page with a
   per-frame re-raster budget. Stated now because the "atlas design mustn't
   preclude SDF/emoji" note implies exactly this structure.
+
+## Corrections (2026-08-09)
+
+- **The reserved UI action set shadows more game keys than the samples
+  assumed.** `ui_move` is bound to **arrows _and_ WASD** and `ui_accept` to
+  Enter and Space, which is the whole of the movement and confirm surface most
+  2D samples use. `docs/backlog.md` records a per-sample analysis concluding
+  "Space is never shadowed" and "asteroids' `KeyW` is not shadowed" — true of
+  the ad-hoc menu handling the samples have today, false under this document's
+  context stack. The mechanism that resolves it is already specified here (the
+  `ui` context is active while a menu has input; `gameplay` sits underneath), so
+  what changes at P10 is that the samples stop handling menu keys directly.
+  Recorded because the backlog's conclusion reads as settled and is not.
+- **The netgraph's crate dependency is decided here, not open.** "Every other
+  module is contributed by the system it reports on" means `crcbl-client` gains
+  a `DebugModule` impl and therefore a dependency on `crcbl-ui`. The backlog
+  treats that as an open call ("the first time a simulation crate would depend
+  on the UI"); this document already made it, and there is no cycle — `crcbl-ui`
+  depends on nothing but `glam` and `bytemuck`. The dependency-direction check
+  in the exit criteria is about `crcbl-ui` not naming the renderer, which is
+  unaffected.
+- **`crcbl_ui::hud` has no consumer and should be deleted rather than
+  extended.** `Hud`/`HudPanel` are used by nothing in the workspace; the four
+  samples each hand-roll a HUD because `Label` has no per-label colour and
+  `HudPanel` auto-sizes where a measured constant is wanted. Adding a `color`
+  field would build on the pre-CSS model this document replaces — colour is a
+  style property here, and panel sizing is flex layout. **Delete it when the
+  widget set lands**, and let the samples adopt the styled widgets instead.

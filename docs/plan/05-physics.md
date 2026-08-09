@@ -53,11 +53,14 @@ scan under churn; `ThrustForce` and `DampingForce` are the first two L1 force
 providers, and `PhysicsSystem::apply_force` is how a single entity feels one.
 Segment CCD rides on the existing `sweep_sphere`. What is still owed —
 rotational dynamics, a teleport-aware re-insert for screen wrap, and a real
-`ShapeHit` from `PhysicsSystem::overlap_sphere` — is in `docs/backlog.md`. |
-Batch overlap queries at 10k bodies, refit cost, sleeping | horde | L0 | |
-Sector frames, gravity/drag/atmosphere, Kepler on-rails, SOI | orbit | L1 | |
-TOI vs moving targets, triggers, character controller | towers | L0+CCD | |
-Lag-compensated rewind queries | arena | post-MVP |
+`ShapeHit` from `PhysicsSystem::overlap_sphere` — is in `docs/backlog.md`.
+
+| Slice                                                        | Demanded by | Layer    |
+| ------------------------------------------------------------ | ----------- | -------- |
+| Batch overlap queries at 10k bodies, refit cost, sleeping    | horde       | L0       |
+| Sector frames, gravity/drag/atmosphere, Kepler on-rails, SOI | orbit       | L1       |
+| TOI vs moving targets, triggers, character controller        | towers      | L0+CCD   |
+| Lag-compensated rewind queries                               | arena       | post-MVP |
 
 Stage 5 "exit" therefore overlaps stages 6–8 in wall-clock: the stage is done
 when the full L0/L1/CCD surface exists and the orbit sample passes, not when a
@@ -203,3 +206,26 @@ early.
   ops are already bit-exact everywhere. The scope is therefore "deterministic
   across targets _within the sim math kernel_", which is what the gates actually
   require.
+
+## Correction (determinism math, 2026-08-09)
+
+**This document and [13-audio.md](13-audio.md) prescribe different answers to
+the same problem, and one of them has to win.** Both identify platform `libm` as
+a cross-target determinism hazard; the correction above routes
+determinism-bearing math through **the `libm` crate**, while topic 13's
+correction requires **own polynomial approximations and LUTs** plus a CI deny on
+std transcendentals inside `crcbl-audio`.
+
+Neither is built: there is no `libm` dependency in the workspace and no deny
+anywhere. Recorded rather than silently resolved because the two are not
+interchangeable — `libm` is a new dependency and therefore the user's call, and
+hand-rolled approximations are a maintenance surface with their own correctness
+burden. Both would need golden values from the specification, per the
+verification rules in `12-testing.md`.
+
+**Also unowned by any sample:** L0 as this document defines it includes a
+**character controller** (capsule vs world, slopes, steps) and, per the
+2026-07-27 correction, **static trimesh/heightfield colliders with a BVH
+midphase**. The ROADMAP marks "P3 L0" done against a narrower list — colliders,
+BVH, ray/segment, swept-sphere TOI — so both are outstanding and neither was in
+`docs/backlog.md` until now. towers is the sample that demands both.

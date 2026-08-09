@@ -16,22 +16,22 @@ is an orthographic projection with `z` as z-index.
 
 ## Locked decisions
 
-| Decision     | Choice                                                                           | Rationale                                                                                                                                                                                                                                                                                                                                                                    |
-| ------------ | -------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Vulkan layer | `ash` (raw Vulkan)                                                               | GPU-driven design needs bindless, indirect draws, fine-grained sync. wgpu abstracts these away.                                                                                                                                                                                                                                                                              |
-| Windowing    | From scratch (`crcbl-shell`, topic 15) — _bindings, not frameworks_              | Wayland/X11 protocol layer + codegen ours over libwayland-client/libxcb connections (the Vulkan WSI ABI requires real driver-visible objects — topic 15); own JS-shim canvas P5; Win32/AppKit at P14. Platform-agnostic Shell trait; SurfaceTarget = only sanctioned leak. Two modes only: windowed (aspect-lockable) + borderless w/ render scale. No exclusive fullscreen. |
-| GUI          | Own immediate-mode GUI, **CSS-subset styled**                                    | DOM-like blocks/spans, flexbox-subset layout, `.css` stylesheets with id/class selectors + hot reload. ALL engine UI (editor, debug tools, HUDs) built this way; editor and game share one draw path.                                                                                                                                                                        |
-| Math         | `glam`                                                                           | SIMD, ecosystem standard, no reason to hand-roll.                                                                                                                                                                                                                                                                                                                            |
-| Scene format | Open sources (glTF/WAV/PNG + LFS), own cooked; scene = `.scn/` dir of RON chunks | **LOCKED.** Per-system chunk files: dirty-chunk saves (no full rewrite) + clean git diffs + conflict-free merges. Deterministic writer, stable IDs, journal autosave, `crcbl bake` for web. RON for entity data, TOML for flat config.                                                                                                                                       |
-| ECS          | System-owned arrays                                                              | Systems track arrays of the objects belonging to them (SoA), not objects with components attached.                                                                                                                                                                                                                                                                           |
-| Networking   | Server-authoritative, transport seam                                             | In-memory channel for single player; real network transport is the same interface. Multiplayer is first-class.                                                                                                                                                                                                                                                               |
-| Wasm target  | WebGPU via `wgpu` as portability backend (Tier B)                                | Browser has no Vulkan. `crcbl-wgpu` covers wasm + doubles as native fallback tier. Perf tier stays ash/mtl/dx12.                                                                                                                                                                                                                                                             |
-| Physics      | From scratch (`crcbl-phys`), layered L0–L3                                       | First-class pillar. Sector-tiled `WorldPos` (galaxy scale), simulator-grade forces, CCD. f64, same-binary determinism.                                                                                                                                                                                                                                                       |
-| Audio        | From scratch (`crcbl-audio`), stylized spatializer                               | First-class pillar, lands before first sample. Deterministic ITD/ILD/pitch/occlusion cue grammar — learnable player skill, not realistic HRTF. cpal/AudioWorklet at the device seam only.                                                                                                                                                                                    |
-| CLI/headless | `crcbl` binary drives everything                                                 | Editor edits are transport commands → CLI is just another client. Scriptable scenes, sims, screenshots; agent/CI-friendly.                                                                                                                                                                                                                                                   |
-| Testing      | Unit + property + e2e per subsystem, same phase                                  | Golden images (lavapipe CI) + golden audio buffers + determinism hashes. No subsystem lands untested.                                                                                                                                                                                                                                                                        |
-| Persistence  | `crcbl-store`: saves = snapshots, settings = TOML                                | Save game = replication snapshot in versioned container (one serialization path, shared with play-mode restore + join-in-progress); layered settings; RON profiles; async `StorageSource` (platform dirs / OPFS wasm); atomic writes.                                                                                                                                        |
-| Game modules | Wasm FFI (`crcbl-mod`, topic 16)                                                 | Game logic = wasm modules, any wasm language; engine owns all state (modules ~stateless → hot reload/saves/replication free); static+wasm dual binding, one API; wasmtime behind seam (browser: nested instantiate).                                                                                                                                                         |
+| Decision     | Choice                                                                           | Rationale                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ------------ | -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Vulkan layer | `ash` (raw Vulkan)                                                               | GPU-driven design needs bindless, indirect draws, fine-grained sync. wgpu abstracts these away.                                                                                                                                                                                                                                                                                                                                                                                                     |
+| Windowing    | From scratch (`crcbl-shell`, topic 15) — _bindings, not frameworks_              | Wayland/X11 protocol layer + codegen ours over libwayland-client/libxcb connections (the Vulkan WSI ABI requires real driver-visible objects — topic 15); own JS-shim canvas P5; Win32/AppKit at **P5C** (moved out of P14 on 2026-08-04). Platform-agnostic Shell trait; SurfaceTarget = only sanctioned leak. Two modes only: windowed (aspect-lockable) + borderless w/ render scale — note the renderer half of render scale is **unbuilt**, see ROADMAP's known gaps. No exclusive fullscreen. |
+| GUI          | Own immediate-mode GUI, **CSS-subset styled**                                    | DOM-like blocks/spans, flexbox-subset layout, `.css` stylesheets with id/class selectors + hot reload. ALL engine UI (editor, debug tools, HUDs) built this way; editor and game share one draw path.                                                                                                                                                                                                                                                                                               |
+| Math         | `glam`                                                                           | SIMD, ecosystem standard, no reason to hand-roll.                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Scene format | Open sources (glTF/WAV/PNG + LFS), own cooked; scene = `.scn/` dir of RON chunks | **LOCKED.** Per-system chunk files: dirty-chunk saves (no full rewrite) + clean git diffs + conflict-free merges. Deterministic writer, stable IDs, journal autosave, `crcbl bake` for web. RON for entity data, TOML for flat config.                                                                                                                                                                                                                                                              |
+| ECS          | System-owned arrays                                                              | Systems track arrays of the objects belonging to them (SoA), not objects with components attached.                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Networking   | Server-authoritative, transport seam                                             | In-memory channel for single player; real network transport is the same interface. Multiplayer is first-class.                                                                                                                                                                                                                                                                                                                                                                                      |
+| Wasm target  | WebGPU via `wgpu`                                                                | Browser has no Vulkan. `crcbl-wgpu` covers wasm and doubles as a native triage backend. **Not a "tier"**: `wgpu` on native exposes bindless, multi-draw-indirect-count, ray query and mesh shaders — the reduced set belongs to the _browser_, not the crate. Capability decides the path (topic 39). Web builds are single player; no browser networking.                                                                                                                                          |
+| Physics      | From scratch (`crcbl-phys`), layered L0–L3                                       | First-class pillar. Sector-tiled `WorldPos` (galaxy scale), simulator-grade forces, CCD. f64, same-binary determinism.                                                                                                                                                                                                                                                                                                                                                                              |
+| Audio        | From scratch (`crcbl-audio`), stylized spatializer                               | First-class pillar, lands before first sample. Deterministic ITD/ILD/pitch/occlusion cue grammar — learnable player skill, not realistic HRTF. cpal/AudioWorklet at the device seam only.                                                                                                                                                                                                                                                                                                           |
+| CLI/headless | `crcbl` binary drives everything                                                 | Editor edits are transport commands → CLI is just another client. Scriptable scenes, sims, screenshots; agent/CI-friendly.                                                                                                                                                                                                                                                                                                                                                                          |
+| Testing      | Unit + property + e2e per subsystem, same phase                                  | Golden images (lavapipe CI) + golden audio buffers + determinism hashes. No subsystem lands untested.                                                                                                                                                                                                                                                                                                                                                                                               |
+| Persistence  | `crcbl-store`: saves = snapshots, settings = TOML                                | Save game = replication snapshot in versioned container (one serialization path, shared with play-mode restore + join-in-progress); layered settings; RON profiles; async `StorageSource` (platform dirs / OPFS wasm); atomic writes.                                                                                                                                                                                                                                                               |
+| Game modules | Wasm FFI (`crcbl-mod`, topic 16)                                                 | Game logic = wasm modules, any wasm language; engine owns all state (modules ~stateless → hot reload/saves/replication free); static+wasm dual binding, one API; wasmtime behind seam (browser: nested instantiate).                                                                                                                                                                                                                                                                                |
 
 ## Core design principles
 
@@ -40,6 +40,16 @@ is an orthographic projection with `z` as z-index.
    trips. Persistent mapped buffers, bindless descriptors, multi-draw-indirect,
    compute-driven culling. The CPU records a nearly constant-size command stream
    regardless of scene size.
+
+   **Three of those four are native-only, and the browser gets none of them.**
+   WebGPU has compute-driven culling and nothing else on that list: no binding
+   arrays, no multi-draw-indirect or GPU-side count, no persistent mapping
+   (`MAPPABLE_PRIMARY_BUFFERS` is native-only in `wgpu`), and no buffer device
+   address anywhere. The principle is a **native** principle; what the browser
+   runs is the degraded path, and which path a device takes is decided by
+   capability rather than by platform — see
+   [39-capabilities.md](39-capabilities.md).
+
 2. **Backend seam is a trait boundary, not a compile flag.** `crcbl-hal` defines
    the contract; `crcbl-vk` is one implementation. Renderer code above the seam
    never names a Vulkan type.
@@ -85,36 +95,37 @@ is an orthographic projection with `z` as z-index.
 
 Cross-cutting topic docs (identity, no ordering implied):
 
-| Topic | Doc                                            | Theme                                                                   |
-| ----- | ---------------------------------------------- | ----------------------------------------------------------------------- |
-| 11    | [11-cli-headless.md](11-cli-headless.md)       | `crcbl` CLI: headless engine/editor control, scripting                  |
-| 12    | [12-testing.md](12-testing.md)                 | Test infra: unit/property/e2e, golden images, determinism               |
-| 13    | [13-audio.md](13-audio.md)                     | Spatial cue grammar, mixer, occlusion, audio testing                    |
-| 14    | [14-persistence.md](14-persistence.md)         | Save games (snapshot-based), settings layers, profiles                  |
-| 15    | [15-windowing.md](15-windowing.md)             | Own windowing: wire-protocol backends, 2 modes, agnostic seam           |
-| 16    | [16-wasm-modules.md](16-wasm-modules.md)       | Game logic as wasm modules: FFI ABI, any language, modding              |
-| 17    | [17-animation.md](17-animation.md)             | Skeletal animation: cooked clips, state machine, GPU skinning           |
-| 18    | [18-render-features.md](18-render-features.md) | Shadows (CSM) + post stack: HDR, tonemap, FXAA, bloom                   |
-| 19    | [19-input.md](19-input.md)                     | Device-agnostic action input: kb/mouse/pad/touch, one config            |
-| 20    | [20-particles.md](20-particles.md)             | GPU-resident particles/VFX: compute sim, RON effects, workbench         |
-| 21    | [21-jobs.md](21-jobs.md)                       | Threading: pipeline threads + job pool, mailboxes, tick sync            |
-| 22    | [22-replay.md](22-replay.md)                   | State recording: replays, black-box debug, spectating                   |
-| 23    | [23-netcode.md](23-netcode.md)                 | Transports (UDP+own reliability, WebTransport/WS), protocol foundations |
-| 24    | [24-navigation.md](24-navigation.md)           | Navmesh gen (Recast-lineage, sector-tiled), A\*+funnel, crowds          |
-| 25    | [25-lod.md](25-lod.md)                         | LOD: hand-first + QEM auto fallback, GPU selection in cull pass         |
-| 26    | [26-prediction.md](26-prediction.md)           | Client prediction/rollback + query-only lag comp, fairness harness      |
-| 27    | [27-auth.md](27-auth.md)                       | Trust tiers (open/PSK/token), identity, ranked chain, crcbl-mint        |
-| 28    | [28-ballistics.md](28-ballistics.md)           | Penetrating sweeps: material energy loss, ricochet, media drag          |
-| 29    | [29-fp-rendering.md](29-fp-rendering.md)       | First-person: viewmodel pass, ADS cameras, PiP optics, kill-cam POV     |
-| 30    | [30-player-kit.md](30-player-kit.md)           | Optional player kit: predicted movement, GTA-style 3P cam, 1P binding   |
-| 31    | [31-vis-culling.md](31-vis-culling.md)         | Optional anti-wallhack: PVS + ray envelopes, leak auditor               |
-| 32    | [32-voip.md](32-voip.md)                       | Voice: team/direct + proximity, Opus, gate-safe (no positions)          |
-| 33    | [33-decals.md](33-decals.md)                   | Decals: projected/parallax/carve-volume tiers, impact + decoration      |
-| 34    | [34-inventory.md](34-inventory.md)             | UI drag-drop + optional grid-inventory kit (looting, slots)             |
-| 35    | [35-ragdolls.md](35-ragdolls.md)               | Ragdolls: server settles / client performs, anim→physics handoff        |
-| 36    | [36-contact-solver.md](36-contact-solver.md)   | Physics L2/L3: substepped impulses, islands, sleeping, joints           |
-| 37    | [37-materials.md](37-materials.md)             | Material authoring: templates+instances, render↔surface link, lint      |
-| 38    | [38-weapons.md](38-weapons.md)                 | Weapon kit: attachments, server-authoritative fire, recoil patterns     |
+| Topic | Doc                                            | Theme                                                                     |
+| ----- | ---------------------------------------------- | ------------------------------------------------------------------------- |
+| 11    | [11-cli-headless.md](11-cli-headless.md)       | `crcbl` CLI: headless engine/editor control, scripting                    |
+| 12    | [12-testing.md](12-testing.md)                 | Test infra: unit/property/e2e, golden images, determinism                 |
+| 13    | [13-audio.md](13-audio.md)                     | Spatial cue grammar, mixer, occlusion, audio testing                      |
+| 14    | [14-persistence.md](14-persistence.md)         | Save games (snapshot-based), settings layers, profiles                    |
+| 15    | [15-windowing.md](15-windowing.md)             | Own windowing: wire-protocol backends, 2 modes, agnostic seam             |
+| 16    | [16-wasm-modules.md](16-wasm-modules.md)       | Game logic as wasm modules: FFI ABI, any language, modding                |
+| 17    | [17-animation.md](17-animation.md)             | Skeletal animation: cooked clips, state machine, GPU skinning             |
+| 18    | [18-render-features.md](18-render-features.md) | Shadows (CSM) + post stack: HDR, tonemap, FXAA, bloom                     |
+| 19    | [19-input.md](19-input.md)                     | Device-agnostic action input: kb/mouse/pad/touch, one config              |
+| 20    | [20-particles.md](20-particles.md)             | GPU-resident particles/VFX: compute sim, RON effects, workbench           |
+| 21    | [21-jobs.md](21-jobs.md)                       | Threading: pipeline threads + job pool, mailboxes, tick sync              |
+| 22    | [22-replay.md](22-replay.md)                   | State recording: replays, black-box debug, spectating                     |
+| 23    | [23-netcode.md](23-netcode.md)                 | Transports (UDP+own reliability, WebTransport/WS), protocol foundations   |
+| 24    | [24-navigation.md](24-navigation.md)           | Navmesh gen (Recast-lineage, sector-tiled), A\*+funnel, crowds            |
+| 25    | [25-lod.md](25-lod.md)                         | LOD: hand-first + QEM auto fallback, GPU selection in cull pass           |
+| 26    | [26-prediction.md](26-prediction.md)           | Client prediction/rollback + query-only lag comp, fairness harness        |
+| 27    | [27-auth.md](27-auth.md)                       | Trust tiers (open/PSK/token), identity, ranked chain, crcbl-mint          |
+| 28    | [28-ballistics.md](28-ballistics.md)           | Penetrating sweeps: material energy loss, ricochet, media drag            |
+| 29    | [29-fp-rendering.md](29-fp-rendering.md)       | First-person: viewmodel pass, ADS cameras, PiP optics, kill-cam POV       |
+| 30    | [30-player-kit.md](30-player-kit.md)           | Optional player kit: predicted movement, GTA-style 3P cam, 1P binding     |
+| 31    | [31-vis-culling.md](31-vis-culling.md)         | Optional anti-wallhack: PVS + ray envelopes, leak auditor                 |
+| 32    | [32-voip.md](32-voip.md)                       | Voice: team/direct + proximity, Opus, gate-safe (no positions)            |
+| 33    | [33-decals.md](33-decals.md)                   | Decals: projected/parallax/carve-volume tiers, impact + decoration        |
+| 34    | [34-inventory.md](34-inventory.md)             | UI drag-drop + optional grid-inventory kit (looting, slots)               |
+| 35    | [35-ragdolls.md](35-ragdolls.md)               | Ragdolls: server settles / client performs, anim→physics handoff          |
+| 36    | [36-contact-solver.md](36-contact-solver.md)   | Physics L2/L3: substepped impulses, islands, sleeping, joints             |
+| 37    | [37-materials.md](37-materials.md)             | Material authoring: templates+instances, render↔surface link, lint        |
+| 38    | [38-weapons.md](38-weapons.md)                 | Weapon kit: attachments, server-authoritative fire, recoil patterns       |
+| 39    | [39-capabilities.md](39-capabilities.md)       | Device capabilities, graceful degradation, path selectors, feature matrix |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
@@ -172,7 +183,11 @@ Every game sample ships as a browser demo on the Pages site.
   single player over the in-memory transport exercises the whole path. Stage 10
   ships WebTransport/WebSocket for the browser, which becomes the protocol base
   for native QUIC later.
-- Ray tracing, mesh shaders (extensions later; keep the HAL open to them).
+- ~~Ray tracing, mesh shaders (extensions later; keep the HAL open to them).~~
+  **Both moved into the MVP on 2026-08-09** — see the ROADMAP correction. Mesh
+  shaders are the primary geometry path (topic 3 §3.5); ray-traced lighting is
+  MVP alongside a complete rasterised twin (topic 18), and is Vulkan and D3D12
+  only.
 - Xbox/console targets — the only unique DX12 value; stage 9 covers desktop
   Windows via DX12 and macOS via Metal.
 

@@ -1,10 +1,67 @@
-# Sample 11 — breach (FPS-era flagship)
+# Sample 11 — breach (FPS-era flagship, web slice then native competitive)
 
 5v5 round-based competitive shooter: CS2-style structure (rounds, buy phase,
 bomb plant/defuse) with Tarkov-flavored gunplay (real ballistics, penetration,
 armor, limb/organ damage). Four modes on shared systems. This is the sample that
 consumes the entire competitive stack — the FPS-era equivalent of what towers is
 to the MVP era, and the reason topics 26–31 exist.
+
+## Two milestones, and the competitive build is native only
+
+**Milestone 1 — the web slice.** A single-player cut — a firing range and a bot
+practice map — that builds for `wasm32` and ships on the Pages site. Rasterised
+lighting, `IndirectPerBatch` geometry, `ArrayPages` materials: every fallback
+path, on first-person content, before any native-only feature is layered over
+it. Same reasoning as `shard` ([15-shard.md](15-shard.md)) — the constrained
+target is built first so the fallbacks are proven rather than assumed.
+
+**Milestone 2 onward — the native competitive game**, and it does not ship a
+browser build. Four things make a browser build of the competitive game not
+merely worse but _wrong_, and they are not degradations the capability model can
+absorb:
+
+- **Anti-cheat is structurally impossible.** A wasm client is dumpable and its
+  memory readable, with no attestation of any kind. Topic 31's server-side
+  visibility filtering survives and is the good half — the server never sends
+  what a client should not see — but topic 27's tier 3 and any client integrity
+  claim mean nothing in a browser.
+- **No raw mouse input.** Pointer Lock reports accelerated, browser-smoothed
+  deltas. `RAW_POINTER_MOTION` is the capability this genre is built on, and the
+  web shell cannot honestly report it.
+- **The unreliable channel degrades to reliable** on the WebSocket fallback —
+  head-of-line blocking on state updates is a gameplay difference, not a perf
+  one.
+- **Latency that cannot be measured or removed**: rAF pacing, no present
+  feedback, the compositor in the path.
+
+Everything the browser _can_ honestly do, milestone 1 does. What milestone 2
+adds is a competitive game, and a competitive game in a browser would be a claim
+the platform cannot back. `shard`'s milestone 2 carries networking on native
+too, at scale rather than at latency.
+
+## Multiplayer is LAN, and that is deliberate
+
+**Sessions are direct-connect by IP, or found through a lobby browser that
+discovers hosts broadcasting on the local network.** No hosted matchmaking, no
+relay, no ranked ladder, no accounts service.
+
+This is a scope decision, not a limitation to apologise for, and it buys a lot:
+the netcode is proven against real packet behaviour without anyone running
+infrastructure; a LAN's low and stable RTT is where prediction and lag
+compensation can be _validated_ before they are stressed; and the fairness
+harness (topic 26) can inject latency deliberately rather than depending on
+whoever happens to connect.
+
+What it removes from this sample: ranked-shaped auth (topic 27 tier 3), a
+matchmaking service, and the server-signed result chain — all of which move to
+`bracket` ([16-bracket.md](16-bracket.md)), where they can be tested against a
+synthetic population instead of needing a real playerbase. The **integrity gate
+(31) stays** — it is a property of what the server sends, not of who is allowed
+to connect, and it is the more interesting half.
+
+What it adds as engine work: **LAN host discovery** — hosts announce on the
+local network, clients enumerate them — which topic 23's "lobby-lite" names but
+does not specify. See that topic for the shape.
 
 ## Proves (the whole competitive spine, as one game)
 
@@ -20,8 +77,8 @@ to the MVP era, and the reason topics 26–31 exist.
 - **`competitive_integrity` gate** (31): the full leak surface closed —
   transforms, VFX, audio, streaming, timing — with the leak auditor reporting
   per map/mode.
-- **Auth tier 3** (27): ranked-shaped session flow via `crcbl-mint`;
-  server-signed results.
+- **Session trust on a local network** (27): the host is the authority and the
+  trust tier is PSK-shaped rather than ranked — see "Multiplayer is LAN" above.
 - **Replays/spectating/casting** (22): every match recorded; observer mode with
   POV switching and the rewind visualizer for disputed kills.
 - **Audio cue grammar under maximum pressure** (13): the esports legibility
@@ -62,8 +119,8 @@ small module, not forks of the game.
   classes, ~6 consumables.
 - 5v5 max; bots fill empty slots.
 - Economy: simplified CS-style buy (kill/round rewards, no skins/trading).
-- No progression, no cosmetic economy, no matchmaking (direct connect +
-  `crcbl-mint` dev tier 3), no clan/social systems.
+- No progression, no cosmetic economy, no clan/social systems. Sessions are
+  direct-connect by IP or found on the LAN — no matchmaking service.
 - **Debug panel on, network module included** (sample rule 4). Ten clients on a
   real transport with prediction, lag comp and an integrity gate is the widest
   the netgraph ever gets asked to be, and the buy menu, the inventory grid and
@@ -83,6 +140,10 @@ monetization anything.
 
 ## Milestones
 
+0. **Web slice**: firing range + bot practice map, single player, rasterised
+   lighting and both geometry fallbacks, shipped on the Pages site. First-person
+   rendering (29) and the weapon kit (38) on the constrained target, with a
+   recorded browser budget.
 1. **Duel test**: 1v1 on a test map — kit movement, ADS, ballistics, prediction,
    lag comp; fairness harness green at 3 RTT tiers.
 2. **Defuse core**: rounds, buy, plant/defuse, 5v5 with bots, HUD.
@@ -92,21 +153,28 @@ monetization anything.
 5. **Health/armor depth**: organs, bleeding, meds, armor degradation.
 6. **Spectator + casting**: observer POV switching, kill review with rewind viz;
    match replays archived.
-7. **Browser client**: wasm build joins native servers (Tier B budget recorded —
-   the "competitive shooter in a browser" demo).
 
 ## Exit criteria
 
-- A full 5v5 defuse match (mixed humans + bots, native + browser clients) on a
-  dedicated tier-3 server, replay archived, spectator watching with broadcast
-  delay.
+**Milestone 0 (web slice)**
+
+- Firing range and bot practice playable in a browser from the same build that
+  runs natively, with the summary line naming the paths it selected.
+- Golden frames per `GeometryPath`, and a recorded browser budget for
+  first-person content.
+
+**Milestone 2 onward (native competitive)**
+
+- A full 5v5 defuse match (mixed humans + bots, all native clients) on a
+  LAN-hosted dedicated server found through the lobby browser, replay archived,
+  spectator watching with broadcast delay.
 - Fairness: hit% vs ping curve flat within tolerance across 20–150 ms; recorded
   in the doc.
 - Leak audit: with the gate on, the all-channel leak property holds over full
   matches; measured leak (grace-window + perceptual audio cone) is documented
   per mode.
 - Perf: server tick budget at 10 players + bots with gate on, recorded; client
-  frame budget with PiP scope active, native + Tier B.
+  frame budget with PiP scope active, native ray-traced and native rasterised.
 - **Feel**: gunplay and movement good enough that people ask to play it again —
   the only exit criterion here that isn't a number, and the one that matters
   most for a flagship.

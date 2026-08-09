@@ -347,3 +347,33 @@ kept in step with the real one.
 `postMessage` — which is what `crcbl-audio`'s worklet feed already does, and
 which changes the shape rather than only the speed. That is why the isolation
 gate is a gate.
+
+## Corrections (2026-08-09)
+
+- **`ring` cannot implement drop-oldest, and the primitives table promises it.**
+  The overflow policy is listed as "counted + policy (drop-oldest or
+  grow-in-dev)". Drop-oldest is impossible from the producer: the read cursor
+  belongs to the consumer, and a producer advancing it would be a second writer
+  to it — which is precisely what makes an SPSC ring cheap. `push` hands the
+  item back and counts the refusal, leaving the policy to the caller. If a
+  consumer ever genuinely needs drop-oldest, the honest options are a
+  consumer-side drain-and-discard or an MPSC design, not a flag on this one.
+  **The table is wrong as written.**
+- **The delivery table still says P8.** `crcbl-jobs` moved to **P5B** by the
+  2026-08-03 correction at the top of this file, and the samples adopt it there.
+  The table below that correction was never updated.
+- **loom and TSAN are specified; Miri is what runs.** The testing section asks
+  for loom-style exhaustive tests on the primitives and a TSAN job in scheduled
+  CI. Neither exists. What exists is a **weekly**
+  `cargo miri test -p crcbl-jobs` in `cron.yml`, which models memory ordering
+  more thoroughly than any test on x86-64 can — a `Release` store and a
+  `Relaxed` one compile identically there, so Miri is load-bearing rather than
+  supplementary. Two gaps follow: an ordering regression can sit on `main` for
+  up to a week, and **nothing runs the primitives on a weakly-ordered machine**
+  — an aarch64 runner would be independent evidence and GitHub offers one.
+- **Finding 1's threaded-wasm measurement is not currently reproducible.** It
+  reports a clean build on `nightly-2026-07-02` with `-Z build-std`, which needs
+  `rust-src`; that component is not installed on that toolchain today and the
+  build fails with `library/Cargo.lock does not exist`. The finding stands as a
+  measurement that was taken; the work is blocked until the component is added.
+  `docs/backlog.md` carries the unblock command.

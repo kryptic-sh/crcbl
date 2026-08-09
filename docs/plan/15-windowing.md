@@ -228,3 +228,30 @@ Notes on the from-scratch protocol work:
 - **Input latency/correctness** (esports audio pillar implies esports input
   standards): raw motion + pointer lock are P0 features, not afterthoughts;
   input timestamps preserved end-to-end for the P2 input pipeline.
+
+## Corrections (2026-08-09)
+
+- **"File-list transfers ride the same machinery … with zero seam changes" is
+  not true.** The clipboard section promises OS-file paste into the editor's
+  asset browser for free. On Win32 `MimeType::UriList` is a registered format
+  and `CF_HDROP` is never read, so an Explorer copy is invisible, and the shared
+  `clipboard::parse_uri_list` cannot round-trip a Windows path. On macOS only
+  `public.file-url` is read. On X11 there is no XDND at all. Closing it is seam
+  work on three of four backends — see [08-editor.md](08-editor.md)'s correction
+  and `docs/backlog.md`.
+- **Render scale has no renderer half.** The display-mode table defines
+  borderless as an internal render target upscaled to the native surface,
+  `ShellCaps` carries `HW_UPSCALE`, and
+  [18-render-features.md](18-render-features.md) orders the post chain around
+  the upscale. `crcbl-render` contains no upscale or render-scale path at all.
+  Until it does, borderless renders at native size and the caps bit describes a
+  mechanism nothing can ask for — which is also why `HW_UPSCALE` is clear on
+  macOS despite `CAMetalLayer` supporting exactly this. The seam addition it
+  needs is a render-scale request on `Shell`, and that is a decision above this
+  crate.
+- **Exclusive fullscreen stays dropped, and one backend actively defends it.**
+  `crcbl-dx12` calls `MakeWindowAssociation(DXGI_MWA_NO_ALT_ENTER)` per
+  swapchain so DXGI's own message hook cannot take Alt+Enter into a fullscreen
+  transition nothing above the seam would see. It is a window-global side effect
+  a HAL backend arguably should not have; recorded here because it enforces this
+  document's locked decision from below the seam.

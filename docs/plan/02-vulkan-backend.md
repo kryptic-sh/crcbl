@@ -130,3 +130,77 @@ Milestone ladder, each a sandbox commit:
   superseded.
 - **Lavapipe golden-image e2e is a hard P1 gate**, not "if practical" — a gate
   cannot be optional.
+
+## Shader portability (2026-08-09) — one source, four targets, and the gaps
+
+§2.3 chose Slang. `crates/crcbl-shaders/tools/compile-shaders.sh` emits four
+artifacts from each `.slang` source — SPIR-V, WGSL, MSL and DXIL — all committed
+with a SHA-256 manifest, so `cargo build` needs no shader compiler on any
+platform and `--check` catches drift in CI. That much works, and it is stronger
+than the comparable engines: neither bevy nor Godot validates shaders offline at
+all, and both discover shader errors at runtime, per permutation, on a user's
+machine.
+
+What follows are the gaps that survey turned up, and the rules that close them.
+
+### Slang stays; a home-grown shading language was declined
+
+The problems are **API gaps, not language gaps** — Metal has no ray tracing in
+Slang, WebGPU has no bindless — and a language of our own would give neither. It
+would also buy only the front half: DXIL must go through `dxc` and be signed by
+`libdxil.so`, and MSL is compiled by Metal at run time. This is the same call
+topic 16 makes for `wasmtime` and topic 7 makes for font parsing: a
+standards-compliance surface that is not this project's learning goal.
+
+**What would reopen it:** Slang blocking us a second time on something with no
+workaround. Recorded in `docs/backlog.md` rather than argued again here.
+
+### Rules
+
+1. **Every shader declares which targets it must support**, and the compile
+   script **fails** when a required target will not take it. A ray-tracing or
+   mesh shader has no WGSL form at all and must say so rather than emitting a
+   broken artifact — which is what happens today, silently, when Slang drops an
+   attribute it cannot express.
+2. **Per-target `-D` defines**, passed by the compile script, because Slang
+   defines no target macro of its own — probing found only `__SLANG_COMPILER__`.
+   Without them the only way to differ per target is to fork the file, which is
+   what `ui_tier_b.slang` is: a twin whose sole substantive difference is
+   `[[vk::push_constant]]` versus a bound binding, held in step by a comment.
+   **Delete that fork** once either mechanism lands — the uniform-buffer form
+   `sprite.slang` already uses is preferred where it is free.
+3. **Declaration order must equal binding order**, enforced by a test that
+   parses the sources. Slang's Metal target **ignores `[[vk::binding]]`** and
+   assigns indices in declaration order, while `crcbl-mtl` binds by ascending
+   `(set, binding)`. When `ui.slang` disagreed with itself, its MSL put the
+   constants where the vertex buffer should have been and the UI pass drew
+   nothing on macOS. Today a comment is the only thing preventing a recurrence.
+4. **Validate all four artifacts, not one.** `spirv-val` runs on the SPIR-V;
+   WGSL, MSL and DXIL are checked by nothing. Add naga for WGSL (already in the
+   lockfile via wgpu — with the caveat that naga accepting something is not Dawn
+   accepting it, which is exactly how the uniformity bug shipped), `xcrun metal`
+   on the macOS CI leg, and pipeline creation on WARP for DXIL.
+5. **Semantic divergence is caught by rendering, not by reading.**
+   `SV_InstanceID` lowers to `InstanceIndex - BaseInstance` on SPIR-V and to a
+   bare `@builtin(instance_index)` on WGSL; the source compiles cleanly to both
+   and draws different pictures, which is why every batch after the first
+   rendered the first batch's instances. No lint can find this class. The only
+   thing that can is `crates/crcbl/tests/run-cross-backend-e2e.sh`, and it
+   currently covers two backends and one scene — **extend it to every engine
+   shader and every backend**, which is also what sample rule 12 asks of the
+   samples.
+
+### Considered, and reopenable: SPIR-V as the single native IR
+
+Godot compiles GLSL to SPIR-V once and translates _that_ to MSL (SPIRV-Cross)
+and DXIL (Mesa NIR). One lowering of the source semantics, so the divergence in
+rule 5 is structurally impossible — it is fixed the moment glslang emits
+`InstanceIndex`.
+
+Not adopted now: it costs two vendored C/C++ translators, and the WGSL leg
+cannot use it anyway — naga's SPIR-V frontend rejects the `DrawParameters`
+capability every artifact here declares, which is why P5.9 carried WGSL across
+the seam in the first place. Neither route solves Metal ray tracing.
+
+**Reopen when** a Metal shader disagrees with its Vulkan twin a second time, or
+when the differential gate above proves too coarse to localise one.

@@ -7,12 +7,14 @@ retrofit.
 
 ## Supported stacks (LOCKED)
 
-| Transport                 | Platform                   | Role                                                                                      | Lands           |
-| ------------------------- | -------------------------- | ----------------------------------------------------------------------------------------- | --------------- |
-| **InMemory**              | all                        | single player, tests, editor — the permanent local path; **the only plaintext transport** | P2              |
-| **UDP + own reliability** | native                     | primary game transport — **per-packet AEAD, always**                                      | P13 (design P2) |
-| **WebTransport**          | browser (+native optional) | QUIC datagrams=unreliable, streams=reliable — 1:1 channel map; TLS inherent               | P13             |
-| **WebSocket**             | browser fallback           | reliable-only; unreliable degrades to reliable; **wss:// only**                           | P13             |
+| Transport                 | Platform | Role                                                                                      | Lands           |
+| ------------------------- | -------- | ----------------------------------------------------------------------------------------- | --------------- |
+| **InMemory**              | all      | single player, tests, editor — the permanent local path; **the only plaintext transport** | P2              |
+| **UDP + own reliability** | native   | the only network transport — **per-packet AEAD, always**                                  | P13 (design P2) |
+
+**WebTransport and WebSocket are removed** (2026-08-09) — see the LAN correction
+at the bottom of this file. Web builds are single player; the browser has no
+network transport at all.
 
 **Encryption rule (LOCKED)**: every packet on every network transport is
 encrypted — no plaintext mode exists on the wire, no "disable crypto" flag.
@@ -260,3 +262,70 @@ named now, along with the two answers it supplies that were missing:
   representation differs_, from P2 onward (identity codec until quantization
   lands at P13). Otherwise the P2 encoder is rewritten at P13 — and prediction
   comparison breaks (see 26).
+
+## Correction (LAN-only networking, 2026-08-09)
+
+**Sessions are LAN. There is no hosted infrastructure anywhere in the project,
+and web builds have no networking at all.**
+
+### What is removed
+
+**WebTransport and WebSocket leave the plan.** Their sole purpose was browser
+clients reaching hosted servers, and no hosted servers exist. The transport
+surface is `InMemory` and UDP.
+
+Browser multiplayer was examined rather than assumed away, and the obstacles are
+structural rather than incidental:
+
+- A browser **cannot listen on a socket** — there is no server-socket API of any
+  kind, so a browser can never host.
+- A browser **cannot discover hosts on a local network** — no UDP broadcast, no
+  mDNS, no API. The lobby browser below is not implementable there.
+- An **HTTPS page cannot open an insecure connection to a LAN address**, and a
+  LAN host cannot readily hold a valid certificate for its address.
+
+**WebRTC was considered and deferred, not refused.** Data channels with manually
+exchanged connection codes need no signalling server and would map onto the
+channel semantics above better than WebSocket did — the unreliable channel
+survives. Against it: a third transport to maintain, a JS shim owning
+`RTCPeerConnection`, a two-peer copy-paste flow no shipping game would use, and
+STUN/TURN still needed off-LAN. Recorded in `docs/backlog.md` with its costs so
+the decision can be reopened without re-deriving it.
+
+Also removed with them: hosted matchmaking, relays, and topic 27's tier 3 — see
+that document's own correction.
+
+### What is added: LAN host discovery
+
+The lobby browser the samples ask for, and the thing "lobby-lite" named without
+specifying:
+
+- **Hosts announce** on the local network at a modest interval — a small
+  datagram carrying the protocol and schema hash the handshake already gates on
+  (P2), the game and mode, the current and maximum player count, and whether a
+  password is set. Broadcast and link-local multicast both, because networks
+  disagree about which they forward.
+- **Clients enumerate** by listening for announcements over a short window and
+  presenting what replied, with entries ageing out when a host stops announcing.
+  No central registry, no state on the client between runs.
+- **Announcements are not trusted.** They advertise a host; they authenticate
+  nothing. The existing handshake, schema-hash gate and per-packet AEAD do all
+  the work they already do, unchanged. An announcement is a hint about where to
+  connect and never a reason to skip a check.
+- **Direct connect by address stays first-class** and is the path that always
+  works: discovery is a convenience over it, not a replacement, and every
+  sample's lobby offers both.
+
+Testing: two processes on one host must find each other through the real code
+path, and the discovery window must be shown to time out cleanly when nothing
+answers — a lobby that hangs when the network is silent is the obvious failure
+and the one nobody writes a test for.
+
+### What this costs, stated plainly
+
+Prediction and lag compensation (topic 26) are validated against **injected**
+latency only — arena's fairness harness — because a LAN has almost none and
+nothing in the project ever crosses the internet. That is reproducible and
+CI-able, which is genuinely better for regression testing, and it means no
+number in this project describes real internet conditions. Any claim that it
+does would be unfounded.

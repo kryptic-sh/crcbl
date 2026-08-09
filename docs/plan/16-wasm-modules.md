@@ -281,3 +281,34 @@ verifier re-runs it in a **freshly instantiated module** and requires an
 identical state hash. Systems that want scratch may keep it, but they are
 ineligible for prediction and are skipped by the verifier (declared at
 registration, so the restriction is visible in code).
+
+## Correction (browser runtime gaps, 2026-08-09)
+
+**The browser is the wasm runtime, and it provides neither of the two guarantees
+this topic's runtime section relies on.**
+
+The runtime section configures `wasmtime` with **NaN canonicalization ON** for
+cross-module float determinism and **fuel or epoch limits** so a buggy module
+cannot hang the server tick. In the browser, modules are instantiated with
+`WebAssembly.instantiate` — which has **no NaN canonicalization and no fuel**.
+
+Two consequences, neither previously stated:
+
+- **The equivalence gate is unprotected against NaN divergence.** The exit
+  criterion is "breakout compiled as wasm module runs bit-identical (state hash)
+  to its static build, native **and in-browser**". Basic IEEE operations agree
+  across targets; NaN _payloads_ are exactly what canonicalization exists to
+  normalise, and the determinism hash is where a difference would surface. The
+  gate can pass for a long time and then not.
+- **Hostile-module containment has no browser equivalent.** "A deliberately
+  hostile module (infinite loop, OOB, huge allocs) cannot crash or hang the
+  server" holds natively because fuel holds it. In a browser there is no fuel:
+  an infinite loop in a module hangs the tab. This is survivable in practice
+  because untrusted modules run **server-side**, and servers are native — but a
+  browser-hosted single-player game with mods has no containment at all, and the
+  modding story should say so.
+
+What is genuinely solved and should not be re-litigated: **imported
+`WebAssembly.Memory` needs no `SharedArrayBuffer`** while it is not shared
+across threads, so the COOP/COEP limitation does not block modules. That half of
+the memory-model correction holds.

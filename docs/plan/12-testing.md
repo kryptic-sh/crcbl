@@ -85,3 +85,23 @@ is the e2e substrate: if it can't be tested without a GUI, it's built wrong.
   intentionally) — unreviewed visual drift is impossible.
 - All e2e drivable locally with one command per suite
   (`cargo nextest run --all-features`, `crcbl`-based scripts for the rest).
+
+## Corrections (2026-08-09)
+
+- **"wgpu's GL/software fallbacks" do not run in CI.** The infrastructure
+  section says render e2e runs on lavapipe _and_ those fallbacks; nothing
+  exercises a GL device anywhere. GL is reachable through `crcbl-wgpu` (wgpu
+  enumerates `Backends::all()`) and is unproven rather than supported —
+  `docs/backlog.md` carries the OpenGL decline and its reasoning. Either point
+  the wgpu e2e suite at a GL device or drop the claim; it currently reads as
+  coverage that exists.
+- **Shader artifacts are validated one target in four.** `spirv-val` runs on the
+  SPIR-V; the WGSL, MSL and DXIL emitted from the same source are checked by
+  nothing, which is how a shader Dawn rejects passed every gate and shipped a
+  black canvas. The rules that close it are in
+  [02-vulkan-backend.md](02-vulkan-backend.md)'s shader-portability section;
+  they belong to this topic's anchor list too.
+- **The cross-backend image compare is the only detector for a whole bug class**
+  — a shader whose _semantics_ differ per target, which no lint can find. It
+  currently covers two backends and one scene. Extending it to every engine
+  shader and every backend is a testing deliverable, not a rendering one.

@@ -148,3 +148,28 @@ Grammar invariants (what makes it a learnable skill):
   approximations / LUTs for every transcendental in the DSP path, a CI `deny` on
   std float transcendentals inside `crcbl-audio` (the same pattern as the
   `std::fs` deny), and no `mul_add`/FMA contraction.
+
+## Correction (2026-08-09)
+
+- **The bus graph is specified here and does not exist.** The architecture
+  section calls for `master ← sfx/music/ui/voice`, per-bus gain and a soft-knee
+  limiter on master, and the delivery table puts buses in **P4A**, which the
+  ROADMAP marks done. `crates/crcbl-audio` has no bus type and no limiter —
+  `Mixer` is voices and nothing above them. Mix snapshots and ducking are
+  scheduled at P10 and depend on the buses that were never built, so P10
+  inherits both.
+- **The transcendental policy conflicts with [05-physics.md](05-physics.md).**
+  This document requires own polynomial approximations plus a CI deny; topic 5's
+  correction requires the `libm` crate. Neither exists. See topic 5's correction
+  for the full note; the decision is one decision and belongs in one place.
+- **Golden buffers are an exit criterion with no instances.** "Golden-buffer
+  audio e2e in CI for every sample that emits sound" is stated above; asteroids
+  and horde both synthesise their cues deterministically from fixed seeds — so a
+  golden is possible — and neither has one. `docs/backlog.md` carries it as a
+  coverage gap.
+- **There is still no listener.** `spatial::compute_cue` takes the listener
+  position on every call, so four samples spell their audio entry point three
+  different ways. This document's architecture already decided the answer —
+  "**Listener** = one entity (client's view); grammar math happens in listener
+  space each block" — so the gap is unbuilt work rather than an open design
+  question, and the backlog entry that frames it as a design question is wrong.

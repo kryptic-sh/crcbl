@@ -135,3 +135,48 @@ OAuth, scaling — that's the backend project.
 - **Nonce/sequence width is specified**: 64-bit sequence, transmitted truncated
   with **DTLS 1.3-style implicit reconstruction**, epoch bump on rekey. Wrap
   behavior is defined rather than left to discovery.
+
+## Correction (LAN-only scope, 2026-08-09)
+
+**No hosted infrastructure exists in this project, so tier 3 as written has no
+deployment.** Sessions are LAN — direct connect by address, or a host found
+through local-network discovery (topic 23's correction) — and web builds have no
+networking at all. What this document specifies is not wrong; what changes is
+which parts have a consumer.
+
+### What survives, and where it is proven
+
+- **Tier 0/1 (open and pre-shared key) are the game tiers.** A LAN host is the
+  authority, a password is a PSK, and the handshake, schema-hash gate and
+  per-packet AEAD from topic 23 do everything they already did. breach and shard
+  both run here.
+- **Player identity stays**, scoped to a host rather than to a service: who you
+  are on the machine you joined. shard's characters belong to the shard they
+  were made on, and there is no cross-server transfer to design.
+- **Signed results survive, at the tier a local host can back.** bracket
+  ([sample/16-bracket.md](sample/16-bracket.md)) is the consumer: the host signs
+  a match result so a client cannot forge one, and a forged or unsigned result
+  must be rejected by a test that fails when the check is removed. That is the
+  useful half of the ranked chain and it needs no service.
+
+### What is deferred for want of a consumer
+
+**Hosted tier 3, the ranked-integrity chain and `crcbl-mint` as a running
+service.** breach was their only consumer and breach is LAN, so per sample rule
+13 — a topic that can name no adopting sample is not ready to be built — they
+are not scheduled. The design is kept because it is the expensive half to get
+right and cheap to keep on paper, and because the token layer in topic 23 is
+already the seam it would arrive through.
+
+**What would change it:** a decision to host anything. That decision was taken
+deliberately in the other direction — see the samples overview — and reversing
+it is a product call rather than a technical one.
+
+### The honest note
+
+Tier 3's value is a chain of custody a player can trust when they do not trust
+the host. On a LAN the host is usually a friend in the room, which is why the
+tier degrades gracefully into "the host is the authority" rather than into
+nothing. It also means **this project never demonstrates a trust model where the
+host is adversarial**, and no claim to the contrary should be made from what it
+does demonstrate.

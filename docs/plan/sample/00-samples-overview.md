@@ -28,26 +28,63 @@ built second. Every sample starts only when all its engine dependencies exist,
 ships with spatial audio, and (except viewer) publishes as a wasm demo on the
 GitHub Pages site.
 
-| #   | Sample                       | Roadmap gate                 | Proves                                                                                                          |
-| --- | ---------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| 01  | [breakout](01-breakout.md)   | S1 (P0–P4A)                  | 2D path, minimal ECS, in-memory server loop, game UI, swept-sphere CCD, panning audio                           |
-| 12  | [flappy](12-flappy.md)       | S1B (needs nothing past P4A) | That the engine has no breakout-shaped assumptions; procedural churn, one-input latency, seeded determinism     |
-| 02  | [asteroids](02-asteroids.md) | S2 (P5–P6)                   | Entity churn, generational ids, broadphase churn, segment CCD, first forces                                     |
-| 03  | [horde](03-horde.md)         | S3 (P7–P8)                   | GPU-driven renderer at scale, flat CPU cost claim, 10k-body queries                                             |
-| 04  | [hud](04-hud.md)             | P4 skeleton → P10 done       | Pure UI demo: CSS HUD + widget gallery + themes; the UI system's living fixture                                 |
-| 05  | [viewer](05-viewer.md)       | S4 (P9–P10)                  | Asset pipeline as a _usable tool_, camera, inspector panels                                                     |
-| 06  | [orbit](06-orbit.md)         | S5 (P11)                     | Physics acceptance test: sector space, orbits, drag, CCD, on-rails handoff                                      |
-| 07  | [towers](07-towers.md)       | S6 (P12–P13)                 | **Flagship**: everything — editor content, co-op multiplayer, browser client, esports audio cues                |
-| 08  | [arena](08-arena.md)         | post-MVP                     | Client prediction driver — pulls netcode forward; audio grammar under fire                                      |
-| 09  | [puppet](09-puppet.md)       | post-MVP wave 1              | Skeletal animation acceptance test; shadows + device-swap input showcase                                        |
-| 10  | [sparks](10-sparks.md)       | post-MVP wave 1              | VFX gallery + live workbench; GPU particle pipeline fixture                                                     |
-| 11  | [breach](11-breach.md)       | FPS-era                      | **FPS flagship**: 5v5 comp shooter — prediction/lagcomp, ballistics, FP rendering, integrity gate, ranked chain |
+| #   | Sample                       | Roadmap gate                 | Proves                                                                                                             |
+| --- | ---------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| 01  | [breakout](01-breakout.md)   | S1 (P0–P4A)                  | 2D path, minimal ECS, in-memory server loop, game UI, swept-sphere CCD, panning audio                              |
+| 12  | [flappy](12-flappy.md)       | S1B (needs nothing past P4A) | That the engine has no breakout-shaped assumptions; procedural churn, one-input latency, seeded determinism        |
+| 02  | [asteroids](02-asteroids.md) | S2 (P5–P6)                   | Entity churn, generational ids, broadphase churn, segment CCD, first forces                                        |
+| 03  | [horde](03-horde.md)         | S3 (P7–P8)                   | GPU-driven renderer at scale, flat CPU cost claim, 10k-body queries                                                |
+| 04  | [hud](04-hud.md)             | P4 skeleton → P10 done       | Pure UI demo: CSS HUD + widget gallery + themes; the UI system's living fixture                                    |
+| 05  | [viewer](05-viewer.md)       | S4 (P9–P10)                  | Asset pipeline as a _usable tool_, camera, inspector panels                                                        |
+| 06  | [orbit](06-orbit.md)         | S5 (P11)                     | Physics acceptance test: sector space, orbits, drag, CCD, on-rails handoff                                         |
+| 07  | [towers](07-towers.md)       | S6 (P12–P13)                 | **Flagship**: everything — editor content, co-op multiplayer, browser client, esports audio cues                   |
+| 08  | [arena](08-arena.md)         | post-MVP                     | Client prediction driver — pulls netcode forward; audio grammar under fire                                         |
+| 09  | [puppet](09-puppet.md)       | post-MVP wave 1              | Skeletal animation acceptance test; shadows + device-swap input showcase                                           |
+| 10  | [sparks](10-sparks.md)       | post-MVP wave 1              | VFX gallery + live workbench; GPU particle pipeline fixture                                                        |
+| 11  | [breach](11-breach.md)       | FPS-era                      | **FPS flagship**: web slice first, then native 5v5 comp — prediction/lagcomp, ballistics, FP rendering, integrity  |
+| 13  | [lumen](13-lumen.md)         | S4B (P7B–P7C)                | Lighting acceptance: the same scene under `RayTraced` and `Rasterised`, every effect, both paths side by side      |
+| 14  | [quarry](14-quarry.md)       | S4C (P7)                     | Geometry acceptance: meshlet clusters, QEM cluster LOD, and all three `GeometryPath` values on one scene           |
+| 15  | [shard](15-shard.md)         | S6B → wave 2                 | **MMO flagship**: web slice first, then a native persistent world — sector streaming, interest management at scale |
+| 16  | [bracket](16-bracket.md)     | P13                          | Matchmaking + rating + ranked auth as a service, with no game attached; the only genuinely networked web client    |
 
 01–06 stay tiny (days, not weeks, each; hud is continuous — a P4 skeleton that
 grows until P10). 07 is the MVP-era flagship and long-lived dogfood. 08 exists
 to force post-MVP netcode work and is explicitly not started before MVP ends. 11
 is the **FPS-era flagship** — the biggest sample by far, consuming topics 26–31
 as one game; it starts only after arena has proven prediction/lag comp.
+
+13 and 14 are **acceptance fixtures** rather than games, in the shape hud
+already established: lumen owns lighting and quarry owns geometry, each proving
+that every path renders correctly before a game depends on it. 15 is the
+**second flagship** and the one the demo site leads with, since breach's
+competitive game never ships to a browser. 16 is a **tech demo with no game in
+it at all** — matchmaking, rating and ranked auth in isolation, which is the
+only way a matchmaker can be evaluated without a real playerbase.
+
+**Where multiplayer lives — and where it does not.** Native sessions are LAN:
+direct connect by IP, or a lobby browser over local-network host discovery.
+**Every web build is single player, without exception.**
+
+That is a decision rather than a limitation discovered late, and the reasoning
+belongs here because it constrains every future sample. A browser cannot listen
+on a socket, cannot discover hosts on a local network, and cannot open an
+insecure connection to a LAN address from an HTTPS page. So a browser client can
+only reach a server somebody is paying to host — and the project hosts nothing.
+WebRTC was considered as the way around it and declined: it still needs a hosted
+signalling broker, it still cannot discover LAN hosts, and talking to browser
+peers would put a full WebRTC stack on the native side, which is a framework of
+exactly the kind the dependency policy in
+[../15-windowing.md](../15-windowing.md) rejects.
+
+The consequence, recorded so nobody re-derives it: **WebTransport and WebSocket
+are not in the plan.** The transport surface is UDP and in-memory. See topic
+23's LAN correction.
+
+**Browser multiplayer is deferred, not refused.** One route survives the
+no-infrastructure constraint — WebRTC data channels with manually exchanged
+connection codes, no signalling server, browser to browser only — and it is
+recorded in `docs/backlog.md` with its costs so the decision can be reopened
+without re-deriving it. It is not in the plan today.
 
 ## Rules for all samples
 
@@ -76,6 +113,22 @@ as one game; it starts only after arena has proven prediction/lag comp.
    the GitHub Pages demo site as part of its exit criteria (viewer exempt as a
    native tool; web build stretch). A sample that breaks the wasm build breaks
    CI.
+
+   **The two flagships are built web slice first, native full version after.**
+   breach (11) and shard (15) each ship a reduced single-player cut to the
+   browser before their native game exists, because the browser runs the
+   fallback paths — rasterised lighting, `IndirectPerBatch`, `ArrayPages` — and
+   a fallback proven after the fact is a fallback nobody proved. The native
+   milestone then layers ray tracing, meshlets and networking on top as a
+   capability upgrade rather than a rewrite, which is the claim
+   [../39-capabilities.md](../39-capabilities.md) makes.
+
+   **breach's competitive game is native only**, and that is a scope decision
+   rather than a degradation: anti-cheat, raw mouse input and an unreliable
+   channel are things a browser cannot honestly provide, so a browser build of
+   it would be a claim the platform cannot back. Its reasons are in its own doc.
+   No other sample gets this exemption without the same kind of argument.
+
 8. **Sound through `crcbl-audio`, spatial by default.** Positional game events
    use the cue grammar (topic 13) — samples are how players (and we) learn the
    grammar. No sample ships silent after P4A.
@@ -104,3 +157,23 @@ as one game; it starts only after arena has proven prediction/lag comp.
     arbitrary glTF, sparks is a particle workbench. Everything else on the
     ladder is 2D or has 2D chrome. A sample claiming the exemption says so in
     its own doc and says why.
+
+12. **Every sample runs on every path the device offers, and says which it
+    took.** `GeometryPath`, `BindingModel` and `LightingPath`
+    ([../39-capabilities.md](../39-capabilities.md)) are selected from device
+    capability and degrade downward; a sample that only ever runs on the best
+    one is how a fallback ships untested. Concretely: the selected paths appear
+    in the debug panel and in the headless summary line, every sample accepts a
+    flag forcing a lesser path, and each sample's CI run exercises at least the
+    path its runner selects plus one below it.
+
+    **This is the rule that keeps the web build honest.** The browser has no ray
+    tracing, no mesh shaders and no bindless, so the lesser paths are not a
+    theoretical fallback for old hardware — they are what every browser visitor
+    and every Apple machine actually runs.
+
+13. **Between them, the samples cover every engine feature.** A feature with no
+    sample is a feature nobody has used, and the ladder is the list of what has
+    been. When a topic lands, either an existing sample adopts it — named in
+    that sample's doc — or the topic says which new sample proves it. A topic
+    that can name neither is not ready to be built.

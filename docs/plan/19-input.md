@@ -127,3 +127,23 @@ swap kb/mouse ↔ gamepad ↔ on-screen pad live, same character.
   controllers, map table grows by demand, no 3rd-party DB import).
 - **Context-stack abuse** (input eaten mysteriously): inspector shows the full
   resolution path per input — debuggability designed in.
+
+## Correction (2026-08-09)
+
+**`DeviceId` names a device _kind_, not a device, on every backend that has
+one.** Win32, X11 and AppKit all report a constant per family. The layered
+design above declares "per-device id" at the shell boundary and states that "the
+device-id plumbing supports [local multiplayer] from day one" — it does not,
+today, on any platform, and the device registry cannot tell two keyboards apart.
+
+Per-backend routes exist and none is free: Windows is best placed
+(`RAWINPUTHEADER::hDevice` identifies the physical device on every `WM_INPUT`,
+but raw input would have to become the source of button and wheel events too,
+and a handle needs a table and a hotplug story); macOS and Linux both end at
+IOKit and evdev respectively, which is the same slice as unaccelerated raw
+motion.
+
+Consequence to state plainly: **local-multiplayer device assignment is
+blocked**, not merely unscheduled, and any test asserting two devices are
+distinguishable would pass vacuously today. `docs/backlog.md` carries the
+per-backend detail.

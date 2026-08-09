@@ -1,9 +1,49 @@
-# Topic 18 — Render Features: Shadows + Post-Processing
+# Topic 18 — Render Features: Lighting, Shadows + Post-Processing
 
-The visual-credibility layer on top of the stage 2/3 renderer: shadow maps and
-the post-processing stack (HDR, tonemapping, AA, bloom). Shadows and the
-HDR/tonemap/FXAA core are **MVP** (they land inside the renderer phases); bloom
-follows at P10; TAA is post-MVP.
+The visual-credibility layer on top of the stage 2/3 renderer: **two complete
+lighting paths** (ray traced and rasterised), shadow maps, and the
+post-processing stack (HDR, tonemapping, AA, bloom). Ray-traced lighting,
+rasterised lighting, shadows and the HDR/tonemap/FXAA core are all **MVP**;
+bloom follows at P10; TAA is post-MVP.
+
+## Lighting: two complete paths (MVP)
+
+**Ray-traced lighting is MVP, and so is a full rasterised twin of everything it
+does.** `LightingPath` (see [39-capabilities.md](39-capabilities.md)) selects
+between them per device, and the selection degrades: a device without
+`RAY_QUERY` and `ACCELERATION_STRUCTURE` gets `Rasterised` and a complete
+picture that merely looks worse.
+
+This is a deliberate and expensive choice. It is made because **ray tracing is
+Vulkan and D3D12 only** — WebGPU has no ray tracing at all, and Slang cannot yet
+emit ray tracing for the Metal target, so macOS, iOS and every browser run the
+rasterised path. Those are not edge platforms, so the raster twin is not a
+degraded fallback nobody looks at; it is the path most players will see.
+
+| Effect              | `RayTraced`                         | `Rasterised`                                     |
+| ------------------- | ----------------------------------- | ------------------------------------------------ |
+| Global illumination | ray-traced GI                       | irradiance probes + baked/ambient                |
+| Reflections         | ray-traced reflections              | screen-space reflections, probe fallback         |
+| Shadows             | ray-traced shadows, all light types | CSM for sun, single map for spot, cube for point |
+| Ambient occlusion   | ray-traced AO                       | screen-space AO                                  |
+
+Rules that keep the two from diverging into two renderers:
+
+- **One material model, one BRDF, one set of inputs.** Both paths shade with the
+  same material table (topic 37) and the same lighting maths; what differs is
+  how visibility and incoming radiance are _gathered_, never how they are
+  _shaded_.
+- **One tonemapped output target.** The post stack below runs identically after
+  either path, so nothing downstream branches on `LightingPath`.
+- **Golden images per path**, and a documented pair-wise comparison: the two
+  paths are not expected to match pixel for pixel, but a scene that reads
+  correctly on one and wrongly on the other is a defect in whichever is wrong.
+  The comparison is a human-reviewed reference, not an automatic tolerance.
+- **Acceleration structures are built regardless of who consumes them** where
+  the device supports them — BLAS per mesh asset at bake or load, TLAS refit per
+  frame from the same instance data the cull pass reads. Topic 24 and topic 13
+  are the other potential consumers; neither is MVP and neither may assume the
+  structure exists.
 
 ## Shadows (MVP — lands with P7)
 
@@ -19,11 +59,17 @@ follows at P10; TAA is post-MVP.
   shadow-map inspector panel (topic 7 debug tools).
 - Skinned casters (topic 17) come free via the skinned-output pool region.
 - **Spot-light shadows** (single map) when towers wants them (tower projectiles
-  at night — optional polish); **point-light** (cube maps) post-MVP;
+  at night — optional polish); **point-light** (cube maps) are MVP now, because
+  the raster twin has to cover every light type ray-traced shadows cover;
   static-geometry caching (cached cascades / shadow atlases) post-MVP when a
   sample's perf numbers demand it.
-- Tier B note: identical approach — depth pass + compacted draws; nothing
-  bindless-dependent in the shadow path.
+- **Under `LightingPath::RayTraced` this whole section is bypassed**, not
+  augmented: shadows come from ray queries against the TLAS, for every light
+  type, with no cascades and no shadow atlas. The two are alternatives, which is
+  what keeps the raster path from acquiring ray-traced special cases.
+- Path note: identical on every `GeometryPath` — depth pass plus whatever emit
+  tail the device selected; nothing in the shadow path depends on the binding
+  model.
 
 ## Post-processing stack
 
@@ -54,6 +100,23 @@ scene (HDR RGBA16F) → bloom (down/upsample chain) → exposure + tonemap → F
   games/samples tune without engine edits; settings UI (topic 14 P10) exposes
   quality toggles.
 
+### Where the toggles live
+
+Every feature in this document is switchable at three layers, resolved in one
+place, per [39-capabilities.md](39-capabilities.md):
+
+```
+camera stack (this RON) declares what the view wants
+  → [engine.video] clamps it downward as a player quality setting
+  → programmatic override may set it either way
+  → device capability clamps it downward, last and absolutely
+```
+
+The per-camera layer is the one this topic owns, and it is genuinely per view: a
+render-to-texture camera driving a security monitor, a planar reflection, or a
+weapon-scope PiP (topic 29) does not want reflections or GI of its own, and that
+is a property of the camera rather than of the player's hardware.
+
 ## Interactions (kept honest)
 
 - Render-scale upscale (topic 15) happens **after** tonemap+AA: post chain costs
@@ -68,18 +131,29 @@ scene (HDR RGBA16F) → bloom (down/upsample chain) → exposure + tonemap → F
 
 ## Delivery
 
-| Slice                                                       | Phase     |
-| ----------------------------------------------------------- | --------- |
-| HDR target + exposure/tonemap pass + FXAA                   | P7        |
-| Sun CSM (culling-integrated, PCF), cascade debug overlay    | P7        |
-| Bloom chain                                                 | P10       |
-| Spot shadows (if towers polish wants)                       | S6 window |
-| Auto-exposure, TAA (motion vectors), point shadows, atlases | post-MVP  |
+| Slice                                                                 | Phase    |
+| --------------------------------------------------------------------- | -------- |
+| HDR target + exposure/tonemap pass + FXAA                             | P7       |
+| Sun CSM (culling-integrated, PCF), cascade debug overlay              | P7       |
+| Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes   | P7B      |
+| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats` | P7C      |
+| Ray-traced shadows + AO                                               | P7C      |
+| Ray-traced reflections                                                | P7C      |
+| Ray-traced global illumination                                        | P7C      |
+| Bloom chain                                                           | P10      |
+| Auto-exposure, TAA (motion vectors), shadow atlases                   | post-MVP |
+
+**P7B and P7C are new phases** carrying the raster twin and the ray-traced path
+respectively; the roadmap's phase table is authoritative for their ordering. The
+raster twin lands **first**, deliberately: it is the path macOS, iOS and every
+browser use, so it is the one whose absence would block more platforms than it
+unblocked, and it is the reference the ray-traced path is reviewed against.
 
 Sample impact: horde (S3) onward renders shadowed + tonemapped; orbit's planet
-terminator and towers' map lighting are the showcase beneficiaries; exit
-criteria of those samples inherit "shadows on, stack on" implicitly via the
-phase gates.
+terminator and towers' map lighting are the showcase beneficiaries; **`lumen`
+(sample 13) is the dedicated lighting sample** and exists to show the same scene
+under both paths side by side. Exit criteria of the other samples inherit
+"shadows on, stack on" implicitly via the phase gates.
 
 ## Risks
 

@@ -204,3 +204,61 @@ SAB is ever wanted on Pages, the standard workaround is the `coi-serviceworker`
 shim, adopted deliberately rather than accidentally. Module memory (16) is
 unaffected — an imported `WebAssembly.Memory` needs no SAB unless shared across
 threads.
+
+## Correction (scope and browser boundary, 2026-08-09)
+
+### The networking half is removed
+
+This document's task 4 (WebTransport/WebSocket transport + server listener) and
+its exit criterion "browser client connects to a native dedicated server" are
+**dropped**. Native multiplayer is LAN and web builds are single player, so no
+browser client has a server to reach. See [23-netcode.md](23-netcode.md)'s LAN
+correction for the full reasoning and for the WebRTC route that was deferred
+rather than refused.
+
+What remains of this stage is what it was always mostly about: the backend, the
+platform, the shaders, the assets and the demo site.
+
+### The threading section is superseded
+
+"MVP wasm build is single-threaded … wasm-threads/SharedArrayBuffer is a
+post-MVP optimization", and the constraint table's "job system (if added
+post-MVP)", both predate **P5B**, which moved `crcbl-jobs` ahead of P6–P8 and
+set wasm thread-topology parity as the target. [21-jobs.md](21-jobs.md)'s
+2026-08-03 correction is canonical. The COOP/COEP gate below still stands and is
+still a gate: Pages cannot set the headers, and if the `coi-serviceworker` shim
+is declined the demos run single-threaded through the `Inline` spawner.
+
+### The browser boundary, canonically
+
+This table is the canonical list of what a browser cannot do. Anything relying
+on a row here needs a stated fallback or an honest absence.
+
+| Gap                                                 | Consequence                                                                  |
+| --------------------------------------------------- | ---------------------------------------------------------------------------- |
+| No bindless / binding arrays                        | `BindingModel::ArrayPages` — texture array pages + batching                  |
+| No multi-draw-indirect or count                     | `GeometryPath::IndirectPerBatch` — compacted list, per-bucket draws          |
+| No mesh shaders                                     | same; per-instance LOD instead of per-cluster                                |
+| No ray tracing                                      | `LightingPath::Rasterised` — the raster twin is MVP for this reason          |
+| No buffer device address                            | indexed SSBO lookups                                                         |
+| No persistent mapped buffers                        | staging copies on every upload                                               |
+| No pipeline cache                                   | every page load recompiles every shader — keep permutations low              |
+| No threads without COOP/COEP                        | `Inline` spawner; sim on the main thread                                     |
+| No listening socket, no LAN discovery, no HTTPS→LAN | no networking at all; web builds are single player                           |
+| No NaN canonicalization, no fuel                    | module determinism unguarded; no hostile-module containment (topic 16)       |
+| WebCodecs audio encode uneven                       | libopus compiled to wasm if VOIP ever ships to a browser (topic 32)          |
+| `wasm32` address space                              | 4 GB architectural ceiling, browsers often lower — a wall, not a degradation |
+
+Timestamp queries, compute, indirect draw, `INDIRECT_FIRST_INSTANCE`, f16,
+dual-source blending and the BC/ETC2/ASTC families **are** available, so the
+profiler, GPU culling and the post stack all work. The gap is narrower than
+"Tier B" implied — see [39-capabilities.md](39-capabilities.md).
+
+### Two smaller items
+
+- **The editor is a native target.** Task 6's "editor-in-browser smoke — should
+  mostly work by construction" was never examined; the asset browser, OS
+  drag-drop and the notify-based file watcher are all native-shaped. See
+  [08-editor.md](08-editor.md).
+- **The P5.13 status section reports 18/18.** The browser gate has grown since;
+  the ROADMAP status section carries the current count and is authoritative.

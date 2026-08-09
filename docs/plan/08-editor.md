@@ -117,3 +117,24 @@ CLI clients without defining them). MVP rules:
   inventory kit uses.
 - Last-writer-wins for conflicting property sets, which server serialization
   gives for free.
+
+## Corrections (2026-08-09)
+
+- **"Shell carries file-list clipboard/DnD mimes from day one so this is editor
+  work, not seam work" is false on three of four desktop backends.** Win32
+  publishes `text/uri-list` as a _registered format_ and never reads `CF_HDROP`,
+  so an Explorer file copy is invisible — and the shared `parse_uri_list` cannot
+  round-trip a Windows path (`file:///C:/a` decodes to `/C:/a`). macOS reads
+  only `public.file-url`, not `NSFilenamesPboardType` or the promised-file form.
+  X11 has no XDND at all and `ShellCaps::DRAG_DROP` is honestly clear there.
+  Closing it is **seam work** — a Windows-aware `file:` encoder and matching
+  decoder, or delivering `CF_HDROP` through a different route, plus a seam
+  question for promised files ("where should a promised drop land?"). Owed
+  before the asset browser wants OS drops; `docs/backlog.md` has the detail per
+  backend.
+- **The editor is a native target.** `10-wasm-webgpu.md` lists editor-in-browser
+  as a stretch that "should mostly work by construction"; the asset browser, OS
+  drag-drop import, `crcbl import` and hot reload's notify-based file watcher
+  are all native-shaped, and nobody has examined what a browser would do with
+  them. Treated as native-only until something makes the case; recorded so the
+  stretch goal is not mistaken for a plan.

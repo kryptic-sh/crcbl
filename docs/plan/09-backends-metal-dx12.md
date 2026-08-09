@@ -2,8 +2,29 @@
 
 Implement the frozen HAL on Metal (macOS) and DX12 (Windows). The renderer, ECS,
 UI, and editor don't change — that's the point of the seam. Vulkan also runs
-natively on Windows, so DX12's practical role is old-Intel-iGPU coverage and
-keeping the door open for Xbox; Metal is the only path on macOS.
+natively on Windows, so DX12 is there for the Xbox door and for first-class
+Windows GPU debugging — **not** old-iGPU coverage; see the 2026-07-27 correction
+below, which retracts the original justification. Metal is the only path on
+macOS.
+
+> **Capability correction, 2026-08-09.** The "tier flags audit" below asserts
+> both backends are Tier A. That framing is superseded by
+> [39-capabilities.md](39-capabilities.md): there are no tiers, a backend
+> reports what the device has, and the renderer picks a path from that. Two
+> specifics this document got wrong are recorded there in full — **Metal has no
+> draw-indirect-count at all** (the count lives in GPU memory and Metal's only
+> count-reading execution needs its commands to already exist; `wgpu` reached
+> the same conclusion independently), and **Metal's bindless story is
+> unsettled** — `crcbl-mtl` withdrew `DESCRIPTOR_INDEXING` at MTL6 because bind
+> groups are flat argument tables, and getting it back needs Slang emitting
+> argument-buffer-shaped MSL rather than a flag being flipped.
+>
+> **Ray tracing on Metal is blocked upstream.** Metal has ray tracing; Slang
+> does not yet emit it for the Metal target. So the MVP's ray-traced lighting
+> path is Vulkan and D3D12 only, and Apple platforms run the rasterised twin —
+> with no engine branch, because the capability model absorbs it. Hand-writing
+> MSL for those shaders was considered and declined; the reasoning is in
+> topic 39.
 
 ## Order
 
@@ -22,10 +43,13 @@ clear.
 - **Shader cross-compilation**: Slang emits Metal (MSL) and DXIL directly — this
   was the reason for choosing Slang in stage 2. Build pipeline grows per-backend
   artifact outputs keyed by the same shader hash.
-- **Tier flags audit**: both backends are Tier A (bindless: Metal argument
-  buffers tier 2 / DX12 descriptor heaps; indirect: ICBs / ExecuteIndirect). Any
-  tier-A capability that doesn't map cleanly gets resolved via the tier system,
-  not backend-specific renderer code.
+- **Capability audit** (superseding the original "both are Tier A"): each
+  backend reports the features it actually has — bindless via Metal argument
+  buffers or DX12 descriptor heaps, indirect via ICBs or `ExecuteIndirect`, mesh
+  shaders on both, ray tracing on DX12 only. A capability that does not map
+  cleanly is reported **clear** and the renderer selects a lesser path; it is
+  never emulated behind the seam and never resolved with backend-specific
+  renderer code. See [39-capabilities.md](39-capabilities.md).
 - **CI**: macOS + Windows runners build + run graph-compile tests; on-hardware
   smoke (render one frame, hash the readback) on self-hosted/manual runners —
   compile-verified-only backends are a known trap (gpur lesson).
@@ -34,16 +58,16 @@ clear.
 
 Mapping notes:
 
-| HAL concept           | Metal                                                                                           |
-| --------------------- | ----------------------------------------------------------------------------------------------- |
-| Device/Queue          | `MTLDevice` / `MTLCommandQueue`                                                                 |
-| Swapchain             | `CAMetalLayer` + drawable pacing                                                                |
-| Bindless              | Argument buffers (tier 2) — resource heaps + `useResource` residency management (the real work) |
-| Buffer device address | `gpuAddress` (Metal 3)                                                                          |
-| Draw indirect count   | ICBs or indirect command encoding — closest-fit chosen during implementation                    |
-| Timeline semaphore    | `MTLSharedEvent`                                                                                |
-| Barriers/sync2        | Mostly implicit; hazard tracking off + explicit fences/`memoryBarrier` to match graph semantics |
-| Timestamps            | `sampleTimestamps` / counter sample buffers                                                     |
+| HAL concept           | Metal                                                                                                     |
+| --------------------- | --------------------------------------------------------------------------------------------------------- |
+| Device/Queue          | `MTLDevice` / `MTLCommandQueue`                                                                           |
+| Swapchain             | `CAMetalLayer` + drawable pacing                                                                          |
+| Bindless              | Argument buffers (tier 2) — resource heaps + `useResource` residency management (the real work)           |
+| Buffer device address | `gpuAddress` (Metal 3)                                                                                    |
+| Draw indirect count   | **Not available.** Reported clear; the renderer selects another `GeometryPath` — see the correction above |
+| Timeline semaphore    | `MTLSharedEvent`                                                                                          |
+| Barriers/sync2        | Mostly implicit; hazard tracking off + explicit fences/`memoryBarrier` to match graph semantics           |
+| Timestamps            | `sampleTimestamps` / counter sample buffers                                                               |
 
 Known risk areas: residency management for bindless (Metal makes you say what's
 resident), drawable acquisition semantics vs the Vulkan-shaped swapchain API,
@@ -75,8 +99,10 @@ GPU-based validation) integration into the same log path as Vulkan validation.
 3. `crcbl-mtl`: bring-up ladder (clear → triangle → sandbox → editor), then
    tier-A features, then perf pass vs Vulkan baseline.
 4. `crcbl-dx12`: same ladder.
-5. Windowing: crcbl-shell Win32 + AppKit backends land here (topic 15); verify
-   DPI + resize behavior per platform.
+5. ~~Windowing: crcbl-shell Win32 + AppKit backends land here (topic 15).~~
+   **Moved to P5C** (ROADMAP's 2026-08-04 correction) and shipped. What still
+   waits for this phase is the sample-level pass — pressing F11 at a running
+   game needs something to draw with.
 6. CI matrix + on-hardware smoke runs.
 7. Perf validation: stage 3 exit-criteria scene within ~15% of the Vulkan
    numbers on comparable hardware (flag, investigate, document if not).
