@@ -170,8 +170,8 @@ struct GpuInstance
     uint flags;
 };
 
-/// One resident mesh's range in the geometry pools, matching
-/// `crcbl_shaders::mesh::GpuMesh`.
+/// One resident mesh's range in the geometry pools **and its local-space
+/// bounds**, matching `crcbl_shaders::mesh::GpuMesh`.
 ///
 /// `docs/plan/03-gpu-driven-rendering.md` §3.1's three integers, in the buffer
 /// the GPU resolves them out of. Two of the three are `draw_indexed`'s own
@@ -179,6 +179,20 @@ struct GpuInstance
 /// §3.3's cull pass builds its draws out of exactly these numbers, and a table
 /// carrying only what today's vertex stage reads would have to change layout
 /// the day it does.
+///
+/// The bounds are §3.3's other half, and they are here rather than in a table
+/// of their own because they have the same lifetime as the range: both are
+/// decided when the mesh is suballocated, both are cleared when it is freed,
+/// and a second table would be a second thing to keep in step. `cull.slang`
+/// reads them; nothing in this file does.
+///
+/// # Nine scalars, and not a `float3` in sight
+///
+/// Under `std430` a `float3` is 16-byte aligned, so a `float3 bounds_min` after
+/// three `uint`s would land at offset 16 with four bytes of padding in front of
+/// it and the struct would be 48 bytes rather than 36. A struct of scalars has
+/// no padding anywhere and a stride that is exactly the sum of its members —
+/// which is the same reason the three `uint`s above are three `uint`s.
 struct GpuMesh
 {
     /// This mesh's first vertex in the pool, added to every index a draw of it
@@ -190,6 +204,14 @@ struct GpuMesh
     /// How many indices the mesh has. Zero for an entry naming no mesh — see
     /// `crcbl_render::MeshPool`, which clears an entry when its mesh is freed.
     uint index_count;
+    /// Lowest corner of the mesh's **local-space** axis-aligned bounding box.
+    float min_x;
+    float min_y;
+    float min_z;
+    /// Highest corner of the same box.
+    float max_x;
+    float max_y;
+    float max_z;
 };
 
 /// Which instance this draw draws, matching `crcbl_shaders::mesh::DrawConstants`.

@@ -57,8 +57,14 @@ const PROBE_NEAR: f32 = 0.1;
 const PROBE_FAR: f32 = 100.0;
 
 impl DepthProbe {
-    /// The two quads, near-first, in `crcbl_shaders::mesh::MeshVertex` layout.
-    fn geometry() -> (Vec<u8>, Vec<u8>) {
+    /// The two quads, near-first, in `crcbl_shaders::mesh::MeshVertex` layout,
+    /// with the box they fit in.
+    ///
+    /// The bounds are accumulated from the same loop that writes the vertices
+    /// rather than restated as a literal beside it: the mesh table's entry is
+    /// supposed to describe *this* geometry, and a hand-written pair of corners
+    /// would go on describing the old geometry the day a quad moves.
+    fn geometry() -> (Vec<u8>, Vec<u8>, [f32; 3], [f32; 3]) {
         // (z, half-extent, colour). The near quad is smaller, so a correct
         // frame is a red square inside a blue ring and a *wrong* one is a plain
         // blue rectangle — two visibly different pictures, not two shades.
@@ -68,10 +74,17 @@ impl DepthProbe {
         ];
         let mut vertices = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
+        let mut bounds_min = [f32::INFINITY; 3];
+        let mut bounds_max = [f32::NEG_INFINITY; 3];
         for (quad, (z, half, color)) in quads.iter().enumerate() {
             let base = u32::try_from(quad * 4).expect("two quads");
             for (x, y) in [(-1.0f32, -1.0f32), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
-                for value in [x * half, y * half, *z, 1.0] {
+                let position = [x * half, y * half, *z];
+                for axis in 0..3 {
+                    bounds_min[axis] = bounds_min[axis].min(position[axis]);
+                    bounds_max[axis] = bounds_max[axis].max(position[axis]);
+                }
+                for value in [position[0], position[1], position[2], 1.0] {
                     vertices.extend_from_slice(&value.to_le_bytes());
                 }
                 // Facing the camera, so both quads are lit identically and the
@@ -89,12 +102,12 @@ impl DepthProbe {
             .iter()
             .flat_map(|index| index.to_le_bytes())
             .collect();
-        (vertices, index_bytes)
+        (vertices, index_bytes, bounds_min, bounds_max)
     }
 
     fn new(headless: &Headless) -> Self {
         let device = headless.device.as_ref();
-        let (vertex_bytes, index_bytes) = Self::geometry();
+        let (vertex_bytes, index_bytes, bounds_min, bounds_max) = Self::geometry();
 
         let upload = |label, usage, bytes: &[u8], state| {
             let size = bytes.len() as u64;
@@ -216,6 +229,13 @@ impl DepthProbe {
                     base_vertex: 0,
                     base_index: 0,
                     index_count: u32::try_from(index_bytes.len() / 4).expect("twelve indices"),
+                    // Read by nothing on this path — `mesh.slang` does not look
+                    // at the bounds and this probe records no cull pass — but
+                    // written rather than defaulted, because an entry claiming a
+                    // degenerate box at the origin is a lie about a mesh that is
+                    // neither.
+                    bounds_min,
+                    bounds_max,
                 }
                 .to_bytes(),
             )

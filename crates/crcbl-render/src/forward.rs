@@ -1349,15 +1349,14 @@ mod tests {
                 &instances,
                 instance as usize * crcbl_shaders::mesh::INSTANCE_STRIDE + 64,
             );
-            let entry = &table[mesh as usize * crcbl_shaders::mesh::MESH_ENTRY_STRIDE..];
+            let at = mesh as usize * crcbl_shaders::mesh::MESH_ENTRY_STRIDE;
+            let entry = &table[at..at + crcbl_shaders::mesh::MESH_ENTRY_STRIDE];
             (
                 instance,
                 mesh,
-                crcbl_shaders::mesh::GpuMesh {
-                    base_vertex: uint_at(entry, 0),
-                    base_index: uint_at(entry, 4),
-                    index_count: uint_at(entry, 8),
-                },
+                crcbl_shaders::mesh::GpuMesh::from_bytes(
+                    entry.try_into().expect("one whole entry"),
+                ),
             )
         };
         let (cube_instance, cube_mesh, cube_entry) = resolved(renderer.cube.constant_offset);

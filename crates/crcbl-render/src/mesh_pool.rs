@@ -17,7 +17,7 @@
 //! Everything above this — instance data, GPU culling, indirect draws, meshlets
 //! — assumes a mesh is a range rather than a buffer, and none of it is here.
 //!
-//! # The same three integers, where the GPU can read them
+//! # The same three integers — and the mesh's box — where the GPU can read them
 //!
 //! There is a third buffer: the **mesh table**, one
 //! [`crcbl_shaders::mesh::GpuMesh`] per slot this pool can hand out, kept in
@@ -25,6 +25,14 @@
 //! [`MeshPool::table_index`] is the number that names an entry, and it is what
 //! an instance's [`GpuInstance::mesh`](crcbl_shaders::mesh::GpuInstance::mesh)
 //! carries.
+//!
+//! An entry carries a fourth thing the range's name does not suggest: the
+//! mesh's **local-space bounding box**, computed here from the vertex positions
+//! the caller uploaded. It lives in the same record rather than in a table of
+//! its own because it has the same lifetime as the range — written by the same
+//! call, cleared by the same call, indexed by the same id — and because §3.3's
+//! cull pass reads the box and the range together. See
+//! [`crate::cull`], which is what reads it.
 //!
 //! §3.3 is why it exists: a cull pass emits draws for the instances it keeps,
 //! so the GPU has to be able to resolve an instance's geometry with no CPU in
@@ -132,6 +140,9 @@ use crcbl_hal::{
     SemaphoreWait, SubmitInfo,
 };
 use crcbl_shaders::mesh::{GpuMesh, MESH_ENTRY_STRIDE, VERTEX_STRIDE};
+use glam::Vec3;
+
+use crate::cull::Aabb;
 
 /// Bytes per index. `Uint32` everywhere, so the index pool suballocates in
 /// indices and [`MeshRange::base_index`] is `draw_indexed`'s own first-index.
@@ -154,14 +165,17 @@ pub enum Mesh {}
 /// resolving rather than naming whatever took its place.
 pub type MeshHandle = Handle<Mesh>;
 
-/// Where a mesh lives in the pools — §3.1's three integers, and the only thing
-/// a draw needs.
+/// Where a mesh lives in the pools — §3.1's three integers — **and the box its
+/// vertices fit in**.
 ///
-/// Two of the three are `draw_indexed`'s own arguments — the draw is
+/// Two of the three integers are `draw_indexed`'s own arguments — the draw is
 /// `draw_indexed(base_index..base_index + index_count, 0, …)` — and
 /// [`MeshRange::base_vertex`] is deliberately not the third. The
 /// [module docs](self) say why it reaches the shader as data instead.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// `PartialEq` but no longer `Eq`: [`MeshRange::bounds`] is floats, and total
+/// equality over an `f32` is a claim `NaN` makes untrue.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MeshRange {
     /// First vertex of this mesh in the vertex pool. Added to every index the
     /// shader reads, which is why the indices themselves are mesh-relative.
@@ -176,6 +190,15 @@ pub struct MeshRange {
     pub base_index: u32,
     /// How many indices to draw.
     pub index_count: u32,
+    /// The mesh's **local-space** bounds: the smallest axis-aligned box holding
+    /// every vertex position [`MeshPool::upload`] was handed.
+    ///
+    /// Computed by the pool rather than supplied by the caller, because the
+    /// pool has the vertex bytes and a caller that got this wrong would produce
+    /// geometry culled while it is on screen — a hole in the picture with
+    /// nothing to fail. It travels with the range for the reason the
+    /// [module docs](self) give: same lifetime, same table entry, same write.
+    pub bounds: Aabb,
 }
 
 /// What a [`MeshPool`] refuses to do.
@@ -507,6 +530,8 @@ impl MeshPool {
             base_vertex: range.base_vertex,
             base_index: range.base_index,
             index_count: range.index_count,
+            bounds_min: range.bounds.min.to_array(),
+            bounds_max: range.bounds.max.to_array(),
         };
         let at = u64::from(index) * MESH_ENTRY_STRIDE as u64;
         device.write_buffer(self.table, at, &entry.to_bytes())?;
@@ -593,6 +618,10 @@ impl MeshPool {
             base_vertex,
             base_index,
             index_count,
+            // From the bytes the caller just handed over, which is the only
+            // moment the pool ever sees them: the vertex pool is device-local
+            // and nothing reads it back.
+            bounds: local_bounds(vertices),
         };
         let ready_at = match self.record_upload(device, queue, label, vertices, indices, range) {
             Ok(ready_at) => ready_at,
@@ -904,6 +933,31 @@ impl MeshPool {
     }
 }
 
+/// The box holding every vertex position in `vertices`.
+///
+/// The position is the first three floats of each [`VERTEX_STRIDE`]-byte vertex
+/// — [`crcbl_shaders::mesh::MeshVertex::position`], whose `w` is unused — read
+/// straight out of the bytes rather than through a decoded `MeshVertex`,
+/// because the pool never builds one and a second decoder is a second thing
+/// that can disagree with the layout.
+///
+/// A zero box for no vertices, which [`MeshPool::upload`] has already refused by
+/// name ([`MeshPoolError::EmptyMesh`]) before it gets here; the fallback exists
+/// so this is total rather than panicking on a case its caller has excluded.
+fn local_bounds(vertices: &[u8]) -> Aabb {
+    let positions = vertices.chunks_exact(VERTEX_STRIDE).map(|vertex| {
+        let float_at = |offset: usize| {
+            f32::from_le_bytes(
+                vertex[offset..offset + 4]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("four bytes inside one vertex")),
+            )
+        };
+        Vec3::new(float_at(0), float_at(4), float_at(8))
+    });
+    Aabb::from_points(positions).unwrap_or_default()
+}
+
 /// What [`MeshPool::write_and_submit`] needs that is not the device or the
 /// queue — one struct rather than six positional arguments, two of which are
 /// byte slices that would otherwise be swappable at the call site.
@@ -1098,6 +1152,8 @@ mod tests {
             base_vertex: range.base_vertex,
             base_index: range.base_index,
             index_count: range.index_count,
+            bounds_min: range.bounds.min.to_array(),
+            bounds_max: range.bounds.max.to_array(),
         }
     }
 
@@ -1428,6 +1484,7 @@ mod tests {
                 base_vertex: 0,
                 base_index: 0,
                 index_count: 6,
+                bounds: local_bounds(&vertex_bytes(4)),
             }),
             "and once the timeline has passed, it must"
         );
@@ -1806,6 +1863,84 @@ mod tests {
         assert_eq!(range.base_vertex, 0);
         assert_eq!(range.base_index, 0);
         assert_eq!(range.index_count as usize, mesh::CUBE_INDEX_COUNT);
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// The bounds the table carries are the box the uploaded vertices actually
+    /// fit in, per mesh.
+    ///
+    /// Checked against positions decoded out of
+    /// [`mesh::cube_vertices`](crcbl_shaders::mesh::cube_vertices) — the struct
+    /// form — where the pool reads the packed bytes, so the two paths agree only
+    /// if both are right. And checked against the *table*, not against the
+    /// range, because the range is the pool repeating itself: a
+    /// [`MeshRange`] and the entry derived from it cannot disagree.
+    ///
+    /// The pyramid is here because it is the case a pool that wrote one
+    /// constant box for every mesh would pass without: it is not the cube's
+    /// size and it is not centred where the cube is.
+    #[test]
+    fn each_mesh_gets_the_bounds_of_its_own_vertices() {
+        let (recorder, device, queue) = open();
+        let mut pool = pool(device.as_ref(), 1024, 1024);
+        let cube = pool
+            .upload(
+                device.as_ref(),
+                queue,
+                "cube",
+                &mesh::cube_vertex_bytes(),
+                &mesh::cube_indices(),
+            )
+            .expect("a cube is small");
+        let pyramid = pool
+            .upload(
+                device.as_ref(),
+                queue,
+                "pyramid",
+                &mesh::pyramid_vertex_bytes(),
+                &mesh::pyramid_indices(),
+            )
+            .expect("a pyramid is small");
+        pool.flush(device.as_ref()).expect("drains");
+
+        // The oracle: the same positions, through the decoded vertex structs.
+        let expected = |vertices: &[mesh::MeshVertex]| {
+            Aabb::from_points(vertices.iter().map(|vertex| {
+                Vec3::new(vertex.position[0], vertex.position[1], vertex.position[2])
+            }))
+            .expect("both meshes have vertices")
+        };
+        let cube_bounds = expected(&mesh::cube_vertices());
+        let pyramid_bounds = expected(&mesh::pyramid_vertices());
+        assert_ne!(
+            cube_bounds, pyramid_bounds,
+            "the two meshes must have different boxes, or this test cannot tell \
+             per-mesh bounds from one constant"
+        );
+
+        let entries = table(&recorder, &pool);
+        for (handle, bounds) in [(cube, cube_bounds), (pyramid, pyramid_bounds)] {
+            let entry = entries[pool.table_index(handle).expect("resident") as usize];
+            assert_eq!(entry.bounds_min, bounds.min.to_array());
+            assert_eq!(entry.bounds_max, bounds.max.to_array());
+            assert_eq!(
+                pool.mesh(handle).expect("resident").bounds,
+                bounds,
+                "and the range agrees with the table"
+            );
+        }
+
+        // A freed mesh's entry goes back to all zeroes, bounds included —
+        // otherwise the cull pass would keep testing a box for geometry that is
+        // no longer there.
+        pool.free(device.as_ref(), cube).expect("the entry clears");
+        let after_free = table(&recorder, &pool);
+        let cleared = after_free[pool.mesh_capacity() as usize - 1];
+        assert_eq!(cleared, GpuMesh::default(), "an unused slot is still empty");
+        let freed = after_free[0];
+        assert_eq!(freed, GpuMesh::default(), "and so is the freed one");
+
         pool.destroy(device.as_ref());
         recorder.assert_valid();
     }

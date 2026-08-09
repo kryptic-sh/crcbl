@@ -59,8 +59,11 @@
 //!
 //! # What this crate is *not*, at P1
 //!
-//! No backend registry (see below), no materials, no scene, no culling, no
-//! scheduler. The graph is a linear pass list with computed barriers, which is
+//! No backend registry (see below), no materials, no scene, no scheduler. The
+//! one thing on that list that has since moved is culling, and only half of it:
+//! [`cull`] is §3.3's frustum test and the reference `cull.slang` is checked
+//! against, and **no pass in this crate runs it** — [`forward`] records the same
+//! draws it always has. The graph is a linear pass list with computed barriers, which is
 //! what §2.4's risk list asks for by name: "No multi-queue scheduling, no
 //! reordering. Resist."
 //!
@@ -113,6 +116,7 @@
 
 pub mod button_skin;
 pub mod camera;
+pub mod cull;
 pub mod forward;
 pub mod graph;
 pub mod instance_pool;
@@ -147,6 +151,7 @@ pub use crcbl_ui::text::FontAtlas;
 /// [`ButtonSkin::insets`] returns a [`SkinInsets`]. A caller that can name this
 /// crate's button API should not have to add a second dependency to call it.
 pub use crcbl_ui::{ButtonState, SkinInsets};
+pub use cull::{Aabb, Frustum, visible_instances};
 pub use forward::ForwardRenderer;
 pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,

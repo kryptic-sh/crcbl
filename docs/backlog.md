@@ -3464,6 +3464,43 @@ the transport seam over a third transport shape.
   Slang's behaviour than is worth encoding for a guard whose false positives
   cost one declaration move. Reopen if a real shader finds it costly.
 
+### Metal cannot dispatch, and that blocks the GPU-driven path
+
+**The structural finding of the cull slice, and the reason the next one is a
+seam change rather than more culling.** `crcbl-mtl`'s `bind_compute_pipeline`,
+`dispatch` and `dispatch_indirect` all refuse by name (`DISPATCH_SLICE` in
+`crcbl_mtl::command`). They fail loudly rather than reporting success, which is
+the right shape — but it means **no compute pass runs on Metal at all**, and
+§3.3 onward is compute.
+
+The obstacle is a seam change, not a Metal one: Metal takes
+`threadsPerThreadgroup` at the dispatch call, while Vulkan and D3D12 bake it
+into the shader via `[numthreads]`, so `ComputePipelineDesc` carries no
+workgroup size for Metal to pass. Adding that field is the slice.
+
+Until it lands, GPU culling is Vulkan-and-wgpu only.
+`cargo check --target aarch64-apple-darwin` **cannot see this** — the refusal is
+a runtime `fail`, not a compile error — so only the macOS CI job can confirm the
+fix.
+
+### Owed by the GPU cull pass
+
+- **The visible list has no consumer**, deliberately: indirect draw generation
+  is its own slice. The pass is built in the e2e rather than in
+  `ForwardRenderer` precisely because Metal would refuse it in a live frame.
+- **Dead instance slots.** `InstancePool::remove` does not rewrite the element
+  and the pass iterates `0..instance_count`, so a removed slot is culled on
+  stale contents. The liveness bit wants to be `GpuInstance::flags`, which is
+  still reserved and defines nothing. Today the count is the caller's problem.
+- **No WGSL execution of `cull.slang` anywhere.** It compiles for wgsl and is
+  run only on radv and lavapipe; the cross-backend script compares rendered
+  scenes and this pass renders nothing. A compute-only differential harness is
+  the missing piece, and it will be needed again for every later compute pass.
+- `cull.slang` **re-declares** `GpuInstance` and `GpuMesh` because the compile
+  script hashes one source per artifact and there is no shared header. A drift
+  test compares the field lines of both files; a shared-include mechanism would
+  remove the need for it.
+
 ### Owed by the GPU mesh table
 
 The table (`MeshPool::table_buffer`) is what §3.3's cull pass will build

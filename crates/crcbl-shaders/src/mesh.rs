@@ -48,13 +48,13 @@ pub const INSTANCE_STRIDE: usize = 80;
 
 /// Bytes per [`GpuMesh`], and the stride of the mesh-table storage buffer.
 ///
-/// Three `uint`, no padding. Checked against the `ArrayStride 12` and the
-/// `Offset` decorations `slangc` emits by this module's
+/// Three `uint` then six `float`, no padding. Checked against the
+/// `ArrayStride 36` and the `Offset` decorations `slangc` emits by this module's
 /// `the_mesh_entry_layout_matches_the_offsets_slangc_emits` — which is the test
 /// that says all three targets really did lay it out this way, since a `std430`
 /// struct of scalars is one of the few whose stride an implementation could
 /// round up without anything else noticing.
-pub const MESH_ENTRY_STRIDE: usize = 12;
+pub const MESH_ENTRY_STRIDE: usize = 36;
 
 /// Bytes in one draw's constant block.
 ///
@@ -240,24 +240,35 @@ impl GpuInstance {
     }
 }
 
-/// One resident mesh's range in the geometry pools, matching `struct GpuMesh`
-/// in `shaders/mesh.slang`.
+/// One resident mesh's range in the geometry pools and its local-space bounds,
+/// matching `struct GpuMesh` in `shaders/mesh.slang`.
 ///
 /// `docs/plan/03-gpu-driven-rendering.md` §3.1's three integers, in the buffer
 /// the *GPU* resolves them out of: [`GpuInstance::mesh`] indexes an array of
 /// these, and the vertex stage adds [`GpuMesh::base_vertex`] to every index it
 /// reads. [`MeshPool`](https://docs.rs/crcbl-render) is what writes them.
 ///
-/// The other two fields are read by nothing today — the CPU still records the
-/// draws, and `draw_indexed` takes those two numbers directly. They are in the
-/// record because §3.3's cull pass builds its indirect draws out of exactly
-/// this range, and a table carrying only what the vertex stage reads would have
-/// to change layout the day it does.
+/// [`GpuMesh::base_index`] and [`GpuMesh::index_count`] are read by nothing
+/// today — the CPU still records the draws, and `draw_indexed` takes those two
+/// numbers directly. They are in the record because §3.3's cull pass builds its
+/// indirect draws out of exactly this range, and a table carrying only what the
+/// vertex stage reads would have to change layout the day it does.
+///
+/// The bounds are the same §3.3's, and they live here rather than in a table of
+/// their own because they share the range's lifetime exactly: written when a
+/// mesh is suballocated, cleared when it is freed, in the same call. `cull.slang`
+/// reads them — see [`crate::cull`] — and `mesh.slang` does not.
 ///
 /// An entry naming no mesh is all zeroes, and [`GpuMesh::index_count`] is the
 /// field that says so: a zero index count is a range with nothing to draw,
 /// where a zero base vertex is an ordinary value the pool's first mesh has.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// The all-zero bounds are a degenerate point box at the origin, which is
+/// exactly why the cull pass rejects on the index count rather than on them.
+///
+/// `PartialEq` but **not** `Eq`, unlike the ids-only record it used to be: the
+/// bounds are floats, and a type that claims total equality over an `f32` is
+/// claiming something `NaN` makes untrue.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GpuMesh {
     /// The mesh's first vertex in the vertex pool. Added to every index a draw
     /// of it reads, which is what lets the pool store indices mesh-relative.
@@ -266,6 +277,15 @@ pub struct GpuMesh {
     pub base_index: u32,
     /// How many indices the mesh has; zero for an entry naming no mesh.
     pub index_count: u32,
+    /// Lowest corner of the mesh's local-space axis-aligned bounding box.
+    ///
+    /// **Local space**: the box bounds the vertices as they sit in the pool,
+    /// before any instance transform. One mesh drawn by a thousand instances
+    /// has one of these, which is the whole reason it is a mesh-table field
+    /// rather than an instance one.
+    pub bounds_min: [f32; 3],
+    /// Highest corner of the same box.
+    pub bounds_max: [f32; 3],
 }
 
 impl GpuMesh {
@@ -275,6 +295,10 @@ impl GpuMesh {
         let mut bytes = [0u8; MESH_ENTRY_STRIDE];
         let mut at = 0usize;
         for value in [self.base_vertex, self.base_index, self.index_count] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        for value in self.bounds_min.iter().chain(&self.bounds_max) {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
@@ -295,10 +319,19 @@ impl GpuMesh {
                     .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
             )
         };
+        let float_at = |offset: usize| {
+            f32::from_le_bytes(
+                bytes[offset..offset + 4]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
+            )
+        };
         Self {
             base_vertex: uint_at(0),
             base_index: uint_at(4),
             index_count: uint_at(8),
+            bounds_min: [float_at(12), float_at(16), float_at(20)],
+            bounds_max: [float_at(24), float_at(28), float_at(32)],
         }
     }
 }
@@ -864,42 +897,55 @@ mod tests {
     }
 
     /// The offsets and the stride `slangc` actually emitted for `GpuMesh`, read
-    /// out of the disassembly. Three `uint` in a row would permute silently — a
-    /// base index read as a base vertex draws *something* — so the byte each
-    /// lands on is pinned rather than assumed.
+    /// out of the disassembly. Nine scalars in a row would permute silently — a
+    /// base index read as a base vertex draws *something*, and a swapped bounds
+    /// corner culls a mesh that is on screen — so the byte each lands on is
+    /// pinned rather than assumed.
     ///
     /// The stride is the half worth pinning hardest. A `std430` struct of
-    /// scalars is 4-byte aligned, so 12 is legal and so is any implementation
-    /// that rounded it to 16; the entry the CPU writes at `index * 12` and the
-    /// entry a shader reads at `index * 16` are the same for element 0 and
+    /// scalars is 4-byte aligned, so 36 is legal and so is any implementation
+    /// that rounded it to 48; the entry the CPU writes at `index * 36` and the
+    /// entry a shader reads at `index * 48` are the same for element 0 and
     /// different for every element after it, which is the mesh-pool bug that
     /// only a second resident can show.
     #[test]
     fn the_mesh_entry_layout_matches_the_offsets_slangc_emits() {
-        // `OpDecorate %_runtimearr_GpuMesh_std430 ArrayStride 12`, and
-        // `OpMemberDecorate %GpuMesh_std430 n Offset …`: 0, 4, 8. The WGSL and
-        // the MSL declare the same three scalars with no explicit alignment,
-        // which is the same layout.
-        assert_eq!(MESH_ENTRY_STRIDE, 12);
+        // `OpDecorate %_runtimearr_GpuMesh_std430 ArrayStride 36`, and
+        // `OpMemberDecorate %GpuMesh_std430 n Offset …`: 0, 4, 8, 12, 16, 20,
+        // 24, 28, 32. The WGSL and the MSL declare the same nine scalars with
+        // no explicit alignment, which is the same layout.
+        assert_eq!(MESH_ENTRY_STRIDE, 36);
 
         let entry = GpuMesh {
             base_vertex: 24,
             base_index: 36,
             index_count: 18,
+            bounds_min: [-1.0, -2.0, -3.0],
+            bounds_max: [4.0, 5.0, 6.0],
         };
         let bytes = entry.to_bytes();
         assert_eq!(bytes.len(), MESH_ENTRY_STRIDE);
         let uint_at =
             |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
+        let float_at =
+            |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
         assert_eq!(uint_at(0), 24, "base_vertex at offset 0");
         assert_eq!(uint_at(4), 36, "base_index at offset 4");
         assert_eq!(uint_at(8), 18, "index_count at offset 8");
+        assert_eq!(float_at(12), -1.0, "bounds_min.x at offset 12");
+        assert_eq!(float_at(16), -2.0, "bounds_min.y at offset 16");
+        assert_eq!(float_at(20), -3.0, "bounds_min.z at offset 20");
+        assert_eq!(float_at(24), 4.0, "bounds_max.x at offset 24");
+        assert_eq!(float_at(28), 5.0, "bounds_max.y at offset 28");
+        assert_eq!(float_at(32), 6.0, "bounds_max.z at offset 32");
 
         // And the decode agrees with the encode, field for field.
         assert_eq!(GpuMesh::from_bytes(&bytes), entry);
 
         // An entry naming no mesh is all zeroes, which is the contract
-        // `MeshPool::free` writes and the shader's `index_count == 0` reads.
+        // `MeshPool::free` writes and the cull shader's `index_count == 0`
+        // reads. The bounds are zero too, which is a degenerate box at the
+        // origin — a shape the cull pass must never decide anything on.
         assert_eq!(GpuMesh::default().to_bytes(), [0u8; MESH_ENTRY_STRIDE]);
         assert_eq!(GpuMesh::default().index_count, 0);
     }

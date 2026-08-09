@@ -16,11 +16,40 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **GPU frustum culling, checked against a CPU reference.** `crcbl-shaders`' new
+  `cull.slang` is `docs/plan/03-gpu-driven-rendering.md` §3.3's compute pass:
+  one thread per instance, the mesh's local-space AABB transformed by the
+  instance transform, tested against six camera half-spaces, and the survivors
+  appended to a compacted list of instance indices with an atomic counter.
+  `crcbl_shaders::cull` carries its `Params` block (six `float4` planes, an
+  instance count and a list capacity) and `WORKGROUP_SIZE`. The counter is the
+  **true** survivor count and can exceed the list's capacity — an overflow is a
+  number a caller can see rather than a list that quietly stops growing.
+
+  `crcbl_render::cull` is the same cull in ordinary Rust: `Aabb`, `Frustum`
+  (Gribb-Hartmann plane extraction from a view-projection matrix, deliberately
+  **not** normalized — under the engine's reversed-Z infinite projection the far
+  plane has a zero normal, and normalizing it produces `NaN`s that cull
+  everything), and `visible_instances`. `Aabb::transformed` is the standard
+  conservative absolute-value-matrix bound, because a rotated box is not a box.
+
+  **Nothing consumes the visible list yet**: `ForwardRenderer` records the same
+  draws it always has, and no pass in `crcbl-render` dispatches the shader.
+  Indirect draw generation is the next slice. What exists now is the cull math
+  and its proof — `crcbl-vk`'s `cull` e2e reads the list and the counter back
+  and compares them against the Rust reference over instances placed inside,
+  outside each of the six planes, straddling one, rotated back in, and naming a
+  freed mesh.
+
 - **A GPU-side mesh table, and `GpuInstance::mesh` now means something.**
   `MeshPool` maintains a third buffer beside the vertex and index pools: one
-  `crcbl_shaders::mesh::GpuMesh { base_vertex, base_index, index_count }` (12
-  bytes, `MESH_ENTRY_STRIDE`) per mesh it can hold, at `mesh.slang`'s new
-  binding 4. `MeshPool::table_index` is the id an instance carries and
+  `crcbl_shaders::mesh::GpuMesh { base_vertex, base_index, index_count, bounds_min, bounds_max }`
+  (36 bytes, `MESH_ENTRY_STRIDE` — nine scalars, no padding) per mesh it can
+  hold, at `mesh.slang`'s new binding 4. The bounds are the mesh's local-space
+  box, computed by `MeshPool::upload` from the vertex positions it is handed and
+  carried on `MeshRange::bounds`; they live in the range's own record because
+  they share its lifetime exactly, and the cull pass above is what reads them.
+  `MeshPool::table_index` is the id an instance carries and
   `MeshPool::table_buffer` is what a bind group names; `MeshPoolDesc` grew
   `mesh_capacity` and `MeshPoolError::MeshTableFull` reports a table with no
   entry left. **The vertex stage now resolves its own base vertex** — through

@@ -157,6 +157,10 @@ mod declaration_order;
 /// layouts that shader declares.
 pub mod compute_probe;
 
+/// The workgroup size and uniform block `cull.slang` declares, in the layouts
+/// that shader declares.
+pub mod cull;
+
 /// The geometry and uniform block `mesh.slang` reads, in the layouts that
 /// shader declares.
 pub mod mesh;

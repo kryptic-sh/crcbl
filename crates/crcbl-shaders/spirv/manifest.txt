@@ -21,17 +21,30 @@ msl-sha256 = 02a6fbe92f87b9630c80b1b764e01b070262e745da7ce7028ee9aa580599aee6
 dxil = computeMain:dxil/compute_probe.computeMain.dxil:75a92d8b7739f51794d8ff70f66ca2f53c9aeb2f9d1f9005a3945ec838dcc762
 entry-points = computeMain:glcompute
 
+[cull]
+source = shaders/cull.slang
+source-sha256 = be2ae6f6cd9b7d6fdb5bd19eea2d5049beca53d17354dfe237f764d2d17ca1f0
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/cull.spv
+spirv-sha256 = 5395c3b09f9718f854172b16de45ea086d263cb305e5bc8fadd7f5db165c0eb2
+wgsl = wgsl/cull.wgsl
+wgsl-sha256 = b718666b01579dbb786bddc320cd7e95c300b163d809b9b3219283a3b7816d45
+msl = msl/cull.metal
+msl-sha256 = 6f699ea87b7f41c788829589c35506528fd962035dbf1e31ff4e4e620ec8f3d8
+dxil = computeMain:dxil/cull.computeMain.dxil:c6f7b8c587af0edd9b2073eabf6fd6fc0d3279dfc8d9101a386fbbf533db8227
+entry-points = computeMain:glcompute
+
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 74de442cb7472e77e6c1a9d7ab49c52fcbe3f3c124e431b348f65dc21796d75b
+source-sha256 = c54763ec6918aa4f7d5cd4329145594af397f2c6b2aab133013a5543e3345fde
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = 4ffe9b1eb8cd4f39456623976410aba6eda8b0be65a8bd6b3e37fca2429eff4c
+spirv-sha256 = 30c8c84bd47ba3118e9721a141d85382a3f123c209a5b5d762490f275eae2f3f
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = 234e412e8ee0575aa2885e57f1ebdf6345c8c178a8f1c82c8da25745b80f0d40
+wgsl-sha256 = 00a334893fcb7dced1ace6674d861eb6b03de655bdea4ec66f97a42de1e29d4f
 msl = msl/mesh.metal
-msl-sha256 = 367c8f43aba6c68e8488ae237e144341e95d17596cc8b508b5dd91c3f0452ad5
-dxil = vertexMain:dxil/mesh.vertexMain.dxil:34a7f94a6c3df961dcaf127ec0e38242405b8b92ffd580c874d735ff8229a13b
+msl-sha256 = 28521ec9523dce3c460677ad4ad94d69eea86b67ae987847a10119937d6e22bb
+dxil = vertexMain:dxil/mesh.vertexMain.dxil:14f950eee78e08de07b4b1ff0443fd1deb549e498f48c42295d098dd2141816e
 dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:229849f757af6ceea37ca2206551f5672ff6047ad6a702dfb85e59d3bf0c2132
 entry-points = vertexMain:vertex, fragmentMain:fragment
 

@@ -28,6 +28,12 @@ struct GpuMesh_std430_0
     @align(4) base_vertex_0 : u32,
     @align(4) base_index_0 : u32,
     @align(4) index_count_0 : u32,
+    @align(4) min_x_0 : f32,
+    @align(4) min_y_0 : f32,
+    @align(4) min_z_0 : f32,
+    @align(4) max_x_0 : f32,
+    @align(4) max_y_0 : f32,
+    @align(4) max_z_0 : f32,
 };
 
 @binding(4) @group(0) var<storage, read> meshes_0 : array<GpuMesh_std430_0>;
