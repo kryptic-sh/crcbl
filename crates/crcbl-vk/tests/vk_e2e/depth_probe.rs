@@ -26,6 +26,11 @@ struct DepthProbe {
     vertices: crcbl_hal::BufferHandle,
     indices: crcbl_hal::BufferHandle,
     uniforms: crcbl_hal::BufferHandle,
+    /// One `GpuInstance` at identity. `mesh.slang` reads its transform out of
+    /// this rather than out of the uniform block, and the probe's geometry is
+    /// already in world space — so the instance is a constant and this buffer
+    /// is written once, at construction.
+    instances: crcbl_hal::BufferHandle,
     layout: crcbl_hal::BindGroupLayoutHandle,
     group: crcbl_hal::BindGroupHandle,
     pipeline_layout: crcbl_hal::PipelineLayoutHandle,
@@ -148,6 +153,25 @@ impl DepthProbe {
                 memory: MemoryLocation::HostUpload,
             })
             .expect("a uniform buffer");
+        let instances = device
+            .create_buffer(&BufferDesc {
+                label: Some("probe instances"),
+                size: crcbl_shaders::mesh::INSTANCE_STRIDE as u64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("an instance buffer");
+        device
+            .write_buffer(
+                instances,
+                0,
+                &crcbl_shaders::mesh::GpuInstance {
+                    transform: glam::Mat4::IDENTITY.to_cols_array(),
+                    ..crcbl_shaders::mesh::GpuInstance::default()
+                }
+                .to_bytes(),
+            )
+            .expect("write");
 
         let entries = [
             crcbl_hal::BindGroupLayoutEntry {
@@ -160,6 +184,16 @@ impl DepthProbe {
             },
             crcbl_hal::BindGroupLayoutEntry {
                 binding: 1,
+                visibility: crcbl_hal::ShaderStages::VERTEX,
+                kind: crcbl_hal::BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 2,
                 visibility: crcbl_hal::ShaderStages::VERTEX,
                 kind: crcbl_hal::BindingKind::StorageBuffer {
                     read_only: true,
@@ -185,6 +219,11 @@ impl DepthProbe {
                 binding: 1,
                 array_index: 0,
                 resource: crcbl_hal::BindingResource::whole_buffer(vertices),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 2,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(instances),
             },
         ];
         let group = device
@@ -244,6 +283,7 @@ impl DepthProbe {
             vertices,
             indices,
             uniforms,
+            instances,
             layout,
             group,
             pipeline_layout,
@@ -256,6 +296,7 @@ impl DepthProbe {
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group(self.group);
         device.destroy_bind_group_layout(self.layout);
+        device.destroy_buffer(self.instances);
         device.destroy_buffer(self.uniforms);
         device.destroy_buffer(self.indices);
         device.destroy_buffer(self.vertices);
@@ -274,7 +315,6 @@ fn render_probe(
 
     let uniforms = crcbl_shaders::mesh::FrameUniforms {
         view_proj: view_proj.to_cols_array(),
-        model: glam::Mat4::IDENTITY.to_cols_array(),
         camera_position: [0.0, 0.0, PROBE_EYE, 1.0],
         // Straight at the quads, so both are lit identically and the only
         // difference between them is their albedo.

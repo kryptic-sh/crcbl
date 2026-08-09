@@ -258,7 +258,10 @@ enum SceneState {
     Cube {
         camera: Camera,
         light: DirectionalLight,
-        renderer: ForwardRenderer,
+        /// Boxed because it is much the largest of the three: it carries the
+        /// geometry pools and the instance ring, and an unboxed variant would
+        /// make every `SceneState` — including the two small ones — that size.
+        renderer: Box<ForwardRenderer>,
     },
     Sprite {
         renderer: SpriteRenderer,
@@ -285,7 +288,7 @@ impl SceneState {
                     near: 0.01,
                 }),
                 light: DirectionalLight::default(),
-                renderer: ForwardRenderer::new(device, queue, format)?,
+                renderer: Box::new(ForwardRenderer::new(device, queue, format)?),
             },
             Scene::Sprite => {
                 let mut renderer = SpriteRenderer::new(device, queue, format)?;

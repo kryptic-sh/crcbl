@@ -115,6 +115,7 @@ pub mod button_skin;
 pub mod camera;
 pub mod forward;
 pub mod graph;
+pub mod instance_pool;
 pub mod layers;
 pub mod menu;
 pub mod mesh_pool;
@@ -151,6 +152,9 @@ pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,
     GraphError, GraphImageBarrier, ImageId, ImportedBuffer, ImportedImage, PassBuilder,
     PassContext, PassKind, RenderGraph,
+};
+pub use instance_pool::{
+    Instance, InstanceHandle, InstancePool, InstancePoolDesc, InstancePoolError,
 };
 pub use layers::{Layer, LayerStack, Parallax};
 pub use menu::{MenuArt, MenuRenderer, menu_camera, menu_view_projection};

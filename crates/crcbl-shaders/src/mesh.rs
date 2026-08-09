@@ -1,9 +1,10 @@
 //! The geometry and the uniform block `mesh.slang` reads, in the byte layouts
 //! that shader declares.
 //!
-//! Same argument as [`triangle`](crate::triangle): `struct MeshVertex` and
-//! `struct FrameUniforms` in `shaders/mesh.slang` fix a memory layout, and any
-//! producer of those bytes has to agree with it exactly. Keeping both in the
+//! Same argument as [`triangle`](crate::triangle): `struct MeshVertex`,
+//! `struct FrameUniforms` and `struct GpuInstance` in `shaders/mesh.slang` fix
+//! a memory layout, and any producer of those bytes has to agree with it
+//! exactly. Keeping them in the
 //! crate that owns the source means there is one place to change rather than one
 //! per consumer — and there are already three consumers (the sandbox,
 //! `crcbl-render`'s forward pass, and `crcbl-vk`'s golden-image suite), which is
@@ -33,10 +34,17 @@ pub const VERTEX_STRIDE: usize = 48;
 
 /// Bytes in the frame uniform block.
 ///
-/// Two `float4x4` (64 each) then four `float4` (16 each). Checked against the
-/// `Offset` decorations `slangc` emits — 0, 64, 128, 144, 160, 176 — by this
-/// module's `the_uniform_block_matches_the_offsets_slangc_emits`.
-pub const FRAME_UNIFORMS_SIZE: usize = 192;
+/// One `float4x4` (64) then four `float4` (16 each). Checked against the
+/// `Offset` decorations `slangc` emits — 0, 64, 80, 96, 112 — by this module's
+/// `the_uniform_block_matches_the_offsets_slangc_emits`.
+pub const FRAME_UNIFORMS_SIZE: usize = 128;
+
+/// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
+///
+/// One `float4x4` (64) then four `uint` (4 each). Checked against the
+/// `ArrayStride 80` and the `Offset` decorations `slangc` emits by this
+/// module's `the_instance_layout_matches_the_offsets_slangc_emits`.
+pub const INSTANCE_STRIDE: usize = 80;
 
 /// One vertex, matching `struct MeshVertex` in `shaders/mesh.slang`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -62,10 +70,6 @@ pub struct FrameUniforms {
     /// World → clip, column-major. Reversed-Z: `1.0` at the near plane, `0.0`
     /// at infinity.
     pub view_proj: [f32; 16],
-    /// Model → world, column-major. Must be **rigid** — rotation and
-    /// translation only — because the shader transforms normals with its 3×3
-    /// part and no inverse-transpose.
-    pub model: [f32; 16],
     /// World-space eye position in `xyz`.
     pub camera_position: [f32; 4],
     /// World-space direction *towards* the light in `xyz`, unit length.
@@ -89,13 +93,125 @@ impl FrameUniforms {
             }
         };
         put(&self.view_proj);
-        put(&self.model);
         put(&self.camera_position);
         put(&self.light_direction);
         put(&self.light_color);
         put(&self.ambient);
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
+    }
+}
+
+/// One drawable object, matching `struct GpuInstance` in `shaders/mesh.slang`.
+///
+/// `docs/plan/03-gpu-driven-rendering.md` §3.2's instance record: "transform,
+/// mesh id, material id, flags", plus the sector id its 2026-07-27 correction
+/// adds. [`crcbl_render::InstancePool`] is what writes these, one storage buffer
+/// element per instance, by delta upload.
+///
+/// # Three of the five fields are reserved, and that is deliberate
+///
+/// Only [`GpuInstance::transform`] is read by anything today. The other three
+/// are here because **changing this layout after a shader, a cull pass and a
+/// draw generator all index it is the expensive path**, and adding a field is
+/// the cheap one now. Each field's own docs say which slice consumes it; none
+/// of them is working camera-relative rendering, a material system or a GPU-side
+/// mesh table, and none of them should be read as evidence that one exists.
+///
+/// [`crcbl_render::InstancePool`]: https://docs.rs/crcbl-render
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GpuInstance {
+    /// Model → **sector**, column-major, the way [`glam::Mat4::to_cols_array`]
+    /// produces it. Must be **rigid** — rotation and translation only — because
+    /// the shader transforms normals with its 3×3 part and no
+    /// inverse-transpose.
+    ///
+    /// Sector-local and `f32` rather than world-space and `f64` because that is
+    /// what makes delta upload survive camera motion: an object that does not
+    /// move has a transform that does not change, whatever the camera does.
+    /// See [`GpuInstance::sector`] for the half of that which is not built.
+    ///
+    /// [`glam::Mat4::to_cols_array`]: https://docs.rs/glam
+    pub transform: [f32; 16],
+    /// Which mesh to draw.
+    ///
+    /// **Reserved and unconsumed.** The draw resolves its
+    /// [`MeshRange`](https://docs.rs/crcbl-render) on the CPU; a GPU-side mesh
+    /// table for the cull pass to read is §3.3's.
+    pub mesh: u32,
+    /// Which material to shade with.
+    ///
+    /// **Reserved and unconsumed.** The material table is the other half of
+    /// §3.2 and is not built; nothing indexes anything with this yet.
+    pub material: u32,
+    /// Which sector [`GpuInstance::transform`] is relative to.
+    ///
+    /// **Reserved and unconsumed — this is not camera-relative rendering.** The
+    /// 2026-07-27 correction's other half is a per-frame f64 sector→camera
+    /// offset table that the vertex and cull shaders add, and that table does
+    /// not exist. Until it does, every instance is in sector 0 and `transform`
+    /// is a plain model → world matrix. The field is here now because the
+    /// format is cheap to extend today and expensive to extend once §3.3's
+    /// shaders index it.
+    pub sector: u32,
+    /// Per-instance bits.
+    ///
+    /// **Reserved and unconsumed: no bit is defined.** It is free — the struct
+    /// is 16-byte aligned, so without it the three ids above would be followed
+    /// by four bytes of padding instead of by this.
+    pub flags: u32,
+}
+
+impl GpuInstance {
+    /// The bytes one storage-buffer element holds, in `std430` order.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; INSTANCE_STRIDE] {
+        let mut bytes = [0u8; INSTANCE_STRIDE];
+        let mut at = 0usize;
+        for value in &self.transform {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        for value in [self.mesh, self.material, self.sector, self.flags] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        debug_assert_eq!(at, INSTANCE_STRIDE);
+        bytes
+    }
+
+    /// The inverse of [`GpuInstance::to_bytes`].
+    ///
+    /// So a producer that keeps its instances packed the way the buffer holds
+    /// them — which is what makes a dirty range one contiguous upload — can
+    /// still read one back without keeping a second, drifting copy.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8; INSTANCE_STRIDE]) -> Self {
+        let float_at = |offset: usize| {
+            f32::from_le_bytes(
+                bytes[offset..offset + 4]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
+            )
+        };
+        let uint_at = |offset: usize| {
+            u32::from_le_bytes(
+                bytes[offset..offset + 4]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
+            )
+        };
+        let mut transform = [0.0f32; 16];
+        for (index, value) in transform.iter_mut().enumerate() {
+            *value = float_at(index * 4);
+        }
+        Self {
+            transform,
+            mesh: uint_at(64),
+            material: uint_at(68),
+            sector: uint_at(72),
+            flags: uint_at(76),
+        }
     }
 }
 
@@ -251,10 +367,10 @@ mod tests {
     /// so before a driver reads the light direction out of the model matrix.
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
-        assert_eq!(FRAME_UNIFORMS_SIZE, 192);
+        assert_eq!(FRAME_UNIFORMS_SIZE, 128);
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …`
-        let offsets = [0usize, 64, 128, 144, 160, 176];
-        let sizes = [64usize, 64, 16, 16, 16, 16];
+        let offsets = [0usize, 64, 80, 96, 112];
+        let sizes = [64usize, 16, 16, 16, 16];
         for (index, (offset, size)) in offsets.iter().zip(&sizes).enumerate() {
             assert_eq!(
                 offset + size,
@@ -268,7 +384,6 @@ mod tests {
 
         let uniforms = FrameUniforms {
             view_proj: [1.0; 16],
-            model: [2.0; 16],
             camera_position: [3.0; 4],
             light_direction: [4.0; 4],
             light_color: [5.0; 4],
@@ -278,11 +393,77 @@ mod tests {
         let at =
             |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
         assert_eq!(at(0), 1.0, "view_proj at offset 0");
-        assert_eq!(at(64), 2.0, "model at offset 64");
-        assert_eq!(at(128), 3.0, "camera_position at offset 128");
-        assert_eq!(at(144), 4.0, "light_direction at offset 144");
-        assert_eq!(at(160), 5.0, "light_color at offset 160");
-        assert_eq!(at(176), 6.0, "ambient at offset 176");
+        assert_eq!(at(64), 3.0, "camera_position at offset 64");
+        assert_eq!(at(80), 4.0, "light_direction at offset 80");
+        assert_eq!(at(96), 5.0, "light_color at offset 96");
+        assert_eq!(at(112), 6.0, "ambient at offset 112");
+    }
+
+    /// The offsets `slangc` actually emitted for `GpuInstance`, read out of the
+    /// disassembly. The four ids are the same width and would silently
+    /// permute — a mesh id read as a material id is a picture, not a crash —
+    /// so the byte each lands on is pinned rather than assumed.
+    #[test]
+    fn the_instance_layout_matches_the_offsets_slangc_emits() {
+        // `OpDecorate %_runtimearr_GpuInstance_std430 ArrayStride 80`, and
+        // `OpMemberDecorate %GpuInstance_std430 n Offset …`.
+        assert_eq!(INSTANCE_STRIDE, 80);
+        assert_eq!(
+            INSTANCE_STRIDE % 16,
+            0,
+            "a std430 struct containing a float4x4 is 16-byte aligned, so its \
+             stride must be a multiple of 16 or every element after the first \
+             lands short"
+        );
+
+        let instance = GpuInstance {
+            transform: [1.0; 16],
+            mesh: 2,
+            material: 3,
+            sector: 4,
+            flags: 5,
+        };
+        let bytes = instance.to_bytes();
+        assert_eq!(bytes.len(), INSTANCE_STRIDE);
+        let float_at =
+            |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
+        let uint_at =
+            |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
+        assert_eq!(float_at(0), 1.0, "transform at offset 0");
+        assert_eq!(float_at(60), 1.0, "and it is 64 bytes wide");
+        assert_eq!(uint_at(64), 2, "mesh at offset 64");
+        assert_eq!(uint_at(68), 3, "material at offset 68");
+        assert_eq!(uint_at(72), 4, "sector at offset 72");
+        assert_eq!(uint_at(76), 5, "flags at offset 76");
+
+        // And the decode agrees with the encode, field for field — four `u32`s
+        // in a row would permute silently, and this is what says they did not.
+        assert_eq!(GpuInstance::from_bytes(&bytes), instance);
+    }
+
+    /// The transform is written the way `glam` produces a column-major matrix,
+    /// with no transpose — the same contract `FrameUniforms::view_proj` has,
+    /// and the one the shader header explains. A transposed instance transform
+    /// is a plausible picture rather than an obviously broken one.
+    #[test]
+    fn the_instance_transform_is_written_in_glam_order() {
+        let mut transform = [0.0f32; 16];
+        for (index, value) in transform.iter_mut().enumerate() {
+            *value = index as f32;
+        }
+        let bytes = GpuInstance {
+            transform,
+            ..GpuInstance::default()
+        }
+        .to_bytes();
+        for index in 0..16 {
+            let at = index * 4;
+            assert_eq!(
+                f32::from_le_bytes(bytes[at..at + 4].try_into().expect("4")),
+                index as f32,
+                "element {index} did not land at byte {at}"
+            );
+        }
     }
 
     #[test]

@@ -457,8 +457,8 @@ impl HudStrings {
 ///
 /// Until the sprite pass existed it had to be: `crcbl-render`'s
 /// [`crcbl::render::ForwardRenderer`] draws **one** instance — `begin_frame`
-/// takes a single `model: Mat4` which it writes into a per-frame uniform buffer,
-/// and `add_passes` records exactly `draw_indexed(0..index_count, 0, 0..1)`. The
+/// takes a single `model: Mat4`, and `add_passes` records exactly
+/// `draw_indexed(0..index_count, 0, 0..1)`. The
 /// paddle was that instance, and the ball and the forty bricks went through the
 /// UI pass as screen-space quads, re-triangulated on the CPU every frame.
 /// Flappy hit the same wall with its pipes, independently, which is what made it

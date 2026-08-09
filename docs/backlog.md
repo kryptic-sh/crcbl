@@ -2909,7 +2909,7 @@ by every hosted image, including the two that execute shaders fine.
   composite with alpha, but nothing verified the non-opaque behaviour, so it is
   not offered rather than offered untested.
 
-## The Win32 focus flake is recurring, and now has a third data point
+## The Win32 shell tests share the desktop, and it keeps costing red builds
 
 `hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for` failed the
 `build + test (windows-latest)` leg on 2026-08-05; re-running the same job
@@ -2941,6 +2941,27 @@ into the feature-gated e2e suite where `desktop::take_foreground` already pulls
 the levers; or allow this specific test a retry. Doing nothing means every
 unrelated commit carries a chance of a red Windows leg, which trains readers to
 re-run rather than read — the exact habit that makes a real failure invisible.
+
+**Fourth instance, 2026-08-09, and it is a different _resource_:**
+`win32::shell::tests::an_empty_offer_empties_the_clipboard_and_an_empty_payload_does_not`
+failed on `assert!(!clipboard_is_open())`. So the class is wider than focus —
+these tests use **shared desktop resources** (the foreground, the clipboard) on
+a runner that contends for them.
+
+**That last one is a genuine test defect with a small fix, not just
+contention.** The assertion sits at the end of the test and means "our code
+closed the clipboard"; `clipboard_is_open()` is
+`!GetOpenClipboardWindow().is_null()`, which reports whether **any process**
+holds it. Its scope is therefore wider than its intent, and a foreign process
+opening the clipboard between our close and the check fails it while our code is
+correct. The fix is to compare against our own window —
+`GetOpenClipboardWindow() != our_hwnd` — so the assertion checks the thing it
+was written to check. That is worth doing regardless of what is decided about
+the class.
+
+Two failures in one session, both on commits that had nothing to do with
+windowing (a `Revert` and a mesh-shader reland), both cleared by re-running the
+same job unchanged.
 
 **Wants a decision rather than another re-run.**
 

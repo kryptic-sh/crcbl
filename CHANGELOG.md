@@ -16,6 +16,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The instance array: `crcbl_render::instance_pool`, and the cube is now an
+  instance.** `InstancePool` owns one `crcbl_shaders::mesh::GpuInstance` storage
+  buffer per frame in flight and uploads **deltas** —
+  `docs/plan/03-gpu-driven-rendering.md` §3.2's "changed instances only, dirty
+  ranges, not full re-upload". `insert`/`set`/`remove` take generational
+  `InstanceHandle`s; `index` gives the element number a shader addresses;
+  `begin_frame` rotates to the next buffer, writes that buffer's outstanding
+  changes, and returns the slot the caller's bind group and uniform ring should
+  use. Adjacent writes coalesce into one `write_buffer` — instances 3, 4 and 5
+  are one upload of three, 3 and 900 are two of one, in whatever order the
+  writes arrive — and a frame in which nothing changed performs **no seam call
+  at all**. The pool never grows: `InstancePoolError::PoolFull` names the
+  capacity and what is in use.
+- **`crcbl_shaders::mesh::GpuInstance` (80 bytes) and `INSTANCE_STRIDE`**, plus
+  `mesh.slang`'s matching `struct GpuInstance` at binding 2. `transform` is a
+  rigid model-to-sector `float4x4`; `mesh`, `material`, `sector` and `flags` are
+  **reserved and read by nothing**. In particular `sector` is _not_ working
+  camera-relative rendering: §3.2's 2026-07-27 correction also calls for a
+  per-frame f64 sector→camera offset table and a shader-side addition, and
+  neither exists, so every instance is in sector 0 and `transform` is a plain
+  model→world matrix. The field is in the format now because extending it after
+  §3.3's shaders index it is the expensive path.
 - **Global geometry pools: `crcbl_render::mesh_pool`, and the cube now lives in
   one.** One device-local vertex buffer and one index buffer, suballocated by a
   first-fit free list, so a mesh is
@@ -1487,6 +1509,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Breaking: `crcbl_shaders::mesh::FrameUniforms` no longer has a `model`
+  field, and the block is 128 bytes rather than 192.** The per-object transform
+  moved into the instance array, so `mesh.slang`'s uniform block holds only what
+  is genuinely per frame and its vertex stage reads
+  `instances[SV_InstanceID].transform`. `ForwardRenderer::begin_frame` keeps its
+  signature — the `model: Mat4` it takes is now written into the instance pool —
+  so a caller that only drives the renderer is unaffected; a caller that builds
+  a `FrameUniforms` itself must drop the field and bind a `GpuInstance` storage
+  buffer at `(set 0, binding 2)`. Every `mesh.slang` artifact is regenerated and
+  the `mesh` and `ortho mesh` goldens are unchanged by the move.
 - **Breaking: the UI pass has one constant path, and `ConstantDelivery` is
   gone.** `crcbl_render::ConstantDelivery`, `UiRenderer::constant_delivery` and
   the `ui_tier_b` shader (`shaders/ui_tier_b.slang` and its `spirv/`, `wgsl/`,

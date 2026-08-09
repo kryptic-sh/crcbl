@@ -7,15 +7,30 @@ struct MeshVertex_std430_0
 
 @binding(1) @group(0) var<storage, read> vertices_0 : array<MeshVertex_std430_0>;
 
-struct _MatrixStorage_float4x4_ColMajorstd140_0
+struct _MatrixStorage_float4x4_ColMajorstd430_0
 {
     @align(16) data_0 : array<vec4<f32>, i32(4)>,
+};
+
+struct GpuInstance_std430_0
+{
+    @align(16) transform_0 : _MatrixStorage_float4x4_ColMajorstd430_0,
+    @align(16) mesh_0 : u32,
+    @align(4) material_0 : u32,
+    @align(8) sector_0 : u32,
+    @align(4) flags_0 : u32,
+};
+
+@binding(2) @group(0) var<storage, read> instances_0 : array<GpuInstance_std430_0>;
+
+struct _MatrixStorage_float4x4_ColMajorstd140_0
+{
+    @align(16) data_1 : array<vec4<f32>, i32(4)>,
 };
 
 struct FrameUniforms_std140_0
 {
     @align(16) view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,
-    @align(16) model_0 : _MatrixStorage_float4x4_ColMajorstd140_0,
     @align(16) camera_position_0 : vec4<f32>,
     @align(16) light_direction_0 : vec4<f32>,
     @align(16) light_color_0 : vec4<f32>,
@@ -32,14 +47,15 @@ struct VertexOutput_0
 };
 
 @vertex
-fn vertexMain(@builtin(vertex_index) index_0 : u32) -> VertexOutput_0
+fn vertexMain(@builtin(vertex_index) index_0 : u32, @builtin(instance_index) instance_index_0 : u32) -> VertexOutput_0
 {
     var vertex_0 : MeshVertex_std430_0 = vertices_0[index_0];
-    var world_0 : vec4<f32> = (((vec4<f32>(vertex_0.position_0.xyz, 1.0f)) * (mat4x4<f32>(frame_0.model_0.data_0[i32(0)][i32(0)], frame_0.model_0.data_0[i32(1)][i32(0)], frame_0.model_0.data_0[i32(2)][i32(0)], frame_0.model_0.data_0[i32(3)][i32(0)], frame_0.model_0.data_0[i32(0)][i32(1)], frame_0.model_0.data_0[i32(1)][i32(1)], frame_0.model_0.data_0[i32(2)][i32(1)], frame_0.model_0.data_0[i32(3)][i32(1)], frame_0.model_0.data_0[i32(0)][i32(2)], frame_0.model_0.data_0[i32(1)][i32(2)], frame_0.model_0.data_0[i32(2)][i32(2)], frame_0.model_0.data_0[i32(3)][i32(2)], frame_0.model_0.data_0[i32(0)][i32(3)], frame_0.model_0.data_0[i32(1)][i32(3)], frame_0.model_0.data_0[i32(2)][i32(3)], frame_0.model_0.data_0[i32(3)][i32(3)]))));
+    var instance_0 : GpuInstance_std430_0 = instances_0[instance_index_0];
+    var _S1 : mat4x4<f32> = mat4x4<f32>(instance_0.transform_0.data_0[i32(0)][i32(0)], instance_0.transform_0.data_0[i32(1)][i32(0)], instance_0.transform_0.data_0[i32(2)][i32(0)], instance_0.transform_0.data_0[i32(3)][i32(0)], instance_0.transform_0.data_0[i32(0)][i32(1)], instance_0.transform_0.data_0[i32(1)][i32(1)], instance_0.transform_0.data_0[i32(2)][i32(1)], instance_0.transform_0.data_0[i32(3)][i32(1)], instance_0.transform_0.data_0[i32(0)][i32(2)], instance_0.transform_0.data_0[i32(1)][i32(2)], instance_0.transform_0.data_0[i32(2)][i32(2)], instance_0.transform_0.data_0[i32(3)][i32(2)], instance_0.transform_0.data_0[i32(0)][i32(3)], instance_0.transform_0.data_0[i32(1)][i32(3)], instance_0.transform_0.data_0[i32(2)][i32(3)], instance_0.transform_0.data_0[i32(3)][i32(3)]);
+    var world_0 : vec4<f32> = (((vec4<f32>(vertex_0.position_0.xyz, 1.0f)) * (_S1)));
     var output_0 : VertexOutput_0;
-    output_0.position_1 = (((world_0) * (mat4x4<f32>(frame_0.view_proj_0.data_0[i32(0)][i32(0)], frame_0.view_proj_0.data_0[i32(1)][i32(0)], frame_0.view_proj_0.data_0[i32(2)][i32(0)], frame_0.view_proj_0.data_0[i32(3)][i32(0)], frame_0.view_proj_0.data_0[i32(0)][i32(1)], frame_0.view_proj_0.data_0[i32(1)][i32(1)], frame_0.view_proj_0.data_0[i32(2)][i32(1)], frame_0.view_proj_0.data_0[i32(3)][i32(1)], frame_0.view_proj_0.data_0[i32(0)][i32(2)], frame_0.view_proj_0.data_0[i32(1)][i32(2)], frame_0.view_proj_0.data_0[i32(2)][i32(2)], frame_0.view_proj_0.data_0[i32(3)][i32(2)], frame_0.view_proj_0.data_0[i32(0)][i32(3)], frame_0.view_proj_0.data_0[i32(1)][i32(3)], frame_0.view_proj_0.data_0[i32(2)][i32(3)], frame_0.view_proj_0.data_0[i32(3)][i32(3)]))));
+    output_0.position_1 = (((world_0) * (mat4x4<f32>(frame_0.view_proj_0.data_1[i32(0)][i32(0)], frame_0.view_proj_0.data_1[i32(1)][i32(0)], frame_0.view_proj_0.data_1[i32(2)][i32(0)], frame_0.view_proj_0.data_1[i32(3)][i32(0)], frame_0.view_proj_0.data_1[i32(0)][i32(1)], frame_0.view_proj_0.data_1[i32(1)][i32(1)], frame_0.view_proj_0.data_1[i32(2)][i32(1)], frame_0.view_proj_0.data_1[i32(3)][i32(1)], frame_0.view_proj_0.data_1[i32(0)][i32(2)], frame_0.view_proj_0.data_1[i32(1)][i32(2)], frame_0.view_proj_0.data_1[i32(2)][i32(2)], frame_0.view_proj_0.data_1[i32(3)][i32(2)], frame_0.view_proj_0.data_1[i32(0)][i32(3)], frame_0.view_proj_0.data_1[i32(1)][i32(3)], frame_0.view_proj_0.data_1[i32(2)][i32(3)], frame_0.view_proj_0.data_1[i32(3)][i32(3)]))));
     output_0.world_position_0 = world_0.xyz;
-    var _S1 : mat4x4<f32> = mat4x4<f32>(frame_0.model_0.data_0[i32(0)][i32(0)], frame_0.model_0.data_0[i32(1)][i32(0)], frame_0.model_0.data_0[i32(2)][i32(0)], frame_0.model_0.data_0[i32(3)][i32(0)], frame_0.model_0.data_0[i32(0)][i32(1)], frame_0.model_0.data_0[i32(1)][i32(1)], frame_0.model_0.data_0[i32(2)][i32(1)], frame_0.model_0.data_0[i32(3)][i32(1)], frame_0.model_0.data_0[i32(0)][i32(2)], frame_0.model_0.data_0[i32(1)][i32(2)], frame_0.model_0.data_0[i32(2)][i32(2)], frame_0.model_0.data_0[i32(3)][i32(2)], frame_0.model_0.data_0[i32(0)][i32(3)], frame_0.model_0.data_0[i32(1)][i32(3)], frame_0.model_0.data_0[i32(2)][i32(3)], frame_0.model_0.data_0[i32(3)][i32(3)]);
     output_0.world_normal_0 = (((vertex_0.normal_0.xyz) * (mat3x3<f32>(_S1[i32(0)].xyz, _S1[i32(1)].xyz, _S1[i32(2)].xyz))));
     output_0.color_1 = vertex_0.color_0;
     return output_0;

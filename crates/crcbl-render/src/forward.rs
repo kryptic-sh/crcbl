@@ -5,7 +5,8 @@
 //! ┌ forward ────────────────────────────┐   ┌ tonemap ─────────────────┐
 //! │ scene-color  Rgba16Float  Clear     │──▶│ reads scene-color        │
 //! │ scene-depth  D32Float     Clear 0.0 │   │ writes the target        │
-//! │ reads camera UBO + cube SSBO + IBO  │   │ full-screen triangle     │
+//! │ reads camera UBO + vertex/instance  │   │ full-screen triangle     │
+//! │ SSBOs + IBO                         │   │                          │
 //! └─────────────────────────────────────┘   └──────────────────────────┘
 //! ```
 //!
@@ -24,10 +25,10 @@
 //! * **5** — orthographic mode, which is [`Camera::projection`] and *nothing
 //!   else*: no second pipeline, no branch in this file, no shader permutation.
 //!
-//! Explicitly not here: instance deltas, GPU culling, indirect draw count (all
-//! P7), bindless at scale (P3), shadows and real post (P7), materials (topic
-//! 37), asset loading (P9). The mesh is a constant in `crcbl-shaders` because
-//! rung 3 says "hardcoded cube/sphere".
+//! Explicitly not here: GPU culling, indirect draw count (both P7), bindless at
+//! scale (P3), shadows and real post (P7), materials (topic 37), asset loading
+//! (P9). The mesh is a constant in `crcbl-shaders` because rung 3 says
+//! "hardcoded cube/sphere".
 //!
 //! What *is* here, since 2026-08, is [`crate::mesh_pool`]: the cube is the first
 //! resident of the global vertex and index pools rather than owning two buffers
@@ -36,6 +37,13 @@
 //! `draw_indexed(range.base_index..…, range.base_vertex, …)` with both bases
 //! zero for the only mesh in the pool, which is why the golden images did not
 //! move.
+//!
+//! And since the same month, [`crate::instance_pool`]: the cube's model matrix
+//! is a `GpuInstance` in a storage buffer rather than a field of the frame's
+//! uniform block, uploaded by delta. It is the pool's instance 0 — see that
+//! module and `mesh.slang` on why a non-indirect draw addresses no other one —
+//! and it holds the same matrix `begin_frame` used to write into the uniform,
+//! which is again why the golden images did not move.
 //!
 //! # Uniforms are a ring, and they have to be
 //!
@@ -61,6 +69,7 @@ use glam::{Mat4, Quat, Vec3};
 
 use crate::camera::{Camera, DirectionalLight};
 use crate::graph::{ImageId, ImportedImage, RenderGraph};
+use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc};
 use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError, MeshRange};
 use crate::transient::TransientImageDesc;
 
@@ -88,6 +97,14 @@ const POOL_VERTEX_CAPACITY: u32 = 64 * 1024;
 /// indexed triangle soup, rounded up.
 const POOL_INDEX_CAPACITY: u32 = 256 * 1024;
 
+/// Instances the instance pool holds, per frame in flight.
+///
+/// One is resident, for the same reason the geometry pools have one mesh in
+/// them. Sized against topic 03's exit criterion — "sandbox scene: 10k+
+/// instanced meshes" — rather than against the cube, because the buffers are
+/// reserved at start-up and never grown.
+const POOL_INSTANCE_CAPACITY: u32 = 16 * 1024;
+
 /// Everything the forward frame owns, created once.
 #[derive(Debug)]
 pub struct ForwardRenderer {
@@ -98,9 +115,17 @@ pub struct ForwardRenderer {
     pool: MeshPool,
     cube: MeshRange,
 
+    // The instance array, and the cube's place in it. `begin_frame` rewrites
+    // the instance's transform and the pool uploads only what changed.
+    instances: InstancePool,
+    cube_instance: InstanceHandle,
+
     // Per-frame uniforms, one set per frame in flight.
     uniforms: Vec<BufferHandle>,
     mesh_groups: Vec<BindGroupHandle>,
+    /// Which frame-in-flight slot is current. Set from
+    /// [`InstancePool::begin_frame`]'s return rather than counted here, so the
+    /// uniform ring and the instance ring cannot drift apart.
     frame: usize,
 
     mesh_layout: BindGroupLayoutHandle,
@@ -138,6 +163,8 @@ struct Rollback {
     /// The geometry pool, which owns two buffers, a semaphore and anything
     /// still staged — so it cannot be rolled back as a list of handles.
     pool: Option<MeshPool>,
+    /// The instance pool, which owns one buffer per frame in flight.
+    instances: Option<InstancePool>,
 }
 
 impl Rollback {
@@ -161,6 +188,9 @@ impl Rollback {
         }
         for handle in self.buffers {
             device.destroy_buffer(handle);
+        }
+        if let Some(pool) = self.instances {
+            pool.destroy(device);
         }
         if let Some(pool) = self.pool {
             pool.destroy(device);
@@ -213,6 +243,13 @@ impl ForwardRenderer {
         let vertices = pool.vertex_buffer();
         rollback.pool = Some(pool);
 
+        let (instances, cube_instance) = Self::build_instances(device)?;
+        // Same handle-then-hand-over dance as the geometry pool above: the
+        // buffers are `Copy` and are read out before the pool becomes the
+        // rollback's, which it must be before the first `?` below.
+        let instance_buffers: Vec<BufferHandle> = instances.buffers().to_vec();
+        rollback.instances = Some(instances);
+
         // --- the mesh pass ---
         //
         // No `BindingFlags` anywhere: this layout is legal on **both** tiers,
@@ -240,6 +277,20 @@ impl ForwardRenderer {
                 count: 1,
                 flags: BindingFlags::empty(),
             },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::VERTEX,
+                kind: BindingKind::StorageBuffer {
+                    // `StructuredBuffer` again: the vertex stage reads its
+                    // instance and writes nothing. The *host* writes this one
+                    // every frame, which is a mapped write rather than a shader
+                    // one and does not make it read-write here.
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
         ];
         let mesh_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("mesh frame"),
@@ -249,7 +300,7 @@ impl ForwardRenderer {
 
         let mut uniforms = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut mesh_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        for index in 0..FRAMES_IN_FLIGHT {
+        for &slot_instances in &instance_buffers {
             let buffer = device.create_buffer(&BufferDesc {
                 label: Some("mesh frame uniforms"),
                 size: mesh::FRAME_UNIFORMS_SIZE as u64,
@@ -268,6 +319,15 @@ impl ForwardRenderer {
                     array_index: 0,
                     resource: BindingResource::whole_buffer(vertices),
                 },
+                BindGroupEntry {
+                    binding: 2,
+                    array_index: 0,
+                    // **This frame's slot of the instance ring, not a shared
+                    // buffer.** Binding one buffer here for every group would
+                    // undo the ring and reintroduce the cross-submission
+                    // read-after-write hazard it exists to prevent.
+                    resource: BindingResource::whole_buffer(slot_instances),
+                },
             ];
             let group = device.create_bind_group(&BindGroupDesc {
                 label: Some("mesh frame"),
@@ -278,7 +338,6 @@ impl ForwardRenderer {
             rollback.bind_groups.push(group);
             uniforms.push(buffer);
             mesh_groups.push(group);
-            let _ = index;
         }
 
         let mesh_set_layouts = [mesh_layout];
@@ -430,6 +489,11 @@ impl ForwardRenderer {
                 .take()
                 .unwrap_or_else(|| unreachable!("the pool was placed in the rollback above")),
             cube,
+            instances: rollback
+                .instances
+                .take()
+                .unwrap_or_else(|| unreachable!("the pool was placed in the rollback above")),
+            cube_instance,
             uniforms,
             mesh_groups,
             frame: 0,
@@ -471,6 +535,49 @@ impl ForwardRenderer {
         }
     }
 
+    /// Creates the instance pool and puts the cube in it.
+    ///
+    /// Self-cleaning for the same reason [`ForwardRenderer::build_geometry`] is:
+    /// the pool is not the rollback's until this has returned.
+    ///
+    /// The instance's transform is left at [`Mat4::IDENTITY`] and every id at
+    /// zero. [`ForwardRenderer::begin_frame`] rewrites the transform before the
+    /// first draw; the ids stay zero because the cube is the only mesh and the
+    /// only material, and because nothing reads either of them yet — see
+    /// [`crcbl_shaders::mesh::GpuInstance`] on which fields are reserved.
+    fn build_instances(device: &dyn Device) -> Result<(InstancePool, InstanceHandle), HalError> {
+        let mut instances = InstancePool::new(
+            device,
+            &InstancePoolDesc {
+                label: Some("forward instances"),
+                capacity: POOL_INSTANCE_CAPACITY,
+                frames_in_flight: FRAMES_IN_FLIGHT,
+            },
+        )?;
+        let cube = match instances.insert(&mesh::GpuInstance {
+            transform: Mat4::IDENTITY.to_cols_array(),
+            ..mesh::GpuInstance::default()
+        }) {
+            Ok(cube) => cube,
+            Err(error) => {
+                instances.destroy(device);
+                return Err(error.into());
+            }
+        };
+        // The draw below is one instance with no base instance, so the shader
+        // reads instance 0 — see `mesh.slang` on why a non-indirect draw can
+        // address no other one portably. This is the first insert into a fresh
+        // pool, so it *is* zero; the check is here because a second instance
+        // added above it would otherwise draw silently wrong.
+        if instances.index(cube) != Some(0) {
+            instances.destroy(device);
+            return Err(HalError::Backend(
+                "the forward pass draws instance 0, and the cube did not land there".to_owned(),
+            ));
+        }
+        Ok((instances, cube))
+    }
+
     /// Uploads the cube and returns its range — **only** once the transfer has
     /// completed.
     ///
@@ -495,17 +602,27 @@ impl ForwardRenderer {
             .ok_or(MeshPoolError::NotResident { handle: cube })
     }
 
-    /// Rotates to the next frame's uniform buffer and writes this frame's
-    /// camera and light into it.
+    /// Rotates to the next frame's uniform buffer and instance buffer, writes
+    /// this frame's camera and light into the first, and uploads whatever
+    /// changed into the second.
     ///
     /// Must be called once per frame, before [`ForwardRenderer::add_passes`].
     /// Separate from `add_passes` because the write happens on the CPU and the
     /// passes are recorded on the GPU timeline: fusing them would hide the ring
     /// rotation inside a function whose name says nothing about it.
     ///
+    /// `model` is the cube's transform, and it is written into the instance
+    /// pool rather than into the uniform block. A frame that passes the same
+    /// matrix as the last one still marks the instance dirty — see
+    /// [`InstancePool::set`], which explains why it does not compare — so the
+    /// sandbox's spinning cube uploads 80 bytes a frame and a still one uploads
+    /// 80 bytes a frame too. What delta upload buys is that a *second* instance
+    /// that did not move costs nothing, which is the property §3.2 is about.
+    ///
     /// # Errors
     ///
-    /// [`HalError`] if the uniform buffer could not be written.
+    /// [`HalError`] if the uniform buffer or the instance buffer could not be
+    /// written.
     pub fn begin_frame(
         &mut self,
         device: &dyn Device,
@@ -514,7 +631,16 @@ impl ForwardRenderer {
         model: Mat4,
         extent: (u32, u32),
     ) -> Result<(), HalError> {
-        self.frame = (self.frame + 1) % self.uniforms.len();
+        self.instances.set(
+            self.cube_instance,
+            &mesh::GpuInstance {
+                transform: model.to_cols_array(),
+                ..mesh::GpuInstance::default()
+            },
+        );
+        // The instance pool owns the ring, so its slot is the frame index the
+        // uniform buffer and the bind group below are picked with.
+        self.frame = self.instances.begin_frame(device)?;
 
         // A minimised window reports a zero extent in *either* dimension, and
         // `Projection::matrix` asserts a finite positive aspect. Guarding only
@@ -528,7 +654,6 @@ impl ForwardRenderer {
         let direction = light.direction.normalize_or_zero();
         let uniforms = mesh::FrameUniforms {
             view_proj: camera.view_projection(aspect).to_cols_array(),
-            model: model.to_cols_array(),
             camera_position: camera.eye.extend(1.0).to_array(),
             light_direction: direction.extend(0.0).to_array(),
             light_color: light.color.extend(0.0).to_array(),
@@ -588,6 +713,9 @@ impl ForwardRenderer {
                     // address, so this conversion has no failing case.
                     i32::try_from(cube.base_vertex)
                         .unwrap_or_else(|_| unreachable!("MeshPool::new caps the vertex capacity")),
+                    // One instance and no base instance, so the vertex stage's
+                    // `SV_InstanceID` is 0 and it reads the pool's instance 0 —
+                    // which `build_instances` has checked the cube is.
                     0..1,
                 );
             });
@@ -724,6 +852,7 @@ impl ForwardRenderer {
         for buffer in self.uniforms {
             device.destroy_buffer(buffer);
         }
+        self.instances.destroy(device);
         self.pool.destroy(device);
     }
 }
@@ -807,6 +936,68 @@ mod tests {
         );
         assert_eq!(seen[0], seen[FRAMES_IN_FLIGHT], "and the ring must wrap");
         renderer.destroy(device.as_ref());
+    }
+
+    /// The cube really is an instance. `begin_frame` puts the model matrix in
+    /// the instance pool instead of the uniform block, at the one index a
+    /// non-indirect draw can address, and it reaches the device as one
+    /// instance-sized write per frame.
+    ///
+    /// The index matters as much as the matrix: the draw records `0..1` and the
+    /// vertex stage reads `instances[SV_InstanceID]`, so a cube that landed
+    /// anywhere but slot 0 would be shaded with whatever slot 0 held.
+    #[test]
+    fn the_cube_is_instance_zero_and_its_transform_is_what_gets_uploaded() {
+        let (recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        assert_eq!(
+            renderer.instances.index(renderer.cube_instance),
+            Some(0),
+            "the draw reads instance 0 and nothing else"
+        );
+        let instance_buffers = renderer.instances.buffers().to_vec();
+
+        let model = ForwardRenderer::spin(1.25);
+        renderer
+            .begin_frame(
+                device.as_ref(),
+                &Camera::default(),
+                &DirectionalLight::default(),
+                model,
+                (64, 48),
+            )
+            .expect("write");
+        assert_eq!(
+            renderer
+                .instances
+                .get(renderer.cube_instance)
+                .expect("the cube is live")
+                .transform,
+            model.to_cols_array(),
+            "the model matrix must land in the instance, not the uniform block"
+        );
+
+        let instance_writes: Vec<(u64, usize)> = recorder
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                crcbl_hal::null::Event::BufferWritten {
+                    buffer,
+                    offset,
+                    len,
+                } if instance_buffers.contains(&buffer) => Some((offset, len)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            instance_writes,
+            [(0, crcbl_shaders::mesh::INSTANCE_STRIDE)],
+            "one frame must upload exactly the one instance that changed"
+        );
+
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
     }
 
     /// The spin is a rotation: no scale, no shear, so the shader's

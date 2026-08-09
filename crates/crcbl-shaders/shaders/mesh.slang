@@ -36,6 +36,25 @@
 // rediscovered is that a transposed matrix produces a *plausible* picture, not
 // an obviously broken one; `crcbl-vk`'s e2e suite pins it by asserting which
 // cube face lands where on screen, which a transpose could not survive.
+//
+// # The model matrix moved into an instance array
+//
+// `docs/plan/03-gpu-driven-rendering.md` §3.2: the per-object transform is a
+// `GpuInstance` in a storage buffer written by delta upload, not a field of the
+// frame's uniform block. `FrameUniforms` below therefore holds only what is
+// genuinely per *frame*, and the vertex stage reads its transform out of
+// `instances`.
+//
+// The draw is still one instance, so `SV_InstanceID` is 0 and the cube is
+// instance 0. That is the whole of what a non-indirect draw can address here,
+// and the reason is a target disagreement rather than a shortcut: the emitted
+// SPIR-V, DXIL and MSL all give `SV_InstanceID` HLSL's meaning — the SPIR-V
+// subtracts `BaseInstance` from `InstanceIndex` to get there — while the
+// emitted WGSL indexes with `@builtin(instance_index)` raw, which in WebGPU
+// starts at the draw's `first_instance`. So a draw's base instance reaches this
+// shader as two different numbers depending on the target, and it is not used.
+// §3.3's indirect path does not need it: the cull pass writes the visible
+// instance ids the draw reads.
 
 /// One vertex of a hardcoded mesh, matching `crcbl_shaders::mesh::MeshVertex`.
 ///
@@ -64,9 +83,6 @@ struct FrameUniforms
 {
     /// World → clip. Reversed-Z: 1.0 at the near plane, 0.0 at infinity.
     float4x4 view_proj;
-    /// Model → world. Rigid (rotation + translation), so its upper-left 3×3
-    /// transforms normals correctly without an inverse-transpose.
-    float4x4 model;
     /// World-space eye position in `xyz`; `w` unused.
     float4 camera_position;
     /// World-space direction **towards** the light in `xyz`, normalized; `w`
@@ -80,11 +96,42 @@ struct FrameUniforms
     float4 ambient;
 };
 
+/// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
+///
+/// `docs/plan/03-gpu-driven-rendering.md` §3.2's "transform, mesh id, material
+/// id, flags", plus the sector id its 2026-07-27 correction adds. The three ids
+/// are written by the CPU and read by nothing yet — see the Rust struct, which
+/// carries the full account of what each is for and which slice consumes it.
+struct GpuInstance
+{
+    /// Model → sector. Rigid (rotation + translation), so its upper-left 3×3
+    /// transforms normals correctly without an inverse-transpose.
+    float4x4 transform;
+    /// Which mesh to draw. **Reserved**: the draw resolves its mesh range on
+    /// the CPU, and the GPU-side mesh table is §3.3's.
+    uint mesh;
+    /// Which material to shade with. **Reserved**: the material table is the
+    /// other half of §3.2 and is not built.
+    uint material;
+    /// Which sector `transform` is relative to. **Reserved**: the f64
+    /// sector→camera offset table and the addition that would make this mean
+    /// anything are §3.3's, so today every instance is in sector 0 and
+    /// `transform` is effectively model → world.
+    uint sector;
+    /// Per-instance bits. **Reserved**: no bit is defined. It costs nothing —
+    /// the struct is 16-byte aligned, so without it the three ids would be
+    /// followed by four bytes of padding instead.
+    uint flags;
+};
+
 [[vk::binding(0, 0)]]
 ConstantBuffer<FrameUniforms> frame;
 
 [[vk::binding(1, 0)]]
 StructuredBuffer<MeshVertex> vertices;
+
+[[vk::binding(2, 0)]]
+StructuredBuffer<GpuInstance> instances;
 
 struct VertexOutput
 {
@@ -95,20 +142,21 @@ struct VertexOutput
 };
 
 [shader("vertex")]
-VertexOutput vertexMain(uint index: SV_VertexID)
+VertexOutput vertexMain(uint index: SV_VertexID, uint instance_index: SV_InstanceID)
 {
     MeshVertex vertex = vertices[index];
+    GpuInstance instance = instances[instance_index];
 
-    float4 world = mul(frame.model, float4(vertex.position.xyz, 1.0));
+    float4 world = mul(instance.transform, float4(vertex.position.xyz, 1.0));
 
     VertexOutput output;
     output.position = mul(frame.view_proj, world);
     output.world_position = world.xyz;
-    // The model matrix is rigid, so its 3×3 part is orthonormal and is its own
+    // The transform is rigid, so its 3×3 part is orthonormal and is its own
     // inverse-transpose. The renderer states that as an obligation on
-    // `FrameUniforms::model` rather than shipping a fourth matrix nothing needs
-    // until non-uniform scale exists.
-    output.world_normal = mul((float3x3)frame.model, vertex.normal.xyz);
+    // `GpuInstance::transform` rather than shipping a second matrix per
+    // instance that nothing needs until non-uniform scale exists.
+    output.world_normal = mul((float3x3)instance.transform, vertex.normal.xyz);
     output.color = vertex.color;
     return output;
 }
