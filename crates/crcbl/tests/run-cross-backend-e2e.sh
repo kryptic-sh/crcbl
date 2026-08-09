@@ -39,8 +39,8 @@
 #
 # WHY A LOOSE TOLERANCE IS STILL A GATE
 #   Two blank frames match perfectly, so `compare-png` refuses to pass a frame
-#   with fewer distinct colours than the scene's floor below. The lit cube has
-#   41 at 256x192 and 36 at 97x61; a cleared frame has one. A backend that
+#   with fewer distinct colours than the scene's floor below. The lit cube scene
+#   has 49 at 256x192 and 44 at 97x61; a cleared frame has one. A backend that
 #   rendered nothing therefore fails this gate even though its output "matches".
 #
 # WHY EVERY SCENE, AND WHY EACH ONE HAS ITS OWN FLOOR
@@ -57,10 +57,18 @@
 #   divergence — went uncovered. `crcbl screenshot --scene` now names all three
 #   and this loop renders every one.
 #
+#   `SV_VertexID` turned out to be the same story — SPIR-V subtracts
+#   `BaseVertex` from it, WGSL and MSL do not — and it is why the cube scene
+#   draws a *second* mesh beside the cube. A base vertex only means something
+#   for a mesh that is not the pool's first, so with one resident the two
+#   lowerings agree by accident and this gate sees nothing. Caught here exactly
+#   once, and the run that caught it is the reason the second mesh is in the
+#   scene rather than in a test nobody crosses backends with.
+#
 #   The anti-vacuity floor is per scene because the scenes are not equally
 #   colourful, and one constant covering all of them is either too loose to
 #   catch a blank cube or too tight for a UI to pass. Measured here, both ICDs,
-#   at both default sizes: cube 36–41, sprite 17–24, UI 7 (a clear, a panel, the
+#   at both default sizes: cube 44–49, sprite 17–24, UI 7 (a clear, a panel, the
 #   translucent bar over each of those, an outline and two text colours). Each
 #   floor below sits just under its scene's measured minimum, so losing one
 #   element of a scene trips it.

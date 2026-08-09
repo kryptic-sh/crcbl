@@ -33,17 +33,33 @@
 //! What *is* here, since 2026-08, is [`crate::mesh_pool`]: the cube is the first
 //! resident of the global vertex and index pools rather than owning two buffers
 //! of its own, so it is `{base_vertex, base_index, index_count}` like everything
-//! P7 will draw. Same geometry, different residence — the draw below is
-//! `draw_indexed(range.base_index..…, range.base_vertex, …)` with both bases
-//! zero for the only mesh in the pool, which is why the golden images did not
-//! move.
+//! P7 will draw. Same geometry, different residence.
 //!
 //! And since the same month, [`crate::instance_pool`]: the cube's model matrix
 //! is a `GpuInstance` in a storage buffer rather than a field of the frame's
-//! uniform block, uploaded by delta. It is the pool's instance 0 — see that
-//! module and `mesh.slang` on why a non-indirect draw addresses no other one —
-//! and it holds the same matrix `begin_frame` used to write into the uniform,
-//! which is again why the golden images did not move.
+//! uniform block, uploaded by delta. It holds the same matrix `begin_frame` used
+//! to write into the uniform, which is why the golden images did not move.
+//!
+//! # A second resident, and the block that makes it draw
+//!
+//! A pool whose only mesh is at base vertex 0 cannot tell a base vertex that
+//! works from one that is silently cancelled out, and `mesh.slang`'s header
+//! shows the four targets disagreeing about exactly that: the SPIR-V subtracts
+//! `BaseVertex` back out of `SV_VertexID`, so the pool's base — passed through
+//! `draw_indexed`'s own argument — reached the shader as zero, while WGSL and
+//! MSL kept it. The same disagreement covers `SV_InstanceID`, which is what
+//! [`crate::sprite_pass`] paid for first.
+//!
+//! So **every draw this pass records passes zero for both of its bases**, and
+//! the real ones arrive as a [`mesh::DrawConstants`] block reached through a
+//! dynamic offset — one block per draw, written once at build. That is the one
+//! formulation no target's lowering can change the meaning of, and it is what
+//! makes the pool's *second* resident, [`mesh::pyramid_vertices`], draw its own
+//! geometry rather than the cube's.
+//!
+//! The pyramid is in the pools from `new` but is drawn only when a caller asks
+//! for it with [`ForwardRenderer::set_pyramid`]. The frame the samples draw is
+//! still the cube alone, which is why their golden images did not move either.
 //!
 //! # Uniforms are a ring, and they have to be
 //!
@@ -87,10 +103,10 @@ pub const FRAMES_IN_FLIGHT: usize = 2;
 
 /// Vertices the geometry pool holds.
 ///
-/// One cube is resident today, and the pool exists so that stops being the
+/// Two meshes are resident today, and the pool exists so that stops being the
 /// interesting number. It is device-local memory reserved at start-up and never
 /// grown — [`crate::mesh_pool`] says why — so it is sized for the scene P7 puts
-/// in it rather than for the mesh P1 draws.
+/// in it rather than for the meshes P1 draws.
 const POOL_VERTEX_CAPACITY: u32 = 64 * 1024;
 
 /// Indices the geometry pool holds. Four per vertex is the usual ratio for
@@ -99,29 +115,61 @@ const POOL_INDEX_CAPACITY: u32 = 256 * 1024;
 
 /// Instances the instance pool holds, per frame in flight.
 ///
-/// One is resident, for the same reason the geometry pools have one mesh in
-/// them. Sized against topic 03's exit criterion — "sandbox scene: 10k+
-/// instanced meshes" — rather than against the cube, because the buffers are
-/// reserved at start-up and never grown.
+/// Two are resident, for the same reason the geometry pools hold two meshes.
+/// Sized against topic 03's exit criterion — "sandbox scene: 10k+ instanced
+/// meshes" — rather than against them, because the buffers are reserved at
+/// start-up and never grown.
 const POOL_INSTANCE_CAPACITY: u32 = 16 * 1024;
+
+/// How many [`mesh::DrawConstants`] blocks the pass keeps: one per draw it can
+/// record, which is one per resident mesh.
+///
+/// A fixed number rather than a growing ring because the pass records a fixed
+/// list of draws — §3.3's indirect path is what makes a frame's draw count a
+/// runtime quantity, and it replaces this block with a GPU-side mesh table
+/// rather than growing it.
+const DRAW_BLOCKS: u64 = 2;
+
+/// One draw call: which mesh, and where the block naming its bases sits.
+///
+/// Both halves are fixed once the mesh is resident and the instance is
+/// allocated, so the constant block is written at build and never again.
+#[derive(Clone, Copy, Debug)]
+struct Draw {
+    /// Where the mesh lives in the pools.
+    range: MeshRange,
+    /// The dynamic offset of this draw's [`mesh::DrawConstants`] block.
+    constant_offset: u32,
+}
 
 /// Everything the forward frame owns, created once.
 #[derive(Debug)]
 pub struct ForwardRenderer {
-    // Geometry: the global pools, and the cube's range in them. The range is
-    // resolved once, at build, and `MeshPool::mesh` only hands one out for a
-    // mesh whose upload has completed — so there is no way to reach the draw
-    // below with a mesh the GPU has not received.
+    // Geometry: the global pools, and the two meshes resident in them. Each
+    // range is resolved once, at build, and `MeshPool::mesh` only hands one out
+    // for a mesh whose upload has completed — so there is no way to reach a
+    // draw below with a mesh the GPU has not received.
     pool: MeshPool,
-    cube: MeshRange,
+    cube: Draw,
+    pyramid: Draw,
+    /// Whether this frame draws the pyramid, from
+    /// [`ForwardRenderer::set_pyramid`]. `false` until a caller asks for it, so
+    /// the frame the samples draw is the cube alone.
+    pyramid_visible: bool,
 
-    // The instance array, and the cube's place in it. `begin_frame` rewrites
-    // the instance's transform and the pool uploads only what changed.
+    // The instance array, and the two objects' places in it. `begin_frame`
+    // rewrites the cube's transform and the pool uploads only what changed.
     instances: InstancePool,
     cube_instance: InstanceHandle,
+    pyramid_instance: InstanceHandle,
 
     // Per-frame uniforms, one set per frame in flight.
     uniforms: Vec<BufferHandle>,
+    /// One [`mesh::DrawConstants`] block per draw, a device dynamic-offset
+    /// alignment apart. Shared by every frame's bind group rather than ringed,
+    /// because nothing rewrites it after `build`: a mesh's base vertex and an
+    /// object's instance index are decided when the pools allocate them.
+    draw_constants: BufferHandle,
     mesh_groups: Vec<BindGroupHandle>,
     /// Which frame-in-flight slot is current. Set from
     /// [`InstancePool::begin_frame`]'s return rather than counted here, so the
@@ -234,7 +282,7 @@ impl ForwardRenderer {
         target_format: Format,
         rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
-        let (pool, cube) = Self::build_geometry(device, queue)?;
+        let (pool, cube, pyramid) = Self::build_geometry(device, queue)?;
         // The handle is `Copy`, so it can be read out before the pool becomes
         // the rollback's — which it must be before the first `?` below, or a
         // failed pipeline would leak two device-local buffers. The index pool is
@@ -243,11 +291,20 @@ impl ForwardRenderer {
         let vertices = pool.vertex_buffer();
         rollback.pool = Some(pool);
 
-        let (instances, cube_instance) = Self::build_instances(device)?;
+        let (instances, cube_instance, pyramid_instance) = Self::build_instances(device)?;
         // Same handle-then-hand-over dance as the geometry pool above: the
         // buffers are `Copy` and are read out before the pool becomes the
-        // rollback's, which it must be before the first `?` below.
+        // rollback's, which it must be before the first `?` below. The two
+        // instance *indices* travel the same way, into the constant blocks
+        // below — after which nothing needs the pool again until `begin_frame`.
         let instance_buffers: Vec<BufferHandle> = instances.buffers().to_vec();
+        let (cube_instance_index, pyramid_instance_index) = match (
+            instances.index(cube_instance),
+            instances.index(pyramid_instance),
+        ) {
+            (Some(cube), Some(pyramid)) => (cube, pyramid),
+            _ => unreachable!("both instances were just inserted into a fresh pool"),
+        };
         rollback.instances = Some(instances);
 
         // --- the mesh pass ---
@@ -291,12 +348,67 @@ impl ForwardRenderer {
                 count: 1,
                 flags: BindingFlags::empty(),
             },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::VERTEX,
+                // `dynamic: true`, and it is the whole mechanism: it is what
+                // lets a draw say which mesh and which instance it is without
+                // `draw_indexed`'s own bases, which the module docs and
+                // `mesh.slang`'s header explain the targets disagree about.
+                // Same shape, for the same reason, as `crate::sprite_pass`'s.
+                kind: BindingKind::UniformBuffer { dynamic: true },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
         ];
         let mesh_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("mesh frame"),
             entries: &mesh_entries,
         })?;
         rollback.bind_group_layouts.push(mesh_layout);
+
+        // A dynamic offset must be a multiple of the device's alignment, and one
+        // block has to fit inside one stride. Read from the device rather than
+        // assumed, exactly as `crate::sprite_pass` does: 256 on WebGPU, 64 on a
+        // typical desktop Vulkan driver.
+        let alignment = device.caps().limits.min_uniform_buffer_offset_alignment;
+        let draw_stride = u32::try_from(
+            (mesh::DRAW_CONSTANTS_SIZE as u64).next_multiple_of(alignment),
+        )
+        .map_err(|_| {
+            HalError::InvalidDescriptor(format!(
+                "min_uniform_buffer_offset_alignment is {alignment}, which no dynamic \
+                         offset can express"
+            ))
+        })?;
+        let draw_constants = device.create_buffer(&BufferDesc {
+            label: Some("mesh draw constants"),
+            size: u64::from(draw_stride) * DRAW_BLOCKS,
+            usage: BufferUsage::UNIFORM,
+            memory: MemoryLocation::HostUpload,
+        })?;
+        rollback.buffers.push(draw_constants);
+        // Written here and never again: a mesh's base vertex and an object's
+        // instance index are decided by the pools, and neither pool moves what
+        // it has handed out.
+        let draw_of = |slot: u32, range: MeshRange, instance: u32| -> Result<Draw, HalError> {
+            let constant_offset = slot * draw_stride;
+            device.write_buffer(
+                draw_constants,
+                u64::from(constant_offset),
+                &mesh::DrawConstants {
+                    base_vertex: range.base_vertex,
+                    base_instance: instance,
+                }
+                .to_bytes(),
+            )?;
+            Ok(Draw {
+                range,
+                constant_offset,
+            })
+        };
+        let cube = draw_of(0, cube, cube_instance_index)?;
+        let pyramid = draw_of(1, pyramid, pyramid_instance_index)?;
 
         let mut uniforms = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut mesh_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
@@ -327,6 +439,20 @@ impl ForwardRenderer {
                     // undo the ring and reintroduce the cross-submission
                     // read-after-write hazard it exists to prevent.
                     resource: BindingResource::whole_buffer(slot_instances),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    array_index: 0,
+                    // **One block, not the whole buffer.** The binding is
+                    // dynamic, so the bind's offset is added on top of this one
+                    // and both Vulkan and WebGPU require `offset + dynamic +
+                    // size` to stay inside the buffer — bound whole, the very
+                    // first non-zero dynamic offset would be out of range.
+                    resource: BindingResource::Buffer {
+                        buffer: draw_constants,
+                        offset: 0,
+                        size: mesh::DRAW_CONSTANTS_SIZE as u64,
+                    },
                 },
             ];
             let group = device.create_bind_group(&BindGroupDesc {
@@ -489,12 +615,16 @@ impl ForwardRenderer {
                 .take()
                 .unwrap_or_else(|| unreachable!("the pool was placed in the rollback above")),
             cube,
+            pyramid,
+            pyramid_visible: false,
             instances: rollback
                 .instances
                 .take()
                 .unwrap_or_else(|| unreachable!("the pool was placed in the rollback above")),
             cube_instance,
+            pyramid_instance,
             uniforms,
+            draw_constants,
             mesh_groups,
             frame: 0,
             mesh_layout,
@@ -517,7 +647,7 @@ impl ForwardRenderer {
     fn build_geometry(
         device: &dyn Device,
         queue: QueueHandle,
-    ) -> Result<(MeshPool, MeshRange), HalError> {
+    ) -> Result<(MeshPool, MeshRange, MeshRange), HalError> {
         let mut pool = MeshPool::new(
             device,
             &MeshPoolDesc {
@@ -526,8 +656,8 @@ impl ForwardRenderer {
                 index_capacity: POOL_INDEX_CAPACITY,
             },
         )?;
-        match Self::resident_cube(device, queue, &mut pool) {
-            Ok(range) => Ok((pool, range)),
+        match Self::residents(device, queue, &mut pool) {
+            Ok((cube, pyramid)) => Ok((pool, cube, pyramid)),
             Err(error) => {
                 pool.destroy(device);
                 Err(error.into())
@@ -535,17 +665,24 @@ impl ForwardRenderer {
         }
     }
 
-    /// Creates the instance pool and puts the cube in it.
+    /// Creates the instance pool and puts both objects in it.
     ///
     /// Self-cleaning for the same reason [`ForwardRenderer::build_geometry`] is:
     /// the pool is not the rollback's until this has returned.
     ///
-    /// The instance's transform is left at [`Mat4::IDENTITY`] and every id at
-    /// zero. [`ForwardRenderer::begin_frame`] rewrites the transform before the
-    /// first draw; the ids stay zero because the cube is the only mesh and the
-    /// only material, and because nothing reads either of them yet — see
+    /// Both transforms are left at [`Mat4::IDENTITY`] and every id at zero.
+    /// [`ForwardRenderer::begin_frame`] rewrites the cube's before the first
+    /// draw and [`ForwardRenderer::set_pyramid`] the pyramid's; the ids stay
+    /// zero because nothing reads any of them yet — see
     /// [`crcbl_shaders::mesh::GpuInstance`] on which fields are reserved.
-    fn build_instances(device: &dyn Device) -> Result<(InstancePool, InstanceHandle), HalError> {
+    ///
+    /// Neither instance's index is asserted to be anything in particular. It
+    /// used to be — the cube had to land at 0, because a draw could address no
+    /// other one — and the [`mesh::DrawConstants`] block is what replaced that
+    /// constraint with a number the draw carries.
+    fn build_instances(
+        device: &dyn Device,
+    ) -> Result<(InstancePool, InstanceHandle, InstanceHandle), HalError> {
         let mut instances = InstancePool::new(
             device,
             &InstancePoolDesc {
@@ -554,42 +691,38 @@ impl ForwardRenderer {
                 frames_in_flight: FRAMES_IN_FLIGHT,
             },
         )?;
-        let cube = match instances.insert(&mesh::GpuInstance {
-            transform: Mat4::IDENTITY.to_cols_array(),
-            ..mesh::GpuInstance::default()
-        }) {
-            Ok(cube) => cube,
-            Err(error) => {
-                instances.destroy(device);
-                return Err(error.into());
-            }
+        let mut insert = || {
+            instances.insert(&mesh::GpuInstance {
+                transform: Mat4::IDENTITY.to_cols_array(),
+                ..mesh::GpuInstance::default()
+            })
         };
-        // The draw below is one instance with no base instance, so the shader
-        // reads instance 0 — see `mesh.slang` on why a non-indirect draw can
-        // address no other one portably. This is the first insert into a fresh
-        // pool, so it *is* zero; the check is here because a second instance
-        // added above it would otherwise draw silently wrong.
-        if instances.index(cube) != Some(0) {
-            instances.destroy(device);
-            return Err(HalError::Backend(
-                "the forward pass draws instance 0, and the cube did not land there".to_owned(),
-            ));
+        match (insert(), insert()) {
+            (Ok(cube), Ok(pyramid)) => Ok((instances, cube, pyramid)),
+            (Err(error), _) | (Ok(_), Err(error)) => {
+                instances.destroy(device);
+                Err(error.into())
+            }
         }
-        Ok((instances, cube))
     }
 
-    /// Uploads the cube and returns its range — **only** once the transfer has
-    /// completed.
+    /// Uploads both meshes and returns their ranges — **only** once the
+    /// transfers have completed.
     ///
-    /// The three calls are §3.1's upload path in order: the copy is recorded and
-    /// submitted against a timeline value, [`MeshPool::flush`] is what makes that
-    /// value pass, and [`MeshPool::mesh`] is what refuses to hand out a range
-    /// before it has.
-    fn resident_cube(
+    /// The calls are §3.1's upload path in order: the copies are recorded and
+    /// submitted against timeline values, [`MeshPool::flush`] is what makes those
+    /// values pass, and [`MeshPool::mesh`] is what refuses to hand out a range
+    /// before they have.
+    ///
+    /// The pyramid is uploaded second, so it is the pool's first resident at a
+    /// non-zero base vertex — which is the whole reason it is here, and what the
+    /// module docs call the one thing that can tell a working base vertex from a
+    /// cancelled one.
+    fn residents(
         device: &dyn Device,
         queue: QueueHandle,
         pool: &mut MeshPool,
-    ) -> Result<MeshRange, MeshPoolError> {
+    ) -> Result<(MeshRange, MeshRange), MeshPoolError> {
         let cube = pool.upload(
             device,
             queue,
@@ -597,9 +730,19 @@ impl ForwardRenderer {
             &mesh::cube_vertex_bytes(),
             &mesh::cube_indices(),
         )?;
+        let pyramid = pool.upload(
+            device,
+            queue,
+            "pyramid",
+            &mesh::pyramid_vertex_bytes(),
+            &mesh::pyramid_indices(),
+        )?;
         pool.flush(device)?;
-        pool.mesh(cube)
-            .ok_or(MeshPoolError::NotResident { handle: cube })
+        let resolve = |handle| {
+            pool.mesh(handle)
+                .ok_or(MeshPoolError::NotResident { handle })
+        };
+        Ok((resolve(cube)?, resolve(pyramid)?))
     }
 
     /// Rotates to the next frame's uniform buffer and instance buffer, writes
@@ -662,6 +805,33 @@ impl ForwardRenderer {
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())
     }
 
+    /// Puts the pool's second mesh in the frame at `model`, or takes it back out
+    /// with `None`.
+    ///
+    /// **This is what makes a non-zero `MeshRange::base_vertex` observable**, and
+    /// it is why it is here at all: the pyramid is uploaded after the cube, so
+    /// it is the pool's first resident that is not at base 0, and a frame
+    /// containing it is a frame that fails if the base is lost on the way to the
+    /// shader. See the module docs for the disagreement that made losing it the
+    /// default.
+    ///
+    /// Off by default, so the frame every sample draws is the cube alone.
+    ///
+    /// Takes effect at the next [`ForwardRenderer::begin_frame`], which is what
+    /// uploads the instance the transform is written into.
+    pub fn set_pyramid(&mut self, model: Option<Mat4>) {
+        self.pyramid_visible = model.is_some();
+        if let Some(model) = model {
+            self.instances.set(
+                self.pyramid_instance,
+                &mesh::GpuInstance {
+                    transform: model.to_cols_array(),
+                    ..mesh::GpuInstance::default()
+                },
+            );
+        }
+    }
+
     /// Adds the forward and tonemap passes to `graph`, rendering into `target`,
     /// and returns the HDR scene target they went through.
     ///
@@ -688,7 +858,10 @@ impl ForwardRenderer {
         let pipeline = self.mesh_pipeline;
         let layout = self.mesh_pipeline_layout;
         let indices = self.pool.index_buffer();
-        let cube = self.cube;
+        let mut draws = vec![self.cube];
+        if self.pyramid_visible {
+            draws.push(self.pyramid);
+        }
 
         graph
             .add_render_pass("forward")
@@ -697,27 +870,31 @@ impl ForwardRenderer {
             .execute(move |ctx| {
                 let encoder = ctx.encoder();
                 encoder.bind_graphics_pipeline(pipeline);
-                encoder.bind_group(0, group, &[], layout);
                 // The index pool is bound whole, at offset zero, for every mesh
-                // in it: the mesh's place is the draw's first index and base
-                // vertex, not a buffer offset. That is what makes one bind
-                // enough for the scene P7 puts in here.
+                // in it: the mesh's place is the draw's first index and its
+                // constant block, not a buffer offset. That is what makes one
+                // bind enough for the scene P7 puts in here.
                 encoder.bind_index_buffer(indices, 0, IndexFormat::Uint32);
-                let first = cube.base_index;
-                encoder.draw_indexed(
-                    first..first + cube.index_count,
-                    // Every backend adds this to the value it reads out of the
-                    // index buffer, which is why the uploaded indices are
-                    // mesh-relative and a mesh can move without being rewritten.
-                    // The pool refuses a capacity a signed base vertex could not
-                    // address, so this conversion has no failing case.
-                    i32::try_from(cube.base_vertex)
-                        .unwrap_or_else(|_| unreachable!("MeshPool::new caps the vertex capacity")),
-                    // One instance and no base instance, so the vertex stage's
-                    // `SV_InstanceID` is 0 and it reads the pool's instance 0 —
-                    // which `build_instances` has checked the cube is.
-                    0..1,
-                );
+                for draw in &draws {
+                    // The block written at build for this draw, and the only
+                    // thing that tells the shader which mesh's vertices and
+                    // which instance it is looking at.
+                    encoder.bind_group(0, group, &[draw.constant_offset], layout);
+                    let first = draw.range.base_index;
+                    encoder.draw_indexed(
+                        first..first + draw.range.index_count,
+                        // **Zero, not the mesh's base vertex.** Every target
+                        // folds this into `SV_VertexID` differently — the
+                        // module docs and `mesh.slang`'s header measure all
+                        // four — and zero is the only value they agree on. The
+                        // real base is in the block bound above.
+                        0,
+                        // One instance and no base instance, for exactly the
+                        // same reason: `SV_InstanceID` is 0 on every target,
+                        // and the block says which instance that means.
+                        0..1,
+                    );
+                }
             });
 
         // The tonemap group names a *graph-owned* view, so it can only be built
@@ -852,6 +1029,7 @@ impl ForwardRenderer {
         for buffer in self.uniforms {
             device.destroy_buffer(buffer);
         }
+        device.destroy_buffer(self.draw_constants);
         self.instances.destroy(device);
         self.pool.destroy(device);
     }
@@ -939,35 +1117,38 @@ mod tests {
     }
 
     /// The cube really is an instance. `begin_frame` puts the model matrix in
-    /// the instance pool instead of the uniform block, at the one index a
-    /// non-indirect draw can address, and it reaches the device as one
-    /// instance-sized write per frame.
-    ///
-    /// The index matters as much as the matrix: the draw records `0..1` and the
-    /// vertex stage reads `instances[SV_InstanceID]`, so a cube that landed
-    /// anywhere but slot 0 would be shaded with whatever slot 0 held.
+    /// the instance pool instead of the uniform block, and in the steady state
+    /// it reaches the device as one instance-sized write per frame — the
+    /// pyramid, which is in the array and did not move, costs nothing.
     #[test]
-    fn the_cube_is_instance_zero_and_its_transform_is_what_gets_uploaded() {
+    fn only_the_instance_that_moved_is_uploaded() {
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
-        assert_eq!(
-            renderer.instances.index(renderer.cube_instance),
-            Some(0),
-            "the draw reads instance 0 and nothing else"
-        );
         let instance_buffers = renderer.instances.buffers().to_vec();
 
+        // Both instances are inserted at build and are dirty in *every* slot, so
+        // the first frames upload both however well delta upload works. The ring
+        // has to be walked right through before an upload is evidence about the
+        // delta rather than about initialisation.
+        let frame = |renderer: &mut ForwardRenderer, model| {
+            renderer
+                .begin_frame(
+                    device.as_ref(),
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    model,
+                    (64, 48),
+                )
+                .expect("write");
+        };
+        for _ in 0..FRAMES_IN_FLIGHT {
+            frame(&mut renderer, Mat4::IDENTITY);
+        }
+
+        let before = recorder.events().len();
         let model = ForwardRenderer::spin(1.25);
-        renderer
-            .begin_frame(
-                device.as_ref(),
-                &Camera::default(),
-                &DirectionalLight::default(),
-                model,
-                (64, 48),
-            )
-            .expect("write");
+        frame(&mut renderer, model);
         assert_eq!(
             renderer
                 .instances
@@ -981,6 +1162,7 @@ mod tests {
         let instance_writes: Vec<(u64, usize)> = recorder
             .events()
             .into_iter()
+            .skip(before)
             .filter_map(|event| match event {
                 crcbl_hal::null::Event::BufferWritten {
                     buffer,
@@ -990,14 +1172,166 @@ mod tests {
                 _ => None,
             })
             .collect();
+        let cube_at = u64::from(
+            renderer
+                .instances
+                .index(renderer.cube_instance)
+                .expect("the cube is live"),
+        ) * crcbl_shaders::mesh::INSTANCE_STRIDE as u64;
         assert_eq!(
             instance_writes,
-            [(0, crcbl_shaders::mesh::INSTANCE_STRIDE)],
-            "one frame must upload exactly the one instance that changed"
+            [(cube_at, crcbl_shaders::mesh::INSTANCE_STRIDE)],
+            "a steady-state frame must upload exactly the one instance that changed"
         );
 
         renderer.destroy(device.as_ref());
         recorder.assert_valid();
+    }
+
+    /// The property the whole draw-constants mechanism exists for: the pool's
+    /// second resident is **not** at base vertex zero, so a frame containing it
+    /// is a frame that fails if the base is lost between the pool and the
+    /// shader.
+    ///
+    /// Without this the pass is back where it started — one mesh, base 0, and a
+    /// base-vertex bug that no picture can show.
+    #[test]
+    fn the_second_mesh_lands_past_the_first() {
+        let (_, device, queue) = open();
+        let renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        assert_eq!(renderer.cube.range.base_vertex, 0, "the cube is first");
+        assert_eq!(
+            renderer.pyramid.range.base_vertex as usize,
+            crcbl_shaders::mesh::CUBE_VERTEX_COUNT,
+            "the pyramid must start where the cube ends, or the pools are not \
+             suballocating at all"
+        );
+        // And the two draws read different constant blocks, or both would be
+        // told the same base.
+        assert_ne!(
+            renderer.cube.constant_offset, renderer.pyramid.constant_offset,
+            "each draw needs a block of its own"
+        );
+        renderer.destroy(device.as_ref());
+    }
+
+    /// Every draw the pass records passes **zero** for its base vertex and its
+    /// base instance, and says which mesh it is through the dynamic offset
+    /// instead.
+    ///
+    /// This is the assertion that would have caught the bug: the base vertex
+    /// used to travel through `draw_indexed`, where the SPIR-V's `OpISub`
+    /// subtracted it straight back out. It is checked on the recorded commands
+    /// rather than argued from the source, because "the shader adds it back" is
+    /// only true while nothing puts it in the draw as well.
+    #[test]
+    fn every_draw_passes_zero_for_both_of_its_bases() {
+        use crcbl_hal::null::Command;
+
+        for pyramid in [None, Some(Mat4::from_translation(Vec3::X))] {
+            let (recorder, device, queue) = open();
+            let mut renderer = ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
+                .expect("built");
+            renderer.set_pyramid(pyramid);
+            renderer
+                .begin_frame(
+                    device.as_ref(),
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    Mat4::IDENTITY,
+                    (64, 48),
+                )
+                .expect("write");
+
+            let expected: Vec<(u32, i32)> = if pyramid.is_some() {
+                vec![
+                    (renderer.cube.constant_offset, 0),
+                    (renderer.pyramid.constant_offset, 0),
+                ]
+            } else {
+                vec![(renderer.cube.constant_offset, 0)]
+            };
+
+            let imported = swapchain_image(device.as_ref());
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            renderer.add_passes(&mut graph, target, (64, 48));
+            let mut pool = crate::TransientPool::new();
+            let compiled = graph.compile(&pool).expect("a legal frame");
+            let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                label: Some("forward draws"),
+                queue,
+            });
+            compiled
+                .execute(device.as_ref(), &mut pool, encoder.as_mut(), None)
+                .expect("the graph executed");
+            let commands = encoder.finish().expect("recording succeeded");
+
+            // The dynamic offset last bound before each draw, paired with the
+            // base vertex that draw asked for.
+            let mut offset = None;
+            let mut seen: Vec<(u32, i32)> = Vec::new();
+            for command in recorder.commands() {
+                match command {
+                    Command::BindGroup {
+                        slot: 0,
+                        dynamic_offsets,
+                        ..
+                    } => offset = dynamic_offsets.first().copied(),
+                    Command::DrawIndexed {
+                        base_vertex,
+                        instances,
+                        ..
+                    } => {
+                        assert_eq!(instances, 0..1, "and no base instance either");
+                        seen.push((
+                            offset.expect("a draw is preceded by its constant block"),
+                            base_vertex,
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+            assert_eq!(
+                seen, expected,
+                "with pyramid = {pyramid:?}, the pass must record one draw per visible \
+                 mesh, each at base vertex 0 and each pointing at its own block"
+            );
+
+            device.destroy_command_buffer(commands);
+            renderer.destroy(device.as_ref());
+            pool.destroy(device.as_ref());
+            device.destroy_image_view(imported.view);
+            device.destroy_image(imported.image);
+        }
+    }
+
+    /// A stand-in for the acquired swapchain image the frame normally ends in.
+    fn swapchain_image(device: &dyn Device) -> ImportedImage {
+        let format = Format::Rgba8UnormSrgb;
+        let image = device
+            .create_image(&crcbl_hal::ImageDesc {
+                label: Some("fake swapchain image"),
+                image_type: crcbl_hal::ImageType::D2,
+                extent: crcbl_hal::Extent3d::d2(64, 48),
+                format,
+                mip_levels: 1,
+                samples: 1,
+                usage: crcbl_hal::ImageUsage::COLOR_ATTACHMENT | crcbl_hal::ImageUsage::PRESENT,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("an image");
+        let view = device
+            .create_image_view(&crcbl_hal::ImageViewDesc {
+                label: Some("fake swapchain view"),
+                image,
+                view_type: crcbl_hal::ImageViewType::D2,
+                format,
+                range: crcbl_hal::ImageSubresourceRange::all(format),
+            })
+            .expect("a view");
+        ForwardRenderer::present_target(image, view, format, (64, 48))
     }
 
     /// The spin is a rotation: no scale, no shear, so the shader's

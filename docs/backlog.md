@@ -3464,6 +3464,31 @@ the transport seam over a third transport shape.
   Slang's behaviour than is worth encoding for a guard whose false positives
   cost one declaration move. Reopen if a real shader finds it costly.
 
+### Settled: base vertex and base instance never reach a shader
+
+Recorded because it is a rule for every future shader here, and because it is
+the first time the differential render gate caught a real divergence rather than
+a hypothetical one.
+
+`SV_VertexID` and `SV_InstanceID` mean **different things per target**, measured
+rather than assumed: SPIR-V subtracts `BaseVertex`/`BaseInstance` (HLSL's
+meaning), DXIL passes them through with D3D12 excluding both bases, and WGSL and
+MSL index raw builtins that _include_ them. A pooled mesh at a non-zero base
+vertex therefore rendered a correct pyramid through wgpu and a corrupted slab
+through Vulkan — one source, two pictures — and `run-cross-backend-e2e.sh`
+failed on it at 10.09% of pixels with a structural mismatch.
+
+**The rule: every draw passes zero for both bases, and the real values arrive in
+a per-draw constants block.** Zero is the one value all four lowerings agree on,
+so nothing in the picture depends on how a target lowers a builtin.
+`sprite.slang` reached the same conclusion independently for its own case; this
+makes it the pattern rather than one shader's workaround.
+
+The gate only caught it because `Scene::Cube` was changed to draw a second mesh
+at a non-zero base. **A path nothing exercises is a path the gate cannot see** —
+which is the general form of this and worth remembering before trusting any
+green run over content that does not use the feature.
+
 ### Owed by the mesh-shader path
 
 - **Slang's Metal backend materialises every global shader parameter in every

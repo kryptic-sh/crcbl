@@ -46,6 +46,14 @@ pub const FRAME_UNIFORMS_SIZE: usize = 128;
 /// module's `the_instance_layout_matches_the_offsets_slangc_emits`.
 pub const INSTANCE_STRIDE: usize = 80;
 
+/// Bytes in one draw's constant block.
+///
+/// Two `uint` and a `uint2` of padding. `std140` requires a uniform block's size
+/// to be a multiple of 16, and the padding is in the shader struct rather than
+/// implied so that both sides write the same number — see
+/// `DrawConstants` in `shaders/mesh.slang`.
+pub const DRAW_CONSTANTS_SIZE: usize = 16;
+
 /// One vertex, matching `struct MeshVertex` in `shaders/mesh.slang`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MeshVertex {
@@ -215,6 +223,38 @@ impl GpuInstance {
     }
 }
 
+/// One draw call's bases, matching `struct DrawConstants` in
+/// `shaders/mesh.slang`.
+///
+/// **Both of these would be arguments of `draw_indexed` if the four targets
+/// agreed about what its bases do to `SV_VertexID` and `SV_InstanceID`, and they
+/// do not.** That shader's header measures the disagreement on all four; the
+/// consequence for a producer of these bytes is that every draw passes zero for
+/// both of its own bases and puts the real ones here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DrawConstants {
+    /// The mesh's first vertex in the vertex pool —
+    /// [`MeshRange::base_vertex`](https://docs.rs/crcbl-render). Added to every
+    /// index the draw reads, which is what lets the pool store indices
+    /// mesh-relative.
+    pub base_vertex: u32,
+    /// The draw's instance in the instance array. Added to `SV_InstanceID`,
+    /// which is zero for every draw the forward pass records.
+    pub base_instance: u32,
+}
+
+impl DrawConstants {
+    /// The bytes one draw's block holds, in `std140` order.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; DRAW_CONSTANTS_SIZE] {
+        let mut bytes = [0u8; DRAW_CONSTANTS_SIZE];
+        bytes[0..4].copy_from_slice(&self.base_vertex.to_le_bytes());
+        bytes[4..8].copy_from_slice(&self.base_instance.to_le_bytes());
+        // The trailing `uint2` is padding and stays zero.
+        bytes
+    }
+}
+
 /// One face of the cube: an outward normal, an albedo, and its four corners in
 /// counter-clockwise order **as seen from outside**.
 ///
@@ -356,6 +396,148 @@ pub fn cube_index_bytes() -> Vec<u8> {
         bytes.extend_from_slice(&index.to_le_bytes());
     }
     bytes
+}
+
+// ---------------------------------------------------------------------------
+// The second mesh
+// ---------------------------------------------------------------------------
+
+/// Half the pyramid's base edge, so its base spans `[-0.4, 0.4]` on X and Z.
+const PYRAMID_HALF_BASE: f32 = 0.4;
+
+/// How far the pyramid's base sits below the origin.
+const PYRAMID_BASE_Y: f32 = -0.4;
+
+/// How far its apex sits above the origin.
+const PYRAMID_APEX_Y: f32 = 0.5;
+
+/// The pyramid's base albedo, linear RGB.
+///
+/// No cube face shares it, and neither does any side below: the pyramid exists
+/// to be told apart from the cube in a single frame, so the day it draws the
+/// cube's vertices the picture is a *different* picture and not a subtly
+/// misplaced one. See [`pyramid_vertices`].
+pub const PYRAMID_BASE_COLOR: [f32; 3] = [0.95, 0.95, 0.90];
+
+/// The four sides' albedos, in `+Z`-first order around the base.
+pub const PYRAMID_SIDE_COLORS: [[f32; 3]; 4] = [
+    [0.95, 0.55, 0.15],
+    [0.15, 0.65, 0.55],
+    [0.60, 0.30, 0.85],
+    [0.65, 0.90, 0.25],
+];
+
+/// Vertices in the pyramid: four for the base, three for each side, so every
+/// face gets its own flat normal exactly as the cube's do.
+pub const PYRAMID_VERTEX_COUNT: usize = 4 + PYRAMID_SIDE_COLORS.len() * 3;
+
+/// Indices in the pyramid: two triangles for the base, one per side.
+pub const PYRAMID_INDEX_COUNT: usize = 6 + PYRAMID_SIDE_COLORS.len() * 3;
+
+/// The second mesh: a square pyramid, and the reason it exists.
+///
+/// [`MeshPool`](https://docs.rs/crcbl-render) allocates a mesh wherever it fits,
+/// so the *second* resident is the first one at a non-zero
+/// `MeshRange::base_vertex` — and a base vertex is exactly what `mesh.slang`'s
+/// header shows the four targets disagreeing about. A pool with one mesh in it
+/// cannot exercise that at all: every index is already absolute. So this is
+/// demo geometry in the same sense the cube is, and it is also the only thing
+/// in the tree that can tell a working base vertex from a subtracted one.
+///
+/// It is deliberately **not** a second box. A mesh built from [`FACES`]' layout
+/// would read the cube's own vertices when the base went missing and come out
+/// looking like a cube, which is the failure that hid behind one resident in
+/// the first place.
+///
+/// The base is wound counter-clockwise seen from below and each side
+/// counter-clockwise seen from outside, so the pass's back-face culling is as
+/// legal here as it is for the cube. Normals are computed from the triangles
+/// rather than written down, because a hand-normalised vector is arithmetic a
+/// reader cannot check.
+#[must_use]
+pub fn pyramid_vertices() -> Vec<MeshVertex> {
+    let base = [
+        [-PYRAMID_HALF_BASE, PYRAMID_BASE_Y, -PYRAMID_HALF_BASE],
+        [PYRAMID_HALF_BASE, PYRAMID_BASE_Y, -PYRAMID_HALF_BASE],
+        [PYRAMID_HALF_BASE, PYRAMID_BASE_Y, PYRAMID_HALF_BASE],
+        [-PYRAMID_HALF_BASE, PYRAMID_BASE_Y, PYRAMID_HALF_BASE],
+    ];
+    let apex = [0.0, PYRAMID_APEX_Y, 0.0];
+
+    let mut vertices = Vec::with_capacity(PYRAMID_VERTEX_COUNT);
+    // The base, in the same corner order as the cube's `-Y` face, so the
+    // `0 1 2, 0 2 3` triangulation below is the one `cube_indices` uses.
+    for corner in base {
+        vertices.push(MeshVertex {
+            position: [corner[0], corner[1], corner[2], 1.0],
+            normal: [0.0, -1.0, 0.0, 0.0],
+            color: [
+                PYRAMID_BASE_COLOR[0],
+                PYRAMID_BASE_COLOR[1],
+                PYRAMID_BASE_COLOR[2],
+                1.0,
+            ],
+        });
+    }
+    // One triangle per side. Corner `i + 1` before corner `i` is what makes the
+    // winding counter-clockwise from outside; taking them in the other order
+    // would make every side vanish under back-face culling.
+    for (side, color) in PYRAMID_SIDE_COLORS.iter().enumerate() {
+        let corners = [base[(side + 1) % base.len()], base[side], apex];
+        let normal = triangle_normal(corners[0], corners[1], corners[2]);
+        for corner in corners {
+            vertices.push(MeshVertex {
+                position: [corner[0], corner[1], corner[2], 1.0],
+                normal: [normal[0], normal[1], normal[2], 0.0],
+                color: [color[0], color[1], color[2], 1.0],
+            });
+        }
+    }
+    vertices
+}
+
+/// The unit normal of the triangle `a b c`, by the right-hand rule — so it
+/// points outward exactly when the winding is counter-clockwise seen from
+/// outside.
+fn triangle_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
+    let edge = |p: [f32; 3], q: [f32; 3]| [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+    let (u, v) = (edge(a, b), edge(a, c));
+    let cross = [
+        u[1] * v[2] - u[2] * v[1],
+        u[2] * v[0] - u[0] * v[2],
+        u[0] * v[1] - u[1] * v[0],
+    ];
+    let length = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+    [cross[0] / length, cross[1] / length, cross[2] / length]
+}
+
+/// The pyramid's indices: the base as two triangles, then one per side.
+#[must_use]
+pub fn pyramid_indices() -> Vec<u32> {
+    let mut indices = Vec::with_capacity(PYRAMID_INDEX_COUNT);
+    indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+    for side in 0..PYRAMID_SIDE_COLORS.len() {
+        let base = u32::try_from(4 + side * 3).expect("four sides fit in a u32");
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
+    }
+    indices
+}
+
+/// [`pyramid_vertices`] as the bytes a storage buffer holds, on the same terms
+/// as [`cube_vertex_bytes`].
+#[must_use]
+pub fn pyramid_vertex_bytes() -> Vec<u8> {
+    let vertices = pyramid_vertices();
+    crate::pack_f32_le(
+        vertices.iter().flat_map(|vertex| {
+            vertex
+                .position
+                .iter()
+                .chain(&vertex.normal)
+                .chain(&vertex.color)
+        }),
+        vertices.len() * VERTEX_STRIDE,
+    )
 }
 
 #[cfg(test)]
@@ -571,6 +753,110 @@ mod tests {
                 .map(|v| v.position[axis].abs())
                 .fold(0.0f32, f32::max);
             assert!((max - H).abs() < 1e-6, "axis {axis} half-extent is {max}");
+        }
+    }
+
+    /// The offsets `slangc` emitted for `DrawConstants`, read out of the
+    /// disassembly. Two `uint` in a row would permute silently — a base vertex
+    /// read as a base instance draws *something* — so the byte each lands on is
+    /// pinned rather than assumed.
+    #[test]
+    fn the_draw_block_matches_the_offsets_slangc_emits() {
+        // `OpMemberDecorate %DrawConstants_std140 n Offset …`: 0, 4, 8.
+        assert_eq!(DRAW_CONSTANTS_SIZE, 16);
+        assert_eq!(
+            DRAW_CONSTANTS_SIZE % 16,
+            0,
+            "std140 rounds a uniform block's size up to a multiple of 16, so a \
+             block that is not one already is a block the shader and the CPU \
+             disagree about the width of"
+        );
+        let bytes = DrawConstants {
+            base_vertex: 24,
+            base_instance: 1,
+        }
+        .to_bytes();
+        let uint_at =
+            |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
+        assert_eq!(uint_at(0), 24, "base_vertex at offset 0");
+        assert_eq!(uint_at(4), 1, "base_instance at offset 4");
+        assert_eq!(uint_at(8), 0, "the pad is written, and it is zero");
+        assert_eq!(uint_at(12), 0, "both halves of it");
+    }
+
+    /// Every pyramid face is wound counter-clockwise as seen from outside, on
+    /// the same terms as [`every_face_is_wound_counter_clockwise_from_outside`]
+    /// — a side wound the other way would be culled and the mesh would render
+    /// with a hole in it.
+    ///
+    /// Checked against a point known to be *inside* the solid rather than
+    /// against a declared normal, because the sides' normals are computed from
+    /// the same winding this is trying to check.
+    #[test]
+    fn every_pyramid_face_faces_away_from_the_interior() {
+        let vertices = pyramid_vertices();
+        let indices = pyramid_indices();
+        // Comfortably inside: the base's centre is on the base plane, so this
+        // is lifted off it.
+        let inside = [0.0f32, PYRAMID_BASE_Y + 0.1, 0.0];
+        for triangle in indices.chunks_exact(3) {
+            let corner = |slot: usize| {
+                let position = vertices[triangle[slot] as usize].position;
+                [position[0], position[1], position[2]]
+            };
+            let (a, b, c) = (corner(0), corner(1), corner(2));
+            let normal = triangle_normal(a, b, c);
+            let outward: f32 = (0..3)
+                .map(|axis| normal[axis] * (a[axis] - inside[axis]))
+                .sum();
+            assert!(
+                outward > 0.0,
+                "triangle {triangle:?} is wound towards the interior, so back-face \
+                 culling would delete it"
+            );
+            // And the declared normals agree with the winding, or the lighting
+            // is inside out on a face that still draws.
+            for slot in 0..3 {
+                let declared = vertices[triangle[slot] as usize].normal;
+                for axis in 0..3 {
+                    assert!(
+                        (declared[axis] - normal[axis]).abs() < 1e-5,
+                        "vertex {} of {triangle:?} declares {declared:?}, not {normal:?}",
+                        triangle[slot]
+                    );
+                }
+            }
+        }
+    }
+
+    /// The pyramid's counts, and the property that makes it usable as evidence:
+    /// it shares no colour with the cube, so a frame that drew it from the
+    /// cube's vertices is a visibly different frame.
+    #[test]
+    fn the_pyramid_is_nothing_like_the_cube() {
+        assert_eq!(pyramid_vertices().len(), PYRAMID_VERTEX_COUNT);
+        assert_eq!(pyramid_indices().len(), PYRAMID_INDEX_COUNT);
+        assert_eq!(
+            pyramid_vertex_bytes().len(),
+            PYRAMID_VERTEX_COUNT * VERTEX_STRIDE
+        );
+        let vertices = pyramid_vertices();
+        for index in pyramid_indices() {
+            assert!(
+                (index as usize) < vertices.len(),
+                "index {index} addresses past the {} vertices",
+                vertices.len()
+            );
+        }
+        for color in PYRAMID_SIDE_COLORS.iter().chain([&PYRAMID_BASE_COLOR]) {
+            for face in &FACES {
+                assert_ne!(
+                    *color, face.color,
+                    "the pyramid shares the cube's {} colour, so drawing it from the \
+                     cube's vertices would be hard to see",
+                    face.name
+                );
+            }
         }
     }
 }

@@ -1,3 +1,11 @@
+struct DrawConstants_std140_0
+{
+    @align(16) base_vertex_0 : u32,
+    @align(4) base_instance_0 : u32,
+    @align(8) pad_0 : vec2<u32>,
+};
+
+@binding(3) @group(0) var<uniform> draw_0 : DrawConstants_std140_0;
 struct MeshVertex_std430_0
 {
     @align(16) position_0 : vec4<f32>,
@@ -49,8 +57,8 @@ struct VertexOutput_0
 @vertex
 fn vertexMain(@builtin(vertex_index) index_0 : u32, @builtin(instance_index) instance_index_0 : u32) -> VertexOutput_0
 {
-    var vertex_0 : MeshVertex_std430_0 = vertices_0[index_0];
-    var instance_0 : GpuInstance_std430_0 = instances_0[instance_index_0];
+    var vertex_0 : MeshVertex_std430_0 = vertices_0[index_0 + draw_0.base_vertex_0];
+    var instance_0 : GpuInstance_std430_0 = instances_0[instance_index_0 + draw_0.base_instance_0];
     var _S1 : mat4x4<f32> = mat4x4<f32>(instance_0.transform_0.data_0[i32(0)][i32(0)], instance_0.transform_0.data_0[i32(1)][i32(0)], instance_0.transform_0.data_0[i32(2)][i32(0)], instance_0.transform_0.data_0[i32(3)][i32(0)], instance_0.transform_0.data_0[i32(0)][i32(1)], instance_0.transform_0.data_0[i32(1)][i32(1)], instance_0.transform_0.data_0[i32(2)][i32(1)], instance_0.transform_0.data_0[i32(3)][i32(1)], instance_0.transform_0.data_0[i32(0)][i32(2)], instance_0.transform_0.data_0[i32(1)][i32(2)], instance_0.transform_0.data_0[i32(2)][i32(2)], instance_0.transform_0.data_0[i32(3)][i32(2)], instance_0.transform_0.data_0[i32(0)][i32(3)], instance_0.transform_0.data_0[i32(1)][i32(3)], instance_0.transform_0.data_0[i32(2)][i32(3)], instance_0.transform_0.data_0[i32(3)][i32(3)]);
     var world_0 : vec4<f32> = (((vec4<f32>(vertex_0.position_0.xyz, 1.0f)) * (_S1)));
     var output_0 : VertexOutput_0;

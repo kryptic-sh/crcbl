@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A second mesh in the geometry pool, and `ForwardRenderer::set_pyramid` to
+  draw it.** `crcbl_shaders::mesh::pyramid_vertices` / `pyramid_indices` /
+  `pyramid_vertex_bytes` are a square pyramid in five colours no cube face has,
+  uploaded after the cube so it is the pool's first resident at a **non-zero**
+  base vertex. Off by default, so the frame every sample draws is unchanged;
+  `crcbl screenshot --scene cube` and a new `crcbl-vk` golden
+  (`tests/golden/mesh_second.png`) turn it on. It exists to make a base vertex
+  observable — see the fix below, which no picture could show while the pool
+  held one mesh.
+
 - **The instance array: `crcbl_render::instance_pool`, and the cube is now an
   instance.** `InstancePool` owns one `crcbl_shaders::mesh::GpuInstance` storage
   buffer per frame in flight and uploads **deltas** —
@@ -1675,6 +1685,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   ship is no longer one picture whether or not the engine is on.
 
 ### Fixed
+
+- **A mesh anywhere but the start of the geometry pool drew another mesh's
+  vertices, on Vulkan and Direct3D but not on WebGPU or Metal.** `mesh.slang`
+  pulled its vertex with `vertices[SV_VertexID]` while
+  `crcbl_render::ForwardRenderer` passed the mesh's `MeshRange::base_vertex`
+  through `draw_indexed`'s own base-vertex argument — and Slang lowers
+  `SV_VertexID` to `gl_VertexIndex - BaseVertex` on SPIR-V, which subtracted
+  that base straight back out. The same disagreement covers `SV_InstanceID`.
+  Invisible while the cube was the pool's only resident, because its base is 0.
+
+  Fixed the way `sprite.slang` resolved its half: **every draw the forward pass
+  records now passes zero for both of its bases**, which is the one value all
+  four targets agree on, and the real ones arrive as a new
+  `crcbl_shaders::mesh::DrawConstants` block (binding 3, one 16-byte block per
+  draw, reached through a dynamic offset). Nothing in the picture now depends on
+  how a target lowers a builtin. The mesh pool still stores indices
+  mesh-relative, so a mesh's bytes still do not depend on where it landed.
+
+  Upgrading: anything that builds `mesh.slang`'s descriptor set by hand must add
+  binding 3 — a uniform buffer holding `DrawConstants` — or the pipeline draws
+  nothing.
 
 - **Asteroids: a rock straddling a field edge was drawn once, so half of it
   vanished for the whole of a crossing.** The field wraps, and the half past the

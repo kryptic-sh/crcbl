@@ -435,6 +435,112 @@ fn the_orthographic_camera_is_a_projection_swap_and_matches_its_golden() {
     headless.finish();
 }
 
+/// Where the second-mesh golden puts the pyramid, in world units.
+///
+/// Left of the cube from this camera and clear of it: the two meshes have to be
+/// separable by eye, because the failure this golden exists to catch is one mesh
+/// drawing the *other's* vertices. Measured against [`two_mesh_camera`] rather
+/// than guessed — at [`mesh_camera`]'s distance the cube hides the pyramid
+/// entirely, which was the first thing this golden showed.
+const PYRAMID_AT: glam::Vec3 = glam::Vec3::new(-2.0, 0.0, 0.0);
+
+/// [`mesh_camera`] pulled back far enough for two meshes to fit side by side.
+///
+/// The same eye direction, the same target, the same projection — only the
+/// distance differs, because a frame that has to hold the cube *and* a mesh
+/// beside it needs about twice the width the cube alone does. Keeping the
+/// direction is what makes this frame comparable to the cube golden's: three
+/// cube faces are visible in both.
+fn two_mesh_camera() -> crcbl_render::Camera {
+    let mut camera = mesh_camera(crcbl_render::Projection::default());
+    camera.eye *= 1.7;
+    camera
+}
+
+/// `docs/plan/03-gpu-driven-rendering.md` §3.1's pool, drawn with **two**
+/// residents in it — which is the first frame in which a base vertex means
+/// anything at all.
+///
+/// The pyramid is the pool's second mesh, so it is at a non-zero
+/// `MeshRange::base_vertex`. Rendered against the cube's own golden camera, and
+/// the assertions below are what make it evidence rather than a picture:
+///
+/// * The cube must still be where the cube golden has it, so this cannot pass by
+///   drawing anything anywhere.
+/// * The pyramid's pixels must carry a colour **no cube face has**. That is the
+///   half that fails when the base vertex is lost: the draw then reads the
+///   cube's first sixteen vertices, and the frame comes out with a piece of a
+///   second cube in the pyramid's place — which is exactly what it did before
+///   `mesh.slang` grew its `DrawConstants` block, on Vulkan and not on WebGPU.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_mesh_at_a_non_zero_base_vertex_draws_its_own_geometry() {
+    let headless = Headless::open_for_mesh();
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds");
+    renderer.set_pyramid(Some(glam::Mat4::from_translation(PYRAMID_AT)));
+
+    let frame = render_mesh(&headless, &mut renderer, &mut pool, &two_mesh_camera());
+
+    // The cube is still there, in the middle where the camera points.
+    let centre = frame.image.pixel(128, 96).expect("inside");
+    assert!(
+        u32::from(centre[0]) + u32::from(centre[1]) + u32::from(centre[2]) > 60,
+        "the centre must still be the cube, got {centre:?}"
+    );
+
+    // And somewhere in the left third there is a hue the cube does not own. The
+    // check is on the *ratios* between channels rather than on an exact colour,
+    // because the value that reaches the swapchain has been through Lambert,
+    // Blinn and a tonemap; what survives all three is which channel leads.
+    // `PYRAMID_SIDE_COLORS`' visible sides are the `+Z` violet and the `+X`
+    // teal, and no cube face is either.
+    let violet = (0..MESH_EXTENT.1)
+        .flat_map(|y| (0..MESH_EXTENT.0 / 3).map(move |x| (x, y)))
+        .filter_map(|(x, y)| frame.image.pixel(x, y))
+        .filter(|pixel| {
+            let (r, g, b) = (
+                u32::from(pixel[0]),
+                u32::from(pixel[1]),
+                u32::from(pixel[2]),
+            );
+            b > 100 && r > g + 30 && b > g + 30
+        })
+        .count();
+    assert!(
+        violet > 200,
+        "the pyramid's violet side is missing: only {violet} texel(s) of it. A frame \
+         that lost the base vertex draws the cube's own vertices here instead, and no \
+         cube face is violet"
+    );
+
+    let reference =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/mesh_second.png");
+    let golden = crcbl_golden::Golden::new(reference);
+    let outcome = golden
+        .check(&frame.image)
+        .expect("the reference is readable");
+    let comparison = match outcome.into_result() {
+        Ok(comparison) => comparison,
+        Err(message) => {
+            renderer.destroy(headless.device.as_ref());
+            pool.destroy(headless.device.as_ref());
+            headless.device.wait_idle().expect("idle");
+            panic!("{message}");
+        }
+    };
+    eprintln!("vk e2e: golden second mesh — {}", comparison.summary());
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
 /// Milestone 4, measured rather than eyeballed: the directional light produces a
 /// real gradient across the cube's faces.
 ///

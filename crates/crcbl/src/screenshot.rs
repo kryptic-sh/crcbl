@@ -18,6 +18,11 @@
 //! `sprite.slang` and `ui.slang` — the two with an actual history of divergence
 //! — are covered too.
 //!
+//! `SV_VertexID` turned out to be the same story, and it is why [`Scene::Cube`]
+//! draws the mesh pool's *second* resident beside the cube: a base vertex only
+//! means something for a mesh that is not at base 0, and this is the only frame
+//! in the tree that renders one through both backends.
+//!
 //! What comes back is the swapchain image's bytes *as they are in memory*, in
 //! [`OffscreenSetup::format`]'s channel order — which on an ordinary desktop
 //! surface is BGRA, not RGBA. Turning them into a `crcbl_golden::Image` is
@@ -87,6 +92,11 @@ pub enum Scene {
     ///
     /// The default, because it is the frame every caller of this module drew
     /// before there was anything to choose between.
+    ///
+    /// The pyramid beside it is the mesh pool's second resident, and it is here
+    /// for the reason the module docs give: it is the only geometry in the tree
+    /// at a non-zero base vertex, so it is the only thing this comparison can
+    /// use to tell the four targets' `SV_VertexID` lowerings apart.
     #[default]
     Cube,
     /// Four sprites over three [`SpriteRenderer`] batches: `sprite.slang`.
@@ -95,6 +105,16 @@ pub enum Scene {
     /// `ui.slang`.
     Ui,
 }
+
+/// Where [`Scene::Cube`] puts the pyramid, in world units.
+///
+/// Left of the cube and clear of it: the camera is two units back with a 60°
+/// vertical field of view, so at `z = 0` the frame is about 2.3 units tall and
+/// 3.1 wide at 4:3. The cube spans `±0.5` and the pyramid `±0.4`, so this
+/// leaves both fully inside the frame with a gap between them — and a gap is
+/// what makes "the pyramid drew the cube's vertices" a visibly different
+/// picture rather than an overlap.
+const PYRAMID_AT: glam::Vec3 = glam::Vec3::new(-1.05, 0.0, 0.0);
 
 /// The colour [`Scene::Sprite`] and [`Scene::Ui`] composite onto, in **linear**
 /// light — which is what a clear value on an sRGB attachment means.
@@ -282,14 +302,18 @@ impl SceneState {
         format: Format,
     ) -> Result<Self, OffscreenError> {
         Ok(match scene {
-            Scene::Cube => Self::Cube {
-                camera: Camera::default().with_projection(Projection::Perspective {
-                    fov_y: std::f32::consts::FRAC_PI_3,
-                    near: 0.01,
-                }),
-                light: DirectionalLight::default(),
-                renderer: Box::new(ForwardRenderer::new(device, queue, format)?),
-            },
+            Scene::Cube => {
+                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                renderer.set_pyramid(Some(glam::Mat4::from_translation(PYRAMID_AT)));
+                Self::Cube {
+                    camera: Camera::default().with_projection(Projection::Perspective {
+                        fov_y: std::f32::consts::FRAC_PI_3,
+                        near: 0.01,
+                    }),
+                    light: DirectionalLight::default(),
+                    renderer: Box::new(renderer),
+                }
+            }
             Scene::Sprite => {
                 let mut renderer = SpriteRenderer::new(device, queue, format)?;
                 let mut register = |label, width, height, pixels| {

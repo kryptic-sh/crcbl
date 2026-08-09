@@ -20,18 +20,24 @@
 //! # One pool means one vertex format
 //!
 //! The vertex pool is suballocated in **vertices**, not bytes, so
-//! [`MeshRange::base_vertex`] is the number `draw_indexed` takes and no caller
+//! [`MeshRange::base_vertex`] is a vertex index the shader can add and no caller
 //! divides anything. That only works because every mesh in the pool has the same
 //! stride, which is §3.1's "vertex pulling everywhere" stated as a data layout:
 //! [`crcbl_shaders::mesh::VERTEX_STRIDE`] is *the* vertex format, and a second
 //! one means a second pool rather than a stride field on this one.
 //!
-//! Indices are `Uint32` for the same reason, and are stored **mesh-relative**:
-//! the base vertex arrives through `draw_indexed`'s own `base_vertex` argument,
-//! which every backend adds to the value it reads out of the index buffer. So
-//! the bytes uploaded for a mesh do not depend on where in the pool it landed,
-//! and a mesh can be freed and re-uploaded at a different base without being
-//! rewritten.
+//! Indices are `Uint32` for the same reason, and are stored **mesh-relative**,
+//! so the bytes uploaded for a mesh do not depend on where in the pool it
+//! landed and a mesh can be freed and re-uploaded at a different base without
+//! being rewritten.
+//!
+//! **The base is not `draw_indexed`'s own `base_vertex` argument.** That is the
+//! obvious place for it and it is where this pool's first consumer put it, until
+//! the second resident showed what it does: the four shading languages disagree
+//! about whether a draw's base vertex is folded into `SV_VertexID`, and Slang's
+//! SPIR-V subtracts it back out. So [`crate::forward`] passes zero there and
+//! hands this number to the shader as data instead — see that module and
+//! `mesh.slang`'s header, which measure all four targets.
 //!
 //! # Fragmentation and exhaustion, which are not the same failure
 //!
@@ -119,16 +125,20 @@ pub type MeshHandle = Handle<Mesh>;
 /// Where a mesh lives in the pools — §3.1's three integers, and the only thing
 /// a draw needs.
 ///
-/// The fields are exactly `draw_indexed`'s arguments: the draw is
-/// `draw_indexed(base_index..base_index + index_count, base_vertex, …)`.
+/// Two of the three are `draw_indexed`'s own arguments — the draw is
+/// `draw_indexed(base_index..base_index + index_count, 0, …)` — and
+/// [`MeshRange::base_vertex`] is deliberately not the third. The
+/// [module docs](self) say why it reaches the shader as data instead.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MeshRange {
     /// First vertex of this mesh in the vertex pool. Added to every index the
-    /// GPU reads, which is why the indices themselves are mesh-relative.
+    /// shader reads, which is why the indices themselves are mesh-relative.
     ///
-    /// Never above `i32::MAX`: [`MeshPool::new`] refuses a vertex capacity a
-    /// draw's signed base vertex could not address, so the conversion at the
-    /// draw call cannot fail.
+    /// Never above `i32::MAX`: [`MeshPool::new`] refuses a vertex capacity that
+    /// a draw's *signed* base vertex could not address, which is the width
+    /// `VkDrawIndexedIndirectCommand::vertexOffset` and its D3D12 and WebGPU
+    /// equivalents have — so a pool this rule allows is one §3.3's indirect
+    /// draws can still address.
     pub base_vertex: u32,
     /// First index of this mesh in the index pool.
     pub base_index: u32,
@@ -370,8 +380,9 @@ impl MeshPool {
     /// Suballocates room for a mesh and records a staging copy into it.
     ///
     /// `vertices` is `VERTEX_STRIDE`-strided vertex data; `indices` are
-    /// **mesh-relative** — the base vertex reaches the GPU through
-    /// `draw_indexed`, not through the bytes. The returned mesh is not resident
+    /// **mesh-relative** — the base vertex reaches the GPU beside them rather
+    /// than inside them, so a mesh's bytes never depend on where it landed. The
+    /// [module docs](self) say by which route. The returned mesh is not resident
     /// until [`MeshPool::flush`] has run, and [`MeshPool::mesh`] says so.
     ///
     /// # Errors

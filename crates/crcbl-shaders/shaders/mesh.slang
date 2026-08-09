@@ -45,16 +45,41 @@
 // genuinely per *frame*, and the vertex stage reads its transform out of
 // `instances`.
 //
-// The draw is still one instance, so `SV_InstanceID` is 0 and the cube is
-// instance 0. That is the whole of what a non-indirect draw can address here,
-// and the reason is a target disagreement rather than a shortcut: the emitted
-// SPIR-V, DXIL and MSL all give `SV_InstanceID` HLSL's meaning — the SPIR-V
-// subtracts `BaseInstance` from `InstanceIndex` to get there — while the
-// emitted WGSL indexes with `@builtin(instance_index)` raw, which in WebGPU
-// starts at the draw's `first_instance`. So a draw's base instance reaches this
-// shader as two different numbers depending on the target, and it is not used.
-// §3.3's indirect path does not need it: the cull pass writes the visible
-// instance ids the draw reads.
+// # Every draw passes zero for both of its bases, and the shader adds them back
+//
+// `SV_VertexID` and `SV_InstanceID` are HLSL semantics, and `slangc` does not
+// lower either of them the same way on the four targets this file declares.
+// Measured with slangc 2026.14, from this crate's own committed artifacts:
+//
+// * **SPIR-V** gives both of them HLSL's meaning by subtracting.
+//   `spirv-dis spirv/mesh.spv` shows an `OpISub` of `VertexIndex` against
+//   `BaseVertex` and another of `InstanceIndex` against `BaseInstance`, so both
+//   ids count from the start of the *draw*.
+// * **HLSL, and so DXIL**, is where those semantics come from: `slangc` emits
+//   `SV_VertexID` and `SV_InstanceID` unchanged, and D3D12 excludes
+//   `BaseVertexLocation` and `StartInstanceLocation` from them. Same meaning as
+//   the SPIR-V, which is what the SPIR-V is subtracting to reproduce.
+// * **WGSL** emits `@builtin(vertex_index)` and `@builtin(instance_index)` raw,
+//   and WebGPU defines both to *include* the draw's `baseVertex` and
+//   `firstInstance`.
+// * **MSL** passes `[[vertex_id]]` and `[[instance_id]]` straight through, and
+//   the Metal Shading Language spec says each "includes the base vertex value"
+//   / "includes the base instance value" when one is given. So MSL agrees with
+//   WGSL and not with SPIR-V.
+//
+// A draw's bases therefore reach this shader as two different numbers depending
+// on the target, and no source using either id can be correct on all four while
+// a base is non-zero. `sprite.slang` hit the instance half of this first and
+// its header carries the full diagnosis; the resolution here is the same one,
+// applied to both ids: **every draw this pass records passes zero for its base
+// vertex and its base instance**, which is the one value all four lowerings
+// agree on, and the real bases arrive as data in `DrawConstants` below.
+//
+// That is what lets a mesh at a non-zero `MeshRange::base_vertex` draw its own
+// vertices. Until this block existed the pool's base vertex travelled through
+// `draw_indexed`'s own argument and the `OpISub` above took it straight back
+// out — correct for the cube at base 0, and another mesh's geometry for every
+// resident after it.
 
 /// One vertex of a hardcoded mesh, matching `crcbl_shaders::mesh::MeshVertex`.
 ///
@@ -124,6 +149,28 @@ struct GpuInstance
     uint flags;
 };
 
+/// Where this draw's mesh and its instance start, matching
+/// `crcbl_shaders::mesh::DrawConstants`.
+///
+/// The whole content of one draw call, and the header says why it cannot be the
+/// draw's own base vertex and base instance. One block per draw, reached
+/// through a dynamic offset — the same mechanism, for the same reason, as
+/// `sprite.slang`'s `SpriteConstants::base`.
+struct DrawConstants
+{
+    /// This mesh's first vertex in the pool: `MeshRange::base_vertex`, added to
+    /// every index the draw reads. The pool stores indices mesh-relative, so
+    /// this is the only thing that says where the mesh actually is.
+    uint base_vertex;
+    /// This draw's instance in the instance array, added to `SV_InstanceID` —
+    /// which is zero on every draw this pass records, because each one is a
+    /// single instance with no base instance.
+    uint base_instance;
+    /// Pads the block to a multiple of 16 bytes, which `std140` requires of a
+    /// uniform buffer's size and which naga enforces where a driver would not.
+    uint2 pad;
+};
+
 [[vk::binding(0, 0)]]
 ConstantBuffer<FrameUniforms> frame;
 
@@ -132,6 +179,9 @@ StructuredBuffer<MeshVertex> vertices;
 
 [[vk::binding(2, 0)]]
 StructuredBuffer<GpuInstance> instances;
+
+[[vk::binding(3, 0)]]
+ConstantBuffer<DrawConstants> draw;
 
 struct VertexOutput
 {
@@ -144,8 +194,8 @@ struct VertexOutput
 [shader("vertex")]
 VertexOutput vertexMain(uint index: SV_VertexID, uint instance_index: SV_InstanceID)
 {
-    MeshVertex vertex = vertices[index];
-    GpuInstance instance = instances[instance_index];
+    MeshVertex vertex = vertices[index + draw.base_vertex];
+    GpuInstance instance = instances[instance_index + draw.base_instance];
 
     float4 world = mul(instance.transform, float4(vertex.position.xyz, 1.0));
 

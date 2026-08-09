@@ -31,6 +31,11 @@ struct DepthProbe {
     /// already in world space — so the instance is a constant and this buffer
     /// is written once, at construction.
     instances: crcbl_hal::BufferHandle,
+    /// One `DrawConstants` block, both bases zero. The probe has one mesh at
+    /// base vertex 0 and one instance, so this is the identity — but
+    /// `mesh.slang` reads the block unconditionally, and a set that did not
+    /// bind it is a pipeline that draws nothing.
+    draw_constants: crcbl_hal::BufferHandle,
     layout: crcbl_hal::BindGroupLayoutHandle,
     group: crcbl_hal::BindGroupHandle,
     pipeline_layout: crcbl_hal::PipelineLayoutHandle,
@@ -173,6 +178,22 @@ impl DepthProbe {
             )
             .expect("write");
 
+        let draw_constants = device
+            .create_buffer(&BufferDesc {
+                label: Some("probe draw constants"),
+                size: crcbl_shaders::mesh::DRAW_CONSTANTS_SIZE as u64,
+                usage: BufferUsage::UNIFORM,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a draw-constants buffer");
+        device
+            .write_buffer(
+                draw_constants,
+                0,
+                &crcbl_shaders::mesh::DrawConstants::default().to_bytes(),
+            )
+            .expect("write");
+
         let entries = [
             crcbl_hal::BindGroupLayoutEntry {
                 binding: 0,
@@ -202,6 +223,16 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl_hal::BindingFlags::empty(),
             },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: crcbl_hal::ShaderStages::VERTEX,
+                // Not dynamic, unlike `crcbl_render::ForwardRenderer`'s: the
+                // probe records one draw, so there is nothing for an offset to
+                // select between.
+                kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
         ];
         let layout = device
             .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
@@ -224,6 +255,11 @@ impl DepthProbe {
                 binding: 2,
                 array_index: 0,
                 resource: crcbl_hal::BindingResource::whole_buffer(instances),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 3,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(draw_constants),
             },
         ];
         let group = device
@@ -284,6 +320,7 @@ impl DepthProbe {
             indices,
             uniforms,
             instances,
+            draw_constants,
             layout,
             group,
             pipeline_layout,
@@ -296,6 +333,7 @@ impl DepthProbe {
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group(self.group);
         device.destroy_bind_group_layout(self.layout);
+        device.destroy_buffer(self.draw_constants);
         device.destroy_buffer(self.instances);
         device.destroy_buffer(self.uniforms);
         device.destroy_buffer(self.indices);
