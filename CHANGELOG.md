@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_core::log::capture`, so a log line can be asserted on.** Returns a
+  `Capture` guard that collects every record the **calling thread** logs, as
+  `CapturedRecord { level, target, message }` read back through
+  `Capture::records`. Capture is thread-scoped so concurrent tests in one binary
+  cannot interleave their records, and it sees every level regardless of
+  `CRCBL_LOG`, so an assertion does not turn on the environment. It is additive:
+  stderr still gets exactly what the filter admitted, and a process that never
+  calls it behaves as before. `capture` panics rather than capturing nothing if
+  this thread is already capturing or if another logger owns the process slot.
+  The first use is the capability downgrade line from
+  `docs/plan/39-capabilities.md`, which `crcbl`'s device-open path emits and
+  which nothing read until now.
 - **`crcbl screenshot --scene`, and a cross-backend comparison that runs every
   scene.** The subcommand takes `cube` (the default, unchanged: the lit cube
   through `ForwardRenderer`), `sprite` — four sprites over three

@@ -5567,6 +5567,126 @@ mod tests {
             .expect("teardown is in the seam's stated order");
     }
 
+    /// The start of topic 39's downgrade line, exactly as
+    /// [`PendingGpuContext::poll`] writes it.
+    const DOWNGRADE_LINE: &str = "hal: this device does not have";
+
+    /// Opens a context on a null instance the caller picked, which the registry
+    /// cannot do: `crcbl::backend`'s null entry is always the `gpu_driven`
+    /// preset, and a downgrade needs a device that grants less than that.
+    ///
+    /// The shell comes back with the context because it owns the window the
+    /// surface was made for, and `create_surface`'s contract has that window
+    /// outliving the surface.
+    fn open_null_context(
+        instance: crcbl_hal::null::NullInstance,
+        optional_features: Features,
+    ) -> (crcbl_shell::HeadlessShell, GpuContext) {
+        let (shell, window) = shell();
+        let extent = (320, 240);
+        let target = shell
+            .surface_target(window)
+            .expect("the headless window is still alive");
+        let stage = GpuContext::start_device(
+            Box::new(instance),
+            &target,
+            extent,
+            "downgrade test",
+            Features::empty(),
+            optional_features,
+            Pacing::Off,
+        )
+        .expect("the null backend opens everywhere");
+        let mut pending = PendingGpuContext {
+            stage,
+            target,
+            extent,
+            label: "downgrade test".to_string(),
+            required_features: Features::empty(),
+            optional_features,
+            pacing: Pacing::Off,
+        };
+        let gpu = loop {
+            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
+                break context;
+            }
+        };
+        (shell, gpu)
+    }
+
+    /// **The downgrade line is an assertion target, not decoration.**
+    ///
+    /// `docs/plan/39-capabilities.md` makes it the engine's only evidence that a
+    /// device refused an optional feature. Nothing but this test reads it, so
+    /// without it a refactor could delete the `log::info!` in
+    /// [`PendingGpuContext::poll`] and leave the suite green.
+    #[test]
+    fn a_device_that_grants_less_says_so() {
+        use crcbl_hal::null::NullInstance;
+
+        let logs = crcbl_core::log::capture();
+        let (_shell, mut gpu) = open_null_context(
+            // The WebGPU-shaped floor, asked for the set every game gets by
+            // default: it has neither bindless nor a GPU-side draw count.
+            NullInstance::portable(),
+            GpuContextDesc::default().optional_features,
+        );
+
+        let records = logs.records();
+        let said: Vec<_> = records
+            .iter()
+            .filter(|record| record.message.starts_with(DOWNGRADE_LINE))
+            .collect();
+        assert_eq!(said.len(), 1, "once, at device creation: {records:?}");
+        assert_eq!(said[0].level, log::Level::Info);
+        assert!(
+            said[0].message.contains("DESCRIPTOR_INDEXING -> binding"),
+            "the line names the feature and the selector its absence moved: {}",
+            said[0].message
+        );
+
+        gpu.drain().expect("nothing was submitted");
+        gpu.destroy()
+            .expect("teardown is in the seam's stated order");
+    }
+
+    /// The silence is the other half of the claim and the easier half to lose: a
+    /// line logged unconditionally reads as "downgraded to nothing" on every
+    /// device that granted the lot, which is most of them.
+    #[test]
+    fn a_device_that_grants_everything_says_nothing() {
+        use crcbl_hal::null::NullInstance;
+
+        let logs = crcbl_core::log::capture();
+        let (_shell, mut gpu) = open_null_context(
+            NullInstance::gpu_driven(),
+            // Every flag here is in that preset's caps. The engine's own default
+            // set is deliberately not used: it also asks for `PRESENT_FEEDBACK`
+            // and `PRESENT_TIMING`, which this preset does not have, and their
+            // absence is a real downgrade.
+            Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
+        );
+
+        let records = logs.records();
+        assert!(
+            records
+                .iter()
+                .any(|record| record.message.contains("null adapter")),
+            "the capture is live — this is the adapter line every open logs, and \
+             without it the assertion below would pass on an empty buffer: {records:?}"
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|record| record.message.starts_with(DOWNGRADE_LINE)),
+            "nothing was lost, so nothing is said: {records:?}"
+        );
+
+        gpu.drain().expect("nothing was submitted");
+        gpu.destroy()
+            .expect("teardown is in the seam's stated order");
+    }
+
     #[test]
     fn pending_records_the_last_size_and_every_flag() {
         use crcbl_shell::{HeadlessShell, WindowDesc};

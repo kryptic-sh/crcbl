@@ -3405,14 +3405,19 @@ the transport seam over a third transport shape.
   regardless — build infos take device addresses — so the pairing question
   returns the moment anything uses the capability rather than reporting it.
 
-- **Nothing asserts the downgrade log line.** `crcbl_hal::downgrades` is
-  unit-tested and the call site in `crcbl::engine`'s `PendingGpuContext::poll`
-  is not, because the workspace has no way to capture log output in a test —
-  `crcbl-core`'s `StderrLogger` is a process-wide `static` with no test sink.
-  Topic 39 calls the line "an assertion target, not decoration", so this is a
-  real gap: a refactor could delete the call and every test would stay green.
-  Closing it needs a capturing `log::Log` implementation, which is a slice of
-  its own and would serve every other log-line assertion in the tree too.
+- **Only the downgrade line is asserted; the engine's other decision lines are
+  not.** `crcbl-core`'s logger can now be captured in a test
+  (`crcbl_core::log::capture`), and `crcbl`'s device-open path asserts both that
+  it names a downgrade and that it stays silent when nothing was lost. The
+  mechanism exists for the rest and nothing uses it yet: the pacing resolution
+  (`asked for Auto, pacing Vsync`), the present-feedback capability line, and
+  Win32's `exact refresh for …` are each the **only** record that a decision was
+  taken, and each could be deleted with every test staying green.
+
+  Two limits of the capture, both documented in the code: it is thread-local, so
+  a test cannot see what a worker thread logged; and a `capture()` racing an
+  `init_logging()` from outside the API can still lose its probe. Neither occurs
+  in the workspace today.
 
 - **"Tier" vocabulary survives in inline comments across the backends.** The
   type is gone and the doc comments are cleaned, but narrative comments,

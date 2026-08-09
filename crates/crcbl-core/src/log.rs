@@ -2,10 +2,15 @@
 //!
 //! The engine logs through the [`log`] facade. This module supplies the
 //! one thing a facade needs and does not provide: a sink. It is deliberately a
-//! ~150-line `log::Log` implementation writing to stderr rather than a
+//! small `log::Log` implementation writing to stderr rather than a
 //! dependency on a logging framework — the engine needs level filtering and a
 //! readable line, and every framework that does more brings a runtime,
 //! a feature matrix, and opinions about async.
+//!
+//! [`capture`] is the second thing that sink does: it hands a test the records
+//! the engine emitted, so a log line that is the only evidence of a decision
+//! can be asserted on instead of trusted. See its docs for the concurrency
+//! argument.
 //!
 //! Filtering is `env_logger`-style, read from `CRCBL_LOG`:
 //!
@@ -19,9 +24,11 @@
 //! the **longest** matching directive wins, so `crcbl_render=debug` and
 //! `crcbl_render::graph=trace` compose the way you would expect.
 
+use std::cell::RefCell;
 use std::env;
 use std::io::Write as _;
-use std::sync::OnceLock;
+use std::marker::PhantomData;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
 use ::log::{Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
@@ -142,13 +149,28 @@ struct StderrLogger {
     start: Instant,
 }
 
+impl StderrLogger {
+    /// Whether the filter admits `metadata`. This, and only this, decides what
+    /// reaches stderr — [`Log::enabled`] below widens for capture, and a record
+    /// let through on that account must still not be printed.
+    fn permits(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.level() <= self.filter.level_for(metadata.target())
+    }
+}
+
 impl Log for StderrLogger {
     fn enabled(&self, metadata: &Metadata<'_>) -> bool {
-        metadata.level() <= self.filter.level_for(metadata.target())
+        // A capturing thread sees everything, whatever `CRCBL_LOG` says: a test
+        // asserting the engine said something must not turn on the developer's
+        // environment. Off this thread — which is every thread in a normal run
+        // — the answer is the filter's, unchanged.
+        self.permits(metadata) || capturing()
     }
 
     fn log(&self, record: &Record<'_>) {
-        if !self.enabled(record.metadata()) {
+        // Before the filter, for the reason `enabled` gives.
+        push_captured(record);
+        if !self.permits(record.metadata()) {
             return;
         }
         // Seconds since init rather than a wall-clock date: the useful question
@@ -218,6 +240,206 @@ pub fn try_init_logging(filter: Filter) -> Result<(), SetLoggerError> {
 #[must_use]
 pub fn is_installed() -> bool {
     LOGGER.get().is_some()
+}
+
+// ---------------------------------------------------------------------------
+// Capture
+// ---------------------------------------------------------------------------
+
+/// One record the installed logger saw, reduced to the three things an
+/// assertion is written against.
+///
+/// The message is rendered here rather than kept as `Arguments`, which borrows
+/// from the stack frame of the `log!` that built it and cannot outlive the call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapturedRecord {
+    /// The level the record was logged at.
+    pub level: Level,
+    /// The record's target — the module path, unless the call overrode it.
+    pub target: String,
+    /// The formatted message.
+    pub message: String,
+}
+
+/// Target of the record [`capture`] logs to prove the capture is wired up.
+const PROBE_TARGET: &str = "crcbl_core::log::capture";
+
+/// Serialises the *start* of a capture, and nothing else.
+///
+/// Starting one installs the logger, raises the facade's global maximum and
+/// then probes it, and those three steps are not atomic. Two threads starting a
+/// capture at the same moment both call [`init_logging`], and the one that
+/// loses the `set_logger` race can still be inside [`try_init_logging`] — whose
+/// last act is to set the maximum to *its* filter, putting it back under the
+/// other thread's probe. The probe then never arrives and the assertion below
+/// fires on code that is perfectly fine. Seen as a 1-in-50 failure of this
+/// crate's own capture tests under a thread-per-test runner, which is exactly
+/// the flake this mechanism exists to avoid producing.
+///
+/// Held across the setup only. Captures themselves run concurrently: their
+/// buffers are thread-local and share nothing.
+static CAPTURE_SETUP: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    /// The calling thread's capture buffer, `None` when it is not capturing.
+    ///
+    /// **Thread-local, not global, and that is the whole design.** Tests in one
+    /// binary run concurrently on many threads by default, so a single shared
+    /// buffer would interleave two tests' records and make both assertions
+    /// depend on the scheduler. The alternatives were a global buffer behind a
+    /// mutex the API forces every capturing test to hold — which serialises the
+    /// suite and deadlocks the moment a test panics with it held — or making
+    /// capture a separate `log::Log` registration, which cannot work at all:
+    /// `log::set_logger` takes the process slot once and [`init_logging`] has
+    /// already taken it. Scoping to the thread costs nothing, needs no lock,
+    /// and is exactly right for a record logged synchronously by the code under
+    /// test. Its one limit is stated on [`capture`]: work the test hands to
+    /// another thread logs somewhere this cannot see.
+    static CAPTURED: RefCell<Option<Vec<CapturedRecord>>> = const { RefCell::new(None) };
+}
+
+/// Whether the calling thread is capturing.
+fn capturing() -> bool {
+    CAPTURED.with(|slot| slot.borrow().is_some())
+}
+
+/// Adds `record` to the calling thread's buffer, if it has one.
+fn push_captured(record: &Record<'_>) {
+    if !capturing() {
+        return;
+    }
+    // Rendered before the buffer is borrowed: `record.args()` runs the caller's
+    // own `Display` impls, and one of those logging in turn would re-enter here
+    // and panic on the outstanding `RefCell` borrow.
+    let captured = CapturedRecord {
+        level: record.level(),
+        target: record.target().to_owned(),
+        message: record.args().to_string(),
+    };
+    CAPTURED.with(|slot| {
+        if let Some(buffer) = slot.borrow_mut().as_mut() {
+            buffer.push(captured);
+        }
+    });
+}
+
+/// Records logged by the calling thread, for as long as this value lives.
+///
+/// From [`capture`]. Neither `Send` nor `Sync`: the buffer is the *thread's*,
+/// and dropping this on another thread would stop that thread's capture while
+/// leaving this one's running for the rest of the process.
+#[derive(Debug)]
+pub struct Capture {
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Capture {
+    /// A copy of everything captured so far, oldest first.
+    ///
+    /// Copies rather than drains, so an assertion that fails can be followed by
+    /// one that prints the whole buffer.
+    #[must_use]
+    pub fn records(&self) -> Vec<CapturedRecord> {
+        CAPTURED.with(|slot| slot.borrow().clone().unwrap_or_default())
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        CAPTURED.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// Starts capturing the records **this thread** logs.
+///
+/// For a log line that is the only evidence a decision was taken — a capability
+/// downgrade, a pacing resolution — so that deleting the line turns a test red
+/// instead of nothing at all.
+///
+/// Capture is additive: stderr still gets whatever `CRCBL_LOG` admits, and a
+/// process that never calls this behaves exactly as before.
+///
+/// # What it does and does not see
+///
+/// Everything the calling thread logs, at every level, regardless of
+/// `CRCBL_LOG` — a test must not pass or fail on the developer's environment.
+/// It sees nothing logged by any *other* thread, so a test that hands work to a
+/// worker and asserts on what the worker logged needs a different mechanism
+/// than this one.
+///
+/// # Panics
+///
+/// If this thread is already capturing — nesting would leave it ambiguous which
+/// buffer a record belongs to — or if the capture cannot be proven to work,
+/// which this checks by logging a record of its own and looking for it. That
+/// second one means the process slot belongs to a logger that is not this
+/// module's, or that `log`'s `release_max_level_*` features compiled the record
+/// away before it was ever offered to a sink.
+///
+/// ```
+/// let logs = crcbl_core::log::capture();
+/// log::info!("the device does not have wings");
+///
+/// let records = logs.records();
+/// assert_eq!(records.len(), 1);
+/// assert_eq!(records[0].level, log::Level::Info);
+/// assert_eq!(records[0].message, "the device does not have wings");
+/// ```
+#[must_use]
+pub fn capture() -> Capture {
+    // See `CAPTURE_SETUP` for what this excludes. The poison is stepped over
+    // rather than propagated: this function panics on purpose below, and a test
+    // that hit one of those must not take every later capture down with it.
+    let _setup = CAPTURE_SETUP.lock().unwrap_or_else(PoisonError::into_inner);
+
+    // Nothing reaches a sink until there is one. Idempotent, and the return
+    // value is deliberately unused: another crate's harness may have installed
+    // this module's logger already, and the probe below is what decides whether
+    // capture actually works — not who won this race.
+    let _ = init_logging();
+
+    CAPTURED.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        assert!(
+            slot.is_none(),
+            "this thread is already capturing log records"
+        );
+        *slot = Some(Vec::new());
+    });
+
+    // The facade's global maximum drops a record before any logger is asked, so
+    // capture has to lift it. Raised and never lowered: a `Drop` that put it
+    // back would race a live capture on another thread, and raising it changes
+    // no output, because the write to stderr is gated on the filter and not on
+    // this.
+    if ::log::max_level() < LevelFilter::Trace {
+        ::log::set_max_level(LevelFilter::Trace);
+    }
+
+    let capture = Capture {
+        _not_send: PhantomData,
+    };
+
+    // Prove the wiring instead of assuming it. If some other logger owns the
+    // process slot this capture is silently empty forever, and every "the
+    // engine said nothing" assertion written against it passes vacuously.
+    ::log::trace!(target: PROBE_TARGET, "capture probe");
+    let wired = CAPTURED.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let buffer = slot.as_mut().expect("this thread's capture was just set");
+        let wired = buffer.iter().any(|record| record.target == PROBE_TARGET);
+        // The probe is plumbing, not evidence; the caller must not have to
+        // filter it out of every assertion.
+        buffer.clear();
+        wired
+    });
+    assert!(
+        wired,
+        "log capture is not wired up: the process logger is not crcbl-core's, \
+         or this level was compiled out"
+    );
+
+    capture
 }
 
 #[cfg(test)]
@@ -340,6 +562,20 @@ mod tests {
             LevelFilter::Trace,
             "the first filter stays in force"
         );
+    }
+
+    /// Nothing is captured until someone asks, and the sink must not pay for
+    /// the feature on the way past.
+    #[test]
+    fn a_thread_that_never_asked_captures_nothing() {
+        assert!(!capturing());
+        push_captured(
+            &Record::builder()
+                .args(format_args!("dropped on the floor"))
+                .target("crcbl_core")
+                .build(),
+        );
+        assert!(!capturing());
     }
 
     #[test]
