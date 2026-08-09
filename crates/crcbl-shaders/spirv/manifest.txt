@@ -10,90 +10,97 @@ dxil-model = 6_6
 
 [compute_probe]
 source = shaders/compute_probe.slang
-source-sha256 = c0326af31bc69615d12ac421130039b50c43d31ec519a5d9f3f298a1615ce41a
+source-sha256 = b9eedd18f794d71a402f8fac0653b1f6b08b2c643b1523f9a214e977629eb2c8
+targets = spirv, wgsl, msl, dxil
 spirv = spirv/compute_probe.spv
 spirv-sha256 = f17714ecd645910c6c5e07f92f38c1425305a53442f8c4f680ff71530b46ce5a
 wgsl = wgsl/compute_probe.wgsl
 wgsl-sha256 = e73b742203440239765b9c7db76710eadb7adcee67c2707cb1440ae72c026fd9
 msl = msl/compute_probe.metal
-msl-sha256 = 142c45ee0c8939fa4d57bca43288d2e7312d8b9d4962e54554613618793fe8e3
+msl-sha256 = 02a6fbe92f87b9630c80b1b764e01b070262e745da7ce7028ee9aa580599aee6
 dxil = computeMain:dxil/compute_probe.computeMain.dxil:75a92d8b7739f51794d8ff70f66ca2f53c9aeb2f9d1f9005a3945ec838dcc762
 entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = e72a843d9fb62ee128296f027a6aaf0badc713a9e376036113057fedeee640b0
+source-sha256 = a8b080ca6c08465098239ff0a0f00f9ce22054de4d8cf5529541e250922fb13d
+targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
 spirv-sha256 = d35ede042a1341375f093f94566fb4773a0ae762eccc48a09348f4318fba5a73
 wgsl = wgsl/mesh.wgsl
 wgsl-sha256 = 7749dd7473397643249ec2760e1ab44f13476ef4011bae9674560bd068ceab01
 msl = msl/mesh.metal
-msl-sha256 = 56e44ac67ff5db6b34450371cebc700bb4dd859eb055e63c84df525db5361768
+msl-sha256 = 19ac92b740d7e7131350cf5feb405b57c2a94a6aaa275593e10dda84b5e6e6e1
 dxil = vertexMain:dxil/mesh.vertexMain.dxil:e133e740c878cd6375db9ea4f8d46452df0d3606f6638d18ec13112a5efba0da
 dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:b280bb72c37899ab9ae075711ee1beb5e27bc3a3302e340a5267bb8e66f8192b
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [sprite]
 source = shaders/sprite.slang
-source-sha256 = ac5aa7b98947f61f287b899f9ca364b8a9442807c546331cabf97be6b7c73009
+source-sha256 = 97e86d7e9556f36c428c66d47c02b14173834045f1a197d34dcac8d271bb3d6f
+targets = spirv, wgsl, msl, dxil
 spirv = spirv/sprite.spv
 spirv-sha256 = 05ae7b3afac570dbc125073e80d9366a014f3f6c10379469cd06b53405cdfaad
 wgsl = wgsl/sprite.wgsl
 wgsl-sha256 = ab16d30cf1b5f065673a5748845811b19c756ee877a0495647a454124cacf4f1
 msl = msl/sprite.metal
-msl-sha256 = d25baf4c46a296dc4aff6f04d149b71557d1b8ca11fb8c08c6d76bd147b953a7
+msl-sha256 = 1f38852b4994b785dfeb33325c8505ed0130c35a246820b79d726a583b21a216
 dxil = vertexMain:dxil/sprite.vertexMain.dxil:46ecd35707ee7eddefae8223f181f9bc3768bae8d728b99d642ae83cfdaeafcd
 dxil = fragmentMain:dxil/sprite.fragmentMain.dxil:210605a40ca95a9c1a417c54ac563a163ef59f03a83cbc7e25fcd4a59a38ff40
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [tonemap]
 source = shaders/tonemap.slang
-source-sha256 = e043ab6a3d10df8166631a05b671f8d632eee5c8f83f5cc8fc18a5359d613d4f
+source-sha256 = b72ed0862cfb5a22c339e767c6913c161759d128d1fac83c33a8fce3b4a08645
+targets = spirv, wgsl, msl, dxil
 spirv = spirv/tonemap.spv
 spirv-sha256 = 178957f0fee6362ab5c31a5312f289251af2c0d731ff0bf6a2353e06fab03598
 wgsl = wgsl/tonemap.wgsl
 wgsl-sha256 = 579856509aad67e6249eb4b0489bb393e9e6e3c77e9676221ac98a03dc121a41
 msl = msl/tonemap.metal
-msl-sha256 = 0679b254b174a4440ef42fbd56cb06af976cfd3d0e254899022cfee2592bfc45
+msl-sha256 = 37304f18db97f6344b68cd39ac260bfd7da4052538591f19327b8496f89eca31
 dxil = vertexMain:dxil/tonemap.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
 dxil = fragmentMain:dxil/tonemap.fragmentMain.dxil:9eb37f71b174b8651b910c3e60f0c4c82dc91f97ef3a62ec3925595403b94bc5
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [triangle]
 source = shaders/triangle.slang
-source-sha256 = e1a5e7acd7da40b0f27f685827467a36dd49eb8ba5978a3dfd03f36d8a33af66
+source-sha256 = cf4b5659767798d750f88ccd81efddb315e529059570b4d433aca57e6271d1a2
+targets = spirv, wgsl, msl, dxil
 spirv = spirv/triangle.spv
 spirv-sha256 = d1a318ebaf3e333a2b7646473aae647d55011b3e91036540beb491896bea6d33
 wgsl = wgsl/triangle.wgsl
 wgsl-sha256 = e94308994c4b422b98293b5ca6c815a109dab182b6f96afc8d749bec38d35af9
 msl = msl/triangle.metal
-msl-sha256 = f45a9712c7d5762bf7d5c1d26bf521a3aff3f2aa5b4e6cd370c94cea09ac4c25
+msl-sha256 = 5e680248a848c37e31089cef381105df1a4b6e5baac35444682fd4f420b6200d
 dxil = vertexMain:dxil/triangle.vertexMain.dxil:e905842dc6032b16bc6693c688d9fea4badab2ab4a293cfe9581ccd7be5b3d67
 dxil = fragmentMain:dxil/triangle.fragmentMain.dxil:fb6542d1fa84d15525bb7cd86438bf382bcafbfee6645791f494eebdde3c3129
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ui]
 source = shaders/ui.slang
-source-sha256 = 7ed6055ee979a6e1490dcc42d7d99fed69d65520d95c489049b6e157ed4f0e0a
+source-sha256 = 8bbeb2f26e9fc00eb7a51bad13f4644ae37ef0f556eadba234a2a192885891d9
+targets = spirv, wgsl, msl, dxil
 spirv = spirv/ui.spv
 spirv-sha256 = cfc3412980ec233f6c85b780557c43ae851164b30190f506ace9bc4f4219ddf5
 wgsl = wgsl/ui.wgsl
 wgsl-sha256 = 4f184f7342f65b430c8521d18c1da19dd9ee206449ab473c167dcc9fe9d23414
 msl = msl/ui.metal
-msl-sha256 = 2d425e61fb62eb4d27560940113d89f782c12bf0dc90508f34d7f152968dc897
+msl-sha256 = 375c3e4d45c4b122029b587a73d9a8d08e8da267f75c5d7015ed765e8977a7f5
 dxil = vertexMain:dxil/ui.vertexMain.dxil:e0c0a9bea6c938720bb4af00ab290cd612fb295cccb05fffb85280981bf60196
 dxil = fragmentMain:dxil/ui.fragmentMain.dxil:3b8d3e9798e8673ba67a5ab96ef54cf064b01854c44bed06b957362700df52d1
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ui_tier_b]
 source = shaders/ui_tier_b.slang
-source-sha256 = ae49a548dc5b79f117ea43dedc3a6f492033e7c2f58d6cb95725a5f929b5721a
+source-sha256 = 054ea53fc22339ab04babf5f556d88e7cec80b489b30c6e6bc982bffacab1a0a
+targets = spirv, wgsl, msl, dxil
 spirv = spirv/ui_tier_b.spv
 spirv-sha256 = c09368c5eedef42b61e25c187991278baec65a193eea4b3f5ff0db90fcceb31c
 wgsl = wgsl/ui_tier_b.wgsl
 wgsl-sha256 = 1113bc41a6805fae74a50a7227e2e6974c98d47a7391bd67a70dbd9cf0b50ee7
 msl = msl/ui_tier_b.metal
-msl-sha256 = 8fb073eb9c28ee21b35268a25a555e863ae86f04a3f0bb4477b58314e7caf5cf
+msl-sha256 = f5a4b2002c6e6e38388c04a6a263cb0396615a3ca3959fdfbde7b0fe490ffaf6
 dxil = vertexMain:dxil/ui_tier_b.vertexMain.dxil:e0c0a9bea6c938720bb4af00ab290cd612fb295cccb05fffb85280981bf60196
 dxil = fragmentMain:dxil/ui_tier_b.fragmentMain.dxil:3b8d3e9798e8673ba67a5ab96ef54cf064b01854c44bed06b957362700df52d1
 entry-points = vertexMain:vertex, fragmentMain:fragment

@@ -1,3 +1,5 @@
+// crcbl-targets: spirv, wgsl, msl, dxil
+
 // Sprite pass: instanced, world-space, alpha-blended quads cut out of a sheet.
 //
 // One instance per sprite. The quad's six corners come from `SV_VertexID` and

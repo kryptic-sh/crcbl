@@ -12,7 +12,10 @@
 //!
 //! What it does, in order:
 //!
-//! 1. Parses `spirv/manifest.txt`.
+//! 1. Parses `spirv/manifest.txt` — which is also where each shader's declared
+//!    target list is held to the artifact columns beside it, so "a target this
+//!    shader says it must support was never built" fails here rather than on
+//!    the machine that tried to use it.
 //! 2. Fails if any source's SHA-256 differs from the recorded one — "someone
 //!    edited the `.slang` and did not regenerate".
 //! 3. Fails if any artifact's SHA-256 differs — "the `.spv`, `.wgsl`, `.metal`
@@ -409,7 +412,33 @@ impl Target {
             Self::Msl => "MSL artifact",
         }
     }
+
+    /// The macro `tools/compile-shaders.sh` defines while compiling this
+    /// target, and which this script must define too.
+    ///
+    /// Slang defines no target macro of its own — probing found only
+    /// `__SLANG_COMPILER__`, which is true everywhere — so these are how a
+    /// shader writes a `#if` that differs per target at all. They are named
+    /// after the language coming *out*: [`Target::Msl`] is emitted by
+    /// `-target metal`, and the HLSL step [`recompile_dxil`] runs defines
+    /// [`HLSL_DEFINE`].
+    ///
+    /// **This list and the script's must stay identical.** A define present on
+    /// one side and not the other changes the preprocessor state the artifact
+    /// was produced under, so every byte comparison below fails for a reason
+    /// that is not drift.
+    const fn define(self) -> &'static str {
+        match self {
+            Self::SpirV => "CRCBL_TARGET_SPIRV=1",
+            Self::Wgsl => "CRCBL_TARGET_WGSL=1",
+            Self::Msl => "CRCBL_TARGET_MSL=1",
+        }
+    }
 }
+
+/// The define for the HLSL leg, which has no [`Target`] because DXIL is reached
+/// in two steps rather than by one `-target`. See [`Target::define`].
+const HLSL_DEFINE: &str = "CRCBL_TARGET_HLSL=1";
 
 /// Recompiles one shader to one target and demands byte-for-byte equality.
 fn recompile(
@@ -436,7 +465,8 @@ fn recompile(
         .current_dir(root)
         .arg(&record.source)
         .args(["-target", target.flag()])
-        .args(["-profile", &manifest.target]);
+        .args(["-profile", &manifest.target])
+        .args(["-D", target.define()]);
     if matches!(target, Target::SpirV) {
         // Both flags must match `tools/compile-shaders.sh` exactly, or this
         // recompile disagrees with the committed artifact for a reason that is
@@ -529,6 +559,7 @@ fn recompile_dxil(
         .args(["-target", "hlsl"])
         .args(["-entry", &artifact.entry_point])
         .args(["-stage", slang_stage(model)])
+        .args(["-D", HLSL_DEFINE])
         .arg("-o")
         .arg(&hlsl)
         .status();

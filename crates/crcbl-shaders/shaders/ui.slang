@@ -1,3 +1,5 @@
+// crcbl-targets: spirv, wgsl, msl, dxil
+
 // UI compositing shader: renders screen-space quads with vertex colours and
 // an optional glyph-atlas texture on top of the existing framebuffer.
 //

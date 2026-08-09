@@ -3345,6 +3345,28 @@ the transport seam over a third transport shape.
   asteroids, one in flappy. Code comments, not docs, so they are not covered by
   the plan sweep.
 
+### Owed by the shader guardrails
+
+- **`ui.slang` and `ui_tier_b.slang` declare `wgsl`, and for `ui.slang` that
+  declaration is currently false.** Slang emits `wgsl/ui.wgsl` with a
+  `var<uniform>` carrying no `@group`/`@binding`, because it drops
+  `[[vk::push_constant]]` without allocating one — and naga rejects it. The
+  per-shader target declaration cannot catch this: **Slang succeeds**, so the
+  compile script has nothing to fail on. Rule 4 (validating all four artifacts,
+  naga over the WGSL) is what turns it into a real failure. The honest fix is
+  then either dropping `wgsl` from `ui.slang`'s declaration or moving it to a
+  uniform buffer on every path — the latter is what `sprite.slang` already does
+  and deletes the fork.
+
+- **The declaration-order lint is stricter than the rule it guards.** Metal
+  assigns indices per argument _table_; the lint asserts one global ascending
+  order across all sets. So it can ask for a move that would have been harmless
+  — swapping two resources in different tables trips it without changing any
+  Metal index. Deliberate and documented in the module header: the per-table
+  rule needs the lint to model Slang's table assignment, which is more of
+  Slang's behaviour than is worth encoding for a guard whose false positives
+  cost one declaration move. Reopen if a real shader finds it costly.
+
 ### Owed by the capability work (P7)
 
 - **No local driver reports the mesh/ray capabilities absent, so the degradation

@@ -1,3 +1,5 @@
+// crcbl-targets: spirv, wgsl, msl, dxil
+
 // HDR from P1: the pass that maps the `Rgba16Float` scene target into the
 // swapchain's format.
 //

@@ -1,3 +1,5 @@
+// crcbl-targets: spirv, wgsl, msl, dxil
+
 // Milestones 3 and 4 of `docs/plan/02-vulkan-backend.md`'s ladder: a
 // depth-tested mesh with a perspective camera in a uniform buffer, lit by a
 // single directional light with Lambert diffuse and Blinn-Phong specular.

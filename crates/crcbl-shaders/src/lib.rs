@@ -144,6 +144,15 @@ pub mod sha256;
 /// shader hash (`docs/plan/06-assets-scenes.md`).
 pub mod manifest;
 
+/// The declaration-order lint over `shaders/*.slang`.
+///
+/// Test-only, because it has no runtime consumer: it reads the *sources* this
+/// crate compiles from rather than any artifact it ships, and what it protects
+/// is `crcbl-mtl`'s argument-table indices, which are decided when the MSL is
+/// generated and not at any later moment a caller could ask about.
+#[cfg(test)]
+mod declaration_order;
+
 /// The workgroup size and uniform block `compute_probe.slang` declares, in the
 /// layouts that shader declares.
 pub mod compute_probe;

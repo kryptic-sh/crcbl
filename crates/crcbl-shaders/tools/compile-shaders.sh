@@ -49,6 +49,67 @@
 # that picked up a system library would report that library's version and be
 # refused here.
 #
+# # Every shader declares the targets it must support
+#
+# Each `.slang` carries one line naming the targets it is required to compile
+# to:
+#
+#     // crcbl-targets: spirv, wgsl, msl, dxil
+#
+# and this script emits **exactly** those. It is a comment rather than a table
+# somewhere else because a list that lives away from the shader is a list that
+# drifts from it: a source moved, renamed or copied carries its own declaration
+# with it, and a reviewer reading the first line of the file has already read
+# the answer.
+#
+# The rule it enforces is `docs/plan/02-vulkan-backend.md`'s first shader
+# portability rule — a required target that will not take the shader must
+# **fail** here rather than emit a broken artifact. Two failure modes, both
+# real:
+#
+# * A target Slang cannot express the shader in. The compile exits non-zero and
+#   `set -e` stops the script, naming the source and the target.
+# * A target a shader *stopped* declaring while its artifact stayed in the tree.
+#   Nothing would regenerate that file and `build.rs` would go on hashing it, so
+#   it would sit there getting older than its source and stay green. This script
+#   refuses it by name and leaves the `git rm` to the author, because it has
+#   never deleted anything and a generated-looking path is not proof.
+#
+# `spirv` is not optional. The entry-point list every other target's work is
+# driven from — the DXIL profiles, the manifest's `entry-points` — is read out
+# of the compiled SPIR-V with `spirv-dis`, so a shader with no SPIR-V is one
+# nothing downstream can enumerate.
+#
+# Every shader shipped today declares all four. The mechanism exists ahead of
+# the first shader that will not: a mesh-shader or ray-tracing source has no
+# WGSL form at all, and must be able to say so before it is written rather than
+# after its broken `.wgsl` is committed.
+#
+# The declaration is recorded in `spirv/manifest.txt` as a `targets` key, and
+# `crcbl_shaders::manifest` refuses a record whose declaration and artifact
+# columns disagree — so the check runs in `build.rs` too, on machines with no
+# shader compiler at all.
+#
+# # Per-target defines
+#
+# **Slang defines no target macro of its own.** Probing 2026.14 turned up only
+# `__SLANG_COMPILER__`, which is true for every target, so there was no way to
+# write a `#if` that differs per target and the only way to differ at all was to
+# fork the file — which is what `shaders/ui_tier_b.slang` is. So each invocation
+# below defines exactly one of:
+#
+#     CRCBL_TARGET_SPIRV  CRCBL_TARGET_WGSL  CRCBL_TARGET_MSL  CRCBL_TARGET_HLSL
+#
+# named after **the language coming out**, not after the declared target: `msl`
+# is emitted by `-target metal` and `dxil` by `-target hlsl` and then `dxc`, and
+# a shader that conditions on one is conditioning on that language's syntax and
+# capabilities. The DXIL leg therefore defines `CRCBL_TARGET_HLSL`.
+#
+# `build.rs` passes the same define on the same invocation when it does its
+# byte-for-byte recompile, and the two lists must stay in step: a define here
+# that is missing there makes every artifact fail that check for a reason which
+# is not drift.
+#
 # ENVIRONMENT
 #   CRCBL_SLANGC   Path to `slangc`. Default: whatever is on PATH.
 #   CRCBL_DXC      Path to `dxc`. **Required**, with no PATH fallback.
@@ -182,6 +243,106 @@ MANIFEST="$WORK/manifest.txt"
     echo "dxil-model = $DXIL_MODEL"
 } >"$MANIFEST"
 
+# Every target a shader may declare, in the canonical order the manifest records
+# them and this script emits them.
+TARGETS=(spirv wgsl msl dxil)
+
+# The same list spelled the way a declaration line and the manifest spell it, so
+# every message quoting it is copy-pasteable into a shader.
+ALL_TARGETS_LIST="${TARGETS[*]}"
+ALL_TARGETS_LIST="${ALL_TARGETS_LIST// /, }"
+
+# The `grep`/`sed` address of the declaration line. One expression, used by both
+# the count and the extraction, so the two cannot come to disagree about what
+# counts as a declaration.
+TARGETS_DIRECTIVE='^//[[:space:]]*crcbl-targets:[[:space:]]*'
+
+# Sets `DECLARED` to the targets `$1` declares, in `TARGETS` order.
+#
+# Exactly one declaration line is required. Zero means a shader that never
+# stated what it must support, which is the state this rule exists to remove;
+# two means the file answers the question twice and nothing says which answer
+# the artifacts were built from.
+DECLARED=""
+read_declared_targets() {
+    local source="$1" count raw target ordered=""
+    count="$(grep -c "$TARGETS_DIRECTIVE" "$source" || true)"
+    if [ "$count" != "1" ]; then
+        echo "crcbl shaders: $source has $count \`// crcbl-targets:\` lines; it needs exactly 1." >&2
+        echo "  Every shader declares the targets it must compile to, as its own first line:" >&2
+        echo "    // crcbl-targets: ${ALL_TARGETS_LIST}" >&2
+        echo "  naming any of: ${ALL_TARGETS_LIST}. \`spirv\` is required — the entry points" >&2
+        echo "  every other target is driven from are read out of the compiled SPIR-V." >&2
+        exit 1
+    fi
+
+    # `|` as the `s` delimiter, because the expression opens with `^//`.
+    raw="$(sed -n "s|$TARGETS_DIRECTIVE||p" "$source" | tr ',' ' ')"
+    for target in $raw; do
+        case " ${TARGETS[*]} " in
+        *" $target "*) ;;
+        *)
+            echo "crcbl shaders: $source declares target '$target', which is not one of:" >&2
+            echo "  ${ALL_TARGETS_LIST}" >&2
+            exit 1
+            ;;
+        esac
+        case " $ordered " in
+        *" $target "*)
+            echo "crcbl shaders: $source declares target '$target' twice" >&2
+            exit 1
+            ;;
+        esac
+        ordered="$ordered $target"
+    done
+
+    # Re-emitted in `TARGETS` order rather than the author's, so the manifest
+    # line is a function of the *set* and reordering a declaration is not drift.
+    DECLARED=""
+    for target in "${TARGETS[@]}"; do
+        case " $ordered " in
+        *" $target "*) DECLARED="$DECLARED $target" ;;
+        esac
+    done
+    DECLARED="${DECLARED# }"
+
+    if ! declares spirv; then
+        echo "crcbl shaders: $source declares '${DECLARED// /, }', which does not include" >&2
+        echo "  \`spirv\`. The entry-point list the manifest records — and the DXIL profiles" >&2
+        echo "  every container is compiled at — are read out of the compiled SPIR-V with" >&2
+        echo "  spirv-dis, so a shader without it is one nothing downstream can enumerate." >&2
+        exit 1
+    fi
+}
+
+# Whether the shader last passed to `read_declared_targets` declares target `$1`.
+declares() {
+    case " $DECLARED " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+    esac
+}
+
+# Records an artifact that exists for a target its shader does not declare.
+#
+# This is the drift the declaration rule catches from the other side: a shader
+# that *stopped* declaring a target leaves a file nothing regenerates, and
+# `build.rs` keeps hashing it happily while it grows older than its source. The
+# file is named rather than removed — this script has never deleted anything,
+# and "it looks generated" is not proof that it is.
+#
+# `STATUS` rather than `exit`, so `--check` reports every stale artifact in one
+# run instead of one per invocation. Reads `$SOURCE`, the shader the compile
+# loop is on, for the same reason it writes `$STATUS`: both belong to that loop.
+require_undeclared_artifact_absent() {
+    local target="$1" artifact="$2"
+    if [ -e "$artifact" ]; then
+        echo "crcbl shaders: $SOURCE does not declare the '$target' target, but $artifact exists." >&2
+        echo "  Either add '$target' to its \`// crcbl-targets:\` line, or \`git rm $artifact\`." >&2
+        STATUS=1
+    fi
+}
+
 # The DXIL profile prefix for one of `spirv-dis`' execution models, or nothing
 # for a model no graphics or compute profile covers.
 dxc_profile_prefix() {
@@ -236,6 +397,7 @@ fi
 
 for SOURCE in "${SHADERS[@]}"; do
     NAME="$(basename "$SOURCE" .slang)"
+    read_declared_targets "$SOURCE"
     ARTIFACT="spirv/${NAME}.spv"
     FRESH="$WORK/${NAME}.spv"
     WGSL_ARTIFACT="wgsl/${NAME}.wgsl"
@@ -250,30 +412,44 @@ for SOURCE in "${SHADERS[@]}"; do
     # `computeMain` everywhere else, and this crate's cross-target name tests
     # fail. It is a no-op for every module with two entry points, which is why
     # the existing artifacts are byte-identical with and without it.
+    #
+    # `read_declared_targets` has already refused a shader that does not declare
+    # `spirv`, so this leg is unconditional.
     echo "crcbl shaders: compiling $SOURCE → SPIR-V"
     "$SLANGC" "$SOURCE" \
         -target spirv \
         -profile "$SLANG_PROFILE" \
         -emit-spirv-directly \
         -fvk-use-entrypoint-name \
+        -D CRCBL_TARGET_SPIRV=1 \
         -o "$FRESH"
 
-    echo "crcbl shaders: compiling $SOURCE → WGSL"
-    "$SLANGC" "$SOURCE" \
-        -target wgsl \
-        -profile "$SLANG_PROFILE" \
-        -o "$FRESH_WGSL"
+    if declares wgsl; then
+        echo "crcbl shaders: compiling $SOURCE → WGSL"
+        "$SLANGC" "$SOURCE" \
+            -target wgsl \
+            -profile "$SLANG_PROFILE" \
+            -D CRCBL_TARGET_WGSL=1 \
+            -o "$FRESH_WGSL"
+    else
+        require_undeclared_artifact_absent wgsl "$WGSL_ARTIFACT"
+    fi
 
     # The Metal backend compiles this at run time through
     # `MTLDevice::newLibraryWithSource:options:error:`, so the artifact is MSL
     # *source* rather than a `.metallib` — there is no offline Metal compiler
     # off macOS, and committing one would put a macOS-only step in the middle of
     # a script every leg of CI runs.
-    echo "crcbl shaders: compiling $SOURCE → MSL"
-    "$SLANGC" "$SOURCE" \
-        -target metal \
-        -profile "$SLANG_PROFILE" \
-        -o "$FRESH_MSL"
+    if declares msl; then
+        echo "crcbl shaders: compiling $SOURCE → MSL"
+        "$SLANGC" "$SOURCE" \
+            -target metal \
+            -profile "$SLANG_PROFILE" \
+            -D CRCBL_TARGET_MSL=1 \
+            -o "$FRESH_MSL"
+    else
+        require_undeclared_artifact_absent msl "$MSL_ARTIFACT"
+    fi
 
     # A compiler that emitted something the driver will reject is worse than one
     # that failed, because the failure moves to `vkCreateShaderModule` on
@@ -312,13 +488,17 @@ for SOURCE in "${SHADERS[@]}"; do
     for PAIR in ${ENTRY_POINTS//,/ }; do
         ENTRY="${PAIR%%:*}"
         MODEL="${PAIR##*:}"
+        DXIL_ARTIFACT="dxil/${NAME}.${ENTRY}.dxil"
+        if ! declares dxil; then
+            require_undeclared_artifact_absent dxil "$DXIL_ARTIFACT"
+            continue
+        fi
         PREFIX="$(dxc_profile_prefix "$MODEL")"
         if [ -z "$PREFIX" ]; then
             echo "crcbl shaders: $SOURCE entry point $ENTRY has execution model '$MODEL'," >&2
             echo "  which no DXIL graphics or compute profile covers." >&2
             exit 1
         fi
-        DXIL_ARTIFACT="dxil/${NAME}.${ENTRY}.dxil"
         FRESH_HLSL="$WORK/${NAME}.${ENTRY}.hlsl"
         FRESH_DXIL="$WORK/${NAME}.${ENTRY}.dxil"
 
@@ -327,6 +507,7 @@ for SOURCE in "${SHADERS[@]}"; do
             -target hlsl \
             -entry "$ENTRY" \
             -stage "$(slang_stage "$MODEL")" \
+            -D CRCBL_TARGET_HLSL=1 \
             -o "$FRESH_HLSL"
         "$DXC" \
             -T "${PREFIX}_${DXIL_MODEL}" \
@@ -355,34 +536,45 @@ for SOURCE in "${SHADERS[@]}"; do
             echo "  image (docs/plan/12-testing.md)." >&2
             STATUS=1
         fi
-        if ! cmp -s "$FRESH_WGSL" "$WGSL_ARTIFACT"; then
+        if declares wgsl && ! cmp -s "$FRESH_WGSL" "$WGSL_ARTIFACT"; then
             echo "crcbl shaders: $WGSL_ARTIFACT does not match a fresh compile of $SOURCE." >&2
             echo "  Run crates/crcbl-shaders/tools/compile-shaders.sh and commit the result." >&2
             STATUS=1
         fi
-        if ! cmp -s "$FRESH_MSL" "$MSL_ARTIFACT"; then
+        if declares msl && ! cmp -s "$FRESH_MSL" "$MSL_ARTIFACT"; then
             echo "crcbl shaders: $MSL_ARTIFACT does not match a fresh compile of $SOURCE." >&2
             echo "  Run crates/crcbl-shaders/tools/compile-shaders.sh and commit the result." >&2
             STATUS=1
         fi
     else
         cp "$FRESH" "$ARTIFACT"
-        cp "$FRESH_WGSL" "$WGSL_ARTIFACT"
-        cp "$FRESH_MSL" "$MSL_ARTIFACT"
+        if declares wgsl; then cp "$FRESH_WGSL" "$WGSL_ARTIFACT"; fi
+        if declares msl; then cp "$FRESH_MSL" "$MSL_ARTIFACT"; fi
     fi
 
+    # A target the shader does not declare contributes no artifact *and* no
+    # manifest key, so `crcbl_shaders::manifest` sees the same absence
+    # `build.rs` sees on disk — which is what lets it refuse a record whose
+    # declaration and columns disagree.
     {
         echo
         echo "[$NAME]"
         echo "source = $SOURCE"
         echo "source-sha256 = $(sha256sum "$SOURCE" | cut -d' ' -f1)"
+        echo "targets = ${DECLARED// /, }"
         echo "spirv = $ARTIFACT"
         echo "spirv-sha256 = $(sha256sum "$FRESH" | cut -d' ' -f1)"
-        echo "wgsl = $WGSL_ARTIFACT"
-        echo "wgsl-sha256 = $(sha256sum "$FRESH_WGSL" | cut -d' ' -f1)"
-        echo "msl = $MSL_ARTIFACT"
-        echo "msl-sha256 = $(sha256sum "$FRESH_MSL" | cut -d' ' -f1)"
-        printf '%s\n' "${DXIL_LINES[@]}"
+        if declares wgsl; then
+            echo "wgsl = $WGSL_ARTIFACT"
+            echo "wgsl-sha256 = $(sha256sum "$FRESH_WGSL" | cut -d' ' -f1)"
+        fi
+        if declares msl; then
+            echo "msl = $MSL_ARTIFACT"
+            echo "msl-sha256 = $(sha256sum "$FRESH_MSL" | cut -d' ' -f1)"
+        fi
+        if [ "${#DXIL_LINES[@]}" -gt 0 ]; then
+            printf '%s\n' "${DXIL_LINES[@]}"
+        fi
         echo "entry-points = $ENTRY_POINTS"
     } >>"$MANIFEST"
 done
@@ -396,6 +588,15 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
     if [ "$STATUS" -eq 0 ]; then
         echo "crcbl shaders: every artifact matches its source (slangc $SLANG_VERSION, dxc $DXC_VERSION)"
     fi
+    exit "$STATUS"
+fi
+
+# A regenerate run has its own way to fail: a stale artifact for a target that
+# is no longer declared. Writing the manifest anyway would record the tree as
+# consistent while that file sits beside it, so the manifest is the thing held
+# back — everything already copied is a faithful compile of its source.
+if [ "$STATUS" -ne 0 ]; then
+    echo "crcbl shaders: spirv/manifest.txt not written — resolve the above first" >&2
     exit "$STATUS"
 fi
 

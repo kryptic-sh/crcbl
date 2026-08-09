@@ -34,6 +34,13 @@ pub struct DxilArtifact {
     pub sha256: String,
 }
 
+/// A target a shader may declare it must compile to.
+///
+/// The set is closed on purpose: a name that is not one of these is a typo in
+/// the shader's `// crcbl-targets:` line, and silently accepting it would mean
+/// a target the author believes is required and nothing emits.
+pub const TARGETS: [&str; 4] = ["spirv", "wgsl", "msl", "dxil"];
+
 /// One shader source and the artifact built from it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShaderRecord {
@@ -43,6 +50,17 @@ pub struct ShaderRecord {
     pub source: String,
     /// SHA-256 of the source file, lower-case hex. **The drift check.**
     pub source_sha256: String,
+    /// The targets the source's `// crcbl-targets:` line declares it must
+    /// compile to, in [`TARGETS`] order. Empty for a manifest that predates the
+    /// declaration.
+    ///
+    /// This is the record's own statement of which artifact columns must be
+    /// filled, and [`parse_manifest`] holds it to that: a shader declaring
+    /// `wgsl` with no `wgsl` column, or carrying a `msl` column it never
+    /// declared, is refused. That is the half of the rule which runs on a
+    /// machine with no shader compiler — `tools/compile-shaders.sh` enforces
+    /// the other half by emitting exactly what is declared.
+    pub targets: Vec<String>,
     /// Compiled SPIR-V artifact path, relative to the crate root.
     pub spirv: String,
     /// SHA-256 of the SPIR-V artifact, lower-case hex.
@@ -127,6 +145,7 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
                     name: name.to_string(),
                     source: String::new(),
                     source_sha256: String::new(),
+                    targets: Vec::new(),
                     spirv: String::new(),
                     spirv_sha256: String::new(),
                     wgsl: String::new(),
@@ -165,6 +184,37 @@ pub fn parse_manifest(text: &str) -> Result<Manifest, String> {
             (Some(record), "source-sha256") => {
                 let hash = hex(value, line_number)?;
                 set_once(&mut record.source_sha256, hash, key, line_number)?;
+            }
+            (Some(record), "targets") => {
+                if !record.targets.is_empty() {
+                    return Err(format!(
+                        "line {line_number}: `targets` is set twice in the same section"
+                    ));
+                }
+                for target in value.split(',') {
+                    let target = target.trim();
+                    if target.is_empty() {
+                        continue;
+                    }
+                    if !TARGETS.contains(&target) {
+                        return Err(format!(
+                            "line {line_number}: `{target}` is not a target; the set is {}",
+                            TARGETS.join(", ")
+                        ));
+                    }
+                    if record.targets.iter().any(|seen| seen == target) {
+                        return Err(format!(
+                            "line {line_number}: target `{target}` is declared twice"
+                        ));
+                    }
+                    record.targets.push(target.to_string());
+                }
+                if record.targets.is_empty() {
+                    return Err(format!(
+                        "line {line_number}: `targets` names nothing, so this shader declares no \
+                         target it must compile to"
+                    ));
+                }
             }
             (Some(record), "spirv") => {
                 set_once(&mut record.spirv, value.to_string(), key, line_number)?
@@ -383,6 +433,7 @@ fn finish(record: ShaderRecord, line_number: usize) -> Result<ShaderRecord, Stri
             record.name
         ));
     }
+    check_targets(&record, line_number)?;
     // A DXIL container is addressed by the entry point it holds, so one naming
     // an entry point the shader does not declare is a container nothing can
     // ever ask for — and, far more likely, a generator that renamed an entry
@@ -401,6 +452,62 @@ fn finish(record: ShaderRecord, line_number: usize) -> Result<ShaderRecord, Stri
         }
     }
     Ok(record)
+}
+
+/// Holds a record to the targets it declares.
+///
+/// **This is the half of `docs/plan/02-vulkan-backend.md`'s first shader
+/// portability rule that runs without a shader compiler.**
+/// `tools/compile-shaders.sh` emits exactly the declared targets; this refuses
+/// a record where the declaration and the artifact columns have come apart —
+/// a `wgsl` declared and never built, or an `msl` column left behind by a
+/// declaration that dropped it. `build.rs` shares this code, so every
+/// `cargo build` on every platform makes the check.
+///
+/// An empty declaration is skipped rather than refused: that is a manifest
+/// predating the rule, the same legal state an absent `wgsl` or `msl` column
+/// is. `the_committed_manifest_parses` is what asserts the shipped manifest is
+/// not in it.
+fn check_targets(record: &ShaderRecord, line_number: usize) -> Result<(), String> {
+    if record.targets.is_empty() {
+        return Ok(());
+    }
+    let declares = |target: &str| record.targets.iter().any(|name| name == target);
+    // `spirv` is required, and not only for symmetry: the `entry-points` this
+    // record carries are read out of the compiled SPIR-V, so a record without
+    // it names entry points nothing derived.
+    if !declares("spirv") {
+        return Err(format!(
+            "line {line_number}: section [{}] declares `{}`, which does not include `spirv` — \
+             its entry points are read out of the SPIR-V it would then not have",
+            record.name,
+            record.targets.join(", ")
+        ));
+    }
+    for (target, built) in [
+        ("wgsl", !record.wgsl.is_empty()),
+        ("msl", !record.msl.is_empty()),
+        ("dxil", !record.dxil.is_empty()),
+    ] {
+        match (declares(target), built) {
+            (true, false) => {
+                return Err(format!(
+                    "line {line_number}: section [{}] declares the `{target}` target but has no \
+                     `{target}` artifact, so a target it says it must support was never built",
+                    record.name
+                ));
+            }
+            (false, true) => {
+                return Err(format!(
+                    "line {line_number}: section [{}] has a `{target}` artifact without declaring \
+                     the `{target}` target, so nothing regenerates it",
+                    record.name
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// A 64-character lower-case hex digest, or an explanation.
@@ -621,6 +728,17 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
         // pairing rule in `finish` only checks path-and-hash *together*, so a
         // whole column silently missing from the generator would parse fine.
         for record in &manifest.shaders {
+            // Every shipped shader declares what it must compile to. The
+            // agreement between that declaration and the columns below is
+            // `check_targets`' job; this is the assertion that the column
+            // exists at all, because a generator that stopped emitting it
+            // would turn that check off for every shader at once.
+            assert_eq!(
+                record.targets,
+                TARGETS.map(str::to_string).to_vec(),
+                "{}: every shader shipped today targets all four",
+                record.name
+            );
             assert!(!record.wgsl.is_empty(), "{}: no wgsl column", record.name);
             assert!(!record.msl.is_empty(), "{}: no msl column", record.name);
             assert!(!record.msl_sha256.is_empty(), "{}", record.name);
@@ -639,6 +757,81 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
         }
         assert!(!manifest.dxc_version.is_empty());
         assert_eq!(manifest.dxil_model, "6_6");
+    }
+
+    /// The declaration a shader's `// crcbl-targets:` line makes reaches the
+    /// record, in order and de-duplicated.
+    #[test]
+    fn a_target_declaration_round_trips() {
+        let text = format!("{SAMPLE}targets = spirv\n");
+        let manifest = parse_manifest(&text).expect("parses");
+        assert_eq!(manifest.shaders[0].targets, vec!["spirv".to_string()]);
+    }
+
+    /// A target name nobody emits is a typo in the shader's declaration, and
+    /// accepting it would leave the author believing a target is required while
+    /// nothing builds it.
+    #[test]
+    fn a_target_that_is_not_one_is_refused() {
+        for bad in ["glsl", "SPIRV", "spir-v", "metal"] {
+            let text = format!("{SAMPLE}targets = spirv, {bad}\n");
+            let error = parse_manifest(&text).expect_err(bad);
+            assert!(error.contains("is not a target"), "{bad}: {error}");
+        }
+    }
+
+    /// A repeated target, and a repeated `targets` key, are both ambiguous
+    /// rather than harmless: neither says which declaration the artifacts were
+    /// built from.
+    #[test]
+    fn a_repeated_target_or_declaration_is_refused() {
+        let error = parse_manifest(&format!("{SAMPLE}targets = spirv, spirv\n"))
+            .expect_err("`spirv` twice");
+        assert!(error.contains("twice"), "{error}");
+
+        let error = parse_manifest(&format!("{SAMPLE}targets = spirv\ntargets = spirv\n"))
+            .expect_err("`targets` twice");
+        assert!(error.contains("twice"), "{error}");
+
+        let error =
+            parse_manifest(&format!("{SAMPLE}targets =  \n")).expect_err("an empty declaration");
+        assert!(error.contains("names nothing"), "{error}");
+    }
+
+    /// The declaration and the artifact columns must agree in **both**
+    /// directions, and every column is checked — a loop that only ever ran over
+    /// `wgsl` would pass this test's first half identically.
+    #[test]
+    fn a_declaration_that_disagrees_with_the_columns_is_refused() {
+        for target in ["wgsl", "msl", "dxil"] {
+            let text = format!("{SAMPLE}targets = spirv, {target}\n");
+            let error = parse_manifest(&text).expect_err("declared and never built");
+            assert!(error.contains("was never built"), "{target}: {error}");
+        }
+
+        // And each column present without its declaration.
+        let built = [
+            format!("wgsl = wgsl/triangle.wgsl\nwgsl-sha256 = {ZERO}"),
+            format!("msl = msl/triangle.metal\nmsl-sha256 = {ZERO}"),
+            format!("dxil = vertexMain:dxil/triangle.vertexMain.dxil:{ZERO}"),
+        ];
+        for (target, lines) in ["wgsl", "msl", "dxil"].iter().zip(built) {
+            let text = format!("{}targets = spirv\n{lines}\n", pinned());
+            let error = parse_manifest(&text).expect_err("built and never declared");
+            assert!(
+                error.contains("nothing regenerates it"),
+                "{target}: {error}"
+            );
+        }
+    }
+
+    /// A record's `entry-points` are read out of its SPIR-V, so a declaration
+    /// without `spirv` names entry points nothing derived.
+    #[test]
+    fn a_declaration_without_spirv_is_refused() {
+        let text = format!("{SAMPLE}targets = wgsl\n");
+        let error = parse_manifest(&text).expect_err("no spirv");
+        assert!(error.contains("spirv"), "{error}");
     }
 
     /// A DXIL line carries the entry point, the path and the digest together,

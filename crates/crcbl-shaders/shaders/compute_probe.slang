@@ -1,3 +1,5 @@
+// crcbl-targets: spirv, wgsl, msl, dxil
+
 // The engine's first compute shader, and the only source here that draws
 // nothing.
 //

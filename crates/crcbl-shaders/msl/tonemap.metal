@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 54 "shaders/tonemap.slang"
+#line 56 "shaders/tonemap.slang"
 float3 tonemap_0(float3 color_0)
 {
     return saturate(color_0);
@@ -32,28 +32,28 @@ struct KernelContext_0
 };
 
 
-#line 74 "shaders/tonemap.slang"
+#line 76 "shaders/tonemap.slang"
 [[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 position_0 [[position]], texture2d<float, access::sample> scene_1 [[texture(0)]], sampler sceneSampler_1 [[sampler(0)]])
 {
 
-#line 74
+#line 76
     thread KernelContext_0 kernelContext_0;
 
-#line 74
+#line 76
     (&kernelContext_0)->scene_0 = scene_1;
 
-#line 74
+#line 76
     (&kernelContext_0)->sceneSampler_0 = sceneSampler_1;
 
-#line 74
+#line 76
     pixelOutput_0 _S2 = { float4(tonemap_0(((scene_1).sample((sceneSampler_1), (_S1.uv_0))).xyz), 1.0f) };
 
-#line 87
+#line 89
     return _S2;
 }
 
 
-#line 87
+#line 89
 struct vertexMain_Result_0
 {
     float4 position_1 [[position]];
@@ -61,7 +61,7 @@ struct vertexMain_Result_0
 };
 
 
-#line 40
+#line 42
 struct FullscreenOutput_0
 {
     float4 position_2;
@@ -82,27 +82,27 @@ struct FullscreenOutput_0
 #line 473
     (&kernelContext_1)->sceneSampler_0 = sceneSampler_2;
 
-#line 62 "shaders/tonemap.slang"
+#line 64 "shaders/tonemap.slang"
     thread FullscreenOutput_0 output_1;
 
     float2 _S3 = float2(float((index_0 << 1U) & 2U), float(index_0 & 2U));
 
-#line 64
+#line 66
     (&output_1)->uv_2 = _S3;
 
-#line 69
+#line 71
     (&output_1)->position_2 = float4(_S3 * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
 
-#line 69
+#line 71
     thread vertexMain_Result_0 _S4;
 
-#line 69
+#line 71
     (&_S4)->position_1 = output_1.position_2;
 
-#line 69
+#line 71
     (&_S4)->uv_1 = output_1.uv_2;
 
-#line 69
+#line 71
     return _S4;
 }
 

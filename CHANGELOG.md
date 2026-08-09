@@ -16,6 +16,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Every shader declares the targets it must compile to, and the compile script
+  emits exactly those.** Each `crates/crcbl-shaders/shaders/*.slang` opens with
+  a `// crcbl-targets: spirv, wgsl, msl, dxil` line; `tools/compile-shaders.sh`
+  refuses a source with no declaration, an unknown target name, or a declaration
+  without `spirv` (the entry points every other target is driven from are read
+  out of the SPIR-V), and refuses an artifact left in the tree for a target its
+  shader no longer declares. The declaration is recorded as a `targets` key in
+  `spirv/manifest.txt` and reaches
+  `crcbl_shaders::manifest::ShaderRecord::targets`, where a record whose
+  declaration and artifact columns disagree is rejected — so the check also runs
+  in `build.rs`, on machines with no shader compiler. Every shader shipped today
+  declares all four; the mechanism exists for the first mesh-shader or
+  ray-tracing source, which will have no WGSL form at all.
+
+- **A per-target preprocessor define, so a shader can differ by target without
+  being forked.** `tools/compile-shaders.sh` and `build.rs` pass exactly one of
+  `CRCBL_TARGET_SPIRV`, `CRCBL_TARGET_WGSL`, `CRCBL_TARGET_MSL` and
+  `CRCBL_TARGET_HLSL` (the DXIL leg, named for the language Slang emits on the
+  way). Slang defines no target macro of its own, so until now the only way to
+  differ per target was a second copy of the file. No committed artifact
+  changed: the defines are inert in every shader that ignores them.
+
+- **A lint that refuses a shader declaring its resources out of binding order.**
+  Slang's Metal target ignores `[[vk::binding]]` and assigns argument-table
+  indices in declaration order, while `crcbl-mtl` binds by ascending
+  `(set, binding)`; when `ui.slang` disagreed with itself, its MSL put the push
+  constants where the vertex buffer should have been and the UI pass drew
+  nothing on macOS. `crcbl-shaders` now parses every `.slang` and asserts
+  ascending `(set, binding)` with push constants last, which is where Slang's
+  Metal target puts them and where `crcbl-mtl` leaves room. A comment was
+  previously the only thing preventing a recurrence.
+
 - **The engine names every capability it asked for and did not get, once, at
   device creation.** `crcbl_hal::downgrades(requested, granted)` returns a
   `Downgrades` describing each absent optional feature and the path selector its
