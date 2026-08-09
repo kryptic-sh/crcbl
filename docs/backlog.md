@@ -21,6 +21,27 @@ confirmed; the rest of this file assumes them.
   `cargo deny` is clean. **To override:** drop the dev-dependency and the WGSL
   artifacts go back to being unchecked, or find a validator that is not naga.
 
+- **CI's `spirv-val` pinned to the Vulkan SDK, taken after it broke `main`.**
+  The shader job installed `spirv-tools` from apt, so CI validated with whatever
+  the runner image carried while a developer validated with whatever they had.
+  On 2026-08-09 those disagreed: CI rejected `mesh_shader.spv` over
+  `VUID-PrimitiveTriangleIndicesEXT-…-07054` — the indices decoration used
+  without `OutputTrianglesEXT` — on a module whose disassembly carries that
+  execution mode on **both** entry points that read the decorated variable, and
+  which radv and lavapipe both render correctly. A current validator (v2026.3,
+  vulkan-sdk-1.4.357.0) accepts it.
+
+  **The judgement:** an old validator's false positive, not a bad artifact. Two
+  drivers and a newer validator against one older validator, with the
+  disassembly readable and unambiguous. But the deeper defect was that CI and a
+  developer could not agree on whether an artifact was valid and **neither could
+  reproduce the other** — so the validator is now pinned the way `slangc` and
+  `dxc` already are, and the step fails if it is not the pinned version.
+
+  **To override:** if you think the artifact is genuinely invalid, the fix is to
+  stop two mesh entry points sharing one `PrimitiveTriangleIndicesEXT` variable
+  — split `amplifiedMeshMain` into its own `.slang` — rather than to unpin.
+
 - **Metal's `DRAW_INDIRECT_COUNT`: the seam was _not_ reshaped.** This reverses
   an explicit instruction ("update the seam and get all features supported in
   all the native backends"), on evidence found after it was given: `wgpu-hal`
