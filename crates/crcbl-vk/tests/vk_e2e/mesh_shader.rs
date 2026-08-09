@@ -91,16 +91,12 @@ impl Headless {
 
 /// Everything the mesh path needs, built through the seam.
 ///
-/// There is a storage buffer and a bind group, and **no vertex buffer and no
-/// index buffer**: a mesh pipeline has no vertex stage to fetch for, so the
-/// geometry arrives the only way this engine has — pulled, by the mesh stage
-/// itself, out of a buffer bound with `ShaderStages::MESH` visibility. That
-/// visibility is what the rest of this fixture is evidence for.
+/// There is **no vertex buffer, no index buffer and no bind group** — not as a
+/// simplification, but because a mesh pipeline has no vertex stage to pull for
+/// and this shader carries its three vertices as constants. That absence is the
+/// interesting part of the descriptor, so it is the interesting part of this
+/// fixture too.
 struct MeshShaderResources {
-    /// The pulled geometry, in `crcbl_shaders::mesh_shader`'s layout.
-    vertices: crcbl_hal::BufferHandle,
-    bind_group_layout: crcbl_hal::BindGroupLayoutHandle,
-    bind_group: crcbl_hal::BindGroupHandle,
     pipeline_layout: crcbl_hal::PipelineLayoutHandle,
     /// Mesh + fragment.
     mesh_only: crcbl_hal::GraphicsPipelineHandle,
@@ -112,99 +108,13 @@ impl MeshShaderResources {
     fn new(headless: &Headless) -> Self {
         let device = headless.device.as_ref();
 
-        // The same staged upload the triangle suite does, for the same reason:
-        // the buffer the shader reads is device-local, so the bytes go through
-        // a host-visible one and a barrier.
-        let bytes = crcbl_shaders::mesh_shader::vertex_bytes();
-        let size = bytes.len() as u64;
-        let staging = device
-            .create_buffer(&BufferDesc {
-                label: Some("mesh shader staging"),
-                size,
-                usage: BufferUsage::TRANSFER_SRC,
-                memory: MemoryLocation::HostUpload,
-            })
-            .expect("a staging buffer");
-        device.write_buffer(staging, 0, &bytes).expect("write");
-        let vertices = device
-            .create_buffer(&BufferDesc {
-                label: Some("mesh shader vertices"),
-                size,
-                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
-                memory: MemoryLocation::DeviceLocal,
-            })
-            .expect("a vertex buffer");
-        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-            label: Some("mesh shader upload"),
-            queue: headless.queue,
-        });
-        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
-            src: staging,
-            src_offset: 0,
-            dst: vertices,
-            dst_offset: 0,
-            size,
-        });
-        encoder.pipeline_barrier(&Barriers {
-            buffers: &[crcbl_hal::BufferBarrier {
-                buffer: vertices,
-                from: ResourceState::TransferDst,
-                to: ResourceState::ShaderRead,
-                queue_transfer: None,
-            }],
-            ..Barriers::default()
-        });
-        let commands = encoder.finish().expect("recording succeeded");
-        device
-            .submit(headless.queue, &SubmitInfo::new(&[commands]))
-            .expect("submit");
-        device.wait_idle().expect("idle");
-        device.destroy_command_buffer(commands);
-        device.destroy_buffer(staging);
-
-        // **The point of this slice.** `ShaderStages::MESH` is outside
-        // `GRAPHICS` and `ALL`, so it is named here explicitly — and a device
-        // that did not report `MESH_SHADER` refuses this call rather than the
-        // draw, which is what `Headless::open_for_mesh_shader` asserted about.
-        let layout_entries = [crcbl_hal::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: crcbl_hal::ShaderStages::MESH,
-            kind: crcbl_hal::BindingKind::StorageBuffer {
-                read_only: true,
-                dynamic: false,
-            },
-            count: 1,
-            flags: crcbl_hal::BindingFlags::empty(),
-        }];
-        let bind_group_layout = device
-            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
-                label: Some("mesh shader vertices"),
-                entries: &layout_entries,
-            })
-            .expect("a mesh-visible layout on a device that reports MESH_SHADER");
-
-        let group_entries = [crcbl_hal::BindGroupEntry {
-            binding: 0,
-            array_index: 0,
-            resource: crcbl_hal::BindingResource::whole_buffer(vertices),
-        }];
-        let bind_group = device
-            .create_bind_group(&crcbl_hal::BindGroupDesc {
-                label: Some("mesh shader vertices"),
-                layout: bind_group_layout,
-                entries: &group_entries,
-                variable_count: None,
-            })
-            .expect("a bind group");
-
-        let set_layouts = [bind_group_layout];
         let pipeline_layout = device
             .create_pipeline_layout(&crcbl_hal::PipelineLayoutDesc {
                 label: Some("mesh shader"),
-                bind_group_layouts: &set_layouts,
+                bind_group_layouts: &[],
                 push_constants: None,
             })
-            .expect("a pipeline layout carrying the mesh-visible set");
+            .expect("a pipeline layout with no sets at all");
 
         let module = device
             .create_shader_module(&crcbl_hal::ShaderModuleDesc {
@@ -268,9 +178,6 @@ impl MeshShaderResources {
         device.destroy_shader_module(module);
 
         Self {
-            vertices,
-            bind_group_layout,
-            bind_group,
             pipeline_layout,
             mesh_only,
             amplified,
@@ -286,9 +193,6 @@ impl MeshShaderResources {
         }
         device.destroy_graphics_pipeline(self.mesh_only);
         device.destroy_pipeline_layout(self.pipeline_layout);
-        device.destroy_bind_group(self.bind_group);
-        device.destroy_bind_group_layout(self.bind_group_layout);
-        device.destroy_buffer(self.vertices);
     }
 }
 
@@ -348,9 +252,6 @@ fn render_mesh_shader(
     encoder.set_viewport(&crcbl_hal::Viewport::from_size(width, height));
     encoder.set_scissor(&Rect2d::from_size(width, height));
     encoder.bind_graphics_pipeline(pipeline);
-    // The geometry the mesh stage pulls. Bound exactly as the raster path binds
-    // the vertex stage's — the stage mask on the layout is the only difference.
-    encoder.bind_group(0, resources.bind_group, &[], resources.pipeline_layout);
     // One workgroup. Of the *task* stage when the pipeline has one, of the mesh
     // stage otherwise — and the shader's `taskMain` dispatches exactly one mesh
     // workgroup, so both pipelines run `emit` three times either way.
@@ -399,6 +300,7 @@ fn render_mesh_shader(
     headless.readback(staging, byte_count, &mut bytes);
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);
+    let _ = resources;
 
     crcbl_golden::Image::from_readback(width, height, &bytes, crcbl_golden::ChannelOrder::Rgba)
         .expect("the readback is exactly one image")

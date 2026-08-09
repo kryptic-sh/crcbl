@@ -3423,6 +3423,35 @@ the transport seam over a third transport shape.
 
 ### Owed by the mesh-shader path
 
+- **Reverted: the mesh stage reading a `StructuredBuffer` breaks Slang's Metal
+  output.** `233b657` made `mesh_shader.slang` pull its vertices from a buffer
+  instead of hardcoding them — correct on Vulkan, bit-identical golden on radv
+  and on lavapipe — and Slang then emitted MSL that `xcrun metal` refuses:
+  `variables in the threadgroup address space cannot be declared in a fragment
+function`. The threadgroup variable belongs to the task stage and Slang put it
+  in the fragment function once the shared vertex type became visible to it.
+  Reverted rather than left on `main`, because it fails the macOS leg of every
+  subsequent commit.
+
+  **The `xcrun metal` gate added earlier is what caught it** — nothing else in
+  the tree compiles MSL, and every other check was green. That gate paid for
+  itself on its second commit.
+
+  To redo it: keep the fragment entry point from referencing the mesh shader's
+  vertex type — a separate fragment input struct is the obvious shape — and
+  verify by reading the regenerated `msl/mesh_shader.metal` for a `threadgroup`
+  declaration inside the fragment function before pushing, since no local tool
+  compiles MSL. Upstream this looks like the same family as
+  shader-slang#9444.
+
+- **Not reproduced: a lavapipe SIGSEGV in CI that does not occur locally.**
+  `retire::two_submissions_referencing_one_destroyed_buffer_keep_it_alive`
+  segfaulted on CI's lavapipe during the same run, in a test unrelated to mesh
+  shaders. The same commit runs 62/62 on this machine's lavapipe (Mesa 26.1.6,
+  LLVM 22.1.8), so CI's Mesa build differs. Unexplained, seen once. If it recurs
+  it is a real bug and the driver version is the first thing to compare —
+  **CI's lavapipe is as unpinned as its `spirv-val` was.**
+
 - **Nothing can bind a descriptor to the mesh stage yet.** `ShaderStages::MESH`
   and `TASK` exist and map correctly, but no bind-group layout or push-constant
   range names them, and no backend polices a layout naming a mesh stage on a

@@ -1930,21 +1930,10 @@ impl Device for Dx12Device {
     }
 
     /// Plans the descriptor ranges a set becomes. See [`crate::binding`].
-    ///
-    /// The mesh-stage check is here rather than in `plan_layout` because it
-    /// reads the *device* rather than the descriptor: this backend reports no
-    /// `Features::MESH_SHADER`, so a layout naming the mesh stage is refused
-    /// here — `conv::shader_visibility` would otherwise widen it to
-    /// `D3D12_SHADER_VISIBILITY_ALL` and say nothing.
     fn create_bind_group_layout(
         &self,
         desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
-        for entry in desc.entries {
-            entry
-                .visibility
-                .check_supported(self.inner.caps.features, BackendKind::Dx12)?;
-        }
         let record = binding::plan_layout(desc, self.inner.owner.id)?;
         let handle = self.state().bind_group_layouts.insert(record);
         Ok(handle::stamp(self.inner.owner, handle))

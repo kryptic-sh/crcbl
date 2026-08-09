@@ -26,21 +26,17 @@
 // claim about what the *compiler* accepts, and those two artifacts are what
 // will catch it the day the compiler stops accepting it.
 //
-// # The geometry is pulled, exactly as the raster path's is
+// # The geometry is hardcoded, and that is the boundary of this slice
 //
 // `triangle.slang` pulls its vertices from a storage buffer because vertex
-// pulling is the engine's only geometry path, and a mesh shader is not an
-// exception to it: the buffer below is bound with `ShaderStages::MESH`
-// visibility, which `crcbl-hal` now accepts and every backend refuses on a
-// device without `Features::MESH_SHADER` (see `ShaderStages::check_supported`).
-// What is *not* here is a meshlet — the vertices are one small buffer a caller
-// uploads rather than a range of a global pool, because the mesh asset system
-// §3.5 wants does not exist yet.
+// pulling is the engine's only geometry path. A mesh shader reading a buffer
+// needs `ShaderStages::MESH` visibility on a binding, which every backend that
+// cannot create a mesh pipeline would then have to police — so the buffer
+// arrives with the mesh asset system, and this shader carries its three
+// vertices as constants.
 //
-// The three vertices are deliberately **not** `triangle.slang`'s: apex down
-// instead of up, so a golden image of this can never be satisfied by a copy of
-// that one. `crcbl_shaders::mesh_shader` owns the values and the byte layout,
-// the way `crcbl_shaders::triangle` owns the raster path's.
+// They are deliberately **not** `triangle.slang`'s: apex down instead of up,
+// so a golden image of this can never be satisfied by a copy of that one.
 //
 // # Winding
 //
@@ -49,26 +45,6 @@
 // counter-clockwise in framebuffer space — matching `FrontFace::Ccw`, exactly
 // as `crcbl_shaders::triangle::VERTICES` does.
 
-/// One pulled vertex, in the `std430` layout
-/// `crcbl_shaders::mesh_shader::vertex_bytes` writes: two `float4`s, 32 bytes,
-/// no padding. The same shape `triangle.slang`'s `Vertex` has, and a separate
-/// declaration for the same reason the two shaders are separate files — one
-/// source, one layout, no shared header to keep in step.
-struct Vertex
-{
-    float4 position;
-    float4 color;
-};
-
-/// The pulled geometry, read by the **mesh** stage rather than a vertex stage.
-/// `StructuredBuffer` rather than `RWStructuredBuffer` makes it a read-only
-/// storage buffer, matching `BindingKind::StorageBuffer { read_only: true }`
-/// with `ShaderStages::MESH` visibility on the Rust side.
-[[vk::binding(0, 0)]]
-StructuredBuffer<Vertex> vertices;
-
-/// What the mesh stage emits: the same two fields, with the semantics the
-/// rasteriser reads.
 struct MeshVertex
 {
     float4 position : SV_Position;
@@ -83,6 +59,23 @@ struct MeshVertex
 struct Amplification
 {
     float4 tint;
+};
+
+/// Apex down, so this is not `triangle.slang`'s triangle.
+static const float4 POSITIONS[3] = {
+    float4(0.0, -0.7, 0.5, 1.0),
+    float4(-0.6, 0.6, 0.5, 1.0),
+    float4(0.6, 0.6, 0.5, 1.0),
+};
+
+/// One saturated primary per corner, no two alike — the same diagnostic
+/// property `crcbl_shaders::triangle::VERTICES` documents, for the same reason:
+/// a Y flip, an X mirror or a reversed vertex order each produce a visibly
+/// different picture rather than a plausible one.
+static const float4 COLORS[3] = {
+    float4(1.0, 0.0, 0.0, 1.0),
+    float4(0.0, 1.0, 0.0, 1.0),
+    float4(0.0, 0.0, 1.0, 1.0),
 };
 
 /// One thread's share of the triangle: its vertex, and the index triple once.
@@ -104,11 +97,9 @@ void emit(
 {
     SetMeshOutputCounts(3, 1);
 
-    Vertex pulled = vertices[index];
-
     MeshVertex vertex;
-    vertex.position = pulled.position;
-    vertex.color = pulled.color * tint;
+    vertex.position = POSITIONS[index];
+    vertex.color = COLORS[index] * tint;
     verts[index] = vertex;
 
     // One thread writes the single primitive; all three write a vertex.

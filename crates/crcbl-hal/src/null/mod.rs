@@ -982,9 +982,6 @@ impl Device for NullDevice {
             .max()
             .unwrap_or(0);
         for (index, entry) in desc.entries.iter().enumerate() {
-            entry
-                .visibility
-                .check_supported(self.caps.features, BackendKind::Null)?;
             if !entry.flags.is_empty() && !indexing {
                 return Err(self.unsupported("descriptor indexing flags"));
             }
@@ -1143,9 +1140,6 @@ impl Device for NullDevice {
                 // visible.
                 return Err(self.unsupported("push constants"));
             }
-            range
-                .stages
-                .check_supported(self.caps.features, BackendKind::Null)?;
             // Saturating, not wrapping: `PushConstantRange { offset: u32::MAX,
             // size: 1 }` panicked in debug and wrapped to 0 in release, and 0
             // then *passed* the check it was supposed to fail.

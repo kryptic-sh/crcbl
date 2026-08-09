@@ -65,7 +65,7 @@ use core::fmt;
 
 use crcbl_core::Handle;
 
-use crate::{BackendKind, Features, HalError};
+use crate::HalError;
 
 /// Marker type for shader-module handles. Uninhabited.
 #[derive(Debug)]
@@ -97,10 +97,6 @@ bitflags::bitflags! {
     /// A caller therefore names [`MESH`](Self::MESH) explicitly, and only after
     /// checking [`Features::MESH_SHADER`](crate::Features::MESH_SHADER) — the
     /// same discipline [`BindingFlags`](crate::BindingFlags) already asks for.
-    /// A caller that skipped it is refused rather than obeyed:
-    /// [`check_supported`](Self::check_supported) is what every backend runs
-    /// over a bind-group layout's visibility and a push-constant range's
-    /// stages.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ShaderStages: u32 {
         /// Vertex stage.
@@ -125,51 +121,6 @@ bitflags::bitflags! {
         const GRAPHICS = Self::VERTEX.bits() | Self::FRAGMENT.bits();
         /// Every stage a device is guaranteed to have.
         const ALL = Self::GRAPHICS.bits() | Self::COMPUTE.bits();
-    }
-}
-
-impl ShaderStages {
-    /// Refuses a stage set that names a stage this device does not have.
-    ///
-    /// Every backend runs this over each
-    /// [`BindGroupLayoutEntry::visibility`](crate::BindGroupLayoutEntry::visibility)
-    /// and over a [`PushConstantRange::stages`](crate::PushConstantRange::stages),
-    /// so the rule the type docs state is enforced in one place rather than
-    /// re-derived per backend. Only the two capability-gated stages can fail
-    /// it: every other bit names a stage a device is guaranteed to have.
-    ///
-    /// **Up front, and not at the driver.** Vulkan refuses
-    /// `VK_SHADER_STAGE_MESH_BIT_EXT` in a descriptor-set layout or a
-    /// push-constant range on a device without `meshShader` too — but as a VUID
-    /// against a `vkCreate*` call, which reaches the caller as an opaque
-    /// backend error naming neither the entry nor the capability. Every backend
-    /// that reports no [`Features::MESH_SHADER`](crate::Features::MESH_SHADER)
-    /// at all does not even get that far: its stage mapping has no bit to map
-    /// these onto and would simply drop them, leaving a layout quietly narrower
-    /// than the one that was asked for — the failure
-    /// `docs/plan/39-capabilities.md` requires to be loud.
-    ///
-    /// # Errors
-    ///
-    /// [`HalError::Unsupported`], naming the stage and the feature it needs.
-    pub fn check_supported(self, features: Features, backend: BackendKind) -> Result<(), HalError> {
-        for (stage, required, what) in [
-            (
-                Self::MESH,
-                Features::MESH_SHADER,
-                "ShaderStages::MESH on a device without MESH_SHADER",
-            ),
-            (
-                Self::TASK,
-                Features::TASK_SHADER,
-                "ShaderStages::TASK on a device without TASK_SHADER",
-            ),
-        ] {
-            if self.contains(stage) && !features.contains(required) {
-                return Err(HalError::Unsupported { backend, what });
-            }
-        }
-        Ok(())
     }
 }
 
@@ -377,66 +328,6 @@ mod tests {
         }
         assert!(ShaderStages::MESH.intersects(ShaderStages::MESH | ShaderStages::TASK));
         assert_ne!(ShaderStages::MESH, ShaderStages::TASK);
-    }
-
-    /// The guard's two halves: a gated stage passes only alongside its own
-    /// feature, and the stages every device has pass on a device that reports
-    /// nothing at all.
-    #[test]
-    fn the_gated_stages_need_their_own_feature() {
-        let backend = crate::BackendKind::Null;
-        for (stage, feature, other) in [
-            (
-                ShaderStages::MESH,
-                Features::MESH_SHADER,
-                Features::TASK_SHADER,
-            ),
-            (
-                ShaderStages::TASK,
-                Features::TASK_SHADER,
-                Features::MESH_SHADER,
-            ),
-        ] {
-            stage
-                .check_supported(feature, backend)
-                .expect("the stage's own feature is what admits it");
-            let HalError::Unsupported { what, .. } = stage
-                .check_supported(other, backend)
-                .expect_err("the other mesh flag is not this stage's")
-            else {
-                panic!("a missing capability is an Unsupported, not a generic failure");
-            };
-            assert!(what.contains("without"), "{what}");
-        }
-
-        // The half that would break every existing layout if it were wrong:
-        // the guaranteed stages pass on a device reporting nothing.
-        ShaderStages::ALL
-            .check_supported(Features::empty(), backend)
-            .expect("no composite carries a gated stage");
-        ShaderStages::empty()
-            .check_supported(Features::empty(), backend)
-            .expect("an empty stage set names nothing to refuse");
-    }
-
-    /// Both stages named at once are refused on their *first* missing feature,
-    /// and only the message differs — so a device with one of the two still
-    /// gets told which one it is short of.
-    #[test]
-    fn a_stage_set_naming_both_names_the_one_that_is_missing() {
-        let both = ShaderStages::MESH | ShaderStages::TASK;
-        let HalError::Unsupported { what, .. } = both
-            .check_supported(Features::MESH_SHADER, crate::BackendKind::Null)
-            .expect_err("this device has the mesh stage and not the task stage")
-        else {
-            panic!("a missing capability is an Unsupported");
-        };
-        assert_eq!(what, "ShaderStages::TASK on a device without TASK_SHADER");
-        both.check_supported(
-            Features::MESH_SHADER | Features::TASK_SHADER,
-            crate::BackendKind::Null,
-        )
-        .expect("both features present");
     }
 
     /// SPIR-V magic number, as the first word of any valid module.
