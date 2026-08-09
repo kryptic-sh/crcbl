@@ -72,22 +72,28 @@ profile is a description after the fact, not an input.
 
 ## The request: `required` versus `preferred`
 
-`DeviceCaps::missing(required)` already answers "which of these is absent". The
-device request grows to say which absences are fatal:
+**This distinction already exists in the seam and is spelled correctly.**
+`DeviceDesc` carries `required_features` and `optional_features`;
+`DeviceCaps::missing(required)` answers "which of these is absent", and
+`request_device` is documented to fail naming exactly what an adapter lacks. No
+new type is needed — an earlier draft of this document proposed a
+`FeatureRequest` struct, which would have duplicated what is there.
 
-```rust
-pub struct FeatureRequest {
-    /// Absent → device creation fails, naming exactly what is missing.
-    pub required: Features,
-    /// Absent → the engine selects a lesser path and logs the downgrade.
-    pub preferred: Features,
-}
-```
+**What is wrong is the default.** `DeviceDesc::default()` sets
+`required_features: Features::TIER_A` — every caller demands descriptor
+indexing, buffer device address, draw-indirect-count, multi-draw-indirect,
+compute and timeline semaphores, or gets no device at all. That is the
+all-or-nothing behaviour this topic exists to replace, and it is why Metal is
+refused over one absent flag while having the rest.
 
-The engine's own default puts only what nothing can work without in `required` —
-compute and timeline semaphores — and everything else in `preferred`. A game
-whose whole look is ray traced puts `RAY_QUERY` in `required` and gets a named
-failure rather than a picture that is quietly a different game.
+The default becomes **only what nothing can work without** — compute and a
+timeline semaphore — with everything else optional. A game whose whole look is
+ray traced puts `RAY_QUERY` in `required_features` and gets a named failure
+rather than a picture that is quietly a different game.
+
+Worth noting the samples already do the right thing: `apps/*/src/gpu.rs` pass
+`optional_features: Features::TIER_A`, so they degrade today. It is the seam's
+own default that does not.
 
 **Every downgrade is logged once, at device creation, naming the feature and the
 path it selected.** A silently absent feature reporting as success is the same
@@ -224,18 +230,18 @@ contributing the target upstream is a legitimate option if it stalls.
 
 ## Delivery
 
-| Slice                                                                 | Phase |
-| --------------------------------------------------------------------- | ----- |
-| Remove `Features::TIER_A` and `RendererTier`; add `FeatureRequest`    | P7    |
-| Derived path selectors + the resolution point + downgrade logging     | P7    |
-| `MESH_SHADER` / `RAY_QUERY` / `ACCELERATION_STRUCTURE` flags reported | P7    |
-| Toggle layering (settings ← camera stack ← programmatic)              | P7    |
-| Settings-screen exposure of the video toggles                         | P10   |
+| Slice                                                                     | Phase |
+| ------------------------------------------------------------------------- | ----- |
+| Remove `Features::TIER_A` and `RendererTier`; fix `DeviceDesc::default()` | P7    |
+| Derived path selectors + the resolution point + downgrade logging         | P7    |
+| `MESH_SHADER` / `RAY_QUERY` / `ACCELERATION_STRUCTURE` flags reported     | P7    |
+| Toggle layering (settings ← camera stack ← programmatic)                  | P7    |
+| Settings-screen exposure of the video toggles                             | P10   |
 
-**The timing is deliberate and it is now.** `RendererTier` is currently consumed
-by log lines, `Debug` impls, tests and one device request; nothing in the
-renderer branches on it, because P7 has not landed. Changing it before P7 is
-nearly free and changing it afterwards is not.
+**The timing is deliberate and it is now.** `RendererTier` is consumed by log
+lines, `Debug` impls, tests and one device request; nothing in the renderer
+branches on it, because P7 has not landed. Changing it before P7 is nearly free
+and changing it afterwards is not.
 
 ## Risks
 
