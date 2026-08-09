@@ -48,6 +48,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Metal target puts them and where `crcbl-mtl` leaves room. A comment was
   previously the only thing preventing a recurrence.
 
+- **The WGSL and MSL artifacts are validated, where before only the SPIR-V
+  was.** `crcbl-shaders` gained `tests/wgsl_validation.rs`, which parses and
+  validates every committed `wgsl/*.wgsl` with naga — the same front end `wgpu`
+  compiles WGSL through, so a module it rejects is a pipeline that fails to
+  create — and cross-checks the set it swept against the manifest records
+  declaring `wgsl`. `wgsl/ui.wgsl` shipped for months with an undecorated
+  `var<uniform>` that naga refuses outright, which `crcbl-wgpu` could never have
+  loaded; that artifact is checked in as a fixture so the failure path stays
+  exercised. naga is a dev-dependency pinned to the version `wgpu` already
+  resolves — the library itself still has no dependencies. The MSL is compiled
+  with `xcrun metal` on the macOS CI job, which is the only place it can be
+  checked at all, and that step fails if it compiled zero files. **naga
+  accepting a module is not Dawn accepting it**: Dawn enforces WGSL's uniformity
+  rule where naga does not, which is how the UI shader's non-uniform
+  `textureSample` drew a black canvas in the browser. This narrows the gap; it
+  does not close it.
+
 - **The engine names every capability it asked for and did not get, once, at
   device creation.** `crcbl_hal::downgrades(requested, granted)` returns a
   `Downgrades` describing each absent optional feature and the path selector its

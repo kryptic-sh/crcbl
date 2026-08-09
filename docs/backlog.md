@@ -10,6 +10,17 @@ can be confirmed or reversed without re-deriving anything. **Each says what was
 decided, why, and what reversing it costs.** Delete an entry once it is
 confirmed; the rest of this file assumes them.
 
+- **`naga` added as a dev-dependency of `crcbl-shaders`, taken without asking.**
+  A new dependency is normally the user's call. Taken because the alternative
+  was leaving three of four committed shader artifacts validated by nothing —
+  the gap that let `wgsl/ui.wgsl` ship for months with a `var<uniform>` carrying
+  no binding decoration, which `crcbl-wgpu` could never have loaded. naga is the
+  tool that would have caught it, is already in `Cargo.lock` through wgpu at the
+  same version, and is dev-only so it does not ship. `git diff Cargo.lock` is a
+  three-line dependency edge and **no new package entered the graph**;
+  `cargo deny` is clean. **To override:** drop the dev-dependency and the WGSL
+  artifacts go back to being unchecked, or find a validator that is not naga.
+
 - **Metal's `DRAW_INDIRECT_COUNT`: the seam was _not_ reshaped.** This reverses
   an explicit instruction ("update the seam and get all features supported in
   all the native backends"), on evidence found after it was given: `wgpu-hal`

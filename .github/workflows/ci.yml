@@ -844,6 +844,43 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+      # **The MSL half of `docs/plan/02-vulkan-backend.md`'s fourth shader
+      # portability rule** — "validate all four artifacts, not one".
+      # `tools/compile-shaders.sh` runs `spirv-val` over the SPIR-V and
+      # `crates/crcbl-shaders/tests/wgsl_validation.rs` runs naga over the WGSL,
+      # both on Linux. The MSL can be checked **nowhere else**: `xcrun metal` is
+      # macOS-only, `newLibraryWithSource:` needs a device, and no open-source
+      # tool parses MSL. So this is the only job in the matrix that can say the
+      # committed `.metal` even compiles, and it runs before the Rust build
+      # because it needs none of it.
+      #
+      # It is deliberately unconditional and deliberately counts. A glob that
+      # matched nothing would compile nothing and exit 0, which is the
+      # silently-skipped gate `docs/plan/12-testing.md` names as a known trap and
+      # every e2e script here already guards against.
+      #
+      # `-c -o /dev/null` compiles to AIR and discards it: what is asserted is
+      # that the Metal front end accepts the artifact, not that a `.metallib`
+      # gets built — `crcbl-mtl` hands the source to
+      # `newLibraryWithSource:options:error:` at run time anyway.
+      - name: Compile every committed MSL artifact with xcrun metal
+        run: |
+          set -eo pipefail
+          COMPILED=0
+          for SOURCE in crates/crcbl-shaders/msl/*.metal; do
+              if [ ! -e "$SOURCE" ]; then
+                  break
+              fi
+              echo "crcbl shaders: compiling $SOURCE"
+              xcrun metal -c "$SOURCE" -o /dev/null
+              COMPILED=$((COMPILED + 1))
+          done
+          if [ "$COMPILED" -eq 0 ]; then
+              echo "crcbl shaders: no msl/*.metal were compiled, so this step" >&2
+              echo "  checked nothing — the artifacts moved or the glob is wrong." >&2
+              exit 1
+          fi
+          echo "crcbl shaders: $COMPILED MSL artifact(s) compiled"
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false

@@ -19,3 +19,13 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+# The WGSL validator, and a dev-dependency only — the library above still has no
+# dependencies at all, which is the property that comment protects.
+#
+# It is the validator `crcbl-wgpu` will actually run: `wgpu` compiles WGSL
+# through naga, so a module naga rejects is a pipeline that fails to create.
+# Pinned to the version `wgpu` already resolves so the lockfile gains an edge and
+# no package. `wgsl-in` is not a default feature and is the only one wanted.
+[dev-dependencies]
+naga = { version = "30", features = ["wgsl-in"] }

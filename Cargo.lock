@@ -437,6 +437,9 @@ dependencies = [
 [[package]]
 name = "crcbl-shaders"
 version = "0.1.0"
+dependencies = [
+ "naga",
+]
 
 [[package]]
 name = "crcbl-shell"
