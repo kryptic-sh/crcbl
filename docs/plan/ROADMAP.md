@@ -403,9 +403,9 @@ was intended.
   onto it. `MAX_VOICES`, priority and stealing are still not in the crate;
   `docs/backlog.md` carries that.
 
-**2061 unit/integration tests**
-(`cargo nextest run --workspace --all-features --locked`: 2061 passed, 110
-skipped — the skips are the `#[ignore]`d e2e harnesses below), plus 29 Vulkan
+**2717 unit/integration tests**
+(`cargo nextest run --workspace --all-features --locked`: 2717 passed, 142
+skipped — the skips are the `#[ignore]`d e2e harnesses below), plus 58 Vulkan
 e2e (run on both radv and lavapipe), 33 Wayland e2e, 29 X11 e2e and 1 CLI e2e.
 The whole workspace suite passes with no Vulkan driver present at all, and the
 shell suites pass under 32-way CPU contention. The browser half adds two checks
