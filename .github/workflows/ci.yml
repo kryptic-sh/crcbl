@@ -751,14 +751,18 @@ jobs:
   # frozen until a *second* backend implements it, and this is the job that says
   # whether it implements it the same way.
   #
-  # It renders one frame through `crcbl screenshot` twice, once per backend, and
-  # compares the two with `crcbl-golden`'s measured tolerance. Not byte
+  # It renders every `crcbl screenshot --scene` twice, once per backend, and
+  # compares each pair with `crcbl-golden`'s measured tolerance. Every scene,
+  # because the divergence this catches is per shader: the lit cube exercises
+  # `mesh.slang` and `tonemap.slang` and says nothing at all about `sprite.slang`
+  # or `ui.slang`, which are the two that have actually diverged. Not byte
   # equality: the two agree to the byte only while they reach the same driver,
   # and on a machine where they do not they differ by one level on most of the
   # frame (measured, in the script's header and in `crcbl-golden`'s docs). Not a
-  # tolerance loose enough to always pass either — the comparator refuses a
-  # frame with fewer than 16 distinct colours, so a backend that rendered
-  # nothing fails here even though "nothing" matches "nothing" perfectly.
+  # tolerance loose enough to always pass either — the comparator refuses a frame
+  # with fewer distinct colours than the scene's own measured floor, so a backend
+  # that rendered nothing fails here even though "nothing" matches "nothing"
+  # perfectly.
   #
   # Its own job rather than a step inside `wgpu-e2e`: it needs no display and no
   # X libraries, it is the P5 deliverable that ought to be visible by name in
@@ -767,7 +771,8 @@ jobs:
   cross-backend-e2e:
     name: cross-backend image compare (vk vs wgpu)
     runs-on: ubuntu-latest
-    # Two offscreen frames per size on a software rasteriser, plus the compile.
+    # Two offscreen frames per scene and size on a software rasteriser, plus the
+    # compile — which is still the bulk of it.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7

@@ -3358,6 +3358,21 @@ the transport seam over a third transport shape.
 
 ### Owed by the shader guardrails
 
+- **The differential render gate is still vk↔wgpu only.** Rule 5 asks for every
+  backend; the gate now covers three scenes (cube, sprite, ui) across two, which
+  closes the shaders with a history of divergence and leaves **Metal and D3D12
+  entirely outside it**. A `sprite.slang` or `ui.slang` that means something
+  different on MSL or DXIL would not be caught by anything. Both are blocked on
+  the same prerequisites as everything else on those backends: `crcbl-mtl`'s
+  draw tests are quarantined on a GPU hang, and `crcbl-dx12` refuses offscreen
+  surfaces so it cannot read a frame back at all.
+
+- **The cross-backend CI job's timeout was left at 30 minutes while its work
+  tripled** (4 renders to 12). The renders are seconds on lavapipe and the
+  compile dominates, but that is a local timing judgement, not a runner
+  measurement. If that job ever times out, this is the first thing to look at
+  rather than the last.
+
 - **The declaration-order lint is stricter than the rule it guards.** Metal
   assigns indices per argument _table_; the lint asserts one global ascending
   order across all sets. So it can ask for a move that would have been harmless

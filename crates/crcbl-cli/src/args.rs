@@ -141,6 +141,9 @@ Renders one frame using the auto-selected GPU backend through an offscreen
 swapchain, reads the pixels back, and writes a PNG.
 
 OPTIONS:
+        --scene <SCENE>  What to draw: `cube` (the default) is the lit cube
+                         through the forward renderer, `sprite` is four sprites
+                         over three batches, `ui` is text, a rect and an outline.
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
                          be between 1 and 16384.
     -o, --output <FILE>  Write the PNG here. Default: screenshot.png.
@@ -296,12 +299,18 @@ pub enum Target {
 }
 
 /// `crcbl screenshot`.
+///
+/// The scene is `crcbl::screenshot`'s own enum rather than a parallel one, for
+/// the reason [`CrpixArgs`] gives about the nine-slice: a second enum meaning
+/// the same thing is a translation layer that can only ever drift.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScreenshotArgs {
     /// Output width.
     pub width: u32,
     /// Output height.
     pub height: u32,
+    /// What to draw.
+    pub scene: crcbl::screenshot::Scene,
     /// Output PNG path.
     pub output: std::path::PathBuf,
     /// Machine-readable output.
@@ -545,6 +554,7 @@ fn parse_screenshot(mut args: impl Iterator<Item = OsString>) -> Invocation {
     let mut parsed = ScreenshotArgs {
         width: 1920,
         height: 1080,
+        scene: crcbl::screenshot::Scene::default(),
         output: std::path::PathBuf::from("screenshot.png"),
         json: false,
     };
@@ -553,6 +563,22 @@ fn parse_screenshot(mut args: impl Iterator<Item = OsString>) -> Invocation {
         match arg.to_str() {
             Some("-h" | "--help") => return Invocation::Help(SCREENSHOT_USAGE),
             Some("--json") => parsed.json = true,
+            Some("--scene") => {
+                let Some(value) = args.next() else {
+                    return bad("--scene needs a value");
+                };
+                match value.to_str() {
+                    Some("cube") => parsed.scene = crcbl::screenshot::Scene::Cube,
+                    Some("sprite") => parsed.scene = crcbl::screenshot::Scene::Sprite,
+                    Some("ui") => parsed.scene = crcbl::screenshot::Scene::Ui,
+                    _ => {
+                        return Invocation::BadUsage(format!(
+                            "unknown scene `{}` (known: cube, sprite, ui)",
+                            value.to_string_lossy()
+                        ));
+                    }
+                }
+            }
             Some("--size") => {
                 let Some(value) = args.next() else {
                     return bad("--size needs a value");
@@ -1068,6 +1094,43 @@ mod tests {
             SCREENSHOT_USAGE.contains(&max.to_string()),
             "`screenshot --help` must name the {max} cap:\n{SCREENSHOT_USAGE}"
         );
+    }
+
+    /// The scene selector, including the default: `crcbl screenshot` with no
+    /// `--scene` has to keep drawing what it drew before there was one, because
+    /// the golden-image suites that call it were written against that frame.
+    #[test]
+    fn the_scene_defaults_to_the_cube_and_names_the_other_two() {
+        use crcbl::screenshot::Scene;
+
+        for (flag, expected) in [
+            (None, Scene::Cube),
+            (Some("cube"), Scene::Cube),
+            (Some("sprite"), Scene::Sprite),
+            (Some("ui"), Scene::Ui),
+        ] {
+            let mut argv = vec!["screenshot"];
+            if let Some(flag) = flag {
+                argv.extend(["--scene", flag]);
+            }
+            let Command::Screenshot(args) = command(&argv) else {
+                panic!("expected screenshot");
+            };
+            assert_eq!(args.scene, expected, "{argv:?}");
+        }
+
+        // A scene the CLI does not know is exit 2, not a silent fall back to the
+        // default — a typo in a harness would otherwise compare the cube twice
+        // and report that every shader agrees.
+        for argv in [
+            vec!["screenshot", "--scene"],
+            vec!["screenshot", "--scene", "menu"],
+        ] {
+            assert!(
+                matches!(parse_args(&argv), Invocation::BadUsage(_)),
+                "{argv:?} should be a bad invocation"
+            );
+        }
     }
 
     /// The largest frame the engine will render is still a *good* invocation;

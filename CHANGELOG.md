@@ -16,6 +16,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl screenshot --scene`, and a cross-backend comparison that runs every
+  scene.** The subcommand takes `cube` (the default, unchanged: the lit cube
+  through `ForwardRenderer`), `sprite` — four sprites over three
+  `SpriteRenderer` batches in `A A B A` submission order, two sheets, one of
+  them tinted — and `ui`, a panel, a translucent bar over its edge, an outline
+  and two lines of glyph-atlas text through `UiRenderer`. The library side is
+  `crcbl::screenshot::Scene`, taken by `OffscreenSetup::open`, which is a
+  breaking change to that signature.
+  `crates/crcbl/tests/run-cross-backend-e2e.sh` now renders **every** scene
+  through both backends at every size and compares each; its anti-vacuity colour
+  floor is per scene (`CRCBL_CROSS_MIN_COLORS_CUBE`, `_SPRITE`, `_UI`, replacing
+  the single `CRCBL_CROSS_MIN_COLORS`) because a UI frame has 7 distinct colours
+  where the lit cube has 36–41, and its "zero comparisons ran" guard is now
+  checked per scene as well as overall. This is
+  `docs/plan/02-vulkan-backend.md`'s shader-portability rule 5: semantic
+  divergence between the four targets is caught by rendering, not by reading,
+  and the gate previously drew one scene — so `sprite.slang` and `ui.slang`, the
+  two shaders with an actual history of divergence, were not covered at all.
+
 - **Every shader declares the targets it must compile to, and the compile script
   emits exactly those.** Each `crates/crcbl-shaders/shaders/*.slang` opens with
   a `// crcbl-targets: spirv, wgsl, msl, dxil` line; `tools/compile-shaders.sh`

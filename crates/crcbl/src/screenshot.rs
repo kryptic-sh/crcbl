@@ -1,7 +1,22 @@
 //! Offscreen render → readback → golden image — the `crcbl screenshot` path.
 //!
 //! Opens a GPU backend, creates an offscreen surface and swapchain, renders
-//! one frame through [`ForwardRenderer`], and reads the pixels back.
+//! one frame of the [`Scene`] the caller named, and reads the pixels back.
+//!
+//! # Why there is more than one scene
+//!
+//! `docs/plan/02-vulkan-backend.md`'s shader-portability rule 5: a shader can
+//! compile cleanly to SPIR-V, WGSL, MSL and DXIL and *mean something different*
+//! on each, and no lint can see it — `SV_InstanceID` lowers to
+//! `InstanceIndex - BaseInstance` on SPIR-V and to a bare
+//! `@builtin(instance_index)` on WGSL, which is why every sprite batch after the
+//! first drew the first batch's instances while every gate stayed green. The
+//! only detector is rendering the same scene through two backends and comparing
+//! pixels, which is what `tests/run-cross-backend-e2e.sh` does — and it can only
+//! catch what it draws. [`Scene::Cube`] exercises `mesh.slang` and
+//! `tonemap.slang`; [`Scene::Sprite`] and [`Scene::Ui`] are here so
+//! `sprite.slang` and `ui.slang` — the two with an actual history of divergence
+//! — are covered too.
 //!
 //! What comes back is the swapchain image's bytes *as they are in memory*, in
 //! [`OffscreenSetup::format`]'s channel order — which on an ordinary desktop
@@ -51,8 +66,273 @@ use crate::hal::{
     SurfaceHandle, SurfaceTarget, SwapchainDesc, SwapchainHandle,
 };
 use crate::render::{
-    Camera, DirectionalLight, ForwardRenderer, GraphError, Projection, RenderGraph, TransientPool,
+    Camera, DirectionalLight, FontAtlas, ForwardRenderer, GraphError, Projection, RenderGraph,
+    SampleMode, SheetDesc, SheetId, Sprite, SpriteRenderer, TransientPool, UiRenderer,
 };
+use crate::ui::draw_list::DrawList;
+
+// ---------------------------------------------------------------------------
+// Scenes
+// ---------------------------------------------------------------------------
+
+/// What a screenshot draws.
+///
+/// One variant per engine shader pair that has pixels of its own, because the
+/// cross-backend comparison this feeds can only catch divergence in a shader it
+/// actually ran — see the module docs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Scene {
+    /// The sandbox's lit cube through [`ForwardRenderer`]: `mesh.slang` into an
+    /// HDR target and `tonemap.slang` back out of it.
+    ///
+    /// The default, because it is the frame every caller of this module drew
+    /// before there was anything to choose between.
+    #[default]
+    Cube,
+    /// Four sprites over three [`SpriteRenderer`] batches: `sprite.slang`.
+    Sprite,
+    /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
+    /// `ui.slang`.
+    Ui,
+}
+
+/// The colour [`Scene::Sprite`] and [`Scene::Ui`] composite onto, in **linear**
+/// light — which is what a clear value on an sRGB attachment means.
+///
+/// Neither pass clears: both load what is already in the target, because
+/// compositing onto it is what they are for. So the scene clears first, and
+/// deliberately not to black — alpha blending onto black is the one background
+/// where `src * a + dst * (1 - a)` and `src * a` agree, so a premultiplication
+/// mistake would be invisible in exactly the frame meant to reveal it. Same
+/// value, and the same reasoning, as `crcbl-vk`'s sprite suite.
+const SCENE_CLEAR: [f32; 4] = [0.10, 0.20, 0.35, 1.0];
+
+/// Half the world height [`Scene::Sprite`]'s orthographic camera shows.
+///
+/// The frame size is the caller's (`--size`), so the scene is laid out in world
+/// units and the projection scales it: every rectangle below sits inside
+/// `|x| <= 95`, which is on screen for any frame at least as wide as it is tall.
+const SPRITE_HALF_HEIGHT: f32 = 100.0;
+
+/// [`Scene::Sprite`]'s first sheet: 4×2 texels, two 2×2 frames side by side,
+/// and no two texels alike.
+///
+/// ```text
+///   frame A          frame B
+///   red    green  |  cyan   magenta
+///   blue   yellow |  white  black
+/// ```
+///
+/// Asymmetric for the reason `crcbl-vk`'s sprite suite records: a flipped V
+/// swaps red with blue, a flipped U swaps red with green, and a symmetric test
+/// image passes through both while looking entirely plausible.
+const SPRITE_SHEET_A: [u8; 32] = [
+    255, 0, 0, 255, // A top-left: red
+    0, 255, 0, 255, // A top-right: green
+    0, 255, 255, 255, // B top-left: cyan
+    255, 0, 255, 255, // B top-right: magenta
+    0, 0, 255, 255, // A bottom-left: blue
+    255, 255, 0, 255, // A bottom-right: yellow
+    255, 255, 255, 255, // B bottom-left: white
+    0, 0, 0, 255, // B bottom-right: black
+];
+
+/// [`Scene::Sprite`]'s second sheet: 2×2 texels in four colours that appear
+/// nowhere in [`SPRITE_SHEET_A`], so "which sheet was bound" is readable
+/// straight off the picture.
+const SPRITE_SHEET_B: [u8; 16] = [
+    255, 128, 0, 255, // orange
+    128, 0, 255, 255, // violet
+    0, 128, 128, 255, // teal
+    128, 128, 128, 255, // grey
+];
+
+/// The tint on the fourth sprite.
+///
+/// A different factor per channel, because a tint that left any channel alone
+/// would let the tinted rectangle share colours with the untinted one it is
+/// there to be told apart from.
+const SPRITE_TINT: [f32; 4] = [0.5, 0.7, 0.9, 1.0];
+
+/// Frame A of [`SPRITE_SHEET_A`], as normalised UVs.
+const SPRITE_FRAME_A: [f32; 4] = [0.0, 0.0, 0.5, 1.0];
+/// Frame B of [`SPRITE_SHEET_A`].
+const SPRITE_FRAME_B: [f32; 4] = [0.5, 0.0, 1.0, 1.0];
+
+/// [`Scene::Sprite`]'s four rectangles, in world units: `[x, y, w, h]`, minimum
+/// corner first, Y up. Ten units apart, so no two of them touch.
+const SPRITE_RECTS: [[f32; 4]; 4] = [
+    [-95.0, -20.0, 40.0, 40.0],
+    [-45.0, -20.0, 40.0, 40.0],
+    [5.0, -20.0, 40.0, 40.0],
+    [55.0, -20.0, 40.0, 40.0],
+];
+
+/// Which sheet each of [`SPRITE_RECTS`] samples: **A A B A**, not A A B B.
+///
+/// The submission order of a `&[Sprite]` is the batching, so this is three
+/// batches over two sheets and the third batch starts at instance 3. That
+/// arrangement is the whole point of the scene: one batch is exactly the case
+/// that hid the `SV_InstanceID` divergence, because with a single draw the
+/// SPIR-V and WGSL lowerings of the instance index agree. A backend that reads
+/// the wrong one draws the last rectangle in the *first* rectangle's place,
+/// leaving its own slot at the clear colour.
+const SPRITE_ORDER: [usize; 4] = [0, 0, 1, 0];
+
+/// The camera [`Scene::Sprite`] is drawn with: orthographic, looking down −Z at
+/// the plane the sprites live on.
+fn sprite_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, 0.0, 1.0),
+        target: glam::Vec3::ZERO,
+        up: glam::Vec3::Y,
+        projection: Projection::Orthographic {
+            half_height: SPRITE_HALF_HEIGHT,
+            near: 0.1,
+            far: 10.0,
+        },
+    }
+}
+
+/// [`Scene::Sprite`]'s four sprites, over the two registered sheets.
+fn sprite_scene(sheets: [SheetId; 2]) -> [Sprite; 4] {
+    let uv = |index: usize| match index {
+        0 => SPRITE_FRAME_A,
+        1 => SPRITE_FRAME_B,
+        // The second sheet has one frame, which is the whole image.
+        2 => [0.0, 0.0, 1.0, 1.0],
+        _ => SPRITE_FRAME_A,
+    };
+    std::array::from_fn(|index| Sprite {
+        sheet: sheets[SPRITE_ORDER[index]],
+        rect: SPRITE_RECTS[index],
+        rotation: 0.0,
+        uv: uv(index),
+        // Only the last one is tinted, so the two rectangles that share frame A
+        // are the same picture in different colours.
+        tint: if index == 3 { SPRITE_TINT } else { [1.0; 4] },
+    })
+}
+
+/// [`Scene::Ui`]'s draw list, in the pass's Y-down screen pixels.
+///
+/// Laid out as fractions of `extent` so the same picture arrives at every
+/// `--size`, and built from all three command kinds: a filled rectangle, a
+/// translucent one straddling its edge, an outline, and two lines of text
+/// through the glyph atlas. Text alone would leave a broken atlas binding
+/// looking like an empty frame; a rectangle alone would never sample the atlas
+/// at all.
+fn ui_draw_list(extent: (u32, u32)) -> DrawList {
+    use glam::Vec2;
+
+    let (width, height) = (extent.0 as f32, extent.1 as f32);
+    let at = |x: f32, y: f32| Vec2::new(width * x, height * y);
+
+    let mut list = DrawList::new();
+    // The panel, then the translucent bar half on it and half off it: the two
+    // colours it blends to are two more distinct colours in the frame, and they
+    // are the only evidence the pass blends rather than replaces.
+    list.rect(at(0.08, 0.10), at(0.92, 0.62), [0.15, 0.20, 0.55, 1.0]);
+    list.rect(at(0.30, 0.45), at(0.70, 0.85), [1.0, 0.45, 0.10, 0.5]);
+    list.rect_outline(
+        at(0.03, 0.04),
+        at(0.97, 0.96),
+        (height * 0.02).max(1.0),
+        [1.0, 0.85, 0.0, 1.0],
+    );
+    list.text(at(0.12, 0.16), "CRCBL", [1.0, 1.0, 1.0, 1.0], height * 0.18);
+    list.text(
+        at(0.12, 0.66),
+        "ui scene",
+        [0.2, 1.0, 0.4, 1.0],
+        height * 0.10,
+    );
+    list
+}
+
+/// The renderer, and the content, for the scene being drawn.
+///
+/// One variant per [`Scene`]; the frame's per-scene work is the two arms of
+/// [`OffscreenSetup::draw_and_readback`] and nothing else keys off it.
+enum SceneState {
+    Cube {
+        camera: Camera,
+        light: DirectionalLight,
+        renderer: ForwardRenderer,
+    },
+    Sprite {
+        renderer: SpriteRenderer,
+        sheets: [SheetId; 2],
+    },
+    Ui {
+        renderer: UiRenderer,
+        atlas: FontAtlas,
+    },
+}
+
+impl SceneState {
+    /// Builds the renderer this scene needs, and uploads whatever it draws.
+    fn open(
+        scene: Scene,
+        device: &dyn Device,
+        queue: QueueHandle,
+        format: Format,
+    ) -> Result<Self, OffscreenError> {
+        Ok(match scene {
+            Scene::Cube => Self::Cube {
+                camera: Camera::default().with_projection(Projection::Perspective {
+                    fov_y: std::f32::consts::FRAC_PI_3,
+                    near: 0.01,
+                }),
+                light: DirectionalLight::default(),
+                renderer: ForwardRenderer::new(device, queue, format)?,
+            },
+            Scene::Sprite => {
+                let mut renderer = SpriteRenderer::new(device, queue, format)?;
+                let mut register = |label, width, height, pixels| {
+                    renderer.register_sheet(
+                        device,
+                        &SheetDesc {
+                            label,
+                            width,
+                            height,
+                            // Pixel art's sampler, and the branch of
+                            // `sprite.slang` a game actually ships on.
+                            sample: SampleMode::Pixel,
+                            pixels,
+                        },
+                    )
+                };
+                let sheets = match (
+                    register("screenshot sheet A", 4, 2, &SPRITE_SHEET_A),
+                    register("screenshot sheet B", 2, 2, &SPRITE_SHEET_B),
+                ) {
+                    (Ok(a), Ok(b)) => [a, b],
+                    // Whichever failed, the renderer owns everything that did
+                    // upload and gives it back here rather than at drop.
+                    (Err(error), _) | (Ok(_), Err(error)) => {
+                        renderer.destroy(device);
+                        return Err(OffscreenError::Hal(error));
+                    }
+                };
+                Self::Sprite { renderer, sheets }
+            }
+            Scene::Ui => Self::Ui {
+                renderer: UiRenderer::new(device, queue, format)?,
+                atlas: FontAtlas::built_in(),
+            },
+        })
+    }
+
+    /// Releases the scene's GPU resources. The device must be idle.
+    fn destroy(self, device: &dyn Device) {
+        match self {
+            Self::Cube { renderer, .. } => renderer.destroy(device),
+            Self::Sprite { renderer, .. } => renderer.destroy(device),
+            Self::Ui { renderer, .. } => renderer.destroy(device),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // OffscreenSetup
@@ -106,7 +386,7 @@ pub const READBACK_ROW_ALIGNMENT: u32 = 256;
 pub const READBACK_DEADLINE: Duration = Duration::from_secs(10);
 
 /// Holds everything needed to render one frame offscreen: a GPU instance,
-/// device, offscreen swapchain ring, and the forward renderer.
+/// device, offscreen swapchain ring, and the chosen scene's renderer.
 ///
 /// The caller drives one frame via [`Self::draw_and_readback`], then tears
 /// down with [`Self::finish`].
@@ -118,10 +398,9 @@ pub struct OffscreenSetup {
     swapchain: SwapchainHandle,
     queue: QueueHandle,
     format: Format,
-    /// Where the camera is and how it projects.
-    camera: Camera,
-    light: DirectionalLight,
-    renderer: ForwardRenderer,
+    /// The renderer for the [`Scene`] this setup was opened with, and whatever
+    /// that scene draws.
+    scene: SceneState,
     pool: TransientPool,
 }
 
@@ -173,14 +452,17 @@ pub enum OffscreenError {
 
 impl OffscreenSetup {
     /// Opens the auto-selected GPU backend, creates an offscreen surface,
-    /// adapter, device, swapchain, and forward renderer for a frame of
+    /// adapter, device, swapchain, and `scene`'s renderer for a frame of
     /// `(width, height)` pixels.
+    ///
+    /// [`Scene::default`] is [`Scene::Cube`], the frame this module drew before
+    /// there was anything to choose between.
     ///
     /// Returns `Err` if the frame is not between `1x1` and
     /// [`MAX_DIMENSION`]`x`[`MAX_DIMENSION`], if no GPU is available (lavapipe,
     /// swiftshader, or a real card), if the device is unusable, or if any HAL
     /// call fails.
-    pub fn open(width: u32, height: u32) -> Result<Self, OffscreenError> {
+    pub fn open(width: u32, height: u32, scene: Scene) -> Result<Self, OffscreenError> {
         // Checked before the backend is opened, so an absurd `--size` costs a
         // comparison rather than a device.
         if width == 0 || height == 0 {
@@ -240,13 +522,7 @@ impl OffscreenSetup {
             })
             .map_err(OffscreenError::Surface)?;
 
-        let renderer =
-            ForwardRenderer::new(device.as_ref(), queue, format).map_err(OffscreenError::Hal)?;
-
-        let camera = Camera::default().with_projection(Projection::Perspective {
-            fov_y: std::f32::consts::FRAC_PI_3,
-            near: 0.01,
-        });
+        let scene = SceneState::open(scene, device.as_ref(), queue, format)?;
 
         Ok(Self {
             instance,
@@ -255,9 +531,7 @@ impl OffscreenSetup {
             swapchain,
             queue,
             format,
-            camera,
-            light: DirectionalLight::default(),
-            renderer,
+            scene,
             pool: TransientPool::new(),
         })
     }
@@ -332,21 +606,58 @@ impl OffscreenSetup {
 
         // ---- render the frame through the graph ----
 
-        self.renderer.begin_frame(
-            device,
-            &self.camera,
-            &self.light,
-            ForwardRenderer::spin(0.0),
-            extent,
-        )?;
-
         let compiled = {
             let mut graph = RenderGraph::new(self.queue);
+            // The same swapchain import for every scene: what differs between
+            // them is which passes are hung off it, not how it is presented.
             let target = graph.import_image(
                 "swapchain",
                 ForwardRenderer::present_target(acquired.image, acquired.view, self.format, extent),
             );
-            let _hdr = self.renderer.add_passes(&mut graph, target, extent);
+            match &mut self.scene {
+                SceneState::Cube {
+                    camera,
+                    light,
+                    renderer,
+                } => {
+                    renderer.begin_frame(
+                        device,
+                        camera,
+                        light,
+                        ForwardRenderer::spin(0.0),
+                        extent,
+                    )?;
+                    let _hdr = renderer.add_passes(&mut graph, target, extent);
+                }
+                SceneState::Sprite { renderer, sheets } => {
+                    let sprites = sprite_scene(*sheets);
+                    let aspect = extent.0 as f32 / extent.1 as f32;
+                    renderer.begin_frame(
+                        device,
+                        &sprites,
+                        sprite_camera().view_projection(aspect),
+                        extent,
+                    )?;
+                    // Both of the passes below load rather than clear, so the
+                    // scene supplies the background they composite onto.
+                    graph
+                        .add_render_pass("scene background")
+                        .clear_color(target, SCENE_CLEAR)
+                        .execute(|_| {});
+                    renderer.add_pass(&mut graph, target);
+                }
+                SceneState::Ui { renderer, atlas } => {
+                    // `scale` is 1.0 because every size in the draw list is
+                    // already a fraction of this frame's extent; a second
+                    // multiplier is a second thing that can disagree with it.
+                    renderer.begin_frame(device, &ui_draw_list(extent), atlas, 1.0)?;
+                    graph
+                        .add_render_pass("scene background")
+                        .clear_color(target, SCENE_CLEAR)
+                        .execute(|_| {});
+                    renderer.add_pass(&mut graph, target, extent);
+                }
+            }
             graph.compile(&self.pool)?
         };
 
@@ -442,8 +753,8 @@ impl OffscreenSetup {
         Ok((extent, pixels))
     }
 
-    /// Tears down in correct order: wait idle, destroy swapchain → surface →
-    /// device.
+    /// Tears down in correct order: wait idle, destroy the scene and the
+    /// transient pool, then swapchain → surface → device.
     ///
     /// # Errors
     ///
@@ -452,8 +763,14 @@ impl OffscreenSetup {
     /// caller about to save the pixels as a golden image needs to be told
     /// before it trusts them. The teardown still runs either way; the failure
     /// is reported after it.
-    pub fn finish(self) -> Result<(), OffscreenError> {
+    pub fn finish(mut self) -> Result<(), OffscreenError> {
         let idle = self.device.wait_idle();
+        // After the wait, because both of these hand handles back to a device
+        // that may still be reading them. `SpriteRenderer` and `UiRenderer` warn
+        // on a drop that skipped this; `ForwardRenderer` and `TransientPool`
+        // leak silently, which is why the screenshot path used to.
+        self.scene.destroy(self.device.as_ref());
+        self.pool.destroy(self.device.as_ref());
         self.device.destroy_swapchain(self.swapchain);
         self.instance.destroy_surface(self.surface);
         drop(self.device);
@@ -566,7 +883,7 @@ mod tests {
             (MAX_DIMENSION + 1, 1),
             (1, MAX_DIMENSION + 1),
         ] {
-            let error = OffscreenSetup::open(width, height)
+            let error = OffscreenSetup::open(width, height, Scene::default())
                 .err()
                 .unwrap_or_else(|| panic!("{width}x{height} is not a frame"));
             assert!(
@@ -583,10 +900,97 @@ mod tests {
         for (width, height) in [(0, 16), (16, 0), (0, 0)] {
             assert!(
                 matches!(
-                    OffscreenSetup::open(width, height),
+                    OffscreenSetup::open(width, height, Scene::default()),
                     Err(OffscreenError::Unusable(_))
                 ),
                 "{width}x{height} should be unusable"
+            );
+        }
+    }
+
+    /// The sprite scene is only diagnostic if it **batches**, and batching is
+    /// the submission order: `A A B A` is three batches, `A A B B` is two and
+    /// `A A A A` is one. One batch is exactly the case that hid the
+    /// `SV_InstanceID` divergence, because with a single draw the SPIR-V and
+    /// WGSL lowerings of the instance index are the same number.
+    #[test]
+    fn the_sprite_scene_submits_three_batches_and_returns_to_the_first_sheet() {
+        let batches: Vec<usize> = SPRITE_ORDER.iter().fold(Vec::new(), |mut runs, sheet| {
+            if runs.last() != Some(sheet) {
+                runs.push(*sheet);
+            }
+            runs
+        });
+        assert_eq!(
+            batches,
+            vec![0, 1, 0],
+            "the scene must interleave its sheets, not group them"
+        );
+        // The last batch is what the bug got wrong: its instances start at 3,
+        // and a backend reading the wrong index draws instance 0 instead.
+        assert!(
+            SPRITE_ORDER.len() > batches.len(),
+            "at least one batch must carry more than one instance"
+        );
+    }
+
+    /// Every rectangle has to be inside the frame at every size the harness
+    /// renders, or the scene silently loses the batch the size cropped — and a
+    /// missing batch is the very thing it is there to catch.
+    #[test]
+    fn every_sprite_rectangle_is_on_screen_at_the_harness_sizes() {
+        for (width, height) in [(256u32, 192u32), (97, 61), (1920, 1080), (192, 192)] {
+            let half_width = SPRITE_HALF_HEIGHT * (width as f32 / height as f32);
+            for rect in SPRITE_RECTS {
+                let (left, right) = (rect[0], rect[0] + rect[2]);
+                let (bottom, top) = (rect[1], rect[1] + rect[3]);
+                assert!(
+                    left > -half_width && right < half_width,
+                    "{width}x{height}: {rect:?} runs off the side of a ±{half_width} view"
+                );
+                assert!(
+                    bottom > -SPRITE_HALF_HEIGHT && top < SPRITE_HALF_HEIGHT,
+                    "{width}x{height}: {rect:?} runs off the top or bottom"
+                );
+            }
+        }
+    }
+
+    /// The UI scene has to exercise all three command kinds — a frame of
+    /// rectangles never samples the glyph atlas, so a broken atlas binding
+    /// would draw an identical picture on both backends.
+    #[test]
+    fn the_ui_scene_draws_text_a_rect_and_an_outline_inside_the_frame() {
+        use crate::ui::draw_list::DrawCommand;
+
+        for extent in [(256u32, 192u32), (97, 61), (1920, 1080)] {
+            let list = ui_draw_list(extent);
+            let (mut rects, mut outlines, mut texts) = (0, 0, 0);
+            for command in list.commands() {
+                match command {
+                    DrawCommand::Rect { min, max, .. } => {
+                        rects += 1;
+                        assert!(min.x >= 0.0 && min.y >= 0.0, "{extent:?}: {command:?}");
+                        assert!(
+                            max.x <= extent.0 as f32 && max.y <= extent.1 as f32,
+                            "{extent:?}: {command:?}"
+                        );
+                    }
+                    DrawCommand::RectOutline { .. } => outlines += 1,
+                    // The glyphs' extent is the atlas's business, so only the
+                    // anchor is checked here.
+                    DrawCommand::Text { pos, .. } => {
+                        texts += 1;
+                        assert!(
+                            pos.x >= 0.0 && pos.y >= 0.0 && pos.y < extent.1 as f32,
+                            "{extent:?}: {command:?}"
+                        );
+                    }
+                }
+            }
+            assert!(
+                rects >= 2 && outlines == 1 && texts >= 1,
+                "{extent:?}: {rects} rect(s), {outlines} outline(s), {texts} text(s)"
             );
         }
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Render one frame through *both* GPU backends and compare the two images.
+# Render every scene through *both* GPU backends and compare the two images.
 #
 #   crates/crcbl/tests/run-cross-backend-e2e.sh [extra compare-png args…]
 #
@@ -39,9 +39,31 @@
 #
 # WHY A LOOSE TOLERANCE IS STILL A GATE
 #   Two blank frames match perfectly, so `compare-png` refuses to pass a frame
-#   with fewer than `CRCBL_CROSS_MIN_COLORS` distinct colours. The lit cube has
+#   with fewer distinct colours than the scene's floor below. The lit cube has
 #   41 at 256x192 and 36 at 97x61; a cleared frame has one. A backend that
 #   rendered nothing therefore fails this gate even though its output "matches".
+#
+# WHY EVERY SCENE, AND WHY EACH ONE HAS ITS OWN FLOOR
+#   `docs/plan/02-vulkan-backend.md`'s shader-portability rule 5: a shader can
+#   compile cleanly to all four targets and *mean something different on each*,
+#   and no lint can see it. `SV_InstanceID` lowers to
+#   `InstanceIndex - BaseInstance` on SPIR-V and to a bare
+#   `@builtin(instance_index)` on WGSL, so the sprite pass rendered every batch
+#   after the first from the first batch's instances — source compiled, every
+#   gate green, wrong picture. This script is the only thing that can catch that
+#   class, and it can only catch it in a shader it actually draws. It used to
+#   draw one scene, the lit cube, which exercises `mesh.slang` and
+#   `tonemap.slang`; `sprite.slang` and `ui.slang` — the two with a history of
+#   divergence — went uncovered. `crcbl screenshot --scene` now names all three
+#   and this loop renders every one.
+#
+#   The anti-vacuity floor is per scene because the scenes are not equally
+#   colourful, and one constant covering all of them is either too loose to
+#   catch a blank cube or too tight for a UI to pass. Measured here, both ICDs,
+#   at both default sizes: cube 36–41, sprite 17–24, UI 7 (a clear, a panel, the
+#   translucent bar over each of those, an outline and two text colours). Each
+#   floor below sits just under its scene's measured minimum, so losing one
+#   element of a scene trips it.
 #
 # ENVIRONMENT
 #   CRCBL_VK_ICD           ICD manifest pinned for the `CRCBL_GPU=vk` run.
@@ -49,12 +71,19 @@
 #                          Setting the two to different drivers is the
 #                          interesting configuration; CI pins both to lavapipe,
 #                          which is the only driver a runner has.
+#   CRCBL_CROSS_SCENES     Scenes, space separated. Default "cube sprite ui",
+#                          which is every scene `crcbl screenshot --scene`
+#                          accepts. A name this script has no floor for is a
+#                          hard failure rather than a default floor: a scene
+#                          nobody measured would be gated by a guessed number.
 #   CRCBL_CROSS_SIZES      Frame sizes, space separated. Default "256x192 97x61".
 #                          The second is deliberately not a multiple of 64: a
 #                          256-byte row-pitch rule wgpu enforces and Vulkan does
 #                          not made every other width fail, and only a size like
 #                          this catches it.
-#   CRCBL_CROSS_MIN_COLORS Anti-vacuity floor. Default 16.
+#   CRCBL_CROSS_MIN_COLORS_CUBE    Anti-vacuity floor for the cube. Default 16.
+#   CRCBL_CROSS_MIN_COLORS_SPRITE  The same, for the sprite scene. Default 16.
+#   CRCBL_CROSS_MIN_COLORS_UI      The same, for the UI scene. Default 6.
 #   CRCBL_CROSS_OUT        Where the PNGs go. Default: a temporary directory.
 #
 # Exits non-zero if either backend fails to render, if a rendered frame is
@@ -62,17 +91,39 @@
 # nearly blank to be evidence, or if **zero comparisons ran** — the trap
 # `docs/plan/12-testing.md` names by name and this repo has already paid for
 # once ("a test-count guard silently matched nothing because CI colours its
-# output"). This guard counts in the shell rather than by grepping the tool's
-# output, so no amount of colouring can make it match nothing.
+# output"). That guard is now checked per scene as well as overall, because a
+# run that quietly skipped a whole scene has the same shape as one that
+# compared nothing: it is the scene's own comparisons that were not run, and the
+# total would still look plausible. Both counts are kept in the shell rather
+# than grepped out of the tool's output, so no amount of colouring can make them
+# match nothing.
 
 set -euo pipefail
 
 CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "${CRATE_DIR}/../.." && pwd)"
-SIZES="${CRCBL_CROSS_SIZES:-256x192 97x61}"
-MIN_COLORS="${CRCBL_CROSS_MIN_COLORS:-16}"
+# `${VAR-default}`, not `${VAR:-default}`: an empty value has to reach the
+# emptiness guards below, and `:-` would substitute the default for it and make
+# those guards unreachable — a check that cannot fail is not a check.
+SCENES="${CRCBL_CROSS_SCENES-cube sprite ui}"
+SIZES="${CRCBL_CROSS_SIZES-256x192 97x61}"
 
 cd "$REPO_ROOT"
+
+# The anti-vacuity floor for one scene — see WHY EACH ONE HAS ITS OWN FLOOR.
+# An unrecognised scene stops the run here rather than being gated by a number
+# nobody measured for it.
+min_colors_for() {
+    case "$1" in
+        cube) echo "${CRCBL_CROSS_MIN_COLORS_CUBE:-16}" ;;
+        sprite) echo "${CRCBL_CROSS_MIN_COLORS_SPRITE:-16}" ;;
+        ui) echo "${CRCBL_CROSS_MIN_COLORS_UI:-6}" ;;
+        *)
+            echo "crcbl cross-backend: no measured colour floor for scene '$1'" >&2
+            return 1
+            ;;
+    esac
+}
 
 OUT_DIR="${CRCBL_CROSS_OUT:-}"
 OWN_OUT_DIR=0
@@ -145,13 +196,13 @@ fi
 # `crates/crcbl/src/screenshot.rs`'s docs rather than worked around silently.
 
 # Rendered before the loop so a compile error is one message rather than one per
-# size, and so the timings below are the render's rather than rustc's.
+# scene and size, and so the timings below are the render's rather than rustc's.
 echo "crcbl cross-backend: building the CLI and the comparator"
 cargo build --locked --quiet --package crcbl-cli --bin crcbl
 cargo build --locked --quiet --package crcbl-golden --example compare-png
 
 render() {
-    local backend="$1" size="$2" output="$3" pin="$4"
+    local backend="$1" scene="$2" size="$3" output="$4" pin="$5"
     rm -f "$output"
     local log
     log="$(mktemp -t "crcbl-cross-${backend}.XXXXXX.log")"
@@ -163,12 +214,12 @@ render() {
         fi
         export CRCBL_GPU="$backend"
         cargo run --locked --quiet --package crcbl-cli --bin crcbl -- \
-            screenshot --size "$size" --output "$output"
+            screenshot --scene "$scene" --size "$size" --output "$output"
     ) >"$log" 2>&1
     local status=$?
     set -e
     if [ "$status" -ne 0 ]; then
-        echo "crcbl cross-backend: $backend failed to render $size (exit $status)" >&2
+        echo "crcbl cross-backend: $backend failed to render $scene at $size (exit $status)" >&2
         cat "$log" >&2
         rm -f "$log"
         exit "$status"
@@ -184,40 +235,69 @@ render() {
     fi
 }
 
-EXPECTED=0
-for _ in $SIZES; do
-    EXPECTED=$((EXPECTED + 1))
+SCENE_COUNT=0
+for _ in $SCENES; do
+    SCENE_COUNT=$((SCENE_COUNT + 1))
 done
-if [ "$EXPECTED" -eq 0 ]; then
+SIZE_COUNT=0
+for _ in $SIZES; do
+    SIZE_COUNT=$((SIZE_COUNT + 1))
+done
+if [ "$SCENE_COUNT" -eq 0 ]; then
+    echo "crcbl cross-backend: CRCBL_CROSS_SCENES is empty — there is nothing to draw" >&2
+    exit 1
+fi
+if [ "$SIZE_COUNT" -eq 0 ]; then
     echo "crcbl cross-backend: CRCBL_CROSS_SIZES is empty — there is nothing to compare" >&2
     exit 1
 fi
+EXPECTED=$((SCENE_COUNT * SIZE_COUNT))
+
+# Resolved before the first render, so a misspelled scene costs a message rather
+# than a full render of everything that came before it.
+for SCENE in $SCENES; do
+    min_colors_for "$SCENE" >/dev/null
+done
 
 COMPARISONS=0
-for SIZE in $SIZES; do
-    VK_PNG="${OUT_DIR}/vk-${SIZE}.png"
-    WGPU_PNG="${OUT_DIR}/wgpu-${SIZE}.png"
+for SCENE in $SCENES; do
+    MIN_COLORS="$(min_colors_for "$SCENE")"
+    SCENE_COMPARISONS=0
 
-    echo "crcbl cross-backend: rendering ${SIZE} through vk"
-    render vk "$SIZE" "$VK_PNG" "$VK_PIN"
-    echo "crcbl cross-backend: rendering ${SIZE} through wgpu"
-    render wgpu "$SIZE" "$WGPU_PNG" "$WGPU_PIN"
+    for SIZE in $SIZES; do
+        VK_PNG="${OUT_DIR}/vk-${SCENE}-${SIZE}.png"
+        WGPU_PNG="${OUT_DIR}/wgpu-${SCENE}-${SIZE}.png"
 
-    # Informative, never asserted: byte equality is what happens when both
-    # backends reach the same driver, and demanding it would make this gate fail
-    # on any machine where they do not.
-    if cmp -s "$VK_PNG" "$WGPU_PNG"; then
-        echo "crcbl cross-backend: ${SIZE} is byte-identical between the backends ($(sha256sum "$VK_PNG" | cut -c1-16)…)"
-    else
-        echo "crcbl cross-backend: ${SIZE} differs byte-wise; the tolerance is what decides"
+        echo "crcbl cross-backend: rendering ${SCENE} at ${SIZE} through vk"
+        render vk "$SCENE" "$SIZE" "$VK_PNG" "$VK_PIN"
+        echo "crcbl cross-backend: rendering ${SCENE} at ${SIZE} through wgpu"
+        render wgpu "$SCENE" "$SIZE" "$WGPU_PNG" "$WGPU_PIN"
+
+        # Informative, never asserted: byte equality is what happens when both
+        # backends reach the same driver, and demanding it would make this gate
+        # fail on any machine where they do not.
+        if cmp -s "$VK_PNG" "$WGPU_PNG"; then
+            echo "crcbl cross-backend: ${SCENE} ${SIZE} is byte-identical between the backends ($(sha256sum "$VK_PNG" | cut -c1-16)…)"
+        else
+            echo "crcbl cross-backend: ${SCENE} ${SIZE} differs byte-wise; the tolerance is what decides"
+        fi
+
+        cargo run --locked --quiet --package crcbl-golden --example compare-png -- \
+            "$VK_PNG" "$WGPU_PNG" \
+            --label "cross-backend-${SCENE}-${SIZE}" \
+            --min-colors "$MIN_COLORS" \
+            "$@"
+        SCENE_COMPARISONS=$((SCENE_COMPARISONS + 1))
+        COMPARISONS=$((COMPARISONS + 1))
+    done
+
+    # Per scene, for the reason the header gives: a scene whose sizes were all
+    # skipped is a shader that went untested, and the overall total is not
+    # sensitive to which scene the missing comparisons belonged to.
+    if [ "$SCENE_COMPARISONS" -ne "$SIZE_COUNT" ]; then
+        echo "crcbl cross-backend: ${SCENE} ran $SCENE_COMPARISONS of $SIZE_COUNT comparisons" >&2
+        exit 1
     fi
-
-    cargo run --locked --quiet --package crcbl-golden --example compare-png -- \
-        "$VK_PNG" "$WGPU_PNG" \
-        --label "cross-backend-${SIZE}" \
-        --min-colors "$MIN_COLORS" \
-        "$@"
-    COMPARISONS=$((COMPARISONS + 1))
 done
 
 # The guard `docs/plan/12-testing.md` names: a job that compares nothing and
@@ -232,4 +312,4 @@ if [ "$COMPARISONS" -ne "$EXPECTED" ]; then
     exit 1
 fi
 
-echo "crcbl cross-backend: $COMPARISONS/$EXPECTED size(s) agree across vk and wgpu"
+echo "crcbl cross-backend: $COMPARISONS/$EXPECTED scene/size pair(s) agree across vk and wgpu"
