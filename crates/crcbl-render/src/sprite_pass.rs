@@ -27,17 +27,14 @@
 //!
 //! # One shader, no tier split
 //!
-//! [`crate::ui_pass`] carries a whole [`ConstantDelivery`](crate::ConstantDelivery)
-//! enum and a second shader artifact because `ui.slang` reads its constants
-//! through `[[vk::push_constant]]`, which WebGPU does not have — and an entry
-//! point either reads a push-constant block or a bound one, so the tier became a
-//! permutation axis.
-//!
-//! **This pass does not repeat that.** `sprite.slang` takes its constants from a
-//! uniform buffer on *every* tier, so there is one artifact, one code path, and
-//! nothing here to pick between. A push constant would save one indirection per
-//! vertex on Tier A; the tier split cost a second `.slang` that has to be kept
-//! in step by hand, and the trade is not close.
+//! `sprite.slang` takes its constants from a uniform buffer on *every* tier, so
+//! there is one artifact, one code path, and nothing here to pick between. A
+//! push constant would save one indirection per vertex where they exist, and
+//! cost a permutation axis: WebGPU has none at all, and an entry point reads
+//! either a push-constant block or a bound one, so a second shader source is the
+//! only way to serve both. [`crate::ui_pass`] paid that — a `ConstantDelivery`
+//! enum and a `ui_tier_b.slang` kept in step by hand — until it took this
+//! pass's trade instead.
 //!
 //! # Sample modes, and where the mode lives
 //!

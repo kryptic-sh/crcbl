@@ -30,9 +30,12 @@
 //! bindings and nothing else. A push constant declared *first* would take
 //! `buffer(0)` in the MSL and shift every buffer binding up by one past what
 //! that backend computes; declared last it takes the first index after them,
-//! and the numbered bindings keep the slots the backend assigns. `msl/ui.metal`
-//! is the evidence: `vertices` (set 0, binding 2) at `buffer(0)` and
-//! `constants` at `buffer(1)`.
+//! and the numbered bindings keep the slots the backend assigns.
+//!
+//! No shipped shader exercises that arm today — `ui.slang` was the last one to
+//! read a push constant, and took a bound uniform buffer instead — so the rule
+//! is checked by this module's own tests rather than by an artifact. See
+//! `crcbl_shaders`' crate docs on why a new source may not reintroduce one.
 //!
 //! # The rule checked here is stricter than the one that must hold
 //!

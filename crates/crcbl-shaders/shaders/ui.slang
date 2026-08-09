@@ -5,19 +5,38 @@
 //
 // Each quad vertex carries a position in screen-space pixels, a UV coordinate
 // into the glyph atlas (zero for untextured rects), and an RGBA colour. The
-// vertex stage converts to NDC via an orthographic projection passed through
-// push constants; the fragment stage composites with alpha blending.
+// vertex stage converts to NDC by dividing through the viewport size in
+// `constants`; the fragment stage composites with alpha blending.
 //
 // Architecture: one draw call per frame (all UI geometry merged into one
 // vertex/index buffer). The glyph atlas is a single-channel R8 texture; text
 // quads sample it and multiply the alpha through while keeping the vertex
 // colour for the RGB channels.
+//
+// # One artifact, no tier split
+//
+// `constants` is a **bound uniform buffer on every target**, which is the
+// choice `sprite.slang`'s header argues for. It was a `[[vk::push_constant]]`
+// block until 2026-08, and that cost a whole second source file: WebGPU has no
+// push constants, Slang's WGSL target drops the attribute without allocating a
+// binding — so `wgsl/ui.wgsl` declared a `var<uniform>` with no
+// `@group`/`@binding`, which naga rejects — and one entry point reads either a
+// push-constant block or a bound one, never both. The twin was
+// `ui_tier_b.slang`, identical but for that single declaration, held in step
+// with this file by a comment, and picked between by capability in
+// `crcbl-render`'s UI pass.
+//
+// The uniform buffer costs one indirection per vertex where a push constant
+// would have served, for a block read once per vertex. It buys back the whole
+// permutation axis: one source, one artifact per target, one Rust code path,
+// and a `.wgsl` a browser will actually accept.
 
-/// Push constants: orthographic projection from screen pixels to NDC.
+/// Per-frame constants: the framebuffer size the vertex stage divides by.
 ///
-/// `viewport` is the framebuffer size in pixels (width, height). The matrix
-/// maps (0,0) top-left to (-1,1) and (w,h) bottom-right to (1,-1) — matching
-/// the Y-up convention from the inverted Vulkan viewport.
+/// A uniform buffer on every target — see the header. `viewport` is the size in
+/// pixels (width, height), and the mapping it defines puts (0,0) top-left at
+/// NDC (-1,1) and (w,h) bottom-right at (1,-1), matching the Y-up convention
+/// from the inverted Vulkan viewport.
 struct UiConstants
 {
     float2 viewport;       // framebuffer size in pixels
@@ -37,9 +56,9 @@ struct Vertex
 // while `crcbl-mtl` flattens `(set, binding)` by ascending binding number per
 // table. The two agree only while this file declares its resources in the order
 // it numbers them, so the glyph atlas, its sampler and the vertex buffer come
-// first and `constants` — which carries no binding number at all here, being a
-// push constant — comes last. See `crcbl_mtl::binding`'s "The index a binding
-// lands on" for the rule and the artifacts that check it.
+// first and `constants`, at binding 3, comes last. `crcbl_shaders`'
+// `declaration_order` lint checks it over every source; see
+// `crcbl_mtl::binding`'s "The index a binding lands on" for the rule itself.
 
 // The glyph atlas: R8_UNORM, so the shader sees r=alpha, g=b=a=0 or 1 depending
 // on the implementation. We only read `.r`.
@@ -53,7 +72,7 @@ SamplerState glyphSampler;
 [[vk::binding(2, 0)]]
 StructuredBuffer<Vertex> vertices;
 
-[[vk::push_constant]]
+[[vk::binding(3, 0)]]
 ConstantBuffer<UiConstants> constants;
 
 struct UiOutput

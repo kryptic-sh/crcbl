@@ -7,12 +7,12 @@ struct Vertex_std430_0
 
 @binding(2) @group(0) var<storage, read> vertices_0 : array<Vertex_std430_0>;
 
-struct UiConstants_std430_0
+struct UiConstants_std140_0
 {
-    @align(8) viewport_0 : vec2<f32>,
+    @align(16) viewport_0 : vec2<f32>,
 };
 
-var<uniform> constants_0 : UiConstants_std430_0;
+@binding(3) @group(0) var<uniform> constants_0 : UiConstants_std140_0;
 @binding(0) @group(0) var glyphAtlas_0 : texture_2d<f32>;
 
 @binding(1) @group(0) var glyphSampler_0 : sampler;

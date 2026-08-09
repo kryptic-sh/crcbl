@@ -1,27 +1,29 @@
-//! The UI pass on both tiers, asserted against `NullBackend`'s recorded stream.
+//! The UI pass's recorded command stream, asserted against `NullBackend`.
 //!
 //! `crates/crcbl-render/tests/graph_compile.rs` is the pattern: build a frame,
 //! run it through the real graph against the recording null backend, and assert
-//! on the commands the backend actually saw. This file asks that suite's
-//! question of the tier split introduced for `docs/plan/10-wasm-webgpu.md` —
-//! **WebGPU has no push constants**, so the UI pass has two ways to hand
-//! `ui.slang` its viewport, and both have to be exercised somewhere that has no
-//! GPU.
+//! on the commands the backend actually saw.
 //!
-//! The null backend is what makes that possible: `NullInstance::gpu_driven` reports
-//! `Features::PUSH_CONSTANTS` and `NullInstance::portable` does not, so one
-//! process can build both renderers and compare them. Without it the Tier B
-//! path would only ever run in a browser, which is the one place this project
-//! cannot assert anything.
+//! This file used to ask that question of a **tier split**. The pass had two
+//! ways to hand `ui.slang` its viewport — a push constant where the device had
+//! them, a uniform buffer where it did not, because WebGPU has none — and two
+//! shader artifacts to match. It has one of each now, and what is left to assert
+//! is that the one path is the same path on a device with push constants and on
+//! a device without: same commands, in the same order, with no push-constant
+//! write on either.
+//!
+//! The null backend is what makes that comparison possible without a GPU.
+//! `NullInstance::gpu_driven` reports `Features::PUSH_CONSTANTS` and
+//! `NullInstance::portable` does not, so one process can build both renderers.
 
 use crcbl_hal::null::{Command, NullInstance, Recorder};
 use crcbl_hal::{
     CommandEncoderDesc, Device, DeviceDesc, Features, Format, ImageUsage, Instance, QueueHandle,
     QueueKind, ResourceState,
 };
+use crcbl_render::UiRenderer;
 use crcbl_render::graph::{ImportedImage, RenderGraph};
 use crcbl_render::transient::TransientPool;
-use crcbl_render::{ConstantDelivery, UiRenderer};
 use crcbl_ui::draw_list::DrawList;
 use crcbl_ui::text::FontAtlas;
 
@@ -31,9 +33,11 @@ const TARGET_FORMAT: Format = Format::Bgra8UnormSrgb;
 /// Which null preset to open. The only difference that matters here is whether
 /// the device reports `Features::PUSH_CONSTANTS`.
 #[derive(Clone, Copy)]
-enum Tier {
-    A,
-    B,
+enum Preset {
+    /// Reports `Features::PUSH_CONSTANTS`, as a native Vulkan device does.
+    WithPushConstants,
+    /// Reports none, as every WebGPU device does.
+    WithoutPushConstants,
 }
 
 struct Harness {
@@ -43,17 +47,17 @@ struct Harness {
 }
 
 impl Harness {
-    fn open(tier: Tier) -> Self {
+    fn open(preset: Preset) -> Self {
         let recorder = Recorder::new();
-        let (instance, required) = match tier {
-            Tier::A => (NullInstance::gpu_driven(), Features::GPU_DRIVEN),
-            Tier::B => (NullInstance::portable(), Features::COMPUTE),
+        let (instance, required) = match preset {
+            Preset::WithPushConstants => (NullInstance::gpu_driven(), Features::GPU_DRIVEN),
+            Preset::WithoutPushConstants => (NullInstance::portable(), Features::COMPUTE),
         };
         let instance = instance.with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc {
-                label: Some("ui tier"),
+                label: Some("ui pass"),
                 adapter: adapter.id,
                 required_features: required,
                 optional_features: Features::PUSH_CONSTANTS,
@@ -124,14 +128,13 @@ fn hud() -> DrawList {
     list
 }
 
-/// Builds a renderer on `tier`, runs one HUD frame through the real graph, and
-/// returns the delivery it chose and every command the backend saw.
-fn record_one_frame(tier: Tier) -> (ConstantDelivery, Vec<Command>) {
-    let harness = Harness::open(tier);
+/// Builds a renderer on `preset`, runs one HUD frame through the real graph, and
+/// returns every command the backend saw.
+fn record_one_frame(preset: Preset) -> Vec<Command> {
+    let harness = Harness::open(preset);
     let mut pool = TransientPool::new();
     let mut renderer = UiRenderer::new(harness.device.as_ref(), harness.queue, TARGET_FORMAT)
-        .expect("neither tier is refused");
-    let delivery = renderer.constant_delivery();
+        .expect("neither device is refused");
 
     let atlas = FontAtlas::built_in();
     let list = hud();
@@ -165,23 +168,23 @@ fn record_one_frame(tier: Tier) -> (ConstantDelivery, Vec<Command>) {
     harness.release(&target);
     harness.recorder.assert_valid();
 
-    (delivery, stream)
+    stream
 }
 
 fn names(stream: &[Command]) -> Vec<&'static str> {
     stream.iter().map(Command::name).collect()
 }
 
-/// **Tier A records exactly what it has always recorded.** The pass binds its
-/// pipeline and its group, writes the viewport as a push constant, binds the
-/// index buffer and draws — in that order, inside the graph's own pass scope.
+/// **The pass binds its pipeline and its group, binds the index buffer and
+/// draws**, inside the graph's own pass scope, and records no `PushConstants` —
+/// on a device that has them.
 ///
-/// This is the no-regression half: the uniform path was added *beside* this
-/// one, not in place of it.
+/// The viewport arrives through the bind group instead. Spelling the whole
+/// stream out rather than asserting the absence of one command is what would
+/// catch a path that "worked" by dropping the draw or binding a second group.
 #[test]
-fn the_push_constant_tier_records_a_push_constant_write() {
-    let (delivery, stream) = record_one_frame(Tier::A);
-    assert_eq!(delivery, ConstantDelivery::PushConstants);
+fn the_pass_records_no_push_constant_even_where_they_exist() {
+    let stream = record_one_frame(Preset::WithPushConstants);
     assert_eq!(
         names(&stream),
         vec![
@@ -194,74 +197,34 @@ fn the_push_constant_tier_records_a_push_constant_write() {
             "SetScissor",
             "BindGraphicsPipeline",
             "BindGroup",
-            "PushConstants",
             "BindIndexBuffer",
             "DrawIndexed",
             "EndRenderPass",
             "Barrier",
         ],
-        "the Tier A stream is the one this pass has always recorded"
+        "the uniform-buffer path is the only path, on every device"
     );
-
-    let push = stream
-        .iter()
-        .find_map(|command| match command {
-            Command::PushConstants {
-                stages,
-                offset,
-                len,
-            } => Some((*stages, *offset, *len)),
-            _ => None,
-        })
-        .expect("Tier A writes one");
-    assert_eq!(push.0, crcbl_hal::ShaderStages::VERTEX);
-    assert_eq!(push.1, 0);
-    assert_eq!(push.2, 8, "two f32s of viewport, and nothing else");
 }
 
-/// **Tier B records the same frame with no push constant at all**, because
-/// there is no such command to record on a device that has none. The viewport
-/// arrives through the bind group instead.
-#[test]
-fn the_uniform_tier_records_no_push_constant() {
-    let (delivery, stream) = record_one_frame(Tier::B);
-    assert_eq!(delivery, ConstantDelivery::UniformBuffer);
-    assert!(
-        !names(&stream).contains(&"PushConstants"),
-        "a device with no push constants must not be handed one: {:?}",
-        names(&stream)
-    );
-    // It still draws. A tier that quietly recorded nothing would also pass the
-    // assertion above.
-    assert!(names(&stream).contains(&"DrawIndexed"));
-    assert!(names(&stream).contains(&"BindGroup"));
-}
-
-/// **And the difference is exactly that one command.** Both tiers open the same
-/// pass, set the same dynamic state, bind the same group at the same slot with
-/// no dynamic offsets, and draw the same indices; the push-constant write is
-/// the whole delta.
+/// **And a device with no push constants records exactly the same frame.** That
+/// equality is the property the tier split cost: the two used to differ by a
+/// `PushConstants` write, a pipeline layout, a bind-group layout and a shader
+/// artifact.
 ///
-/// This is the assertion that would catch a Tier B path that "worked" by
-/// dropping the draw, binding a second group, or taking a different pass shape
-/// — which is the failure mode a `contains("PushConstants") == false` check
-/// cannot see.
+/// The bind is identical too — same slot, no dynamic offsets. The uniform buffer
+/// is bound whole, which is why `dynamic_offsets` is empty rather than `[0]`;
+/// see `crcbl_render::ui_pass`'s docs.
 #[test]
-fn the_two_tiers_differ_by_exactly_the_push_constant_write() {
-    let (_, tier_a) = record_one_frame(Tier::A);
-    let (_, tier_b) = record_one_frame(Tier::B);
+fn a_device_without_push_constants_records_the_same_frame() {
+    let with = record_one_frame(Preset::WithPushConstants);
+    let without = record_one_frame(Preset::WithoutPushConstants);
 
-    let mut without_push = names(&tier_a);
-    without_push.retain(|name| *name != "PushConstants");
     assert_eq!(
-        without_push,
-        names(&tier_b),
-        "the tiers must differ only in how the viewport is delivered"
+        names(&with),
+        names(&without),
+        "one path means one stream, whatever the device reports"
     );
 
-    // The bind is identical too — same slot, no dynamic offsets on either side.
-    // The uniform buffer is bound whole, which is why `dynamic_offsets` is
-    // empty rather than `[0]`; see `crcbl_render::ui_pass`'s docs.
     let bind = |stream: &[Command]| {
         stream
             .iter()
@@ -273,8 +236,8 @@ fn the_two_tiers_differ_by_exactly_the_push_constant_write() {
                 } => Some((*slot, dynamic_offsets.clone())),
                 _ => None,
             })
-            .expect("both tiers bind one")
+            .expect("both bind one")
     };
-    assert_eq!(bind(&tier_a), (0, Vec::new()));
-    assert_eq!(bind(&tier_b), (0, Vec::new()));
+    assert_eq!(bind(&with), (0, Vec::new()));
+    assert_eq!(bind(&without), (0, Vec::new()));
 }

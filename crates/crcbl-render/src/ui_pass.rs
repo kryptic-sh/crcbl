@@ -11,76 +11,55 @@
 //! with alpha blending. The glyph atlas is a static R8_UNORM texture uploaded
 //! once at creation.
 //!
-//! # Per-pass constants are a tier decision
+//! # Per-pass constants are a uniform buffer, on every tier
 //!
 //! `ui.slang` needs one thing from the CPU each pass — the framebuffer size it
-//! divides by to reach NDC — and **WebGPU has no push constants at all**. That
-//! is the Tier A / Tier B split `docs/plan/03-gpu-driven-rendering.md`
-//! describes, arriving at its smallest possible scale: the same renderer, two
-//! ways of delivering the same eight bytes, chosen from
-//! [`Features::PUSH_CONSTANTS`].
+//! divides by to reach NDC — and it takes it from a uniform buffer bound at
+//! [`CONSTANTS_BINDING`] of the frame's existing bind group. One per frame in
+//! flight, written on the CPU while the pass body records; the pass records no
+//! `push_constants` at all.
 //!
-//! * **Tier A** ([`ConstantDelivery::PushConstants`]) — a
-//!   [`PushConstantRange`] on the pipeline layout and one
-//!   [`push_constants`](crcbl_hal::CommandEncoder::push_constants) per pass.
-//!   Nothing about this path changed when Tier B arrived, deliberately: it is
-//!   the cheaper one and it is what native wants.
-//! * **Tier B** ([`ConstantDelivery::UniformBuffer`]) — one small uniform
-//!   buffer per frame in flight, bound at binding 3 of the frame's existing
-//!   bind group. The pass records no `push_constants` at all; the block is
-//!   written on the CPU while the pass body records.
+//! **That is a deliberate refusal of a tier split.** A push constant would
+//! deliver the same eight bytes with one indirection fewer, and **WebGPU has no
+//! push constants at all** — so it would have made this pass the smallest
+//! possible instance of `docs/plan/03-gpu-driven-rendering.md`'s Tier A / Tier B
+//! axis, chosen from
+//! [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS). It did,
+//! until 2026-08: there was a `ConstantDelivery` enum here, two branches through
+//! every layout and buffer this file creates, and — because one Slang entry
+//! point reads either a `[[vk::push_constant]]` block or a `[[vk::binding]]`ed
+//! one, never both — a whole second shader source, `ui_tier_b.slang`, kept in
+//! step with `ui.slang` by a comment. `sprite.slang` had already declined the same trade for the same
+//! reason; `crates/crcbl-shaders/shaders/ui.slang`'s header carries the
+//! argument. What is left is one source, one artifact per target, and one path
+//! through this file.
 //!
 //! **Not** a dynamic offset, even though the seam has `dynamic_offsets` on
 //! [`bind_group`](crcbl_hal::CommandEncoder::bind_group) and
-//! [`BindingKind::UniformBuffer`] documents it as *the* Tier B substitute. A
-//! dynamic offset buys one buffer sliced per draw; this pass has exactly one
-//! draw per frame and already owns one bind group per frame in flight, so the
-//! offset would always be zero and the only thing it would add is a way to get
-//! it wrong. P7's per-bucket constants are where that vocabulary earns its
-//! keep, and the layout here does not foreclose it — `dynamic: false` becomes
-//! `dynamic: true` and the offset joins the `bind_group` call.
+//! [`BindingKind::UniformBuffer`] documents it as *the* portable substitute for
+//! a push constant. A dynamic offset buys one buffer sliced per draw; this pass
+//! has exactly one draw per frame and already owns one bind group per frame in
+//! flight, so the offset would always be zero and the only thing it would add is
+//! a way to get it wrong. P7's per-bucket constants are where that vocabulary
+//! earns its keep, and the layout here does not foreclose it — `dynamic: false`
+//! becomes `dynamic: true` and the offset joins the `bind_group` call.
 //!
-//! # The tier is a shader permutation, and both artifacts are committed
-//!
-//! The two paths need two *shader* spellings of the same block, and one Slang
-//! source cannot carry both: an entry point either reads a `[[vk::push_constant]]`
-//! block or a `[[vk::binding]]`ed constant buffer, and whichever it reads is
-//! what the pipeline layout must provide. So the tier is a **permutation axis**
-//! — `03-gpu-driven-rendering.md`'s own words — and the permutation is a second
-//! artifact named `ui_tier_b`.
-//!
-//! `crates/crcbl-shaders/shaders/ui_tier_b.slang` is `ui.slang` with exactly one
-//! declaration changed:
-//!
-//! ```text
-//! // ui.slang (Tier A)                 ui_tier_b.slang (Tier B)
-//! [[vk::push_constant]]                [[vk::binding(3, 0)]]
-//! ConstantBuffer<UiConstants>          ConstantBuffer<UiConstants>
-//!     constants;                           constants;
-//! ```
-//!
-//! `ui.slang` itself was untouched, so `spirv/ui.spv` stayed byte-identical and
-//! Tier A could not move. Both artifacts are verified byte-for-byte against
-//! `crates/crcbl-shaders/spirv/manifest.txt`, and `wgsl/ui_tier_b.wgsl` declares
-//! `@binding(3) @group(0) var<uniform> constants_0`, which is what makes it the
-//! WGSL a browser will accept.
-//!
-//! `wgsl/ui.wgsl` is **not** that, and never was: it declares
-//! `var<uniform> constants_0` with no `@group` or `@binding`, because that is
-//! what Slang's WGSL target lowers a push-constant block to, and `naga` rejects
-//! it. Nothing consumes it. The only backend that ingests WGSL is `crcbl-wgpu`,
-//! which deliberately never reports [`Features::PUSH_CONSTANTS`] on any target
-//! (see `crcbl-wgpu`'s `instance::hal_features_for`), so every WGSL consumer
-//! resolves `ui_tier_b`.
+//! `wgsl/ui.wgsl` declares `@binding(3) @group(0) var<uniform> constants_0`,
+//! which is what makes it WGSL a browser will accept: the push-constant form
+//! lowered to a module-scope `var<uniform>` with no `@group`/`@binding` at all,
+//! which `naga` rejects outright, so the only backend that ingests WGSL —
+//! `crcbl-wgpu`, which deliberately never reports
+//! [`PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) on any target — could
+//! not create the module.
 
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BlendState, BufferDesc,
-    BufferHandle, BufferUsage, ColorTargetState, ColorWrites, Device, Features, FilterMode, Format,
+    BufferHandle, BufferUsage, ColorTargetState, ColorWrites, Device, FilterMode, Format,
     GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageViewHandle, IndexFormat, LoadOp,
-    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, PushConstantRange,
-    QueueHandle, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
-    ShaderStages, StoreOp,
+    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, QueueHandle,
+    SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderStages,
+    StoreOp,
 };
 
 use crcbl_shaders::{Stage, UI};
@@ -94,64 +73,17 @@ use crate::texture::{UploadedTexture, upload_texture};
 ///
 /// `viewport` is the framebuffer size in pixels (width, height). The shader
 /// divides position by viewport and maps to NDC.
-///
-/// The same eight bytes go down both delivery paths: a push-constant write on
-/// Tier A, a uniform-buffer write on Tier B. One type rather than two, so the
-/// two paths cannot disagree about the layout the shader reads.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 struct UiConstants {
     viewport: [f32; 2],
 }
 
-/// How the UI pass delivers `ui.slang`'s `UiConstants` block to the shader.
-///
-/// Chosen from the device's capabilities by
-/// [`ConstantDelivery::for_device`], never by the caller: a game asking for
-/// push constants on a browser would be asking for something that does not
-/// exist. See this module's docs for the full reasoning.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ConstantDelivery {
-    /// **Tier A.** A [`PushConstantRange`] on the pipeline layout, written with
-    /// [`push_constants`](crcbl_hal::CommandEncoder::push_constants) once per
-    /// pass. Requires [`Features::PUSH_CONSTANTS`].
-    PushConstants,
-    /// **Tier B.** A uniform buffer per frame in flight, bound at
-    /// [`CONSTANTS_BINDING`] of the frame's bind group. What WebGPU — which has
-    /// no push constants at all — gets instead.
-    UniformBuffer,
-}
-
-impl ConstantDelivery {
-    /// What `device` can actually do.
-    #[must_use]
-    pub fn for_device(device: &dyn Device) -> Self {
-        if device.caps().features.contains(Features::PUSH_CONSTANTS) {
-            Self::PushConstants
-        } else {
-            Self::UniformBuffer
-        }
-    }
-
-    /// The name of the `crcbl-shaders` artifact that spells the constants this
-    /// way.
-    ///
-    /// The tier is a permutation axis, and the permutation is a whole artifact:
-    /// see this module's docs on why one Slang entry point cannot carry both.
-    #[must_use]
-    pub const fn shader_name(self) -> &'static str {
-        match self {
-            Self::PushConstants => "ui",
-            Self::UniformBuffer => "ui_tier_b",
-        }
-    }
-}
-
-/// The binding number the Tier B constants buffer occupies, after the atlas
-/// (0), its sampler (1) and the vertex storage buffer (2).
+/// The binding number the constants buffer occupies, after the atlas (0), its
+/// sampler (1) and the vertex storage buffer (2).
 pub const CONSTANTS_BINDING: u32 = 3;
 
-/// Bytes reserved for one frame's Tier B constants buffer.
+/// Bytes reserved for one frame's constants buffer.
 ///
 /// Sixteen rather than the eight [`UiConstants`] occupies: WGSL rounds a
 /// `uniform` struct's size up to a multiple of 16, so a binding sized to the
@@ -191,21 +123,14 @@ pub struct UiRenderer {
     atlas: UploadedTexture,
     atlas_sampler: SamplerHandle,
 
-    // Per-frame bind groups (each contains atlas+sampler+vertex_buffer, plus
-    // the constants buffer on Tier B)
+    // Per-frame bind groups (each contains atlas+sampler+vertex_buffer+constants)
     frame_groups: Vec<BindGroupHandle>,
     vertex_buffers: Vec<BufferHandle>,
     index_buffers: Vec<BufferHandle>,
     frame: usize,
 
-    /// How this renderer hands the shader its viewport size.
-    delivery: ConstantDelivery,
-
-    /// One constants buffer per frame in flight on
-    /// [`ConstantDelivery::UniformBuffer`], and **empty** on
-    /// [`ConstantDelivery::PushConstants`] — so the Tier A path allocates
-    /// nothing for a thing it does not use, and `constants_buffer` below
-    /// returns `None` without a second flag to keep in step with this one.
+    /// One constants buffer per frame in flight, rotating with the geometry
+    /// rings so a frame still in flight cannot have its viewport overwritten.
     constant_buffers: Vec<BufferHandle>,
 
     /// How many **bytes** each ring buffer holds. Compared against the bytes a
@@ -240,11 +165,9 @@ impl UiRenderer {
     ///
     /// The atlas is uploaded immediately via a staging copy.
     ///
-    /// A device without [`Features::PUSH_CONSTANTS`] is **not** an error: it
-    /// gets [`ConstantDelivery::UniformBuffer`] instead, which is the whole
-    /// point of the tier split and the only reason a browser can run this pass
-    /// at all. Ask [`constant_delivery`](Self::constant_delivery) which one it
-    /// got.
+    /// This pass asks for no device feature of its own — its constants are a
+    /// uniform buffer, which every target has — so a browser and a native
+    /// Vulkan device build the same pipeline from the same artifact.
     ///
     /// # Errors
     ///
@@ -274,7 +197,6 @@ impl UiRenderer {
         target_format: Format,
         rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
-        let delivery = ConstantDelivery::for_device(device);
         let atlas = FontAtlas::built_in();
         let (atlas_w, atlas_h, atlas_pixels) = atlas.glyph_bitmap();
 
@@ -300,8 +222,8 @@ impl UiRenderer {
         })?;
         rollback.samplers.push(atlas_sampler);
 
-        // Bind group layout: atlas texture, sampler, vertex storage buffer —
-        // and, on Tier B only, the constants uniform buffer.
+        // Bind group layout: atlas texture, sampler, vertex storage buffer and
+        // the constants uniform buffer.
         let layout_entries = [
             BindGroupLayoutEntry {
                 binding: 0,
@@ -338,13 +260,9 @@ impl UiRenderer {
                 flags: BindingFlags::empty(),
             },
         ];
-        let declared = match delivery {
-            ConstantDelivery::PushConstants => 3,
-            ConstantDelivery::UniformBuffer => 4,
-        };
         let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("ui pass"),
-            entries: &layout_entries[..declared],
+            entries: &layout_entries,
         })?;
         rollback.bind_group_layouts.push(bind_group_layout);
 
@@ -352,7 +270,7 @@ impl UiRenderer {
         let mut frame_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut vertex_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut index_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        let mut constant_buffers = Vec::new();
+        let mut constant_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut last_vertex_count = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut last_index_count = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut vertex_capacity = Vec::with_capacity(FRAMES_IN_FLIGHT);
@@ -372,25 +290,18 @@ impl UiRenderer {
                 memory: MemoryLocation::HostUpload,
             })?;
             rollback.buffers.push(ib);
-            let cb = match delivery {
-                ConstantDelivery::PushConstants => None,
-                ConstantDelivery::UniformBuffer => {
-                    let cb = device.create_buffer(&BufferDesc {
-                        label: Some("ui constants"),
-                        size: CONSTANTS_UNIFORM_SIZE,
-                        usage: BufferUsage::UNIFORM,
-                        memory: MemoryLocation::HostUpload,
-                    })?;
-                    rollback.buffers.push(cb);
-                    constant_buffers.push(cb);
-                    Some(cb)
-                }
-            };
-            let (entries, used) = frame_entries(atlas.view, atlas_sampler, vb, cb);
+            let cb = device.create_buffer(&BufferDesc {
+                label: Some("ui constants"),
+                size: CONSTANTS_UNIFORM_SIZE,
+                usage: BufferUsage::UNIFORM,
+                memory: MemoryLocation::HostUpload,
+            })?;
+            rollback.buffers.push(cb);
+            constant_buffers.push(cb);
             let bg = device.create_bind_group(&BindGroupDesc {
                 label: Some("ui frame"),
                 layout: bind_group_layout,
-                entries: &entries[..used],
+                entries: &frame_entries(atlas.view, atlas_sampler, vb, cb),
                 variable_count: None,
             })?;
             rollback.bind_groups.push(bg);
@@ -407,34 +318,24 @@ impl UiRenderer {
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("ui"),
             bind_group_layouts: &set_layouts,
-            // The block is a push-constant range only where push constants
-            // exist. A backend without them must refuse this range rather than
-            // drop the writes silently, which is exactly what the null backend
-            // and `crcbl-wgpu` do — so asking for it unconditionally is how the
-            // browser used to lose its HUD.
-            push_constants: match delivery {
-                ConstantDelivery::PushConstants => Some(PushConstantRange {
-                    stages: ShaderStages::VERTEX,
-                    offset: 0,
-                    size: std::mem::size_of::<UiConstants>() as u32,
-                }),
-                ConstantDelivery::UniformBuffer => None,
-            },
+            // No range at all: the block arrives through the bind group, and a
+            // backend without push constants must refuse a range rather than
+            // drop the writes silently — which is exactly what the null backend
+            // and `crcbl-wgpu` do, and is how the browser used to lose its HUD.
+            push_constants: None,
         })?;
         rollback.pipeline_layouts.push(pipeline_layout);
 
         // Entry points resolved before the module exists: a manifest that
         // disagreed with the artifact would otherwise fail inside the descriptor
         // literal, with the module already created and nothing holding it.
-        let shader = ui_shader(delivery);
-        let vertex_entry = entry(shader, Stage::Vertex)?;
-        let fragment_entry = entry(shader, Stage::Fragment)?;
-        let module_label = format!("{}.slang", shader.name());
+        let vertex_entry = entry(&UI, Stage::Vertex)?;
+        let fragment_entry = entry(&UI, Stage::Fragment)?;
         let ui_module = device.create_shader_module(&ShaderModuleDesc {
-            label: Some(&module_label),
-            spirv: shader.spirv(),
-            wgsl: shader.wgsl(),
-            msl: shader.msl(),
+            label: Some("ui.slang"),
+            spirv: UI.spirv(),
+            wgsl: UI.wgsl(),
+            msl: UI.msl(),
             // `None` because a DXIL container holds one entry point and this
             // module has two; see `crcbl_render::forward`.
             dxil: None,
@@ -474,7 +375,6 @@ impl UiRenderer {
             vertex_buffers,
             index_buffers,
             frame: 0,
-            delivery,
             constant_buffers,
             vertex_capacity,
             index_capacity,
@@ -489,22 +389,6 @@ impl UiRenderer {
     #[must_use]
     pub const fn target_format(&self) -> Format {
         self.target_format
-    }
-
-    /// How this renderer hands `ui.slang` its viewport size.
-    ///
-    /// Decided from the device at construction and fixed for the renderer's
-    /// life. Exposed because it is the observable half of the tier split: a
-    /// test — or a debug overlay — can ask which path a device took without
-    /// re-deriving it from [`DeviceCaps`](crcbl_hal::DeviceCaps).
-    #[must_use]
-    pub const fn constant_delivery(&self) -> ConstantDelivery {
-        self.delivery
-    }
-
-    /// This frame's constants buffer, on the tier that has one.
-    fn constants_buffer(&self) -> Option<BufferHandle> {
-        self.constant_buffers.get(self.frame).copied()
     }
 
     /// Uploads the draw list's triangulated geometry and advances the ring.
@@ -582,16 +466,16 @@ impl UiRenderer {
         // Only a new vertex buffer needs a new bind group; the atlas and the
         // sampler never change, so a steady-state frame writes no descriptors.
         if vertex_buffer_replaced {
-            let (entries, used) = frame_entries(
+            let entries = frame_entries(
                 self.atlas.view,
                 self.atlas_sampler,
                 self.vertex_buffers[idx],
-                self.constant_buffers.get(idx).copied(),
+                self.constant_buffers[idx],
             );
             let fresh = device.create_bind_group(&BindGroupDesc {
                 label: Some("ui frame"),
                 layout: self.bind_group_layout,
-                entries: &entries[..used],
+                entries: &entries,
                 variable_count: None,
             })?;
             device.destroy_bind_group(std::mem::replace(&mut self.frame_groups[idx], fresh));
@@ -611,10 +495,10 @@ impl UiRenderer {
     /// ([`CompiledGraph::execute`](crate::graph::CompiledGraph::execute)), and a
     /// body that set them again could only disagree with it.
     ///
-    /// `extent` is also the *only* source of the viewport constants on either
-    /// tier, which is why the Tier B uniform buffer is written here rather than
-    /// in [`begin_frame`](Self::begin_frame): a second extent taken a second
-    /// time is a second thing that can disagree.
+    /// `extent` is also the *only* source of the viewport constants, which is
+    /// why the uniform buffer is written here rather than in
+    /// [`begin_frame`](Self::begin_frame): a second extent taken a second time
+    /// is a second thing that can disagree.
     pub fn add_pass<'a>(
         &'a self,
         graph: &mut RenderGraph<'a>,
@@ -630,9 +514,7 @@ impl UiRenderer {
         let bg = self.frame_groups[self.frame];
         let index_buffer = self.index_buffers[self.frame];
         let index_count = self.last_index_count[self.frame] as u32;
-        // `None` on Tier A, and the *only* thing that distinguishes the two
-        // paths in the body below.
-        let constants = self.constants_buffer();
+        let constants = self.constant_buffers[self.frame];
 
         graph
             .add_render_pass("ui-composite")
@@ -643,27 +525,21 @@ impl UiRenderer {
                     viewport: [extent.0 as f32, extent.1 as f32],
                 };
                 let bytes: &[u8] = bytemuck::bytes_of(&block);
-                if let Some(buffer) = constants {
-                    // A host-visible write, not a command: it lands before this
-                    // frame is submitted, and the buffer is one of
-                    // `FRAMES_IN_FLIGHT` — the same rotation that makes the
-                    // vertex ring safe makes this safe.
-                    if let Err(error) = ctx.device().write_buffer(buffer, 0, bytes) {
-                        // Recording a pass that draws nothing beats aborting the
-                        // frame, as in the tonemap's bind-group path: the HUD
-                        // vanishes for a frame, the log says why, the next frame
-                        // retries.
-                        log::error!("graph: ui constants write failed: {error}");
-                        return;
-                    }
+                // A host-visible write, not a command: it lands before this
+                // frame is submitted, and the buffer is one of
+                // `FRAMES_IN_FLIGHT` — the same rotation that makes the vertex
+                // ring safe makes this safe.
+                if let Err(error) = ctx.device().write_buffer(constants, 0, bytes) {
+                    // Recording a pass that draws nothing beats aborting the
+                    // frame, as in the tonemap's bind-group path: the HUD
+                    // vanishes for a frame, the log says why, the next frame
+                    // retries.
+                    log::error!("graph: ui constants write failed: {error}");
+                    return;
                 }
                 let encoder = ctx.encoder();
                 encoder.bind_graphics_pipeline(pipeline);
                 encoder.bind_group(0, bg, &[], pipeline_layout);
-                if constants.is_none() {
-                    // Tier A: the viewport goes down the push-constant block.
-                    encoder.push_constants(ShaderStages::VERTEX, 0, bytes, pipeline_layout);
-                }
                 encoder.bind_index_buffer(index_buffer, 0, IndexFormat::Uint32);
                 encoder.draw_indexed(0..index_count, 0, 0..1);
             });
@@ -686,7 +562,6 @@ impl UiRenderer {
         for ib in self.index_buffers.drain(..) {
             device.destroy_buffer(ib);
         }
-        // Empty on Tier A, so this is a no-op there rather than a branch.
         for cb in self.constant_buffers.drain(..) {
             device.destroy_buffer(cb);
         }
@@ -755,23 +630,19 @@ impl Rollback {
     }
 }
 
-/// One frame's bind-group entries, and how many of them this tier declares.
+/// One frame's bind-group entries.
 ///
 /// One function rather than the two copies `new` and `begin_frame` used to
-/// carry: they build the *same* group, and a Tier B binding added to one and
-/// forgotten in the other is a bind group that stops matching its layout the
-/// first time the vertex ring grows.
-///
-/// The fourth entry is written unconditionally and sliced off on Tier A —
-/// [`BindGroupEntry`] has no "absent" resource to spell, and a `Vec` here would
-/// allocate on a path that runs whenever the ring grows.
+/// carry: they build the *same* group, and a binding added to one and forgotten
+/// in the other is a bind group that stops matching its layout the first time
+/// the vertex ring grows.
 fn frame_entries(
     atlas_view: ImageViewHandle,
     atlas_sampler: SamplerHandle,
     vertices: BufferHandle,
-    constants: Option<BufferHandle>,
-) -> ([BindGroupEntry; 4], usize) {
-    let mut entries = [
+    constants: BufferHandle,
+) -> [BindGroupEntry; 4] {
+    [
         BindGroupEntry {
             binding: 0,
             array_index: 0,
@@ -790,49 +661,9 @@ fn frame_entries(
         BindGroupEntry {
             binding: CONSTANTS_BINDING,
             array_index: 0,
-            // Placeholder, replaced below when there is a constants buffer and
-            // never reached when there is not.
-            resource: BindingResource::whole_buffer(vertices),
+            resource: BindingResource::whole_buffer(constants),
         },
-    ];
-    match constants {
-        Some(buffer) => {
-            entries[3].resource = BindingResource::whole_buffer(buffer);
-            (entries, 4)
-        }
-        None => (entries, 3),
-    }
-}
-
-/// The shader artifact that spells the constants the way `delivery` delivers
-/// them.
-///
-/// Resolved **by name** out of [`crcbl_shaders::ALL`] rather than by naming a
-/// static, which is how the Tier B permutation was able to land as an artifact
-/// alone with no change here. Both names resolve today.
-///
-/// The fallback below is therefore unreachable in this workspace and is kept as
-/// the honest failure for a build that drops an artifact: falling back to `ui`
-/// hands a Tier B device a pipeline whose SPIR-V takes a push constant and whose
-/// WGSL declares an unbound uniform, which it will refuse loudly at module or
-/// pipeline creation rather than draw a mis-scaled UI. A silent `unwrap` here
-/// would be a panic in a renderer instead.
-fn ui_shader(delivery: ConstantDelivery) -> &'static crcbl_shaders::Shader {
-    let wanted = delivery.shader_name();
-    if let Some(shader) = crcbl_shaders::ALL
-        .iter()
-        .copied()
-        .find(|shader| shader.name() == wanted)
-    {
-        return shader;
-    }
-    log::warn!(
-        "ui pass: this device has no push constants and `{wanted}` is not among the compiled \
-         shaders, so the pass falls back to `ui`, which delivers its viewport through a push \
-         constant. Add crates/crcbl-shaders/shaders/{wanted}.slang and run \
-         crates/crcbl-shaders/tools/compile-shaders.sh — see crcbl_render::ui_pass's docs."
-    );
-    &UI
+    ]
 }
 
 fn entry(shader: &crcbl_shaders::Shader, stage: Stage) -> Result<&'static str, HalError> {
@@ -1126,7 +957,9 @@ mod tests {
         renderer.destroy(device.as_ref());
     }
 
-    fn open_tier_b() -> (Box<dyn Device>, QueueHandle) {
+    /// A device that reports no [`Features::PUSH_CONSTANTS`] — what a browser
+    /// is, and what this pass used to need a second shader artifact for.
+    fn open_portable() -> (Box<dyn Device>, QueueHandle) {
         let instance = NullInstance::portable();
         let adapter = instance.adapters().remove(0);
         let device = instance
@@ -1142,50 +975,31 @@ mod tests {
         (device, queue)
     }
 
-    /// **A device without push constants is no longer refused.** WebGPU has
-    /// none at all, and the UI pass is where breakout's score, lives and game
-    /// state are drawn — so the tier without them gets the uniform-buffer path
-    /// rather than an error.
+    /// **Both devices build the same renderer**, each with one constants buffer
+    /// per frame in flight. A device that reports push constants gets no
+    /// different treatment from one that does not, which is the whole of what
+    /// deleting `ConstantDelivery` was for: the two used to differ in the
+    /// pipeline layout, the bind-group layout, the buffers allocated, the
+    /// commands recorded *and* the shader artifact resolved.
     #[test]
-    fn a_device_without_push_constants_gets_the_uniform_path() {
-        let (device, queue) = open_tier_b();
-        let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb)
-            .expect("the tier B path exists precisely so this succeeds");
-        assert_eq!(
-            renderer.constant_delivery(),
-            ConstantDelivery::UniformBuffer
-        );
-        assert_eq!(
-            renderer.constant_buffers.len(),
-            FRAMES_IN_FLIGHT,
-            "one constants buffer per frame in flight, or two frames share one"
-        );
-        renderer.destroy(device.as_ref());
+    fn push_constants_or_not_the_renderer_is_the_same() {
+        for (device, queue) in [open(), open_portable()] {
+            let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb)
+                .expect("neither device is refused");
+            assert_eq!(
+                renderer.constant_buffers.len(),
+                FRAMES_IN_FLIGHT,
+                "one constants buffer per frame in flight, or two frames share one"
+            );
+            renderer.destroy(device.as_ref());
+        }
     }
 
-    /// And a device *with* them still takes the cheaper path, with nothing
-    /// allocated for the buffer it does not use.
+    /// The renderer builds, uploads and tears down with no GPU and no leak on a
+    /// device with no push constants — the path that was once an early
+    /// `return Err`, and then a second shader artifact.
     #[test]
-    fn a_device_with_push_constants_keeps_the_push_path() {
-        let (device, queue) = open();
-        let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb)
-            .expect("the null backend accepts everything");
-        assert_eq!(
-            renderer.constant_delivery(),
-            ConstantDelivery::PushConstants
-        );
-        assert!(
-            renderer.constant_buffers.is_empty(),
-            "Tier A must not allocate a uniform buffer it never binds"
-        );
-        renderer.destroy(device.as_ref());
-    }
-
-    /// The Tier B renderer builds, uploads and tears down with no GPU and no
-    /// leak — the same sweep the Tier A one gets, on the path that used to be
-    /// an early `return Err`.
-    #[test]
-    fn the_tier_b_renderer_leaks_nothing() {
+    fn the_portable_renderer_leaks_nothing() {
         let recorder = crcbl_hal::null::Recorder::new();
         let instance = NullInstance::portable().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
@@ -1197,7 +1011,7 @@ mod tests {
                 optional_features: Features::empty(),
                 compatible_surface: None,
             })
-            .expect("the tier B null adapter opens");
+            .expect("the portable null adapter opens");
         let queue = device.queue(QueueKind::Graphics).expect("always present");
         let before = recorder.total_live_objects();
 
@@ -1216,12 +1030,12 @@ mod tests {
         recorder.assert_valid();
     }
 
-    /// A Tier B frame that grows its ring rebuilds a bind group that still
-    /// names the constants buffer — the entry `new` and `begin_frame` used to
-    /// spell twice, and could therefore spell differently.
+    /// A frame that grows its ring rebuilds a bind group that still names the
+    /// constants buffer — the entry `new` and `begin_frame` used to spell twice,
+    /// and could therefore spell differently.
     #[test]
-    fn growing_the_tier_b_ring_keeps_the_constants_bound() {
-        let (device, queue) = open_tier_b();
+    fn growing_the_ring_keeps_the_constants_bound() {
+        let (device, queue) = open_portable();
         let mut renderer =
             UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
         let atlas = FontAtlas::built_in();
@@ -1243,21 +1057,11 @@ mod tests {
         assert!(renderer.vertex_capacity[renderer.frame] > INITIAL_RING_BYTES);
         // A bind group that had stopped matching its layout would have been
         // refused by the null backend's descriptor check, not merely wrong.
-        assert!(renderer.constants_buffer().is_some());
-        renderer.destroy(device.as_ref());
-    }
-
-    /// Both tiers ask for a shader by name, and Tier A's name resolves to the
-    /// artifact that is actually committed. Tier B's does not yet — which is
-    /// the documented gap, and this is what will notice when it closes.
-    #[test]
-    fn the_push_path_resolves_the_committed_ui_artifact() {
-        assert_eq!(ConstantDelivery::PushConstants.shader_name(), "ui");
         assert_eq!(
-            ui_shader(ConstantDelivery::PushConstants).name(),
-            "ui",
-            "the Tier A pass must never silently fall back to another artifact"
+            renderer.constant_buffers.len(),
+            FRAMES_IN_FLIGHT,
+            "the rebuilt group still names a constants buffer per frame"
         );
-        assert_eq!(ConstantDelivery::UniformBuffer.shader_name(), "ui_tier_b");
+        renderer.destroy(device.as_ref());
     }
 }

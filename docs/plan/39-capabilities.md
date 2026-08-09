@@ -199,7 +199,8 @@ because **MSL cannot be validated anywhere except on a Mac** — `xcrun metal` i
 macOS-only and `MTLDevice::newLibraryWithSource:` needs a real device, so on the
 development machine there is no way to syntax-check it, and no open-source tool
 parses MSL at all. A hand-written twin would be the `ui_tier_b.slang`
-duplication in a language nothing local can read, guarded by an end-to-end suite
+duplication — since deleted, precisely because a manually synced twin is what it
+was — but in a language nothing local can read, guarded by an end-to-end suite
 whose draw tests are currently quarantined and which has never run on real Apple
 hardware. The drift would be undetectable. **Do not revisit without either a
 Metal compiler that runs off macOS or a differential gate that runs on real

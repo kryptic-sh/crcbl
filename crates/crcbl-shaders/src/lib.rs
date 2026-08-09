@@ -96,35 +96,35 @@
 //! The triangle does not vary by tier, and a permutation system with one
 //! permutation would be a guess at the shape `37-materials.md` owns.
 //!
-//! # Known gap: push constants have no WGSL spelling (`ui.wgsl`)
+//! # No shader here uses a push constant, and that is a rule
 //!
 //! WGSL has no push constants — they are a native-`wgpu` extension, absent from
 //! WebGPU — and Slang's WGSL target does not say so. It lowers a
 //! `[[vk::push_constant]]` block to a module-scope `var<uniform>` with **no**
-//! `@group`/`@binding`, which is not valid WGSL. `wgsl/ui.wgsl` carries one:
+//! `@group`/`@binding`, which is not valid WGSL:
 //!
 //! ```text
 //! var<uniform> constants_0 : UiConstants_std430_0;
 //! ```
 //!
-//! and `naga` rejects it — "Binding decoration is missing or not applicable" —
-//! so `crcbl-wgpu` cannot create the `ui.slang` module. `mesh`, `tonemap` and
-//! `triangle` use no push constants and compile.
+//! `naga` rejects that — "Binding decoration is missing or not applicable" — so
+//! `crcbl-wgpu` cannot create the module at all. It is not fixable in the
+//! artifact, which is a faithful translation of a source asking for something
+//! the target does not have; the only fix is in the source.
 //!
-//! **The DXIL column does not share this gap.** HLSL has root constants and
-//! Slang lowers the same block to an ordinary `cbuffer`, so `dxil/ui.*.dxil`
-//! compiles; the gap is WGSL's alone.
+//! `ui.slang` carried exactly this until 2026-08, along with a `ui_tier_b.slang`
+//! twin that spelled the same block as a bound uniform buffer for the WGSL
+//! consumers, and a `ConstantDelivery` enum in `crcbl-render` picking between
+//! the two artifacts by capability. It now takes its constants from a uniform
+//! buffer on every target, like every other shader here, and the twin is gone.
 //!
-//! This is not fixable here: the artifact is a faithful translation of a source
-//! that asks for something the target does not have. The fix is in
-//! `crcbl-render`'s UI pass and `ui.slang` — a uniform buffer binding in place
-//! of the push-constant block, which is the Tier B data-layout rule
-//! `docs/plan/10-wasm-webgpu.md` states for this backend anyway. Regenerating
-//! the artifacts is part of that change, not of the seam change that made the
-//! WGSL reachable.
+//! **So a shader added here may not use a push constant**, on any target,
+//! however native-only it looks — a `wgsl` line in its `crcbl-targets`
+//! declaration then produces an artifact nothing can load, and the fork that
+//! works around it is the cost this crate has already paid once.
 //!
-//! No shader added here may use push constants until that lands, or it acquires
-//! the same gap silently.
+//! The DXIL column never shared the gap: HLSL has root constants and Slang
+//! lowers the same block to an ordinary `cbuffer`. The rule is WGSL's.
 //!
 //! # Nothing here knows a backend
 //!

@@ -95,8 +95,8 @@
 # **Slang defines no target macro of its own.** Probing 2026.14 turned up only
 # `__SLANG_COMPILER__`, which is true for every target, so there was no way to
 # write a `#if` that differs per target and the only way to differ at all was to
-# fork the file — which is what `shaders/ui_tier_b.slang` is. So each invocation
-# below defines exactly one of:
+# fork the file — which is what `shaders/ui_tier_b.slang` was, until `ui.slang`
+# stopped needing it. So each invocation below defines exactly one of:
 #
 #     CRCBL_TARGET_SPIRV  CRCBL_TARGET_WGSL  CRCBL_TARGET_MSL  CRCBL_TARGET_HLSL
 #

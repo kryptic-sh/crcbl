@@ -3347,17 +3347,6 @@ the transport seam over a third transport shape.
 
 ### Owed by the shader guardrails
 
-- **`ui.slang` and `ui_tier_b.slang` declare `wgsl`, and for `ui.slang` that
-  declaration is currently false.** Slang emits `wgsl/ui.wgsl` with a
-  `var<uniform>` carrying no `@group`/`@binding`, because it drops
-  `[[vk::push_constant]]` without allocating one — and naga rejects it. The
-  per-shader target declaration cannot catch this: **Slang succeeds**, so the
-  compile script has nothing to fail on. Rule 4 (validating all four artifacts,
-  naga over the WGSL) is what turns it into a real failure. The honest fix is
-  then either dropping `wgsl` from `ui.slang`'s declaration or moving it to a
-  uniform buffer on every path — the latter is what `sprite.slang` already does
-  and deletes the fork.
-
 - **The declaration-order lint is stricter than the rule it guards.** Metal
   assigns indices per argument _table_; the lint asserts one global ascending
   order across all sets. So it can ask for a move that would have been harmless
@@ -3403,9 +3392,9 @@ the transport seam over a third transport shape.
   type is gone and the doc comments are cleaned, but narrative comments,
   `.expect()` strings and test names still say Tier A/B in `crcbl-render`,
   `crcbl-wgpu`, `crcbl-mtl`, `crcbl-vk` and `crcbl-dx12`. Two caveats before
-  anyone sweeps it: `crcbl-render`'s references are about the
-  `ui.slang`/`ui_tier_b.slang` **shader permutation**, which is a different
-  thing and is being deleted by the shader-guardrails slice; and much of
+  anyone sweeps it: `crcbl-render`'s references were about the
+  `ui.slang`/`ui_tier_b.slang` **shader permutation**, which no longer exists —
+  that fork is deleted, so those are now simply dead words; and much of
   `crcbl-dx12`'s is real D3D12 `ResourceBindingTier` vocabulary that must stay.
 
 - **Every path selector value must be executed by something.** A `GeometryPath`,

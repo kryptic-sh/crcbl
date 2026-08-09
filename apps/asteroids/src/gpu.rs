@@ -136,13 +136,12 @@ pub struct Gpu {
 fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
     GpuContextDesc {
         label: "asteroids",
-        // Optional, not required: the UI pass hands its shader the viewport size
-        // through a push constant where there are any and through a uniform
-        // buffer where there are none.
+        // Optional, not required: none of these changes what is drawn, only how
+        // fast or how observable it is. Push constants are not among them —
+        // every engine pass takes its constants from a uniform buffer.
         optional_features: Features::GPU_DRIVEN
             | Features::TIMESTAMP_QUERY
-            | Features::DEBUG_MARKERS
-            | Features::PUSH_CONSTANTS,
+            | Features::DEBUG_MARKERS,
         ..GpuContextDesc::from(gpu)
     }
 }

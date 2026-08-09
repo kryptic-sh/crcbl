@@ -168,15 +168,13 @@ pub struct Gpu {
 fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
     GpuContextDesc {
         label: "breakout",
-        // `optional_features`, not required: the UI pass hands `ui.slang` its
-        // viewport size through a push constant where there are any, and
-        // through a uniform buffer where there are none — see
-        // `crcbl::render::ConstantDelivery`. A browser is the second case and
-        // always will be, since WebGPU has no push constants at all.
+        // `optional_features`, not required: none of these changes what is
+        // drawn, only how fast or how observable it is. Push constants are not
+        // among them — every engine pass takes its constants from a uniform
+        // buffer, which is what lets a browser run the same shaders.
         optional_features: Features::GPU_DRIVEN
             | Features::TIMESTAMP_QUERY
-            | Features::DEBUG_MARKERS
-            | Features::PUSH_CONSTANTS,
+            | Features::DEBUG_MARKERS,
         ..GpuContextDesc::from(gpu)
     }
 }

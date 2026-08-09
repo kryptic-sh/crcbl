@@ -1360,6 +1360,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Breaking: the UI pass has one constant path, and `ConstantDelivery` is
+  gone.** `crcbl_render::ConstantDelivery`, `UiRenderer::constant_delivery` and
+  the `ui_tier_b` shader (`shaders/ui_tier_b.slang` and its `spirv/`, `wgsl/`,
+  `msl/` and `dxil/` artifacts) are removed. `ui.slang` takes its viewport from
+  a uniform buffer at `(set 0, binding 3)` on every target instead of a
+  `[[vk::push_constant]]` block, so one artifact set serves every backend and
+  `UiRenderer` builds the same pipeline layout, bind-group layout, buffers and
+  command stream whatever the device reports for `Features::PUSH_CONSTANTS`. The
+  cost is one indirection per vertex where a push constant would have served;
+  the saving is a permutation axis and a second `.slang` that had to be kept in
+  step by hand. The sample binaries no longer ask for `PUSH_CONSTANTS` at all —
+  nothing in the engine reads one now.
+
+- **`wgsl/ui.wgsl` is a loadable artifact for the first time.** It declares
+  `@binding(3) @group(0) var<uniform> constants_0`, where the push-constant form
+  lowered to a module-scope `var<uniform>` with no `@group`/`@binding` that naga
+  rejects outright — so `crcbl-wgpu`, the only backend that ingests WGSL, could
+  not create the UI module from it and resolved `ui_tier_b` instead. Verified by
+  parsing and validating every `wgsl/*.slang` output with naga 30: all six pass,
+  and the previous `ui.wgsl` fails with "Binding decoration is missing or not
+  applicable". The regenerated `spirv/ui.spv`, `wgsl/ui.wgsl` and `msl/ui.metal`
+  are byte-identical to the deleted `ui_tier_b` ones, and every Vulkan golden
+  image — `button_skin_widths` and `menu_frame_two_sizes` among them — is
+  unchanged at zero differing pixels.
+
 - **Breaking: the two-valued renderer tier is gone, replaced by device
   capabilities and three derived path selectors.** `crcbl_hal::RendererTier` and
   `DeviceCaps::tier` are removed; `Features::TIER_A` is renamed

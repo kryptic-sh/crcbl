@@ -65,23 +65,22 @@
 //! `sampler(0)`) and `tonemap.metal` (`scene` 0/0 → `texture(0)`,
 //! `sceneSampler` 0/1 → `sampler(0)`) all agree with it exactly.
 //!
-//! **`ui.slang` and `ui_tier_b.slang` did not, and the fix was theirs.** Both
-//! declared their constant buffer *before* the storage buffer in source while
-//! numbering it *after* — `ui_tier_b.slang` puts `constants` at binding 3 and
-//! `vertices` at binding 2 — and Slang assigns Metal indices in declaration
-//! order, so their MSL had `constants` at `buffer(0)` and `vertices` at
-//! `buffer(1)`, the reverse of what this rule computes. What that produced was
-//! not a diagnostic: the UI vertex stage read the viewport constants as its
-//! vertex array, every quad landed nowhere, and macOS drew a game with no text
-//! in it. Nothing below the seam can detect it either — reflection would name
-//! the shader's own parameter names, and a [`BindGroupLayoutEntry`] has no name
-//! to compare them with.
+//! **`ui.slang` did not, and the fix was its own.** It declared its constant
+//! buffer *before* the storage buffer in source while numbering it *after* —
+//! `constants` at binding 3, `vertices` at binding 2 — and Slang assigns Metal
+//! indices in declaration order, so its MSL had `constants` at `buffer(0)` and
+//! `vertices` at `buffer(1)`, the reverse of what this rule computes. What that
+//! produced was not a diagnostic: the UI vertex stage read the viewport
+//! constants as its vertex array, every quad landed nowhere, and macOS drew a
+//! game with no text in it. Nothing below the seam can detect it either —
+//! reflection would name the shader's own parameter names, and a
+//! [`BindGroupLayoutEntry`] has no name to compare them with.
 //!
-//! Both sources now declare their resources in the order they number them, and
-//! say so in a comment, so `msl/ui_tier_b.metal` has `vertices` at `buffer(0)`
-//! and `constants` at `buffer(1)`. The rule holds across every committed
-//! artifact again; the standing obligation is on `crcbl-shaders`, where a new
-//! shader must declare in binding order or this backend binds the wrong slot.
+//! It now declares its resources in the order it numbers them, so
+//! `msl/ui.metal` has `vertices` at `buffer(0)` and `constants` at `buffer(1)`.
+//! The rule holds across every committed artifact again, and `crcbl-shaders`'
+//! `declaration_order` lint now checks it over every source rather than leaving
+//! it to a comment.
 //!
 //! # A bind group holds the Metal objects, not the handles
 //!

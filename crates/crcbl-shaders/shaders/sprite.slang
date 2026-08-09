@@ -14,17 +14,15 @@
 //
 // # One artifact, no tier split
 //
-// `ui.slang` needed a `ui_tier_b.slang` twin because it delivers its constants
-// through `[[vk::push_constant]]`, which WebGPU does not have — and an entry
-// point either reads a push-constant block or a bound one, so the tier became a
-// whole second source file that has to be kept in step by hand.
+// Its constants are a **bound uniform buffer on every tier**, so there is one
+// source, one `.spv`, one `.wgsl` and one Rust code path. The cost is one
+// indirection that a push constant would have avoided, for a block that is read
+// once per vertex; the saving is an entire permutation axis, because WebGPU has
+// no push constants and an entry point reads either a push-constant block or a
+// bound one — so serving both means a second source file kept in step by hand.
 //
-// This shader does not repeat that. Its constants are a **bound uniform buffer
-// on every tier**, so there is one source, one `.spv`, one `.wgsl` and one Rust
-// code path, and `crcbl_render::ui_pass::ConstantDelivery` has no counterpart
-// here. The cost is one indirection on Tier A that a push constant would have
-// avoided, for a block that is read once per vertex; the saving is the entire
-// permutation axis.
+// `ui.slang` was that second file's other half, and stopped being one when it
+// took this trade too; its header records what the split had cost.
 //
 // # Matrix layout
 //
@@ -135,8 +133,8 @@ struct SpriteInstance
     /// `SamplerState` and a shader has no way to ask which filter it got. It
     /// could come from a second uniform block rebound per batch, which is a
     /// third descriptor set and a per-batch bind for eight bytes; or from a
-    /// second pipeline, which is the `ui.slang`/`ui_tier_b.slang` permutation
-    /// mistake again, this time with the two halves differing by one `lerp`.
+    /// second pipeline, which is the `ui.slang` permutation mistake again, this
+    /// time with the two halves differing by one `lerp`.
     /// Two `float4` lanes of a buffer that is already written per sprite per
     /// frame cost one 16-byte store and buy one pipeline, one sampler and one
     /// descriptor set for both modes.

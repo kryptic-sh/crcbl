@@ -44,23 +44,17 @@
 //! # Two tiers, one renderer
 //!
 //! `docs/plan/03-gpu-driven-rendering.md`'s rule is that **Tier B is a
-//! constraint on data layout, not a separate renderer**, and [`ui_pass`] is
-//! where the first one bites: WebGPU has no push constants at all, so the pass
-//! that draws every sample's HUD picks its constant delivery from
-//! [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS) — see
-//! [`ConstantDelivery`]. [`forward`] needs no such branch; its camera has been
-//! in a uniform buffer since P1 for exactly this reason.
+//! constraint on data layout, not a separate renderer**, and no pass here reads
+//! a push constant. [`forward`]'s camera has been in a uniform buffer since P1
+//! for exactly that reason; [`sprite_pass`] followed it; and [`ui_pass`] — which
+//! draws every sample's HUD, and which WebGPU's lack of push constants had made
+//! this crate's one permutation axis, with a `ConstantDelivery` enum and a
+//! second `.slang` — joined them in 2026-08.
 //!
-//! The Tier B *shader* artifact that split needs is committed —
-//! `crates/crcbl-shaders/shaders/ui_tier_b.slang` and its `spirv/` and `wgsl/`
-//! outputs — so both tiers now resolve a real artifact. [`ui_pass`]'s own docs
-//! carry what the permutation is and why it could not be one source.
-//!
-//! [`sprite_pass`] deliberately does **not** repeat that split: its constants
-//! are a bound uniform buffer on every tier, so it ships one shader artifact and
-//! one code path and has no [`ConstantDelivery`] of its own. The tier is a
-//! permutation axis only for a pass that reads a push constant, and the cheapest
-//! way not to have the axis is not to read one.
+//! So the tier costs one indirection where a push constant would have served,
+//! and buys one artifact per shader, one code path per pass, and nothing to
+//! select between at device-open time. [`ui_pass`]'s own docs carry the trade in
+//! full, including what the split had cost.
 //!
 //! # What this crate is *not*, at P1
 //!
@@ -166,4 +160,4 @@ pub use sprite_pass::{
 pub use texture::{UploadedTexture, upload_texture};
 pub use timing::{FrameTimings, PassTimers, PassTiming};
 pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};
-pub use ui_pass::{ConstantDelivery, UiRenderer};
+pub use ui_pass::UiRenderer;

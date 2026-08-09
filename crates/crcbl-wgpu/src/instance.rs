@@ -147,11 +147,12 @@ pub(crate) fn hal_features_for(features: wgpu::Features) -> Features {
     // way out either — every artifact this workspace ships declares
     // `OpCapability DrawParameters`, which naga does not implement.
     //
-    // Reporting the adapter's answer here made `crcbl_render::ConstantDelivery`
-    // choose the push-constant path on native wgpu and then fail to create the
-    // UI shader module, which is exactly the confusion the capability exists to
-    // prevent. Tier B's uniform-buffer path is the one this backend can serve,
-    // so it is the one it asks for.
+    // Reporting the adapter's answer here made `crcbl-render`'s UI pass choose
+    // its push-constant path on native wgpu and then fail to create the UI
+    // shader module, which is exactly the confusion the capability exists to
+    // prevent. That pass now reads a uniform buffer on every target, so there is
+    // no such choice left to get wrong — but the answer this backend gives is
+    // still bounded by WGSL and not by the adapter.
     let _ = wgpu::Features::IMMEDIATES;
     if features.contains(wgpu::Features::DEPTH_CLIP_CONTROL) {
         out |= Features::DEPTH_CLAMP;
@@ -616,7 +617,7 @@ mod tests {
     /// This backend ingests WGSL, and WGSL has no push constants — so an
     /// adapter that has `IMMEDIATES` still cannot be handed a pipeline that
     /// uses them, because the shader for it cannot be compiled. Reporting the
-    /// adapter's answer instead made `ConstantDelivery` pick the Tier A path on
+    /// adapter's answer instead made the UI pass pick its push-constant path on
     /// native wgpu and fail at `create_shader_module`. The limit must agree with
     /// the feature, which is what makes the pair checkable at all.
     #[test]
