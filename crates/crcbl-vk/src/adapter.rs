@@ -26,7 +26,7 @@
 
 use core::ffi::CStr;
 
-use ash::{khr, vk};
+use ash::{ext, khr, vk};
 
 use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
 
@@ -157,6 +157,129 @@ pub(crate) fn has_device_extension(properties: &[vk::ExtensionProperties], name:
     })
 }
 
+/// The capabilities no core feature struct can answer.
+///
+/// Every member is an extension whose presence was probed **and** a feature bit
+/// that came back `VK_TRUE` — the module's "honest, not optimistic" rule applied
+/// to the half of [`Features`] that lives outside `VkPhysicalDeviceFeatures` and
+/// the version structs. [`describe`] establishes them all before
+/// [`features_of`] is called, which is why that function takes answers rather
+/// than a driver.
+///
+/// A struct rather than a row of `bool` parameters: eight positional
+/// `true, false, false, …` arguments say nothing at a call site about which
+/// capability each one is, and a transposed pair would report the wrong flag
+/// and still compile.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ExtensionSupport {
+    /// `VK_EXT_debug_utils` — an *instance* extension, and the only member here
+    /// the physical device has no say in.
+    pub(crate) debug_utils: bool,
+    /// `VK_KHR_present_id` + `VK_KHR_present_wait`, both feature bits granted.
+    pub(crate) present_feedback: bool,
+    /// The whole `VK_EXT_present_timing` chain, both feature bits granted.
+    pub(crate) present_timing: bool,
+    /// `VK_EXT_mesh_shader` with `meshShader`.
+    pub(crate) mesh_shader: bool,
+    /// The same extension with `taskShader`, and only alongside `mesh_shader`:
+    /// the amplification stage exists to launch mesh workgroups, so a task
+    /// stage with no mesh stage to feed is not a capability anything can use.
+    pub(crate) task_shader: bool,
+    /// `VK_KHR_acceleration_structure` with `accelerationStructure`.
+    pub(crate) acceleration_structure: bool,
+    /// `VK_KHR_ray_query` with `rayQuery`, and only alongside
+    /// `acceleration_structure` — a ray has nothing to traverse otherwise, and
+    /// [`LightingPath::RayTraced`](crcbl_hal::LightingPath::RayTraced) needs
+    /// both flags, so a half-reported pair would select a path the device
+    /// cannot run.
+    pub(crate) ray_query: bool,
+    /// `VK_KHR_ray_tracing_pipeline` with `rayTracingPipeline`, and only
+    /// alongside `acceleration_structure`, for the same reason.
+    pub(crate) ray_tracing_pipeline: bool,
+}
+
+/// Which of the mesh-shading and ray-tracing device extensions a device lists.
+///
+/// Kept apart from the feature bits because the list is needed at its own
+/// moment: it decides which feature structs may be *chained* onto
+/// `VkPhysicalDeviceFeatures2` at all — chaining one whose extension the device
+/// lacks reads back as a zeroed "no" for the wrong reason, exactly as the 1.3
+/// and present-timing structs in [`describe`] already document — and the bits
+/// then decide the answer. Probing once and carrying the result is what keeps
+/// the two halves from drifting apart.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StageExtensions {
+    /// `VK_EXT_mesh_shader`, which carries both the mesh and the task stage.
+    pub(crate) mesh_shader: bool,
+    /// `VK_KHR_acceleration_structure` **and**
+    /// `VK_KHR_deferred_host_operations`, which `vk.xml` declares it depends
+    /// on. An extension chain is not partially satisfiable — the same rule the
+    /// present-timing chain is probed under, and the reason one name covers
+    /// two here.
+    pub(crate) acceleration_structure: bool,
+    /// `VK_KHR_ray_query`.
+    pub(crate) ray_query: bool,
+    /// `VK_KHR_ray_tracing_pipeline`.
+    pub(crate) ray_tracing_pipeline: bool,
+}
+
+impl StageExtensions {
+    /// Reads the device's extension list. Pure, so the "is it there" half is
+    /// testable without a driver.
+    #[must_use]
+    pub(crate) fn probe(properties: &[vk::ExtensionProperties]) -> Self {
+        Self {
+            mesh_shader: has_device_extension(properties, ext::mesh_shader::NAME),
+            acceleration_structure: has_device_extension(
+                properties,
+                khr::acceleration_structure::NAME,
+            ) && has_device_extension(
+                properties,
+                khr::deferred_host_operations::NAME,
+            ),
+            ray_query: has_device_extension(properties, khr::ray_query::NAME),
+            ray_tracing_pipeline: has_device_extension(properties, khr::ray_tracing_pipeline::NAME),
+        }
+    }
+}
+
+impl ExtensionSupport {
+    /// Folds the mesh-shading and ray-tracing answers into a support set that
+    /// already carries the debug and present ones.
+    ///
+    /// Both halves of every answer, and then the dependencies *between* the
+    /// answers: **a capability is reported only when everything it stands on is
+    /// reported too.** `RAY_QUERY` without `ACCELERATION_STRUCTURE` is not a
+    /// device that traces fewer rays, it is a device that cannot trace any —
+    /// and reporting the pair half-set is what would put such a device on
+    /// [`LightingPath::RayTraced`](crcbl_hal::LightingPath::RayTraced).
+    ///
+    /// Pure, so every one of those dependencies is testable against a synthetic
+    /// device: the extension present with the bit clear, the bit set with the
+    /// extension absent, and the acceleration structure withdrawn from under
+    /// both ray capabilities at once.
+    #[must_use]
+    pub(crate) fn with_stages(
+        mut self,
+        listed: StageExtensions,
+        mesh: &vk::PhysicalDeviceMeshShaderFeaturesEXT<'_>,
+        acceleration: &vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'_>,
+        ray_query: &vk::PhysicalDeviceRayQueryFeaturesKHR<'_>,
+        ray_tracing_pipeline: &vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'_>,
+    ) -> Self {
+        self.mesh_shader = listed.mesh_shader && mesh.mesh_shader == vk::TRUE;
+        self.task_shader = self.mesh_shader && mesh.task_shader == vk::TRUE;
+        self.acceleration_structure =
+            listed.acceleration_structure && acceleration.acceleration_structure == vk::TRUE;
+        self.ray_query =
+            self.acceleration_structure && listed.ray_query && ray_query.ray_query == vk::TRUE;
+        self.ray_tracing_pipeline = self.acceleration_structure
+            && listed.ray_tracing_pipeline
+            && ray_tracing_pipeline.ray_tracing_pipeline == vk::TRUE;
+        self
+    }
+}
+
 /// Maps a Vulkan device type onto the seam's.
 #[must_use]
 fn device_type(raw: vk::PhysicalDeviceType) -> DeviceType {
@@ -182,9 +305,7 @@ pub(crate) fn features_of(
     vulkan_1_2: &vk::PhysicalDeviceVulkan12Features<'_>,
     limits: &vk::PhysicalDeviceLimits,
     families: QueueFamilies,
-    debug_utils: bool,
-    present_feedback: bool,
-    present_timing: bool,
+    extensions: ExtensionSupport,
 ) -> Features {
     let mut features = Features::empty();
 
@@ -260,7 +381,7 @@ pub(crate) fn features_of(
     if limits.timestamp_compute_and_graphics == vk::TRUE && limits.timestamp_period > 0.0 {
         features |= Features::TIMESTAMP_QUERY;
     }
-    if debug_utils {
+    if extensions.debug_utils {
         features |= Features::DEBUG_MARKERS;
     }
     // Both extensions *and* both feature bits, which is what `describe`
@@ -268,14 +389,34 @@ pub(crate) fn features_of(
     // computed. Anything less is the optimistic lie the module docs warn
     // about: `VK_KHR_present_wait` being listed says the driver knows the
     // name, not that `presentWait` came back `VK_TRUE`.
-    if present_feedback {
+    if extensions.present_feedback {
         features |= Features::PRESENT_FEEDBACK;
     }
     // The whole four-extension chain *and* both feature bits, established by
     // `describe` for the same reason as the pair above. A shorter check would
     // promise an answer this backend cannot obtain.
-    if present_timing {
+    if extensions.present_timing {
         features |= Features::PRESENT_TIMING;
+    }
+    // The five capabilities `ExtensionSupport::with_stages` resolved, each
+    // already carrying its extension, its feature bit and whatever it depends
+    // on. They are the only flags in this function a *core* feature struct is
+    // silent about, and they are what makes `GeometryPath` and `LightingPath`
+    // able to select anything above their floor.
+    if extensions.mesh_shader {
+        features |= Features::MESH_SHADER;
+    }
+    if extensions.task_shader {
+        features |= Features::TASK_SHADER;
+    }
+    if extensions.acceleration_structure {
+        features |= Features::ACCELERATION_STRUCTURE;
+    }
+    if extensions.ray_query {
+        features |= Features::RAY_QUERY;
+    }
+    if extensions.ray_tracing_pipeline {
+        features |= Features::RAY_TRACING_PIPELINE;
     }
     // SHADER_DEBUG_PRINTF needs the validation layer's printf feature wired to
     // a message handler; it lands with the debug UI at P7 and is
@@ -464,6 +605,10 @@ fn describe(
         && has_device_extension(&device_extensions, present_timing::PRESENT_ID2_NAME)
         && has_device_extension(&device_extensions, khr::calibrated_timestamps::NAME)
         && has_device_extension(&device_extensions, present_timing::PRESENT_TIMING_NAME);
+    // The mesh-shading and ray-tracing extensions, probed once: the answer
+    // decides both which feature structs may be chained below and, with those
+    // structs' bits, which capabilities are real.
+    let stage_extensions = StageExtensions::probe(&device_extensions);
 
     let mut vulkan_1_1 = vk::PhysicalDeviceVulkan11Features::default();
     let mut vulkan_1_2 = vk::PhysicalDeviceVulkan12Features::default();
@@ -473,6 +618,10 @@ fn describe(
     let mut present_timing_features =
         present_timing::PhysicalDevicePresentTimingFeaturesEXT::default();
     let mut present_id2_features = present_timing::PhysicalDevicePresentId2FeaturesKHR::default();
+    let mut mesh_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
+    let mut acceleration_features = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
+    let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
+    let mut ray_pipeline_features = vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default();
     // Only chained on a device that has the version defining it. A
     // `VkPhysicalDeviceVulkan13Features` in the chain of a 1.2 device is not
     // merely useless — the spec forbids it, and a driver that honours the
@@ -502,6 +651,22 @@ fn describe(
             .push_next(&mut present_timing_features)
             .push_next(&mut present_id2_features);
     }
+    // The same rule a fifth time, for the extensions this backend reports mesh
+    // shading and ray tracing from. Nothing below reads a struct that was not
+    // chained here — `with_stages` takes `stage_extensions` too — so a zeroed
+    // one could not be mistaken for a driver's answer even if it were.
+    if stage_extensions.mesh_shader {
+        features2 = features2.push_next(&mut mesh_features);
+    }
+    if stage_extensions.acceleration_structure {
+        features2 = features2.push_next(&mut acceleration_features);
+    }
+    if stage_extensions.ray_query {
+        features2 = features2.push_next(&mut ray_query_features);
+    }
+    if stage_extensions.ray_tracing_pipeline {
+        features2 = features2.push_next(&mut ray_pipeline_features);
+    }
     // SAFETY: as above.
     unsafe { instance.get_physical_device_features2(physical, &mut features2) };
     // Copied out before any chained struct is read: the chain holds a mutable
@@ -523,14 +688,25 @@ fn describe(
         unsafe { instance.get_physical_device_queue_family_properties(physical) };
     let families = QueueFamilies::select(&family_properties);
 
+    let extensions = ExtensionSupport {
+        debug_utils,
+        present_feedback,
+        present_timing,
+        ..ExtensionSupport::default()
+    }
+    .with_stages(
+        stage_extensions,
+        &mesh_features,
+        &acceleration_features,
+        &ray_query_features,
+        &ray_pipeline_features,
+    );
     let features = features_of(
         &core_features,
         &vulkan_1_2,
         &properties.limits,
         families,
-        debug_utils,
-        present_feedback,
-        present_timing,
+        extensions,
     );
     let limits = limits_of(&properties.limits, &vulkan_1_2_props, features);
 
@@ -619,7 +795,21 @@ mod tests {
         assert_eq!(common_sample_count(&limits), 1);
     }
 
-    use crcbl_hal::{BindingModel, GeometryPath};
+    use crcbl_hal::{BindingModel, GeometryPath, LightingPath};
+
+    /// One `VkExtensionProperties` naming `name`, for the probes that decide
+    /// which optional extensions a device has.
+    fn named(name: &CStr) -> vk::ExtensionProperties {
+        let mut properties = vk::ExtensionProperties::default();
+        let bytes = name.to_bytes_with_nul();
+        for (slot, byte) in properties.extension_name.iter_mut().zip(bytes) {
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                *slot = *byte as core::ffi::c_char;
+            }
+        }
+        properties
+    }
 
     fn family(flags: vk::QueueFlags, count: u32) -> vk::QueueFamilyProperties {
         vk::QueueFamilyProperties {
@@ -722,9 +912,10 @@ mod tests {
             &fully_featured_vulkan_1_2(),
             &desktop_limits(),
             QueueFamilies::select(&[family(GRAPHICS, 1)]),
-            true,
-            false,
-            false,
+            ExtensionSupport {
+                debug_utils: true,
+                ..ExtensionSupport::default()
+            },
         );
         let caps = DeviceCaps {
             features,
@@ -758,9 +949,10 @@ mod tests {
                 &fully_featured_vulkan_1_2(),
                 &desktop_limits(),
                 QueueFamilies::select(&[family(GRAPHICS, 1)]),
-                false,
-                present_feedback,
-                false,
+                ExtensionSupport {
+                    present_feedback,
+                    ..ExtensionSupport::default()
+                },
             )
         };
         assert!(device(true).contains(Features::PRESENT_FEEDBACK));
@@ -789,9 +981,10 @@ mod tests {
                 &fully_featured_vulkan_1_2(),
                 &desktop_limits(),
                 QueueFamilies::select(&[family(GRAPHICS, 1)]),
-                false,
-                false,
-                present_timing,
+                ExtensionSupport {
+                    present_timing,
+                    ..ExtensionSupport::default()
+                },
             )
         };
         assert!(device(true).contains(Features::PRESENT_TIMING));
@@ -824,15 +1017,17 @@ mod tests {
     /// `VK_KHR_present_wait`, which is most of them and wrong on all of them.
     #[test]
     fn the_two_present_capabilities_are_independent() {
-        let device = |feedback, timing| {
+        let device = |present_feedback, present_timing| {
             features_of(
                 &vk::PhysicalDeviceFeatures::default(),
                 &fully_featured_vulkan_1_2(),
                 &desktop_limits(),
                 QueueFamilies::select(&[family(GRAPHICS, 1)]),
-                false,
-                feedback,
-                timing,
+                ExtensionSupport {
+                    present_feedback,
+                    present_timing,
+                    ..ExtensionSupport::default()
+                },
             )
         };
         assert!(!device(true, false).contains(Features::PRESENT_TIMING));
@@ -850,18 +1045,6 @@ mod tests {
     /// advisory — and a name that merely *starts* the same must not match.
     #[test]
     fn the_extension_probe_matches_whole_names_only() {
-        fn named(name: &CStr) -> vk::ExtensionProperties {
-            let mut properties = vk::ExtensionProperties::default();
-            let bytes = name.to_bytes_with_nul();
-            for (slot, byte) in properties.extension_name.iter_mut().zip(bytes) {
-                #[allow(clippy::cast_possible_wrap)]
-                {
-                    *slot = *byte as core::ffi::c_char;
-                }
-            }
-            properties
-        }
-
         let available = [named(khr::swapchain::NAME), named(khr::present_id::NAME)];
         assert!(has_device_extension(&available, khr::swapchain::NAME));
         assert!(has_device_extension(&available, khr::present_id::NAME));
@@ -942,9 +1125,10 @@ mod tests {
                 &vulkan_1_2,
                 &desktop_limits(),
                 QueueFamilies::select(&[family(GRAPHICS, 1)]),
-                true,
-                false,
-                false,
+                ExtensionSupport {
+                    debug_utils: true,
+                    ..ExtensionSupport::default()
+                },
             );
             assert!(
                 !features.contains(Features::DESCRIPTOR_INDEXING),
@@ -969,9 +1153,7 @@ mod tests {
             &fully_featured_vulkan_1_2().draw_indirect_count(false),
             &desktop_limits(),
             QueueFamilies::select(&[family(GRAPHICS, 1)]),
-            false,
-            false,
-            false,
+            ExtensionSupport::default(),
         );
         let caps = DeviceCaps {
             features,
@@ -1006,9 +1188,7 @@ mod tests {
             &vk::PhysicalDeviceVulkan12Features::default(),
             &raw,
             QueueFamilies::select(&[family(GRAPHICS, 1)]),
-            false,
-            false,
-            false,
+            ExtensionSupport::default(),
         );
         let limits = limits_of(
             &raw,
@@ -1041,6 +1221,319 @@ mod tests {
             Features::empty(),
         );
         assert_eq!(limits.max_compute_workgroups_per_dimension, 1024);
+    }
+
+    /// Every mesh-shading and ray-tracing extension listed at once, so each
+    /// test below removes exactly one thing and watches exactly one answer go.
+    fn all_stage_extensions() -> StageExtensions {
+        StageExtensions {
+            mesh_shader: true,
+            acceleration_structure: true,
+            ray_query: true,
+            ray_tracing_pipeline: true,
+        }
+    }
+
+    fn mesh_features() -> vk::PhysicalDeviceMeshShaderFeaturesEXT<'static> {
+        vk::PhysicalDeviceMeshShaderFeaturesEXT::default()
+            .mesh_shader(true)
+            .task_shader(true)
+    }
+
+    fn acceleration_features() -> vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'static> {
+        vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true)
+    }
+
+    fn ray_query_features() -> vk::PhysicalDeviceRayQueryFeaturesKHR<'static> {
+        vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true)
+    }
+
+    fn ray_pipeline_features() -> vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'static> {
+        vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true)
+    }
+
+    /// The full report for one synthetic device, everything else held at the
+    /// desktop baseline so only the stage answers move.
+    fn stage_report(
+        listed: StageExtensions,
+        mesh: &vk::PhysicalDeviceMeshShaderFeaturesEXT<'_>,
+        acceleration: &vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'_>,
+        ray_query: &vk::PhysicalDeviceRayQueryFeaturesKHR<'_>,
+        ray_tracing_pipeline: &vk::PhysicalDeviceRayTracingPipelineFeaturesKHR<'_>,
+    ) -> Features {
+        features_of(
+            &vk::PhysicalDeviceFeatures::default().multi_draw_indirect(true),
+            &fully_featured_vulkan_1_2(),
+            &desktop_limits(),
+            QueueFamilies::select(&[family(GRAPHICS, 1)]),
+            ExtensionSupport::default().with_stages(
+                listed,
+                mesh,
+                acceleration,
+                ray_query,
+                ray_tracing_pipeline,
+            ),
+        )
+    }
+
+    /// The whole set, which every test below subtracts from.
+    const STAGE_FLAGS: Features = Features::MESH_SHADER
+        .union(Features::TASK_SHADER)
+        .union(Features::ACCELERATION_STRUCTURE)
+        .union(Features::RAY_QUERY)
+        .union(Features::RAY_TRACING_PIPELINE);
+
+    /// A device with every extension listed and every feature bit set reports
+    /// all five flags — the baseline the "one thing missing" tests need, and
+    /// the only test here that would still pass if the mapping reported
+    /// everything unconditionally.
+    #[test]
+    fn a_full_mesh_and_ray_device_reports_all_five_flags() {
+        let features = stage_report(
+            all_stage_extensions(),
+            &mesh_features(),
+            &acceleration_features(),
+            &ray_query_features(),
+            &ray_pipeline_features(),
+        );
+        assert_eq!(features.intersection(STAGE_FLAGS), STAGE_FLAGS);
+    }
+
+    /// The extension half. Every feature bit stays `VK_TRUE` and the name
+    /// leaves the device's list — which is the case that matters most, because
+    /// `vkCreateDevice` fails outright on an extension that was never listed,
+    /// so a flag reported from the bits alone is a device this backend then
+    /// cannot open.
+    #[test]
+    fn every_mesh_and_ray_flag_needs_its_extension_listed() {
+        let all = stage_report(
+            all_stage_extensions(),
+            &mesh_features(),
+            &acceleration_features(),
+            &ray_query_features(),
+            &ray_pipeline_features(),
+        );
+        type Withdraw = fn(StageExtensions) -> StageExtensions;
+        let cases: &[(&str, Features, Withdraw)] = &[
+            (
+                "VK_EXT_mesh_shader",
+                Features::MESH_SHADER.union(Features::TASK_SHADER),
+                |mut listed| {
+                    listed.mesh_shader = false;
+                    listed
+                },
+            ),
+            // Withdrawing the acceleration structure takes both ray
+            // capabilities with it: this is `VK_KHR_deferred_host_operations`
+            // missing as much as it is `VK_KHR_acceleration_structure`, and
+            // either way there is nothing left to traverse.
+            (
+                "VK_KHR_acceleration_structure",
+                Features::ACCELERATION_STRUCTURE
+                    .union(Features::RAY_QUERY)
+                    .union(Features::RAY_TRACING_PIPELINE),
+                |mut listed| {
+                    listed.acceleration_structure = false;
+                    listed
+                },
+            ),
+            ("VK_KHR_ray_query", Features::RAY_QUERY, |mut listed| {
+                listed.ray_query = false;
+                listed
+            }),
+            (
+                "VK_KHR_ray_tracing_pipeline",
+                Features::RAY_TRACING_PIPELINE,
+                |mut listed| {
+                    listed.ray_tracing_pipeline = false;
+                    listed
+                },
+            ),
+        ];
+        for (name, lost, withdraw) in cases {
+            let features = stage_report(
+                withdraw(all_stage_extensions()),
+                &mesh_features(),
+                &acceleration_features(),
+                &ray_query_features(),
+                &ray_pipeline_features(),
+            );
+            // A difference, not a `contains`: the flags that go must be exactly
+            // these, so a capability that dragged an unrelated one down would
+            // fail here too.
+            assert_eq!(
+                all.difference(features),
+                *lost,
+                "{name} absent must clear exactly {lost:?}"
+            );
+        }
+    }
+
+    /// The feature-bit half. Every extension stays listed and the bit comes
+    /// back `VK_FALSE` — the "the driver knows the name" case the present
+    /// probes already guard against, now for five more capabilities.
+    #[test]
+    fn every_mesh_and_ray_flag_needs_its_feature_bit() {
+        let all = stage_report(
+            all_stage_extensions(),
+            &mesh_features(),
+            &acceleration_features(),
+            &ray_query_features(),
+            &ray_pipeline_features(),
+        );
+        // `meshShader` clear takes the task stage with it: an amplification
+        // stage with no mesh stage to launch is not something a caller can use.
+        let mesh_off = stage_report(
+            all_stage_extensions(),
+            &vk::PhysicalDeviceMeshShaderFeaturesEXT::default().task_shader(true),
+            &acceleration_features(),
+            &ray_query_features(),
+            &ray_pipeline_features(),
+        );
+        assert_eq!(
+            all.difference(mesh_off),
+            Features::MESH_SHADER | Features::TASK_SHADER
+        );
+
+        // …and `taskShader` clear on its own takes only itself, which is why
+        // the seam has two flags rather than one.
+        let task_off = stage_report(
+            all_stage_extensions(),
+            &vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(true),
+            &acceleration_features(),
+            &ray_query_features(),
+            &ray_pipeline_features(),
+        );
+        assert_eq!(all.difference(task_off), Features::TASK_SHADER);
+
+        let acceleration_off = stage_report(
+            all_stage_extensions(),
+            &mesh_features(),
+            &vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default(),
+            &ray_query_features(),
+            &ray_pipeline_features(),
+        );
+        assert_eq!(
+            all.difference(acceleration_off),
+            Features::ACCELERATION_STRUCTURE | Features::RAY_QUERY | Features::RAY_TRACING_PIPELINE,
+            "neither ray capability survives the structure it traverses"
+        );
+
+        let ray_query_off = stage_report(
+            all_stage_extensions(),
+            &mesh_features(),
+            &acceleration_features(),
+            &vk::PhysicalDeviceRayQueryFeaturesKHR::default(),
+            &ray_pipeline_features(),
+        );
+        assert_eq!(all.difference(ray_query_off), Features::RAY_QUERY);
+
+        let ray_pipeline_off = stage_report(
+            all_stage_extensions(),
+            &mesh_features(),
+            &acceleration_features(),
+            &ray_query_features(),
+            &vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default(),
+        );
+        assert_eq!(
+            all.difference(ray_pipeline_off),
+            Features::RAY_TRACING_PIPELINE
+        );
+    }
+
+    /// What the flags are *for*. Reporting them is only worth anything if the
+    /// selectors move, and until this slice landed neither could leave its
+    /// floor on any device.
+    #[test]
+    fn mesh_shading_and_ray_query_select_the_paths_they_gate() {
+        let caps = |features| DeviceCaps {
+            features,
+            limits: Limits::desktop(),
+        };
+
+        // Mesh shading alone. `fully_featured_vulkan_1_2` has
+        // `drawIndirectCount`, so this is also the assertion that the mesh path
+        // outranks the indirect-count one rather than merely being available.
+        let mesh_only = stage_report(
+            StageExtensions {
+                mesh_shader: true,
+                ..StageExtensions::default()
+            },
+            &mesh_features(),
+            &acceleration_features(),
+            &ray_query_features(),
+            &ray_pipeline_features(),
+        );
+        assert_eq!(caps(mesh_only).geometry_path(), GeometryPath::MeshShader);
+        assert_eq!(caps(mesh_only).lighting_path(), LightingPath::Rasterised);
+
+        // Ray query with the structure under it, and no mesh shading: the two
+        // selectors are independent axes and must not drag each other.
+        let ray_only = stage_report(
+            StageExtensions {
+                mesh_shader: false,
+                acceleration_structure: true,
+                ray_query: true,
+                ray_tracing_pipeline: false,
+            },
+            &mesh_features(),
+            &acceleration_features(),
+            &ray_query_features(),
+            &ray_pipeline_features(),
+        );
+        assert_eq!(caps(ray_only).lighting_path(), LightingPath::RayTraced);
+        assert_eq!(caps(ray_only).geometry_path(), GeometryPath::IndirectCount);
+
+        // And the floor, which is what every device reported before this slice:
+        // nothing listed, nothing selected above the fallback.
+        let neither = stage_report(
+            StageExtensions::default(),
+            &mesh_features(),
+            &acceleration_features(),
+            &ray_query_features(),
+            &ray_pipeline_features(),
+        );
+        assert!(neither.intersection(STAGE_FLAGS).is_empty());
+        assert_eq!(caps(neither).geometry_path(), GeometryPath::IndirectCount);
+        assert_eq!(caps(neither).lighting_path(), LightingPath::Rasterised);
+    }
+
+    /// `VK_KHR_acceleration_structure` declares
+    /// `VK_KHR_deferred_host_operations` as a dependency, so the probe answers
+    /// for the pair rather than for the name anyone would think to look for.
+    /// Asking `vkCreateDevice` for a dependent extension without its dependency
+    /// is invalid usage a driver need not honour.
+    #[test]
+    fn the_acceleration_structure_probe_wants_the_whole_chain() {
+        let both = [
+            named(khr::acceleration_structure::NAME),
+            named(khr::deferred_host_operations::NAME),
+        ];
+        assert!(StageExtensions::probe(&both).acceleration_structure);
+        assert!(
+            !StageExtensions::probe(&both[..1]).acceleration_structure,
+            "the dependency is not optional"
+        );
+        assert!(!StageExtensions::probe(&both[1..]).acceleration_structure);
+
+        // The other three are each one name, and each is probed for its own —
+        // a probe reading a neighbour's answer would report ray tracing on
+        // every device with mesh shaders.
+        let listed = StageExtensions::probe(&[
+            named(ext::mesh_shader::NAME),
+            named(khr::ray_query::NAME),
+            named(khr::ray_tracing_pipeline::NAME),
+        ]);
+        assert_eq!(
+            listed,
+            StageExtensions {
+                mesh_shader: true,
+                acceleration_structure: false,
+                ray_query: true,
+                ray_tracing_pipeline: true,
+            }
+        );
+        assert_eq!(StageExtensions::probe(&[]), StageExtensions::default());
     }
 
     #[test]

@@ -3347,6 +3347,27 @@ the transport seam over a third transport shape.
 
 ### Owed by the capability work (P7)
 
+- **No local driver reports the mesh/ray capabilities absent, so the degradation
+  path is unexercised here.** `crcbl-vk` now reports `MESH_SHADER`,
+  `TASK_SHADER`, `RAY_QUERY`, `RAY_TRACING_PIPELINE` and
+  `ACCELERATION_STRUCTURE` from the real device — and **lavapipe reports all
+  five too** (Mesa 26.1 implements `VK_EXT_mesh_shader` and the whole ray
+  tracing set), which was not expected: the software rasteriser was assumed to
+  be the negative case and is not. So on this machine and in CI's `vk e2e`,
+  `GeometryPath::MeshShader` and `LightingPath::RayTraced` are what gets
+  selected, and the fallbacks are compiled and unrun on the Vulkan backend. The
+  unit tests cover the mapping; nothing covers a real device that lacks the
+  extensions. Same shape as the Tier B indirect-draw arms recorded elsewhere in
+  this file — an assumption about which driver is the weak one, that turned out
+  to be wrong.
+
+- **`accelerationStructure` is enabled without forcing `bufferDeviceAddress`.**
+  Checked against the installed `validusage.json`: no VUID requires them
+  co-enabled, and it is validation-clean on radv. Recorded because an
+  acceleration-structure _build_ slice will need `BUFFER_DEVICE_ADDRESS`
+  regardless — build infos take device addresses — so the pairing question
+  returns the moment anything uses the capability rather than reporting it.
+
 - **Nothing asserts the downgrade log line.** `crcbl_hal::downgrades` is
   unit-tested and the call site in `crcbl::engine`'s `PendingGpuContext::poll`
   is not, because the workspace has no way to capture log output in a test —

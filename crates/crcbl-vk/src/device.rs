@@ -479,6 +479,33 @@ const fn queue_index(kind: QueueKind) -> u32 {
     }
 }
 
+/// Adds the capabilities a granted one cannot be enabled without.
+///
+/// [`adapter::features_of`](crate::adapter::features_of) never reports a ray
+/// capability without the acceleration structure it traverses, nor the task
+/// stage without the mesh stage it feeds, so every flag this can add is one the
+/// adapter already has. What loses them is the *intersection with the caller's
+/// request*: ask for `RAY_QUERY` and not `ACCELERATION_STRUCTURE` and the
+/// granted set carries a dependency it cannot stand on.
+///
+/// Vulkan will not infer them either — `VK_KHR_ray_query` declares
+/// `VK_KHR_acceleration_structure` as a dependency, and enabling the dependent
+/// extension without its dependency is invalid usage. Restoring them here
+/// rather than at the enable site is what keeps [`DeviceCaps`] a description of
+/// the device that was actually created: a device reporting `RAY_QUERY` and not
+/// `ACCELERATION_STRUCTURE` would be describing one that cannot exist.
+#[must_use]
+fn granted_with_dependencies(granted: Features) -> Features {
+    let mut granted = granted;
+    if granted.contains(Features::TASK_SHADER) {
+        granted |= Features::MESH_SHADER;
+    }
+    if granted.intersects(Features::RAY_QUERY | Features::RAY_TRACING_PIPELINE) {
+        granted |= Features::ACCELERATION_STRUCTURE;
+    }
+    granted
+}
+
 /// The Vulkan implementation of [`Device`].
 #[derive(Debug)]
 pub struct VkDevice {
@@ -589,6 +616,9 @@ impl VkDevice {
             .features
             .intersection(desc.required_features.union(desc.optional_features))
             .union(desc.required_features);
+        // …plus whatever those cannot be enabled without, which the
+        // intersection above is exactly where a caller loses.
+        let granted = granted_with_dependencies(granted);
 
         let priorities = [1.0_f32];
         let queue_infos: Vec<vk::DeviceQueueCreateInfo<'_>> = record
@@ -661,6 +691,23 @@ impl VkDevice {
         // `VK_KHR_get_surface_capabilities2` is an instance extension the
         // instance enabled, which leaves these two to add here.
         let present_timing = granted.contains(Features::PRESENT_TIMING);
+        // The same argument once more for the mesh-shading and ray-tracing
+        // extensions: `adapter::describe` reports each of these only when the
+        // extension was listed *and* its feature bit came back true, so asking
+        // is never a guess — and asking only when the caller wanted the
+        // capability is what keeps device creation identical for everyone else.
+        // One extension carries both mesh stages, so `MESH_SHADER` alone
+        // decides it; `granted_with_dependencies` has already put that flag
+        // beside a lone `TASK_SHADER`.
+        let mesh_shader = granted.contains(Features::MESH_SHADER);
+        // `VK_KHR_acceleration_structure` depends on
+        // `VK_KHR_deferred_host_operations`, which is not a seam capability at
+        // all — it is the end of a chain, exactly like present timing's
+        // `VK_KHR_calibrated_timestamps` above, and an extension chain is not
+        // partially satisfiable.
+        let acceleration_structure = granted.contains(Features::ACCELERATION_STRUCTURE);
+        let ray_query = granted.contains(Features::RAY_QUERY);
+        let ray_tracing_pipeline = granted.contains(Features::RAY_TRACING_PIPELINE);
         // A named local, not a temporary in the chain: the builder stores the
         // pointer, so `&[…]` inline would dangle by the time `vkCreateDevice`
         // reads it.
@@ -673,6 +720,19 @@ impl VkDevice {
             device_extensions.push(khr::calibrated_timestamps::NAME.as_ptr());
             device_extensions.push(present_timing::PRESENT_ID2_NAME.as_ptr());
             device_extensions.push(present_timing::PRESENT_TIMING_NAME.as_ptr());
+        }
+        if mesh_shader {
+            device_extensions.push(ext::mesh_shader::NAME.as_ptr());
+        }
+        if acceleration_structure {
+            device_extensions.push(khr::deferred_host_operations::NAME.as_ptr());
+            device_extensions.push(khr::acceleration_structure::NAME.as_ptr());
+        }
+        if ray_query {
+            device_extensions.push(khr::ray_query::NAME.as_ptr());
+        }
+        if ray_tracing_pipeline {
+            device_extensions.push(khr::ray_tracing_pipeline::NAME.as_ptr());
         }
         // The extension names alone enable nothing: chaining a `VkPresentIdKHR`
         // onto a present without `presentId` granted here is a validation
@@ -688,6 +748,20 @@ impl VkDevice {
             present_timing::PhysicalDevicePresentTimingFeaturesEXT::enabling_timing();
         let mut present_id2_features =
             present_timing::PhysicalDevicePresentId2FeaturesKHR::enabling_present_id2();
+        // And the same for these: the extension name admits the stage, the
+        // feature bit is what turns it on. The task stage is asked for
+        // separately because the seam reports it separately — a caller wanting
+        // only the mesh stage gets only the mesh stage.
+        let mut mesh_shader_features = vk::PhysicalDeviceMeshShaderFeaturesEXT::default()
+            .mesh_shader(true)
+            .task_shader(granted.contains(Features::TASK_SHADER));
+        let mut acceleration_features =
+            vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+                .acceleration_structure(true);
+        let mut ray_query_features =
+            vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
+        let mut ray_pipeline_features =
+            vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(true);
         let mut create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_features(&core_features)
@@ -704,6 +778,18 @@ impl VkDevice {
             create_info = create_info
                 .push_next(&mut present_timing_features)
                 .push_next(&mut present_id2_features);
+        }
+        if mesh_shader {
+            create_info = create_info.push_next(&mut mesh_shader_features);
+        }
+        if acceleration_structure {
+            create_info = create_info.push_next(&mut acceleration_features);
+        }
+        if ray_query {
+            create_info = create_info.push_next(&mut ray_query_features);
+        }
+        if ray_tracing_pipeline {
+            create_info = create_info.push_next(&mut ray_pipeline_features);
         }
 
         // SAFETY: `record.physical` came from `instance`; every pointer in
@@ -3402,6 +3488,52 @@ mod tests {
     fn an_unstamped_handle_belongs_to_no_device() {
         let handle: Handle<u8> = Handle::from_bits((1u64 << 32) | 7).expect("non-zero generation");
         assert_eq!(handle_tag(handle), 0);
+    }
+
+    /// A granted capability drags in what it cannot be enabled without.
+    ///
+    /// The case is a caller naming one half of a pair — `RAY_QUERY` without the
+    /// acceleration structure it traverses, `TASK_SHADER` without the mesh
+    /// stage it feeds. The adapter never reports those halves apart, so the
+    /// gap opens at the intersection with the request, and a device created
+    /// from the gapped set would enable `VK_KHR_ray_query` without its
+    /// dependency and then report caps describing a device that cannot exist.
+    #[test]
+    fn a_granted_capability_carries_what_it_cannot_be_enabled_without() {
+        assert_eq!(
+            granted_with_dependencies(Features::RAY_QUERY),
+            Features::RAY_QUERY | Features::ACCELERATION_STRUCTURE
+        );
+        assert_eq!(
+            granted_with_dependencies(Features::RAY_TRACING_PIPELINE),
+            Features::RAY_TRACING_PIPELINE | Features::ACCELERATION_STRUCTURE
+        );
+        assert_eq!(
+            granted_with_dependencies(Features::TASK_SHADER),
+            Features::TASK_SHADER | Features::MESH_SHADER
+        );
+
+        // Nothing is invented in the other direction: an acceleration
+        // structure on its own is a perfectly good thing to ask for, and a
+        // mesh stage does not imply a task stage in front of it.
+        assert_eq!(
+            granted_with_dependencies(Features::ACCELERATION_STRUCTURE),
+            Features::ACCELERATION_STRUCTURE
+        );
+        assert_eq!(
+            granted_with_dependencies(Features::MESH_SHADER),
+            Features::MESH_SHADER
+        );
+        // And a set with none of them is returned untouched, which is every
+        // caller that predates this slice.
+        assert_eq!(
+            granted_with_dependencies(Features::GPU_DRIVEN),
+            Features::GPU_DRIVEN
+        );
+        assert_eq!(
+            granted_with_dependencies(Features::empty()),
+            Features::empty()
+        );
     }
 
     /// The refusal must name the backend and the capability, because a caller

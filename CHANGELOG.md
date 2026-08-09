@@ -33,10 +33,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `MESH_SHADER`, `TASK_SHADER`, `RAY_QUERY`, `RAY_TRACING_PIPELINE` and
   `ACCELERATION_STRUCTURE`. `MESH_SHADER` is the best `GeometryPath` and
   `RAY_QUERY` plus `ACCELERATION_STRUCTURE` together select
-  `LightingPath::RayTraced`. **No backend reports any of them yet** — every one
-  is clear on Vulkan, wgpu, Metal, D3D12 and the null presets — so every device
-  still selects the same path it did before; the flags exist so the selectors
-  and the shader permutations can be written against them.
+  `LightingPath::RayTraced`. Vulkan reports them (below); wgpu, Metal, D3D12 and
+  the null presets report every one of them clear, so a device on those backends
+  still selects the same path it did before.
+
+- **`crcbl-vk` reports mesh shading and ray tracing, and enables them when
+  asked.** An adapter's `DeviceCaps` now carries `MESH_SHADER` / `TASK_SHADER`
+  from `VK_EXT_mesh_shader`, and `ACCELERATION_STRUCTURE` / `RAY_QUERY` /
+  `RAY_TRACING_PIPELINE` from `VK_KHR_acceleration_structure` (with its
+  `VK_KHR_deferred_host_operations` dependency), `VK_KHR_ray_query` and
+  `VK_KHR_ray_tracing_pipeline` — each only when the extension is listed **and**
+  its feature bit came back true, and only when everything it depends on is
+  there too: neither ray capability is reported without the acceleration
+  structure it traverses, and the task stage is not reported without the mesh
+  stage it feeds. `GeometryPath::MeshShader` and `LightingPath::RayTraced` are
+  therefore reachable for the first time. The extensions are enabled only when a
+  caller names the capability in `required_features` or `optional_features`, so
+  device creation is unchanged for everyone else. **This is reporting only** —
+  no mesh-shader pipelines, no acceleration structures, no ray-tracing commands
+  yet.
 
 - **The X11 F11 pass now asserts the summary-line extent.** `run-x11-e2e.sh`'s
   toggle pass used to press F11 at a running sandbox, check the engine's own log

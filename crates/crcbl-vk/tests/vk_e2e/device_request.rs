@@ -1,8 +1,15 @@
 use crate::harness::instance;
 use crcbl_hal::{
     BindingModel, BufferDesc, BufferUsage, DeviceDesc, Features, GeometryPath, Instance,
-    MemoryLocation,
+    LightingPath, MemoryLocation,
 };
+
+/// Everything this backend reports about mesh shading and ray tracing.
+const STAGES: Features = Features::MESH_SHADER
+    .union(Features::TASK_SHADER)
+    .union(Features::ACCELERATION_STRUCTURE)
+    .union(Features::RAY_QUERY)
+    .union(Features::RAY_TRACING_PIPELINE);
 
 /// The two `request_device` argument errors, neither of which any vk test
 /// asserted. Both are decided before a `VkDevice` exists, so they need nothing
@@ -112,6 +119,82 @@ fn a_device_request_hands_its_device_over_exactly_once() {
     instance.validation_report().assert_clean();
 }
 
+/// Opening a device with whatever mesh shading and ray tracing this adapter
+/// turns out to have.
+///
+/// Reporting the capability is only honest if the extensions and feature
+/// structs behind it are ones `vkCreateDevice` actually accepts, and nothing
+/// else in this suite asks for any of them — the harness's own device
+/// deliberately does not — so without this the enable path runs on no machine
+/// at all. On radv that means the whole chain is negotiated for real; on
+/// lavapipe the same call must open a device with none of it, which is the
+/// other half of "these are optional".
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_device_opens_with_whatever_mesh_and_ray_tracing_the_adapter_reports() {
+    let instance = instance();
+    let adapter = instance.adapters().remove(0);
+    let wanted = adapter.caps.features.intersection(STAGES);
+    eprintln!("vk e2e: {} reports {wanted:?}", adapter.name);
+
+    let device = instance
+        .create_device(&DeviceDesc {
+            label: Some("mesh and ray tracing"),
+            adapter: adapter.id,
+            required_features: Features::empty(),
+            optional_features: STAGES,
+            compatible_surface: None,
+        })
+        .expect("optional capabilities never refuse a device");
+    let granted = device.caps().features.intersection(STAGES);
+    assert_eq!(
+        granted, wanted,
+        "{}: asking for every one of them optionally must grant exactly the \
+         ones the adapter reported — more is an extension enabled on a guess, \
+         less is a report the device cannot back",
+        adapter.name
+    );
+    // The dependency rule survives the intersection with the request, which is
+    // the one place it can be lost.
+    if granted.intersects(Features::RAY_QUERY | Features::RAY_TRACING_PIPELINE) {
+        assert!(
+            granted.contains(Features::ACCELERATION_STRUCTURE),
+            "{}",
+            adapter.name
+        );
+    }
+    if granted.contains(Features::TASK_SHADER) {
+        assert!(granted.contains(Features::MESH_SHADER), "{}", adapter.name);
+    }
+    assert_eq!(
+        device.caps().lighting_path() == LightingPath::RayTraced,
+        granted.contains(Features::RAY_QUERY | Features::ACCELERATION_STRUCTURE),
+        "{}: the lighting path and the granted features must agree",
+        adapter.name
+    );
+    drop(device);
+
+    // And a caller that asks for none of it gets a device with none of it —
+    // the guarantee that this slice changed device creation for nobody else.
+    let plain = instance
+        .create_device(&DeviceDesc {
+            label: Some("no mesh, no rays"),
+            adapter: adapter.id,
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            compatible_surface: None,
+        })
+        .expect("a device opens");
+    assert!(
+        plain.caps().features.intersection(STAGES).is_empty(),
+        "{}: an extension nobody asked for must not be enabled",
+        adapter.name
+    );
+    drop(plain);
+
+    instance.validation_report().assert_clean();
+}
+
 /// The path selection, against whatever this machine actually is. The assertion
 /// is not "the best path" — lavapipe may not reach it — but that the *report is
 /// consistent* with the limits beside it, which is what a renderer branches on.
@@ -140,6 +223,12 @@ fn the_selected_paths_agree_with_the_reported_features() {
             caps.geometry_path() == GeometryPath::IndirectCount,
             caps.supports(Features::DRAW_INDIRECT_COUNT) && !caps.supports(Features::MESH_SHADER),
             "{}: the geometry path and the features must agree",
+            adapter.name
+        );
+        assert_eq!(
+            caps.lighting_path() == LightingPath::RayTraced,
+            caps.supports(Features::RAY_QUERY | Features::ACCELERATION_STRUCTURE),
+            "{}: the lighting path and the features must agree",
             adapter.name
         );
         if caps.binding_model() == BindingModel::Bindless {
