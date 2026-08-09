@@ -3443,25 +3443,32 @@ the transport seam over a third transport shape.
 
 ### Owed by the mesh-shader path
 
-- **Reverted: the mesh stage reading a `StructuredBuffer` breaks Slang's Metal
-  output.** `233b657` made `mesh_shader.slang` pull its vertices from a buffer
-  instead of hardcoding them — correct on Vulkan, bit-identical golden on radv
-  and on lavapipe — and Slang then emitted MSL that `xcrun metal` refuses:
-  `variables in the threadgroup address space cannot be declared in a fragment function`.
-  The threadgroup variable belongs to the task stage and Slang put it in the
-  fragment function once the shared vertex type became visible to it. Reverted
-  rather than left on `main`, because it fails the macOS leg of every subsequent
-  commit.
+- **Slang's Metal backend materialises every global shader parameter in every
+  entry point, and that once broke `main`.** Worth keeping because it constrains
+  how any future shader here is written, and because the first diagnosis was
+  wrong.
 
-  **The `xcrun metal` gate added earlier is what caught it** — nothing else in
-  the tree compiles MSL, and every other check was green. That gate paid for
-  itself on its second commit.
+  Slang 2026.14 builds a `KernelContext` struct holding a pointer to every
+  global shader parameter, and materialises it — with **all** of its globals —
+  in every entry point, used or not. `mesh_shader.slang` had no global shader
+  parameter until a `StructuredBuffer<Vertex>` was added for the vertex pull;
+  that switched the machinery on, which dragged the module-scope
+  `groupshared Amplification` into all four entry points including the fragment
+  one, and `xcrun metal` refuses a threadgroup declaration in a fragment
+  function. Fixed by making the payload a **local** in `taskMain` so no
+  `groupshared` global exists for the context to carry. Slang lowers that to the
+  same `TaskPayloadWorkgroupEXT` storage class in SPIR-V and to a stack payload
+  `dxc` accepts.
 
-  To redo it: keep the fragment entry point from referencing the mesh shader's
-  vertex type — a separate fragment input struct is the obvious shape — and
-  verify by reading the regenerated `msl/mesh_shader.metal` for a `threadgroup`
-  declaration inside the fragment function before pushing, since no local tool
-  compiles MSL. Upstream this looks like the same family as shader-slang#9444.
+  **The hypothesis recorded here first — that the fragment entry point sharing
+  the vertex struct was the cause — was wrong**, and was falsified by trying it:
+  a separate fragment input struct leaves the declaration exactly where it was.
+  So were reordering the globals and function-local `groupshared` (which Slang
+  rejects outright, `E31201`). Recorded so the wrong lead is not followed twice.
+
+  **The rule that falls out:** a module-scope `groupshared` in a file that also
+  has any global shader parameter is invalid on Metal. Nothing checks this — the
+  `xcrun metal` CI step catches it after the fact, which is how it was found.
 
 - **Not reproduced: a lavapipe SIGSEGV in CI that does not occur locally.**
   `retire::two_submissions_referencing_one_destroyed_buffer_keep_it_alive`

@@ -639,10 +639,21 @@ pub(crate) fn apply(
 
 impl MetalDevice {
     /// Places a bind-group layout in the argument tables. See [`plan_set`].
+    ///
+    /// The mesh-stage check is here rather than in [`plan_set`] because it is
+    /// the one rule in this path that reads the *device* rather than the
+    /// descriptor: this backend reports no `Features::MESH_SHADER`, so a layout
+    /// naming the mesh stage is refused here rather than becoming a set of
+    /// argument-table slots no pipeline on this backend could ever read.
     pub(crate) fn create_bind_group_layout_impl(
         &self,
         desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
+        for entry in desc.entries {
+            entry
+                .visibility
+                .check_supported(self.inner.caps.features, crcbl_hal::BackendKind::Metal)?;
+        }
         let plan = plan_set(desc)?;
         let handle = self
             .state()
