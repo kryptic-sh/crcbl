@@ -42,7 +42,7 @@
 //! become what `crcbl screenshot` and the P1 golden-image path were built on —
 //! they are written on Linux, against `crcbl-vk`, and would work — and the
 //! breakage would surface at P5 when those exact paths are asked to run in a
-//! browser. One API that both tiers implement is cheaper than two APIs and a
+//! browser. One API that every backend implements is cheaper than two APIs and a
 //! rule nobody remembers. Callers that genuinely have nothing else to do
 //! ([`wait_idle`](crate::Device::wait_idle) at shutdown, a load-time asset
 //! probe) poll in a loop with a deadline; that loop is three lines and it is
@@ -148,10 +148,10 @@ mod tests {
             SemaphoreDesc, SemaphoreKind,
         };
 
-        let instance = NullInstance::tier_a();
+        let instance = NullInstance::gpu_driven();
         let device = instance
             .create_device(&DeviceDesc::for_adapter(AdapterId(0)))
-            .expect("the tier A preset opens");
+            .expect("the gpu_driven preset opens");
         let buffer = device
             .create_buffer(&BufferDesc {
                 label: Some("culling stats"),

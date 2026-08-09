@@ -299,7 +299,7 @@ mod tests {
         clock.update(std::time::Duration::from_millis(100));
         assert!(clock.consume_tick());
 
-        let instance: Box<dyn Instance> = Box::new(NullInstance::tier_a());
+        let instance: Box<dyn Instance> = Box::new(NullInstance::gpu_driven());
         let target: SurfaceTarget = shell
             .surface_target(window)
             .expect("the handle is live, and the target exists before configure");

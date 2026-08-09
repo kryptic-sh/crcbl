@@ -61,7 +61,7 @@
 //! One consequence is deliberate: **`wgpu` is auto-selectable on `wasm32` and
 //! not on native**. It is the browser's only backend, so an `open()` there that
 //! refused to select it would always fail; on native Vulkan is the performance
-//! tier and wgpu stays the portability tier a developer asks for by name.
+//! path and wgpu stays the portable one a developer asks for by name.
 //!
 //! The other is **Metal, and only Metal, on macOS**. `docs/plan/09-backends-
 //! metal-dx12.md`'s 2026-08-05 correction settles the platform question: Apple
@@ -279,7 +279,7 @@ static REGISTRY: &[Registration] = &[
         // device does — timeline semaphores, explicit acquire semaphores — and
         // a `--backend null` run is a meaningful rehearsal rather than a
         // different program.
-        open: || ready(Ok(Box::new(crcbl_hal::null::NullInstance::tier_a()))),
+        open: || ready(Ok(Box::new(crcbl_hal::null::NullInstance::gpu_driven()))),
     },
 ];
 
@@ -573,7 +573,7 @@ mod tests {
         static ONLY_NULL: &[Registration] = &[Registration {
             backend: GpuBackend::Null,
             auto: false,
-            open: || ready(Ok(Box::new(crcbl_hal::null::NullInstance::tier_a()))),
+            open: || ready(Ok(Box::new(crcbl_hal::null::NullInstance::gpu_driven()))),
         }];
 
         let Err(error) = lookup(ONLY_NULL, GpuBackend::Vulkan) else {
@@ -770,7 +770,7 @@ mod tests {
             Registration {
                 backend: GpuBackend::Null,
                 auto: false,
-                open: || ready(Ok(Box::new(crcbl_hal::null::NullInstance::tier_a()))),
+                open: || ready(Ok(Box::new(crcbl_hal::null::NullInstance::gpu_driven()))),
             },
         ];
 

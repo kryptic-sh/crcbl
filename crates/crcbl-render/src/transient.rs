@@ -434,7 +434,7 @@ mod tests {
     use crcbl_hal::{DeviceDesc, Instance};
 
     fn device() -> Box<dyn Device> {
-        let instance = NullInstance::tier_a();
+        let instance = NullInstance::gpu_driven();
         let adapter = instance.adapters().remove(0);
         instance
             .create_device(&DeviceDesc::for_adapter(adapter.id))

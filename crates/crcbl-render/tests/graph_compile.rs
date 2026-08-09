@@ -40,7 +40,7 @@ struct Harness {
 impl Harness {
     fn open() -> Self {
         let recorder = Recorder::new();
-        let instance = NullInstance::tier_a().with_recorder(recorder.clone());
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc {

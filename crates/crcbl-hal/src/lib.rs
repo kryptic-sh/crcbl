@@ -24,7 +24,8 @@
 //!   [`sync`].
 //! * **Bindless-capable descriptors.** [`BindGroupLayoutEntry`] carries a
 //!   `count` and [`BindingFlags`], so one declaration produces a runtime-sized
-//!   descriptor array on Tier A and a fixed texture-array page on Tier B.
+//!   descriptor array where the device has descriptor indexing and a fixed
+//!   texture-array page where it does not.
 //! * **Indirect from day one.** [`CommandEncoder::draw_indexed_indirect_count`]
 //!   and friends are not bolted on for topic 03; they are the steady-state draw
 //!   path, and [`CommandEncoder::draw`] exists mostly for full-screen triangles
@@ -56,8 +57,8 @@
 //!    the steady-state frame is a fixed set of passes, each emitting one
 //!    [`draw_indexed_indirect_count`](CommandEncoder::draw_indexed_indirect_count)
 //!    whose draw count lives in a GPU buffer. Command count scales with pass and
-//!    bucket count — order 10² — not with object count. Tier B, which has no
-//!    `draw_indirect_count`, still gets one call per bucket through
+//!    bucket count — order 10² — not with object count. A device with no
+//!    `draw_indirect_count` still gets one call per bucket through
 //!    [`DrawIndirect::draw_count`].
 //!
 //! Costs, stated plainly:
@@ -186,7 +187,7 @@
 //! use crcbl_hal::null::NullInstance;
 //! use crcbl_hal::{BindingModel, BufferDesc, BufferUsage, DeviceDesc, Instance, MemoryLocation};
 //!
-//! let instance: Box<dyn Instance> = Box::new(NullInstance::tier_a());
+//! let instance: Box<dyn Instance> = Box::new(NullInstance::gpu_driven());
 //! let adapters = instance.adapters();
 //! let device = instance.create_device(&DeviceDesc::for_adapter(adapters[0].id))?;
 //!
@@ -218,8 +219,8 @@ pub mod sync;
 pub mod threading;
 
 pub use caps::{
-    AdapterId, AdapterInfo, BackendKind, BindingModel, DeviceCaps, DeviceType, Features,
-    GeometryPath, LightingPath, Limits,
+    AdapterId, AdapterInfo, BackendKind, BindingModel, DeviceCaps, DeviceType, Downgrade,
+    Downgrades, Features, GeometryPath, LightingPath, Limits, SelectedPath, downgrades,
 };
 pub use command::{
     Barriers, BufferBarrier, BufferCopy, BufferImageCopy, ClearValue, ColorAttachment,

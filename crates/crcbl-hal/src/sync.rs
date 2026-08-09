@@ -46,10 +46,10 @@
 //! # WebGPU has no semaphores at all
 //!
 //! WebGPU serialises queue submission and inserts hazard barriers itself. A
-//! Tier B backend therefore implements every type in this module as a no-op:
+//! backend on it therefore implements every type in this module as a no-op:
 //! waits are satisfied trivially, signals are recorded, and
 //! [`Device::wait_semaphores`](crate::Device::wait_semaphores) resolves against
-//! `onSubmittedWorkDone`. The renderer's submit code is identical on both tiers
+//! `onSubmittedWorkDone`. The renderer's submit code is identical either way
 //! because the *shape* is the same; only the cost differs.
 
 use crcbl_core::Handle;
@@ -150,7 +150,7 @@ mod tests {
         assert!(submit.command_buffers.is_empty());
     }
 
-    /// The split the two kinds exist for. A Tier B backend has no timeline
+    /// The split the two kinds exist for. A backend on WebGPU has no timeline
     /// semaphores and must say so — but it must still hand out a **binary**
     /// one, because WSI acquire/present needs one and the swapchain is where
     /// they come from. A backend that refused both would satisfy every test
@@ -166,13 +166,13 @@ mod tests {
         use crate::null::NullInstance;
         use crate::{AdapterId, DeviceDesc, Features, HalError, Instance};
 
-        let instance = NullInstance::tier_b();
+        let instance = NullInstance::portable();
         let device = instance
             .create_device(&DeviceDesc {
                 required_features: Features::COMPUTE,
                 ..DeviceDesc::for_adapter(AdapterId(0))
             })
-            .expect("the tier B preset has compute");
+            .expect("the portable preset has compute");
         assert!(!device.caps().supports(Features::TIMELINE_SEMAPHORE));
 
         let error = device
@@ -188,19 +188,19 @@ mod tests {
                 label: Some("acquire"),
                 kind: SemaphoreKind::Binary,
             })
-            .expect("WSI acquire needs a binary semaphore on every tier");
+            .expect("WSI acquire needs a binary semaphore on every device");
         device.destroy_semaphore(binary);
 
-        let instance = NullInstance::tier_a();
+        let instance = NullInstance::gpu_driven();
         let device = instance
             .create_device(&DeviceDesc::for_adapter(AdapterId(0)))
-            .expect("the tier A preset opens");
+            .expect("the gpu_driven preset opens");
         let timeline = device
             .create_semaphore(&SemaphoreDesc {
                 label: Some("frame timeline"),
                 kind: SemaphoreKind::Timeline { initial_value: 0 },
             })
-            .expect("tier A has timeline semaphores");
+            .expect("the gpu_driven preset has timeline semaphores");
         device.destroy_semaphore(timeline);
     }
 }

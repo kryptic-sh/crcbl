@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The engine names every capability it asked for and did not get, once, at
+  device creation.** `crcbl_hal::downgrades(requested, granted)` returns a
+  `Downgrades` describing each absent optional feature and the path selector its
+  absence moved (`Downgrade::feature`, `::name`, `::selected`, the last a
+  `SelectedPath::{Geometry, Binding, Lighting}`); `GpuContext`'s open logs it
+  when it is not empty, as
+  `hal: this device does not have DESCRIPTOR_INDEXING -> binding ArrayPages, …`.
+  A device that got everything logs **nothing**, which is what makes the silence
+  readable: `IndirectPerBatch` in the path line is now distinguishable from a
+  descriptor that never asked for the count. `GeometryPath::INPUTS`,
+  `BindingModel::INPUTS` and `LightingPath::INPUTS` are new, and state which
+  features each selector is derived from.
+
 - **Five `crcbl_hal::Features` flags for mesh shading and ray tracing.**
   `MESH_SHADER`, `TASK_SHADER`, `RAY_QUERY`, `RAY_TRACING_PIPELINE` and
   `ACCELERATION_STRUCTURE`. `MESH_SHADER` is the best `GeometryPath` and
@@ -1314,7 +1327,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   through `from_features`. Log lines and `Debug` impls that printed a tier now
   print the three selected paths. A tier could not express three independent
   axes, and forcing a device into the wrong bucket is a lie the renderer then
-  acts on.
+  acts on. The null backend's two presets are renamed with it:
+  `NullInstance::tier_a` is now `NullInstance::gpu_driven` and
+  `NullInstance::tier_b` is now `NullInstance::portable`.
 
 - **Breaking: `DeviceDesc::for_adapter` requires only what nothing can work
   without.** `required_features` is now

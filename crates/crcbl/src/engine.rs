@@ -65,7 +65,7 @@
 //! that: a timeline semaphore, or [`Device::wait_idle`] — which the seam itself
 //! documents as "a shutdown and test primitive" that "destroys pipelining". So
 //! [`GpuContext`] keeps a ring keyed on a timeline semaphore value, and falls
-//! back to `wait_idle` only on a Tier B device that has no timeline semaphores.
+//! back to `wait_idle` only on a device that has no timeline semaphores.
 //!
 //! # What the join revealed
 //!
@@ -765,6 +765,18 @@ impl PendingGpuContext {
                         return Ok(None);
                     }
                     crcbl_hal::DeviceRequestState::Ready(device) => {
+                        // Topic 39's one downgrade line, said here rather than
+                        // at adapter selection because this is the first point
+                        // that knows what the device actually *granted* — an
+                        // adapter's report is only what it could have given.
+                        // Nothing is logged when it granted the lot, and that
+                        // silence is the useful half: it tells a reader that
+                        // `IndirectPerBatch` was the device's ceiling rather
+                        // than something the descriptor never asked for.
+                        let absent = crcbl_hal::downgrades(self.optional_features, &device.caps());
+                        if !absent.is_empty() {
+                            log::info!("hal: this device does not have {absent}");
+                        }
                         return GpuContext::finish(
                             instance,
                             surface,
@@ -5715,7 +5727,7 @@ mod tests {
         // test is to hold the recorder the device writes to.
         let recorder = Recorder::new();
         let instance: Box<dyn Instance> =
-            Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+            Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
         let target = shell
             .surface_target(window)
             .expect("the window is still alive");
@@ -5833,7 +5845,7 @@ mod tests {
 
         let recorder = Recorder::new();
         let instance: Box<dyn Instance> =
-            Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+            Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
         let target = shell
             .surface_target(window)
             .expect("the window is still alive");
@@ -5962,7 +5974,7 @@ mod tests {
 
         let recorder = Recorder::new();
         let instance: Box<dyn Instance> =
-            Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+            Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
         let target = shell
             .surface_target(window)
             .expect("the window is still alive");
@@ -6070,7 +6082,7 @@ mod tests {
         // the test is to hold the recorder that decides when the device fails.
         let recorder = Recorder::new();
         let instance: Box<dyn Instance> =
-            Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+            Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
         let target = shell
             .surface_target(window)
             .expect("the window is still alive");

@@ -72,7 +72,7 @@ bitflags::bitflags! {
         const INDIRECT = 1 << 5;
         /// Its GPU address may be taken. Requires
         /// [`Features::BUFFER_DEVICE_ADDRESS`](crate::Features::BUFFER_DEVICE_ADDRESS);
-        /// Tier B never sets this.
+        /// A backend without it never sets this.
         const DEVICE_ADDRESS = 1 << 6;
         /// Destination of a query resolve.
         const QUERY_RESOLVE = 1 << 7;

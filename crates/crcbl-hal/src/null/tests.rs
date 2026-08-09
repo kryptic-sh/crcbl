@@ -38,13 +38,13 @@ fn open(instance: &dyn Instance) -> Box<dyn Device> {
             optional_features: Features::all(),
             ..DeviceDesc::for_adapter(adapters[0].id)
         })
-        .expect("the tier A adapter has compute and a timeline semaphore")
+        .expect("the gpu_driven adapter has compute and a timeline semaphore")
 }
 
 #[test]
-fn tier_presets_select_the_documented_paths() {
-    let a = NullInstance::tier_a();
-    let b = NullInstance::tier_b();
+fn the_two_presets_select_the_documented_paths() {
+    let a = NullInstance::gpu_driven();
+    let b = NullInstance::portable();
     let (a_caps, b_caps) = (a.adapters()[0].caps, b.adapters()[0].caps);
     assert_eq!(a_caps.binding_model(), BindingModel::Bindless);
     assert_eq!(a_caps.geometry_path(), GeometryPath::IndirectCount);
@@ -67,30 +67,33 @@ fn tier_presets_select_the_documented_paths() {
     ] {
         assert!(
             !caps.supports(absent),
-            "the tier B preset must not claim {absent:?} — it models WebGPU"
+            "the portable preset must not claim {absent:?} — it models WebGPU"
         );
     }
     assert!(
         caps.supports(Features::COMPUTE),
-        "GPU culling runs on tier B"
+        "GPU culling runs on the portable preset"
     );
 }
 
 /// `required` has to be able to fail, and it has to name the gap — a
-/// requirement that cannot be refused is not a gate. The tier B preset lacks a
+/// requirement that cannot be refused is not a gate. The portable preset lacks a
 /// timeline semaphore, which the headless default does require, so this is the
 /// refusal the seam owes with nothing contrived to provoke it.
 #[test]
-fn a_tier_b_device_refuses_the_headless_default_and_names_the_gap() {
-    let instance = NullInstance::tier_b();
+fn the_portable_preset_refuses_the_headless_default_and_names_the_gap() {
+    let instance = NullInstance::portable();
     let error = instance
         .create_device(&DeviceDesc::for_adapter(AdapterId(0)))
-        .expect_err("tier B has no timeline semaphore");
+        .expect_err("the portable preset has no timeline semaphore");
     let HalError::UnsupportedFeatures { missing } = error else {
         panic!("expected UnsupportedFeatures, got {error:?}");
     };
     assert!(missing.contains(Features::TIMELINE_SEMAPHORE));
-    assert!(!missing.contains(Features::COMPUTE), "tier B has compute");
+    assert!(
+        !missing.contains(Features::COMPUTE),
+        "the portable preset has compute"
+    );
     // The bindless half is *optional* now: absent, and not a reason to refuse.
     assert!(
         !missing.contains(Features::DESCRIPTOR_INDEXING),
@@ -100,7 +103,7 @@ fn a_tier_b_device_refuses_the_headless_default_and_names_the_gap() {
 
 #[test]
 fn unknown_adapters_are_rejected() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let error = instance
         .create_device(&DeviceDesc {
             adapter: AdapterId(7),
@@ -112,7 +115,7 @@ fn unknown_adapters_are_rejected() {
 
 #[test]
 fn queue_families_follow_the_adapter_features() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     assert!(device.queue(QueueKind::Graphics).is_some());
     assert!(device.queue(QueueKind::Compute).is_some());
@@ -123,13 +126,13 @@ fn queue_families_follow_the_adapter_features() {
         "distinct families must have distinct handles"
     );
 
-    let instance = NullInstance::tier_b();
+    let instance = NullInstance::portable();
     let device = instance
         .create_device(&DeviceDesc {
             required_features: Features::COMPUTE,
             ..DeviceDesc::for_adapter(AdapterId(0))
         })
-        .expect("tier B has compute");
+        .expect("the portable preset has compute");
     assert!(
         device.queue(QueueKind::Graphics).is_some(),
         "the graphics queue always exists"
@@ -140,7 +143,7 @@ fn queue_families_follow_the_adapter_features() {
 
 #[test]
 fn buffers_round_trip_through_the_host_and_reject_the_wrong_memory() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
 
     let upload = device
@@ -189,7 +192,7 @@ fn buffers_round_trip_through_the_host_and_reject_the_wrong_memory() {
 
 #[test]
 fn destroyed_handles_are_rejected_rather_than_aliased() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     let buffer = device
         .create_buffer(&BufferDesc {
@@ -228,7 +231,7 @@ fn destroyed_handles_are_rejected_rather_than_aliased() {
 
 #[test]
 fn shader_modules_reject_non_spirv() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     let error = device
         .create_shader_module(&ShaderModuleDesc {
@@ -269,7 +272,7 @@ fn shader_modules_reject_non_spirv() {
 /// descriptor the SPIR-V magic-number check must not reject.
 #[test]
 fn shader_modules_accept_a_text_artifact_with_or_without_spirv() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     assert!(
         device
@@ -323,7 +326,7 @@ fn shader_modules_accept_a_text_artifact_with_or_without_spirv() {
 /// a module handle no pipeline could use.
 #[test]
 fn a_shader_module_with_no_artifact_names_the_gap() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     let error = device
         .create_shader_module(&ShaderModuleDesc {
@@ -344,7 +347,7 @@ fn a_shader_module_with_no_artifact_names_the_gap() {
 /// every real caller destroys its modules the moment its pipelines exist.
 #[test]
 fn created_shader_modules_are_logged_with_the_formats_they_carried() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let recorder = instance.recorder();
     let device = open(&instance);
     let module = device
@@ -365,18 +368,18 @@ fn created_shader_modules_are_logged_with_the_formats_they_carried() {
     assert!(recorder.shader_modules_created().is_empty());
 }
 
-/// The Tier B trap the seam exists to make visible: a layout that asks for
+/// The trap the seam exists to make visible: a layout that asks for
 /// push constants on a device without them fails at *creation*, not by silently
 /// dropping the writes at record time.
 #[test]
-fn push_constants_and_bindless_fail_loudly_on_tier_b() {
-    let instance = NullInstance::tier_b();
+fn push_constants_and_bindless_fail_loudly_on_the_portable_preset() {
+    let instance = NullInstance::portable();
     let device = instance
         .create_device(&DeviceDesc {
             required_features: Features::COMPUTE,
             ..DeviceDesc::for_adapter(AdapterId(0))
         })
-        .expect("tier B device");
+        .expect("the portable preset opens");
 
     let layout = device
         .create_bind_group_layout(&BindGroupLayoutDesc {
@@ -389,7 +392,7 @@ fn push_constants_and_bindless_fail_loudly_on_tier_b() {
                 flags: crate::BindingFlags::empty(),
             }],
         })
-        .expect("a plain layout is fine on tier B");
+        .expect("a plain layout is fine without push constants");
 
     let error = device
         .create_pipeline_layout(&PipelineLayoutDesc {
@@ -401,7 +404,7 @@ fn push_constants_and_bindless_fail_loudly_on_tier_b() {
                 size: 64,
             }),
         })
-        .expect_err("tier B has no push constants");
+        .expect_err("the portable preset has no push constants");
     assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
 
     // Bindless flags are refused for the same reason.
@@ -418,7 +421,7 @@ fn push_constants_and_bindless_fail_loudly_on_tier_b() {
                     | crate::BindingFlags::VARIABLE_COUNT,
             }],
         })
-        .expect_err("tier B has no descriptor indexing");
+        .expect_err("the portable preset has no descriptor indexing");
     assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
 
     // And so are timeline semaphores.
@@ -427,7 +430,7 @@ fn push_constants_and_bindless_fail_loudly_on_tier_b() {
             label: None,
             kind: SemaphoreKind::Timeline { initial_value: 0 },
         })
-        .expect_err("tier B has no timeline semaphores");
+        .expect_err("the portable preset has no timeline semaphores");
     assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
 }
 
@@ -437,7 +440,7 @@ fn push_constants_and_bindless_fail_loudly_on_tier_b() {
 /// The seam doc now states both halves; this pins them.
 #[test]
 fn variable_count_must_be_the_last_and_highest_binding() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     let plain = BindGroupLayoutEntry {
         binding: 0,
@@ -494,7 +497,7 @@ fn variable_count_must_be_the_last_and_highest_binding() {
 /// backend used to wave through.
 #[test]
 fn a_duplicated_binding_number_is_refused() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     let entry = BindGroupLayoutEntry {
         binding: 3,
@@ -512,14 +515,15 @@ fn a_duplicated_binding_number_is_refused() {
     assert!(error.to_string().contains("twice"), "{error}");
 }
 
-/// Tier A gets binary acquire/present semaphores; Tier B, modelling WebGPU's
-/// implicit `getCurrentTexture`, gets `None` for both. The renderer's splice is
+/// A device with timeline semaphores gets binary acquire/present semaphores;
+/// the portable preset, modelling WebGPU's implicit `getCurrentTexture`, gets
+/// `None` for both. The renderer's splice is
 /// the same code in each case — see [`crate::swapchain`].
 #[test]
-fn swapchain_acquire_matches_the_tiers_sync_model() {
+fn swapchain_acquire_matches_each_presets_sync_model() {
     for (instance, features, expect_semaphores) in [
-        (NullInstance::tier_a(), Features::GPU_DRIVEN, true),
-        (NullInstance::tier_b(), Features::COMPUTE, false),
+        (NullInstance::gpu_driven(), Features::GPU_DRIVEN, true),
+        (NullInstance::portable(), Features::COMPUTE, false),
     ] {
         let device = instance
             .create_device(&DeviceDesc {
@@ -637,7 +641,7 @@ fn swapchain_acquire_matches_the_tiers_sync_model() {
 /// invariant; `build_ring` is what keeps them so.
 #[test]
 fn reconfiguring_to_a_larger_ring_reissues_the_semaphores_too() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     // SAFETY: an offscreen target holds no platform pointers.
     let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
@@ -667,7 +671,7 @@ fn reconfiguring_to_a_larger_ring_reissues_the_semaphores_too() {
         assert_eq!(frame.index, expected);
         assert!(
             frame.acquire_semaphore.is_some() && frame.present_semaphore.is_some(),
-            "a tier A ring has a semaphore pair per slot, for every slot"
+            "a semaphore-carrying ring has a pair per slot, for every slot"
         );
     }
 
@@ -686,7 +690,7 @@ fn reconfiguring_to_a_larger_ring_reissues_the_semaphores_too() {
 /// on the one backend whose whole job is noticing.
 #[test]
 fn a_present_wait_is_answered_not_refused_and_still_checks_its_swapchain() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let recorder = instance.recorder();
     let device = open(&instance);
     assert!(
@@ -736,7 +740,7 @@ fn a_present_wait_is_answered_not_refused_and_still_checks_its_swapchain() {
 /// view are usable; a failed call must not be able to break it.
 #[test]
 fn a_failed_reconfigure_leaves_the_swapchain_usable() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     // SAFETY: an offscreen target holds no platform pointers.
     let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
@@ -795,7 +799,7 @@ fn a_failed_reconfigure_leaves_the_swapchain_usable() {
 
 #[test]
 fn destroying_a_swapchain_releases_its_images_and_semaphores() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let recorder = instance.recorder();
     let device = open(&instance);
     // SAFETY: an offscreen target holds no platform pointers.
@@ -840,7 +844,7 @@ fn destroying_a_swapchain_releases_its_images_and_semaphores() {
 
 #[test]
 fn a_swapchain_needs_a_live_surface_and_a_real_extent() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     // SAFETY: an offscreen target holds no platform pointers.
     let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
@@ -871,7 +875,7 @@ fn a_swapchain_needs_a_live_surface_and_a_real_extent() {
 /// problem in a frame instead of only the first.
 #[test]
 fn scope_violations_are_recorded() {
-    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
     let device = open(instance.as_ref());
     let queue = device.queue(QueueKind::Graphics).expect("queue");
 
@@ -960,7 +964,7 @@ fn scope_violations_are_recorded() {
 
 #[test]
 fn nested_passes_are_rejected() {
-    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
     let device = open(instance.as_ref());
     let queue = device.queue(QueueKind::Graphics).expect("queue");
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
@@ -992,7 +996,7 @@ fn nested_passes_are_rejected() {
 /// render graph's own suite will assert on at P1.
 #[test]
 fn a_gpu_driven_frame_records_the_expected_stream() {
-    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
     let device = open(instance.as_ref());
     let queue = device.queue(QueueKind::Graphics).expect("queue");
 
@@ -1315,7 +1319,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
 
 #[test]
 fn timestamp_queries_read_back_zeros_without_failing() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     let timers = device
         .create_query_set(&QuerySetDesc {
@@ -1335,8 +1339,8 @@ fn timestamp_queries_read_back_zeros_without_failing() {
 }
 
 #[test]
-fn tier_b_refuses_query_kinds_it_lacks() {
-    let instance = NullInstance::tier_b();
+fn the_portable_preset_refuses_query_kinds_it_lacks() {
+    let instance = NullInstance::portable();
     let device = instance
         .create_device(&DeviceDesc {
             required_features: Features::COMPUTE,
@@ -1355,7 +1359,7 @@ fn tier_b_refuses_query_kinds_it_lacks() {
 
 #[test]
 fn wait_idle_and_semaphore_waits_are_recorded_and_satisfied() {
-    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
     let device = open(instance.as_ref());
     let semaphore = device
         .create_semaphore(&SemaphoreDesc {
@@ -1387,7 +1391,7 @@ fn wait_idle_and_semaphore_waits_are_recorded_and_satisfied() {
 
 #[test]
 fn images_are_validated_against_the_devices_limits() {
-    let instance = NullInstance::tier_b();
+    let instance = NullInstance::portable();
     let device = instance
         .create_device(&DeviceDesc {
             required_features: Features::COMPUTE,
@@ -1439,8 +1443,8 @@ fn a_surface_from_another_instance_is_a_foreign_object() {
     // the hardest case, and the one a naive "does the handle resolve?" check
     // gets wrong.
     let recorder = Recorder::new();
-    let first = NullInstance::tier_a().with_recorder(recorder.clone());
-    let second = NullInstance::tier_a().with_recorder(recorder.clone());
+    let first = NullInstance::gpu_driven().with_recorder(recorder.clone());
+    let second = NullInstance::gpu_driven().with_recorder(recorder.clone());
 
     // SAFETY: an offscreen target holds no platform pointers.
     let foreign = unsafe { second.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
@@ -1498,7 +1502,7 @@ fn a_surface_from_another_instance_is_a_foreign_object() {
 /// share resources.
 #[test]
 fn a_buffer_from_another_device_is_a_foreign_object() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let first = open(&instance);
     let second = open(&instance);
 
@@ -1532,7 +1536,7 @@ fn a_buffer_from_another_device_is_a_foreign_object() {
 /// distinct from a dead one — the fixes differ.
 #[test]
 fn commands_naming_a_foreign_handle_are_recorded_as_such() {
-    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
     let first = open(instance.as_ref());
     let second = open(instance.as_ref());
     let queue = first.queue(QueueKind::Graphics).expect("queue");
@@ -1574,7 +1578,7 @@ fn commands_naming_a_foreign_handle_are_recorded_as_such() {
 /// error, never undefined behaviour.
 #[test]
 fn destroying_a_surface_out_of_order_is_detected_not_undefined() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     // SAFETY: an offscreen target holds no platform pointers.
     let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
@@ -1622,7 +1626,7 @@ fn a_device_outlives_its_instance() {
     let recorder = Recorder::new();
     let device = {
         let instance: Box<dyn Instance> =
-            Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+            Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
         let adapters = instance.adapters();
         instance
             .create_device(&DeviceDesc {
@@ -1653,7 +1657,7 @@ fn a_device_outlives_its_instance() {
 
 #[test]
 fn readback_completes_and_yields_the_buffers_bytes() {
-    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
     let device = open(instance.as_ref());
     let buffer = device
         .create_buffer(&BufferDesc {
@@ -1701,7 +1705,7 @@ fn readback_completes_and_yields_the_buffers_bytes() {
 /// `mapAsync` does on every readback, so the poll loop has to be exercised.
 #[test]
 fn a_pending_readback_reports_pending_and_leaves_the_output_untouched() {
-    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
     let device = open(instance.as_ref());
     recorder.set_readback_latency(3);
 
@@ -1744,7 +1748,7 @@ fn a_pending_readback_reports_pending_and_leaves_the_output_untouched() {
 
 #[test]
 fn readback_validates_its_buffer_memory_range_and_output_length() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
 
     // Wrong memory location: WebGPU would reject the MAP_READ usage too.
@@ -1814,7 +1818,7 @@ fn readback_validates_its_buffer_memory_range_and_output_length() {
 
 #[test]
 fn a_readback_may_name_an_explicit_completion_point() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     let semaphore = device
         .create_semaphore(&SemaphoreDesc {
@@ -1879,7 +1883,7 @@ fn a_readback_may_name_an_explicit_completion_point() {
 /// must be the right *kind*. None of that used to happen here.
 #[test]
 fn a_bind_group_is_checked_against_its_layout() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
 
     let layout = device
@@ -1963,7 +1967,7 @@ fn a_bind_group_is_checked_against_its_layout() {
 /// backend used to accept it, which made the doc untestable.
 #[test]
 fn updating_a_group_without_update_after_bind_is_refused() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     let slot = |flags| BindGroupLayoutEntry {
         binding: 0,
@@ -2016,7 +2020,7 @@ fn updating_a_group_without_update_after_bind_is_refused() {
 /// supposed to fail.
 #[test]
 fn a_push_constant_range_that_overflows_is_refused_not_wrapped() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     let error = device
         .create_pipeline_layout(&PipelineLayoutDesc {
@@ -2036,7 +2040,7 @@ fn a_push_constant_range_that_overflows_is_refused_not_wrapped() {
 /// before: `first_query` was ignored and the set's size was never stored.
 #[test]
 fn query_results_are_bounded_by_the_sets_size() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     let set = device
         .create_query_set(&QuerySetDesc {
@@ -2063,7 +2067,7 @@ fn query_results_are_bounded_by_the_sets_size() {
 /// a volume's depth checked against nothing, and `samples` unvalidated.
 #[test]
 fn images_are_validated_per_type_and_sample_count() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     let limits = device.caps().limits;
     let base = ImageDesc {
@@ -2143,7 +2147,7 @@ fn images_are_validated_per_type_and_sample_count() {
 /// therefore *identical* — submitted happily.
 #[test]
 fn a_queue_from_another_device_is_foreign() {
-    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
     let first = open(instance.as_ref());
     let second = open(instance.as_ref());
 
@@ -2184,7 +2188,7 @@ fn a_queue_from_another_device_is_foreign() {
 /// makes the latency it is being tested against a lie.
 #[test]
 fn a_rejected_poll_does_not_advance_the_simulated_readback() {
-    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
     let device = open(instance.as_ref());
     recorder.set_readback_latency(2);
 
@@ -2234,7 +2238,7 @@ fn a_rejected_poll_does_not_advance_the_simulated_readback() {
 /// size must be clamped to the min/max the same backend reports.
 #[test]
 fn a_swapchain_format_must_be_one_the_surface_offers() {
-    let instance = NullInstance::tier_a();
+    let instance = NullInstance::gpu_driven();
     let device = open(&instance);
     // SAFETY: `Offscreen` names no platform object.
     let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
@@ -2300,7 +2304,7 @@ fn a_swapchain_format_must_be_one_the_surface_offers() {
 /// one process depends on.
 #[test]
 fn device_latency_applies_per_request_and_only_after_it_is_set() {
-    let (recorder, instance) = boxed(NullInstance::tier_a());
+    let (recorder, instance) = boxed(NullInstance::gpu_driven());
     let adapter = instance.adapters()[0].id;
 
     // Requested before the latency is set: unaffected.
@@ -2333,7 +2337,7 @@ fn device_latency_applies_per_request_and_only_after_it_is_set() {
 /// from one is foreign to the other.
 #[test]
 fn a_polled_device_stamps_its_own_ownership_like_any_other() {
-    let (_recorder, instance) = boxed(NullInstance::tier_a());
+    let (_recorder, instance) = boxed(NullInstance::gpu_driven());
     let adapter = instance.adapters()[0].id;
 
     let mut request = instance

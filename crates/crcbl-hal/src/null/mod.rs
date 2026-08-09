@@ -42,12 +42,13 @@
 //!
 //! # Two presets
 //!
-//! [`NullInstance::tier_a`] reports a full desktop Tier A device;
-//! [`NullInstance::tier_b`] reports the WebGPU-shaped Tier B floor — no
-//! bindless, no `draw_indirect_count`, no buffer device address, no push
-//! constants, no timeline semaphores, and an implicit swapchain acquire. Running
-//! the same renderer code against both is how the tier system gets tested before
-//! `crcbl-wgpu` exists.
+//! [`NullInstance::gpu_driven`] reports a full desktop device holding
+//! [`Features::GPU_DRIVEN`] and most of what sits beside it;
+//! [`NullInstance::portable`] reports the WebGPU-shaped floor — no bindless, no
+//! `draw_indirect_count`, no buffer device address, no push constants, no
+//! timeline semaphores, and an implicit swapchain acquire. They are two points
+//! in the capability space rather than two tiers, and running the same renderer
+//! code against both is how degradation gets tested before `crcbl-wgpu` exists.
 //!
 //! ```
 //! use crcbl_hal::null::{NullInstance, Recorder};
@@ -55,7 +56,7 @@
 //!
 //! let recorder = Recorder::new();
 //! let instance: Box<dyn Instance> =
-//!     Box::new(NullInstance::tier_b().with_recorder(recorder.clone()));
+//!     Box::new(NullInstance::portable().with_recorder(recorder.clone()));
 //!
 //! let adapter = instance.adapters()[0].clone();
 //! assert_eq!(adapter.caps.binding_model(), BindingModel::ArrayPages);
@@ -179,10 +180,17 @@ impl NullInstance {
         }
     }
 
-    /// A full desktop **Tier A** device: bindless, buffer device address,
-    /// `draw_indirect_count`, timeline semaphores, push constants, timestamps.
+    /// A full desktop device: everything in [`Features::GPU_DRIVEN`] —
+    /// bindless, buffer device address, `draw_indirect_count`, multi-draw,
+    /// compute, timeline semaphores — plus push constants, timestamps and the
+    /// other query kinds.
+    ///
+    /// Not mesh shaders and not ray tracing: those are separate selector axes,
+    /// and a preset that held every flag would leave
+    /// [`GeometryPath::MeshShader`](crate::GeometryPath::MeshShader) as the only
+    /// answer any test could get.
     #[must_use]
-    pub fn tier_a() -> Self {
+    pub fn gpu_driven() -> Self {
         Self::new(DeviceCaps {
             features: Features::GPU_DRIVEN
                 | Features::INDIRECT_FIRST_INSTANCE
@@ -202,21 +210,21 @@ impl NullInstance {
         })
     }
 
-    /// The **Tier B** floor, shaped like WebGPU: compute only.
+    /// The floor every backend clears, shaped like WebGPU: compute only.
     ///
     /// No descriptor indexing, no buffer device address, no
     /// `draw_indirect_count`, no multi-draw, no push constants, no timeline
     /// semaphores, and — the shape that matters most — an **implicit swapchain
     /// acquire**, so [`AcquiredFrame`] comes back with no semaphores at all.
-    /// Renderer code that works against both presets works against `crcbl-vk`
-    /// and `crcbl-wgpu`.
+    /// Every selector lands on its lowest value here. Renderer code that works
+    /// against both presets works against `crcbl-vk` and `crcbl-wgpu`.
     #[must_use]
-    pub fn tier_b() -> Self {
+    pub fn portable() -> Self {
         let mut instance = Self::new(DeviceCaps {
             features: Features::COMPUTE | Features::TEXTURE_COMPRESSION_BC,
             limits: Limits::minimum(),
         });
-        instance.name = "null adapter (tier B)".to_string();
+        instance.name = "null adapter (portable)".to_string();
         instance
     }
 
@@ -357,7 +365,8 @@ impl Instance for NullInstance {
             device_id: next_owner_id(),
             // The *device's* granted features decide the acquire shape, not the
             // adapter's. A caller that never asked for timeline semaphores gets
-            // the implicit-acquire shape even on a Tier A adapter, which is
+            // the implicit-acquire shape even on a fully featured adapter,
+            // which is
             // exactly what it would get from a real backend.
             implicit_acquire: !caps.features.contains(Features::TIMELINE_SEMAPHORE),
             caps,
@@ -1073,7 +1082,7 @@ impl Device for NullDevice {
         if let Some(range) = desc.push_constants {
             if !self.caps.features.contains(Features::PUSH_CONSTANTS) {
                 // Loudly, at layout creation — not by silently dropping the
-                // writes later. This is the Tier B trap the seam exists to make
+                // writes later. This is the trap the seam exists to make
                 // visible.
                 return Err(self.unsupported("push constants"));
             }

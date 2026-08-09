@@ -851,7 +851,7 @@ mod tests {
     use crcbl_hal::{DeviceDesc, Features, Instance, QueueKind};
 
     fn open() -> (Box<dyn Device>, QueueHandle) {
-        let instance = NullInstance::tier_a();
+        let instance = NullInstance::gpu_driven();
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc {
@@ -893,7 +893,7 @@ mod tests {
         use crcbl_hal::{Extent3d, Offset3d, ResourceState};
 
         let recorder = crcbl_hal::null::Recorder::new();
-        let instance = NullInstance::tier_a().with_recorder(recorder.clone());
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc {
@@ -1027,7 +1027,7 @@ mod tests {
     #[test]
     fn a_steady_state_frame_recreates_nothing() {
         let recorder = crcbl_hal::null::Recorder::new();
-        let instance = NullInstance::tier_a().with_recorder(recorder.clone());
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc {
@@ -1127,7 +1127,7 @@ mod tests {
     }
 
     fn open_tier_b() -> (Box<dyn Device>, QueueHandle) {
-        let instance = NullInstance::tier_b();
+        let instance = NullInstance::portable();
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc {
@@ -1187,7 +1187,7 @@ mod tests {
     #[test]
     fn the_tier_b_renderer_leaks_nothing() {
         let recorder = crcbl_hal::null::Recorder::new();
-        let instance = NullInstance::tier_b().with_recorder(recorder.clone());
+        let instance = NullInstance::portable().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc {

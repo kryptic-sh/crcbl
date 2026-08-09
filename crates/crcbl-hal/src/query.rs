@@ -23,7 +23,7 @@
 //! documents is an obligation on a *backend*. Both halves of the degrading rule
 //! above are checked where they are implemented — `crate::null`'s
 //! `timestamp_queries_read_back_zeros_without_failing` and
-//! `tier_b_refuses_query_kinds_it_lacks`. A test here could only rebuild a
+//! `the_portable_preset_refuses_query_kinds_it_lacks`. A test here could only rebuild a
 //! [`QuerySetDesc`] and read its own literals back, which is what used to be
 //! here.
 

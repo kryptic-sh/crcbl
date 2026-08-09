@@ -16,8 +16,8 @@
 //!
 //! A literal port of the Vulkan signature — `acquire_next_image(&self, swapchain,
 //! semaphore)` — forces the caller to create and rotate binary semaphores it
-//! has no use for on Tier B, and forces the wgpu backend to invent and signal
-//! fake ones.
+//! has no use for on a device with no semaphores at all, and forces the wgpu
+//! backend to invent and signal fake ones.
 //!
 //! **The fix: the swapchain owns its synchronisation.** [`Device::acquire_next_frame`](crate::Device::acquire_next_frame)
 //! returns an [`AcquiredFrame`] carrying the image *and* an
@@ -30,7 +30,7 @@
 //! * `crcbl-wgpu` returns `None` for both. The same renderer code splices
 //!   nothing.
 //!
-//! The renderer is written once, with no tier branch, and the WebGPU
+//! The renderer is written once, with no per-backend branch, and the WebGPU
 //! implementation is three lines. This is also why [`AcquiredFrame`] hands back
 //! an [`ImageHandle`] rather than an index the caller must map: WebGPU has no
 //! stable image index to give, only a texture per frame.
@@ -320,7 +320,7 @@ pub enum CompositeAlpha {
 /// has no notion of a swapchain image count. Recorded so it is not
 /// re-litigated: *surface capabilities are inherently a WSI concept* — this
 /// whole struct describes what a window system will accept — so WSI vocabulary
-/// is the right vocabulary in it. A Tier B backend reports the range its
+/// is the right vocabulary in it. A WebGPU backend reports the range its
 /// platform actually offers (`2..=2` for a WebGPU canvas, which has one
 /// implicit ring) and the caller's clamp code is unchanged. The alternative,
 /// removing the fields, would take a real knob away from the three backends
@@ -569,7 +569,7 @@ mod tests {
         );
     }
 
-    /// The Tier B shape from the module docs, asserted against the backend that
+    /// The portable shape from the module docs, asserted against the backend that
     /// models it rather than against a hand-built literal: an implicit acquire
     /// returns `None` for both semaphores, so the renderer's splice becomes an
     /// empty slice rather than a branch. The image, the view and the extent are
@@ -577,9 +577,9 @@ mod tests {
     /// reason they sit beside the semaphores rather than being left to the
     /// caller — and here they are checked by *using* them.
     ///
-    /// The Tier A half of the same contract, and the ring's rotation and
+    /// The timeline-semaphore half of the same contract, and the ring's rotation and
     /// reconfigure behaviour, are the null backend's own
-    /// `swapchain_acquire_matches_the_tiers_sync_model`.
+    /// `swapchain_acquire_matches_each_presets_sync_model`.
     #[test]
     fn an_implicit_acquire_frame_carries_no_semaphores() {
         use crate::null::NullInstance;
@@ -591,7 +591,7 @@ mod tests {
 
         const EXTENT: (u32, u32) = (1280, 720);
 
-        let instance = NullInstance::tier_b();
+        let instance = NullInstance::portable();
         // SAFETY: `Offscreen` names no platform object at all, so there is
         // nothing that has to outlive the surface.
         let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
@@ -601,7 +601,7 @@ mod tests {
                 required_features: Features::COMPUTE,
                 ..DeviceDesc::for_adapter(AdapterId(0))
             })
-            .expect("the tier B preset has compute");
+            .expect("the portable preset has compute");
         let surface_caps = instance
             .surface_caps(surface, AdapterId(0))
             .expect("surface caps");
@@ -661,7 +661,8 @@ mod tests {
             .expect("submit");
 
         // The renderer's splice: `None` collects to an empty slice, so the
-        // present is the same code as Tier A's with nothing in it.
+        // present is the same code as a semaphore-carrying device's with nothing in
+        // it.
         let waits: Vec<SemaphoreHandle> = frame.present_semaphore.into_iter().collect();
         assert!(waits.is_empty(), "the splice is an empty slice");
         device
@@ -673,7 +674,7 @@ mod tests {
                     present_id: None,
                 },
             )
-            .expect("presenting with no waits is the Tier B path, not an error");
+            .expect("presenting with no waits is the implicit-acquire path, not an error");
 
         device.destroy_command_buffer(commands);
         device.destroy_swapchain(swapchain);

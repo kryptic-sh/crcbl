@@ -63,7 +63,7 @@
 //! that: a timeline semaphore, or [`Device::wait_idle`] — which the seam itself
 //! documents as "a shutdown and test primitive" that "destroys pipelining". So
 //! this keeps a two-deep ring keyed on a timeline semaphore value, and falls
-//! back to `wait_idle` only on a Tier B device that has no timeline semaphores.
+//! back to `wait_idle` only on a device that has no timeline semaphores.
 //!
 //! # What the join revealed
 //!

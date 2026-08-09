@@ -15,12 +15,14 @@
 //!
 //! # Bindless-capable descriptors
 //!
-//! [`BindGroupLayoutEntry`] carries a `count` and [`BindingFlags`]. A Tier A
-//! backend turns `count: u32::MAX` plus `VARIABLE_COUNT | PARTIALLY_BOUND |
-//! UPDATE_AFTER_BIND` into a runtime-sized descriptor array; a Tier B backend
-//! sees a fixed `count` and produces an ordinary texture array page. Same
-//! declaration, both tiers — which is the point of topic 03's "Tier B is a
-//! constraint on data layout, not a separate renderer".
+//! [`BindGroupLayoutEntry`] carries a `count` and [`BindingFlags`]. A backend
+//! with [`Features::DESCRIPTOR_INDEXING`](crate::Features::DESCRIPTOR_INDEXING)
+//! turns `count: u32::MAX` plus `VARIABLE_COUNT | PARTIALLY_BOUND |
+//! UPDATE_AFTER_BIND` into a runtime-sized descriptor array; one without it sees
+//! a fixed `count` and produces an ordinary texture array page. Same
+//! declaration, both [`BindingModel`](crate::BindingModel)s — which is the point
+//! of topic 03's "the lesser path is a constraint on data layout, not a separate
+//! renderer".
 
 use crcbl_core::Handle;
 
@@ -64,7 +66,8 @@ pub enum BindingKind {
     UniformBuffer {
         /// Whether the binding takes a dynamic offset at bind time.
         ///
-        /// The Tier B substitute for push constants: WebGPU has no root
+        /// The substitute for push constants where there are none: WebGPU has
+        /// no root
         /// constants, so per-draw data becomes a dynamic offset into one large
         /// uniform buffer.
         dynamic: bool,
@@ -97,7 +100,7 @@ bitflags::bitflags! {
     /// Descriptor-indexing behaviour for one binding.
     ///
     /// All three require [`Features::DESCRIPTOR_INDEXING`](crate::Features::DESCRIPTOR_INDEXING).
-    /// A Tier B backend must reject a layout that sets any of them rather than
+    /// A backend without it must reject a layout that sets any of them rather than
     /// silently ignoring it — a bindless array quietly downgraded to a fixed
     /// one reads garbage at index 4097.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -223,9 +226,9 @@ pub struct BindGroupDesc<'a> {
 ///
 /// Requires [`Features::PUSH_CONSTANTS`](crate::Features::PUSH_CONSTANTS).
 ///
-/// # Tier B has none — an obligation, not a footnote
+/// # WebGPU has none — an obligation, not a footnote
 ///
-/// WebGPU has no push constants at all, so a Tier B backend **must** report
+/// WebGPU has no push constants at all, so a backend on it **must** report
 /// [`Features::PUSH_CONSTANTS`](crate::Features::PUSH_CONSTANTS) absent and
 /// `max_push_constant_size` as `0`, and **must** fail
 /// [`PipelineLayoutDesc::push_constants`] loudly at layout creation rather than

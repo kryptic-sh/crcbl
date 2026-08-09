@@ -3347,6 +3347,24 @@ the transport seam over a third transport shape.
 
 ### Owed by the capability work (P7)
 
+- **Nothing asserts the downgrade log line.** `crcbl_hal::downgrades` is
+  unit-tested and the call site in `crcbl::engine`'s `PendingGpuContext::poll`
+  is not, because the workspace has no way to capture log output in a test —
+  `crcbl-core`'s `StderrLogger` is a process-wide `static` with no test sink.
+  Topic 39 calls the line "an assertion target, not decoration", so this is a
+  real gap: a refactor could delete the call and every test would stay green.
+  Closing it needs a capturing `log::Log` implementation, which is a slice of
+  its own and would serve every other log-line assertion in the tree too.
+
+- **"Tier" vocabulary survives in inline comments across the backends.** The
+  type is gone and the doc comments are cleaned, but narrative comments,
+  `.expect()` strings and test names still say Tier A/B in `crcbl-render`,
+  `crcbl-wgpu`, `crcbl-mtl`, `crcbl-vk` and `crcbl-dx12`. Two caveats before
+  anyone sweeps it: `crcbl-render`'s references are about the
+  `ui.slang`/`ui_tier_b.slang` **shader permutation**, which is a different
+  thing and is being deleted by the shader-guardrails slice; and much of
+  `crcbl-dx12`'s is real D3D12 `ResourceBindingTier` vocabulary that must stay.
+
 - **Every path selector value must be executed by something.** A `GeometryPath`,
   `BindingModel` or `LightingPath` value no device in CI selects is compiled and
   unrun. The existing instance is the Tier B arm of the indirect-draw tests:

@@ -2,10 +2,11 @@
 //!
 //! # Honest, not optimistic
 //!
-//! [`DeviceCaps::tier`](crcbl_hal::DeviceCaps::tier) is *derived* from
-//! [`Features`], so a backend cannot claim Tier A while missing a Tier A
-//! feature — the seam made that structurally impossible on purpose. What a
-//! backend *can* still do is lie in the other direction: set
+//! Every path selector — [`DeviceCaps::binding_model`](crcbl_hal::DeviceCaps::binding_model)
+//! and its two siblings — is *derived* from [`Features`], so a backend cannot
+//! claim the bindless model while missing what bindless is built on; the seam
+//! made that structurally impossible on purpose. What a backend *can* still do
+//! is lie in the other direction: set
 //! `DESCRIPTOR_INDEXING` because the extension is present without checking that
 //! the specific sub-features the bindless model needs are. [`features_of`]
 //! therefore spells every sub-feature out, and the P1 CI matrix — radv on the
@@ -173,7 +174,7 @@ fn device_type(raw: vk::PhysicalDeviceType) -> DeviceType {
 /// feature structs.
 ///
 /// Pure so that "which features does this device have" can be tested against a
-/// synthetic feature set — including the Tier A boundary, which is the answer
+/// synthetic feature set — including the bindless boundary, which is the answer
 /// most likely to differ between radv and lavapipe.
 #[must_use]
 pub(crate) fn features_of(
@@ -188,8 +189,8 @@ pub(crate) fn features_of(
     let mut features = Features::empty();
 
     // The full bindless set the seam documents, not merely "the extension is
-    // present". Topic 03's Tier A needs runtime-sized arrays, partial binding
-    // and update-after-bind together; any one of them missing means the
+    // present". `BindingModel::Bindless` needs runtime-sized arrays, partial
+    // binding and update-after-bind together; any one of them missing means the
     // bindless path cannot run, so any one of them missing must demote.
     if vulkan_1_2.descriptor_indexing == vk::TRUE
         && vulkan_1_2.runtime_descriptor_array == vk::TRUE
@@ -684,7 +685,7 @@ mod tests {
         assert_eq!(families.graphics, Some(1));
     }
 
-    fn tier_a_vulkan_1_2<'a>() -> vk::PhysicalDeviceVulkan12Features<'a> {
+    fn fully_featured_vulkan_1_2<'a>() -> vk::PhysicalDeviceVulkan12Features<'a> {
         vk::PhysicalDeviceVulkan12Features::default()
             .descriptor_indexing(true)
             .runtime_descriptor_array(true)
@@ -711,14 +712,14 @@ mod tests {
         }
     }
 
-    /// The synthetic Tier A device. This is the test that pins what "Tier A"
-    /// means in Vulkan terms, and it is deliberately expressed as a feature set
-    /// rather than a driver name.
+    /// The synthetic fully featured device. This is the test that pins what
+    /// [`Features::GPU_DRIVEN`] means in Vulkan terms, and it is deliberately
+    /// expressed as a feature set rather than a driver name.
     #[test]
-    fn a_full_featured_device_is_tier_a() {
+    fn a_full_featured_device_reports_the_whole_gpu_driven_bundle() {
         let features = features_of(
             &vk::PhysicalDeviceFeatures::default().multi_draw_indirect(true),
-            &tier_a_vulkan_1_2(),
+            &fully_featured_vulkan_1_2(),
             &desktop_limits(),
             QueueFamilies::select(&[family(GRAPHICS, 1)]),
             true,
@@ -754,7 +755,7 @@ mod tests {
         let device = |present_feedback| {
             features_of(
                 &vk::PhysicalDeviceFeatures::default(),
-                &tier_a_vulkan_1_2(),
+                &fully_featured_vulkan_1_2(),
                 &desktop_limits(),
                 QueueFamilies::select(&[family(GRAPHICS, 1)]),
                 false,
@@ -785,7 +786,7 @@ mod tests {
         let device = |present_timing| {
             features_of(
                 &vk::PhysicalDeviceFeatures::default(),
-                &tier_a_vulkan_1_2(),
+                &fully_featured_vulkan_1_2(),
                 &desktop_limits(),
                 QueueFamilies::select(&[family(GRAPHICS, 1)]),
                 false,
@@ -826,7 +827,7 @@ mod tests {
         let device = |feedback, timing| {
             features_of(
                 &vk::PhysicalDeviceFeatures::default(),
-                &tier_a_vulkan_1_2(),
+                &fully_featured_vulkan_1_2(),
                 &desktop_limits(),
                 QueueFamilies::select(&[family(GRAPHICS, 1)]),
                 false,
@@ -903,11 +904,11 @@ mod tests {
     }
 
     /// The half of "honest reporting" that matters: a device missing one
-    /// bindless sub-feature must report Tier B, not Tier A with a caveat.
-    /// Dropping each sub-feature in turn is what stops someone "simplifying"
-    /// the check to `descriptor_indexing == TRUE`.
+    /// bindless sub-feature must report [`BindingModel::ArrayPages`], not
+    /// bindless with a caveat. Dropping each sub-feature in turn is what stops
+    /// someone "simplifying" the check to `descriptor_indexing == TRUE`.
     #[test]
-    fn dropping_any_bindless_sub_feature_demotes_to_tier_b() {
+    fn dropping_any_bindless_sub_feature_demotes_to_array_pages() {
         type Setter = fn(
             vk::PhysicalDeviceVulkan12Features<'static>,
         ) -> vk::PhysicalDeviceVulkan12Features<'static>;
@@ -935,7 +936,7 @@ mod tests {
             }),
         ];
         for (name, disable) in disablers {
-            let vulkan_1_2 = disable(tier_a_vulkan_1_2());
+            let vulkan_1_2 = disable(fully_featured_vulkan_1_2());
             let features = features_of(
                 &vk::PhysicalDeviceFeatures::default().multi_draw_indirect(true),
                 &vulkan_1_2,
@@ -965,7 +966,7 @@ mod tests {
     fn a_device_without_indirect_count_falls_back_and_says_which_feature() {
         let features = features_of(
             &vk::PhysicalDeviceFeatures::default(),
-            &tier_a_vulkan_1_2().draw_indirect_count(false),
+            &fully_featured_vulkan_1_2().draw_indirect_count(false),
             &desktop_limits(),
             QueueFamilies::select(&[family(GRAPHICS, 1)]),
             false,
@@ -1020,7 +1021,8 @@ mod tests {
         assert_eq!(limits.max_sampler_anisotropy, 1.0);
         assert_eq!(
             limits.max_draw_indirect_count, 1,
-            "Tier B emits one draw per call, whatever the raw limit says"
+            "without DRAW_INDIRECT_COUNT one call emits one draw, whatever the \
+             raw limit says"
         );
     }
 

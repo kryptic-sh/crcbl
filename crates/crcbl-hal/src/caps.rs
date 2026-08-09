@@ -350,9 +350,10 @@ impl Limits {
     /// The floor every backend must clear.
     ///
     /// Chosen to sit at or below WebGPU's guaranteed `downlevel` limits, so a
-    /// renderer written against these numbers runs on the weakest tier the
+    /// renderer written against these numbers runs on the weakest device the
     /// engine targets. It is a *contract*, not a description of any real
-    /// device — the null backend's Tier B preset reports exactly this.
+    /// device — [`NullInstance::portable`](crate::null::NullInstance::portable)
+    /// reports exactly this.
     #[must_use]
     pub const fn minimum() -> Self {
         Self {
@@ -379,10 +380,11 @@ impl Limits {
         }
     }
 
-    /// A representative desktop Tier A device.
+    /// A representative desktop device with headroom on every axis.
     ///
-    /// Used by the null backend's Tier A preset and by tests that need
-    /// plausible headroom. Not a promise about any specific GPU.
+    /// Used by [`NullInstance::gpu_driven`](crate::null::NullInstance::gpu_driven)
+    /// and by tests that need plausible ceilings. Not a promise about any
+    /// specific GPU.
     #[must_use]
     pub const fn desktop() -> Self {
         Self {
@@ -429,6 +431,15 @@ pub enum GeometryPath {
 }
 
 impl GeometryPath {
+    /// The features this selector reads, and the only ones it may read.
+    ///
+    /// Stated as data because [`downgrades`] has to answer "which selector did
+    /// this absence move", and a second hand-written table would drift from
+    /// [`from_features`](Self::from_features) the first time an axis gains a
+    /// flag. `selector_inputs_are_the_only_features_a_selector_reads` pins the
+    /// two together.
+    pub const INPUTS: Features = Features::MESH_SHADER.union(Features::DRAW_INDIRECT_COUNT);
+
     /// The best path `features` can run.
     #[must_use]
     pub const fn from_features(features: Features) -> Self {
@@ -457,6 +468,9 @@ pub enum BindingModel {
 }
 
 impl BindingModel {
+    /// The features this selector reads — see [`GeometryPath::INPUTS`].
+    pub const INPUTS: Features = Features::DESCRIPTOR_INDEXING;
+
     /// The best model `features` can run.
     #[must_use]
     pub const fn from_features(features: Features) -> Self {
@@ -482,6 +496,9 @@ pub enum LightingPath {
 }
 
 impl LightingPath {
+    /// The features this selector reads — see [`GeometryPath::INPUTS`].
+    pub const INPUTS: Features = Features::RAY_QUERY.union(Features::ACCELERATION_STRUCTURE);
+
     /// The best path `features` can run.
     ///
     /// Ray tracing needs **both** halves: a device reporting only one of
@@ -544,6 +561,166 @@ impl DeviceCaps {
     #[must_use]
     pub fn supports(&self, required: Features) -> bool {
         self.features.contains(required)
+    }
+}
+
+/// Which derived selector an absent feature moved, and the value it moved it to.
+///
+/// Only the flags the three selectors are derived from have one. A device that
+/// declines a timestamp query or a debug marker has still downgraded — the
+/// caller asked and did not get — but nothing about which path the renderer
+/// compiles changed, and [`Downgrade::selected`] says so by being `None` rather
+/// than by naming a path that was never in question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SelectedPath {
+    /// A [`GeometryPath`], from [`GeometryPath::INPUTS`].
+    Geometry(GeometryPath),
+    /// A [`BindingModel`], from [`BindingModel::INPUTS`].
+    Binding(BindingModel),
+    /// A [`LightingPath`], from [`LightingPath::INPUTS`].
+    Lighting(LightingPath),
+}
+
+impl fmt::Display for SelectedPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Geometry(path) => write!(f, "geometry {path:?}"),
+            Self::Binding(model) => write!(f, "binding {model:?}"),
+            Self::Lighting(path) => write!(f, "lighting {path:?}"),
+        }
+    }
+}
+
+/// One optional feature a device was asked for and did not grant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Downgrade {
+    /// The absent feature — always exactly one flag.
+    pub feature: Features,
+    /// How the flag is spelled in source, e.g. `"MESH_SHADER"`. Taken from the
+    /// flag table rather than written out, so it cannot disagree with the flag.
+    pub name: &'static str,
+    /// The selector this absence moved, or `None` when no selector reads it.
+    pub selected: Option<SelectedPath>,
+}
+
+impl fmt::Display for Downgrade {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.selected {
+            Some(selected) => write!(f, "{} -> {selected}", self.name),
+            None => f.write_str(self.name),
+        }
+    }
+}
+
+/// Every optional feature a device declined, with the path each absence chose.
+///
+/// From [`downgrades`], and **empty when the device granted everything asked
+/// for**. That is the property worth having: topic 39 wants one line at device
+/// creation and no line at all when nothing degraded, so silence means no
+/// downgrade rather than meaning nobody looked.
+///
+/// [`Display`](fmt::Display) renders the whole set as one comma-separated
+/// clause — `MESH_SHADER -> geometry IndirectCount, TIMESTAMP_QUERY` — which is
+/// the log line's payload. It renders empty when the set is, so a caller must
+/// gate on [`is_empty`](Self::is_empty) rather than logging unconditionally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Downgrades {
+    absent: Features,
+    geometry: GeometryPath,
+    binding: BindingModel,
+    lighting: LightingPath,
+}
+
+impl Downgrades {
+    /// The absent features as one flag set. Empty means nothing degraded.
+    #[must_use]
+    pub const fn absent(&self) -> Features {
+        self.absent
+    }
+
+    /// Whether the device granted everything it was asked for.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.absent.is_empty()
+    }
+
+    /// Each absent feature in flag-declaration order, with what it cost.
+    pub fn iter(&self) -> impl Iterator<Item = Downgrade> + '_ {
+        use bitflags::Flags;
+
+        Features::FLAGS
+            .iter()
+            // `GPU_DRIVEN` is a named union of other flags, not a bit of its
+            // own; reporting it would name the same absence twice.
+            .filter(|flag| flag.value().bits().is_power_of_two())
+            .filter(|flag| self.absent.contains(*flag.value()))
+            .map(|flag| Downgrade {
+                feature: *flag.value(),
+                name: flag.name(),
+                selected: self.selected_for(*flag.value()),
+            })
+    }
+
+    /// Which selector `feature`'s absence moved, from the selectors' own
+    /// declared inputs rather than from a table repeated here.
+    fn selected_for(&self, feature: Features) -> Option<SelectedPath> {
+        if GeometryPath::INPUTS.contains(feature) {
+            Some(SelectedPath::Geometry(self.geometry))
+        } else if BindingModel::INPUTS.contains(feature) {
+            Some(SelectedPath::Binding(self.binding))
+        } else if LightingPath::INPUTS.contains(feature) {
+            Some(SelectedPath::Lighting(self.lighting))
+        } else {
+            None
+        }
+    }
+}
+
+impl fmt::Display for Downgrades {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, downgrade) in self.iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{downgrade}")?;
+        }
+        Ok(())
+    }
+}
+
+/// What `granted` did not deliver of the optional features `requested`.
+///
+/// Topic 39: *"Every downgrade is logged once, at device creation, naming the
+/// feature and the path it selected."* This is that line's content, computed
+/// away from the call site so it can be checked without a device — the call
+/// site's only job is to log the result when it is not
+/// [`empty`](Downgrades::is_empty).
+///
+/// `requested` is the **optional** set and nothing else. A missing *required*
+/// feature is not a downgrade: it is
+/// [`HalError::UnsupportedFeatures`](crate::HalError::UnsupportedFeatures) and
+/// there is no device to describe.
+///
+/// ```
+/// use crcbl_hal::{DeviceCaps, Features, Limits, downgrades};
+///
+/// let webgpu_shaped = DeviceCaps {
+///     features: Features::COMPUTE,
+///     limits: Limits::minimum(),
+/// };
+/// let report = downgrades(Features::COMPUTE | Features::DESCRIPTOR_INDEXING, &webgpu_shaped);
+/// assert_eq!(report.to_string(), "DESCRIPTOR_INDEXING -> binding ArrayPages");
+///
+/// let asked_for_what_it_has = downgrades(Features::COMPUTE, &webgpu_shaped);
+/// assert!(asked_for_what_it_has.is_empty());
+/// ```
+#[must_use]
+pub fn downgrades(requested: Features, granted: &DeviceCaps) -> Downgrades {
+    Downgrades {
+        absent: granted.missing(requested),
+        geometry: granted.geometry_path(),
+        binding: granted.binding_model(),
+        lighting: granted.lighting_path(),
     }
 }
 
@@ -849,8 +1026,230 @@ mod tests {
         assert_eq!(min.max_push_constant_size, 0);
         assert_eq!(
             min.max_draw_indirect_count, 1,
-            "Tier B emits one draw per call"
+            "the floor emits one draw per indirect call"
         );
+    }
+
+    /// The mapping [`Downgrades::selected_for`] reads must be the whole of what
+    /// a selector reads, or the log line attributes an absence to a path that
+    /// did not move — and, worse, stays silent about the one that did.
+    ///
+    /// Checked by exhaustion rather than by inspection: every flag outside a
+    /// selector's `INPUTS` is toggled against every subset of the flags inside
+    /// it, and the selector's answer must not budge.
+    #[test]
+    fn selector_inputs_are_the_only_features_a_selector_reads() {
+        use bitflags::Flags;
+
+        let single_bits: Vec<Features> = Features::FLAGS
+            .iter()
+            .map(|flag| *flag.value())
+            .filter(|feature| feature.bits().is_power_of_two())
+            .collect();
+
+        // One function per selector, each returning a rank so the three can be
+        // compared through one code path.
+        type Select = fn(Features) -> u8;
+        let selectors: [(Features, Select); 3] = [
+            (GeometryPath::INPUTS, |features| {
+                GeometryPath::from_features(features) as u8
+            }),
+            (BindingModel::INPUTS, |features| {
+                BindingModel::from_features(features) as u8
+            }),
+            (LightingPath::INPUTS, |features| {
+                LightingPath::from_features(features) as u8
+            }),
+        ];
+
+        for (inputs, select) in selectors {
+            let members: Vec<Features> = single_bits
+                .iter()
+                .copied()
+                .filter(|feature| inputs.contains(*feature))
+                .collect();
+            assert!(
+                !members.is_empty(),
+                "a selector reading nothing would pass this vacuously"
+            );
+
+            for subset in 0..(1u32 << members.len()) {
+                let base = members
+                    .iter()
+                    .enumerate()
+                    .filter(|(bit, _)| subset & (1 << bit) != 0)
+                    .fold(Features::empty(), |acc, (_, feature)| acc.union(*feature));
+                let expected = select(base);
+                for other in &single_bits {
+                    if inputs.contains(*other) {
+                        continue;
+                    }
+                    assert_eq!(
+                        select(base.union(*other)),
+                        expected,
+                        "{other:?} moved a selector that does not list it in INPUTS"
+                    );
+                }
+            }
+
+            // The other half: each input must be *able* to move it, or it is
+            // listed in `INPUTS` and read by nothing.
+            for member in &members {
+                assert!(
+                    (0..(1u32 << members.len())).any(|subset| {
+                        let base = members
+                            .iter()
+                            .enumerate()
+                            .filter(|(bit, _)| subset & (1 << bit) != 0)
+                            .fold(Features::empty(), |acc, (_, feature)| acc.union(*feature));
+                        select(base.union(*member)) != select(base.difference(*member))
+                    }),
+                    "{member:?} is listed in INPUTS but changes nothing"
+                );
+            }
+        }
+    }
+
+    /// **Silence is the property.** A device that granted everything asked for
+    /// must produce nothing to log, and the empty rendering is what the call
+    /// site's `is_empty` guard stands in for.
+    #[test]
+    fn a_device_that_granted_everything_reports_no_downgrade() {
+        let caps = DeviceCaps {
+            features: Features::all(),
+            limits: Limits::desktop(),
+        };
+        for requested in [
+            Features::empty(),
+            Features::COMPUTE,
+            Features::GPU_DRIVEN,
+            Features::all(),
+        ] {
+            let report = downgrades(requested, &caps);
+            assert!(report.is_empty(), "{requested:?}");
+            assert!(report.absent().is_empty(), "{requested:?}");
+            assert_eq!(report.iter().count(), 0, "{requested:?}");
+            assert_eq!(report.to_string(), "", "{requested:?}");
+        }
+    }
+
+    /// One absent feature names *that* feature and the selector it moved —
+    /// which is the whole of what topic 39 asks the line to say.
+    ///
+    /// Driven off the selectors' own inputs so every axis is covered, and the
+    /// expected value is computed from the device rather than written out, so
+    /// the assertion is about the wiring rather than about three literals.
+    #[test]
+    fn one_absent_feature_names_itself_and_the_path_it_moved() {
+        for (feature, name, expected) in [
+            (
+                Features::MESH_SHADER,
+                "MESH_SHADER",
+                SelectedPath::Geometry(GeometryPath::IndirectCount),
+            ),
+            (
+                Features::DRAW_INDIRECT_COUNT,
+                "DRAW_INDIRECT_COUNT",
+                SelectedPath::Geometry(GeometryPath::MeshShader),
+            ),
+            (
+                Features::DESCRIPTOR_INDEXING,
+                "DESCRIPTOR_INDEXING",
+                SelectedPath::Binding(BindingModel::ArrayPages),
+            ),
+            (
+                Features::RAY_QUERY,
+                "RAY_QUERY",
+                SelectedPath::Lighting(LightingPath::Rasterised),
+            ),
+            (
+                Features::ACCELERATION_STRUCTURE,
+                "ACCELERATION_STRUCTURE",
+                SelectedPath::Lighting(LightingPath::Rasterised),
+            ),
+        ] {
+            let caps = DeviceCaps {
+                features: Features::all().difference(feature),
+                limits: Limits::desktop(),
+            };
+            let report = downgrades(Features::all(), &caps);
+            assert!(!report.is_empty(), "{name}");
+            assert_eq!(report.absent(), feature, "{name}");
+
+            let entries: Vec<Downgrade> = report.iter().collect();
+            assert_eq!(entries.len(), 1, "{name}");
+            assert_eq!(entries[0].feature, feature, "{name}");
+            assert_eq!(entries[0].name, name);
+            assert_eq!(entries[0].selected, Some(expected), "{name}");
+
+            let line = report.to_string();
+            assert!(line.starts_with(name), "{line}");
+            assert!(line.contains(&expected.to_string()), "{line}");
+        }
+    }
+
+    /// A feature no selector is derived from is still a downgrade — the caller
+    /// asked and did not get — but it must not claim to have moved a path.
+    #[test]
+    fn an_absence_no_selector_reads_names_no_path() {
+        let caps = DeviceCaps {
+            features: Features::all().difference(Features::TIMESTAMP_QUERY),
+            limits: Limits::desktop(),
+        };
+        let report = downgrades(Features::all(), &caps);
+        let entries: Vec<Downgrade> = report.iter().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].selected, None);
+        assert_eq!(report.to_string(), "TIMESTAMP_QUERY");
+    }
+
+    /// Several absences must *all* be named. The failure this guards is a line
+    /// that reports the first gap and stops, which reads like a complete
+    /// account and is not.
+    #[test]
+    fn every_absent_feature_is_named() {
+        // The browser's shape: compute and nothing else, asked for the full
+        // GPU-driven bundle plus the two selector axes above it.
+        let caps = DeviceCaps {
+            features: Features::COMPUTE | Features::TIMELINE_SEMAPHORE,
+            limits: Limits::minimum(),
+        };
+        let requested = Features::GPU_DRIVEN
+            | Features::MESH_SHADER
+            | Features::RAY_QUERY
+            | Features::ACCELERATION_STRUCTURE
+            | Features::TIMESTAMP_QUERY;
+        let report = downgrades(requested, &caps);
+
+        let named: Vec<&'static str> = report.iter().map(|downgrade| downgrade.name).collect();
+        assert_eq!(
+            named,
+            [
+                "DESCRIPTOR_INDEXING",
+                "BUFFER_DEVICE_ADDRESS",
+                "DRAW_INDIRECT_COUNT",
+                "MULTI_DRAW_INDIRECT",
+                "TIMESTAMP_QUERY",
+                "MESH_SHADER",
+                "RAY_QUERY",
+                "ACCELERATION_STRUCTURE",
+            ],
+            "in flag-declaration order, and `GPU_DRIVEN` itself never named"
+        );
+
+        let line = report.to_string();
+        for name in &named {
+            assert!(line.contains(name), "{line} omits {name}");
+        }
+        assert!(line.contains("binding ArrayPages"), "{line}");
+        assert!(line.contains("geometry IndirectPerBatch"), "{line}");
+        assert!(line.contains("lighting Rasterised"), "{line}");
+
+        // What the device *did* grant is never named, and neither is anything
+        // nobody asked for: the line is about the gap, not about the device.
+        assert!(!line.contains("COMPUTE"), "{line}");
+        assert!(!line.contains("TIMELINE_SEMAPHORE"), "{line}");
+        assert!(!line.contains("PRESENT_FEEDBACK"), "{line}");
     }
 
     #[test]

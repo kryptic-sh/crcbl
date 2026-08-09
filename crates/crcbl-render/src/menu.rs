@@ -475,7 +475,7 @@ mod tests {
     ///
     /// A real [`SpriteRenderer`], because [`SheetId`] can only come from one.
     fn with_art(body: impl FnOnce(&MenuArt)) {
-        let instance = NullInstance::tier_a();
+        let instance = NullInstance::gpu_driven();
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc::for_adapter(adapter.id))

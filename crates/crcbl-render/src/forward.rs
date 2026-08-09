@@ -771,7 +771,7 @@ mod tests {
 
     fn open() -> (Recorder, Box<dyn Device>, QueueHandle) {
         let recorder = Recorder::new();
-        let instance = NullInstance::tier_a().with_recorder(recorder.clone());
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc::for_adapter(adapter.id))

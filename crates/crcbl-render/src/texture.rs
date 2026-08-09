@@ -339,7 +339,7 @@ mod tests {
     /// WebGPU's — and Tier A's is 4, which an `Rgba8Unorm` row satisfies for
     /// free. Padding is only exercised on the tier that asks for it.
     fn open_tier_b(recorder: &Recorder) -> (Box<dyn Device>, QueueHandle) {
-        let instance = NullInstance::tier_b().with_recorder(recorder.clone());
+        let instance = NullInstance::portable().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc {
@@ -355,7 +355,7 @@ mod tests {
     }
 
     fn open_tier_a(recorder: &Recorder) -> (Box<dyn Device>, QueueHandle) {
-        let instance = NullInstance::tier_a().with_recorder(recorder.clone());
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc {

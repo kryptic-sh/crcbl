@@ -1225,7 +1225,7 @@ mod tests {
     const EXTENT: (u32, u32) = (256, 192);
 
     fn open(recorder: &Recorder) -> (Box<dyn Device>, QueueHandle) {
-        let instance = NullInstance::tier_a().with_recorder(recorder.clone());
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc {

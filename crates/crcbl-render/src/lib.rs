@@ -88,7 +88,7 @@
 //! use crcbl_render::graph::RenderGraph;
 //! use crcbl_render::transient::{TransientImageDesc, TransientPool};
 //!
-//! let instance = NullInstance::tier_a();
+//! let instance = NullInstance::gpu_driven();
 //! let adapter = instance.adapters().remove(0);
 //! let device = instance.create_device(&DeviceDesc::for_adapter(adapter.id))?;
 //! let queue = device.queue(QueueKind::Graphics).expect("always present");

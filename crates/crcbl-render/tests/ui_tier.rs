@@ -8,8 +8,8 @@
 //! `ui.slang` its viewport, and both have to be exercised somewhere that has no
 //! GPU.
 //!
-//! The null backend is what makes that possible: `NullInstance::tier_a` reports
-//! `Features::PUSH_CONSTANTS` and `NullInstance::tier_b` does not, so one
+//! The null backend is what makes that possible: `NullInstance::gpu_driven` reports
+//! `Features::PUSH_CONSTANTS` and `NullInstance::portable` does not, so one
 //! process can build both renderers and compare them. Without it the Tier B
 //! path would only ever run in a browser, which is the one place this project
 //! cannot assert anything.
@@ -46,8 +46,8 @@ impl Harness {
     fn open(tier: Tier) -> Self {
         let recorder = Recorder::new();
         let (instance, required) = match tier {
-            Tier::A => (NullInstance::tier_a(), Features::GPU_DRIVEN),
-            Tier::B => (NullInstance::tier_b(), Features::COMPUTE),
+            Tier::A => (NullInstance::gpu_driven(), Features::GPU_DRIVEN),
+            Tier::B => (NullInstance::portable(), Features::COMPUTE),
         };
         let instance = instance.with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);

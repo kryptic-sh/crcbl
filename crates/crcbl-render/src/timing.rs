@@ -491,7 +491,7 @@ mod tests {
         use crcbl_hal::null::NullInstance;
         use crcbl_hal::{DeviceDesc, Instance};
 
-        let instance = NullInstance::tier_b();
+        let instance = NullInstance::portable();
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc {

@@ -391,7 +391,7 @@ mod tests {
     /// opaque outside `crcbl-render` and there is no other way to have one —
     /// which is the point of it being opaque.
     fn with_scene(body: impl FnOnce(&mut Scene)) {
-        let instance = NullInstance::tier_a();
+        let instance = NullInstance::gpu_driven();
         let adapter = instance.adapters().remove(0);
         let device = instance
             .create_device(&DeviceDesc::for_adapter(adapter.id))

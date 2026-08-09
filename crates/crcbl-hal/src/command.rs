@@ -37,7 +37,7 @@
 //! [`CommandEncoder::draw_indexed_indirect_count`] is the normal path (topic 03:
 //! a compute pass writes the arguments and the count, the CPU never learns how
 //! many draws happen). [`CommandEncoder::draw`] exists for full-screen triangles
-//! and bring-up. Tier B, which has no count buffer, uses
+//! and bring-up. A device with no count buffer uses
 //! [`CommandEncoder::draw_indexed_indirect`] once per bucket — hence
 //! [`DrawIndirect::draw_count`], so even that is one call per bucket rather than
 //! one per draw.
@@ -486,8 +486,10 @@ pub struct ImageCopy {
 /// Arguments for an indirect draw whose *count* is known on the CPU.
 ///
 /// The argument buffer's contents are still GPU-written; only how many argument
-/// structures to read is fixed. This is Tier B's draw path: one call per bucket
-/// with `draw_count` set to the bucket's capacity.
+/// structures to read is fixed. This is
+/// [`GeometryPath::IndirectPerBatch`](crate::GeometryPath::IndirectPerBatch)'s
+/// draw path: one call per bucket with `draw_count` set to the bucket's
+/// capacity.
 ///
 /// `draw_count > 1` requires
 /// [`Features::MULTI_DRAW_INDIRECT`](crate::Features::MULTI_DRAW_INDIRECT).
@@ -506,8 +508,9 @@ pub struct DrawIndirect {
 
 /// Arguments for an indirect draw whose count is *also* read from GPU memory.
 ///
-/// Tier A's steady-state draw call: a compute pass writes both the arguments and
-/// the count, and the CPU never learns how many draws happen. Requires
+/// [`GeometryPath::IndirectCount`](crate::GeometryPath::IndirectCount)'s
+/// steady-state draw call: a compute pass writes both the arguments and the
+/// count, and the CPU never learns how many draws happen. Requires
 /// [`Features::DRAW_INDIRECT_COUNT`](crate::Features::DRAW_INDIRECT_COUNT).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DrawIndirectCount {
@@ -646,7 +649,8 @@ pub trait CommandEncoder: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// Binds a bind group at `slot`, with dynamic offsets for any
     /// dynamic-offset bindings in its layout, in binding order.
     ///
-    /// `dynamic_offsets` is Tier B's substitute for push constants — see
+    /// `dynamic_offsets` is the substitute for push constants on a device
+    /// without them — see
     /// [`BindingKind::UniformBuffer`](crate::BindingKind::UniformBuffer).
     fn bind_group(
         &mut self,
@@ -681,15 +685,17 @@ pub trait CommandEncoder: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// Indirect non-indexed draw with a CPU-known draw count.
     fn draw_indirect(&mut self, draw: &DrawIndirect);
 
-    /// Indirect indexed draw with a CPU-known draw count. **Tier B's draw
-    /// path**, one call per bucket.
+    /// Indirect indexed draw with a CPU-known draw count.
+    /// **[`GeometryPath::IndirectPerBatch`](crate::GeometryPath::IndirectPerBatch)'s
+    /// draw path**, one call per bucket.
     fn draw_indexed_indirect(&mut self, draw: &DrawIndirect);
 
     /// Indirect non-indexed draw with a GPU-read draw count.
     fn draw_indirect_count(&mut self, draw: &DrawIndirectCount);
 
-    /// Indirect indexed draw with a GPU-read draw count. **Tier A's steady-state
-    /// draw call** — one per pass, regardless of scene size.
+    /// Indirect indexed draw with a GPU-read draw count.
+    /// **[`GeometryPath::IndirectCount`](crate::GeometryPath::IndirectCount)'s
+    /// steady-state draw call** — one per pass, regardless of scene size.
     fn draw_indexed_indirect_count(&mut self, draw: &DrawIndirectCount);
 
     // --- compute scope ---

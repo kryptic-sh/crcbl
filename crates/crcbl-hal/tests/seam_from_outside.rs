@@ -243,7 +243,7 @@ fn setup(instance: &dyn Instance) -> Frame {
     }
 }
 
-/// Records and submits one frame. Identical for both tiers except the draw
+/// Records and submits one frame. Identical for both presets except the draw
 /// tail, which is exactly the split topic 03 specifies.
 fn render(frame: &Frame) {
     let device: &dyn Device = frame.device.as_ref();
@@ -317,7 +317,7 @@ fn render(frame: &Frame) {
     encoder.set_scissor(&Rect2d::from_size(WIDTH, HEIGHT));
     encoder.bind_graphics_pipeline(frame.pipeline);
 
-    // The one place the tiers differ.
+    // The one place the two presets differ.
     if device.caps().supports(Features::DRAW_INDIRECT_COUNT) {
         encoder.draw_indexed_indirect_count(&DrawIndirectCount {
             args: frame.draw_args,
@@ -328,7 +328,7 @@ fn render(frame: &Frame) {
             stride: 20,
         });
     } else {
-        // Tier B: one indirect call per bucket, count fixed on the CPU.
+        // No GPU-read count: one indirect call per bucket, fixed on the CPU.
         encoder.draw_indexed_indirect(&DrawIndirect {
             args: frame.draw_args,
             offset: 0,
@@ -342,7 +342,7 @@ fn render(frame: &Frame) {
 
     let command_buffer: CommandBufferHandle = encoder.finish().expect("finish");
 
-    // The acquire/present semaphores splice in without a tier branch — `None`
+    // The acquire/present semaphores splice in without a branch — `None`
     // on an implicit-acquire backend simply contributes nothing.
     let waits: Vec<_> = acquired
         .acquire_semaphore
@@ -391,8 +391,8 @@ fn render(frame: &Frame) {
 #[test]
 fn the_same_frame_runs_on_both_geometry_paths_through_trait_objects() {
     for (preset, expected_geometry) in [
-        (NullInstance::tier_a(), GeometryPath::IndirectCount),
-        (NullInstance::tier_b(), GeometryPath::IndirectPerBatch),
+        (NullInstance::gpu_driven(), GeometryPath::IndirectCount),
+        (NullInstance::portable(), GeometryPath::IndirectPerBatch),
     ] {
         let recorder = Recorder::new();
         let instance: Box<dyn Instance> = Box::new(preset.with_recorder(recorder.clone()));
@@ -478,7 +478,7 @@ fn the_seam_is_also_usable_generically() {
         device.caps().geometry_path()
     }
 
-    let instance: Box<dyn Instance> = Box::new(NullInstance::tier_a());
+    let instance: Box<dyn Instance> = Box::new(NullInstance::gpu_driven());
     let adapters = instance.adapters();
     let device: Box<dyn Device> = instance
         .create_device(&DeviceDesc::for_adapter(adapters[0].id))
@@ -497,7 +497,7 @@ fn the_seam_is_also_usable_generically() {
 fn a_full_setup_and_teardown_leaks_nothing() {
     let recorder = Recorder::new();
     let instance: Box<dyn Instance> =
-        Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+        Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
     assert_eq!(recorder.total_live_objects(), 0);
 
     {
@@ -542,10 +542,10 @@ fn a_full_setup_and_teardown_leaks_nothing() {
 /// the specific gap rather than merely failing.
 #[test]
 fn errors_cross_the_seam_intact() {
-    let instance: Box<dyn Instance> = Box::new(NullInstance::tier_b());
+    let instance: Box<dyn Instance> = Box::new(NullInstance::portable());
     let error: HalError = instance
         .create_device(&DeviceDesc::for_adapter(instance.adapters()[0].id))
-        .expect_err("tier B has no timeline semaphore");
+        .expect_err("the portable preset has no timeline semaphore");
     let text = error.to_string();
     assert!(text.contains("TIMELINE_SEMAPHORE"), "{text}");
     assert!(matches!(error, HalError::UnsupportedFeatures { .. }));
@@ -562,14 +562,14 @@ fn errors_cross_the_seam_intact() {
 fn the_screenshot_readback_path_polls_instead_of_blocking() {
     let recorder = Recorder::new();
     let instance: Box<dyn Instance> =
-        Box::new(NullInstance::tier_b().with_recorder(recorder.clone()));
+        Box::new(NullInstance::portable().with_recorder(recorder.clone()));
     let adapters = instance.adapters();
     let device: Box<dyn Device> = instance
         .create_device(&DeviceDesc {
             required_features: Features::COMPUTE,
             ..DeviceDesc::for_adapter(adapters[0].id)
         })
-        .expect("tier B device");
+        .expect("the portable preset opens");
     let queue = device.queue(QueueKind::Graphics).expect("queue");
 
     let pixels = WIDTH as u64 * HEIGHT as u64 * u64::from(Format::Rgba8Unorm.block_size());
@@ -676,7 +676,7 @@ fn the_screenshot_readback_path_polls_instead_of_blocking() {
 #[test]
 fn a_device_outlives_the_instance_that_made_it() {
     let device: Box<dyn Device> = {
-        let instance: Box<dyn Instance> = Box::new(NullInstance::tier_a());
+        let instance: Box<dyn Instance> = Box::new(NullInstance::gpu_driven());
         let adapters = instance.adapters();
         instance
             .create_device(&DeviceDesc::for_adapter(adapters[0].id))
@@ -709,7 +709,7 @@ fn a_device_outlives_the_instance_that_made_it() {
 fn a_device_request_can_take_several_polls_and_still_produce_a_working_device() {
     let recorder = Recorder::new();
     let instance: Box<dyn Instance> =
-        Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+        Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
     let adapters: Vec<AdapterInfo> = instance.adapters();
 
     // Make the backend behave like a browser: `requestDevice` does not resolve
@@ -749,11 +749,11 @@ fn a_device_request_can_take_several_polls_and_still_produce_a_working_device() 
 /// is what `crcbl-vk` does and what the blocking wrapper depends on.
 #[test]
 fn a_request_with_no_latency_is_ready_at_once() {
-    let instance: Box<dyn Instance> = Box::new(NullInstance::tier_b());
+    let instance: Box<dyn Instance> = Box::new(NullInstance::portable());
     let adapters: Vec<AdapterInfo> = instance.adapters();
     let mut pending: Box<dyn PendingDevice> = instance
         .request_device(&DeviceDesc {
-            label: Some("tier b"),
+            label: Some("portable"),
             adapter: adapters[0].id,
             required_features: Features::empty(),
             optional_features: Features::COMPUTE,
@@ -773,7 +773,7 @@ fn a_request_with_no_latency_is_ready_at_once() {
 /// and says so rather than handing out a second device.
 #[test]
 fn polling_a_completed_request_is_an_error_not_a_second_device() {
-    let instance: Box<dyn Instance> = Box::new(NullInstance::tier_a());
+    let instance: Box<dyn Instance> = Box::new(NullInstance::gpu_driven());
     let adapters: Vec<AdapterInfo> = instance.adapters();
     let mut pending: Box<dyn PendingDevice> = instance
         .request_device(&DeviceDesc::for_adapter(adapters[0].id))
@@ -791,9 +791,10 @@ fn polling_a_completed_request_is_an_error_not_a_second_device() {
 /// typo'd adapter index N frames later.
 #[test]
 fn what_can_fail_immediately_does_fail_immediately() {
-    let instance: Box<dyn Instance> = Box::new(NullInstance::tier_b());
+    let instance: Box<dyn Instance> = Box::new(NullInstance::portable());
     let recorder = Recorder::new();
-    let slow: Box<dyn Instance> = Box::new(NullInstance::tier_b().with_recorder(recorder.clone()));
+    let slow: Box<dyn Instance> =
+        Box::new(NullInstance::portable().with_recorder(recorder.clone()));
     recorder.set_device_latency(5);
 
     let unknown = instance.request_device(&DeviceDesc::for_adapter(crcbl_hal::AdapterId(7)));
@@ -802,7 +803,8 @@ fn what_can_fail_immediately_does_fail_immediately() {
         "an unknown adapter is not a deferred failure"
     );
 
-    // Tier B has no timeline semaphore, which the headless default requires,
+    // The portable preset has no timeline semaphore, which the headless
+    // default requires,
     // and the latency must not delay *that* answer either.
     let too_much = slow.request_device(&DeviceDesc::for_adapter(slow.adapters()[0].id));
     match too_much {
@@ -819,7 +821,7 @@ fn what_can_fail_immediately_does_fail_immediately() {
 fn create_device_still_blocks_through_the_latency() {
     let recorder = Recorder::new();
     let instance: Box<dyn Instance> =
-        Box::new(NullInstance::tier_a().with_recorder(recorder.clone()));
+        Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
     recorder.set_device_latency(4);
     let device: Box<dyn Device> = instance
         .create_device(&DeviceDesc::for_adapter(instance.adapters()[0].id))
