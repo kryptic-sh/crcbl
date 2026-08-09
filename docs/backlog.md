@@ -21,6 +21,21 @@ confirmed; the rest of this file assumes them.
   `cargo deny` is clean. **To override:** drop the dev-dependency and the WGSL
   artifacts go back to being unchecked, or find a validator that is not naga.
 
+- **The shader manifest's section order was locale-dependent, and that broke
+  `main` a third time.** `compile-shaders.sh` iterates `shaders/*.slang`, and a
+  glob is sorted by the caller's collation: `en_US.UTF-8` ignores the
+  punctuation and puts `mesh_shader.slang` before `mesh.slang`, while `C`
+  compares bytes and puts `mesh.slang` first. So the committed manifest carried
+  one developer's locale, CI regenerated the other order, and the byte
+  comparison refused it — with every artifact identical and only the section
+  order differing. `export LC_ALL=C` fixes it and the manifest was regenerated.
+
+  Worth keeping because the class is general: **this project pins its compilers
+  and now its validator, and the environment those run in is provenance too.**
+  Any glob, sort, `uniq` or `tr` in a build script has the same exposure. It
+  went unnoticed for months because no two shader filenames collided this way
+  until `mesh_shader.slang` arrived next to `mesh.slang`.
+
 - **CI's `spirv-val` is pinned to a fixed `.deb`, after an unpinned one broke
   `main` twice.** The shader job installed whatever `spirv-tools` the runner
   image carried. On 2026-08-09 that was **SPIRV-Tools v2025.1**, which rejects a

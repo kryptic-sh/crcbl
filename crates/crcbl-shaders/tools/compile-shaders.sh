@@ -116,6 +116,18 @@
 
 set -euo pipefail
 
+# **The manifest's section order is a glob expansion, and a glob is sorted by
+# the caller's locale.** `mesh.slang` and `mesh_shader.slang` order differently
+# under `en_US.UTF-8` (which ignores the punctuation and puts `mesh_shader`
+# first) than under `C` (where `.` is 0x2E and `_` is 0x5F, so `mesh.slang`
+# comes first) — so two developers could commit byte-different manifests from
+# identical sources, and one of them would fail `--check` on a machine that
+# disagreed. That is exactly what happened on 2026-08-09: CI regenerated a
+# correct manifest whose sections were in a different order and refused it.
+#
+# The compilers are pinned, so the environment has to be too.
+export LC_ALL=C
+
 CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Pinned in exactly one place, and read by CI. Bumping it is a deliberate act
