@@ -1867,10 +1867,17 @@ mod tests {
     /// The observable behind "closed on every path out": the guard's `Drop` is
     /// what has to have run, and this is the only thing that can see whether it
     /// did.
-    fn clipboard_is_open() -> bool {
-        // SAFETY: the call takes no arguments and only reads window-station
-        // state.
-        !unsafe { ffi::GetOpenClipboardWindow() }.is_null()
+    /// Whether *this* window holds the clipboard open.
+    ///
+    /// This replaced a `clipboard_is_open` that asked `GetOpenClipboardWindow`
+    /// whether **anybody** holds it — a wider question than these tests are
+    /// asking. Every caller wanted "did our own guard give it back", and the
+    /// broad form answers that wrongly whenever a foreign process on a shared
+    /// desktop happens to hold the clipboard, which says nothing about our
+    /// code. That is a real CI flake, recorded in `docs/backlog.md`.
+    fn clipboard_held_by(hwnd: *mut core::ffi::c_void) -> bool {
+        // SAFETY: as above — a read of window-station state, no arguments.
+        core::ptr::eq(unsafe { ffi::GetOpenClipboardWindow() }, hwnd)
     }
 
     /// A window that accepts file drops, which is off by default.
@@ -2966,7 +2973,7 @@ mod tests {
             )
             .expect("claiming the clipboard needs no user interaction on Win32");
         assert!(
-            !clipboard_is_open(),
+            !clipboard_held_by(hwnd_of(&shell, window)),
             "the guard closed the clipboard on the way out of the offer"
         );
 
@@ -2981,7 +2988,7 @@ mod tests {
             "the engine's own format is lossless, padding and all"
         );
         assert!(
-            !clipboard_is_open(),
+            !clipboard_held_by(hwnd_of(&shell, window)),
             "and on the way out of every read as well"
         );
 
@@ -3023,7 +3030,7 @@ mod tests {
             paste(&mut shell, window, MimeType::TextUtf8),
             ClipboardContent::Empty
         );
-        assert!(!clipboard_is_open());
+        assert!(!clipboard_held_by(hwnd_of(&shell, window)));
     }
 
     #[test]
@@ -3250,7 +3257,10 @@ mod tests {
         // asserted is that it was not *refused* and that the guard's `Drop` ran
         // — the second being what stops this process locking every other
         // application out of the clipboard.
-        assert!(!clipboard_is_open(), "nothing is open before we start");
+        // Deliberately no "nothing is open before we start" precondition: this
+        // test is *about* contention — it asserts the open was not refused —
+        // and a foreign process holding the clipboard is the case the retry
+        // budget exists for, not a reason to fail before starting.
         let mut shell = shell();
         let window = window(&mut shell);
         let hwnd = hwnd_of(&shell, window);
@@ -3258,11 +3268,11 @@ mod tests {
         let opened = {
             let board = super::super::clipboard::Clipboard::open(hwnd)
                 .expect("an idle desktop lets a process open the clipboard");
-            assert!(clipboard_is_open(), "held for the guard's lifetime");
+            assert!(clipboard_held_by(hwnd), "held for the guard's lifetime");
             board.opened()
         };
         assert!(
-            !clipboard_is_open(),
+            !clipboard_held_by(hwnd),
             "and given back the moment the guard leaves scope"
         );
         assert!(

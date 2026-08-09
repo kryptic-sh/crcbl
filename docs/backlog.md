@@ -2948,16 +2948,18 @@ failed on `assert!(!clipboard_is_open())`. So the class is wider than focus —
 these tests use **shared desktop resources** (the foreground, the clipboard) on
 a runner that contends for them.
 
-**That last one is a genuine test defect with a small fix, not just
-contention.** The assertion sits at the end of the test and means "our code
-closed the clipboard"; `clipboard_is_open()` is
-`!GetOpenClipboardWindow().is_null()`, which reports whether **any process**
-holds it. Its scope is therefore wider than its intent, and a foreign process
-opening the clipboard between our close and the check fails it while our code is
-correct. The fix is to compare against our own window —
-`GetOpenClipboardWindow() != our_hwnd` — so the assertion checks the thing it
-was written to check. That is worth doing regardless of what is decided about
-the class.
+**The clipboard half is fixed.** That assertion sat at the end of a test and
+meant "our code closed the clipboard", while `clipboard_is_open()` was
+`!GetOpenClipboardWindow().is_null()` — whether **any process** holds it. Its
+scope was wider than its intent, so a foreign process failed it while our code
+was correct. `clipboard_held_by(hwnd)` replaces it, every caller now asks the
+narrower question, and that is both non-flaky and a **stronger** assertion. The
+"nothing is open before we start" precondition was deleted rather than narrowed:
+that test is _about_ contention — it asserts the open was not refused — so a
+foreign holder is the case its retry budget exists for, not a reason to fail
+before starting.
+
+**The focus half is not fixed** and remains the open decision below.
 
 Two failures in one session, both on commits that had nothing to do with
 windowing (a `Revert` and a mesh-shader reland), both cleared by re-running the
