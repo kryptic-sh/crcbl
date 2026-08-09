@@ -686,6 +686,12 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// [`BindingFlags`](crate::BindingFlags) the device does not support, or if
     /// [`VARIABLE_COUNT`](crate::BindingFlags::VARIABLE_COUNT) is not on the
     /// last binding.
+    ///
+    /// [`HalError::Unsupported`] if an entry's
+    /// [`visibility`](crate::BindGroupLayoutEntry::visibility) names a mesh or
+    /// task stage the device does not report — see
+    /// [`ShaderStages::check_supported`](crate::ShaderStages::check_supported),
+    /// which every backend runs here.
     fn create_bind_group_layout(
         &self,
         desc: &BindGroupLayoutDesc<'_>,
@@ -732,7 +738,10 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// [`HalError::InvalidHandle`], or [`HalError::Unsupported`] if it declares
     /// push constants on a device without
     /// [`Features::PUSH_CONSTANTS`] — loudly, rather than dropping the writes
-    /// later.
+    /// later — or if
+    /// [`PushConstantRange::stages`](crate::PushConstantRange::stages) names a
+    /// mesh or task stage the device does not report, per
+    /// [`ShaderStages::check_supported`](crate::ShaderStages::check_supported).
     fn create_pipeline_layout(
         &self,
         desc: &PipelineLayoutDesc<'_>,

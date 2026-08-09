@@ -130,7 +130,8 @@ pub(crate) struct SamplerEntry {
 ///
 /// [`HalError::InvalidDescriptor`] naming the offending binding, or
 /// [`HalError::Unsupported`] when the device is Tier B and the layout asked for
-/// descriptor indexing.
+/// descriptor indexing, or when an entry is visible to a mesh stage the device
+/// does not have.
 pub(crate) fn validate_bind_group_layout(
     desc: &BindGroupLayoutDesc<'_>,
     caps: &DeviceCaps,
@@ -139,6 +140,14 @@ pub(crate) fn validate_bind_group_layout(
     let mut seen: Vec<u32> = Vec::with_capacity(desc.entries.len());
 
     for (index, entry) in desc.entries.iter().enumerate() {
+        // Before the driver sees it. `VK_SHADER_STAGE_MESH_BIT_EXT` in a set
+        // layout on a device without `meshShader` is a validation error, but it
+        // arrives from `vkCreateDescriptorSetLayout` naming neither the binding
+        // it came from nor the capability that is missing. See
+        // `ShaderStages::check_supported`.
+        entry
+            .visibility
+            .check_supported(caps.features, crcbl_hal::BackendKind::Vulkan)?;
         if entry.count == 0 {
             return Err(HalError::InvalidDescriptor(format!(
                 "binding {} has count 0; a binding must hold at least one descriptor",
@@ -585,6 +594,9 @@ impl VkDevice {
                         range.offset
                     )));
                 }
+                range
+                    .stages
+                    .check_supported(caps.features, crcbl_hal::BackendKind::Vulkan)?;
                 let stages = conv::shader_stages(range.stages);
                 if stages.is_empty() {
                     return Err(HalError::InvalidDescriptor(
@@ -1388,6 +1400,40 @@ mod tests {
             );
             validate_bind_group_layout(&desc, &caps(Features::GPU_DRIVEN))
                 .expect("Tier A accepts it");
+        }
+    }
+
+    /// A binding visible to a mesh stage is legal here and only here: on a
+    /// device that reports the stage.
+    ///
+    /// The same shape as the descriptor-indexing rule above and for the same
+    /// reason — `VK_SHADER_STAGE_MESH_BIT_EXT` on a device without `meshShader`
+    /// fails at `vkCreateDescriptorSetLayout` with a VUID naming neither the
+    /// binding nor the flag, and this is what turns that into a named refusal.
+    /// `GPU_DRIVEN` carries neither mesh flag, which is what makes the first
+    /// half of each pair a real device rather than a contrived one.
+    #[test]
+    fn a_mesh_visible_binding_needs_the_matching_capability() {
+        for (stage, feature) in [
+            (ShaderStages::MESH, Features::MESH_SHADER),
+            (ShaderStages::TASK, Features::TASK_SHADER),
+        ] {
+            let entries = [BindGroupLayoutEntry {
+                visibility: stage,
+                ..entry(0, BindingFlags::empty(), 1)
+            }];
+            let desc = BindGroupLayoutDesc {
+                label: Some("mesh shader vertices"),
+                entries: &entries,
+            };
+            let error = validate_bind_group_layout(&desc, &caps(Features::GPU_DRIVEN))
+                .expect_err("GPU_DRIVEN carries neither mesh flag");
+            assert!(
+                matches!(error, HalError::Unsupported { .. }),
+                "{stage:?}: {error}"
+            );
+            validate_bind_group_layout(&desc, &caps(Features::GPU_DRIVEN | feature))
+                .unwrap_or_else(|error| panic!("{stage:?} on a device reporting it: {error}"));
         }
     }
 

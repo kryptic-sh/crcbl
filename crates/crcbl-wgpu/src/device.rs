@@ -736,6 +736,11 @@ impl Device for WgpuDevice {
             .entries
             .iter()
             .map(|e| {
+                // WebGPU has no mesh stage at all, so `map_shader_stages` has
+                // no bit to map these onto and would hand wgpu a *narrower*
+                // visibility than the caller declared. Refused instead.
+                e.visibility
+                    .check_supported(self.caps.features, BackendKind::Wgpu)?;
                 Ok(wgpu::BindGroupLayoutEntry {
                     binding: e.binding,
                     visibility: conv::map_shader_stages(e.visibility),
@@ -889,6 +894,9 @@ impl Device for WgpuDevice {
                         "push constants: this device did not enable wgpu's IMMEDIATES feature",
                     ));
                 }
+                range
+                    .stages
+                    .check_supported(self.caps.features, BackendKind::Wgpu)?;
                 // Saturating, not wrapping: `PushConstantRange { offset: u32::MAX,
                 // size: 1 }` panicked in debug and wrapped to 0 in release, and 0
                 // then *passed* the check it was supposed to fail. The null backend

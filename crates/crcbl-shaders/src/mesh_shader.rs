@@ -1,23 +1,28 @@
-//! The triangle `mesh_shader.slang` emits, and the tint its amplification
-//! stage applies.
+//! The triangle `mesh_shader.slang` pulls, and the tint its amplification stage
+//! applies.
 //!
 //! # Why these live beside the shader rather than in the test that samples them
 //!
-//! `mesh_shader.slang` hardcodes its three vertices — a mesh shader reading a
-//! storage buffer needs mesh-stage descriptor visibility, which is the next
-//! slice, so the geometry is constants for now. Anything that wants to know
-//! *where* the triangle landed therefore has to restate them, and the same
-//! argument [`crate::triangle`] makes applies: the restatement belongs in the
-//! crate that owns the source it mirrors, so there is one place to change when
-//! the shader changes rather than one per consumer.
+//! The same argument [`crate::triangle`] makes, and now for the same two
+//! reasons: `mesh_shader.slang` reads these three vertices out of a storage
+//! buffer, so a producer of those bytes has to agree with the `std430` layout
+//! `struct Vertex` declares — and a test that wants to know *where* the
+//! triangle landed has to know the positions as well. One place to change when
+//! the shader changes, rather than one per consumer.
 //!
-//! Unlike [`crate::triangle`], nothing here is uploaded anywhere and there is
-//! no byte layout to agree on. **What holds these in step with the shader is
-//! the golden image**, not a layout check: move the triangle in the `.slang`
-//! and leave these alone, and `crcbl-vk`'s `mesh_shader_triangle.png` stops
-//! matching.
+//! The values are split into [`POSITIONS`](crate::mesh_shader::POSITIONS) and
+//! [`COLORS`](crate::mesh_shader::COLORS) rather than kept as a `Vertex` array
+//! like [`crate::triangle::VERTICES`], because both consumers want a column:
+//! [`vertex_bytes`](crate::mesh_shader::vertex_bytes) interleaves them for the
+//! upload, and `crcbl-vk`'s golden test averages the positions to find its
+//! sample points.
+//!
+//! **What holds them in step with the shader is the golden image**, on top of
+//! the layout check below: move the triangle in the `.slang` and leave these
+//! alone, and `crcbl-vk`'s `mesh_shader_triangle.png` stops matching.
 
-/// Clip-space positions, matching `POSITIONS` in `shaders/mesh_shader.slang`.
+/// Clip-space positions, as the `position` field of each `Vertex` the mesh
+/// stage of `shaders/mesh_shader.slang` reads out of its `vertices` buffer.
 ///
 /// Apex **down**, unlike [`crate::triangle::VERTICES`], so a golden image of
 /// the mesh path can never be satisfied by a copy of the raster path's.
@@ -27,7 +32,8 @@ pub const POSITIONS: [[f32; 4]; 3] = [
     [0.6, 0.6, 0.5, 1.0],
 ];
 
-/// Linear RGBA per corner, matching `COLORS` in `shaders/mesh_shader.slang`.
+/// Linear RGBA per corner, as the `color` field of the same vertices — with
+/// `amplifiedMeshMain` multiplying each by [`AMPLIFICATION_TINT`].
 ///
 /// One saturated primary each, no two alike, for the reason
 /// [`crate::triangle::VERTICES`] gives: a Y flip, an X mirror or a reversed
@@ -37,6 +43,27 @@ pub const COLORS: [[f32; 4]; 3] = [
     [0.0, 1.0, 0.0, 1.0],
     [0.0, 0.0, 1.0, 1.0],
 ];
+
+/// Bytes per vertex under `std430`: two `float4`s, which is what `struct
+/// Vertex` in `shaders/mesh_shader.slang` declares.
+pub const VERTEX_STRIDE: usize = 32;
+
+/// [`POSITIONS`] and [`COLORS`] interleaved, as the bytes the mesh stage's
+/// storage buffer holds.
+///
+/// Little-endian `f32`s, position then colour per vertex — the same layout
+/// [`crate::triangle::vertex_bytes`] writes, because the two shaders declare
+/// the same struct.
+#[must_use]
+pub fn vertex_bytes() -> Vec<u8> {
+    crate::pack_f32_le(
+        POSITIONS
+            .iter()
+            .zip(&COLORS)
+            .flat_map(|(position, color)| position.iter().chain(color)),
+        POSITIONS.len() * VERTEX_STRIDE,
+    )
+}
 
 /// The tint `taskMain` puts in its payload, which `amplifiedMeshMain`
 /// multiplies every colour by.
@@ -49,6 +76,27 @@ pub const AMPLIFICATION_TINT: [f32; 4] = [0.0, 1.0, 1.0, 1.0];
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The layout claim, checked rather than asserted in prose: three vertices
+    /// of exactly 32 bytes, position first and colour at offset 16, with no
+    /// padding anywhere. The two offsets the mesh stage indexes.
+    #[test]
+    fn the_byte_layout_is_two_float4s_per_vertex_with_no_padding() {
+        let bytes = vertex_bytes();
+        assert_eq!(bytes.len(), POSITIONS.len() * VERTEX_STRIDE);
+        assert_eq!(VERTEX_STRIDE, 8 * size_of::<f32>());
+
+        let word = |offset: usize| {
+            f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
+        };
+        for (index, (position, color)) in POSITIONS.iter().zip(&COLORS).enumerate() {
+            let base = index * VERTEX_STRIDE;
+            for component in 0..4 {
+                assert_eq!(word(base + component * 4), position[component]);
+                assert_eq!(word(base + 16 + component * 4), color[component]);
+            }
+        }
+    }
 
     /// The diagnostic properties the golden image and its sample points depend
     /// on, stated as assertions rather than as prose in the shader's comments.

@@ -537,6 +537,148 @@ fn the_task_stage_is_refused_on_its_own_flag() {
     assert!(what.contains("TASK_SHADER"), "{what}");
 }
 
+/// One storage-buffer binding visible to `stage`, which is the shape
+/// `mesh_shader.slang` pulls its vertices through.
+fn visible_to(stage: ShaderStages) -> [BindGroupLayoutEntry; 1] {
+    [BindGroupLayoutEntry {
+        binding: 0,
+        visibility: stage,
+        kind: BindingKind::StorageBuffer {
+            read_only: true,
+            dynamic: false,
+        },
+        count: 1,
+        flags: crate::BindingFlags::empty(),
+    }]
+}
+
+/// The two capability-gated stages, each with a device that has it and a device
+/// that does not — so one loop covers both sides of both flags.
+///
+/// The "lacks it" device for `TASK` still has `MESH_SHADER`, because that is
+/// the device the split exists for: a real adapter reports the task stage only
+/// alongside the mesh stage, and what is being checked is that the *second*
+/// flag is read on its own rather than implied by the first.
+const GATED_STAGES: [(ShaderStages, Features, Features, &str); 2] = [
+    (
+        ShaderStages::MESH,
+        Features::MESH_SHADER,
+        Features::empty(),
+        "MESH_SHADER",
+    ),
+    (
+        ShaderStages::TASK,
+        Features::MESH_SHADER.union(Features::TASK_SHADER),
+        Features::MESH_SHADER,
+        "TASK_SHADER",
+    ),
+];
+
+/// **The visibility guard**, which is what lets a mesh shader read a buffer at
+/// all: a bind-group layout may name a mesh stage, and only on a device that
+/// reports it.
+///
+/// Both halves are load-bearing. Refused on a capable device, the mesh path
+/// could only ever draw constants; accepted on an incapable one, the layout
+/// carries `VK_SHADER_STAGE_MESH_BIT_EXT` into `vkCreateDescriptorSetLayout`,
+/// where the refusal names neither the binding nor the missing capability.
+#[test]
+fn a_mesh_visible_layout_needs_the_matching_capability() {
+    for (stage, with, without, name) in GATED_STAGES {
+        let entries = visible_to(stage);
+        let desc = BindGroupLayoutDesc {
+            label: Some("mesh shader vertices"),
+            entries: &entries,
+        };
+
+        let (device, ..) = mesh_fixture(with);
+        device
+            .create_bind_group_layout(&desc)
+            .unwrap_or_else(|error| panic!("a device reporting {name} must accept it: {error}"));
+
+        let (device, ..) = mesh_fixture(without);
+        let error = device
+            .create_bind_group_layout(&desc)
+            .expect_err("this device does not report the stage");
+        let HalError::Unsupported { backend, what } = error else {
+            panic!("the refusal must name the capability, not be a generic failure");
+        };
+        assert_eq!(backend, BackendKind::Null);
+        assert!(what.contains(name), "{what}");
+    }
+}
+
+/// The same rule on the other surface that names stages: a push-constant range
+/// read by a mesh stage.
+///
+/// Vulkan refuses `VK_SHADER_STAGE_MESH_BIT_EXT` in a `VkPushConstantRange` on
+/// a device without the feature exactly as it refuses one in a set layout, so
+/// the two are checked together or the layout path is the only one policed.
+#[test]
+fn a_push_constant_range_naming_a_mesh_stage_needs_the_capability() {
+    for (stage, with, without, name) in GATED_STAGES {
+        let describe = |stages| PipelineLayoutDesc {
+            label: Some("mesh shader constants"),
+            bind_group_layouts: &[],
+            push_constants: Some(PushConstantRange {
+                stages,
+                offset: 0,
+                size: 16,
+            }),
+        };
+
+        let (device, ..) = mesh_fixture(with);
+        device
+            .create_pipeline_layout(&describe(stage))
+            .unwrap_or_else(|error| panic!("a device reporting {name} must accept it: {error}"));
+
+        let (device, ..) = mesh_fixture(without);
+        let error = device
+            .create_pipeline_layout(&describe(stage))
+            .expect_err("this device does not report the stage");
+        let HalError::Unsupported { what, .. } = error else {
+            panic!("the refusal must name the capability");
+        };
+        assert!(what.contains(name), "{what}");
+    }
+}
+
+/// The guard must be invisible to everything that came before it: a layout and
+/// a push-constant range naming only the stages every device has are accepted
+/// on a device with both mesh flags, one of them, and neither.
+///
+/// This is the assertion that would have caught folding the mesh bits into
+/// `ShaderStages::ALL` — which is why the stage set here is `ALL` rather than
+/// `VERTEX | FRAGMENT`.
+#[test]
+fn the_guaranteed_stages_are_unaffected_on_every_device() {
+    for extra in [
+        Features::empty(),
+        Features::MESH_SHADER,
+        Features::MESH_SHADER | Features::TASK_SHADER,
+    ] {
+        let (device, ..) = mesh_fixture(extra);
+        let entries = visible_to(ShaderStages::ALL);
+        let layout = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("frame"),
+                entries: &entries,
+            })
+            .unwrap_or_else(|error| panic!("{extra:?} must not disturb a raster layout: {error}"));
+        device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("frame"),
+                bind_group_layouts: &[layout],
+                push_constants: Some(PushConstantRange {
+                    stages: ShaderStages::ALL,
+                    offset: 0,
+                    size: 16,
+                }),
+            })
+            .unwrap_or_else(|error| panic!("{extra:?} must not disturb a raster layout: {error}"));
+    }
+}
+
 /// The whole path on a device that has both stages: create, bind, dispatch,
 /// destroy — and the dispatch lands in the command stream as its own command,
 /// the way `draw` and `draw_indexed` do, so a frame's shape stays assertable

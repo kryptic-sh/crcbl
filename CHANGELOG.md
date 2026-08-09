@@ -41,8 +41,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   refusal is a build failure rather than a broken committed artifact. The
   compile script and `build.rs` learned the `meshext` and `taskext` execution
   models, and `crcbl_shaders::Stage` grew `Mesh` and `Task`.
-  `crcbl_shaders::mesh_shader` carries the triangle's positions and the
-  amplification tint for the tests that sample them.
+  `crcbl_shaders::mesh_shader` carries the triangle's positions, its colours and
+  the amplification tint for the tests that sample them, plus
+  `vertex_bytes`/`VERTEX_STRIDE` for the storage buffer the mesh stage pulls
+  them from.
+- **A bind-group layout and a push-constant range may now name
+  `ShaderStages::MESH` and `ShaderStages::TASK`, so a mesh shader can read a
+  buffer.** Until this, nothing accepted either flag and `mesh_shader.slang`
+  hardcoded its three vertices; it now pulls them from a `StructuredBuffer` at
+  set 0 binding 0, the way `triangle.slang` does. A layout entry's `visibility`
+  or a `PushConstantRange::stages` naming a stage the device does not report is
+  refused up front with `HalError::Unsupported` — by
+  `ShaderStages::check_supported`, which every backend calls, rather than by a
+  driver VUID that names neither the binding nor the capability. The two stages
+  are still outside `GRAPHICS` and `ALL`, so nothing that already worked
+  changes.
 - **`crcbl-vk`'s e2e suite gained a `GeometryPath::MeshShader` golden**,
   `tests/golden/mesh_shader_triangle.png` — apex-down, so it cannot be satisfied
   by a copy of the raster triangle's — alongside tests that the mesh stage's

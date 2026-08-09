@@ -164,8 +164,7 @@ pub mod mesh;
 /// The geometry `triangle.slang` pulls, in the layout that shader declares.
 pub mod triangle;
 
-/// The triangle `mesh_shader.slang` emits, mirrored for the tests that sample
-/// it.
+/// The triangle `mesh_shader.slang` pulls, in the layout that shader declares.
 pub mod mesh_shader;
 
 use std::sync::OnceLock;
