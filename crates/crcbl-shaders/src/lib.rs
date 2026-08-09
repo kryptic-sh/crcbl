@@ -164,6 +164,10 @@ pub mod mesh;
 /// The geometry `triangle.slang` pulls, in the layout that shader declares.
 pub mod triangle;
 
+/// The triangle `mesh_shader.slang` emits, mirrored for the tests that sample
+/// it.
+pub mod mesh_shader;
+
 use std::sync::OnceLock;
 
 /// Little-endian `f32`s in iteration order — what `std430` means for a struct
@@ -195,6 +199,13 @@ pub enum Stage {
     Fragment,
     /// Compute stage.
     Compute,
+    /// Mesh stage — `VK_EXT_mesh_shader`'s `MeshEXT`, D3D12's `ms` profile,
+    /// Metal's `[[mesh]]`. Replaces the vertex stage; see
+    /// `shaders/mesh_shader.slang`.
+    Mesh,
+    /// Task stage, which D3D12 and Metal call *amplification* — `TaskEXT` and
+    /// the `as` profile. Runs before the mesh stage.
+    Task,
 }
 
 /// One `OpEntryPoint` in a compiled module, and the DXIL compiled for it.
@@ -553,8 +564,8 @@ mod tests {
         assert_eq!(ambiguous.entry_point(Stage::Fragment), Some("mainFs"));
     }
 
-    /// Every shipped shader has a WGSL artifact, and it names the entry points
-    /// the manifest recorded from the SPIR-V.
+    /// Every shipped shader **that has** a WGSL artifact names in it the entry
+    /// points the manifest recorded from the SPIR-V.
     ///
     /// The wgpu backend addresses a WGSL module by the *same* entry-point name
     /// it would use for the SPIR-V one, because `ShaderEntry` is per-stage and
@@ -562,17 +573,37 @@ mod tests {
     /// future release mangled them, every wgpu pipeline would fail at creation
     /// on a machine with a GPU and nowhere else. This is that check, with no
     /// GPU.
+    ///
+    /// **Absence is legitimate and is checked elsewhere.** `mesh_shader.slang`
+    /// declares no `wgsl` target because WGSL cannot express a mesh shader at
+    /// all, so demanding an artifact from every shader here would be demanding
+    /// one that cannot exist. That a shader which *does* declare the target has
+    /// the artifact is [`manifest`]'s job, on every machine, with no shader
+    /// compiler — so skipping here loses nothing.
     #[test]
     fn every_shipped_shader_has_wgsl_naming_the_same_entry_points() {
+        let mut checked = 0_usize;
         for shader in ALL {
-            let wgsl = shader
-                .wgsl()
-                .unwrap_or_else(|| panic!("{}: no WGSL artifact", shader.name()));
+            let Some(wgsl) = shader.wgsl() else {
+                continue;
+            };
+            checked += 1;
             for entry in shader.entry_points() {
                 let attribute = match entry.stage() {
                     Stage::Vertex => "@vertex",
                     Stage::Fragment => "@fragment",
                     Stage::Compute => "@compute",
+                    // Not a gap in this match: WGSL has no mesh pipeline, so a
+                    // shader carrying one of these stages *and* a WGSL artifact
+                    // means the target declaration let a broken artifact
+                    // through, which is the whole thing that mechanism exists
+                    // to stop.
+                    stage @ (Stage::Mesh | Stage::Task) => panic!(
+                        "{}: entry point {} is a {stage:?} stage and this shader still has a \
+                         WGSL artifact; WGSL cannot express mesh shading",
+                        shader.name(),
+                        entry.name()
+                    ),
                 };
                 assert!(
                     wgsl.contains(attribute),
@@ -588,6 +619,10 @@ mod tests {
                 );
             }
         }
+        assert!(
+            checked > 0,
+            "no shader has a WGSL artifact, so this check covered nothing"
+        );
     }
 
     /// Every shipped shader has an MSL artifact, and it names the entry points
@@ -614,6 +649,10 @@ mod tests {
                     Stage::Vertex => "[[vertex]]",
                     Stage::Fragment => "[[fragment]]",
                     Stage::Compute => "[[kernel]]",
+                    Stage::Mesh => "[[mesh]]",
+                    // Metal names the amplification stage the *object* stage,
+                    // and spells the qualifier accordingly.
+                    Stage::Task => "[[object]]",
                 };
                 assert!(
                     msl.contains(attribute),
@@ -734,12 +773,15 @@ mod tests {
     }
 
     /// `DXIL::ShaderKind` for a stage. Fixed by the container format, not by
-    /// this crate — pixel is `0`, vertex `1`, compute `5`.
+    /// this crate — pixel is `0`, vertex `1`, compute `5`, and the two mesh
+    /// stages are `13` and `14`.
     const fn dxil_program_kind(stage: Stage) -> u32 {
         match stage {
             Stage::Fragment => 0,
             Stage::Vertex => 1,
             Stage::Compute => 5,
+            Stage::Mesh => 13,
+            Stage::Task => 14,
         }
     }
 

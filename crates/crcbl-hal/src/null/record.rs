@@ -237,6 +237,15 @@ pub enum Command {
     DrawIndirectCount(DrawIndirectCount),
     /// [`draw_indexed_indirect_count`](crate::CommandEncoder::draw_indexed_indirect_count).
     DrawIndexedIndirectCount(DrawIndirectCount),
+    /// [`draw_mesh_tasks`](crate::CommandEncoder::draw_mesh_tasks).
+    DrawMeshTasks {
+        /// Workgroups on X.
+        x: u32,
+        /// Workgroups on Y.
+        y: u32,
+        /// Workgroups on Z.
+        z: u32,
+    },
     /// [`begin_compute_pass`](crate::CommandEncoder::begin_compute_pass).
     BeginComputePass {
         /// Pass label, if the caller gave one.
@@ -323,6 +332,7 @@ impl Command {
             Self::DrawIndexedIndirect(_) => "DrawIndexedIndirect",
             Self::DrawIndirectCount(_) => "DrawIndirectCount",
             Self::DrawIndexedIndirectCount(_) => "DrawIndexedIndirectCount",
+            Self::DrawMeshTasks { .. } => "DrawMeshTasks",
             Self::BeginComputePass { .. } => "BeginComputePass",
             Self::EndComputePass => "EndComputePass",
             Self::BindComputePipeline(_) => "BindComputePipeline",
@@ -1135,6 +1145,7 @@ mod tests {
             Command::DrawIndexedIndirect(indirect),
             Command::DrawIndirectCount(indirect_count),
             Command::DrawIndexedIndirectCount(indirect_count),
+            Command::DrawMeshTasks { x: 1, y: 1, z: 1 },
             Command::BeginComputePass { label: None },
             Command::EndComputePass,
             Command::BindComputePipeline(handle()),
@@ -1185,6 +1196,7 @@ mod tests {
                 | Command::DrawIndexedIndirect(_)
                 | Command::DrawIndirectCount(_)
                 | Command::DrawIndexedIndirectCount(_)
+                | Command::DrawMeshTasks { .. }
                 | Command::BeginComputePass { .. }
                 | Command::EndComputePass
                 | Command::BindComputePipeline(_)

@@ -534,6 +534,17 @@ pub fn shader_stages(stages: crcbl_hal::ShaderStages) -> vk::ShaderStageFlags {
     if stages.contains(S::COMPUTE) {
         flags |= vk::ShaderStageFlags::COMPUTE;
     }
+    // These two are legal only on a device with `meshShader` / `taskShader`
+    // enabled, which is why the seam keeps them out of `GRAPHICS` and `ALL` —
+    // see `crcbl_hal::ShaderStages`. Nothing is dropped here: a caller that
+    // names them on a device without the capability gets the driver's refusal
+    // rather than a silently narrower stage mask.
+    if stages.contains(S::MESH) {
+        flags |= vk::ShaderStageFlags::MESH_EXT;
+    }
+    if stages.contains(S::TASK) {
+        flags |= vk::ShaderStageFlags::TASK_EXT;
+    }
     flags
 }
 
@@ -1449,6 +1460,29 @@ mod tests {
                 | vk::ShaderStageFlags::COMPUTE
         );
         assert!(shader_stages(crcbl_hal::ShaderStages::empty()).is_empty());
+    }
+
+    /// The mesh stages map, and neither composite drags one in.
+    ///
+    /// The second half is the load-bearing one: `VK_SHADER_STAGE_MESH_BIT_EXT`
+    /// in a descriptor-set layout on a device without `meshShader` is a
+    /// validation error, so an `ALL` that expanded to include it would break
+    /// every layout in the engine on every device that lacks the extension.
+    #[test]
+    fn the_mesh_stages_map_and_stay_out_of_the_composites() {
+        use crcbl_hal::ShaderStages as S;
+        assert_eq!(shader_stages(S::MESH), vk::ShaderStageFlags::MESH_EXT);
+        assert_eq!(shader_stages(S::TASK), vk::ShaderStageFlags::TASK_EXT);
+        assert_eq!(
+            shader_stages(S::MESH | S::TASK),
+            vk::ShaderStageFlags::MESH_EXT | vk::ShaderStageFlags::TASK_EXT
+        );
+        for composite in [S::GRAPHICS, S::ALL] {
+            assert!(
+                !shader_stages(composite)
+                    .intersects(vk::ShaderStageFlags::MESH_EXT | vk::ShaderStageFlags::TASK_EXT)
+            );
+        }
     }
 
     #[test]

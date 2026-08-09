@@ -3382,6 +3382,37 @@ the transport seam over a third transport shape.
   Slang's behaviour than is worth encoding for a guard whose false positives
   cost one declaration move. Reopen if a real shader finds it costly.
 
+### Owed by the mesh-shader path
+
+- **Nothing can bind a descriptor to the mesh stage yet.** `ShaderStages::MESH`
+  and `TASK` exist and map correctly, but no bind-group layout or push-constant
+  range names them, and no backend polices a layout naming a mesh stage on a
+  device without the capability. That is why the first mesh shader hardcodes its
+  three vertices instead of pulling them from a storage buffer the way
+  `triangle.slang` does — pulling needs mesh-stage visibility, which obliges
+  every backend to police the flag. **This is the next slice**, and it is the
+  prerequisite for a mesh shader that reads real geometry.
+
+  Note the flags are deliberately outside `ShaderStages::GRAPHICS` and `ALL`:
+  Vulkan refuses `MESH_BIT_EXT` in a layout on a device without `meshShader`, so
+  a composite carrying them would break every existing layout on most devices.
+
+- **Meshlets need a mesh asset system that does not exist.** §3.5 wants clusters
+  with bounds and normal cones baked from a mesh; `crcbl-scene` is a stub and
+  the only mesh in the tree is a hardcoded cube. The builder, the cluster
+  hierarchy and amplification-stage culling are all blocked behind topic 6's
+  asset work — building any of them now would be building ahead of a consumer.
+
+- **`crcbl-vk`'s absent-capability refusal is unexercised.** Both drivers here
+  report `MESH_SHADER`, so only the null backend takes that arm. The e2e
+  falsifies what any device can refuse instead — a mesh pipeline naming a
+  fragment entry point as its mesh stage.
+
+- **Metal and D3D12 have the stages and the committed artifacts, and neither
+  loads them.** `msl/mesh_shader.metal` and the `ms_6_6`/`as_6_6` DXIL are built
+  and validated; what is missing is `MTLMeshRenderPipelineDescriptor` and the
+  D3D12 pipeline-state stream. Both refuse the entry points by name today.
+
 ### Owed by the capability work (P7)
 
 - **The null backend cannot express several device states, so the engine's

@@ -737,6 +737,85 @@ pub struct GraphicsPipelineDesc<'a> {
     pub color_targets: &'a [ColorTargetState],
 }
 
+/// Creation parameters for a **mesh** pipeline — the primary geometry path.
+///
+/// `docs/plan/03-gpu-driven-rendering.md` §3.5 makes mesh shading the geometry
+/// path the engine reaches for first, with the indirect draws in
+/// [`GeometryPath`](crate::GeometryPath) as what a device without
+/// [`Features::MESH_SHADER`](crate::Features::MESH_SHADER) falls back to.
+///
+/// # Decision: a sibling descriptor, the *same* handle type
+///
+/// This is a separate descriptor from [`GraphicsPipelineDesc`] but it produces
+/// a [`GraphicsPipelineHandle`], is bound with
+/// [`bind_graphics_pipeline`](crate::CommandEncoder::bind_graphics_pipeline)
+/// and destroyed with
+/// [`destroy_graphics_pipeline`](crate::Device::destroy_graphics_pipeline).
+/// Both halves of that were deliberate.
+///
+/// **A separate descriptor, because the field sets are disjoint where it
+/// matters.** A mesh pipeline has no vertex stage, and the only honest way to
+/// express that on [`GraphicsPipelineDesc`] would be to make
+/// [`vertex`](GraphicsPipelineDesc::vertex) an `Option` and add `mesh` and
+/// `task` beside it — three optional stage slots of which exactly two
+/// combinations are legal, checked at run time, in a type every existing caller
+/// would have to be edited for. There is also nothing for
+/// [`PrimitiveState::topology`] to mean here: the topology is fixed by the mesh
+/// shader's own `[outputtopology(…)]`, and there is no primitive assembly to
+/// configure because there are no input primitives to assemble.
+///
+/// **The same handle, because on all three native APIs a mesh pipeline is the
+/// same kind of object as a raster one.** Vulkan builds it with
+/// `vkCreateGraphicsPipelines` and binds it at
+/// `VK_PIPELINE_BIND_POINT_GRAPHICS`; D3D12 produces an `ID3D12PipelineState`
+/// bound by `SetPipelineState`; Metal produces an `MTLRenderPipelineState` from
+/// an `MTLMeshRenderPipelineDescriptor`. A distinct `MeshPipelineHandle` would
+/// buy one thing — making "bind a raster pipeline, then
+/// [`draw_mesh_tasks`](crate::CommandEncoder::draw_mesh_tasks)" a type error —
+/// and this seam does not track that kind of pairing anywhere else either
+/// ([`draw`](crate::CommandEncoder::draw) after binding nothing is equally
+/// unchecked, and is left to the validation layer). It would cost a second
+/// handle type, a second destroy, a second bind, and a second pool in every
+/// backend, all aliasing one driver object.
+///
+/// # No vertex input, in a stronger sense than everywhere else
+///
+/// The module docs above say the seam has no vertex-buffer layout because
+/// vertex pulling is the only geometry path. A mesh shader takes that further:
+/// there is no vertex *stage*, no `SV_VertexID`, and no index buffer in play —
+/// the mesh stage writes its vertices and its index triples into output arrays
+/// and says how many of each it produced.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeshPipelineDesc<'a> {
+    /// Debug name; see [`BufferDesc::label`](crate::BufferDesc::label).
+    pub label: Option<&'a str>,
+    /// Resource layout.
+    pub layout: PipelineLayoutHandle,
+    /// Task stage, if any. Runs first and chooses how many mesh workgroups to
+    /// launch, which is where per-cluster culling will live (§3.5).
+    ///
+    /// Requires [`Features::TASK_SHADER`](crate::Features::TASK_SHADER) — a
+    /// device may have the mesh stage without it, which is why the seam reports
+    /// the two separately.
+    pub task: Option<ShaderEntry<'a>>,
+    /// Mesh stage. Emits vertices and primitives; there is no vertex stage.
+    pub mesh: ShaderEntry<'a>,
+    /// Fragment stage; `None` for a depth-only pass, as on
+    /// [`GraphicsPipelineDesc`].
+    pub fragment: Option<ShaderEntry<'a>>,
+    /// Rasteriser state. [`PrimitiveState::topology`] is **ignored**: the mesh
+    /// shader's `[outputtopology(…)]` decides it, and there is no input
+    /// assembly. Everything else — winding, culling, fill mode, depth clamp —
+    /// applies exactly as it does to a raster pipeline.
+    pub primitive: PrimitiveState,
+    /// Depth/stencil state; `None` for a pass with no depth attachment.
+    pub depth_stencil: Option<DepthStencilState>,
+    /// Multisampling state.
+    pub multisample: MultisampleState,
+    /// Colour attachment formats and blend state, in attachment order.
+    pub color_targets: &'a [ColorTargetState],
+}
+
 /// Creation parameters for a compute pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ComputePipelineDesc<'a> {

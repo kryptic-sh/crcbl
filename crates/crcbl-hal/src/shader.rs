@@ -76,6 +76,27 @@ pub type ShaderModuleHandle = Handle<ShaderModule>;
 
 bitflags::bitflags! {
     /// Which shader stages something applies to.
+    ///
+    /// # The two mesh stages are outside every composite, deliberately
+    ///
+    /// [`MESH`](Self::MESH) and [`TASK`](Self::TASK) are **not** members of
+    /// [`GRAPHICS`](Self::GRAPHICS) or [`ALL`](Self::ALL), which is why those
+    /// two are documented as "every stage a device is guaranteed to have"
+    /// rather than "every stage there is".
+    ///
+    /// The reason is that a stage flag naming a stage the device does not have
+    /// is not merely useless, it is *refused*: Vulkan rejects
+    /// `VK_SHADER_STAGE_MESH_BIT_EXT` in a descriptor-set layout or a
+    /// push-constant range on a device where `meshShader` was not enabled. So a
+    /// composite carrying the mesh bits would break every layout and every
+    /// push-constant range in the engine on the majority of devices, to serve
+    /// the one pipeline that wants them — the exact inversion of
+    /// `docs/plan/39-capabilities.md`'s rule that a missing feature degrades
+    /// rather than failing.
+    ///
+    /// A caller therefore names [`MESH`](Self::MESH) explicitly, and only after
+    /// checking [`Features::MESH_SHADER`](crate::Features::MESH_SHADER) — the
+    /// same discipline [`BindingFlags`](crate::BindingFlags) already asks for.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ShaderStages: u32 {
         /// Vertex stage.
@@ -84,10 +105,21 @@ bitflags::bitflags! {
         const FRAGMENT = 1 << 1;
         /// Compute stage.
         const COMPUTE = 1 << 2;
+        /// Mesh stage, which replaces the vertex stage and emits primitives
+        /// directly. Requires
+        /// [`Features::MESH_SHADER`](crate::Features::MESH_SHADER); see
+        /// [`MeshPipelineDesc`](crate::MeshPipelineDesc).
+        const MESH = 1 << 3;
+        /// Task (D3D12 and Metal call it amplification) stage, which runs
+        /// before the mesh stage and chooses how many mesh workgroups to
+        /// launch. Requires
+        /// [`Features::TASK_SHADER`](crate::Features::TASK_SHADER).
+        const TASK = 1 << 4;
 
-        /// Every graphics stage the engine uses.
+        /// Every graphics stage a device is guaranteed to have. See the type
+        /// docs on why the mesh stages are not in it.
         const GRAPHICS = Self::VERTEX.bits() | Self::FRAGMENT.bits();
-        /// Every stage.
+        /// Every stage a device is guaranteed to have.
         const ALL = Self::GRAPHICS.bits() | Self::COMPUTE.bits();
     }
 }
@@ -281,6 +313,21 @@ mod tests {
         assert!(!ShaderStages::GRAPHICS.contains(ShaderStages::COMPUTE));
         assert!(ShaderStages::ALL.contains(ShaderStages::GRAPHICS));
         assert!(ShaderStages::ALL.contains(ShaderStages::COMPUTE));
+    }
+
+    /// The composites must stay clear of the capability-gated stages. A
+    /// `GRAPHICS` that grew a mesh bit would put
+    /// `VK_SHADER_STAGE_MESH_BIT_EXT` into every existing layout and
+    /// push-constant range, which every device without the feature refuses —
+    /// so this is the assertion that keeps a convenience constant from
+    /// breaking device creation for everyone. See the type docs.
+    #[test]
+    fn the_mesh_stages_are_in_no_composite() {
+        for composite in [ShaderStages::GRAPHICS, ShaderStages::ALL] {
+            assert!(!composite.intersects(ShaderStages::MESH | ShaderStages::TASK));
+        }
+        assert!(ShaderStages::MESH.intersects(ShaderStages::MESH | ShaderStages::TASK));
+        assert_ne!(ShaderStages::MESH, ShaderStages::TASK);
     }
 
     /// SPIR-V magic number, as the first word of any valid module.

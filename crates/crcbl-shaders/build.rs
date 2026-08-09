@@ -152,6 +152,8 @@ fn main() {
                     "vertex" => "Vertex",
                     "fragment" => "Fragment",
                     "glcompute" | "compute" => "Compute",
+                    "meshext" => "Mesh",
+                    "taskext" => "Task",
                     other => fail(&format!(
                         "shader `{}` declares entry point `{name}` with execution model \
                          `{other}`, which the seam has no `ShaderStages` bit for",
@@ -618,6 +620,10 @@ fn dxil_profile(model: &str, shader_model: &str) -> Option<String> {
         "vertex" => "vs",
         "fragment" => "ps",
         "glcompute" | "compute" => "cs",
+        // `VK_EXT_mesh_shader`'s two models. D3D12 calls the task stage
+        // *amplification*, hence `as`.
+        "meshext" => "ms",
+        "taskext" => "as",
         _ => return None,
     };
     Some(format!("{prefix}_{shader_model}"))
@@ -627,6 +633,8 @@ fn dxil_profile(model: &str, shader_model: &str) -> Option<String> {
 const fn slang_stage(model: &str) -> &str {
     match model.as_bytes() {
         b"glcompute" => "compute",
+        b"meshext" => "mesh",
+        b"taskext" => "amplification",
         _ => model,
     }
 }

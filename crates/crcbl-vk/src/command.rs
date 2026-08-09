@@ -1043,6 +1043,29 @@ impl CommandEncoder for VkCommandEncoder {
         self.indirect_count(draw, true);
     }
 
+    fn draw_mesh_tasks(&mut self, x: u32, y: u32, z: u32) {
+        if !self.ok() {
+            return;
+        }
+        let Some(mesh) = self.device.mesh_shader_ext.as_ref() else {
+            // Unreachable through the seam — `create_mesh_pipeline` refuses on
+            // a device without the extension, so there is no pipeline to have
+            // bound. Reported rather than ignored because the alternative is a
+            // draw that silently does nothing, which is the exact failure the
+            // capability model exists to prevent.
+            self.fail(HalError::Unsupported {
+                backend: crcbl_hal::BackendKind::Vulkan,
+                what: "draw_mesh_tasks on a device without MESH_SHADER",
+            });
+            return;
+        };
+        // SAFETY: as `draw` — `self.raw` is recording inside a render pass with
+        // a mesh pipeline bound, which the seam makes the caller's
+        // responsibility and the validation layer holds them to. `mesh` was
+        // loaded from this device, whose extension was enabled at creation.
+        unsafe { mesh.cmd_draw_mesh_tasks(self.raw, x, y, z) };
+    }
+
     // --- compute scope ---
 
     fn begin_compute_pass(&mut self, desc: &ComputePassDesc<'_>) {

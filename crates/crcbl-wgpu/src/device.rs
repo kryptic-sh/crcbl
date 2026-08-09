@@ -1066,6 +1066,22 @@ impl Device for WgpuDevice {
             .insert(pipeline)
             .cast())
     }
+    /// Refused, and it is the API's gap rather than this backend's.
+    ///
+    /// WebGPU has no mesh pipeline at all — no stage, no `DispatchMesh`, and no
+    /// WGSL spelling for one, which is why `mesh_shader.slang` declares no WGSL
+    /// target. This backend accordingly never reports
+    /// `Features::MESH_SHADER`, so a caller following the capability model
+    /// never arrives here; the refusal is what a caller that ignored it gets.
+    fn create_mesh_pipeline(
+        &self,
+        _desc: &hal::MeshPipelineDesc<'_>,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        Err(Self::unsupported(
+            "mesh pipelines (WebGPU has no mesh stage)",
+        ))
+    }
+
     fn destroy_graphics_pipeline(&self, h: GraphicsPipelineHandle) {
         self.pools
             .graphics_pipelines

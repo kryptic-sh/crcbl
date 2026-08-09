@@ -16,6 +16,40 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Mesh shaders are usable end to end: `Device::create_mesh_pipeline`,
+  `CommandEncoder::draw_mesh_tasks`, and a golden image of the result.**
+  `Features::MESH_SHADER` was reported and nothing could ask for it. The seam
+  now takes a `MeshPipelineDesc` — a task stage (optional), a mesh stage, a
+  fragment stage, and **no vertex input at all** — and returns an ordinary
+  `GraphicsPipelineHandle`, so a mesh pipeline is bound with
+  `bind_graphics_pipeline` and destroyed with `destroy_graphics_pipeline` like
+  any other. `draw_mesh_tasks(x, y, z)` is the draw, taking workgroup counts of
+  whichever stage the pipeline starts with. `ShaderStages` grows `MESH` and
+  `TASK`, deliberately **outside** `GRAPHICS` and `ALL`, because a stage flag
+  naming a stage the device lacks is refused rather than ignored. `crcbl-vk`
+  implements both through `VK_EXT_mesh_shader`; `crcbl-wgpu`, `crcbl-mtl` and
+  `crcbl-dx12` refuse them with `HalError::Unsupported` and report no
+  `MESH_SHADER`. A device that does not report the capability refuses pipeline
+  creation by name rather than failing later, and `TASK_SHADER` is refused on
+  its own flag.
+- **`crcbl_shaders::MESH_SHADER`, from `shaders/mesh_shader.slang` — the first
+  shader that is not all four targets.** One triangle emitted by a mesh stage,
+  plus an amplification stage whose payload tints it, plus the fragment stage
+  both share. It declares `spirv, msl, dxil` and **not** `wgsl`, because Slang
+  refuses a mesh entry point for that target outright; this is the first real
+  use of the per-shader target declaration, which exists precisely so the
+  refusal is a build failure rather than a broken committed artifact. The
+  compile script and `build.rs` learned the `meshext` and `taskext` execution
+  models, and `crcbl_shaders::Stage` grew `Mesh` and `Task`.
+  `crcbl_shaders::mesh_shader` carries the triangle's positions and the
+  amplification tint for the tests that sample them.
+- **`crcbl-vk`'s e2e suite gained a `GeometryPath::MeshShader` golden**,
+  `tests/golden/mesh_shader_triangle.png` — apex-down, so it cannot be satisfied
+  by a copy of the raster triangle's — alongside tests that the mesh stage's
+  three vertices reach memory, that the amplification stage's payload actually
+  arrives (the tinted frame differs from the untinted one in a way only the task
+  stage can produce), and that a mesh pipeline naming a fragment entry point as
+  its mesh stage is refused by name.
 - **`crcbl_core::log::capture`, so a log line can be asserted on.** Returns a
   `Capture` guard that collects every record the **calling thread** logs, as
   `CapturedRecord { level, target, message }` read back through

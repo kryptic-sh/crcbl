@@ -84,12 +84,12 @@ use crate::{
     DeviceCaps, DeviceDesc, DeviceRequestState, DeviceType, DisplayTiming, DrawIndirect,
     DrawIndirectCount, Features, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError,
     ImageCopy, ImageDesc, ImageHandle, ImageType, ImageUsage, ImageViewDesc, ImageViewHandle,
-    IndexFormat, Instance, Limits, MemoryLocation, PendingDevice, PipelineLayoutDesc,
-    PipelineLayoutHandle, PresentInfo, PresentMode, QueryKind, QuerySetDesc, QuerySetHandle,
-    QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, Rect2d, RenderPassDesc,
-    SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreWait,
-    ShaderModuleDesc, ShaderModuleHandle, ShaderSources, ShaderStages, SubmitInfo, SurfaceCaps,
-    SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
+    IndexFormat, Instance, Limits, MemoryLocation, MeshPipelineDesc, PendingDevice,
+    PipelineLayoutDesc, PipelineLayoutHandle, PresentInfo, PresentMode, QueryKind, QuerySetDesc,
+    QuerySetHandle, QueueHandle, QueueKind, ReadbackDesc, ReadbackHandle, ReadbackState, Rect2d,
+    RenderPassDesc, SamplerDesc, SamplerHandle, SemaphoreDesc, SemaphoreHandle, SemaphoreKind,
+    SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, ShaderSources, ShaderStages, SubmitInfo,
+    SurfaceCaps, SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle, Viewport,
 };
 
 /// Formats a null surface reports, and therefore the only ones a swapchain on
@@ -497,6 +497,60 @@ impl NullDevice {
             backend: BackendKind::Null,
             what,
         }
+    }
+
+    /// The checks a raster and a mesh pipeline share.
+    ///
+    /// Everything after the geometry stages is identical between the two —
+    /// same layout, same fragment stage, same attachment formats, same
+    /// rasteriser state — so the two `create_*_pipeline` methods differ only in
+    /// the stages they resolve and the capability they demand. Splitting it
+    /// this way is what keeps a fix to one of these checks from landing in one
+    /// pipeline kind and not the other.
+    fn check_raster_state(
+        &self,
+        layout: PipelineLayoutHandle,
+        fragment: Option<crate::ShaderEntry<'_>>,
+        color_targets: &[crate::ColorTargetState],
+        primitive: crate::PrimitiveState,
+        depth_stencil: Option<crate::DepthStencilState>,
+    ) -> Result<(), HalError> {
+        self.check(
+            ObjectKind::PipelineLayout,
+            layout.to_bits(),
+            "pipeline layout",
+        )?;
+        if let Some(fragment) = fragment {
+            self.check(
+                ObjectKind::ShaderModule,
+                fragment.module.to_bits(),
+                "shader module",
+            )?;
+        }
+        if color_targets.len() > self.caps.limits.max_color_attachments as usize {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{} colour targets exceeds max_color_attachments {}",
+                color_targets.len(),
+                self.caps.limits.max_color_attachments
+            )));
+        }
+        if primitive.polygon_mode == crate::PolygonMode::Line
+            && !self.caps.features.contains(Features::POLYGON_MODE_LINE)
+        {
+            return Err(self.unsupported("wireframe polygon mode"));
+        }
+        if primitive.depth_clamp && !self.caps.features.contains(Features::DEPTH_CLAMP) {
+            return Err(self.unsupported("depth clamping"));
+        }
+        if let Some(depth) = depth_stencil
+            && !depth.format.is_depth_stencil()
+        {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{:?} is not a depth/stencil format",
+                depth.format
+            )));
+        }
+        Ok(())
     }
 
     /// Whether this device has a queue of `kind` at all.
@@ -1109,45 +1163,54 @@ impl Device for NullDevice {
         desc: &GraphicsPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
         self.check(
-            ObjectKind::PipelineLayout,
-            desc.layout.to_bits(),
-            "pipeline layout",
-        )?;
-        self.check(
             ObjectKind::ShaderModule,
             desc.vertex.module.to_bits(),
             "shader module",
         )?;
-        if let Some(fragment) = desc.fragment {
+        self.check_raster_state(
+            desc.layout,
+            desc.fragment,
+            desc.color_targets,
+            desc.primitive,
+            desc.depth_stencil,
+        )?;
+        Ok(self.insert(ObjectKind::GraphicsPipeline, desc.label, Detail::None))
+    }
+
+    fn create_mesh_pipeline(
+        &self,
+        desc: &MeshPipelineDesc<'_>,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        // Before anything else, so a device modelling the absent capability
+        // refuses for the reason the caller needs to hear rather than tripping
+        // over a stale handle first.
+        if !self.caps.features.contains(Features::MESH_SHADER) {
+            return Err(self.unsupported("mesh shading without Features::MESH_SHADER"));
+        }
+        if desc.task.is_some() && !self.caps.features.contains(Features::TASK_SHADER) {
+            return Err(self.unsupported("a task stage without Features::TASK_SHADER"));
+        }
+        self.check(
+            ObjectKind::ShaderModule,
+            desc.mesh.module.to_bits(),
+            "shader module",
+        )?;
+        if let Some(task) = desc.task {
             self.check(
                 ObjectKind::ShaderModule,
-                fragment.module.to_bits(),
+                task.module.to_bits(),
                 "shader module",
             )?;
         }
-        if desc.color_targets.len() > self.caps.limits.max_color_attachments as usize {
-            return Err(HalError::InvalidDescriptor(format!(
-                "{} colour targets exceeds max_color_attachments {}",
-                desc.color_targets.len(),
-                self.caps.limits.max_color_attachments
-            )));
-        }
-        if desc.primitive.polygon_mode == crate::PolygonMode::Line
-            && !self.caps.features.contains(Features::POLYGON_MODE_LINE)
-        {
-            return Err(self.unsupported("wireframe polygon mode"));
-        }
-        if desc.primitive.depth_clamp && !self.caps.features.contains(Features::DEPTH_CLAMP) {
-            return Err(self.unsupported("depth clamping"));
-        }
-        if let Some(depth) = desc.depth_stencil
-            && !depth.format.is_depth_stencil()
-        {
-            return Err(HalError::InvalidDescriptor(format!(
-                "{:?} is not a depth/stencil format",
-                depth.format
-            )));
-        }
+        self.check_raster_state(
+            desc.layout,
+            desc.fragment,
+            desc.color_targets,
+            desc.primitive,
+            desc.depth_stencil,
+        )?;
+        // The same pool as a raster pipeline, because the seam gives the two
+        // one handle type — see `MeshPipelineDesc`'s decision note.
         Ok(self.insert(ObjectKind::GraphicsPipeline, desc.label, Detail::None))
     }
 
@@ -2110,6 +2173,14 @@ impl CommandEncoder for NullEncoder {
             draw.count_buffer.to_bits(),
         );
         self.record(Command::DrawIndexedIndirectCount(*draw));
+    }
+
+    fn draw_mesh_tasks(&mut self, x: u32, y: u32, z: u32) {
+        // A draw, so `need_render` rather than `need_compute` — the three
+        // counts are workgroups, but they are workgroups of a stage that emits
+        // fragments.
+        self.need_render("DrawMeshTasks");
+        self.record(Command::DrawMeshTasks { x, y, z });
     }
 
     fn begin_compute_pass(&mut self, desc: &ComputePassDesc<'_>) {

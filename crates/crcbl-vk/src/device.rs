@@ -329,6 +329,14 @@ pub(crate) struct DeviceInner {
     /// [`Device::display_timing`] the `Ok(DisplayTiming::Unknown)` the seam
     /// documents.
     pub(crate) present_timing_ext: Option<present_timing::Device>,
+    /// `Some` when `VK_EXT_mesh_shader` was enabled — that is, when this device
+    /// advertises [`Features::MESH_SHADER`]. `vkCmdDrawMeshTasksEXT` lives in
+    /// this table and nowhere else, so `None` is what makes a mesh dispatch on
+    /// a device without the extension impossible rather than a call through an
+    /// unresolved pointer; `create_mesh_pipeline` has already refused, so
+    /// reaching a dispatch with `None` here means a pipeline was bound that
+    /// this device never created.
+    pub(crate) mesh_shader_ext: Option<ext::mesh_shader::Device>,
     /// Says, once, what the display turned out to be doing.
     ///
     /// The same idiom and the same argument as [`first_present_wait`](Self::first_present_wait):
@@ -815,6 +823,11 @@ impl VkDevice {
         let present_timing_ext = present_timing
             .then(|| present_timing::Device::load(&instance.raw, &raw))
             .flatten();
+        // Same idiom as `present_wait_ext`: `Some` *is* the record that the
+        // extension is live, and every mesh dispatch branches on it rather than
+        // re-reading `caps`.
+        let mesh_shader_ext =
+            mesh_shader.then(|| ext::mesh_shader::Device::new(&instance.raw, &raw));
         let debug_ext = instance
             .debug_ext
             .as_ref()
@@ -866,6 +879,7 @@ impl VkDevice {
             swapchain_ext,
             present_wait_ext,
             present_timing_ext,
+            mesh_shader_ext,
             first_display_timing: Once::new(),
             first_present_wait: Once::new(),
             debug_ext,
@@ -1970,6 +1984,13 @@ impl Device for VkDevice {
         desc: &GraphicsPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
         self.create_graphics_pipeline_impl(desc)
+    }
+
+    fn create_mesh_pipeline(
+        &self,
+        desc: &crcbl_hal::MeshPipelineDesc<'_>,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        self.create_mesh_pipeline_impl(desc)
     }
 
     fn destroy_graphics_pipeline(&self, pipeline: GraphicsPipelineHandle) {

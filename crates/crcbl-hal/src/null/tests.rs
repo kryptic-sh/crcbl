@@ -434,6 +434,232 @@ fn push_constants_and_bindless_fail_loudly_on_the_portable_preset() {
     assert!(matches!(error, HalError::Unsupported { .. }), "{error:?}");
 }
 
+/// Opens a null device reporting exactly `extra` beyond the `gpu_driven`
+/// preset, plus a shader module and a pipeline layout to build pipelines from.
+///
+/// The preset deliberately omits both mesh flags, so this is what lets one test
+/// model a device that has the capability and another model a device that does
+/// not — the two sides of `docs/plan/39-capabilities.md`'s rule.
+fn mesh_fixture(extra: Features) -> (Box<dyn Device>, ShaderModuleHandle, PipelineLayoutHandle) {
+    let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
+    caps.features |= extra;
+    let instance = NullInstance::new(caps);
+    let device = instance
+        .create_device(&DeviceDesc {
+            optional_features: caps.features,
+            ..DeviceDesc::for_adapter(AdapterId(0))
+        })
+        .expect("the preset opens");
+    let module = device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("mesh_shader.slang"),
+            spirv: &SPIRV,
+            wgsl: None,
+            msl: None,
+            dxil: None,
+        })
+        .expect("module");
+    let layout = device
+        .create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("mesh"),
+            bind_group_layouts: &[],
+            push_constants: None,
+        })
+        .expect("pipeline layout");
+    (device, module, layout)
+}
+
+/// A mesh pipeline descriptor over `module`, with `task` optional.
+fn mesh_desc<'a>(
+    module: ShaderModuleHandle,
+    layout: PipelineLayoutHandle,
+    task: Option<ShaderEntry<'a>>,
+) -> MeshPipelineDesc<'a> {
+    MeshPipelineDesc {
+        label: Some("mesh triangle"),
+        layout,
+        task,
+        mesh: ShaderEntry {
+            module,
+            entry_point: "meshMain",
+        },
+        fragment: Some(ShaderEntry {
+            module,
+            entry_point: "fragmentMain",
+        }),
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        color_targets: &[],
+    }
+}
+
+/// **The capability guard.** A device that does not report `MESH_SHADER` must
+/// refuse a mesh pipeline at creation, by name — not accept it and fail at the
+/// draw, where the diagnosis is a frame away from the mistake.
+///
+/// The `gpu_driven` preset omits both mesh flags on purpose, so this is the
+/// device the majority of the suite already runs against.
+#[test]
+fn a_device_without_mesh_shader_refuses_a_mesh_pipeline() {
+    let (device, module, layout) = mesh_fixture(Features::empty());
+    assert!(!device.caps().supports(Features::MESH_SHADER));
+    let error = device
+        .create_mesh_pipeline(&mesh_desc(module, layout, None))
+        .expect_err("the preset reports no MESH_SHADER");
+    let HalError::Unsupported { backend, what } = error else {
+        panic!("the refusal must name the capability, not be a generic failure");
+    };
+    assert_eq!(backend, BackendKind::Null);
+    assert!(what.contains("MESH_SHADER"), "{what}");
+}
+
+/// The two mesh stages are reported separately, so they are refused
+/// separately: a device with the mesh stage and no task stage takes a mesh
+/// pipeline and refuses one carrying a task entry point.
+#[test]
+fn the_task_stage_is_refused_on_its_own_flag() {
+    let (device, module, layout) = mesh_fixture(Features::MESH_SHADER);
+    device
+        .create_mesh_pipeline(&mesh_desc(module, layout, None))
+        .expect("MESH_SHADER alone is enough for a mesh + fragment pipeline");
+
+    let task = ShaderEntry {
+        module,
+        entry_point: "taskMain",
+    };
+    let error = device
+        .create_mesh_pipeline(&mesh_desc(module, layout, Some(task)))
+        .expect_err("this device has no task stage");
+    let HalError::Unsupported { what, .. } = error else {
+        panic!("the refusal must name the capability");
+    };
+    assert!(what.contains("TASK_SHADER"), "{what}");
+}
+
+/// The whole path on a device that has both stages: create, bind, dispatch,
+/// destroy — and the dispatch lands in the command stream as its own command,
+/// the way `draw` and `draw_indexed` do, so a frame's shape stays assertable
+/// with no GPU in the room.
+#[test]
+fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
+    let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
+    caps.features |= Features::MESH_SHADER | Features::TASK_SHADER;
+    let instance = NullInstance::new(caps);
+    let recorder = instance.recorder();
+    let device = instance
+        .create_device(&DeviceDesc {
+            optional_features: caps.features,
+            ..DeviceDesc::for_adapter(AdapterId(0))
+        })
+        .expect("the preset opens");
+    assert_eq!(
+        device.caps().geometry_path(),
+        GeometryPath::MeshShader,
+        "a device with the flag must select the path the flag is for"
+    );
+    let queue = device.queue(QueueKind::Graphics).expect("graphics queue");
+    let module = device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("mesh_shader.slang"),
+            spirv: &SPIRV,
+            wgsl: None,
+            msl: None,
+            dxil: None,
+        })
+        .expect("module");
+    let layout = device
+        .create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("mesh"),
+            bind_group_layouts: &[],
+            push_constants: None,
+        })
+        .expect("pipeline layout");
+    let task = ShaderEntry {
+        module,
+        entry_point: "taskMain",
+    };
+    let pipeline = device
+        .create_mesh_pipeline(&mesh_desc(module, layout, Some(task)))
+        .expect("both stages are reported");
+    recorder.clear();
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("mesh frame"),
+        queue,
+    });
+    encoder.begin_render_pass(&RenderPassDesc {
+        label: Some("mesh"),
+        color_attachments: &[],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(16, 16),
+    });
+    // The same `bind_graphics_pipeline` a raster pipeline uses: the seam gives
+    // both kinds one handle type, so there is no second bind to get wrong.
+    encoder.bind_graphics_pipeline(pipeline);
+    encoder.draw_mesh_tasks(3, 2, 1);
+    encoder.end_render_pass();
+    let commands = encoder.finish().expect("recording succeeded");
+
+    assert_eq!(
+        recorder.command_names(),
+        vec![
+            "BeginRenderPass",
+            "BindGraphicsPipeline",
+            "DrawMeshTasks",
+            "EndRenderPass",
+        ]
+    );
+    assert!(
+        recorder
+            .commands()
+            .contains(&Command::DrawMeshTasks { x: 3, y: 2, z: 1 }),
+        "the workgroup counts must survive into the stream, not merely the \
+         command's name: {:?}",
+        recorder.commands()
+    );
+
+    device.destroy_command_buffer(commands);
+    // One destroy for both pipeline kinds, which is the other half of sharing
+    // the handle type — a mesh pipeline left in the pool here would show up as
+    // a leak at teardown.
+    device.destroy_graphics_pipeline(pipeline);
+    device.destroy_pipeline_layout(layout);
+    device.destroy_shader_module(module);
+}
+
+/// A mesh dispatch outside a render pass is the same mistake as a `draw`
+/// outside one, and must be reported the same way.
+#[test]
+fn a_mesh_dispatch_outside_a_render_pass_is_refused() {
+    let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
+    caps.features |= Features::MESH_SHADER;
+    let instance = NullInstance::new(caps);
+    let device = instance
+        .create_device(&DeviceDesc {
+            optional_features: caps.features,
+            ..DeviceDesc::for_adapter(AdapterId(0))
+        })
+        .expect("the preset opens");
+    let recorder = instance.recorder();
+    let queue = device.queue(QueueKind::Graphics).expect("graphics queue");
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+    encoder.draw_mesh_tasks(1, 1, 1);
+    let commands = encoder.finish().expect("recorded, and carried past");
+    let errors = recorder.validation_errors();
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            ValidationError::OutsidePass {
+                command: "DrawMeshTasks",
+                expected: "render",
+            }
+        )),
+        "{errors:?}"
+    );
+    device.destroy_command_buffer(commands);
+}
+
 /// Vulkan permits a runtime-sized array only on the **highest-numbered** binding
 /// of a set, and both backends additionally require it to be the last element of
 /// the slice so "the variable binding is `entries.last()`" is a true reading.

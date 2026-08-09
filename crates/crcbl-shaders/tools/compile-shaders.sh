@@ -345,11 +345,16 @@ require_undeclared_artifact_absent() {
 
 # The DXIL profile prefix for one of `spirv-dis`' execution models, or nothing
 # for a model no graphics or compute profile covers.
+#
+# `meshext` and `taskext` are how `spirv-dis` spells `VK_EXT_mesh_shader`'s two
+# execution models; D3D12 calls the second one *amplification*, hence `as`.
 dxc_profile_prefix() {
     case "$1" in
     vertex) echo "vs" ;;
     fragment) echo "ps" ;;
     glcompute | compute) echo "cs" ;;
+    meshext) echo "ms" ;;
+    taskext) echo "as" ;;
     *) echo "" ;;
     esac
 }
@@ -358,6 +363,8 @@ dxc_profile_prefix() {
 slang_stage() {
     case "$1" in
     glcompute) echo "compute" ;;
+    meshext) echo "mesh" ;;
+    taskext) echo "amplification" ;;
     *) echo "$1" ;;
     esac
 }

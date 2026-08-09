@@ -172,6 +172,13 @@ fn stage_of(model: u32) -> Option<ShaderStages> {
         0 => Some(ShaderStages::VERTEX),
         4 => Some(ShaderStages::FRAGMENT),
         5 => Some(ShaderStages::COMPUTE),
+        // `VK_EXT_mesh_shader`'s pair. **Not** the `NV` pair at 5267 and 5268:
+        // those are a different extension with a different SPIR-V surface, and
+        // `crcbl-vk` enables only `VK_EXT_mesh_shader`, so accepting an NV
+        // module here would report an entry point the pipeline then could not
+        // use.
+        5364 => Some(ShaderStages::TASK),
+        5365 => Some(ShaderStages::MESH),
         // Tessellation (1, 2), geometry (3), OpenCL kernels (6), and the ray
         // tracing models. Real execution models the engine has no vocabulary
         // for; `None` says so rather than pretending they are compute.
@@ -275,6 +282,34 @@ mod tests {
             "a geometry shader must be reported with no stage, not silently skipped"
         );
         assert_eq!(found[1].name, "geometry");
+    }
+
+    /// The two `VK_EXT_mesh_shader` models, and the two `NV` ones that must
+    /// **not** be mistaken for them.
+    ///
+    /// The numbers are the ones this backend's own artifact carries —
+    /// `crates/crcbl-shaders/spirv/mesh_shader.spv` uses 5365 and 5364 — and
+    /// they are fixed by the SPIR-V grammar rather than by this crate. Getting
+    /// the pair the wrong way round would accept a task entry point wherever a
+    /// mesh one was asked for, which the driver then rejects with a message
+    /// naming neither.
+    #[test]
+    fn the_ext_mesh_models_map_and_the_nv_ones_do_not() {
+        let words = module(&[
+            (5365, "meshMain"),
+            (5364, "taskMain"),
+            (5268, "meshNv"),
+            (5267, "taskNv"),
+        ]);
+        let found = entry_points(&words).expect("parses");
+        assert_eq!(found[0].stage, Some(ShaderStages::MESH));
+        assert_eq!(found[1].stage, Some(ShaderStages::TASK));
+        assert_eq!(found[2].stage, None, "VK_NV_mesh_shader is a different API");
+        assert_eq!(found[3].stage, None);
+        require_entry_point(&words, "meshMain", ShaderStages::MESH).expect("present");
+        let error = require_entry_point(&words, "taskMain", ShaderStages::MESH)
+            .expect_err("the task entry point is not a mesh one");
+        assert!(error.contains("but not at"), "{error}");
     }
 
     /// The mistake the seam's docs single out: `&[u8]` reinterpreted as words.

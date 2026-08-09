@@ -1266,6 +1266,12 @@ impl CommandEncoder for Dx12CommandEncoder {
         self.refuse("indirect-count draws (the DX12 pipeline slice)");
     }
 
+    /// Refused for the same reason `create_mesh_pipeline` is: there is no mesh
+    /// pipeline for this to have been recorded against.
+    fn draw_mesh_tasks(&mut self, _x: u32, _y: u32, _z: u32) {
+        self.refuse("DispatchMesh (the DX12 mesh slice)");
+    }
+
     // --- compute scope ---
 
     /// Opens a compute *scope*, and records nothing.

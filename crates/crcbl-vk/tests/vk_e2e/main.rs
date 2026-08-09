@@ -44,6 +44,7 @@ mod harness;
 mod indirect;
 mod menu;
 mod mesh;
+mod mesh_shader;
 mod nine_slice;
 mod pipeline;
 mod queries;

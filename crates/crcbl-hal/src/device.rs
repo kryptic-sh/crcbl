@@ -752,7 +752,33 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
         desc: &GraphicsPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError>;
 
-    /// Destroys a graphics pipeline.
+    /// Creates a **mesh** pipeline — the primary geometry path, per
+    /// `docs/plan/03-gpu-driven-rendering.md` §3.5.
+    ///
+    /// It produces a [`GraphicsPipelineHandle`], and is bound and destroyed
+    /// exactly like one; [`MeshPipelineDesc`](crate::MeshPipelineDesc) explains
+    /// why a sibling descriptor shares the handle type rather than adding a
+    /// second one.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::Unsupported`] on a device that does not report
+    /// [`Features::MESH_SHADER`], or whose
+    /// [`MeshPipelineDesc::task`](crate::MeshPipelineDesc::task) is `Some` on a
+    /// device without [`Features::TASK_SHADER`]. **Refusing here is the
+    /// contract**, not an implementation detail: a backend that accepted the
+    /// descriptor and failed at the draw would put the diagnosis a frame away
+    /// from the mistake, and `docs/plan/39-capabilities.md` requires an absent
+    /// capability to be a named, loud failure rather than a quiet one.
+    ///
+    /// Otherwise as [`Device::create_graphics_pipeline`].
+    fn create_mesh_pipeline(
+        &self,
+        desc: &crate::MeshPipelineDesc<'_>,
+    ) -> Result<GraphicsPipelineHandle, HalError>;
+
+    /// Destroys a graphics pipeline. Also destroys a mesh pipeline — see
+    /// [`Device::create_mesh_pipeline`].
     fn destroy_graphics_pipeline(&self, pipeline: GraphicsPipelineHandle);
 
     /// Creates a compute pipeline.

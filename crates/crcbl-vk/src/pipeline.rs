@@ -625,44 +625,15 @@ impl VkDevice {
         desc: &GraphicsPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
         let inner = Arc::clone(self.inner());
-        let caps = inner.caps;
         let mut state = inner.state();
 
-        if desc.color_targets.len() > caps.limits.max_color_attachments as usize {
-            return Err(HalError::InvalidDescriptor(format!(
-                "{} colour targets exceeds max_color_attachments {}",
-                desc.color_targets.len(),
-                caps.limits.max_color_attachments
-            )));
-        }
-        if desc.primitive.polygon_mode == crcbl_hal::PolygonMode::Line
-            && !caps.features.contains(Features::POLYGON_MODE_LINE)
-        {
-            return Err(HalError::Unsupported {
-                backend: crcbl_hal::BackendKind::Vulkan,
-                what: "PolygonMode::Line on a device without POLYGON_MODE_LINE",
-            });
-        }
-        if desc.primitive.depth_clamp && !caps.features.contains(Features::DEPTH_CLAMP) {
-            return Err(HalError::Unsupported {
-                backend: crcbl_hal::BackendKind::Vulkan,
-                what: "depth clamping on a device without DEPTH_CLAMP",
-            });
-        }
-        let Some(samples) = conv::sample_count(desc.multisample.samples) else {
-            return Err(HalError::InvalidDescriptor(format!(
-                "MultisampleState::samples is {}, which is not a power of two in 1..=64",
-                desc.multisample.samples
-            )));
-        };
-        if let Some(depth) = desc.depth_stencil
-            && !depth.format.is_depth_stencil()
-        {
-            return Err(HalError::InvalidDescriptor(format!(
-                "DepthStencilState::format is {:?}, which is not a depth/stencil format",
-                depth.format
-            )));
-        }
+        let samples = validate_rendering_state(
+            &inner.caps,
+            desc.primitive,
+            desc.depth_stencil,
+            desc.multisample,
+            desc.color_targets,
+        )?;
 
         let layout = lookup(
             &state.pipeline_layouts,
@@ -696,149 +667,131 @@ impl VkDevice {
             );
         }
 
-        // Empty, and it stays empty. See the module docs.
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
-        let assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-            .topology(conv::topology(desc.primitive.topology))
-            .primitive_restart_enable(false);
-        // Counts without pointers: both are dynamic state, set per pass by the
-        // encoder, because a pipeline that baked a viewport would need
-        // recreating on every window resize.
-        let viewport = vk::PipelineViewportStateCreateInfo::default()
-            .viewport_count(1)
-            .scissor_count(1);
-        let bias = desc.depth_stencil.map(|depth| depth.bias);
-        let bias_enabled = bias.is_some_and(|bias| bias.constant != 0.0 || bias.slope_scale != 0.0);
-        let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
-            .depth_clamp_enable(desc.primitive.depth_clamp)
-            .rasterizer_discard_enable(false)
-            .polygon_mode(conv::polygon_mode(desc.primitive.polygon_mode))
-            .cull_mode(conv::cull_mode(desc.primitive.cull_mode))
-            .front_face(conv::front_face(desc.primitive.front_face))
-            .depth_bias_enable(bias_enabled)
-            .depth_bias_constant_factor(bias.map_or(0.0, |bias| bias.constant))
-            .depth_bias_clamp(bias.map_or(0.0, |bias| bias.clamp))
-            .depth_bias_slope_factor(bias.map_or(0.0, |bias| bias.slope_scale))
-            .line_width(1.0);
-        let sample_mask = [desc.multisample.mask];
-        let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-            .rasterization_samples(samples)
-            .sample_shading_enable(false)
-            .sample_mask(&sample_mask)
-            .alpha_to_coverage_enable(desc.multisample.alpha_to_coverage);
+        create_rendering_pipeline(
+            &inner,
+            &mut state,
+            &RenderingState {
+                label: desc.label,
+                layout: layout_raw,
+                stages: &stages,
+                topology: Some(desc.primitive.topology),
+                primitive: desc.primitive,
+                depth_stencil: desc.depth_stencil,
+                multisample: desc.multisample,
+                samples,
+                color_targets: desc.color_targets,
+            },
+        )
+    }
 
-        let depth_stencil = desc.depth_stencil.map(|depth| {
-            let stencil = depth.stencil.unwrap_or_default();
-            vk::PipelineDepthStencilStateCreateInfo::default()
-                .depth_test_enable(true)
-                // Reversed-Z reaches the driver untouched: the seam's default
-                // is `Greater`, `conv::compare_op` is a pure rename, and the
-                // matching clear value is `depth::CLEAR` = 0.0.
-                .depth_compare_op(conv::compare_op(depth.depth_compare))
-                .depth_write_enable(depth.depth_write)
-                .depth_bounds_test_enable(false)
-                .stencil_test_enable(depth.stencil.is_some())
-                .front(conv::stencil_face(stencil.front, stencil))
-                .back(conv::stencil_face(stencil.back, stencil))
-        });
+    /// Builds a mesh pipeline — `VK_EXT_mesh_shader`'s stages in an otherwise
+    /// ordinary `vkCreateGraphicsPipelines` call.
+    ///
+    /// Everything after the geometry stages is shared with
+    /// [`create_graphics_pipeline_impl`](Self::create_graphics_pipeline_impl)
+    /// through [`create_rendering_pipeline`], because on Vulkan a mesh pipeline
+    /// genuinely *is* a graphics pipeline: same create function, same handle,
+    /// same `VK_PIPELINE_BIND_POINT_GRAPHICS`. What differs is two stage
+    /// entries and the absence of `pVertexInputState` and
+    /// `pInputAssemblyState`, which the spec says are ignored for a pipeline
+    /// carrying a mesh stage and which this therefore does not build at all.
+    pub(crate) fn create_mesh_pipeline_impl(
+        &self,
+        desc: &crcbl_hal::MeshPipelineDesc<'_>,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        let inner = Arc::clone(self.inner());
+        let caps = inner.caps;
 
-        let attachments: Vec<vk::PipelineColorBlendAttachmentState> = desc
-            .color_targets
-            .iter()
-            .map(|target| {
-                let mut state = vk::PipelineColorBlendAttachmentState::default()
-                    .color_write_mask(conv::color_writes(target.write_mask))
-                    .blend_enable(target.blend.is_some());
-                if let Some(blend) = target.blend {
-                    state = state
-                        .src_color_blend_factor(conv::blend_factor(blend.color_src))
-                        .dst_color_blend_factor(conv::blend_factor(blend.color_dst))
-                        .color_blend_op(conv::blend_op(blend.color_op))
-                        .src_alpha_blend_factor(conv::blend_factor(blend.alpha_src))
-                        .dst_alpha_blend_factor(conv::blend_factor(blend.alpha_dst))
-                        .alpha_blend_op(conv::blend_op(blend.alpha_op));
-                }
-                state
-            })
-            .collect();
-        let blend = vk::PipelineColorBlendStateCreateInfo::default()
-            .logic_op_enable(false)
-            .attachments(&attachments);
-
-        // `STENCIL_REFERENCE` because the encoder has `set_stencil_reference`,
-        // and a pipeline that baked it would make that call a no-op.
-        let dynamic_states = [
-            vk::DynamicState::VIEWPORT,
-            vk::DynamicState::SCISSOR,
-            vk::DynamicState::STENCIL_REFERENCE,
-        ];
-        let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-
-        let color_formats: Vec<vk::Format> = desc
-            .color_targets
-            .iter()
-            .map(|target| conv::format(target.format))
-            .collect();
-        let depth_format = desc
-            .depth_stencil
-            .map_or(vk::Format::UNDEFINED, |depth| conv::format(depth.format));
-        let mut rendering = vk::PipelineRenderingCreateInfo::default()
-            .color_attachment_formats(&color_formats)
-            .depth_attachment_format(depth_format);
-        if desc
-            .depth_stencil
-            .is_some_and(|depth| depth.format.has_stencil())
-        {
-            rendering = rendering.stencil_attachment_format(depth_format);
+        // First, and before any handle is resolved: the caller needs to hear
+        // which capability is missing, not which handle was stale. The
+        // extension is only *enabled* when the device reported the flag (see
+        // `device.rs`), so this is also what stops a call through an
+        // unloaded `vkCmdDrawMeshTasksEXT` later.
+        if !caps.features.contains(Features::MESH_SHADER) {
+            return Err(HalError::Unsupported {
+                backend: crcbl_hal::BackendKind::Vulkan,
+                what: "mesh shading on a device without MESH_SHADER",
+            });
+        }
+        if desc.task.is_some() && !caps.features.contains(Features::TASK_SHADER) {
+            return Err(HalError::Unsupported {
+                backend: crcbl_hal::BackendKind::Vulkan,
+                what: "a task stage on a device without TASK_SHADER",
+            });
         }
 
-        let mut info = vk::GraphicsPipelineCreateInfo::default()
-            .stages(&stages)
-            .vertex_input_state(&vertex_input)
-            .input_assembly_state(&assembly)
-            .viewport_state(&viewport)
-            .rasterization_state(&rasterization)
-            .multisample_state(&multisample)
-            .color_blend_state(&blend)
-            .dynamic_state(&dynamic)
-            .layout(layout_raw)
-            .push_next(&mut rendering);
-        if let Some(depth_stencil) = depth_stencil.as_ref() {
-            info = info.depth_stencil_state(depth_stencil);
+        let mut state = inner.state();
+        let samples = validate_rendering_state(
+            &caps,
+            desc.primitive,
+            desc.depth_stencil,
+            desc.multisample,
+            desc.color_targets,
+        )?;
+
+        let layout = lookup(
+            &state.pipeline_layouts,
+            "pipeline layout",
+            desc.layout,
+            &inner,
+        )?;
+        let layout_raw = layout.raw;
+
+        // Owned for the same reason the raster path's are: the builder stores
+        // the pointer and `vkCreateGraphicsPipelines` reads it after this
+        // statement.
+        let task_name = match desc.task {
+            Some(entry) => Some(entry_name(&state, &inner, entry, ShaderStages::TASK)?),
+            None => None,
+        };
+        let (mesh_name, mesh_module) = entry_name(&state, &inner, desc.mesh, ShaderStages::MESH)?;
+        let fragment_name = match desc.fragment {
+            Some(entry) => Some(entry_name(&state, &inner, entry, ShaderStages::FRAGMENT)?),
+            None => None,
+        };
+
+        let mut stages = Vec::with_capacity(3);
+        if let Some((name, module)) = task_name.as_ref() {
+            stages.push(
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::TASK_EXT)
+                    .module(*module)
+                    .name(name),
+            );
+        }
+        stages.push(
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::MESH_EXT)
+                .module(mesh_module)
+                .name(&mesh_name),
+        );
+        if let Some((name, module)) = fragment_name.as_ref() {
+            stages.push(
+                vk::PipelineShaderStageCreateInfo::default()
+                    .stage(vk::ShaderStageFlags::FRAGMENT)
+                    .module(*module)
+                    .name(name),
+            );
         }
 
-        // SAFETY: every pointer in `info` borrows a local that outlives the
-        // call; the modules and the layout were resolved against this device's
-        // tables; and the entry points were checked to exist in the modules.
-        let created = unsafe {
-            inner
-                .raw
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
-        };
-        let raw = match created {
-            Ok(pipelines) => pipelines[0],
-            // `create_graphics_pipelines` returns the partial results alongside
-            // the error, and any pipeline it did manage to create is ours to
-            // free — dropping the `Vec` would leak them.
-            Err((pipelines, error)) => {
-                for pipeline in pipelines {
-                    if pipeline != vk::Pipeline::null() {
-                        // SAFETY: created by this device moments ago, never
-                        // used, destroyed once.
-                        unsafe { inner.raw.destroy_pipeline(pipeline, None) };
-                    }
-                }
-                return Err(HalError::PipelineCreation(format!(
-                    "vkCreateGraphicsPipelines: {error:?}"
-                )));
-            }
-        };
-        inner.set_object_name(raw, desc.label);
-
-        Ok(inner.stamp(state.pipelines.insert(PipelineEntry {
-            owner: inner.id,
-            raw,
-        })))
+        create_rendering_pipeline(
+            &inner,
+            &mut state,
+            &RenderingState {
+                label: desc.label,
+                layout: layout_raw,
+                stages: &stages,
+                // No input primitives to assemble, so no input-assembly state
+                // and no vertex-input state. The mesh shader's
+                // `[outputtopology(…)]` is the topology.
+                topology: None,
+                primitive: desc.primitive,
+                depth_stencil: desc.depth_stencil,
+                multisample: desc.multisample,
+                samples,
+                color_targets: desc.color_targets,
+            },
+        )
     }
 
     pub(crate) fn create_compute_pipeline_impl(
@@ -959,6 +912,245 @@ impl VkDevice {
 }
 
 // --- helpers ---------------------------------------------------------------
+
+/// The half of a graphics pipeline that a mesh pipeline shares with a raster
+/// one: everything after the geometry stages.
+///
+/// A struct rather than nine parameters, and borrowed rather than owned,
+/// because every field is already a local of the caller that outlives the
+/// `vkCreateGraphicsPipelines` call.
+struct RenderingState<'a> {
+    label: Option<&'a str>,
+    layout: vk::PipelineLayout,
+    stages: &'a [vk::PipelineShaderStageCreateInfo<'a>],
+    /// `Some` for a raster pipeline; `None` for a mesh one, which has no input
+    /// primitives to assemble and therefore neither an input-assembly nor a
+    /// vertex-input state.
+    topology: Option<crcbl_hal::PrimitiveTopology>,
+    primitive: crcbl_hal::PrimitiveState,
+    depth_stencil: Option<crcbl_hal::DepthStencilState>,
+    multisample: crcbl_hal::MultisampleState,
+    samples: vk::SampleCountFlags,
+    color_targets: &'a [crcbl_hal::ColorTargetState],
+}
+
+/// The state checks a raster and a mesh pipeline share, in the order the raster
+/// path has always made them, returning the resolved sample count.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] for a value out of range, or
+/// [`HalError::Unsupported`] for state the device lacks the feature for.
+fn validate_rendering_state(
+    caps: &DeviceCaps,
+    primitive: crcbl_hal::PrimitiveState,
+    depth_stencil: Option<crcbl_hal::DepthStencilState>,
+    multisample: crcbl_hal::MultisampleState,
+    color_targets: &[crcbl_hal::ColorTargetState],
+) -> Result<vk::SampleCountFlags, HalError> {
+    if color_targets.len() > caps.limits.max_color_attachments as usize {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{} colour targets exceeds max_color_attachments {}",
+            color_targets.len(),
+            caps.limits.max_color_attachments
+        )));
+    }
+    if primitive.polygon_mode == crcbl_hal::PolygonMode::Line
+        && !caps.features.contains(Features::POLYGON_MODE_LINE)
+    {
+        return Err(HalError::Unsupported {
+            backend: crcbl_hal::BackendKind::Vulkan,
+            what: "PolygonMode::Line on a device without POLYGON_MODE_LINE",
+        });
+    }
+    if primitive.depth_clamp && !caps.features.contains(Features::DEPTH_CLAMP) {
+        return Err(HalError::Unsupported {
+            backend: crcbl_hal::BackendKind::Vulkan,
+            what: "depth clamping on a device without DEPTH_CLAMP",
+        });
+    }
+    let Some(samples) = conv::sample_count(multisample.samples) else {
+        return Err(HalError::InvalidDescriptor(format!(
+            "MultisampleState::samples is {}, which is not a power of two in 1..=64",
+            multisample.samples
+        )));
+    };
+    if let Some(depth) = depth_stencil
+        && !depth.format.is_depth_stencil()
+    {
+        return Err(HalError::InvalidDescriptor(format!(
+            "DepthStencilState::format is {:?}, which is not a depth/stencil format",
+            depth.format
+        )));
+    }
+    Ok(samples)
+}
+
+/// Assembles and creates the pipeline once its stages are resolved.
+///
+/// Shared by the raster and the mesh path, because on Vulkan they differ only
+/// in which stages they carry: both go through `vkCreateGraphicsPipelines`,
+/// both land in the same pool, and both are bound at
+/// `VK_PIPELINE_BIND_POINT_GRAPHICS`.
+///
+/// # Errors
+///
+/// [`HalError::PipelineCreation`] with the driver's result.
+fn create_rendering_pipeline(
+    inner: &Arc<DeviceInner>,
+    state: &mut DeviceState,
+    desc: &RenderingState<'_>,
+) -> Result<GraphicsPipelineHandle, HalError> {
+    // Empty, and it stays empty — and for a mesh pipeline it is not even
+    // attached. See the module docs.
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+    let assembly = desc.topology.map(|topology| {
+        vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(conv::topology(topology))
+            .primitive_restart_enable(false)
+    });
+    // Counts without pointers: both are dynamic state, set per pass by the
+    // encoder, because a pipeline that baked a viewport would need
+    // recreating on every window resize.
+    let viewport = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let bias = desc.depth_stencil.map(|depth| depth.bias);
+    let bias_enabled = bias.is_some_and(|bias| bias.constant != 0.0 || bias.slope_scale != 0.0);
+    let rasterization = vk::PipelineRasterizationStateCreateInfo::default()
+        .depth_clamp_enable(desc.primitive.depth_clamp)
+        .rasterizer_discard_enable(false)
+        .polygon_mode(conv::polygon_mode(desc.primitive.polygon_mode))
+        .cull_mode(conv::cull_mode(desc.primitive.cull_mode))
+        .front_face(conv::front_face(desc.primitive.front_face))
+        .depth_bias_enable(bias_enabled)
+        .depth_bias_constant_factor(bias.map_or(0.0, |bias| bias.constant))
+        .depth_bias_clamp(bias.map_or(0.0, |bias| bias.clamp))
+        .depth_bias_slope_factor(bias.map_or(0.0, |bias| bias.slope_scale))
+        .line_width(1.0);
+    let sample_mask = [desc.multisample.mask];
+    let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+        .rasterization_samples(desc.samples)
+        .sample_shading_enable(false)
+        .sample_mask(&sample_mask)
+        .alpha_to_coverage_enable(desc.multisample.alpha_to_coverage);
+
+    let depth_stencil = desc.depth_stencil.map(|depth| {
+        let stencil = depth.stencil.unwrap_or_default();
+        vk::PipelineDepthStencilStateCreateInfo::default()
+            .depth_test_enable(true)
+            // Reversed-Z reaches the driver untouched: the seam's default
+            // is `Greater`, `conv::compare_op` is a pure rename, and the
+            // matching clear value is `depth::CLEAR` = 0.0.
+            .depth_compare_op(conv::compare_op(depth.depth_compare))
+            .depth_write_enable(depth.depth_write)
+            .depth_bounds_test_enable(false)
+            .stencil_test_enable(depth.stencil.is_some())
+            .front(conv::stencil_face(stencil.front, stencil))
+            .back(conv::stencil_face(stencil.back, stencil))
+    });
+
+    let attachments: Vec<vk::PipelineColorBlendAttachmentState> = desc
+        .color_targets
+        .iter()
+        .map(|target| {
+            let mut state = vk::PipelineColorBlendAttachmentState::default()
+                .color_write_mask(conv::color_writes(target.write_mask))
+                .blend_enable(target.blend.is_some());
+            if let Some(blend) = target.blend {
+                state = state
+                    .src_color_blend_factor(conv::blend_factor(blend.color_src))
+                    .dst_color_blend_factor(conv::blend_factor(blend.color_dst))
+                    .color_blend_op(conv::blend_op(blend.color_op))
+                    .src_alpha_blend_factor(conv::blend_factor(blend.alpha_src))
+                    .dst_alpha_blend_factor(conv::blend_factor(blend.alpha_dst))
+                    .alpha_blend_op(conv::blend_op(blend.alpha_op));
+            }
+            state
+        })
+        .collect();
+    let blend = vk::PipelineColorBlendStateCreateInfo::default()
+        .logic_op_enable(false)
+        .attachments(&attachments);
+
+    // `STENCIL_REFERENCE` because the encoder has `set_stencil_reference`,
+    // and a pipeline that baked it would make that call a no-op.
+    let dynamic_states = [
+        vk::DynamicState::VIEWPORT,
+        vk::DynamicState::SCISSOR,
+        vk::DynamicState::STENCIL_REFERENCE,
+    ];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+
+    let color_formats: Vec<vk::Format> = desc
+        .color_targets
+        .iter()
+        .map(|target| conv::format(target.format))
+        .collect();
+    let depth_format = desc
+        .depth_stencil
+        .map_or(vk::Format::UNDEFINED, |depth| conv::format(depth.format));
+    let mut rendering = vk::PipelineRenderingCreateInfo::default()
+        .color_attachment_formats(&color_formats)
+        .depth_attachment_format(depth_format);
+    if desc
+        .depth_stencil
+        .is_some_and(|depth| depth.format.has_stencil())
+    {
+        rendering = rendering.stencil_attachment_format(depth_format);
+    }
+
+    let mut info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(desc.stages)
+        .viewport_state(&viewport)
+        .rasterization_state(&rasterization)
+        .multisample_state(&multisample)
+        .color_blend_state(&blend)
+        .dynamic_state(&dynamic)
+        .layout(desc.layout)
+        .push_next(&mut rendering);
+    if let Some(assembly) = assembly.as_ref() {
+        info = info
+            .vertex_input_state(&vertex_input)
+            .input_assembly_state(assembly);
+    }
+    if let Some(depth_stencil) = depth_stencil.as_ref() {
+        info = info.depth_stencil_state(depth_stencil);
+    }
+
+    // SAFETY: every pointer in `info` borrows a local that outlives the
+    // call; the modules and the layout were resolved against this device's
+    // tables; and the entry points were checked to exist in the modules.
+    let created = unsafe {
+        inner
+            .raw
+            .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None)
+    };
+    let raw = match created {
+        Ok(pipelines) => pipelines[0],
+        // `create_graphics_pipelines` returns the partial results alongside
+        // the error, and any pipeline it did manage to create is ours to
+        // free — dropping the `Vec` would leak them.
+        Err((pipelines, error)) => {
+            for pipeline in pipelines {
+                if pipeline != vk::Pipeline::null() {
+                    // SAFETY: created by this device moments ago, never
+                    // used, destroyed once.
+                    unsafe { inner.raw.destroy_pipeline(pipeline, None) };
+                }
+            }
+            return Err(HalError::PipelineCreation(format!(
+                "vkCreateGraphicsPipelines: {error:?}"
+            )));
+        }
+    };
+    inner.set_object_name(raw, desc.label);
+
+    Ok(inner.stamp(state.pipelines.insert(PipelineEntry {
+        owner: inner.id,
+        raw,
+    })))
+}
 
 /// Resolves a stage's entry point, checking it exists in the module first.
 ///

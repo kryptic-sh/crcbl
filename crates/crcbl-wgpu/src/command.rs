@@ -762,6 +762,13 @@ impl CommandEncoder for WgpuCommandEncoder {
         }
     }
 
+    /// Refused: WebGPU has no mesh stage, so there is no pipeline this could
+    /// have been recorded against. See `create_mesh_pipeline`, which refuses
+    /// first.
+    fn draw_mesh_tasks(&mut self, _x: u32, _y: u32, _z: u32) {
+        self.unsupported("draw_mesh_tasks (WebGPU has no mesh stage)");
+    }
+
     fn begin_compute_pass(&mut self, desc: &hal::ComputePassDesc<'_>) {
         let wgpu_desc = wgpu::ComputePassDescriptor {
             label: desc.label,

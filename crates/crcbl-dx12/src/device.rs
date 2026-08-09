@@ -2156,6 +2156,26 @@ impl Device for Dx12Device {
         Ok(handle::stamp(self.inner.owner, handle))
     }
 
+    /// Still refused, and the obstacle is this backend rather than D3D12.
+    ///
+    /// D3D12 has amplification and mesh shaders from SM6.5, and the DXIL is
+    /// already committed — `crates/crcbl-shaders/dxil/mesh_shader.*.dxil`, at
+    /// `ms_6_6` and `as_6_6`. What is missing here is the backend: a mesh
+    /// pipeline needs the `D3D12_PIPELINE_STATE_STREAM_DESC` path rather than
+    /// the fixed `D3D12_GRAPHICS_PIPELINE_STATE_DESC` `pipeline::graphics`
+    /// fills, and the draw is `DispatchMesh` on an `ID3D12GraphicsCommandList6`.
+    ///
+    /// This backend accordingly reports no `Features::MESH_SHADER`.
+    fn create_mesh_pipeline(
+        &self,
+        _desc: &crcbl_hal::MeshPipelineDesc<'_>,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        Err(not_yet(
+            "mesh pipelines: D3D12 has the stages and the DXIL is committed, but this backend \
+             builds no pipeline state stream (the DX12 mesh slice)",
+        ))
+    }
+
     fn destroy_graphics_pipeline(&self, pipeline: GraphicsPipelineHandle) {
         let mut state = self.state();
         handle::take_owned(&mut state.graphics_pipelines, pipeline, self.inner.owner);

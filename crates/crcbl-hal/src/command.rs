@@ -698,6 +698,28 @@ pub trait CommandEncoder: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// steady-state draw call** — one per pass, regardless of scene size.
     fn draw_indexed_indirect_count(&mut self, draw: &DrawIndirectCount);
 
+    /// Launches a mesh-shading workload, in workgroups —
+    /// **[`GeometryPath::MeshShader`](crate::GeometryPath::MeshShader)'s draw
+    /// call**.
+    ///
+    /// `x`, `y` and `z` count workgroups of the *first* stage the bound
+    /// pipeline has: the task stage when
+    /// [`MeshPipelineDesc::task`](crate::MeshPipelineDesc::task) was `Some`,
+    /// and the mesh stage otherwise. That is Vulkan's rule for
+    /// `vkCmdDrawMeshTasksEXT`, D3D12's for `DispatchMesh`, and Metal's for
+    /// `drawMeshThreadgroups:`, so it is the seam's rule too.
+    ///
+    /// This is a *draw*, not a dispatch: it belongs inside a render pass with a
+    /// mesh pipeline bound, and its output is fragments rather than buffer
+    /// writes. The three-dimensional count is why it does not reuse
+    /// [`draw`](CommandEncoder::draw)'s vertex/instance ranges — there are no
+    /// vertices to range over.
+    ///
+    /// Requires [`Features::MESH_SHADER`](crate::Features::MESH_SHADER), which
+    /// [`create_mesh_pipeline`](crate::Device::create_mesh_pipeline) has
+    /// already refused without.
+    fn draw_mesh_tasks(&mut self, x: u32, y: u32, z: u32);
+
     // --- compute scope ---
 
     /// Opens a compute pass.

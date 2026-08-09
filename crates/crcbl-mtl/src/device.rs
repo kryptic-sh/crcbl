@@ -1625,6 +1625,29 @@ impl Device for MetalDevice {
         self.create_graphics_pipeline_impl(desc)
     }
 
+    /// Still refused, and the obstacle is this backend rather than Metal.
+    ///
+    /// Metal 3 has the object/mesh stages and Slang emits them for
+    /// `-target metal` — `crates/crcbl-shaders/msl/mesh_shader.metal` is
+    /// committed proof, with `[[mesh]]` and `[[object]]` functions in it. What
+    /// is missing here is the backend: a mesh pipeline is built from an
+    /// `MTLMeshRenderPipelineDescriptor` rather than the
+    /// `MTLRenderPipelineDescriptor` `create_graphics_pipeline_impl` fills, and
+    /// the dispatch is `drawMeshThreadgroups:`.
+    ///
+    /// This backend accordingly reports no `Features::MESH_SHADER`, so the
+    /// capability model keeps a caller away from here; the refusal is what a
+    /// caller that ignored it gets.
+    fn create_mesh_pipeline(
+        &self,
+        _desc: &crcbl_hal::MeshPipelineDesc<'_>,
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        Err(crate::MetalInstance::not_yet(
+            "mesh pipelines: Metal has the object/mesh stages and Slang emits them, but this \
+             backend builds no MTLMeshRenderPipelineDescriptor (the Metal mesh slice)",
+        ))
+    }
+
     fn destroy_graphics_pipeline(&self, pipeline: GraphicsPipelineHandle) {
         self.destroy_graphics_pipeline_impl(pipeline);
     }

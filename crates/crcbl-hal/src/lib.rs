@@ -239,8 +239,8 @@ pub use pipeline::{
     BindingResource, BlendFactor, BlendOp, BlendState, ColorTargetState, ColorWrites, CompareOp,
     ComputePipeline, ComputePipelineDesc, ComputePipelineHandle, CullMode, DepthBias,
     DepthStencilState, FrontFace, GraphicsPipeline, GraphicsPipelineDesc, GraphicsPipelineHandle,
-    MultisampleState, PipelineLayout, PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode,
-    PrimitiveState, PrimitiveTopology, PushConstantRange, StencilFaceState, StencilOp,
+    MeshPipelineDesc, MultisampleState, PipelineLayout, PipelineLayoutDesc, PipelineLayoutHandle,
+    PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange, StencilFaceState, StencilOp,
     StencilState, Viewport,
 };
 pub use query::{QueryKind, QuerySet, QuerySetDesc, QuerySetHandle};

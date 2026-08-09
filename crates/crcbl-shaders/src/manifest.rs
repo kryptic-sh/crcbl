@@ -727,21 +727,46 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
         // Every optional column is filled for every shipped shader. The
         // pairing rule in `finish` only checks path-and-hash *together*, so a
         // whole column silently missing from the generator would parse fine.
+        // A shader is free to declare fewer than all four targets — the first
+        // one that does is `mesh_shader.slang`, because WGSL cannot express a
+        // mesh shader — so what is asserted per record is that its columns
+        // match *its own* declaration, and separately that the whole tree still
+        // exercises every target. A generator that stopped emitting the `wgsl`
+        // column entirely would otherwise read as "no shader declares it".
+        let mut declaring: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for record in &manifest.shaders {
             // Every shipped shader declares what it must compile to. The
             // agreement between that declaration and the columns below is
             // `check_targets`' job; this is the assertion that the column
             // exists at all, because a generator that stopped emitting it
             // would turn that check off for every shader at once.
+            assert!(
+                !record.targets.is_empty()
+                    && record.targets.iter().all(|t| TARGETS.contains(&t.as_str())),
+                "{}: declares {:?}",
+                record.name,
+                record.targets
+            );
+            declaring.extend(record.targets.iter().map(String::as_str));
+            let declares = |target: &str| record.targets.iter().any(|t| t == target);
             assert_eq!(
-                record.targets,
-                TARGETS.map(str::to_string).to_vec(),
-                "{}: every shader shipped today targets all four",
+                !record.wgsl.is_empty(),
+                declares("wgsl"),
+                "{}: the wgsl column and the declaration disagree",
                 record.name
             );
-            assert!(!record.wgsl.is_empty(), "{}: no wgsl column", record.name);
-            assert!(!record.msl.is_empty(), "{}: no msl column", record.name);
-            assert!(!record.msl_sha256.is_empty(), "{}", record.name);
+            assert_eq!(
+                !record.msl.is_empty(),
+                declares("msl"),
+                "{}: the msl column and the declaration disagree",
+                record.name
+            );
+            assert_eq!(
+                !record.msl_sha256.is_empty(),
+                declares("msl"),
+                "{}",
+                record.name
+            );
             // One DXIL container per entry point, not one per shader — so the
             // count is the check. A generator that emitted only the first entry
             // point would leave every fragment stage unusable on D3D12, and a
@@ -755,6 +780,12 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
                 record.dxil.len()
             );
         }
+        assert_eq!(
+            declaring,
+            TARGETS.iter().copied().collect(),
+            "every target must still be declared by some shader, or the column \
+             stopped being generated and nothing above would say so"
+        );
         assert!(!manifest.dxc_version.is_empty());
         assert_eq!(manifest.dxil_model, "6_6");
     }

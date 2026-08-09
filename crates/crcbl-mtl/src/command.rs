@@ -1199,6 +1199,14 @@ impl CommandEncoder for MetalCommandEncoder {
         self.fail(indirect_count());
     }
 
+    /// Refused for the same reason `create_mesh_pipeline` is: there is no mesh
+    /// pipeline for this to have been recorded against.
+    fn draw_mesh_tasks(&mut self, _x: u32, _y: u32, _z: u32) {
+        self.fail(crate::MetalInstance::not_yet(
+            "drawMeshThreadgroups: (the Metal mesh slice)",
+        ));
+    }
+
     // --- compute scope ---
 
     /// Opens a compute scope, and creates no Metal encoder for it.
