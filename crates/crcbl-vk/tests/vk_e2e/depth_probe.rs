@@ -31,11 +31,17 @@ struct DepthProbe {
     /// already in world space — so the instance is a constant and this buffer
     /// is written once, at construction.
     instances: crcbl_hal::BufferHandle,
-    /// One `DrawConstants` block, both bases zero. The probe has one mesh at
-    /// base vertex 0 and one instance, so this is the identity — but
-    /// `mesh.slang` reads the block unconditionally, and a set that did not
-    /// bind it is a pipeline that draws nothing.
+    /// One `DrawConstants` block naming instance zero. The probe has one
+    /// instance, so this is the identity — but `mesh.slang` reads the block
+    /// unconditionally, and a set that did not bind it is a pipeline that draws
+    /// nothing.
     draw_constants: crcbl_hal::BufferHandle,
+    /// A one-entry mesh table, and it is the identity for the same reason: the
+    /// probe's geometry starts at vertex 0, so entry 0 is all zeroes and the
+    /// instance's mesh id is 0. What it proves is that the *path* is bound —
+    /// the vertex stage resolves its base vertex through here on every draw in
+    /// the engine, this one included.
+    mesh_table: crcbl_hal::BufferHandle,
     layout: crcbl_hal::BindGroupLayoutHandle,
     group: crcbl_hal::BindGroupHandle,
     pipeline_layout: crcbl_hal::PipelineLayoutHandle,
@@ -194,6 +200,27 @@ impl DepthProbe {
             )
             .expect("write");
 
+        let mesh_table = device
+            .create_buffer(&BufferDesc {
+                label: Some("probe mesh table"),
+                size: crcbl_shaders::mesh::MESH_ENTRY_STRIDE as u64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a mesh table");
+        device
+            .write_buffer(
+                mesh_table,
+                0,
+                &crcbl_shaders::mesh::GpuMesh {
+                    base_vertex: 0,
+                    base_index: 0,
+                    index_count: u32::try_from(index_bytes.len() / 4).expect("twelve indices"),
+                }
+                .to_bytes(),
+            )
+            .expect("write");
+
         let entries = [
             crcbl_hal::BindGroupLayoutEntry {
                 binding: 0,
@@ -233,6 +260,16 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl_hal::BindingFlags::empty(),
             },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: crcbl_hal::ShaderStages::VERTEX,
+                kind: crcbl_hal::BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
         ];
         let layout = device
             .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
@@ -260,6 +297,11 @@ impl DepthProbe {
                 binding: 3,
                 array_index: 0,
                 resource: crcbl_hal::BindingResource::whole_buffer(draw_constants),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 4,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(mesh_table),
             },
         ];
         let group = device
@@ -321,6 +363,7 @@ impl DepthProbe {
             uniforms,
             instances,
             draw_constants,
+            mesh_table,
             layout,
             group,
             pipeline_layout,
@@ -333,6 +376,7 @@ impl DepthProbe {
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group(self.group);
         device.destroy_bind_group_layout(self.layout);
+        device.destroy_buffer(self.mesh_table);
         device.destroy_buffer(self.draw_constants);
         device.destroy_buffer(self.instances);
         device.destroy_buffer(self.uniforms);

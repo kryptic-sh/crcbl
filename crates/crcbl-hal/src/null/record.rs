@@ -810,6 +810,31 @@ impl Recorder {
         self.lock().pools[kind as usize].len()
     }
 
+    /// What a mappable buffer currently holds, or `None` if the handle names
+    /// nothing this recorder created.
+    ///
+    /// [`Event::BufferWritten`] says an upload happened, at an offset, of a
+    /// length — which catches a write that went to the wrong slot and cannot
+    /// catch one that went to the right slot with the wrong bytes. A producer
+    /// that packs a record into a storage buffer is exactly that case: the
+    /// field order, the endianness and the stride are all invisible in the
+    /// event and all decidable here, by decoding what landed with the same
+    /// layout the shader reads it with.
+    ///
+    /// Only [`MemoryLocation::HostUpload`](crate::MemoryLocation::HostUpload)
+    /// buffers hold anything: the null backend executes no copies, so a
+    /// device-local buffer's contents are whatever nothing wrote to it. It is
+    /// therefore evidence about the *host's* writes, and a copy this backend
+    /// recorded but did not perform leaves no trace in it.
+    #[must_use]
+    pub fn buffer_bytes(&self, buffer: BufferHandle) -> Option<Vec<u8>> {
+        let state = self.lock();
+        match &state.get(ObjectKind::Buffer, buffer.to_bits())?.detail {
+            Detail::Buffer { bytes, .. } => Some(bytes.clone()),
+            _ => unreachable!("a buffer handle always carries buffer detail"),
+        }
+    }
+
     /// Every shader module created so far, as `(label, formats the descriptor
     /// carried)`, in creation order.
     ///

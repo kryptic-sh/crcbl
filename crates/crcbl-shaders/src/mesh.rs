@@ -46,11 +46,21 @@ pub const FRAME_UNIFORMS_SIZE: usize = 128;
 /// module's `the_instance_layout_matches_the_offsets_slangc_emits`.
 pub const INSTANCE_STRIDE: usize = 80;
 
+/// Bytes per [`GpuMesh`], and the stride of the mesh-table storage buffer.
+///
+/// Three `uint`, no padding. Checked against the `ArrayStride 12` and the
+/// `Offset` decorations `slangc` emits by this module's
+/// `the_mesh_entry_layout_matches_the_offsets_slangc_emits` — which is the test
+/// that says all three targets really did lay it out this way, since a `std430`
+/// struct of scalars is one of the few whose stride an implementation could
+/// round up without anything else noticing.
+pub const MESH_ENTRY_STRIDE: usize = 12;
+
 /// Bytes in one draw's constant block.
 ///
-/// Two `uint` and a `uint2` of padding. `std140` requires a uniform block's size
-/// to be a multiple of 16, and the padding is in the shader struct rather than
-/// implied so that both sides write the same number — see
+/// One `uint` and three more of padding. `std140` requires a uniform block's
+/// size to be a multiple of 16, and the padding is in the shader struct rather
+/// than implied so that both sides write the same number — see
 /// `DrawConstants` in `shaders/mesh.slang`.
 pub const DRAW_CONSTANTS_SIZE: usize = 16;
 
@@ -117,14 +127,14 @@ impl FrameUniforms {
 /// adds. [`crcbl_render::InstancePool`] is what writes these, one storage buffer
 /// element per instance, by delta upload.
 ///
-/// # Three of the five fields are reserved, and that is deliberate
+/// # Two of the five fields are reserved, and that is deliberate
 ///
-/// Only [`GpuInstance::transform`] is read by anything today. The other three
-/// are here because **changing this layout after a shader, a cull pass and a
-/// draw generator all index it is the expensive path**, and adding a field is
-/// the cheap one now. Each field's own docs say which slice consumes it; none
-/// of them is working camera-relative rendering, a material system or a GPU-side
-/// mesh table, and none of them should be read as evidence that one exists.
+/// [`GpuInstance::transform`] and [`GpuInstance::mesh`] are read by the vertex
+/// stage. The other two are here because **changing this layout after a shader,
+/// a cull pass and a draw generator all index it is the expensive path**, and
+/// adding a field is the cheap one now. Each field's own docs say which slice
+/// consumes it; neither of them is working camera-relative rendering or a
+/// material system, and neither should be read as evidence that one exists.
 ///
 /// [`crcbl_render::InstancePool`]: https://docs.rs/crcbl-render
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -141,11 +151,18 @@ pub struct GpuInstance {
     ///
     /// [`glam::Mat4::to_cols_array`]: https://docs.rs/glam
     pub transform: [f32; 16],
-    /// Which mesh to draw.
+    /// Which mesh to draw: an index into the mesh table, whose entries are
+    /// [`GpuMesh`].
     ///
-    /// **Reserved and unconsumed.** The draw resolves its
-    /// [`MeshRange`](https://docs.rs/crcbl-render) on the CPU; a GPU-side mesh
-    /// table for the cull pass to read is §3.3's.
+    /// The vertex stage resolves this instance's base vertex through it, so an
+    /// instance's geometry is decided by data the GPU reads rather than by the
+    /// draw call — which is what lets one draw cover instances of different
+    /// meshes, and what §3.3's cull pass needs in order to emit draws at all.
+    ///
+    /// [`MeshPool`](https://docs.rs/crcbl-render) is what hands these out and
+    /// what keeps the table in step with them; an id whose mesh has been freed
+    /// resolves to an entry that is all zeroes, which is the empty range rather
+    /// than another mesh's.
     pub mesh: u32,
     /// Which material to shade with.
     ///
@@ -223,21 +240,85 @@ impl GpuInstance {
     }
 }
 
-/// One draw call's bases, matching `struct DrawConstants` in
+/// One resident mesh's range in the geometry pools, matching `struct GpuMesh`
+/// in `shaders/mesh.slang`.
+///
+/// `docs/plan/03-gpu-driven-rendering.md` §3.1's three integers, in the buffer
+/// the *GPU* resolves them out of: [`GpuInstance::mesh`] indexes an array of
+/// these, and the vertex stage adds [`GpuMesh::base_vertex`] to every index it
+/// reads. [`MeshPool`](https://docs.rs/crcbl-render) is what writes them.
+///
+/// The other two fields are read by nothing today — the CPU still records the
+/// draws, and `draw_indexed` takes those two numbers directly. They are in the
+/// record because §3.3's cull pass builds its indirect draws out of exactly
+/// this range, and a table carrying only what the vertex stage reads would have
+/// to change layout the day it does.
+///
+/// An entry naming no mesh is all zeroes, and [`GpuMesh::index_count`] is the
+/// field that says so: a zero index count is a range with nothing to draw,
+/// where a zero base vertex is an ordinary value the pool's first mesh has.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct GpuMesh {
+    /// The mesh's first vertex in the vertex pool. Added to every index a draw
+    /// of it reads, which is what lets the pool store indices mesh-relative.
+    pub base_vertex: u32,
+    /// The mesh's first index in the index pool.
+    pub base_index: u32,
+    /// How many indices the mesh has; zero for an entry naming no mesh.
+    pub index_count: u32,
+}
+
+impl GpuMesh {
+    /// The bytes one mesh-table element holds, in `std430` order.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; MESH_ENTRY_STRIDE] {
+        let mut bytes = [0u8; MESH_ENTRY_STRIDE];
+        let mut at = 0usize;
+        for value in [self.base_vertex, self.base_index, self.index_count] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        debug_assert_eq!(at, MESH_ENTRY_STRIDE);
+        bytes
+    }
+
+    /// The inverse of [`GpuMesh::to_bytes`].
+    ///
+    /// So a test — or §3.6's debug readback — can decode what the table
+    /// actually holds rather than trusting a host-side copy of it.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8; MESH_ENTRY_STRIDE]) -> Self {
+        let uint_at = |offset: usize| {
+            u32::from_le_bytes(
+                bytes[offset..offset + 4]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
+            )
+        };
+        Self {
+            base_vertex: uint_at(0),
+            base_index: uint_at(4),
+            index_count: uint_at(8),
+        }
+    }
+}
+
+/// Which instance one draw call draws, matching `struct DrawConstants` in
 /// `shaders/mesh.slang`.
 ///
-/// **Both of these would be arguments of `draw_indexed` if the four targets
-/// agreed about what its bases do to `SV_VertexID` and `SV_InstanceID`, and they
-/// do not.** That shader's header measures the disagreement on all four; the
-/// consequence for a producer of these bytes is that every draw passes zero for
-/// both of its own bases and puts the real ones here.
+/// **This would be `draw_indexed`'s own base instance if the four targets
+/// agreed about what that does to `SV_InstanceID`, and they do not.** That
+/// shader's header measures the disagreement on all four; the consequence for a
+/// producer of these bytes is that every draw passes zero for its own bases and
+/// puts the real instance here.
+///
+/// The base *vertex* used to sit beside it and does not any more: it is
+/// [`GpuMesh::base_vertex`], reached through the drawn instance's
+/// [`mesh`](GpuInstance::mesh). A per-draw block can say only one thing per
+/// draw, so a base vertex here made every instance in a draw share a mesh —
+/// which is exactly what §3.3's cull pass cannot promise.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrawConstants {
-    /// The mesh's first vertex in the vertex pool —
-    /// [`MeshRange::base_vertex`](https://docs.rs/crcbl-render). Added to every
-    /// index the draw reads, which is what lets the pool store indices
-    /// mesh-relative.
-    pub base_vertex: u32,
     /// The draw's instance in the instance array. Added to `SV_InstanceID`,
     /// which is zero for every draw the forward pass records.
     pub base_instance: u32,
@@ -248,9 +329,8 @@ impl DrawConstants {
     #[must_use]
     pub fn to_bytes(&self) -> [u8; DRAW_CONSTANTS_SIZE] {
         let mut bytes = [0u8; DRAW_CONSTANTS_SIZE];
-        bytes[0..4].copy_from_slice(&self.base_vertex.to_le_bytes());
-        bytes[4..8].copy_from_slice(&self.base_instance.to_le_bytes());
-        // The trailing `uint2` is padding and stays zero.
+        bytes[0..4].copy_from_slice(&self.base_instance.to_le_bytes());
+        // The three trailing `uint`s are padding and stay zero.
         bytes
     }
 }
@@ -757,12 +837,11 @@ mod tests {
     }
 
     /// The offsets `slangc` emitted for `DrawConstants`, read out of the
-    /// disassembly. Two `uint` in a row would permute silently — a base vertex
-    /// read as a base instance draws *something* — so the byte each lands on is
-    /// pinned rather than assumed.
+    /// disassembly, and the padding that makes the block's width the same
+    /// number on both sides.
     #[test]
     fn the_draw_block_matches_the_offsets_slangc_emits() {
-        // `OpMemberDecorate %DrawConstants_std140 n Offset …`: 0, 4, 8.
+        // `OpMemberDecorate %DrawConstants_std140 n Offset …`: 0, 4, 8, 12.
         assert_eq!(DRAW_CONSTANTS_SIZE, 16);
         assert_eq!(
             DRAW_CONSTANTS_SIZE % 16,
@@ -771,17 +850,58 @@ mod tests {
              block that is not one already is a block the shader and the CPU \
              disagree about the width of"
         );
-        let bytes = DrawConstants {
-            base_vertex: 24,
-            base_instance: 1,
+        let bytes = DrawConstants { base_instance: 1 }.to_bytes();
+        let uint_at =
+            |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
+        assert_eq!(uint_at(0), 1, "base_instance at offset 0");
+        for pad in [4, 8, 12] {
+            assert_eq!(
+                uint_at(pad),
+                0,
+                "the pad at {pad} is written, and it is zero"
+            );
         }
-        .to_bytes();
+    }
+
+    /// The offsets and the stride `slangc` actually emitted for `GpuMesh`, read
+    /// out of the disassembly. Three `uint` in a row would permute silently — a
+    /// base index read as a base vertex draws *something* — so the byte each
+    /// lands on is pinned rather than assumed.
+    ///
+    /// The stride is the half worth pinning hardest. A `std430` struct of
+    /// scalars is 4-byte aligned, so 12 is legal and so is any implementation
+    /// that rounded it to 16; the entry the CPU writes at `index * 12` and the
+    /// entry a shader reads at `index * 16` are the same for element 0 and
+    /// different for every element after it, which is the mesh-pool bug that
+    /// only a second resident can show.
+    #[test]
+    fn the_mesh_entry_layout_matches_the_offsets_slangc_emits() {
+        // `OpDecorate %_runtimearr_GpuMesh_std430 ArrayStride 12`, and
+        // `OpMemberDecorate %GpuMesh_std430 n Offset …`: 0, 4, 8. The WGSL and
+        // the MSL declare the same three scalars with no explicit alignment,
+        // which is the same layout.
+        assert_eq!(MESH_ENTRY_STRIDE, 12);
+
+        let entry = GpuMesh {
+            base_vertex: 24,
+            base_index: 36,
+            index_count: 18,
+        };
+        let bytes = entry.to_bytes();
+        assert_eq!(bytes.len(), MESH_ENTRY_STRIDE);
         let uint_at =
             |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
         assert_eq!(uint_at(0), 24, "base_vertex at offset 0");
-        assert_eq!(uint_at(4), 1, "base_instance at offset 4");
-        assert_eq!(uint_at(8), 0, "the pad is written, and it is zero");
-        assert_eq!(uint_at(12), 0, "both halves of it");
+        assert_eq!(uint_at(4), 36, "base_index at offset 4");
+        assert_eq!(uint_at(8), 18, "index_count at offset 8");
+
+        // And the decode agrees with the encode, field for field.
+        assert_eq!(GpuMesh::from_bytes(&bytes), entry);
+
+        // An entry naming no mesh is all zeroes, which is the contract
+        // `MeshPool::free` writes and the shader's `index_count == 0` reads.
+        assert_eq!(GpuMesh::default().to_bytes(), [0u8; MESH_ENTRY_STRIDE]);
+        assert_eq!(GpuMesh::default().index_count, 0);
     }
 
     /// Every pyramid face is wound counter-clockwise as seen from outside, on

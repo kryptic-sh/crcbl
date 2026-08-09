@@ -16,6 +16,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A GPU-side mesh table, and `GpuInstance::mesh` now means something.**
+  `MeshPool` maintains a third buffer beside the vertex and index pools: one
+  `crcbl_shaders::mesh::GpuMesh { base_vertex, base_index, index_count }` (12
+  bytes, `MESH_ENTRY_STRIDE`) per mesh it can hold, at `mesh.slang`'s new
+  binding 4. `MeshPool::table_index` is the id an instance carries and
+  `MeshPool::table_buffer` is what a bind group names; `MeshPoolDesc` grew
+  `mesh_capacity` and `MeshPoolError::MeshTableFull` reports a table with no
+  entry left. **The vertex stage now resolves its own base vertex** — through
+  the drawn instance's `mesh` id — instead of being handed one per draw. That is
+  what `docs/plan/03-gpu-driven-rendering.md` §3.3's cull pass needs (it emits
+  draws the CPU never looked at, so the geometry has to be resolvable from
+  instance data alone), and it already buys something before that pass exists: a
+  base vertex resolved per _instance_ lets one draw cover instances of different
+  meshes, where a per-draw constant made every instance in a draw share a mesh.
+  The rule that produced the block is untouched — every draw still passes zero
+  for both of its own bases.
+
+  A freed mesh's entry is **cleared**, so an instance still naming it resolves
+  to the empty range (`index_count == 0`) rather than to whatever mesh next
+  lands in that space; `MeshPool::free` therefore takes a `&dyn Device` and
+  returns `Result<bool, MeshPoolError>`, and frees nothing if the clear fails.
+  What clearing cannot cover is a table _slot_ reused by a later upload: a mesh
+  id is a bare `u32` with no generation in it, so a stale id names the mesh that
+  took the slot. `MeshHandle` is the generational one, and only it can tell
+  those apart.
+
+  Upgrading: `MeshPoolDesc` needs `mesh_capacity`; `MeshPool::free` needs the
+  device; anything building `mesh.slang`'s descriptor set by hand must add
+  binding 4 — a read-only storage buffer of `GpuMesh` — and every instance it
+  draws must carry a mesh id that indexes it, because id 0 is a real entry and
+  an instance that forgot its id draws whatever mesh sits there.
+
 - **A second mesh in the geometry pool, and `ForwardRenderer::set_pyramid` to
   draw it.** `crcbl_shaders::mesh::pyramid_vertices` / `pyramid_indices` /
   `pyramid_vertex_bytes` are a square pyramid in five colours no cube face has,
@@ -41,8 +73,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   capacity and what is in use.
 - **`crcbl_shaders::mesh::GpuInstance` (80 bytes) and `INSTANCE_STRIDE`**, plus
   `mesh.slang`'s matching `struct GpuInstance` at binding 2. `transform` is a
-  rigid model-to-sector `float4x4`; `mesh`, `material`, `sector` and `flags` are
-  **reserved and read by nothing**. In particular `sector` is _not_ working
+  rigid model-to-sector `float4x4`; `mesh` indexes the mesh table (see the entry
+  above, which is what made it mean something); `material`, `sector` and `flags`
+  are **reserved and read by nothing**. In particular `sector` is _not_ working
   camera-relative rendering: §3.2's 2026-07-27 correction also calls for a
   per-frame f64 sector→camera offset table and a shader-side addition, and
   neither exists, so every instance is in sector 0 and `transform` is a plain
@@ -1697,11 +1730,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
   Fixed the way `sprite.slang` resolved its half: **every draw the forward pass
   records now passes zero for both of its bases**, which is the one value all
-  four targets agree on, and the real ones arrive as a new
-  `crcbl_shaders::mesh::DrawConstants` block (binding 3, one 16-byte block per
-  draw, reached through a dynamic offset). Nothing in the picture now depends on
-  how a target lowers a builtin. The mesh pool still stores indices
-  mesh-relative, so a mesh's bytes still do not depend on where it landed.
+  four targets agree on, and the real ones arrive as data. The instance index is
+  a `crcbl_shaders::mesh::DrawConstants` block (binding 3, one 16-byte block per
+  draw, reached through a dynamic offset); the base vertex is the mesh table's,
+  reached through the drawn instance — see the mesh-table entry above, which
+  moved it there. Nothing in the picture now depends on how a target lowers a
+  builtin. The mesh pool still stores indices mesh-relative, so a mesh's bytes
+  still do not depend on where it landed.
 
   Upgrading: anything that builds `mesh.slang`'s descriptor set by hand must add
   binding 3 — a uniform buffer holding `DrawConstants` — or the pipeline draws

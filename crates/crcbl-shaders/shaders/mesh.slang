@@ -73,13 +73,33 @@
 // its header carries the full diagnosis; the resolution here is the same one,
 // applied to both ids: **every draw this pass records passes zero for its base
 // vertex and its base instance**, which is the one value all four lowerings
-// agree on, and the real bases arrive as data in `DrawConstants` below.
+// agree on, and the real bases arrive as data.
 //
 // That is what lets a mesh at a non-zero `MeshRange::base_vertex` draw its own
-// vertices. Until this block existed the pool's base vertex travelled through
+// vertices. Until it did, the pool's base vertex travelled through
 // `draw_indexed`'s own argument and the `OpISub` above took it straight back
 // out — correct for the cube at base 0, and another mesh's geometry for every
 // resident after it.
+//
+// # The base vertex comes from the mesh table, per instance
+//
+// `docs/plan/03-gpu-driven-rendering.md` §3.3's cull pass has to emit draws for
+// the instances it keeps, which means the GPU must be able to resolve an
+// instance's geometry with no CPU in the loop. So the pool's ranges are a
+// storage buffer of their own — `meshes` below — and `GpuInstance::mesh` is an
+// index into it. The vertex stage reads its own base vertex from there rather
+// than being handed one per draw.
+//
+// The two are not the same reach even before culling exists: a per-draw block
+// can only say one thing per draw, so every instance in a draw had to share a
+// mesh. Resolved per instance, one draw covers instances of *different* meshes
+// — which is the shape §3.3 emits and the reason this is the arrangement now
+// rather than after the cull pass is written.
+//
+// What stays in `DrawConstants` is the instance index, and only it: the draw
+// still has to say which instance it is, because `SV_InstanceID` is zero on
+// every target for the reason above and nothing else in the frame carries that
+// number.
 
 /// One vertex of a hardcoded mesh, matching `crcbl_shaders::mesh::MeshVertex`.
 ///
@@ -132,8 +152,9 @@ struct GpuInstance
     /// Model → sector. Rigid (rotation + translation), so its upper-left 3×3
     /// transforms normals correctly without an inverse-transpose.
     float4x4 transform;
-    /// Which mesh to draw. **Reserved**: the draw resolves its mesh range on
-    /// the CPU, and the GPU-side mesh table is §3.3's.
+    /// Which mesh to draw: an index into `meshes` below. The vertex stage
+    /// resolves this instance's base vertex through it, which is what lets one
+    /// draw cover instances of different meshes.
     uint mesh;
     /// Which material to shade with. **Reserved**: the material table is the
     /// other half of §3.2 and is not built.
@@ -149,26 +170,49 @@ struct GpuInstance
     uint flags;
 };
 
-/// Where this draw's mesh and its instance start, matching
-/// `crcbl_shaders::mesh::DrawConstants`.
+/// One resident mesh's range in the geometry pools, matching
+/// `crcbl_shaders::mesh::GpuMesh`.
 ///
-/// The whole content of one draw call, and the header says why it cannot be the
-/// draw's own base vertex and base instance. One block per draw, reached
-/// through a dynamic offset — the same mechanism, for the same reason, as
-/// `sprite.slang`'s `SpriteConstants::base`.
+/// `docs/plan/03-gpu-driven-rendering.md` §3.1's three integers, in the buffer
+/// the GPU resolves them out of. Two of the three are `draw_indexed`'s own
+/// arguments and are read by nothing here yet; they are in the record because
+/// §3.3's cull pass builds its draws out of exactly these numbers, and a table
+/// carrying only what today's vertex stage reads would have to change layout
+/// the day it does.
+struct GpuMesh
+{
+    /// This mesh's first vertex in the pool, added to every index a draw of it
+    /// reads. The pool stores indices mesh-relative, so this is the only thing
+    /// that says where the mesh actually is.
+    uint base_vertex;
+    /// This mesh's first index in the index pool.
+    uint base_index;
+    /// How many indices the mesh has. Zero for an entry naming no mesh — see
+    /// `crcbl_render::MeshPool`, which clears an entry when its mesh is freed.
+    uint index_count;
+};
+
+/// Which instance this draw draws, matching `crcbl_shaders::mesh::DrawConstants`.
+///
+/// One block per draw, reached through a dynamic offset — the same mechanism,
+/// for the same reason, as `sprite.slang`'s `SpriteConstants::base`. The header
+/// says why this number cannot be the draw's own base instance, and why the
+/// base vertex that used to sit beside it is in `meshes` instead.
 struct DrawConstants
 {
-    /// This mesh's first vertex in the pool: `MeshRange::base_vertex`, added to
-    /// every index the draw reads. The pool stores indices mesh-relative, so
-    /// this is the only thing that says where the mesh actually is.
-    uint base_vertex;
     /// This draw's instance in the instance array, added to `SV_InstanceID` —
     /// which is zero on every draw this pass records, because each one is a
     /// single instance with no base instance.
     uint base_instance;
     /// Pads the block to a multiple of 16 bytes, which `std140` requires of a
     /// uniform buffer's size and which naga enforces where a driver would not.
-    uint2 pad;
+    ///
+    /// Three scalars rather than a `uint3`: std140 aligns a three-component
+    /// vector to 16 bytes, so one declared here would land at offset 16 and
+    /// make the block 32 bytes rather than pad it to 16.
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 
 [[vk::binding(0, 0)]]
@@ -183,6 +227,9 @@ StructuredBuffer<GpuInstance> instances;
 [[vk::binding(3, 0)]]
 ConstantBuffer<DrawConstants> draw;
 
+[[vk::binding(4, 0)]]
+StructuredBuffer<GpuMesh> meshes;
+
 struct VertexOutput
 {
     float4 position : SV_Position;
@@ -194,8 +241,12 @@ struct VertexOutput
 [shader("vertex")]
 VertexOutput vertexMain(uint index: SV_VertexID, uint instance_index: SV_InstanceID)
 {
-    MeshVertex vertex = vertices[index + draw.base_vertex];
     GpuInstance instance = instances[instance_index + draw.base_instance];
+    // The instance names its mesh and the mesh names its vertices: nothing on
+    // this path came from the draw call, which is what §3.3's cull pass needs
+    // in order to emit draws the CPU never looked at.
+    GpuMesh mesh = meshes[instance.mesh];
+    MeshVertex vertex = vertices[index + mesh.base_vertex];
 
     float4 world = mul(instance.transform, float4(vertex.position.xyz, 1.0));
 

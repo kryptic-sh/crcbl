@@ -190,6 +190,50 @@ fn buffers_round_trip_through_the_host_and_reject_the_wrong_memory() {
     assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
 }
 
+/// The bytes a host write left behind are readable, which is what lets a test
+/// check the *content* of an upload rather than only its offset and length.
+///
+/// A packed record written to the wrong offset is caught by
+/// [`Event::BufferWritten`]; one written to the right offset with its fields
+/// permuted is not, and that is the failure this exists for.
+#[test]
+fn a_written_buffer_reports_the_bytes_that_landed_in_it() {
+    let recorder = Recorder::new();
+    let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+    let device = open(&instance);
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            label: Some("table"),
+            size: 8,
+            usage: crate::BufferUsage::STORAGE,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("buffer");
+
+    assert_eq!(
+        recorder.buffer_bytes(buffer),
+        Some(vec![0u8; 8]),
+        "a fresh buffer reads as zeroes, so a slot nothing wrote is \
+         distinguishable from one that was written"
+    );
+    device
+        .write_buffer(buffer, 4, &[1, 2, 3, 4])
+        .expect("write");
+    assert_eq!(
+        recorder.buffer_bytes(buffer),
+        Some(vec![0, 0, 0, 0, 1, 2, 3, 4]),
+        "the write must land at its offset and nowhere else"
+    );
+
+    device.destroy_buffer(buffer);
+    assert_eq!(
+        recorder.buffer_bytes(buffer),
+        None,
+        "a destroyed buffer holds nothing, rather than the bytes of whatever \
+         takes its slot next"
+    );
+}
+
 #[test]
 fn destroyed_handles_are_rejected_rather_than_aliased() {
     let instance = NullInstance::gpu_driven();

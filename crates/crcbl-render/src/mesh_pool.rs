@@ -17,6 +17,31 @@
 //! Everything above this — instance data, GPU culling, indirect draws, meshlets
 //! — assumes a mesh is a range rather than a buffer, and none of it is here.
 //!
+//! # The same three integers, where the GPU can read them
+//!
+//! There is a third buffer: the **mesh table**, one
+//! [`crcbl_shaders::mesh::GpuMesh`] per slot this pool can hand out, kept in
+//! step with the free lists by [`MeshPool::upload`] and [`MeshPool::free`].
+//! [`MeshPool::table_index`] is the number that names an entry, and it is what
+//! an instance's [`GpuInstance::mesh`](crcbl_shaders::mesh::GpuInstance::mesh)
+//! carries.
+//!
+//! §3.3 is why it exists: a cull pass emits draws for the instances it keeps,
+//! so the GPU has to be able to resolve an instance's geometry with no CPU in
+//! the loop. It pays for itself before that pass is written, because a base
+//! vertex resolved per *instance* lets one draw cover instances of different
+//! meshes where a per-draw constant could not.
+//!
+//! **A freed mesh's entry is cleared**, so it reads as
+//! [`GpuMesh::default`](crcbl_shaders::mesh::GpuMesh) — the empty range, whose
+//! `index_count` is zero. An instance still naming it therefore resolves to no
+//! geometry rather than to whatever mesh next lands in that space, which is the
+//! defect a table left stale produces. What it cannot defend against is a slot
+//! *reused*: an id is a bare `u32` with no generation in it, so an instance
+//! holding the id of a freed mesh names the next mesh uploaded into that slot.
+//! [`MeshHandle`] is generational and a mesh id is not, and only the handle can
+//! tell those apart.
+//!
 //! # One pool means one vertex format
 //!
 //! The vertex pool is suballocated in **vertices**, not bytes, so
@@ -88,6 +113,13 @@
 //! docs' "no manual barriers outside the graph" names exactly these. Streaming a
 //! mesh in *during* a frame is P9's, and it is the reason residency is a query
 //! rather than an assertion — the shape survives when `flush` becomes a poll.
+//!
+//! It is also why the mesh table is one host-visible buffer rather than a ring
+//! like [`crate::instance_pool`]'s: nothing rewrites an entry between frames, so
+//! there is no frame still reading the value a write would replace. The two
+//! calls that do write it, [`MeshPool::upload`] and [`MeshPool::free`], are the
+//! same two the pools' own space moves under — and P9's streaming path is where
+//! that, the free lists and `flush` all stop being start-up-only together.
 
 use core::ops::Range;
 use core::time::Duration;
@@ -99,7 +131,7 @@ use crcbl_hal::{
     QueueHandle, ResourceState, SemaphoreDesc, SemaphoreHandle, SemaphoreKind, SemaphoreSignal,
     SemaphoreWait, SubmitInfo,
 };
-use crcbl_shaders::mesh::VERTEX_STRIDE;
+use crcbl_shaders::mesh::{GpuMesh, MESH_ENTRY_STRIDE, VERTEX_STRIDE};
 
 /// Bytes per index. `Uint32` everywhere, so the index pool suballocates in
 /// indices and [`MeshRange::base_index`] is `draw_indexed`'s own first-index.
@@ -181,6 +213,20 @@ pub enum MeshPoolError {
         /// What was asked for.
         capacity: u32,
     },
+    /// Every mesh-table entry is spoken for.
+    ///
+    /// The table is one entry per mesh the pool can hold at once, and it is
+    /// fixed by [`MeshPoolDesc::mesh_capacity`] for the reason every other
+    /// capacity here is: the buffer is created once and bound into every group
+    /// that names it.
+    #[error("the mesh table holds {capacity} meshes and {in_use} of them are in use")]
+    MeshTableFull {
+        /// The table's fixed capacity.
+        capacity: u32,
+        /// Entries that cannot be handed out — live meshes, plus any slot
+        /// permanently withdrawn by generation exhaustion.
+        in_use: u32,
+    },
     /// A mesh with no vertices or no indices.
     #[error("a mesh needs both vertices and indices; got {vertices} and {indices}")]
     EmptyMesh {
@@ -245,6 +291,12 @@ pub struct MeshPoolDesc<'a> {
     pub vertex_capacity: u32,
     /// Indices the pool can hold.
     pub index_capacity: u32,
+    /// Meshes the pool can hold at once, which is the length of the mesh table.
+    ///
+    /// Counted in meshes rather than in bytes, so it is the largest
+    /// [`MeshPool::table_index`] plus one and the number an instance's mesh id
+    /// must stay below.
+    pub mesh_capacity: u32,
 }
 
 /// One suballocated mesh, and the timeline value its bytes arrive under.
@@ -277,6 +329,12 @@ pub struct MeshPool {
     indices: BufferHandle,
     vertex_alloc: FreeList,
     index_alloc: FreeList,
+
+    /// The mesh table: `table_capacity` [`GpuMesh`] entries, indexed by a
+    /// mesh's slot. Host-visible and written in place — see the
+    /// [module docs](self) on why it needs no ring.
+    table: BufferHandle,
+    table_capacity: u32,
 
     meshes: Pool<Resident>,
 
@@ -328,6 +386,15 @@ impl MeshPool {
             }
         };
 
+        let table = match Self::create_table(device, stem, desc.mesh_capacity) {
+            Ok(table) => table,
+            Err(error) => {
+                device.destroy_buffer(indices);
+                device.destroy_buffer(vertices);
+                return Err(error);
+            }
+        };
+
         // The capability check rather than the error, so a device that simply
         // has no timeline semaphores takes the documented fallback and a device
         // that has them but failed to make one still reports why.
@@ -342,6 +409,7 @@ impl MeshPool {
             }) {
                 Ok(semaphore) => Some(semaphore),
                 Err(error) => {
+                    device.destroy_buffer(table);
                     device.destroy_buffer(indices);
                     device.destroy_buffer(vertices);
                     return Err(error.into());
@@ -357,6 +425,8 @@ impl MeshPool {
             indices,
             vertex_alloc: FreeList::new(desc.vertex_capacity),
             index_alloc: FreeList::new(desc.index_capacity),
+            table,
+            table_capacity: desc.mesh_capacity,
             meshes: Pool::new(),
             timeline,
             submitted: 0,
@@ -377,6 +447,83 @@ impl MeshPool {
         self.indices
     }
 
+    /// The mesh table. Bound as a read-only storage buffer; the vertex stage
+    /// indexes it with an instance's mesh id.
+    #[must_use]
+    pub const fn table_buffer(&self) -> BufferHandle {
+        self.table
+    }
+
+    /// How many meshes the table holds, which is the bound every mesh id is
+    /// below.
+    #[must_use]
+    pub const fn mesh_capacity(&self) -> u32 {
+        self.table_capacity
+    }
+
+    /// Creates the mesh table and clears it.
+    ///
+    /// Cleared rather than left as the driver handed it over: an entry no mesh
+    /// occupies is read by any instance naming it, and "all zeroes is the empty
+    /// range" is only a contract if it holds for the entries nothing has
+    /// written yet as well as for the ones [`MeshPool::free`] clears.
+    fn create_table(
+        device: &dyn Device,
+        stem: &str,
+        capacity: u32,
+    ) -> Result<BufferHandle, MeshPoolError> {
+        let size = u64::from(capacity) * MESH_ENTRY_STRIDE as u64;
+        let table = device.create_buffer(&BufferDesc {
+            label: Some(&format!("{stem} mesh table")),
+            size,
+            // Host-visible, for the reason `crate::instance_pool`'s buffers
+            // are: a write is then a `write_buffer` rather than a staging copy
+            // needing a barrier. Unlike those there is no ring, because nothing
+            // rewrites an entry between frames.
+            usage: BufferUsage::STORAGE,
+            memory: MemoryLocation::HostUpload,
+        })?;
+        let cleared = vec![0u8; usize::try_from(size).unwrap_or(usize::MAX)];
+        if let Err(error) = device.write_buffer(table, 0, &cleared) {
+            device.destroy_buffer(table);
+            return Err(error.into());
+        }
+        Ok(table)
+    }
+
+    /// Writes one mesh table entry, at the slot `index` names.
+    ///
+    /// The one place a [`MeshRange`] becomes the record the shader reads, so
+    /// the two layouts have a single point of contact rather than a conversion
+    /// per call site. A default range is the empty entry [`MeshPool::free`]
+    /// clears a slot with.
+    fn write_entry(
+        &self,
+        device: &dyn Device,
+        index: u32,
+        range: &MeshRange,
+    ) -> Result<(), MeshPoolError> {
+        let entry = GpuMesh {
+            base_vertex: range.base_vertex,
+            base_index: range.base_index,
+            index_count: range.index_count,
+        };
+        let at = u64::from(index) * MESH_ENTRY_STRIDE as u64;
+        device.write_buffer(self.table, at, &entry.to_bytes())?;
+        Ok(())
+    }
+
+    /// Table slots that cannot be handed out: live meshes, plus any
+    /// permanently withdrawn by generation exhaustion.
+    ///
+    /// Same shape and same reason as [`crate::instance_pool`]'s: [`Pool`] hands
+    /// out a fresh index only when it has no vacant slot, so this is exactly
+    /// the highest index it could be about to create.
+    fn table_slots_in_use(&self) -> u32 {
+        let used = self.meshes.len() + self.meshes.retired_slots();
+        u32::try_from(used).unwrap_or(u32::MAX)
+    }
+
     /// Suballocates room for a mesh and records a staging copy into it.
     ///
     /// `vertices` is `VERTEX_STRIDE`-strided vertex data; `indices` are
@@ -389,7 +536,8 @@ impl MeshPool {
     ///
     /// [`MeshPoolError::EmptyMesh`] or [`MeshPoolError::VertexStrideMismatch`]
     /// for data this pool cannot describe, [`MeshPoolError::PoolExhausted`] when
-    /// either pool has no block large enough, and [`MeshPoolError::Hal`] from any
+    /// either pool has no block large enough, [`MeshPoolError::MeshTableFull`]
+    /// when the table has no entry left, and [`MeshPoolError::Hal`] from any
     /// seam call. Nothing is left allocated on any failing path: a vertex range
     /// taken before the index pool refused is given back.
     pub fn upload(
@@ -414,6 +562,18 @@ impl MeshPool {
             });
         }
 
+        // Before either free list is touched, so a table that is full costs no
+        // allocation to give back. Checked rather than left to the write below
+        // running off the end of the buffer, which is the seam refusing an
+        // out-of-range write and says nothing about meshes.
+        let in_use = self.table_slots_in_use();
+        if in_use >= self.table_capacity {
+            return Err(MeshPoolError::MeshTableFull {
+                capacity: self.table_capacity,
+                in_use,
+            });
+        }
+
         let base_vertex = self
             .vertex_alloc
             .alloc(vertex_count)
@@ -434,16 +594,36 @@ impl MeshPool {
             base_index,
             index_count,
         };
-        match self.record_upload(device, queue, label, vertices, indices, range) {
-            Ok(ready_at) => Ok(self
-                .meshes
-                .insert(Resident {
-                    range,
-                    vertex_count,
-                    ready_at,
-                })
-                .cast()),
+        let ready_at = match self.record_upload(device, queue, label, vertices, indices, range) {
+            Ok(ready_at) => ready_at,
             Err(error) => {
+                self.vertex_alloc.free(base_vertex, vertex_count);
+                self.index_alloc.free(base_index, index_count);
+                return Err(error);
+            }
+        };
+        let handle: MeshHandle = self
+            .meshes
+            .insert(Resident {
+                range,
+                vertex_count,
+                ready_at,
+            })
+            .cast();
+        // The slot the pool just handed out is the table entry this mesh owns,
+        // and it is written now rather than at `flush`: the CPU-side residency
+        // gate is `MeshPool::mesh`, so a draw for a mesh whose bytes have not
+        // landed cannot be recorded whatever the table says.
+        match self.write_entry(device, handle.index(), &range) {
+            Ok(()) => Ok(handle),
+            Err(error) => {
+                // A mesh no shader can resolve is not a mesh, so the handle is
+                // retired and the space goes back rather than being held by
+                // something nothing can draw. The copy already submitted still
+                // runs into that space — harmlessly, because the next upload's
+                // own copy is submitted after it on the same queue and lands
+                // second.
+                self.meshes.remove(handle.cast());
                 self.vertex_alloc.free(base_vertex, vertex_count);
                 self.index_alloc.free(base_index, index_count);
                 Err(error)
@@ -631,31 +811,62 @@ impl MeshPool {
     /// expressed as a type rather than as a rule to remember.
     #[must_use]
     pub fn mesh(&self, handle: MeshHandle) -> Option<MeshRange> {
+        self.resident(handle).map(|resident| resident.range)
+    }
+
+    /// Which entry of the mesh table `handle` is: the number an instance's
+    /// [`GpuInstance::mesh`](crcbl_shaders::mesh::GpuInstance::mesh) carries.
+    ///
+    /// `None` on the same terms as [`MeshPool::mesh`], and for the same reason:
+    /// handing out an id for a mesh whose bytes may not have landed would move
+    /// §3.1's residency gate from "the caller cannot get one" to "the caller
+    /// must remember not to ask".
+    #[must_use]
+    pub fn table_index(&self, handle: MeshHandle) -> Option<u32> {
+        self.resident(handle).map(|_| handle.index())
+    }
+
+    /// `handle`'s mesh, if it is resident — the shared half of
+    /// [`MeshPool::mesh`] and [`MeshPool::table_index`], so the two cannot come
+    /// to disagree about what residency means.
+    fn resident(&self, handle: MeshHandle) -> Option<&Resident> {
         self.meshes
             .get(handle.cast())
             .filter(|resident| resident.ready_at <= self.completed)
-            .map(|resident| resident.range)
     }
 
-    /// Returns a mesh's space to both free lists.
+    /// Clears a mesh's table entry and returns its space to both free lists.
     ///
     /// The space is reusable immediately, which is only true because uploads are
     /// drained by [`MeshPool::flush`] before anything draws — freeing a mesh a
     /// submitted-but-unfinished copy still writes into would be a hazard, and
     /// P9's streaming path is where that stops being free.
     ///
+    /// **The entry is cleared before the space goes back**, which is why this
+    /// needs a device at all: an entry that outlived its mesh would resolve an
+    /// instance's mesh id to space some other mesh now owns. Cleared, it reads
+    /// as the empty range — see the [module docs](self), which also name the
+    /// case clearing cannot cover.
+    ///
     /// Returns whether the handle named a live mesh; a second free of the same
     /// handle answers `false` rather than corrupting the free list, because the
     /// handle's generation has moved on.
-    pub fn free(&mut self, handle: MeshHandle) -> bool {
-        let Some(resident) = self.meshes.remove(handle.cast()) else {
-            return false;
+    ///
+    /// # Errors
+    ///
+    /// [`MeshPoolError::Hal`] if the entry could not be cleared, in which case
+    /// **nothing is freed** — the mesh is still live and the caller can retry.
+    pub fn free(&mut self, device: &dyn Device, handle: MeshHandle) -> Result<bool, MeshPoolError> {
+        let Some(resident) = self.meshes.get(handle.cast()).copied() else {
+            return Ok(false);
         };
+        self.write_entry(device, handle.index(), &MeshRange::default())?;
+        self.meshes.remove(handle.cast());
         self.vertex_alloc
             .free(resident.range.base_vertex, resident.vertex_count);
         self.index_alloc
             .free(resident.range.base_index, resident.range.index_count);
-        true
+        Ok(true)
     }
 
     /// Vertices free, and the largest single run of them: the pair that tells
@@ -687,6 +898,7 @@ impl MeshPool {
         if let Some(semaphore) = self.timeline {
             device.destroy_semaphore(semaphore);
         }
+        device.destroy_buffer(self.table);
         device.destroy_buffer(self.indices);
         device.destroy_buffer(self.vertices);
     }
@@ -831,6 +1043,11 @@ mod tests {
         (recorder, device, queue)
     }
 
+    /// How many meshes the pools below can hold. More than any test uploads,
+    /// so a table that is full is a case a test asks for rather than one it
+    /// stumbles into.
+    const TEST_MESHES: u32 = 8;
+
     fn pool(device: &dyn Device, vertices: u32, indices: u32) -> MeshPool {
         MeshPool::new(
             device,
@@ -838,6 +1055,7 @@ mod tests {
                 label: Some("test"),
                 vertex_capacity: vertices,
                 index_capacity: indices,
+                mesh_capacity: TEST_MESHES,
             },
         )
         .expect("the null backend accepts every descriptor")
@@ -849,6 +1067,38 @@ mod tests {
         (0..n as usize * VERTEX_STRIDE)
             .map(|byte| (byte % 251) as u8)
             .collect()
+    }
+
+    /// The mesh table as the GPU would read it: every entry decoded out of the
+    /// bytes that actually reached the buffer, with the same layout
+    /// `mesh.slang` indexes it by.
+    ///
+    /// Read back rather than mirrored, so this is evidence about the upload and
+    /// not about the pool's own bookkeeping repeating itself.
+    fn table(recorder: &Recorder, pool: &MeshPool) -> Vec<GpuMesh> {
+        let bytes = recorder
+            .buffer_bytes(pool.table_buffer())
+            .expect("the table is live");
+        assert_eq!(
+            bytes.len(),
+            pool.mesh_capacity() as usize * MESH_ENTRY_STRIDE,
+            "the table must be one entry per mesh the pool can hold"
+        );
+        bytes
+            .chunks_exact(MESH_ENTRY_STRIDE)
+            .map(|entry| {
+                GpuMesh::from_bytes(entry.try_into().unwrap_or_else(|_| unreachable!("exact")))
+            })
+            .collect()
+    }
+
+    /// `range` as the entry the table holds for it.
+    fn entry(range: MeshRange) -> GpuMesh {
+        GpuMesh {
+            base_vertex: range.base_vertex,
+            base_index: range.base_index,
+            index_count: range.index_count,
+        }
     }
 
     // --- the allocator, which is pure logic ---
@@ -991,6 +1241,7 @@ mod tests {
                 label: Some("far too large"),
                 vertex_capacity: u32::MAX,
                 index_capacity: 8,
+                mesh_capacity: TEST_MESHES,
             },
         )
         .expect_err("a draw cannot address that many vertices");
@@ -1013,6 +1264,7 @@ mod tests {
                 label: Some("at the boundary"),
                 vertex_capacity: i32::MAX as u32,
                 index_capacity: 8,
+                mesh_capacity: TEST_MESHES,
             },
         )
         .expect("the largest addressable capacity is not too large");
@@ -1269,16 +1521,266 @@ mod tests {
         pool.flush(device.as_ref()).expect("drains");
         assert_eq!(pool.vertex_space(), (64 - 8, 64 - 8));
 
-        assert!(pool.free(handle), "the handle names a live mesh");
+        assert!(
+            pool.free(device.as_ref(), handle).expect("the write lands"),
+            "the handle names a live mesh"
+        );
         assert_eq!(pool.vertex_space(), (64, 64), "and its space comes back");
         assert_eq!(pool.index_space(), (64, 64));
         assert_eq!(pool.mesh(handle), None, "the handle stops resolving");
-        assert!(!pool.free(handle), "and a second free is refused");
+        assert_eq!(pool.table_index(handle), None, "and names no table entry");
+        assert!(
+            !pool
+                .free(device.as_ref(), handle)
+                .expect("nothing to write"),
+            "and a second free is refused"
+        );
         assert_eq!(
             pool.vertex_space(),
             (64, 64),
             "a refused free must not double-count the space"
         );
+
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    // --- the mesh table ---
+
+    /// **The table is what the pool says it is, after a sequence of allocations
+    /// and frees.** Decoded out of the buffer's own bytes, entry by entry,
+    /// against what [`MeshPool::mesh`] hands the CPU for the same handle.
+    ///
+    /// The sequence is chosen so that no single mistake passes: three meshes,
+    /// so an entry landing at the wrong stride is visible; a free in the
+    /// *middle*, so the surviving neighbours must be untouched; and a fourth
+    /// upload afterwards, which takes the freed slot and must replace that
+    /// entry rather than append past it.
+    #[test]
+    fn the_table_matches_the_pool_through_allocations_and_frees() {
+        let (recorder, device, queue) = open();
+        let mut pool = pool(device.as_ref(), 64, 64);
+
+        // Distinct sizes, so no two meshes have interchangeable entries.
+        let handles: Vec<MeshHandle> = [(4u32, 6usize), (3, 3), (5, 9)]
+            .into_iter()
+            .map(|(vertices, indices)| {
+                pool.upload(
+                    device.as_ref(),
+                    queue,
+                    "mesh",
+                    &vertex_bytes(vertices),
+                    &vec![0u32; indices],
+                )
+                .expect("they fit")
+            })
+            .collect();
+        pool.flush(device.as_ref()).expect("drains");
+
+        let live = |pool: &MeshPool, recorder: &Recorder, handles: &[MeshHandle]| {
+            let table = table(recorder, pool);
+            for handle in handles {
+                let range = pool.mesh(*handle).expect("resident");
+                let index = pool.table_index(*handle).expect("resident") as usize;
+                assert_eq!(
+                    table[index],
+                    entry(range),
+                    "entry {index} does not hold {handle:?}'s range"
+                );
+            }
+        };
+        live(&pool, &recorder, &handles);
+        // The ranges really are different, or the comparison above would hold
+        // for a table that wrote the same entry three times.
+        let ranges: Vec<MeshRange> = handles
+            .iter()
+            .map(|handle| pool.mesh(*handle).expect("resident"))
+            .collect();
+        assert_eq!(
+            ranges[1].base_vertex, 4,
+            "the second starts after the first"
+        );
+        assert_eq!(ranges[2].base_vertex, 7, "and the third after the second");
+
+        // Free the middle one. Its entry is cleared and its neighbours' are not.
+        let freed = pool.table_index(handles[1]).expect("resident");
+        assert!(
+            pool.free(device.as_ref(), handles[1])
+                .expect("the write lands")
+        );
+        let after = table(&recorder, &pool);
+        assert_eq!(
+            after[freed as usize],
+            GpuMesh::default(),
+            "a freed mesh's entry must be cleared"
+        );
+        live(&pool, &recorder, &[handles[0], handles[2]]);
+
+        // And a fourth mesh takes the freed slot, replacing that entry rather
+        // than landing past the ones already there.
+        let reused = pool
+            .upload(device.as_ref(), queue, "fourth", &vertex_bytes(2), &[0; 3])
+            .expect("the freed space fits it");
+        pool.flush(device.as_ref()).expect("drains");
+        assert_eq!(
+            pool.table_index(reused),
+            Some(freed),
+            "the freed table slot is the one handed out again"
+        );
+        live(&pool, &recorder, &[handles[0], handles[2], reused]);
+        assert_ne!(
+            table(&recorder, &pool)[freed as usize],
+            GpuMesh::default(),
+            "and the slot is no longer the empty range"
+        );
+
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **What an instance naming a freed mesh resolves to**, which is the
+    /// contract the module docs state: the empty range, and specifically *not*
+    /// the range of whatever mesh moved into the space.
+    ///
+    /// A table left stale is the obvious defect and this is what fails on it —
+    /// the freed mesh's entry would still name vertices that are now the
+    /// second mesh's, so an instance pointing at it would draw geometry it has
+    /// no relationship with rather than nothing at all.
+    #[test]
+    fn an_instance_naming_a_freed_mesh_resolves_to_the_empty_range() {
+        let (recorder, device, queue) = open();
+        let mut pool = pool(device.as_ref(), 64, 64);
+        let first = pool
+            .upload(device.as_ref(), queue, "first", &vertex_bytes(4), &[0; 6])
+            .expect("it fits");
+        pool.flush(device.as_ref()).expect("drains");
+        let mesh_id = pool.table_index(first).expect("resident");
+        let freed_range = pool.mesh(first).expect("resident");
+
+        assert!(
+            pool.free(device.as_ref(), first).expect("the write lands"),
+            "the mesh was live"
+        );
+
+        // The successor lands in the space the freed mesh had, which is what
+        // makes a stale entry actively wrong rather than merely out of date.
+        let second = pool
+            .upload(device.as_ref(), queue, "second", &vertex_bytes(4), &[0; 6])
+            .expect("the freed space fits it");
+        pool.flush(device.as_ref()).expect("drains");
+        assert_eq!(
+            pool.mesh(second).expect("resident"),
+            freed_range,
+            "this test is only meaningful while the successor takes the same space"
+        );
+
+        // The mesh id the instance still carries. The successor took the same
+        // *slot* too, so the entry is the successor's — see the module docs on
+        // the case a `u32` id cannot tell apart, which is why this is asserted
+        // against the successor rather than against the empty range here.
+        assert_eq!(pool.table_index(second), Some(mesh_id));
+
+        // With the successor gone the entry is empty again, and that is what an
+        // instance holding `mesh_id` reads: `index_count == 0`, no geometry —
+        // rather than a range naming somebody else's vertices.
+        assert!(pool.free(device.as_ref(), second).expect("the write lands"));
+        assert_eq!(
+            table(&recorder, &pool)[mesh_id as usize],
+            GpuMesh::default(),
+            "an id whose mesh was freed must resolve to the empty range"
+        );
+
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// Every entry is the empty range before anything is uploaded, so an
+    /// instance naming a slot no mesh has ever occupied reads no geometry
+    /// rather than whatever the driver left in the buffer.
+    ///
+    /// Asserted on the *write* rather than only on the contents: the null
+    /// backend hands out a zeroed buffer, so reading zeroes back says nothing
+    /// about whether anything cleared it — and a real driver's host-visible
+    /// allocation is not zeroed. The two halves together are the claim: the
+    /// whole table was written, and what it holds is empty ranges.
+    #[test]
+    fn a_fresh_table_is_empty_ranges() {
+        let (recorder, device, _) = open();
+        let pool = pool(device.as_ref(), 64, 64);
+        assert_eq!(pool.mesh_capacity(), TEST_MESHES);
+
+        let table_writes: Vec<(u64, usize)> = recorder
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                Event::BufferWritten {
+                    buffer,
+                    offset,
+                    len,
+                } if buffer == pool.table_buffer() => Some((offset, len)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            table_writes,
+            [(0, TEST_MESHES as usize * MESH_ENTRY_STRIDE)],
+            "creating a pool must clear the whole table, once"
+        );
+        assert_eq!(
+            table(&recorder, &pool),
+            vec![GpuMesh::default(); TEST_MESHES as usize],
+            "and what it cleared it to is empty ranges"
+        );
+
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// A table with no entry left refuses by name, and takes nothing: the
+    /// refused upload must not consume pool space, or a caller that retried
+    /// after making room would find less of it than before.
+    #[test]
+    fn a_full_mesh_table_fails_by_name_and_reserves_nothing() {
+        let (recorder, device, queue) = open();
+        let mut pool = MeshPool::new(
+            device.as_ref(),
+            &MeshPoolDesc {
+                label: Some("two meshes"),
+                vertex_capacity: 64,
+                index_capacity: 64,
+                mesh_capacity: 2,
+            },
+        )
+        .expect("the null backend accepts every descriptor");
+        let upload = |pool: &mut MeshPool| {
+            pool.upload(device.as_ref(), queue, "mesh", &vertex_bytes(2), &[0; 3])
+        };
+        let first = upload(&mut pool).expect("room");
+        upload(&mut pool).expect("room");
+        let before = pool.vertex_space();
+
+        let error = upload(&mut pool).expect_err("two meshes fill a table of two");
+        assert!(
+            matches!(
+                error,
+                MeshPoolError::MeshTableFull {
+                    capacity: 2,
+                    in_use: 2
+                }
+            ),
+            "got: {error:?}"
+        );
+        assert_eq!(
+            pool.vertex_space(),
+            before,
+            "a refused upload must reserve nothing, however much room the pools have"
+        );
+
+        // And a freed entry is handed out again, so the refusal is the table's
+        // size rather than the pool having given up.
+        pool.flush(device.as_ref()).expect("drains");
+        assert!(pool.free(device.as_ref(), first).expect("the write lands"));
+        upload(&mut pool).expect("the freed entry");
 
         pool.destroy(device.as_ref());
         recorder.assert_valid();

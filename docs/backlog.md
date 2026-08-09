@@ -3464,6 +3464,29 @@ the transport seam over a third transport shape.
   Slang's behaviour than is worth encoding for a guard whose false positives
   cost one declaration move. Reopen if a real shader finds it costly.
 
+### Owed by the GPU mesh table
+
+The table (`MeshPool::table_buffer`) is what §3.3's cull pass will build
+indirect draws from, so these two are due before a compute pass walks it, not
+after.
+
+- **A mesh id is a bare `u32` with no generation.** Freeing clears the entry to
+  the empty range, so a _freed_ id resolves to `index_count == 0` and draws
+  nothing. A **reused** slot is the gap: a stale id then names whichever mesh
+  took the space, silently and plausibly. `MeshHandle` is the generational type;
+  the id that reaches the GPU is not. Fix by putting a generation in the id or
+  an epoch word in the entry — the choice interacts with how wide the cull pass
+  wants its instance record, so decide them together.
+- **The table has no resident bit.** Residency is a CPU gate today
+  (`MeshPool::mesh`, `MeshPool::table_index`), which suffices only because the
+  CPU records every draw. Once a compute pass reads the table itself, an entry
+  written at upload but not yet flushed is reachable, and `index_count == 0` is
+  the only signal it has.
+- `crcbl-vk`'s `depth_probe` hand-builds a one-entry mesh table, so any further
+  binding added to `mesh.slang` has to be mirrored there. A second hand-built
+  copy of a layout is the kind of thing that drifts; worth folding into a shared
+  test helper the next time either moves.
+
 ### Settled: base vertex and base instance never reach a shader
 
 Recorded because it is a rule for every future shader here, and because it is
