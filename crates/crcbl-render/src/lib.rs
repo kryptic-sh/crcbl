@@ -22,8 +22,9 @@
 //! [`pipeline_barrier`](crcbl_hal::CommandEncoder::pipeline_barrier) during a
 //! frame.
 //!
-//! The barriers outside it are the **startup uploads**: [`forward`]'s staging
-//! copy for the cube, and [`ui_pass`]'s for the glyph atlas. Both run before any
+//! The barriers outside it are the **startup uploads**: [`mesh_pool`]'s staging
+//! copy into the geometry pools, and [`texture`]'s for every image
+//! ([`ui_pass`]'s glyph atlas and [`sprite_pass`]'s sheets). Both run before any
 //! frame exists and have no graph to belong to; both are called out at the call
 //! site. There are no others, and a barrier recorded during a frame from
 //! anywhere but [`graph::CompiledGraph::execute`] is a bug.
@@ -116,6 +117,7 @@ pub mod forward;
 pub mod graph;
 pub mod layers;
 pub mod menu;
+pub mod mesh_pool;
 pub mod nine_slice;
 pub mod sprite_pass;
 pub mod texture;
@@ -152,6 +154,9 @@ pub use graph::{
 };
 pub use layers::{Layer, LayerStack, Parallax};
 pub use menu::{MenuArt, MenuRenderer, menu_camera, menu_view_projection};
+pub use mesh_pool::{
+    Mesh, MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshRange, UPLOAD_TIMEOUT,
+};
 pub use nine_slice::{NineQuads, NineSliceSource, SliceQuad};
 pub use sprite_pass::{
     CONSTANTS_SIZE, INSTANCE_STRIDE, SAMPLE_PIXEL, SAMPLE_SMOOTH, SheetDesc, SheetId, Sprite,

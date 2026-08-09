@@ -24,10 +24,18 @@
 //! * **5** — orthographic mode, which is [`Camera::projection`] and *nothing
 //!   else*: no second pipeline, no branch in this file, no shader permutation.
 //!
-//! Explicitly not here: geometry pools, instance deltas, GPU culling, indirect
-//! draw count (all P7), bindless at scale (P3), shadows and real post (P7),
-//! materials (topic 37), asset loading (P9). The mesh is a constant in
-//! `crcbl-shaders` because rung 3 says "hardcoded cube/sphere".
+//! Explicitly not here: instance deltas, GPU culling, indirect draw count (all
+//! P7), bindless at scale (P3), shadows and real post (P7), materials (topic
+//! 37), asset loading (P9). The mesh is a constant in `crcbl-shaders` because
+//! rung 3 says "hardcoded cube/sphere".
+//!
+//! What *is* here, since 2026-08, is [`crate::mesh_pool`]: the cube is the first
+//! resident of the global vertex and index pools rather than owning two buffers
+//! of its own, so it is `{base_vertex, base_index, index_count}` like everything
+//! P7 will draw. Same geometry, different residence — the draw below is
+//! `draw_indexed(range.base_index..…, range.base_vertex, …)` with both bases
+//! zero for the only mesh in the pool, which is why the golden images did not
+//! move.
 //!
 //! # Uniforms are a ring, and they have to be
 //!
@@ -42,17 +50,18 @@
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
-    BufferUsage, ColorTargetState, CommandEncoderDesc, CullMode, DepthStencilState, Device,
-    FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageViewHandle,
-    IndexFormat, LoadOp, MemoryLocation, MultisampleState, PipelineLayoutDesc,
-    PipelineLayoutHandle, PrimitiveState, QueueHandle, ResourceState, SamplerAddressMode,
-    SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, SubmitInfo,
+    BufferUsage, ColorTargetState, CullMode, DepthStencilState, Device, FilterMode, Format,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageViewHandle, IndexFormat, LoadOp,
+    MemoryLocation, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
+    QueueHandle, ResourceState, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry,
+    ShaderModuleDesc, ShaderStages, StoreOp,
 };
 use crcbl_shaders::{MESH, Stage, TONEMAP, mesh};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::camera::{Camera, DirectionalLight};
 use crate::graph::{ImageId, ImportedImage, RenderGraph};
+use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError, MeshRange};
 use crate::transient::TransientImageDesc;
 
 /// The clear behind the mesh, in **linear** light.
@@ -67,13 +76,27 @@ pub const SCENE_CLEAR: [f32; 4] = [0.012, 0.016, 0.030, 1.0];
 /// frames-in-flight.
 pub const FRAMES_IN_FLIGHT: usize = 2;
 
+/// Vertices the geometry pool holds.
+///
+/// One cube is resident today, and the pool exists so that stops being the
+/// interesting number. It is device-local memory reserved at start-up and never
+/// grown — [`crate::mesh_pool`] says why — so it is sized for the scene P7 puts
+/// in it rather than for the mesh P1 draws.
+const POOL_VERTEX_CAPACITY: u32 = 64 * 1024;
+
+/// Indices the geometry pool holds. Four per vertex is the usual ratio for
+/// indexed triangle soup, rounded up.
+const POOL_INDEX_CAPACITY: u32 = 256 * 1024;
+
 /// Everything the forward frame owns, created once.
 #[derive(Debug)]
 pub struct ForwardRenderer {
-    // Geometry, uploaded once at startup.
-    vertices: BufferHandle,
-    indices: BufferHandle,
-    index_count: u32,
+    // Geometry: the global pools, and the cube's range in them. The range is
+    // resolved once, at build, and `MeshPool::mesh` only hands one out for a
+    // mesh whose upload has completed — so there is no way to reach the draw
+    // below with a mesh the GPU has not received.
+    pool: MeshPool,
+    cube: MeshRange,
 
     // Per-frame uniforms, one set per frame in flight.
     uniforms: Vec<BufferHandle>,
@@ -104,7 +127,7 @@ pub struct ForwardRenderer {
 /// `destroy_*` is explicit — so a failure half way through used to leak
 /// everything created before it. The recorder's leak assertions cover the happy
 /// path; this covers the other one.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Rollback {
     buffers: Vec<BufferHandle>,
     bind_groups: Vec<BindGroupHandle>,
@@ -112,6 +135,9 @@ struct Rollback {
     pipeline_layouts: Vec<PipelineLayoutHandle>,
     pipelines: Vec<GraphicsPipelineHandle>,
     samplers: Vec<SamplerHandle>,
+    /// The geometry pool, which owns two buffers, a semaphore and anything
+    /// still staged — so it cannot be rolled back as a list of handles.
+    pool: Option<MeshPool>,
 }
 
 impl Rollback {
@@ -135,6 +161,9 @@ impl Rollback {
         }
         for handle in self.buffers {
             device.destroy_buffer(handle);
+        }
+        if let Some(pool) = self.pool {
+            pool.destroy(device);
         }
     }
 }
@@ -175,22 +204,14 @@ impl ForwardRenderer {
         target_format: Format,
         rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
-        let vertices = upload(
-            device,
-            queue,
-            "cube vertices",
-            BufferUsage::STORAGE,
-            &mesh::cube_vertex_bytes(),
-        )?;
-        rollback.buffers.push(vertices);
-        let indices = upload(
-            device,
-            queue,
-            "cube indices",
-            BufferUsage::INDEX,
-            &mesh::cube_index_bytes(),
-        )?;
-        rollback.buffers.push(indices);
+        let (pool, cube) = Self::build_geometry(device, queue)?;
+        // The handle is `Copy`, so it can be read out before the pool becomes
+        // the rollback's — which it must be before the first `?` below, or a
+        // failed pipeline would leak two device-local buffers. The index pool is
+        // not named here at all: it is bound at draw time rather than
+        // descriptor-written, and only the vertex pool reaches a bind group.
+        let vertices = pool.vertex_buffer();
+        rollback.pool = Some(pool);
 
         // --- the mesh pass ---
         //
@@ -404,9 +425,11 @@ impl ForwardRenderer {
         rollback.samplers.push(sampler);
 
         Ok(Self {
-            vertices,
-            indices,
-            index_count: u32::try_from(mesh::CUBE_INDEX_COUNT).expect("a cube is small"),
+            pool: rollback
+                .pool
+                .take()
+                .unwrap_or_else(|| unreachable!("the pool was placed in the rollback above")),
+            cube,
             uniforms,
             mesh_groups,
             frame: 0,
@@ -420,6 +443,56 @@ impl ForwardRenderer {
             tonemap_group: None,
             target_format,
         })
+    }
+
+    /// Creates the geometry pool and makes the cube resident in it.
+    ///
+    /// Separate from [`ForwardRenderer::build`] because it is **self-cleaning**:
+    /// the pool is not the rollback's until this has returned, so a failure
+    /// between creating it and flushing the cube releases it here.
+    fn build_geometry(
+        device: &dyn Device,
+        queue: QueueHandle,
+    ) -> Result<(MeshPool, MeshRange), HalError> {
+        let mut pool = MeshPool::new(
+            device,
+            &MeshPoolDesc {
+                label: Some("forward geometry"),
+                vertex_capacity: POOL_VERTEX_CAPACITY,
+                index_capacity: POOL_INDEX_CAPACITY,
+            },
+        )?;
+        match Self::resident_cube(device, queue, &mut pool) {
+            Ok(range) => Ok((pool, range)),
+            Err(error) => {
+                pool.destroy(device);
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Uploads the cube and returns its range — **only** once the transfer has
+    /// completed.
+    ///
+    /// The three calls are §3.1's upload path in order: the copy is recorded and
+    /// submitted against a timeline value, [`MeshPool::flush`] is what makes that
+    /// value pass, and [`MeshPool::mesh`] is what refuses to hand out a range
+    /// before it has.
+    fn resident_cube(
+        device: &dyn Device,
+        queue: QueueHandle,
+        pool: &mut MeshPool,
+    ) -> Result<MeshRange, MeshPoolError> {
+        let cube = pool.upload(
+            device,
+            queue,
+            "cube",
+            &mesh::cube_vertex_bytes(),
+            &mesh::cube_indices(),
+        )?;
+        pool.flush(device)?;
+        pool.mesh(cube)
+            .ok_or(MeshPoolError::NotResident { handle: cube })
     }
 
     /// Rotates to the next frame's uniform buffer and writes this frame's
@@ -489,9 +562,8 @@ impl ForwardRenderer {
         let group = self.mesh_groups[self.frame];
         let pipeline = self.mesh_pipeline;
         let layout = self.mesh_pipeline_layout;
-        let vertices = self.vertices;
-        let indices = self.indices;
-        let index_count = self.index_count;
+        let indices = self.pool.index_buffer();
+        let cube = self.cube;
 
         graph
             .add_render_pass("forward")
@@ -501,9 +573,23 @@ impl ForwardRenderer {
                 let encoder = ctx.encoder();
                 encoder.bind_graphics_pipeline(pipeline);
                 encoder.bind_group(0, group, &[], layout);
+                // The index pool is bound whole, at offset zero, for every mesh
+                // in it: the mesh's place is the draw's first index and base
+                // vertex, not a buffer offset. That is what makes one bind
+                // enough for the scene P7 puts in here.
                 encoder.bind_index_buffer(indices, 0, IndexFormat::Uint32);
-                encoder.draw_indexed(0..index_count, 0, 0..1);
-                let _ = vertices;
+                let first = cube.base_index;
+                encoder.draw_indexed(
+                    first..first + cube.index_count,
+                    // Every backend adds this to the value it reads out of the
+                    // index buffer, which is why the uploaded indices are
+                    // mesh-relative and a mesh can move without being rewritten.
+                    // The pool refuses a capacity a signed base vertex could not
+                    // address, so this conversion has no failing case.
+                    i32::try_from(cube.base_vertex)
+                        .unwrap_or_else(|_| unreachable!("MeshPool::new caps the vertex capacity")),
+                    0..1,
+                );
             });
 
         // The tonemap group names a *graph-owned* view, so it can only be built
@@ -638,8 +724,7 @@ impl ForwardRenderer {
         for buffer in self.uniforms {
             device.destroy_buffer(buffer);
         }
-        device.destroy_buffer(self.indices);
-        device.destroy_buffer(self.vertices);
+        self.pool.destroy(device);
     }
 }
 
@@ -655,112 +740,6 @@ fn entry(shader: &crcbl_shaders::Shader, stage: Stage) -> Result<&'static str, H
             shader.name()
         ))
     })
-}
-
-/// Uploads `bytes` into a fresh device-local buffer through a staging copy.
-///
-/// The real upload path — staging buffer, copy, barrier into the state the
-/// shader reads it in — rather than a host-visible buffer written directly.
-/// `docs/plan/03-gpu-driven-rendering.md` §3.1's upload path is a staging ring
-/// with timeline tracking, and doing the shape once at startup means P7 changes
-/// *when* this happens rather than *what* happens.
-///
-/// The barrier here is the one exception to "no manual barriers outside the
-/// graph", and it is not really one: this is a **startup** submission with no
-/// graph in the room, before any frame. Every barrier in a *frame* is the
-/// graph's.
-///
-/// Every object created here is released on every path out, failing ones
-/// included: a `?` that walked away from the staging buffer would leak one per
-/// failed startup and leave the recorder's leak assertions passing.
-fn upload(
-    device: &dyn Device,
-    queue: QueueHandle,
-    label: &str,
-    usage: BufferUsage,
-    bytes: &[u8],
-) -> Result<BufferHandle, HalError> {
-    let size = bytes.len() as u64;
-    let staging = device.create_buffer(&BufferDesc {
-        label: Some("upload staging"),
-        size,
-        usage: BufferUsage::TRANSFER_SRC,
-        memory: MemoryLocation::HostUpload,
-    })?;
-    let target = upload_into_target(device, queue, label, usage, bytes, staging);
-    device.destroy_buffer(staging);
-    target
-}
-
-/// The half of [`upload`] that owns the destination buffer.
-fn upload_into_target(
-    device: &dyn Device,
-    queue: QueueHandle,
-    label: &str,
-    usage: BufferUsage,
-    bytes: &[u8],
-    staging: BufferHandle,
-) -> Result<BufferHandle, HalError> {
-    let size = bytes.len() as u64;
-    device.write_buffer(staging, 0, bytes)?;
-
-    let target = device.create_buffer(&BufferDesc {
-        label: Some(label),
-        size,
-        usage: usage | BufferUsage::TRANSFER_DST,
-        memory: MemoryLocation::DeviceLocal,
-    })?;
-    match record_upload(device, queue, usage, size, staging, target) {
-        Ok(()) => Ok(target),
-        Err(error) => {
-            device.destroy_buffer(target);
-            Err(error)
-        }
-    }
-}
-
-/// Records, submits and drains the staging copy.
-fn record_upload(
-    device: &dyn Device,
-    queue: QueueHandle,
-    usage: BufferUsage,
-    size: u64,
-    staging: BufferHandle,
-    target: BufferHandle,
-) -> Result<(), HalError> {
-    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-        label: Some("startup upload"),
-        queue,
-    });
-    encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
-        src: staging,
-        src_offset: 0,
-        dst: target,
-        dst_offset: 0,
-        size,
-    });
-    encoder.pipeline_barrier(&crcbl_hal::Barriers {
-        buffers: &[crcbl_hal::BufferBarrier::new(
-            target,
-            ResourceState::TransferDst,
-            if usage.contains(BufferUsage::INDEX) {
-                ResourceState::IndexBuffer
-            } else {
-                ResourceState::ShaderRead
-            },
-        )],
-        ..crcbl_hal::Barriers::default()
-    });
-    let commands = encoder.finish()?;
-
-    // The seam sanctions `wait_idle` as "a shutdown and test primitive".
-    // Startup is neither, but it is also not a frame, and the staging buffer
-    // cannot be freed until the copy has run.
-    let submitted = device
-        .submit(queue, &SubmitInfo::new(&[commands]))
-        .and_then(|()| device.wait_idle());
-    device.destroy_command_buffer(commands);
-    submitted
 }
 
 #[cfg(test)]

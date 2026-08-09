@@ -16,6 +16,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Global geometry pools: `crcbl_render::mesh_pool`, and the cube now lives in
+  one.** One device-local vertex buffer and one index buffer, suballocated by a
+  first-fit free list, so a mesh is
+  `MeshRange { base_vertex, base_index, index_count }` — the three integers
+  `docs/plan/03-gpu-driven-rendering.md` §3.1 asks for and everything above it
+  (instance data, GPU culling, indirect draws, meshlets) assumes.
+  `MeshPool::upload` suballocates both pools, stages the bytes and submits the
+  copy against the pool's own timeline semaphore; `MeshPool::flush` waits for
+  that value and retires the staging buffers; `MeshPool::mesh` hands out a range
+  **only** for a mesh whose upload has completed, so the renderer cannot consume
+  geometry the GPU has not received. `MeshPool::free` returns a mesh's space and
+  retires its handle. `ForwardRenderer` no longer owns two buffers of its own:
+  the cube is the pool's first resident, drawn as a range with `draw_indexed`'s
+  own base vertex, and the `mesh` and `ortho mesh` goldens are unchanged by the
+  move.
+- **The pools never grow and never defragment, and say so by name.** Capacity is
+  fixed at `MeshPool::new`; a request no single free block can satisfy fails
+  with `MeshPoolError::PoolExhausted`, which names the largest free block _and_
+  the total free so a caller can tell fragmentation from a full pool. This is
+  §3.1's stated MVP — "free-list + offline compaction on load only, no live
+  defrag" — rather than an omission; the free list does coalesce neighbouring
+  frees, so an alloc/free/alloc cycle reuses its space.
 - **Mesh shaders are usable end to end: `Device::create_mesh_pipeline`,
   `CommandEncoder::draw_mesh_tasks`, and a golden image of the result.**
   `Features::MESH_SHADER` was reported and nothing could ask for it. The seam
