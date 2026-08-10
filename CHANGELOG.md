@@ -1796,6 +1796,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Every `crcbl-mtl` draw hung on Apple's paravirtual GPU, and the call was
+  `setDepthStencilState:nil`.** `bind_graphics_pipeline` passed nil for any
+  pipeline whose descriptor carried no `depth_stencil` — which is every pipeline
+  drawing into a colour-only pass — and that argument hangs the virtualised
+  device GitHub's macOS runners expose, faulting the command buffer with
+  `kIOGPUCommandBufferCallbackErrorHang` while render-pass clears on the same
+  device succeeded. A ten-probe bisect isolated it: a hand-encoded pass plus
+  `setDepthStencilState:nil` hung, the same pass plus a real
+  `MTLDepthStencilState` passed, and each of the five other rasteriser calls
+  passed alone.
+
+  Metal documents nil as "restore the default state", so the driver is at fault,
+  but the fix costs one object per device and removes the nil path entirely: a
+  `MetalDevice` now builds one always-pass, never-write `MTLDepthStencilState`
+  when it opens, and a pipeline that declares no depth/stencil state carries
+  that instead of `None`. The substituted state compares `Always` with depth
+  writes off and keeps on every stencil outcome, so it tests nothing and writes
+  nothing — it cannot change an image.
+
 - **`crcbl-dx12` built root signatures naming registers its shaders do not
   read.** `BaseShaderRegister` was the seam's binding number and `RegisterSpace`
   was the set index, on the theory that `[[vk::binding(binding, set)]]` reaches

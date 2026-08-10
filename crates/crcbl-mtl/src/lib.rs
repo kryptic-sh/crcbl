@@ -291,12 +291,6 @@ mod conv;
 mod device;
 #[cfg(target_os = "macos")]
 mod draw;
-// Diagnostics, not code this crate ships: the bisect for `docs/backlog.md`'s
-// "Metal draws hang, and it is our bug, not the runner". Gated on the hardware
-// feature *and* on `test` because every item in it is a probe that makes a real
-// GPU draw, and the module goes when the question is answered.
-#[cfg(all(target_os = "macos", test, feature = "mtl-e2e"))]
-mod draw_probe;
 #[cfg(target_os = "macos")]
 mod fault;
 #[cfg(target_os = "macos")]

@@ -999,9 +999,11 @@ impl CommandEncoder for MetalCommandEncoder {
         encoder.setDepthClipMode(bound.raster.clip);
         let [constant, slope_scale, clamp] = bound.raster.bias;
         encoder.setDepthBias_slopeScale_clamp(constant, slope_scale, clamp);
-        // Nil restores Metal's default state — always pass, never write —
-        // which is exactly what `depth_stencil: None` means on the seam.
-        encoder.setDepthStencilState(bound.depth_stencil.as_deref());
+        // Always an object, never nil: a pipeline with no depth/stencil state
+        // carries the device's always-pass one instead, because nil hangs
+        // Apple's paravirtual GPU. `crcbl_mtl::pipeline`'s
+        // `default_depth_stencil_state` has the bisect and the no-op argument.
+        encoder.setDepthStencilState(Some(&bound.depth_stencil));
         if let Some(reference) = bound.raster.stencil_reference {
             encoder.setStencilReferenceValue(reference);
         }

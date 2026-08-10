@@ -24,21 +24,12 @@
 # not on shader execution. `.github/workflows/ci.yml` explains why there and
 # passes the filter; this script excludes nothing on its own.
 #
-# # The draw probes, and running one at a time
+# # Running one test at a time
 #
-# `crcbl_mtl::draw_probe` holds the bisect for the draw hang `docs/backlog.md`
-# describes: a pass that faults on CI's paravirtual device, and beside it the
-# hand-encoded pass that does not, plus one encoder state call at a time.
-# Extra arguments go straight to nextest, so a person on a real Mac runs the
-# set, or any one of them, by name:
+# Extra arguments go straight to nextest, so a person on a real Mac runs any
+# one test by name:
 #
-#   crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(draw_probe_)'
-#   crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(draw_probe_a_hand_encoded_pass_plus_set_front_facing_winding)'
-#
-# **A real Mac is where they mean the most.** Every one of them is expected to
-# pass on an unvirtualised GPU — they draw the same triangle the ordinary suite
-# does — so a probe that fails *there* is a defect in this backend that the
-# paravirtual device merely found first.
+#   crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear)'
 #
 # # The zero-tests check is the point
 #

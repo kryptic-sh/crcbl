@@ -52,8 +52,8 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSString, NSUInteger};
 use objc2_metal::{
     MTLArgumentBuffersTier, MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandQueue,
-    MTLDevice, MTLEvent, MTLResource, MTLSamplerDescriptor, MTLSamplerState, MTLSharedEvent,
-    MTLTexture, MTLTextureDescriptor,
+    MTLDepthStencilState, MTLDevice, MTLEvent, MTLResource, MTLSamplerDescriptor, MTLSamplerState,
+    MTLSharedEvent, MTLTexture, MTLTextureDescriptor,
 };
 
 use crate::command::MetalCommandEncoder;
@@ -315,6 +315,23 @@ pub(crate) struct DeviceInner {
     /// families, which is exactly why the seam's enum is named
     /// [`QueueKind`] rather than `QueueFamily`.
     pub(crate) queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    /// The always-pass, never-write `MTLDepthStencilState` that stands in for
+    /// nil, and the reason `setDepthStencilState:` has no nil path at all:
+    /// passing nil hangs Apple's paravirtual GPU. `crcbl_mtl::pipeline`'s
+    /// [`default_depth_stencil_state`](crate::pipeline::default_depth_stencil_state)
+    /// builds it and argues both halves — the hang, and why the substitution
+    /// cannot change an image.
+    ///
+    /// **One object per device, created at open.** It is immutable, it is
+    /// `Send + Sync` on its own (`objc2-metal` declares `MTLDepthStencilState`
+    /// so), and every pipeline that needs it holds a `Retained` clone — so it
+    /// outlives every encoder that binds it without living under `state`'s
+    /// `Mutex` the way the tables do. Eager rather than `crcbl-dx12`'s
+    /// create-on-first-use `indirect_signature`, because that cache is keyed on
+    /// `(kind, stride)` and this is a single object with no key: there is
+    /// nothing for a lazy path to decide, and the one message send belongs
+    /// where its failure can still be reported as device creation failing.
+    pub(crate) default_depth_stencil: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     pub(crate) caps: DeviceCaps,
     /// Says, once, that a present wait actually reached a drawable.
     ///
@@ -337,12 +354,12 @@ pub(crate) struct DeviceInner {
 // would not need, and the reason it does is narrower than "Objective-C is not
 // thread-safe".
 //
-// `MTLDevice`, `MTLCommandQueue` and `MTLSamplerState` are all declared
-// `NSObjectProtocol + Send + Sync` in `objc2-metal`, so those three fields
-// carry the markers themselves and are not why this impl exists. `MTLBuffer`
-// and `MTLTexture` are not: they inherit from `MTLResource`, which objc2 leaves
-// unmarked because `MTLBuffer::contents` hands out a raw pointer into the
-// allocation and a binding cannot know what a user will do with it.
+// `MTLDevice`, `MTLCommandQueue`, `MTLDepthStencilState` and `MTLSamplerState`
+// are all declared `NSObjectProtocol + Send + Sync` in `objc2-metal`, so those
+// fields carry the markers themselves and are not why this impl exists.
+// `MTLBuffer` and `MTLTexture` are not: they inherit from `MTLResource`, which
+// objc2 leaves unmarked because `MTLBuffer::contents` hands out a raw pointer
+// into the allocation and a binding cannot know what a user will do with it.
 //
 // This backend can answer that, which is what makes the assertion sound rather
 // than optimistic:
@@ -648,6 +665,9 @@ impl MetalDevice {
         if let Some(label) = desc.label {
             queue.setLabel(Some(&NSString::from_str(label)));
         }
+        // Before any pipeline exists, because every pipeline without a
+        // depth/stencil state binds it and nil is not an alternative here.
+        let default_depth_stencil = crate::pipeline::default_depth_stencil_state(&raw)?;
 
         // **Metal has no `pEnabledFeatures`.** A `VkDevice` reports only what
         // was switched on at creation, so `crcbl-vk` intersects the adapter's
@@ -664,6 +684,7 @@ impl MetalDevice {
             instance,
             raw,
             queue,
+            default_depth_stencil,
             caps,
             first_present_wait: Once::new(),
             id,
@@ -2217,15 +2238,16 @@ fn resolve_count(requested: u32, base: NSUInteger, total: NSUInteger) -> NSUInte
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use std::time::Duration;
 
     use crcbl_hal::{
         Barriers, BufferCopy, BufferImageCopy, ClearValue, ColorAttachment, ColorTargetState,
-        Extent3d, ImageAspect, ImageBarrier, ImageSubresourceLayers, ImageSubresourceRange,
-        ImageUsage, ImageViewType, Instance, LoadOp, MultisampleState, Offset3d, PrimitiveState,
-        Rect2d, RenderPassDesc, ResourceState, SemaphoreSignal, ShaderEntry, StoreOp,
+        DepthStencilState, Extent3d, ImageAspect, ImageBarrier, ImageSubresourceLayers,
+        ImageSubresourceRange, ImageUsage, ImageViewType, Instance, LoadOp, MultisampleState,
+        Offset3d, PrimitiveState, Rect2d, RenderPassDesc, ResourceState, SemaphoreSignal,
+        ShaderEntry, StoreOp,
     };
     use objc2_metal::MTLHazardTrackingMode;
 
@@ -2245,7 +2267,7 @@ pub(crate) mod tests {
 
     /// A device, opened through this crate's own type so a test can reach the
     /// pools underneath it.
-    pub(crate) fn open_device() -> (MetalInstance, MetalDevice) {
+    fn open_device() -> (MetalInstance, MetalDevice) {
         let instance = open_instance();
         let adapters = instance.adapters();
         assert!(!adapters.is_empty(), "a Mac has at least one adapter");
@@ -2501,10 +2523,10 @@ pub(crate) mod tests {
     /// the attachment been `Rgba8UnormSrgb`, a clear of `0.5` would land as
     /// `188`, not `128`, because the hardware encodes on write. See
     /// `crcbl_mtl::conv`.
-    pub(crate) const CLEAR: [f32; 4] = [17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 1.0];
+    const CLEAR: [f32; 4] = [17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 1.0];
 
     /// What [`CLEAR`] must read back as, per the derivation above.
-    pub(crate) const CLEAR_TEXEL: [u8; 4] = [0x11, 0x22, 0x33, 0xFF];
+    const CLEAR_TEXEL: [u8; 4] = [0x11, 0x22, 0x33, 0xFF];
 
     /// A second colour, for the load/store pair. Same derivation.
     const OTHER: [f32; 4] = [204.0 / 255.0, 187.0 / 255.0, 170.0 / 255.0, 1.0];
@@ -2525,7 +2547,7 @@ pub(crate) mod tests {
     /// `format`: Metal permits a view to reinterpret a texture's format, and a
     /// test that reinterpreted one here by accident would be asserting about a
     /// pair of formats rather than the one it named.
-    pub(crate) fn color_target_of(
+    fn color_target_of(
         device: &MetalDevice,
         extent: Extent3d,
         format: Format,
@@ -2560,7 +2582,7 @@ pub(crate) mod tests {
     }
 
     /// A host-readable buffer, poisoned so an absent copy cannot pass.
-    pub(crate) fn readback_buffer(device: &MetalDevice, size: u64) -> BufferHandle {
+    fn readback_buffer(device: &MetalDevice, size: u64) -> BufferHandle {
         let handle = device
             .create_buffer(&buffer(size, MemoryLocation::HostReadback))
             .expect("a readback buffer");
@@ -2571,7 +2593,7 @@ pub(crate) mod tests {
     }
 
     /// The whole of an `extent`-sized image, copied into the start of a buffer.
-    pub(crate) fn whole_image_copy_of(
+    fn whole_image_copy_of(
         image: ImageHandle,
         into: BufferHandle,
         extent: Extent3d,
@@ -2604,7 +2626,7 @@ pub(crate) mod tests {
     /// genuinely have nothing else to do"; the deadline is what turns a
     /// completion point that is never reached into a failed test instead of a
     /// hung one.
-    pub(crate) fn drain(device: &MetalDevice, readback: ReadbackHandle, size: usize) -> Vec<u8> {
+    fn drain(device: &MetalDevice, readback: ReadbackHandle, size: usize) -> Vec<u8> {
         let mut out = vec![0u8; size];
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -2803,11 +2825,11 @@ pub(crate) mod tests {
     /// The image the triangle is drawn into: square, so "the centre" and "a
     /// corner" are far apart, and 64 texels wide so a row is 256 bytes — the
     /// same comfortable stride [`TARGET`] was chosen for.
-    pub(crate) const CANVAS: Extent3d = Extent3d::d2(64, 64);
+    const CANVAS: Extent3d = Extent3d::d2(64, 64);
 
     #[cfg(feature = "mtl-e2e")]
     /// Bytes one full copy of [`CANVAS`] occupies, at four bytes a texel.
-    pub(crate) const CANVAS_BYTES: usize = 64 * 64 * 4;
+    const CANVAS_BYTES: usize = 64 * 64 * 4;
 
     /// **The triangle's colour, derived exactly as [`CLEAR`] is.**
     ///
@@ -2849,7 +2871,7 @@ pub(crate) mod tests {
     /// Built with [`INK`] formatted in rather than written out, so the colour
     /// the shader returns and the colour the assertions expect cannot drift
     /// apart.
-    pub(crate) fn ink_msl() -> String {
+    fn ink_msl() -> String {
         format!(
             "#include <metal_stdlib>\n\
              using namespace metal;\n\
@@ -2872,7 +2894,7 @@ pub(crate) mod tests {
     }
 
     /// The MSL-only descriptor a Metal caller supplies.
-    pub(crate) fn msl_module<'a>(msl: &'a str, label: &'a str) -> ShaderModuleDesc<'a> {
+    fn msl_module<'a>(msl: &'a str, label: &'a str) -> ShaderModuleDesc<'a> {
         ShaderModuleDesc {
             label: Some(label),
             spirv: &[],
@@ -2883,7 +2905,7 @@ pub(crate) mod tests {
     }
 
     /// The empty pipeline layout, which is the only one this slice can make.
-    pub(crate) fn empty_layout(device: &MetalDevice) -> PipelineLayoutHandle {
+    fn empty_layout(device: &MetalDevice) -> PipelineLayoutHandle {
         device
             .create_pipeline_layout(&PipelineLayoutDesc {
                 label: Some("crcbl-mtl empty layout"),
@@ -3428,6 +3450,95 @@ using namespace metal;\n\
             matches!(error, HalError::InvalidHandle { kind, .. } if kind == "pipeline layout"),
             "{error:?}"
         );
+    }
+
+    /// **A pipeline that declares no depth/stencil state binds the device's
+    /// default object — never nil.**
+    ///
+    /// `setDepthStencilState:nil` hangs Apple's paravirtual GPU, which is what
+    /// made every draw this backend recorded fault on GitHub's macOS runner
+    /// while a render-pass clear passed. `crcbl_mtl::pipeline`'s
+    /// [`default_depth_stencil_state`](crate::pipeline::default_depth_stencil_state)
+    /// carries the bisect that named the call and the argument that the
+    /// substitution cannot change an image.
+    ///
+    /// **What turns it red.** Handing Metal nil again — the shape the seam used
+    /// to carry, an `Option` that was `None` for every pipeline whose pass has
+    /// no depth attachment. And, from the other side, substituting the default
+    /// for a pipeline that *did* declare depth state, which would silently
+    /// disable a depth test the caller asked for: the second half asserts that a
+    /// declared state resolves to its own object.
+    ///
+    /// **This needs a Metal device and not a working one.** It creates state
+    /// objects and reads them back through the same resolve the encoder uses;
+    /// nothing is submitted and no shader runs, so it is neither `#[ignore]`d
+    /// nor behind `mtl-e2e` and it runs on the device that faults on a draw.
+    #[test]
+    fn a_pipeline_without_depth_state_binds_the_devices_default_rather_than_nil() {
+        let (_instance, device) = open_device();
+        let layout = empty_layout(&device);
+        let module = device
+            .create_shader_module(&msl_module(&ink_msl(), "crcbl-mtl ink.metal"))
+            .expect("valid MSL compiles");
+        let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+        let desc = GraphicsPipelineDesc {
+            label: Some("crcbl-mtl no depth state"),
+            layout,
+            vertex: ShaderEntry {
+                module,
+                entry_point: "vertexMain",
+            },
+            fragment: Some(ShaderEntry {
+                module,
+                entry_point: "fragmentMain",
+            }),
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            color_targets: &targets,
+        };
+        let colour_only = device
+            .create_graphics_pipeline(&desc)
+            .expect("a colour-only pipeline");
+        let with_depth = device
+            .create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("crcbl-mtl reversed-Z depth state"),
+                depth_stencil: Some(DepthStencilState::default()),
+                ..desc
+            })
+            .expect("a pipeline declaring the seam's default reversed-Z depth state");
+
+        let default = &device.inner.default_depth_stencil;
+        let bound = device
+            .inner
+            .graphics_pipeline_raw(colour_only)
+            .expect("the pipeline is live and this device's");
+        assert!(
+            std::ptr::eq(
+                Retained::as_ptr(&bound.depth_stencil),
+                Retained::as_ptr(default)
+            ),
+            "a pipeline with no depth/stencil state must bind the device's shared always-pass \
+             object, because nil is what hangs the paravirtual GPU"
+        );
+
+        let bound = device
+            .inner
+            .graphics_pipeline_raw(with_depth)
+            .expect("the pipeline is live and this device's");
+        assert!(
+            !std::ptr::eq(
+                Retained::as_ptr(&bound.depth_stencil),
+                Retained::as_ptr(default)
+            ),
+            "a pipeline that declares depth state must bind that state, not the always-pass \
+             default that would drop its depth test"
+        );
+
+        device.destroy_graphics_pipeline(with_depth);
+        device.destroy_graphics_pipeline(colour_only);
+        device.destroy_shader_module(module);
+        device.destroy_pipeline_layout(layout);
     }
 
     /// A pipeline layout is the empty one or a refusal, and the two refusals are
@@ -5296,11 +5407,10 @@ using namespace metal;\n\
     ///
     /// The viewport and the scissor are always recorded, both covering the
     /// whole canvas, because that is what every draw in this backend's own
-    /// suite records. `crcbl_mtl::draw_probe` once varied them; both calls are
-    /// eliminated as suspects in the Metal draw hang and the variants that
-    /// dropped them are gone.
+    /// suite records. The retired draw-hang probes once varied them, and
+    /// eliminated both calls as suspects.
     #[cfg(feature = "mtl-e2e")]
-    pub(crate) fn draw_canvas(
+    fn draw_canvas(
         device: &MetalDevice,
         format: Format,
         paint: impl FnOnce(&mut dyn CommandEncoder),
@@ -5377,7 +5487,7 @@ using namespace metal;\n\
     /// silent identity for a format whose layout is neither of these two would
     /// be an assertion that no longer knows what it is comparing.
     #[cfg(feature = "mtl-e2e")]
-    pub(crate) fn texel_in(format: Format, rgba: [u8; 4]) -> [u8; 4] {
+    fn texel_in(format: Format, rgba: [u8; 4]) -> [u8; 4] {
         match format {
             Format::Rgba8Unorm => rgba,
             Format::Bgra8Unorm => [rgba[2], rgba[1], rgba[0], rgba[3]],
@@ -5393,7 +5503,7 @@ using namespace metal;\n\
     /// attachment must hold, so it proves the channel *order* as well as the
     /// coverage — see [`texel_in`].
     #[cfg(feature = "mtl-e2e")]
-    pub(crate) fn assert_ink_triangle(bytes: &[u8], format: Format) {
+    fn assert_ink_triangle(bytes: &[u8], format: Format) {
         assert_eq!(bytes.len(), CANVAS_BYTES, "the readback is the wrong size");
         let ink = texel_in(format, INK_TEXEL);
         let clear = texel_in(format, CLEAR_TEXEL);

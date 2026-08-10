@@ -84,10 +84,11 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLComputePipelineDescriptor, MTLComputePipelineState, MTLCullMode, MTLDepthClipMode,
-    MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLFunction, MTLLibrary,
-    MTLPipelineOption, MTLPrimitiveType, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
-    MTLSize, MTLStencilDescriptor, MTLTriangleFillMode, MTLWinding,
+    MTLCompareFunction, MTLComputePipelineDescriptor, MTLComputePipelineState, MTLCullMode,
+    MTLDepthClipMode, MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLFunction,
+    MTLLibrary, MTLPipelineOption, MTLPrimitiveType, MTLRenderPipelineDescriptor,
+    MTLRenderPipelineState, MTLSize, MTLStencilDescriptor, MTLStencilOperation,
+    MTLTriangleFillMode, MTLWinding,
 };
 
 use crate::conv;
@@ -143,9 +144,11 @@ pub(crate) struct RasterState {
 pub(crate) struct GraphicsPipelineEntry {
     pub(crate) owner: u64,
     pub(crate) raw: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    /// `None` for a pipeline with no depth/stencil state, which binds nil and
-    /// so restores Metal's default: always pass, never write.
-    pub(crate) depth_stencil: Option<Retained<ProtocolObject<dyn MTLDepthStencilState>>>,
+    /// Never absent. A pipeline that declares no depth/stencil state carries
+    /// the device's [`DeviceInner::default_depth_stencil`] instead, which is
+    /// what keeps `setDepthStencilState:` from ever being handed nil — see
+    /// [`default_depth_stencil_state`].
+    pub(crate) depth_stencil: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     pub(crate) raster: RasterState,
 }
 
@@ -179,7 +182,8 @@ owned!(
 /// resolves handles with the lock held and then encodes without it.
 pub(crate) struct BoundPipeline {
     pub(crate) raw: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
-    pub(crate) depth_stencil: Option<Retained<ProtocolObject<dyn MTLDepthStencilState>>>,
+    /// Never absent, as [`GraphicsPipelineEntry::depth_stencil`] says.
+    pub(crate) depth_stencil: Retained<ProtocolObject<dyn MTLDepthStencilState>>,
     pub(crate) raster: RasterState,
 }
 
@@ -379,7 +383,11 @@ impl MetalDevice {
         }
 
         let depth_stencil = match desc.depth_stencil {
-            None => None,
+            // The device's shared always-pass state, not nil. Which object a
+            // no-depth pipeline binds is decided here, once per pipeline,
+            // rather than at every bind — see
+            // [`DeviceInner::default_depth_stencil`].
+            None => self.inner.default_depth_stencil.clone(),
             Some(state) => {
                 if !state.format.is_depth_stencil() {
                     return Err(HalError::InvalidDescriptor(format!(
@@ -399,7 +407,7 @@ impl MetalDevice {
                         state.format
                     )));
                 }
-                Some(self.depth_stencil_state(&state, desc.label)?)
+                self.depth_stencil_state(&state, desc.label)?
             }
         };
 
@@ -614,6 +622,77 @@ impl MetalDevice {
         let mut state = self.state();
         crate::device::take_owned(&mut state.compute_pipelines, pipeline, &*self.inner);
     }
+}
+
+/// The `MTLDepthStencilState` a pipeline that declares none is bound with, so
+/// that `setDepthStencilState:` is never handed nil.
+///
+/// # Why nil is not an option
+///
+/// `setDepthStencilState:nil` **hangs** GitHub's `Apple Paravirtual device`:
+/// every draw this backend recorded faulted there with
+/// `kIOGPUCommandBufferCallbackErrorHang` while a render-pass clear read back
+/// correctly, and a ten-probe bisect on `6a59e89` narrowed it to that one call
+/// with that one argument. A hand-encoded pass plus `setDepthStencilState:nil`
+/// hung; the same pass plus a real state object passed; each of the other five
+/// rasteriser calls passed on its own. Metal documents nil as "reset to the
+/// default", so this is a driver bug rather than misuse — but a bug on a device
+/// the project ships to, and the substitution costs one object per device.
+///
+/// # Why it is a no-op for rendering
+///
+/// What nil is documented to restore is "the depth test always passes and depth
+/// writes are disabled", and this builds exactly that — but it **sets** every
+/// field rather than trusting a default. `objc2-metal` is a generated ABI
+/// binding: `MTLDepthStencilDescriptor::new` is `[MTLDepthStencilDescriptor
+/// new]` and nothing in the crate states what the fields come back as, so
+/// leaving one unset would be relying on a value that is not written down
+/// anywhere this workspace can read.
+///
+/// * `depthCompareFunction` is `Always` and `depthWriteEnabled` is false, which
+///   is the documented no-state behaviour verbatim.
+/// * Both facings compare `Always` and keep on all three outcomes, so the
+///   stencil test rejects nothing and no stencil write happens. The read and
+///   write masks are left alone deliberately: `Always` reads no bits and `Keep`
+///   writes none, so neither mask can be observed whatever it defaults to.
+///
+/// Which makes the state unobservable in the image for every pipeline it is
+/// bound for — and it is bound for exactly the pipelines whose
+/// [`GraphicsPipelineDesc::depth_stencil`] is `None`, which declare no depth or
+/// stencil attachment format at all.
+///
+/// # Errors
+///
+/// [`HalError::Backend`] when `newDepthStencilStateWithDescriptor:` returns
+/// nil, which fails device creation rather than leaving a device that cannot
+/// bind a pipeline.
+pub(crate) fn default_depth_stencil_state(
+    raw: &ProtocolObject<dyn MTLDevice>,
+) -> Result<Retained<ProtocolObject<dyn MTLDepthStencilState>>, HalError> {
+    let face = MTLStencilDescriptor::new();
+    face.setStencilCompareFunction(MTLCompareFunction::Always);
+    face.setStencilFailureOperation(MTLStencilOperation::Keep);
+    face.setDepthFailureOperation(MTLStencilOperation::Keep);
+    face.setDepthStencilPassOperation(MTLStencilOperation::Keep);
+
+    let descriptor = MTLDepthStencilDescriptor::new();
+    descriptor.setDepthCompareFunction(MTLCompareFunction::Always);
+    descriptor.setDepthWriteEnabled(false);
+    // Both setters copy, so one descriptor can serve both facings.
+    descriptor.setFrontFaceStencil(Some(&face));
+    descriptor.setBackFaceStencil(Some(&face));
+    descriptor.setLabel(Some(&NSString::from_str(
+        "crcbl-mtl default depth/stencil (always, no write)",
+    )));
+
+    raw.newDepthStencilStateWithDescriptor(&descriptor)
+        .ok_or_else(|| {
+            HalError::Backend(
+                "MTLDevice::newDepthStencilStateWithDescriptor: returned nil for the default \
+                 always-pass state, which every pipeline without a depth/stencil state binds"
+                    .to_string(),
+            )
+        })
 }
 
 /// One facing's stencil state.
