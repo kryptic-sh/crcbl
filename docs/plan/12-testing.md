@@ -102,7 +102,7 @@ it.
 `test_foo`, not the function under test — the thing that is true if the test
 passes.
 `a_pipeline_without_depth_state_binds_the_devices_default_rather_than_nil`
-(`crcbl-mtl`), `an_indirect_draws_stride_is_only_checked_when_it_is_used`
+(`crcbl-mtl`), `a_metal_indirect_draws_stride_is_only_checked_when_it_is_used`
 (`crcbl-mtl`), `the_engine_passes_offer_every_shader_artifact_they_have`
 (`crcbl-render`). Names that long are not decoration: a failing e2e run on a
 runner you cannot attach a debugger to gives you the name and a diff, and a name
@@ -118,17 +118,24 @@ difference; renaming them is a task nobody has taken.
 **A test that exists on more than one backend names the backend or its API.**
 `no_two_formats_share_a_metal_format` in `crcbl-mtl/src/conv.rs` against
 `no_two_formats_share_a_dxgi_format` in `crcbl-dx12/src/conv.rs`;
-`reported_limits_come_from_the_device_and_agree_with_the_features` against
+`reported_limits_come_from_metal_and_agree_with_the_features` against
 `reported_limits_come_from_d3d12_and_agree_with_the_features`;
 `a_device_reports_metal_and_one_graphics_queue` against
 `a_device_reports_dx12_and_one_graphics_queue`. The convention exists where the
-claims genuinely differ per backend, and it is what makes a runner log legible:
-twenty-six test names in `crcbl-vk`, `crcbl-mtl`, `crcbl-dx12` and `crcbl-wgpu`
-are currently _verbatim identical_ across two or three of those crates —
-`a_device_outlives_the_instance_that_made_it` and
-`a_compute_dispatch_writes_the_values_it_was_asked_for` exist in three each. In
-nextest output the crate prefix is the only thing telling them apart, and in a
-grep, a bug report or a CI annotation it is often not carried at all.
+claims genuinely differ per backend, and it is what makes a runner log legible.
+It was applied late: twenty-six names across `crcbl-vk`, `crcbl-mtl`,
+`crcbl-dx12` and `crcbl-wgpu` were once _verbatim identical_ in two or three of
+those crates at the same time, and the crate prefix in nextest's output was the
+only thing telling them apart — a prefix a grep, a bug report or a CI annotation
+usually does not carry. They now differ by the backend word alone, which is the
+property worth keeping: a search for one finds the other, and neither can be
+read as the wrong backend's result.
+
+The one name left deliberately bare is
+`a_device_outlives_the_instance_that_made_it` in
+`crates/crcbl-hal/tests/seam_from_outside.rs`, which asserts the obligation
+against the null backend. Once the three backend copies took prefixes, the
+unprefixed name belongs to the test that genuinely is about no backend.
 
 **A test that is deliberately backend-agnostic takes no prefix, and says so.**
 `crates/crcbl/tests/render_e2e.rs` is the exemplar: one test, opening whatever

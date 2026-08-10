@@ -897,7 +897,7 @@ pub(crate) mod tests {
     /// reports because Metal has no such ids — DXGI does, so this backend has no
     /// excuse for one.
     #[test]
-    fn every_adapter_names_itself_its_driver_its_vendor_and_its_backend() {
+    fn every_dxgi_adapter_names_itself_its_driver_its_vendor_and_its_backend() {
         let adapters = open().adapters();
         assert!(!adapters.is_empty(), "nothing to check");
         for info in &adapters {
@@ -923,7 +923,7 @@ pub(crate) mod tests {
     /// lists display-only and too-old adapters that D3D12 refuses to open, and
     /// on the machine that has one every id after it would be off by one.
     #[test]
-    fn adapter_ids_are_their_enumeration_positions() {
+    fn adapter_ids_are_their_positions_in_the_dxgi_enumeration() {
         let adapters = open().adapters();
         assert!(!adapters.is_empty(), "nothing to check");
         for (index, info) in adapters.iter().enumerate() {
@@ -1282,7 +1282,7 @@ pub(crate) mod tests {
     /// seam specifies — including the second poll being a caller bug rather than
     /// a second device.
     #[test]
-    fn a_device_opens_on_the_first_poll_and_only_once() {
+    fn a_d3d12_device_opens_on_the_first_poll_and_only_once() {
         let instance = open();
         let adapter = pinned_adapter(&instance);
 
@@ -1341,7 +1341,7 @@ pub(crate) mod tests {
     /// the adapter and the features, so a valid adapter with a stale surface
     /// reaches this branch rather than an earlier one.
     #[test]
-    fn a_compatible_surface_is_refused_as_an_unresolvable_handle() {
+    fn a_compatible_surface_is_refused_by_d3d12_as_an_unresolvable_handle() {
         let instance = open();
         let adapter = pinned_adapter(&instance);
 
@@ -1365,7 +1365,7 @@ pub(crate) mod tests {
     /// Obligation 1, made observable: the device must survive its instance being
     /// dropped, and must still work afterwards.
     #[test]
-    fn a_device_outlives_the_instance_that_made_it() {
+    fn a_d3d12_device_outlives_the_instance_that_made_it() {
         let device = {
             let instance = open();
             let adapter = pinned_adapter(&instance);
@@ -1391,7 +1391,7 @@ pub(crate) mod tests {
     /// An out-of-range adapter is a distinct contract from a feature gap, and it
     /// must not be swallowed by one.
     #[test]
-    fn an_unknown_adapter_is_refused_as_such_not_as_unimplemented() {
+    fn an_unknown_dxgi_adapter_is_refused_as_such_not_as_unimplemented() {
         let instance = open();
         let past_the_end = AdapterId(instance.adapters().len() as u32);
 

@@ -25,7 +25,7 @@
 //! `create_graphics_pipeline` and `create_compute_pipeline` build real
 //! `MTLRenderPipelineState` and `MTLComputePipelineState` objects — so
 //! `bind_graphics_pipeline` and `draw` are calls rather than refusals, and
-//! `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` submits a
+//! `a_metal_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` submits a
 //! draw, copies the image into a host-readable buffer and asserts that the
 //! centre carries the triangle's colour while every corner still carries the
 //! clear's. `crcbl_mtl::pipeline` is where that all lives, and where the split
@@ -128,7 +128,7 @@
 //! backend must keep the instance's state alive internally. The instance's
 //! state is an `Arc` and every device holds a clone of it, so dropping the
 //! public `MetalInstance` while a device is open releases nothing — which the
-//! `a_device_outlives_the_instance_that_made_it` test exercises rather than
+//! `a_metal_device_outlives_the_instance_that_made_it` test exercises rather than
 //! asserts on paper.
 //!
 //! # The `Send + Sync` question — and the marker impl MTL1 said would not be

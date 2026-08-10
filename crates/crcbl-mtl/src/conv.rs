@@ -890,7 +890,7 @@ mod tests {
     /// Reversed-Z is produced above this seam, so the comparison must arrive
     /// and leave with the same name.
     #[test]
-    fn comparisons_are_not_flipped_for_reversed_z() {
+    fn metal_comparisons_are_not_flipped_for_reversed_z() {
         assert_eq!(
             compare_function(CompareOp::Greater),
             MTLCompareFunction::Greater,
@@ -956,7 +956,7 @@ mod tests {
     }
 
     /// **Load and store actions, pinned by name.** A transposition here is the
-    /// bug the `load_op_preserves_what_clear_replaces` device test exists to
+    /// bug the `a_metal_load_action_preserves_what_clear_replaces` device test exists to
     /// catch on hardware; this is the same check without a GPU.
     #[test]
     fn load_and_store_actions_are_not_transposed() {

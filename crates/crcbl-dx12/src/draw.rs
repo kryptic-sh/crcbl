@@ -346,7 +346,7 @@ mod tests {
     /// one-byte-short `expect_err`. Dropping the offset's alignment check — the
     /// last one.
     #[test]
-    fn a_multi_command_span_is_bounded_by_the_buffer_it_reads() {
+    fn a_d3d12_multi_command_span_is_bounded_by_the_buffer_it_reads() {
         // Three structures, 32 bytes apart, from offset 8: the last one ends at
         // 8 + 64 + 16 = 88, which is exactly the buffer.
         assert_eq!(

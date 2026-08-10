@@ -46,7 +46,7 @@ const QUADRANT_VERTICES: u32 = QUADRANT_CORNERS.len() as u32;
 /// The per-channel ceiling for "this is still the clear colour".
 ///
 /// [`TRIANGLE_CLEAR`] is dark but not black, and its blue is the largest
-/// channel — the same asymmetry `a_triangle_pulled_from_a_storage_buffer_reaches_memory`
+/// channel — the same asymmetry `a_triangle_pulled_from_a_vulkan_storage_buffer_reaches_memory`
 /// allows for at the frame corners.
 const QUADRANT_DARK: [u32; 3] = [60, 60, 80];
 

@@ -1113,7 +1113,7 @@ mod tests {
     /// Reversed-Z is produced above this seam, so the comparison must arrive and
     /// leave with the same name.
     #[test]
-    fn comparisons_are_not_flipped_for_reversed_z() {
+    fn d3d12_comparisons_are_not_flipped_for_reversed_z() {
         assert_eq!(
             comparison_func(CompareOp::Greater),
             D3D12_COMPARISON_FUNC_GREATER,

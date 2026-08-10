@@ -1441,7 +1441,7 @@ jobs:
       # this backend recorded faulted on this runner with
       # `kIOGPUCommandBufferCallbackErrorHang`, every encoder reporting
       # `completed` and none faulted — while
-      # `a_render_pass_clear_reads_back_the_exact_texels`, which is behind
+      # `a_metal_render_pass_clear_reads_back_the_exact_texels`, which is behind
       # neither the feature nor `#[ignore]` and was never filtered, passed in
       # the same runs. The device was never the limitation: run 31037470086 ran
       # a compute dispatch and two triangle draws on this same image from a
@@ -1480,10 +1480,10 @@ jobs:
       #
       # **Five of the six come out of the filter on that fix**, and they are
       # every quarantined test that draws:
-      # `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`,
+      # `a_metal_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`,
       # `a_triangle_draw_into_a_bgra_target_paints_the_same_image`,
       # `the_engines_own_triangle_draws_through_a_bind_group`,
-      # `an_indexed_draw_reads_the_bound_index_range` and
+      # `a_metal_indexed_draw_reads_the_bound_index_range` and
       # `a_multi_draw_indirect_emits_every_argument_structure`. Every one of
       # them draws into a colour-only pass, which is exactly the case whose
       # pipeline bound nil. The sixth is the layer swapchain above, which is

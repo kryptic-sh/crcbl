@@ -270,7 +270,7 @@ fn drain(device: &dyn Device, readback: crcbl_hal::ReadbackHandle, out: &mut [u8
 /// image comparison needs and which this backend refused outright until now.
 #[test]
 #[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn a_render_pass_clear_reaches_host_memory_with_the_colour_it_was_given() {
+fn a_wgpu_render_pass_clear_reaches_host_memory_with_the_colour_it_was_given() {
     let headless = Headless::open();
     let device = headless.device.as_ref();
 
@@ -404,7 +404,7 @@ fn a_render_pass_clear_reaches_host_memory_with_the_colour_it_was_given() {
 /// while the previous trip's copy is still reading it.
 ///
 /// `crates/crcbl-vk/tests/vk_e2e.rs` has
-/// `reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it`,
+/// `reusing_an_offscreen_vulkan_ring_image_is_ordered_against_the_frame_that_had_it`,
 /// which records the same two trips and asserts the **validation layer** saw no
 /// write-after-read. That test exists because the Vulkan backend genuinely had
 /// the bug: an offscreen ring hands its image back with no acquire semaphore,
@@ -429,7 +429,7 @@ fn a_render_pass_clear_reaches_host_memory_with_the_colour_it_was_given() {
 /// not a layer verdict.
 #[test]
 #[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it() {
+fn reusing_an_offscreen_wgpu_ring_image_is_ordered_against_the_frame_that_had_it() {
     // One image, so the second acquire is genuinely the first image again
     // rather than the other half of a ring.
     let headless = Headless::open_with(EXTENT, 1);
@@ -641,7 +641,7 @@ fn acquiring_twice_without_a_present_is_refused_rather_than_dropping_a_frame() {
 /// Present without an acquire is a caller bug the backend names, not a no-op.
 #[test]
 #[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn presenting_without_an_acquire_is_refused() {
+fn presenting_a_wgpu_swapchain_without_an_acquire_is_refused() {
     let headless = Headless::open();
     let error = headless
         .device
@@ -887,7 +887,7 @@ fn a_shader_module_that_will_not_compile_is_refused_instead_of_handed_back() {
 /// that did not skips with the reason printed.
 #[test]
 #[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
-fn a_push_constant_range_that_overflows_is_refused_not_wrapped() {
+fn a_push_constant_range_that_overflows_is_refused_by_wgpu_not_wrapped() {
     let (instance, device, surface, _queue, _format) =
         Headless::open_device_with(Features::PUSH_CONSTANTS);
     if !device.caps().features.contains(Features::PUSH_CONSTANTS) {

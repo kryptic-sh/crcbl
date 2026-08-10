@@ -677,7 +677,7 @@ mod tests {
     /// Red when `plan`'s `present_id > self.committed` guard is dropped: every
     /// assertion here then answers `Block`.
     #[test]
-    fn an_id_this_swapchain_was_never_given_is_answered_at_once() {
+    fn an_id_this_dxgi_swapchain_was_never_given_is_answered_at_once() {
         let mut ledger = PresentLedger::default();
         assert_eq!(ledger.plan(1), PresentWait::NothingToWaitFor);
         assert_eq!(ledger.plan(u64::MAX), PresentWait::NothingToWaitFor);
@@ -709,7 +709,7 @@ mod tests {
     /// guard — id 3 then walks `committed` back to 3 and the last assertion
     /// finds present 5 unwaitable.
     #[test]
-    fn an_id_that_does_not_follow_the_last_is_refused() {
+    fn a_d3d12_present_id_that_does_not_follow_the_last_is_refused() {
         let mut ledger = PresentLedger::default();
         assert!(!ledger.record_present(0), "zero numbers nothing");
         assert!(ledger.record_present(5));
@@ -733,7 +733,7 @@ mod tests {
     /// Red for any future ledger that carried state across a reconfigure, and
     /// red if `Default` ever starts at a non-zero `committed`.
     #[test]
-    fn a_fresh_ledger_answers_every_id_the_old_one_had_presented() {
+    fn a_fresh_ledger_answers_every_id_the_old_dxgi_swapchain_had_presented() {
         let mut old = PresentLedger::default();
         for id in 1..=100 {
             assert!(old.record_present(id));

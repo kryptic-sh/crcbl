@@ -29,7 +29,7 @@
 # Extra arguments go straight to nextest, so a person on a real Mac runs any
 # one test by name:
 #
-#   crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear)'
+#   crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(a_metal_triangle_draw_paints_the_centre_and_leaves_the_corners_clear)'
 #
 # # The zero-tests check is the point
 #

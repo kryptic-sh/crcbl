@@ -4225,3 +4225,120 @@ records six crates as drifted below the prose-sentence-name convention —
 `centre_position_is_symmetric` and `right_position_pans_to_right`, and
 `orbit_cue_changes_over_time` now names a fixture the file is no longer named
 after. Renaming the functions is a separate task and stays unclaimed.
+
+### Stale test-name references left behind by the backend-qualifier rename
+
+`docs/plan/12-testing.md`'s "a test that exists on more than one backend names
+the backend or its API" rule has now been applied to `crcbl-vk`, `crcbl-mtl`,
+`crcbl-dx12` and `crcbl-wgpu`: 26 verbatim-identical names across two or three
+of those crates are gone, along with 12 near-identical pairs whose only
+divergence was cosmetic. The rename touched test function names and their doc
+comments only — no production code, no signature, no behaviour — plus the three
+places a test name is a string outside a test body (`.github/workflows/ci.yml`'s
+Metal job comments and `crates/crcbl-mtl/tests/run-mtl-e2e.sh`'s usage example).
+`crates/crcbl-dx12/tests/run-dx12-e2e.sh` needed no change:
+`the_pinned_adapter_opens_a_device_and_names_itself` and
+`a_fresh_device_says_whether_it_is_validated_and_is_not_already_removed` were
+never duplicates, and `.github/workflows/ci.yml`'s
+`not test(a_layer_swapchain_acquires_a_drawable_and_presents_it)` filter names a
+test that is unique to `crcbl-mtl` and was likewise untouched.
+
+Prose in two files still names the old identifiers, and neither was in the
+rename's paths:
+
+- `docs/plan/12-testing.md`'s naming section argues the rule by citing
+  `a_device_outlives_the_instance_that_made_it` and
+  `a_compute_dispatch_writes_the_values_it_was_asked_for` as names existing "in
+  three each", and gives a count of twenty-six. Both citations and the count are
+  now historical. The paragraph wants rewriting to describe the convention as
+  held rather than as owed — the three-way examples are now
+  `a_vulkan_/a_metal_/a_d3d12_device_outlives_the_instance_that_made_it` and the
+  matching compute-dispatch trio.
+- `docs/backlog.md` itself names old identifiers in entries that predate the
+  rename: `a_render_pass_clear_reads_back_the_exact_texels` (now
+  `a_metal_`/`a_d3d12_`-prefixed, and the entry means the Metal one),
+  `the_slices_that_have_not_arrived_still_refuse_and_name_themselves`,
+  `an_indirect_dispatch_reads_its_workgroup_count_from_the_buffer`,
+  `an_indexed_draw_reads_the_bound_index_range`,
+  `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`,
+  `a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` and
+  `reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it`.
+  Each now carries a backend word.
+
+### Two backend test-name pairs deliberately left diverging
+
+Both are cases where renaming would break something outside the rename's paths,
+not cases where the convention was judged not to apply:
+
+- `an_indirect_calls_stride_is_only_checked_when_it_is_used` (`crcbl-dx12`,
+  `src/draw.rs`) against
+  `an_indirect_draws_stride_is_only_checked_when_it_is_used` (`crcbl-mtl`,
+  `src/draw.rs`). They differ by one word — `calls` against `draws` — so a grep
+  for either misses the other. The Metal name is quoted in
+  `docs/plan/12-testing.md` as an exemplar of the prose-sentence rule, so
+  renaming it strands that citation.
+- `reported_limits_come_from_d3d12_and_agree_with_the_features` against
+  `reported_limits_come_from_the_device_and_agree_with_the_features`
+  (`crcbl-mtl`). The Metal side never says "Metal". `docs/plan/12-testing.md`
+  presents this exact pair as an example of the convention being followed, so it
+  is left as the doc describes it; the honest reading is that the D3D12 side
+  names its API and the Metal side does not.
+
+### Exact test-name collisions still open between non-backend crates
+
+Measured over every crate under `crates/` with the same detector used for the
+backend rename — a name defined under `#[test]` in more than one crate. Eight
+remain, all outside the four backend crates and so outside that task's paths:
+
+- `debug_format` in `crcbl-client`, `crcbl-ecs`, `crcbl-phys`, `crcbl-server`
+  and `crcbl-ui` — five copies, and the only name in the workspace that is not a
+  prose sentence at all.
+- `automatic_selection_reports_what_it_tried` (`crcbl`, `crcbl-shell`),
+  `messages_name_the_specific_problem` (`crcbl-hal`, `crcbl-shell`),
+  `the_seam_is_also_usable_generically` (`crcbl-hal`, `crcbl-shell`),
+  `placeholder_compatibility_is_refused` (`crcbl-client`, `crcbl-server`),
+  `sweep_removes_dead_entities` (`crcbl-ecs`, `crcbl-phys`),
+  `the_entry_points_answer_zero_until_a_source_is_installed` (`crcbl-audio`,
+  `crcbl-store`), `the_frames_corners_do_not_grow_with_the_menu`
+  (`crcbl-render`, `crcbl-ui`).
+
+`a_device_outlives_the_instance_that_made_it` in
+`crates/crcbl-hal/tests/seam_from_outside.rs` is deliberately **not** in that
+list any more and should stay unqualified: it is the seam's own obligation
+checked on `NullBackend` from outside the crate, which `docs/plan/12-testing.md`
+calls the backend-agnostic shape. It was a fifth copy of that name until the
+three backend copies took their prefixes; the bare name now belongs to the one
+test that is genuinely about no backend.
+
+### The first-triangle milestone is four different claims, not one written four ways
+
+Recorded because the opposite is the obvious guess and unifying the four names
+would flatten a real difference. All four were read end to end:
+
+- `crcbl-mtl`'s
+  `a_metal_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` draws a
+  hand-written MSL triangle with **no bindings at all** — geometry from
+  `[[vertex_id]]`, a fragment shader returning the `INK` literal — and
+  `assert_ink_triangle` checks that the centre texel is exactly the ink colour,
+  all four corners exactly the clear, and every other texel is one of those two.
+  `ink_msl`'s own doc says why it is not the engine's shader: pulling vertices
+  needs bind groups.
+- `crcbl-dx12`'s
+  `a_pulled_triangle_is_drawn_by_d3d12_and_read_back_texel_by_texel` runs the
+  engine's `crcbl_shaders::triangle` through an SRV over a storage buffer, and
+  `assert_triangle_drawn` asserts three fixed probes are red-, blue- and
+  green-dominant and that each probe's channels sum to full scale — the
+  barycentric property that catches a wrong element stride.
+- `crcbl-vk`'s `a_triangle_pulled_from_a_vulkan_storage_buffer_reaches_memory`
+  makes the same pulled-vertex claim but derives its probes from the geometry
+  (75% of the way from centroid to each vertex) rather than fixing pixel
+  coordinates, and adds a centre-blend assertion for interpolation.
+- `crcbl-vk`'s `the_vulkan_triangle_matches_its_golden_image` is the P1
+  golden-image gate against `tests/golden/triangle.png` at
+  `Tolerance::RASTERISER`.
+
+So the flat-colour coverage check, the two dominance checks and the golden
+compare are four distinct assertions; only the backend qualifier was missing and
+only that was added. What is genuinely absent is a golden-image gate on Metal
+and D3D12 — `crates/crcbl/tests/render_e2e.rs` is the backend-agnostic golden
+and covers the cube scene, not the triangle.

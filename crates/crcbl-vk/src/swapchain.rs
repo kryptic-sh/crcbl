@@ -585,7 +585,7 @@ mod tests {
     /// Obligation 4: a zero extent is refused, and the error says why rather
     /// than guessing a size from `currentExtent`.
     #[test]
-    fn a_zero_extent_is_a_caller_error_not_a_fallback() {
+    fn a_zero_vulkan_extent_is_a_caller_error_not_a_fallback() {
         for requested in [(0, 720), (1280, 0), (0, 0)] {
             let error = resolve_swapchain_extent(requested, &x11_capabilities(1280, 720))
                 .expect_err("zero is refused");

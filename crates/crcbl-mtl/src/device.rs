@@ -2354,7 +2354,7 @@ mod tests {
     /// module comment above describes, and a `%` that produced a zero tag would
     /// make the wrapping owner accept every hand-made handle.
     #[test]
-    fn every_owner_id_gets_a_non_zero_tag_and_ids_wrap_rather_than_collide_at_zero() {
+    fn every_metal_owner_id_gets_a_non_zero_tag_and_ids_wrap_rather_than_collide_at_zero() {
         for id in [1u64, 2, 254, 255, 256, 1_000_000] {
             assert_ne!(
                 device_tag(id),
@@ -2374,7 +2374,7 @@ mod tests {
     /// on it, so a stamp that disturbed it would make every handle stale on its
     /// first use.
     #[test]
-    fn stamping_preserves_the_pool_index_and_the_generation() {
+    fn stamping_a_metal_handle_preserves_the_pool_index_and_the_generation() {
         let owner = TestOwner::new(7);
         let mut pool: Pool<TestEntry> = Pool::new();
         let raw = pool.insert(TestEntry { owner: owner.id });
@@ -2411,7 +2411,7 @@ mod tests {
     /// fresh pools issue the same index and generation, so the tag is the only
     /// thing that can tell them apart.
     #[test]
-    fn a_foreign_handle_is_foreign_a_stale_one_is_stale_and_an_untagged_one_is_neither() {
+    fn a_foreign_metal_handle_is_foreign_a_stale_one_is_stale_and_an_untagged_one_is_neither() {
         let a = TestOwner::new(1);
         let b = TestOwner::new(2);
         let mut pool_a: Pool<TestEntry> = Pool::new();
@@ -2472,7 +2472,7 @@ mod tests {
     /// Queue handles are per owner and per kind, and carry the tag so a queue
     /// from another device is detectable.
     #[test]
-    fn queue_handles_differ_by_device_and_by_kind() {
+    fn metal_queue_handles_differ_by_device_and_by_kind() {
         let kinds = [QueueKind::Graphics, QueueKind::Compute, QueueKind::Transfer];
         let mut seen: Vec<QueueHandle> = Vec::new();
         for owner in [TestOwner::new(1), TestOwner::new(2)] {
@@ -2666,7 +2666,7 @@ mod tests {
     /// asymmetric in every channel, so any permutation is caught. Getting the
     /// row stride wrong — only the first row would match.
     #[test]
-    fn a_render_pass_clear_reads_back_the_exact_texels() {
+    fn a_metal_render_pass_clear_reads_back_the_exact_texels() {
         let (_instance, device) = open_device();
         let (image, view) = color_target(&device);
         let readback = readback_buffer(&device, TARGET_BYTES as u64);
@@ -2801,7 +2801,7 @@ mod tests {
     /// both onto one action makes the two runs agree, which either assertion
     /// then catches.
     #[test]
-    fn load_op_preserves_what_clear_replaces() {
+    fn a_metal_load_action_preserves_what_clear_replaces() {
         let (_instance, device) = open_device();
         assert_ne!(
             CLEAR_TEXEL, OTHER_TEXEL,
@@ -2976,7 +2976,7 @@ mod tests {
     #[cfg(feature = "mtl-e2e")]
     #[test]
     #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear() {
+    fn a_metal_triangle_draw_paints_the_centre_and_leaves_the_corners_clear() {
         let (_instance, device) = open_device();
         assert_ne!(
             INK_TEXEL, CLEAR_TEXEL,
@@ -3026,7 +3026,7 @@ mod tests {
     ///
     /// # The experiment, and what it settled
     ///
-    /// [`a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`] faults
+    /// [`a_metal_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`] faults
     /// on the CI runner (`macos-latest`, an Apple Paravirtual device) with
     /// `kIOGPUCommandBufferCallbackErrorHang`, every encoder reported
     /// `completed` and none faulted — one of four draws that do, which
@@ -3604,7 +3604,7 @@ using namespace metal;\n\
     /// window lands in the wrong place, which the untouched head and tail
     /// assertions catch. Ignoring the size — the tail is overwritten.
     #[test]
-    fn a_buffer_to_buffer_copy_moves_the_bytes_at_both_offsets() {
+    fn a_metal_buffer_to_buffer_copy_moves_the_bytes_at_both_offsets() {
         let (_instance, device) = open_device();
         let queue = device
             .queue(QueueKind::Graphics)
@@ -4064,7 +4064,7 @@ using namespace metal;\n\
     /// An encoder made against another device's queue refuses at `finish`
     /// rather than recording onto the wrong device.
     #[test]
-    fn an_encoder_built_on_a_foreign_queue_refuses() {
+    fn a_metal_encoder_built_on_a_foreign_queue_refuses() {
         let (_instance, device) = open_device();
         let (_other_instance, other) = open_device();
         let foreign = other
@@ -4111,7 +4111,7 @@ using namespace metal;\n\
     /// nothing, so a device that reported less than its adapter would be
     /// lying about hardware it can use.
     #[test]
-    fn device_caps_match_the_adapter_they_came_from() {
+    fn metal_device_caps_match_the_adapter_they_came_from() {
         let instance = open_instance();
         let adapters = instance.adapters();
         assert!(!adapters.is_empty(), "nothing to check");
@@ -4130,7 +4130,7 @@ using namespace metal;\n\
     /// `InvalidDescriptor`, so "it returned an error" would pass whether or not
     /// the handle was ever invalidated.
     #[test]
-    fn buffers_of_every_memory_location_create_and_then_stop_resolving() {
+    fn metal_buffers_of_every_memory_location_create_and_then_stop_resolving() {
         let (_instance, device) = open_device();
         assert!(!LOCATIONS.is_empty(), "nothing to check");
         for &location in LOCATIONS {
@@ -4152,7 +4152,7 @@ using namespace metal;\n\
 
     /// A recycled slot must not resurrect the handle that used to name it.
     #[test]
-    fn a_destroyed_handle_does_not_alias_the_buffer_that_replaces_it() {
+    fn a_destroyed_metal_handle_does_not_alias_the_buffer_that_replaces_it() {
         let (_instance, device) = open_device();
         let first = device
             .create_buffer(&buffer(256, MemoryLocation::HostUpload))
@@ -4184,7 +4184,7 @@ using namespace metal;\n\
     /// `write_buffer` writes, at the offset it was given, and refuses the
     /// location Metal cannot reach without a blit.
     #[test]
-    fn write_buffer_writes_host_visible_memory_and_refuses_device_local() {
+    fn write_buffer_writes_host_visible_memory_and_refuses_what_metal_cannot_map() {
         let (_instance, device) = open_device();
         let readback = device
             .create_buffer(&buffer(16, MemoryLocation::HostReadback))
@@ -4250,7 +4250,7 @@ using namespace metal;\n\
     /// handle to B's own buffer, find the owner matching, and write into the
     /// wrong object with no error anywhere.
     #[test]
-    fn a_handle_from_another_device_is_foreign_not_merely_unresolvable() {
+    fn a_handle_from_another_metal_device_is_foreign_not_merely_unresolvable() {
         let instance = open_instance();
         let adapters = instance.adapters();
         assert!(!adapters.is_empty(), "nothing to check");
@@ -4296,7 +4296,7 @@ using namespace metal;\n\
     /// Images, views and samplers all the way through, and the handles stop
     /// resolving when they are destroyed.
     #[test]
-    fn images_views_and_samplers_create_and_destroy() {
+    fn metal_images_views_and_samplers_create_and_destroy() {
         let (_instance, device) = open_device();
         let extent = Extent3d::d2(64, 64);
         let image = device
@@ -4447,7 +4447,7 @@ using namespace metal;\n\
     /// Anisotropy is bounded on both sides, and the bound is the one the
     /// adapter reports.
     #[test]
-    fn samplers_reject_anisotropy_outside_the_reported_cap() {
+    fn metal_samplers_reject_anisotropy_outside_the_reported_cap() {
         let (_instance, device) = open_device();
         let cap = device.caps().limits.max_sampler_anisotropy;
         assert!(
@@ -4610,10 +4610,10 @@ using namespace metal;\n\
     /// sampling point, and the indirect-count draws, whose obstacle is named in
     /// `crcbl_mtl::command`'s `indirect_count`. The calls that stopped refusing
     /// are asserted in `the_binding_slice_replaced_refusals_with_real_errors`
-    /// and in `a_compute_dispatch_writes_the_values_it_was_asked_for` rather
+    /// and in `a_metal_compute_dispatch_writes_the_values_it_was_asked_for` rather
     /// than merely dropped from here.
     #[test]
-    fn the_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
+    fn the_metal_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
         let (_instance, device) = open_device();
 
         let refusals: Vec<(&str, HalError)> = vec![(
@@ -5114,7 +5114,7 @@ using namespace metal;\n\
     /// last assertion admits nowhere.
     ///
     /// **Needs a real GPU, and CI does not have one** — see
-    /// `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`, whose
+    /// `a_metal_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`, whose
     /// gating argument and measured evidence apply unchanged.
     #[cfg(feature = "mtl-e2e")]
     #[test]
@@ -5236,7 +5236,7 @@ using namespace metal;\n\
     /// rather than as encoder state.
     ///
     /// The index buffer names the same three vertices as
-    /// `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`, in a
+    /// `a_metal_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`, in a
     /// **rotated** order and from a non-zero first index, so a draw that
     /// ignored the binding and drew `0..3` directly would still cover the
     /// centre — and would fail the offset arithmetic that this exercises:
@@ -5253,7 +5253,7 @@ using namespace metal;\n\
     #[cfg(feature = "mtl-e2e")]
     #[test]
     #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn an_indexed_draw_reads_the_bound_index_range() {
+    fn a_metal_indexed_draw_reads_the_bound_index_range() {
         let (_instance, device) = open_device();
         let ink = ink_msl();
         let module = device
@@ -5911,7 +5911,7 @@ using namespace metal;\n\
     #[cfg(feature = "mtl-e2e")]
     #[test]
     #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn a_compute_dispatch_writes_the_values_it_was_asked_for() {
+    fn a_metal_compute_dispatch_writes_the_values_it_was_asked_for() {
         let (_instance, device) = open_device();
         assert!(
             device.caps().features.contains(Features::COMPUTE),
@@ -5945,7 +5945,7 @@ using namespace metal;\n\
     #[cfg(feature = "mtl-e2e")]
     #[test]
     #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn an_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
+    fn a_metal_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
         /// Workgroups the real arguments ask for. Fewer than [`PROBE_GROUPS`],
         /// so the difference is visible in the readback.
         const DISPATCHED_GROUPS: u32 = 2;

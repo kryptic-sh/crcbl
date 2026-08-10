@@ -370,7 +370,7 @@ fn render_triangle(headless: &Headless, resources: &TriangleResources) -> crcbl_
 /// was mirrored, or a Y flip would each break at least one of them.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_triangle_pulled_from_a_storage_buffer_reaches_memory() {
+fn a_triangle_pulled_from_a_vulkan_storage_buffer_reaches_memory() {
     let headless = Headless::open_for_triangle();
     let resources = TriangleResources::new(&headless);
     let image = render_triangle(&headless, &resources);
@@ -470,7 +470,7 @@ fn a_triangle_pulled_from_a_storage_buffer_reaches_memory() {
 /// rejects a triangle that moved by a few pixels.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn the_triangle_matches_its_golden_image() {
+fn the_vulkan_triangle_matches_its_golden_image() {
     let headless = Headless::open_for_triangle();
     let resources = TriangleResources::new(&headless);
     let image = render_triangle(&headless, &resources);

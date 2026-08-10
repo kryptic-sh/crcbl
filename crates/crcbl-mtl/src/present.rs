@@ -219,7 +219,7 @@ mod tests {
     /// dropped: every assertion below then blocks for `GENEROUS` and comes back
     /// `Err(Timeout)`.
     #[test]
-    fn an_id_this_swapchain_was_never_given_is_answered_at_once() {
+    fn an_id_this_metal_swapchain_was_never_given_is_answered_at_once() {
         let ledger = PresentLedger::default();
         let started = Instant::now();
         let never = ledger
@@ -358,7 +358,7 @@ mod tests {
     /// guard (id 5 is accepted twice and id 3 walks `committed` back to 3, so
     /// the last assertion finds present 5 unwaitable).
     #[test]
-    fn an_id_that_does_not_follow_the_last_is_refused() {
+    fn a_metal_present_id_that_does_not_follow_the_last_is_refused() {
         let ledger = PresentLedger::default();
         assert!(!ledger.record_present(0), "zero numbers nothing");
         assert!(ledger.record_present(5));
@@ -413,7 +413,7 @@ mod tests {
     /// Red when `Counts::default` is given a non-zero `committed`, and red for
     /// any future ledger that carried state across a reconfigure.
     #[test]
-    fn a_fresh_ledger_answers_every_id_the_old_one_had_presented() {
+    fn a_fresh_ledger_answers_every_id_the_old_metal_layer_had_presented() {
         let old = PresentLedger::default();
         for id in 1..=100 {
             assert!(old.record_present(id));

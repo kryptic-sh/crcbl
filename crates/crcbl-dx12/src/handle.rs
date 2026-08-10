@@ -263,7 +263,7 @@ mod tests {
     /// module docs describe, and a `%` that produced a zero tag would make the
     /// wrapping device accept every hand-made handle.
     #[test]
-    fn every_device_id_gets_a_non_zero_tag_and_ids_wrap_rather_than_collide_at_zero() {
+    fn every_d3d12_device_id_gets_a_non_zero_tag_and_ids_wrap_rather_than_collide_at_zero() {
         for id in [1u64, 2, 254, 255, 256, 1_000_000] {
             let owner = Owner::new(id);
             assert_ne!(owner.tag, 0, "device {id} would accept an untagged handle");
@@ -281,7 +281,7 @@ mod tests {
     /// staleness on it, so a stamp that disturbed it would make every handle
     /// stale on its first use.
     #[test]
-    fn stamping_preserves_the_pool_index_and_the_generation() {
+    fn stamping_a_d3d12_handle_preserves_the_pool_index_and_the_generation() {
         let owner = Owner::new(7);
         let mut pool: Pool<Entry> = Pool::new();
         let raw = pool.insert(Entry { owner: owner.id });
@@ -317,7 +317,7 @@ mod tests {
     /// identical* — two fresh pools issue the same index and generation, so the
     /// tag is the only thing that can tell them apart.
     #[test]
-    fn a_foreign_handle_is_foreign_a_stale_one_is_stale_and_an_untagged_one_is_neither() {
+    fn a_foreign_d3d12_handle_is_foreign_a_stale_one_is_stale_and_an_untagged_one_is_neither() {
         let a = Owner::new(1);
         let b = Owner::new(2);
         let mut pool_a: Pool<Entry> = Pool::new();
@@ -365,7 +365,7 @@ mod tests {
     /// Queue handles are per device and per kind, and carry the tag so a queue
     /// from another device is detectable.
     #[test]
-    fn queue_handles_differ_by_device_and_by_kind() {
+    fn d3d12_queue_handles_differ_by_device_and_by_kind() {
         let a = Owner::new(1);
         let b = Owner::new(2);
         let kinds = [QueueKind::Graphics, QueueKind::Compute, QueueKind::Transfer];

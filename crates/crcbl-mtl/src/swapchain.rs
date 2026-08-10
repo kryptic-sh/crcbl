@@ -1341,7 +1341,7 @@ mod tests {
     /// Red when `resolve_extent` clamps a zero up to one, or returns `Ok` for
     /// any of the three shapes below.
     #[test]
-    fn a_zero_extent_is_a_caller_error_not_a_fallback() {
+    fn a_zero_metal_extent_is_a_caller_error_not_a_fallback() {
         for requested in [(0, 720), (1280, 0), (0, 0)] {
             let error = resolve_extent(requested, 16384).expect_err("zero is refused");
             let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = error else {
@@ -1823,7 +1823,7 @@ mod tests {
     /// Red when `present` returns `Ok` for a swapchain with nothing
     /// outstanding, which is the shape that silently drops a frame.
     #[test]
-    fn presenting_without_acquiring_is_refused() {
+    fn presenting_a_metal_swapchain_without_acquiring_is_refused() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
         let surface = offscreen_surface(&instance);
@@ -1970,7 +1970,7 @@ mod tests {
     /// Red when `build_swapchain` stops calling `resolve_extent`, or clamps a
     /// zero up to one.
     #[test]
-    fn a_zero_extent_swapchain_is_refused_end_to_end() {
+    fn a_zero_extent_metal_swapchain_is_refused_end_to_end() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
         let surface = offscreen_surface(&instance);
@@ -1999,7 +1999,7 @@ mod tests {
     /// call would succeed against the wrong surface — which is exactly the bug
     /// `crcbl_mtl::device`'s handle-tagging section describes.
     #[test]
-    fn a_surface_from_another_instance_is_foreign() {
+    fn a_metal_surface_from_another_instance_is_foreign() {
         let first = open_instance();
         let second = open_instance();
         let theirs = offscreen_surface(&first);
@@ -2267,7 +2267,7 @@ mod tests {
     /// exactly the drawable.
     ///
     /// Feature-gated *and* `#[ignore]`d, the shape
-    /// `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` already
+    /// `a_metal_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` already
     /// uses; `tests/run-mtl-e2e.sh` is the only thing that turns it on.
     ///
     /// Red when `nextDrawable`'s result is dropped rather than retained (the

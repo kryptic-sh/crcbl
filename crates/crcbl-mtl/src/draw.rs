@@ -322,7 +322,7 @@ mod tests {
     /// size wrong — the fourth assertion, where 16 is legal for a plain draw
     /// and too small for an indexed one.
     #[test]
-    fn an_indirect_draws_stride_is_only_checked_when_it_is_used() {
+    fn a_metal_indirect_draws_stride_is_only_checked_when_it_is_used() {
         assert_eq!(
             plan_indirect(&draw(0, 1, 0), false, 16).expect("one structure fills the buffer"),
             Some(IndirectPlan {
@@ -358,7 +358,7 @@ mod tests {
     /// the one-byte-short `expect_err`. Dropping the alignment check on the
     /// offset — the last one.
     #[test]
-    fn a_multi_draws_span_is_bounded_by_the_buffer_it_reads() {
+    fn a_metal_multi_draws_span_is_bounded_by_the_buffer_it_reads() {
         // Three structures, 32 bytes apart, from offset 8: the last one ends at
         // 8 + 64 + 16 = 88, which is exactly the buffer.
         let plan = plan_indirect(&draw(8, 3, 32), false, 88)

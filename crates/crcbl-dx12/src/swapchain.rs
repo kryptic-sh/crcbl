@@ -951,7 +951,7 @@ mod tests {
     /// `destroy_surface` stops invalidating the handle (the `surface_caps`
     /// below then succeeds).
     #[test]
-    fn a_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
+    fn a_dxgi_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
         let (instance, device) = open_device();
         let adapter = pinned_adapter(&instance);
         let window = TestWindow::open(EXTENT);

@@ -3591,7 +3591,7 @@ pub(crate) mod tests {
     /// `ResourceBindingTier=3` and `HighestShaderModel=6.8` is a claim about the
     /// API surface; this is the pixel.
     #[test]
-    fn a_render_pass_clear_reads_back_the_exact_texels() {
+    fn a_d3d12_render_pass_clear_reads_back_the_exact_texels() {
         let (_instance, device) = open_device();
         let (target, view) = color_target(&device);
         let readback = readback_buffer(&device, TARGET_BYTES);
@@ -3822,7 +3822,7 @@ pub(crate) mod tests {
     /// has already been shown to execute a clear and a readback, so a failure
     /// here is about shaders specifically.
     #[test]
-    fn a_pulled_triangle_is_drawn_and_read_back_texel_by_texel() {
+    fn a_pulled_triangle_is_drawn_by_d3d12_and_read_back_texel_by_texel() {
         use crcbl_shaders::{TRIANGLE, triangle};
 
         let (_instance, device) = open_device();
@@ -4017,7 +4017,7 @@ pub(crate) mod tests {
     /// once and drawn through several times.
     ///
     /// The same geometry, pipeline and bind group
-    /// `a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` builds, plus an
+    /// `a_pulled_triangle_is_drawn_by_d3d12_and_read_back_texel_by_texel` builds, plus an
     /// index buffer — so what the tests below vary is the *draw call* and
     /// nothing else, which is the only way the picture can be evidence about
     /// which call produced it.
@@ -4353,7 +4353,7 @@ pub(crate) mod tests {
     /// All of it. This crate compiles on Windows alone and the development box
     /// is Linux, so nothing here has ever executed outside a CI runner.
     #[test]
-    fn an_indexed_draw_reads_the_index_buffer_it_was_bound() {
+    fn a_d3d12_indexed_draw_reads_the_index_buffer_it_was_bound() {
         let (_instance, device) = open_device();
         let triangle = IndexedTriangle::new(&device);
 
@@ -4395,7 +4395,7 @@ pub(crate) mod tests {
     /// # What only CI can settle
     ///
     /// All of it, for the reason
-    /// [`an_indexed_draw_reads_the_index_buffer_it_was_bound`] gives.
+    /// [`a_d3d12_indexed_draw_reads_the_index_buffer_it_was_bound`] gives.
     #[test]
     fn an_indexed_indirect_draw_reads_its_arguments_at_the_offset_and_count_it_was_given() {
         let (_instance, device) = open_device();
@@ -4469,7 +4469,7 @@ pub(crate) mod tests {
     /// # What only CI can settle
     ///
     /// All of it, for the reason
-    /// [`an_indexed_draw_reads_the_index_buffer_it_was_bound`] gives.
+    /// [`a_d3d12_indexed_draw_reads_the_index_buffer_it_was_bound`] gives.
     #[test]
     fn an_indexed_indirect_count_draw_reads_its_count_from_gpu_memory() {
         /// Where the count sits in its buffer. Non-zero, and a `0` sits at zero,
@@ -4696,7 +4696,7 @@ pub(crate) mod tests {
     /// offset must be — which is the rule `plan_copy` enforces and this exercises
     /// from the outside.
     #[test]
-    fn load_preserves_what_clear_replaces() {
+    fn a_d3d12_load_op_preserves_what_clear_replaces() {
         let (_instance, device) = open_device();
         let (target, view) = color_target(&device);
         let readback = readback_buffer(&device, TARGET_BYTES * 3);
@@ -4884,7 +4884,7 @@ pub(crate) mod tests {
     /// of the two offsets would still move the right *number* of bytes, and only
     /// the poison either side of the window catches it.
     #[test]
-    fn a_buffer_to_buffer_copy_moves_the_bytes_at_both_offsets() {
+    fn a_d3d12_buffer_to_buffer_copy_moves_the_bytes_at_both_offsets() {
         let (_instance, device) = open_device();
         let source = device
             .create_buffer(&BufferDesc {
@@ -5146,7 +5146,7 @@ pub(crate) mod tests {
     /// failure path end to end — and the error is `ForeignObject` rather than a
     /// missing slice, because the caller crossed two devices.
     #[test]
-    fn an_encoder_built_on_a_foreign_queue_refuses_at_finish() {
+    fn a_d3d12_encoder_built_on_a_foreign_queue_refuses_at_finish() {
         let (_instance, device) = open_device();
         let (_other_instance, other) = open_device();
         let foreign = other
@@ -5362,7 +5362,7 @@ pub(crate) mod tests {
     /// so a device that reported less than its adapter would be lying about
     /// hardware it can use.
     #[test]
-    fn device_caps_match_the_adapter_they_came_from() {
+    fn d3d12_device_caps_match_the_adapter_they_came_from() {
         let instance = open_instance();
         let adapter = pinned_adapter(&instance);
         let info = instance
@@ -5385,7 +5385,7 @@ pub(crate) mod tests {
     /// `InvalidDescriptor`, so "it returned an error" would pass whether or not
     /// the handle was ever invalidated.
     #[test]
-    fn buffers_of_every_memory_location_create_and_then_stop_resolving() {
+    fn d3d12_buffers_of_every_memory_location_create_and_then_stop_resolving() {
         let (_instance, device) = open_device();
         assert!(!LOCATIONS.is_empty(), "nothing to check");
         for &location in LOCATIONS {
@@ -5411,7 +5411,7 @@ pub(crate) mod tests {
 
     /// A recycled slot must not resurrect the handle that used to name it.
     #[test]
-    fn a_destroyed_handle_does_not_alias_the_buffer_that_replaces_it() {
+    fn a_destroyed_d3d12_handle_does_not_alias_the_buffer_that_replaces_it() {
         let (_instance, device) = open_device();
         let first = device
             .create_buffer(&buffer(256, MemoryLocation::HostUpload))
@@ -5443,7 +5443,7 @@ pub(crate) mod tests {
     /// `write_buffer` writes, at the offset it was given, and refuses the
     /// location D3D12 cannot map.
     #[test]
-    fn write_buffer_writes_host_visible_memory_and_refuses_device_local() {
+    fn write_buffer_writes_host_visible_memory_and_refuses_what_d3d12_cannot_map() {
         let (_instance, device) = open_device();
         let readback = device
             .create_buffer(&buffer(16, MemoryLocation::HostReadback))
@@ -5509,7 +5509,7 @@ pub(crate) mod tests {
     /// own buffer, find the owner matching, and write into the wrong object with
     /// no error anywhere.
     #[test]
-    fn a_handle_from_another_device_is_foreign_not_merely_unresolvable() {
+    fn a_handle_from_another_d3d12_device_is_foreign_not_merely_unresolvable() {
         let instance = open_instance();
         let adapter = pinned_adapter(&instance);
         let a = instance
@@ -5554,7 +5554,7 @@ pub(crate) mod tests {
     /// Images, views and samplers all the way through, and the handles stop
     /// resolving when they are destroyed.
     #[test]
-    fn images_views_and_samplers_create_and_destroy() {
+    fn d3d12_images_views_and_samplers_create_and_destroy() {
         let (_instance, device) = open_device();
         let extent = Extent3d::d2(64, 64);
         let handle = device
@@ -5942,7 +5942,7 @@ pub(crate) mod tests {
     /// Anisotropy is bounded on both sides, and a point filter beside it is
     /// refused rather than silently dropped.
     #[test]
-    fn samplers_reject_anisotropy_outside_the_reported_cap() {
+    fn d3d12_samplers_reject_anisotropy_outside_the_reported_cap() {
         let (_instance, device) = open_device();
         let cap = device.caps().limits.max_sampler_anisotropy;
         assert!(
@@ -6059,7 +6059,7 @@ pub(crate) mod tests {
     /// Every slice that has not arrived still refuses, by name — so none of them
     /// can be half-implemented without this saying so.
     #[test]
-    fn the_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
+    fn the_d3d12_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
         let (_instance, device) = open_device();
 
         let refusals: Vec<(&str, HalError)> = vec![
@@ -7201,7 +7201,7 @@ pub(crate) mod tests {
     /// All of it. This crate compiles on Windows alone and the development box
     /// is Linux.
     #[test]
-    fn a_compute_dispatch_writes_the_values_it_was_asked_for() {
+    fn a_d3d12_compute_dispatch_writes_the_values_it_was_asked_for() {
         let (_instance, device) = open_device();
         // Not a skip. Every D3D12 device accepts compute work on its DIRECT
         // queue, so an absence here is a capability-reporting bug rather than a
@@ -7584,7 +7584,7 @@ pub(crate) mod tests {
     /// how D3D12 spells this call, and a signature with the wrong stride or the
     /// wrong argument type reads three words from somewhere else in the buffer.
     #[test]
-    fn dispatch_indirect_reads_its_workgroup_count_from_the_buffer() {
+    fn a_d3d12_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
         /// Workgroups the real arguments ask for. Fewer than [`PROBE_GROUPS`],
         /// so the difference is visible in the readback.
         const DISPATCHED_GROUPS: u32 = 2;

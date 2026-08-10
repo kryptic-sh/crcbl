@@ -153,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unset_pin_takes_the_adapter_enumeration_put_first() {
+    fn an_unset_dx12_pin_takes_the_adapter_enumeration_put_first() {
         assert_eq!(resolve(None, &workstation()), Ok(AdapterId(0)));
     }
 
@@ -229,7 +229,7 @@ mod tests {
     /// An empty enumeration is answered rather than indexed into, whichever way
     /// the pin is set.
     #[test]
-    fn an_empty_enumeration_is_refused_rather_than_indexed() {
+    fn an_empty_dxgi_enumeration_is_refused_rather_than_indexed() {
         for pin in [None, Some(WARP), Some("nonsense")] {
             let why = resolve(pin, &[]).expect_err("there is no adapter to name");
             assert!(why.contains("no adapter at all"), "{pin:?}: {why}");

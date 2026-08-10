@@ -487,7 +487,7 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   have no bit for it. It waited for the call rather than for a query:
 ///   `Device::create_compute_pipeline` builds the state object,
 ///   `CommandEncoder::dispatch` and `dispatch_indirect` record against it, and
-///   `crcbl_dx12::device`'s `a_compute_dispatch_writes_the_values_it_was_asked_for`
+///   `crcbl_dx12::device`'s `a_d3d12_compute_dispatch_writes_the_values_it_was_asked_for`
 ///   reads the result back. Reporting it before that would have been the
 ///   "unsupported arriving as passed" shape the crate docs name.
 /// * [`Features::DRAW_INDIRECT_COUNT`], [`Features::MULTI_DRAW_INDIRECT`] and

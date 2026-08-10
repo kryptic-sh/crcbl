@@ -11,7 +11,7 @@ use crcbl_hal::{
 /// rather than the backend guessing a size.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_zero_extent_swapchain_is_refused_with_a_reason() {
+fn a_zero_extent_vulkan_swapchain_is_refused_with_a_reason() {
     let instance = instance();
     let adapter = instance.adapters().remove(0);
     // SAFETY: `Offscreen` names no platform object.
@@ -117,7 +117,7 @@ fn a_buffer_from_one_device_is_foreign_to_another() {
 /// validation layer reports — so the report is the assertion.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_device_outlives_the_instance_that_made_it() {
+fn a_vulkan_device_outlives_the_instance_that_made_it() {
     let instance = instance();
     let adapter = instance.adapters().remove(0);
     let device = instance
@@ -168,7 +168,7 @@ fn a_device_outlives_the_instance_that_made_it() {
 /// the validation layer, which is the observable the deferral exists to keep.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
+fn a_vulkan_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
     let headless = Headless::open();
     let device = &headless.device;
 
@@ -248,7 +248,7 @@ fn a_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
 /// no vk test opened two instances at all.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_surface_from_one_instance_is_foreign_to_another() {
+fn a_vulkan_surface_from_one_instance_is_foreign_to_another() {
     let owner = instance();
     let other = instance();
 

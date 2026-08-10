@@ -18,7 +18,7 @@ use crcbl_hal::{
 /// [`LoadOp::Clear`], which is what "clear colour through the graph" means.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
+fn a_vulkan_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
     let headless = Headless::open();
     let device = &headless.device;
 
@@ -207,7 +207,7 @@ fn a_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
 /// on any machine, and the two-submission instance stays CI's job.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn reusing_an_offscreen_ring_image_is_ordered_against_the_frame_that_had_it() {
+fn reusing_an_offscreen_vulkan_ring_image_is_ordered_against_the_frame_that_had_it() {
     // One image, so the second acquire is genuinely the first image again
     // rather than the other half of a ring.
     let headless = Headless::open_with(EXTENT, 1);

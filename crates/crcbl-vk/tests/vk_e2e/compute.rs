@@ -498,7 +498,7 @@ fn assert_probe(actual: &[u32], expected: &[u32], what: &str) {
 /// the destination back tells the two apart.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn a_compute_dispatch_writes_the_values_it_was_asked_for() {
+fn a_vulkan_compute_dispatch_writes_the_values_it_was_asked_for() {
     let headless = Headless::open();
     let device = headless.device.as_ref();
     // Not a skip. Every Vulkan device with a graphics queue has compute — the
@@ -537,7 +537,7 @@ fn a_compute_dispatch_writes_the_values_it_was_asked_for() {
 /// leaves the sentinel behind it.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn dispatch_indirect_reads_its_workgroup_count_from_the_buffer() {
+fn a_vulkan_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
     let headless = Headless::open();
     let device = headless.device.as_ref();
     let probe = ComputeProbe::new(&headless, crcbl_hal::BindingFlags::empty());
