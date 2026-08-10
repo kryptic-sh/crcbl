@@ -272,7 +272,7 @@ mod tests {
     // ── InMemoryTransport roundtrip ────────────────────────────────────────
 
     #[test]
-    fn reliable_roundtrip() {
+    fn a_reliable_message_reaches_the_far_end_with_its_kind_and_payload_intact() {
         let (mut a, mut b) = InMemoryTransport::pair();
         assert!(a.is_connected());
         assert!(b.is_connected());
@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn unreliable_roundtrip() {
+    fn an_unreliable_message_reaches_the_far_end_with_its_kind_and_payload_intact() {
         let (mut a, mut b) = InMemoryTransport::pair();
 
         let msg = Message {
@@ -418,7 +418,7 @@ mod tests {
     }
 
     #[test]
-    fn send_after_disconnect() {
+    fn sending_after_a_local_disconnect_reports_disconnected_rather_than_queueing() {
         let (mut a, _b) = InMemoryTransport::pair();
         a.disconnect();
 
@@ -430,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn recv_after_disconnect() {
+    fn receiving_after_a_local_disconnect_reports_disconnected() {
         let (mut a, _b) = InMemoryTransport::pair();
         a.disconnect();
 
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn bidirectional_traffic() {
+    fn each_end_of_a_pair_receives_what_the_other_sent_and_not_its_own() {
         let (mut a, mut b) = InMemoryTransport::pair();
 
         a.send_reliable(Message {
@@ -469,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_messages() {
+    fn queued_reliable_messages_arrive_in_send_order_and_then_the_queue_is_empty() {
         let (mut a, mut b) = InMemoryTransport::pair();
 
         for i in 0..5 {
@@ -491,7 +491,7 @@ mod tests {
     // ── Debug coverage ────────────────────────────────────────────────────
 
     #[test]
-    fn debug_formatting() {
+    fn every_transport_type_debug_prints_without_panicking() {
         let _ = format!("{:?}", MessageKind::Reliable);
         let _ = format!("{:?}", TransportError::Disconnected);
         let _ = format!("{:?}", TransportError::Channel("oops".into()));

@@ -188,7 +188,7 @@ fn right_position_pans_to_right() {
 }
 
 #[test]
-fn orbit_integration_deterministic() {
+fn an_orbit_hashes_the_same_twice_and_differently_in_reverse() {
     // Full orbit twice → same hash both times.
     let grammar = CueGrammar::default();
 

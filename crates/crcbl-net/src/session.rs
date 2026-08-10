@@ -265,7 +265,7 @@ mod tests {
     // ── Connect flow ──────────────────────────────────────────────────────
 
     #[test]
-    fn connect_flow() {
+    fn a_session_moves_through_handshaking_on_its_way_to_connected() {
         let mut mgr = SessionManager::new(SessionId(2), &config());
         mgr.begin_handshake();
         assert_eq!(mgr.state(), SessionState::Handshaking);
@@ -524,7 +524,7 @@ mod tests {
     // ── Accessors ─────────────────────────────────────────────────────────
 
     #[test]
-    fn baseline_store_accessors() {
+    fn a_sectors_baseline_store_starts_empty_and_keeps_what_the_mutable_accessor_inserts() {
         let mut mgr = SessionManager::new(SessionId(11), &config());
         // BaselineStore starts empty.
         assert!(mgr.baseline_store(SectorId::ZERO).is_none());
@@ -543,7 +543,7 @@ mod tests {
     // ── Debug coverage ────────────────────────────────────────────────────
 
     #[test]
-    fn debug_output() {
+    fn every_session_state_and_the_manager_itself_debug_print_without_panicking() {
         let _ = format!("{:?}", SessionState::Disconnected);
         let _ = format!("{:?}", SessionState::Handshaking);
         let _ = format!("{:?}", SessionState::Connected);

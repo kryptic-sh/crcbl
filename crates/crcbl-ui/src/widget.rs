@@ -724,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn button_click_detected() {
+    fn a_press_and_release_over_one_button_is_a_click_and_frees_the_capture() {
         let btn = Button::new("Fire");
         let atlas = atlas();
         let mut ui = UiState::new();

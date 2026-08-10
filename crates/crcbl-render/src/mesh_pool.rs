@@ -1164,7 +1164,7 @@ mod tests {
     /// same address out twice, and every mesh after the first would be drawn
     /// with another's vertices.
     #[test]
-    fn allocations_never_overlap() {
+    fn every_allocation_is_inside_the_pool_and_disjoint_from_the_others() {
         let mut list = FreeList::new(64);
         let mut taken: Vec<Range<u32>> = Vec::new();
         for len in [8u32, 1, 16, 3, 8, 20] {

@@ -4410,3 +4410,52 @@ fails); the second is never caught at all — the test simply stops being run by
 anything except the harness. A lint would have to know which helpers open a
 device, which is the same trace this slice did by hand; recorded as a gap rather
 than attempted.
+
+### What the non-backend test-name rename left behind
+
+The prose-sentence rule in `docs/plan/12-testing.md` was applied to every test
+name of three words or fewer outside the backend crates. Measured with a
+`#[test]`/`#[tokio::test]` extractor over the whole tree: 138 such names before,
+1 after. The `debug_format` bullet and the `ray_misses_aabb`, `decode_empty`,
+`decode_truncated`, `debug_output` and `debug_formatting` copies named in "Exact
+test-name collisions still open between non-backend crates" above are resolved;
+the rest of that entry's list still stands.
+
+- **`orbit_integration_deterministic` (`crcbl-audio`, `tests/spatial_chain.rs`)
+  was deliberately not renamed.** It is cited by name in `docs/code-review.md`,
+  which was outside this slice's paths, so renaming it would strand that
+  citation. The citation is already stale in two other ways and is worth fixing
+  together with the rename: it gives the path as
+  `crates/crcbl-audio/tests/orbit.rs:191` (the file is now
+  `tests/spatial_chain.rs`), and its finding — that the test XORs per-block
+  hashes, which is order-insensitive — no longer holds, because the test feeds
+  one hasher in block order and asserts that the reversed event order hashes
+  differently.
+- **`crcbl-wgpu/src/conv.rs`'s `format_mapping_round_trips` remains**, a
+  three-word name naming the function under test rather than a claim. `crcbl-vk`
+  and `crcbl-mtl` state the same contract as
+  `no_two_formats_share_a_metal_format` and its siblings, so the wgpu name
+  should follow that shape. It was outside this slice's paths.
+- **The four `the_workgroup_size_matches_the_numthreads_the_shader_declares`
+  copies and the three `the_params_block_matches_the_offsets_slangc_emits`
+  copies in `crcbl-shaders` now name their shader** — read end to end first, and
+  they are one contract instantiated per shader, not one claim written several
+  ways: each reads its own `.slang` source, or asserts its own `PARAMS_SIZE` and
+  field offsets. That is the same situation `docs/plan/12-testing.md` describes
+  for the backend crates, where the fix is to differ by the one word that names
+  what is under test. Renaming them meant editing the `PARAMS_SIZE` doc comments
+  in `cull.rs`, `clear_counters.rs` and `draw_gen.rs`, which cite the test by
+  name; those three doc-comment lines are the only non-test text the rename
+  touched.
+- **Same-crate duplicate names in `crcbl-render` were left alone**:
+  `a_pool_leaks_nothing` and
+  `a_pool_error_flattens_into_the_seams_without_losing_its_message` each exist
+  in both `instance_pool.rs` and `mesh_pool.rs`. Both are prose sentences
+  already, so they were outside the rename's criterion, but a grep for either
+  finds two tests over two different pools and nothing in the name says which.
+  Naming the pool in each would close it.
+- **Not re-examined:** the 4-to-6-word names that already read as claims but are
+  thin — `sweep_removes_dead_entities`, `t_values_are_correct`,
+  `element_ids_are_preserved` and their neighbours in `crcbl-phys` and
+  `crcbl-net`. The rename's cut was at three words, so these were never read;
+  whether they state what the body asserts is unmeasured, not judged fine.

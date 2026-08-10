@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn index_sizes() {
+    fn each_index_format_reports_the_byte_size_its_name_promises() {
         assert_eq!(IndexFormat::Uint16.size(), 2);
         assert_eq!(IndexFormat::Uint32.size(), 4);
     }

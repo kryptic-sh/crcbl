@@ -957,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn add_and_remove() {
+    fn adding_and_removing_a_collider_leaves_the_world_empty_again() {
         let mut world = PhysicsWorld::new();
         let id = world.add_sphere(Sphere::new(DVec3::ZERO, 1.0));
         assert_eq!(world.len(), 1);
@@ -1063,7 +1063,7 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_after_removal() {
+    fn rebuilding_after_the_last_removal_leaves_nothing_for_a_ray_to_hit() {
         let mut world = PhysicsWorld::new();
         let id = world.add_sphere(Sphere::new(DVec3::new(5.0, 0.0, 0.0), 1.0));
         world.remove(id);
@@ -1184,7 +1184,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_format() {
+    fn the_worlds_debug_output_reports_how_many_colliders_it_holds() {
         let mut world = PhysicsWorld::new();
         world.add_sphere(Sphere::new(DVec3::ZERO, 1.0));
         let s = format!("{world:?}");

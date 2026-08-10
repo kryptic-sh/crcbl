@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn save_roundtrip() {
+    fn a_save_reads_back_with_its_header_its_sector_and_a_valid_checksum() {
         let storage = MemoryStorage::new();
         let writer = make_sample_save();
         let path = Path::new("test.crb");
@@ -476,7 +476,7 @@ mod tests {
     }
 
     #[test]
-    fn save_multiple_sectors() {
+    fn a_save_with_several_sectors_reads_them_back_in_order_with_their_own_data() {
         let storage = MemoryStorage::new();
         let header = SaveHeader {
             tick: TickId::from_raw(100),
@@ -506,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn checksum_catches_corruption() {
+    fn a_corrupt_save_is_refused_by_open_and_flagged_by_the_salvage_path() {
         let storage = MemoryStorage::new();
         let writer = make_sample_save();
         let path = Path::new("test.crb");
@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_magic_rejected() {
+    fn a_file_with_the_wrong_magic_is_refused_as_an_invalid_save() {
         let storage = MemoryStorage::new();
         // Must be >= MIN_SAVE_SIZE (HEADER_SIZE + CHECKSUM_SIZE) to pass the
         // length check and reach the magic validation.
@@ -597,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn too_short_rejected() {
+    fn a_file_shorter_than_the_save_header_is_refused() {
         let storage = MemoryStorage::new();
         storage.write(Path::new("short.crb"), b"too short").unwrap();
 

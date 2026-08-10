@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn single_value_allocation() {
+    fn an_arena_allocation_hands_back_storage_the_caller_can_write_through() {
         let arena = FrameArena::with_capacity(256);
         let value = arena.alloc([1u16, 2, 3]);
         value[1] = 9;
@@ -553,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn stats_start_empty() {
+    fn a_fresh_arena_reports_default_stats_and_a_zero_peak_fraction() {
         let arena = FrameArena::with_capacity(0);
         assert_eq!(arena.stats(), ArenaStats::default());
         assert_eq!(arena.stats().peak_fraction(), 0.0);

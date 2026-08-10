@@ -243,7 +243,7 @@ mod tests {
     }
 
     #[test]
-    fn ahead_is_reference() {
+    fn a_source_straight_ahead_is_centred_with_no_itd_and_no_pitch_shift() {
         // Within rolloff_start: full volume, no ITD, no pitch shift, and the
         // constant-power centre in both ears (not unity — see `REFERENCE`).
         let centre = core::f32::consts::FRAC_1_SQRT_2;
@@ -358,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn cue_is_deterministic() {
+    fn the_same_listener_and_source_produce_a_bit_identical_cue() {
         let grammar = grammar();
         let a = compute_cue([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], &grammar);
         let b = compute_cue([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], &grammar);

@@ -390,17 +390,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_non_qoa() {
+    fn a_file_without_the_qoa_magic_is_rejected_as_missing_magic() {
         assert_eq!(decode(b"not a qoa file"), Err(QoaError::MissingMagic));
     }
 
     #[test]
-    fn rejects_truncated_header() {
+    fn a_qoa_header_shorter_than_its_magic_is_rejected_as_truncated() {
         assert_eq!(decode(&[0x71, 0x6f, 0x61]), Err(QoaError::Truncated));
     }
 
     #[test]
-    fn rejects_streaming() {
+    fn a_zero_sample_count_is_read_as_streaming_and_refused() {
         let mut header = vec![0x71, 0x6f, 0x61, 0x66]; // 'qoaf'
         header.extend_from_slice(&0u32.to_be_bytes()); // zero samples = streaming
         assert_eq!(decode(&header), Err(QoaError::StreamingUnsupported));
@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_silent_mono() {
+    fn a_silent_mono_qoa_decodes_to_its_declared_rate_length_and_silence() {
         let data = silent_qoa(1, 44100, 40);
         let qoa = decode(&data).unwrap();
         assert_eq!(qoa.channels, 1);
@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_silent_stereo() {
+    fn a_silent_stereo_qoa_decodes_to_two_interleaved_samples_per_frame() {
         let data = silent_qoa(2, 48000, 60);
         let qoa = decode(&data).unwrap();
         assert_eq!(qoa.channels, 2);
@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_multi_frame() {
+    fn a_sound_spanning_more_than_one_qoa_frame_decodes_to_every_sample() {
         // 520 samples = 2 frames (256 + 264)
         let data = silent_qoa(1, 44100, 520);
         let qoa = decode(&data).unwrap();
@@ -584,7 +584,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_zero_channels() {
+    fn a_qoa_header_declaring_no_channels_is_rejected_rather_than_decoded() {
         let data = silent_qoa(0, 44100, 20);
         assert_eq!(decode(&data), Err(QoaError::ZeroChannels));
     }

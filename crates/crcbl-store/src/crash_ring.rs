@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "capacity must be non-zero")]
-    fn zero_capacity_panics() {
+    fn a_crash_ring_asked_for_zero_capacity_panics_rather_than_holding_nothing() {
         CrashRing::new(0);
     }
 }

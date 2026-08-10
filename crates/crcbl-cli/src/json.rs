@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn arrays_nest() {
+    fn an_array_nested_in_an_object_renders_inline_and_an_empty_one_is_brackets() {
         let value = Json::Object(vec![(
             "files",
             Json::strings(["Cargo.toml", "src/main.rs"]),
@@ -134,7 +134,7 @@ mod tests {
     /// The whole reason this module is allowed to exist rather than being a
     /// `format!` call.
     #[test]
-    fn strings_are_escaped() {
+    fn strings_escape_the_control_characters_json_requires_and_leave_utf8_alone() {
         let nasty = "quote\" back\\slash\nnewline\ttab\u{1}bell\u{8}back";
         let rendered = Json::string(nasty).to_string();
         assert_eq!(

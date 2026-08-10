@@ -1408,7 +1408,7 @@ mod tests {
     // ── Debug ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn debug_format() {
+    fn the_servers_debug_output_names_it_and_reports_whether_it_is_connected() {
         let (transport, _peer) = InMemoryTransport::pair();
         let server = server(World::new(), transport);
         let s = format!("{server:?}");

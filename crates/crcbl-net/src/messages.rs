@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_writer_empty() {
+    fn a_snapshot_written_with_no_systems_reads_back_with_its_tick_and_nothing_else() {
         let writer = SnapshotWriter::new(TickId::from_raw(1));
         let msg = writer.finish();
 
@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_formatting() {
+    fn every_wire_message_and_its_writer_and_reader_debug_print_without_panicking() {
         let _ = format!(
             "{:?}",
             ClientToServer::Input {

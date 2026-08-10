@@ -495,7 +495,7 @@ mod tests {
     /// Unknown arguments are refused rather than ignored; this sample claims no
     /// flags of its own.
     #[test]
-    fn nonsense_is_refused() {
+    fn an_unknown_flag_is_refused_by_name_and_help_still_prints() {
         let bad = parse(["--nonsense".to_string()].into_iter());
         assert!(matches!(bad, Invocation::BadUsage(message) if message.contains("nonsense")));
         assert!(matches!(

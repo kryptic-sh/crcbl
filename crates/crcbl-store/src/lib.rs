@@ -521,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn native_list_entries() {
+    fn the_native_backend_lists_the_files_that_were_written_to_it() {
         let dir = tempfile::tempdir().unwrap();
         let store = NativeStorage::at(dir.path().to_path_buf());
 

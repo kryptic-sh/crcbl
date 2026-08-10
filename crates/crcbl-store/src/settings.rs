@@ -502,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn stack_get_section() {
+    fn get_section_returns_the_table_the_layer_stored_under_that_key() {
         let mut stack = SettingsStack::new();
         let mut t = toml::Table::new();
         let mut video = toml::Table::new();

@@ -34,7 +34,7 @@ pub const WORKGROUP_SIZE: u32 = 64;
 ///
 /// Three `uint` and the tail padding `std140` requires of a uniform block's
 /// size. Checked against the `Offset` decorations `slangc` emits by this
-/// module's `the_params_block_matches_the_offsets_slangc_emits`.
+/// module's `the_draw_gen_params_block_matches_the_offsets_slangc_emits`.
 pub const PARAMS_SIZE: usize = 16;
 
 /// The uniform block, matching `struct DrawGenParams` in
@@ -169,7 +169,7 @@ mod tests {
     /// reason [`crate::cull`]'s twin gives: a mismatch shows up only as a partly
     /// generated draw list, which reads as "those instances were culled".
     #[test]
-    fn the_workgroup_size_matches_the_numthreads_the_shader_declares() {
+    fn the_workgroup_size_matches_the_numthreads_draw_gen_slang_declares() {
         let source = include_str!("../shaders/draw_gen.slang");
         let declaration = format!("[numthreads({WORKGROUP_SIZE}, 1, 1)]");
         assert!(
@@ -182,7 +182,7 @@ mod tests {
     /// The offsets `slangc` actually emitted for `DrawGenParams`, read out of
     /// the disassembly.
     #[test]
-    fn the_params_block_matches_the_offsets_slangc_emits() {
+    fn the_draw_gen_params_block_matches_the_offsets_slangc_emits() {
         // `OpMemberDecorate %DrawGenParams_std140 n Offset …`: 0, 4, 8.
         assert_eq!(PARAMS_SIZE, 16);
         assert_eq!(

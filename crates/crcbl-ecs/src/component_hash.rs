@@ -185,19 +185,19 @@ mod tests {
     // -- tuples ---------------------------------------------------------------
 
     #[test]
-    fn tuple_hashes_deterministically() {
+    fn hashing_the_same_tuple_twice_gives_the_same_value() {
         assert_eq!(hash_one(&(1u8, 2u16, 3u32)), hash_one(&(1u8, 2u16, 3u32)),);
     }
 
     #[test]
-    fn tuple_order_matters() {
+    fn swapping_two_fields_of_a_tuple_changes_its_hash() {
         assert_ne!(hash_one(&(1u8, 2u8)), hash_one(&(2u8, 1u8)),);
     }
 
     // -- arrays ---------------------------------------------------------------
 
     #[test]
-    fn array_hashes_deterministically() {
+    fn hashing_the_same_array_twice_gives_the_same_value() {
         assert_eq!(hash_one(&[1u32, 2u32, 3u32]), hash_one(&[1u32, 2u32, 3u32]),);
     }
 

@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_bits_roundtrip() {
+    fn a_handle_survives_to_bits_and_back_and_a_zero_generation_is_not_a_handle() {
         let handle = Handle::<u8>::new(0xDEAD_BEEF, NonZeroU32::new(0x0BAD_F00D).unwrap());
         assert_eq!(Handle::from_bits(handle.to_bits()), Some(handle));
         assert_ne!(handle.to_bits(), 0);
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn insert_get_remove() {
+    fn a_pool_hands_back_what_was_inserted_and_a_removed_handle_never_resurrects() {
         let mut pool = Pool::new();
         let a = pool.insert("a".to_string());
         let b = pool.insert("b".to_string());

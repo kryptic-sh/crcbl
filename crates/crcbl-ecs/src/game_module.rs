@@ -92,13 +92,13 @@ mod tests {
     }
 
     #[test]
-    fn module_has_name() {
+    fn a_game_module_reports_the_name_it_was_built_with() {
         let module = CounterModule::new("test_mod");
         assert_eq!(module.name(), "test_mod");
     }
 
     #[test]
-    fn module_registers_systems() {
+    fn a_modules_register_call_spawns_into_the_world_it_is_handed() {
         let mut world = World::new();
         let module = CounterModule::new("test_mod");
         module.register(&mut world);

@@ -1050,7 +1050,7 @@ mod tests {
     }
 
     #[test]
-    fn key_held_duration() {
+    fn a_key_still_down_after_a_tick_reports_held_with_how_long_it_has_been() {
         let mut map = ActionMap::new();
         map.declare(decl_button("fire", Binding::Key(KeyCode::KeyF)));
 
@@ -1110,7 +1110,7 @@ mod tests {
     // -- ActionMap: WASD composite -------------------------------------------
 
     #[test]
-    fn wasd_composite_basics() {
+    fn a_wasd_composite_stays_a_unit_vector_from_idle_through_every_diagonal() {
         let mut map = ActionMap::new();
         map.declare(decl_axis2_wasd(
             "move",
@@ -1178,7 +1178,7 @@ mod tests {
     // -- ActionMap: mouse motion --------------------------------------------
 
     #[test]
-    fn mouse_motion_axis2() {
+    fn mouse_motion_accumulates_within_a_tick_and_begin_tick_clears_it() {
         let mut map = ActionMap::new();
         map.declare(decl_axis2_mouse("look"));
 
@@ -1197,7 +1197,7 @@ mod tests {
     // -- ActionMap: mouse scroll --------------------------------------------
 
     #[test]
-    fn mouse_scroll_axis1() {
+    fn scroll_sums_positive_and_negative_notches_and_resets_on_the_next_tick() {
         let mut map = ActionMap::new();
         map.declare(decl_axis1_scroll("zoom"));
 
@@ -1819,7 +1819,7 @@ mod tests {
     // -- edge case: multiple actions with overlapping bindings ---------------
 
     #[test]
-    fn overlapping_bindings_independent() {
+    fn two_actions_bound_to_one_key_both_report_pressed() {
         let mut map = ActionMap::new();
         map.declare(decl_button("jump", Binding::Key(KeyCode::Space)));
         map.declare(decl_button("fire", Binding::Key(KeyCode::Space)));
@@ -1859,7 +1859,7 @@ mod tests {
     // -- Debug implementations ----------------------------------------------
 
     #[test]
-    fn debug_impls() {
+    fn every_input_type_debug_prints_without_panicking() {
         // Just make sure they don't panic.
         let mut map = ActionMap::new();
         map.declare(decl_button("jump", Binding::Key(KeyCode::Space)));

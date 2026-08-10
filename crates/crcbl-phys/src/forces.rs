@@ -327,7 +327,7 @@ mod tests {
     // ── Drag ─────────────────────────────────────────────────────────────
 
     #[test]
-    fn drag_opposes_velocity() {
+    fn drag_produces_a_force_opposite_the_velocity_and_proportional_to_it() {
         let drag = DragForce::new(0.5);
         let mut body = RigidBody::new_dynamic(1.0);
         body.velocity = DVec3::new(10.0, 0.0, 0.0);
@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn multiple_providers_accumulate() {
+    fn two_force_providers_add_into_the_same_accumulator_rather_than_replacing_it() {
         let g = GravityForce::EARTH;
         let drag = DragForce::new(0.3);
         let mut body = RigidBody::new_dynamic(1.0);

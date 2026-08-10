@@ -580,7 +580,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_hello() {
+    fn a_hello_survives_a_roundtrip_with_or_without_a_session_token() {
         // With session token
         let hello = Hello {
             protocol_version: 1,
@@ -614,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_handshake_result() {
+    fn an_accept_keeps_its_session_and_tick_and_a_reject_keeps_its_reason() {
         // Accept
         let accept = HandshakeResult::Accept {
             generation: 1,
@@ -661,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_ack() {
+    fn an_ack_roundtrips_with_its_negative_sector_coordinates_intact() {
         let sector = SectorId { x: -1, y: 2, z: 3 };
         let tick = TickId::from_raw(0xABCD);
         let encoded = encode_ack(sector, tick);
@@ -681,7 +681,7 @@ mod tests {
     // ── Error tests ────────────────────────────────────────────────────────
 
     #[test]
-    fn decode_empty() {
+    fn every_wire_decoder_errors_on_an_empty_payload() {
         let empty: &[u8] = &[];
         assert!(decode_client_to_server(empty).is_err());
         assert!(decode_server_to_client(empty).is_err());
@@ -691,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_unknown_tag() {
+    fn an_unrecognised_tag_is_reported_as_unknown_with_the_byte_that_was_read() {
         let buf = [0xFFu8];
         assert!(matches!(
             decode_client_to_server(&buf),
@@ -716,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_truncated() {
+    fn truncating_any_wire_message_yields_too_short_rather_than_a_partial_decode() {
         // Input truncated (tag + tick but no data_len)
         let mut input_enc = encode_client_to_server(&ClientToServer::Input {
             tick: TickId::from_raw(1),
@@ -822,7 +822,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_trailing_bytes() {
+    fn bytes_after_a_complete_message_are_refused_rather_than_ignored() {
         // ClientToServer with trailing bytes
         let mut enc = encode_client_to_server(&ClientToServer::Input {
             tick: TickId::from_raw(1),
@@ -1011,7 +1011,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_error_display() {
+    fn each_decode_error_prints_the_offsets_and_lengths_that_explain_it() {
         assert_eq!(
             format!(
                 "{}",

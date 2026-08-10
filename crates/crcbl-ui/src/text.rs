@@ -719,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn text_width_scales() {
+    fn text_width_scales_linearly_with_the_scale_it_is_given() {
         let atlas = FontAtlas::built_in();
         let w1 = atlas.text_width("Hi", 1.0);
         let w2 = atlas.text_width("Hi", 2.0);
@@ -821,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_format() {
+    fn the_font_atlas_debug_output_reports_its_glyph_count() {
         let atlas = FontAtlas::built_in();
         let s = format!("{atlas:?}");
         assert!(s.contains(&format!("glyph_count: {GLYPH_COUNT}")));

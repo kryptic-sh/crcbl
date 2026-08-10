@@ -372,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_empty_writer() {
+    fn an_empty_replay_keeps_its_tick_rate_and_reports_no_ticks_to_replay() {
         let storage = MemoryStorage::new();
         let writer = ReplayWriter::new(30);
         let path = Path::new("empty.crpl");
@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_tick_at() {
+    fn tick_at_answers_the_recorded_tick_and_zero_past_the_end() {
         let storage = MemoryStorage::new();
         let mut writer = ReplayWriter::new(60);
         writer.push_tick(TickId::from_raw(10), b"msg");

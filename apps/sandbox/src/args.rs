@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn every_flag_parses() {
+    fn every_flag_the_sandbox_accepts_reaches_its_option_field() {
         let options = options(&[
             "--headless",
             "--frames",

@@ -548,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn ray_misses_sphere() {
+    fn a_ray_passing_beside_a_sphere_reports_no_hit() {
         let ray = Ray::new(DVec3::new(-5.0, 3.0, 0.0), DVec3::X);
         let sphere = Sphere::new(DVec3::ZERO, 1.0);
         assert!(ray_vs_sphere(&ray, &sphere).is_none());
@@ -621,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn ray_misses_aabb() {
+    fn a_ray_passing_above_a_box_reports_no_hit() {
         let ray = Ray::new(DVec3::new(-5.0, 5.0, 0.0), DVec3::X);
         let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
         assert!(ray_vs_aabb(&ray, &aabb).is_none());
@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn ray_misses_capsule() {
+    fn a_ray_passing_beside_a_capsule_reports_no_hit() {
         let capsule = Capsule::new(DVec3::ZERO, 0.5, 1.0);
         let ray = Ray::new(DVec3::new(-5.0, 3.0, 0.0), DVec3::X);
         assert!(ray_vs_capsule(&ray, &capsule).is_none());

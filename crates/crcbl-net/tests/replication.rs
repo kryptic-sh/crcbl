@@ -114,7 +114,7 @@ fn drain_all<T: Transport>(t: &mut T) -> Vec<Message> {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[test]
-fn replication_roundtrip_lossless() {
+fn a_lossless_run_leaves_the_clients_state_hash_equal_to_the_servers() {
     let mut server = Server::new();
     let mut client = Client::new();
 
@@ -213,7 +213,7 @@ fn modified_state_produces_modified_entries() {
 }
 
 #[test]
-fn removed_entity_detected() {
+fn entities_gone_since_the_last_ack_are_listed_as_removed_in_the_next_delta() {
     let mut server = Server::new();
 
     // Tick 1: 3 entities.

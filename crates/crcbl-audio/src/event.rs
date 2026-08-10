@@ -79,7 +79,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encode_decode_roundtrip() {
+    fn an_audio_event_encodes_to_its_wire_size_and_decodes_back_field_for_field() {
         let event = AudioEvent {
             sound_id: 42,
             position: [1.5, 2.5, -3.0],
@@ -121,7 +121,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_position_event() {
+    fn an_event_at_the_origin_with_no_range_decodes_exactly_equal() {
         let event = AudioEvent {
             sound_id: 7,
             position: [0.0, 0.0, 0.0],

@@ -569,7 +569,7 @@ mod tests {
     /// The same input twice gives the same file, so re-running the converter
     /// does not churn a diff.
     #[test]
-    fn tracing_is_deterministic() {
+    fn tracing_the_same_image_twice_gives_a_byte_identical_file() {
         let once = trace(&[image("a", &FOUR)], &Options::default()).expect("traces");
         let twice = trace(&[image("a", &FOUR)], &Options::default()).expect("traces");
         assert_eq!(once, twice);

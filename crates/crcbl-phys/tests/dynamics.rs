@@ -447,7 +447,7 @@ fn hash_physics_state(phys: &PhysicsSystem, count: usize) -> u64 {
 }
 
 #[test]
-fn thousand_body_determinism() {
+fn a_thousand_body_run_hashes_the_same_state_twice_over() {
     let run = || {
         let mut phys = PhysicsSystem::new();
         phys.add_force_provider(Box::new(GravityForce::EARTH));

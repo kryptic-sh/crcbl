@@ -521,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_mappability() {
+    fn only_the_host_visible_memory_locations_report_themselves_as_mappable() {
         assert!(!MemoryLocation::DeviceLocal.is_mappable());
         assert!(MemoryLocation::HostUpload.is_mappable());
         assert!(MemoryLocation::HostReadback.is_mappable());

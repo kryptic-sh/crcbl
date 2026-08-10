@@ -134,7 +134,7 @@ mod tests {
     }
 
     #[test]
-    fn session_id_equality() {
+    fn session_ids_compare_equal_only_when_their_raw_values_match() {
         let a = SessionId(42);
         let b = SessionId(42);
         let c = SessionId(7);
@@ -181,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn entity_data_debug() {
+    fn entity_data_debug_shows_the_entity_bits_and_the_payload_bytes() {
         let ed = EntityData {
             entity_bits: 0xDEAD_BEEF,
             data: vec![1, 2, 3],

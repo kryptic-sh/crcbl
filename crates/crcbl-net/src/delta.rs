@@ -1100,7 +1100,7 @@ mod tests {
     // ── Eviction ──────────────────────────────────────────────────────────
 
     #[test]
-    fn baseline_store_eviction() {
+    fn the_baseline_store_evicts_its_oldest_tick_and_then_calls_it_too_old() {
         let mut store = BaselineStore::new(3);
         for i in 0..4 {
             let b = make_snapshot(TickId::from_raw(i), 1, &[(i, b"x")]);
@@ -1163,7 +1163,7 @@ mod tests {
     // ── newest ────────────────────────────────────────────────────────────
 
     #[test]
-    fn baseline_store_newest() {
+    fn the_baseline_store_has_no_newest_until_one_is_inserted_then_tracks_the_latest() {
         let mut store = BaselineStore::new(4);
         assert!(store.newest().is_none());
 
@@ -1177,7 +1177,7 @@ mod tests {
     // ── Baseline::from_snapshot ───────────────────────────────────────────
 
     #[test]
-    fn baseline_from_snapshot() {
+    fn a_baseline_carries_the_tick_and_the_system_and_entity_counts_of_its_snapshot() {
         let baseline = make_snapshot(
             TickId::from_raw(42),
             1,
@@ -1334,7 +1334,7 @@ mod tests {
     // ── Debug coverage ────────────────────────────────────────────────────
 
     #[test]
-    fn debug_output() {
+    fn a_baseline_and_its_store_debug_print_without_panicking() {
         let b = make_snapshot(TickId::from_raw(1), 42, &[(0, b"x")]);
         let _ = format!("{b:?}");
 
@@ -1401,7 +1401,7 @@ mod tests {
 
     /// 3. Server adds entity → delta.added has 1 entry.
     #[test]
-    fn add_one_entity() {
+    fn an_entity_added_since_the_baseline_appears_once_in_the_deltas_added_list() {
         let tick_a = TickId::from_raw(1);
         let tick_b = TickId::from_raw(2);
 
@@ -1423,7 +1423,7 @@ mod tests {
 
     /// 4. Server removes entity → delta.removed has 1 entry.
     #[test]
-    fn remove_one_entity() {
+    fn an_entity_gone_since_the_baseline_appears_once_in_the_deltas_removed_list() {
         let tick_a = TickId::from_raw(1);
         let tick_b = TickId::from_raw(2);
 
@@ -1445,7 +1445,7 @@ mod tests {
 
     /// 5. Change entity bytes → delta.modified has 1 entry.
     #[test]
-    fn modify_entity_data() {
+    fn changed_entity_bytes_appear_as_a_modified_entry_carrying_the_new_data() {
         let tick_a = TickId::from_raw(1);
         let tick_b = TickId::from_raw(2);
 
@@ -1488,7 +1488,7 @@ mod tests {
     /// 7. Encode N ticks, apply sequentially, final baseline matches latest
     ///    snapshot.
     #[test]
-    fn delta_apply_roundtrip() {
+    fn applying_a_run_of_deltas_leaves_the_baseline_equal_to_the_latest_snapshot() {
         // Tick 1: entity 10 with "a"
         let snaps_t1 = make_snapshots(&[(1, &[(10, b"a")])]);
         let mut baseline =
@@ -1570,14 +1570,14 @@ mod tests {
 
     /// 10. Empty byte slice → error.
     #[test]
-    fn decode_empty() {
+    fn an_empty_delta_payload_is_reported_as_too_short() {
         let result = decode_delta(b"", Trust::Untrusted);
         assert!(matches!(result, Err(DeltaDecodeError::TooShort)));
     }
 
     /// 11. Various truncations → error, never panic.
     #[test]
-    fn decode_truncated() {
+    fn a_delta_truncated_at_any_length_errors_instead_of_panicking() {
         // Build a valid encoded delta first.
         let tick = TickId::from_raw(1);
         let snaps = make_snapshots(&[(1, &[(10, b"data")])]);

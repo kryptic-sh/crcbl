@@ -31,7 +31,7 @@ mod tests {
     use crcbl_ecs::System;
 
     #[test]
-    fn empty_world_hashes() {
+    fn hashing_an_empty_world_twice_gives_the_same_value() {
         let world = World::new();
         let h1 = hash_world(&world, TickId::ZERO);
         let h2 = hash_world(&world, TickId::ZERO);
@@ -47,7 +47,7 @@ mod tests {
     }
 
     #[test]
-    fn hash_is_deterministic() {
+    fn a_worlds_hash_repeats_within_a_tick_and_differs_across_ticks() {
         let mut world = World::new();
         let e = world.spawn();
         let mut sys = System::<f32>::new("pos");

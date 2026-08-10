@@ -376,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_format() {
+    fn the_worlds_debug_output_reports_how_many_entities_it_holds() {
         let mut world = World::new();
         world.spawn();
         world.spawn();

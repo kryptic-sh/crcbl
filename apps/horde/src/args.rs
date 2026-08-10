@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn help_is_help() {
+    fn both_spellings_of_help_print_the_usage_rather_than_a_complaint() {
         assert!(matches!(
             parse(["-h".to_string()].into_iter()),
             Invocation::Help

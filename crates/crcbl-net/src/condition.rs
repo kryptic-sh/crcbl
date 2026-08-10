@@ -478,7 +478,7 @@ mod tests {
     // ── Latency ──────────────────────────────────────────────────────────
 
     #[test]
-    fn latency_delays_messages() {
+    fn a_message_under_latency_does_not_arrive_until_the_delay_has_passed() {
         let (a, mut b) = InMemoryTransport::pair();
         let mut sim = ConditionSimulator::new(
             a,
@@ -695,7 +695,7 @@ mod tests {
     // ── is_connected / disconnect ────────────────────────────────────────
 
     #[test]
-    fn is_connected_delegates() {
+    fn the_simulator_reports_the_connectedness_of_the_transport_it_wraps() {
         let (a, _b) = InMemoryTransport::pair();
         let sim = ConditionSimulator::new(a, SimConditions::default());
         assert!(sim.is_connected());
@@ -736,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn conditions_accessor() {
+    fn the_simulator_reports_back_the_conditions_it_was_built_with() {
         let (a, _b) = InMemoryTransport::pair();
         let sim = ConditionSimulator::new(
             a,
@@ -774,7 +774,7 @@ mod tests {
     // ── Convenience constructors ─────────────────────────────────────────
 
     #[test]
-    fn with_loss_constructor() {
+    fn the_loss_only_constructor_applies_the_loss_rate_it_was_given() {
         let (a, mut b) = InMemoryTransport::pair();
         let mut sim = ConditionSimulator::with_loss(a, 1.0, 0);
         sim.send_reliable(msg(1)).unwrap();
@@ -782,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn with_latency_constructor() {
+    fn the_latency_only_constructor_delays_delivery_and_still_delivers() {
         let (a, mut b) = InMemoryTransport::pair();
         let mut sim = ConditionSimulator::with_latency(
             a,
@@ -802,7 +802,7 @@ mod tests {
     // ── Edge cases ───────────────────────────────────────────────────────
 
     #[test]
-    fn empty_recv() {
+    fn neither_end_of_an_idle_simulator_produces_a_message() {
         let (a, mut b) = InMemoryTransport::pair();
         let mut sim = ConditionSimulator::new(a, SimConditions::default());
         // Nothing sent — recv on the wrapped end should be None.
@@ -812,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    fn unreliable_preserves_kind() {
+    fn an_unreliable_send_arrives_still_marked_unreliable() {
         let (a, mut b) = InMemoryTransport::pair();
         let mut sim = ConditionSimulator::new(a, SimConditions::default());
         sim.send_unreliable(Message {

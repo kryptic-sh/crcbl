@@ -49,14 +49,14 @@ mod tests {
     use crate::System;
 
     #[test]
-    fn collect_empty_world() {
+    fn an_inspector_over_a_world_with_no_systems_collects_nothing() {
         let world = World::new();
         let stats = Inspector::collect(&world);
         assert!(stats.is_empty());
     }
 
     #[test]
-    fn collect_single_system() {
+    fn a_single_registered_system_is_reported_with_its_name_and_entity_count() {
         let mut world = World::new();
         let e = world.spawn();
         let mut sys = System::<i32>::new("movement");
@@ -74,7 +74,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_multiple_systems() {
+    fn several_systems_are_reported_in_registration_order_each_with_its_own_count() {
         let mut world = World::new();
         let e1 = world.spawn();
         let e2 = world.spawn();

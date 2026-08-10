@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn seal_roundtrips() {
+    fn an_envelope_opens_back_to_the_counter_and_payload_it_sealed() {
         let key = key();
         let sealed = seal(&key, 7, b"payload");
         let (counter, payload) = open(&key, &sealed).expect("own envelope verifies");
@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_error_display() {
+    fn an_auth_error_names_the_check_that_failed_and_the_offending_counter() {
         assert_eq!(
             AuthError::Replayed(9).to_string(),
             "replayed or out-of-window counter: 9"

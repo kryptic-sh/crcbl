@@ -298,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_8bit_unsigned() {
+    fn eight_bit_pcm_is_unsigned_so_the_midpoint_byte_decodes_to_silence() {
         // 8-bit PCM: 0x00 = -1.0, 0x80 = 0.0, 0xFF = ~1.0
         let raw = [0x80u8]; // 128 = zero
         let bytes = minimal_wav(&raw, 8000, 1, 8);
@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_24bit() {
+    fn twenty_four_bit_pcm_decodes_its_most_negative_value_to_minus_one() {
         // 0x000000 = 0.0, 0x000080 = -0.5 (?), let's do a simple one
         let raw = [0x00u8, 0x00, 0x80]; // -8388608 → -1.0
         let bytes = minimal_wav(&raw, 48000, 1, 24);
@@ -316,7 +316,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_32bit_signed() {
+    fn thirty_two_bit_pcm_decodes_half_of_full_scale_to_a_half() {
         let val: i32 = 1_073_741_824; // 0.5 * 2^31
         let raw: Vec<u8> = val.to_le_bytes().to_vec();
         let bytes = minimal_wav(&raw, 48000, 1, 32);
@@ -325,7 +325,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_float32() {
+    fn format_tag_three_is_read_as_float_samples_rather_than_integers() {
         let val: f32 = -0.75;
         let raw: Vec<u8> = val.to_le_bytes().to_vec();
         let mut bytes = minimal_wav(&raw, 48000, 1, 32);
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_truncated() {
+    fn a_wav_cut_off_before_its_format_chunk_is_rejected_as_truncated() {
         assert_eq!(decode(b"RIFF"), Err(WavError::Truncated));
         // 20 bytes: RIFF header + "fmt " + size field, but no chunk body.
         assert_eq!(
@@ -393,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_riff() {
+    fn a_file_that_does_not_start_with_riff_is_rejected() {
         let mut bytes = minimal_wav(&[0u8; 2], 44100, 1, 16);
         bytes[0] = b'X';
         assert_eq!(decode(&bytes), Err(WavError::MissingRIFF));

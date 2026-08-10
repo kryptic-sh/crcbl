@@ -374,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn into_commands_consumes() {
+    fn into_commands_hands_back_the_commands_that_were_recorded() {
         let mut dl = DrawList::new();
         dl.rect(Vec2::ZERO, Vec2::splat(10.0), [1.0; 4]);
         let cmds = dl.into_commands();

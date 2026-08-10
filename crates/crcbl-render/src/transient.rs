@@ -605,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn destroy_releases_everything() {
+    fn destroying_a_transient_pool_releases_every_image_and_buffer_and_can_be_repeated() {
         let device = device();
         let mut pool = TransientPool::new();
         pool.begin_frame();

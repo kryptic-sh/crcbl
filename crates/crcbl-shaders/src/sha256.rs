@@ -194,7 +194,7 @@ mod tests {
     /// SHA-256 would still be deterministic, so the drift check would keep
     /// passing while comparing the wrong thing.
     #[test]
-    fn nist_vectors() {
+    fn sha256_matches_the_published_nist_test_vectors() {
         assert_eq!(
             sha256_hex(b""),
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"

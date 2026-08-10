@@ -1773,7 +1773,11 @@ real crates.
 - **`crates/crcbl-audio/tests/orbit.rs:191`** (style) —
   `orbit_integration_deterministic` XORs per-block hashes, which is
   order-insensitive; `orbit_cue_changes_over_time` only asserts _some_ hash
-  differs.
+  differs. **Fixed since.** The test feeds one hasher in block order and asserts
+  that the reversed event order hashes differently, with the XOR fold named in a
+  comment as what it replaced. It now lives in
+  `crates/crcbl-audio/tests/spatial_chain.rs` as
+  `an_orbit_hashes_the_same_twice_and_differently_in_reverse`.
 
 ### Clean — crcbl-core
 

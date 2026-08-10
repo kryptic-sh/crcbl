@@ -405,7 +405,7 @@ mod tests {
     }
 
     #[test]
-    fn aabb_intersects_overlapping() {
+    fn two_overlapping_aabbs_report_that_they_intersect() {
         let a = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(2.0));
         let b = Aabb::from_centre_half(DVec3::new(1.0, 0.0, 0.0), DVec3::splat(2.0));
         assert!(a.intersects(&b));
@@ -419,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn ray_intersects_aabb() {
+    fn a_ray_aimed_at_a_box_passes_the_slab_test() {
         let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
         let origin = DVec3::new(-5.0, 0.0, 0.0);
         let dir = DVec3::new(1.0, 0.0, 0.0);
@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    fn ray_misses_aabb() {
+    fn a_ray_passing_above_a_box_fails_the_slab_test() {
         let aabb = Aabb::from_centre_half(DVec3::ZERO, DVec3::splat(1.0));
         let origin = DVec3::new(-5.0, 10.0, 0.0);
         let dir = DVec3::new(1.0, 0.0, 0.0);
@@ -500,7 +500,7 @@ mod tests {
     // -- Sphere --------------------------------------------------------------
 
     #[test]
-    fn sphere_aabb() {
+    fn a_spheres_bounds_are_its_centre_expanded_by_its_radius() {
         let s = Sphere::new(DVec3::new(1.0, 2.0, 3.0), 0.5);
         let aabb = s.aabb();
         assert_eq!(aabb.min, DVec3::new(0.5, 1.5, 2.5));
@@ -510,7 +510,7 @@ mod tests {
     // -- BoxCollider ---------------------------------------------------------
 
     #[test]
-    fn box_aabb() {
+    fn a_box_colliders_bounds_are_its_centre_expanded_by_its_half_extents() {
         let b = BoxCollider::new(DVec3::ZERO, DVec3::splat(2.0));
         let aabb = b.aabb();
         assert_eq!(aabb.min, DVec3::splat(-2.0));
@@ -520,7 +520,7 @@ mod tests {
     // -- Capsule -------------------------------------------------------------
 
     #[test]
-    fn capsule_aabb() {
+    fn a_capsules_bounds_reach_a_radius_past_each_cap_and_a_radius_sideways() {
         let c = Capsule::new(DVec3::ZERO, 0.5, 1.0);
         let aabb = c.aabb();
         assert_eq!(aabb.min, DVec3::new(-0.5, -1.5, -0.5));
@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn capsule_top_bottom() {
+    fn a_capsules_end_points_exclude_the_radius_its_caps_add() {
         let c = Capsule::new(DVec3::new(0.0, 5.0, 0.0), 0.5, 2.0);
         assert_eq!(c.top(), DVec3::new(0.0, 7.0, 0.0));
         assert_eq!(c.bottom(), DVec3::new(0.0, 3.0, 0.0));

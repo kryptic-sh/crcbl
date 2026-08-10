@@ -931,7 +931,7 @@ mod tests {
     }
 
     #[test]
-    fn segment_hits() {
+    fn a_segment_crossing_a_leaf_reports_that_leaf_as_a_hit() {
         let bvh = Bvh::build([unit_box_at(DVec3::new(5.0, 0.0, 0.0))]);
         let seg = Segment::new(DVec3::ZERO, DVec3::new(10.0, 0.0, 0.0));
         let hits = bvh.traverse_segment(&seg);

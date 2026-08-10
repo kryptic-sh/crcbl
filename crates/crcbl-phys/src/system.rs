@@ -949,7 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn entity_count_matches() {
+    fn the_entity_count_starts_at_zero_and_follows_the_colliders_that_are_set() {
         let mut phys = PhysicsSystem::new();
         assert_eq!(phys.entity_count(), 0);
         let e = test_entity(0);

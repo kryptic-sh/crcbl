@@ -111,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn euler_is_deterministic() {
+    fn two_identical_euler_runs_end_at_bit_identical_velocity_and_position() {
         let integrator = SemiImplicitEuler;
         let dt = 1.0 / 120.0;
 

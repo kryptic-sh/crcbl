@@ -669,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_loops() {
+    fn a_looping_voice_fills_a_buffer_longer_than_its_sound_without_a_gap() {
         let data = vec![0.5f32; 16 * CHANNELS];
         let mut voice = Voice::new(data).with_looping();
         let mut buf = vec![0.0f32; 32 * CHANNELS];
@@ -1177,7 +1177,7 @@ mod tests {
     }
 
     #[test]
-    fn two_voices_sum() {
+    fn two_voices_playing_at_once_sum_into_the_same_output_buffer() {
         let mixer = Mixer::new();
         mixer.play(Voice::new(vec![0.25f32; 64 * CHANNELS]));
         mixer.play(Voice::new(vec![0.25f32; 64 * CHANNELS]));

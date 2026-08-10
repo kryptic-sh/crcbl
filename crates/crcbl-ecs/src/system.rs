@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn attach_and_get() {
+    fn a_component_attached_to_an_entity_is_what_get_answers_with() {
         let mut sys = System::<i32>::new("test");
         let ent = e(1);
         sys.attach(ent, 42);
@@ -312,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn attach_overwrites_existing() {
+    fn attaching_twice_to_one_entity_replaces_the_value_without_adding_a_row() {
         let mut sys = System::<i32>::new("test");
         let ent = e(1);
         sys.attach(ent, 10);
@@ -484,13 +484,13 @@ mod tests {
     }
 
     #[test]
-    fn name_is_preserved() {
+    fn a_system_reports_the_name_it_was_built_with() {
         let sys = System::<i32>::new("physics");
         assert_eq!(sys.name(), "physics");
     }
 
     #[test]
-    fn debug_format() {
+    fn a_systems_debug_output_names_it_and_reports_its_entity_count() {
         let mut sys = System::<i32>::new("render");
         sys.attach(e(7), 1);
         let s = format!("{sys:?}");

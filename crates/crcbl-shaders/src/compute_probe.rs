@@ -58,7 +58,7 @@ mod tests {
     /// is hash-pinned by the manifest, so it is the same file the committed
     /// artifact was built from.
     #[test]
-    fn the_workgroup_size_matches_the_numthreads_the_shader_declares() {
+    fn the_workgroup_size_matches_the_numthreads_compute_probe_slang_declares() {
         let source = include_str!("../shaders/compute_probe.slang");
         let declaration = format!("[numthreads({WORKGROUP_SIZE}, 1, 1)]");
         assert!(

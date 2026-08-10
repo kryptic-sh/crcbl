@@ -1642,7 +1642,7 @@ mod tests {
     // ── Debug ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn debug_format() {
+    fn the_clients_debug_output_names_it_and_reports_whether_it_is_connected() {
         let (transport, _peer) = InMemoryTransport::pair();
         let client = client(transport);
         let s = format!("{client:?}");

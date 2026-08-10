@@ -385,7 +385,7 @@ mod tests {
     // ── Debug coverage ────────────────────────────────────────────────────
 
     #[test]
-    fn debug_output() {
+    fn every_handshake_type_debug_prints_without_panicking() {
         let g = gate();
         let _ = format!("{g:?}");
 

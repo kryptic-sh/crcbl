@@ -322,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_force_accumulates() {
+    fn applied_forces_sum_into_the_accumulator_and_clearing_zeroes_it() {
         let mut body = RigidBody::new_dynamic(1.0);
         body.apply_force(DVec3::new(1.0, 0.0, 0.0));
         body.apply_force(DVec3::new(0.0, 2.0, 0.0));

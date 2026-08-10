@@ -26,7 +26,7 @@ pub const WORKGROUP_SIZE: u32 = 64;
 ///
 /// Two `uint` and the tail padding `std140` requires of a uniform block's size.
 /// Checked against the `Offset` decorations `slangc` emits by this module's
-/// `the_params_block_matches_the_offsets_slangc_emits`.
+/// `the_clear_counters_params_block_matches_the_offsets_slangc_emits`.
 pub const PARAMS_SIZE: usize = 16;
 
 /// The uniform block, matching `struct ClearParams` in
@@ -74,7 +74,7 @@ mod tests {
     /// buckets look right and a later one carries the previous frame's instance
     /// count.
     #[test]
-    fn the_workgroup_size_matches_the_numthreads_the_shader_declares() {
+    fn the_workgroup_size_matches_the_numthreads_clear_counters_slang_declares() {
         let source = include_str!("../shaders/clear_counters.slang");
         let declaration = format!("[numthreads({WORKGROUP_SIZE}, 1, 1)]");
         assert!(
@@ -87,7 +87,7 @@ mod tests {
     /// The offsets `slangc` actually emitted for `ClearParams`, read out of the
     /// disassembly.
     #[test]
-    fn the_params_block_matches_the_offsets_slangc_emits() {
+    fn the_clear_counters_params_block_matches_the_offsets_slangc_emits() {
         // `OpMemberDecorate %ClearParams_std140 n Offset …`: 0, 4.
         assert_eq!(PARAMS_SIZE, 16);
         assert_eq!(

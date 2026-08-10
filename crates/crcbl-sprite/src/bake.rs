@@ -489,7 +489,7 @@ nine: 1 0 1 0
     /// The same input twice gives the same bytes, so a rebuild that changed
     /// nothing does not churn a committed artifact.
     #[test]
-    fn baking_is_deterministic() {
+    fn baking_the_same_sprite_twice_gives_byte_identical_output() {
         let first = bake(&bird(), "bird.png", 60).expect("this bakes");
         let second = bake(&bird(), "bird.png", 60).expect("this bakes");
         assert_eq!(first, second);

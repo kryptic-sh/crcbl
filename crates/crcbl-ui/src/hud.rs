@@ -463,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn debug_format() {
+    fn the_huds_debug_output_mentions_the_panels_it_holds() {
         let hud = setup_hud();
         let s = format!("{hud:?}");
         assert!(s.contains("panels"));
