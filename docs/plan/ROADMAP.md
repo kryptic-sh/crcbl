@@ -1412,3 +1412,47 @@ Two new standing sample rules follow: every sample runs on every path its device
 offers and reports which it took, and between them the samples cover every
 engine feature. See
 [sample/00-samples-overview.md](sample/00-samples-overview.md).
+
+## Progress (test infrastructure and a re-measurement, 2026-08-10)
+
+**The testing standard is written down and the backends follow it.** Naming and
+placement had never been recorded, which is why six crates drifted from a
+convention the other eighteen kept; `docs/plan/12-testing.md` now states the
+rules and three of its own statements that the tree had already replaced with
+better mechanisms have been retired. What changed in the tree:
+
+- **`crcbl-mtl` and `crcbl-dx12` mark their device tests `#[ignore]`**, and both
+  harnesses select `--run-ignored only`, so the count each guards on is the
+  number of tests that touched a GPU rather than that plus arithmetic. Measured
+  in CI: 70 on the Metal runner, 73 on the D3D12 one, against `crcbl-vk`'s 74 —
+  three implementations of one seam, now comparable. Their tests stay in `src/`
+  because moving them would mean widening two backends' public APIs to host
+  tests; `crcbl-dx12` exports one item and `crcbl-mtl` two.
+- **One shared guard reads nextest's summary.** Five of the eight harnesses read
+  a cancelled `2/15 tests run` as a healthy fifteen. `tools/nextest-summary.sh`
+  is now the only copy, and a `shell` CI job exercises it against synthetic
+  cancelled, zero, absent and colour-wrapped summaries — the shapes a real suite
+  cannot be asked to produce.
+- **`render_e2e` covers all three scenes**, so `sprite.slang` and `ui.slang` are
+  compared across every backend rather than only vk-versus-wgpu. Metal and D3D12
+  drew both for the first time and matched a lavapipe-blessed reference at max
+  channel delta 1 with no pixel over tolerance.
+- **`crcbl-wgpu` honours the seam's third obligation.** It had no owner tagging
+  at all, so a handle crossing devices was undefined on the backend the wasm
+  build uses.
+
+**A number the plan was reasoning from is stale.** `sample/03-horde.md` recorded
+a converged ten thousand at 84 ms against a 16.67 ms budget and concluded P8 was
+worth the whole gap. That table was taken **single-threaded**, and
+`steer_enemies` went onto `par_for` afterwards without anything re-running it.
+Re-measured varying only `--workers`: converged ten thousand goes 37.4 ms → 7.9
+ms, a 4.71× speed-up, **inside budget**. The section's own prediction was "to
+something like 6 ms if it scaled"; it scaled.
+
+So **P8's headline claim for this sample is already met**, by `par_for` alone
+and without the ECS schedule running systems in parallel. The two
+single-threaded wins that section named as prerequisites — `overlap_sphere`
+allocating, and no `body_mut` — are both taken. This does not retire P8, whose
+batch-query and islands work stands on its own; it retires horde as the argument
+for it, the same way the sample's own measurement retired horde as the argument
+for P7.

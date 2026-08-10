@@ -447,3 +447,50 @@ it got wrong: it read the rise at ten thousand as a working set leaving cache,
 and the real cause is that its own grid got denser relative to the arena it was
 being clamped into. Density, not cache, is what the cost tracks — which the
 spread-versus-converged columns above show directly, at a fixed `N`.
+
+## Re-measured with the pool threaded (2026-08-10)
+
+**The table above was taken single-threaded, and it says so in its conditions.**
+`apps/horde`'s `steer_enemies` went onto `crcbl_jobs::pool`'s `par_for` after
+those numbers were recorded, and nothing re-ran them — so the conclusion drawn
+from them, that a converged ten thousand "fails by 5×", has been describing a
+configuration the sample no longer runs in.
+
+Re-measured by the same marginal method — release, headless, `--backend null`,
+wall time for the later `--frames` minus the earlier, over the 120 ticks
+between, best of three — on a 32-thread machine, varying only `--workers`:
+
+| case                     | enemies | `--workers 1` | `--workers 16` | speed-up |
+| ------------------------ | ------: | ------------: | -------------: | -------: |
+| spread, ticks 60–180     |  10 000 |      6.508 ms |       3.525 ms |    1.85× |
+| converged, ticks 480–600 |   5 000 |     11.508 ms |       2.842 ms |    4.05× |
+| converged, ticks 480–600 |  10 000 |     37.383 ms |       7.933 ms |    4.71× |
+
+**Every one of these is inside the 16.67 ms budget on sixteen workers**,
+including the converged ten thousand the earlier table recorded as five times
+over it.
+
+Two things to be careful about before reading this as a straight refutation:
+
+- **It is a different machine.** Single-threaded converged is 37.4 ms here
+  against the original 84.1 ms, so this box is about 2.2× the one that produced
+  the table. The machine-independent claim is the **speed-up column**, measured
+  on one machine with one binary and one flag changed.
+- **The prediction was almost exactly right.** That section argued sixteen cores
+  should take the converged ten thousand "to something like 6 ms if it scaled,
+  and it should: there is no shared mutable state in the pass at all." It
+  measures 7.9 ms. The reasoning was sound and the work it predicted has since
+  landed.
+
+**What this changes.** The two single-threaded wins that section named as
+sitting in front of parallelisation — `overlap_sphere` returning an owned `Vec`,
+and `PhysicsSystem` having no `body_mut` — **are both already taken**.
+`PhysicsSystem::body_mut` exists, and the steering pass calls
+`overlap_sphere_into` with a reused buffer. The four remaining `overlap_sphere`
+calls in `apps/horde/src/game.rs` are one per tick or `#[cfg(test)]`, not per
+enemy, so the allocation argument no longer applies to the hot path.
+
+So P8's headline claim for this sample — that the parallel schedule is worth the
+whole of the gap — is **met by `par_for` alone**, without the ECS schedule
+itself running systems in parallel. What P8 still owes this sample is nothing
+measurable; what it owes elsewhere is unchanged.
