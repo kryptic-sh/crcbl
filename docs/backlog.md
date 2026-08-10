@@ -3569,25 +3569,39 @@ Two candidates are now dead, both killed by tests that were already green:
   `HostReadback` poll.
 
 What is left is the encoder calls that exist only between `begin_render_pass`
-and `end_render_pass` on a draw. **The leading candidate, untested:**
-`crcbl_mtl::command` always emits the _long_ draw forms
-(`drawPrimitives:…:instanceCount:baseInstance:` and its indexed and indirect
-siblings), while `crcbl_mtl::adapter::features_of` reports `MULTI_DRAW_INDIRECT`
-and `INDIRECT_FIRST_INSTANCE` unconditionally with no `supportsFamily:` query
-behind either. The short forms exist in objc2-metal 0.3.2
-(`drawPrimitives_vertexStart_vertexCount`,
-`drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset`).
+and `end_render_pass` on a draw. **Every candidate named so far is now dead,
+including the leading one.**
 
-**The experiment**, roughly one CI run: emit the short form when the instance
-range is `0..1` with zero bases, and un-filter
-`a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` for that run. A
-pass identifies the cause and unblocks six tests plus the render e2e; a fail
-eliminates the last standing candidate. It was written and then reverted this
-session — reverted on a misreading of the device as the cause, which this entry
-corrects, so it is worth doing.
+- **Render-target format** — the RGBA twin faulted byte-identically (run
+  31080128007).
+- **The error-options command-buffer descriptor** —
+  `a_render_pass_clear_reads_back_the_exact_texels` is unfiltered, passes, and
+  goes through the same `fault::command_buffer` path, render encoder, blit
+  encoder after it, `submit` and `HostReadback` poll.
+- **The long draw forms** — killed by experiment on `326c751`. `crcbl-mtl`
+  emitted `drawPrimitives:vertexStart:vertexCount:` for a single instance from
+  zero (the spelling the working Swift probe used) and four quarantined draw
+  tests were released. **All four hung identically**, `canvas` and
+  `crcbl copies` both `completed`. The code is reverted; do not spend another
+  run on it.
 
-Note the standalone Swift probe drew with the **short** form, which is part of
-why the long form is the leading suspect rather than a guess.
+**What is left.** A render-pass clear succeeds and a draw does not, on the same
+device, through the same submit and readback. So the fault is in something only
+a draw sets up between `begin_render_pass` and `end_render_pass`: the render
+pipeline state object itself, the bind groups a draw needs, or the
+viewport/scissor. Nothing has been eliminated inside that set.
+
+The other half of the old candidate is still untested and cheap:
+`crcbl_mtl::adapter::features_of` reports `MULTI_DRAW_INDIRECT` and
+`INDIRECT_FIRST_INSTANCE` **unconditionally, with no `supportsFamily:` query**.
+That cannot affect a plain triangle's encoding, so it is unlikely to be this bug
+— but it is an unbacked capability claim regardless, and the kind this session
+has already found twice elsewhere.
+
+A useful next experiment, if someone wants one: bisect toward the Swift probe.
+It set up a pipeline state and drew; ours does the same plus bind groups and a
+viewport. Removing our extras one at a time, on a device that faults in under a
+second, converges faster than reasoning about it does.
 
 ### Metal draw coverage in CI: what the ecosystem does
 

@@ -1160,10 +1160,27 @@ jobs:
       # would block rather than fault, so `--run-ignored all` sweeping it up
       # would burn the timeout. A person with a real window server runs it,
       # which is why the filter lives here and not in the script.
-      - name: Run the Metal suite, with the short-form draws released
+      # **The short-form experiment is over and it failed.** `025cf90` emitted
+      # `drawPrimitives:vertexStart:vertexCount:` for a single instance from
+      # zero and released these four, on the theory that the long forms'
+      # `instanceCount:baseInstance:` were the fault — the Swift probe that drew
+      # correctly on this device used the short form. All four hung identically,
+      # `canvas` and `crcbl copies` both `completed`, so the draw *form* is not
+      # what distinguishes a working command stream from ours. The code is
+      # reverted and they are quarantined again.
+      #
+      # What that leaves: a clear works and a draw does not, so the fault is in
+      # something only a draw sets up — the render pipeline state, the bind
+      # groups it needs, or the viewport/scissor. `docs/backlog.md` carries the
+      # eliminated candidates so nobody spends another run on one.
+      - name: Run the Metal suite, minus the draws that fault on this device
         run: >-
           crates/crcbl-mtl/tests/run-mtl-e2e.sh --no-fail-fast -E 'not
           (test(a_layer_swapchain_acquires_a_drawable_and_presents_it) +
+          test(a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear) +
+          test(a_triangle_draw_into_a_bgra_target_paints_the_same_image) +
+          test(the_engines_own_triangle_draws_through_a_bind_group) +
+          test(an_indexed_draw_reads_the_bound_index_range) +
           test(a_multi_draw_indirect_emits_every_argument_structure))'
 
       # # The renderer on Metal: measured, and blocked by this runner
