@@ -807,6 +807,7 @@ mod tests {
     /// from that wait is a failure. `docs/backlog.md` records what that leaves
     /// unmeasured.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_windowed_swapchain_presents_paces_and_resizes_on_a_real_hwnd() {
         let (instance, device) = open_device();
         let adapter = pinned_adapter(&instance);
@@ -951,6 +952,7 @@ mod tests {
     /// `destroy_surface` stops invalidating the handle (the `surface_caps`
     /// below then succeeds).
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_dxgi_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
         let (instance, device) = open_device();
         let adapter = pinned_adapter(&instance);
@@ -994,6 +996,7 @@ mod tests {
     /// succeeds or comes back as `HalError::Backend` with DXGI's message, and
     /// both fail the `InvalidDescriptor` assertion.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_descriptor_flip_discard_rejects_is_refused_before_dxgi_sees_it() {
         let (instance, device) = open_device();
         let adapter = pinned_adapter(&instance);
@@ -1161,6 +1164,7 @@ mod tests {
     /// name the stage they reached, for the reason `crcbl_dx12::device`'s `run`
     /// gives.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn an_offscreen_ring_draws_reads_back_and_comes_round_again() {
         let (instance, device) = open_device();
         let adapter = pinned_adapter(&instance);
@@ -1459,6 +1463,7 @@ mod tests {
     /// All of it. This crate compiles on Windows alone and the development box
     /// is Linux.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn the_ring_shape_crcbl_screenshot_builds_leaves_a_usable_device() {
         let (instance, device) = open_device();
         let adapter = pinned_adapter(&instance);
@@ -1672,6 +1677,7 @@ mod tests {
     /// clamp is replaced by `present::buffer_count` (the single-image ring then
     /// comes back with two).
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn an_offscreen_descriptor_is_checked_against_the_rings_own_rules() {
         let (instance, device) = open_device();
         let adapter = pinned_adapter(&instance);

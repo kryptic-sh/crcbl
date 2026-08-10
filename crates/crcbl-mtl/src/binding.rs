@@ -1165,6 +1165,7 @@ mod tests {
     /// would land on the *next* binding's entry, which is the failure the flat
     /// tables make possible and the seam's `array_index` makes checkable.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_bind_group_entry_must_match_the_kind_and_the_array_it_writes() {
         let (_instance, device) = open_device();
         let handle = device
@@ -1299,6 +1300,7 @@ mod tests {
     /// Appending instead of replacing — `sort_bindings` would find the slot
     /// written twice and fail the call.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn update_bind_group_rewrites_only_the_slots_it_names() {
         let (_instance, device) = open_device();
         let handle = device
@@ -1380,6 +1382,7 @@ mod tests {
     /// to its own object, find the owner matching, and build a bind group
     /// against the wrong layout with no error anywhere.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_layout_or_group_from_another_device_is_foreign() {
         let instance = open_instance();
         let adapters = instance.adapters();
@@ -1447,6 +1450,7 @@ mod tests {
     /// `max_bind_groups` check — the seam documents that limit as a hard
     /// ceiling.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_pipeline_layout_stores_where_each_of_its_sets_starts() {
         let (_instance, device) = open_device();
         let first = device
@@ -1504,6 +1508,7 @@ mod tests {
     /// resolving it at all — the group would hold the wrong texture or fail to
     /// build.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_texture_binding_resolves_the_views_own_texture() {
         let (_instance, device) = open_device();
         let image = device
@@ -1643,6 +1648,7 @@ mod tests {
     /// offset. Dropping the layout-identity check — the fourth binds at the
     /// wrong index with no error anywhere.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_bind_is_refused_outside_a_pass_and_against_the_wrong_layout() {
         let (_instance, device) = open_device();
         let plain = device
@@ -1761,6 +1767,7 @@ mod tests {
     /// Dropping the alignment check — the third, whose offset is legal
     /// arithmetic and an illegal Metal buffer offset.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_dynamic_offset_is_aligned_and_bounded_by_its_buffer() {
         let (_instance, device) = open_device();
         let set = device

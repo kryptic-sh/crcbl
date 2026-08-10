@@ -53,13 +53,25 @@ interesting part is the order of many.
   provides one. Turning the features on and calling it coverage would only move
   the trap, since a feature-gated test on a machine that cannot host it either
   fails or is skipped anyway. The counter-measure is each suite's own harness
-  (`run-<suite>-e2e.sh` / `.ps1`): it passes `--run-ignored all`, then parses
+  (`run-<suite>-e2e.sh` / `.ps1`): it turns the ignored set on, then parses
   nextest's own summary line out of a colour-stripped copy of the log — CI sets
   `CARGO_TERM_COLOR: always`, so the counts arrive wrapped in escapes — and
   fails when the count is zero, which is the gate having stopped gating because
   a feature or an `#[ignore]` no longer matches the tests. Reading nextest's
   reported total rather than counting lines of its output is deliberate: a line
   count silently picks up headers and lands a number close enough to look right.
+- **A harness over a crate whose tests are mixed selects `--run-ignored only`,
+  not `all`.** Where the suite is its own target — `vk_e2e`, `wgpu_e2e`,
+  `wayland_e2e` — the two flags pick the same tests, because everything in that
+  binary needs the hardware. `crcbl-mtl` and `crcbl-dx12` keep their tests in
+  `src/` alongside pure ones (the next section says why they must), so
+  `--run-ignored all` there had the harness run the whole crate and made the
+  guarded count "unit tests plus device tests". A run in which **every device
+  test had vanished** would still report a healthy total and clear the zero
+  check — the same check-that-cannot-fail shape the guard exists to catch, one
+  level up. `--run-ignored only` selects exactly the tests that need the device,
+  which is what makes the number mean something. It also requires the placement
+  rule below to actually hold: the flag is only as good as the `#[ignore]`s.
 - **The cut-short run is the same trap wearing a healthy number**, and one
   sourced guard is what catches it. nextest prints `<n> tests run:` for a
   complete run and `<ran>/<total> tests run:` for one it cancelled, so a guard
@@ -172,6 +184,37 @@ target under `tests/`; those directories hold harness scripts only. Moving those
 suites out would mean widening two backends' public APIs for no reason but to
 host tests, which is the opposite of what `seam_from_outside.rs` exists to
 check.
+
+**So those two crates keep the `#[ignore]` half of the rule instead of the
+directory half, and now they actually do.** Both once kept every test unmarked —
+`crcbl-mtl` marked only the handful that make the GPU execute a shader, and
+`crcbl-dx12` carried no `#[ignore]` anywhere — which is what let their harnesses
+run the whole crate and guard on a count that mixed pure tests with device ones.
+Every test whose body causes a real device, instance or adapter to be created is
+now `#[ignore]`d with a reason naming its harness, in the form `crcbl-vk` and
+`crcbl-wgpu` use; every test that passes with no GPU is not. The split was read
+off the bodies, tracing `instance::tests::open`, `device::tests::open_device`
+and `instance::tests::pinned_adapter` through each module's local helpers: in
+`crcbl-mtl` 71 tests open a device and 48 do not, and in `crcbl-dx12` 73 do and
+98 do not. Three calls that look like hardware and are not stayed on the pure
+side, each because it can pass on a machine with no GPU:
+`crcbl-mtl/src/fault.rs`'s two tests, which build a synthetic `NSError` and
+assert how the encoder states are worded; and
+`neither_caps_list_is_ever_empty_and_both_always_offer_fifo` in
+`crcbl-mtl/src/swapchain.rs`, which makes a detached `CAMetalLayer` — Core
+Animation vends one without a window server, a display or an `MTLDevice`.
+`crcbl-dx12/src/descriptor.rs` went the other way for the same reason: its
+address arithmetic is asserted against descriptor heaps `CreateDescriptorHeap`
+really allocated, so it needs the device even though the claim is arithmetic.
+
+The consequence to know when reading a CI log: the
+`cargo nextest run --workspace --all-features` sweep on `macos-latest` and
+`windows-latest` now runs each crate's pure tests only. The device tests run in
+the `mtl e2e` and `dx12 e2e` jobs, and — for D3D12 on an unpinned adapter — in
+`test-cross-platform`'s "DX12 adapter report" step, which passes
+`--run-ignored all` for exactly that reason: the adapter line it publishes is
+printed by a device test, and without the flag the step would run the pure
+tests, print nothing, and still pass its `--no-tests fail` check.
 
 **Filenames name the subject, never the taxonomy tier.**
 

@@ -362,6 +362,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn enumeration_finds_at_least_one_metal_device() {
         let adapters = open().adapters();
         assert!(
@@ -375,6 +376,7 @@ pub(crate) mod tests {
     /// says, so the emptiness check is its own assertion above rather than an
     /// assumption here.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn every_metal_adapter_names_itself_its_driver_and_its_backend() {
         let adapters = open().adapters();
         assert!(!adapters.is_empty(), "nothing to check");
@@ -392,6 +394,7 @@ pub(crate) mod tests {
     /// `request_device` resolves it by search — so a mismatch would make every
     /// id but the first name the wrong GPU on a dual-GPU Mac.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn adapter_ids_are_their_positions_in_the_metal_device_list() {
         let adapters = open().adapters();
         assert!(!adapters.is_empty(), "nothing to check");
@@ -417,6 +420,7 @@ pub(crate) mod tests {
     /// bindless capacity without the bindless feature, or a push-constant budget
     /// without push constants, is a promise no call can keep.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn reported_limits_come_from_metal_and_agree_with_the_features() {
         let adapters = open().adapters();
         assert!(!adapters.is_empty(), "nothing to check");
@@ -469,6 +473,7 @@ pub(crate) mod tests {
     /// the seam specifies — including the second poll being a caller bug rather
     /// than a second device.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_metal_device_opens_on_the_first_poll_and_only_once() {
         let instance = open();
         let adapters = instance.adapters();
@@ -509,6 +514,7 @@ pub(crate) mod tests {
     /// still cannot be. All three are asserted rather than only the absent
     /// ones, so a change in either direction fails here.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn the_default_device_desc_opens_and_the_rest_degrades() {
         let instance = open();
         let adapters = instance.adapters();
@@ -550,6 +556,7 @@ pub(crate) mod tests {
     /// An out-of-range adapter is a distinct contract from a feature gap, and
     /// it must not be swallowed by one.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn an_unknown_metal_adapter_is_refused_as_such() {
         let instance = open();
         let past_the_end = AdapterId(instance.adapters().len() as u32);
@@ -571,6 +578,7 @@ pub(crate) mod tests {
     /// `crcbl_mtl::swapchain` is the case where a live surface is accepted — so
     /// what is left here is the handle that never resolved.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_compatible_surface_is_refused_by_metal_as_an_unresolvable_handle() {
         let instance = open();
         let adapters = instance.adapters();
@@ -601,6 +609,7 @@ pub(crate) mod tests {
     /// added to `create_surface_impl` would make this pass while quietly
     /// swallowing a new one.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn the_platforms_metal_is_not_are_refused_by_name() {
         let instance = open();
         let dangling = core::ptr::NonNull::dangling();
@@ -636,6 +645,7 @@ pub(crate) mod tests {
     /// Obligation 1, made observable: the device must survive its instance
     /// being dropped, and must still work afterwards.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_metal_device_outlives_the_instance_that_made_it() {
         let device = {
             let instance = open();

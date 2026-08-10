@@ -3591,6 +3591,7 @@ pub(crate) mod tests {
     /// `ResourceBindingTier=3` and `HighestShaderModel=6.8` is a claim about the
     /// API surface; this is the pixel.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_d3d12_render_pass_clear_reads_back_the_exact_texels() {
         let (_instance, device) = open_device();
         let (target, view) = color_target(&device);
@@ -3822,6 +3823,7 @@ pub(crate) mod tests {
     /// has already been shown to execute a clear and a readback, so a failure
     /// here is about shaders specifically.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_pulled_triangle_is_drawn_by_d3d12_and_read_back_texel_by_texel() {
         use crcbl_shaders::{TRIANGLE, triangle};
 
@@ -4353,6 +4355,7 @@ pub(crate) mod tests {
     /// All of it. This crate compiles on Windows alone and the development box
     /// is Linux, so nothing here has ever executed outside a CI runner.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_d3d12_indexed_draw_reads_the_index_buffer_it_was_bound() {
         let (_instance, device) = open_device();
         let triangle = IndexedTriangle::new(&device);
@@ -4397,6 +4400,7 @@ pub(crate) mod tests {
     /// All of it, for the reason
     /// [`a_d3d12_indexed_draw_reads_the_index_buffer_it_was_bound`] gives.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn an_indexed_indirect_draw_reads_its_arguments_at_the_offset_and_count_it_was_given() {
         let (_instance, device) = open_device();
         assert!(
@@ -4471,6 +4475,7 @@ pub(crate) mod tests {
     /// All of it, for the reason
     /// [`a_d3d12_indexed_draw_reads_the_index_buffer_it_was_bound`] gives.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn an_indexed_indirect_count_draw_reads_its_count_from_gpu_memory() {
         /// Where the count sits in its buffer. Non-zero, and a `0` sits at zero,
         /// so a backend that ignored `CountBufferOffset` reads a count of no
@@ -4543,6 +4548,7 @@ pub(crate) mod tests {
     /// The accepted draw at the end is what makes the six above about their own
     /// descriptors rather than about an encoder that refuses draws.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn the_draws_d3d12_cannot_express_are_refused_by_name() {
         let (_instance, device) = open_device();
         let triangle = IndexedTriangle::new(&device);
@@ -4696,6 +4702,7 @@ pub(crate) mod tests {
     /// offset must be — which is the rule `plan_copy` enforces and this exercises
     /// from the outside.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_d3d12_load_op_preserves_what_clear_replaces() {
         let (_instance, device) = open_device();
         let (target, view) = color_target(&device);
@@ -4797,6 +4804,7 @@ pub(crate) mod tests {
     /// The falsifying value is the right-hand half: it must still hold the
     /// colour the *first* pass wrote.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_clear_covers_the_render_area_and_leaves_the_rest_alone() {
         let (_instance, device) = open_device();
         let (target, view) = color_target(&device);
@@ -4884,6 +4892,7 @@ pub(crate) mod tests {
     /// of the two offsets would still move the right *number* of bytes, and only
     /// the poison either side of the window catches it.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_d3d12_buffer_to_buffer_copy_moves_the_bytes_at_both_offsets() {
         let (_instance, device) = open_device();
         let source = device
@@ -4951,6 +4960,7 @@ pub(crate) mod tests {
     /// race at this level and is pinned instead by `crate::retire`'s own unit
     /// tests over a payload that records its release.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_buffer_destroyed_while_its_submission_is_in_flight_survives_it() {
         let (_instance, device) = open_device();
         let queue = device
@@ -5042,6 +5052,7 @@ pub(crate) mod tests {
     /// `CopyTextureRegion` returns `void`, so the failure would arrive as a
     /// readback of the wrong bytes rather than as an error.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_copy_d3d12_cannot_place_is_refused_by_name() {
         let (_instance, device) = open_device();
         let queue = device
@@ -5146,6 +5157,7 @@ pub(crate) mod tests {
     /// failure path end to end — and the error is `ForeignObject` rather than a
     /// missing slice, because the caller crossed two devices.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_d3d12_encoder_built_on_a_foreign_queue_refuses_at_finish() {
         let (_instance, device) = open_device();
         let (_other_instance, other) = open_device();
@@ -5179,6 +5191,7 @@ pub(crate) mod tests {
     /// An encoder that mis-nests or leaves a pass open refuses, rather than
     /// handing back a command buffer D3D12 would run half of.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_mis_nested_or_unclosed_pass_refuses_at_finish() {
         let (_instance, device) = open_device();
         let queue = device
@@ -5231,6 +5244,7 @@ pub(crate) mod tests {
     /// A destroyed command buffer stops resolving, so a second submission of it
     /// is a stale handle rather than a second execution.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_destroyed_command_buffer_stops_resolving() {
         let (_instance, device) = open_device();
         let queue = device
@@ -5261,6 +5275,7 @@ pub(crate) mod tests {
     /// accept one and hand back write-combined memory the CPU reads at a crawl
     /// and the GPU never wrote.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_readback_refuses_the_buffers_and_ranges_it_cannot_serve() {
         let (_instance, device) = open_device();
         let readback = readback_buffer(&device, 64);
@@ -5337,6 +5352,7 @@ pub(crate) mod tests {
     /// The device opens, says which backend it is, and has exactly the queue
     /// this backend creates.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_device_reports_dx12_and_one_graphics_queue() {
         let (_instance, device) = open_device();
         assert_eq!(device.backend(), BackendKind::Dx12);
@@ -5362,6 +5378,7 @@ pub(crate) mod tests {
     /// so a device that reported less than its adapter would be lying about
     /// hardware it can use.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn d3d12_device_caps_match_the_adapter_they_came_from() {
         let instance = open_instance();
         let adapter = pinned_adapter(&instance);
@@ -5385,6 +5402,7 @@ pub(crate) mod tests {
     /// `InvalidDescriptor`, so "it returned an error" would pass whether or not
     /// the handle was ever invalidated.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn d3d12_buffers_of_every_memory_location_create_and_then_stop_resolving() {
         let (_instance, device) = open_device();
         assert!(!LOCATIONS.is_empty(), "nothing to check");
@@ -5411,6 +5429,7 @@ pub(crate) mod tests {
 
     /// A recycled slot must not resurrect the handle that used to name it.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_destroyed_d3d12_handle_does_not_alias_the_buffer_that_replaces_it() {
         let (_instance, device) = open_device();
         let first = device
@@ -5443,6 +5462,7 @@ pub(crate) mod tests {
     /// `write_buffer` writes, at the offset it was given, and refuses the
     /// location D3D12 cannot map.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn write_buffer_writes_host_visible_memory_and_refuses_what_d3d12_cannot_map() {
         let (_instance, device) = open_device();
         let readback = device
@@ -5509,6 +5529,7 @@ pub(crate) mod tests {
     /// own buffer, find the owner matching, and write into the wrong object with
     /// no error anywhere.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_handle_from_another_d3d12_device_is_foreign_not_merely_unresolvable() {
         let instance = open_instance();
         let adapter = pinned_adapter(&instance);
@@ -5554,6 +5575,7 @@ pub(crate) mod tests {
     /// Images, views and samplers all the way through, and the handles stop
     /// resolving when they are destroyed.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn d3d12_images_views_and_samplers_create_and_destroy() {
         let (_instance, device) = open_device();
         let extent = Extent3d::d2(64, 64);
@@ -5618,6 +5640,7 @@ pub(crate) mod tests {
     /// time, so a leak of a handful would not even show up as a failure to
     /// allocate.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn destroying_a_view_returns_every_descriptor_it_took() {
         let (_instance, device) = open_device();
         // Sampled *and* rendered to, so the view really owns two descriptors in
@@ -5672,6 +5695,7 @@ pub(crate) mod tests {
 
     /// A sampler's descriptor comes back too, by the same test.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn destroying_a_sampler_returns_its_descriptor() {
         let (_instance, device) = open_device();
         let mut addresses = Vec::new();
@@ -5704,6 +5728,7 @@ pub(crate) mod tests {
     /// writing nothing and returning `void`, so this would pass creation and
     /// sample black.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_sampled_depth_image_gets_both_of_its_views() {
         let (_instance, device) = open_device();
         let handle = device
@@ -5744,6 +5769,7 @@ pub(crate) mod tests {
     /// The image descriptors D3D12 cannot satisfy are refused before anything is
     /// created.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn images_d3d12_cannot_create_are_refused_by_name() {
         let (_instance, device) = open_device();
         let base = image(
@@ -5811,6 +5837,7 @@ pub(crate) mod tests {
     /// in the message — this backend's one documented divergence from
     /// `crcbl-mtl`.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_differing_view_format_is_refused_and_says_why() {
         let (_instance, device) = open_device();
         let handle = device
@@ -5844,6 +5871,7 @@ pub(crate) mod tests {
     /// An image with only transfer usage has no D3D12 view, and says so rather
     /// than handing back a view that names nothing.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_transfer_only_image_has_no_view_to_create() {
         let (_instance, device) = open_device();
         let handle = device
@@ -5868,6 +5896,7 @@ pub(crate) mod tests {
     /// non-zero layer has no field to carry the layer, so it would quietly view
     /// layer zero.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_view_whose_shape_disagrees_with_its_image_is_refused() {
         let (_instance, device) = open_device();
         let layered = device
@@ -5942,6 +5971,7 @@ pub(crate) mod tests {
     /// Anisotropy is bounded on both sides, and a point filter beside it is
     /// refused rather than silently dropped.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn d3d12_samplers_reject_anisotropy_outside_the_reported_cap() {
         let (_instance, device) = open_device();
         let cap = device.caps().limits.max_sampler_anisotropy;
@@ -5995,6 +6025,7 @@ pub(crate) mod tests {
     /// `wait_idle` really waits: it signals the queue's fence and blocks on it.
     /// A queue or fence that could not do either fails here.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn wait_idle_signals_the_queue_fence_and_waits_for_it() {
         let (_instance, device) = open_device();
         device
@@ -6026,6 +6057,7 @@ pub(crate) mod tests {
     /// the race cannot happen. Its failure mode is a hang rather than an
     /// assertion, caught by `slow-timeout` in `.config/nextest.toml`.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn concurrent_waits_each_signal_once_and_all_return() {
         let (_instance, device) = open_device();
         let before = {
@@ -6059,6 +6091,7 @@ pub(crate) mod tests {
     /// Every slice that has not arrived still refuses, by name — so none of them
     /// can be half-implemented without this saying so.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn the_d3d12_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
         let (_instance, device) = open_device();
 
@@ -6207,6 +6240,7 @@ pub(crate) mod tests {
     /// [`HalError::ShaderCompilation`] — and none of them is
     /// [`HalError::Unsupported`].
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn the_entry_points_that_landed_never_answer_unsupported_again() {
         let (_instance, device) = open_device();
         let queue = device
@@ -6386,6 +6420,7 @@ pub(crate) mod tests {
     /// Red the moment any of them answers `OutOfDate`, `Lost`, `Timeout` or
     /// `Unsupported`, and red if one starts resolving a handle it should not.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn the_presentation_entry_points_refuse_a_dead_handle_and_never_as_out_of_date() {
         let (_instance, device) = open_device();
         let queue = device
@@ -6472,6 +6507,7 @@ pub(crate) mod tests {
     /// swapchain handle position deliberately left unissued too: the semaphore
     /// is checked first.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_present_with_a_semaphore_is_refused_on_the_semaphore() {
         let (_instance, device) = open_device();
         let queue = device
@@ -6508,6 +6544,7 @@ pub(crate) mod tests {
     /// [`Features::GPU_DRIVEN`], which it must not: the seam says a device without
     /// present feedback renders the same frames.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn every_device_reports_present_feedback_and_it_is_not_a_gpu_driven_flag() {
         let (_instance, device) = open_device();
         assert!(
@@ -6535,6 +6572,7 @@ pub(crate) mod tests {
     /// the claim is about the difference: a backend that answered `Unsupported`
     /// everywhere would pass either assertion alone.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_query_set_and_a_semaphore_handle_refuse_as_unresolvable_not_as_unimplemented() {
         let (_instance, device) = open_device();
 
@@ -7201,6 +7239,7 @@ pub(crate) mod tests {
     /// All of it. This crate compiles on Windows alone and the development box
     /// is Linux.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_d3d12_compute_dispatch_writes_the_values_it_was_asked_for() {
         let (_instance, device) = open_device();
         // Not a skip. Every D3D12 device accepts compute work on its DIRECT
@@ -7259,6 +7298,7 @@ pub(crate) mod tests {
     /// arithmetic; that D3D12 accepts the signature and that the address
     /// arrives at the shader is a claim about a driver.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_dynamic_offset_binds_the_block_of_the_uniform_buffer_it_names() {
         let (_instance, device) = open_device();
         assert_eq!(
@@ -7311,6 +7351,7 @@ pub(crate) mod tests {
     /// the refusal reaches `create_pipeline_layout`, and that D3D12 really does
     /// serialise the signature the accepted arm asks for.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_root_signature_over_the_budget_is_refused_at_pipeline_layout_creation() {
         let (_instance, device) = open_device();
         assert!(
@@ -7408,6 +7449,7 @@ pub(crate) mod tests {
     /// run on any host and cover the arithmetic; that a padded buffer is one the
     /// runtime will take a 256-byte view of is a claim about a driver.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_uniform_buffer_under_one_block_and_a_storage_buffer_both_get_views() {
         let (_instance, device) = open_device();
 
@@ -7510,6 +7552,7 @@ pub(crate) mod tests {
     /// instance and table buffers take, so a backend that refused every
     /// host-visible storage binding would fail here.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_host_visible_buffer_is_refused_for_writing_and_accepted_for_reading() {
         let (_instance, device) = open_device();
         let staged = device
@@ -7584,6 +7627,7 @@ pub(crate) mod tests {
     /// how D3D12 spells this call, and a signature with the wrong stride or the
     /// wrong argument type reads three words from somewhere else in the buffer.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_d3d12_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
         /// Workgroups the real arguments ask for. Fewer than [`PROBE_GROUPS`],
         /// so the difference is visible in the readback.
@@ -7698,6 +7742,7 @@ pub(crate) mod tests {
     /// asserted beside a descriptor that *is* accepted, so neither is a backend
     /// refusing everything.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_workgroup_size_the_container_disagrees_with_is_refused_by_name() {
         let (_instance, device) = open_device();
         let probe = ComputeProbe::new(&device);
@@ -7772,6 +7817,7 @@ pub(crate) mod tests {
     /// graph that mis-nests fails here rather than recording a dispatch onto the
     /// graphics bind point — which D3D12 would accept and quietly get wrong.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn compute_commands_outside_a_pass_and_with_no_pipeline_are_refused() {
         let (_instance, device) = open_device();
         let queue = device

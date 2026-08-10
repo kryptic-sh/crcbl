@@ -1,19 +1,40 @@
 #!/usr/bin/env bash
-# Run `crcbl-dx12`'s suite against a D3D12 device that is definitely WARP.
+# Run `crcbl-dx12`'s hardware suite against a D3D12 device that is definitely
+# WARP.
 #
 #   crates/crcbl-dx12/tests/run-dx12-e2e.sh [extra nextest args…]
 #
+# # There is still no feature, and there should not be one
+#
+# D3D12 ships in Windows and WARP ships with it, so unlike Metal (no software
+# rasteriser at all) and Vulkan (no loader on a bare machine) there is no Windows
+# machine where this backend's tests *cannot* run. Hiding them behind a feature
+# would remove working coverage from the ordinary Windows job in exchange for
+# nothing, which is why `docs/plan/12-testing.md` records the absence as argued
+# rather than overlooked.
+#
+# # Why `--run-ignored only`
+#
+# What *has* changed is that the device tests are now `#[ignore]`d — not to hide
+# them, but so that they can be named. Some of the tests here open a real
+# `ID3D12Device`; the rest are pure — the DXGI format tables, the root signature
+# layout arithmetic, the DXIL container parse, the adapter pin's decision table —
+# and pass on a machine with no GPU, which is what `docs/plan/12-testing.md`'s
+# placement rule turns on.
+#
+# This script used to run the whole crate, so the count the guard below reads was
+# unit tests plus device tests. A run in which **every device test had vanished**
+# would still have reported a healthy total and cleared the zero check — the same
+# "check that cannot fail" shape the guard exists to prevent, one level up.
+# `--run-ignored only` selects exactly the tests that need the device, so the
+# number this script prints is the number that matters. The pure ones are not
+# lost: they run on Linux on every push, because the modules holding them are not
+# behind `#[cfg(target_os = "windows")]`, and on Windows they run in the ordinary
+# `--workspace --all-features` job.
+#
 # # What this harness adds over running the tests
 #
-# The suite is neither feature-gated nor `#[ignore]`d — every test in it opens a
-# real `ID3D12Device`, and a plain `cargo nextest run -p crcbl-dx12` on any
-# Windows machine runs the lot. That is not an accident to be corrected: D3D12
-# ships in Windows and WARP ships with it, so unlike Metal (no software
-# rasteriser at all) and Vulkan (no loader on a bare machine) there is no machine
-# where this backend's tests *cannot* run. Hiding them behind a feature would
-# remove working coverage from the ordinary Windows job in exchange for nothing.
-#
-# So what this script is for is the thing that plain run does not give:
+# What this script is for is the thing a plain run does not give:
 #
 #   * **it names the adapter.** `adapters()[0]` is the discrete GPU on a
 #     workstation and WARP only on a runner that has nothing else, so a green run
@@ -119,6 +140,7 @@ set +e
 cargo nextest run \
     --locked \
     --package crcbl-dx12 \
+    --run-ignored only \
     --no-fail-fast \
     --no-tests fail \
     --success-output immediate \
@@ -144,8 +166,9 @@ fi
 # `tools/nextest-summary.sh` so the other seven harnesses stop carrying the
 # version it was written to replace.
 if ! crcbl_nextest_summary "${LOG}.plain" "crcbl dx12 e2e" \
-    "This suite is neither feature-gated nor ignored, so an empty selection" \
-    "means a filter argument matched nothing."; then
+    "This suite is not feature-gated, so an empty selection means the ignore" \
+    "attribute stopped matching the device tests, or a filter argument matched" \
+    "nothing."; then
     exit 1
 fi
 COUNTS="$CRCBL_NEXTEST_TESTS_RUN"

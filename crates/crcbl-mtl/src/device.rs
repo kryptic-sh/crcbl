@@ -2666,6 +2666,7 @@ mod tests {
     /// asymmetric in every channel, so any permutation is caught. Getting the
     /// row stride wrong — only the first row would match.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_metal_render_pass_clear_reads_back_the_exact_texels() {
         let (_instance, device) = open_device();
         let (image, view) = color_target(&device);
@@ -2801,6 +2802,7 @@ mod tests {
     /// both onto one action makes the two runs agree, which either assertion
     /// then catches.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_metal_load_action_preserves_what_clear_replaces() {
         let (_instance, device) = open_device();
         assert_ne!(
@@ -3133,6 +3135,7 @@ mod tests {
     /// refusal or descriptor error anywhere in the bind-group chain — every
     /// recording failure surfaces at `finish`, which is `expect`ed.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn the_engines_own_triangle_artifact_builds_a_real_pipeline() {
         use crcbl_shaders::{Stage as ShaderStage, TRIANGLE};
 
@@ -3319,6 +3322,7 @@ mod tests {
     /// not compile — the `expect_err`. Reporting it as anything other than a
     /// compilation failure — the `let else`.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_broken_shader_module_carries_metals_own_message() {
         let (_instance, device) = open_device();
 
@@ -3370,6 +3374,7 @@ mod tests {
     /// "it returned an error" would pass against a pipeline layout that was
     /// never valid in the first place.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn pipelines_create_and_then_stop_resolving() {
         let (_instance, device) = open_device();
         let layout = empty_layout(&device);
@@ -3471,9 +3476,12 @@ using namespace metal;\n\
     ///
     /// **This needs a Metal device and not a working one.** It creates state
     /// objects and reads them back through the same resolve the encoder uses;
-    /// nothing is submitted and no shader runs, so it is neither `#[ignore]`d
-    /// nor behind `mtl-e2e` and it runs on the device that faults on a draw.
+    /// nothing is submitted and no shader runs, so it is `#[ignore]`d — which
+    /// is what every test needing a device carries — but stays outside
+    /// `mtl-e2e`, the gate for tests that make the GPU execute a shader. It
+    /// runs on the paravirtual device that faults on a draw.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_pipeline_without_depth_state_binds_the_devices_default_rather_than_nil() {
         let (_instance, device) = open_device();
         let layout = empty_layout(&device);
@@ -3552,6 +3560,7 @@ using namespace metal;\n\
     /// nothing. Collapsing the two onto one error — the two `matches!` demand
     /// different variants.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_pipeline_layout_is_empty_or_refused_by_cause() {
         let (_instance, device) = open_device();
         assert!(
@@ -3604,6 +3613,7 @@ using namespace metal;\n\
     /// window lands in the wrong place, which the untouched head and tail
     /// assertions catch. Ignoring the size — the tail is overwritten.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_metal_buffer_to_buffer_copy_moves_the_bytes_at_both_offsets() {
         let (_instance, device) = open_device();
         let queue = device
@@ -3668,6 +3678,7 @@ using namespace metal;\n\
     /// two changes that would make `pipeline_barrier` a silent no-op instead of
     /// a working barrier.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn every_resource_is_hazard_tracked() {
         let (_instance, device) = open_device();
         assert!(!LOCATIONS.is_empty(), "nothing to check");
@@ -3719,6 +3730,7 @@ using namespace metal;\n\
     /// that timed out — the second assertion, which is made *before* anything
     /// signals. Dropping the monotonicity check — the last one.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
         let (_instance, device) = open_device();
         let queue = device
@@ -3815,6 +3827,7 @@ using namespace metal;\n\
     /// first assertion. Never reaching `Ready` — `drain`'s deadline. Copying
     /// from the wrong offset — the byte comparison.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_readback_is_pending_before_its_completion_point_and_ready_after() {
         let (_instance, device) = open_device();
         let queue = device
@@ -3929,6 +3942,7 @@ using namespace metal;\n\
     /// Proving that needs an observation taken between two submissions, and
     /// every such observation is a race rather than an assertion.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_wait_runs_when_it_is_satisfiable_and_is_refused_when_it_is_not() {
         let (_instance, device) = open_device();
         let queue = device
@@ -4031,6 +4045,7 @@ using namespace metal;\n\
     /// second submit would then reach the driver, and this test would abort the
     /// whole run rather than fail, which is itself the loudest possible signal.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_command_buffer_cannot_be_submitted_twice() {
         let (_instance, device) = open_device();
         let queue = device
@@ -4064,6 +4079,7 @@ using namespace metal;\n\
     /// An encoder made against another device's queue refuses at `finish`
     /// rather than recording onto the wrong device.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_metal_encoder_built_on_a_foreign_queue_refuses() {
         let (_instance, device) = open_device();
         let (_other_instance, other) = open_device();
@@ -4086,6 +4102,7 @@ using namespace metal;\n\
     /// The device opens, says which backend it is, and has exactly the queue
     /// Metal has.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_device_reports_metal_and_one_graphics_queue() {
         let (_instance, device) = open_device();
         assert_eq!(device.backend(), BackendKind::Metal);
@@ -4111,6 +4128,7 @@ using namespace metal;\n\
     /// nothing, so a device that reported less than its adapter would be
     /// lying about hardware it can use.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn metal_device_caps_match_the_adapter_they_came_from() {
         let instance = open_instance();
         let adapters = instance.adapters();
@@ -4130,6 +4148,7 @@ using namespace metal;\n\
     /// `InvalidDescriptor`, so "it returned an error" would pass whether or not
     /// the handle was ever invalidated.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn metal_buffers_of_every_memory_location_create_and_then_stop_resolving() {
         let (_instance, device) = open_device();
         assert!(!LOCATIONS.is_empty(), "nothing to check");
@@ -4152,6 +4171,7 @@ using namespace metal;\n\
 
     /// A recycled slot must not resurrect the handle that used to name it.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_destroyed_metal_handle_does_not_alias_the_buffer_that_replaces_it() {
         let (_instance, device) = open_device();
         let first = device
@@ -4184,6 +4204,7 @@ using namespace metal;\n\
     /// `write_buffer` writes, at the offset it was given, and refuses the
     /// location Metal cannot reach without a blit.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn write_buffer_writes_host_visible_memory_and_refuses_what_metal_cannot_map() {
         let (_instance, device) = open_device();
         let readback = device
@@ -4250,6 +4271,7 @@ using namespace metal;\n\
     /// handle to B's own buffer, find the owner matching, and write into the
     /// wrong object with no error anywhere.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_handle_from_another_metal_device_is_foreign_not_merely_unresolvable() {
         let instance = open_instance();
         let adapters = instance.adapters();
@@ -4296,6 +4318,7 @@ using namespace metal;\n\
     /// Images, views and samplers all the way through, and the handles stop
     /// resolving when they are destroyed.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn metal_images_views_and_samplers_create_and_destroy() {
         let (_instance, device) = open_device();
         let extent = Extent3d::d2(64, 64);
@@ -4374,6 +4397,7 @@ using namespace metal;\n\
     /// Metal refuses the view, so this is the assertion that keeps the flag
     /// from being "optimised away" later.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_linear_image_can_be_viewed_as_its_srgb_partner() {
         let (_instance, device) = open_device();
         let image = device
@@ -4404,6 +4428,7 @@ using namespace metal;\n\
     /// A depth image cannot be reinterpreted, and says so instead of letting
     /// Metal raise.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_depth_image_refuses_a_differing_view_format() {
         let (_instance, device) = open_device();
         let image = device
@@ -4447,6 +4472,7 @@ using namespace metal;\n\
     /// Anisotropy is bounded on both sides, and the bound is the one the
     /// adapter reports.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn metal_samplers_reject_anisotropy_outside_the_reported_cap() {
         let (_instance, device) = open_device();
         let cap = device.caps().limits.max_sampler_anisotropy;
@@ -4510,6 +4536,7 @@ using namespace metal;\n\
     /// queue, and across two the wait says nothing about the blit. The second
     /// round is what a queue that works exactly once fails.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn wait_idle_waits_for_the_work_committed_before_it() {
         let (_instance, device) = open_device();
         let queue = device
@@ -4613,6 +4640,7 @@ using namespace metal;\n\
     /// and in `a_metal_compute_dispatch_writes_the_values_it_was_asked_for` rather
     /// than merely dropped from here.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn the_metal_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
         let (_instance, device) = open_device();
 
@@ -4733,6 +4761,7 @@ using namespace metal;\n\
     /// **What turns it red.** Any of these four regressing to `Unsupported`, or
     /// — for the first two — succeeding against a handle no device issued.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn the_binding_slice_replaced_refusals_with_real_errors() {
         let (_instance, device) = open_device();
         let unissued = Handle::from_bits(1 << 32).expect("generation 1");
@@ -4821,6 +4850,7 @@ using namespace metal;\n\
     /// raises on `commit`, which aborts this process rather than failing the
     /// test, so the empty-pass submission is the check that it closes.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn the_compute_pass_opens_an_encoder_and_its_calls_fail_only_as_themselves() {
         let (_instance, device) = open_device();
         let queue = device
@@ -4941,6 +4971,7 @@ using namespace metal;\n\
     /// *recording* check, so none of them needs the GPU to execute anything —
     /// which is why this one is not gated.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn indexed_and_indirect_draws_record_and_report_their_descriptor_errors() {
         let (_instance, device) = open_device();
         let ink = ink_msl();

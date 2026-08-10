@@ -288,6 +288,7 @@ mod tests {
     /// chunk's addresses again. Two views then share one descriptor, which no
     /// call reports, because `CreateShaderResourceView` returns nothing.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn slots_have_distinct_addresses_across_a_chunk_boundary() {
         let (_instance, device) = open_device();
         let raw = device.raw().clone();
@@ -327,6 +328,7 @@ mod tests {
     /// A freed slot comes back, and comes back at the same address — which is
     /// what makes the free list a recycler rather than a leak with extra steps.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_freed_slot_is_reissued_at_the_address_it_had() {
         let (_instance, device) = open_device();
         let raw = device.raw().clone();
@@ -369,6 +371,7 @@ mod tests {
     /// render target view belongs, which D3D12 refuses at *bind* time and never
     /// at write time.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn each_kind_allocates_out_of_its_own_heap() {
         let (_instance, device) = open_device();
         let raw = device.raw().clone();

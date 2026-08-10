@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run `crcbl-mtl`'s hardware suite — the tests that make the GPU execute a
-# shader program.
+# Run `crcbl-mtl`'s hardware suite — every test that opens a real Metal device,
+# up to and including the ones that make the GPU execute a shader program.
 #
 #   crates/crcbl-mtl/tests/run-mtl-e2e.sh [extra nextest args…]
 #
@@ -30,6 +30,28 @@
 # one test by name:
 #
 #   crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(a_metal_triangle_draw_paints_the_centre_and_leaves_the_corners_clear)'
+#
+# # Why `--run-ignored only` and not `all`
+#
+# This harness used to pass `--run-ignored all`, which ran the whole crate — the
+# hardware tests *and* the pure ones (format tables, handle tagging, the extent
+# arithmetic, the present ledger) that pass on a machine with no GPU at all. The
+# count the guard below reads was then unit tests plus device tests, and a run in
+# which **every device test had vanished** would still report a healthy total and
+# clear the zero check. That is the same "check that cannot fail" shape the guard
+# exists to prevent, one level up.
+#
+# `docs/plan/12-testing.md`'s placement rule is what makes the narrower selection
+# possible: a test lives ungated in `src/` iff it can pass with no GPU, and a
+# test that needs a live device is `#[ignore]`d. So `--run-ignored only` selects
+# exactly the device tests, and the number this script prints is the number that
+# matters. The pure ones are not lost — they are what
+# `cargo nextest run --workspace --all-features` runs on every push.
+#
+# `--features mtl-e2e` stays, and is not redundant with it: the handful of tests
+# that make the GPU execute a shader are feature-gated *as well as* `#[ignore]`d,
+# so without the feature they are not compiled and `--run-ignored only` cannot
+# select what does not exist.
 #
 # # The zero-tests check is the point
 #
@@ -64,7 +86,7 @@ trap cleanup EXIT INT TERM
 
 set +e
 cargo nextest run --locked -p crcbl-mtl --features mtl-e2e \
-    --run-ignored all --no-tests fail "$@" 2>&1 | tee "$LOG"
+    --run-ignored only --no-tests fail "$@" 2>&1 | tee "$LOG"
 STATUS=${PIPESTATUS[0]}
 set -e
 

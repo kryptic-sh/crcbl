@@ -877,6 +877,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn enumeration_finds_at_least_one_d3d12_adapter() {
         let adapters = open().adapters();
         assert!(
@@ -897,6 +898,7 @@ pub(crate) mod tests {
     /// reports because Metal has no such ids — DXGI does, so this backend has no
     /// excuse for one.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn every_dxgi_adapter_names_itself_its_driver_its_vendor_and_its_backend() {
         let adapters = open().adapters();
         assert!(!adapters.is_empty(), "nothing to check");
@@ -923,6 +925,7 @@ pub(crate) mod tests {
     /// lists display-only and too-old adapters that D3D12 refuses to open, and
     /// on the machine that has one every id after it would be off by one.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn adapter_ids_are_their_positions_in_the_dxgi_enumeration() {
         let adapters = open().adapters();
         assert!(!adapters.is_empty(), "nothing to check");
@@ -947,6 +950,7 @@ pub(crate) mod tests {
     /// push-constant budget without push constants, or an anisotropy cap without
     /// anisotropic sampling is a promise no call can keep.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn reported_limits_come_from_d3d12_and_agree_with_the_features() {
         let instance = open();
         assert!(!instance.records().is_empty(), "nothing to check");
@@ -1012,6 +1016,7 @@ pub(crate) mod tests {
     /// unconditionally goes red on any adapter below tier 3, and one that never
     /// sets it goes red on any adapter at or above it.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn the_bindless_flag_follows_the_two_answers_d3d12_gave_for_it() {
         let instance = open();
         assert!(!instance.records().is_empty(), "nothing to check");
@@ -1054,6 +1059,7 @@ pub(crate) mod tests {
     /// `cargo nextest run -p crcbl-dx12 --success-output immediate`, or off the
     /// failure message of any assertion above if the run is red.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn warp_is_enumerated_exactly_once_and_publishes_its_dynamic_resource_answer() {
         let instance = open();
         let all = report_all(&instance);
@@ -1148,6 +1154,7 @@ pub(crate) mod tests {
     /// rasteriser now reports ids this backend does not recognise, which is the
     /// classification silently reverting to the bug.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_microsoft_software_rasteriser_is_never_enumerated_as_hardware() {
         let instance = open();
         let all = report_all(&instance);
@@ -1205,6 +1212,7 @@ pub(crate) mod tests {
     /// waiting flag: that is a flag added ahead of the call behind it, which is
     /// the mistake `crcbl-mtl` had to reverse.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn every_reported_flag_has_a_call_behind_it_and_the_path_follows() {
         let instance = open();
         assert!(!instance.records().is_empty(), "nothing to check");
@@ -1264,6 +1272,7 @@ pub(crate) mod tests {
     /// nextest captures a passing test's stdout, so read it with
     /// `--success-output immediate` — which is what the harness passes.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn the_pinned_adapter_opens_a_device_and_names_itself() {
         let instance = open();
         let adapter = pinned_adapter(&instance);
@@ -1282,6 +1291,7 @@ pub(crate) mod tests {
     /// seam specifies — including the second poll being a caller bug rather than
     /// a second device.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_d3d12_device_opens_on_the_first_poll_and_only_once() {
         let instance = open();
         let adapter = pinned_adapter(&instance);
@@ -1314,6 +1324,7 @@ pub(crate) mod tests {
     /// the whole set. The timeline semaphore is what remains, and this test is
     /// what says so rather than letting the change go unnoticed.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn the_default_device_desc_is_refused_for_the_gap() {
         let instance = open();
         let adapter = pinned_adapter(&instance);
@@ -1341,6 +1352,7 @@ pub(crate) mod tests {
     /// the adapter and the features, so a valid adapter with a stale surface
     /// reaches this branch rather than an earlier one.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_compatible_surface_is_refused_by_d3d12_as_an_unresolvable_handle() {
         let instance = open();
         let adapter = pinned_adapter(&instance);
@@ -1365,6 +1377,7 @@ pub(crate) mod tests {
     /// Obligation 1, made observable: the device must survive its instance being
     /// dropped, and must still work afterwards.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_d3d12_device_outlives_the_instance_that_made_it() {
         let device = {
             let instance = open();
@@ -1391,6 +1404,7 @@ pub(crate) mod tests {
     /// An out-of-range adapter is a distinct contract from a feature gap, and it
     /// must not be swallowed by one.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn an_unknown_dxgi_adapter_is_refused_as_such_not_as_unimplemented() {
         let instance = open();
         let past_the_end = AdapterId(instance.adapters().len() as u32);
@@ -1427,6 +1441,7 @@ pub(crate) mod tests {
     /// Red when a refusal loses the backend's name, when a permanent refusal
     /// starts naming a slice, and when `Offscreen` stops resolving.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn every_target_d3d12_cannot_present_to_is_refused_by_name() {
         let instance = open();
         let adapter = pinned_adapter(&instance);
@@ -1493,6 +1508,7 @@ pub(crate) mod tests {
     /// assertion then finds `InvalidHandle`), and red when either check is
     /// dropped.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn surface_capability_queries_refuse_an_unknown_adapter_before_a_stale_handle() {
         let instance = open();
         let adapters = instance.adapters();
@@ -1528,6 +1544,7 @@ pub(crate) mod tests {
     /// all, which is the case `crate::handle`'s `take_owned` exists to keep
     /// away from a live row that shares its bits.
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn destroying_a_surface_handle_nothing_issued_does_nothing() {
         let instance = open();
         let stale: SurfaceHandle =

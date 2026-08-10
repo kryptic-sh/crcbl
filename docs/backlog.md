@@ -4342,3 +4342,71 @@ compare are four distinct assertions; only the backend qualifier was missing and
 only that was added. What is genuinely absent is a golden-image gate on Metal
 and D3D12 — `crates/crcbl/tests/render_e2e.rs` is the backend-agnostic golden
 and covers the cube scene, not the triangle.
+
+## What the mtl/dx12 `#[ignore]` placement slice left open (2026-08-10)
+
+The slice marked every `crcbl-mtl` and `crcbl-dx12` test that opens a real
+device, instance or adapter with `#[ignore]`, and narrowed both harnesses from
+running the whole crate to `--run-ignored only`, so the count each guards on is
+the number of device tests. `docs/plan/12-testing.md`'s placement section
+records what landed. What it did not settle:
+
+### The device-test counts are a source reading, not a measured run
+
+`run-mtl-e2e.sh` should select 71 tests and `run-dx12-e2e.sh` 73 (the mtl CI job
+filters `a_layer_swapchain_acquires_a_drawable_and_presents_it` out, so it
+should report 70). **Those numbers come from classifying the test bodies, not
+from watching nextest select them** — nothing on this team's machines executes
+either crate, and `cargo nextest list --run-ignored only` for both is empty on
+Linux because every device test lives in a `#[cfg(target_os = …)]` module Linux
+does not compile. The first `mtl e2e` and `dx12 e2e` runs after this are the
+first observation of the real counts; a number well below these means an
+`#[ignore]` did not land where it was thought to, and a number above means the
+classification missed a device path.
+
+The classification traced `instance::tests::open`, `device::tests::open_device`
+and `instance::tests::pinned_adapter` transitively through each module's local
+helpers, then every test the trace called pure was read. **A test that reaches a
+device by some route none of those three names would have been missed**, and
+nothing in the tree would report it: it would simply keep running in the
+`--workspace --all-features` sweep on the macOS/Windows runners and fail there
+rather than in the harness.
+
+`crates/crcbl-dx12/tests/run-dx12-e2e.sh`'s CI job header still records "the HAL
+suite above passed **155/155 on WARP**" from runs on `dc846ff` and `0354eec`.
+That is a dated account and correct for those runs; a reader comparing it
+against the ~73 the harness will now print should read the drop as the selection
+narrowing, not as tests disappearing.
+
+### The workspace sweep deliberately did not gain `--run-ignored all`
+
+The slice brief asked for `--run-ignored all` on both
+`cargo nextest run --workspace --all-features --locked --profile ci` lines in
+`ci.yml`, so the ordinary sweeps would keep running the newly-ignored tests.
+**That was not done, on `docs/plan/12-testing.md`'s authority**, which reserves
+that run as the one that deliberately does not execute the ignored set so it
+stays green on a machine with no compositor and no GPU. Measured rather than
+argued: `cargo nextest list --workspace --all-features --run-ignored only` on
+Linux selects 159 tests — `crcbl-vk::vk_e2e` 73, `crcbl-shell::wayland_e2e` 37,
+`crcbl-shell::x11_e2e` 32, `crcbl-wgpu::wgpu_e2e` 15, and one each from
+`crcbl::render_e2e` and `crcbl-cli::cli_e2e`. `--all-features` compiles the
+Vulkan, wgpu and render suites on the macOS and Windows runners too, so the flag
+would have those jobs open a Vulkan device on a runner with no loader.
+
+What that leaves is a **pairing nothing enforces**: `crcbl-mtl`'s device
+coverage now exists only in the `mtl e2e` job and `crcbl-dx12`'s only in the
+`dx12 e2e` job plus `test-cross-platform`'s "DX12 adapter report" step. Delete
+or disable any of those and the crate's device tests stop running everywhere,
+with every remaining job still green — the harnesses' zero-count guards cannot
+fire for a harness nobody invoked. The obvious fix is a required-job list the
+workflow checks against itself; it was out of scope here.
+
+### The pure/device split is not checked by anything
+
+Nothing fails when a newly written test opens a device and forgets `#[ignore]`,
+or when an existing one stops needing a device and keeps it. The first shape is
+caught late (the test runs in the sweep on a runner without the hardware and
+fails); the second is never caught at all — the test simply stops being run by
+anything except the harness. A lint would have to know which helpers open a
+device, which is the same trace this slice did by hand; recorded as a gap rather
+than attempted.

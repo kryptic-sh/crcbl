@@ -447,6 +447,7 @@ mod tests {
     /// `--success-output immediate` — which is what the harness passes.
     #[cfg(target_os = "windows")]
     #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_fresh_device_says_whether_it_is_validated_and_is_not_already_removed() {
         let (_instance, device) = crate::device::tests::open_device();
         let raw = device.raw();

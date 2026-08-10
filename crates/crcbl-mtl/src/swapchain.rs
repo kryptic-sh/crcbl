@@ -1486,6 +1486,7 @@ mod tests {
     /// ever report, so it sits out `PRESENT_WAIT` and comes back
     /// [`SurfaceError::Timeout`].
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn an_offscreen_ring_advertises_present_feedback_and_still_answers_at_once() {
         use crcbl_hal::Device as _;
         /// Long enough that a wait which really blocked is unmistakable in the
@@ -1543,6 +1544,7 @@ mod tests {
     /// when either semaphore comes back `Some` (this backend has no WSI
     /// semaphore to give), or when the ring cursor does not advance.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn an_offscreen_surface_configures_a_swapchain_and_hands_out_frames() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
@@ -1607,6 +1609,7 @@ mod tests {
     /// (the handle assertion) — which is the behaviour the *layer* path has and
     /// this one deliberately does not.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn an_offscreen_ring_comes_back_round_to_the_same_handles() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
@@ -1661,6 +1664,7 @@ mod tests {
     /// the readback is observed before the submission completed (`POISON`
     /// again).
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn an_offscreen_frame_clears_and_reads_back_through_the_seams_own_path() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
@@ -1773,6 +1777,7 @@ mod tests {
     /// `destroy_image_view`: the row goes, and the next acquire of the same
     /// position hands back a handle that no longer resolves.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_swapchain_owned_image_survives_a_caller_destroying_it() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
@@ -1823,6 +1828,7 @@ mod tests {
     /// Red when `present` returns `Ok` for a swapchain with nothing
     /// outstanding, which is the shape that silently drops a frame.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn presenting_a_metal_swapchain_without_acquiring_is_refused() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
@@ -1865,6 +1871,7 @@ mod tests {
     /// stale-handle assertion) — which is the leak the seam's "do not hold a
     /// view across a reconfigure" rule exists to make detectable.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_reconfigure_resizes_in_place_and_retires_the_old_rows() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
@@ -1912,6 +1919,7 @@ mod tests {
     /// call then succeeds and the swapchain quietly belongs to a window nobody
     /// asked it to.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_reconfigure_naming_another_surface_is_refused() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
@@ -1941,6 +1949,7 @@ mod tests {
     /// then accept a depth format as a colour ring and the failure would arrive
     /// at the first render pass instead.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_format_the_surface_does_not_offer_is_refused_by_name() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
@@ -1970,6 +1979,7 @@ mod tests {
     /// Red when `build_swapchain` stops calling `resolve_extent`, or clamps a
     /// zero up to one.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_zero_extent_metal_swapchain_is_refused_end_to_end() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
@@ -1999,6 +2009,7 @@ mod tests {
     /// call would succeed against the wrong surface — which is exactly the bug
     /// `crcbl_mtl::device`'s handle-tagging section describes.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_metal_surface_from_another_instance_is_foreign() {
         let first = open_instance();
         let second = open_instance();
@@ -2021,6 +2032,7 @@ mod tests {
     /// device's pool resolves the first's handle to its own swapchain and
     /// acquires from the wrong ring.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_swapchain_from_another_device_is_foreign() {
         use crcbl_hal::Device as _;
         let (instance, first) = open_device();
@@ -2055,6 +2067,7 @@ mod tests {
     /// and red when `surface_caps` checks the surface first and reports a stale
     /// handle for what is actually an adapter the caller invented (the second).
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_stale_surface_and_an_unknown_adapter_are_told_apart() {
         let instance = open_instance();
         let surface = offscreen_surface(&instance);
@@ -2085,6 +2098,7 @@ mod tests {
     /// place — every windowed device would then fail to open, which is the
     /// whole point of this slice.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_device_opens_against_its_own_instances_surface() {
         let instance = open_instance();
         let surface = offscreen_surface(&instance);
@@ -2119,6 +2133,7 @@ mod tests {
     /// and format list differ from the layer's, and `maximumDrawableCount`
     /// raises outside 2...3.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_detached_layer_becomes_a_surface_whose_caps_are_the_layers() {
         let instance = open_instance();
         let layer = detached_layer();
@@ -2161,6 +2176,7 @@ mod tests {
     /// frame illegal; `setMaximumDrawableCount:` is left unclamped or unset;
     /// `setDisplaySyncEnabled:` ignores the present mode.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn configuring_a_layer_writes_the_format_the_table_says_and_the_size_asked_for() {
         use crcbl_hal::Device as _;
         let (instance, device) = open_device();
@@ -2238,6 +2254,7 @@ mod tests {
     /// and the failure arrives much later as an Objective-C exception, which
     /// aborts the process rather than returning an `Err`.
     #[test]
+    #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
     fn a_layer_that_is_not_a_metal_layer_is_refused_rather_than_raising() {
         let instance = open_instance();
         let plain = CALayer::new();

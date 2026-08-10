@@ -318,6 +318,21 @@ jobs:
       - run:
           cargo clippy --workspace --all-targets --all-features --locked -- -D
           warnings
+      # **No `--run-ignored all` here, and that is the whole design.**
+      # `docs/plan/12-testing.md` reserves the workspace sweep as the run that
+      # deliberately does *not* execute the ignored suites, so it stays green on
+      # a machine with no compositor, no X server, no Vulkan loader and no GPU —
+      # which these runners are. `--all-features` compiles `vk-e2e`, `wgpu-e2e`
+      # and `render-e2e` here, so turning the ignored set on would try to open a
+      # Vulkan device on a runner with no loader and fail for reasons that are
+      # not about this workspace.
+      #
+      # What that sweep covers on these two runners is `crcbl-mtl`'s and
+      # `crcbl-dx12`'s **pure** tests — the format tables, the layout arithmetic,
+      # the handle tagging — which is exactly what the placement rule says
+      # belongs in an ungated `src/` test. Their device tests are `#[ignore]`d
+      # and run in the `mtl e2e` and `dx12 e2e` jobs, plus the DX12 adapter
+      # report step below.
       - run: cargo nextest run --workspace --all-features --locked --profile ci
       # # Why the AppKit session gets a step of its own, and no job of its own
       #
@@ -368,6 +383,17 @@ jobs:
       # is the same count check the macOS step makes: this crate is behind no
       # feature, so nothing else would go red if its suite stopped being built.
       #
+      # **`--run-ignored all` is load-bearing, and `--no-tests fail` would not
+      # have caught its absence.** The tests that open a real `ID3D12Device` —
+      # including `the_pinned_adapter_opens_a_device_and_names_itself`, which is
+      # what prints the line this step exists for — are now `#[ignore]`d, so that
+      # `crates/crcbl-dx12/tests/run-dx12-e2e.sh` can select exactly them and
+      # guard on their count. Without this flag the step would run the crate's
+      # pure tests, print no adapter line at all, and still pass: tests *did*
+      # run, so the count check sees nothing wrong. The flag also keeps this
+      # runner's unpinned enumeration covered, which is the half the `dx12 e2e`
+      # job cannot give — that one pins WARP on purpose.
+      #
       # Read the verdict off `sm66-dynamic-resources`, **not** off
       # `renderer-tier`. Every adapter reports Tier B in the enumeration slice
       # because `COMPUTE`, `TIMELINE_SEMAPHORE` and the two indirect features
@@ -376,8 +402,8 @@ jobs:
       - name: The DX12 adapter report, named rather than swept up
         if: runner.os == 'Windows'
         run: >-
-          cargo nextest run --locked -p crcbl-dx12 --no-tests fail
-          --success-output immediate
+          cargo nextest run --locked -p crcbl-dx12 --run-ignored all
+          --no-tests fail --success-output immediate
 
   # The only job that runs the Wayland backend against a real compositor.
   # `docs/plan/12-testing.md` schedules "scripted resize/mode-switch sequences
@@ -567,9 +593,11 @@ jobs:
   #
   # # What a green run here IS evidence of
   #
-  # Every test in `crcbl-dx12` opens a real `ID3D12Device`, and the harness pins
-  # it to **WARP** — D3D12's software rasteriser, which ships in Windows and is
-  # this backend's lavapipe. So this covers adapter enumeration against a live
+  # This runs `crcbl-dx12`'s device tests — the `#[ignore]`d ones, which is how
+  # that crate spells "needs a live `ID3D12Device`" and how `--run-ignored only`
+  # in the harness selects exactly them — and it pins the adapter to **WARP**,
+  # D3D12's software rasteriser, which ships in Windows and is this backend's
+  # lavapipe. So this covers adapter enumeration against a live
   # DXGI (including `EnumWarpAdapter` and the software/hardware classification),
   # device and queue creation, buffers in all three `MemoryLocation`s with
   # host-visible writes and readback, images, image views, samplers and the
@@ -581,12 +609,15 @@ jobs:
   # presented and resized on a real `HWND`.
   #
   # It runs the same tests the `windows-latest` leg of `test-cross-platform`
-  # sweeps up, and that duplication is the point rather than an oversight: the
-  # sweep runs them on `adapters()[0]`, which is whatever DXGI listed first, and
+  # runs in its "DX12 adapter report" step, and that duplication is the point
+  # rather than an oversight: that step passes `--run-ignored all` with no pin,
+  # so it runs them on `adapters()[0]`, which is whatever DXGI listed first, and
   # this job runs them on the adapter it names. On today's runner those are the
   # same device; on a runner that grows a GPU they stop being, and only one of
   # the two jobs would still be testing the software path. `vk-e2e` pins
-  # lavapipe for exactly this reason.
+  # lavapipe for exactly this reason. (The `--workspace --all-features` sweep in
+  # that job is *not* the other copy: it deliberately leaves the ignored set
+  # alone, so what it runs of this crate is its pure tests.)
   #
   # It also covers the **offscreen ring** twice over: once at a shape chosen so
   # the texels can be asserted exactly, and once at the shape
@@ -1351,12 +1382,17 @@ jobs:
   # `docs/backlog.md` carries the per-image output.
   #
   # The tests stay `#[ignore]`d in the source, exactly as `crcbl-vk`'s and
-  # `crcbl-wgpu`'s do: a plain `cargo nextest run --workspace --all-features`
-  # on a machine with no usable GPU must stay green, and the script's
-  # `--run-ignored all` is the only thing that turns them on. The script also
-  # fails when the suite reports zero tests run, because a suite that is both
-  # feature-gated and `#[ignore]`d has two ways to run nothing and
-  # `docs/plan/12-testing.md` calls a silently-skipped e2e job a known trap.
+  # `crcbl-wgpu`'s do — and now *every* test in the crate that opens a Metal
+  # device does, not only the ones that make the GPU execute a shader: a plain
+  # `cargo nextest run --workspace --all-features` on a machine with no usable
+  # GPU must stay green, and the script is the only thing that turns them on. It
+  # selects them with `--run-ignored only`, so the count it guards on is the
+  # number of device tests rather than that plus the crate's pure ones — a total
+  # made of both would look healthy on a run in which every device test had
+  # vanished. The script also fails when the suite reports zero tests run,
+  # because a suite that is both feature-gated and `#[ignore]`d has two ways to
+  # run nothing and `docs/plan/12-testing.md` calls a silently-skipped e2e job a
+  # known trap.
   #
   # This job does not replace running the script on a real Mac. It says the
   # suite passes on Apple's paravirtual device; a discrete or unvirtualised
@@ -1422,11 +1458,12 @@ jobs:
       # `a_layer_swapchain_acquires_a_drawable_and_presents_it` is `#[ignore]`d
       # because a detached `CAMetalLayer` in a headless container has no
       # surface to vend a drawable from, so `nextDrawable` returns nil or
-      # blocks. `--run-ignored all` would sweep it up and a block would burn
-      # the timeout, so the filter below names it. Every other `#[ignore]` in
-      # the crate is a shader-execution gate and every one of them runs here.
-      # The filter lives here rather than in the script because a person on a
-      # real Mac, with a real window server, should run that test.
+      # blocks. The script's `--run-ignored only` sweeps it up with every other
+      # device test and a block would burn the timeout, so the filter below
+      # names it. Every other `#[ignore]` in the crate marks a test that opens a
+      # Metal device, and every one of them runs here. The filter lives here
+      # rather than in the script because a person on a real Mac, with a real
+      # window server, should run that test.
       #
       # **`--no-fail-fast`, because the first run found a hang and then hid the
       # rest of the answer.** Run 31040839716 stopped at test 45 of 106 and
