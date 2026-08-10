@@ -4633,3 +4633,91 @@ each platform's job compare against it, with the distinct-colour floor
 - **`crcbl-ui` owes a hit-test grid and has two points.**
   `button_hit_test_inside` and `button_hit_test_outside` exist; the sweep the
   plan names does not.
+
+## Decisions taken 2026-08-10, so they are not re-argued
+
+Each of these was a question the coverage audit raised and left open. They are
+answered here rather than carried, with the reasoning, so a later session can
+disagree with the argument rather than rediscover the question.
+
+### Decided: `crcbl-wgpu` gets owner tagging, and the wasm build pays for it
+
+The question was whether the browser target should carry the side table the
+seam's third obligation requires. **It does.** The cost is one `u64` compare per
+handle resolve, against a hash lookup that already happens; that is not a cost
+the wasm build needs protecting from, and a seam obligation honoured by three of
+four backends is not honoured. Cross-device handle misuse being undefined on
+exactly the backend a browser runs is the worst place to have it, not the most
+defensible.
+
+Follow whichever existing backend's shape is closest rather than inventing a
+fourth spelling.
+
+**Noted while deciding, not acted on:** owner tagging will then exist in four
+crates as four hand-written copies of one idea. That is duplicated knowledge and
+it will drift. Extracting it into `crcbl-hal` is the obvious move and is
+deliberately _not_ being done now — three of the copies work, and rewriting
+working backends to host a fourth is scope the task does not need. Revisit if a
+fifth backend ever appears, which is the point at which the duplication stops
+being tolerable.
+
+### Decided: device loss surfaces, it does not self-heal
+
+The engine will not recreate the device. `HalError::DeviceLost` propagates and
+the loop stops with an error naming it.
+
+Recreation means rebuilding every resource the frame graph, the pools and the
+renderers hold, on a code path that by construction almost never runs — the
+classic shape of a recovery path that is broken when it is finally needed.
+Surfacing it is honest, testable in one assertion, and leaves the harder policy
+available later for whoever has a real reason to want it. A game that wants to
+survive a lost device can restart the engine; nothing in the samples does.
+
+This makes the null-backend hook worth adding: a `Recorder` that can report a
+device as gone _and keep it gone_ is what turns this from a policy nobody can
+observe into one assertion.
+
+### Decided: the four-backend compare is more scenes in `render_e2e`, not a new job
+
+The audit's framing was a cross-platform image compare — bless a shared
+reference and have the macOS and Windows jobs compare against it. **That already
+exists**: `crates/crcbl/tests/render_e2e.rs` compares against a checked-in
+golden blessed on lavapipe, and CI runs it on all four backends. What it does
+not do is cover more than one scene.
+
+So the gap is one line of scope, not a new job: `Scene` has `Cube`, `Sprite` and
+`Ui`, `render_e2e` draws only `Cube`, and `sprite.slang` and `ui.slang` are the
+two shaders that have _actually_ diverged per target in this repo's history. The
+fix is to draw all three scenes there and bless two more goldens, which gives
+Metal and D3D12 the coverage `run-cross-backend-e2e.sh` gives Vulkan and wgpu.
+
+Cheaper than a new job, reuses the anti-vacuity colour floor and the tolerance
+that are already calibrated, and it puts the coverage in the file whose whole
+purpose is being backend-agnostic.
+
+### Declined: minimum-count floors on the e2e harnesses
+
+Both backend harnesses now select `--run-ignored only`, so the number they guard
+on is the device-test count — 70 on the Metal runner and 73 on the D3D12 one,
+measured. The zero-count guard still passes a selection that collapsed from 73
+to 3.
+
+A floor would catch that, and it is **not** being added: any threshold below the
+real number is arbitrary, and a threshold equal to it fails CI every time a
+device test is added, which trains people to bump it without reading. The counts
+are printed by both harnesses and visible in the run log, and the classification
+that produces them is now documented in `docs/plan/12-testing.md`. Revisit if a
+collapse ever actually happens — at that point the floor has evidence behind it
+instead of a guess.
+
+### Declined for now: a golden frame per sample
+
+`docs/plan/12-testing.md` asks every sample for a determinism check _and_ a
+golden frame. The determinism half is met everywhere. The golden half needs each
+sample to expose a screenshot path it does not have, which is a feature in every
+sample rather than a test — and the samples are already pinned by replay hashes,
+which catch the same regressions a golden would catch for gameplay and catch
+them deterministically.
+
+Left undone deliberately. If it is taken up, the cheap version is one shared
+`--screenshot` flag in the sample scaffold rather than five implementations.
