@@ -259,6 +259,7 @@ dependencies = [
  "crcbl-audio",
  "crcbl-client",
  "crcbl-core",
+ "crcbl-dx12",
  "crcbl-ecs",
  "crcbl-golden",
  "crcbl-hal",
