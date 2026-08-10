@@ -1642,8 +1642,9 @@ mod tests {
                 }
             }
             assert_eq!(
-                dispatches, 2,
-                "the cull pass and the draw-argument pass, in front of the draws"
+                dispatches, 3,
+                "the clearing pass, the cull pass and the draw-argument pass, in front of \
+                 the draws"
             );
             assert_eq!(
                 seen, expected,
@@ -1883,41 +1884,40 @@ mod tests {
         recorder.assert_valid();
     }
 
-    /// **Every counter both compute passes add to starts each frame at zero.**
+    /// **Every counter both compute passes add to is zeroed by a pass of its
+    /// own, before either of them runs.**
     ///
     /// The two shaders only ever increment, so a counter carrying the previous
     /// frame's total makes a bucket's argument structure claim more instances
     /// than its run holds — which draws whatever the run's stale tail happens to
     /// name.
     ///
-    /// Every buffer is **poisoned before each frame**, and that is the whole
-    /// test: the null backend runs no shader, so a counter nothing wrote reads
-    /// as the zero it was created with and an assertion against that would pass
-    /// whether or not `begin_frame` zeroed anything. The poison is what makes
-    /// the zero evidence of a write.
+    /// # This once read the bytes back, and no longer can
+    ///
+    /// It used to poison all three counters with `0xAB` and assert `begin_frame`
+    /// had written zeroes over them — the poison being the whole test, because
+    /// the null backend runs no shader and a counter nothing wrote reads as the
+    /// zero it was created with. The counters are device-local now, so nothing
+    /// on the host writes them and [`Recorder::buffer_bytes`] holds nothing for
+    /// them: the zero is a dispatch inside the frame, and a backend that runs no
+    /// shader cannot observe it at all.
+    ///
+    /// So the poison moved to where a shader actually runs — `crcbl-vk`'s
+    /// `draw_gen` end-to-end fills all three with a sentinel and reads back the
+    /// generated arguments — and what is checkable *here* is the schedule: that
+    /// the frame contains the clearing pass, that it writes exactly those three
+    /// buffers, and that the graph orders the two accumulating passes after it.
+    /// Each of the three counts below goes red if a buffer is dropped from the
+    /// clearing pass, and the pass list goes red if the pass leaves the frame.
     #[test]
     fn every_frame_starts_from_zeroed_counters() {
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
-        let zeroed = |renderer: &ForwardRenderer, frame: usize| {
-            [
-                ("the survivor count", renderer.draws.visible_count(frame)),
-                ("the indirect arguments", renderer.draws.args(frame)),
-                ("the draw counts", renderer.draws.counts(frame)),
-            ]
-        };
-        for _ in 0..FRAMES_IN_FLIGHT * 2 {
-            // Every slot, because `begin_frame` picks the next one and a poison
-            // only in the current slot would miss it.
-            for frame in 0..FRAMES_IN_FLIGHT {
-                for (_, buffer) in zeroed(&renderer, frame) {
-                    let size = recorder.buffer_bytes(buffer).expect("live").len();
-                    device
-                        .write_buffer(buffer, 0, &vec![0xAB; size])
-                        .expect("write");
-                }
-            }
+        let imported = swapchain_image(device.as_ref());
+        // Twice round the ring, because a slot cleared only on its first use is
+        // exactly the failure this is about.
+        for round in 0..FRAMES_IN_FLIGHT * 2 {
             renderer
                 .begin_frame(
                     device.as_ref(),
@@ -1927,15 +1927,77 @@ mod tests {
                     (64, 48),
                 )
                 .expect("write");
-            for (what, buffer) in zeroed(&renderer, renderer.frame) {
-                let bytes = recorder.buffer_bytes(buffer).expect("live");
-                assert!(
-                    bytes.iter().all(|byte| *byte == 0),
-                    "{what} must reach the frame at zero: {bytes:?}"
-                );
-            }
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            renderer.add_passes(&mut graph, target, (64, 48));
+            let pool = crate::TransientPool::new();
+            let compiled = graph.compile(&pool).expect("a legal frame");
+
+            let clear = &compiled.passes()[0];
+            assert_eq!(
+                clear.label(),
+                "clear-counters",
+                "round {round}: the zero has to be written before anything adds to it"
+            );
+            let barriers = &clear.barriers().buffers;
+            assert_eq!(
+                barriers.len(),
+                3,
+                "round {round}: the survivor count, the arguments and the draw counts, \
+                 and nothing else: {barriers:?}"
+            );
+            assert!(
+                barriers
+                    .iter()
+                    .all(|barrier| barrier.to == ResourceState::ShaderReadWrite),
+                "round {round}: every one of them is written by this pass: {barriers:?}"
+            );
+            // The two the frame leaves as indirect arguments are the arguments
+            // and the counts; the survivor count rests in a shader read. That
+            // split is what names the three without a handle to compare.
+            assert_eq!(
+                barriers
+                    .iter()
+                    .filter(|barrier| barrier.from == ResourceState::IndirectArgument)
+                    .count(),
+                2,
+                "round {round}: out of the state a draw read them in: {barriers:?}"
+            );
+
+            let after = |label: &str| {
+                compiled
+                    .passes()
+                    .iter()
+                    .find(|pass| pass.label() == label)
+                    .unwrap_or_else(|| panic!("round {round}: no `{label}` pass"))
+                    .barriers()
+                    .buffers
+                    .iter()
+                    .filter(|barrier| {
+                        barrier.from == ResourceState::ShaderReadWrite
+                            && barrier.to == ResourceState::ShaderReadWrite
+                    })
+                    .count()
+            };
+            assert_eq!(
+                after("cull"),
+                1,
+                "round {round}: the survivor count reaches the cull pass's atomic behind a \
+                 barrier on the write that zeroed it"
+            );
+            assert_eq!(
+                after("draw-args"),
+                2,
+                "round {round}: and so do the arguments and the draw counts"
+            );
+
+            // The compiled graph borrows the renderer's pass bodies, so it has
+            // to go before the next frame borrows the renderer again.
+            drop(compiled);
         }
         renderer.destroy(device.as_ref());
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
         recorder.assert_valid();
     }
 
@@ -1976,8 +2038,8 @@ mod tests {
             .collect();
         assert_eq!(
             passes,
-            ["cull", "draw-args", "forward", "tonemap"],
-            "the two compute passes come first, and in that order"
+            ["clear-counters", "cull", "draw-args", "forward", "tonemap"],
+            "the three compute passes come first, and in that order"
         );
 
         let forward = compiled

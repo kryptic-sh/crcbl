@@ -1704,6 +1704,7 @@ fn the_engine_passes_offer_every_shader_artifact_they_have() {
         "ui.slang",
         "cull",
         "draw_gen",
+        "clear_counters",
     ] {
         assert!(
             created

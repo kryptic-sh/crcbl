@@ -2,9 +2,12 @@
 //! buffers between them.
 //!
 //! ```text
-//!  begin_frame ──▶ cull params (this frame's frustum) + three zeroed counters
+//!  begin_frame ──▶ cull params (this frame's frustum)
 //!
-//!  add_passes ──┬─ compute "cull"      instances ──▶ visible + visible_count
+//!  add_passes ──┬─ compute "clear-counters" ──▶ visible_count, draw_args,
+//!               │                                        │  draw_counts
+//!               │                                        │ graph barrier
+//!               ├─ compute "cull"      instances ──▶ visible + visible_count
 //!               │                                        │ graph barrier
 //!               └─ compute "draw-args" visible ──▶ visible_instances
 //!                                              ──▶ draw_args + draw_counts
@@ -15,11 +18,11 @@
 //! `docs/plan/03-gpu-driven-rendering.md` §3.3, both halves: "compute pass:
 //! frustum cull against instance AABBs → compacted visible instance list →
 //! `draw_indexed_indirect` records + count buffer". The first dispatch is
-//! `cull.slang` and the second is `draw_gen.slang`; **there is not one
-//! hand-written barrier here** — the two passes declare what they touch and
-//! [`crate::graph`] computes the transitions, including the one into
-//! [`ResourceState::IndirectArgument`] that the seam calls the single most
-//! important barrier in a GPU-driven frame.
+//! `cull.slang` and the second is `draw_gen.slang`, with `clear_counters.slang`
+//! ahead of both; **there is not one hand-written barrier here** — the three
+//! passes declare what they touch and [`crate::graph`] computes the
+//! transitions, including the one into [`ResourceState::IndirectArgument`] that
+//! the seam calls the single most important barrier in a GPU-driven frame.
 //!
 //! # Buckets, and why the CPU still records a draw at all
 //!
@@ -42,20 +45,37 @@
 //! `(material template, permutation, pass)` bucket the correction describes is
 //! the same table with a longer key.
 //!
-//! # Three counters the caller zeroes, and why they are host-visible
+//! # Three counters a dispatch zeroes, and why it is a dispatch
 //!
 //! Both shaders only ever *add*: the cull pass's survivor counter and each
 //! bucket's instance count are atomics, and an argument buffer left holding last
 //! frame's totals would draw last frame's scene twice over. Something has to
-//! zero them, and the seam only permits a fill outside a pass — which is exactly
-//! where a render graph frame has no room.
+//! zero them.
 //!
-//! So the three are [`MemoryLocation::HostUpload`] and
-//! [`DrawGen::begin_frame`] writes zeroes into them, on the same terms
-//! [`crate::instance_pool`] writes its deltas: one buffer per frame in flight,
-//! rotated, so the write never lands on a buffer a submission in flight is still
-//! reading. The lists the counters index — the visible list and the per-bucket
-//! runs — are device-local, because nothing needs to write those from the host.
+//! The seam has a fill for exactly this — `CommandEncoder::fill_buffer`, "the
+//! idiomatic way to zero an indirect count buffer" — and it is unusable here
+//! twice over. A fill is legal only *outside* a pass, and a render-graph frame
+//! is passes end to end; and `crcbl-dx12` refuses one outright, because D3D12's
+//! fill is `ClearUnorderedAccessViewUint` over a descriptor from a
+//! shader-visible heap, which that backend does not create.
+//!
+//! So the zero is a dispatch of its own, `clear_counters.slang`, scheduled
+//! ahead of the cull pass by [`DrawGen::add_passes`] like any other producer —
+//! and the barrier between its write and the cull pass's first atomic is the
+//! graph's, computed from what the two declare. Every backend that can run the
+//! two passes this zeroes for can run this one, which a fill is not true of.
+//!
+//! **All five buffers are therefore [`MemoryLocation::DeviceLocal`]**, which is
+//! not a tidiness point: D3D12 has no unordered-access view of an upload-heap
+//! resource at all — the flag is rejected at creation and the heap pins the
+//! resource to `GENERIC_READ` for its lifetime — so the three counters being
+//! host-visible and bound writable is what took its device down.
+//!
+//! They carry [`BufferUsage::TRANSFER_DST`] as well as `TRANSFER_SRC`, and for
+//! the same reason: a buffer only ever written by a shader is one nothing can
+//! poison, and a test that cannot poison a counter cannot tell a zero this pass
+//! wrote from the zero the allocation came with. `crcbl-vk`'s `draw_gen`
+//! end-to-end fills all three with a sentinel before the frame.
 //!
 //! # The overflow is visible, and it is not silent
 //!
@@ -72,7 +92,9 @@ use crcbl_hal::{
     PipelineLayoutDesc, PipelineLayoutHandle, ResourceState, ShaderEntry, ShaderModuleDesc,
     ShaderStages,
 };
-use crcbl_shaders::{CULL, DRAW_GEN, Stage, cull as cull_shader, draw_gen};
+use crcbl_shaders::{
+    CLEAR_COUNTERS, CULL, DRAW_GEN, Stage, clear_counters, cull as cull_shader, draw_gen,
+};
 
 use crate::cull::Frustum;
 use crate::graph::{BufferId, ImportedBuffer, RenderGraph};
@@ -133,6 +155,9 @@ pub struct DrawGen {
     /// The block naming the bucket count and the two capacities. Shared by every
     /// frame's group, because none of the three changes.
     gen_params: BufferHandle,
+    /// The two buffer lengths the clearing dispatch zeroes. Shared for the same
+    /// reason: both are fixed when the bucket table is built.
+    clear_params: BufferHandle,
 
     // One per frame in flight, indexed by the caller's frame slot.
     cull_params: Vec<BufferHandle>,
@@ -141,9 +166,13 @@ pub struct DrawGen {
     runs: Vec<BufferHandle>,
     args: Vec<BufferHandle>,
     counts: Vec<BufferHandle>,
+    clear_groups: Vec<BindGroupHandle>,
     cull_groups: Vec<BindGroupHandle>,
     gen_groups: Vec<BindGroupHandle>,
 
+    clear_layout: BindGroupLayoutHandle,
+    clear_pipeline_layout: PipelineLayoutHandle,
+    clear_pipeline: ComputePipelineHandle,
     cull_layout: BindGroupLayoutHandle,
     cull_pipeline_layout: PipelineLayoutHandle,
     cull_pipeline: ComputePipelineHandle,
@@ -238,6 +267,25 @@ impl DrawGen {
             .to_bytes(),
         )?;
 
+        let clear_params = buffer(
+            "clear params",
+            clear_counters::PARAMS_SIZE as u64,
+            BufferUsage::UNIFORM,
+            MemoryLocation::HostUpload,
+        )?;
+        // The argument buffer's length in words, from the crate that owns the
+        // argument layout — so the clearing shader never re-declares it.
+        let args_words = bucket_count * draw_gen::DRAW_ARGS_WORDS as u32;
+        device.write_buffer(
+            clear_params,
+            0,
+            &clear_counters::Params {
+                args_words,
+                counts_words: bucket_count,
+            }
+            .to_bytes(),
+        )?;
+
         let frames = desc.instances.len();
         let mut cull_params = Vec::with_capacity(frames);
         let mut visible = Vec::with_capacity(frames);
@@ -265,14 +313,14 @@ impl DrawGen {
                 BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
                 MemoryLocation::DeviceLocal,
             )?);
-            // Host-visible, because `begin_frame` zeroes it and the seam has
-            // nowhere inside a graph frame to record a fill — see the module
-            // docs.
+            // `TRANSFER_DST` on the three the clearing dispatch owns, so a test
+            // can poison them — see the module docs. They are device-local like
+            // everything else here: nothing writes them from the host any more.
             visible_count.push(buffer(
                 &format!("visible count {frame}"),
                 4,
-                BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
-                MemoryLocation::HostUpload,
+                BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
+                MemoryLocation::DeviceLocal,
             )?);
             runs.push(buffer(
                 &format!("bucket runs {frame}"),
@@ -283,16 +331,48 @@ impl DrawGen {
             args.push(buffer(
                 &format!("draw args {frame}"),
                 u64::from(bucket_count) * draw_gen::DRAW_ARGS_SIZE as u64,
-                BufferUsage::STORAGE | BufferUsage::INDIRECT | BufferUsage::TRANSFER_SRC,
-                MemoryLocation::HostUpload,
+                BufferUsage::STORAGE
+                    | BufferUsage::INDIRECT
+                    | BufferUsage::TRANSFER_SRC
+                    | BufferUsage::TRANSFER_DST,
+                MemoryLocation::DeviceLocal,
             )?);
             counts.push(buffer(
                 &format!("draw counts {frame}"),
                 u64::from(bucket_count) * 4,
-                BufferUsage::STORAGE | BufferUsage::INDIRECT | BufferUsage::TRANSFER_SRC,
-                MemoryLocation::HostUpload,
+                BufferUsage::STORAGE
+                    | BufferUsage::INDIRECT
+                    | BufferUsage::TRANSFER_SRC
+                    | BufferUsage::TRANSFER_DST,
+                MemoryLocation::DeviceLocal,
             )?);
         }
+
+        // --- the clearing pass ---
+        let clear_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+            label: Some("clear counters"),
+            entries: &[
+                uniform(0),
+                storage(1, false),
+                storage(2, false),
+                storage(3, false),
+            ],
+        })?;
+        rollback.bind_group_layouts.push(clear_layout);
+        let clear_pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("clear counters"),
+            bind_group_layouts: &[clear_layout],
+            push_constants: None,
+        })?;
+        rollback.pipeline_layouts.push(clear_pipeline_layout);
+        let clear_pipeline = compute_pipeline(
+            device,
+            "clear counters",
+            &CLEAR_COUNTERS,
+            clear_pipeline_layout,
+            clear_counters::WORKGROUP_SIZE,
+        )?;
+        rollback.pipelines.push(clear_pipeline);
 
         // --- the cull pass ---
         //
@@ -361,9 +441,24 @@ impl DrawGen {
         )?;
         rollback.pipelines.push(gen_pipeline);
 
+        let mut clear_groups = Vec::with_capacity(frames);
         let mut cull_groups = Vec::with_capacity(frames);
         let mut gen_groups = Vec::with_capacity(frames);
         for frame in 0..frames {
+            let group = device.create_bind_group(&BindGroupDesc {
+                label: Some("clear counters"),
+                layout: clear_layout,
+                entries: &[
+                    bound(0, clear_params),
+                    bound(1, visible_count[frame]),
+                    bound(2, args[frame]),
+                    bound(3, counts[frame]),
+                ],
+                variable_count: None,
+            })?;
+            rollback.bind_groups.push(group);
+            clear_groups.push(group);
+
             // **This frame's slot of every ring, not a shared buffer.** Binding
             // one buffer here for every group would undo the ring and put a
             // frame's writes where the previous frame is still reading.
@@ -406,14 +501,19 @@ impl DrawGen {
         Ok(Self {
             bucket_meshes,
             gen_params,
+            clear_params,
             cull_params,
             visible,
             visible_count,
             runs,
             args,
             counts,
+            clear_groups,
             cull_groups,
             gen_groups,
+            clear_layout,
+            clear_pipeline_layout,
+            clear_pipeline,
             cull_layout,
             cull_pipeline_layout,
             cull_pipeline,
@@ -525,11 +625,16 @@ impl DrawGen {
         self.counts[frame]
     }
 
-    /// Writes `frame`'s cull parameters and zeroes the three counters both
-    /// dispatches only ever add to.
+    /// Writes `frame`'s cull parameters — this frame's frustum, and how much of
+    /// the instance array to test.
+    ///
+    /// The three counters both dispatches add to are **not** zeroed here: that
+    /// is the clearing pass [`DrawGen::add_passes`] schedules, and the module
+    /// docs say why it has to be a dispatch inside the frame rather than a host
+    /// write before it.
     ///
     /// Call once per frame, before [`DrawGen::add_passes`], against the frame
-    /// slot the instance pool rotated to — the buffers written here are the ones
+    /// slot the instance pool rotated to — the buffer written here is the one
     /// that slot's bind groups name.
     ///
     /// `instance_count` is how many elements of the instance array the cull
@@ -540,7 +645,7 @@ impl DrawGen {
     ///
     /// # Errors
     ///
-    /// [`HalError`] if any of the four writes failed.
+    /// [`HalError`] if the write failed.
     ///
     /// # Panics
     ///
@@ -561,21 +666,6 @@ impl DrawGen {
                 capacity: self.capacity,
             }
             .to_bytes(),
-        )?;
-        // Both shaders only add, so every counter starts at zero or it carries
-        // the previous frame into this one. The arguments are zeroed whole
-        // rather than word by word: the dispatch rewrites the four static words
-        // of every bucket it owns, so there is nothing here worth preserving.
-        device.write_buffer(self.visible_count[frame], 0, &[0u8; 4])?;
-        device.write_buffer(
-            self.args[frame],
-            0,
-            &vec![0u8; self.bucket_count as usize * draw_gen::DRAW_ARGS_SIZE],
-        )?;
-        device.write_buffer(
-            self.counts[frame],
-            0,
-            &vec![0u8; self.bucket_count as usize * 4],
         )
     }
 
@@ -641,6 +731,29 @@ impl DrawGen {
             ResourceState::IndirectArgument,
         );
 
+        // The zero every atomic below counts up from, and the first thing in the
+        // frame that touches any of the three. Its barrier into the cull pass is
+        // the graph's, out of the `ShaderReadWrite` declared on both sides.
+        let clear_pipeline = self.clear_pipeline;
+        let clear_layout = self.clear_pipeline_layout;
+        let clear_group = self.clear_groups[frame];
+        // The longest of the three buffers, which is the arguments: one
+        // structure per bucket, and `new` refuses a table with no buckets, so
+        // this is never the empty dispatch Metal rejects.
+        let clear_groups = (self.bucket_count * draw_gen::DRAW_ARGS_WORDS as u32)
+            .div_ceil(clear_counters::WORKGROUP_SIZE);
+        graph
+            .add_compute_pass("clear-counters")
+            .use_buffer(visible_count, ResourceState::ShaderReadWrite)
+            .use_buffer(args, ResourceState::ShaderReadWrite)
+            .use_buffer(counts, ResourceState::ShaderReadWrite)
+            .execute(move |ctx| {
+                let encoder = ctx.encoder();
+                encoder.bind_compute_pipeline(clear_pipeline);
+                encoder.bind_group(0, clear_group, &[], clear_layout);
+                encoder.dispatch(clear_groups, 1, 1);
+            });
+
         let cull_pipeline = self.cull_pipeline;
         let cull_layout = self.cull_pipeline_layout;
         let cull_group = self.cull_groups[frame];
@@ -704,12 +817,20 @@ impl DrawGen {
         device.destroy_pipeline_layout(self.gen_pipeline_layout);
         device.destroy_compute_pipeline(self.cull_pipeline);
         device.destroy_pipeline_layout(self.cull_pipeline_layout);
-        for group in self.gen_groups.into_iter().chain(self.cull_groups) {
+        device.destroy_compute_pipeline(self.clear_pipeline);
+        device.destroy_pipeline_layout(self.clear_pipeline_layout);
+        for group in self
+            .gen_groups
+            .into_iter()
+            .chain(self.cull_groups)
+            .chain(self.clear_groups)
+        {
             device.destroy_bind_group(group);
         }
         device.destroy_bind_group_layout(self.gen_layout);
         device.destroy_bind_group_layout(self.cull_layout);
-        for buffer in [self.bucket_meshes, self.gen_params]
+        device.destroy_bind_group_layout(self.clear_layout);
+        for buffer in [self.bucket_meshes, self.gen_params, self.clear_params]
             .into_iter()
             .chain(self.cull_params)
             .chain(self.visible)

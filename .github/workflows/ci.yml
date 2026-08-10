@@ -625,54 +625,24 @@ jobs:
       # something before it broke the device, and the code alone names neither
       # the call nor the mistake.
       #
-      # **This step is restored to make the next run say what.** It is
-      # `continue-on-error` rather than a gate, because it is expected to fail
-      # again and a step that always fails gates nothing — but held out entirely
-      # it produces no evidence at all, which is what the two previous
-      # measurements cost. What changed since them:
+      # **This is a gate again, because both named causes are fixed.** It was
+      # `continue-on-error` while the frame failed for reasons this backend
+      # could only report: a constant buffer view rounded to D3D12's 256-byte
+      # requirement while its buffer stayed 16 bytes, and three draw-generation
+      # buffers that `crcbl-render` put on an upload heap and bound writable —
+      # which D3D12 refuses outright, since its upload heap pins a resource to a
+      # state no shader can write from. The first is fixed in `crcbl-dx12`; the
+      # second in `crcbl-render`, by giving the frame a clear dispatch so those
+      # three can be `DeviceLocal`.
       #
-      #   * every device-removed failure this backend reports now carries
-      #     `GetDeviceRemovedReason`'s answer, spelled out, and whatever the
-      #     debug layer stored — `crcbl_dx12::debug`;
-      #   * `CRCBL_DX12_VALIDATION=1` turns that layer on, so a validation error
-      #     is reported at the call that caused it rather than at the next one.
-      #     **Whether this runner has the layer at all is not assumed.** The
-      #     image README lists `Microsoft.VisualStudio.Component.Graphics` and
-      #     `…Graphics.Tools`, which are Visual Studio components; the layer
-      #     itself (`D3D12SDKLayers.dll`) comes from the Windows *Graphics
-      #     Tools* feature on demand, which that README does not list and which
-      #     is not offered on every Server SKU. So the step above prints
-      #     `debug layer=true|false` and this job answers the question instead
-      #     of anyone guessing at it. Either way the removal reason still
-      #     answers — it needs nothing installed;
-      #   * `crcbl-dx12`'s own suite now builds a ring at this path's shape, so
-      #     if the ring is the cause the step above goes red first, with the
-      #     failure inside the crate that owns it.
+      # What is still unproven is the clear pass itself: it is a new compute
+      # pipeline, root signature and descriptor table on this backend, and no
+      # D3D12 device has run it. A failure here now names its own cause —
+      # `GetDeviceRemovedReason` and the drained debug layer are wired into
+      # every device-removed report, and the harness confirms the layer loaded.
       #
-      #   * both calls that removed the device are fixed: a uniform buffer's
-      #     allocation is padded to D3D12's 256-byte constant-buffer block, and
-      #     every buffer view is now bounded and aligned before it is written —
-      #     `crcbl_dx12::buffer`, whose tests run on any host.
-      #
-      # **It is still expected to fail, one step further along, and this is what
-      # the next run should say.** `crcbl-render`'s GPU draw generation keeps
-      # three buffers a compute shader *writes* on `MemoryLocation::HostUpload`
-      # — `visible count`, `draw args` and `draw counts` in
-      # `crcbl_render::draw_gen` — and D3D12 has no unordered access view of an
-      # upload-heap resource at all: the flag is rejected at creation and the
-      # heap pins the resource to a state a shader cannot write from. So the
-      # frame should now fail at `DrawGen::new` with an `InvalidDescriptor`
-      # naming the binding and the heap, instead of removing the device. Getting
-      # past it is a decision rather than a fix — make those three
-      # `DeviceLocal` and give the graph a fill step, or place a host-visible
-      # storage buffer on a D3D12 *custom* heap and let it take barriers — and
-      # `docs/backlog.md` carries both.
-      #
-      # **Take the `continue-on-error` off with the fix, not before.**
-      # `docs/backlog.md` carries every measurement and what to try next.
       - name: Draw a frame through ForwardRenderer on WARP
         shell: bash
-        continue-on-error: true
         env:
           CRCBL_GPU: dx12
           CRCBL_ADAPTER: cpu

@@ -47,6 +47,13 @@ const PYRAMID_AT: Vec3 = Vec3::new(-1.05, 0.0, 0.0);
 /// not depend on the conservative bound being tight.
 const PYRAMID_AWAY: Vec3 = Vec3::new(60.0, 0.0, 0.0);
 
+/// What a counter is filled with before a frame that must overwrite it.
+///
+/// All four bytes equal, which is not decoration: the seam's fill takes a `u32`
+/// and Metal's `fillBuffer:range:value:` repeats a *byte*, so a word whose bytes
+/// differ has no encoding there. `crcbl-mtl`'s own probe uses the same value.
+const SENTINEL: u32 = 0xABAB_ABAB;
+
 /// Entries of one bucket's run to copy back. The scene has one instance per
 /// bucket and this is comfortably more, so a run that scattered too *many*
 /// entries shows up as a non-zero word past the count rather than as a copy that
@@ -146,18 +153,36 @@ impl Generated {
 
 /// Renders one frame through the real `ForwardRenderer` and the real graph, then
 /// copies every buffer the draw generation wrote back to the host.
-///
-/// The barriers around the copies are **this test's**, not the frame's: the
-/// graph left each buffer in the state its next frame declares, and the copies
-/// take them out of it and put them back. Nothing about the frame itself
-/// hand-writes a barrier — `crcbl_render::draw_gen` declares its accesses and
-/// the graph computes the transitions.
 fn generate(
     headless: &Headless,
     renderer: &mut ForwardRenderer,
     pool: &mut TransientPool,
     camera: &crcbl_render::Camera,
     model: Mat4,
+) -> Generated {
+    generate_with(headless, renderer, pool, camera, model, None)
+}
+
+/// The same frame, with the three counters the frame's clearing pass owns filled
+/// with `poison` first.
+///
+/// Recorded into the frame's **own** encoder, ahead of the graph, so the fill
+/// and the dispatch that has to undo it are one submission. The fill is a
+/// transfer and is therefore recorded outside any pass, which is the only place
+/// the seam allows one — and is exactly why the zeroing itself cannot be a fill.
+///
+/// The barriers around the fill, like those around the copies below, are **this
+/// test's**, not the frame's: the graph left each buffer in the state its next
+/// frame declares, and both take them out of it and put them back. Nothing about
+/// the frame itself hand-writes a barrier — `crcbl_render::draw_gen` declares
+/// its accesses and the graph computes the transitions.
+fn generate_with(
+    headless: &Headless,
+    renderer: &mut ForwardRenderer,
+    pool: &mut TransientPool,
+    camera: &crcbl_render::Camera,
+    model: Mat4,
+    poison: Option<u32>,
 ) -> Generated {
     let device = headless.device.as_ref();
     let acquired = device
@@ -204,6 +229,44 @@ fn generate(
         label: Some("draw gen frame"),
         queue: headless.queue,
     });
+    if let Some(value) = poison {
+        // The three the frame's clearing pass owns, each with the state this
+        // slot's imports declare it arrives in and the bytes it holds.
+        let counters = [
+            (visible_count, ResourceState::ShaderRead, 4u64),
+            (args, ResourceState::IndirectArgument, args_bytes),
+            (counts, ResourceState::IndirectArgument, counts_bytes),
+        ];
+        let around = |into_transfer: bool| -> Vec<crcbl_hal::BufferBarrier> {
+            counters
+                .iter()
+                .map(|(buffer, state, _)| {
+                    let (from, to) = if into_transfer {
+                        (*state, ResourceState::TransferDst)
+                    } else {
+                        (ResourceState::TransferDst, *state)
+                    };
+                    crcbl_hal::BufferBarrier {
+                        buffer: *buffer,
+                        from,
+                        to,
+                        queue_transfer: None,
+                    }
+                })
+                .collect()
+        };
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &around(true),
+            ..Barriers::default()
+        });
+        for (buffer, _, size) in counters {
+            encoder.fill_buffer(buffer, 0, size, value);
+        }
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &around(false),
+            ..Barriers::default()
+        });
+    }
     let compiled = {
         let mut graph = RenderGraph::new(headless.queue);
         let target = graph.import_image(
@@ -475,6 +538,61 @@ fn a_culled_bucket_generates_no_draw_and_says_so_in_the_count() {
         "the mesh range is written whether or not anything draws it"
     );
     assert_eq!(generated.args[1].first_index, meshes[1].base_index);
+
+    teardown(headless, renderer, pool);
+}
+
+/// **A counter poisoned right up to the frame reaches both shaders at zero.**
+///
+/// This is what says the clearing pass *runs*, and it is the only shape that
+/// can. Every one of these three buffers is written by a shader and by nothing
+/// else, so a counter nothing poisoned reads as the zero its allocation came
+/// with and an assertion against that passes whether or not anything zeroed it.
+/// The engine's own unit suite used to make this check against a host write and
+/// cannot any more: the counters are device-local now, and the backend that
+/// suite runs on executes no shader.
+///
+/// [`SENTINEL`] is what the frame has to have overwritten. Every assertion below
+/// is a number a single frame produces, and none of them survives the poison
+/// leaking through: the survivor count would be `SENTINEL + 2`, each bucket's
+/// instance count `SENTINEL + 1`, and a draw count would stay at `SENTINEL`
+/// outright, because `draw_gen.slang` stores its `1` only for the invocation
+/// that took slot zero and no invocation would.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_poisoned_counter_reaches_the_frame_at_zero() {
+    let (headless, mut renderer, mut pool) = setup();
+    renderer.set_pyramid(Some(Mat4::from_translation(PYRAMID_AT)));
+
+    let camera = mesh_camera(Projection::default());
+    let model = ForwardRenderer::spin(0.35);
+    let generated = generate_with(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &camera,
+        model,
+        Some(SENTINEL),
+    );
+
+    assert_eq!(
+        generated.visible_count, 2,
+        "both instances survive, and the count is this frame's alone rather than \
+         {SENTINEL:#010x} counted up from"
+    );
+    for (bucket, args) in generated.args.iter().enumerate() {
+        assert_eq!(
+            args.instance_count, 1,
+            "bucket {bucket} draws its one instance: {:?}",
+            generated.args
+        );
+    }
+    assert_eq!(
+        generated.counts,
+        vec![1, 1],
+        "and each bucket's draw count is the `1` the pass stored, not the poison it \
+         was left holding"
+    );
 
     teardown(headless, renderer, pool);
 }

@@ -167,6 +167,10 @@ pub mod compute_probe;
 /// that shader declares.
 pub mod cull;
 
+/// The workgroup size and uniform block `clear_counters.slang` declares, in the
+/// layouts that shader declares.
+pub mod clear_counters;
+
 /// The workgroup size, uniform block and indirect-argument layout
 /// `draw_gen.slang` declares, in the layouts that shader declares.
 pub mod draw_gen;

@@ -8,6 +8,19 @@ target = spirv_1_5
 dxc-version = 1.9(1-0d3ee6b5)(1.9.0.1)
 dxil-model = 6_6
 
+[clear_counters]
+source = shaders/clear_counters.slang
+source-sha256 = 38fc1e80039a2acae26518e44176d196c0d906c868e690baebbac5409ad1e8c9
+targets = spirv, wgsl, msl, dxil
+spirv = spirv/clear_counters.spv
+spirv-sha256 = 8978d70a7786b429d60a6516836749fa77c157efbe28049d4574f4543f766548
+wgsl = wgsl/clear_counters.wgsl
+wgsl-sha256 = 7a449965478272a415a21c4d6498b8b7a7a354e0691f98db92a4ab68bf607df1
+msl = msl/clear_counters.metal
+msl-sha256 = 9723931df70d2bd34758ee4647e211612ad8c8d89273dcdcb8635dace7985e67
+dxil = computeMain:dxil/clear_counters.computeMain.dxil:98334c2411a11006cb0502426499fae7274243e4db746eab1c5e87c27763ce15
+entry-points = computeMain:glcompute
+
 [compute_probe]
 source = shaders/compute_probe.slang
 source-sha256 = b9eedd18f794d71a402f8fac0653b1f6b08b2c643b1523f9a214e977629eb2c8

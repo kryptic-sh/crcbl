@@ -1813,6 +1813,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The three GPU draw-generation counters are device-local, zeroed by a
+  dispatch inside the frame.** `crcbl_render::draw_gen` put its survivor count,
+  indirect arguments and draw counts on `MemoryLocation::HostUpload` and bound
+  them writable, so that `DrawGen::begin_frame` could zero them from the CPU —
+  the seam allows a buffer fill only outside a pass, and a render-graph frame is
+  passes end to end. D3D12 has no unordered access view of an upload-heap
+  resource at all, so that arrangement is what removed its device. A new
+  `clear_counters.slang` pass, scheduled by `DrawGen::add_passes` ahead of the
+  cull dispatch and barriered into it by the graph, writes the zeroes instead;
+  all five of the stage's buffers are now `MemoryLocation::DeviceLocal`, and the
+  three the pass owns also carry `BufferUsage::TRANSFER_DST` so a test can
+  poison them. `DrawGen::begin_frame` still writes the cull parameters and no
+  longer touches the counters. A frame now records three compute dispatches
+  ahead of the draws rather than two, and the per-pass GPU timer report names
+  `clear-counters` first. Nothing rendered changes.
+
 - **A uniform buffer smaller than 256 bytes removed the D3D12 device.** A
   constant buffer view's `SizeInBytes` must be a multiple of 256 and a view may
   not run past the end of its resource, so `crcbl-dx12` rounding the view up

@@ -144,8 +144,8 @@ fn per_pass_gpu_timers_report_real_numbers() {
             .iter()
             .map(|pass| pass.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["cull", "draw-args", "forward", "tonemap"],
-        "the report must name the passes the graph ran, in order — the two \
+        vec!["clear-counters", "cull", "draw-args", "forward", "tonemap"],
+        "the report must name the passes the graph ran, in order — the three \
          compute dispatches that generate the draws included, which is what the \
          per-pass HUD is for"
     );
