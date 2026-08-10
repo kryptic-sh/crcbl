@@ -42,6 +42,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`CRCBL_DX12_VALIDATION` turns the D3D12 debug layer on or off**, and it is
+  on by default in a debug build and off in a release one — the shape
+  `CRCBL_VK_VALIDATION` already has on Vulkan. It needs Windows' _Graphics
+  Tools_ optional feature; without it `crcbl-dx12` warns and carries on, because
+  a missing optional component must not stop the engine running. Because the
+  layer writes to a debugger and CI has none attached, its messages are also
+  pulled out of the `ID3D12InfoQueue` and put into the error a caller actually
+  sees.
+
+- **Every device-removed failure `crcbl-dx12` reports now names its reason.**
+  `DXGI_ERROR_DEVICE_REMOVED` is reported at the _next_ call rather than the one
+  that caused it, so the code alone is a symptom; `GetDeviceRemovedReason`'s
+  answer — spelled out, not left as an `HRESULT` — and whatever the debug layer
+  stored are appended to the message by `HalError::DeviceLost` and
+  `HalError::Backend` alike, on resource creation, swapchain creation, resize,
+  present, `GetBuffer` and every fence wait.
+
 - **`CRCBL_ADAPTER` picks which adapter a screenshot opens a device on**, for
   every backend. It names a device _class_ — `cpu`, `integrated`, `discrete` or
   `virtual` — rather than an index, because an index is a position in one

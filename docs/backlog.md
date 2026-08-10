@@ -3737,43 +3737,56 @@ Three results in one run:
 frame still dies in `OffscreenSetup::open` — see the offscreen-ring entry. So
 the renderer runs on three backends of four.
 
-### D3D12's frame fails in the offscreen ring, not on adapter choice
+### D3D12's frame: what is eliminated, and the correction
 
-**Measured twice.** On `dc846ff` and again on `0354eec` with `CRCBL_ADAPTER=cpu`
-pinning the software adapter, the D3D12 HAL suite passed **155/155 on WARP** and
-the frame then failed inside `OffscreenSetup::open`, before drawing anything:
+**Correction first, because this entry twice said something false.** It claimed
+the offscreen ring "was written blind and has never executed anywhere". It has:
+`swapchain::tests::an_offscreen_ring_draws_reads_back_and_comes_round_again`
+landed in the same commit as the ring and **passes on WARP as test 155/155** —
+verified in the CI log for `18862f5`, not inferred. The ring creates, acquires,
+clears, copies out, presents, wraps past its depth and reconfigures, all green.
+
+What the frame actually does, measured twice (`dc846ff`, and `0354eec` with
+`CRCBL_ADAPTER=cpu` pinning WARP, which changed nothing):
 
 ```
 a GPU backend opens: HAL: CreateCommittedResource (buffer) failed:
 The GPU device instance has been suspended. … (0x887A0005)
 ```
 
-**Adapter choice was the first theory and the pin did not change the outcome**,
-so it is not the cause — though the pin is worth having on its own terms and
-found a real gap (`screenshot` picked `adapters().first()` and never said
-which).
+**Eliminated by measurement:**
 
-What that leaves: **the offscreen ring**, which is the one part of `crcbl-dx12`
-the HAL suite never touches. It was written blind, has never executed anywhere,
-and creates its ring images through `create_image` with
-`COLOR_ATTACHMENT | TRANSFER_SRC | TRANSFER_DST | SAMPLED` and `DeviceLocal`. A
-device that serves 155 tests and is then removed on a buffer creation is a
-device that something before it already broke — `DXGI_ERROR_DEVICE_REMOVED` is
-reported at the next call, not at the offending one.
+- Adapter choice — pinning the software adapter did not change the outcome.
+- The ring at 64x4 / `Rgba8Unorm` — passes on WARP.
+- **The `TransferSrc`-never-barriered-back lead in
+  `crcbl::screenshot::draw_and_readback`.** It cannot be this failure: nothing
+  is recorded or submitted before `open` fails. It is still a real defect —
+  D3D12 validates a transition's declared before-state where Vulkan does not —
+  and worth fixing, but it is a different bug.
 
-Next steps, cheapest first:
+**What is left**, and it is narrow: the ring at the shape `OffscreenSetup`
+builds — `caps.preferred_format()` is `Rgba8UnormSrgb` where the passing test
+pins `Rgba8Unorm`, at 256x192 rather than 64x4 — or `create_device`'s
+`GPU_DRIVEN | DEBUG_MARKERS` and `compatible_surface: Some(..)`, which the HAL
+suite's own `open_device` never passes.
 
-- **Call `GetDeviceRemovedReason`** and report it. The seam already surfaces the
-  0x887A0005 code; the reason behind it is what names the offending call, and
-  the error message even says to ask.
-- **Enable the D3D12 debug layer** in the harness, which reports the real
-  validation error at the call that caused it rather than at the next one.
-- Add a HAL-level test that creates an offscreen ring and presents through it,
-  so the failure is inside `crcbl-dx12`'s own suite where it can be bisected,
-  rather than at the far end of an engine frame.
+**The next run should name it rather than narrow it again.** Every
+device-removed failure this backend reports now carries
+`GetDeviceRemovedReason`'s answer spelled out plus whatever the debug layer
+stored, and `CRCBL_DX12_VALIDATION` turns that layer on so a validation error is
+reported at the offending call rather than at the next one. A new HAL test
+builds the ring at the screenshot's exact shape, so if that is the cause it goes
+red inside the crate that owns it.
 
-The CI step is held out until then, because a step that always fails gates
-nothing.
+**Owed:** the frame step is `continue-on-error: true`. That is acceptable only
+because the ring hypothesis is covered by an ungated test in the job's first
+step — the flagged step adds evidence, not coverage. **It must lose the flag
+with the fix**, or it silently stops meaning anything.
+
+**Also owed:** `crates/crcbl/tests/render_e2e.rs` installs no logger, so every
+`log::info!` this backend emits — the adapter report, ring creation, debug-layer
+state — is invisible in exactly the run that needs them. That is why two
+sessions had nothing to read.
 
 ### What WARP has actually proven
 

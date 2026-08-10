@@ -119,6 +119,22 @@
 //! things a plain `cargo nextest run -p crcbl-dx12` cannot tell you. `crcbl-vk`
 //! pins lavapipe through `CRCBL_VK_ICD` for the same reason.
 //!
+//! # A removed device names its reason, and the debug layer names the call
+//!
+//! `DXGI_ERROR_DEVICE_REMOVED` arrives at the **next** call rather than at the
+//! one that caused it, so the code on its own says only that something earlier
+//! went wrong. Every failure this backend reports out of a live device now
+//! carries `GetDeviceRemovedReason`'s answer where there is one — the call
+//! D3D12's own error text tells you to make — plus whatever the debug layer has
+//! stored for that device. `crcbl_dx12::debug` is where both come from.
+//!
+//! The layer itself is off in a release build, on in a debug one, and
+//! `CRCBL_DX12_VALIDATION` overrides both directions — the shape
+//! `CRCBL_VK_VALIDATION` already has in `crcbl-vk`. It needs Windows' **Graphics
+//! Tools** optional feature; without it, `enable_debug_layer` warns and the
+//! removal reason still answers, because that one is a vtable call on a device
+//! this crate already holds and needs nothing installed.
+//!
 //! # Every adapter now derives `IndirectCount`, and that is *this backend* speaking
 //!
 //! [`GeometryPath`](crcbl_hal::GeometryPath) is derived from
@@ -234,6 +250,13 @@ mod binding;
 mod command;
 #[cfg(target_os = "windows")]
 mod conv;
+// The debug layer, the info queue behind it, and `GetDeviceRemovedReason`.
+// Not Windows-only for the reason `present` below is not: the policy deciding
+// whether the layer is on holds no `windows` type, so off Windows it exists in
+// the test build alone and `cargo test` on any host checks the one part of this
+// module a reader can get wrong without a device.
+#[cfg(any(target_os = "windows", test))]
+mod debug;
 #[cfg(target_os = "windows")]
 mod descriptor;
 #[cfg(target_os = "windows")]

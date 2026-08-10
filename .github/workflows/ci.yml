@@ -553,35 +553,24 @@ jobs:
   # the two jobs would still be testing the software path. `vk-e2e` pins
   # lavapipe for exactly this reason.
   #
-  # # What it is NOT evidence of, in the order a render e2e needs them
+  # It also covers the **offscreen ring** twice over: once at a shape chosen so
+  # the texels can be asserted exactly, and once at the shape
+  # `crcbl::screenshot::OffscreenSetup` actually builds — the preferred (sRGB)
+  # format, the engine's frame extent, and the barrier sequence
+  # `draw_and_readback` records, which leaves the image in `TransferSrc` and
+  # declares `Undefined` on the next trip round. The second of those is new and
+  # is a **reproduction attempt**: see the frame step below for what it is
+  # reproducing. It may be the first thing in this job to go red, and that is
+  # the finding rather than a regression in it.
   #
-  # **This backend does not draw a `crcbl` frame, and a green tick here must not
-  # be read as saying it does.** `crates/crcbl/tests/render_e2e.rs` — the
-  # forward renderer's frame, compared against a golden — cannot name this
-  # backend at all, and these are what stand in the way:
+  # # What it is NOT evidence of
   #
-  #   1. **`crcbl::backend` has no `Dx12` variant.** `GpuBackend` registers
-  #      Metal, Vulkan, wgpu and Null; there is no `CRCBL_GPU=dx12` to pass, so
-  #      the umbrella cannot select this backend even to fail.
-  #   2. **`Features::COMPUTE` and `Features::TIMELINE_SEMAPHORE` are not
-  #      reported**, because `create_compute_pipeline`, `dispatch`,
-  #      `create_semaphore` and `wait_semaphores` all refuse. That makes
-  #      `DeviceDesc::for_adapter` — what a generic caller opens a device with —
-  #      an `UnsupportedFeatures` refusal before any frame is attempted.
-  #   3. **Offscreen surfaces are refused**, and offscreen is what a headless
-  #      render suite renders into. Only an `HWND` swapchain works today.
-  #   4. **Indexed draws and index buffers are refused**, so nothing with a real
-  #      mesh can be recorded; the triangle above is vertex-pulled.
-  #   5. **Indirect and indirect-count draws are refused**, so every adapter
-  #      derives `GeometryPath::IndirectPerBatch` — the floor — whatever it can
-  #      actually do.
-  #   6. **Buffer fills and image-to-image copies are refused**, so a graph pass
-  #      cannot clear or blit a transient.
-  #   7. **Query sets, MSAA resolve attachments and mesh pipelines are refused**,
-  #      which is no GPU timing, no multisampled target and no mesh path.
+  # **The picture.** Every test above asserts a clear, a copy or a refusal;
+  # nothing here compares a rendered frame against a golden. That is the frame
+  # step at the end of this job, and it is not a gate yet.
   #
-  # An `ImageViewDesc` whose format differs from its image's is refused too, and
-  # that one is a decision rather than a gap — `crcbl_dx12::device` argues it.
+  # An `ImageViewDesc` whose format differs from its image's is refused, and
+  # that is a decision rather than a gap — `crcbl_dx12::device` argues it.
   #
   # There is nothing to install: `windows-latest` boots into a session with a
   # window station and a desktop, which is what the swapchain tests need, and
@@ -611,10 +600,16 @@ jobs:
       # zero tests, when it was cancelled part-way, when it never named the
       # adapter it opened, or when the adapter it named is not the software
       # rasteriser that was pinned.
+      #
+      # It also exports `CRCBL_DX12_VALIDATION=1` and checks, off the suite's own
+      # output again, that the suite said whether the debug layer was on. See
+      # that script's header for why the layer matters more here than a
+      # validation layer usually does.
       - name: Drive a D3D12 device pinned to WARP
         shell: bash
         run: crates/crcbl-dx12/tests/run-dx12-e2e.sh
-      # # A frame through ForwardRenderer, on D3D12 — held, twice measured
+
+      # # A frame through ForwardRenderer, on D3D12 — a measurement, not a gate
       #
       # Ran on `dc846ff` and again on `0354eec` with `CRCBL_ADAPTER=cpu`. Both
       # times the HAL suite above passed **155/155 on WARP** and then the frame
@@ -623,15 +618,47 @@ jobs:
       #   a GPU backend opens: HAL: CreateCommittedResource (buffer) failed:
       #   The GPU device instance has been suspended. … (0x887A0005)
       #
-      # The second run is the informative one. Adapter choice was the first
-      # theory and the pin did not change the outcome, so **the suspect is now
-      # the offscreen ring** — the one part of `crcbl-dx12` that the HAL suite
-      # never touches, added blind, and never executed anywhere. A device that
-      # serves 155 tests and is then removed on a buffer creation is a device
-      # something before it already broke.
+      # The second run is the informative one: adapter choice was the first
+      # theory and the pin did not change the outcome. That buffer is
+      # `ForwardRenderer`'s first, and `DXGI_ERROR_DEVICE_REMOVED` is reported at
+      # the **next** call rather than the offending one — so what it says is that
+      # something before it broke the device, and the code alone names neither
+      # the call nor the mistake.
       #
-      # Held out rather than left red. `docs/backlog.md` carries both
-      # measurements and what to try next.
+      # **This step is restored to make the next run say what.** It is
+      # `continue-on-error` rather than a gate, because it is expected to fail
+      # again and a step that always fails gates nothing — but held out entirely
+      # it produces no evidence at all, which is what the two previous
+      # measurements cost. What changed since them:
+      #
+      #   * every device-removed failure this backend reports now carries
+      #     `GetDeviceRemovedReason`'s answer, spelled out, and whatever the
+      #     debug layer stored — `crcbl_dx12::debug`;
+      #   * `CRCBL_DX12_VALIDATION=1` turns that layer on, so a validation error
+      #     is reported at the call that caused it rather than at the next one.
+      #     **Whether this runner has the layer at all is not assumed.** The
+      #     image README lists `Microsoft.VisualStudio.Component.Graphics` and
+      #     `…Graphics.Tools`, which are Visual Studio components; the layer
+      #     itself (`D3D12SDKLayers.dll`) comes from the Windows *Graphics
+      #     Tools* feature on demand, which that README does not list and which
+      #     is not offered on every Server SKU. So the step above prints
+      #     `debug layer=true|false` and this job answers the question instead
+      #     of anyone guessing at it. Either way the removal reason still
+      #     answers — it needs nothing installed;
+      #   * `crcbl-dx12`'s own suite now builds a ring at this path's shape, so
+      #     if the ring is the cause the step above goes red first, with the
+      #     failure inside the crate that owns it.
+      #
+      # **Take the `continue-on-error` off with the fix, not before.**
+      # `docs/backlog.md` carries both measurements and what to try next.
+      - name: Draw a frame through ForwardRenderer on WARP
+        shell: bash
+        continue-on-error: true
+        env:
+          CRCBL_GPU: dx12
+          CRCBL_ADAPTER: cpu
+          CRCBL_DX12_VALIDATION: '1'
+        run: crates/crcbl/tests/run-render-e2e.sh
 
   # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
   # project, the project *compiles*, it lints clean, and it runs its loop

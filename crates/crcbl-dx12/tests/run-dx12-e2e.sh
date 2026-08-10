@@ -40,6 +40,24 @@
 #                        nextest directly to use whatever DXGI listed first.
 #                        A pin that matches no adapter is a hard failure and
 #                        never a fallback — see that module.
+#   CRCBL_DX12_VALIDATION
+#                        Whether the D3D12 debug layer is on. Defaulted to `1`
+#                        here rather than left to the build profile, so the
+#                        suite states what it ran with instead of inheriting it
+#                        — a test binary built `--release` would otherwise turn
+#                        validation off and still look identical from outside.
+#                        `crcbl-vk`'s harness sets `CRCBL_VK_VALIDATION` for the
+#                        same reason.
+#
+# # Why the debug layer matters more here than a validation layer usually does
+#
+# `DXGI_ERROR_DEVICE_REMOVED` is reported at the **next** call, not the offending
+# one, so without the layer a failure names a symptom and the call that caused it
+# is somewhere earlier with nothing pointing at it. The layer reports at the
+# call. It needs Windows' **Graphics Tools** optional feature; without it
+# `crcbl_dx12::debug` warns, prints `debug layer=false` on the line this script
+# checks, and the run still happens — a missing optional component is not a
+# reason to refuse to test.
 #
 # # Why bash, when `run-win32-e2e.ps1` argued for PowerShell
 #
@@ -71,6 +89,10 @@ cd "$REPO_ROOT"
 # script *is* running what CI runs.
 export CRCBL_DX12_ADAPTER="${CRCBL_DX12_ADAPTER:-warp}"
 echo "crcbl dx12 e2e: CRCBL_DX12_ADAPTER=${CRCBL_DX12_ADAPTER}"
+
+# The debug layer, exported for the same reason and read by the same process.
+export CRCBL_DX12_VALIDATION="${CRCBL_DX12_VALIDATION:-1}"
+echo "crcbl dx12 e2e: CRCBL_DX12_VALIDATION=${CRCBL_DX12_VALIDATION}"
 
 LOG="$(mktemp -t crcbl-dx12-e2e.XXXXXX.log)"
 cleanup() {
@@ -162,6 +184,30 @@ case "$ADAPTER" in
         echo "                process or crcbl_dx12::pin stopped honouring it; both make" >&2
         echo "                every result above evidence about a device nobody chose." >&2
         exit 1
+        ;;
+esac
+
+# Whether validation was on, off the suite's own output — the same rule the
+# adapter check above follows, and for the same reason: a variable that never
+# reached the test process and a layer Windows does not have both look like a
+# green run from outside. This is a *report*, not a gate: a machine without the
+# Graphics Tools feature must still be able to run the suite, so the line being
+# absent is the failure and `debug layer=false` is merely news.
+VALIDATION="$(grep -F 'crcbl-dx12 e2e: debug layer=' "${LOG}.plain" | head -1 || true)"
+if [ -z "$VALIDATION" ]; then
+    echo "crcbl dx12 e2e: the suite never said whether validation was on." >&2
+    echo "                crcbl_dx12::debug's" >&2
+    echo "                a_fresh_device_says_whether_it_is_validated_and_is_not_already_removed" >&2
+    echo "                must print it and this script must be able to find it, or a green" >&2
+    echo "                run claims evidence it does not have." >&2
+    exit 1
+fi
+echo "crcbl dx12 e2e: ${VALIDATION#*crcbl-dx12 e2e: }"
+case "$VALIDATION" in
+    *"debug layer=false"*)
+        echo "crcbl dx12 e2e: the D3D12 debug layer is NOT on for this run. A validation" >&2
+        echo "                error will be reported one call late, if at all. Install the" >&2
+        echo "                Graphics Tools optional feature to fix that." >&2
         ;;
 esac
 

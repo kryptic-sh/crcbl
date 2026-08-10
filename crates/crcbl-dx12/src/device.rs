@@ -107,6 +107,7 @@ use windows::core::{Interface, PCWSTR};
 
 use crate::binding::{self, BindGroupLayoutRecord, BindGroupRecord, VisibleHeaps};
 use crate::command::Dx12CommandEncoder;
+use crate::debug;
 use crate::descriptor::{Descriptors, Kind, Slot};
 use crate::draw::IndirectKind;
 use crate::dxil::ShaderModuleEntry;
@@ -578,7 +579,7 @@ impl DeviceInner {
             self.raw
                 .CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)
         }
-        .map_err(|error| creation_error("CreateCommandAllocator", &error))?;
+        .map_err(|error| creation_error(&self.raw, "CreateCommandAllocator", &error))?;
         // SAFETY: `allocator` is the allocator just created, of the same type as
         // the list being asked for, and no list has been created from it yet —
         // D3D12 permits one recording list per allocator at a time. The initial
@@ -588,7 +589,7 @@ impl DeviceInner {
             self.raw
                 .CreateCommandList(FIRST_NODE, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)
         }
-        .map_err(|error| creation_error("CreateCommandList", &error))?;
+        .map_err(|error| creation_error(&self.raw, "CreateCommandList", &error))?;
         if let Some(label) = label {
             label_object(&list, label);
         }
@@ -915,7 +916,10 @@ impl DeviceInner {
         // created together in `open`. `Signal` takes the fence by reference and
         // a scalar.
         unsafe { self.queue.Signal(&self.fence, value) }.map_err(|error| {
-            HalError::DeviceLost(format!("ID3D12CommandQueue::Signal failed: {error}"))
+            HalError::DeviceLost(format!(
+                "ID3D12CommandQueue::Signal failed: {error}{}",
+                debug::diagnosis(&self.raw)
+            ))
         })?;
         Ok(value)
     }
@@ -963,7 +967,10 @@ impl DeviceInner {
             log::debug!("crcbl-dx12: could not close a fence wait event: {error}");
         }
         armed.map_err(|error| {
-            HalError::DeviceLost(format!("SetEventOnCompletion failed: {error}"))
+            HalError::DeviceLost(format!(
+                "SetEventOnCompletion failed: {error}{}",
+                debug::diagnosis(&self.raw)
+            ))
         })?;
         if waited != Some(WAIT_OBJECT_0) {
             return Err(HalError::DeviceLost(format!(
@@ -972,8 +979,13 @@ impl DeviceInner {
         }
         let completed = self.completed();
         if completed < value {
+            // The shape a device removed mid-submission takes: the wait is
+            // satisfied because the runtime abandoned the fence, not because
+            // the work finished. `diagnosis` is what separates that from a
+            // fence this crate mis-signalled.
             return Err(HalError::DeviceLost(format!(
-                "the wait returned with the fence at {completed}, short of {value}"
+                "the wait returned with the fence at {completed}, short of {value}{}",
+                debug::diagnosis(&self.raw)
             )));
         }
         Ok(())
@@ -1076,11 +1088,21 @@ fn heap_properties(memory: MemoryLocation) -> D3D12_HEAP_PROPERTIES {
 /// bugs — an illegal flag for a heap type, a dimension past the device's
 /// ceiling — and reporting them as an allocation failure would send a reader
 /// looking for memory pressure that is not there.
-fn creation_error(what: &str, error: &windows::core::Error) -> HalError {
+///
+/// **The device is taken so the message can carry a diagnosis.** A creation
+/// call is where a device that was broken *earlier* first reports itself, and
+/// `DXGI_ERROR_DEVICE_REMOVED` alone names neither the offending call nor the
+/// mistake — [`crate::debug`]'s `diagnosis` is what adds
+/// `GetDeviceRemovedReason`'s answer and the debug layer's messages, and the
+/// empty string when there is nothing wrong with the device at all.
+fn creation_error(device: &ID3D12Device, what: &str, error: &windows::core::Error) -> HalError {
     if error.code() == E_OUTOFMEMORY {
         HalError::OutOfDeviceMemory
     } else {
-        HalError::Backend(format!("{what} failed: {error}"))
+        HalError::Backend(format!(
+            "{what} failed: {error}{}",
+            debug::diagnosis(device)
+        ))
     }
 }
 
@@ -1127,6 +1149,10 @@ impl Dx12Device {
                 record.info.name
             ))
         })?;
+        // Says whether this device's validation messages can be read back at
+        // all, and drops whatever the info queue already held so a later
+        // failure reports its own messages rather than the process's.
+        debug::attach(&raw);
 
         let queue_desc = D3D12_COMMAND_QUEUE_DESC {
             Type: D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -1336,7 +1362,11 @@ impl Dx12Device {
                 // D3D12 swapchain's buffers are.
                 let raw: ID3D12Resource =
                     unsafe { created.raw.GetBuffer(index) }.map_err(|error| {
-                        swapchain::surface_error("IDXGISwapChain::GetBuffer", &error)
+                        swapchain::surface_error(
+                            &self.inner.raw,
+                            "IDXGISwapChain::GetBuffer",
+                            &error,
+                        )
                     })?;
                 if let Some(label) = desc.label {
                     label_object(&raw, label);
@@ -1588,7 +1618,9 @@ impl Device for Dx12Device {
                 &mut resource,
             )
         }
-        .map_err(|error| creation_error("CreateCommittedResource (buffer)", &error))?;
+        .map_err(|error| {
+            creation_error(&self.inner.raw, "CreateCommittedResource (buffer)", &error)
+        })?;
         let raw = resource.ok_or_else(|| {
             HalError::Backend(
                 "CreateCommittedResource reported success and wrote no buffer".to_string(),
@@ -1909,7 +1941,9 @@ impl Device for Dx12Device {
                 &mut resource,
             )
         }
-        .map_err(|error| creation_error("CreateCommittedResource (image)", &error))?;
+        .map_err(|error| {
+            creation_error(&self.inner.raw, "CreateCommittedResource (image)", &error)
+        })?;
         let raw = resource.ok_or_else(|| {
             HalError::Backend(
                 "CreateCommittedResource reported success and wrote no image".to_string(),
@@ -2771,6 +2805,7 @@ impl Device for Dx12Device {
         };
         let created = swapchain::create(
             &self.inner.instance.factory,
+            &self.inner.raw,
             &self.inner.queue,
             hwnd,
             desc,
@@ -2914,7 +2949,7 @@ impl Device for Dx12Device {
                 let state = self.state();
                 let entry =
                     handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
-                swapchain::resize(entry, extent, buffers)?;
+                swapchain::resize(&self.inner.raw, entry, extent, buffers)?;
             }
 
             // Re-fetched after the lock was released, because `create_image_view`
@@ -3098,7 +3133,7 @@ impl Device for Dx12Device {
             };
             (raw, entry.present_mode)
         };
-        swapchain::present(&raw, mode)?;
+        swapchain::present(&self.inner.raw, &raw, mode)?;
 
         let Some(id) = present.present_id else {
             return Ok(());

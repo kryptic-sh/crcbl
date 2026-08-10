@@ -72,7 +72,7 @@ use crcbl_hal::{
 };
 use windows::Win32::Foundation::{HANDLE, HWND, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::Graphics::Direct3D12::{
-    D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, ID3D12CommandQueue,
+    D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION, ID3D12CommandQueue, ID3D12Device,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_ALPHA_MODE_IGNORE, DXGI_SAMPLE_DESC};
 use windows::Win32::Graphics::Dxgi::{
@@ -85,6 +85,7 @@ use windows::Win32::System::Threading::WaitForSingleObjectEx;
 use windows::core::{BOOL, Interface};
 
 use crate::conv;
+use crate::debug;
 use crate::handle::Owned;
 use crate::present::{self, PresentLedger};
 
@@ -333,6 +334,7 @@ pub(crate) fn check_offscreen(desc: &SwapchainDesc<'_>) -> Result<((u32, u32), u
 /// [`surface_error`].
 pub(crate) fn create(
     factory: &IDXGIFactory4,
+    device: &ID3D12Device,
     queue: &ID3D12CommandQueue,
     hwnd: HWND,
     desc: &SwapchainDesc<'_>,
@@ -372,17 +374,17 @@ pub(crate) fn create(
     // descriptor means windowed, and `None` for the output restriction means
     // "any" — both are documented as optional.
     let chain = unsafe { factory.CreateSwapChainForHwnd(queue, hwnd, &desc1, None, None) }
-        .map_err(|error| surface_error("CreateSwapChainForHwnd", &error))?;
+        .map_err(|error| surface_error(device, "CreateSwapChainForHwnd", &error))?;
     let raw: IDXGISwapChain3 = chain
         .cast()
-        .map_err(|error| surface_error("QueryInterface for IDXGISwapChain3", &error))?;
+        .map_err(|error| surface_error(device, "QueryInterface for IDXGISwapChain3", &error))?;
 
     let latency = present::frame_latency(buffers);
     // SAFETY: `raw` is the swapchain just created, and it carries
     // `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` — which is what
     // makes both of these calls legal on it. The call takes one scalar.
     unsafe { raw.SetMaximumFrameLatency(latency) }
-        .map_err(|error| surface_error("SetMaximumFrameLatency", &error))?;
+        .map_err(|error| surface_error(device, "SetMaximumFrameLatency", &error))?;
     // SAFETY: as above. The call reads nothing of ours and returns a handle by
     // value; see `SwapchainEntry::waitable` for why it is kept as an integer
     // and not closed.
@@ -425,6 +427,7 @@ pub(crate) fn create(
 ///
 /// As [`surface_error`].
 pub(crate) fn resize(
+    device: &ID3D12Device,
     entry: &SwapchainEntry,
     extent: (u32, u32),
     buffers: u32,
@@ -448,7 +451,7 @@ pub(crate) fn resize(
             entry.flags,
         )
     }
-    .map_err(|error| surface_error("ResizeBuffers", &error))
+    .map_err(|error| surface_error(device, "ResizeBuffers", &error))
 }
 
 /// Presents a swapchain's current back buffer.
@@ -465,7 +468,11 @@ pub(crate) fn resize(
 /// is a **success** code and is treated as one: the frame was accepted, the
 /// compositor simply will not show it, and turning that into an error would
 /// fail every frame of a minimized window.
-pub(crate) fn present(raw: &IDXGISwapChain3, mode: PresentMode) -> Result<(), SurfaceError> {
+pub(crate) fn present(
+    device: &ID3D12Device,
+    raw: &IDXGISwapChain3,
+    mode: PresentMode,
+) -> Result<(), SurfaceError> {
     let pacing = present::pacing(mode);
     let flags = if pacing.allow_tearing {
         DXGI_PRESENT_ALLOW_TEARING
@@ -479,7 +486,7 @@ pub(crate) fn present(raw: &IDXGISwapChain3, mode: PresentMode) -> Result<(), Su
     let result = unsafe { raw.Present(pacing.sync_interval, flags) };
     result
         .ok()
-        .map_err(|error| surface_error("IDXGISwapChain::Present", &error))
+        .map_err(|error| surface_error(device, "IDXGISwapChain::Present", &error))
 }
 
 /// Blocks on a frame-latency waitable object.
@@ -529,12 +536,29 @@ pub(crate) fn wait(waitable: usize, timeout: Duration) -> Result<(), SurfaceErro
 /// DXGI never reports it (see the module docs), so a code translated into it
 /// would put a caller into an unending reconfigure loop over a condition
 /// reconfiguring cannot fix.
-pub(crate) fn surface_error(what: &str, error: &windows::core::Error) -> SurfaceError {
+///
+/// **The device is taken so both arms can carry a diagnosis**, exactly as
+/// `crate::device`'s `creation_error` does: `DXGI_ERROR_DEVICE_REMOVED` is
+/// reported at the next call rather than the offending one, so the code by
+/// itself is a symptom. [`crate::debug`]'s `diagnosis` adds
+/// `GetDeviceRemovedReason`'s answer and whatever the debug layer stored, and
+/// is the empty string when the device is healthy — which is the ordinary case
+/// for the `Backend` arm here.
+pub(crate) fn surface_error(
+    device: &ID3D12Device,
+    what: &str,
+    error: &windows::core::Error,
+) -> SurfaceError {
     let code = error.code();
+    let diagnosis = debug::diagnosis(device);
     if code == DXGI_ERROR_DEVICE_REMOVED || code == DXGI_ERROR_DEVICE_RESET {
-        return SurfaceError::Hal(HalError::DeviceLost(format!("{what} failed: {error}")));
+        return SurfaceError::Hal(HalError::DeviceLost(format!(
+            "{what} failed: {error}{diagnosis}"
+        )));
     }
-    SurfaceError::Hal(HalError::Backend(format!("{what} failed: {error}")))
+    SurfaceError::Hal(HalError::Backend(format!(
+        "{what} failed: {error}{diagnosis}"
+    )))
 }
 
 #[cfg(test)]
@@ -545,11 +569,11 @@ mod tests {
 
     use crcbl_core::SurfaceTarget;
     use crcbl_hal::{
-        Barriers, BufferImageCopy, ClearValue, ColorAttachment, CommandEncoderDesc, CompositeAlpha,
-        Device as _, Extent3d, ImageAspect, ImageBarrier, ImageSubresourceLayers,
-        ImageSubresourceRange, Instance as _, LoadOp, Offset3d, PresentInfo, QueueKind,
-        ReadbackDesc, Rect2d, RenderPassDesc, ResourceState, StoreOp, SubmitInfo, SurfaceCaps,
-        SurfaceHandle, SwapchainDesc, SwapchainHandle,
+        Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
+        CommandEncoderDesc, CompositeAlpha, Device as _, Extent3d, ImageAspect, ImageBarrier,
+        ImageSubresourceLayers, ImageSubresourceRange, Instance as _, LoadOp, MemoryLocation,
+        Offset3d, PresentInfo, QueueKind, ReadbackDesc, Rect2d, RenderPassDesc, ResourceState,
+        StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle, SwapchainDesc, SwapchainHandle,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, SW_SHOWNOACTIVATE, ShowWindow, WS_EX_TOOLWINDOW, WS_POPUP,
@@ -1337,6 +1361,296 @@ mod tests {
 
         // Obligation 2's teardown order: the swapchain, then the surface, then
         // the device.
+        device.destroy_buffer(readback);
+        device.destroy_swapchain(swapchain);
+        instance.destroy_surface(surface);
+        device.wait_idle().expect("the queue drains");
+    }
+
+    /// The frame size `crates/crcbl/tests/render_e2e.rs` draws at, and the size
+    /// its golden was blessed at. Named here so this test's ring is the shape
+    /// the engine actually asks for rather than a shape that was convenient.
+    const SHOT: (u32, u32) = (256, 192);
+
+    /// Bytes one whole [`SHOT`] readback occupies. Four per texel, and the
+    /// tight row pitch — `256 * 4` is already a multiple of
+    /// `D3D12_TEXTURE_DATA_PITCH_ALIGNMENT`, so no padding is in play here and
+    /// the copy below can pass a zero row length as every other one does.
+    const SHOT_BYTES: usize = 256 * 192 * 4;
+
+    /// One clear per frame, and the texel it must land as **through an sRGB
+    /// target**.
+    ///
+    /// Black and white rather than [`RING_FRAMES`]' distinct channels, and that
+    /// is the whole reason this test can assert on bytes at all: a render pass
+    /// clearing to a linear colour through an `_SRGB` view writes *encoded*
+    /// bytes, so any intermediate value would be asserting on the driver's
+    /// transfer function. `0.0` and `1.0` are the two the sRGB curve fixes
+    /// exactly, on every implementation, so these compare byte for byte while
+    /// still differing from each other and from an untouched buffer.
+    const SHOT_FRAMES: &[([f32; 4], [u8; 4])] = &[
+        ([1.0, 1.0, 1.0, 1.0], [0xFF, 0xFF, 0xFF, 0xFF]),
+        ([0.0, 0.0, 0.0, 1.0], [0x00, 0x00, 0x00, 0xFF]),
+        ([1.0, 1.0, 1.0, 1.0], [0xFF, 0xFF, 0xFF, 0xFF]),
+    ];
+
+    /// **The ring at the shape `crcbl::screenshot::OffscreenSetup` builds it,
+    /// driven the way that module drives it — and a device-local buffer
+    /// straight afterwards.**
+    ///
+    /// # The failure this exists to reproduce
+    ///
+    /// `crates/crcbl/tests/render_e2e.rs` on WARP fails inside
+    /// `OffscreenSetup::open`, *before* drawing:
+    ///
+    /// ```text
+    /// CreateCommittedResource (buffer) failed: The GPU device instance has
+    /// been suspended. … (0x887A0005)
+    /// ```
+    ///
+    /// That buffer is `ForwardRenderer`'s first, and the only thing between it
+    /// and a device that had just served this crate's whole suite is the ring
+    /// created a few lines earlier. `DXGI_ERROR_DEVICE_REMOVED` is reported at
+    /// the *next* call rather than the offending one, so a ring that broke the
+    /// device would look exactly like this — and nothing in this crate's suite
+    /// created a ring at that shape.
+    ///
+    /// # What is different here, and it is only what `crcbl::screenshot` does
+    ///
+    /// [`an_offscreen_ring_draws_reads_back_and_comes_round_again`] already
+    /// covers a ring end to end, so this is deliberately not that test with
+    /// different numbers. Three things differ, and each is a thing the engine
+    /// does and this crate had never executed:
+    ///
+    /// * **The format is [`SurfaceCaps::preferred_format`]'s**, which is the
+    ///   sRGB one — the sibling test pins `Rgba8Unorm` precisely so it can
+    ///   assert texels, so no ring image had ever been created as `_SRGB`.
+    /// * **The extent is the engine's frame**, not four rows.
+    /// * **No barrier puts the image back**, which is what
+    ///   `OffscreenSetup::draw_and_readback` records: it leaves the image in
+    ///   `TransferSrc` and the next trip round the ring declares `Undefined`.
+    ///   D3D12 validates a transition's *declared* before-state where Vulkan
+    ///   does not, so this is the one recording difference between the backend
+    ///   that works and the one that does not. The sibling test barriers back
+    ///   on purpose and says so; this one must not, or it stops being the
+    ///   engine's frame.
+    ///
+    /// # What makes it able to fail
+    ///
+    /// * **The buffer after the ring.** This is the exact call the engine died
+    ///   on, made immediately after the ring exists and before anything is
+    ///   recorded — so a ring that removes the device fails here, in a test
+    ///   naming the ring, rather than at the far end of an engine frame.
+    /// * **A second buffer after three frames**, which is what catches a
+    ///   removal caused by the *recording* rather than by the creation.
+    /// * **The texels.** Black and white through an sRGB target are exact; a
+    ///   copy that never ran leaves [`crate::device::tests::POISON`], and a
+    ///   ring handing out one image every trip fails frame two.
+    /// * **The indices are `0, 1, 0`**, as the sibling test argues.
+    ///
+    /// Failures report with `Display` rather than `Debug`, and that is not a
+    /// style choice: a device-removed error now carries
+    /// `GetDeviceRemovedReason`'s answer and the debug layer's messages on
+    /// their own lines, and `{:?}` would escape every one of them into a single
+    /// unreadable string — see [`crate::debug`].
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it. This crate compiles on Windows alone and the development box
+    /// is Linux.
+    #[test]
+    fn the_ring_shape_crcbl_screenshot_builds_leaves_a_usable_device() {
+        let (instance, device) = open_device();
+        let adapter = pinned_adapter(&instance);
+
+        // SAFETY: as the sibling test — `Offscreen` names no platform object.
+        let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+            .expect("an offscreen surface needs no window");
+        let caps = instance
+            .surface_caps(surface, adapter)
+            .expect("a live offscreen surface on a real adapter");
+        let format = caps
+            .preferred_format()
+            .expect("an offscreen ring offers at least one format");
+        // Not an incidental assertion: it is what states that this test's ring
+        // is the sRGB one, so a caps list reordered to put a linear format
+        // first would report that this coverage had quietly moved rather than
+        // keep passing under the sibling test's format.
+        assert_eq!(
+            format,
+            Format::Rgba8UnormSrgb,
+            "the preferred offscreen format moved, and with it what this test covers: {:?}",
+            caps.formats
+        );
+
+        let swapchain = device
+            .create_swapchain(&SwapchainDesc {
+                label: Some("crcbl-dx12 e2e screenshot ring"),
+                surface,
+                format,
+                extent: SHOT,
+                // What `crcbl::screenshot::OffscreenSetup::open` asks for.
+                image_count: 2,
+                present_mode: caps.choose_present_mode(&[PresentMode::Fifo]),
+                composite_alpha: CompositeAlpha::Opaque,
+            })
+            .unwrap_or_else(|error| panic!("stage=create_swapchain: {error}"));
+
+        // **The call the engine died on.** Device-local, because that is the
+        // heap `ForwardRenderer`'s geometry lands on and the one a removed
+        // device refuses.
+        let after_ring = device
+            .create_buffer(&BufferDesc {
+                label: Some("crcbl-dx12 e2e buffer after the ring"),
+                size: 64 * 1024,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .unwrap_or_else(|error| {
+                panic!(
+                    "stage=create_buffer-after-ring: creating the ring left this device unable to \
+                     make a buffer: {error}"
+                )
+            });
+
+        let readback = readback_buffer(&device, SHOT_BYTES);
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+
+        let mut indices: Vec<u32> = Vec::new();
+        for (number, &(colour, texel)) in SHOT_FRAMES.iter().enumerate() {
+            let id = number as u64 + 1;
+            let frame = device
+                .acquire_next_frame(swapchain)
+                .unwrap_or_else(|error| panic!("stage=acquire id={id}: {error}"));
+            assert_eq!(
+                frame.extent, SHOT,
+                "the ring reports the size it was made at"
+            );
+            indices.push(frame.index);
+
+            let range = ImageSubresourceRange::all(format);
+            let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+                label: Some("crcbl-dx12 e2e screenshot frame"),
+                queue,
+            });
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    frame.image,
+                    range,
+                    ResourceState::Undefined,
+                    ResourceState::ColorAttachment,
+                )],
+                ..Barriers::default()
+            });
+            encoder.begin_render_pass(&RenderPassDesc {
+                label: Some("crcbl-dx12 e2e screenshot clear"),
+                color_attachments: &[ColorAttachment {
+                    view: frame.view,
+                    resolve: None,
+                    load: LoadOp::Clear,
+                    store: StoreOp::Store,
+                    clear: ClearValue::color(colour),
+                }],
+                depth_stencil_attachment: None,
+                render_area: Rect2d::from_size(frame.extent.0, frame.extent.1),
+            });
+            encoder.end_render_pass();
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    frame.image,
+                    range,
+                    ResourceState::ColorAttachment,
+                    ResourceState::TransferSrc,
+                )],
+                ..Barriers::default()
+            });
+            encoder.copy_image_to_buffer(&BufferImageCopy {
+                buffer: readback,
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image: frame.image,
+                image_subresource: ImageSubresourceLayers {
+                    aspect: ImageAspect::COLOR,
+                    mip: 0,
+                    base_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: Offset3d::default(),
+                image_extent: Extent3d::d2(SHOT.0, SHOT.1),
+            });
+            // **And nothing puts the image back.** See this test's docs: the
+            // engine's frame ends here, so a barrier here would test a
+            // recording the engine does not make.
+            let commands = encoder
+                .finish()
+                .unwrap_or_else(|error| panic!("stage=finish id={id}: {error}"));
+            device
+                .submit(queue, &SubmitInfo::new(&[commands]))
+                .unwrap_or_else(|error| panic!("stage=submit id={id}: {error}"));
+            device
+                .present(
+                    queue,
+                    &PresentInfo {
+                        swapchain,
+                        waits: &[],
+                        present_id: Some(id),
+                    },
+                )
+                .unwrap_or_else(|error| panic!("stage=present id={id}: {error}"));
+            device
+                .wait_idle()
+                .unwrap_or_else(|error| panic!("stage=wait_idle id={id}: {error}"));
+
+            let request = device
+                .request_readback(&ReadbackDesc {
+                    label: Some("crcbl-dx12 e2e screenshot readback"),
+                    buffer: readback,
+                    offset: 0,
+                    size: SHOT_BYTES as u64,
+                    after: None,
+                })
+                .unwrap_or_else(|error| panic!("stage=request_readback id={id}: {error}"));
+            let bytes = drain(&device, request, SHOT_BYTES);
+            assert_eq!(
+                &bytes[..4],
+                &texel,
+                "frame {id}'s first texel is {:?}, not the colour that frame cleared to",
+                &bytes[..4]
+            );
+            assert!(
+                bytes.chunks_exact(4).all(|read| read == texel),
+                "frame {id}'s clear did not reach every texel of the ring image"
+            );
+            device.destroy_readback(request);
+            device.destroy_command_buffer(commands);
+        }
+        assert_eq!(
+            indices,
+            vec![0, 1, 0],
+            "a two-image ring must rotate and wrap"
+        );
+
+        // The other half of the same question: three frames recorded the way
+        // the engine records them, and the device still makes a buffer.
+        let after_frames = device
+            .create_buffer(&BufferDesc {
+                label: Some("crcbl-dx12 e2e buffer after three frames"),
+                size: 64 * 1024,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .unwrap_or_else(|error| {
+                panic!(
+                    "stage=create_buffer-after-frames: three frames through the ring left this \
+                     device unable to make a buffer: {error}"
+                )
+            });
+
+        device.destroy_buffer(after_frames);
+        device.destroy_buffer(after_ring);
         device.destroy_buffer(readback);
         device.destroy_swapchain(swapchain);
         instance.destroy_surface(surface);

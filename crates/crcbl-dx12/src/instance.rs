@@ -18,6 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 use windows::core::{BOOL, Interface};
 
 use crate::adapter::{self, RawCaps};
+use crate::debug;
 use crate::device::Dx12Device;
 use crate::handle::{self, Owned, Owner};
 use crate::present;
@@ -300,11 +301,22 @@ impl Dx12Instance {
     /// backend reports for it.
     #[must_use]
     pub fn open() -> Option<Self> {
+        // **Before anything else opens a device.** The D3D12 debug layer is
+        // chosen per device at creation, and `candidates` below opens one per
+        // adapter to describe it — so a layer turned on after this line would
+        // validate nothing this instance enumerated. See [`crate::debug`],
+        // which also says why its messages are pulled out of the info queue
+        // rather than left for a debugger nobody has attached.
+        debug::enable_debug_layer();
+
         // `CreateDXGIFactory2` rather than `CreateDXGIFactory1`: they differ
-        // only in the flags word, and `DXGI_CREATE_FACTORY_DEBUG` is where the
-        // debug-layer slice will have to reach. Zero here, because turning the
-        // debug layer on without also installing a message callback would put
-        // driver output somewhere nobody in this workspace reads.
+        // only in the flags word. Zero here even with the D3D12 debug layer on,
+        // and that is a decision rather than an omission:
+        // `DXGI_CREATE_FACTORY_DEBUG` turns on a *second*, separate layer whose
+        // output is object-lifetime reporting rather than the API validation
+        // this backend needs — and it fails factory creation outright with
+        // `DXGI_ERROR_SDK_COMPONENT_MISSING` on a machine without the Graphics
+        // Tools feature, which would cost enumeration itself for a diagnostic.
         //
         // SAFETY: the call takes no pointer of ours and writes only the
         // interface it returns; `IDXGIFactory4` is the IID it is asked for, so
