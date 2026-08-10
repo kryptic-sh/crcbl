@@ -119,7 +119,7 @@
 
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    BindGroupLayoutHandle, BindingFlags, BindingKind, HalError, ShaderStages,
+    BindGroupLayoutHandle, BindingFlags, BindingKind, HalError, MemoryLocation, ShaderStages,
 };
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_BUFFER_SRV, D3D12_BUFFER_SRV_FLAG_RAW, D3D12_BUFFER_UAV, D3D12_BUFFER_UAV_FLAG_RAW,
@@ -138,6 +138,7 @@ use windows::Win32::Graphics::Direct3D12::{
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32_TYPELESS;
 
+use crate::buffer;
 use crate::conv;
 use crate::dxil;
 use crate::handle::Owned;
@@ -158,13 +159,6 @@ const VIEW_DESCRIPTORS: u32 = 4096;
 /// D3D12's own hard ceiling, because a sampler descriptor is small and there is
 /// no smaller number that is not arbitrary.
 const SAMPLER_DESCRIPTORS: u32 = D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE;
-
-/// A constant buffer view's size must be a multiple of this many bytes.
-///
-/// D3D12's rule, not a choice here: `SizeInBytes` is rounded **up** to it, so a
-/// caller's legal seam-side size is accepted and the view reads padding the
-/// caller's own buffer already owns.
-const CONSTANT_BUFFER_ALIGNMENT: u32 = 256;
 
 /// One binding of a layout, resolved to the descriptor range it becomes.
 #[derive(Clone, Copy, Debug)]
@@ -886,6 +880,7 @@ fn write_root(
         offset,
         size,
         capacity,
+        location,
         ..
     } = resource
     else {
@@ -897,6 +892,12 @@ fn write_root(
             plan.parameter_type(),
         )));
     };
+    // A root unordered access view is subject to D3D12's heap rule exactly as a
+    // descriptor-table one is: the address it takes has to be a resource created
+    // for unordered access, which no host-visible heap can be.
+    if plan.parameter_type() == D3D12_ROOT_PARAMETER_TYPE_UAV {
+        buffer::check_unordered_access(*location, entry.binding)?;
+    }
     Ok(BoundBuffer {
         // The buffer's **base**, not the bound range's start: `crate::root`
         // adds the entry's offset and the dynamic one together, because it is
@@ -929,6 +930,13 @@ pub(crate) enum Resolved {
         /// The buffer's **own** size. Only a dynamic binding reads it, and only
         /// to bound the offset a bind adds — see [`BoundBuffer::capacity`].
         capacity: u64,
+        /// The bytes the resource occupies, which a constant buffer view is the
+        /// one descriptor allowed to read to the end of — see
+        /// [`buffer::allocation_size`].
+        allocation: u64,
+        /// Which heap it lives on, because D3D12 admits an unordered access
+        /// view only on the default one.
+        location: MemoryLocation,
     },
     /// An image view's descriptor in the device's CPU-visible heap.
     View {
@@ -965,17 +973,17 @@ impl Resolved {
                 address,
                 offset,
                 size,
+                allocation,
                 ..
             } if range_type == D3D12_DESCRIPTOR_RANGE_TYPE_CBV => {
-                let Ok(bytes) = u32::try_from(*size) else {
-                    return Err(HalError::InvalidDescriptor(format!(
-                        "binding {binding} binds {size} bytes as a constant buffer, and D3D12's \
-                         SizeInBytes is 32-bit"
-                    )));
-                };
+                // Rounded **up** to D3D12's block, which is legal only because
+                // `create_buffer` padded the allocation to the same block —
+                // `crate::buffer` owns both halves of that rule and checks this
+                // one against the allocation rather than assuming it.
+                let bytes = buffer::constant_view_size(*offset, *size, *allocation, binding)?;
                 let desc = D3D12_CONSTANT_BUFFER_VIEW_DESC {
                     BufferLocation: address + offset,
-                    SizeInBytes: bytes.next_multiple_of(CONSTANT_BUFFER_ALIGNMENT),
+                    SizeInBytes: bytes,
                 };
                 // SAFETY: `desc` is a live local borrowed for the call, and `at`
                 // is a descriptor inside this device's own shader-visible
@@ -984,7 +992,11 @@ impl Resolved {
                 Ok(())
             }
             Self::Buffer {
-                raw, offset, size, ..
+                raw,
+                offset,
+                size,
+                location,
+                ..
             } if range_type == D3D12_DESCRIPTOR_RANGE_TYPE_SRV
                 || range_type == D3D12_DESCRIPTOR_RANGE_TYPE_UAV =>
             {
@@ -993,9 +1005,9 @@ impl Resolved {
                 // byte range. A raw view's element is four bytes and the HLSL's
                 // own `StructuredBuffer<T>` declaration supplies the stride,
                 // which is what `_FLAG_RAW` means and why the format is
-                // `R32_TYPELESS`.
-                let first = offset / 4;
-                let elements = u32::try_from(size / 4).unwrap_or(u32::MAX);
+                // `R32_TYPELESS`. `crate::buffer` owns the arithmetic and the
+                // alignment D3D12 requires of the start.
+                let (first, elements) = buffer::raw_view_range(*offset, *size, binding)?;
                 if range_type == D3D12_DESCRIPTOR_RANGE_TYPE_SRV {
                     let desc = D3D12_SHADER_RESOURCE_VIEW_DESC {
                         Format: DXGI_FORMAT_R32_TYPELESS,
@@ -1017,6 +1029,13 @@ impl Resolved {
                     // own shader-visible CBV/SRV/UAV heap.
                     unsafe { device.CreateShaderResourceView(raw, Some(&raw const desc), at) };
                 } else {
+                    // D3D12 admits an unordered access view only on the default
+                    // heap, and a host-visible buffer bound for writing is a
+                    // combination the seam permits and D3D12 cannot express.
+                    // Refused here, where the binding can be named, rather than
+                    // left to `CreateUnorderedAccessView` — which returns `void`
+                    // and takes the device down at the next call.
+                    buffer::check_unordered_access(*location, binding)?;
                     let desc = D3D12_UNORDERED_ACCESS_VIEW_DESC {
                         Format: DXGI_FORMAT_R32_TYPELESS,
                         ViewDimension: D3D12_UAV_DIMENSION_BUFFER,

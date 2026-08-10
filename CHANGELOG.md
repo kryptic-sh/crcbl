@@ -1813,6 +1813,43 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A uniform buffer smaller than 256 bytes removed the D3D12 device.** A
+  constant buffer view's `SizeInBytes` must be a multiple of 256 and a view may
+  not run past the end of its resource, so `crcbl-dx12` rounding the view up
+  over a 16-byte buffer was `DXGI_ERROR_INVALID_CALL` and a removed device —
+  reported at whatever call came next, which is why it looked like an offscreen
+  swapchain failure. `create_buffer` now pads the **allocation** of any buffer
+  carrying `BufferUsage::UNIFORM` up to the same 256-byte block, and every
+  constant buffer view is checked against that allocation instead of assuming
+  it. Nothing above the seam can see the padding: the size a caller asked for is
+  still the size `write_buffer`, `WHOLE_BUFFER` and every bounds check use, and
+  `Limits::max_uniform_buffer_range` is a limit on a bindable range rather than
+  on an allocation.
+
+- **`crcbl-dx12` refuses a host-visible buffer bound for writing instead of
+  taking the device down.** D3D12 has no unordered access view of an upload- or
+  readback-heap resource — the flag is rejected at creation and the heap pins
+  the resource to a state a shader cannot write from — and the seam permits the
+  combination because Vulkan does. Binding one to a
+  `BindingKind::StorageBuffer { read_only: false }` slot is now
+  `HalError::InvalidDescriptor` naming the binding, the heap and the fix, where
+  it used to be a `CreateUnorderedAccessView` that wrote nothing and a device
+  removed at the next call. Read-only storage bindings of a host-visible buffer
+  are unaffected, and remain how the engine's instance and table buffers are
+  read. **A shader that writes a buffer needs `MemoryLocation::DeviceLocal` on
+  this backend**; `crcbl-render`'s GPU draw generation still asks for the other
+  thing, so the D3D12 frame does not yet run.
+
+- **A `crcbl-dx12` buffer view is bounded and aligned rather than truncated.** A
+  storage binding's raw view is refused when its offset is not a multiple of
+  D3D12's 16-byte raw-view alignment, or when its range is shorter than one
+  four-byte element, or when the element count would not fit `NumElements` —
+  which was previously clamped to `u32::MAX`, i.e. to a view running past the
+  end of the buffer. A constant buffer binding is likewise refused when its
+  offset is not a multiple of `Limits::min_uniform_buffer_offset_alignment`.
+  Every one of those was a `Create*View` call that returns `void` and diagnoses
+  nothing.
+
 - **Every `crcbl-mtl` draw hung on Apple's paravirtual GPU, and the call was
   `setDepthStencilState:nil`.** `bind_graphics_pipeline` passed nil for any
   pipeline whose descriptor carried no `depth_stencil` — which is every pipeline

@@ -246,6 +246,14 @@
 mod adapter;
 #[cfg(target_os = "windows")]
 mod binding;
+// What D3D12 requires of a buffer's allocation and of the views over it. Not
+// Windows-only for the reason `present` below is not: it holds no `windows`
+// type, so off Windows it exists in the test build alone and `cargo test` on any
+// host checks the padding, alignment and bounds arithmetic that a `Create*View`
+// call — which returns `void` and removes the device at the *next* call — can
+// never report.
+#[cfg(any(target_os = "windows", test))]
+mod buffer;
 #[cfg(target_os = "windows")]
 mod command;
 #[cfg(target_os = "windows")]

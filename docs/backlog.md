@@ -3763,10 +3763,34 @@ for 256; `forward cull params` is 112 and asks for the same. The fix is that the
 _buffer_ has to be padded when it is going to be viewed as a constant buffer,
 not just the view rounded.
 
-**Bug 2 — storage buffers are not created for unordered access.** Every UAV on
-them is refused because the resource carries no
-`D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`. A `BufferUsage::STORAGE` to
-resource-flags mapping gap.
+**Bug 2 was not what it looked like, and it is not a D3D12 bug.**
+`conv::buffer_flags` was already correct — `STORAGE ∧ DeviceLocal` does set
+`ALLOW_UNORDERED_ACCESS`, with a test asserting it. The buffers whose UAVs D3D12
+refused are **host-visible**: `crcbl_render::draw_gen` puts `visible count`,
+`draw args` and `draw counts` on `MemoryLocation::HostUpload` and binds them
+writable. **D3D12 has no UAV of an upload-heap resource at all** — the flag is
+rejected at creation, and the heap pins the resource to `GENERIC_READ` for its
+lifetime, which a shader cannot write from.
+
+**This is the same compromise this file already recorded** under the GPU-driven
+draw-generation entry: "the three counters are host-visible only because the
+seam allows a fill outside a pass and the graph has no fill step". Vulkan
+tolerates it; D3D12 does not, and it took a device removal to surface that.
+
+The fix is therefore in `crcbl-render`, not `crcbl-dx12`: **a graph-level fill
+(or a small clear dispatch) so those three can be `DeviceLocal`** — exactly what
+the earlier entry asked for. The alternative, a D3D12 custom heap
+(`GetCustomHeapProperties(0, UPLOAD)` → `Type = CUSTOM`), lifts the flag and
+state pinning but means host-visible storage buffers start needing barriers,
+which `command.rs` currently skips for every non-`DeviceLocal` buffer. That is a
+memory-model change and should not be made to route around a design compromise
+that has a named fix.
+
+Meanwhile `crcbl-dx12` refuses a host-visible buffer bound writable **by name**,
+at both the descriptor-table and root-UAV paths, rather than handing D3D12 a
+`void`-returning call that removes the device at the next one. Read-only storage
+bindings of host-visible buffers still work, which is how the instance and mesh
+tables are read.
 
 **Everything else is exonerated by measurement**, and the list is worth keeping
 because three sessions were spent narrowing it:
@@ -3793,8 +3817,16 @@ messages must be _drained_ from the info queue; `EnableDebugLayer` alone writes
 to `OutputDebugString`, which a runner with no debugger attached swallows
 silently.
 
-**Owed:** the frame step is still `continue-on-error: true` and must lose that
-flag with the fix.
+**Owed:** the frame step is still `continue-on-error: true`. It stays until the
+`crcbl-render` fill lands, because until then the frame fails for a reason
+`crcbl-dx12` now reports honestly rather than one it can fix.
+
+**Neighbouring defects found and fixed while there**, same class, one line
+apart: a raw SRV/UAV had no start-alignment check where D3D12 requires a
+multiple of 16, and `NumElements` was clamped with `unwrap_or(u32::MAX)` — a
+clamp that manufactures exactly the "view past the end of the resource" shape
+that bug 1 was. Both latent today, since everything binds whole buffers at
+offset 0.
 
 ### What WARP has actually proven
 

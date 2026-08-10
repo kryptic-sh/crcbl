@@ -320,8 +320,15 @@ pub(crate) const fn resource_state(state: ResourceState) -> D3D12_RESOURCE_STATE
 /// Only one of D3D12's flags applies to a buffer, and **only on the default
 /// heap**: `ALLOW_UNORDERED_ACCESS` is rejected outright on the upload and
 /// readback heaps, so a `STORAGE` staging buffer asking for it would fail
-/// creation rather than gaining anything. A host-visible buffer is read through
-/// a copy or as a root descriptor either way, neither of which needs the flag.
+/// creation rather than gaining anything. Nor would the flag help if it were
+/// accepted — D3D12 pins a resource on either host-visible heap to a state a
+/// shader cannot write from, for its whole lifetime.
+///
+/// So a host-visible storage buffer is a **read-only** storage buffer on this
+/// backend: a shader resource view of one is legal and is what the engine's
+/// instance and table buffers take, while binding one for writing is refused by
+/// [`buffer::check_unordered_access`](crate::buffer::check_unordered_access)
+/// naming the rule. That refusal is where the whole story is written down.
 pub(crate) fn buffer_flags(usage: BufferUsage, memory: MemoryLocation) -> D3D12_RESOURCE_FLAGS {
     if usage.contains(BufferUsage::STORAGE) && matches!(memory, MemoryLocation::DeviceLocal) {
         D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS

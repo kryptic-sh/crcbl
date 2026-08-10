@@ -649,8 +649,27 @@ jobs:
       #     if the ring is the cause the step above goes red first, with the
       #     failure inside the crate that owns it.
       #
+      #   * both calls that removed the device are fixed: a uniform buffer's
+      #     allocation is padded to D3D12's 256-byte constant-buffer block, and
+      #     every buffer view is now bounded and aligned before it is written —
+      #     `crcbl_dx12::buffer`, whose tests run on any host.
+      #
+      # **It is still expected to fail, one step further along, and this is what
+      # the next run should say.** `crcbl-render`'s GPU draw generation keeps
+      # three buffers a compute shader *writes* on `MemoryLocation::HostUpload`
+      # — `visible count`, `draw args` and `draw counts` in
+      # `crcbl_render::draw_gen` — and D3D12 has no unordered access view of an
+      # upload-heap resource at all: the flag is rejected at creation and the
+      # heap pins the resource to a state a shader cannot write from. So the
+      # frame should now fail at `DrawGen::new` with an `InvalidDescriptor`
+      # naming the binding and the heap, instead of removing the device. Getting
+      # past it is a decision rather than a fix — make those three
+      # `DeviceLocal` and give the graph a fill step, or place a host-visible
+      # storage buffer on a D3D12 *custom* heap and let it take barriers — and
+      # `docs/backlog.md` carries both.
+      #
       # **Take the `continue-on-error` off with the fix, not before.**
-      # `docs/backlog.md` carries both measurements and what to try next.
+      # `docs/backlog.md` carries every measurement and what to try next.
       - name: Draw a frame through ForwardRenderer on WARP
         shell: bash
         continue-on-error: true

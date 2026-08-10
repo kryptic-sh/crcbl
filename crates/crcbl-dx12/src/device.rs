@@ -118,7 +118,7 @@ use crate::present::{self, PresentWait};
 use crate::retire::RetireQueue;
 use crate::swapchain::{self, SwapchainEntry};
 use crate::view::Subresource;
-use crate::{conv, validate};
+use crate::{buffer, conv, validate};
 
 /// Node mask naming the single adapter node the seam models.
 ///
@@ -148,7 +148,14 @@ macro_rules! owned {
 struct BufferEntry {
     owner: u64,
     raw: ID3D12Resource,
+    /// The size the caller asked for, which is the only size the seam knows —
+    /// every bounds check a write, a copy or a binding makes is against this.
     size: u64,
+    /// The bytes the resource actually occupies, which is `size` rounded up for
+    /// a buffer that may be bound as a constant buffer. See
+    /// [`buffer::allocation_size`]; a constant buffer view is the one descriptor
+    /// allowed to read past `size`, into padding nothing else can observe.
+    allocation: u64,
     location: MemoryLocation,
 }
 
@@ -1284,6 +1291,8 @@ impl Dx12Device {
                         offset,
                         size,
                         capacity: record.size,
+                        allocation: record.allocation,
+                        location: record.location,
                     })
                 }
                 BindingResource::ImageView(view) => {
@@ -1581,12 +1590,19 @@ impl Device for Dx12Device {
                 "BufferDesc::size must be non-zero".to_string(),
             ));
         }
+        // **The allocation, not the requested size.** A buffer that may be bound
+        // as a constant buffer is padded to a whole number of D3D12's
+        // 256-byte blocks here, because the view over it has to be one and a
+        // view may not run past its resource — see `crate::buffer`, which owns
+        // that arithmetic and its tests. The table below keeps `desc.size`, so
+        // nothing above the seam can see the difference.
+        let allocation = buffer::allocation_size(desc.size, desc.usage)?;
         let resource_desc = D3D12_RESOURCE_DESC {
             Dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
             // Zero means "the default for this resource", which for a buffer is
             // the 64 KiB D3D12 requires.
             Alignment: 0,
-            Width: desc.size,
+            Width: allocation,
             Height: 1,
             DepthOrArraySize: 1,
             MipLevels: 1,
@@ -1634,6 +1650,7 @@ impl Device for Dx12Device {
             owner: self.inner.owner.id,
             raw,
             size: desc.size,
+            allocation,
             location: desc.memory,
         });
         Ok(handle::stamp(self.inner.owner, handle))
@@ -7348,6 +7365,209 @@ pub(crate) mod tests {
 
         device.destroy_bind_group_layout(over);
         device.destroy_bind_group_layout(fits);
+    }
+
+    /// Panics unless the device is still alive and the debug layer logged
+    /// nothing against it, naming `what` and quoting everything it did say.
+    ///
+    /// `GetDeviceRemovedReason` is what makes this a check rather than a hope:
+    /// `DXGI_ERROR_DEVICE_REMOVED` is reported at the *next* call, so a test
+    /// that only asserted its own call returned `Ok` passes with a device the
+    /// runtime has already taken down. A `WARNING` is tolerated because it is
+    /// not this test's subject; an `ERROR` is exactly what an invalid view is.
+    fn still_alive(device: &Dx12Device, what: &str) {
+        let diagnosis = debug::diagnosis(&device.inner.raw);
+        assert!(
+            !diagnosis.contains("GetDeviceRemovedReason"),
+            "{what}: the device was removed{diagnosis}"
+        );
+        assert!(
+            !diagnosis.contains("[ERROR]") && !diagnosis.contains("[CORRUPTION]"),
+            "{what}: the debug layer objected{diagnosis}"
+        );
+    }
+
+    /// **A uniform buffer smaller than D3D12's constant-buffer block gets a view
+    /// over it and the device survives.**
+    ///
+    /// The reproduction of the call that killed the engine's D3D12 frame, at the
+    /// two sizes it died at: `forward params` is 16 bytes and `forward cull
+    /// params` is 112, and a constant buffer view's `SizeInBytes` has to be a
+    /// multiple of 256. Rounding the view up over an unpadded resource is
+    /// `CreateConstantBufferView` writing a view past the end of its buffer,
+    /// which is `DXGI_ERROR_INVALID_CALL` and a removed device — reported at
+    /// whatever call comes next, which is why [`still_alive`] asks the device
+    /// rather than reading this call's own `Ok`.
+    ///
+    /// The storage buffer beside them is the other half: a writable binding is a
+    /// UAV, which needs the resource created with `ALLOW_UNORDERED_ACCESS`.
+    ///
+    /// # What only CI can settle
+    ///
+    /// Whether D3D12 accepts the descriptors. `crcbl_dx12::buffer`'s own tests
+    /// run on any host and cover the arithmetic; that a padded buffer is one the
+    /// runtime will take a 256-byte view of is a claim about a driver.
+    #[test]
+    fn a_uniform_buffer_under_one_block_and_a_storage_buffer_both_get_views() {
+        let (_instance, device) = open_device();
+
+        // The two sizes from the frame, and one that is already a whole block.
+        let uniforms: Vec<BufferHandle> = [16u64, 112, 256]
+            .iter()
+            .map(|&size| {
+                device
+                    .create_buffer(&BufferDesc {
+                        label: Some("params"),
+                        size,
+                        usage: BufferUsage::UNIFORM,
+                        memory: MemoryLocation::HostUpload,
+                    })
+                    .unwrap_or_else(|error| panic!("a {size}-byte uniform buffer: {error:?}"))
+            })
+            .collect();
+        let counter = device
+            .create_buffer(&BufferDesc {
+                label: Some("visible count"),
+                size: 4,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a storage buffer a shader writes");
+        still_alive(&device, "creating the buffers");
+
+        let mut entries: Vec<BindGroupLayoutEntry> = (0..uniforms.len() as u32)
+            .map(|binding| BindGroupLayoutEntry {
+                binding,
+                visibility: ShaderStages::COMPUTE,
+                kind: BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: BindingFlags::empty(),
+            })
+            .collect();
+        entries.push(BindGroupLayoutEntry {
+            binding: uniforms.len() as u32,
+            visibility: ShaderStages::COMPUTE,
+            kind: BindingKind::StorageBuffer {
+                read_only: false,
+                dynamic: false,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
+        let layout = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("small uniforms"),
+                entries: &entries,
+            })
+            .expect("uniform and storage buffers are a layout this backend builds");
+
+        let mut bound: Vec<BindGroupEntry> = uniforms
+            .iter()
+            .enumerate()
+            .map(|(binding, &buffer)| BindGroupEntry {
+                binding: binding as u32,
+                array_index: 0,
+                resource: BindingResource::whole_buffer(buffer),
+            })
+            .collect();
+        bound.push(BindGroupEntry {
+            binding: uniforms.len() as u32,
+            array_index: 0,
+            resource: BindingResource::whole_buffer(counter),
+        });
+        let group = device
+            .create_bind_group(&BindGroupDesc {
+                label: Some("small uniforms"),
+                layout,
+                entries: &bound,
+                variable_count: None,
+            })
+            .expect("a constant buffer view of a padded buffer and an unordered access view");
+        still_alive(&device, "writing the descriptors");
+
+        device.destroy_bind_group(group);
+        device.destroy_bind_group_layout(layout);
+        device.destroy_buffer(counter);
+        for buffer in uniforms {
+            device.destroy_buffer(buffer);
+        }
+    }
+
+    /// **A host-visible buffer bound for writing is refused by name, and the
+    /// device is untouched.**
+    ///
+    /// D3D12 has no unordered access view of an upload-heap resource: the flag
+    /// is rejected at creation and the heap pins the resource to a state a
+    /// shader cannot write from. The seam permits the combination because Vulkan
+    /// does, so this backend answers with
+    /// [`HalError::InvalidDescriptor`](crcbl_hal::HalError::InvalidDescriptor)
+    /// at the binding that asked, rather than letting
+    /// `CreateUnorderedAccessView` write nothing and take the device down at the
+    /// next call.
+    ///
+    /// The read-only twin is the half that keeps the refusal honest: a shader
+    /// resource view of the same buffer is legal and is what the engine's
+    /// instance and table buffers take, so a backend that refused every
+    /// host-visible storage binding would fail here.
+    #[test]
+    fn a_host_visible_buffer_is_refused_for_writing_and_accepted_for_reading() {
+        let (_instance, device) = open_device();
+        let staged = device
+            .create_buffer(&BufferDesc {
+                label: Some("instances"),
+                size: 64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a host-visible storage buffer");
+
+        let layout_of = |read_only: bool| {
+            device
+                .create_bind_group_layout(&BindGroupLayoutDesc {
+                    label: Some("staged instances"),
+                    entries: &[BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::COMPUTE,
+                        kind: BindingKind::StorageBuffer {
+                            read_only,
+                            dynamic: false,
+                        },
+                        count: 1,
+                        flags: BindingFlags::empty(),
+                    }],
+                })
+                .expect("a storage buffer binding")
+        };
+        let bind_to = |layout| {
+            device.create_bind_group(&BindGroupDesc {
+                label: Some("staged instances"),
+                layout,
+                entries: &[BindGroupEntry {
+                    binding: 0,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(staged),
+                }],
+                variable_count: None,
+            })
+        };
+
+        let writable = layout_of(false);
+        let error = bind_to(writable).expect_err("D3D12 has no UAV of an upload-heap buffer");
+        let HalError::InvalidDescriptor(text) = &error else {
+            panic!("a heap that cannot carry a UAV is not {error:?}");
+        };
+        assert!(text.contains("HostUpload"), "{text}");
+        assert!(text.contains("DeviceLocal"), "{text}");
+        still_alive(&device, "refusing the writable binding");
+
+        let readable = layout_of(true);
+        let group = bind_to(readable).expect("a shader resource view of an upload-heap buffer");
+        still_alive(&device, "writing the read-only descriptor");
+
+        device.destroy_bind_group(group);
+        device.destroy_bind_group_layout(readable);
+        device.destroy_bind_group_layout(writable);
+        device.destroy_buffer(staged);
     }
 
     /// `dispatch_indirect` reads its workgroup count out of GPU memory, at the
