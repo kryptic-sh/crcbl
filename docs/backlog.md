@@ -3709,71 +3709,33 @@ rasteriser that would close that gap the same way lavapipe closes Vulkan's** —
 no hardware purchase, no self-hosted runner. That is the better next investment
 than a Mac mini, and it is not blocked on anything.
 
-### The render layer runs on Vulkan and wgpu
+### The render layer runs on Vulkan, wgpu and Metal
 
-`crcbl-mtl` does not depend on `crcbl-render`, and `crcbl-dx12` has no e2e job
-at all — only adapter enumeration. So the frame graph, the cull pass, draw
-generation, forward and tonemap execute on Vulkan (radv locally, lavapipe in CI)
-and native wgpu, and nowhere else.
+**Closed on `eab7b5d`.** `crates/crcbl/tests/render_e2e.rs` draws a frame
+through `ForwardRenderer` on whichever backend `CRCBL_GPU` names, and the Metal
+arm now runs in CI:
 
-**A green `mtl e2e` run is not evidence about the renderer.** It proves the
-Metal HAL — dispatch, encoders, bindings, copies — which is what it was built to
-prove. It has never constructed a `ForwardRenderer`, and neither has macOS's
-`build + test` job, whose render tests use the null backend. Easy to misread as
-backend parity; it is not.
+```
+metal selected IndirectPerBatch / ArrayPages / Rasterised
+device on adapter 0 "Apple Paravirtual device" type=Integrated
+golden cube on metal — 256x192: 37860 pixel(s) differ at all (77.0264%),
+max channel delta 207, 1 over tolerance (0.0020%), ssim 0.999811
+```
 
-`crates/crcbl/tests/render_e2e.rs` now exists and closes this for any backend
-that can run it. Its Vulkan arm runs in CI on lavapipe; its Metal arm is blocked
-by the entry above.
+Three results in one run:
 
-**Correction, 2026-08-10: "D3D12 has no e2e of any kind" was wrong**, and it was
-repeated twice before anyone checked. `crcbl-dx12`'s device tests run on
-`windows-latest` inside `test-cross-platform`, against a real D3D12 device, and
-they include `a_render_pass_clear_reads_back_the_exact_texels` and
-`a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` — verified passing in
-CI. **D3D12 draws a triangle and reads it back; Metal cannot.** What D3D12
-lacked was a _named_ harness with an adapter pin, which `run-dx12-e2e.sh` and
-the `dx12-e2e` job now add. The lesson is the one this file keeps re-teaching:
-grepping for a job name answers a question about job names, not about coverage.
+- **`GeometryPath::IndirectPerBatch` is proven on the backend that selects it.**
+  Until now that arm had only run on Vulkan behind a deliberately weakened
+  device request, which is a forced selector rather than a degradation.
+- **A golden blessed on lavapipe matches Metal inside `Tolerance::RASTERISER`.**
+  That tolerance was calibrated for radv-versus-lavapipe; it holds across a
+  third, very different rasteriser. One pixel over, out of 49152.
+- The Metal arm was blocked only by the nil depth-stencil hang. Fixing that
+  unblocked it with no further work.
 
-What still stands between D3D12 and `render_e2e.rs`, in the order that test
-would hit them:
-
-1. **`crcbl::backend` has no `Dx12` variant** — there is no `CRCBL_GPU=dx12` to
-   pass, so the harness could not select it even if everything below worked.
-2. ~~Compute pipelines and dispatch~~ — **done**, with `Features::COMPUTE`
-   reported alongside the calls. `TIMELINE_SEMAPHORE` is still unreported, but
-   the engine gates `create_semaphore` on it and `MeshPool` degrades without it,
-   so it is not on this path.
-3. ~~Offscreen surfaces~~ — **done**.
-4. ~~Per-stage DXIL from `crcbl-render`~~ — **done**. `ShaderModuleDesc::dxil`
-   now carries `(entry point, container)` pairs, so one module still serves
-   every backend and the one that needs a container per entry point picks by
-   stage.
-5. ~~Indexed draws and index buffers~~ — **done**.
-6. ~~Indirect and indirect-count draws~~ — **done**, and D3D12 reports
-   `DRAW_INDIRECT_COUNT` because `pCountBuffer` is an ordinary parameter of the
-   same `ExecuteIndirect` call the CPU-count path makes — the parameter Metal
-   has nowhere, which is why `crcbl-mtl` refuses it. **So D3D12 derives
-   `GeometryPath::IndirectCount`, not the per-batch floor**, and
-   `max_draw_indirect_count` moves to `u32::MAX`.
-7. ~~Dynamic offsets~~ — **done**, and this one was never on the list until
-   implementing the draws made it visible. A `dynamic: true` binding leaves its
-   set's descriptor table and becomes a root descriptor, whose setter takes a
-   bare GPU virtual address, so the offset is one addition. Root budget is
-   costed at layout creation — 64 DWORDs, a table 1, a root descriptor 2 — and a
-   `const` assert ties the constant to `D3D12_MAX_ROOT_COST` in the build that
-   has the symbol.
-8. Buffer fills and image-to-image copies refused; then query sets, MSAA resolve
-   attachments, and mesh pipelines. **None of these is on a frame's path** —
-   each is either never called above the seam or gated on a feature D3D12 does
-   not report.
-
-**Reading the source, nothing on the cube frame's path refuses any more.** Every
-encoder method the render layer calls is implemented and every DXIL it needs is
-committed. **Unverified**: only the `dx12-e2e` job can say whether a frame
-actually records, and `render_e2e.rs` is not wired into that job yet — wiring it
-is the next step, and the first thing that would tell us.
+**What remains uncovered: D3D12.** Its HAL suite passes 155/155 on WARP, but a
+frame still dies in `OffscreenSetup::open` — see the offscreen-ring entry. So
+the renderer runs on three backends of four.
 
 ### D3D12's frame fails in the offscreen ring, not on adapter choice
 
