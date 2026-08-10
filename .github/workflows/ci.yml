@@ -753,6 +753,13 @@ jobs:
       # which is the one path every other developer's machine does not have.
       - name: Run the suite against lavapipe
         env:
+          # The loader's own search log, because its summary line is ambiguous:
+          # `Registry lookup failed to get ICD manifest files` appears both when
+          # VK_DRIVER_FILES was never seen and when it was read and every driver
+          # in it was declined. Two runs have now been spent distinguishing those
+          # by inference. VK_LOADER_DEBUG=all makes the loader say which manifest
+          # it opened, whether it loaded the DLL, and why it dropped it.
+          VK_LOADER_DEBUG: all
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_SYNC_VALIDATION: '1'
         run: crates/crcbl-vk/tests/run-vk-e2e.sh
