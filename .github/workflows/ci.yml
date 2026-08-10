@@ -49,6 +49,41 @@ jobs:
       # here, on the toolchain that does the formatting.
       - run: cargo fmt --manifest-path crates/crcbl-net/fuzz/Cargo.toml --check
 
+  # # Why the e2e harnesses get a gate of their own
+  #
+  # Every e2e suite in this repo is `#[ignore]`d on top of its feature, so
+  # `--all-features` is the run that skips it and the harness script is the only
+  # thing that turns it on. That makes each script's summary parser the sole
+  # guard against a suite that tested nothing — and nothing was checking the
+  # guards. Five of them read nextest's cancelled `2/15 tests run` as a healthy
+  # fifteen until `tools/nextest-summary.sh` replaced them.
+  #
+  # A guard nobody exercises is the defect it exists to catch, one level up. So
+  # `tools/nextest-summary-test.sh` runs here, on every commit, against synthetic
+  # summary lines it would be impossible to provoke from a real suite on demand:
+  # a cancelled run, a zero-test run, an absent summary, one wrapped in the
+  # colour escapes CI's own `CARGO_TERM_COLOR: always` produces.
+  #
+  # No toolchain and no build — `ubuntu-latest` ships `shellcheck`, and the
+  # scripts under test are shell.
+  shell:
+    name: shell (e2e harness guards)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # `-x` follows the `source` lines, which is the whole point here: the
+      # harnesses source `tools/nextest-summary.sh` and `vulkan-icd.sh`, and
+      # without it every caller reports SC1091 and nothing about the callee.
+      # The glob takes every script under a `tests/` directory, not just
+      # `run-*`: the sourced-not-run helpers (`vulkan-icd.sh`,
+      # `sway-session.sh`) are where the cross-crate knowledge lives, and `-x`
+      # alone would only ever see them through a caller.
+      - name: Lint every harness and the helpers they share
+        run: shellcheck -x tools/*.sh crates/*/tests/*.sh
+      - name: The summary guard rejects the runs it is there to reject
+        run: ./tools/nextest-summary-test.sh
+
   clippy:
     name: clippy (linux)
     runs-on: ubuntu-latest

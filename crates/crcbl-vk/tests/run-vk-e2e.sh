@@ -97,6 +97,14 @@ export CRCBL_VK_SYNC_VALIDATION="${CRCBL_VK_SYNC_VALIDATION:-1}"
 source "${CRATE_DIR}/tests/vulkan-icd.sh"
 crcbl_pin_vk_icd "crcbl vk e2e"
 
+# Reading nextest's summary is `tools/nextest-summary.sh`'s job, for the same
+# reason this file does not carry its own ICD resolution: eight harnesses had a
+# copy, and five of them read a cancelled run's `2/15 tests run` as a healthy
+# fifteen. `run-vk-e2e.ps1` still carries its own — it cannot source a bash file
+# — which `docs/backlog.md` records.
+# shellcheck source=tools/nextest-summary.sh
+source "${REPO_ROOT}/tools/nextest-summary.sh"
+
 if [ -z "${CRCBL_VK_ICD:-}" ]; then
     # Say so. The header above claims this script is what a developer runs to
     # see what CI sees, and with no ICD pinned that claim is false: the loader
@@ -204,7 +212,7 @@ set -e
 # The colour-stripped copy is load-bearing for every match below — CI sets
 # `CARGO_TERM_COLOR: always`, so nextest wraps its counts in escapes and a
 # plain-text match sees no digits next to "tests run".
-sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" >"${OUTPUT}.plain"
+crcbl_nextest_plain "$OUTPUT" "${OUTPUT}.plain"
 
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl vk e2e: the suite failed" >&2
@@ -219,12 +227,13 @@ if [ "$STATUS" -ne 0 ]; then
 fi
 
 # The trap `docs/plan/12-testing.md` names by name: a job that skips everything
-# and reports success is worse than no job.
-RAN="$(grep -Eo '[0-9]+ tests? run' "${OUTPUT}.plain" | tail -1 | grep -Eo '^[0-9]+' || true)"
-if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
-    echo "crcbl vk e2e: the suite reported no tests run — the gate is not gating" >&2
+# and reports success is worse than no job — and so is one nextest cancelled
+# after two tests, whose summary still ends in the total it never reached.
+if ! crcbl_nextest_summary "${OUTPUT}.plain" "crcbl vk e2e" \
+    "The vk-e2e feature or the ignore attribute stopped matching the tests."; then
     exit 1
 fi
+RAN="$CRCBL_NEXTEST_TESTS_RUN"
 
 # Which driver actually ran, from the suite rather than from the manifest that
 # was asked for. A pinned ICD the loader quietly ignored, or a sibling manifest

@@ -56,6 +56,12 @@ RUNTIME_DIR="$(mktemp -d -t crcbl-cli-e2e.XXXXXX)"
 # shellcheck source=crates/crcbl-shell/tests/sway-session.sh
 source "${REPO_ROOT}/crates/crcbl-shell/tests/sway-session.sh"
 
+# And reading nextest's own summary is `tools/nextest-summary.sh`'s, for the
+# same reason: eight harnesses carried that inline and five of them ended up
+# reading a cancelled run's `2/15 tests run` as a healthy fifteen.
+# shellcheck source=tools/nextest-summary.sh
+source "${REPO_ROOT}/tools/nextest-summary.sh"
+
 cleanup() {
     local status=$?
     sway_session_stop
@@ -97,19 +103,15 @@ if [ "$STATUS" -ne 0 ]; then
 fi
 
 # The trap `docs/plan/12-testing.md` names by name: a job that skips everything
-# and reports success is worse than no job.
-#
-# Parsed from a colour-stripped copy: CI sets `CARGO_TERM_COLOR: always`, so
-# nextest emits the count as `\e[1m1\e[0m tests run` and a plain-text match sees
-# no digits next to "tests run".
+# and reports success is worse than no job — and so is one that stopped after two
+# tests and printed a total that reads like fifteen.
 PLAIN="${RUNTIME_DIR}/nextest.plain.log"
-sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" >"$PLAIN"
-RAN="$(grep -Eo '[0-9]+ tests? run' "$PLAIN" | tail -1 | grep -Eo '^[0-9]+' || true)"
-if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
-    echo "crcbl e2e: the suite reported no tests run — the gate is not gating" >&2
+crcbl_nextest_plain "$OUTPUT" "$PLAIN"
+if ! crcbl_nextest_summary "$PLAIN" "crcbl e2e" \
+    "The cli-e2e feature or the ignore attribute stopped matching the tests."; then
     exit 1
 fi
-echo "crcbl e2e: $RAN CLI scaffold tests ran on the ${CRCBL_CLI_E2E_BACKEND:-null} GPU backend"
+echo "crcbl e2e: $CRCBL_NEXTEST_TESTS_RUN CLI scaffold tests ran on the ${CRCBL_CLI_E2E_BACKEND:-null} GPU backend"
 
 # Said out loud, because "the tests passed" does not distinguish a run that
 # opened a window from one that skipped that step — which is the whole reason

@@ -27,6 +27,12 @@ CONF="${CRATE_DIR}/tests/wayland-e2e-sway.conf"
 # shellcheck source=crates/crcbl-shell/tests/sway-session.sh
 source "${CRATE_DIR}/tests/sway-session.sh"
 
+# And reading nextest's own summary is `tools/nextest-summary.sh`'s, for the
+# same reason: eight harnesses carried that inline and five of them ended up
+# reading a cancelled run's `2/15 tests run` as a healthy fifteen.
+# shellcheck source=tools/nextest-summary.sh
+source "${REPO_ROOT}/tools/nextest-summary.sh"
+
 cleanup() {
     local status=$?
     sway_session_stop
@@ -57,21 +63,18 @@ if [ "$STATUS" -ne 0 ]; then
 fi
 
 # The trap `docs/plan/12-testing.md` names by name: a job that skips everything
-# and reports success is worse than no job. `Summary [ 0.1s] 7 tests run: …`
-#
-# Parse a colour-stripped copy: CI sets `CARGO_TERM_COLOR: always`, so nextest
-# emits the count as `\e[1m10\e[0m tests run` and a plain-text match sees no
-# digits next to "tests run". That is how this guard first fired — on a run
-# where all ten tests had in fact passed.
+# and reports success is worse than no job — and so is one nextest cancelled
+# after two tests, whose `Summary [ 0.1s] 2/15 tests run` still ends in the
+# total it never reached. The compositor's log tail is printed on the way out
+# here, which is why the helper returns rather than exiting.
 PLAIN="${SWAY_RUNTIME_DIR}/nextest.plain.log"
-sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" >"$PLAIN"
-RAN="$(grep -Eo '[0-9]+ tests? run' "$PLAIN" | tail -1 | grep -Eo '^[0-9]+' || true)"
-if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
-    echo "crcbl e2e: the suite reported no tests run — the gate is not gating" >&2
+crcbl_nextest_plain "$OUTPUT" "$PLAIN"
+if ! crcbl_nextest_summary "$PLAIN" "crcbl e2e" \
+    "The wayland-e2e feature or the ignore attribute stopped matching the tests."; then
     sway_log_tail
     exit 1
 fi
-echo "crcbl e2e: $RAN tests ran against headless sway"
+echo "crcbl e2e: $CRCBL_NEXTEST_TESTS_RUN tests ran against headless sway"
 
 # `docs/plan/01-foundations.md`'s sandbox exit criterion is about the *sample*,
 # not about the shell crate's tests: "sandbox opens a window on Linux/Wayland

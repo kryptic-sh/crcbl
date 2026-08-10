@@ -52,6 +52,12 @@ set -euo pipefail
 CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "${CRATE_DIR}/../.." && pwd)"
 
+# Reading nextest's summary is `tools/nextest-summary.sh`'s job, in one copy
+# rather than eight — five of those copies read a cancelled run's `2/15 tests
+# run` as a healthy fifteen, this one among them.
+# shellcheck source=tools/nextest-summary.sh
+source "${REPO_ROOT}/tools/nextest-summary.sh"
+
 # How long to wait for the display to answer. Generous, because a cold CI
 # runner starting an X server for the first time is slow — and bounded, because
 # `docs/plan/12-testing.md` requires a deadline rather than a sleep.
@@ -220,21 +226,18 @@ if [ "$STATUS" -ne 0 ]; then
 fi
 
 # The trap `docs/plan/12-testing.md` names by name: a job that skips everything
-# and reports success is worse than no job. `Summary [ 0.1s] 7 tests run: …`
-#
-# Parse a colour-stripped copy: CI sets `CARGO_TERM_COLOR: always`, so nextest
-# emits the count as `\e[1m10\e[0m tests run` and a plain-text match sees no
-# digits next to "tests run". That is how the Wayland harness's guard first
-# fired — on a run where all ten tests had in fact passed.
+# and reports success is worse than no job — and so is one nextest cancelled
+# after two tests, whose `Summary [ 0.1s] 2/15 tests run` still ends in the
+# total it never reached. The server's log tail is printed on the way out here,
+# which is why the helper returns rather than exiting.
 PLAIN="${RUNTIME_DIR}/nextest.plain.log"
-sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" >"$PLAIN"
-RAN="$(grep -Eo '[0-9]+ tests? run' "$PLAIN" | tail -1 | grep -Eo '^[0-9]+' || true)"
-if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
-    echo "crcbl e2e: the suite reported no tests run — the gate is not gating" >&2
+crcbl_nextest_plain "$OUTPUT" "$PLAIN"
+if ! crcbl_nextest_summary "$PLAIN" "crcbl e2e" \
+    "The x11-e2e feature or the ignore attribute stopped matching the tests."; then
     log_tail
     exit 1
 fi
-echo "crcbl e2e: $RAN tests ran against Xvfb on ${DISPLAY}"
+echo "crcbl e2e: $CRCBL_NEXTEST_TESTS_RUN tests ran against Xvfb on ${DISPLAY}"
 
 # The X11 half of `docs/plan/01-foundations.md`'s sandbox exit criterion — see
 # the same block in `run-wayland-e2e.sh`. `CRCBL_SHELL=x11` because Wayland is

@@ -60,18 +60,20 @@ interesting part is the order of many.
   a feature or an `#[ignore]` no longer matches the tests. Reading nextest's
   reported total rather than counting lines of its output is deliberate: a line
   count silently picks up headers and lands a number close enough to look right.
-- **The cut-short run is the same trap wearing a healthy number**, and only some
-  of the harnesses catch it. nextest prints `<n> tests run:` for a complete run
-  and `<ran>/<total> tests run:` for one it cancelled, so a guard matching the
-  digits immediately before the words reads `2/15 tests run` as a healthy
-  fifteen — thirteen tests that never executed, reported as a pass.
-  `crates/crcbl-dx12/tests/run-dx12-e2e.sh` matches the `<ran>/` group
-  explicitly and fails on it by name; the two PowerShell harnesses do the same.
-  `run-mtl-e2e.sh` and `run-render-e2e.sh` reject it too, because their match is
-  anchored to the whole summary line and the `/` breaks it. The remaining bash
-  guards — `run-cli-e2e.sh`, `run-wgpu-e2e.sh`, `run-vk-e2e.sh`,
-  `run-wayland-e2e.sh`, `run-x11-e2e.sh` — check only for zero and still read a
-  cancelled run as whole. Closing that is a testing deliverable.
+- **The cut-short run is the same trap wearing a healthy number**, and one
+  sourced guard is what catches it. nextest prints `<n> tests run:` for a
+  complete run and `<ran>/<total> tests run:` for one it cancelled, so a guard
+  matching the digits immediately before the words reads `2/15 tests run` as a
+  healthy fifteen — thirteen tests that never executed, reported as a pass. Five
+  of the eight bash harnesses did exactly that, and two more rejected it while
+  reporting "zero tests run" about a run that had run some, so one sourced
+  helper — `tools/nextest-summary.sh` — now owns the whole of it: strip the
+  colour, find the summary, name the cancelled shape, fail on zero. Every bash
+  harness sources it, and `tools/nextest-summary-test.sh` feeds it each shape —
+  complete, cancelled, zero, absent, colour-wrapped, repeated — and asserts what
+  it does with them, which is the thing eight inline copies could not have. The
+  PowerShell harnesses keep their own copies of the same logic, which
+  `docs/backlog.md` records as the remaining place it can drift.
 - **Software GPU in CI**: render e2e runs on **lavapipe** (Vulkan) and wgpu's
   GL/software fallbacks — every commit exercises real render paths without
   hardware runners. Hardware jobs (real GPU, later mac/win) are scheduled, not

@@ -4092,3 +4092,80 @@ green run over content that does not use the feature.
 - **`required` must be shown to fail.** A device request naming a feature the
   null backend does not report must produce the named error; a `required` that
   cannot fail is not a gate.
+
+### The two PowerShell harnesses keep their own copy of the nextest summary guard
+
+Every bash e2e harness now sources `tools/nextest-summary.sh` for the one thing
+they all have to do — strip the colour, find nextest's summary line, tell a
+complete run from the `<ran>/<total>` shape nextest prints for one it cancelled,
+fail on zero. That is eight copies collapsed to one, after five of them had
+drifted into reading `2/15 tests run` as a healthy fifteen.
+
+`crates/crcbl-vk/tests/run-vk-e2e.ps1` and
+`crates/crcbl-shell/tests/run-win32-e2e.ps1` cannot source a bash file, so each
+keeps a PowerShell transcription of the same logic. Both are **correct today** —
+their `(?:(\d+)/)?(\d+) tests? run` is where the bash fix came from — and both
+are now the only place the guard can drift, since nothing compares them against
+the shared one and no fix to it reaches them. `run-vk-e2e.ps1` and
+`run-vk-e2e.sh` are two harnesses over the same `crcbl-vk` `vk_e2e` suite, which
+is the sharpest version of the problem: one suite, two guards, one of them
+shared and one of them a copy.
+
+**The option, stated and not taken: make the Windows harnesses bash and delete
+the `.ps1` copies.** It is demonstrably possible for at least one of them —
+`crates/crcbl-dx12/tests/run-dx12-e2e.sh` runs on `windows-latest` today, and
+its "Why bash, when `run-win32-e2e.ps1` argued for PowerShell" section argues
+that the Git Bash that image ships has `mktemp`, `tee`, `sed` and `grep`, that
+GitHub Actions' `shell: bash` selects it, and that what bash buys is guards
+`shellcheck` and a Linux developer can exercise, which matters because nobody on
+this team has a Windows machine.
+
+Against it, from those files' own headers:
+
+- `run-win32-e2e.ps1` chose `pwsh` because it starts nothing and needs nothing a
+  Windows shell lacks: `windows-latest` boots into a session with a window
+  station and a desktop, so unlike the Wayland and X11 harnesses there is no
+  compositor to launch, and `mkfifo` and `trap EXIT` — the two things those
+  harnesses need bash for — mean nothing on Windows. Porting it would buy the
+  shared guard and nothing else.
+- `run-vk-e2e.ps1`'s reason is a measurement rather than a preference, and it is
+  the strong one. `run-vk-e2e.sh` **was** the Windows harness, for three CI
+  runs, and the Vulkan loader never saw its environment. Two real causes were
+  found and fixed on the way (the manifest reaching the loader in Git Bash's
+  `C:/…` form, and exported variables not reaching a native child), and the
+  loader still reported
+  `windows_read_data_files_in_registry: Registry lookup failed`. Its conclusion
+  is that a native process launching a native process is the only shape with no
+  environment translation in it.
+
+**Correction to the premise this entry was raised under:** `run-vk-e2e.ps1` does
+_not_ register an ICD in `HKLM`. What it does is resolve `CRCBL_VK_ICD` to a
+native path, fill in `VK_DRIVER_FILES`/`VK_ICD_FILENAMES` when nobody else set
+them, walk `PATH` for `vulkan-1.dll`, dump those variables one process from the
+loader, and run `vulkaninfo`. The `HKLM:\SOFTWARE\Khronos\Vulkan\Drivers` and
+`…\ExplicitLayers` writes are in `.github/workflows/ci.yml`, in the job step
+that extracts lavapipe — and stay PowerShell whichever shell the harness is
+written in.
+
+That correction cuts both ways, which is why the call needs a measurement rather
+than a re-read. The workflow's own comment says GitHub's Windows runners are
+elevated and that the loader **discards every environment path when the process
+is elevated**, deliberately, which is why HKLM is what actually selects lavapipe
+there and `CRCBL_VK_EXPECT_ADAPTER` is the only thing that proves which driver
+answered. If that holds, the environment-translation argument for `pwsh` is no
+longer load-bearing on the runner it was written for: nothing the harness
+exports selects the driver either way. Verifying that is a CI run, not a
+reading.
+
+What was verified here: the two `.ps1` guards' regexes and their cancelled and
+zero branches; that `run-dx12-e2e.sh` is bash on `windows-latest` in `ci.yml`;
+that the HKLM writes are in the workflow and not in either harness. What was
+not: whether `run-vk-e2e.sh` under Git Bash would pass on that runner today,
+which only a CI run can answer.
+
+Related, and also not acted on: `tools/nextest-summary-test.sh` exercises the
+shared guard against every summary shape and **nothing runs it**. `ci.yml` has
+no shell-lint or script job to hang it on —
+`grep -n shellcheck .github/workflows/` matches nothing — and adding one was
+outside the paths that slice owned. Until it is wired in, the guard's own test
+is a file somebody has to remember to run.

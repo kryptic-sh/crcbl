@@ -39,6 +39,13 @@ set -euo pipefail
 
 CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_ROOT="$(cd "${CRATE_DIR}/../.." && pwd)"
+
+# Reading nextest's summary is `tools/nextest-summary.sh`'s job, in one copy
+# rather than eight — five of those copies read a cancelled run's `2/15 tests
+# run` as a healthy fifteen, this one among them.
+# shellcheck source=tools/nextest-summary.sh
+source "${REPO_ROOT}/tools/nextest-summary.sh"
+
 DISPLAY_NUM="${CRCBL_WGPU_DISPLAY:-:97}"
 FRAMES="${CRCBL_WGPU_FRAMES:-60}"
 
@@ -104,7 +111,7 @@ set -e
 # The colour-stripped copy is load-bearing for every match below — CI sets
 # `CARGO_TERM_COLOR: always`, so nextest wraps its counts in escapes and a
 # plain-text match sees no digits next to "tests run".
-sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$OUTPUT" >"${OUTPUT}.plain"
+crcbl_nextest_plain "$OUTPUT" "${OUTPUT}.plain"
 
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl wgpu e2e: the offscreen suite failed" >&2
@@ -112,12 +119,13 @@ if [ "$STATUS" -ne 0 ]; then
 fi
 
 # The trap `docs/plan/12-testing.md` names by name: a job that skips everything
-# and reports success is worse than no job.
-RAN="$(grep -Eo '[0-9]+ tests? run' "${OUTPUT}.plain" | tail -1 | grep -Eo '^[0-9]+' || true)"
-if [ -z "$RAN" ] || [ "$RAN" -eq 0 ]; then
-    echo "crcbl wgpu e2e: the suite reported no tests run — the gate is not gating" >&2
+# and reports success is worse than no job — and so is one nextest cancelled
+# after two tests, whose summary still ends in the total it never reached.
+if ! crcbl_nextest_summary "${OUTPUT}.plain" "crcbl wgpu e2e" \
+    "The wgpu-e2e feature or the ignore attribute stopped matching the tests."; then
     exit 1
 fi
+RAN="$CRCBL_NEXTEST_TESTS_RUN"
 
 # Which adapter actually ran, from the suite rather than from the manifest that
 # was asked for. A pinned ICD the loader quietly ignored shows up here.

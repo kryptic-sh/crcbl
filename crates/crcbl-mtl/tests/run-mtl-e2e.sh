@@ -47,6 +47,13 @@ fi
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$REPO"
 
+# Reading nextest's summary is `tools/nextest-summary.sh`'s job, in one copy
+# rather than eight. This harness rejected a cancelled run only by accident —
+# its anchored pattern happened to break on the `/` in `2/15 tests run` — and so
+# reported "zero tests run" about a run that had run two.
+# shellcheck source=tools/nextest-summary.sh
+source "${REPO}/tools/nextest-summary.sh"
+
 LOG="$(mktemp -t crcbl-mtl-e2e.XXXXXX.log)"
 cleanup() {
     local status=$?
@@ -72,15 +79,13 @@ fi
 # "tests run". Without this the check fires on a suite that ran everything and
 # passed — which is what run 31045734181 did, reporting the zero-tests trap at
 # `102 tests run: 102 passed`.
-sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$LOG" >"${LOG}.plain"
+crcbl_nextest_plain "$LOG" "${LOG}.plain"
 
 # nextest reports its own totals; counting lines of its output would silently
 # pick up headers and land a number that is close and wrong.
-if ! grep -qE "Summary \[[^]]*\] +[1-9][0-9]* tests? run" "${LOG}.plain"; then
-    echo "crcbl mtl e2e: the suite reported zero tests run, which is the trap" >&2
-    echo "  this script exists to catch — the feature gate or the ignore" >&2
-    echo "  attribute stopped matching the tests." >&2
+if ! crcbl_nextest_summary "${LOG}.plain" "crcbl mtl e2e" \
+    "The mtl-e2e feature or the ignore attribute stopped matching the tests."; then
     exit 1
 fi
 
-echo "crcbl mtl e2e: the hardware suite ran against a Metal device"
+echo "crcbl mtl e2e: the hardware suite ran $CRCBL_NEXTEST_TESTS_RUN tests against a Metal device"

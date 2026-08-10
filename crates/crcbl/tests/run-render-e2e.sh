@@ -78,6 +78,13 @@ REPO_ROOT="$(cd "${CRATE_DIR}/../.." && pwd)"
 source "${REPO_ROOT}/crates/crcbl-vk/tests/vulkan-icd.sh"
 crcbl_pin_vk_icd "crcbl render e2e"
 
+# And reading nextest's own summary is `tools/nextest-summary.sh`'s, for the
+# same reason. This harness rejected a cancelled run only by accident — its
+# anchored pattern happened to break on the `/` in `2/15 tests run` — and so
+# reported "zero tests run" about a run that had run two.
+# shellcheck source=tools/nextest-summary.sh
+source "${REPO_ROOT}/tools/nextest-summary.sh"
+
 if [ -z "${CRCBL_GPU:-}" ]; then
     cat >&2 <<'NOBACKEND'
 crcbl render e2e: CRCBL_GPU is not set, so nothing would pin the backend and a
@@ -127,14 +134,12 @@ fi
 # nextest wraps its counts in escapes and the match below sees no digits next to
 # "tests run" — a check that then fires on a suite which ran everything and
 # passed.
-sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$LOG" >"${LOG}.plain"
+crcbl_nextest_plain "$LOG" "${LOG}.plain"
 
 # nextest reports its own totals; counting lines of its output would silently
 # pick up headers and land a number that is close and wrong.
-if ! grep -qE "Summary \[[^]]*\] +[1-9][0-9]* tests? run" "${LOG}.plain"; then
-    echo "crcbl render e2e: the suite reported zero tests run, which is the trap" >&2
-    echo "  this script exists to catch — the feature gate or the ignore" >&2
-    echo "  attribute stopped matching the test." >&2
+if ! crcbl_nextest_summary "${LOG}.plain" "crcbl render e2e" \
+    "The render-e2e feature or the ignore attribute stopped matching the test."; then
     exit 1
 fi
 

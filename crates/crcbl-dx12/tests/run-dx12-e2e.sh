@@ -84,6 +84,13 @@ esac
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$REPO_ROOT"
 
+# The summary parsing below was this harness's own, and it was the only bash
+# copy that told a cancelled run from a whole one. `tools/nextest-summary.sh` is
+# that code, moved out to where the other seven can call it instead of carrying
+# the version it was written to replace.
+# shellcheck source=tools/nextest-summary.sh
+source "${REPO_ROOT}/tools/nextest-summary.sh"
+
 # The pin. Exported rather than passed as a flag because it is read by the test
 # process, not by cargo — and defaulted rather than required so that running the
 # script *is* running what CI runs.
@@ -124,7 +131,7 @@ set -e
 # plain-text match sees no digits next to "tests run". Both bash harnesses and
 # the PowerShell one do this, and each of them learnt it from a guard firing on a
 # run where everything had in fact passed.
-sed -E 's/\x1b\[[0-9;]*[a-zA-Z]//g' "$LOG" >"${LOG}.plain"
+crcbl_nextest_plain "$LOG" "${LOG}.plain"
 
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl dx12 e2e: the suite failed (exit $STATUS)" >&2
@@ -132,26 +139,16 @@ if [ "$STATUS" -ne 0 ]; then
 fi
 
 # nextest prints `<n> tests run:` for a complete run and `<ran>/<total> tests
-# run:` for one it cancelled, so the optional first group is what tells a
-# cut-short run from a whole one. Matching only the digits before the words reads
-# `2/15 tests run` as a healthy fifteen, which is how the Win32 harness's guard
-# was wrong before it was fixed.
-SUMMARY="$(grep -Eo '([0-9]+/)?[0-9]+ tests? run' "${LOG}.plain" | tail -1 || true)"
-if [ -z "$SUMMARY" ]; then
-    echo "crcbl dx12 e2e: nextest printed no test count at all — the gate is not gating" >&2
+# run:` for one it cancelled, and telling those apart is the whole job of the
+# helper this now calls — this is where that code was written, moved out to
+# `tools/nextest-summary.sh` so the other seven harnesses stop carrying the
+# version it was written to replace.
+if ! crcbl_nextest_summary "${LOG}.plain" "crcbl dx12 e2e" \
+    "This suite is neither feature-gated nor ignored, so an empty selection" \
+    "means a filter argument matched nothing."; then
     exit 1
 fi
-COUNTS="${SUMMARY% tests run}"
-COUNTS="${COUNTS% test run}"
-if [ "$COUNTS" != "${COUNTS#*/}" ]; then
-    echo "crcbl dx12 e2e: the run was cancelled after ${COUNTS%%/*} of ${COUNTS#*/} tests —" >&2
-    echo "                the rest never executed, so a green count here would be a lie" >&2
-    exit 1
-fi
-if [ "$COUNTS" -eq 0 ]; then
-    echo "crcbl dx12 e2e: the suite reported no tests run — the gate is not gating" >&2
-    exit 1
-fi
+COUNTS="$CRCBL_NEXTEST_TESTS_RUN"
 
 # Which adapter the suite actually opened, from the suite rather than from the
 # variable this script exported. `the_pinned_adapter_opens_a_device_and_names_itself`
