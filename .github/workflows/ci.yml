@@ -576,7 +576,7 @@ jobs:
   # window station and a desktop, which is what the swapchain tests need, and
   # WARP is part of the OS.
   dx12-e2e:
-    name: dx12 e2e (WARP)
+    name: dx12 e2e (software adapter)
     runs-on: windows-latest
     # A Windows runner is roughly 2x slower than a Linux one, and this compiles
     # the backend's test target from cold.
@@ -847,7 +847,7 @@ jobs:
   # Windows game gets unless it asks for something else** — and until this job,
   # `crcbl-vk` had never been executed on Windows by anything. The
   # `windows-latest` leg of `test-cross-platform` compiles it and runs the unit
-  # tests, which open no device; `dx12 e2e (WARP)` drives a device on this runner
+  # tests, which open no device; `dx12 e2e (software adapter)` drives a device on this runner
   # but through a different backend entirely. Every line of `crcbl-vk` that talks
   # to a loader, a driver or a swapchain was covered on Linux only.
   #

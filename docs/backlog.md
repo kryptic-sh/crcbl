@@ -3778,11 +3778,16 @@ construction.
 
 **Two follow-ups this leaves:**
 
-- The `dx12 e2e (WARP)` job is misnamed. `CRCBL_ADAPTER=cpu` correctly selects
-  the single `DeviceType::Cpu` adapter, and on this runner that is **Microsoft
-  Basic Render Driver**, not WARP. The pin is right; the label is not.
-- `crcbl-dx12::fill_buffer` is still a refusal, and now nothing in the workspace
-  needs it. Worth recording as a deliberate non-fix rather than an oversight.
+- ~~The `dx12 e2e (WARP)` job is misnamed~~ — renamed to
+  `dx12 e2e (software adapter)`. `CRCBL_ADAPTER=cpu` selects the single
+  `DeviceType::Cpu` adapter, and on that runner it is **Microsoft Basic Render
+  Driver** rather than WARP. Naming the job after a specific implementation
+  claimed something the pin never asked for.
+- ~~`crcbl-dx12::fill_buffer` wants recording as a deliberate non-fix~~ — done,
+  at the refusal itself. D3D12's fill needs a shader-visible descriptor heap
+  this backend does not create, and nothing in the workspace needs it now that
+  the counters are cleared by dispatch. A caller who wants it should say why a
+  dispatch will not do.
 
 ### What WARP has actually proven
 

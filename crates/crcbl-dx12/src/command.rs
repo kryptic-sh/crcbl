@@ -950,6 +950,16 @@ impl CommandEncoder for Dx12CommandEncoder {
         // `crate::descriptor` deliberately never creates, because a
         // shader-visible heap is a frame resource belonging to the slice that
         // has a root signature to bind it against.
+        // **Deliberately not implemented, and nothing needs it.** D3D12's fill
+        // is `ClearUnorderedAccessViewUint`, which needs a descriptor from a
+        // shader-visible heap that `crcbl_dx12::descriptor` does not create.
+        // `crcbl-render` zeroes its draw-generation counters with a clear
+        // dispatch instead — chosen over a graph-level fill precisely because
+        // `fill_buffer` is four separate backend promises (Metal repeats a
+        // byte, wgpu clears only to zero, this refuses) where a dispatch runs
+        // anywhere that can dispatch. So this is a non-fix on purpose rather
+        // than an oversight, and a caller that wants it should say why a
+        // dispatch will not do.
         self.refuse("buffer fills (the DX12 binding slice)");
     }
 
