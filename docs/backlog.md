@@ -3506,11 +3506,17 @@ declares no thread count, which is why the field exists) and wgpu keeps no
 module source after `create_shader_module`. Safe only while every compute shader
 is also run under Vulkan, which is true today and will not always be.
 
-### Metal draws hang on the CI runner's virtual GPU
+### Metal draws hang, and it is our bug, not the runner
 
-**Measured on 878f582, and it reframes the macOS coverage question.**
-`crates/crcbl/tests/render_e2e.rs` drew one frame through `ForwardRenderer` on
-Metal and failed with:
+**Corrected 2026-08-10.** An earlier version of this entry concluded the blocker
+was the runner's virtualised GPU. That was wrong, and the evidence against it
+was already in `.github/workflows/ci.yml`: **run 31037470086 ran a compute
+dispatch and two triangle draws from a standalone Swift script on this same
+`macos-26-arm64` image, and all three were correct.** The device draws. Ours
+does not.
+
+What `crates/crcbl/tests/render_e2e.rs` measured on 878f582, drawing one frame
+through `ForwardRenderer`:
 
 ```
 Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)
@@ -3519,32 +3525,69 @@ encoders in recorded order: `cull` completed, `draw-args` completed,
 `forward` completed, `tonemap` completed, `crcbl copies` completed
 ```
 
-Three things follow:
+Same signature as the four draw tests already quarantined in the `mtl-e2e` job:
+every encoder reports `completed`, none faulted, and the command buffer reports
+a hang anyway. **Compute is fine** — both compute passes completed here, and the
+dispatch and indirect-dispatch tests pass on this runner. So the fault is
+specific to this backend's _draw_ command stream.
 
-- **The device is `Apple Paravirtual device`** — a virtualised GPU, not real
-  Apple silicon. The six draw tests already quarantined in the `mtl-e2e` job
-  fault the same way. **Compute does not**: the dispatch and indirect-dispatch
-  tests pass on the same runner, and here both compute encoders completed.
-- **Every encoder reported completion** and the command buffer still reported a
-  hang, which is not the shape of a bad encoder call.
-- The standing hypothesis that the _long_ draw forms
-  (`…instanceCount:baseInstance:`) are at fault is **weakened, not confirmed**.
-  It was worth testing — the short forms exist in objc2-metal 0.3.2 and the
-  branch is three lines — but changing how every Metal draw is emitted on a
-  guess, when the evidence points at the virtualisation, is churn. **Left undone
-  deliberately; the experiment is still the cheapest discriminator if someone
-  wants it.**
+Two candidates are now dead, both killed by tests that were already green:
 
-**What this means for the plan: Metal draw coverage is not obtainable from
-GitHub's macOS runners.** Compute is. Settling whether any of this is our bug
-needs one run of `CRCBL_GPU=mtl crates/crcbl/tests/run-render-e2e.sh` on real
-Apple hardware — a machine, or a self-hosted runner. That is a decision with a
-cost attached, so it is yours.
+- **Render-target format** — run 31080128007 ran the RGBA twin unfiltered and it
+  faulted byte-identically.
+- **The error-options command-buffer descriptor** —
+  `a_render_pass_clear_reads_back_the_exact_texels` is unfiltered, passes, and
+  goes through the same `fault::command_buffer` path with
+  `MTLCommandBufferErrorOptionEncoderExecutionStatus`, a render encoder, a blit
+  encoder after it on the same buffer, the same `submit` and the same
+  `HostReadback` poll.
 
-**Confirmed on Metal along the way:** it selects
-`IndirectPerBatch / ArrayPages / Rasterised`. The per-batch tail is the arm
-Metal actually takes, which until this run had only ever been exercised on
-Vulkan behind a deliberately weakened device request.
+What is left is the encoder calls that exist only between `begin_render_pass`
+and `end_render_pass` on a draw. **The leading candidate, untested:**
+`crcbl_mtl::command` always emits the _long_ draw forms
+(`drawPrimitives:…:instanceCount:baseInstance:` and its indexed and indirect
+siblings), while `crcbl_mtl::adapter::features_of` reports `MULTI_DRAW_INDIRECT`
+and `INDIRECT_FIRST_INSTANCE` unconditionally with no `supportsFamily:` query
+behind either. The short forms exist in objc2-metal 0.3.2
+(`drawPrimitives_vertexStart_vertexCount`,
+`drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset`).
+
+**The experiment**, roughly one CI run: emit the short form when the instance
+range is `0..1` with zero bases, and un-filter
+`a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` for that run. A
+pass identifies the cause and unblocks six tests plus the render e2e; a fail
+eliminates the last standing candidate. It was written and then reverted this
+session — reverted on a misreading of the device as the cause, which this entry
+corrects, so it is worth doing.
+
+Note the standalone Swift probe drew with the **short** form, which is part of
+why the long form is the leading suspect rather than a guess.
+
+### Metal draw coverage in CI: what the ecosystem does
+
+Researched 2026-08-10, because "is this just us?" was worth answering before
+buying hardware. It is a real and widely-hit gap, but **it is not our failure**
+— see the entry above.
+
+- **GitHub's own position**: "Add support for Metal in macOS images" is an open
+  discussion; a GitHub staff reply says _"There is no ETA for now but it's on
+  our radar."_ Real GPU passthrough for hosted macOS runners is an open feature
+  request.
+- **Godot hit the paravirtual device too**, differently: it aborts with
+  `-[AppleParavirtDevice newArgumentEncoderWithLayout:]: unrecognized selector`
+  on `Apple Paravirtual device (Apple5)`. Closed unresolved; the reporter asked
+  only for a graceful error. So the device is genuinely feature-poor — but ours
+  fails on draws it demonstrably supports.
+- **The asymmetry that matters for the plan**: Linux and Windows both have
+  software rasterisers CI can install — lavapipe, which we already use, and
+  **WARP** on Windows. macOS has no equivalent, which is why this gap is
+  macOS-shaped rather than general.
+
+**Actionable consequence, cheap:** `crcbl-dx12` has no e2e at all, and the
+Windows runner has a real desktop session. **WARP is the D3D12 software
+rasteriser that would close that gap the same way lavapipe closes Vulkan's** —
+no hardware purchase, no self-hosted runner. That is the better next investment
+than a Mac mini, and it is not blocked on anything.
 
 ### The render layer runs on Vulkan and wgpu
 

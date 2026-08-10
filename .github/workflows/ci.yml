@@ -1020,14 +1020,17 @@ jobs:
       #    encoder reporting completion: `cull` completed, `draw-args`
       #    completed, `forward` completed, `tonemap` completed, `crcbl copies`
       #    completed. The two compute passes are the ones that work; this is the
-      #    same shape as the six draw tests quarantined above.
+      #    same shape as the draw tests quarantined above.
       #
-      # So the blocker is the runner's GPU, not a call this backend makes, and a
-      # step that can only ever be red gates nothing while reading as coverage.
-      # It is removed rather than left failing or set `continue-on-error`. The
-      # test is not: it runs on `vk` and `wgpu` today, and on a real Apple GPU
-      # with `CRCBL_GPU=mtl crates/crcbl/tests/run-render-e2e.sh`, which is the
-      # one thing that would settle whether any of this is our bug.
+      # **This is a `crcbl-mtl` bug, not a runner limitation**, on the same
+      # evidence that clears the device above: run 31037470086 drew two
+      # triangles on this image from a standalone Swift script. The step is
+      # removed because it duplicates a signal the quarantined tests already
+      # give, and a step that can only be red gates nothing while reading as
+      # coverage — not because the answer is unobtainable. The test stays and
+      # runs on `vk` and `wgpu`; it comes back here with the four above the
+      # moment the draw stream is fixed. `docs/backlog.md` carries the surviving
+      # candidate and the one-run experiment that settles it.
       # The same artifact the `vk e2e` job uploads, and wanted here for a
       # stronger reason: nobody on this team has a Mac, so a golden mismatch on
       # Metal is otherwise three numbers with no picture behind them. The
