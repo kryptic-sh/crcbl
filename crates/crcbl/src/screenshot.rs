@@ -576,6 +576,32 @@ impl OffscreenSetup {
         self.format
     }
 
+    /// Which backend [`crate::backend::open`] selected for this frame.
+    ///
+    /// The frame itself cannot say: every backend renders the same scene
+    /// through the same [`ForwardRenderer`], so a caller comparing pixels has
+    /// no way to tell which one produced them. A test that pinned
+    /// [`BACKEND_ENV_VAR`](crate::backend::BACKEND_ENV_VAR) and never checked
+    /// would therefore pass identically on the backend it asked for and on the
+    /// one it fell back to — "not supported here" arriving as a green run.
+    #[must_use]
+    pub fn backend(&self) -> crate::hal::BackendKind {
+        self.device.backend()
+    }
+
+    /// What the opened device reported it can do.
+    ///
+    /// The selector this exists for is
+    /// [`geometry_path`](crate::hal::DeviceCaps::geometry_path): the forward
+    /// pass's indirect tail is chosen from it once, at build, and is otherwise
+    /// invisible from outside — so this is how a caller learns which arm a
+    /// frame was actually drawn through rather than assuming the one its
+    /// developer's GPU happens to select.
+    #[must_use]
+    pub fn caps(&self) -> crate::hal::DeviceCaps {
+        self.device.caps()
+    }
+
     /// Records, submits, and reads back one frame.
     ///
     /// Returns the swapchain image's bytes as `((width, height), Vec<u8>)`,

@@ -31,6 +31,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A screenshot now says which backend drew it and what that device selected.**
+  `crcbl::screenshot::OffscreenSetup::backend` returns the `BackendKind` the
+  registry opened and `OffscreenSetup::caps` returns its `DeviceCaps`, so a
+  caller can read the `GeometryPath`, `BindingModel` and `LightingPath` the
+  frame was actually rendered through. Without them the frame is the only
+  output, and every backend draws this scene identically by construction — so a
+  run pinned with `CRCBL_GPU` that silently fell back to another backend
+  produced a passing frame and proved nothing about the one that was asked for.
+
 - **The forward pass draws from GPU-generated indirect arguments.** `cull.slang`
   and a new `draw_gen.slang` run as two compute passes in front of the forward
   pass, and the pass records **one indirect call per bucket whatever the scene

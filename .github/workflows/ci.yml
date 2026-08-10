@@ -651,6 +651,26 @@ jobs:
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
           CRCBL_VK_SYNC_VALIDATION: '1'
         run: crates/crcbl-vk/tests/run-vk-e2e.sh
+      # **The Vulkan arm of `crates/crcbl/tests/render_e2e.rs`, and the reason
+      # its golden can be trusted.** That test draws the cube scene through
+      # `ForwardRenderer` on whichever backend `CRCBL_GPU` names, and it exists
+      # for the Metal arm in the `mtl-e2e` job — but a golden only stays honest
+      # while something keeps re-deriving it, and the Metal arm currently
+      # cannot (see that job for why). This step is what keeps it from rotting:
+      # the reference was blessed on lavapipe, so this comparison is
+      # bit-identical and any drift is loud rather than absorbed by the
+      # rasteriser tolerance.
+      #
+      # The ICD is exported directly rather than through a `CRCBL_VK_ICD`-style
+      # resolver: `run-render-e2e.sh` deliberately owns no fourth copy of
+      # `run-vk-e2e.sh`'s `resolve_icd`, and pinning is the caller's job. The
+      # path is Debian's spelling, which is what this runner has.
+      - name: Draw a frame through ForwardRenderer on lavapipe
+        env:
+          CRCBL_GPU: vk
+          VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-render-e2e.sh
       # The first playable sample, against a real driver. `run-vk-e2e.sh` drives
       # `--package sandbox` and every other harness script does too, so until
       # this step existed nothing outside breakout's own unit tests ever ran the
@@ -943,8 +963,25 @@ jobs:
       # `Format::Rgba8Unorm` and nothing else changed. Run 31080128007 ran it
       # unfiltered: **110 passed, 1 failed**, and the one is that test, faulting
       # byte-identically to its RGBA twin. So the render-target format is ruled
-      # out, the error-options command-buffer descriptor is what is left, and
-      # this test joins the quarantine until that is tested.
+      # out and this test joins the quarantine until the cause is understood.
+      #
+      # **The second candidate is settled too, by a test that was already
+      # green.** `a_render_pass_clear_reads_back_the_exact_texels` is behind
+      # neither the feature nor the `#[ignore]` and is not in the filter below,
+      # so it ran and passed in both of those runs — and it goes through
+      # `crate::fault::command_buffer` with
+      # `MTLCommandBufferErrorOptionEncoderExecutionStatus`, a render encoder,
+      # a blit encoder **after** it on the same command buffer, the same
+      # `submit`, and the same `HostReadback` poll. The error-options
+      # descriptor therefore cannot be what distinguishes the failures either,
+      # and neither can `retainedReferences`, the encoder ordering or the
+      # readback path. What is left is the nine encoder calls that exist only
+      # between `begin_render_pass` and `end_render_pass` on a draw — of which
+      # the strongest candidate is that `crcbl_mtl::command` always emits the
+      # *long* draw forms (`…instanceCount:baseInstance:` and its indexed and
+      # indirect siblings), and `crcbl_mtl::adapter::features_of` reports
+      # `MULTI_DRAW_INDIRECT` and `INDIRECT_FIRST_INSTANCE` with no
+      # `supportsFamily:` query behind them.
       #
       # One name in the list is older and unrelated:
       # `a_layer_swapchain_acquires_a_drawable_and_presents_it` is `#[ignore]`d
@@ -962,6 +999,54 @@ jobs:
           test(the_engines_own_triangle_draws_through_a_bind_group) +
           test(an_indexed_draw_reads_the_bound_index_range) +
           test(a_multi_draw_indirect_emits_every_argument_structure))'
+
+      # # The renderer, on Metal, for the first time
+      #
+      # Everything above this line is the Metal **HAL**. `docs/backlog.md`'s
+      # "The render layer has only ever run on Vulkan and wgpu" is the gap it
+      # leaves: no Metal test had ever constructed a `ForwardRenderer`, so the
+      # frame graph, the cull pass, draw generation, forward and tonemap
+      # executed on exactly two things, and a green `mtl e2e` was not evidence
+      # about any of them. `crates/crcbl/tests/render_e2e.rs` closes that — one
+      # frame of the cube scene, read back and compared against the golden the
+      # `vk e2e` job re-derives on lavapipe.
+      #
+      # **This is also the arm that proves `GeometryPath::IndirectPerBatch` on
+      # the backend that actually selects it.** Metal reports no
+      # `DRAW_INDIRECT_COUNT` — the flag is absent from the API rather than
+      # unimplemented — so it takes the per-batch tail, which until now had only
+      # ever run on Vulkan behind a deliberately weakened device request. The
+      # test prints the selected path on a green run.
+      #
+      # **Expect this step to fault the first time, and read that as the
+      # measurement.** The forward pass records `draw_indexed_indirect`, which
+      # is the same encoder call as
+      # `a_multi_draw_indirect_emits_every_argument_structure` in the
+      # quarantine above — so on the evidence this should fail with
+      # `kIOGPUCommandBufferCallbackErrorHang` exactly as those do, and it will
+      # keep failing until that bug is found. It is wired live rather than
+      # pre-quarantined on purpose: the quarantine above is a list of tests that
+      # were *observed* to fault, and adding a test to it on an inference would
+      # make it a list of guesses. A red run here converts the inference into a
+      # measurement for the cost of one run, which is how the four tests above
+      # were characterised in the first place.
+      - name: Draw a frame through ForwardRenderer on Metal
+        env:
+          CRCBL_GPU: mtl
+        run: crates/crcbl/tests/run-render-e2e.sh
+      # The same artifact the `vk e2e` job uploads, and wanted here for a
+      # stronger reason: nobody on this team has a Mac, so a golden mismatch on
+      # Metal is otherwise three numbers with no picture behind them. The
+      # reference, what Metal drew, and a red-marked diff of the two tell "the
+      # tolerance is too tight" from "the MSL lowered `SV_VertexID`
+      # differently" without reproducing the run.
+      - name: Upload golden-image diffs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: golden-diff-metal
+          path: target/golden-diff/
+          if-no-files-found: ignore
 
   # The anti-rot gate for the committed SPIR-V. `crates/crcbl-shaders` ships
   # Slang sources *and* the compiled artifacts, because
