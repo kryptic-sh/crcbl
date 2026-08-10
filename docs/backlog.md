@@ -4902,3 +4902,51 @@ the binding was scoped to `crcbl-render`, `crcbl-shaders` and `crcbl`:**
 
 Neither is a design question: both are the mechanical half of "change a shared
 interface and you own its callers", left for whoever owns those crates.
+
+## The debug-overlay retrofit: what was rejected, and one engine doc that is now stale
+
+Breakout, flappy and asteroids now contribute `DebugModule` sections
+(`BoardStats`, `CourseStats`, `FieldStats`, plus `DebugModule for Audio` on
+flappy and asteroids), wired through `HostedGame::debug_sections` the way
+horde's `SceneStats` already was. What was considered and left out:
+
+- **Breakout has no audio section.** `breakout::audio::Audio` keeps no counter
+  at all — no `plays`, no `dropped` — so a row would have meant adding state to
+  the game for the panel's benefit. Rejected on those grounds. If breakout ever
+  grows a `plays` vector the way flappy's did, the section is three lines.
+- **Ball speed was the only invisible breakout number.** `GameLogic::ball_speed`
+  is the difficulty ramp and nothing displayed it; everything else breakout
+  knows (score, lives, state, high score) is already in `HudStrings`. A
+  `paddle`/`ball x,y` row was considered and dropped as a number the player can
+  see.
+- **Asteroids does not repeat the wave.** `HudStrings::refresh` already draws
+  `Wave: {wave + 1}`, and two numbers on screen under the same word that differ
+  by one is worse than one.
+- **No entity count for breakout.** It would have meant a new
+  `Game::entity_count` accessor, and breakout does not churn: it spawns the grid
+  once and despawns bricks until a restart respawns them. Flappy and asteroids
+  both already had the accessor because both are churn samples.
+- **Four audio modules, four different facts — deliberately not shared.** Horde
+  reports `dropped` (it is the only sample with a `MAX_VOICES` cap), flappy two
+  cue counts plus live voices, asteroids three cue counts plus whether the held
+  engine loop is sounding, breakout nothing. The `label: value` shape is common;
+  the knowledge is not, and the samples are separate binaries, so extracting one
+  would mean a new crate or a change to `crcbl-ui`.
+
+Two findings that are **not** fixed:
+
+- **`crcbl::engine::HostedGame::debug_sections`'s doc comment is now wrong.** It
+  says the empty default "is exactly what four of the five samples want" and
+  that "`apps/horde` is the one that does not". Four of the five override it now
+  (breakout, flappy, asteroids, horde); sandbox is the only one that does not.
+  Left alone because the retrofit was scoped to `apps/**` and the comment is in
+  `crates/crcbl/src/engine.rs`.
+- **Debug row labels share one namespace across modules, and one collided.**
+  `crcbl-render`'s `FrameTimings` renders `timings: pending` while a timestamp
+  report is in flight, and asteroids' first draft used `pending` as the label
+  for its deferred-despawn count. Nothing detects that — the panel is a flat
+  list of `label: value` rows and a reader tells two `pending`s apart by which
+  section they are under. The asteroids row was renamed to `despawns`; the
+  general problem stands, and the place it bites first is a test that searches
+  the draw list by label text (`row_value` in each sample's `app.rs`), which
+  silently reads the wrong row rather than failing.

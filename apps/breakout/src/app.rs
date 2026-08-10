@@ -102,6 +102,12 @@ pub struct Breakout {
     /// not allocate a fresh brick vector.
     render_state: RenderState,
     hud: HudStrings,
+    /// The board numbers the debug panel shows, snapshotted in [`Breakout::draw`].
+    ///
+    /// Horde's `scene` field is the same shape and there for the same reason:
+    /// `debug_sections` takes `&self`, so the numbers have to be read on a path
+    /// that has the game mutably and be waiting when the panel asks.
+    board: game::BoardStats,
 }
 
 /// The loop breakout runs in.
@@ -197,6 +203,7 @@ fn assemble<S: Shell + ?Sized>(
             game,
             render_state: RenderState::default(),
             hud: HudStrings::default(),
+            board: game::BoardStats::default(),
         },
         options.common.loop_config(),
     ))
@@ -277,8 +284,21 @@ impl HostedGame for Breakout {
     ) {
         self.game.render_state(&mut self.render_state);
         gpu.set_board(&self.render_state);
+        self.board = self.game.board_stats();
         self.hud.refresh(&self.render_state, frame.paused);
         draw_hud(draw_list, &self.hud);
+    }
+
+    /// **Breakout's own module, and it has exactly one.**
+    ///
+    /// No network section, because this game runs over `InMemoryTransport` and
+    /// has no connection to report on; no audio section, because
+    /// [`crate::audio::Audio`] keeps no counter — it banks two cues and plays
+    /// them, and a row invented to fill the panel would be state added for the
+    /// panel's benefit rather than the game's. What is left is the board, and
+    /// the panel is the two numbers of it that are nowhere else.
+    fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
+        panel.add(&self.board);
     }
 
     fn summary(&self, run: RunSummary) -> Summary {
@@ -738,9 +758,11 @@ mod tests {
 
     /// **The panel renders with no network module.** Breakout is one half of the
     /// modularity check: it runs over `InMemoryTransport`, so the sections it
-    /// has are the frame's, plus the GPU's when the device has timestamp
-    /// queries. Nothing else, and no configuration decided that — the panel got
-    /// what the sample's systems offered.
+    /// has are the frame's, the GPU's when the device has timestamp queries, and
+    /// this game's own board. No network section, and no audio one either —
+    /// `crate::audio::Audio` counts nothing, so there is nothing for it to say.
+    /// No configuration decided any of that; the panel got what the sample's
+    /// systems offered.
     #[test]
     fn the_overlay_is_composed_of_exactly_the_modules_breakout_has() {
         let mut engine = scripted(&headless_with(8, |common| {
@@ -757,9 +779,9 @@ mod tests {
             .map(crcbl::ui::DebugSection::title)
             .collect();
         let expected: &[&str] = if engine.gpu().timings().is_some() {
-            &["frame", "gpu"]
+            &["frame", "gpu", "board"]
         } else {
-            &["frame"]
+            &["frame", "board"]
         };
         assert_eq!(titles, expected, "no module appears that no system offered");
 
@@ -767,6 +789,15 @@ mod tests {
         for row in ["frame", "fps", "avg", "worst", "window"] {
             assert!(drawn.iter().any(|t| t == row), "missing {row}: {drawn:?}");
         }
+
+        // **The board section reached the draw list with the board's numbers in
+        // it**, not just its heading: nothing has been played, so the grid is
+        // whole and the ball is on its launch speed.
+        assert_eq!(
+            row_value(&drawn, "bricks"),
+            format!("{0}/{0}", game::BRICK_COUNT),
+        );
+        assert_eq!(row_value(&drawn, "ball"), "11.00/s");
 
         // **The numbers come from the clock, not from nowhere.** A frame that
         // never fed the window would draw the same labels with 0.00 ms beside

@@ -1659,6 +1659,70 @@ pub struct RenderState {
     pub state: Option<GameState>,
 }
 
+/// Asteroids' debug-panel section: what is on the field, and what it has cost
+/// the entity pool.
+///
+/// **This is the churn sample, and these are the numbers the churn is judged
+/// by.** `docs/plan/sample/04-asteroids.md`'s whole case is that a game which
+/// spawns and destroys forever must not grow forever, and the soak test asserts
+/// exactly the three counts at the bottom of this struct — until this section
+/// existed they were assertable and not *watchable*, so a leak in a real
+/// playthrough showed up as the process getting slower and nothing else.
+///
+/// [`FieldStats::entities`] must be read together with
+/// [`FieldStats::pending_despawns`]: `crcbl::ecs::World::sweep` runs at the end
+/// of `World::tick` and `crcbl-server` calls `GameModule::tick` after it, so
+/// everything destroyed on a tick is still counted for one more. A panel showing
+/// only the first would report a leak every time a rock shattered. See
+/// [`Game::pending_despawns`].
+///
+/// The wave number is **not** here: the HUD already draws it, and a second copy
+/// on screen is a number a reader has to reconcile rather than one they can
+/// use.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FieldStats {
+    /// Large rocks on the field.
+    pub large: usize,
+    /// Medium rocks — what a large one breaks into.
+    pub medium: usize,
+    /// Small rocks, which break into nothing.
+    pub small: usize,
+    /// Bullets in the air.
+    pub bullets: usize,
+    /// Rocks ever put on the field, across every wave, split and restart.
+    pub rocks_spawned: u64,
+    /// Bullets ever fired.
+    pub bullets_fired: u64,
+    /// Entities the simulation is holding.
+    pub entities: usize,
+    /// Entities destroyed and not yet swept. See the type docs.
+    pub pending_despawns: usize,
+    /// Colliders the physics world is holding — a second, independent count,
+    /// because a collider outliving its entity is an invisible wall that the
+    /// entity count would say nothing about.
+    pub colliders: usize,
+}
+
+impl crcbl::ui::DebugModule for FieldStats {
+    fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
+        section.set_title("field");
+        section.row(
+            "rocks",
+            format_args!("{}/{}/{}", self.large, self.medium, self.small),
+        );
+        section.row("bullets", format_args!("{}", self.bullets));
+        section.row("spawned", format_args!("{}", self.rocks_spawned));
+        section.row("fired", format_args!("{}", self.bullets_fired));
+        section.row("entities", format_args!("{}", self.entities));
+        // "despawns" rather than "pending": the GPU's own section renders
+        // `timings: pending` while a timestamp report is still in flight, and
+        // two rows a panel apart that both say "pending" are two different
+        // facts a reader has to tell apart by position.
+        section.row("despawns", format_args!("{}", self.pending_despawns));
+        section.row("colliders", format_args!("{}", self.colliders));
+    }
+}
+
 pub struct Game {
     pub ship_entity: Entity,
     action_map: ActionMap,
@@ -2127,6 +2191,33 @@ impl Game {
             phys.collider_count()
         })
         .unwrap_or(0)
+    }
+
+    /// Everything [`FieldStats`] shows, read in one pass.
+    ///
+    /// Takes `&mut self` because three of the nine numbers are the server's
+    /// world rather than the shared cell, which is why the panel is handed a
+    /// snapshot taken on the frame's own draw rather than reading the game
+    /// itself — `HostedGame::debug_sections` has only `&self`. Horde's
+    /// `SceneStats` is the same arrangement.
+    #[must_use]
+    pub fn field_stats(&mut self) -> FieldStats {
+        let entities = self.entity_count();
+        let pending_despawns = self.pending_despawns();
+        let colliders = self.collider_count();
+        let logic = lock(&self.shared);
+        let count = |size| logic.rocks.iter().filter(|rock| rock.size == size).count();
+        FieldStats {
+            large: count(RockSize::Large),
+            medium: count(RockSize::Medium),
+            small: count(RockSize::Small),
+            bullets: logic.bullets.len(),
+            rocks_spawned: logic.rocks_spawned,
+            bullets_fired: logic.bullets_fired,
+            entities,
+            pending_despawns,
+            colliders,
+        }
     }
 
     /// Clears the field and places one rock, for a test that needs a known
@@ -3973,6 +4064,118 @@ mod tests {
         let mut render = RenderState::default();
         harness.game.render_state(&mut render);
         assert_eq!(render.best, 1_234);
+    }
+
+    // ---- the debug panel's field section --------------------------------------
+
+    /// **A known field renders known rows.** Built by hand, with nine values no
+    /// two of which are equal, so a row that reported its neighbour's number
+    /// cannot pass — which counting a real board could not rule out, since a
+    /// fresh one has three of these at zero.
+    #[test]
+    fn the_field_section_renders_the_counts_it_was_given() {
+        use crcbl::ui::DebugModule as _;
+
+        let stats = FieldStats {
+            large: 2,
+            medium: 3,
+            small: 5,
+            bullets: 4,
+            rocks_spawned: 61,
+            bullets_fired: 97,
+            entities: 15,
+            pending_despawns: 1,
+            colliders: 10,
+        };
+        let mut section = crcbl::ui::DebugSection::new("field");
+        stats.debug_section(&mut section);
+        assert_eq!(section.title(), "field");
+        assert_eq!(
+            section.rows(),
+            &[
+                row("rocks", "2/3/5"),
+                row("bullets", "4"),
+                row("spawned", "61"),
+                row("fired", "97"),
+                row("entities", "15"),
+                row("despawns", "1"),
+                row("colliders", "10"),
+            ],
+            "the field section is exactly these seven rows",
+        );
+    }
+
+    /// **And the rows follow the churn.** A few seconds of the autopilot fires
+    /// bullets and splits rocks, so every counter here moves — and the entity
+    /// row keeps agreeing with [`Harness::assert_nothing_leaked`]'s accounting,
+    /// which is the point of putting these particular numbers on screen.
+    #[test]
+    fn playing_moves_the_field_sections_rows_and_they_still_account_for_the_world() {
+        use crcbl::ui::DebugModule as _;
+
+        let mut harness = Harness::new(60, 60);
+        let opening = harness.game.field_stats();
+        assert!(opening.large > 0, "the opening wave is all large rocks");
+        assert_eq!((opening.medium, opening.small), (0, 0));
+        assert_eq!((opening.bullets, opening.bullets_fired), (0, 0));
+        assert_eq!(opening.rocks_spawned, opening.large as u64);
+
+        harness.play_ticks(900);
+        let played = harness.game.field_stats();
+        assert!(
+            played.bullets_fired > 0,
+            "fifteen seconds and the autopilot never shot",
+        );
+        assert!(
+            played.rocks_spawned > opening.rocks_spawned,
+            "nothing ever split: {} then {}",
+            opening.rocks_spawned,
+            played.rocks_spawned,
+        );
+        assert!(
+            played.medium + played.small > 0,
+            "no rock was ever broken, so the size split says nothing",
+        );
+
+        // The same sum `assert_nothing_leaked` asserts, read off the rows the
+        // panel draws — so a leak would be visible on screen and not only in
+        // this suite.
+        assert_eq!(
+            played.entities,
+            1 + played.large
+                + played.medium
+                + played.small
+                + played.bullets
+                + played.pending_despawns,
+            "the entity row does not account for what is on the field",
+        );
+        assert_eq!(
+            played.colliders,
+            played.large + played.medium + played.small,
+            "the collider row does not account for the rocks",
+        );
+
+        let mut section = crcbl::ui::DebugSection::new("field");
+        played.debug_section(&mut section);
+        assert_eq!(section.rows().len(), 7);
+        assert_eq!(
+            section.rows()[0].value,
+            format!("{}/{}/{}", played.large, played.medium, played.small),
+        );
+        assert_eq!(section.rows()[3].value, played.bullets_fired.to_string());
+        assert_ne!(
+            section.rows()[3].value,
+            "0",
+            "the fired row never left zero",
+        );
+    }
+
+    /// One expected row, spelled once.
+    fn row(label: &str, value: &str) -> crcbl::ui::DebugRow {
+        crcbl::ui::DebugRow {
+            label: label.into(),
+            value: value.into(),
+        }
     }
 
     // ---- the entity lifecycle, which is what this sample is for ---------------

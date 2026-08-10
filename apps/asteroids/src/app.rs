@@ -107,6 +107,15 @@ pub struct Asteroids {
     /// not allocate a fresh rock list.
     render_state: RenderState,
     hud: HudStrings,
+    /// The field and churn numbers the debug panel shows, snapshotted in
+    /// [`Asteroids::draw`].
+    ///
+    /// A snapshot rather than a read at panel time because
+    /// `HostedGame::debug_sections` is handed `&self` while
+    /// [`Game::field_stats`] needs the game mutably — the entity pool, the
+    /// despawn queue and the collider count are all the server's world. Horde's
+    /// `scene` field is the same arrangement.
+    field: game::FieldStats,
 }
 
 /// The loop asteroids runs in.
@@ -205,6 +214,7 @@ fn assemble<S: Shell + ?Sized>(
             game,
             render_state: RenderState::default(),
             hud: HudStrings::default(),
+            field: game::FieldStats::default(),
         },
         options.common.loop_config(),
     ))
@@ -300,8 +310,23 @@ impl HostedGame for Asteroids {
         // read before, it saturates just under one rather than reporting the
         // fraction of a tick that is left.
         gpu.set_world(&self.render_state, render_alpha(frame.paused, frame.alpha));
+        self.field = self.game.field_stats();
         self.hud.refresh(&self.render_state, frame.paused);
         draw_hud(draw_list, &self.hud);
+    }
+
+    /// **Asteroids' two modules: the churn, and the cues.**
+    ///
+    /// No network section — this game runs over `InMemoryTransport`, so there is
+    /// no connection for one to report on. What it has instead is the thing this
+    /// sample was written for: a field that spawns and destroys forever, whose
+    /// entity, despawn-queue and collider counts the soak test asserts and which
+    /// nothing could previously *watch*. The audio section is here because this
+    /// is the sample with a held voice, and a looping engine that outlives its
+    /// burn is silent-to-the-tests and audible to everyone else.
+    fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
+        panel.add(&self.field);
+        panel.add(&self.game.audio);
     }
 
     fn summary(&self, run: RunSummary) -> Summary {
@@ -536,7 +561,6 @@ mod tests {
     /// Struct-update syntax cannot reach through `Options::common` — `..` fills
     /// whole fields, and `common` is one field — so an override is a closure
     /// rather than another literal.
-    #[allow(dead_code)]
     fn headless_with(frames: u64, edit: impl FnOnce(&mut Common)) -> Options {
         let mut options = headless(frames);
         edit(&mut options.common);
@@ -574,6 +598,83 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The value drawn immediately after `label`, which is how the panel lays a
+    /// row out: label then value, in one draw list.
+    fn row_value(drawn: &[String], label: &str) -> String {
+        let at = drawn
+            .iter()
+            .position(|text| text == label)
+            .unwrap_or_else(|| panic!("no {label} row in {drawn:?}"));
+        drawn
+            .get(at + 1)
+            .unwrap_or_else(|| panic!("no value after {label} in {drawn:?}"))
+            .clone()
+    }
+
+    /// **The panel is exactly the modules this sample has.** No network section,
+    /// because the game runs over `InMemoryTransport`; the frame's, the GPU's
+    /// where the device has timestamp queries, and this game's own two.
+    ///
+    /// Asserted on the rows and not only on the headings: a field section
+    /// drawing its labels beside a default `FieldStats` would pass a
+    /// heading-only check while reporting an empty board on a board that has
+    /// rocks on it.
+    #[test]
+    fn the_overlay_is_composed_of_exactly_the_modules_asteroids_has() {
+        let mut engine = scripted(&headless_with(8, |common| {
+            common.debug_overlay = Some(true)
+        }));
+        engine.frame().expect("a frame");
+        engine.frame().expect("a frame");
+
+        let titles: Vec<&str> = engine
+            .debug()
+            .panel
+            .sections()
+            .iter()
+            .map(crcbl::ui::DebugSection::title)
+            .collect();
+        let expected: &[&str] = if engine.gpu().timings().is_some() {
+            &["frame", "gpu", "field", "audio"]
+        } else {
+            &["frame", "field", "audio"]
+        };
+        assert_eq!(titles, expected, "no module appears that no system offered");
+
+        let drawn = ui_text(&engine);
+        for row in ["frame", "fps", "avg", "worst", "window"] {
+            assert!(drawn.iter().any(|t| t == row), "missing {row}: {drawn:?}");
+        }
+
+        // The opening wave is on the field before anything is played, and it is
+        // all large rocks — a wave puts up one size and the splits come later.
+        let rocks = engine.game().game().rocks();
+        assert!(!rocks.is_empty(), "the opening wave is placed at start-up");
+        assert_eq!(
+            row_value(&drawn, "rocks"),
+            format!("{}/0/0", rocks.len()),
+            "large / medium / small",
+        );
+        assert_eq!(row_value(&drawn, "bullets"), "0");
+        assert_eq!(row_value(&drawn, "spawned"), rocks.len().to_string());
+        assert_eq!(row_value(&drawn, "fired"), "0");
+        assert_eq!(row_value(&drawn, "despawns"), "0", "nothing has died yet");
+        let entities: usize = row_value(&drawn, "entities").parse().expect("a count");
+        assert!(
+            entities > rocks.len(),
+            "{entities} entities cannot hold {} rocks and a ship",
+            rocks.len(),
+        );
+
+        // Nothing has been fired and the engine is not burning, so every audio
+        // row is at rest — which is the state the counters have to be able to
+        // report as well as the busy one.
+        assert_eq!(row_value(&drawn, "shots"), "0");
+        assert_eq!(row_value(&drawn, "booms"), "0");
+        assert_eq!(row_value(&drawn, "engine"), "off");
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
     // -----------------------------------------------------------------------

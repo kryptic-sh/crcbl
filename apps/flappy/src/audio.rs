@@ -146,6 +146,35 @@ impl Audio {
     }
 }
 
+/// The panel's audio section: the two cues, and what is sounding now.
+///
+/// **This is what [`Audio::plays`] was for.** It has been counted since the
+/// counter landed and nothing read it outside this file's tests — a monotonic
+/// record of every cue emitted, which is the only thing that can answer "the
+/// death cue did not play" after the voice has been reaped. `ROADMAP.md`'s
+/// standing requirement 1 names it by name as flappy's contribution to the
+/// modular panel.
+///
+/// [`Audio::voices`] sits beside it because the two disagree in the case that
+/// matters: a cue that was emitted and is already silent reads as one play and
+/// no voice, which is a working game, while a play count that never moves is a
+/// game whose cues are not reaching the mixer at all.
+///
+/// Deliberately **not** shared with the other samples' audio modules. Horde's
+/// reports one row, `dropped`, because it is the only sample with a voice cap
+/// to refuse anything; asteroids' reports three cues and whether the held engine
+/// loop is running; breakout's `Audio` keeps no counter and so contributes no
+/// section. Four samples, four different facts — the resemblance is the shape of
+/// a `label: value` row and not knowledge that would change in one place.
+impl crcbl::ui::DebugModule for Audio {
+    fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
+        section.set_title("audio");
+        section.row("flaps", format_args!("{}", self.plays(SOUND_FLAP)));
+        section.row("deaths", format_args!("{}", self.plays(SOUND_DEATH)));
+        section.row("voices", format_args!("{}", self.voices()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,6 +224,62 @@ mod tests {
             1,
             "the flap stopped being counted once it stopped sounding"
         );
+    }
+
+    /// **The audio section reports what [`Audio::plays`] counts**, per cue and
+    /// not in total: a section that summed them would read the same for a run
+    /// that flapped twice and one that flapped once and died.
+    #[test]
+    fn the_audio_section_counts_each_cue_separately() {
+        use crcbl::ui::DebugModule as _;
+
+        let mut audio = Audio::new(true);
+        let mut section = crcbl::ui::DebugSection::new("audio");
+        audio.debug_section(&mut section);
+        assert_eq!(section.title(), "audio");
+        assert_eq!(
+            section.rows(),
+            &[row("flaps", "0"), row("deaths", "0"), row("voices", "0")],
+            "a fresh mixer has played nothing and is sounding nothing",
+        );
+
+        audio.play_at(SOUND_FLAP, 0.0, 0.0, 0.0);
+        audio.play_at(SOUND_FLAP, 0.0, 0.0, 0.0);
+        audio.play_at(SOUND_DEATH, 0.0, 0.0, 0.0);
+        section.clear();
+        audio.debug_section(&mut section);
+        assert_eq!(
+            section.rows(),
+            &[row("flaps", "2"), row("deaths", "1"), row("voices", "3")],
+            "two flaps and a death, all three still sounding",
+        );
+
+        // **The play counts survive the voices.** Reaped by hand rather than by
+        // waiting on the audio thread, exactly as the test above does it: this
+        // is the difference the `plays` counter exists for, and a section built
+        // on `voices()` alone would read zeroes here.
+        let mut block = vec![0.0f32; 256 * 2];
+        let start = std::time::Instant::now();
+        while audio.voices() > 0 {
+            assert!(start.elapsed().as_secs() < 5, "a voice never finished");
+            block.fill(0.0);
+            crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
+        }
+        section.clear();
+        audio.debug_section(&mut section);
+        assert_eq!(
+            section.rows(),
+            &[row("flaps", "2"), row("deaths", "1"), row("voices", "0")],
+            "the cues stopped being counted once they stopped sounding",
+        );
+    }
+
+    /// One expected row, spelled once.
+    fn row(label: &str, value: &str) -> crcbl::ui::DebugRow {
+        crcbl::ui::DebugRow {
+            label: label.into(),
+            value: value.into(),
+        }
     }
 
     /// The grammar is actually consulted: a cue away from the listener is not

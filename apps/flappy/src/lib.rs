@@ -44,8 +44,8 @@ pub mod web;
 pub use app::{FlappyError, Loop, PendingLoop, Summary, run};
 pub use args::{Invocation, Options, USAGE, parse};
 pub use game::{
-    BIRD_RADIUS, BIRD_START, DEFAULT_SEED, DEFAULT_TICK_HZ, Death, FIRST_PIPE_X, FLAP_SPEED,
-    GAP_CENTRE_RANGE, GAP_HALF_HEIGHT, GRAVITY, Game, GameError, GameState, PIPE_HALF_WIDTH,
-    PIPE_SPACING, PipeView, RenderState, SCROLL_SPEED, WORLD_CEILING, WORLD_FLOOR, gap_centre,
-    pipe_x,
+    BIRD_RADIUS, BIRD_START, CourseStats, DEFAULT_SEED, DEFAULT_TICK_HZ, Death, FIRST_PIPE_X,
+    FLAP_SPEED, GAP_CENTRE_RANGE, GAP_HALF_HEIGHT, GRAVITY, Game, GameError, GameState,
+    PIPE_HALF_WIDTH, PIPE_SPACING, PipeView, RenderState, SCROLL_SPEED, WORLD_CEILING, WORLD_FLOOR,
+    gap_centre, pipe_x,
 };

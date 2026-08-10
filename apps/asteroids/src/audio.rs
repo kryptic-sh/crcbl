@@ -313,6 +313,34 @@ impl Audio {
     }
 }
 
+/// The panel's audio section: the three cues, and the one that is *held*.
+///
+/// **The `engine` row is this sample's own and is why the section is not a copy
+/// of flappy's.** Thrust is the only sustained voice in any sample — one looping
+/// [`Voice`](crcbl::audio::mixer::Voice) started on the first burning tick,
+/// re-aimed every tick after and stopped when the key comes up — and the failure
+/// it can have is a voice that outlives the burn, which no *count* can show:
+/// `burns` reads the same whether the engine stopped or ran for the rest of the
+/// process. [`Audio::thrust_playing`] asks the mixer, so the row is what is
+/// sounding rather than what this end remembers starting.
+///
+/// The other three rows are per-cue emission counts, monotonic, so a cue that
+/// happened and has already been reaped is still reported — see
+/// [`Audio::plays`]. Not shared with flappy's audio module: that sample has two
+/// cues and no held voice, horde's reports its voice cap's refusals and nothing
+/// else, and breakout's `Audio` counts nothing at all. The `label: value` shape
+/// is common; the knowledge is not.
+impl crcbl::ui::DebugModule for Audio {
+    fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
+        section.set_title("audio");
+        section.row("shots", format_args!("{}", self.plays(SOUND_SHOT)));
+        section.row("booms", format_args!("{}", self.plays(SOUND_EXPLOSION)));
+        section.row("burns", format_args!("{}", self.plays(SOUND_THRUST)));
+        section.row_str("engine", if self.thrust_playing() { "on" } else { "off" });
+        section.row("voices", format_args!("{}", self.voices()));
+    }
+}
+
 /// How fast the explosion decays, in nepers per second.
 ///
 /// `e^-9t` is down to a twentieth of its peak by a fifth of a second, which is
@@ -554,6 +582,72 @@ mod tests {
             left.volume,
             near.volume
         );
+    }
+
+    /// **The audio section counts each cue separately and says whether the
+    /// engine is running.**
+    ///
+    /// The engine row is the one that could not be a count: a burn that was
+    /// started and never stopped has the same `burns` as one that ended
+    /// correctly, and it is the loop still sounding that is the bug. Driven
+    /// through the same key-up the game does, and read back through
+    /// [`Audio::thrust_playing`], which asks the mixer rather than this end's
+    /// handle.
+    #[test]
+    fn the_audio_section_counts_each_cue_and_reports_the_held_engine() {
+        use crcbl::ui::DebugModule as _;
+
+        let mut audio = Audio::new(true);
+        let mut section = crcbl::ui::DebugSection::new("audio");
+        audio.debug_section(&mut section);
+        assert_eq!(section.title(), "audio");
+        assert_eq!(
+            section.rows(),
+            &[
+                row("shots", "0"),
+                row("booms", "0"),
+                row("burns", "0"),
+                row("engine", "off"),
+                row("voices", "0"),
+            ],
+            "a fresh mixer has played nothing and is sounding nothing",
+        );
+
+        audio.play_at(SOUND_SHOT, 0.0, 0.0);
+        audio.play_at(SOUND_SHOT, 4.0, 0.0);
+        audio.play_at(SOUND_EXPLOSION, -3.0, 2.0);
+        audio.set_thrust(true, 0.0, 0.0);
+        section.clear();
+        audio.debug_section(&mut section);
+        assert_eq!(
+            section.rows(),
+            &[
+                row("shots", "2"),
+                row("booms", "1"),
+                row("burns", "1"),
+                row("engine", "on"),
+                row("voices", "4"),
+            ],
+            "two shots, a boom and a burn, all four still sounding",
+        );
+
+        // The key comes up: the burn is still counted, and the engine row is
+        // the half that changes. A section built on `burns` alone would read
+        // identically to the line above.
+        audio.set_thrust(false, 0.0, 0.0);
+        section.clear();
+        audio.debug_section(&mut section);
+        assert_eq!(section.rows()[2], row("burns", "1"), "the burn happened");
+        assert_eq!(section.rows()[3], row("engine", "off"), "the key came up");
+        assert_eq!(section.rows().len(), 5, "still exactly five rows");
+    }
+
+    /// One expected row, spelled once.
+    fn row(label: &str, value: &str) -> crcbl::ui::DebugRow {
+        crcbl::ui::DebugRow {
+            label: label.into(),
+            value: value.into(),
+        }
     }
 
     /// This game's explosion is noise rather than a tone, and decays.

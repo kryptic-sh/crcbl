@@ -101,6 +101,14 @@ pub struct Flappy {
     /// not allocate a fresh pipe vector.
     render_state: RenderState,
     hud: HudStrings,
+    /// The course numbers the debug panel shows, snapshotted in
+    /// [`Flappy::draw`].
+    ///
+    /// A snapshot rather than a read at panel time because
+    /// `HostedGame::debug_sections` is handed `&self` while
+    /// [`Game::course_stats`] needs the game mutably — the entity count is the
+    /// server's world. Horde's `scene` field is the same arrangement.
+    course: game::CourseStats,
 }
 
 /// The loop flappy runs in.
@@ -199,6 +207,7 @@ fn assemble<S: Shell + ?Sized>(
             game,
             render_state: RenderState::default(),
             hud: HudStrings::default(),
+            course: game::CourseStats::default(),
         },
         options.common.loop_config(),
     ))
@@ -279,8 +288,22 @@ impl HostedGame for Flappy {
         // `crate::art::Scene::advance`. A frame that ran no ticks advances it by
         // nothing, which is what makes a paused game's bird hold still.
         gpu.advance_animation(frame.ticks);
+        self.course = self.game.course_stats();
         self.hud.refresh(&self.render_state, frame.paused);
         draw_hud(draw_list, &self.hud);
+    }
+
+    /// **Flappy's two modules, and no third.**
+    ///
+    /// No network section: this game runs over `InMemoryTransport` and has no
+    /// connection to report on, which is half of the panel's modularity claim
+    /// and the reason `ROADMAP.md` names this sample as the check on it. What it
+    /// does have is a treadmill — [`game::CourseStats`] is the entity churn that
+    /// runs forever — and two cues whose emission counter, `Audio::plays`,
+    /// existed for this section before this section existed.
+    fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
+        panel.add(&self.course);
+        panel.add(&self.game.audio);
     }
 
     fn summary(&self, run: RunSummary) -> Summary {
@@ -648,8 +671,9 @@ mod tests {
 
     /// **The panel renders with no network module.** Flappy is the other half of
     /// the modularity check: it runs over `InMemoryTransport`, so the sections it
-    /// has are the frame's, plus the GPU's when the device has timestamp
-    /// queries. Nothing else, and no configuration decided that.
+    /// has are the frame's, the GPU's when the device has timestamp queries, and
+    /// this game's own two — the course and the cues. Nothing else, and no
+    /// configuration decided that.
     #[test]
     fn the_overlay_is_composed_of_exactly_the_modules_flappy_has() {
         let mut engine = scripted(&headless_with(8, |common| {
@@ -666,9 +690,9 @@ mod tests {
             .map(crcbl::ui::DebugSection::title)
             .collect();
         let expected: &[&str] = if engine.gpu().timings().is_some() {
-            &["frame", "gpu"]
+            &["frame", "gpu", "course", "audio"]
         } else {
-            &["frame"]
+            &["frame", "course", "audio"]
         };
         assert_eq!(titles, expected, "no module appears that no system offered");
 
@@ -676,6 +700,24 @@ mod tests {
         for row in ["frame", "fps", "avg", "worst", "window"] {
             assert!(drawn.iter().any(|t| t == row), "missing {row}: {drawn:?}");
         }
+
+        // **Both of this game's sections reached the draw list carrying the
+        // game's own numbers**, not just their headings. Nothing has flapped,
+        // so the bird is level and no cue has been raised; the course is the
+        // opening stretch `Game::new` builds before the first tick, so the pipe
+        // count is non-zero and every pipe standing is one the entity count has
+        // to cover.
+        let pipes: usize = row_value(&drawn, "pipes").parse().expect("a count");
+        let entities: usize = row_value(&drawn, "entities").parse().expect("a count");
+        assert!(pipes > 0, "the opening stretch is built before tick one");
+        assert_eq!(row_value(&drawn, "built"), pipes.to_string());
+        assert!(
+            entities > pipes * 2,
+            "{entities} entities cannot hold {pipes} pipes and a bird",
+        );
+        assert_eq!(row_value(&drawn, "bird vy"), "+0.00");
+        assert_eq!(row_value(&drawn, "flaps"), "0");
+        assert_eq!(row_value(&drawn, "deaths"), "0");
 
         // **The numbers come from the clock, not from nowhere.** A frame that
         // never fed the window would draw the same labels with 0.00 ms beside

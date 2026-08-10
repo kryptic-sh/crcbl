@@ -957,20 +957,34 @@ word — a sample turns the panel on and gets whatever the systems it uses
 registered, which is why this does not become a per-sample HUD written twelve
 times the way `web.rs` was written twice.
 
-The frame-timing core is **pulled forward out of P10** and built as the next
-slice, because every sample that already exists wants it and two more are
-planned before P10. What stays at P10 is the rest of
-[07-ui-debug.md](07-ui-debug.md)'s debug suite — inspector, console, culling
-stats, debug-draw controls, UI inspector — and the network module is
-[23-netcode.md](23-netcode.md)'s netgraph (RTT, jitter, loss, send/recv
-bandwidth, snapshot size, resend counts, tick-lead), which lands with it. Both
-docs already name these; this is the same work with an earlier start and a
-stated obligation on samples, not a second plan.
+The frame-timing core was **pulled forward out of P10** and is **built**, for
+the reason it was pulled: every sample that already existed wanted it and two
+more were planned before P10. `crcbl-ui`'s `debug` module is the panel —
+`DebugModule`, `DebugSection`, `DebugRow`, `FrameStats` — `crcbl-render`'s
+`FrameTimings` implements `DebugModule` for the GPU's pass timings, and
+`HostedGame::debug_sections` is the one hook a sample adds its own through.
+Every sample contributes: horde a scene section and an audio one, asteroids the
+field and churn counts its soak test asserts plus its held-engine cue, flappy
+the treadmill's course and entity counts plus `Audio::plays`, breakout the
+bricks left and the ball's ramped speed.
 
-Breakout and flappy are the retrofit consumers, and they are the check that the
+What stays at P10 is the rest of [07-ui-debug.md](07-ui-debug.md)'s debug suite
+— inspector, console, culling stats, debug-draw controls, UI inspector — and the
+network module is still [23-netcode.md](23-netcode.md)'s netgraph (RTT, jitter,
+loss, send/recv bandwidth, snapshot size, resend counts, tick-lead), which lands
+with it. Both docs already name these; this is the same work with an earlier
+start and a stated obligation on samples, not a second plan.
+
+Breakout and flappy were the retrofit consumers, and they are the check that the
 panel is genuinely modular: neither has a network module to show, because both
 run over `InMemoryTransport`, so a panel that cannot render without one is
-broken. Flappy's `Audio::plays` counter already exists for exactly this.
+broken. It renders — and each sample's
+`the_overlay_is_composed_of_exactly_the_modules_*_has` asserts the exact section
+list, so a module that appeared without a system behind it would fail. Flappy's
+`Audio::plays` counter existed for exactly this and is now what its audio
+section reports. Breakout contributes no audio section at all, because its
+`Audio` keeps no counter — the honest answer, and a second shape of the same
+modularity claim.
 
 **2. Every sample that should have pixel art uses the sprite system.** Authored
 as `.crpix` text in the repository, baked at build time to PNG + sidecar by the
@@ -1169,7 +1183,9 @@ slice tables):
   its overlay/inspector hooks, and contributes a **module** to the one debug
   panel every sample switches on. Frame timing and FPS are unconditional; the
   netgraph appears when the sample has a connection. See the standing
-  requirements above; the frame-timing core is pulled forward out of P10.
+  requirements above; the frame-timing core was pulled forward out of P10 and is
+  built, and every sample contributes its own modules through it. The netgraph
+  and the rest of the debug suite are still P10.
 - **Pixel art** ([specs/crcbl/pix.md](../specs/crcbl/pix.md)) — `.crpix` text
   baked at build time and drawn through `SpriteRenderer`. Every sample that
   should have pixel art uses it; see the standing requirements above.

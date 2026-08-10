@@ -666,6 +666,43 @@ pub struct RenderState {
     pub state: Option<GameState>,
 }
 
+/// Breakout's debug-panel section: the two board numbers nothing on screen
+/// says.
+///
+/// **Both of them are invisible by construction, which is the whole reason
+/// there is a module here rather than a HUD line.** The HUD already carries the
+/// score, the lives and the state, so repeating them would be a section a
+/// reader has to check against the line above it.
+///
+/// [`BoardStats::ball_speed`] is the one this sample cannot be understood
+/// without: this game's difficulty is a ramp — [`ramped_speed`] multiplies the
+/// ball's speed once per brick and clamps it at [`MAX_BALL_SPEED`] — and a
+/// player feels the ball getting faster while nothing anywhere reports it, so
+/// "did the ramp apply, and has it hit the cap" is a question the game could
+/// not previously be asked.
+///
+/// [`BoardStats::bricks`] is the win condition. Countable on screen, in the
+/// sense that forty rectangles can be counted; the row is what makes "two left
+/// and it will not end" separable from "one left, behind another".
+///
+/// The counts are a snapshot taken during the frame's own draw, not read at
+/// render time — see [`Game::board_stats`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BoardStats {
+    /// Bricks still standing, of [`BRICK_COUNT`].
+    pub bricks: usize,
+    /// The speed the ball is on right now, in world units per second.
+    pub ball_speed: f64,
+}
+
+impl crcbl::ui::DebugModule for BoardStats {
+    fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
+        section.set_title("board");
+        section.row("bricks", format_args!("{}/{}", self.bricks, BRICK_COUNT));
+        section.row("ball", format_args!("{:.2}/s", self.ball_speed));
+    }
+}
+
 pub struct Game {
     pub paddle_entity: Entity,
     pub ball_entity: Entity,
@@ -1029,6 +1066,22 @@ impl Game {
     #[must_use]
     pub fn bricks_remaining(&self) -> usize {
         lock(&self.shared).bricks.len()
+    }
+
+    /// The two numbers the board does not show, for the debug panel.
+    ///
+    /// One lock, taken on the frame's own draw, for the reason horde's
+    /// `SceneStats` is a snapshot: `HostedGame::debug_sections` is handed
+    /// `&self` and runs after the draw, so a module that re-read the simulation
+    /// there would be answering a different question from the one the frame was
+    /// drawn from — and would take the tick lock a second time to do it.
+    #[must_use]
+    pub fn board_stats(&self) -> BoardStats {
+        let logic = lock(&self.shared);
+        BoardStats {
+            bricks: logic.bricks.len(),
+            ball_speed: logic.ball_speed,
+        }
     }
 
     /// The paddle's authoritative X position.
@@ -1444,6 +1497,82 @@ mod tests {
             "the ball moved {} where {} was owed",
             (render.ball - before).length(),
             now * h.game.tick_dt_secs(),
+        );
+    }
+
+    /// **A known board renders known rows.** Built by hand rather than played
+    /// into, so the two numbers are distinguishable from each other and from
+    /// the grid's size: a section that printed the bricks twice, or the total
+    /// where the remainder goes, spells something other than `7/40`.
+    #[test]
+    fn the_board_section_renders_the_bricks_left_and_the_speed_it_was_given() {
+        use crcbl::ui::DebugModule as _;
+
+        let stats = BoardStats {
+            bricks: 7,
+            ball_speed: 13.25,
+        };
+        let mut section = crcbl::ui::DebugSection::new("board");
+        stats.debug_section(&mut section);
+        assert_eq!(section.title(), "board");
+        assert_eq!(
+            section.rows(),
+            &[
+                crcbl::ui::DebugRow {
+                    label: "bricks".into(),
+                    value: format!("7/{BRICK_COUNT}"),
+                },
+                crcbl::ui::DebugRow {
+                    label: "ball".into(),
+                    value: "13.25/s".into(),
+                },
+            ],
+            "the board section is exactly these two rows",
+        );
+    }
+
+    /// **And the rows move when the board does.** A fresh grid reads
+    /// `40/40` at the launch speed; play until a brick goes and both rows have
+    /// changed — which is what separates a module reporting the simulation from
+    /// one reporting a default it was constructed with.
+    #[test]
+    fn breaking_a_brick_changes_both_of_the_board_sections_rows() {
+        use crcbl::ui::DebugModule as _;
+
+        let mut h = Harness::new(60, 60);
+        let mut section = crcbl::ui::DebugSection::new("board");
+        h.game.board_stats().debug_section(&mut section);
+        assert_eq!(section.rows().len(), 2);
+        let before: Vec<String> = section.rows().iter().map(|r| r.value.clone()).collect();
+        assert_eq!(
+            before,
+            [
+                format!("{BRICK_COUNT}/{BRICK_COUNT}"),
+                format!("{BALL_SPEED:.2}/s")
+            ],
+            "a fresh board is a whole grid at the launch speed",
+        );
+
+        h.run(0.1, LAUNCH);
+        let broken = play_until_a_brick_breaks(&mut h);
+        let stats = h.game.board_stats();
+        assert_eq!(stats.bricks, BRICK_COUNT - broken as usize);
+
+        // Cleared first, exactly as `DebugPanel::add` clears before handing the
+        // section over: `row` appends, so a re-render into a dirty section is
+        // four rows and not two.
+        section.clear();
+        h.game.board_stats().debug_section(&mut section);
+        assert_eq!(section.rows().len(), 2, "still exactly two rows");
+        let after: Vec<String> = section.rows().iter().map(|r| r.value.clone()).collect();
+        assert_eq!(
+            after[0],
+            format!("{}/{BRICK_COUNT}", BRICK_COUNT - broken as usize),
+            "the brick row must count down",
+        );
+        assert_ne!(
+            after[1], before[1],
+            "{broken} bricks ramped the ball and the row said nothing",
         );
     }
 

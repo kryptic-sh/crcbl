@@ -717,6 +717,56 @@ pub struct RenderState {
     pub death: Option<Death>,
 }
 
+/// Flappy's debug-panel section: what the treadmill is holding, and where the
+/// bird is going.
+///
+/// **The numbers here are the ones the treadmill's correctness rests on.**
+/// `advance_course` is the only place this game creates or destroys entities
+/// after start-up and it runs forever, so [`CourseStats::entities`] read against
+/// [`CourseStats::built`] is the leak: pipes built climbs without bound by
+/// design, and the entity count must not follow it. That relationship is
+/// asserted in this module's tests and was, until this section existed,
+/// unobservable in a running game.
+///
+/// The other three are the flight. [`CourseStats::gap`] is the number the player
+/// is actually aiming at — `gap_centre` of the pipe `score_passed_pipes` has
+/// not counted yet — and [`CourseStats::bird_vy`] is the whole of this game's
+/// physics: one integrated velocity, which a screenshot of an arc cannot be read
+/// back into. The score, the best and the state are the HUD's and are not
+/// repeated.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CourseStats {
+    /// Pipe pairs standing right now.
+    pub pipes: usize,
+    /// Pipes built since this run started. Only ever goes up within a run.
+    pub built: u32,
+    /// Entities the simulation is holding, the bird and both halves of every
+    /// live pipe included.
+    pub entities: usize,
+    /// The centre of the gap through the next pipe the bird can score, or
+    /// `None` when no such pipe is standing.
+    pub gap: Option<f64>,
+    /// The bird's vertical velocity.
+    pub bird_vy: f64,
+}
+
+impl crcbl::ui::DebugModule for CourseStats {
+    fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
+        section.set_title("course");
+        section.row("pipes", format_args!("{}", self.pipes));
+        section.row("built", format_args!("{}", self.built));
+        section.row("entities", format_args!("{}", self.entities));
+        match self.gap {
+            Some(gap) => section.row("gap", format_args!("{gap:+.2}")),
+            // A dash rather than a zero: zero is a perfectly ordinary gap
+            // centre — the middle of the band — and a run with no pipe left to
+            // score must not read as one aimed at the middle.
+            None => section.row_str("gap", "-"),
+        }
+        section.row("bird vy", format_args!("{:+.2}", self.bird_vy));
+    }
+}
+
 pub struct Game {
     pub bird_entity: Entity,
     action_map: ActionMap,
@@ -1061,6 +1111,29 @@ impl Game {
     #[must_use]
     pub fn entity_count(&mut self) -> usize {
         self.session.server_mut().world_mut().entity_count()
+    }
+
+    /// The numbers [`CourseStats`] shows, read in one pass.
+    ///
+    /// Takes `&mut self` because [`Game::entity_count`] does — the entity pool
+    /// is the server's world, not the shared cell — which is why the panel is
+    /// handed a snapshot taken on the frame's own draw rather than reading the
+    /// game itself. Horde's `SceneStats` is the same arrangement.
+    #[must_use]
+    pub fn course_stats(&mut self) -> CourseStats {
+        let entities = self.entity_count();
+        let logic = lock(&self.shared);
+        CourseStats {
+            pipes: logic.pipes.len(),
+            built: logic.next_index,
+            entities,
+            gap: logic
+                .pipes
+                .iter()
+                .find(|pipe| pipe.index == logic.next_score)
+                .map(|pipe| pipe.gap_centre),
+            bird_vy: logic.bird_vel.y,
+        }
     }
 }
 
@@ -1829,6 +1902,116 @@ mod tests {
             "the world peaked at {worst} entities against a window that holds {ceiling}, \
              so pipes are being built and never destroyed"
         );
+    }
+
+    /// **A known course renders known rows**, including the one arm the
+    /// simulation almost never reaches: no pipe left to score.
+    ///
+    /// Built by hand rather than flown into, because the five values have to be
+    /// distinguishable from one another — a section that printed `pipes` where
+    /// `built` goes reads `4` twice, and a game happens to have those equal for
+    /// the whole of its opening.
+    #[test]
+    fn the_course_section_renders_the_numbers_it_was_given() {
+        use crcbl::ui::DebugModule as _;
+
+        let stats = CourseStats {
+            pipes: 4,
+            built: 9,
+            entities: 11,
+            gap: Some(-1.5),
+            bird_vy: 2.25,
+        };
+        let mut section = crcbl::ui::DebugSection::new("course");
+        stats.debug_section(&mut section);
+        assert_eq!(section.title(), "course");
+        assert_eq!(
+            section.rows(),
+            &[
+                row("pipes", "4"),
+                row("built", "9"),
+                row("entities", "11"),
+                row("gap", "-1.50"),
+                row("bird vy", "+2.25"),
+            ],
+            "the course section is exactly these five rows",
+        );
+
+        // No pipe left to score reads as a dash, not as a gap in the middle of
+        // the band — which is what a `0.00` here would be indistinguishable
+        // from.
+        section.clear();
+        CourseStats { gap: None, ..stats }.debug_section(&mut section);
+        assert_eq!(section.rows().len(), 5, "still exactly five rows");
+        assert_eq!(section.rows()[3], row("gap", "-"));
+    }
+
+    /// **And the rows follow the run.** Flying a few seconds passes pipes, so
+    /// the built count climbs, the gap the bird is aiming at changes, and the
+    /// bird has a vertical velocity — while the entity count does not follow
+    /// the built count, which is the treadmill claim this section exists to
+    /// make visible.
+    #[test]
+    fn flying_the_course_moves_the_course_sections_rows() {
+        use crcbl::ui::DebugModule as _;
+
+        let mut harness = Harness::new(60, 60);
+        let opening = harness.game.course_stats();
+        assert!(opening.pipes > 0, "the opening stretch is built up front");
+        assert_eq!(
+            opening.built as usize, opening.pipes,
+            "nothing has been culled yet"
+        );
+        assert_eq!(
+            opening.bird_vy, 0.0,
+            "the bird is held before the first flap"
+        );
+        let first_gap = opening.gap.expect("a pipe is standing to be scored");
+
+        harness.fly_ticks(600);
+        let flown = harness.game.course_stats();
+        assert_eq!(
+            harness.game.state,
+            GameState::Playing,
+            "the autopilot has to still be alive for this to mean anything",
+        );
+        assert!(
+            flown.built > opening.built,
+            "ten seconds built no pipes: {} then {}",
+            opening.built,
+            flown.built,
+        );
+        assert!(
+            flown.entities < opening.entities + flown.built as usize,
+            "the entity count followed the build count, so nothing is being culled",
+        );
+        assert_ne!(
+            flown.gap.expect("a pipe ahead"),
+            first_gap,
+            "the bird passed pipes and is still aiming at the first gap",
+        );
+
+        // And the rendered rows carry those numbers, rather than the section
+        // being right about a struct nobody draws.
+        let mut section = crcbl::ui::DebugSection::new("course");
+        flown.debug_section(&mut section);
+        assert_eq!(section.rows().len(), 5);
+        assert_eq!(section.rows()[0].value, flown.pipes.to_string());
+        assert_eq!(section.rows()[1].value, flown.built.to_string());
+        assert_eq!(section.rows()[2].value, flown.entities.to_string());
+        assert_ne!(
+            section.rows()[3].value,
+            "-",
+            "there is a pipe ahead and the row said there was not",
+        );
+    }
+
+    /// One expected row, spelled once.
+    fn row(label: &str, value: &str) -> crcbl::ui::DebugRow {
+        crcbl::ui::DebugRow {
+            label: label.into(),
+            value: value.into(),
+        }
     }
 
     /// The course a run meets does not depend on how often the frame loop asked
