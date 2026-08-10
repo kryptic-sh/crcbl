@@ -3681,6 +3681,50 @@ committed. **Unverified**: only the `dx12-e2e` job can say whether a frame
 actually records, and `render_e2e.rs` is not wired into that job yet — wiring it
 is the next step, and the first thing that would tell us.
 
+### D3D12's frame is blocked on adapter choice, not on the renderer
+
+**Measured on `dc846ff`.** With `render_e2e.rs` wired into the `dx12-e2e` job,
+the HAL suite passed **155/155 on WARP** and the frame then failed before
+drawing anything:
+
+```
+a GPU backend opens: Hal(Backend("CreateCommittedResource (buffer) failed:
+The GPU device instance has been suspended. Use GetDeviceRemovedReason to
+determine the appropriate action. (0x887A0005)"))
+```
+
+`0x887A0005` is `DXGI_ERROR_DEVICE_REMOVED`, on the first buffer, before a
+frame. So nothing in `ForwardRenderer` was reached and none of the six D3D12
+slices is implicated.
+
+**The cause is that the WARP pin cannot reach this path.** `crcbl::screenshot`
+picks `adapters().first()`, and on that runner the first adapter is not a usable
+device. `crcbl-dx12`'s pin resolves `CRCBL_DX12_ADAPTER` and refuses to fall
+back — but it is `#[cfg(test)]`, so it serves only that crate's own suite. Its
+module doc argues test-only is right because "the seam already publishes every
+adapter and lets the caller choose, so an engine has no use for this". **The
+evidence falsifies that**: the caller that needs to choose lives in a different
+crate, and test-only cannot reach it.
+
+The fix is a design choice worth making deliberately rather than patching:
+
+- **Narrow**: promote the pin to production in `crcbl-dx12` so
+  `CRCBL_DX12_ADAPTER` works everywhere. Smallest, but backend-specific, and
+  `adapters()` returning a reordered list would change what an `AdapterId`
+  denotes.
+- **General**: `crcbl::screenshot` stops taking `.first()` blindly and selects
+  by requested `DeviceType` — a `CRCBL_ADAPTER=cpu|discrete|integrated` pin that
+  works for every backend, mirroring what `CRCBL_VK_ICD` does for Vulkan. More
+  work; removes a class of "which GPU did CI actually use" question that is
+  already noted against `screenshot.rs`
+  (`picks adapters().first() and never reports which one that was`).
+- Either way, **`.first()` with no report is the underlying defect** — it is how
+  a harness silently runs on a different device than intended, which is exactly
+  what the Vulkan ICD pin exists to prevent.
+
+The CI step is removed until this lands, because a step that always fails gates
+nothing. Everything it needs is otherwise in place.
+
 ### What WARP has actually proven
 
 Worth separating from what is merely implemented, because this backend is

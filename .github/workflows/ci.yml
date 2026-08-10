@@ -614,29 +614,24 @@ jobs:
       - name: Drive a D3D12 device pinned to WARP
         shell: bash
         run: crates/crcbl-dx12/tests/run-dx12-e2e.sh
-      # # A frame through ForwardRenderer, on D3D12
+      # # A frame through ForwardRenderer, on D3D12 — blocked on adapter choice
       #
-      # Everything above this line is the D3D12 **HAL**. This is the render
-      # layer: `crates/crcbl/tests/render_e2e.rs` draws the cube scene through
-      # `ForwardRenderer` and compares it against the golden the `vk e2e` job
-      # re-derives on lavapipe. Until the slices below it landed, D3D12 refused
-      # somewhere in `ForwardRenderer::build` — offscreen surfaces, then compute
-      # pipelines, then per-stage DXIL, then indexed and indirect draws, then
-      # dynamic offsets.
+      # This step ran once, on `dc846ff`, and the result was worth more than the
+      # step. The HAL suite above passed **155/155** on WARP in the same job,
+      # and then the frame failed before drawing anything:
       #
-      # **The golden is the risky part, not the frame.** It was blessed on
-      # lavapipe and is compared with `Tolerance::RASTERISER`, calibrated for
-      # the radv/lavapipe difference. WARP is a third rasteriser and nothing
-      # here has measured it. A failure that reports a large pixel delta is a
-      # tolerance question; one that reports a structural mismatch, a blank
-      # frame or a refusal is a real finding about the backend. The comparison
-      # prints both, so the first run distinguishes them.
-      - name: Draw a frame through ForwardRenderer on WARP
-        shell: bash
-        env:
-          CRCBL_GPU: dx12
-          CRCBL_DX12_ADAPTER: warp
-        run: crates/crcbl/tests/run-render-e2e.sh
+      #   a GPU backend opens: Hal(Backend("CreateCommittedResource (buffer)
+      #   failed: The GPU device instance has been suspended. … (0x887A0005)"))
+      #
+      # `0x887A0005` is `DXGI_ERROR_DEVICE_REMOVED`, on the first buffer, before
+      # a frame. **The renderer is not what failed — adapter selection is.**
+      # `crcbl::screenshot` picks `adapters().first()`, and this runner's first
+      # adapter is not a device that works; the HAL suite passes because
+      # `run-dx12-e2e.sh` pins WARP, and that pin is `#[cfg(test)]` inside
+      # `crcbl-dx12`, so it cannot reach a harness in another crate.
+      #
+      # Removed rather than left red: a step that always fails gates nothing. It
+      # comes back with the adapter pin, which `docs/backlog.md` carries.
 
   # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
   # project, the project *compiles*, it lints clean, and it runs its loop
@@ -1042,9 +1037,10 @@ jobs:
       # drawables, so whether macos-26 vends one here is an open question this
       # job deliberately does not gamble on: `--run-ignored all` would sweep
       # the test up and a block would burn the timeout. Every other `#[ignore]`
-      # in the crate is a shader-execution gate and every one of those runs.
-      # The filter lives here rather than in the script because a person on a
-      # real Mac, with a real window server, should run that test.
+      # in the crate is a shader-execution gate; the one further exclusion below
+      # is a quarantine with its own reason, and everything else runs. The
+      # filter lives here rather than in the script because a person on a real
+      # Mac, with a real window server, should run that test.
       #
       # **`--no-fail-fast`, because the first run found a hang and then hid the
       # rest of the answer.** Run 31040839716 stopped at test 45 of 106 and
@@ -1053,7 +1049,7 @@ jobs:
       # surfaces as a `DeviceLost` error rather than a block, so letting the
       # suite finish costs under a second per faulting test.
       #
-      # # The draw tests are held out, and the reason is not the device
+      # # The draw tests were held out, and the reason is not the device
       #
       # Run 31042925024 ran the suite out: **102 passed, 4 failed**, and the
       # four are exactly the tests that make the GPU run a shader. They fault
@@ -1095,6 +1091,49 @@ jobs:
       # `MULTI_DRAW_INDIRECT` and `INDIRECT_FIRST_INSTANCE` with no
       # `supportsFamily:` query behind them.
       #
+      # # This run is the experiment, and either answer is a result
+      #
+      # `crcbl_mtl::command` now emits the **short** selectors —
+      # `drawPrimitives:vertexStart:vertexCount:` and
+      # `drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:`
+      # — for any draw whose instance range is `0..1` with no base vertex.
+      #
+      # Four tests come out of the filter below on that change, because it is
+      # every draw they record:
+      # `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`,
+      # `a_triangle_draw_into_a_bgra_target_paints_the_same_image` and
+      # `the_engines_own_triangle_draws_through_a_bind_group` all draw `0..3`
+      # over `0..1`, and `an_indexed_draw_reads_the_bound_index_range` draws
+      # indices `3..6` with base vertex 0 over `0..1` — its first index rides in
+      # `indexBufferOffset`, which the short selector takes. Nothing else about
+      # the command stream changed, so this run turns on one variable.
+      #
+      # * **They pass** — the long argument forms were the fault. Those four
+      #   come back for good, and `crates/crcbl/tests/render_e2e.rs`'s Metal arm
+      #   is worth re-wiring, though only partly for the same reason: a
+      #   `ForwardRenderer` frame is mixed, with `crcbl_render::forward`'s
+      #   tonemap draw and `crcbl_render::ui_pass`'s indexed one on the short
+      #   form and the forward pass's `draw_indexed_indirect` on a selector this
+      #   change does not touch.
+      # * **They still fault** — the last standing candidate from
+      #   `docs/backlog.md` is eliminated, the argument form is not it, and this
+      #   comment should say so before the tests go back behind the filter.
+      #
+      # Nothing was verified locally: there is no Metal device on this team's
+      # machines, `cargo check --target aarch64-apple-darwin` compiles without
+      # executing, and the only local test of the change is a unit test in
+      # `crcbl_mtl::draw` over the predicate that picks the form. **This job is
+      # the first thing that runs it.**
+      #
+      # **`a_multi_draw_indirect_emits_every_argument_structure` stays behind
+      # the filter, and not out of caution.** The indirect selectors —
+      # `drawPrimitives:indirectBuffer:indirectBufferOffset:` and its indexed
+      # sibling — have no short form at all: every argument they take is
+      # load-bearing, so that path's encoder calls are byte-identical to the run
+      # in which it faulted. Releasing it would guarantee a red job whichever
+      # way the experiment goes, for a reason this change cannot have altered,
+      # and a job that is red either way reports nothing.
+      #
       # One name in the list is older and unrelated:
       # `a_layer_swapchain_acquires_a_drawable_and_presents_it` is `#[ignore]`d
       # because a detached `CAMetalLayer` in a headless container vends no
@@ -1102,14 +1141,10 @@ jobs:
       # would block rather than fault, so `--run-ignored all` sweeping it up
       # would burn the timeout. A person with a real window server runs it,
       # which is why the filter lives here and not in the script.
-      - name: Run the Metal suite, minus the draws that fault on this device
+      - name: Run the Metal suite, with the short-form draws released
         run: >-
           crates/crcbl-mtl/tests/run-mtl-e2e.sh --no-fail-fast -E 'not
           (test(a_layer_swapchain_acquires_a_drawable_and_presents_it) +
-          test(a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear) +
-          test(a_triangle_draw_into_a_bgra_target_paints_the_same_image) +
-          test(the_engines_own_triangle_draws_through_a_bind_group) +
-          test(an_indexed_draw_reads_the_bound_index_range) +
           test(a_multi_draw_indirect_emits_every_argument_structure))'
 
       # # The renderer on Metal: measured, and blocked by this runner
@@ -1138,9 +1173,10 @@ jobs:
       # removed because it duplicates a signal the quarantined tests already
       # give, and a step that can only be red gates nothing while reading as
       # coverage — not because the answer is unobtainable. The test stays and
-      # runs on `vk` and `wgpu`; it comes back here with the four above the
-      # moment the draw stream is fixed. `docs/backlog.md` carries the surviving
-      # candidate and the one-run experiment that settles it.
+      # runs on `vk` and `wgpu`; it comes back here the moment the draw stream
+      # is fixed. The short-form experiment above is what decides that, and this
+      # step stays out of it so the run turns on one change and one set of
+      # tests. `docs/backlog.md` carries the surviving candidate.
       # The same artifact the `vk e2e` job uploads, and wanted here for a
       # stronger reason: nobody on this team has a Mac, so a golden mismatch on
       # Metal is otherwise three numbers with no picture behind them. The
