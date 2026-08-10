@@ -1064,6 +1064,20 @@ jobs:
           # `vulkan-icd.sh` makes for the ICD, one level up. The loader honours
           # it on Windows exactly as it does elsewhere.
           Add-Content -Path $env:GITHUB_ENV -Value "VK_LAYER_PATH=$($manifest.DirectoryName)"
+          # **The registry, because this runner is elevated.** The loader prints
+          # "Loader is running with elevated permissions. Environment variable
+          # VK_LAYER_PATH will be ignored" and does the same for
+          # VK_DRIVER_FILES, VK_ICD_FILENAMES and VK_ADD_DRIVER_FILES — it
+          # discards every environment path when the process has elevated
+          # privileges, deliberately, so a lower-privileged caller cannot inject
+          # a DLL into one. GitHub's Windows runners are elevated, so no shell
+          # and no path form was ever going to work. What the loader does read
+          # while elevated is HKLM, which is where a normally-installed driver
+          # registers itself.
+          New-Item -Path 'HKLM:\SOFTWARE\Khronos\Vulkan\ExplicitLayers' -Force | Out-Null
+          New-ItemProperty -Path 'HKLM:\SOFTWARE\Khronos\Vulkan\ExplicitLayers' `
+            -Name $manifest.FullName -PropertyType DWord -Value 0 -Force | Out-Null
+          Write-Host "crcbl vk e2e (windows): registered layer $($manifest.FullName)"
       # The archive is `bin/`, `lib/` and `share/vulkan/icd.d/` with no wrapping
       # directory, and the manifest's `library_path` climbs three levels out of
       # `share/vulkan/icd.d` to reach `bin` — so extracting it anywhere as a
@@ -1117,6 +1131,16 @@ jobs:
           # `[ -f ]` takes only that spelling. `run-vk-e2e.ps1` has no such
           # constraint, so nothing here converts a path any more.
           Add-Content -Path $env:GITHUB_ENV -Value "VK_DRIVER_FILES=$icd"
+          # Registered for the same reason the layer is: an elevated loader
+          # ignores VK_DRIVER_FILES. The variable stays set so a future
+          # non-elevated runner keeps working and so the harness can still print
+          # what it was asked for, but HKLM is what actually selects lavapipe
+          # here. `CRCBL_VK_EXPECT_ADAPTER` is what proves which one answered,
+          # and it is now the only thing that can.
+          New-Item -Path 'HKLM:\SOFTWARE\Khronos\Vulkan\Drivers' -Force | Out-Null
+          New-ItemProperty -Path 'HKLM:\SOFTWARE\Khronos\Vulkan\Drivers' `
+            -Name $icd -PropertyType DWord -Value 0 -Force | Out-Null
+          Write-Host "crcbl vk e2e (windows): registered driver $icd"
           Add-Content -Path $env:GITHUB_ENV -Value "VK_ICD_FILENAMES=$icd"
           Add-Content -Path $env:GITHUB_ENV -Value "CRCBL_VK_ICD=$icd"
       # **`CRCBL_VK_EXPECT_ADAPTER` is what makes the pin a check.**

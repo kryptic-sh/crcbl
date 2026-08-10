@@ -3642,55 +3642,55 @@ Things worth carrying out of this investigation:
 since the fix. If they pass, `crcbl-mtl` has working draws in CI for the first
 time and the Metal arm of `render_e2e.rs` becomes worth wiring.
 
-### Vulkan on Windows: restored, on pwsh, with one measurement retracted
+### Vulkan on Windows: the loader ignores its environment when elevated
 
-**Retraction first.** This entry previously said: "`VK_LOADER_DEBUG=all`
-produced no loader debug output whatever. A loader ignoring its own debug switch
-is not reading its environment at all — so the variables are not reaching the
-process." **That is wrong, and the error was mine.** `VK_LOADER_DEBUG: all` was
-inserted by matching the first step named `Run the suite against lavapipe` — and
-**both** the Linux and Windows jobs have a step with that exact name, so it
-landed in the Linux one (`06dbf26`, line 762, inside `vk-e2e:` which spans
-719–904; `vk-e2e-windows:` starts at 905). The Windows job never had the switch
-set. `windows_read_data_files_in_registry: Registry lookup failed` is a warning
-the loader emits at its default level anyway.
+**The cause, in the loader's own words** (`44bdf32`, with `VK_LOADER_DEBUG=all`
+finally on the right job):
 
-So the bash-to-native environment hypothesis is **back to being a hypothesis**.
-What is actually known is only that the loader reported falling back to the
-registry — equally consistent with it reading `VK_DRIVER_FILES` and declining
-every driver in it.
+```
+[Vulkan Loader] INFO: Loader is running with elevated permissions.
+                      Environment variable VK_DRIVER_FILES will be ignored
+                      … VK_ICD_FILENAMES will be ignored
+                      … VK_ADD_DRIVER_FILES will be ignored
+                      … VK_LAYER_PATH will be ignored
+[Vulkan Loader] ERROR | DRIVER: vkCreateInstance: Found no drivers!
+```
 
-**What is still established, all measured:** `windows-latest` ships no loader
-and no driver; the job installs a pinned SDK and a pinned lavapipe and verifies
-both arrived, including resolving the manifest's relative `library_path`; it
-selects all **74** tests; and every guard reported truthfully across three runs.
+**GitHub's Windows runners run elevated, and the Vulkan loader discards every
+environment-variable driver and layer path when the process has elevated
+privileges** — deliberately, so a lower-privileged caller cannot inject a DLL
+into one. `VK_DRIVER_FILES` was set correctly the entire time and the loader was
+throwing it away by design. No shell and no path form was ever going to work:
+neither the `cygpath -w` fix nor the move to `pwsh` could have mattered.
 
-**The job is restored on `shell: pwsh`**, with a `run-vk-e2e.ps1` following
-`run-win32-e2e.ps1`'s shape. `run-vk-e2e.sh` and `vulkan-icd.sh` are byte-
-identical to before — Linux is untouched and still passes 74. `VK_LOADER_DEBUG`
-now sits on the Windows job, so both the shell change and a working debug switch
-land in one round, because each round trip is an hour.
+**The fix is registry registration** — `HKLM\SOFTWARE\Khronos\Vulkan\Drivers`
+for the ICD and `…\ExplicitLayers` for the validation layer, each a `DWORD 0`
+named by the manifest's full path. That is where a normally-installed driver
+registers itself and what an elevated loader still reads.
 
-pwsh is now **closer to a control than to a fix**: it removes a whole class of
-doubt for one line of workflow change, but the evidence that pointed at the
-environment evaporated with the retraction.
+**`CRCBL_VK_EXPECT_ADAPTER` is now the only thing that can prove which driver
+answered**, since the pin no longer works through the environment. It was worth
+building for exactly this.
 
-**Next-most-likely failures, in order:** the loader reads the manifest and
-declines the driver (this Mesa build's `api_version` against this SDK's loader,
-or an unsatisfied `vulkan_lvp.dll` dependency) — `VK_LOADER_DEBUG` will finally
-say which, and that is the main thing this round buys; then the goldens, whose
-`Tolerance::RASTERISER` was calibrated radv-versus-one-lavapipe and is
-**unmeasured between two lavapipe builds**; then the LunarG layer not reporting
-the record-time hazard `validation_gate` requires.
+Three rounds of diagnosis went to two causes that were real but not sufficient
+(the `C:/…` path form; variables not crossing from Git Bash) and one that was
+never measured at all — see the retraction below. **The loader could have said
+this on round one.** `VK_LOADER_DEBUG` cost one line and answered immediately
+once it was set on the job being debugged.
 
-**Owed:** two harnesses now cover one suite, and their guards are duplicated
-knowledge that will drift the first time one side gains a check.
+**Retracted, and the error was mine:** an earlier version of this entry
+concluded "a loader ignoring its own debug switch is not reading its
+environment". The switch had been inserted by matching the first step named
+`Run the suite against lavapipe`, and both the Linux and Windows jobs have a
+step with that name, so it landed on Linux. That conclusion was drawn from a
+variable never set on the job it described.
 
-**The general lesson, and it has now cost twice.** A scripted edit that matches
-the first occurrence of a string will silently target the wrong one when the
-string is not unique — the same shape as the earlier span-replacement that
-deleted a neighbouring entry from this file. Anchor on something unique, or
-verify where the edit landed before reporting on what it measured.
+**Still unknown after this fix:** whether the goldens hold.
+`Tolerance::RASTERISER` was calibrated radv-versus-one-lavapipe and this is a
+second, Windows Mesa build — unmeasured between two lavapipes.
+
+**Owed:** `run-vk-e2e.ps1` and `run-vk-e2e.sh` are two harnesses over one suite,
+and their guards are duplicated knowledge that will drift.
 
 ### Metal draw coverage in CI: what the ecosystem does
 
