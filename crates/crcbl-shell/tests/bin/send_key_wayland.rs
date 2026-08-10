@@ -1,7 +1,7 @@
 //! Types keys into whatever the compositor has focused — a *different* process.
 //!
 //! ```text
-//! crcbl-e2e-key < a stream of evdev codes, one per line
+//! crcbl-e2e-wayland-key < a stream of evdev codes, one per line
 //! ```
 //!
 //! **Compiled only with the `wayland-e2e` feature**, which nothing but
@@ -9,6 +9,12 @@
 //! test target because the thing it drives is another program: the sandbox
 //! running under the same sway, whose `F11` handler is the one path in the
 //! display-mode story that no in-process test can reach.
+//!
+//! The Wayland member of this directory's key-sender family, alongside
+//! `tests/bin/send_key_x11.rs` and `tests/bin/send_input_win32.rs`. The name
+//! carries the window system because the three are not interchangeable: each
+//! reaches a running game by its own mechanism and is gated behind its own
+//! backend's feature, so a build with one suite on does not compile the others.
 //!
 //! # Why a whole process, and why it does not steal focus
 //!
@@ -70,7 +76,7 @@ use crcbl_shell::{LogicalSize, ShellBackend, WindowDesc, open_backend};
 #[cfg(not(target_os = "linux"))]
 fn main() -> ExitCode {
     eprintln!(
-        "crcbl-e2e-key: Wayland is a Linux window system; there is no seat here to plug \
+        "crcbl-e2e-wayland-key: Wayland is a Linux window system; there is no seat here to plug \
          a keyboard into"
     );
     ExitCode::FAILURE
@@ -86,7 +92,7 @@ fn main() -> ExitCode {
     let mut shell = match open_backend(ShellBackend::Wayland) {
         Ok(shell) => shell,
         Err(error) => {
-            eprintln!("crcbl-e2e-key: no compositor: {error}");
+            eprintln!("crcbl-e2e-wayland-key: no compositor: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -99,7 +105,7 @@ fn main() -> ExitCode {
     }) {
         Ok(window) => window,
         Err(error) => {
-            eprintln!("crcbl-e2e-key: could not create a window: {error}");
+            eprintln!("crcbl-e2e-wayland-key: could not create a window: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -107,7 +113,7 @@ fn main() -> ExitCode {
     let input = match VirtualInput::attach(&*shell, window) {
         Ok(input) => input,
         Err(error) => {
-            eprintln!("crcbl-e2e-key: no virtual devices: {error}");
+            eprintln!("crcbl-e2e-wayland-key: no virtual devices: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -124,7 +130,7 @@ fn main() -> ExitCode {
         let line = match line {
             Ok(line) => line,
             Err(error) => {
-                eprintln!("crcbl-e2e-key: could not read stdin: {error}");
+                eprintln!("crcbl-e2e-wayland-key: could not read stdin: {error}");
                 return ExitCode::FAILURE;
             }
         };
@@ -133,7 +139,7 @@ fn main() -> ExitCode {
             continue;
         }
         let Ok(evdev) = code.parse::<u32>() else {
-            eprintln!("crcbl-e2e-key: {code:?} is not an evdev code (KEY_F11 is 87)");
+            eprintln!("crcbl-e2e-wayland-key: {code:?} is not an evdev code (KEY_F11 is 87)");
             return ExitCode::from(2);
         };
         input.tap(evdev);
@@ -151,6 +157,6 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 fn say(what: &str) {
     let mut out = std::io::stdout().lock();
-    let _ = writeln!(out, "crcbl-e2e-key: {what}");
+    let _ = writeln!(out, "crcbl-e2e-wayland-key: {what}");
     let _ = out.flush();
 }

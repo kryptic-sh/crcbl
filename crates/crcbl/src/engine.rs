@@ -3272,7 +3272,7 @@ pub struct LoopConfig {
 ///
 /// `apps/bare` drives the same public pieces — [`GpuContext`], [`Pending`],
 /// [`FrameBudget`] — with a loop it writes itself, and
-/// `crates/crcbl/tests/library_seam.rs` guards that path. A game that wants the
+/// `crates/crcbl/tests/seam_from_outside.rs` guards that path. A game that wants the
 /// frame back takes it; this type is the default, not the toll gate.
 pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     shell: Box<S>,

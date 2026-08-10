@@ -389,7 +389,7 @@ measuring ${mean_ms} ms a frame"
 # which a creation-time flag touches.
 #
 # Nothing in-process can drive it. The sample is a separate program, so the key
-# has to be a real one: `tests/bin/send_key.rs` builds a
+# has to be a real one: `tests/bin/send_key_wayland.rs` builds a
 # `zwp_virtual_keyboard_v1` on this compositor's seat and taps it, and the
 # keystroke then goes through sway's whole input path — focus, serials, XKB —
 # before reaching the sandbox, which cannot tell it from a physical keyboard.
@@ -433,7 +433,7 @@ run_sandbox_toggle() {
     # holding the window the next step is waiting on. The sandbox gets no frame
     # budget either — it runs until the window closes, which is what a player's
     # session is.
-    for binary in sandbox crcbl-e2e-key; do
+    for binary in sandbox crcbl-e2e-wayland-key; do
         if [ ! -x "${BIN_DIR}/${binary}" ]; then
             echo "crcbl e2e: ${BIN_DIR}/${binary} was not built" >&2
             exit 1
@@ -444,12 +444,12 @@ run_sandbox_toggle() {
     # docs for why typing straight after the hotplug loses the key.
     rm -f "$keys_in"
     mkfifo "$keys_in"
-    "${BIN_DIR}/crcbl-e2e-key" <"$keys_in" >"$keys_log" 2>&1 &
+    "${BIN_DIR}/crcbl-e2e-wayland-key" <"$keys_in" >"$keys_log" 2>&1 &
     local keys_pid=$!
     # Holds the write end open, so the sender blocks on an empty stream instead
     # of seeing EOF from the first writer that finishes.
     exec 9>"$keys_in"
-    wait_for_line "the key sender to plug in a keyboard" "$keys_log" "crcbl-e2e-key: ready"
+    wait_for_line "the key sender to plug in a keyboard" "$keys_log" "crcbl-e2e-wayland-key: ready"
 
     CRCBL_SHELL=wayland \
     CRCBL_VK_VALIDATION=1 \
@@ -532,7 +532,7 @@ if [ -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || [ -e /usr/lib/libvulkan.so
     # And the switch between them, which neither of those two makes.
     cargo build --locked --quiet --package sandbox
     cargo build --locked --quiet --package crcbl-shell \
-        --features wayland-e2e --bin crcbl-e2e-key
+        --features wayland-e2e --bin crcbl-e2e-wayland-key
     run_sandbox_toggle vk
 else
     echo "crcbl e2e: no Vulkan loader; skipping the vk sandbox pass" >&2

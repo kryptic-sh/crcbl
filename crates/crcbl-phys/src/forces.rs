@@ -239,7 +239,7 @@ impl ForceProvider for DampingForce {
 /// v_n = (T/k)·(1 - (1 - k·dt/m)^n)
 /// ```
 ///
-/// which is what `crates/crcbl-phys/tests/property.rs` checks it against.
+/// which is what `crates/crcbl-phys/tests/dynamics.rs` checks it against.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ThrustForce {
     /// Thrust magnitude in newtons.

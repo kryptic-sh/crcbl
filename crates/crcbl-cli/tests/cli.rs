@@ -1,11 +1,23 @@
-//! End-to-end tests of the `crcbl` binary that do not compile anything.
+//! The `crcbl` binary, run for everything that does not need a compiler.
 //!
 //! These run in the ordinary suite on every platform: they invoke the real
 //! binary, assert the exit-code contract and the `--json` shapes, and scaffold
-//! into a temporary directory. What they deliberately do *not* do is build the
-//! scaffolded project — that takes a full engine compile, so it lives in
-//! `cli_e2e.rs` behind the `cli-e2e` feature and its own CI job, exactly as the
-//! shell crate's two display-dependent suites do.
+//! into a temporary directory.
+//!
+//! # The split from `cli_e2e.rs` is compile cost, not depth
+//!
+//! Both files are end to end — both spawn the shipped binary and judge it by
+//! what a user sees. The line between them is that `cli_e2e.rs` goes on to
+//! *build* the project `crcbl new` scaffolds, and building a scaffold means
+//! building the whole engine behind it. Minutes, not milliseconds. So that half
+//! sits behind the `cli-e2e` feature with a CI job of its own, and this half
+//! stays in the run a developer does on every change, exactly as the shell
+//! crate's two display-dependent suites are split from its ordinary one.
+//!
+//! The names would be clearer the other way around, and are not being swapped:
+//! `cli_e2e` follows the `<subject>_e2e.rs` convention every gated, harness-
+//! driven suite in this workspace uses, and that convention is worth more than
+//! this one pair reading precisely.
 //!
 //! `docs/plan/12-testing.md` calls the CLI "the e2e substrate: if it can't be
 //! tested without a GUI, it's built wrong". These are the tests that make that

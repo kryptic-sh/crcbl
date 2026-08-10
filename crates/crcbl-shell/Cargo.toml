@@ -36,8 +36,8 @@ crcbl-wl-scanner = { workspace = true }
 # auto-discovery — a `tests/*.rs` file would also become an integration test
 # target with nothing in it.
 [[bin]]
-name = "crcbl-e2e-key"
-path = "tests/bin/send_key.rs"
+name = "crcbl-e2e-wayland-key"
+path = "tests/bin/send_key_wayland.rs"
 required-features = ["wayland-e2e"]
 
 # The X11 counterpart, and separate rather than one binary with a flag: the two

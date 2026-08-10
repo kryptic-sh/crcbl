@@ -19,8 +19,8 @@ is the e2e substrate: if it can't be tested without a GUI, it's built wrong.
 **Property tests are not all `proptest`, and that is fine.** `proptest` is a
 dependency of `crcbl-core` alone, where it guards `WorldPos` rebase and pool
 handle invalidation. Everywhere else the property suites are hand-written loops
-over a seeded generator — `crates/crcbl-phys/tests/churn.rs` and
-`crates/crcbl-phys/tests/property.rs` are the two the anchor list below points
+over a seeded generator — `crates/crcbl-phys/tests/broadphase_churn.rs` and
+`crates/crcbl-phys/tests/dynamics.rs` are the two the anchor list below points
 at. What a property test owes is a generator, a shrink story and a seed you can
 replay, not a particular crate; and where the input is a long _sequence_ of
 operations checked against a brute-force oracle, an explicit loop states the
@@ -186,8 +186,11 @@ system already knows and nothing about what is inside. Anything under `tests/`
 is an integration target by definition, so the name is spent on a fact you get
 for free, and the file becomes the place unrelated tests accumulate because
 nothing in its name says they do not belong.
-`crates/crcbl-server/tests/integration.rs` is the one that carries it; its `//!`
-header does the work the name should.
+`crates/crcbl-server/tests/integration.rs` was the one file carrying it, and it
+is now `client_server_session.rs` — named for the handshake, resume and
+replication it actually asserts. No file in the workspace carries a tier name
+today, which is the state to keep rather than a rule with nothing left to point
+at.
 
 **Every file in a `tests/` directory carries a `//!` header** saying what it
 covers _and why it is a separate target_ — the second half is the one that gets

@@ -7,7 +7,7 @@
 //!
 //! **Compiled only with the `x11-e2e` feature**, which nothing but
 //! `tests/run-x11-e2e.sh` turns on. The X11 counterpart of
-//! `tests/bin/send_key.rs`, and a `[[bin]]` for the same reason: the thing it
+//! `tests/bin/send_key_wayland.rs`, and a `[[bin]]` for the same reason: the thing it
 //! drives is another program — the sandbox running against the same display,
 //! whose `F11` handler is the one part of the display-mode story no in-process
 //! test can reach.

@@ -1,7 +1,15 @@
-//! Property-level integration tests for the physics dynamics pipeline.
+//! The dynamics pipeline: force providers, the integrator, and what falls out
+//! of running them for a long time.
 //!
-//! These verify emergent physical behaviour — terminal velocity, energy
-//! drift bounds, determinism — that simple unit tests cannot capture.
+//! These verify emergent physical behaviour — terminal velocity, energy drift
+//! bounds, determinism — that simple unit tests cannot capture, which is why
+//! they are a target of their own rather than a `#[cfg(test)]` module beside
+//! `PhysicsSystem`: the claim is about a long run of the assembled pipeline,
+//! not about any one call into it.
+//!
+//! Both files in this directory are property tests, so "property" is not what
+//! distinguishes them — this one is the integrator, `broadphase_churn.rs` is
+//! the BVH and the overlap queries.
 
 use crcbl_phys::{
     DampingForce, DragForce, ForceProvider, GravityForce, PhysicsSystem, RigidBody, ThrustForce,

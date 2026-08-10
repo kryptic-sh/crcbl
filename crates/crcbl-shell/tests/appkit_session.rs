@@ -144,6 +144,25 @@
 //! *listing* step runs the whole session and then fails to parse it; that is how
 //! this target broke three CI jobs at once on the run that introduced it. The
 //! listing is therefore answered in [`main`] before anything else happens.
+//!
+//! # Why it is not called `appkit_e2e`
+//!
+//! By subject it belongs with `tests/wayland_e2e.rs`, `tests/x11_e2e.rs` and
+//! `tests/win32_e2e.rs`: it is the macOS member of that family, driving a real
+//! WindowServer and injecting real input. The name stops short of `_e2e` on
+//! purpose, because in this crate that suffix has come to carry a second
+//! meaning the reader relies on — every other `*_e2e.rs` here opens with a
+//! crate-level `#![cfg(all(target_os = …, feature = "…-e2e"))]`, carries
+//! `#[ignore]`, and is driven by a harness script of its own. None of that is
+//! true of this file. It is behind no feature, it is not ignored, and the
+//! ordinary `build + test (macos-latest)` sweep runs it.
+//!
+//! That is not an oversight to be tidied up later; it is the reason the target
+//! exists. `.github/workflows/ci.yml` says so at its AppKit step: this is the
+//! *only* executable coverage the AppKit backend has, so a gate would mean the
+//! backend had none by default. A name promising a switch nobody has to throw
+//! would be the more expensive kind of wrong — the reader would go looking for
+//! the feature that turns it on and conclude, wrongly, that it is off.
 
 /// The one test this target contains, under the name `nextest` reports it by.
 const TEST_NAME: &str = "appkit_session";

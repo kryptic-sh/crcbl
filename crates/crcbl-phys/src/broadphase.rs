@@ -28,7 +28,7 @@
 //! The rotation is what makes tree quality a property rather than a hope: the
 //! surface area heuristic alone degenerates when elements pile into the same
 //! region, because then every candidate site costs the same. [`Bvh::depth`] is
-//! the observable, and `crates/crcbl-phys/tests/churn.rs` bounds it across
+//! the observable, and `crates/crcbl-phys/tests/broadphase_churn.rs` bounds it across
 //! thousands of operations including that degenerate input.
 
 use crate::collider::Aabb;
@@ -632,7 +632,7 @@ impl Bvh {
     /// This is the tree-quality observable: query cost is bounded by how far a
     /// traversal can descend, so a depth that grows past `O(log n)` under churn
     /// is the shape of degradation, and this is what
-    /// `crates/crcbl-phys/tests/churn.rs` asserts a bound on. It walks the
+    /// `crates/crcbl-phys/tests/broadphase_churn.rs` asserts a bound on. It walks the
     /// whole tree — `O(n)` — so it is for tests and diagnostics, not for a
     /// per-frame check.
     #[must_use]

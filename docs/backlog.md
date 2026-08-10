@@ -682,8 +682,9 @@ system} × {honoured, refused} is now executed by a harness on both Wayland
 (`run-wayland-e2e.sh`) and X11 (`run-x11-e2e.sh`, with and without
 `CRCBL_E2E_X11_WM`) — and the X11 F11 pass asserts the summary line's extent
 after a clean `WM_DELETE_WINDOW` close as well as the engine's own mode line.
-`crates/crcbl-shell/tests/bin/send_key.rs` and `send_key_x11.rs` are what drive
-`F11` at a running sample from outside its process. What is still uncovered:
+`crates/crcbl-shell/tests/bin/send_key_wayland.rs` and `send_key_x11.rs` are
+what drive `F11` at a running sample from outside its process. What is still
+uncovered:
 
 - **The null GPU backend is excluded from every mode assertion, and correctly.**
   It presents by doing nothing, so no `wl_buffer` is attached, so the surface
@@ -717,7 +718,7 @@ consequences that cost a round trip each if you do not know them:
   feature-gated helper whose `use` resolves only on Linux compiles nowhere else.
   Give it a `#[cfg(not(target_os = "linux"))] fn main` that fails and says why,
   rather than a `cfg` that quietly compiles it to nothing —
-  `crates/crcbl-shell/tests/bin/send_key.rs` is the worked example.
+  `crates/crcbl-shell/tests/bin/send_key_wayland.rs` is the worked example.
 - **Rustdoc is the only gate that notices a public type nobody exported.** A
   `pub` field whose type is `pub` inside a private module is readable and
   unnameable: a consumer can get the value out and cannot write it down.
@@ -4169,3 +4170,58 @@ no shell-lint or script job to hang it on —
 `grep -n shellcheck .github/workflows/` matches nothing — and adding one was
 outside the paths that slice owned. Until it is wired in, the guard's own test
 is a file somebody has to remember to run.
+
+## Test-file names: what the rename slice left, and one rename declined
+
+The naming slice took `docs/plan/12-testing.md`'s "filenames name the subject,
+never the taxonomy tier" and applied it to nine files. What it could not close,
+and one thing it deliberately did not do:
+
+**`crates/crcbl-shell/tests/appkit_session.rs` is not renamed to `appkit_e2e.rs`
+— considered and declined.** By subject it is the macOS member of the family
+`wayland_e2e.rs` / `x11_e2e.rs` / `win32_e2e.rs` belong to: a real WindowServer,
+a real window, injected input. But in this workspace the `_e2e` suffix carries a
+second meaning beyond the subject — every other file wearing it opens with a
+crate-level `#![cfg(all(target_os = …, feature = "…-e2e"))]`, carries
+`#[ignore]`, and is driven by its own harness script. `appkit_session.rs` has
+none of that, and cannot: `.github/workflows/ci.yml`'s AppKit step records that
+this target is the AppKit backend's _only_ executable coverage, so putting it
+behind a gate would leave the backend with none by default. A name promising a
+switch nobody has to throw is the more expensive error — the reader goes looking
+for the feature that enables it and concludes it is off. The file's `//!` header
+now argues this under "Why it is not called `appkit_e2e`", so the question does
+not get re-opened from the filename alone. If the suffix ever stops implying a
+gate, the rename becomes correct and the header is where to look.
+
+**Stale path references left behind, all in files that slice did not own.** Each
+is prose in a code span, not an intra-doc link, so nothing fails to build and
+`cargo doc` stays green — they are simply wrong and will send a reader to a file
+that is not there:
+
+- `crates/crcbl-phys/src/broadphase.rs` names `tests/churn.rs` twice (module
+  header and the depth-bound doc comment); it is now
+  `tests/broadphase_churn.rs`.
+- `crates/crcbl-phys/src/forces.rs` names `tests/property.rs`; it is now
+  `tests/dynamics.rs`.
+- `crates/crcbl/src/engine.rs` names `tests/library_seam.rs` in the doc comment
+  about the hand-driven loop; it is now `tests/seam_from_outside.rs`.
+- `docs/plan/12-testing.md` names `tests/churn.rs` and `tests/property.rs` in
+  its seeded-generator paragraph, and names
+  `crates/crcbl-server/tests/integration.rs` as the one file carrying a taxonomy
+  tier for a name. That example is now spent — the file is
+  `client_server_session.rs` — so the paragraph needs rewriting rather than a
+  path substitution, and there is no remaining file in the workspace to point at
+  as the counter-example.
+- `docs/code-review.md` cites `crates/crcbl-server/tests/integration.rs:15` and
+  `crates/crcbl-audio/tests/orbit.rs:191`. That file is a dated record of past
+  reviews, so leaving the paths as they were written may be right; the decision
+  was not made either way.
+
+**Test _names_ inside these files were not touched.** `docs/plan/12-testing.md`
+records six crates as drifted below the prose-sentence-name convention —
+`crcbl-ecs`, `crcbl-net`, `crcbl-input`, `crcbl-phys`, `crcbl-audio` and
+`crcbl-store`. Two of the renamed files sit in that set and show it:
+`crates/crcbl-audio/tests/spatial_chain.rs` still has
+`centre_position_is_symmetric` and `right_position_pans_to_right`, and
+`orbit_cue_changes_over_time` now names a fixture the file is no longer named
+after. Renaming the functions is a separate task and stays unclaimed.

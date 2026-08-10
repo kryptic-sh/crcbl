@@ -1,9 +1,20 @@
-//! Integration test — real `crcbl_server::Server` ↔ `crcbl_client::Client`
-//! over an in-memory transport pair.
+//! A whole client/server session: handshake, resume, replication — a real
+//! `crcbl_server::Server` against a real `crcbl_client::Client` over an
+//! in-memory transport pair.
 //!
 //! Verifies that the shipped wiring (not hand-rolled mocks) survives a
 //! multi-tick exchange: the server emits delta-encoded snapshots, the client
 //! applies them, acks, and the server advances its baseline accordingly.
+//!
+//! # Why it is a separate target
+//!
+//! It is the only place the two crates meet, and it compiles as a **separate
+//! crate**, so it reaches `Server` and `Client` through exactly the surface a
+//! game reaches them through — no `pub(crate)` shortcut into either one's
+//! session state, no `#[cfg(test)]` constructor. Every `Hello`, token and
+//! snapshot below therefore travels the shipped path, encoders and all. An
+//! in-crate module could reach past all of that and would stop noticing when
+//! the public wiring drifted from the private state it was checking.
 
 use crcbl_client::Client;
 use crcbl_core::TickId;

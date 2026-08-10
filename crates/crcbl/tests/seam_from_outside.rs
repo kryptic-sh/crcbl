@@ -1,4 +1,9 @@
-//! The public library seam: what a consumer can reach, and whether it is enough.
+//! The `crcbl` seam, exercised the way a real consumer will exercise it: what a
+//! game can reach through the umbrella, and whether it is enough.
+//!
+//! The third file under that name — `crcbl-hal` and `crcbl-shell` each have one
+//! — because all three answer the same question about a different crate, and one
+//! shared name is what makes that legible in a nextest log and a grep.
 //!
 //! # Why this is an integration test and not a unit test
 //!

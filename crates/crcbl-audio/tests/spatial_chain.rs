@@ -1,7 +1,22 @@
-//! Grammar-trainer integration tests: full spatial cue → mixer chain.
+//! The full spatial cue → mixer chain, end to end.
 //!
-//! These exercise the audio pipeline end-to-end: emitter orbiting the
-//! listener produces deterministic, spatially correct stereo output.
+//! An emitter's world position becomes a cue, the cue drives a voice, and the
+//! voices mix down to stereo. These hold the whole chain to being spatially
+//! correct (centre is symmetric, right pans right) and deterministic (the same
+//! event stream hashes the same, and a reordered one does not).
+//!
+//! # Why it is a separate target
+//!
+//! Every step above is a `pub` item — `compute_cue`, `CueGrammar`, `SoundBank`,
+//! `Mixer` — and the claim is about the *seam between* them, not about any one.
+//! Compiling as a separate crate is what keeps it that way: an in-crate module
+//! could drive the mixer past the cue stage, which is the join most likely to
+//! break.
+//!
+//! Circular motion is the input several of these use, because it sweeps every
+//! pan position without a table of hand-picked ones. It is a fixture, not the
+//! subject — the file is not about orbits, and "orbit" in this workspace is
+//! `docs/plan/12-testing.md`'s anchor term for `crcbl-phys`'s analytic cases.
 
 use crcbl_audio::AudioSource;
 use crcbl_audio::event::AudioEvent;

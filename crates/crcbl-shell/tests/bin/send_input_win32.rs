@@ -7,8 +7,9 @@
 //!
 //! **Compiled only with the `win32-e2e` feature**, which nothing but
 //! `tests/run-win32-e2e.ps1` turns on. The Windows counterpart of
-//! `tests/bin/send_key.rs` and `tests/bin/send_key_x11.rs`, and a `[[bin]]` for
-//! the same reason those are: the thing it drives is another program.
+//! `tests/bin/send_key_wayland.rs` and `tests/bin/send_key_x11.rs`, and a
+//! `[[bin]]` for the same reason those are: the thing it drives is another
+//! program.
 //!
 //! # Why this cannot be a function in the test
 //!

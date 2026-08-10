@@ -1,4 +1,8 @@
-//! Property tests for dynamic broadphase churn.
+//! The broadphase held to its bounds across a long sequence of spawns and kills.
+//!
+//! Both files in this directory are property tests, so the tier is no longer
+//! what tells them apart — this one is the BVH and `PhysicsWorld`'s overlap
+//! queries, `dynamics.rs` is the integrator and its force providers.
 //!
 //! The [`Bvh`] can be inserted into and removed from without a rebuild, which
 //! is what lets a game spawn and kill colliders every tick. Everything that

@@ -1,12 +1,26 @@
-//! The generator, compared against `wayland-scanner`'s own output.
+//! This generator's output, held to parity with `wayland-scanner`'s own.
 //!
 //! Every expected value in this file was read out of
-//! `wayland-scanner private-code` run on the same two XML files the shell
-//! vendors (`wayland-scanner 1.25.0`). That is the point: a test asserting what
-//! *we* think a signature should be proves nothing, because the failure mode is
-//! that our idea is wrong. libwayland and the graphics driver read these tables
-//! to encode and decode every message, and a wrong character or a shifted index
-//! compiles cleanly, raises no protocol error, and mis-encodes the wire.
+//! `wayland-scanner private-code` run on the XML files the shell vendors
+//! (`wayland-scanner 1.25.0`) and then written out here inline — there is no
+//! blessed artifact on disk, and nothing regenerates these expectations. That is
+//! the point: a test asserting what *we* think a signature should be proves
+//! nothing, because the failure mode is that our idea is wrong. libwayland and
+//! the graphics driver read these tables to encode and decode every message, and
+//! a wrong character or a shifted index compiles cleanly, raises no protocol
+//! error, and mis-encodes the wire.
+//!
+//! # Why it is a separate target, and why it is not called `golden`
+//!
+//! It drives the generator through `Options`, `Source`, `parse_protocol` and
+//! `emit` — the same four items `crates/crcbl-shell/build.rs` imports. The one
+//! consumer this crate has is out-of-crate, so the test that stands in for it is
+//! too, and anything this file cannot reach `build.rs` cannot reach either.
+//!
+//! "Golden" is spoken for elsewhere in this workspace: it means a blessed
+//! *image* on disk, the kind `crcbl-golden` diffs and `tests/golden/*.png`
+//! stores. Nothing here is blessed and nothing here is an image, so the name
+//! would have promised a `--bless` flow that does not exist.
 //!
 //! The XML is reached across the workspace on purpose — these tests must pin
 //! the files the build actually generates from, not a copy that can drift.

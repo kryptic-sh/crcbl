@@ -1,5 +1,11 @@
-//! `crcbl-sim` as CI runs it: the real binary, its arguments, its exit codes
-//! and its one-line output contract.
+//! `crcbl-sim` as CI runs it: the real binary, no display, deterministic — its
+//! arguments, its exit codes and its one-line output contract.
+//!
+//! This file tests the *deliverable* rather than a function inside it, for the
+//! reason `apps/breakout/tests/headless.rs` and `apps/sandbox/tests/headless.rs`
+//! exist under the same name: the compiled binary is what
+//! `.github/workflows/ci.yml` and a developer both actually invoke, and only a
+//! separate target can spawn it.
 //!
 //! The determinism harness had no tests at all, which is how `--tick-rate 0`
 //! survived: it parsed cleanly and then divided by zero computing the tick

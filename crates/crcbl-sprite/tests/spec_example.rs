@@ -1,5 +1,5 @@
-//! The worked example from `docs/specs/crcbl/pix.md`, held to what §8 claims
-//! about it.
+//! `tests/spec_example.crpix` — the worked example from
+//! `docs/specs/crcbl/pix.md` — held to what §8 claims about it.
 //!
 //! A specification whose example does not parse is worse than none: it is the
 //! first thing anyone copies. The example is a file rather than a string
@@ -10,6 +10,21 @@
 //!
 //! When this test and the spec disagree, one of them is wrong and the disagree-
 //! ment is the point of having it.
+//!
+//! # Why it is not part of `round_trip.rs`, which loads the same fixture
+//!
+//! Different subjects, and they fail for different reasons. This one is about
+//! the **document**: it re-reads §8's prose and goes red when the spec and the
+//! implementation drift apart. `round_trip.rs` is about `bake` and `load` being
+//! inverses and would go on passing while both halves agreed on something the
+//! spec never said. Naming this file after the fixture rather than after
+//! "spec" is what keeps that split visible, since both files test the spec.
+//!
+//! It is a target of its own rather than a `#[cfg(test)]` module because the
+//! spec describes what a *consumer* gets: it reaches `crpix::parse` and
+//! `bake::bake` through the crate's public surface, and a claim the document
+//! makes that only a `pub(crate)` item can check is a claim the document should
+//! not be making.
 
 #![cfg(feature = "bake")]
 
