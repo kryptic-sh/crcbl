@@ -76,17 +76,27 @@ impl Tolerance {
     /// interior rather than confined to the edges.
     ///
     /// `max_failing_ratio` gates pixels that *exceed* that delta, so it is sized
-    /// against how many of those a passing frame has — which is very nearly
-    /// none. Every one of `crcbl-vk`'s goldens and every scene of `crcbl`'s
-    /// render e2e reports zero on vk and wgpu; dx12 on WARP and metal on a
-    /// paravirtual device report zero on all but one, the cube on metal, which
-    /// reports two pixels of a 256×192 frame — 0.0041%. The bound sits about
-    /// twenty-four times above that worst case, which is room for a driver
-    /// considerably worse than any yet seen and still tight enough to refuse a
-    /// visible recolour of part of one sprite. Both ends are pinned by tests
-    /// rather than by this paragraph, in
-    /// `the_worst_measured_cross_backend_frame_still_passes_with_room_to_spare`
-    /// and `a_localised_recolour_that_the_old_two_percent_ratio_passed_now_fails`.
+    /// against how many of those a passing frame has. On vk and wgpu that is
+    /// zero, for every one of `crcbl-vk`'s goldens and every scene of `crcbl`'s
+    /// render e2e. It is not zero on the two backends this team cannot run
+    /// locally, and both figures are measurements rather than estimates: metal
+    /// on a paravirtual device puts two pixels of the cube over the delta —
+    /// 0.0041% — and **WARP puts 76 pixels of the sprite scene over it,
+    /// 0.1546%, at up to delta 13**. That second number is the one the bound
+    /// has to clear, and it was found by tightening this ratio and reading the
+    /// diff the run uploaded: the pixels sit on sprite quad edges, the sprites
+    /// themselves are the right colours in the right places, and two software
+    /// rasterisers disagreeing about an edge texel is what this tolerance
+    /// exists to absorb.
+    ///
+    /// So the bound is about three times WARP's worst frame, and still refuses
+    /// the recolour that motivated tightening it — 361 pixels at delta 40,
+    /// 0.7345%. **That is only a fivefold gap between legitimate variance and a
+    /// caught regression**, which is thinner than it looks and is the real
+    /// argument for a comparator that separates "many pixels slightly wrong"
+    /// from "few pixels very wrong" rather than trading one ratio off against
+    /// both. `docs/backlog.md` carries that. Every end is pinned by a test
+    /// rather than by this paragraph.
     ///
     /// Note the ratio counts only pixels over `max_channel_delta` — were it to
     /// count pixels differing at all, the HDR frame's 91% would blow through any
@@ -97,7 +107,7 @@ impl Tolerance {
     /// to admit a triangle that moved.
     pub const RASTERISER: Self = Self {
         max_channel_delta: 2,
-        max_failing_ratio: 0.001,
+        max_failing_ratio: 0.005,
         min_ssim: 0.99,
     };
 }
@@ -813,6 +823,53 @@ mod tests {
         assert!(
             result.failing_ratio * 20.0 < Tolerance::RASTERISER.max_failing_ratio,
             "the worst real frame must keep at least twenty times of headroom: {}",
+            result.summary()
+        );
+    }
+
+    /// WARP's sprite frame, which is the widest legitimate disagreement any
+    /// backend has shown — and the one that set this bound.
+    ///
+    /// Found by tightening `max_failing_ratio` to a value derived without it:
+    /// the D3D12 job went red, and the diff it uploaded put every failing pixel
+    /// on a sprite quad's edge with the sprites themselves correct. Two
+    /// software rasterisers disagreeing about an edge texel is exactly what
+    /// this tolerance absorbs, so the bound has to clear it — but only just, so
+    /// this test is what fails if somebody tightens the ratio again without the
+    /// Windows runner in front of them.
+    #[test]
+    fn warps_sprite_edges_pass_and_are_what_the_ratio_is_sized_against() {
+        // 76 of 49152 pixels at delta 13: the run's own numbers.
+        let reference = triangle(256, 192, 0);
+        let mut actual = reference.clone();
+        let mut placed = 0;
+        'rows: for y in 0..192u32 {
+            for x in 0..256u32 {
+                if placed == 76 {
+                    break 'rows;
+                }
+                // A scattered edge, not a block — the real failures sit along
+                // quad boundaries rather than in one patch.
+                if (x + y) % 97 == 0 {
+                    let pixel = actual.pixel(x, y).expect("in range");
+                    actual.set_pixel(
+                        x,
+                        y,
+                        [pixel[0], pixel[1].saturating_add(13), pixel[2], pixel[3]],
+                    );
+                    placed += 1;
+                }
+            }
+        }
+        assert_eq!(placed, 76, "the fixture must place every pixel it claims");
+
+        let result = compare(&reference, &actual, &Tolerance::RASTERISER);
+        assert_eq!(result.failing_pixels, 76, "{}", result.summary());
+        assert_eq!(result.max_channel_delta, 13, "{}", result.summary());
+        assert!(
+            result.is_match(),
+            "WARP's measured sprite frame must pass, or the D3D12 job is a \
+             false-alarm generator nobody here can debug: {}",
             result.summary()
         );
     }

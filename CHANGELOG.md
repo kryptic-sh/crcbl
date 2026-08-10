@@ -64,6 +64,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `sprite_rotation` golden reports exactly 2 across 125 pixels, so tightening
   both knobs at once would turn a passing frame into a 0.25% failure.
 
+  The value is `0.005`, and it is three times WARP's sprite frame — 76 pixels at
+  delta 13, 0.1546%, all on quad edges — which is the widest legitimate
+  disagreement any backend has shown and was found by tightening this ratio too
+  far first. Both that frame and the recolour are now pinned by tests.
+
 ### Added
 
 - **`crcbl-assets` — asset ids, load states, and the IO seam under them.** A new

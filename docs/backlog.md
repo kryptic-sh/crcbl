@@ -5109,3 +5109,33 @@ any implementor that is not `Send`.
 **Not reviewed:** budgets. The registry has no size cap, no eviction and no
 limit on how many loads can be outstanding; `poll` walks every `Loading` entry
 every call, which is fine for tens and unmeasured for thousands.
+
+### The golden comparator trades one ratio against two failure modes
+
+Tightening `max_failing_ratio` to 0.001 turned the D3D12 job red on its first
+run, and the diff that job now uploads explains why: WARP puts **76 pixels of
+the sprite scene over `max_channel_delta`, 0.1546%, at up to delta 13**, every
+one of them on a sprite quad's edge, with the sprites themselves the right
+colours in the right places. That is legitimate disagreement between two
+software rasterisers about an edge texel, and the bound is now 0.005 to clear
+it.
+
+**The uncomfortable part is how little room is left.** The widest legitimate
+variance measured is 0.1546% and the regression the bound exists to catch is
+0.7345% — a gap of about five. One ratio is being asked to separate "many pixels
+slightly wrong", which is a driver, from "few pixels very wrong", which is a
+bug, and those are different questions. A comparator that scored them separately
+— say, a budget on total absolute error alongside a much tighter count of
+badly-wrong pixels — would have far more room on both sides than this one knob
+can.
+
+Not attempted here. It is a redesign of `crcbl_golden::compare`'s scoring, every
+golden in the tree is calibrated against the current one, and the change that
+found this was meant to size a constant rather than rewrite the comparator.
+
+**Also worth keeping:** the derivation for 0.001 was built from a table of
+per-backend figures that did not include D3D12's sprite scene, because that
+number had never appeared in a log anybody had read. It was not wrong about the
+data it had. It is the ordinary shape of a bound calibrated on the backends that
+are easy to measure, and the reason the Metal and D3D12 jobs now upload their
+diffs.
