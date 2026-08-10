@@ -3600,82 +3600,47 @@ It set up a pipeline state and drew; ours does the same plus bind groups and a
 viewport. Removing our extras one at a time, on a device that faults in under a
 second, converges faster than reasoning about it does.
 
-### The Metal hang is in the encoder's rasteriser replay, and needs no draw
+### Settled: `setDepthStencilState(nil)` hung every Metal draw
 
-**Bisected on `a849436`, and this narrows it from a class to six calls.** Five
-probes, one CI run:
+**Found by bisect, fixed in `8e40f55`.** For months every draw `crcbl-mtl`
+recorded hung on GitHub's macOS runner with
+`kIOGPUCommandBufferCallbackErrorHang` while render-pass clears succeeded, and
+six tests were quarantined for it. Two hypotheses were wrong before this one.
 
-| Probe                                                         | Result     |
-| ------------------------------------------------------------- | ---------- |
-| Our encoder: pipeline bound, **no draw call at all**          | **hangs**  |
-| Our encoder: draw with no scissor                             | hangs      |
-| Our encoder: draw with no viewport or scissor                 | hangs      |
-| Hand-encoded pass over **this backend's own** pipeline object | **passes** |
-| Hand-encoded pass over a hand-built pipeline                  | **passes** |
+The final round: ten probes, each the known-good hand-encoded pass plus exactly
+one call, with a known-red and a known-green control. **7 passed, 3 failed**,
+and the three failures are precisely the ones passing `nil` to
+`setDepthStencilState:`. Its twin — same selector, real state object — passed,
+as did `setCullMode`, `setFrontFacingWinding`, `setTriangleFillMode`,
+`setDepthClipMode` and `setDepthBias:slopeScale:clamp:` individually.
 
-Read together these say a great deal:
+**The fix makes `None` unrepresentable** rather than substituting at the bind
+site: a pipeline without depth-stencil state holds a default object the device
+builds once at open, so nothing in the crate can produce nil and the type says
+so. Every descriptor field is set explicitly — `Always`, no depth write, `Keep`
+on all three stencil outcomes — because `objc2-metal` is a generated binding
+that documents no defaults, and guessing them would trade a hang for wrong
+pictures.
 
-- **The hang does not need a draw.** Binding a pipeline in our pass is enough.
-  Everything about draws — the call, its arguments, the forms — is exonerated,
-  which retroactively explains why the short-form experiment changed nothing.
-- **The objects are exonerated.** The two hand-encoded probes use our
-  `MTLDevice`, queue, `MTLTexture`, `MTLRenderPipelineState` and our
-  `fault::command_buffer` descriptor, and they pass. So it is not the device,
-  the texture's usage or storage mode, the pipeline descriptor, or the
-  error-options descriptor.
-- **Viewport and scissor are exonerated**, by the two probes that drop them.
+Things worth carrying out of this investigation:
 
-**What is left: the six-call rasteriser replay `crcbl_mtl::command` emits inside
-a render pass.** That is the entire difference between the passing hand-encoded
-probe (two calls) and the failing one (the replay plus a bound pipeline).
+- **Three hypotheses, two wrong, and both wrong ones were "what's left standing"
+  arguments.** The render-target format and the long draw forms were each the
+  last candidate after eliminating others. What settled it was a _controlled
+  comparison_ — one call reproducing the hang and its near-identical variant not
+  — rather than an elimination.
+- **The bug was invisible to every picture-based test by construction.** All six
+  replay calls are image-neutral for a pipeline with no culling and no depth
+  attachment. No golden could ever have caught it; only a device that faults.
+- **Carry a known-red and a known-green control in any bisect** whose baseline
+  would otherwise be a previous log. Without them "everything passed" cannot be
+  distinguished from "the runner changed".
+- The probes were deleted once they answered. A diagnostic that keeps running
+  after it has reported is noise in the next run's signal.
 
-The named suspect within it, and the reason it is named:
-**`setFrontFacingWinding:`** is the only one of the six asking for anything
-other than a Metal default — `FrontFace::Ccw` against the encoder's `Clockwise`
-— and with `CullMode::None` it cannot change the image, so it would be invisible
-in any picture-based test.
-
-**Round two is wired** (`5d39f0c`): each probe is the known-good hand-encoded
-pass plus exactly one of the six, with every value read from the resolved
-`BoundPipeline` rather than written as a literal, so a probe passes what the
-replay would. `setDepthStencilState` gets two — nil and a default object —
-because the pass has no depth attachment and those may differ. A whole-replay
-probe backstops the case where no single call is enough, which would mean a
-combination rather than a call.
-
-**Two controls travel with them, and that is the part worth copying.** A bisect
-whose baseline is a _previous log_ cannot tell a real result from a changed
-runner image. So the set carries the old whole-path probe (known red) and the
-hand-encoded pass alone (known green): if the positive control passes, the run
-is void and something outside this crate moved; if the negative control hangs,
-the objects are back in play and no single-call result means anything.
-
-Everything else in the neighbourhood has been eliminated by measurement rather
-than by argument.
-
-### Vulkan on Windows: the pin has to be a native path
-
-The `vk e2e (lavapipe, windows)` job's first run installed the loader and
-lavapipe, resolved the ICD manifest and its relative `library_path`, and then
-failed every test with `ERROR_INCOMPATIBLE_DRIVER`.
-
-The loader named the real cause itself:
-`windows_read_data_files_in_registry: Registry lookup failed to get ICD manifest files`,
-then `vkCreateInstance: Found no drivers!` — **what it prints when
-`VK_DRIVER_FILES` was never seen**, not when it was seen and declined. Under Git
-Bash the manifest was exported as `C:/lavapipe/...`, which the native loader
-does not take. `cygpath -w` converts it and the native form is echoed, so a
-future failure names the form as well as the path.
-
-Worth remembering because `ERROR_INCOMPATIBLE_DRIVER` is _also_ what a genuinely
-incompatible manifest gives — the same error covers "never read it", "read it
-and declined it", and "wrong path form". Only the loader's own preceding line
-distinguishes them, which is why the job prints `vulkaninfo` before the suite.
-
-What that first run did establish: `windows-latest` ships no Vulkan loader (as
-the runner-image README says), the pinned SDK and lavapipe both install, and the
-suite's 73 tests are selected and run. Nothing passed vacuously — every guard
-the job carries reported truthfully.
+**Unverified at time of writing**: the five released draw tests have not run
+since the fix. If they pass, `crcbl-mtl` has working draws in CI for the first
+time and the Metal arm of `render_e2e.rs` becomes worth wiring.
 
 ### Metal draw coverage in CI: what the ecosystem does
 
