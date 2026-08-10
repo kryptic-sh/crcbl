@@ -48,13 +48,22 @@
 //!
 //! # A pipeline layout is a root signature, and the sets are its parameters
 //!
-//! Each bind group layout becomes one or two root parameters — a CBV/SRV/UAV
-//! descriptor table and a sampler table, which D3D12 will not let share one —
-//! and `crcbl_dx12::binding` computes the ranges. [`SetPlacement`] records which
-//! root parameter index each half landed at, because
+//! Each bind group layout becomes one or two descriptor tables — a CBV/SRV/UAV
+//! table and a sampler table, which D3D12 will not let share one — plus a **root
+//! descriptor per dynamic binding**, and `crcbl_dx12::binding` computes what
+//! each contains. Which root parameter index each landed at is
+//! [`crate::root`]'s answer, because
 //! [`bind_group`](crcbl_hal::CommandEncoder::bind_group) is given a set index
-//! and `SetGraphicsRootDescriptorTable` takes a root parameter index, and the
-//! two are only the same number when every set has exactly one table.
+//! while `SetGraphicsRootDescriptorTable` and
+//! `SetGraphicsRootConstantBufferView` take a root parameter index, and the two
+//! are the same number only when every set is exactly one table.
+//!
+//! **This module does not decide that order, it replays it.** [`plan_root`]
+//! iterates [`root::RootLayout::slots`] — the parameter array's own order, as
+//! `crate::root` assigned it — so the indices `crate::device` binds against
+//! cannot drift from the signature these parameters describe. The same call is
+//! what refuses a layout costing more than D3D12's 64 root DWORDs, at layout
+//! creation rather than at the draw.
 //!
 //! Root signature **1.0** is serialised, deliberately: its descriptor ranges are
 //! volatile by definition, which is what
@@ -109,36 +118,31 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_DEPTH_STENCIL_DESC, D3D12_DEPTH_STENCILOP_DESC, D3D12_DEPTH_WRITE_MASK_ALL,
     D3D12_DEPTH_WRITE_MASK_ZERO, D3D12_DESCRIPTOR_RANGE, D3D12_GRAPHICS_PIPELINE_STATE_DESC,
     D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED, D3D12_INPUT_LAYOUT_DESC, D3D12_LOGIC_OP_NOOP,
-    D3D12_PIPELINE_STATE_FLAG_NONE, D3D12_RASTERIZER_DESC, D3D12_RENDER_TARGET_BLEND_DESC,
-    D3D12_ROOT_DESCRIPTOR_TABLE, D3D12_ROOT_PARAMETER, D3D12_ROOT_PARAMETER_0,
-    D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, D3D12_ROOT_SIGNATURE_DESC,
+    D3D12_MAX_ROOT_COST, D3D12_PIPELINE_STATE_FLAG_NONE, D3D12_RASTERIZER_DESC,
+    D3D12_RENDER_TARGET_BLEND_DESC, D3D12_ROOT_DESCRIPTOR_TABLE, D3D12_ROOT_PARAMETER,
+    D3D12_ROOT_PARAMETER_0, D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, D3D12_ROOT_SIGNATURE_DESC,
     D3D12_ROOT_SIGNATURE_FLAG_NONE, D3D12SerializeRootSignature, ID3D12Device, ID3D12PipelineState,
     ID3D12RootSignature,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 
+use crate::binding::SetTables;
 use crate::conv;
 use crate::dxil::{Dxil, ShaderModuleEntry};
 use crate::handle::Owned;
+use crate::root::{self, SetPlacement, SlotKind};
+
+/// `crate::root` spells D3D12's root budget out because it compiles off Windows.
+/// This is the build that has the real constant, so this is where the two are
+/// made to agree — a divergence would let a layout D3D12 refuses pass the check
+/// meant to catch it.
+const _: () = assert!(root::MAX_ROOT_COST == D3D12_MAX_ROOT_COST);
 
 /// Colour attachments a D3D12 pipeline state object can declare.
 ///
 /// The array's own length in `D3D12_GRAPHICS_PIPELINE_STATE_DESC`, which is what
 /// makes a longer `color_targets` a refusal rather than a silent truncation.
 const RENDER_TARGETS: usize = 8;
-
-/// Where one bind group set's tables landed among the root parameters.
-///
-/// A set is one root parameter when it declares only views or only samplers, and
-/// two when it declares both — so the set index and the root parameter index are
-/// not the same number, and this is what keeps them apart.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SetPlacement {
-    /// Root parameter index of the CBV/SRV/UAV table, if the set has one.
-    pub(crate) views: Option<u32>,
-    /// Root parameter index of the sampler table, if the set has one.
-    pub(crate) samplers: Option<u32>,
-}
 
 /// A pipeline layout: the root signature, and where each set's tables are.
 #[derive(Debug)]
@@ -216,13 +220,13 @@ impl Owned for GraphicsPipelineEntry {
     }
 }
 
-/// One set's root parameters, and the ranges they point at.
+/// A whole signature's root parameters, and the ranges they point at.
 ///
 /// The ranges are returned alongside because `D3D12_ROOT_DESCRIPTOR_TABLE` holds
 /// a *pointer* into them: they must outlive the serialisation call, and keeping
-/// them in one owned `Vec` per set is what guarantees that without a lifetime
+/// them in one owned `Vec` per table is what guarantees that without a lifetime
 /// nobody can express in an FFI struct.
-struct RootPlan {
+struct RootSignaturePlan {
     parameters: Vec<D3D12_ROOT_PARAMETER>,
     /// One entry per set, in set order.
     sets: Vec<SetPlacement>,
@@ -235,15 +239,16 @@ struct RootPlan {
 /// # Errors
 ///
 /// [`HalError::InvalidDescriptor`] for a push-constant range (see the module
-/// docs) or more sets than
-/// [`Limits::max_bind_groups`](crcbl_hal::Limits::max_bind_groups), and
-/// [`HalError::Backend`] when D3D12 refuses to serialise or create the
-/// signature — carrying the serialiser's own error blob, which is the only text
-/// that says *which* parameter it objected to.
+/// docs), more sets than
+/// [`Limits::max_bind_groups`](crcbl_hal::Limits::max_bind_groups), or a
+/// signature costing more root DWORDs than D3D12 holds — see
+/// [`root::place`] — and [`HalError::Backend`] when D3D12 refuses to serialise
+/// or create the signature, carrying the serialiser's own error blob, which is
+/// the only text that says *which* parameter it objected to.
 pub(crate) fn layout(
     device: &ID3D12Device,
     desc: &PipelineLayoutDesc<'_>,
-    sets: &[(crcbl_hal::BindGroupLayoutHandle, RootTables)],
+    sets: &[(crcbl_hal::BindGroupLayoutHandle, SetTables)],
     owner: u64,
 ) -> Result<PipelineLayoutEntry, HalError> {
     if let Some(range) = desc.push_constants {
@@ -255,7 +260,7 @@ pub(crate) fn layout(
             range.size
         )));
     }
-    let plan = plan_root(sets);
+    let plan = plan_root(sets)?;
     let signature = D3D12_ROOT_SIGNATURE_DESC {
         NumParameters: u32::try_from(plan.parameters.len()).unwrap_or(u32::MAX),
         pParameters: plan.parameters.as_ptr(),
@@ -317,57 +322,91 @@ pub(crate) fn layout(
     })
 }
 
-/// The ranges one set contributes, already computed by `crcbl_dx12::binding`.
-pub(crate) struct RootTables {
-    /// CBV/SRV/UAV ranges, empty when the set declares none.
-    pub(crate) views: Vec<D3D12_DESCRIPTOR_RANGE>,
-    /// Sampler ranges, empty when the set declares none.
-    pub(crate) samplers: Vec<D3D12_DESCRIPTOR_RANGE>,
-    /// The union of the set's entry visibilities.
-    pub(crate) visibility: ShaderStages,
-}
+/// Builds the root parameter array, in the order [`root::place`] laid it out.
+///
+/// **The loop is over `layout.slots`, not over `sets`**, and that is the whole
+/// point: the indices `crate::device` binds against come from
+/// [`root::RootLayout::sets`], which was filled in the same pass. A second
+/// ordering rule written here is the bug this shape rules out.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] when the signature does not fit D3D12's root
+/// budget. See [`root::place`].
+fn plan_root(
+    sets: &[(crcbl_hal::BindGroupLayoutHandle, SetTables)],
+) -> Result<RootSignaturePlan, HalError> {
+    let shapes: Vec<root::SetShape> = sets
+        .iter()
+        .map(|(_, tables)| root::SetShape {
+            views: !tables.views.is_empty(),
+            samplers: !tables.samplers.is_empty(),
+            // A layout's entries come from a slice, so this cannot exceed a
+            // `u32` on any target this crate builds for; saturating keeps the
+            // budget check on the right side either way.
+            roots: u32::try_from(tables.roots.len()).unwrap_or(u32::MAX),
+        })
+        .collect();
+    let layout = root::place(&shapes)?;
 
-/// Lays every set's tables out as root parameters, in set order.
-fn plan_root(sets: &[(crcbl_hal::BindGroupLayoutHandle, RootTables)]) -> RootPlan {
-    let mut parameters = Vec::new();
-    let mut placements = Vec::with_capacity(sets.len());
+    let mut parameters = Vec::with_capacity(layout.slots.len());
     let mut owned: Vec<Vec<D3D12_DESCRIPTOR_RANGE>> = Vec::new();
-
-    for (_, tables) in sets {
-        let mut placement = SetPlacement::default();
-        for (ranges, slot) in [
-            (&tables.views, &mut placement.views),
-            (&tables.samplers, &mut placement.samplers),
-        ] {
-            if ranges.is_empty() {
-                continue;
-            }
-            // Cloned into `owned` and pointed at from there. Pushing another
-            // entry later moves the outer `Vec`'s elements but never the inner
-            // allocation this pointer names, which is what makes taking the
-            // address here sound while the list is still being built.
-            owned.push(ranges.clone());
-            let held = owned.last().expect("just pushed");
-            *slot = Some(u32::try_from(parameters.len()).unwrap_or(u32::MAX));
-            parameters.push(D3D12_ROOT_PARAMETER {
-                ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
-                Anonymous: D3D12_ROOT_PARAMETER_0 {
-                    DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE {
-                        NumDescriptorRanges: u32::try_from(held.len()).unwrap_or(u32::MAX),
-                        pDescriptorRanges: held.as_ptr(),
+    for slot in &layout.slots {
+        let tables = &sets
+            .get(slot.set)
+            .unwrap_or_else(|| unreachable!("every slot names a set that was placed"))
+            .1;
+        match slot.kind {
+            SlotKind::Views | SlotKind::Samplers => {
+                let ranges = if slot.kind == SlotKind::Views {
+                    &tables.views
+                } else {
+                    &tables.samplers
+                };
+                // Cloned into `owned` and pointed at from there. Pushing another
+                // entry later moves the outer `Vec`'s elements but never the
+                // inner allocation this pointer names, which is what makes
+                // taking the address here sound while the list is still being
+                // built.
+                owned.push(ranges.clone());
+                let held = owned.last().expect("just pushed");
+                parameters.push(D3D12_ROOT_PARAMETER {
+                    ParameterType: D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+                    Anonymous: D3D12_ROOT_PARAMETER_0 {
+                        DescriptorTable: D3D12_ROOT_DESCRIPTOR_TABLE {
+                            NumDescriptorRanges: u32::try_from(held.len()).unwrap_or(u32::MAX),
+                            pDescriptorRanges: held.as_ptr(),
+                        },
                     },
-                },
-                ShaderVisibility: conv::shader_visibility(tables.visibility),
-            });
+                    ShaderVisibility: conv::shader_visibility(tables.visibility),
+                });
+            }
+            SlotKind::Root(index) => {
+                let root = tables.roots.get(index).unwrap_or_else(|| {
+                    unreachable!("the shape counted this set's root descriptors")
+                });
+                parameters.push(D3D12_ROOT_PARAMETER {
+                    ParameterType: root.parameter_type,
+                    // A root descriptor holds the register itself rather than a
+                    // pointer to anything, so it has no owned allocation to keep
+                    // alive the way a table's ranges do.
+                    Anonymous: D3D12_ROOT_PARAMETER_0 {
+                        Descriptor: root.descriptor,
+                    },
+                    // Its own stage rather than the set's union: one root
+                    // parameter is one binding here, so nothing has to be
+                    // widened to cover a neighbour.
+                    ShaderVisibility: conv::shader_visibility(root.visibility),
+                });
+            }
         }
-        placements.push(placement);
     }
 
-    RootPlan {
+    Ok(RootSignaturePlan {
         parameters,
-        sets: placements,
+        sets: layout.sets,
         _ranges: owned,
-    }
+    })
 }
 
 /// The serialiser's own diagnostic, or nothing.

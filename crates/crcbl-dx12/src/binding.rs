@@ -93,20 +93,29 @@
 //! A root signature naming registers the shader does not read is rejected by
 //! pipeline creation, so this is not a subtlety a caller can absorb.
 //!
-//! [`ranges`] therefore assigns registers with [`dxil::Registers`], threaded
-//! across a pipeline layout's sets in order, and `crate::dxil` checks the rule
-//! against every committed container on any host. It is correct because
+//! [`ranges`] therefore assigns registers with [`root::assign_registers`],
+//! threaded across a pipeline layout's sets in order, and `crate::dxil` checks
+//! the rule against every committed container on any host. It is correct because
 //! `crcbl-shaders`' `declaration_order` lint already requires each source to
 //! declare its resources in ascending `(set, binding)` order — the same
 //! guarantee `crcbl-mtl` leans on for its flat argument tables.
 //!
-//! What is **not** honoured is a dynamic offset:
+//! # A dynamic offset leaves the table and becomes a root descriptor
+//!
 //! [`BindingKind::UniformBuffer`](crcbl_hal::BindingKind::UniformBuffer)'s
-//! `dynamic` and its storage-buffer twin are refused at layout creation. A
-//! descriptor table has no offset to apply — D3D12's answer is a *root*
-//! CBV/SRV/UAV, a different root parameter type carrying a raw GPU address,
-//! which changes how every binding in the set is reached rather than adding to
-//! it.
+//! `dynamic` and its storage-buffer twin are the one binding shape a descriptor
+//! table cannot express: the table is reached by a descriptor handle, and every
+//! view inside it was written when the group was created. D3D12's answer is a
+//! **root** CBV/SRV/UAV — a root parameter carrying a raw GPU virtual address,
+//! to which the offset is simply added — so such a binding occupies no slot in
+//! the set's block and is planned into [`BindGroupLayoutRecord::roots`] instead.
+//! [`crate::root`] owns that decision, the budget it spends and the parameter
+//! index it lands on, because two modules have to agree on the last of those.
+//!
+//! What this module still owns is everything about the *binding*: that a dynamic
+//! binding is a single buffer rather than an array or an image, that it still
+//! takes its register in declaration order beside the table's, and that the
+//! address a group holds for it is the buffer's plus the entry's offset.
 
 use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
@@ -121,16 +130,18 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_DESCRIPTOR_RANGE, D3D12_DESCRIPTOR_RANGE_TYPE, D3D12_DESCRIPTOR_RANGE_TYPE_CBV,
     D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER, D3D12_DESCRIPTOR_RANGE_TYPE_SRV,
     D3D12_DESCRIPTOR_RANGE_TYPE_UAV, D3D12_GPU_DESCRIPTOR_HANDLE,
-    D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE, D3D12_SHADER_RESOURCE_VIEW_DESC,
-    D3D12_SHADER_RESOURCE_VIEW_DESC_0, D3D12_SRV_DIMENSION_BUFFER, D3D12_UAV_DIMENSION_BUFFER,
-    D3D12_UNORDERED_ACCESS_VIEW_DESC, D3D12_UNORDERED_ACCESS_VIEW_DESC_0, ID3D12DescriptorHeap,
-    ID3D12Device, ID3D12Resource,
+    D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE, D3D12_ROOT_DESCRIPTOR, D3D12_ROOT_PARAMETER_TYPE,
+    D3D12_ROOT_PARAMETER_TYPE_CBV, D3D12_ROOT_PARAMETER_TYPE_SRV, D3D12_ROOT_PARAMETER_TYPE_UAV,
+    D3D12_SHADER_RESOURCE_VIEW_DESC, D3D12_SHADER_RESOURCE_VIEW_DESC_0, D3D12_SRV_DIMENSION_BUFFER,
+    D3D12_UAV_DIMENSION_BUFFER, D3D12_UNORDERED_ACCESS_VIEW_DESC,
+    D3D12_UNORDERED_ACCESS_VIEW_DESC_0, ID3D12DescriptorHeap, ID3D12Device, ID3D12Resource,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32_TYPELESS;
 
 use crate::conv;
 use crate::dxil;
 use crate::handle::Owned;
+use crate::root;
 
 /// Descriptors in the one shader-visible CBV/SRV/UAV heap.
 ///
@@ -172,11 +183,63 @@ pub(crate) struct RangePlan {
     declared: u32,
 }
 
+/// One binding that takes a dynamic offset, and so becomes a root descriptor.
+///
+/// It occupies no descriptor in a group's block: `SetGraphicsRootConstantBufferView`
+/// and its siblings take a GPU virtual address, and the address is what a bind
+/// adds the offset to. See the module docs and [`crate::root`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RootPlan {
+    /// The seam's binding number.
+    pub(crate) binding: u32,
+    /// The range type this binding would have taken in a table, kept because it
+    /// carries both the register class and the root parameter type.
+    range_type: D3D12_DESCRIPTOR_RANGE_TYPE,
+    /// This binding's own visibility. A root descriptor is one binding, so it
+    /// need not widen to the union of the set's the way a table does.
+    visibility: ShaderStages,
+}
+
+impl RootPlan {
+    /// Whether this is a root CBV, and so takes the uniform-buffer alignment.
+    pub(crate) fn uniform(&self) -> bool {
+        self.range_type == D3D12_DESCRIPTOR_RANGE_TYPE_CBV
+    }
+
+    /// The root parameter type D3D12 spells this binding with.
+    pub(crate) fn parameter_type(&self) -> D3D12_ROOT_PARAMETER_TYPE {
+        match self.range_type {
+            D3D12_DESCRIPTOR_RANGE_TYPE_CBV => D3D12_ROOT_PARAMETER_TYPE_CBV,
+            D3D12_DESCRIPTOR_RANGE_TYPE_SRV => D3D12_ROOT_PARAMETER_TYPE_SRV,
+            // `plan_layout` only routes a buffer binding here and a sampler is
+            // not one, so the remaining case is the writable storage buffer.
+            _ => D3D12_ROOT_PARAMETER_TYPE_UAV,
+        }
+    }
+}
+
 /// A block of descriptors inside one shader-visible heap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Block {
     start: u32,
     count: u32,
+}
+
+/// A dynamic binding's resolved buffer, as a bind reads it.
+///
+/// The address is `GetGPUVirtualAddress` plus the entry's own offset, and
+/// `None` until an entry writes one — a root descriptor is a bare address with
+/// no null view behind it, so an unwritten binding has to refuse rather than
+/// bind zero.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BoundBuffer {
+    pub(crate) address: Option<u64>,
+    /// Byte offset the entry bound the range at.
+    pub(crate) offset: u64,
+    /// Bytes the entry bound.
+    pub(crate) size: u64,
+    /// The buffer's own size, which is what a dynamic offset is bounded by.
+    pub(crate) capacity: u64,
 }
 
 /// A bind group layout: the ranges it declares, split by heap type.
@@ -187,6 +250,12 @@ pub(crate) struct BindGroupLayoutRecord {
     pub(crate) views: Vec<RangePlan>,
     /// Sampler ranges, in declaration order.
     pub(crate) samplers: Vec<RangePlan>,
+    /// The bindings that take a dynamic offset, **ascending by binding number**
+    /// — which is the order
+    /// [`bind_group`](crcbl_hal::CommandEncoder::bind_group) documents its
+    /// `dynamic_offsets` in, and therefore the order a group's addresses and
+    /// the layout's root parameter indices are both kept in.
+    pub(crate) roots: Vec<RootPlan>,
     /// Descriptors a group of this layout needs in the view heap, before the
     /// unbounded binding's own count is added.
     view_descriptors: u32,
@@ -207,6 +276,10 @@ pub(crate) struct BindGroupRecord {
     pub(crate) layout: BindGroupLayoutHandle,
     pub(crate) views: Option<Block>,
     pub(crate) samplers: Option<Block>,
+    /// One entry per dynamic binding of the layout, in the same ascending order
+    /// [`BindGroupLayoutRecord::roots`] is kept in. Sized when the group is
+    /// created, so the two lists index each other.
+    pub(crate) roots: Vec<BoundBuffer>,
     /// A reference to every resource a descriptor in this group names.
     ///
     /// **A descriptor is a raw address into a resource and D3D12 refcounts
@@ -382,9 +455,9 @@ impl VisibleHeaps {
 /// # Errors
 ///
 /// [`HalError::InvalidDescriptor`] for a descriptor D3D12 has no encoding for:
-/// a duplicate binding number, a zero-length binding, a dynamic offset (see the
-/// module docs), or a [`BindingFlags::VARIABLE_COUNT`] entry that is not both
-/// last in the slice and highest-numbered — the rule
+/// a duplicate binding number, a zero-length binding, a dynamic-offset binding
+/// that is an array or a bindless one, or a [`BindingFlags::VARIABLE_COUNT`]
+/// entry that is not both last in the slice and highest-numbered — the rule
 /// [`BindGroupLayoutDesc::entries`] states, and which every "the variable
 /// binding is `entries.last()`" reading depends on.
 pub(crate) fn plan_layout(
@@ -393,14 +466,26 @@ pub(crate) fn plan_layout(
 ) -> Result<BindGroupLayoutRecord, HalError> {
     let mut views: Vec<RangePlan> = Vec::new();
     let mut samplers: Vec<RangePlan> = Vec::new();
+    let mut roots: Vec<RootPlan> = Vec::new();
     let mut visibility = ShaderStages::empty();
     let mut variable = None;
 
     for (index, entry) in desc.entries.iter().enumerate() {
         check_entry(desc, index, entry)?;
+        let range_type = conv::descriptor_range_type(entry.kind);
+        if is_dynamic(entry.kind) {
+            roots.push(RootPlan {
+                binding: entry.binding,
+                range_type: range_type
+                    .unwrap_or_else(|| unreachable!("a dynamic binding is a buffer")),
+                visibility: entry.visibility,
+            });
+            continue;
+        }
+        // The union is what a *descriptor table* takes, so a root descriptor's
+        // stage is left out of it: the root parameter carries its own.
         visibility |= entry.visibility;
         let unbounded = entry.flags.contains(BindingFlags::VARIABLE_COUNT);
-        let range_type = conv::descriptor_range_type(entry.kind);
         let in_views = range_type.is_some();
         let table = if in_views { &mut views } else { &mut samplers };
         table.push(RangePlan {
@@ -414,6 +499,9 @@ pub(crate) fn plan_layout(
             variable = Some((entry.binding, in_views));
         }
     }
+    // Ascending, because that is the order the seam delivers dynamic offsets in
+    // and `desc.entries` is not required to be sorted.
+    roots.sort_by_key(|root| root.binding);
 
     Ok(BindGroupLayoutRecord {
         owner,
@@ -421,9 +509,19 @@ pub(crate) fn plan_layout(
         sampler_descriptors: next_offset(&samplers),
         views,
         samplers,
+        roots,
         variable,
         visibility,
     })
+}
+
+/// Whether a binding takes one of `bind_group`'s dynamic offsets.
+const fn is_dynamic(kind: BindingKind) -> bool {
+    matches!(
+        kind,
+        BindingKind::UniformBuffer { dynamic: true }
+            | BindingKind::StorageBuffer { dynamic: true, .. }
+    )
 }
 
 /// Where the next range starts in a table.
@@ -452,17 +550,26 @@ fn check_entry(
             entry.binding
         )));
     }
-    if matches!(
-        entry.kind,
-        BindingKind::UniformBuffer { dynamic: true }
-            | BindingKind::StorageBuffer { dynamic: true, .. }
-    ) {
-        return Err(HalError::InvalidDescriptor(format!(
-            "binding {} takes a dynamic offset, and a D3D12 descriptor table has none to apply: \
-             the equivalent is a root CBV/SRV/UAV, which is a different root parameter type for \
-             every binding in the set (the DX12 dynamic-offset slice)",
-            entry.binding
-        )));
+    if is_dynamic(entry.kind) {
+        // A root descriptor is one address, so there is nothing for a second
+        // element to be reached by — and the seam gives one offset per dynamic
+        // *binding*, not per element, so an array of them could not be offset
+        // either. `crcbl-mtl` refuses the same shape for the same reason.
+        if entry.count != 1 {
+            return Err(HalError::InvalidDescriptor(format!(
+                "binding {} takes a dynamic offset and has count {}; a root descriptor is one \
+                 GPU address, and bind_group carries one offset per dynamic binding rather than \
+                 per element",
+                entry.binding, entry.count
+            )));
+        }
+        if !entry.flags.is_empty() {
+            return Err(HalError::InvalidDescriptor(format!(
+                "binding {} takes a dynamic offset and declares {:?}; every one of those flags \
+                 describes a descriptor heap, and a root descriptor is not in one",
+                entry.binding, entry.flags
+            )));
+        }
     }
     if entry.flags.contains(BindingFlags::VARIABLE_COUNT) {
         if index + 1 != desc.entries.len() {
@@ -485,55 +592,101 @@ fn check_entry(
     Ok(())
 }
 
-/// The `D3D12_DESCRIPTOR_RANGE` arrays one set's two root parameters point at:
-/// its views and its samplers.
+/// Every root parameter one set contributes, and the registers its bindings
+/// take.
+pub(crate) struct SetTables {
+    /// The CBV/SRV/UAV descriptor table's ranges, empty when the set declares
+    /// none.
+    pub(crate) views: Vec<D3D12_DESCRIPTOR_RANGE>,
+    /// The sampler descriptor table's ranges, empty when the set declares none.
+    pub(crate) samplers: Vec<D3D12_DESCRIPTOR_RANGE>,
+    /// One root descriptor per dynamic binding, in
+    /// [`BindGroupLayoutRecord::roots`] order.
+    pub(crate) roots: Vec<RootDescriptor>,
+    /// The union of the *table* entries' visibilities, which is what a
+    /// descriptor table takes. Each root descriptor carries its own.
+    pub(crate) visibility: ShaderStages,
+}
+
+/// One root descriptor, ready to become a `D3D12_ROOT_PARAMETER`.
+pub(crate) struct RootDescriptor {
+    pub(crate) parameter_type: D3D12_ROOT_PARAMETER_TYPE,
+    pub(crate) descriptor: D3D12_ROOT_DESCRIPTOR,
+    pub(crate) visibility: ShaderStages,
+}
+
+/// The root parameters one set contributes: its two tables' ranges, and a root
+/// descriptor per dynamic binding.
 ///
 /// **The register is not the binding number, and the space is not the set.**
 /// `[[vk::binding(binding, set)]]` is a Vulkan attribute; Slang's HLSL output
 /// ignores it and lets `dxc` number each register class from zero in
-/// declaration order, in space 0. So the two are assigned by running
-/// [`dxil::Registers`] over the layout — threaded across a pipeline layout's
-/// sets by the caller, because the count does not restart at a set boundary.
+/// declaration order, in space 0. So the registers are assigned by
+/// [`root::assign_registers`] — threaded across a pipeline layout's sets by the
+/// caller, because the count does not restart at a set boundary.
 /// `crate::dxil` measures the rule against every committed container.
 ///
-/// Both tables are built in one call because the registers they take come from
-/// one running count, and splitting it would put the order of two calls in
-/// charge of what the artifact is compared against.
-pub(crate) fn ranges(
-    layout: &BindGroupLayoutRecord,
-    registers: &mut dxil::Registers,
-) -> (Vec<D3D12_DESCRIPTOR_RANGE>, Vec<D3D12_DESCRIPTOR_RANGE>) {
-    // Views and samplers never share a register class — a sampler is `s` and
-    // nothing else is — so the two tables can be numbered one after the other
-    // and still agree with a source that interleaved them by binding number.
-    (
-        assign(&layout.views, registers),
-        assign(&layout.samplers, registers),
-    )
-}
+/// Everything the set declares is numbered in **one** call, tables and root
+/// descriptors together: they share the `b`/`t`/`u` register files, so numbering
+/// them separately would put the order of two calls in charge of what the
+/// artifact is compared against.
+pub(crate) fn ranges(layout: &BindGroupLayoutRecord, registers: &mut dxil::Registers) -> SetTables {
+    // One list in a fixed order — views, then samplers, then root descriptors —
+    // so the registers come back indexable by the same order.
+    let bindings: Vec<root::Binding> = layout
+        .views
+        .iter()
+        .chain(&layout.samplers)
+        .map(|plan| root::Binding {
+            binding: plan.binding,
+            class: register_class(plan.range_type),
+            declared: plan.declared,
+        })
+        .chain(layout.roots.iter().map(|plan| root::Binding {
+            binding: plan.binding,
+            class: register_class(plan.range_type),
+            // A root descriptor is exactly one resource; there is no unbounded
+            // form of it.
+            declared: 1,
+        }))
+        .collect();
+    let assigned = root::assign_registers(&bindings, registers);
 
-/// One table's ranges, taking registers in ascending binding order.
-///
-/// Ascending *binding* rather than declaration order: `dxc` numbers in the
-/// source's declaration order, and `crcbl-shaders`' `declaration_order` lint is
-/// what makes the two the same. Sorting here means a caller that declared its
-/// entries out of order still gets the registers the artifact has, rather than a
-/// root signature that is wrong in a way only a Windows runner would report.
-fn assign(plans: &[RangePlan], registers: &mut dxil::Registers) -> Vec<D3D12_DESCRIPTOR_RANGE> {
-    let mut order: Vec<usize> = (0..plans.len()).collect();
-    order.sort_by_key(|index| plans[*index].binding);
-    let mut ranges = vec![D3D12_DESCRIPTOR_RANGE::default(); plans.len()];
-    for index in order {
-        let plan = &plans[index];
-        ranges[index] = D3D12_DESCRIPTOR_RANGE {
+    let mut tables: Vec<D3D12_DESCRIPTOR_RANGE> = layout
+        .views
+        .iter()
+        .chain(&layout.samplers)
+        .zip(&assigned)
+        .map(|(plan, register)| D3D12_DESCRIPTOR_RANGE {
             RangeType: plan.range_type,
             NumDescriptors: plan.declared,
-            BaseShaderRegister: registers.take(register_class(plan.range_type), plan.declared),
+            BaseShaderRegister: *register,
             RegisterSpace: 0,
             OffsetInDescriptorsFromTableStart: plan.offset,
-        };
+        })
+        .collect();
+    let samplers = tables.split_off(layout.views.len());
+    let views = tables;
+    let roots = layout
+        .roots
+        .iter()
+        .zip(assigned.iter().skip(views.len() + samplers.len()))
+        .map(|(plan, register)| RootDescriptor {
+            parameter_type: plan.parameter_type(),
+            descriptor: D3D12_ROOT_DESCRIPTOR {
+                ShaderRegister: *register,
+                RegisterSpace: 0,
+            },
+            visibility: plan.visibility,
+        })
+        .collect();
+
+    SetTables {
+        views,
+        samplers,
+        roots,
+        visibility: layout.visibility,
     }
-    ranges
 }
 
 /// Which HLSL register file a descriptor range takes its register from.
@@ -617,6 +770,15 @@ impl BindGroupLayoutRecord {
             .chain(self.samplers.iter().map(|plan| (plan, false)))
             .find(|(plan, _)| plan.binding == binding)
     }
+
+    /// Where a dynamic binding sits in [`Self::roots`], and so in a group's
+    /// addresses and in the layout's root parameter indices.
+    fn root(&self, binding: u32) -> Option<(usize, &RootPlan)> {
+        self.roots
+            .iter()
+            .enumerate()
+            .find(|(_, plan)| plan.binding == binding)
+    }
 }
 
 /// How many descriptors the layout's unbounded binding gets in this group.
@@ -637,7 +799,14 @@ fn variable_count(layout: &BindGroupLayoutRecord, desc: &BindGroupDesc<'_>) -> u
         .unwrap_or(0)
 }
 
-/// Writes one entry's descriptor into a group's block.
+/// Writes one entry's descriptor into a group's block, or resolves it to the
+/// address a root descriptor is bound at.
+///
+/// A dynamic binding has no descriptor to write: it is a root CBV/SRV/UAV, and
+/// what the group keeps for it is a GPU virtual address. Returning it rather
+/// than storing it is what lets one function serve both `create_bind_group`,
+/// which holds the record by value, and `update_bind_group`, which holds it
+/// through the pool.
 ///
 /// # Errors
 ///
@@ -651,7 +820,10 @@ pub(crate) fn write_entry(
     group: &BindGroupRecord,
     entry: &BindGroupEntry,
     resource: &Resolved,
-) -> Result<(), HalError> {
+) -> Result<Option<(usize, BoundBuffer)>, HalError> {
+    if let Some((index, plan)) = layout.root(entry.binding) {
+        return write_root(plan, entry, resource).map(|bound| Some((index, bound)));
+    }
     let Some((plan, in_views)) = layout.plan(entry.binding) else {
         return Err(HalError::InvalidDescriptor(format!(
             "binding {} is not declared by this bind group's layout",
@@ -686,7 +858,54 @@ pub(crate) fn write_entry(
         plan.range_type,
         heap.cpu(block, slot),
         entry.binding,
-    )
+    )?;
+    Ok(None)
+}
+
+/// Resolves a dynamic binding's entry to the address its root descriptor takes.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] when the entry names an array element a root
+/// descriptor does not have, or a resource that is not a buffer — a root
+/// CBV/SRV/UAV is an address into one, and there is no image or sampler form.
+fn write_root(
+    plan: &RootPlan,
+    entry: &BindGroupEntry,
+    resource: &Resolved,
+) -> Result<BoundBuffer, HalError> {
+    if entry.array_index != 0 {
+        return Err(HalError::InvalidDescriptor(format!(
+            "binding {} index {} was written, and a dynamic binding is one root descriptor with \
+             no array to index",
+            entry.binding, entry.array_index
+        )));
+    }
+    let Resolved::Buffer {
+        address,
+        offset,
+        size,
+        capacity,
+        ..
+    } = resource
+    else {
+        return Err(HalError::InvalidDescriptor(format!(
+            "binding {} takes a dynamic offset and was given a {}; a root {:?} is an address \
+             into a buffer",
+            entry.binding,
+            resource.what(),
+            plan.parameter_type(),
+        )));
+    };
+    Ok(BoundBuffer {
+        // The buffer's **base**, not the bound range's start: `crate::root`
+        // adds the entry's offset and the dynamic one together, because it is
+        // their sum that has to satisfy D3D12's address alignment.
+        address: Some(*address),
+        offset: *offset,
+        size: *size,
+        capacity: *capacity,
+    })
 }
 
 /// A [`BindingResource`](crcbl_hal::BindingResource) resolved against the
@@ -707,6 +926,9 @@ pub(crate) enum Resolved {
         offset: u64,
         /// Byte length, already resolved from the seam's `WHOLE_BUFFER`.
         size: u64,
+        /// The buffer's **own** size. Only a dynamic binding reads it, and only
+        /// to bound the offset a bind adds — see [`BoundBuffer::capacity`].
+        capacity: u64,
     },
     /// An image view's descriptor in the device's CPU-visible heap.
     View {
@@ -1051,18 +1273,24 @@ mod tests {
                 }],
             ),
             (
-                "dynamic offset",
-                vec![entry(0, BindingKind::UniformBuffer { dynamic: true })],
+                "one offset per dynamic binding rather than per element",
+                vec![BindGroupLayoutEntry {
+                    count: 4,
+                    ..entry(0, BindingKind::UniformBuffer { dynamic: true })
+                }],
             ),
             (
-                "dynamic offset",
-                vec![entry(
-                    0,
-                    BindingKind::StorageBuffer {
-                        read_only: true,
-                        dynamic: true,
-                    },
-                )],
+                "a root descriptor is not in one",
+                vec![BindGroupLayoutEntry {
+                    flags: BindingFlags::PARTIALLY_BOUND,
+                    ..entry(
+                        0,
+                        BindingKind::StorageBuffer {
+                            read_only: true,
+                            dynamic: true,
+                        },
+                    )
+                }],
             ),
             (
                 "not the last entry",
@@ -1128,7 +1356,8 @@ mod tests {
         ];
         let layout = plan(&entries).expect("five bindings");
         let mut registers = dxil::Registers::default();
-        let (views, samplers) = ranges(&layout, &mut registers);
+        let tables = ranges(&layout, &mut registers);
+        let (views, samplers) = (&tables.views, &tables.samplers);
 
         // In `views` order, which is declaration order: b0, t0, u0, t1.
         assert_eq!(views.len(), 4);
@@ -1141,7 +1370,7 @@ mod tests {
         );
         assert_eq!(samplers.len(), 1);
         assert_eq!(samplers[0].BaseShaderRegister, 0, "the only sampler is s0");
-        for range in views.iter().chain(&samplers) {
+        for range in views.iter().chain(samplers) {
             assert_eq!(
                 range.RegisterSpace, 0,
                 "Slang's HLSL output puts every set in space 0"
@@ -1149,6 +1378,7 @@ mod tests {
         }
         assert_eq!(views[0].NumDescriptors, 1);
         assert_eq!(views[0].OffsetInDescriptorsFromTableStart, 0);
+        assert!(tables.roots.is_empty(), "no binding here is dynamic");
 
         // The counter carries across sets, so a second layout continues where
         // the first stopped — which is what makes a two-set pipeline layout
@@ -1161,8 +1391,89 @@ mod tests {
             },
         )];
         let second = plan(&more).expect("one binding");
-        let (views, _) = ranges(&second, &mut registers);
-        assert_eq!(views[0].BaseShaderRegister, 2, "the third SRV is t2");
+        let tables = ranges(&second, &mut registers);
+        assert_eq!(tables.views[0].BaseShaderRegister, 2, "the third SRV is t2");
+    }
+
+    /// **A dynamic binding leaves the descriptor table and becomes a root
+    /// descriptor, and every binding after it keeps the offset it had.**
+    ///
+    /// The table offsets are the assertion that would otherwise go wrong
+    /// silently: a dynamic binding occupies no descriptor, so leaving a gap for
+    /// it would put every later binding one slot past the descriptor its group
+    /// wrote — a shader reading the wrong resource, with nothing in D3D12 to say
+    /// so. The registers are the other half: it is still a `ConstantBuffer` in
+    /// the source, so it still takes `b1` and the CBV after it takes `b2`.
+    #[test]
+    fn a_dynamic_binding_leaves_the_table_and_becomes_a_root_descriptor() {
+        let entries = [
+            entry(0, BindingKind::UniformBuffer { dynamic: false }),
+            entry(1, BindingKind::UniformBuffer { dynamic: true }),
+            entry(2, BindingKind::UniformBuffer { dynamic: false }),
+            entry(
+                3,
+                BindingKind::StorageBuffer {
+                    read_only: false,
+                    dynamic: true,
+                },
+            ),
+            entry(4, BindingKind::SampledImage),
+        ];
+        let layout = plan(&entries).expect("two dynamic bindings among three table ones");
+
+        assert_eq!(
+            layout.views.len(),
+            3,
+            "the two dynamic bindings are not here"
+        );
+        assert_eq!(
+            layout
+                .views
+                .iter()
+                .map(|plan| plan.offset)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "the table packs, so nothing reserves a slot for a root descriptor"
+        );
+        assert_eq!(layout.view_descriptors, 3);
+        assert_eq!(
+            layout
+                .roots
+                .iter()
+                .map(|plan| plan.binding)
+                .collect::<Vec<_>>(),
+            vec![1, 3],
+            "ascending, which is the order dynamic offsets arrive in"
+        );
+        assert!(layout.roots[0].uniform(), "binding 1 is a root CBV");
+        assert!(
+            !layout.roots[1].uniform(),
+            "binding 3 is a writable storage buffer, so a root UAV"
+        );
+
+        let mut registers = dxil::Registers::default();
+        let tables = ranges(&layout, &mut registers);
+        assert_eq!(
+            tables
+                .views
+                .iter()
+                .map(|range| range.BaseShaderRegister)
+                .collect::<Vec<_>>(),
+            vec![0, 2, 0],
+            "b0 and b2 in the table, and t0 for the sampled image — b1 went to the root descriptor"
+        );
+        assert_eq!(tables.roots.len(), 2);
+        assert_eq!(
+            tables.roots[0].parameter_type,
+            D3D12_ROOT_PARAMETER_TYPE_CBV
+        );
+        assert_eq!(tables.roots[0].descriptor.ShaderRegister, 1, "b1");
+        assert_eq!(tables.roots[0].descriptor.RegisterSpace, 0);
+        assert_eq!(
+            tables.roots[1].parameter_type,
+            D3D12_ROOT_PARAMETER_TYPE_UAV
+        );
+        assert_eq!(tables.roots[1].descriptor.ShaderRegister, 0, "u0");
     }
 
     /// A block's addresses are its start times the stride, in both spaces —

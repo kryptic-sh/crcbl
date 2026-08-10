@@ -87,18 +87,18 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_RESOURCE_BARRIER, D3D12_RESOURCE_BARRIER_0, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
     D3D12_RESOURCE_BARRIER_FLAG_NONE, D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
     D3D12_RESOURCE_BARRIER_TYPE_UAV, D3D12_RESOURCE_STATES, D3D12_RESOURCE_TRANSITION_BARRIER,
-    D3D12_RESOURCE_UAV_BARRIER, D3D12_SUBRESOURCE_FOOTPRINT, D3D12_TEXTURE_COPY_LOCATION,
-    D3D12_TEXTURE_COPY_LOCATION_0, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
-    D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT,
-    D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_VIEWPORT, ID3D12CommandAllocator,
-    ID3D12CommandSignature, ID3D12GraphicsCommandList, ID3D12Resource,
+    D3D12_RESOURCE_UAV_BARRIER, D3D12_ROOT_PARAMETER_TYPE_CBV, D3D12_ROOT_PARAMETER_TYPE_SRV,
+    D3D12_SUBRESOURCE_FOOTPRINT, D3D12_TEXTURE_COPY_LOCATION, D3D12_TEXTURE_COPY_LOCATION_0,
+    D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
+    D3D12_TEXTURE_DATA_PITCH_ALIGNMENT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_VIEWPORT,
+    ID3D12CommandAllocator, ID3D12CommandSignature, ID3D12GraphicsCommandList, ID3D12Resource,
 };
 use windows::core::Interface;
 
 use crate::conv;
 use crate::device::{
-    AttachmentRef, BoundCompute, BoundPipeline, BufferRef, CommandBufferEntry, DeviceInner,
-    ImageRef,
+    AttachmentRef, BoundCompute, BoundPipeline, BoundRoot, BufferRef, CommandBufferEntry,
+    DeviceInner, ImageRef,
 };
 use crate::draw::{IndirectKind, check_count, plan_index_binding, plan_indirect};
 use crate::instance::not_yet;
@@ -784,6 +784,44 @@ fn clear_flags(format: Format, depth: LoadOp, stencil: LoadOp) -> Option<D3D12_C
     if flags.0 == 0 { None } else { Some(flags) }
 }
 
+/// Sets one root descriptor's address, through the call its parameter type
+/// names.
+///
+/// Six calls rather than one because D3D12 has six: a root CBV, SRV and UAV are
+/// three different root parameter types, and each has a graphics and a compute
+/// form because a `DIRECT` command list carries a root signature of each. All
+/// six take a bare `u64` GPU virtual address, which is the property that makes a
+/// dynamic offset free here — see `crcbl_dx12::root`.
+fn set_root_descriptor(list: &ID3D12GraphicsCommandList, compute: bool, root: BoundRoot) {
+    let (parameter, address) = (root.parameter, root.address);
+    // SAFETY: `list` is live and recording. `address` is inside a buffer
+    // resource the encoder holds a reference to, and `parameter` is a root
+    // parameter index the bound root signature declares with exactly this
+    // parameter type — both come from `crcbl_dx12::root`, which laid the
+    // signature out and resolved the address against it.
+    unsafe {
+        match (compute, root.parameter_type) {
+            (true, D3D12_ROOT_PARAMETER_TYPE_CBV) => {
+                list.SetComputeRootConstantBufferView(parameter, address);
+            }
+            (false, D3D12_ROOT_PARAMETER_TYPE_CBV) => {
+                list.SetGraphicsRootConstantBufferView(parameter, address);
+            }
+            (true, D3D12_ROOT_PARAMETER_TYPE_SRV) => {
+                list.SetComputeRootShaderResourceView(parameter, address);
+            }
+            (false, D3D12_ROOT_PARAMETER_TYPE_SRV) => {
+                list.SetGraphicsRootShaderResourceView(parameter, address);
+            }
+            // `RootPlan::parameter_type` produces exactly those two and the UAV,
+            // so this is the writable storage buffer and cannot be anything
+            // else.
+            (true, _) => list.SetComputeRootUnorderedAccessView(parameter, address),
+            (false, _) => list.SetGraphicsRootUnorderedAccessView(parameter, address),
+        }
+    }
+}
+
 impl CommandEncoder for Dx12CommandEncoder {
     // --- debug ---
 
@@ -1237,17 +1275,17 @@ impl CommandEncoder for Dx12CommandEncoder {
         self.index_buffer = true;
     }
 
-    /// Binds a bind group's descriptor tables at the root parameters the
-    /// pipeline layout put them at.
+    /// Binds a bind group's descriptor tables and root descriptors at the root
+    /// parameters the pipeline layout put them at.
     ///
-    /// `dynamic_offsets` is refused rather than ignored: a descriptor table has
-    /// no offset to apply, which is why
-    /// [`create_bind_group_layout`](crcbl_hal::Device::create_bind_group_layout)
-    /// already refuses a `dynamic` binding. A caller reaching here with offsets
-    /// is holding a layout no bind group in this backend could conform to, and
-    /// dropping them would bind the wrong region of one large buffer.
+    /// **A dynamic offset reaches a root descriptor, not a table.** A descriptor
+    /// table has no offset to apply, so `crcbl_dx12::binding` plans a `dynamic`
+    /// binding as a root CBV/SRV/UAV — which takes a GPU virtual address rather
+    /// than a handle — and the offset is added on the way to
+    /// `SetGraphicsRootConstantBufferView` here. `crcbl_dx12::device::bind_group`
+    /// has already checked the count, the alignment and the bounds.
     ///
-    /// **Which bind point the table lands on is decided by the open scope**, and
+    /// **Which bind point anything lands on is decided by the open scope**, and
     /// nothing else: the seam gives a backend no other signal, which is why it
     /// asks a caller to bind its groups inside the pass they are for. That is
     /// `crcbl-vk`'s rule verbatim, and here it is the difference between
@@ -1264,16 +1302,10 @@ impl CommandEncoder for Dx12CommandEncoder {
         if self.list().is_none() {
             return;
         }
-        if !dynamic_offsets.is_empty() {
-            self.fail(HalError::InvalidDescriptor(format!(
-                "{} dynamic offset(s) at set {index}, and a D3D12 descriptor table has none to \
-                 apply; no bind group layout on this device declares a dynamic binding (the DX12 \
-                 dynamic-offset slice)",
-                dynamic_offsets.len()
-            )));
-            return;
-        }
-        let bound = match self.device.bind_group(index, group, layout) {
+        let bound = match self
+            .device
+            .bind_group(index, group, dynamic_offsets, layout)
+        {
             Ok(bound) => bound,
             Err(error) => {
                 self.fail(error);
@@ -1289,8 +1321,10 @@ impl CommandEncoder for Dx12CommandEncoder {
         // shader-visible heaps this device owns, borrowed for the call and
         // containing no null entry — `VisibleHeaps::bound` drops a heap that was
         // never created rather than passing one. Each table base is an address
-        // inside one of exactly those heaps, at a root parameter index the
-        // pipeline layout's own root signature declares.
+        // inside one of exactly those heaps, and each root descriptor's address
+        // is inside a buffer this encoder now holds a reference to; both are at
+        // a root parameter index the pipeline layout's own root signature
+        // declares, of the type declared there.
         unsafe {
             if !bound.heaps.is_empty() {
                 list.SetDescriptorHeaps(&bound.heaps);
@@ -1301,6 +1335,9 @@ impl CommandEncoder for Dx12CommandEncoder {
                 } else {
                     list.SetGraphicsRootDescriptorTable(root, base);
                 }
+            }
+            for root in bound.roots {
+                set_root_descriptor(list, compute, root);
             }
         }
     }

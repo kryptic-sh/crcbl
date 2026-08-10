@@ -272,6 +272,14 @@ mod pipeline;
 mod present;
 #[cfg(target_os = "windows")]
 mod retire;
+// Where every binding of a pipeline layout lands among the root parameters,
+// what the signature costs, and how a dynamic offset reaches a root descriptor.
+// Not Windows-only for the reason `present` below is not — it holds no `windows`
+// type — and that matters more here than anywhere else in this crate: nothing in
+// D3D12 reports a root parameter index that disagrees with the one the signature
+// was built with.
+#[cfg(any(target_os = "windows", test))]
+mod root;
 #[cfg(target_os = "windows")]
 mod swapchain;
 #[cfg(target_os = "windows")]

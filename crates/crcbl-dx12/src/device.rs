@@ -94,11 +94,12 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_HEAP_PROPERTIES, D3D12_INDIRECT_ARGUMENT_DESC, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
     D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED,
     D3D12_MEMORY_POOL_UNKNOWN, D3D12_RANGE, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
-    D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_BUFFER, D3D12_SAMPLER_DESC,
-    D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12CreateDevice,
-    ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12CommandSignature,
-    ID3D12DescriptorHeap, ID3D12Device, ID3D12Fence, ID3D12GraphicsCommandList, ID3D12Object,
-    ID3D12PipelineState, ID3D12Resource, ID3D12RootSignature,
+    D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_BUFFER, D3D12_ROOT_PARAMETER_TYPE,
+    D3D12_SAMPLER_DESC, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_TEXTURE_LAYOUT_UNKNOWN,
+    D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue,
+    ID3D12CommandSignature, ID3D12DescriptorHeap, ID3D12Device, ID3D12Fence,
+    ID3D12GraphicsCommandList, ID3D12Object, ID3D12PipelineState, ID3D12Resource,
+    ID3D12RootSignature,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
@@ -504,9 +505,25 @@ pub(crate) struct BoundGroup {
     pub(crate) views: Option<(u32, D3D12_GPU_DESCRIPTOR_HANDLE)>,
     /// The same for the sampler table.
     pub(crate) samplers: Option<(u32, D3D12_GPU_DESCRIPTOR_HANDLE)>,
+    /// One root descriptor per dynamic binding, with its offset already applied.
+    pub(crate) roots: Vec<BoundRoot>,
     /// Every resource the group's descriptors point into, so the encoder can
     /// hold a reference for the length of the submission.
     pub(crate) retained: Vec<ID3D12Resource>,
+}
+
+/// One root descriptor a bind sets: which parameter, which call, which address.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct BoundRoot {
+    pub(crate) parameter: u32,
+    /// Which of `SetGraphicsRootConstantBufferView`'s family the address goes
+    /// to. A root descriptor's type is part of the signature, so setting a CBV's
+    /// address through the SRV call is a mismatch D3D12's debug layer reports
+    /// and a release runtime does not.
+    pub(crate) parameter_type: D3D12_ROOT_PARAMETER_TYPE,
+    /// The buffer's GPU virtual address, plus the entry's offset, plus the
+    /// dynamic one.
+    pub(crate) address: u64,
 }
 
 /// A render pass attachment: its descriptor, and the resource behind it.
@@ -793,14 +810,16 @@ impl DeviceInner {
     /// # Errors
     ///
     /// As [`handle::lookup`] for either handle, plus
-    /// [`HalError::InvalidDescriptor`] when `index` is past the layout's sets or
+    /// [`HalError::InvalidDescriptor`] when `index` is past the layout's sets,
     /// when the group's own layout is not the one that set declares — the case
     /// that otherwise binds a table of the wrong length, which D3D12 reads as
-    /// arithmetic and never reports.
+    /// arithmetic and never reports — or when `dynamic_offsets` cannot be
+    /// applied to the set's root descriptors. See [`crate::root::apply`].
     pub(crate) fn bind_group(
         &self,
         index: u32,
         group: BindGroupHandle,
+        dynamic_offsets: &[u32],
         layout: PipelineLayoutHandle,
     ) -> Result<BoundGroup, HalError> {
         let state = self.state();
@@ -823,6 +842,41 @@ impl DeviceInner {
                  layout than the one this pipeline layout declares there"
             )));
         }
+        // The group's layout is the one the pipeline layout declares here, so
+        // all three lists — the layout's plans, the group's addresses and the
+        // placement's parameter indices — are the same length and in the same
+        // ascending-binding order.
+        let plans = handle::lookup(
+            &state.bind_group_layouts,
+            "bind group layout",
+            record.layout,
+            self.owner,
+        )?;
+        let dynamic: Vec<crate::root::Dynamic> = plans
+            .roots
+            .iter()
+            .zip(&record.roots)
+            .zip(&placement.roots)
+            .map(|((plan, bound), parameter)| crate::root::Dynamic {
+                binding: plan.binding,
+                parameter: *parameter,
+                uniform: plan.uniform(),
+                address: bound.address,
+                offset: bound.offset,
+                size: bound.size,
+                capacity: bound.capacity,
+            })
+            .collect();
+        let roots = crate::root::apply(index, &dynamic, dynamic_offsets, &self.caps.limits)?
+            .into_iter()
+            .zip(&plans.roots)
+            .map(|((parameter, address), plan)| BoundRoot {
+                parameter,
+                parameter_type: plan.parameter_type(),
+                address,
+            })
+            .collect();
+
         Ok(BoundGroup {
             heaps: state.visible.bound(),
             views: placement
@@ -833,6 +887,7 @@ impl DeviceInner {
                 .samplers
                 .zip(record.samplers)
                 .map(|(root, block)| (root, state.visible.gpu_samplers(block))),
+            roots,
             retained: record.retained.clone(),
         })
     }
@@ -1202,6 +1257,7 @@ impl Dx12Device {
                         address,
                         offset,
                         size,
+                        capacity: record.size,
                     })
                 }
                 BindingResource::ImageView(view) => {
@@ -2220,6 +2276,11 @@ impl Device for Dx12Device {
             layout: desc.layout,
             views,
             samplers,
+            // One slot per dynamic binding, in the layout's ascending order, so
+            // the group's addresses and the layout's root plans index each
+            // other. Unwritten until an entry names the binding, which a bind
+            // refuses rather than reading as zero.
+            roots: vec![binding::BoundBuffer::default(); layout.roots.len()],
             retained: retained(&resolved),
         };
 
@@ -2227,32 +2288,42 @@ impl Device for Dx12Device {
         // before the error arm needs `state.visible` mutably to give the block
         // back — which it must, or a group that failed half way through would
         // leak its descriptors for the device's lifetime.
-        let written = desc
-            .entries
-            .iter()
-            .zip(&resolved)
-            .try_for_each(|(entry, resource)| {
+        let mut roots: Vec<(usize, binding::BoundBuffer)> = Vec::new();
+        let written = desc.entries.iter().zip(&resolved).try_for_each(
+            |(entry, resource)| -> Result<(), HalError> {
                 let layout = handle::lookup(
                     &state.bind_group_layouts,
                     "bind group layout",
                     desc.layout,
                     self.inner.owner,
                 )?;
-                binding::write_entry(
+                if let Some(bound) = binding::write_entry(
                     &self.inner.raw,
                     &state.visible,
                     layout,
                     &record,
                     entry,
                     resource,
-                )
-            });
+                )? {
+                    roots.push(bound);
+                }
+                Ok(())
+            },
+        );
         if let Err(error) = written {
             binding::free_group(&mut state.visible, &record);
             // The references were taken before the writes and are dropped with
             // the record, which never reaches a pool.
             record.retained.clear();
             return Err(error);
+        }
+        // After the loop rather than inside it, because a dynamic binding's
+        // address is the record's and the loop borrows the record to reach the
+        // heaps.
+        for (index, bound) in roots {
+            if let Some(slot) = record.roots.get_mut(index) {
+                *slot = bound;
+            }
         }
         let handle = state.bind_groups.insert(record);
         Ok(handle::stamp(self.inner.owner, handle))
@@ -2280,6 +2351,7 @@ impl Device for Dx12Device {
             let record = handle::lookup(&state.bind_groups, "bind group", group, self.inner.owner)?;
             record.layout
         };
+        let mut roots: Vec<(usize, binding::BoundBuffer)> = Vec::new();
         for (entry, resource) in entries.iter().zip(&resolved) {
             let record = handle::lookup(&state.bind_groups, "bind group", group, self.inner.owner)?;
             let layout = handle::lookup(
@@ -2288,18 +2360,28 @@ impl Device for Dx12Device {
                 index,
                 self.inner.owner,
             )?;
-            binding::write_entry(
+            if let Some(bound) = binding::write_entry(
                 &self.inner.raw,
                 &state.visible,
                 layout,
                 record,
                 entry,
                 resource,
-            )?;
+            )? {
+                roots.push(bound);
+            }
         }
         let slot = handle::local::<BindGroupRecord, _>("bind group", group, self.inner.owner)?;
         if let Some(record) = state.bind_groups.get_mut(slot) {
             record.retained.extend(retained(&resolved));
+            // As `create_bind_group`: a root descriptor's address is state on
+            // the record rather than a descriptor in a heap, so it is written
+            // once the loop's borrow of the record has ended.
+            for (index, bound) in roots {
+                if let Some(root) = record.roots.get_mut(index) {
+                    *root = bound;
+                }
+            }
         }
         Ok(())
     }
@@ -2338,15 +2420,7 @@ impl Device for Dx12Device {
                 *handle,
                 self.inner.owner,
             )?;
-            let (views, samplers) = binding::ranges(record, &mut registers);
-            sets.push((
-                *handle,
-                pipeline::RootTables {
-                    views,
-                    samplers,
-                    visibility: record.visibility,
-                },
-            ));
+            sets.push((*handle, binding::ranges(record, &mut registers)));
         }
         let entry = pipeline::layout(&self.inner.raw, desc, &sets, self.inner.owner.id)?;
         if let Some(label) = desc.label {
@@ -5994,22 +6068,6 @@ pub(crate) mod tests {
             .expect("the graphics queue exists");
         type Refused = (&'static str, fn(&mut dyn CommandEncoder));
         let recording: &[Refused] = &[
-            ("indexed draws", |encoder| {
-                encoder.draw_indexed(0..3, 0, 0..1);
-            }),
-            ("indirect-count draws", |encoder| {
-                encoder.draw_indexed_indirect_count(&DrawIndirectCount {
-                    args: unissued(),
-                    args_offset: 0,
-                    count_buffer: unissued(),
-                    count_offset: 0,
-                    max_draw_count: 1,
-                    stride: 20,
-                });
-            }),
-            ("index buffers", |encoder| {
-                encoder.bind_index_buffer(unissued(), 0, IndexFormat::Uint32);
-            }),
             ("buffer fills", |encoder| {
                 encoder.fill_buffer(unissued(), 0, 4, 0);
             }),
@@ -6122,11 +6180,13 @@ pub(crate) mod tests {
                             binding: 0,
                             visibility: ShaderStages::ALL,
                             kind: BindingKind::UniformBuffer { dynamic: true },
-                            count: 1,
+                            // A dynamic binding is one root descriptor, so an
+                            // array of them has nothing to offset per element.
+                            count: 4,
                             flags: BindingFlags::empty(),
                         }],
                     })
-                    .expect_err("a descriptor table has no dynamic offset"),
+                    .expect_err("a root descriptor is not an array"),
             ),
             (
                 "pipeline layouts",
@@ -6581,6 +6641,25 @@ pub(crate) mod tests {
         PROBE_ELEMENTS as u64 * 4
     }
 
+    /// Bytes between the two `Params` blocks of a dynamic probe's uniform
+    /// buffer.
+    ///
+    /// `D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT`, which is what
+    /// `crcbl_dx12::adapter` reports as
+    /// `min_uniform_buffer_offset_alignment` — a root CBV's address must be a
+    /// multiple of it, so this is the smallest non-zero dynamic offset a caller
+    /// may pass here.
+    const PROBE_PARAMS_STRIDE: u32 = 256;
+
+    /// The element count the *second* `Params` block carries.
+    ///
+    /// Not [`PROBE_ELEMENTS`] and not a multiple of the workgroup size, so a
+    /// dispatch that read the second block leaves a boundary partway through a
+    /// group and the sentinel behind it — while one that read the first writes
+    /// every element and leaves no sentinel at all. The two readbacks cannot be
+    /// confused, which is what makes the offset provable rather than assumed.
+    const PROBE_DYNAMIC_COUNT: u32 = PROBE_ELEMENTS / 2 + 1;
+
     /// The probe's input, one distinct value per index.
     ///
     /// Distinct matters: with a constant input, a shader that indexed `source`
@@ -6628,6 +6707,11 @@ pub(crate) mod tests {
         group: BindGroupHandle,
         pipeline_layout: PipelineLayoutHandle,
         pipeline: ComputePipelineHandle,
+        /// What [`run`](Self::run) passes to `bind_group`. Empty unless the
+        /// probe was built by [`dynamic`](Self::dynamic), and writable so one
+        /// probe can be run at two offsets — which is what makes a difference in
+        /// the readback a statement about the offset and nothing else.
+        dynamic_offsets: Vec<u32>,
     }
 
     impl ComputeProbe {
@@ -6638,10 +6722,39 @@ pub(crate) mod tests {
         /// because D3D12 checks a transition's *before* state: every run starts
         /// from the same place only if the setup ends where a run ends.
         fn new(device: &Dx12Device) -> Self {
-            let params = crcbl_shaders::compute_probe::Params {
+            Self::build(device, false)
+        }
+
+        /// The same probe with binding 0 declared `dynamic`, so it becomes a
+        /// **root CBV** rather than an entry in the set's descriptor table.
+        ///
+        /// Its uniform buffer holds two `Params` blocks
+        /// [`PROBE_PARAMS_STRIDE`] apart: the first says every element, the
+        /// second says [`PROBE_DYNAMIC_COUNT`]. Which one the shader reads is
+        /// decided entirely by the dynamic offset a bind passes, and the two
+        /// produce different destinations.
+        fn dynamic(device: &Dx12Device) -> Self {
+            Self::build(device, true)
+        }
+
+        fn build(device: &Dx12Device, dynamic: bool) -> Self {
+            let mut params = crcbl_shaders::compute_probe::Params {
                 count: PROBE_ELEMENTS,
             }
-            .to_bytes();
+            .to_bytes()
+            .to_vec();
+            if dynamic {
+                // Zero padding out to the stride, then the second block. The
+                // gap is never read: a root CBV reads `Params` from whichever
+                // of the two addresses it was given.
+                params.resize(PROBE_PARAMS_STRIDE as usize, 0);
+                params.extend_from_slice(
+                    &crcbl_shaders::compute_probe::Params {
+                        count: PROBE_DYNAMIC_COUNT,
+                    }
+                    .to_bytes(),
+                );
+            }
             let source_bytes: Vec<u8> = probe_source()
                 .iter()
                 .flat_map(|value| value.to_le_bytes())
@@ -6689,7 +6802,7 @@ pub(crate) mod tests {
             let params_buffer = device
                 .create_buffer(&BufferDesc {
                     label: Some("compute probe params"),
-                    size: crcbl_shaders::compute_probe::PARAMS_SIZE as u64,
+                    size: params.len() as u64,
                     usage: BufferUsage::UNIFORM | BufferUsage::TRANSFER_DST,
                     memory: MemoryLocation::DeviceLocal,
                 })
@@ -6764,7 +6877,7 @@ pub(crate) mod tests {
                         BindGroupLayoutEntry {
                             binding: 0,
                             visibility: ShaderStages::COMPUTE,
-                            kind: BindingKind::UniformBuffer { dynamic: false },
+                            kind: BindingKind::UniformBuffer { dynamic },
                             count: 1,
                             flags: BindingFlags::empty(),
                         },
@@ -6806,7 +6919,20 @@ pub(crate) mod tests {
                         BindGroupEntry {
                             binding: 0,
                             array_index: 0,
-                            resource: BindingResource::whole_buffer(params_buffer),
+                            // **One block, not the whole buffer**, when the
+                            // binding is dynamic: the offset is added on top of
+                            // this one, and `offset + dynamic + size` has to
+                            // stay inside the buffer. Bound whole, the second
+                            // block would be out of range.
+                            resource: if dynamic {
+                                BindingResource::Buffer {
+                                    buffer: params_buffer,
+                                    offset: 0,
+                                    size: crcbl_shaders::compute_probe::PARAMS_SIZE as u64,
+                                }
+                            } else {
+                                BindingResource::whole_buffer(params_buffer)
+                            },
                         },
                         BindGroupEntry {
                             binding: 1,
@@ -6857,6 +6983,7 @@ pub(crate) mod tests {
                 group,
                 pipeline_layout,
                 pipeline,
+                dynamic_offsets: if dynamic { vec![0] } else { Vec::new() },
             }
         }
 
@@ -6906,7 +7033,7 @@ pub(crate) mod tests {
                 encoder.bind_compute_pipeline(self.pipeline);
                 // Inside the pass, because the open scope is the only signal the
                 // seam gives the backend about which bind point a group is for.
-                encoder.bind_group(0, self.group, &[], self.pipeline_layout);
+                encoder.bind_group(0, self.group, &self.dynamic_offsets, self.pipeline_layout);
                 record(encoder);
                 encoder.end_compute_pass();
 
@@ -7054,6 +7181,138 @@ pub(crate) mod tests {
         );
 
         probe.destroy(&device);
+    }
+
+    /// **A dynamic offset reaches the shader as a different constant buffer**,
+    /// and the offset that proves it is not zero.
+    ///
+    /// The probe's uniform buffer holds two `Params` blocks
+    /// [`PROBE_PARAMS_STRIDE`] apart, saying [`PROBE_ELEMENTS`] and
+    /// [`PROBE_DYNAMIC_COUNT`]. One bind group, one buffer, one pipeline: the
+    /// **only** difference between the two runs below is the number passed to
+    /// `bind_group`, and the two destinations differ in more than a hundred
+    /// elements. So this cannot pass with the offset dropped — that run is the
+    /// first one, and it is asserted to look different.
+    ///
+    /// It is also the only test of the root parameter *index*. Binding 0 is a
+    /// root CBV and bindings 1 and 2 are a descriptor table, so the set is two
+    /// root parameters of different types; `SetComputeRootConstantBufferView` on
+    /// the table's index, or the table on the root descriptor's, is a shader
+    /// reading somewhere else entirely — which is exactly what the destination
+    /// would show.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it. `crcbl_dx12::root`'s own tests run anywhere and cover the
+    /// arithmetic; that D3D12 accepts the signature and that the address
+    /// arrives at the shader is a claim about a driver.
+    #[test]
+    fn a_dynamic_offset_binds_the_block_of_the_uniform_buffer_it_names() {
+        let (_instance, device) = open_device();
+        assert_eq!(
+            device.caps().limits.min_uniform_buffer_offset_alignment,
+            u64::from(PROBE_PARAMS_STRIDE),
+            "the offsets below are built on this device's reported alignment"
+        );
+
+        let mut probe = ComputeProbe::dynamic(&device);
+
+        // Offset zero: the first block, which says every element.
+        probe.dynamic_offsets = vec![0];
+        let whole = probe.run(&device, |encoder| {
+            encoder.dispatch(PROBE_GROUPS, 1, 1);
+        });
+        assert_probe(&whole, &probe_expected(PROBE_ELEMENTS), "at offset 0");
+
+        // The same everything, one number apart: the second block, which says
+        // half the elements and one more.
+        probe.dynamic_offsets = vec![PROBE_PARAMS_STRIDE];
+        let half = probe.run(&device, |encoder| {
+            encoder.dispatch(PROBE_GROUPS, 1, 1);
+        });
+        assert_probe(
+            &half,
+            &probe_expected(PROBE_DYNAMIC_COUNT),
+            "at a non-zero dynamic offset",
+        );
+        assert!(
+            half.contains(&PROBE_SENTINEL),
+            "the second block's count leaves elements unwritten, and none were"
+        );
+        assert_ne!(
+            whole, half,
+            "the two runs differ only in the dynamic offset, so an offset that \
+             was dropped makes them equal"
+        );
+
+        probe.destroy(&device);
+    }
+
+    /// **A pipeline layout that does not fit D3D12's root budget is refused
+    /// here, by name, rather than at the draw that would have bound nothing.**
+    ///
+    /// The boundary is the assertion. A root descriptor costs two of the
+    /// signature's 64 DWORDs, so 32 dynamic bindings are exactly the budget and
+    /// 36 are over it — and the accepted half is what stops this from passing
+    /// with a backend that refused every dynamic binding. `crcbl_dx12::root`'s
+    /// own test covers the arithmetic on any host; this is the half that says
+    /// the refusal reaches `create_pipeline_layout`, and that D3D12 really does
+    /// serialise the signature the accepted arm asks for.
+    #[test]
+    fn a_root_signature_over_the_budget_is_refused_at_pipeline_layout_creation() {
+        let (_instance, device) = open_device();
+        assert!(
+            device.caps().limits.max_bind_groups >= 4,
+            "the counts below assume four sets are allowed"
+        );
+
+        let set_of = |bindings: u32| {
+            let entries: Vec<BindGroupLayoutEntry> = (0..bindings)
+                .map(|binding| BindGroupLayoutEntry {
+                    binding,
+                    visibility: ShaderStages::COMPUTE,
+                    kind: BindingKind::UniformBuffer { dynamic: true },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                })
+                .collect();
+            device
+                .create_bind_group_layout(&BindGroupLayoutDesc {
+                    label: Some("root budget"),
+                    entries: &entries,
+                })
+                .expect("dynamic uniform buffers are a layout this backend plans")
+        };
+        // Four sets, because that is what `max_bind_groups` allows: eight
+        // dynamic bindings each is 32 root descriptors and exactly 64 DWORDs;
+        // nine each is 36 and 72.
+        let fits = set_of(8);
+        let over = set_of(9);
+
+        device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("exactly the budget"),
+                bind_group_layouts: &[fits; 4],
+                push_constants: None,
+            })
+            .map(|layout| device.destroy_pipeline_layout(layout))
+            .expect("32 root descriptors are exactly D3D12's 64 root DWORDs");
+
+        let error = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("over the budget"),
+                bind_group_layouts: &[over; 4],
+                push_constants: None,
+            })
+            .expect_err("36 root descriptors are 72 root DWORDs");
+        let HalError::InvalidDescriptor(text) = &error else {
+            panic!("a signature that does not fit is not {error:?}");
+        };
+        assert!(text.contains("72 root DWORD(s)"), "{text}");
+        assert!(text.contains("holds 64"), "{text}");
+
+        device.destroy_bind_group_layout(over);
+        device.destroy_bind_group_layout(fits);
     }
 
     /// `dispatch_indirect` reads its workgroup count out of GPU memory, at the

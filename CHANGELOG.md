@@ -42,6 +42,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-dx12` honours dynamic offsets.** A
+  `BindingKind::UniformBuffer { dynamic: true }` or its storage-buffer twin was
+  refused at `create_bind_group_layout`, and `bind_group` refused a non-empty
+  `dynamic_offsets` again; both now work. Such a binding leaves the set's
+  descriptor table and becomes a **root descriptor** — a root CBV, SRV or UAV,
+  which takes a GPU virtual address rather than a descriptor handle, so the
+  offset is one addition on the way to
+  `SetGraphicsRootConstantBufferView`/`SetComputeRootConstantBufferView` and
+  their SRV/UAV siblings. It costs no descriptor in the group's block, and it
+  still takes its HLSL register in declaration order beside the table's.
+  `ForwardRenderer`'s mesh set — whose binding 3 is dynamic — is a layout this
+  backend can now build, and the forward pass's
+  `bind_group(0, group, &[constant_offset], layout)` records.
+
+  Three things are refused by name rather than discovered later: a dynamic
+  binding with `count` other than 1 or with any `BindingFlags`, because a root
+  descriptor is one address and is not in a descriptor heap; a `bind_group`
+  whose offset count, alignment or bounds do not fit the set, checked against
+  the device's own `min_uniform_buffer_offset_alignment` (256 on D3D12) and
+  `min_storage_buffer_offset_alignment` (16); and a **pipeline layout that
+  exceeds D3D12's 64-DWORD root signature budget**, at `create_pipeline_layout`
+  rather than at the draw — a descriptor table costs one DWORD and a root
+  descriptor two, so 32 dynamic bindings across a layout's sets are the ceiling.
+
 - **`crcbl-dx12` records every draw the seam has.** `bind_index_buffer` sets a
   `D3D12_INDEX_BUFFER_VIEW`, `draw_indexed` is `DrawIndexedInstanced`, and
   `draw_indirect`, `draw_indexed_indirect` and both `_count` siblings are
