@@ -214,7 +214,7 @@ impl MeshShaderResources {
                 // express a mesh stage, so there is no artifact to offer.
                 wgsl: crcbl_shaders::MESH_SHADER.wgsl(),
                 msl: crcbl_shaders::MESH_SHADER.msl(),
-                dxil: None,
+                dxil: &[],
             })
             .expect("the committed SPIR-V is accepted");
         assert_eq!(
@@ -634,7 +634,7 @@ fn a_mesh_pipeline_naming_a_fragment_entry_point_as_its_mesh_stage_is_refused() 
             spirv: crcbl_shaders::MESH_SHADER.spirv(),
             wgsl: None,
             msl: None,
-            dxil: None,
+            dxil: &[],
         })
         .expect("the committed SPIR-V is accepted");
 

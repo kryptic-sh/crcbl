@@ -659,14 +659,13 @@ impl ForwardRenderer {
             spirv: MESH.spirv(),
             wgsl: MESH.wgsl(),
             msl: MESH.msl(),
-            // **`None` is the truthful answer for a two-stage module, not an
-            // omission.** A DXIL container holds exactly one entry point, so
-            // `crcbl_shaders::Shader::dxil` takes an entry-point name and there
-            // is no container that is "the DXIL for mesh.slang". Reaching D3D12
-            // means one module per stage here, which is a change to this pass's
-            // handle bookkeeping rather than to the descriptor —
-            // `docs/backlog.md` carries it.
-            dxil: None,
+            // **Both containers, and still one module.** A DXIL container holds
+            // exactly one entry point, so this is a list where its three
+            // neighbours are single artifacts; the backend that consumes it
+            // picks the container named by the stage it is building. Nothing
+            // here branches on a backend, and the three that ignore DXIL see
+            // the same module they always did.
+            dxil: &MESH.dxil_containers(),
         })?;
         let mesh_targets = [ColorTargetState::opaque(Format::Rgba16Float)];
         let mesh_pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {
@@ -738,9 +737,9 @@ impl ForwardRenderer {
             spirv: TONEMAP.spirv(),
             wgsl: TONEMAP.wgsl(),
             msl: TONEMAP.msl(),
-            // `None` for the reason the mesh module above gives: one DXIL
-            // container, one entry point, and this module has two.
-            dxil: None,
+            // A container per entry point, for the reason the mesh module above
+            // gives.
+            dxil: &TONEMAP.dxil_containers(),
         })?;
         let tonemap_targets = [ColorTargetState::opaque(target_format)];
         let tonemap_pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {

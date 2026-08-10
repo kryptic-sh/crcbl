@@ -2878,7 +2878,7 @@ mod tests {
             spirv: &[],
             wgsl: None,
             msl: Some(msl),
-            dxil: None,
+            dxil: &[],
         }
     }
 
@@ -3329,7 +3329,7 @@ mod tests {
                 spirv: crcbl_shaders::TRIANGLE.spirv(),
                 wgsl: crcbl_shaders::TRIANGLE.wgsl(),
                 msl: None,
-                dxil: None,
+                dxil: &[],
             })
             .expect_err("this backend compiles MSL and nothing else");
         let HalError::ShaderCompilation(text) = error else {

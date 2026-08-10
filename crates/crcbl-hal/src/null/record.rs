@@ -566,6 +566,13 @@ pub(super) enum Detail {
         layout: BindGroupLayoutHandle,
         update_after_bind: bool,
     },
+    /// A shader module: the entry points it offered a DXIL container for.
+    ///
+    /// Empty for a module created without DXIL, which is every call site that
+    /// ships only the other three artifacts — so this is a *claim* to check
+    /// rather than a requirement, and only a module that made one is held to
+    /// it. See `check_stage`.
+    ShaderModule { dxil_entry_points: Vec<String> },
     /// A query set: how many queries it holds, so a range can be checked.
     QuerySet { count: u32 },
     /// A swapchain: its image ring and rotation state.

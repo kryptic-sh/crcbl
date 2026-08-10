@@ -410,7 +410,7 @@ impl CullProbe {
                 spirv: crcbl_shaders::CULL.spirv(),
                 wgsl: crcbl_shaders::CULL.wgsl(),
                 msl: crcbl_shaders::CULL.msl(),
-                dxil: None,
+                dxil: &[],
             })
             .expect("the committed SPIR-V is accepted");
         // The manifest's name rather than a literal, for the reason

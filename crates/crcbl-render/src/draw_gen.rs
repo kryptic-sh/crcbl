@@ -784,9 +784,10 @@ fn compute_pipeline(
         spirv: shader.spirv(),
         wgsl: shader.wgsl(),
         msl: shader.msl(),
-        // One DXIL container per entry point, and this module has exactly one —
-        // so unlike the two-stage graphics modules there is a right answer here.
-        dxil: shader.dxil(entry_point),
+        // One DXIL container per entry point, all of them, exactly as the
+        // two-stage graphics modules pass theirs — the backend picks the one
+        // `entry_point` names below.
+        dxil: &shader.dxil_containers(),
     })?;
     let pipeline = device.create_compute_pipeline(&ComputePipelineDesc {
         label: Some(label),

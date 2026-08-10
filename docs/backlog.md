@@ -3103,20 +3103,17 @@ Deferred inside DX4, each with what it would take:
   is knowing which root parameter slot the committed DXIL expects one at — the
   same gap `crcbl-mtl` names for `setVertexBytes:`.
 - **Register-space mapping is verified for set 0 only.** Every committed shader
-  declares `[[vk::binding(N, 0)]]`; what a set-1 binding maps to (`space1` is
-  the expectation) has never been checked. A shader with a set-1 binding, or a
-  direct `dxc` run, would settle it before a second set is trusted.
+  declares `[[vk::binding(N, 0)]]`. **Settled by measurement, and the
+  expectation was wrong**: `[[vk::binding]]` is Vulkan-only, and `dxc` numbers
+  each register class from zero in declaration order across the whole source,
+  all in space 0 — `sprite`'s set-1 texture is `t1` in space 0, not `t0` in
+  space 1. Read out of the `PSV0` resource table of every committed container. A
+  multi-set layout is still only checked by that artifact test, never by a
+  driver.
 - **The shader-visible descriptor heaps do not grow.** One heap per type at a
   fixed capacity, and `HalError::OutOfDeviceMemory` past it, because a bind
   group's GPU handle is an address inside the heap it came from. A real
   suballocator is a slice of its own.
-- **`crcbl-render` cannot reach D3D12 yet, and the reason is structural.** A
-  DXIL container holds exactly one entry point, and each render pass creates one
-  shader module from a vertex + fragment `ShaderEntry` — so those call sites
-  pass `ShaderModuleDesc::dxil: None`, truthfully. Reaching D3D12 means one
-  module per stage in `forward`, `sprite_pass` and `ui_pass`.
-  `the_engine_passes_offer_every_shader_artifact_they_have` asserts DXIL's
-  absence, so it goes red the day a pass can offer it — delete this entry then.
 
 Two things DX1 decided that a later slice may have to undo:
 
@@ -3650,14 +3647,24 @@ would hit them:
 
 1. **`crcbl::backend` has no `Dx12` variant** — there is no `CRCBL_GPU=dx12` to
    pass, so the harness could not select it even if everything below worked.
-2. **`Features::COMPUTE` and `TIMELINE_SEMAPHORE` are unreported** and
-   `create_compute_pipeline`/`dispatch`/`create_semaphore`/`wait_semaphores` all
-   refuse, so `DeviceDesc::for_adapter` refuses before a frame starts.
-3. **Offscreen surfaces refused** — only an `HWND` swapchain works.
-4. **Indexed draws and index buffers refused.**
-5. **Indirect and indirect-count draws refused**, so every adapter would derive
-   `GeometryPath::IndirectPerBatch`, the floor.
-6. Buffer fills and image-to-image copies refused; then query sets, MSAA resolve
+2. ~~Compute pipelines and dispatch~~ — **done**, with `Features::COMPUTE`
+   reported alongside the calls. `TIMELINE_SEMAPHORE` is still unreported, but
+   the engine gates `create_semaphore` on it and `MeshPool` degrades without it,
+   so it is not on this path.
+3. ~~Offscreen surfaces~~ — **done**.
+4. ~~Per-stage DXIL from `crcbl-render`~~ — **done**. `ShaderModuleDesc::dxil`
+   now carries `(entry point, container)` pairs, so one module still serves
+   every backend and the one that needs a container per entry point picks by
+   stage.
+5. **Indexed draws and index buffers refused** — `crcbl-dx12`'s
+   `bind_index_buffer` in `command.rs`. **This is where a D3D12 frame stops
+   today**, on the forward pass's first recorded call after
+   `bind_graphics_pipeline`.
+6. **Indirect and indirect-count draws refused**, immediately behind it in the
+   same pass body. Until both land, D3D12 cannot run the GPU-driven path at all
+   — it would derive `GeometryPath::IndirectPerBatch` and then refuse the call
+   that arm makes.
+7. Buffer fills and image-to-image copies refused; then query sets, MSAA resolve
    attachments, and mesh pipelines.
 
 Also: `crcbl-dx12`'s crate docs still say bind groups and pipelines refuse,

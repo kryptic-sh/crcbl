@@ -100,7 +100,7 @@ fn a_missing_entry_point_is_named_before_the_driver_sees_it() {
             spirv: crcbl_shaders::TRIANGLE.spirv(),
             wgsl: crcbl_shaders::TRIANGLE.wgsl(),
             msl: crcbl_shaders::TRIANGLE.msl(),
-            dxil: None,
+            dxil: &[],
         })
         .expect("the committed SPIR-V is accepted");
     let pipeline_layout = device
@@ -160,7 +160,7 @@ fn a_missing_entry_point_is_named_before_the_driver_sees_it() {
             spirv: &[0x0302_2307, 0, 0, 0, 0],
             wgsl: None,
             msl: None,
-            dxil: None,
+            dxil: &[],
         })
         .expect_err("a byte-swapped module is not SPIR-V");
     assert!(error.to_string().contains("byte-swapped"), "{error}");

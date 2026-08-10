@@ -9,7 +9,7 @@
 //!                                                    │
 //!                          build.rs verifies ────────┤
 //!                                                    ▼
-//!        crcbl_shaders::TRIANGLE.spirv() / .wgsl() / .msl() / .dxil(entry)
+//!  crcbl_shaders::TRIANGLE.spirv() / .wgsl() / .msl() / .dxil_containers()
 //!                                                    │
 //!                             ShaderModuleDesc { spirv, wgsl, msl, dxil }
 //! ```
@@ -27,10 +27,16 @@
 //! produce one artifact carrying every entry point of the module.
 //!
 //! That difference reaches all the way up: [`Shader::dxil`] takes an entry-point
-//! name where [`Shader::wgsl`] and [`Shader::msl`] take nothing, and a D3D12
-//! caller creates one shader module per stage where the others create one per
-//! shader. `spirv/manifest.txt` records one `dxil` line per entry point for the
-//! same reason.
+//! name where [`Shader::wgsl`] and [`Shader::msl`] take nothing, and
+//! `spirv/manifest.txt` records one `dxil` line per entry point for the same
+//! reason.
+//!
+//! It stops there, though. [`Shader::dxil_containers`] hands over *every*
+//! container the shader holds, each paired with its entry-point name, and
+//! `crcbl_hal::ShaderModuleDesc::dxil` takes that list — so a caller drawing
+//! with a vertex and a fragment stage still creates **one** shader module, on
+//! every backend, and the one that consumes DXIL picks the container the stage
+//! names. See `crcbl_hal::shader` on why that selection belongs below the seam.
 //!
 //! # Decision: Slang source, committed SPIR-V, no compiler in the build
 //!
@@ -129,8 +135,8 @@
 //! # Nothing here knows a backend
 //!
 //! This crate has no dependencies at all, not even `crcbl-hal`. It hands out
-//! `&[u32]`, `Option<&str>`, `Option<&[u8]>` and entry-point names, which is
-//! exactly what `crcbl_hal::ShaderModuleDesc` takes field for field, and it
+//! `&[u32]`, `Option<&str>`, entry-point names and `(name, bytes)` pairs, which
+//! is exactly what `crcbl_hal::ShaderModuleDesc` takes field for field, and it
 //! stays usable by
 //! a backend that has not been written yet. Each new artifact format is a new
 //! accessor here and a new field there; neither names the other's types.
@@ -413,20 +419,45 @@ impl Shader {
     /// one target with an artifact per entry point.** `dxc` compiles a single
     /// `-E`, and a D3D12 pipeline state object takes one bytecode blob per
     /// stage, so there is nothing a container holding both a vertex and a
-    /// fragment entry point could be handed to. A caller therefore creates one
-    /// `crcbl_hal::ShaderModuleDesc` per stage, each with the container for that
-    /// stage's entry point, where SPIR-V, WGSL and MSL each get one module for
-    /// the whole shader.
+    /// fragment entry point could be handed to.
     ///
     /// It is a lookup by name because the containers hang off
     /// [`EntryPoint::dxil`], which is where the per-entry-point shape is
-    /// expressed rather than restated.
+    /// expressed rather than restated. A caller filling in a
+    /// `crcbl_hal::ShaderModuleDesc` wants [`dxil_containers`](Self::dxil_containers)
+    /// instead — the whole module at once, which is what that field takes.
     #[must_use]
     pub fn dxil(&self, entry_point: &str) -> Option<&'static [u8]> {
         self.entry_points
             .iter()
             .find(|entry| entry.name == entry_point)
             .and_then(EntryPoint::dxil)
+    }
+
+    /// Every DXIL container this shader holds, each paired with the entry point
+    /// it was compiled for — what `crcbl_hal::ShaderModuleDesc::dxil` takes, in
+    /// the shape it takes it.
+    ///
+    /// **The whole module, so a two-stage shader is still one module.** The
+    /// per-entry-point shape of DXIL is real and stops here: the seam carries
+    /// the list and a backend picks the container the pipeline stage names, so
+    /// the caller builds one descriptor with the same SPIR-V, WGSL, MSL and
+    /// this list — not one descriptor per stage, which would compile the other
+    /// three targets' artifacts twice to serve the one that needs the split.
+    ///
+    /// Empty for a shader with no DXIL artifact, which is how the seam spells
+    /// "no artifact" for this field. A shader compiled for only some of its
+    /// entry points yields only those, and a backend asked for one of the rest
+    /// refuses by name rather than reaching for a container from another stage.
+    ///
+    /// Pairs rather than a named type for the reason the crate docs give: this
+    /// crate names none of `crcbl-hal`'s types and is not going to start.
+    #[must_use]
+    pub fn dxil_containers(&self) -> Vec<(&'static str, &'static [u8])> {
+        self.entry_points
+            .iter()
+            .filter_map(|entry| entry.dxil().map(|bytes| (entry.name, bytes)))
+            .collect()
     }
 
     /// One text artifact, decoded — the body [`wgsl`](Self::wgsl) and
@@ -769,6 +800,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **The container list covers every entry point that has one, and pairs
+    /// each with its *own* container.**
+    ///
+    /// This is what lets one `crcbl_hal::ShaderModuleDesc` serve both stages of
+    /// a graphics pipeline. A list that dropped an entry point would leave a
+    /// D3D12 backend with no bytecode for that stage, and one that paired a
+    /// name with a neighbour's container would build a pipeline out of the
+    /// wrong artifact — which no other target can catch, because the other
+    /// three carry every entry point in one artifact and never make the pairing.
+    #[test]
+    fn dxil_containers_pairs_every_entry_point_with_its_own_container() {
+        for shader in ALL {
+            let containers = shader.dxil_containers();
+            let named: Vec<&str> = containers.iter().map(|(name, _)| *name).collect();
+            let expected: Vec<&str> = shader
+                .entry_points()
+                .iter()
+                .filter(|entry| entry.dxil().is_some())
+                .map(EntryPoint::name)
+                .collect();
+            assert_eq!(named, expected, "{}", shader.name());
+            for (name, bytes) in containers {
+                assert_eq!(
+                    Some(bytes),
+                    shader.dxil(name),
+                    "{}: `{name}` is paired with a container that is not its own",
+                    shader.name()
+                );
+            }
+        }
+    }
+
+    /// The four shaders the render layer draws with each expose both graphics
+    /// stages out of one module, so each needs both containers from one call.
+    /// This is the concrete shape `crcbl-render`'s passes hand the seam.
+    #[test]
+    fn the_graphics_shaders_offer_a_container_for_both_stages() {
+        for shader in [&MESH, &TONEMAP, &SPRITE, &UI] {
+            let containers = shader.dxil_containers();
+            for stage in [Stage::Vertex, Stage::Fragment] {
+                let entry_point = shader
+                    .entry_point(stage)
+                    .unwrap_or_else(|| panic!("{}: no {stage:?} entry point", shader.name()));
+                assert!(
+                    containers.iter().any(|(name, _)| *name == entry_point),
+                    "{}: no DXIL container for `{entry_point}`",
+                    shader.name()
+                );
+            }
+        }
+    }
+
+    /// A shader with no DXIL column reports an empty list, which is how the
+    /// seam spells "no artifact" for this field — not a list of empty
+    /// containers, which is a *truncated* artifact and must not be conflated
+    /// with absence.
+    #[test]
+    fn a_shader_without_dxil_has_no_containers() {
+        static BARE: [EntryPoint; 2] = [
+            EntryPoint::new("mainVs", Stage::Vertex, b""),
+            EntryPoint::new("mainPs", Stage::Fragment, b""),
+        ];
+        let spirv_only = Shader::new(
+            "spirv-only",
+            "shaders/spirv-only.slang",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            b"",
+            b"",
+            b"",
+            &BARE,
+        );
+        assert!(spirv_only.dxil_containers().is_empty());
+
+        // And a shader compiled for only one of its entry points yields only
+        // that one, rather than padding the list out with the container it does
+        // not have.
+        static PARTIAL: [EntryPoint; 2] = [
+            EntryPoint::new("mainVs", Stage::Vertex, b"DXBC-ish"),
+            EntryPoint::new("mainPs", Stage::Fragment, b""),
+        ];
+        let half = Shader::new(
+            "half",
+            "shaders/half.slang",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            b"",
+            b"",
+            b"",
+            &PARTIAL,
+        );
+        assert_eq!(
+            half.dxil_containers(),
+            vec![("mainVs", b"DXBC-ish".as_slice())]
+        );
     }
 
     /// What [`dxil_container`] reads out of a `DxilContainerHeader`.

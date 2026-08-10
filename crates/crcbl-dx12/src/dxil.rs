@@ -54,7 +54,7 @@
 //! This module's tests check the rule against the resource table in every
 //! committed container, so it is measured rather than asserted.
 
-use crcbl_hal::{HalError, ShaderStages};
+use crcbl_hal::{HalError, ShaderModuleDesc, ShaderSources, ShaderStages};
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Direct3D12::D3D12_SHADER_BYTECODE;
 
@@ -212,6 +212,116 @@ impl Dxil {
             stage_name_of_kind(self.kind),
         )))
     }
+}
+
+/// A shader module: one validated DXIL container per entry point the caller
+/// offered one for.
+///
+/// It lives in this module rather than beside the pipeline state objects it
+/// feeds because it holds no `windows` type — so the lookup below, and the
+/// refusal it owes a caller, are provable on a machine with no D3D12.
+#[derive(Debug)]
+pub(crate) struct ShaderModuleEntry {
+    /// The device that created it. Read through
+    /// [`Owned`](crate::handle::Owned), whose implementation is beside the rest
+    /// of that trait's and therefore exists on Windows alone.
+    #[cfg_attr(
+        not(target_os = "windows"),
+        expect(
+            dead_code,
+            reason = "read through `handle::Owned`, which is Windows-only"
+        )
+    )]
+    pub(crate) owner: u64,
+    /// The label the module was created with, so [`container`] names the
+    /// artifact rather than only the entry point.
+    ///
+    /// [`container`]: ShaderModuleEntry::container
+    label: String,
+    /// One container per entry point, in the order the caller offered them.
+    ///
+    /// Pairs rather than a map, for the reason
+    /// [`ShaderModuleDesc::dxil`](crcbl_hal::ShaderModuleDesc::dxil) gives: a
+    /// module has a handful of entry points and the scan is nothing beside
+    /// creating a pipeline state object.
+    containers: Vec<(String, Dxil)>,
+}
+
+impl ShaderModuleEntry {
+    /// The container compiled for `entry_point`.
+    ///
+    /// **This is where a two-stage module stops being a D3D12 problem.** The
+    /// other three backends put every entry point into one artifact and find
+    /// the one they want by name inside it; here the name selects among
+    /// containers, which is the same lookup one level up.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::ShaderCompilation`] naming the entry point asked for and the
+    /// ones this module holds — the failure a call site that offered a
+    /// container for only one of its two stages produces, and one no other
+    /// backend can see, because the other three artifacts carry every entry
+    /// point at once and never make the pairing.
+    pub(crate) fn container(&self, entry_point: &str) -> Result<&Dxil, HalError> {
+        self.containers
+            .iter()
+            .find(|(name, _)| name == entry_point)
+            .map(|(_, dxil)| dxil)
+            .ok_or_else(|| {
+                HalError::ShaderCompilation(format!(
+                    "shader module `{}` holds DXIL for {}, and this stage names `{entry_point}`; a \
+                     container is compiled for one entry point, so a module used at two stages has \
+                     to be given a container for each",
+                    self.label,
+                    self.containers
+                        .iter()
+                        .map(|(name, _)| format!("`{name}`"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ))
+            })
+    }
+}
+
+/// Validates every container a caller offered and wraps them in a module entry.
+///
+/// # Errors
+///
+/// [`HalError::ShaderCompilation`] when the descriptor carries no DXIL — named
+/// through [`ShaderModuleDesc::unusable`](crcbl_hal::ShaderModuleDesc::unusable),
+/// so the message says which formats were offered — or when any container fails
+/// [`Dxil::parse`].
+pub(crate) fn module(
+    desc: &ShaderModuleDesc<'_>,
+    owner: u64,
+) -> Result<ShaderModuleEntry, HalError> {
+    // DXIL and nothing else. `desc.spirv`, `.wgsl` and `.msl` are ignored rather
+    // than translated: a cross-compiler inside this backend would be a second
+    // shader compiler solving a problem `crcbl-shaders` already solved offline,
+    // with a pinned compiler and a hashed, signed artifact.
+    if desc.dxil.is_empty() {
+        return Err(desc.unusable(ShaderSources::DXIL));
+    }
+    let label = desc.label.unwrap_or("<unlabelled>");
+    let mut containers = Vec::with_capacity(desc.dxil.len());
+    for (entry_point, bytes) in desc.dxil {
+        // Every container up front rather than at the pipeline that reaches for
+        // one: a module offering three stages and a truncated container for the
+        // third is a broken artifact, and finding that out at
+        // `create_shader_module` puts the error where the bytes came from.
+        //
+        // `label:entry` because a module now holds several containers, and the
+        // label alone would not say which of them the parser objected to.
+        containers.push((
+            (*entry_point).to_owned(),
+            Dxil::parse(bytes, &format!("{label}:{entry_point}"))?,
+        ));
+    }
+    Ok(ShaderModuleEntry {
+        owner,
+        label: label.to_owned(),
+        containers,
+    })
 }
 
 /// One part of a container: its four-character code and where its data starts.
@@ -385,6 +495,114 @@ mod tests {
         // A container with no `PSV0` part says nothing about a thread group,
         // which is the arm that must not become "one thread".
         assert_eq!(vertex.numthreads(), None);
+    }
+
+    /// A descriptor with no DXIL says which formats it had, rather than which
+    /// slice is missing — the seam's own message, so it reads the same on every
+    /// backend.
+    #[test]
+    fn a_module_without_dxil_names_the_formats_it_was_given() {
+        let error = module(
+            &ShaderModuleDesc {
+                label: Some("mesh.slang"),
+                spirv: &[0x0723_0203, 0, 0, 0, 0],
+                wgsl: Some("@vertex fn vertexMain() {}"),
+                ..ShaderModuleDesc::default()
+            },
+            1,
+        )
+        .expect_err("this backend compiles DXIL and nothing else");
+        let HalError::ShaderCompilation(text) = &error else {
+            panic!("{error:?}");
+        };
+        assert!(text.contains("mesh.slang"), "{text}");
+        assert!(text.contains("SPIR-V and WGSL"), "{text}");
+        assert!(text.contains("only compile DXIL"), "{text}");
+    }
+
+    /// **One module, two stages: each entry point resolves to its own
+    /// container, and a stage the module was not given one for is refused by
+    /// name.**
+    ///
+    /// This is what lets `crcbl-render`'s graphics passes create a single
+    /// shader module the way every other backend does. The two halves are both
+    /// necessary: without the lookup a pipeline would be built from whichever
+    /// container came first — a pixel shader in the vertex slot, which only
+    /// `CreateGraphicsPipelineState` on a Windows runner would ever notice —
+    /// and without the refusal a call site that offered one container for a
+    /// two-stage module would be silently half-built.
+    #[test]
+    fn each_stage_of_a_two_stage_module_resolves_to_its_own_container() {
+        let vertex = container(KIND_VERTEX);
+        let fragment = container(KIND_PIXEL);
+        let entry = module(
+            &ShaderModuleDesc {
+                label: Some("mesh.slang"),
+                dxil: &[("vertexMain", &vertex), ("fragmentMain", &fragment)],
+                ..ShaderModuleDesc::default()
+            },
+            1,
+        )
+        .expect("two signed containers are one module");
+
+        // Each name selects its own container, and `expect` agrees about the
+        // stage — so a swapped pair would fail here rather than at a driver.
+        entry
+            .container("vertexMain")
+            .expect("the vertex container")
+            .expect(ShaderStages::VERTEX, "vertexMain")
+            .expect("a vertex container in the vertex slot");
+        entry
+            .container("fragmentMain")
+            .expect("the fragment container")
+            .expect(ShaderStages::FRAGMENT, "fragmentMain")
+            .expect("a pixel container in the fragment slot");
+
+        let error = entry
+            .container("computeMain")
+            .expect_err("this module was given no compute container");
+        let HalError::ShaderCompilation(text) = &error else {
+            panic!("{error:?}");
+        };
+        assert!(text.contains("mesh.slang"), "{text}");
+        assert!(text.contains("computeMain"), "{text}");
+        assert!(text.contains("`vertexMain`, `fragmentMain`"), "{text}");
+    }
+
+    /// **The committed artifacts go through the same lookup**, so the pairing
+    /// is checked against the real containers rather than only against ones
+    /// this test built.
+    ///
+    /// `crcbl-shaders` hands over the pairs and this resolves each back, which
+    /// is the join between the two crates: a `dxil_containers` that mislabelled
+    /// a container would put a pixel shader in the vertex slot, and the stage
+    /// check is what refuses it.
+    #[test]
+    fn the_committed_graphics_shaders_resolve_both_stages() {
+        for shader in [&crcbl_shaders::MESH, &crcbl_shaders::UI] {
+            let entry = module(
+                &ShaderModuleDesc {
+                    label: Some(shader.name()),
+                    dxil: &shader.dxil_containers(),
+                    ..ShaderModuleDesc::default()
+                },
+                1,
+            )
+            .unwrap_or_else(|error| panic!("{}: {error}", shader.name()));
+            for (stage, stages) in [
+                (crcbl_shaders::Stage::Vertex, ShaderStages::VERTEX),
+                (crcbl_shaders::Stage::Fragment, ShaderStages::FRAGMENT),
+            ] {
+                let entry_point = shader
+                    .entry_point(stage)
+                    .unwrap_or_else(|| panic!("{}: no {stage:?} entry point", shader.name()));
+                entry
+                    .container(entry_point)
+                    .unwrap_or_else(|error| panic!("{}: {error}", shader.name()))
+                    .expect(stages, entry_point)
+                    .unwrap_or_else(|error| panic!("{}: {error}", shader.name()));
+            }
+        }
     }
 
     /// **Every way a container can be wrong is refused, by name.**

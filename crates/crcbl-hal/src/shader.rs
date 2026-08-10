@@ -41,16 +41,25 @@
 //! preference — it is a statement that the artifact does not exist, and it is
 //! how a shader silently becomes unusable on a backend that has not been
 //! written yet. `crcbl-shaders`' generated table hands out every one
-//! (`Shader::spirv`, `Shader::wgsl`, `Shader::msl`, `Shader::dxil`), so the
+//! (`Shader::spirv`, `Shader::wgsl`, `Shader::msl`,
+//! `Shader::dxil_containers`), so the
 //! correct call site names all four.
 //!
-//! **DXIL is per entry point, so a call site that uses it makes one descriptor
-//! per stage.** `dxc` compiles one entry point per container and a D3D12
-//! pipeline takes one blob per stage, so `Shader::dxil` takes an entry-point
-//! name where the other three accessors take nothing. A caller drawing with a
-//! vertex and a fragment stage therefore builds two descriptors — the same
-//! SPIR-V, WGSL and MSL in each, and a different [`ShaderModuleDesc::dxil`] —
-//! and the backends that ignore the DXIL simply see two equivalent modules.
+//! **DXIL is per entry point, and the descriptor carries the list rather than
+//! the caller splitting itself in two.** `dxc` compiles one entry point per
+//! container and a D3D12 pipeline takes one blob per stage, so
+//! [`ShaderModuleDesc::dxil`] is a list of `(entry point, container)` pairs
+//! where its three neighbours are single artifacts. A caller drawing with a
+//! vertex and a fragment stage offers both containers and creates **one**
+//! module; the backend that consumes DXIL picks the container named by the
+//! [`ShaderEntry::entry_point`] of the stage it is building.
+//!
+//! One descriptor *per stage* was the alternative, and it was rejected: it puts
+//! the granularity of one backend's artifact format above the seam — the exact
+//! thing the parallel fields exist to prevent — and it makes the three backends
+//! that carry every entry point in one artifact compile that artifact twice,
+//! which on Metal is a source compile per stage per pass, to serve the one
+//! backend that needs the split.
 //!
 //! **A descriptor must carry at least one format.** One with neither is
 //! [`HalError::ShaderCompilation`].
@@ -269,8 +278,28 @@ pub struct ShaderModuleDesc<'a> {
     /// to compile it owes the caller Metal's own message — see
     /// [`HalError::ShaderCompilation`].
     pub msl: Option<&'a str>,
-    /// A compiled DXIL container, as raw bytes. `None` when there is no DXIL
-    /// artifact.
+    /// The compiled DXIL containers, each paired with the entry point it was
+    /// compiled for. Empty when there is no DXIL artifact.
+    ///
+    /// **A list where the three fields above are single artifacts, because a
+    /// container holds exactly one entry point.** `dxc` compiles a single `-E`
+    /// and a D3D12 pipeline state object takes one bytecode blob per stage, so
+    /// there is no container that is "the DXIL for `mesh.slang`" the way there
+    /// is one SPIR-V module for it. The module still is one module: a backend
+    /// that consumes DXIL looks the container up by the
+    /// [`ShaderEntry::entry_point`] of the stage it is building, and owes the
+    /// caller [`HalError::ShaderCompilation`] naming that entry point when the
+    /// list has no container for it — never a pipeline built from whichever
+    /// container happened to be first. See the [module docs](self) for what was
+    /// rejected.
+    ///
+    /// The names are matched exactly, as they appear in the SPIR-V
+    /// `OpEntryPoint` — the same strings [`ShaderEntry::entry_point`] carries.
+    ///
+    /// Pairs rather than a map: a module has a handful of entry points, a
+    /// linear scan over them is nothing beside creating a pipeline state
+    /// object, and a `&[(…)]` is something a caller can build in a `const`
+    /// while no map is.
     ///
     /// **Bytes, not text — this field is closer to [`spirv`](Self::spirv) than
     /// to its two `Option<&str>` neighbours.** DXIL is a *signed binary blob*:
@@ -281,21 +310,13 @@ pub struct ShaderModuleDesc<'a> {
     /// artifact had been decoded and re-encoded on the way, and an unsigned or
     /// re-encoded container is rejected by every D3D12 driver.
     ///
-    /// It is `Option<&[u8]>` rather than `&[u8]` — where `spirv` uses empty for
-    /// absence — because the two formats fail differently. A zero-word SPIR-V
-    /// module cannot exist, so `&[]` is unambiguous there; a zero-byte file
-    /// reaching here is a *truncated* container, and conflating that with "no
-    /// artifact" would report a corrupt build as an unwritten backend. It is
-    /// also `&[u8]` rather than `&[u32]` because nothing about a DXIL container
-    /// is word-addressed: its parts are byte-offset, so aligning it would buy
-    /// no consumer anything.
-    ///
-    /// **One entry point per container.** `dxc` compiles a single `-E` and a
-    /// D3D12 pipeline state object takes one bytecode blob per stage, so unlike
-    /// every other field here this one describes *one stage* rather than the
-    /// whole module. See the [module docs](self) for what that means at a call
-    /// site.
-    pub dxil: Option<&'a [u8]>,
+    /// Absence is the *empty list*, and a pair whose container is empty is a
+    /// truncated artifact rather than an absent one — the distinction a
+    /// zero-byte file would otherwise lose, reporting a corrupt build as an
+    /// unwritten backend. Each container is `&[u8]` rather than `&[u32]`
+    /// because nothing about a DXIL container is word-addressed: its parts are
+    /// byte-offset, so aligning it would buy no consumer anything.
+    pub dxil: &'a [(&'a str, &'a [u8])],
 }
 
 impl ShaderModuleDesc<'_> {
@@ -315,7 +336,7 @@ impl ShaderModuleDesc<'_> {
         if self.msl.is_some() {
             sources |= ShaderSources::MSL;
         }
-        if self.dxil.is_some() {
+        if !self.dxil.is_empty() {
             sources |= ShaderSources::DXIL;
         }
         sources
@@ -483,7 +504,7 @@ mod tests {
         );
         assert_eq!(
             ShaderModuleDesc {
-                dxil: Some(b"DXBC"),
+                dxil: &[("mainVs", b"DXBC")],
                 ..ShaderModuleDesc::default()
             }
             .provided(),
@@ -494,25 +515,28 @@ mod tests {
                 spirv: &spirv,
                 wgsl: Some("@fragment fn main() {}"),
                 msl: Some("[[fragment]] float4 main() { return 0; }"),
-                dxil: Some(b"DXBC"),
+                dxil: &[("mainVs", b"DXBC"), ("mainPs", b"DXBC")],
                 ..ShaderModuleDesc::default()
             }
             .provided(),
-            ShaderSources::all()
+            ShaderSources::all(),
+            "a module carrying a container for each of its two entry points \
+             offers DXIL once, not twice"
         );
     }
 
     /// An empty DXIL blob is a *present* artifact, like the two text formats
     /// and unlike [`ShaderModuleDesc::spirv`].
     ///
-    /// The distinction is the whole reason this field is an `Option` where
-    /// `spirv` is not: a zero-byte container is a truncated file, and reporting
-    /// it as absent would send a reader looking for an unwritten backend.
+    /// The distinction is the whole reason absence is spelled as the empty
+    /// *list* rather than as an empty container: a zero-byte container is a
+    /// truncated file, and reporting it as absent would send a reader looking
+    /// for an unwritten backend.
     #[test]
     fn an_empty_dxil_blob_is_present_not_absent() {
         assert_eq!(
             ShaderModuleDesc {
-                dxil: Some(b""),
+                dxil: &[("mainVs", b"")],
                 ..ShaderModuleDesc::default()
             }
             .provided(),

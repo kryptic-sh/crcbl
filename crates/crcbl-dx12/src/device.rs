@@ -106,11 +106,10 @@ use windows::core::{Interface, PCWSTR};
 use crate::binding::{self, BindGroupLayoutRecord, BindGroupRecord, VisibleHeaps};
 use crate::command::Dx12CommandEncoder;
 use crate::descriptor::{Descriptors, Kind, Slot};
+use crate::dxil::ShaderModuleEntry;
 use crate::handle::{self, Owned, Owner};
 use crate::instance::{AdapterRecord, InstanceInner, OFFSCREEN_HWND, next_owner_id, not_yet};
-use crate::pipeline::{
-    self, ComputePipelineEntry, GraphicsPipelineEntry, PipelineLayoutEntry, ShaderModuleEntry,
-};
+use crate::pipeline::{self, ComputePipelineEntry, GraphicsPipelineEntry, PipelineLayoutEntry};
 use crate::present::{self, PresentWait};
 use crate::retire::RetireQueue;
 use crate::swapchain::{self, SwapchainEntry};
@@ -2130,16 +2129,16 @@ impl Device for Dx12Device {
 
     // --- shaders and pipelines ---
 
-    /// Validates a DXIL container and files it.
+    /// Validates the caller's DXIL containers and files them.
     ///
-    /// See [`crate::pipeline`] for why nothing is compiled, why the container is
-    /// parsed here rather than left to the driver, and why a module is **one
-    /// entry point**.
+    /// See [`crate::pipeline`] for why nothing is compiled, why the containers
+    /// are parsed here rather than left to the driver, and why a module holds
+    /// **one container per entry point**.
     fn create_shader_module(
         &self,
         desc: &ShaderModuleDesc<'_>,
     ) -> Result<ShaderModuleHandle, HalError> {
-        let entry = pipeline::module(desc, self.inner.owner.id)?;
+        let entry = crate::dxil::module(desc, self.inner.owner.id)?;
         let handle = self.state().shader_modules.insert(entry);
         Ok(handle::stamp(self.inner.owner, handle))
     }
@@ -3636,22 +3635,19 @@ pub(crate) mod tests {
             })
             .expect("a bind group over the vertex buffer");
 
-        // **One module per stage**, which is the DXIL shape: `dxc` compiles a
-        // single entry point per container, so there is no module that is "the
-        // DXIL for triangle.slang".
-        let module = |entry: &str| {
-            device
-                .create_shader_module(&ShaderModuleDesc {
-                    label: Some("triangle.slang"),
-                    spirv: TRIANGLE.spirv(),
-                    wgsl: TRIANGLE.wgsl(),
-                    msl: TRIANGLE.msl(),
-                    dxil: TRIANGLE.dxil(entry),
-                })
-                .unwrap_or_else(|error| panic!("stage=create_shader_module({entry}): {error:?}"))
-        };
-        let vertex_module = module("vertexMain");
-        let fragment_module = module("fragmentMain");
+        // **One module for both stages**, exactly as every other backend
+        // creates: `dxc` compiles a single entry point per container, and the
+        // seam carries a container per entry point so that shape stops at
+        // `crate::pipeline`'s lookup rather than reaching the call site.
+        let module = device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("triangle.slang"),
+                spirv: TRIANGLE.spirv(),
+                wgsl: TRIANGLE.wgsl(),
+                msl: TRIANGLE.msl(),
+                dxil: &TRIANGLE.dxil_containers(),
+            })
+            .unwrap_or_else(|error| panic!("stage=create_shader_module: {error:?}"));
 
         let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
         let pipeline = device
@@ -3659,11 +3655,11 @@ pub(crate) mod tests {
                 label: Some("triangle"),
                 layout: pipeline_layout,
                 vertex: ShaderEntry {
-                    module: vertex_module,
+                    module,
                     entry_point: "vertexMain",
                 },
                 fragment: Some(ShaderEntry {
-                    module: fragment_module,
+                    module,
                     entry_point: "fragmentMain",
                 }),
                 primitive: PrimitiveState::default(),
@@ -3787,8 +3783,7 @@ pub(crate) mod tests {
 
         device.destroy_readback(request);
         device.destroy_graphics_pipeline(pipeline);
-        device.destroy_shader_module(fragment_module);
-        device.destroy_shader_module(vertex_module);
+        device.destroy_shader_module(module);
         device.destroy_bind_group(group);
         device.destroy_pipeline_layout(pipeline_layout);
         device.destroy_bind_group_layout(set_layout);
@@ -6063,7 +6058,7 @@ pub(crate) mod tests {
             let module = device
                 .create_shader_module(&ShaderModuleDesc {
                     label: Some("compute_probe.slang"),
-                    dxil: crcbl_shaders::COMPUTE_PROBE.dxil(PROBE_ENTRY),
+                    dxil: &crcbl_shaders::COMPUTE_PROBE.dxil_containers(),
                     ..ShaderModuleDesc::default()
                 })
                 .expect("the committed DXIL is accepted");
@@ -6427,7 +6422,7 @@ pub(crate) mod tests {
         let module = device
             .create_shader_module(&ShaderModuleDesc {
                 label: Some("compute_probe.slang"),
-                dxil: crcbl_shaders::COMPUTE_PROBE.dxil(PROBE_ENTRY),
+                dxil: &crcbl_shaders::COMPUTE_PROBE.dxil_containers(),
                 ..ShaderModuleDesc::default()
             })
             .expect("the committed DXIL is accepted");

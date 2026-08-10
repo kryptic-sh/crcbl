@@ -1,7 +1,7 @@
 //! Shader modules, root signatures and pipeline state objects — the rung that
 //! turns a clear into a triangle.
 //!
-//! # A shader module is a *signed DXIL container*, and it holds one entry point
+//! # A shader module is a set of *signed DXIL containers*, one per entry point
 //!
 //! `crcbl-shaders` commits `dxil/<shader>.<entry>.dxil`, and
 //! [`create_shader_module`](crcbl_hal::Device::create_shader_module) takes the
@@ -11,10 +11,14 @@
 //! with Xcode.
 //!
 //! **`dxc` compiles a single `-E` per invocation, so a container is one entry
-//! point.** That is why `crcbl_shaders::Shader::dxil` takes an entry-point name
-//! and why a caller drawing with a vertex and a fragment stage creates **two**
-//! modules where the other backends create one. `crcbl_hal::shader` documents
-//! the difference on the field itself.
+//! point.** That is why `crcbl_shaders::Shader::dxil` takes an entry-point name.
+//! It is not why a caller would create two modules, though: the seam's
+//! [`dxil`](crcbl_hal::ShaderModuleDesc::dxil) field carries a container *per
+//! entry point*, so a caller drawing with a vertex and a fragment stage creates
+//! one module here exactly as it does on the other three backends, and
+//! [`ShaderModuleEntry::container`] picks the container the stage names. That
+//! keeps the format's granularity inside this backend, which is the only place
+//! it means anything.
 //!
 //! # The container is validated in [`crate::dxil`], because the alternative is a
 //! driver rejecting it
@@ -96,8 +100,7 @@ use core::mem::ManuallyDrop;
 
 use crcbl_hal::{
     ColorTargetState, ComputePipelineDesc, DepthStencilState, GraphicsPipelineDesc, HalError,
-    MultisampleState, PipelineLayoutDesc, PrimitiveState, ShaderModuleDesc, ShaderSources,
-    ShaderStages,
+    MultisampleState, PipelineLayoutDesc, PrimitiveState, ShaderStages,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_PRIMITIVE_TOPOLOGY, ID3DBlob};
 use windows::Win32::Graphics::Direct3D12::{
@@ -115,7 +118,7 @@ use windows::Win32::Graphics::Direct3D12::{
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 
 use crate::conv;
-use crate::dxil::Dxil;
+use crate::dxil::{Dxil, ShaderModuleEntry};
 use crate::handle::Owned;
 
 /// Colour attachments a D3D12 pipeline state object can declare.
@@ -123,13 +126,6 @@ use crate::handle::Owned;
 /// The array's own length in `D3D12_GRAPHICS_PIPELINE_STATE_DESC`, which is what
 /// makes a longer `color_targets` a refusal rather than a silent truncation.
 const RENDER_TARGETS: usize = 8;
-
-/// A shader module: one validated DXIL container.
-#[derive(Debug)]
-pub(crate) struct ShaderModuleEntry {
-    pub(crate) owner: u64,
-    dxil: Dxil,
-}
 
 /// Where one bind group set's tables landed among the root parameters.
 ///
@@ -218,30 +214,6 @@ impl Owned for GraphicsPipelineEntry {
     fn owner(&self) -> u64 {
         self.owner
     }
-}
-
-/// Validates a caller's DXIL and wraps it in a module entry.
-///
-/// # Errors
-///
-/// [`HalError::ShaderCompilation`] when the descriptor carries no DXIL — named
-/// through [`ShaderModuleDesc::unusable`], so the message says which formats
-/// were offered — or when the container fails [`Dxil::parse`].
-pub(crate) fn module(
-    desc: &ShaderModuleDesc<'_>,
-    owner: u64,
-) -> Result<ShaderModuleEntry, HalError> {
-    // DXIL and nothing else. `desc.spirv`, `.wgsl` and `.msl` are ignored rather
-    // than translated: a cross-compiler inside this backend would be a second
-    // shader compiler solving a problem `crcbl-shaders` already solved offline,
-    // with a pinned compiler and a hashed, signed artifact.
-    let Some(bytes) = desc.dxil else {
-        return Err(desc.unusable(ShaderSources::DXIL));
-    };
-    Ok(ShaderModuleEntry {
-        owner,
-        dxil: Dxil::parse(bytes, desc.label.unwrap_or("<unlabelled>"))?,
-    })
 }
 
 /// One set's root parameters, and the ranges they point at.
@@ -432,14 +404,20 @@ pub(crate) fn graphics(
     fragment: Option<&ShaderModuleEntry>,
     owner: u64,
 ) -> Result<GraphicsPipelineEntry, HalError> {
-    vertex
-        .dxil
-        .expect(ShaderStages::VERTEX, desc.vertex.entry_point)?;
-    if let (Some(module), Some(entry)) = (fragment, desc.fragment) {
-        module
-            .dxil
-            .expect(ShaderStages::FRAGMENT, entry.entry_point)?;
-    }
+    // The container each stage names, out of whatever the module was given.
+    // Both stages routinely come out of *one* module — Slang emits a vertex and
+    // a fragment entry point into one file, and the seam carries a container per
+    // entry point so the caller need not split the module in two.
+    let vertex_dxil = vertex.container(desc.vertex.entry_point)?;
+    vertex_dxil.expect(ShaderStages::VERTEX, desc.vertex.entry_point)?;
+    let fragment_dxil = match (fragment, desc.fragment) {
+        (Some(module), Some(entry)) => {
+            let dxil = module.container(entry.entry_point)?;
+            dxil.expect(ShaderStages::FRAGMENT, entry.entry_point)?;
+            Some(dxil)
+        }
+        _ => None,
+    };
     if desc.color_targets.len() > RENDER_TARGETS {
         return Err(HalError::InvalidDescriptor(format!(
             "{} colour targets exceed the {RENDER_TARGETS} a D3D12 pipeline state declares",
@@ -468,10 +446,8 @@ pub(crate) fn graphics(
         // function, so the reference it clones here is released by the
         // `ManuallyDrop::drop` at the end.
         pRootSignature: ManuallyDrop::new(Some(layout.raw.clone())),
-        VS: vertex.dxil.bytecode(),
-        PS: fragment
-            .map(|module| module.dxil.bytecode())
-            .unwrap_or_default(),
+        VS: vertex_dxil.bytecode(),
+        PS: fragment_dxil.map(Dxil::bytecode).unwrap_or_default(),
         BlendState: blend_state(desc.color_targets, &desc.multisample),
         SampleMask: desc.multisample.mask,
         RasterizerState: rasterizer_state(&desc.primitive, desc.depth_stencil.as_ref(), samples),
@@ -577,10 +553,9 @@ pub(crate) fn compute(
     owner: u64,
 ) -> Result<ComputePipelineEntry, HalError> {
     let label = desc.label.unwrap_or("<unlabelled>");
-    module
-        .dxil
-        .expect(ShaderStages::COMPUTE, desc.compute.entry_point)?;
-    if let Some(declared) = module.dxil.numthreads()
+    let dxil = module.container(desc.compute.entry_point)?;
+    dxil.expect(ShaderStages::COMPUTE, desc.compute.entry_point)?;
+    if let Some(declared) = dxil.numthreads()
         && declared != desc.workgroup_size
     {
         return Err(HalError::ShaderCompilation(format!(
@@ -595,7 +570,7 @@ pub(crate) fn compute(
     // so no `?` can leak the reference `pRootSignature` clones.
     let mut state = D3D12_COMPUTE_PIPELINE_STATE_DESC {
         pRootSignature: ManuallyDrop::new(Some(layout.raw.clone())),
-        CS: module.dxil.bytecode(),
+        CS: dxil.bytecode(),
         NodeMask: 0,
         Flags: D3D12_PIPELINE_STATE_FLAG_NONE,
         ..Default::default()
@@ -757,29 +732,6 @@ fn depth_stencil_state(
 mod tests {
     use super::*;
     use crcbl_hal::{BlendState, ColorWrites, CompareOp, Format, StencilState};
-
-    /// A descriptor with no DXIL says which formats it had, rather than which
-    /// slice is missing — the seam's own message, so it reads the same on every
-    /// backend.
-    #[test]
-    fn a_module_without_dxil_names_the_formats_it_was_given() {
-        let error = module(
-            &ShaderModuleDesc {
-                label: Some("mesh.slang"),
-                spirv: &[0x0723_0203, 0, 0, 0, 0],
-                wgsl: Some("@vertex fn vertexMain() {}"),
-                ..ShaderModuleDesc::default()
-            },
-            1,
-        )
-        .expect_err("this backend compiles DXIL and nothing else");
-        let HalError::ShaderCompilation(text) = &error else {
-            panic!("{error:?}");
-        };
-        assert!(text.contains("mesh.slang"), "{text}");
-        assert!(text.contains("SPIR-V and WGSL"), "{text}");
-        assert!(text.contains("only compile DXIL"), "{text}");
-    }
 
     /// Blend state is per target, and a target with no blend still writes the
     /// channels it asked for.

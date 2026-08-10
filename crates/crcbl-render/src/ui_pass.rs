@@ -336,9 +336,9 @@ impl UiRenderer {
             spirv: UI.spirv(),
             wgsl: UI.wgsl(),
             msl: UI.msl(),
-            // `None` because a DXIL container holds one entry point and this
-            // module has two; see `crcbl_render::forward`.
-            dxil: None,
+            // One container per entry point, both of them, in one module; see
+            // `crcbl_render::forward`.
+            dxil: &UI.dxil_containers(),
         })?;
         let ui_targets = [ColorTargetState {
             format: target_format,

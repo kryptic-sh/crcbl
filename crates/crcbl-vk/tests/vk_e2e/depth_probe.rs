@@ -382,7 +382,7 @@ impl DepthProbe {
                 spirv: crcbl_shaders::MESH.spirv(),
                 wgsl: crcbl_shaders::MESH.wgsl(),
                 msl: crcbl_shaders::MESH.msl(),
-                dxil: None,
+                dxil: &[],
             })
             .expect("the committed SPIR-V is accepted");
         let color_targets = [crcbl_hal::ColorTargetState::opaque(headless.format)];

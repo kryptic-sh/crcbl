@@ -1637,21 +1637,20 @@ fn declaring_one_image_twice_in_a_pass_is_an_error() {
 /// notice. That is precisely how the WGSL artifacts sat unused between P5.3 and
 /// P5.9. This runs with no ICD, no driver and no GPU.
 ///
-/// # DXIL depends on how many entry points the module has
+/// # DXIL is a list, so a two-stage module offers it like any other format
 ///
 /// A DXIL container holds exactly one entry point — `dxc` compiles a single
-/// `-E`, and a D3D12 pipeline takes one blob per stage. So the forward
-/// renderer's *graphics* modules, each named from a vertex `ShaderEntry` and a
-/// fragment one, have no container that is "the DXIL for mesh.slang", and
-/// `None` is the truthful answer rather than a dropped format. Its two
-/// **compute** modules have one entry point each, so there is a right answer for
-/// them and they pass it.
+/// `-E`, and a D3D12 pipeline takes one blob per stage — so
+/// `ShaderModuleDesc::dxil` carries a container *per entry point* and a
+/// graphics module offers both of its own. Every module here therefore offers
+/// all four formats, and a `sources` short of that is a call site that dropped
+/// one.
 ///
-/// The expectation is therefore per module rather than one constant, and both
-/// arms are asserted to have been *reached*: a rule that silently matched no
-/// module would pass having checked nothing, which is the shape this whole test
-/// exists to avoid. `docs/backlog.md` carries the per-stage graphics modules
-/// that would let the first arm widen.
+/// What this cannot see is whether those containers *cover the stages the
+/// pipeline names*: the recorder keeps which formats were offered, not which
+/// entry points. That half is checked where it can be — the null backend
+/// refuses a stage whose entry point has no container, so each `new` below
+/// returning at all is the assertion.
 #[test]
 fn the_engine_passes_offer_every_shader_artifact_they_have() {
     use crcbl_hal::ShaderSources;
@@ -1664,41 +1663,53 @@ fn the_engine_passes_offer_every_shader_artifact_they_have() {
     )
     .expect("the null backend accepts every descriptor");
     renderer.destroy(harness.device.as_ref());
+    // The sprite and UI passes are built by a caller rather than by the forward
+    // renderer, and they create the other two graphics modules — so they are
+    // built here too, or half the engine's call sites would go unchecked.
+    let sprites = crcbl_render::SpriteRenderer::new(
+        harness.device.as_ref(),
+        harness.queue,
+        Format::Rgba8UnormSrgb,
+    )
+    .expect("the null backend accepts every descriptor");
+    sprites.destroy(harness.device.as_ref());
+    let ui = crcbl_render::UiRenderer::new(
+        harness.device.as_ref(),
+        harness.queue,
+        Format::Rgba8UnormSrgb,
+    )
+    .expect("the null backend accepts every descriptor");
+    ui.destroy(harness.device.as_ref());
 
     let created = harness.recorder.shader_modules_created();
     assert!(
         !created.is_empty(),
-        "the forward renderer created no shader modules at all"
+        "the engine's passes created no shader modules at all"
     );
-    // The two single-entry-point modules, by the label their creator gives them
-    // — which is the shader's own name.
-    let compute = ["cull", "draw_gen"];
-    let text = ShaderSources::SPIRV | ShaderSources::WGSL | ShaderSources::MSL;
-    let (mut graphics_seen, mut compute_seen) = (0, 0);
-    for (label, sources) in created {
+    for (label, sources) in &created {
         let name = label.as_deref().unwrap_or("<unlabelled>");
-        let expected = if compute.contains(&name) {
-            compute_seen += 1;
-            ShaderSources::all()
-        } else {
-            graphics_seen += 1;
-            text
-        };
-        assert_eq!(sources, expected, "{name}: offered only {sources}");
+        assert_eq!(
+            *sources,
+            ShaderSources::all(),
+            "{name}: offered only {sources}"
+        );
     }
-    assert_eq!(
-        compute_seen,
-        compute.len(),
-        "both compute modules must have been created, or the DXIL arm checked nothing"
-    );
-    assert!(
-        graphics_seen > 0,
-        "and at least one graphics module, or the arm without DXIL checked nothing"
-    );
-    assert_ne!(
-        text,
-        ShaderSources::all(),
-        "a graphics pass can now offer DXIL, so the expectation above is stale — widen it \
-         and delete the backlog entry for per-stage shader modules"
-    );
+    // Every shader the engine draws or dispatches with, by the label its
+    // creator gives it, so a pass that stopped creating its module at all is a
+    // failure rather than a shorter list nothing looks at.
+    for expected in [
+        "mesh.slang",
+        "tonemap.slang",
+        "sprite.slang",
+        "ui.slang",
+        "cull",
+        "draw_gen",
+    ] {
+        assert!(
+            created
+                .iter()
+                .any(|(label, _)| label.as_deref() == Some(expected)),
+            "no module labelled `{expected}` was created; got {created:?}"
+        );
+    }
 }

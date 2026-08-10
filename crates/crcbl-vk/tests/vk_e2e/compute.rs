@@ -263,7 +263,7 @@ impl ComputeProbe {
                 spirv: crcbl_shaders::COMPUTE_PROBE.spirv(),
                 wgsl: crcbl_shaders::COMPUTE_PROBE.wgsl(),
                 msl: crcbl_shaders::COMPUTE_PROBE.msl(),
-                dxil: None,
+                dxil: &[],
             })
             .expect("the committed SPIR-V is accepted");
         // The manifest's name rather than a literal: it is read out of the

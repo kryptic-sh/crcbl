@@ -16,6 +16,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`ShaderModuleDesc::dxil` is a list of `(entry point, container)` pairs**,
+  `&[(&str, &[u8])]`, where it was `Option<&[u8]>`. A DXIL container holds one
+  entry point, so a module drawing with a vertex and a fragment stage now offers
+  a container for each and stays **one** module on every backend — where the
+  alternative was one descriptor per stage, which would have made the three
+  backends that carry every entry point in one artifact compile it twice.
+  Absence is the empty slice, so `dxil: None` becomes `dxil: &[]` and
+  `dxil: Some(bytes)` becomes `dxil: &[(entry_point, bytes)]`. `crcbl-dx12`
+  picks the container named by the stage's `ShaderEntry::entry_point` and
+  refuses by name when the module was given none for it.
+
 - **`mesh.slang` gained a sixth binding and `DrawConstants` changed meaning.**
   Binding 5 is the per-bucket run of surviving instance indices the vertex stage
   now reads its instance out of, and `DrawConstants::base_instance` is
@@ -31,6 +42,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_shaders::Shader::dxil_containers` hands over every DXIL container a
+  shader holds**, each paired with its entry-point name, in the shape
+  `ShaderModuleDesc::dxil` takes. `Shader::dxil(entry_point)` still answers for
+  one entry point; a call site filling in a descriptor wants the new accessor,
+  and every one of the engine's passes now does — so the graphics passes offer
+  DXIL where they previously offered none.
+
 - **`CRCBL_GPU=dx12` selects the Direct3D 12 backend on Windows.**
   `crcbl::backend::GpuBackend` gains a `Dx12` variant, spelled `dx12` or `d3d12`
   wherever a backend is named — the environment variable, `--backend`, and
@@ -43,12 +61,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   that build does have.
 
   The rest of the seam is not there yet: a `CRCBL_GPU=dx12` run of anything that
-  builds a `ForwardRenderer` now gets as far as the mesh pass's shader module,
-  which `crcbl-render` builds with `dxil: None` because one DXIL container holds
-  one entry point and that module has two — so it fails with "shader module
-  `mesh.slang` was given SPIR-V, WGSL and MSL, but this backend can only compile
-  DXIL". Adapter enumeration, buffers, images, bind groups, graphics and compute
-  pipelines, a clear, a triangle, a dispatch and a swapchain all work.
+  builds a `ForwardRenderer` now builds every pipeline the renderer needs and
+  gets as far as the forward pass's `bind_index_buffer`, which refuses with
+  "indexed draws (the DX12 pipeline slice)". Adapter enumeration, buffers,
+  images, bind groups, graphics and compute pipelines, a clear, a triangle, a
+  dispatch and a swapchain all work.
 
 - **`crcbl-dx12` runs compute.** `Device::create_compute_pipeline` builds a
   `D3D12_COMPUTE_PIPELINE_STATE_DESC` from the same root signature and the same

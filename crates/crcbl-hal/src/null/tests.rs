@@ -283,7 +283,7 @@ fn shader_modules_reject_non_spirv() {
             spirv: &[0xDEAD_BEEF],
             wgsl: None,
             msl: None,
-            dxil: None,
+            dxil: &[],
         })
         .expect_err("not SPIR-V");
     assert!(matches!(error, HalError::ShaderCompilation(_)), "{error:?}");
@@ -294,7 +294,7 @@ fn shader_modules_reject_non_spirv() {
                 spirv: &[],
                 wgsl: None,
                 msl: None,
-                dxil: None,
+                dxil: &[],
             })
             .is_err()
     );
@@ -305,7 +305,7 @@ fn shader_modules_reject_non_spirv() {
                 spirv: &SPIRV,
                 wgsl: None,
                 msl: None,
-                dxil: None,
+                dxil: &[],
             })
             .is_ok()
     );
@@ -325,7 +325,7 @@ fn shader_modules_accept_a_text_artifact_with_or_without_spirv() {
                 spirv: &[],
                 wgsl: Some("@fragment fn main() {}"),
                 msl: None,
-                dxil: None,
+                dxil: &[],
             })
             .is_ok()
     );
@@ -336,7 +336,7 @@ fn shader_modules_accept_a_text_artifact_with_or_without_spirv() {
                 spirv: &[],
                 wgsl: None,
                 msl: Some("[[fragment]] float4 main() { return 0; }"),
-                dxil: None,
+                dxil: &[],
             })
             .is_ok(),
         "MSL alone is a legal descriptor; crcbl-mtl is the backend that reads it"
@@ -348,7 +348,7 @@ fn shader_modules_accept_a_text_artifact_with_or_without_spirv() {
                 spirv: &[],
                 wgsl: None,
                 msl: None,
-                dxil: Some(DXIL),
+                dxil: &[("vertexMain", DXIL)],
             })
             .is_ok(),
         "DXIL alone is a legal descriptor; crcbl-dx12 is the backend that reads it"
@@ -360,7 +360,7 @@ fn shader_modules_accept_a_text_artifact_with_or_without_spirv() {
                 spirv: &SPIRV,
                 wgsl: Some("@fragment fn main() {}"),
                 msl: Some("[[fragment]] float4 main() { return 0; }"),
-                dxil: Some(DXIL),
+                dxil: &[("vertexMain", DXIL)],
             })
             .is_ok()
     );
@@ -378,7 +378,7 @@ fn a_shader_module_with_no_artifact_names_the_gap() {
             spirv: &[],
             wgsl: None,
             msl: None,
-            dxil: None,
+            dxil: &[],
         })
         .expect_err("a descriptor with no artifact is not a shader");
     let text = error.to_string();
@@ -400,7 +400,7 @@ fn created_shader_modules_are_logged_with_the_formats_they_carried() {
             spirv: &SPIRV,
             wgsl: Some("@vertex fn vertexMain() {}"),
             msl: Some("[[vertex]] void vertexMain() {}"),
-            dxil: Some(DXIL),
+            dxil: &[("vertexMain", DXIL)],
         })
         .expect("every format");
     device.destroy_shader_module(module);
@@ -410,6 +410,84 @@ fn created_shader_modules_are_logged_with_the_formats_they_carried() {
     );
     recorder.clear();
     assert!(recorder.shader_modules_created().is_empty());
+}
+
+/// **A module that offers DXIL must offer it for every stage it is used at, and
+/// the refusal names the entry point.**
+///
+/// A DXIL container is compiled for one entry point, so this is the one
+/// artifact format a call site can under-supply: offer the vertex container and
+/// not the fragment one and the SPIR-V, WGSL and MSL backends keep drawing
+/// while D3D12 has no bytecode for half the pipeline. This backend compiles
+/// nothing, so what it checks is the claim — and checking it here is what puts
+/// the failure in the no-GPU suite rather than on the one machine with a D3D12
+/// driver.
+#[test]
+fn a_stage_whose_entry_point_has_no_dxil_container_is_refused_by_name() {
+    let instance = NullInstance::gpu_driven();
+    let device = open(&instance);
+    let layout = device
+        .create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("ui"),
+            bind_group_layouts: &[],
+            push_constants: None,
+        })
+        .expect("pipeline layout");
+    let targets = [ColorTargetState::opaque(Format::Rgba16Float)];
+    let pipeline = |module| GraphicsPipelineDesc {
+        label: Some("ui compositing"),
+        layout,
+        vertex: ShaderEntry {
+            module,
+            entry_point: "vertexMain",
+        },
+        fragment: Some(ShaderEntry {
+            module,
+            entry_point: "fragmentMain",
+        }),
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        color_targets: &targets,
+    };
+    let module = |dxil| ShaderModuleDesc {
+        label: Some("ui.slang"),
+        spirv: &SPIRV,
+        wgsl: None,
+        msl: None,
+        dxil,
+    };
+
+    let half = device
+        .create_shader_module(&module(&[("vertexMain", DXIL)]))
+        .expect("one container is still a module");
+    let error = device
+        .create_graphics_pipeline(&pipeline(half))
+        .expect_err("the fragment stage has no container");
+    assert!(matches!(error, HalError::ShaderCompilation(_)), "{error:?}");
+    let text = error.to_string();
+    assert!(text.contains("ui.slang"), "{text}");
+    assert!(text.contains("fragmentMain"), "{text}");
+    assert!(text.contains("vertexMain"), "{text}");
+
+    // The same pipeline over a module carrying both containers is built, so the
+    // refusal above is the missing container and not something else about the
+    // descriptor.
+    let both = device
+        .create_shader_module(&module(&[("vertexMain", DXIL), ("fragmentMain", DXIL)]))
+        .expect("module");
+    device
+        .create_graphics_pipeline(&pipeline(both))
+        .expect("both stages have a container");
+
+    // And a module that offered no DXIL at all is held to nothing: it made no
+    // claim, and each of the other three artifacts carries every entry point.
+    let none = device
+        .create_shader_module(&module(&[]))
+        .expect("SPIR-V alone is a module");
+    device
+        .create_graphics_pipeline(&pipeline(none))
+        .expect("a module offering no DXIL claims nothing");
 }
 
 /// The trap the seam exists to make visible: a layout that asks for
@@ -500,7 +578,7 @@ fn mesh_fixture(extra: Features) -> (Box<dyn Device>, ShaderModuleHandle, Pipeli
             spirv: &SPIRV,
             wgsl: None,
             msl: None,
-            dxil: None,
+            dxil: &[],
         })
         .expect("module");
     let layout = device
@@ -751,7 +829,7 @@ fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
             spirv: &SPIRV,
             wgsl: None,
             msl: None,
-            dxil: None,
+            dxil: &[],
         })
         .expect("module");
     let layout = device
@@ -1498,7 +1576,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
             spirv: &SPIRV,
             wgsl: None,
             msl: None,
-            dxil: None,
+            dxil: &[],
         })
         .expect("module");
     let set_layout = device

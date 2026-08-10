@@ -473,6 +473,50 @@ impl NullDevice {
         self.check_owner(kind, bits, name, self.instance_id)
     }
 
+    /// Resolves one pipeline stage: its module handle, and that the module can
+    /// actually supply the entry point the stage names.
+    ///
+    /// The second half only bites a module that offered DXIL. That is the one
+    /// artifact format with a container *per entry point*, so it is the one a
+    /// call site can under-supply — offering the vertex container and not the
+    /// fragment one leaves every other backend working and D3D12 with no
+    /// bytecode for half the pipeline. Every real backend that consumes DXIL
+    /// refuses that; saying so here means the no-GPU suite catches it on a
+    /// machine with no D3D12, which is where these call sites are written.
+    ///
+    /// A module with no DXIL at all is not held to anything: it made no claim,
+    /// and the backends that read its SPIR-V, WGSL or MSL find every entry
+    /// point inside the one artifact.
+    fn check_stage(&self, stage: crate::ShaderEntry<'_>) -> Result<(), HalError> {
+        let bits = stage.module.to_bits();
+        self.check(ObjectKind::ShaderModule, bits, "shader module")?;
+        let state = self.recorder.lock();
+        let Some(Detail::ShaderModule { dxil_entry_points }) = state
+            .get(ObjectKind::ShaderModule, bits)
+            .map(|object| &object.detail)
+        else {
+            return Ok(());
+        };
+        if dxil_entry_points.is_empty()
+            || dxil_entry_points
+                .iter()
+                .any(|name| name == stage.entry_point)
+        {
+            return Ok(());
+        }
+        Err(HalError::ShaderCompilation(format!(
+            "shader module `{label}` offers DXIL for {held}, and this stage names `{wanted}`; a \
+             DXIL container is compiled for one entry point, so a module used at two stages has \
+             to offer a container for each",
+            label = state
+                .get(ObjectKind::ShaderModule, bits)
+                .and_then(|object| object.label.as_deref())
+                .unwrap_or("<unlabelled>"),
+            held = dxil_entry_points.join(", "),
+            wanted = stage.entry_point,
+        )))
+    }
+
     fn insert<T>(&self, kind: ObjectKind, label: Option<&str>, detail: Detail) -> Handle<T> {
         self.recorder.lock().insert_owned(
             kind,
@@ -521,11 +565,7 @@ impl NullDevice {
             "pipeline layout",
         )?;
         if let Some(fragment) = fragment {
-            self.check(
-                ObjectKind::ShaderModule,
-                fragment.module.to_bits(),
-                "shader module",
-            )?;
+            self.check_stage(fragment)?;
         }
         if color_targets.len() > self.caps.limits.max_color_attachments as usize {
             return Err(HalError::InvalidDescriptor(format!(
@@ -962,7 +1002,17 @@ impl Device for NullDevice {
             .lock()
             .shader_modules_created
             .push((desc.label.map(ToOwned::to_owned), sources));
-        Ok(self.insert(ObjectKind::ShaderModule, desc.label, Detail::None))
+        Ok(self.insert(
+            ObjectKind::ShaderModule,
+            desc.label,
+            Detail::ShaderModule {
+                dxil_entry_points: desc
+                    .dxil
+                    .iter()
+                    .map(|(entry_point, _)| (*entry_point).to_owned())
+                    .collect(),
+            },
+        ))
     }
 
     fn destroy_shader_module(&self, module: ShaderModuleHandle) {
@@ -1168,11 +1218,7 @@ impl Device for NullDevice {
         &self,
         desc: &GraphicsPipelineDesc<'_>,
     ) -> Result<GraphicsPipelineHandle, HalError> {
-        self.check(
-            ObjectKind::ShaderModule,
-            desc.vertex.module.to_bits(),
-            "shader module",
-        )?;
+        self.check_stage(desc.vertex)?;
         self.check_raster_state(
             desc.layout,
             desc.fragment,
@@ -1196,17 +1242,9 @@ impl Device for NullDevice {
         if desc.task.is_some() && !self.caps.features.contains(Features::TASK_SHADER) {
             return Err(self.unsupported("a task stage without Features::TASK_SHADER"));
         }
-        self.check(
-            ObjectKind::ShaderModule,
-            desc.mesh.module.to_bits(),
-            "shader module",
-        )?;
+        self.check_stage(desc.mesh)?;
         if let Some(task) = desc.task {
-            self.check(
-                ObjectKind::ShaderModule,
-                task.module.to_bits(),
-                "shader module",
-            )?;
+            self.check_stage(task)?;
         }
         self.check_raster_state(
             desc.layout,
@@ -1236,11 +1274,7 @@ impl Device for NullDevice {
             desc.layout.to_bits(),
             "pipeline layout",
         )?;
-        self.check(
-            ObjectKind::ShaderModule,
-            desc.compute.module.to_bits(),
-            "shader module",
-        )?;
+        self.check_stage(desc.compute)?;
         // This recorder has no module contents to compare the declared size
         // against, so it checks the half that needs none: a size the device's
         // own limits could not launch.
