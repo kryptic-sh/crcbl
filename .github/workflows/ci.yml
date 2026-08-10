@@ -715,6 +715,19 @@ jobs:
           CRCBL_DX12_VALIDATION: '1'
         run: crates/crcbl/tests/run-render-e2e.sh
 
+      # The two backends nobody on this team can run locally are the two whose
+      # golden diffs were being discarded: this job and the Metal one wrote
+      # `target/golden-diff/` on a failure and uploaded nothing, so the one
+      # artifact that could diagnose a cross-target divergence died with the
+      # runner. The vk jobs have uploaded theirs since they were written.
+      - name: Upload golden-image diffs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: golden-diff-warp
+          path: target/golden-diff/
+          if-no-files-found: ignore
+
   # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
   # project, the project *compiles*, it lints clean, and it runs its loop
   # headless. `docs/plan/11-cli-headless.md` makes the CLI the substrate every
@@ -1638,6 +1651,14 @@ jobs:
         env:
           CRCBL_GPU: mtl
         run: crates/crcbl/tests/run-render-e2e.sh
+
+      - name: Upload golden-image diffs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: golden-diff-metal
+          path: target/golden-diff/
+          if-no-files-found: ignore
   shaders:
     name: shaders (committed artifacts match their sources)
     runs-on: ubuntu-latest
