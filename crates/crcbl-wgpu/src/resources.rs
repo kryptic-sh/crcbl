@@ -3,11 +3,39 @@
 //! Each HAL resource type gets its own [`crcbl_core::Pool`] mapping handles to
 //! wgpu objects. The pools are behind `Mutex` for interior mutability (the HAL
 //! trait methods take `&self`).
+//!
+//! Every entry is wrapped in [`Owned`], which carries the id of the device — or,
+//! for surfaces, the instance — that created it. That is `crcbl-hal`'s
+//! obligation 3; [`crate::handle`] is where it is enforced, and nothing here
+//! reaches into a pool without going through it.
 
 use crate::cell::{Lock, Shared};
+use crate::handle::{Owned, Owner};
 
 use crcbl_core::Pool;
 use crcbl_hal::{BufferHandle, ImageHandle, ImageViewHandle, MemoryLocation, SemaphoreKind};
+
+/// The surface pool an instance shares with every device it opens, and the
+/// instance identity those surfaces are checked against.
+///
+/// One type rather than two fields threaded side by side, because the pool and
+/// the owner are only ever correct together: a device handed one instance's
+/// surfaces and another's id would accept every surface and resolve none.
+#[derive(Clone)]
+pub struct Surfaces {
+    pub pool: Shared<Lock<Pool<Owned<SurfaceSlot>>>>,
+    pub owner: Owner,
+}
+
+impl Surfaces {
+    /// A fresh, empty surface pool for one instance.
+    pub fn new() -> Self {
+        Self {
+            pool: Shared::new(Lock::new(Pool::new())),
+            owner: Owner::next(),
+        }
+    }
+}
 
 /// A wgpu surface, stored in the instance's surface pool so Device swapchain
 /// methods can reach it. `'static` because the caller (`create_surface_unsafe`)
@@ -163,26 +191,32 @@ pub struct ReadbackSlot {
 }
 
 pub struct Pools {
-    pub buffers: Lock<Pool<BufferSlot>>,
-    pub images: Lock<Pool<wgpu::Texture>>,
-    pub image_views: Lock<Pool<wgpu::TextureView>>,
-    pub samplers: Lock<Pool<wgpu::Sampler>>,
-    pub shader_modules: Lock<Pool<wgpu::ShaderModule>>,
-    pub bind_group_layouts: Lock<Pool<wgpu::BindGroupLayout>>,
-    pub bind_groups: Lock<Pool<wgpu::BindGroup>>,
-    pub pipeline_layouts: Lock<Pool<wgpu::PipelineLayout>>,
-    pub graphics_pipelines: Lock<Pool<wgpu::RenderPipeline>>,
-    pub compute_pipelines: Lock<Pool<wgpu::ComputePipeline>>,
-    pub command_buffers: Shared<Lock<Pool<CommandBufferSlot>>>,
-    pub swapchains: Lock<Pool<SwapchainSlot>>,
-    pub semaphores: Lock<Pool<SemaphoreSlot>>,
-    pub readbacks: Lock<Pool<ReadbackSlot>>,
-    /// Shared surface pool, cloned from the instance.
-    pub surfaces: Shared<Lock<Pool<SurfaceSlot>>>,
+    pub buffers: Lock<Pool<Owned<BufferSlot>>>,
+    pub images: Lock<Pool<Owned<wgpu::Texture>>>,
+    pub image_views: Lock<Pool<Owned<wgpu::TextureView>>>,
+    pub samplers: Lock<Pool<Owned<wgpu::Sampler>>>,
+    pub shader_modules: Lock<Pool<Owned<wgpu::ShaderModule>>>,
+    pub bind_group_layouts: Lock<Pool<Owned<wgpu::BindGroupLayout>>>,
+    pub bind_groups: Lock<Pool<Owned<wgpu::BindGroup>>>,
+    pub pipeline_layouts: Lock<Pool<Owned<wgpu::PipelineLayout>>>,
+    pub graphics_pipelines: Lock<Pool<Owned<wgpu::RenderPipeline>>>,
+    pub compute_pipelines: Lock<Pool<Owned<wgpu::ComputePipeline>>>,
+    pub command_buffers: Shared<Lock<Pool<Owned<CommandBufferSlot>>>>,
+    pub swapchains: Lock<Pool<Owned<SwapchainSlot>>>,
+    pub semaphores: Lock<Pool<Owned<SemaphoreSlot>>>,
+    pub readbacks: Lock<Pool<Owned<ReadbackSlot>>>,
+    /// Shared surface pool and the instance that owns it, cloned from the
+    /// instance. Surfaces are checked against the *instance* id, so any device
+    /// from that instance may use them.
+    pub surfaces: Surfaces,
+    /// The device every pool above belongs to. Held here rather than on
+    /// [`crate::device::WgpuDevice`] because the command encoder resolves
+    /// handles through these same pools and must apply the same check.
+    pub owner: Owner,
 }
 
 impl Pools {
-    pub fn new(surfaces: Shared<Lock<Pool<SurfaceSlot>>>) -> Self {
+    pub fn new(surfaces: Surfaces) -> Self {
         Self {
             buffers: Lock::new(Pool::new()),
             images: Lock::new(Pool::new()),
@@ -199,6 +233,7 @@ impl Pools {
             semaphores: Lock::new(Pool::new()),
             readbacks: Lock::new(Pool::new()),
             surfaces,
+            owner: Owner::next(),
         }
     }
 }

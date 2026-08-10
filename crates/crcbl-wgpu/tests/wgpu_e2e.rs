@@ -2516,3 +2516,202 @@ fn a_wgpu_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
     device.destroy_semaphore(semaphore);
     headless.finish();
 }
+
+/// **Obligation 3.** A handle from device A used on device B is a caller bug
+/// that must be *detected*, and detected as `ForeignObject` rather than as a
+/// stale handle — the two send a reader to different bugs.
+///
+/// Device B is given a buffer of its own first, and that is the whole design of
+/// this test: without the device tag in the handle, A's first handle and B's
+/// first handle are bit-identical, so B would resolve A's handle to B's own
+/// buffer, find the owner matching, and write into the wrong object with no
+/// error anywhere. Two devices from *one* instance, because that is the
+/// arrangement in which their pools genuinely allocate in step.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_handle_from_another_wgpu_device_is_foreign_not_merely_unresolvable() {
+    let instance = instance();
+    let adapter = instance.adapters().remove(0);
+    let open = |label| {
+        instance
+            .create_device(&DeviceDesc {
+                label: Some(label),
+                adapter: adapter.id,
+                required_features: Features::empty(),
+                optional_features: Features::empty(),
+                compatible_surface: None,
+            })
+            .expect("a featureless headless device opens on any adapter")
+    };
+    let a = open("wgpu e2e obligation 3 A");
+    let b = open("wgpu e2e obligation 3 B");
+
+    let describe = |label| BufferDesc {
+        label: Some(label),
+        size: 64,
+        usage: BufferUsage::TRANSFER_SRC,
+        memory: MemoryLocation::HostUpload,
+    };
+    let on_a = a.create_buffer(&describe("on A")).expect("a buffer on A");
+    let on_b = b
+        .create_buffer(&describe("on B"))
+        .expect("a buffer on B, occupying the slot A's handle would land in");
+    assert_eq!(
+        on_a.generation(),
+        on_b.generation(),
+        "both pools are fresh, so only the tag can tell these apart"
+    );
+
+    let error = b
+        .write_buffer(on_a, 0, &[0xFF; 4])
+        .expect_err("A's buffer is not B's to write");
+    assert!(
+        matches!(error, HalError::ForeignObject { kind: "buffer", .. }),
+        "a live handle from another device is foreign, not merely unresolvable: {error}"
+    );
+
+    // B's own still resolves, so the check is not simply refusing everything.
+    b.write_buffer(on_b, 0, &[0xFF; 4])
+        .expect("B's own buffer resolves");
+
+    // A destroy with a foreign handle must not take the local object that
+    // shares its bits.
+    b.destroy_buffer(on_a);
+    b.write_buffer(on_b, 0, &[0xEE; 4])
+        .expect("B's buffer survived a foreign destroy");
+
+    // The queue is synthesised rather than pooled, and obligation 3 covers it
+    // too: without the tag, every device accepted every other device's.
+    let queue_of_a = a.queue(QueueKind::Graphics).expect("a graphics queue");
+    let error = b
+        .submit(queue_of_a, &SubmitInfo::new(&[]))
+        .expect_err("A's queue is not B's to submit to");
+    assert!(
+        matches!(error, HalError::ForeignObject { kind: "queue", .. }),
+        "{error}"
+    );
+
+    a.destroy_buffer(on_a);
+    b.destroy_buffer(on_b);
+}
+
+/// **Obligation 3, across two instances.** Handle bits are only unique within
+/// the backend that issued them, so two instances genuinely hand out identical
+/// ones — a surface crossing them must be detected, and detected as
+/// `ForeignObject`.
+///
+/// Surfaces are scoped to the *instance* rather than the device, which is why
+/// this is a separate test from the buffer above and not a second assertion in
+/// it.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_wgpu_surface_from_one_instance_is_foreign_to_another() {
+    let owner = instance();
+    let other = instance();
+
+    // SAFETY: `Offscreen` names no platform object at all, so there is nothing
+    // that has to outlive the surface.
+    let surface = unsafe { owner.create_surface(&SurfaceTarget::Offscreen) }
+        .expect("an offscreen surface needs no window system");
+    // The other instance makes one of its own first, so its pool is occupied at
+    // the slot the foreign handle names — without the tag it would resolve.
+    let native = unsafe { other.create_surface(&SurfaceTarget::Offscreen) }.expect("offscreen");
+    assert_eq!(
+        surface.generation(),
+        native.generation(),
+        "both pools are fresh, so only the tag can tell these apart"
+    );
+    let adapter = other.adapters().remove(0);
+
+    let error = other
+        .surface_caps(surface, adapter.id)
+        .expect_err("this surface belongs to the other instance");
+    assert!(
+        matches!(
+            error,
+            HalError::ForeignObject {
+                kind: "surface",
+                ..
+            }
+        ),
+        "a live handle from another instance is foreign, not unresolvable: {error}"
+    );
+
+    let error = other
+        .create_device(&DeviceDesc {
+            label: Some("foreign surface"),
+            adapter: adapter.id,
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            compatible_surface: Some(surface),
+        })
+        .expect_err("and the same on the device-creation path");
+    assert!(
+        matches!(
+            error,
+            HalError::ForeignObject {
+                kind: "surface",
+                ..
+            }
+        ),
+        "{error}"
+    );
+
+    // The other instance must not be able to free it either, which is what
+    // stops a stray `destroy_surface` from turning a bit collision into a
+    // double free.
+    other.destroy_surface(surface);
+    owner
+        .surface_caps(surface, owner.adapters().remove(0).id)
+        .expect("the owning instance still has its surface");
+
+    other.destroy_surface(native);
+    owner.destroy_surface(surface);
+}
+
+/// A recycled slot must not resurrect the handle that used to name it.
+///
+/// The tagging is what could break this: the generation half is the only thing
+/// separating the two handles, so a stamp that disturbed it would make the dead
+/// handle name the live buffer.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_destroyed_wgpu_handle_does_not_alias_the_buffer_that_replaces_it() {
+    let (instance, device, surface, _queue, _format) = Headless::open_device();
+    let describe = BufferDesc {
+        label: Some("wgpu e2e recycled slot"),
+        size: 256,
+        usage: BufferUsage::TRANSFER_SRC,
+        memory: MemoryLocation::HostUpload,
+    };
+    let first = device.create_buffer(&describe).expect("first buffer");
+    device.destroy_buffer(first);
+    let second = device.create_buffer(&describe).expect("second buffer");
+
+    assert_eq!(
+        first.index(),
+        second.index(),
+        "the free list should have handed back the same slot; if not, this test is not exercising \
+         recycling at all"
+    );
+    assert_ne!(
+        first, second,
+        "the pool reissued the identical handle, so the generation never moved"
+    );
+    device
+        .write_buffer(second, 0, &[1u8; 4])
+        .expect("the live handle resolves");
+    let error = device
+        .write_buffer(first, 0, &[1u8; 4])
+        .expect_err("the dead handle must not name its replacement");
+    assert!(
+        matches!(error, HalError::InvalidHandle { kind: "buffer", .. }),
+        "a stale handle of this device's own is stale, not foreign: {error}"
+    );
+
+    device.destroy_buffer(second);
+    device.wait_idle().expect("idle");
+    instance.destroy_surface(surface);
+    drop(device);
+    drop(instance);
+}

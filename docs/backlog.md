@@ -4762,3 +4762,37 @@ now `crcbl-wgpu` each have
 `a_<backend>_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it`;
 D3D12 has none because the feature is unimplemented there, not because the test
 was forgotten.
+
+## `crcbl-wgpu` owner tagging: what the tests do not reach
+
+Obligation 3 is now implemented in `crcbl-wgpu` —
+`crates/crcbl-wgpu/src/handle.rs` holds the tag/id pair, and every pool entry is
+an `Owned<T>` — so the "Decided: `crcbl-wgpu` gets owner tagging" entry above is
+answered. Two things about that work are worth carrying rather than
+rediscovering.
+
+**The slot's `u64` cannot separate owners whose tags collide.** Not a defect in
+this backend, and true of `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` for the same
+reason: every pool holds exactly one owner's rows, so a foreign handle that gets
+past the tag lands on a row the _looking-up_ owner filled, the id agrees, and
+the lookup succeeds. The id half is what catches a shared pool and what stops
+`handle::remove` from taking a row this owner does not own — that much is
+asserted by
+`a_wgpu_slot_belongs_to_the_owner_that_filled_it_even_when_two_tags_collide` —
+but it is not a second line of defence against a colliding tag, and this session
+briefly wrote a test claiming it was before the test failed and said otherwise.
+The hole opens only after `OWNER_TAG_COUNT` owners in one process.
+
+**The windowed swapchain path's owner checks are untested.**
+`WgpuDevice::swapchain` and `WgpuDevice::surface` funnel through
+`dead_or_foreign`, which keeps a dead handle reporting `SurfaceError::Lost`
+(what callers retry on) and reports a foreign one as
+`SurfaceError::Hal(ForeignObject)`. **Nothing asserts that split.**
+`crates/crcbl-wgpu/tests/wgpu_e2e.rs` is offscreen-only by construction and the
+harness's Xvfb half runs `apps/sandbox` and `apps/breakout` rather than checking
+errors, so no test hands `acquire_next_frame`, `present` or
+`reconfigure_swapchain` a swapchain from another device or a surface from
+another instance. The three new e2e tests cover buffers, the queue handle and
+surfaces at `Instance` level only. Closing it needs either a windowed test
+target or an offscreen swapchain crossed between two devices — the latter is
+cheap and was simply not in this task's scope.

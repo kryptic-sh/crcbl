@@ -1,8 +1,7 @@
 //! The wgpu `Instance` implementation — adapter enumeration, surfaces.
 
-use crate::cell::{Lock, Shared};
+use crate::handle;
 
-use crcbl_core::Pool;
 use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, CompositeAlpha, DeviceCaps, DeviceDesc, DeviceType,
     Features, Format, HalError, Instance, Limits, PresentMode, SurfaceCaps, SurfaceHandle,
@@ -10,13 +9,20 @@ use crcbl_hal::{
 };
 
 use crate::device::WgpuDevice;
-use crate::resources::SurfaceSlot;
+use crate::resources::{SurfaceSlot, Surfaces};
 
-#[derive(Debug)]
 pub struct WgpuInstance {
     instance: wgpu::Instance,
     adapters: Vec<(AdapterInfo, wgpu::Adapter)>,
-    surfaces: Shared<Lock<Pool<SurfaceSlot>>>,
+    surfaces: Surfaces,
+}
+
+impl std::fmt::Debug for WgpuInstance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WgpuInstance")
+            .field("adapters", &self.adapters.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl WgpuInstance {
@@ -68,12 +74,13 @@ impl WgpuInstance {
         Some(Self {
             instance,
             adapters,
-            surfaces: Shared::new(Lock::new(Pool::new())),
+            surfaces: Surfaces::new(),
         })
     }
 
-    /// The surface pool shared with devices created by this instance.
-    pub(crate) fn surface_pool(&self) -> Shared<Lock<Pool<SurfaceSlot>>> {
+    /// The surface pool shared with devices created by this instance, and the
+    /// instance identity those surfaces are checked against.
+    pub(crate) fn surface_pool(&self) -> Surfaces {
         self.surfaces.clone()
     }
 }
@@ -268,10 +275,8 @@ impl Instance for WgpuInstance {
         surface: SurfaceHandle,
         adapter: AdapterId,
     ) -> Result<SurfaceCaps, HalError> {
-        let surfaces = self.surfaces.lock().unwrap();
-        let slot = surfaces
-            .get(surface.cast())
-            .ok_or_else(|| HalError::invalid_handle("surface", surface))?;
+        let surfaces = self.surfaces.pool.lock().unwrap();
+        let slot = handle::lookup(&surfaces, "surface", surface, self.surfaces.owner)?;
 
         let Some(surface_ref) = slot.surface.as_ref() else {
             // The adapter still has to exist — a caller doing adapter selection
@@ -361,14 +366,16 @@ impl Instance for WgpuInstance {
         // of plain textures on it. Same shape as `crcbl-vk`, which stores a null
         // `VkSurfaceKHR` for exactly this case.
         if matches!(target, SurfaceTarget::Offscreen) {
-            let mut surfaces = self.surfaces.lock().unwrap();
-            return Ok(surfaces
-                .insert(SurfaceSlot {
+            let mut surfaces = self.surfaces.pool.lock().unwrap();
+            return Ok(handle::insert(
+                &mut surfaces,
+                self.surfaces.owner,
+                SurfaceSlot {
                     surface: None,
                     platform: "offscreen",
                     srgb_view_only: false,
-                })
-                .cast());
+                },
+            ));
         }
 
         let (raw_window, raw_display, platform) = unsafe { map_surface_target(target)? };
@@ -382,18 +389,21 @@ impl Instance for WgpuInstance {
         }
         .map_err(|e| HalError::Backend(format!("wgpu create_surface on {platform}: {e}")))?;
 
-        let mut surfaces = self.surfaces.lock().unwrap();
-        Ok(surfaces
-            .insert(SurfaceSlot {
+        let mut surfaces = self.surfaces.pool.lock().unwrap();
+        Ok(handle::insert(
+            &mut surfaces,
+            self.surfaces.owner,
+            SurfaceSlot {
                 surface: Some(surface),
                 platform,
                 srgb_view_only: matches!(target, SurfaceTarget::Web { .. }),
-            })
-            .cast())
+            },
+        ))
     }
 
     fn destroy_surface(&self, surface: SurfaceHandle) {
-        if let Some(slot) = self.surfaces.lock().unwrap().remove(surface.cast()) {
+        let mut surfaces = self.surfaces.pool.lock().unwrap();
+        if let Some(slot) = handle::remove(&mut surfaces, surface, self.surfaces.owner) {
             log::debug!("crcbl-wgpu: destroyed the {} surface", slot.platform);
         }
     }

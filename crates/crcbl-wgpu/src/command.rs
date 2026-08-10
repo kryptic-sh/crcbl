@@ -16,6 +16,7 @@ use crcbl_hal::{
     HalError, IndexFormat, LoadOp, StoreOp,
 };
 
+use crate::handle;
 use crate::resources::Pools;
 
 pub struct WgpuCommandEncoder {
@@ -82,24 +83,21 @@ impl WgpuCommandEncoder {
         self.encoder.as_mut()
     }
 
-    fn buffer(&self, handle: hal::BufferHandle) -> Result<wgpu::Buffer, HalError> {
-        self.pools
-            .buffers
-            .lock()
-            .unwrap()
-            .get(handle.cast())
-            .map(|slot| slot.buffer.clone())
-            .ok_or_else(|| HalError::invalid_handle("buffer", handle))
+    fn buffer(&self, buffer: hal::BufferHandle) -> Result<wgpu::Buffer, HalError> {
+        let buffers = self.pools.buffers.lock().unwrap();
+        handle::lookup(&buffers, "buffer", buffer, self.pools.owner).map(|slot| slot.buffer.clone())
     }
 
-    fn image(&self, handle: hal::ImageHandle) -> Result<wgpu::Texture, HalError> {
-        self.pools
-            .images
-            .lock()
-            .unwrap()
-            .get(handle.cast())
-            .cloned()
-            .ok_or_else(|| HalError::invalid_handle("image", handle))
+    fn image(&self, image: hal::ImageHandle) -> Result<wgpu::Texture, HalError> {
+        let images = self.pools.images.lock().unwrap();
+        handle::lookup(&images, "image", image, self.pools.owner).cloned()
+    }
+
+    /// One of this device's image views, cloned so the pool lock can be
+    /// released before the pass descriptor is built.
+    fn view(&self, view: hal::ImageViewHandle) -> Result<wgpu::TextureView, HalError> {
+        let views = self.pools.image_views.lock().unwrap();
+        handle::lookup(&views, "image view", view, self.pools.owner).cloned()
     }
 
     /// Bytes per row for a buffer↔image copy, from the seam's *texel* counts.
@@ -449,50 +447,34 @@ impl CommandEncoder for WgpuCommandEncoder {
 
     fn begin_render_pass(&mut self, desc: &hal::RenderPassDesc<'_>) {
         // Resolve all attachment views from pools before building descriptor.
-        let color_views: Vec<Option<wgpu::TextureView>> = {
-            let views = self.pools.image_views.lock().unwrap();
-            desc.color_attachments
-                .iter()
-                .map(|a| views.get(a.view.cast()).cloned())
-                .collect()
+        let color_views: Vec<wgpu::TextureView> = match desc
+            .color_attachments
+            .iter()
+            .map(|a| self.view(a.view))
+            .collect()
+        {
+            Ok(views) => views,
+            Err(error) => return self.fail(error),
         };
-        for (attachment, view) in desc.color_attachments.iter().zip(&color_views) {
-            if view.is_none() {
-                return self.fail(HalError::invalid_handle("image view", attachment.view));
-            }
-        }
         // The resolve destinations, alongside the colour views: `att.resolve`
         // is read here and nowhere else, so a stale handle has to fail here
         // rather than silently dropping the resolve.
-        let resolve_views: Vec<Option<wgpu::TextureView>> = {
-            let views = self.pools.image_views.lock().unwrap();
-            desc.color_attachments
-                .iter()
-                .map(|a| match a.resolve {
-                    Some(handle) => views.get(handle.cast()).cloned(),
-                    None => None,
-                })
-                .collect()
+        let resolve_views: Vec<Option<wgpu::TextureView>> = match desc
+            .color_attachments
+            .iter()
+            .map(|a| a.resolve.map(|view| self.view(view)).transpose())
+            .collect()
+        {
+            Ok(views) => views,
+            Err(error) => return self.fail(error),
         };
-        for (attachment, resolve) in desc.color_attachments.iter().zip(&resolve_views) {
-            if let Some(handle) = attachment.resolve
-                && resolve.is_none()
-            {
-                return self.fail(HalError::invalid_handle("image view", handle));
-            }
-        }
-        let depth_view: Option<wgpu::TextureView> = match desc.depth_stencil_attachment {
-            Some(ds) => {
-                let views = self.pools.image_views.lock().unwrap();
-                match views.get(ds.view.cast()).cloned() {
-                    Some(view) => Some(view),
-                    None => {
-                        drop(views);
-                        return self.fail(HalError::invalid_handle("image view", ds.view));
-                    }
-                }
-            }
-            None => None,
+        let depth_view: Option<wgpu::TextureView> = match desc
+            .depth_stencil_attachment
+            .map(|ds| self.view(ds.view))
+            .transpose()
+        {
+            Ok(view) => view,
+            Err(error) => return self.fail(error),
         };
 
         let color_attachments: Vec<_> = desc
@@ -502,7 +484,7 @@ impl CommandEncoder for WgpuCommandEncoder {
             .zip(resolve_views.iter())
             .map(|((att, view), resolve)| {
                 let clear_color: [f64; 4] = att.clear.color.map(f64::from);
-                view.as_ref().map(|view| wgpu::RenderPassColorAttachment {
+                Some(wgpu::RenderPassColorAttachment {
                     view,
                     depth_slice: None,
                     resolve_target: resolve.as_ref(),
@@ -593,15 +575,13 @@ impl CommandEncoder for WgpuCommandEncoder {
     }
 
     fn bind_graphics_pipeline(&mut self, pipeline: GraphicsPipelineHandle) {
-        let rp = self
-            .pools
-            .graphics_pipelines
-            .lock()
-            .unwrap()
-            .get(pipeline.cast())
-            .cloned();
-        let Some(rp) = rp else {
-            return self.fail(HalError::invalid_handle("graphics pipeline", pipeline));
+        let rp = {
+            let pipelines = self.pools.graphics_pipelines.lock().unwrap();
+            handle::lookup(&pipelines, "graphics pipeline", pipeline, self.pools.owner).cloned()
+        };
+        let rp = match rp {
+            Ok(rp) => rp,
+            Err(error) => return self.fail(error),
         };
         if let Some(ref mut pass) = self.render_pass {
             pass.set_pipeline(&rp);
@@ -626,21 +606,19 @@ impl CommandEncoder for WgpuCommandEncoder {
         dynamic_offsets: &[u32],
         _layout: hal::PipelineLayoutHandle,
     ) {
-        let bg = self
-            .pools
-            .bind_groups
-            .lock()
-            .unwrap()
-            .get(group.cast())
-            .cloned();
-        let Some(ref bg) = bg else {
-            return self.fail(HalError::invalid_handle("bind group", group));
+        let bg = {
+            let groups = self.pools.bind_groups.lock().unwrap();
+            handle::lookup(&groups, "bind group", group, self.pools.owner).cloned()
+        };
+        let bg = match bg {
+            Ok(bg) => bg,
+            Err(error) => return self.fail(error),
         };
         if let Some(ref mut pass) = self.render_pass {
-            pass.set_bind_group(slot, bg, dynamic_offsets);
+            pass.set_bind_group(slot, &bg, dynamic_offsets);
         }
         if let Some(ref mut pass) = self.compute_pass {
-            pass.set_bind_group(slot, bg, dynamic_offsets);
+            pass.set_bind_group(slot, &bg, dynamic_offsets);
         }
     }
 
@@ -786,15 +764,13 @@ impl CommandEncoder for WgpuCommandEncoder {
     }
 
     fn bind_compute_pipeline(&mut self, pipeline: hal::ComputePipelineHandle) {
-        let cp = self
-            .pools
-            .compute_pipelines
-            .lock()
-            .unwrap()
-            .get(pipeline.cast())
-            .cloned();
-        let Some(cp) = cp else {
-            return self.fail(HalError::invalid_handle("compute pipeline", pipeline));
+        let cp = {
+            let pipelines = self.pools.compute_pipelines.lock().unwrap();
+            handle::lookup(&pipelines, "compute pipeline", pipeline, self.pools.owner).cloned()
+        };
+        let cp = match cp {
+            Ok(cp) => cp,
+            Err(error) => return self.fail(error),
         };
         if let Some(ref mut pass) = self.compute_pass {
             pass.set_pipeline(&cp);
@@ -850,9 +826,8 @@ impl CommandEncoder for WgpuCommandEncoder {
             Some(enc) => {
                 let wgpu_cb = enc.finish();
                 let mut cmds = this.pools.command_buffers.lock().unwrap();
-                let slot = cmds
-                    .get_mut(this.handle.cast())
-                    .ok_or_else(|| HalError::invalid_handle("command buffer", this.handle))?;
+                let slot =
+                    handle::lookup_mut(&mut cmds, "command buffer", this.handle, this.pools.owner)?;
                 slot.buffer = Some(wgpu_cb);
                 Ok(this.handle)
             }

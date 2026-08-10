@@ -131,6 +131,19 @@
 //!   [`Device::take_error`](crcbl_hal::Device::take_error), which
 //!   `crcbl::engine::GpuContext::acquire` drains before it records a frame.
 //!
+//! # Handles carry the device that issued them
+//!
+//! `crcbl-hal`'s obligation 3 — a handle never crosses an instance or a device
+//! — is enforced here, and the wasm build pays for it like every other target:
+//! it is one `u64` compare on a path already doing a table lookup, and a
+//! cross-device handle resolving to an unrelated object is at its worst on the
+//! backend a browser runs. Every pool entry records its creating device (a
+//! surface, its creating instance) and every handle carries that owner's tag, so
+//! another device's handle is
+//! [`HalError::ForeignObject`](crcbl_hal::HalError::ForeignObject) rather than
+//! whatever happens to live at the same index. The private `handle` module has
+//! the mechanism and the residual hole.
+//!
 //! # wasm32
 //!
 //! The crate compiles for `wasm32` and opens devices there. Adapter enumeration
@@ -166,6 +179,7 @@ mod command;
 mod conv;
 mod device;
 mod errors;
+mod handle;
 mod instance;
 mod resources;
 

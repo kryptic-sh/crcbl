@@ -15,13 +15,14 @@ use crcbl_hal::{
 
 use crate::cell::{Lock, Shared};
 use crate::errors::ErrorSink;
+use crate::handle::{self, Owned, Owner};
 
 use crcbl_core::Pool;
 
 use crate::conv;
 use crate::resources::{
     BufferSlot, CommandBufferSlot, MapStatus, OffscreenRing, PendingSignal, Pools, ReadbackSlot,
-    SurfaceSlot, SwapchainKind, SwapchainSlot, WindowedSwapchain,
+    Surfaces, SwapchainKind, SwapchainSlot, WindowedSwapchain,
 };
 
 /// wgpu requires buffer copy offsets and sizes to be multiples of this.
@@ -77,7 +78,7 @@ pub(crate) struct WgpuPendingDevice {
     /// `None` once the device has been handed over, so a second poll is the
     /// caller bug it is rather than a second device.
     future: Lock<Option<DeviceFuture>>,
-    surfaces: Shared<Lock<Pool<SurfaceSlot>>>,
+    surfaces: Surfaces,
 }
 
 impl std::fmt::Debug for WgpuPendingDevice {
@@ -129,15 +130,19 @@ impl WgpuDevice {
     pub(crate) fn request(
         adapter: &wgpu::Adapter,
         desc: &DeviceDesc<'_>,
-        surfaces: Shared<Lock<Pool<SurfaceSlot>>>,
+        surfaces: Surfaces,
     ) -> Result<WgpuPendingDevice, HalError> {
         // A compatible surface names a surface this instance must still own —
-        // same lookup `create_swapchain` does, so a destroyed or foreign handle
-        // is `InvalidHandle` here too instead of a device that presents nowhere.
-        if let Some(surface) = desc.compatible_surface
-            && surfaces.lock().unwrap().get(surface.cast()).is_none()
-        {
-            return Err(HalError::invalid_handle("surface", surface));
+        // same lookup `create_swapchain` does, so a destroyed handle is
+        // `InvalidHandle` and another instance's is `ForeignObject` here too,
+        // instead of a device that presents nowhere.
+        if let Some(surface) = desc.compatible_surface {
+            handle::lookup(
+                &surfaces.pool.lock().unwrap(),
+                "surface",
+                surface,
+                surfaces.owner,
+            )?;
         }
 
         let advertised = crate::instance::adapter_caps(adapter);
@@ -176,11 +181,7 @@ impl WgpuDevice {
     }
 
     /// Wraps an opened wgpu device and its queue.
-    fn from_open(
-        device: wgpu::Device,
-        queue: wgpu::Queue,
-        surfaces: Shared<Lock<Pool<SurfaceSlot>>>,
-    ) -> Self {
+    fn from_open(device: wgpu::Device, queue: wgpu::Queue, surfaces: Surfaces) -> Self {
         // What the device *has*, not what was asked for: an optional feature
         // the caller did not request is simply not in `enabled`, and one that
         // needs no enabling at all (compute, debug markers) is always there.
@@ -202,21 +203,68 @@ impl WgpuDevice {
             sink.record(error.to_string());
         }));
 
+        // A handle's high 32 bits are its generation and zero is the "never
+        // issued" sentinel, so the synthesised queue handle needs a non-zero
+        // one — `from_bits(1)` is index 1, generation 0, which is no handle at
+        // all and panicked on the first real device this backend ever opened.
+        // Index 0, generation 1, exactly as `crcbl_hal::null` synthesises its
+        // own queue handles — and then stamped, because obligation 3 covers
+        // queues too: an unstamped one carries no device identity at all, so
+        // every device would accept every other device's.
+        let pools = Pools::new(surfaces);
+        let graphics_queue = handle::stamp(
+            pools.owner,
+            QueueHandle::from_bits(1 << 32).expect("generation 1 is non-zero"),
+        );
+
         Self {
             device,
             queue,
             caps,
             enabled,
-            // A handle's high 32 bits are its generation and zero is the "never
-            // issued" sentinel, so the synthesised queue handle needs a
-            // non-zero one — `from_bits(1)` is index 1, generation 0, which is
-            // no handle at all and panicked on the first real device this
-            // backend ever opened. Index 0, generation 1, exactly as
-            // `crcbl_hal::null` synthesises its own queue handles.
-            graphics_queue: QueueHandle::from_bits(1 << 32).expect("generation 1 is non-zero"),
-            pools: Shared::new(Pools::new(surfaces)),
+            graphics_queue,
+            pools: Shared::new(pools),
             errors,
         }
+    }
+
+    /// The device every pool entry of this device's is stamped with.
+    fn owner(&self) -> Owner {
+        self.pools.owner
+    }
+
+    /// A swapchain of this device's, in the swapchain surface's error type.
+    ///
+    /// # Errors
+    ///
+    /// [`SurfaceError::Lost`] for a destroyed handle — what this backend has
+    /// always reported and what the seam's callers retry on — and
+    /// [`SurfaceError::Hal`] wrapping
+    /// [`HalError::ForeignObject`] for another device's, which is a caller bug
+    /// no retry can fix.
+    fn swapchain<'p>(
+        &self,
+        pool: &'p Pool<Owned<SwapchainSlot>>,
+        swapchain: SwapchainHandle,
+    ) -> Result<&'p SwapchainSlot, SurfaceError> {
+        handle::lookup(pool, "swapchain", swapchain, self.owner()).map_err(dead_or_foreign)
+    }
+
+    /// A surface of this device's *instance*, in the same shape as
+    /// [`Self::swapchain`].
+    ///
+    /// The instance's owner rather than the device's: obligation 3 scopes
+    /// surfaces to the instance, so any device from it may present to them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::swapchain`].
+    fn surface<'p>(
+        &self,
+        pool: &'p Pool<Owned<crate::resources::SurfaceSlot>>,
+        surface: crcbl_hal::SurfaceHandle,
+    ) -> Result<&'p crate::resources::SurfaceSlot, SurfaceError> {
+        handle::lookup(pool, "surface", surface, self.pools.surfaces.owner).map_err(dead_or_foreign)
     }
 
     /// Runs a creation call and reports anything the device blamed on it.
@@ -251,7 +299,7 @@ impl WgpuDevice {
     /// wait, which is wgpu's non-blocking way to ask about one submission.
     fn resolve_semaphores(&self) {
         let mut semaphores = self.pools.semaphores.lock().unwrap();
-        for (_, slot) in semaphores.iter_mut() {
+        for slot in handle::values_mut(&mut semaphores) {
             slot.pending.retain(|signal| {
                 let done = self
                     .device
@@ -309,26 +357,22 @@ impl Device for WgpuDevice {
             // `write_buffer` is `Queue::write_buffer`, which needs no mapping.
             mapped_at_creation: false,
         });
-        Ok(self
-            .pools
-            .buffers
-            .lock()
-            .unwrap()
-            .insert(BufferSlot {
+        Ok(handle::insert(
+            &mut self.pools.buffers.lock().unwrap(),
+            self.owner(),
+            BufferSlot {
                 buffer: b,
                 size: desc.size,
                 memory: desc.memory,
-            })
-            .cast())
+            },
+        ))
     }
     fn destroy_buffer(&self, h: BufferHandle) {
-        self.pools.buffers.lock().unwrap().remove(h.cast());
+        handle::remove(&mut self.pools.buffers.lock().unwrap(), h, self.owner());
     }
     fn write_buffer(&self, h: BufferHandle, offset: u64, data: &[u8]) -> Result<(), HalError> {
         let pools = self.pools.buffers.lock().unwrap();
-        let slot = pools
-            .get(h.cast())
-            .ok_or_else(|| HalError::invalid_handle("buffer", h))?;
+        let slot = handle::lookup(&pools, "buffer", h, self.owner())?;
         // Only HostUpload is writable here: wgpu's `Queue::write_buffer` is a
         // host→device copy, and `HostReadback` is mappable but reserved for the
         // readback ring, exactly as the null backend enforces.
@@ -371,9 +415,7 @@ impl Device for WgpuDevice {
     fn request_readback(&self, desc: &ReadbackDesc<'_>) -> Result<ReadbackHandle, HalError> {
         let buffer = {
             let buffers = self.pools.buffers.lock().unwrap();
-            let slot = buffers
-                .get(desc.buffer.cast())
-                .ok_or_else(|| HalError::invalid_handle("buffer", desc.buffer))?;
+            let slot = handle::lookup(&buffers, "buffer", desc.buffer, self.owner())?;
             if slot.memory != hal::MemoryLocation::HostReadback {
                 return Err(HalError::InvalidDescriptor(format!(
                     "request_readback needs a HostReadback buffer — that is what carries wgpu's \
@@ -416,14 +458,11 @@ impl Device for WgpuDevice {
         // `map_async` rather than returning. Two live readbacks of one buffer is
         // therefore a caller bug this backend has to name, even though
         // `crcbl-vk` — which reads an always-mapped allocation — can serve it.
-        if self
-            .pools
-            .readbacks
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(_, slot)| slot.buffer == desc.buffer)
-        {
+        let in_flight = {
+            let readbacks = self.pools.readbacks.lock().unwrap();
+            handle::values(&readbacks).any(|slot| slot.buffer == desc.buffer)
+        };
+        if in_flight {
             return Err(HalError::InvalidDescriptor(
                 "a second readback of a buffer that already has one in flight: wgpu maps a buffer \
                  once, so destroy the first readback before requesting another"
@@ -440,9 +479,7 @@ impl Device for WgpuDevice {
             Some(wait) => {
                 self.resolve_semaphores();
                 let semaphores = self.pools.semaphores.lock().unwrap();
-                let slot = semaphores
-                    .get(wait.semaphore.cast())
-                    .ok_or_else(|| HalError::invalid_handle("semaphore", wait.semaphore))?;
+                let slot = handle::lookup(&semaphores, "semaphore", wait.semaphore, self.owner())?;
                 if slot.value >= wait.value {
                     None
                 } else {
@@ -475,19 +512,17 @@ impl Device for WgpuDevice {
                 };
             });
 
-        Ok(self
-            .pools
-            .readbacks
-            .lock()
-            .unwrap()
-            .insert(ReadbackSlot {
+        Ok(handle::insert(
+            &mut self.pools.readbacks.lock().unwrap(),
+            self.owner(),
+            ReadbackSlot {
                 buffer: desc.buffer,
                 offset: desc.offset,
                 size: desc.size,
                 status,
                 after,
-            })
-            .cast())
+            },
+        ))
     }
     fn poll_readback(&self, r: ReadbackHandle, out: &mut [u8]) -> Result<ReadbackState, HalError> {
         // Nothing else drives wgpu's callbacks on native: `map_async` only
@@ -496,9 +531,7 @@ impl Device for WgpuDevice {
 
         let (buffer_handle, offset, size, status, after) = {
             let readbacks = self.pools.readbacks.lock().unwrap();
-            let slot = readbacks
-                .get(r.cast())
-                .ok_or_else(|| HalError::invalid_handle("readback", r))?;
+            let slot = handle::lookup(&readbacks, "readback", r, self.owner())?;
             (
                 slot.buffer,
                 slot.offset,
@@ -536,9 +569,7 @@ impl Device for WgpuDevice {
         }
 
         let buffers = self.pools.buffers.lock().unwrap();
-        let slot = buffers
-            .get(buffer_handle.cast())
-            .ok_or_else(|| HalError::invalid_handle("buffer", buffer_handle))?;
+        let slot = handle::lookup(&buffers, "buffer", buffer_handle, self.owner())?;
         // Dropped before this function returns, which is what lets the next
         // poll take its own view of the same range.
         let view = slot
@@ -552,7 +583,8 @@ impl Device for WgpuDevice {
         Ok(ReadbackState::Ready)
     }
     fn destroy_readback(&self, r: ReadbackHandle) {
-        let Some(slot) = self.pools.readbacks.lock().unwrap().remove(r.cast()) else {
+        let Some(slot) = handle::remove(&mut self.pools.readbacks.lock().unwrap(), r, self.owner())
+        else {
             return;
         };
         // The seam says this call *is* the `unmap`, and wgpu's `unmap` covers
@@ -566,7 +598,12 @@ impl Device for WgpuDevice {
         if matches!(&*slot.status.lock().unwrap(), MapStatus::Failed(_)) {
             return;
         }
-        if let Some(buffer) = self.pools.buffers.lock().unwrap().get(slot.buffer.cast()) {
+        if let Ok(buffer) = handle::lookup(
+            &self.pools.buffers.lock().unwrap(),
+            "buffer",
+            slot.buffer,
+            self.owner(),
+        ) {
             buffer.buffer.unmap();
         }
     }
@@ -598,16 +635,18 @@ impl Device for WgpuDevice {
             usage,
             view_formats: &[conv::map_format(desc.format)],
         });
-        Ok(self.pools.images.lock().unwrap().insert(tex).cast())
+        Ok(handle::insert(
+            &mut self.pools.images.lock().unwrap(),
+            self.owner(),
+            tex,
+        ))
     }
     fn destroy_image(&self, h: ImageHandle) {
-        self.pools.images.lock().unwrap().remove(h.cast());
+        handle::remove(&mut self.pools.images.lock().unwrap(), h, self.owner());
     }
     fn create_image_view(&self, desc: &ImageViewDesc<'_>) -> Result<ImageViewHandle, HalError> {
         let images = self.pools.images.lock().unwrap();
-        let tex = images
-            .get(desc.image.cast())
-            .ok_or_else(|| HalError::invalid_handle("image", desc.image))?;
+        let tex = handle::lookup(&images, "image", desc.image, self.owner())?;
         // `ImageSubresourceRange::ALL` means "every remaining level/layer",
         // which is exactly what wgpu spells `None`. Passing `u32::MAX` through
         // is an out-of-range count, and it is what every graph-owned view was
@@ -632,10 +671,14 @@ impl Device for WgpuDevice {
             ..Default::default()
         });
         drop(images);
-        Ok(self.pools.image_views.lock().unwrap().insert(view).cast())
+        Ok(handle::insert(
+            &mut self.pools.image_views.lock().unwrap(),
+            self.owner(),
+            view,
+        ))
     }
     fn destroy_image_view(&self, h: ImageViewHandle) {
-        self.pools.image_views.lock().unwrap().remove(h.cast());
+        handle::remove(&mut self.pools.image_views.lock().unwrap(), h, self.owner());
     }
 
     // ---------- samplers ----------
@@ -657,10 +700,14 @@ impl Device for WgpuDevice {
             anisotropy_clamp: anisotropy as u16,
             ..Default::default()
         });
-        Ok(self.pools.samplers.lock().unwrap().insert(s).cast())
+        Ok(handle::insert(
+            &mut self.pools.samplers.lock().unwrap(),
+            self.owner(),
+            s,
+        ))
     }
     fn destroy_sampler(&self, h: SamplerHandle) {
-        self.pools.samplers.lock().unwrap().remove(h.cast());
+        handle::remove(&mut self.pools.samplers.lock().unwrap(), h, self.owner());
     }
 
     // ---------- shader modules ----------
@@ -721,10 +768,18 @@ impl Device for WgpuDevice {
                 }
             }
         })?;
-        Ok(self.pools.shader_modules.lock().unwrap().insert(sm).cast())
+        Ok(handle::insert(
+            &mut self.pools.shader_modules.lock().unwrap(),
+            self.owner(),
+            sm,
+        ))
     }
     fn destroy_shader_module(&self, h: ShaderModuleHandle) {
-        self.pools.shader_modules.lock().unwrap().remove(h.cast());
+        handle::remove(
+            &mut self.pools.shader_modules.lock().unwrap(),
+            h,
+            self.owner(),
+        );
     }
 
     // ---------- bind group layouts ----------
@@ -759,30 +814,25 @@ impl Device for WgpuDevice {
                 label: desc.label,
                 entries: &entries,
             });
-        Ok(self
-            .pools
-            .bind_group_layouts
-            .lock()
-            .unwrap()
-            .insert(layout)
-            .cast())
+        Ok(handle::insert(
+            &mut self.pools.bind_group_layouts.lock().unwrap(),
+            self.owner(),
+            layout,
+        ))
     }
     fn destroy_bind_group_layout(&self, h: BindGroupLayoutHandle) {
-        self.pools
-            .bind_group_layouts
-            .lock()
-            .unwrap()
-            .remove(h.cast());
+        handle::remove(
+            &mut self.pools.bind_group_layouts.lock().unwrap(),
+            h,
+            self.owner(),
+        );
     }
 
     // ---------- bind groups ----------
     fn create_bind_group(&self, desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError> {
         let layout = {
             let layouts = self.pools.bind_group_layouts.lock().unwrap();
-            let l = layouts
-                .get(desc.layout.cast())
-                .ok_or_else(|| HalError::invalid_handle("bind group layout", desc.layout))?;
-            l.clone()
+            handle::lookup(&layouts, "bind group layout", desc.layout, self.owner())?.clone()
         };
 
         // Collect cloned wgpu resources so MutexGuards can be dropped.
@@ -798,9 +848,7 @@ impl Device for WgpuDevice {
                     size,
                 } => {
                     let bufs = self.pools.buffers.lock().unwrap();
-                    let buf = bufs
-                        .get(buffer.cast())
-                        .ok_or_else(|| HalError::invalid_handle("buffer", buffer))?
+                    let buf = handle::lookup(&bufs, "buffer", buffer, self.owner())?
                         .buffer
                         .clone();
                     let sz = if size == hal::BindingResource::WHOLE_BUFFER {
@@ -820,19 +868,14 @@ impl Device for WgpuDevice {
                     let views = self.pools.image_views.lock().unwrap();
                     tex_views.push((
                         e.binding,
-                        views
-                            .get(view.cast())
-                            .ok_or_else(|| HalError::invalid_handle("image view", view))?
-                            .clone(),
+                        handle::lookup(&views, "image view", view, self.owner())?.clone(),
                     ));
                 }
                 hal::BindingResource::Sampler(sampler) => {
                     let ss = self.pools.samplers.lock().unwrap();
                     samplers.push((
                         e.binding,
-                        ss.get(sampler.cast())
-                            .ok_or_else(|| HalError::invalid_handle("sampler", sampler))?
-                            .clone(),
+                        handle::lookup(&ss, "sampler", sampler, self.owner())?.clone(),
                     ));
                 }
             }
@@ -863,7 +906,11 @@ impl Device for WgpuDevice {
             layout: &layout,
             entries: &entries,
         });
-        Ok(self.pools.bind_groups.lock().unwrap().insert(bg).cast())
+        Ok(handle::insert(
+            &mut self.pools.bind_groups.lock().unwrap(),
+            self.owner(),
+            bg,
+        ))
     }
     fn update_bind_group(
         &self,
@@ -876,7 +923,7 @@ impl Device for WgpuDevice {
         ))
     }
     fn destroy_bind_group(&self, h: BindGroupHandle) {
-        self.pools.bind_groups.lock().unwrap().remove(h.cast());
+        handle::remove(&mut self.pools.bind_groups.lock().unwrap(), h, self.owner());
     }
 
     // ---------- pipeline layouts ----------
@@ -915,12 +962,7 @@ impl Device for WgpuDevice {
         let bgls: Vec<Option<&wgpu::BindGroupLayout>> = desc
             .bind_group_layouts
             .iter()
-            .map(|h| {
-                layouts
-                    .get(h.cast())
-                    .ok_or_else(|| HalError::invalid_handle("bind group layout", *h))
-                    .map(Some)
-            })
+            .map(|h| handle::lookup(&layouts, "bind group layout", *h, self.owner()).map(Some))
             .collect::<Result<Vec<_>, _>>()?;
         let pl = self
             .device
@@ -930,16 +972,18 @@ impl Device for WgpuDevice {
                 immediate_size,
             });
         drop(layouts);
-        Ok(self
-            .pools
-            .pipeline_layouts
-            .lock()
-            .unwrap()
-            .insert(pl)
-            .cast())
+        Ok(handle::insert(
+            &mut self.pools.pipeline_layouts.lock().unwrap(),
+            self.owner(),
+            pl,
+        ))
     }
     fn destroy_pipeline_layout(&self, h: PipelineLayoutHandle) {
-        self.pools.pipeline_layouts.lock().unwrap().remove(h.cast());
+        handle::remove(
+            &mut self.pools.pipeline_layouts.lock().unwrap(),
+            h,
+            self.owner(),
+        );
     }
 
     // ---------- graphics pipelines ----------
@@ -949,21 +993,16 @@ impl Device for WgpuDevice {
     ) -> Result<GraphicsPipelineHandle, HalError> {
         let layout = {
             let pls = self.pools.pipeline_layouts.lock().unwrap();
-            pls.get(desc.layout.cast())
-                .ok_or_else(|| HalError::invalid_handle("pipeline layout", desc.layout))?
-                .clone()
+            handle::lookup(&pls, "pipeline layout", desc.layout, self.owner())?.clone()
         };
         let (vs, fs_entry) = {
             let sms = self.pools.shader_modules.lock().unwrap();
-            let vs = sms
-                .get(desc.vertex.module.cast())
-                .ok_or_else(|| HalError::invalid_handle("shader module", desc.vertex.module))?
-                .clone();
+            let vs =
+                handle::lookup(&sms, "shader module", desc.vertex.module, self.owner())?.clone();
             let fs = desc
                 .fragment
                 .map(|f| {
-                    sms.get(f.module.cast())
-                        .ok_or_else(|| HalError::invalid_handle("shader module", f.module))
+                    handle::lookup(&sms, "shader module", f.module, self.owner())
                         .map(|m| (m.clone(), f.entry_point))
                 })
                 .transpose()?;
@@ -1066,13 +1105,11 @@ impl Device for WgpuDevice {
                     cache: None,
                 })
         })?;
-        Ok(self
-            .pools
-            .graphics_pipelines
-            .lock()
-            .unwrap()
-            .insert(pipeline)
-            .cast())
+        Ok(handle::insert(
+            &mut self.pools.graphics_pipelines.lock().unwrap(),
+            self.owner(),
+            pipeline,
+        ))
     }
     /// Refused, and it is the API's gap rather than this backend's.
     ///
@@ -1091,11 +1128,11 @@ impl Device for WgpuDevice {
     }
 
     fn destroy_graphics_pipeline(&self, h: GraphicsPipelineHandle) {
-        self.pools
-            .graphics_pipelines
-            .lock()
-            .unwrap()
-            .remove(h.cast());
+        handle::remove(
+            &mut self.pools.graphics_pipelines.lock().unwrap(),
+            h,
+            self.owner(),
+        );
     }
 
     // ---------- compute pipelines ----------
@@ -1115,15 +1152,11 @@ impl Device for WgpuDevice {
         desc.check_workgroup_size(&self.caps.limits)?;
         let layout = {
             let pls = self.pools.pipeline_layouts.lock().unwrap();
-            pls.get(desc.layout.cast())
-                .ok_or_else(|| HalError::invalid_handle("pipeline layout", desc.layout))?
-                .clone()
+            handle::lookup(&pls, "pipeline layout", desc.layout, self.owner())?.clone()
         };
         let cs = {
             let sms = self.pools.shader_modules.lock().unwrap();
-            sms.get(desc.compute.module.cast())
-                .ok_or_else(|| HalError::invalid_handle("shader module", desc.compute.module))?
-                .clone()
+            handle::lookup(&sms, "shader module", desc.compute.module, self.owner())?.clone()
         };
         let pipeline = self.checked("create_compute_pipeline", || {
             self.device
@@ -1136,20 +1169,18 @@ impl Device for WgpuDevice {
                     cache: None,
                 })
         })?;
-        Ok(self
-            .pools
-            .compute_pipelines
-            .lock()
-            .unwrap()
-            .insert(pipeline)
-            .cast())
+        Ok(handle::insert(
+            &mut self.pools.compute_pipelines.lock().unwrap(),
+            self.owner(),
+            pipeline,
+        ))
     }
     fn destroy_compute_pipeline(&self, h: ComputePipelineHandle) {
-        self.pools
-            .compute_pipelines
-            .lock()
-            .unwrap()
-            .remove(h.cast());
+        handle::remove(
+            &mut self.pools.compute_pipelines.lock().unwrap(),
+            h,
+            self.owner(),
+        );
     }
 
     // ---------- queries ----------
@@ -1169,27 +1200,23 @@ impl Device for WgpuDevice {
             hal::SemaphoreKind::Binary => 0,
             hal::SemaphoreKind::Timeline { initial_value } => initial_value,
         };
-        Ok(self
-            .pools
-            .semaphores
-            .lock()
-            .unwrap()
-            .insert(crate::resources::SemaphoreSlot {
+        Ok(handle::insert(
+            &mut self.pools.semaphores.lock().unwrap(),
+            self.owner(),
+            crate::resources::SemaphoreSlot {
                 kind: desc.kind,
                 value,
                 pending: Vec::new(),
-            })
-            .cast())
+            },
+        ))
     }
     fn destroy_semaphore(&self, h: SemaphoreHandle) {
-        self.pools.semaphores.lock().unwrap().remove(h.cast());
+        handle::remove(&mut self.pools.semaphores.lock().unwrap(), h, self.owner());
     }
     fn semaphore_value(&self, h: SemaphoreHandle) -> Result<u64, HalError> {
         self.resolve_semaphores();
         let semaphores = self.pools.semaphores.lock().unwrap();
-        let slot = semaphores
-            .get(h.cast())
-            .ok_or_else(|| HalError::invalid_handle("semaphore", h))?;
+        let slot = handle::lookup(&semaphores, "semaphore", h, self.owner())?;
         match slot.kind {
             hal::SemaphoreKind::Timeline { .. } => Ok(slot.value),
             hal::SemaphoreKind::Binary => Err(Self::unsupported(
@@ -1209,9 +1236,7 @@ impl Device for WgpuDevice {
             // take the whole timeout and `resolve_semaphores` wants the lock.
             let submission = {
                 let semaphores = self.pools.semaphores.lock().unwrap();
-                let slot = semaphores
-                    .get(wait.semaphore.cast())
-                    .ok_or_else(|| HalError::invalid_handle("semaphore", wait.semaphore))?;
+                let slot = handle::lookup(&semaphores, "semaphore", wait.semaphore, self.owner())?;
                 if slot.value >= wait.value {
                     continue;
                 }
@@ -1266,17 +1291,20 @@ impl Device for WgpuDevice {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: desc.label });
         // Pre-allocate a handle and a slot for the finished command buffer.
-        let handle = {
+        let buffer_handle = {
             let mut cmds = self.pools.command_buffers.lock().unwrap();
-            cmds.insert(CommandBufferSlot {
-                buffer: None,
-                label: desc.label.unwrap_or("<unnamed>").to_string(),
-            })
-            .cast()
+            handle::insert(
+                &mut cmds,
+                self.owner(),
+                CommandBufferSlot {
+                    buffer: None,
+                    label: desc.label.unwrap_or("<unnamed>").to_string(),
+                },
+            )
         };
         Box::new(crate::command::WgpuCommandEncoder::new(
             enc,
-            handle,
+            buffer_handle,
             self.pools.clone(),
             self.enabled.contains(wgpu::Features::IMMEDIATES),
             self.enabled
@@ -1284,13 +1312,20 @@ impl Device for WgpuDevice {
         ))
     }
     fn destroy_command_buffer(&self, b: CommandBufferHandle) {
-        self.pools.command_buffers.lock().unwrap().remove(b.cast());
+        handle::remove(
+            &mut self.pools.command_buffers.lock().unwrap(),
+            b,
+            self.owner(),
+        );
     }
 
     // ---------- submit ----------
     fn submit(&self, queue: QueueHandle, submit: &SubmitInfo<'_>) -> Result<(), HalError> {
         if queue != self.graphics_queue {
-            return Err(HalError::invalid_handle("queue", queue));
+            // Obligation 3 covers queues too, and a queue is not pooled — so the
+            // classification happens on the tag alone: another device's handle
+            // is foreign, one nobody issued is invalid.
+            return Err(handle::not_ours("queue", queue, self.owner()));
         }
         self.resolve_semaphores();
 
@@ -1299,9 +1334,7 @@ impl Device for WgpuDevice {
         {
             let cmds = self.pools.command_buffers.lock().unwrap();
             for h in submit.command_buffers {
-                let slot = cmds
-                    .get(h.cast())
-                    .ok_or_else(|| HalError::invalid_handle("command buffer", *h))?;
+                let slot = handle::lookup(&cmds, "command buffer", *h, self.owner())?;
                 if slot.buffer.is_none() {
                     return Err(HalError::InvalidDescriptor(format!(
                         "command buffer `{}` was never finished, or has already been submitted",
@@ -1313,9 +1346,7 @@ impl Device for WgpuDevice {
         {
             let semaphores = self.pools.semaphores.lock().unwrap();
             for wait in submit.waits {
-                let slot = semaphores
-                    .get(wait.semaphore.cast())
-                    .ok_or_else(|| HalError::invalid_handle("semaphore", wait.semaphore))?;
+                let slot = handle::lookup(&semaphores, "semaphore", wait.semaphore, self.owner())?;
                 // wgpu executes one queue's submissions in order and inserts
                 // its own hazard barriers, so a wait on work already submitted
                 // is satisfied by construction. A wait on anything else has no
@@ -1335,9 +1366,8 @@ impl Device for WgpuDevice {
                 }
             }
             for signal in submit.signals {
-                let slot = semaphores
-                    .get(signal.semaphore.cast())
-                    .ok_or_else(|| HalError::invalid_handle("semaphore", signal.semaphore))?;
+                let slot =
+                    handle::lookup(&semaphores, "semaphore", signal.semaphore, self.owner())?;
                 if matches!(slot.kind, hal::SemaphoreKind::Timeline { .. })
                     && signal.value <= slot.value
                 {
@@ -1354,14 +1384,20 @@ impl Device for WgpuDevice {
             submit
                 .command_buffers
                 .iter()
-                .filter_map(|h| cmds.get_mut(h.cast()).and_then(|s| s.buffer.take()))
+                .filter_map(|h| {
+                    handle::lookup_mut(&mut cmds, "command buffer", *h, self.owner())
+                        .ok()
+                        .and_then(|slot| slot.buffer.take())
+                })
                 .collect()
         };
         let submission = self.queue.submit(wgpu_cmds);
 
         let mut semaphores = self.pools.semaphores.lock().unwrap();
         for signal in submit.signals {
-            if let Some(slot) = semaphores.get_mut(signal.semaphore.cast()) {
+            if let Ok(slot) =
+                handle::lookup_mut(&mut semaphores, "semaphore", signal.semaphore, self.owner())
+            {
                 slot.pending.push(PendingSignal {
                     submission: submission.clone(),
                     value: signal.value,
@@ -1374,10 +1410,8 @@ impl Device for WgpuDevice {
     // ---------- swapchain ----------
     fn create_swapchain(&self, desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
         let kind = {
-            let surfaces = self.pools.surfaces.lock().unwrap();
-            let surface_slot = surfaces
-                .get(desc.surface.cast())
-                .ok_or(SurfaceError::Lost)?;
+            let surfaces = self.pools.surfaces.pool.lock().unwrap();
+            let surface_slot = self.surface(&surfaces, desc.surface)?;
 
             match surface_slot.surface.as_ref() {
                 Some(surface) => {
@@ -1419,7 +1453,7 @@ impl Device for WgpuDevice {
         };
 
         let mut swapchains = self.pools.swapchains.lock().unwrap();
-        Ok(swapchains.insert(slot).cast())
+        Ok(handle::insert(&mut swapchains, self.owner(), slot))
     }
 
     fn reconfigure_swapchain(
@@ -1431,7 +1465,7 @@ impl Device for WgpuDevice {
         // reason `create_swapchain` builds it outside the surface lock.
         let offscreen = {
             let swapchains = self.pools.swapchains.lock().unwrap();
-            let slot = swapchains.get(swapchain.cast()).ok_or(SurfaceError::Lost)?;
+            let slot = self.swapchain(&swapchains, swapchain)?;
             if slot.surface_handle != desc.surface {
                 return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
                     "reconfigure_swapchain cannot move a swapchain to a different surface"
@@ -1447,17 +1481,14 @@ impl Device for WgpuDevice {
             None
         };
 
-        let surfaces = self.pools.surfaces.lock().unwrap();
+        let surfaces = self.pools.surfaces.pool.lock().unwrap();
         let mut swapchains = self.pools.swapchains.lock().unwrap();
-        let slot = swapchains
-            .get_mut(swapchain.cast())
-            .ok_or(SurfaceError::Lost)?;
+        let slot = handle::lookup_mut(&mut swapchains, "swapchain", swapchain, self.owner())
+            .map_err(dead_or_foreign)?;
 
         let stale = match (&mut slot.kind, replacement) {
             (SwapchainKind::Windowed(windowed), _) => {
-                let surface_slot = surfaces
-                    .get(slot.surface_handle.cast())
-                    .ok_or(SurfaceError::Lost)?;
+                let surface_slot = self.surface(&surfaces, slot.surface_handle)?;
                 let surface = surface_slot.surface.as_ref().ok_or(SurfaceError::Lost)?;
                 // The acquired texture is *presented* rather than dropped: a
                 // dropped `SurfaceTexture` is discarded, and a discarded image
@@ -1489,21 +1520,20 @@ impl Device for WgpuDevice {
     }
 
     fn destroy_swapchain(&self, swapchain: SwapchainHandle) {
-        let stale = self
-            .pools
-            .swapchains
-            .lock()
-            .unwrap()
-            .remove(swapchain.cast())
-            .map(|slot| match slot.kind {
-                SwapchainKind::Windowed(mut windowed) => {
-                    if let Some(texture) = windowed.acquired.take() {
-                        self.queue.present(texture);
-                    }
-                    Stale::Frame(windowed.frame_image, windowed.frame_view)
+        let stale = handle::remove(
+            &mut self.pools.swapchains.lock().unwrap(),
+            swapchain,
+            self.owner(),
+        )
+        .map(|slot| match slot.kind {
+            SwapchainKind::Windowed(mut windowed) => {
+                if let Some(texture) = windowed.acquired.take() {
+                    self.queue.present(texture);
                 }
-                SwapchainKind::Offscreen(ring) => Stale::Ring(ring),
-            });
+                Stale::Frame(windowed.frame_image, windowed.frame_view)
+            }
+            SwapchainKind::Offscreen(ring) => Stale::Ring(ring),
+        });
         if let Some(stale) = stale {
             self.release_stale(stale);
         }
@@ -1513,11 +1543,10 @@ impl Device for WgpuDevice {
         &self,
         swapchain: SwapchainHandle,
     ) -> Result<AcquiredFrame, SurfaceError> {
-        let surfaces = self.pools.surfaces.lock().unwrap();
+        let surfaces = self.pools.surfaces.pool.lock().unwrap();
         let mut swapchains = self.pools.swapchains.lock().unwrap();
-        let slot = swapchains
-            .get_mut(swapchain.cast())
-            .ok_or(SurfaceError::Lost)?;
+        let slot = handle::lookup_mut(&mut swapchains, "swapchain", swapchain, self.owner())
+            .map_err(dead_or_foreign)?;
         let extent = slot.extent;
         let surface_handle = slot.surface_handle;
         // The format the *seam* was told this swapchain has, when it differs
@@ -1554,9 +1583,7 @@ impl Device for WgpuDevice {
         let ring = match &mut slot.kind {
             SwapchainKind::Offscreen(ring) => ring,
             SwapchainKind::Windowed(_) => {
-                let surface_slot = surfaces
-                    .get(surface_handle.cast())
-                    .ok_or(SurfaceError::Lost)?;
+                let surface_slot = self.surface(&surfaces, surface_handle)?;
                 let surface = surface_slot.surface.as_ref().ok_or(SurfaceError::Lost)?;
                 let (surface_texture, suboptimal) = match surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(texture) => (texture, false),
@@ -1578,9 +1605,16 @@ impl Device for WgpuDevice {
                     ..Default::default()
                 });
 
-                let image: ImageHandle = self.pools.images.lock().unwrap().insert(texture).cast();
-                let view: ImageViewHandle =
-                    self.pools.image_views.lock().unwrap().insert(view).cast();
+                let image: ImageHandle = handle::insert(
+                    &mut self.pools.images.lock().unwrap(),
+                    self.owner(),
+                    texture,
+                );
+                let view: ImageViewHandle = handle::insert(
+                    &mut self.pools.image_views.lock().unwrap(),
+                    self.owner(),
+                    view,
+                );
 
                 let SwapchainKind::Windowed(windowed) = &mut slot.kind else {
                     unreachable!("matched Windowed above")
@@ -1630,7 +1664,12 @@ impl Device for WgpuDevice {
 
     fn present(&self, queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
         if queue != self.graphics_queue {
-            return Err(SurfaceError::Hal(HalError::invalid_handle("queue", queue)));
+            // As `submit`: foreign and never-issued are different bugs.
+            return Err(SurfaceError::Hal(handle::not_ours(
+                "queue",
+                queue,
+                self.owner(),
+            )));
         }
         // wgpu has no queue-side wait to express these: one queue's submissions
         // run in order, so a present after the submission that signalled is
@@ -1639,18 +1678,21 @@ impl Device for WgpuDevice {
         // an error rather than something nobody looked at.
         {
             let semaphores = self.pools.semaphores.lock().unwrap();
-            for handle in present.waits {
-                semaphores.get(handle.cast()).ok_or_else(|| {
-                    SurfaceError::Hal(HalError::invalid_handle("semaphore", *handle))
-                })?;
+            for wait in present.waits {
+                handle::lookup(&semaphores, "semaphore", *wait, self.owner())
+                    .map_err(SurfaceError::Hal)?;
             }
         }
 
         let (texture, stale) = {
             let mut swapchains = self.pools.swapchains.lock().unwrap();
-            let slot = swapchains
-                .get_mut(present.swapchain.cast())
-                .ok_or(SurfaceError::Lost)?;
+            let slot = handle::lookup_mut(
+                &mut swapchains,
+                "swapchain",
+                present.swapchain,
+                self.owner(),
+            )
+            .map_err(dead_or_foreign)?;
 
             match &mut slot.kind {
                 SwapchainKind::Windowed(windowed) => {
@@ -1715,10 +1757,7 @@ impl Device for WgpuDevice {
         _timeout: Duration,
     ) -> Result<(), SurfaceError> {
         let swapchains = self.pools.swapchains.lock().unwrap();
-        swapchains
-            .get(swapchain.cast())
-            .ok_or(SurfaceError::Lost)
-            .map(|_| ())
+        self.swapchain(&swapchains, swapchain).map(|_| ())
     }
 
     /// Always [`DisplayTiming::Unknown`]: this device does not advertise
@@ -1743,10 +1782,21 @@ impl Device for WgpuDevice {
     /// [`wait_until_presented`](Self::wait_until_presented) resolves it.
     fn display_timing(&self, swapchain: SwapchainHandle) -> Result<DisplayTiming, SurfaceError> {
         let swapchains = self.pools.swapchains.lock().unwrap();
-        swapchains
-            .get(swapchain.cast())
-            .ok_or(SurfaceError::Lost)
+        self.swapchain(&swapchains, swapchain)
             .map(|_| DisplayTiming::Unknown)
+    }
+}
+
+/// A swapchain or surface lookup failure, in the swapchain API's error type.
+///
+/// A dead handle stays [`SurfaceError::Lost`] — what this backend has always
+/// reported for one, and what a caller retries on. A *foreign* one is
+/// obligation 3's error and must not be mistaken for it: no retry recovers from
+/// having crossed two devices.
+fn dead_or_foreign(error: HalError) -> SurfaceError {
+    match error {
+        HalError::InvalidHandle { .. } => SurfaceError::Lost,
+        other => SurfaceError::Hal(other),
     }
 }
 
@@ -1768,21 +1818,25 @@ impl WgpuDevice {
             Stale::Nothing => {}
             Stale::Frame(image, view) => {
                 if let Some(view) = view {
-                    self.pools.image_views.lock().unwrap().remove(view.cast());
+                    handle::remove(
+                        &mut self.pools.image_views.lock().unwrap(),
+                        view,
+                        self.owner(),
+                    );
                 }
                 if let Some(image) = image {
-                    self.pools.images.lock().unwrap().remove(image.cast());
+                    handle::remove(&mut self.pools.images.lock().unwrap(), image, self.owner());
                 }
             }
             Stale::Ring(ring) => {
                 let mut views = self.pools.image_views.lock().unwrap();
                 for view in ring.views {
-                    views.remove(view.cast());
+                    handle::remove(&mut views, view, self.owner());
                 }
                 drop(views);
                 let mut images = self.pools.images.lock().unwrap();
                 for image in ring.images {
-                    images.remove(image.cast());
+                    handle::remove(&mut images, image, self.owner());
                 }
             }
         }
@@ -1845,14 +1899,14 @@ impl WgpuDevice {
             let mut images = self.pools.images.lock().unwrap();
             textures
                 .into_iter()
-                .map(|texture| images.insert(texture).cast())
+                .map(|texture| handle::insert(&mut images, self.owner(), texture))
                 .collect()
         };
         let view_handles = {
             let mut pool = self.pools.image_views.lock().unwrap();
             views
                 .into_iter()
-                .map(|view| pool.insert(view).cast())
+                .map(|view| handle::insert(&mut pool, self.owner(), view))
                 .collect()
         };
 
