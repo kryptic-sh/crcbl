@@ -376,6 +376,9 @@ impl CullProbe {
                     module,
                     entry_point,
                 },
+                // The shader's own number; see `compute.rs` for why it is not
+                // a literal.
+                workgroup_size: [crcbl_shaders::cull::WORKGROUP_SIZE, 1, 1],
             })
             .expect("a compute pipeline");
         device.destroy_shader_module(module);

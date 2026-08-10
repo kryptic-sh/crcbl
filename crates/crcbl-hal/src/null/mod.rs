@@ -1241,6 +1241,10 @@ impl Device for NullDevice {
             desc.compute.module.to_bits(),
             "shader module",
         )?;
+        // This recorder has no module contents to compare the declared size
+        // against, so it checks the half that needs none: a size the device's
+        // own limits could not launch.
+        desc.check_workgroup_size(&self.caps.limits)?;
         Ok(self.insert(ObjectKind::ComputePipeline, desc.label, Detail::None))
     }
 

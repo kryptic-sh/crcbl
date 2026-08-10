@@ -823,6 +823,21 @@ impl VkDevice {
 
         let (name, module) = entry_name(&state, &inner, desc.compute, ShaderStages::COMPUTE)?;
 
+        // The seam's workgroup size exists for Metal, which takes it at the
+        // dispatch call and has no declaration to compare it with. This backend
+        // is compiling the module that declares one, so it is where a
+        // disagreement can be caught at all. Both halves: a size no device could
+        // launch, and a size that is not the one the module asks for.
+        desc.check_workgroup_size(&inner.caps.limits)?;
+        let entry = lookup(
+            &state.shader_modules,
+            "shader module",
+            desc.compute.module,
+            &inner,
+        )?;
+        spirv::require_workgroup_size(&entry.words, desc.compute.entry_point, desc.workgroup_size)
+            .map_err(HalError::ShaderCompilation)?;
+
         let stage = vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::COMPUTE)
             .module(module)

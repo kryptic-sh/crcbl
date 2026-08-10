@@ -1543,6 +1543,7 @@ fn a_gpu_driven_frame_records_the_expected_stream() {
                 module,
                 entry_point: "cull_main",
             },
+            workgroup_size: [64, 1, 1],
         })
         .expect("cull pipeline");
     let opaque = device

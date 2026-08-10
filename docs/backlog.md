@@ -2979,9 +2979,9 @@ moved rather than went away:
   declares it nowhere and `ComputePipelineDesc` carries no field for it. There
   is no number the backend could pass that is not a guess about the kernel, and
   a wrong one runs the shader with the wrong thread count rather than failing.
-  So this needs `ComputePipelineDesc` to carry the workgroup size, or `dispatch`
-  to take threads-per-group — **a HAL change, with Vulkan to re-verify**. The
-  constant `DISPATCH_SLICE` in `command.rs` says so at every refusal site.
+  **Resolved**: `ComputePipelineDesc` carries `workgroup_size`, sourced from the
+  `WORKGROUP_SIZE` constant `crcbl-shaders` publishes beside each compute
+  shader, so no caller restates a number the `.slang` already declares.
 - **Needs the user: `block2` is now a direct dependency of `crcbl-mtl`.**
   `objc2-metal` types the `addPresentedHandler:` parameter as a
   `block2::DynBlock` and re-exports nothing, so the callback the seam needs
@@ -3464,24 +3464,29 @@ the transport seam over a third transport shape.
   Slang's behaviour than is worth encoding for a guard whose false positives
   cost one declaration move. Reopen if a real shader finds it costly.
 
-### Metal cannot dispatch, and that blocks the GPU-driven path
+### Metal compute: shipped, and what CI has to confirm
 
-**The structural finding of the cull slice, and the reason the next one is a
-seam change rather than more culling.** `crcbl-mtl`'s `bind_compute_pipeline`,
-`dispatch` and `dispatch_indirect` all refuse by name (`DISPATCH_SLICE` in
-`crcbl_mtl::command`). They fail loudly rather than reporting success, which is
-the right shape — but it means **no compute pass runs on Metal at all**, and
-§3.3 onward is compute.
+`ComputePipelineDesc` now carries `workgroup_size`, `crcbl-mtl` implements
+`bind_compute_pipeline`/`dispatch`/`dispatch_indirect`, and `DISPATCH_SLICE` is
+gone. **No line of that Metal code has ever executed on this machine** — there
+is no Metal device here, and
+`cargo check`/`clippy --target aarch64-apple-darwin` compile it while running
+none of it. Only the macOS CI job can say whether it works.
 
-The obstacle is a seam change, not a Metal one: Metal takes
-`threadsPerThreadgroup` at the dispatch call, while Vulkan and D3D12 bake it
-into the shader via `[numthreads]`, so `ComputePipelineDesc` carries no
-workgroup size for Metal to pass. Adding that field is the slice.
+Worth knowing before reading a green run: the mtl e2e job already **excludes six
+draw tests by name** because they fault on that runner
+(`.github/workflows/ci.yml`). The new compute tests are not excluded, so they do
+run — but a device that faults on six draws is not a device to assume anything
+about.
 
-Until it lands, GPU culling is Vulkan-and-wgpu only.
-`cargo check --target aarch64-apple-darwin` **cannot see this** — the refusal is
-a runtime `fail`, not a compile error — so only the macOS CI job can confirm the
-fix.
+The one guard that _is_ proven locally:
+`crcbl_vk::spirv::require_workgroup_size` reads `OpExecutionMode … LocalSize`
+and refuses a descriptor whose size disagrees with the shader's `[numthreads]`.
+Vulkan alone can do this — Metal cannot (MSL declares no thread count, which is
+why the field exists) and wgpu keeps no module source after
+`create_shader_module`. So **a wrong workgroup size is caught on Vulkan and
+nowhere else**, which is fine only while every compute shader is also run under
+Vulkan. It is today. It will not always be.
 
 ### Owed by the GPU cull pass
 

@@ -161,16 +161,16 @@ fn device_type_of(device: &ProtocolObject<dyn MTLDevice>) -> DeviceType {
 ///   `crcbl_mtl::command`'s debug-label methods call, which is what puts named
 ///   regions in an Xcode GPU capture — one of this phase's exit criteria.
 ///
-/// * [`Features::COMPUTE`] — unconditional in Metal, and backed by
-///   `crcbl_mtl::pipeline`'s `create_compute_pipeline_impl`:
-///   `MTLDevice::newComputePipelineStateWithDescriptor:options:reflection:error:`
-///   is a real call this backend makes, so a compute pipeline can now be built.
-///   **What is still missing is the dispatch**, and it is missing for a seam
-///   reason rather than a Metal one: `dispatchThreadgroups:threadsPerThreadgroup:`
-///   takes the workgroup size at the *call*, MSL has nowhere to declare it, and
-///   [`ComputePipelineDesc`](crcbl_hal::ComputePipelineDesc) carries no field
-///   for it. `crcbl_mtl::command`'s `dispatch` refuses by name, so the flag
-///   says "compute pipelines exist" and nothing more.
+/// * [`Features::COMPUTE`] — unconditional in Metal, and backed end to end:
+///   `crcbl_mtl::pipeline`'s `create_compute_pipeline_impl` builds the
+///   `MTLComputePipelineState`, `crcbl_mtl::command`'s `begin_compute_pass`
+///   opens the `MTLComputeCommandEncoder` that holds it, and `dispatch` and
+///   `dispatch_indirect` are `dispatchThreadgroups:threadsPerThreadgroup:` and
+///   `dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:`.
+///   The workgroup size those calls take comes from
+///   [`ComputePipelineDesc::workgroup_size`](crcbl_hal::ComputePipelineDesc::workgroup_size),
+///   which exists because MSL has nowhere to declare it — the one field of the
+///   seam this backend is the reason for.
 /// * [`Features::MULTI_DRAW_INDIRECT`] — backed by `crcbl_mtl::command`'s
 ///   `indirect`, which issues one
 ///   `drawPrimitives:indirectBuffer:indirectBufferOffset:` per argument

@@ -87,7 +87,7 @@ use objc2_metal::{
     MTLComputePipelineDescriptor, MTLComputePipelineState, MTLCullMode, MTLDepthClipMode,
     MTLDepthStencilDescriptor, MTLDepthStencilState, MTLDevice, MTLFunction, MTLLibrary,
     MTLPipelineOption, MTLPrimitiveType, MTLRenderPipelineDescriptor, MTLRenderPipelineState,
-    MTLStencilDescriptor, MTLTriangleFillMode, MTLWinding,
+    MTLSize, MTLStencilDescriptor, MTLTriangleFillMode, MTLWinding,
 };
 
 use crate::conv;
@@ -149,15 +149,20 @@ pub(crate) struct GraphicsPipelineEntry {
     pub(crate) raster: RasterState,
 }
 
-/// A compute pipeline.
+/// A compute pipeline, and the threadgroup size Metal will not take until the
+/// dispatch.
 #[derive(Debug)]
 pub(crate) struct ComputePipelineEntry {
     pub(crate) owner: u64,
-    /// Held so the handle keeps the pipeline alive. Nothing reads it back until
-    /// `bind_compute_pipeline` lands, which needs an
-    /// `MTLComputeCommandEncoder` this slice does not open.
-    #[allow(dead_code)]
     pub(crate) raw: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    /// [`ComputePipelineDesc::workgroup_size`](crcbl_hal::ComputePipelineDesc::workgroup_size),
+    /// as the `MTLSize` every `dispatchThreadgroups:threadsPerThreadgroup:` on
+    /// this pipeline passes.
+    ///
+    /// Carried here rather than re-derived at the dispatch because the dispatch
+    /// call has only the *bound* pipeline to ask, and Metal's encoder does not
+    /// hand its pipeline state back.
+    pub(crate) threads_per_threadgroup: MTLSize,
 }
 
 owned!(
@@ -191,6 +196,23 @@ impl DeviceInner {
             depth_stencil: entry.depth_stencil.clone(),
             raster: entry.raster,
         })
+    }
+
+    /// The compute pipeline a handle names, with the threadgroup size the
+    /// dispatch after it will need.
+    pub(crate) fn compute_pipeline_raw(
+        &self,
+        handle: ComputePipelineHandle,
+    ) -> Result<
+        (
+            Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+            MTLSize,
+        ),
+        HalError,
+    > {
+        let state = self.state();
+        let entry = lookup(&state.compute_pipelines, "compute pipeline", handle, self)?;
+        Ok((entry.raw.clone(), entry.threads_per_threadgroup))
     }
 }
 
@@ -429,11 +451,25 @@ impl MetalDevice {
     /// `newComputePipelineStateWithFunction:error:`, because only the
     /// descriptor carries a label — which is what names the pipeline in an
     /// Xcode GPU capture, and this backend labels every object it can.
+    ///
+    /// # The workgroup size is checked here, twice
+    ///
+    /// This is the backend
+    /// [`ComputePipelineDesc::workgroup_size`](crcbl_hal::ComputePipelineDesc::workgroup_size)
+    /// exists for, and the one that cannot see what the shader declared: MSL's
+    /// `[[kernel]]` says nothing about thread counts. So both checks that *are*
+    /// possible happen at creation, where an error can still be returned —
+    /// against the seam's limits, and against the compiled kernel's own
+    /// `maxTotalThreadsPerThreadgroup`, which Metal derives from its register
+    /// use and which a dispatch exceeding raises on. A raise from Objective-C
+    /// aborts the process, so catching it here is the difference between an
+    /// error a caller handles and a dead one.
     pub(crate) fn create_compute_pipeline_impl(
         &self,
         desc: &ComputePipelineDesc<'_>,
     ) -> Result<ComputePipelineHandle, HalError> {
         self.check_pipeline_layout(desc.layout)?;
+        desc.check_workgroup_size(&self.inner.caps.limits)?;
         let descriptor = MTLComputePipelineDescriptor::new();
         let function = self.function(desc.compute, "compute")?;
         descriptor.setComputeFunction(Some(&function));
@@ -455,9 +491,27 @@ impl MetalDevice {
                      rejected `{label}`: {error}"
                 ))
             })?;
+
+        let [x, y, z] = desc.workgroup_size;
+        let invocations = u64::from(x) * u64::from(y) * u64::from(z);
+        let allowed = raw.maxTotalThreadsPerThreadgroup() as u64;
+        if invocations > allowed {
+            return Err(HalError::PipelineCreation(format!(
+                "`{label}` asks for {invocations} threads per threadgroup ({:?}), and this \
+                 kernel's maxTotalThreadsPerThreadgroup is {allowed} — Metal raises at the \
+                 dispatch rather than reporting it, and a raise aborts the process",
+                desc.workgroup_size
+            )));
+        }
+
         let handle = self.state().compute_pipelines.insert(ComputePipelineEntry {
             owner: self.inner.id,
             raw,
+            threads_per_threadgroup: MTLSize {
+                width: to_ns(u64::from(x)),
+                height: to_ns(u64::from(y)),
+                depth: to_ns(u64::from(z)),
+            },
         });
         Ok(self.stamp(handle))
     }

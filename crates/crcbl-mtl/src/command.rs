@@ -1,5 +1,6 @@
 //! [`MetalCommandEncoder`]: real recording into an `MTLCommandBuffer` — render
-//! passes, blit copies, and the encoder boundary a barrier becomes.
+//! passes, compute passes, blit copies, and the encoder boundary a barrier
+//! becomes.
 //!
 //! # A render pass, not a blit clear
 //!
@@ -29,13 +30,20 @@
 //! Metal raises if a second encoder is created while one is still encoding, and
 //! an Objective-C exception crossing into Rust aborts the process. So this type
 //! owns exactly one [`Open`] encoder and closes it before opening another:
-//! copies open a blit encoder and keep it, a render pass closes the blit
-//! encoder first, and [`finish`](CommandEncoder::finish) closes whatever is
-//! left. A copy recorded *inside* a render pass is refused with
+//! copies open a blit encoder and keep it, a render or compute pass closes the
+//! blit encoder first, and [`finish`](CommandEncoder::finish) closes whatever is
+//! left. A copy recorded *inside* a pass is refused with
 //! [`HalError::InvalidDescriptor`] rather than being allowed to raise — the
 //! seam already forbids it ("copies, barriers and query writes are legal only
 //! outside any pass"), so this is a caller bug being caught, not a restriction
 //! this backend invents.
+//!
+//! **A pass owns its encoder for exactly its own length.** Both
+//! [`begin_render_pass`](CommandEncoder::begin_render_pass) and
+//! [`begin_compute_pass`](CommandEncoder::begin_compute_pass) create one, and
+//! their `end_*` closes it — which is what makes pipeline state, argument
+//! tables and the seam's scope rules line up with Metal's, since every one of
+//! those dies with `endEncoding`.
 //!
 //! # A barrier is an encoder boundary
 //!
@@ -67,8 +75,9 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSString, NSUInteger};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLOrigin,
-    MTLRenderCommandEncoder, MTLRenderPassDescriptor, MTLScissorRect, MTLTexture, MTLViewport,
+    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _,
+    MTLComputeCommandEncoder, MTLOrigin, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
+    MTLScissorRect, MTLTexture, MTLViewport,
 };
 
 use crate::conv;
@@ -87,6 +96,8 @@ const UNLABELLED_COMMAND_BUFFER: &str = "crcbl command buffer";
 /// See [`UNLABELLED_COMMAND_BUFFER`].
 const UNLABELLED_RENDER_PASS: &str = "crcbl render pass";
 /// See [`UNLABELLED_COMMAND_BUFFER`].
+const UNLABELLED_COMPUTE_PASS: &str = "crcbl compute pass";
+/// See [`UNLABELLED_COMMAND_BUFFER`].
 const COPY_ENCODER: &str = "crcbl copies";
 
 /// The one Metal encoder that may be open on the command buffer.
@@ -97,15 +108,18 @@ enum Open {
     Blit(Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>),
     /// A render pass.
     Render(Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>),
+    /// A compute pass.
+    Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
 }
 
 impl Open {
-    /// The open encoder as the base protocol, for the calls both share.
+    /// The open encoder as the base protocol, for the calls they all share.
     fn as_encoder(&self) -> Option<&ProtocolObject<dyn objc2_metal::MTLCommandEncoder>> {
         match self {
             Self::None => None,
             Self::Blit(encoder) => Some(ProtocolObject::from_ref(&**encoder)),
             Self::Render(encoder) => Some(ProtocolObject::from_ref(&**encoder)),
+            Self::Compute(encoder) => Some(ProtocolObject::from_ref(&**encoder)),
         }
     }
 }
@@ -137,15 +151,19 @@ pub(crate) struct MetalCommandEncoder {
     failed: Option<HalError>,
     /// Whether the seam thinks a render or compute pass is open.
     ///
-    /// `in_compute_pass` has no Metal object behind it: a compute pass with no
-    /// pipeline can dispatch nothing, so this slice tracks the scope and
-    /// creates no `MTLComputeCommandEncoder`. See `begin_compute_pass`.
+    /// Both track a scope that [`Open`] also has an encoder for; they are
+    /// separate because the seam's rules are about the *pass* — a copy inside
+    /// one is refused whether or not an encoder happens to be open, and a pass
+    /// left open at `finish` is an error rather than something to close
+    /// quietly.
     in_render_pass: bool,
     in_compute_pass: bool,
     /// Open debug groups, innermost last.
     labels: Vec<Label>,
     /// Whether the open render pass pushed a label of its own.
     render_pass_label: bool,
+    /// Whether the open compute pass pushed a label of its own.
+    compute_pass_label: bool,
     /// The topology of the bound graphics pipeline, which Metal takes at the
     /// draw call rather than in the pipeline object.
     ///
@@ -154,6 +172,14 @@ pub(crate) struct MetalCommandEncoder {
     /// not survive `endEncoding` — keeping it would let a draw in the *next*
     /// pass proceed with no pipeline set and let Metal raise.
     bound_primitive: Option<objc2_metal::MTLPrimitiveType>,
+    /// The threadgroup size of the bound compute pipeline, which Metal takes at
+    /// the dispatch call rather than in the pipeline object.
+    ///
+    /// The compute half of [`Self::bound_primitive`], and cleared by
+    /// [`Self::close_open`] for the same reason: an `MTLComputeCommandEncoder`
+    /// loses its pipeline state at `endEncoding`, so a dispatch in the next
+    /// pass must not inherit the previous pass's number.
+    bound_threads: Option<objc2_metal::MTLSize>,
     /// The index buffer an indexed draw will read, which Metal takes at the
     /// draw call rather than as encoder state.
     ///
@@ -206,7 +232,9 @@ impl MetalCommandEncoder {
             in_compute_pass: false,
             labels: Vec::new(),
             render_pass_label: false,
+            compute_pass_label: false,
             bound_primitive: None,
+            bound_threads: None,
             index: None,
         };
         // The queue is checked before the command buffer is taken, so a handle
@@ -256,22 +284,24 @@ impl MetalCommandEncoder {
         }
         self.open = Open::None;
         // Pipeline state belongs to the encoder that is going away; see
-        // `bound_primitive`.
+        // `bound_primitive` and `bound_threads`.
         self.bound_primitive = None;
+        self.bound_threads = None;
     }
 
     /// The blit encoder, opening one if the command buffer has none.
     ///
     /// `None` means the caller has already been told why — either recording had
-    /// failed, or a render pass is open and the seam forbids a copy there.
+    /// failed, or a pass is open and the seam forbids a copy there.
     fn blit(&mut self) -> Option<Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>> {
         if !self.ok() {
             return None;
         }
-        if self.in_render_pass {
+        if self.in_render_pass || self.in_compute_pass {
             self.fail(HalError::InvalidDescriptor(
-                "a copy inside a render pass: the seam places copies between passes, and Metal \
-                 raises rather than accepting a second encoder"
+                "a copy inside a pass: the seam places copies between passes, and opening a blit \
+                 encoder here would end the pass's own encoder — taking its pipeline state and \
+                 argument tables with it"
                     .to_string(),
             ));
             return None;
@@ -476,7 +506,7 @@ impl CommandEncoder for MetalCommandEncoder {
     ///
     /// [`ResourceState`]: crcbl_hal::ResourceState
     fn pipeline_barrier(&mut self, _barriers: &Barriers<'_>) {
-        if !self.ok() || self.in_render_pass {
+        if !self.ok() || self.in_render_pass || self.in_compute_pass {
             return;
         }
         self.close_open();
@@ -1009,17 +1039,21 @@ impl CommandEncoder for MetalCommandEncoder {
         });
     }
 
-    /// Sets one bind group's resources on the open render encoder.
+    /// Sets one bind group's resources on the open encoder, whichever kind of
+    /// pass it belongs to.
     ///
     /// The indices come from `crcbl_mtl::binding`'s flattening of
     /// `(set, binding)` onto Metal's three per-stage argument tables; the
     /// pipeline layout is what says where this slot's tables start, which is
-    /// exactly why the seam passes one.
+    /// exactly why the seam passes one. **The open pass is what decides the
+    /// bind point** — the seam has no compute-vs-graphics parameter here, and
+    /// the scope is the only signal a backend gets.
     ///
-    /// Outside a render pass this is a caller error rather than a no-op, for
-    /// the reason [`bind_graphics_pipeline`](CommandEncoder::bind_graphics_pipeline)
+    /// Outside a pass this is a caller error rather than a no-op, for the
+    /// reason [`bind_graphics_pipeline`](CommandEncoder::bind_graphics_pipeline)
     /// gives: Metal keeps argument tables on the encoder, so there is nowhere
-    /// to record the binding and the following draw would use none of it.
+    /// to record the binding and the following draw or dispatch would use none
+    /// of it.
     fn bind_group(
         &mut self,
         slot: u32,
@@ -1030,19 +1064,17 @@ impl CommandEncoder for MetalCommandEncoder {
         if !self.ok() {
             return;
         }
-        if self.in_compute_pass {
-            // Not "outside a render pass": a compute pass is a scope this
-            // backend tracks and cannot encode into, and saying so names the
-            // gap rather than the symptom.
-            self.fail(later(DISPATCH_SLICE));
-            return;
+        enum Target {
+            Render(Retained<ProtocolObject<dyn MTLRenderCommandEncoder>>),
+            Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
         }
-        let encoder = match &self.open {
-            Open::Render(encoder) => encoder.clone(),
+        let target = match &self.open {
+            Open::Render(encoder) => Target::Render(encoder.clone()),
+            Open::Compute(encoder) => Target::Compute(encoder.clone()),
             _ => {
                 self.fail(HalError::InvalidDescriptor(
-                    "bind_group outside a render pass: Metal keeps its argument tables on the \
-                     render encoder, so there is nowhere to record it"
+                    "bind_group outside a render or compute pass: Metal keeps its argument \
+                     tables on the encoder, so there is nowhere to record it"
                         .to_string(),
                 ));
                 return;
@@ -1053,7 +1085,10 @@ impl CommandEncoder for MetalCommandEncoder {
             .device
             .bind_group_raw(slot, group, dynamic_offsets, layout, &limits)
         {
-            Ok(bindings) => crate::binding::apply(&bindings, &encoder),
+            Ok(bindings) => match target {
+                Target::Render(encoder) => crate::binding::apply(&bindings, &encoder),
+                Target::Compute(encoder) => crate::binding::apply_compute(&bindings, &encoder),
+            },
             Err(error) => self.fail(error),
         }
     }
@@ -1209,15 +1244,17 @@ impl CommandEncoder for MetalCommandEncoder {
 
     // --- compute scope ---
 
-    /// Opens a compute scope, and creates no Metal encoder for it.
+    /// Opens a compute pass, **and the `MTLComputeCommandEncoder` that is its
+    /// Metal object**.
     ///
-    /// An `MTLComputeCommandEncoder` exists to hold a pipeline state and
-    /// dispatches, and [`dispatch`](CommandEncoder::dispatch) still cannot be
-    /// expressed — see [`DISPATCH_SLICE`], where the obstacle is a missing seam
-    /// field rather than an unwritten call. Creating an encoder that could only
-    /// ever be opened and closed again would be a driver object allocated to do
-    /// nothing, so the scope is tracked here and the dispatch is the refusal.
-    fn begin_compute_pass(&mut self, _desc: &ComputePassDesc<'_>) {
+    /// The encoder's lifetime is the pass's, which is the one shape that keeps
+    /// the seam's scope and Metal's agreeing: everything a compute pass does —
+    /// the pipeline state, the argument tables a `bind_group` writes, the
+    /// dispatches — lives on that encoder and dies with `endEncoding`. Opening
+    /// it at the first dispatch instead would leave `bind_group` and
+    /// `bind_compute_pipeline` with nowhere to record, which is precisely the
+    /// state this backend was in before compute could dispatch at all.
+    fn begin_compute_pass(&mut self, desc: &ComputePassDesc<'_>) {
         if !self.ok() {
             return;
         }
@@ -1227,31 +1264,139 @@ impl CommandEncoder for MetalCommandEncoder {
             ));
             return;
         }
+        // Metal raises on a second encoder, so the copy encoder a preceding
+        // upload left open goes first — which is also this backend's barrier.
+        self.close_open();
+        let Some(raw) = self.raw.as_ref() else {
+            return;
+        };
+        let Some(encoder) = raw.computeCommandEncoder() else {
+            self.fail(HalError::DeviceLost(
+                "MTLCommandBuffer::computeCommandEncoder returned nil".to_string(),
+            ));
+            return;
+        };
+        self.epoch += 1;
+        encoder.setLabel(Some(&NSString::from_str(
+            desc.label.unwrap_or(UNLABELLED_COMPUTE_PASS),
+        )));
+        self.open = Open::Compute(encoder);
         self.in_compute_pass = true;
+        if let Some(label) = desc.label {
+            self.begin_debug_label(label);
+            self.compute_pass_label = true;
+        }
     }
 
     fn end_compute_pass(&mut self) {
+        if !self.in_compute_pass {
+            return;
+        }
+        if core::mem::take(&mut self.compute_pass_label) {
+            self.end_debug_label();
+        }
+        // Not gated on `ok`, as `end_render_pass`: an already-failed encoder
+        // still has to close its compute encoder, because `commit` with one
+        // still encoding raises.
+        self.close_open();
         self.in_compute_pass = false;
     }
 
-    /// Refused, even though `create_compute_pipeline` succeeds.
+    /// Sets the pipeline state, and records the threadgroup size the dispatch
+    /// after it will need.
     ///
-    /// A compute pipeline is bound onto an `MTLComputeCommandEncoder`, and
-    /// [`begin_compute_pass`](CommandEncoder::begin_compute_pass) still opens
-    /// none because nothing could be dispatched into it — see
-    /// [`DISPATCH_SLICE`]. Opening one here instead would put the encoder's
-    /// lifetime in a different place from the pass's, which is the seam's shape
-    /// and not Metal's; whichever slice lands the dispatch moves both together.
-    fn bind_compute_pipeline(&mut self, _pipeline: ComputePipelineHandle) {
-        self.fail(later(DISPATCH_SLICE));
+    /// Metal takes threads-per-threadgroup at
+    /// `dispatchThreadgroups:threadsPerThreadgroup:` while every other backend
+    /// reads it out of the module, which is why
+    /// [`ComputePipelineDesc::workgroup_size`](crcbl_hal::ComputePipelineDesc::workgroup_size)
+    /// exists — see `crcbl_mtl::pipeline`, where the size is checked and stored
+    /// on the pipeline entry. This is where it comes back off.
+    fn bind_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
+        if !self.ok() {
+            return;
+        }
+        let Open::Compute(encoder) = &self.open else {
+            self.fail(HalError::InvalidDescriptor(
+                "bind_compute_pipeline outside a compute pass: Metal keeps pipeline state on the \
+                 compute encoder, so there is nowhere to record it"
+                    .to_string(),
+            ));
+            return;
+        };
+        let encoder = encoder.clone();
+        let (raw, threads) = match self.device.compute_pipeline_raw(pipeline) {
+            Ok(bound) => bound,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        encoder.setComputePipelineState(&raw);
+        self.bound_threads = Some(threads);
     }
 
-    fn dispatch(&mut self, _x: u32, _y: u32, _z: u32) {
-        self.fail(later(DISPATCH_SLICE));
+    fn dispatch(&mut self, x: u32, y: u32, z: u32) {
+        let Some((encoder, threads)) = self.dispatch_target("dispatch") else {
+            return;
+        };
+        // A dispatch of nothing, which `vkCmdDispatch` accepts as a no-op — and
+        // which a caller computing `count.div_ceil(WORKGROUP_SIZE)` writes
+        // whenever `count` is zero. Metal's header documents every threadgroup
+        // count as at least one, and its validation layer raises on a zero,
+        // which aborts the process; the no-op is performed here instead.
+        if x == 0 || y == 0 || z == 0 {
+            return;
+        }
+        encoder.dispatchThreadgroups_threadsPerThreadgroup(
+            objc2_metal::MTLSize {
+                width: to_ns(u64::from(x)),
+                height: to_ns(u64::from(y)),
+                depth: to_ns(u64::from(z)),
+            },
+            threads,
+        );
     }
 
-    fn dispatch_indirect(&mut self, _args: BufferHandle, _offset: u64) {
-        self.fail(later(DISPATCH_SLICE));
+    /// `dispatchThreadgroupsWithIndirectBuffer:indirectBufferOffset:threadsPerThreadgroup:`.
+    ///
+    /// The argument structure is `MTLDispatchThreadgroups­IndirectArguments` —
+    /// three `uint32_t`s, field for field what Vulkan calls
+    /// `VkDispatchIndirectCommand`, which is what lets one compute pass write
+    /// arguments both backends read. The **threadgroup size is still a CPU
+    /// value**: only the counts come from the buffer.
+    fn dispatch_indirect(&mut self, args: BufferHandle, offset: u64) {
+        let Some((encoder, threads)) = self.dispatch_target("dispatch_indirect") else {
+            return;
+        };
+        let Some(raw) = self.buffer(args) else {
+            return;
+        };
+        // Metal reads three `uint32_t`s and bounds-checks neither the offset
+        // nor the span, so a short buffer is a GPU fault rather than an error.
+        // Refused here while it is still one a caller can catch.
+        let length = raw.length() as u64;
+        if offset
+            .checked_add(DISPATCH_ARGUMENTS)
+            .is_none_or(|end| end > length)
+        {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "dispatch_indirect reads {DISPATCH_ARGUMENTS} bytes at offset {offset} of a \
+                 {length}-byte buffer"
+            )));
+            return;
+        }
+        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
+        // the offset nor the argument structure it reads. The span was checked
+        // against this buffer's own length just above, the buffer is kept alive
+        // by the `Retained` held here, and the encoder is the open one.
+        unsafe {
+            encoder
+                .dispatchThreadgroupsWithIndirectBuffer_indirectBufferOffset_threadsPerThreadgroup(
+                    &raw,
+                    to_ns(offset),
+                    threads,
+                );
+        }
     }
 
     // --- queries ---
@@ -1297,7 +1442,7 @@ impl CommandEncoder for MetalCommandEncoder {
             self.fail(HalError::InvalidDescriptor(
                 "finish with a compute pass still open".to_string(),
             ));
-            self.in_compute_pass = false;
+            self.end_compute_pass();
         }
         while !self.labels.is_empty() {
             self.end_debug_label();
@@ -1360,6 +1505,40 @@ impl MetalCommandEncoder {
             return None;
         };
         Some((encoder, primitive))
+    }
+
+    /// The open compute encoder and the threadgroup size a dispatch needs, or
+    /// the failure that says which is missing.
+    ///
+    /// The compute twin of [`Self::draw_target`], and refused for the same
+    /// reason: Metal answers a dispatch with no pipeline bound by raising,
+    /// which aborts the process, so it is caught here while it is still an
+    /// error a caller can handle.
+    fn dispatch_target(
+        &mut self,
+        what: &str,
+    ) -> Option<(
+        Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+        objc2_metal::MTLSize,
+    )> {
+        if !self.ok() {
+            return None;
+        }
+        let Open::Compute(encoder) = &self.open else {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} outside a compute pass; the seam places every dispatch inside one"
+            )));
+            return None;
+        };
+        let encoder = encoder.clone();
+        let Some(threads) = self.bound_threads else {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "{what} with no compute pipeline bound: Metal takes the threadgroup size at the \
+                 dispatch and raises rather than reporting it, and a raise aborts the process"
+            )));
+            return None;
+        };
+        Some((encoder, threads))
     }
 
     /// The shared body of the two indirect draws.
@@ -1549,28 +1728,9 @@ struct CopyPlan {
     slices: Range<NSUInteger>,
 }
 
-/// The refusal for a recording call whose slice has not arrived.
-///
-/// `what` is already the whole phrase, so a reader of the call site sees the
-/// message a caller will get rather than a key into a table somewhere else.
-fn later(what: &'static str) -> HalError {
-    crate::MetalInstance::not_yet(what)
-}
-
-/// What every compute recording call refuses under.
-///
-/// Named once because the reason is one reason, and it is a **seam** gap rather
-/// than an unwritten slice: Metal takes `threadsPerThreadgroup` at
-/// `dispatchThreadgroups:threadsPerThreadgroup:`, while SPIR-V, DXIL and WGSL
-/// all bake the workgroup size into the shader — so MSL has no declaration of
-/// it and [`ComputePipelineDesc`](crcbl_hal::ComputePipelineDesc) has no field
-/// carrying it. There is no number this backend could pass that is not a guess
-/// about the kernel, and a wrong one runs the shader with the wrong number of
-/// threads rather than failing. `MTLComputeCommandEncoder` is otherwise ready;
-/// what is missing is the size.
-const DISPATCH_SLICE: &str = "compute dispatches: Metal takes threadsPerThreadgroup at the dispatch call and \
-     ComputePipelineDesc carries no workgroup size (the Metal dispatch slice, which needs a seam \
-     change first)";
+/// Bytes an indirect dispatch reads: `MTLDispatchThreadgroupsIndirectArguments`
+/// is three `uint32_t`s, fixed by Metal's own header.
+const DISPATCH_ARGUMENTS: u64 = 12;
 
 /// The refusal for the one indirect shape Metal cannot express at all.
 ///

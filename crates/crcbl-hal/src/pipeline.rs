@@ -27,7 +27,8 @@
 use crcbl_core::Handle;
 
 use crate::{
-    Format, ImageViewHandle, SamplerHandle, ShaderEntry, ShaderStages, resource::BufferHandle,
+    Format, HalError, ImageViewHandle, Limits, SamplerHandle, ShaderEntry, ShaderStages,
+    resource::BufferHandle,
 };
 
 /// Marker type for pipeline-layout handles. Uninhabited.
@@ -150,7 +151,7 @@ pub struct BindGroupLayoutDesc<'a> {
     /// check the first half too, because a `VARIABLE_COUNT` entry that is
     /// highest-numbered but not last would make every "the variable binding is
     /// `entries.last()`" reading in a backend silently wrong. Violating either
-    /// is [`HalError::InvalidDescriptor`](crate::HalError::InvalidDescriptor).
+    /// is [`HalError::InvalidDescriptor`].
     ///
     /// Duplicate binding numbers are rejected.
     pub entries: &'a [BindGroupLayoutEntry],
@@ -257,7 +258,7 @@ pub struct PushConstantRange {
     /// Byte offset within the push-constant block.
     pub offset: u32,
     /// Byte size, bounded by
-    /// [`Limits::max_push_constant_size`](crate::Limits::max_push_constant_size).
+    /// [`Limits::max_push_constant_size`].
     pub size: u32,
 }
 
@@ -817,6 +818,22 @@ pub struct MeshPipelineDesc<'a> {
 }
 
 /// Creation parameters for a compute pipeline.
+///
+/// # Why the workgroup size is here at all
+///
+/// SPIR-V, DXIL and WGSL each bake it into the module — `[numthreads(…)]` in
+/// the Slang source becomes `OpExecutionMode … LocalSize`, a DXIL metadata
+/// entry, and `@workgroup_size(…)` respectively — so Vulkan and D3D12 need no
+/// such field. **Metal has nowhere to declare it.** MSL's `[[kernel]]` carries
+/// no thread count, and `dispatchThreadgroups:threadsPerThreadgroup:` takes it
+/// at the *call*, which means a Metal backend with only a module and an entry
+/// point has no number to pass and cannot dispatch at all. Carrying it on the
+/// descriptor is what makes the compute half of this seam expressible on every
+/// backend rather than on three of the four.
+///
+/// The cost is a second place the number lives, and
+/// [`workgroup_size`](Self::workgroup_size) says where to take it from so the
+/// two cannot be written independently.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ComputePipelineDesc<'a> {
     /// Debug name; see [`BufferDesc::label`](crate::BufferDesc::label).
@@ -825,6 +842,77 @@ pub struct ComputePipelineDesc<'a> {
     pub layout: PipelineLayoutHandle,
     /// Compute stage.
     pub compute: ShaderEntry<'a>,
+    /// Invocations per workgroup, in the three dimensions — the same numbers
+    /// the shader's own `[numthreads(x, y, z)]` declares.
+    ///
+    /// **Take it from the crate that owns the shader source rather than
+    /// writing a literal.** `crcbl-shaders` publishes a `WORKGROUP_SIZE` beside
+    /// every compute shader it compiles, checked against the `[numthreads(…)]`
+    /// in the `.slang` file by that module's own test, so
+    /// `[crcbl_shaders::cull::WORKGROUP_SIZE, 1, 1]` is one number in one place.
+    /// A hand-written value that disagrees with the shader is the failure this
+    /// field introduces, and it is invisible on the backends that read the size
+    /// out of the module: only Metal would launch the wrong number of threads.
+    ///
+    /// A backend that *can* see the declared size checks this against it and
+    /// fails by name — `crcbl-vk` does, from the SPIR-V it is compiling.
+    /// [`check_workgroup_size`](Self::check_workgroup_size) is the half every
+    /// backend can perform.
+    pub workgroup_size: [u32; 3],
+}
+
+impl ComputePipelineDesc<'_> {
+    /// Checks [`workgroup_size`](Self::workgroup_size) against what the device
+    /// can actually launch.
+    ///
+    /// Every backend calls this, because none of them gets a usable diagnostic
+    /// from below: Vulkan reports an over-large size as a VUID against
+    /// `vkCreateComputePipelines` naming neither the number nor the dimension,
+    /// and Metal raises an Objective-C exception at the dispatch — which aborts
+    /// the process rather than returning an error at all.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`], naming the dimension and the limit it
+    /// exceeded.
+    pub fn check_workgroup_size(&self, limits: &Limits) -> Result<(), HalError> {
+        let size = self.workgroup_size;
+        for (axis, (extent, max)) in size
+            .into_iter()
+            .zip(limits.max_compute_workgroup_size)
+            .enumerate()
+        {
+            if extent == 0 {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "workgroup_size {size:?} is zero in dimension {axis}: a workgroup with no \
+                     invocations runs nothing, and no shader declares one"
+                )));
+            }
+            if extent > max {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "workgroup_size {size:?} exceeds this device's \
+                     max_compute_workgroup_size {:?} in dimension {axis}",
+                    limits.max_compute_workgroup_size
+                )));
+            }
+        }
+        let invocations = size[0]
+            .checked_mul(size[1])
+            .and_then(|product| product.checked_mul(size[2]))
+            .ok_or_else(|| {
+                HalError::InvalidDescriptor(format!(
+                    "workgroup_size {size:?} overflows a u32 when multiplied out"
+                ))
+            })?;
+        if invocations > limits.max_compute_invocations_per_workgroup {
+            return Err(HalError::InvalidDescriptor(format!(
+                "workgroup_size {size:?} is {invocations} invocations, over this device's \
+                 max_compute_invocations_per_workgroup {}",
+                limits.max_compute_invocations_per_workgroup
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -914,6 +1002,67 @@ mod tests {
             "culling must be asked for: the default cannot know the winding of \
              imported geometry"
         );
+    }
+
+    /// A workgroup size no device could launch is refused, and the message
+    /// names the dimension.
+    ///
+    /// **What turns it red.** Dropping the zero check — a `[0, 1, 1]` pipeline
+    /// builds on every backend and dispatches nothing, which is exactly the
+    /// silent no-op this field exists to make impossible. Comparing against the
+    /// wrong axis, or against the total only — the `z` case passes its own
+    /// dimension's limit and fails on the product, and the `x` case is the
+    /// reverse. Accepting the size that satisfies both limits — the last case,
+    /// which is what every real shader here looks like.
+    #[test]
+    fn a_workgroup_size_the_device_cannot_launch_is_refused_by_dimension() {
+        let mut pool: crcbl_core::Pool<u8> = crcbl_core::Pool::new();
+        let layout: PipelineLayoutHandle = pool.insert(0).cast();
+        let module: crate::ShaderModuleHandle = pool.insert(0).cast();
+        let desc = |workgroup_size| ComputePipelineDesc {
+            label: Some("guard"),
+            layout,
+            compute: ShaderEntry {
+                module,
+                entry_point: "computeMain",
+            },
+            workgroup_size,
+        };
+        let limits = Limits::minimum();
+
+        let zero = desc([0, 1, 1])
+            .check_workgroup_size(&limits)
+            .expect_err("a workgroup of no invocations");
+        assert!(zero.to_string().contains("zero in dimension 0"), "{zero}");
+
+        let wide = desc([limits.max_compute_workgroup_size[0] + 1, 1, 1])
+            .check_workgroup_size(&limits)
+            .expect_err("over the per-dimension limit");
+        assert!(
+            wide.to_string().contains("dimension 0"),
+            "the dimension must be named: {wide}"
+        );
+
+        // Under every per-dimension limit and still too many threads, which is
+        // the case a per-axis check alone would let through.
+        let deep = [8, 8, limits.max_compute_workgroup_size[2]];
+        assert!(
+            deep.iter()
+                .zip(limits.max_compute_workgroup_size)
+                .all(|(extent, max)| *extent <= max),
+            "this case must be legal on every axis or it proves nothing"
+        );
+        let total = desc(deep)
+            .check_workgroup_size(&limits)
+            .expect_err("over the invocation total");
+        assert!(
+            total.to_string().contains("invocations"),
+            "the total must be named: {total}"
+        );
+
+        desc([64, 1, 1])
+            .check_workgroup_size(&limits)
+            .expect("the size every compute shader in this workspace declares");
     }
 
     #[test]

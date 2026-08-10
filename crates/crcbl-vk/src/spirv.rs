@@ -1,5 +1,6 @@
 //! Just enough SPIR-V parsing to answer "does this module have that entry
-//! point, and at which stage?".
+//! point, at which stage, and — for a compute one — with how many threads per
+//! workgroup?".
 //!
 //! # Why parse at all
 //!
@@ -16,6 +17,14 @@
 //! It also catches the mistake the seam explicitly worries about — bytes passed
 //! where words were wanted — one call earlier than the driver would, and with a
 //! message that says so.
+//!
+//! The workgroup size is read for a different reason:
+//! [`ComputePipelineDesc::workgroup_size`](crcbl_hal::ComputePipelineDesc::workgroup_size)
+//! carries the number Metal needs at its dispatch call, and this backend is
+//! compiling the module that already declares it — so a descriptor that
+//! disagrees with `[numthreads(…)]` fails here rather than launching the wrong
+//! number of threads on the one backend that cannot check.
+//! See [`require_workgroup_size`].
 //!
 //! # Deliberately shallow
 //!
@@ -42,6 +51,14 @@ const MAGIC_REVERSED: u32 = 0x0302_2307;
 /// `OpEntryPoint`, from the SPIR-V core grammar.
 const OP_ENTRY_POINT: u16 = 15;
 
+/// `OpExecutionMode`, from the SPIR-V core grammar. Its `OpExecutionModeId`
+/// sibling (331) is deliberately not read; see [`workgroup_size`].
+const OP_EXECUTION_MODE: u16 = 16;
+
+/// The `LocalSize` execution mode, whose three literal operands are what
+/// `[numthreads(x, y, z)]` compiles to.
+const EXECUTION_MODE_LOCAL_SIZE: u32 = 17;
+
 /// One `OpEntryPoint` in a module.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntryPoint {
@@ -55,13 +72,21 @@ pub struct EntryPoint {
     pub stage: Option<ShaderStages>,
 }
 
-/// Reads the header and every `OpEntryPoint`.
+/// Hands every instruction's opcode, word offset and operands to `visit`.
+///
+/// The header check and the step-by-word-count walk are the same in both
+/// readers below, and getting the step wrong is the classic way to read an
+/// operand as an opcode — so it exists once.
 ///
 /// # Errors
 ///
 /// A `String` explaining what is wrong with the module: too short, not SPIR-V,
 /// byte-swapped, or an instruction whose word count would run past the end.
-pub fn entry_points(words: &[u32]) -> Result<Vec<EntryPoint>, String> {
+/// Also whatever `visit` returns, unchanged.
+fn walk(
+    words: &[u32],
+    mut visit: impl FnMut(u16, usize, &[u32]) -> Result<(), String>,
+) -> Result<(), String> {
     // The header is magic, version, generator, bound, schema.
     if words.len() < 5 {
         return Err(format!(
@@ -86,7 +111,6 @@ pub fn entry_points(words: &[u32]) -> Result<Vec<EntryPoint>, String> {
         }
     }
 
-    let mut found = Vec::new();
     let mut index = 5;
     while index < words.len() {
         let instruction = words[index];
@@ -107,28 +131,123 @@ pub fn entry_points(words: &[u32]) -> Result<Vec<EntryPoint>, String> {
                 words.len() - index
             ));
         }
-
-        if opcode == OP_ENTRY_POINT {
-            // OpEntryPoint: execution model, entry point id, then the name as a
-            // null-terminated literal string, then the interface ids.
-            if word_count < 4 {
-                return Err(format!(
-                    "OpEntryPoint at word {index} is {word_count} words; the shortest legal \
-                     one is 4"
-                ));
-            }
-            let model = words[index + 1];
-            let name = literal_string(&words[index + 3..end])
-                .ok_or_else(|| format!("OpEntryPoint at word {index} has an unterminated name"))?;
-            found.push(EntryPoint {
-                name,
-                stage: stage_of(model),
-            });
-        }
-
+        visit(opcode, index, &words[index + 1..end])?;
         index = end;
     }
+    Ok(())
+}
+
+/// Reads the header and every `OpEntryPoint`.
+///
+/// # Errors
+///
+/// As [`walk`], plus an `OpEntryPoint` too short to hold a name or whose name
+/// never terminates.
+pub fn entry_points(words: &[u32]) -> Result<Vec<EntryPoint>, String> {
+    let mut found = Vec::new();
+    walk(words, |opcode, index, operands| {
+        if opcode != OP_ENTRY_POINT {
+            return Ok(());
+        }
+        // OpEntryPoint: execution model, entry point id, then the name as a
+        // null-terminated literal string, then the interface ids.
+        if operands.len() < 3 {
+            return Err(format!(
+                "OpEntryPoint at word {index} is {} words; the shortest legal one is 4",
+                operands.len() + 1
+            ));
+        }
+        let name = literal_string(&operands[2..])
+            .ok_or_else(|| format!("OpEntryPoint at word {index} has an unterminated name"))?;
+        found.push(EntryPoint {
+            name,
+            stage: stage_of(operands[0]),
+        });
+        Ok(())
+    })?;
     Ok(found)
+}
+
+/// The `LocalSize` an entry point declares, if it declares one that way.
+///
+/// `Ok(None)` means the module has that entry point and gives its workgroup
+/// size some *other* way — `OpExecutionModeId LocalSizeId`, or the deprecated
+/// `WorkgroupSize` builtin decoration — both of which name specialisation
+/// constants rather than literals and so cannot be answered without evaluating
+/// them. Nothing `crcbl-shaders` emits does that: `[numthreads(…)]` through
+/// Slang is always the literal form.
+///
+/// # Errors
+///
+/// As [`entry_points`], plus a module with no entry point of that name.
+pub fn workgroup_size(words: &[u32], name: &str) -> Result<Option<[u32; 3]>, String> {
+    let mut entry_id: Option<u32> = None;
+    let mut declared: Vec<(u32, [u32; 3])> = Vec::new();
+    walk(words, |opcode, index, operands| {
+        match opcode {
+            OP_ENTRY_POINT => {
+                if operands.len() < 3 {
+                    return Err(format!(
+                        "OpEntryPoint at word {index} is {} words; the shortest legal one is 4",
+                        operands.len() + 1
+                    ));
+                }
+                let found = literal_string(&operands[2..]).ok_or_else(|| {
+                    format!("OpEntryPoint at word {index} has an unterminated name")
+                })?;
+                if found == name {
+                    entry_id = Some(operands[1]);
+                }
+            }
+            // OpExecutionMode: entry point id, mode, then the mode's own
+            // literals — three of them for LocalSize, which is why a shorter
+            // instruction is some other mode rather than a malformed one.
+            OP_EXECUTION_MODE
+                if operands.len() >= 5 && operands[1] == EXECUTION_MODE_LOCAL_SIZE =>
+            {
+                declared.push((operands[0], [operands[2], operands[3], operands[4]]));
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+    let entry_id =
+        entry_id.ok_or_else(|| format!("the module has no entry point named {name:?}"))?;
+    Ok(declared
+        .into_iter()
+        .find(|(target, _)| *target == entry_id)
+        .map(|(_, size)| size))
+}
+
+/// Whether the module agrees with the workgroup size a
+/// [`ComputePipelineDesc`](crcbl_hal::ComputePipelineDesc) declares.
+///
+/// **This is the guard that keeps that field from being a second, independent
+/// number.** Metal takes its threads-per-threadgroup at the dispatch call and
+/// has no way to check it, so a descriptor whose size disagrees with
+/// `[numthreads(…)]` runs the wrong number of threads *there* and nowhere else
+/// — a bug that reproduces on exactly one backend. Vulkan is compiling the very
+/// module that declares the real size, so it is the place that can say so.
+///
+/// # Errors
+///
+/// A `String` naming both sizes on a mismatch, and saying which form the module
+/// used when it declares no literal `LocalSize` at all.
+pub fn require_workgroup_size(words: &[u32], name: &str, declared: [u32; 3]) -> Result<(), String> {
+    match workgroup_size(words, name)? {
+        Some(size) if size == declared => Ok(()),
+        Some(size) => Err(format!(
+            "the descriptor declares a workgroup size of {declared:?} for {name:?}, but the \
+             module declares [numthreads({}, {}, {})]. Take the value from the `WORKGROUP_SIZE` \
+             beside the shader in `crcbl-shaders` rather than writing it twice.",
+            size[0], size[1], size[2]
+        )),
+        None => Err(format!(
+            "the module gives no literal LocalSize for {name:?}, so its workgroup size comes \
+             from LocalSizeId or the WorkgroupSize builtin — specialisation constants this \
+             engine's shaders do not use and this backend cannot evaluate"
+        )),
+    }
 }
 
 /// Whether `words` contains `name` at `stage`, and why not if it does not.
@@ -224,6 +343,15 @@ mod tests {
             words.push((word_count << 16) | u32::from(OP_ENTRY_POINT));
             words.extend(operands);
         }
+        words
+    }
+
+    /// [`module`], with a `LocalSize` execution mode on the entry point id
+    /// every entry there is given.
+    fn compute_module(name: &str, size: [u32; 3]) -> Vec<u32> {
+        let mut words = module(&[(5, name)]);
+        words.push((6u32 << 16) | u32::from(OP_EXECUTION_MODE));
+        words.extend([1, EXECUTION_MODE_LOCAL_SIZE, size[0], size[1], size[2]]);
         words
     }
 
@@ -361,6 +489,73 @@ mod tests {
         let error = require_entry_point(&words, "fragmentMain", ShaderStages::VERTEX)
             .expect_err("wrong stage");
         assert!(error.contains("but not at"), "{error}");
+    }
+
+    /// The guard behind
+    /// [`ComputePipelineDesc::workgroup_size`](crcbl_hal::ComputePipelineDesc::workgroup_size):
+    /// the size the module declares is read back, and one that disagrees is
+    /// refused with both numbers in the message.
+    ///
+    /// **What turns it red.** Reading the mode's operands at the wrong offset —
+    /// the declared size comes back as the entry id or the mode number, neither
+    /// of which is `[64, 2, 1]`, and the `y` of 2 is what makes an all-ones
+    /// tail unable to pass by accident. Treating "the module declares nothing"
+    /// as agreement — the bare module. Comparing loosely enough that
+    /// `[32, 2, 1]` and `[64, 2, 1]` agree — the mismatch case.
+    #[test]
+    fn a_compute_entry_points_declared_workgroup_size_is_read_and_enforced() {
+        let words = compute_module("computeMain", [64, 2, 1]);
+        assert_eq!(
+            workgroup_size(&words, "computeMain").expect("parses"),
+            Some([64, 2, 1])
+        );
+        require_workgroup_size(&words, "computeMain", [64, 2, 1]).expect("the declared size");
+
+        let error = require_workgroup_size(&words, "computeMain", [32, 2, 1])
+            .expect_err("a descriptor that disagrees with the shader");
+        assert!(error.contains("[32, 2, 1]"), "{error}");
+        assert!(error.contains("numthreads(64, 2, 1)"), "{error}");
+
+        // A module with no execution mode at all: the size is not merely
+        // assumed to be whatever the descriptor said.
+        let bare = module(&[(5, "computeMain")]);
+        assert_eq!(workgroup_size(&bare, "computeMain").expect("parses"), None);
+        let error = require_workgroup_size(&bare, "computeMain", [64, 1, 1])
+            .expect_err("nothing to check against is not a pass");
+        assert!(error.contains("LocalSizeId"), "{error}");
+
+        let error = workgroup_size(&words, "notThere").expect_err("no such entry point");
+        assert!(error.contains("notThere"), "{error}");
+    }
+
+    /// The parser against a real `slangc` artifact, and the constant
+    /// `crcbl-shaders` publishes for callers to fill the descriptor with.
+    ///
+    /// The synthetic modules above are built by this file, so they can only
+    /// prove it is self-consistent. This one is the committed
+    /// `spirv/compute_probe.spv`, and it is what says the two numbers a caller
+    /// juggles — `crcbl_shaders::compute_probe::WORKGROUP_SIZE` and the
+    /// shader's own `[numthreads(…)]` — are the same number, without a driver
+    /// in the room.
+    #[test]
+    fn the_committed_compute_artifact_declares_the_size_crcbl_shaders_publishes() {
+        let words = crcbl_shaders::COMPUTE_PROBE.spirv();
+        let entry_point = crcbl_shaders::COMPUTE_PROBE
+            .entry_point(crcbl_shaders::Stage::Compute)
+            .expect("the probe has a compute entry point");
+        assert_eq!(
+            workgroup_size(words, entry_point).expect("the committed artifact parses"),
+            Some([crcbl_shaders::compute_probe::WORKGROUP_SIZE, 1, 1])
+        );
+
+        let cull = crcbl_shaders::CULL.spirv();
+        let cull_entry = crcbl_shaders::CULL
+            .entry_point(crcbl_shaders::Stage::Compute)
+            .expect("the cull pass has a compute entry point");
+        assert_eq!(
+            workgroup_size(cull, cull_entry).expect("the committed artifact parses"),
+            Some([crcbl_shaders::cull::WORKGROUP_SIZE, 1, 1])
+        );
     }
 
     /// Instructions the parser does not care about must be skipped by their

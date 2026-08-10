@@ -104,6 +104,14 @@ crcbl-shaders = { workspace = true }
 # `MTLRenderCommandEncoder`, and `MTLStencilDescriptor`/`MTLStencilOperation` in
 # `MTLDepthStencil`; both were already on. `MTLPipelineOption` is in `MTLDevice`.
 #
+# The dispatch slice adds exactly one:
+#
+# * `MTLComputeCommandEncoder` for the encoder a compute pass now opens:
+#   `MTLCommandBuffer::computeCommandEncoder` is `cfg`-gated on it upstream, as
+#   are `setComputePipelineState:`, the three argument-table setters
+#   `crcbl_mtl::binding`'s `apply_compute` calls, and both
+#   `dispatchThreadgroups:` forms.
+#
 # MTL6 — bind groups, indexed draws and the indirect loop — adds exactly one:
 #
 # * `MTLArgument` is where the Metal headers put `MTLIndexType`, which is what
@@ -195,6 +203,7 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
   "MTLCommandBuffer",
   "MTLCommandEncoder",
   "MTLCommandQueue",
+  "MTLComputeCommandEncoder",
   "MTLComputePipeline",
   "MTLDepthStencil",
   "MTLDevice",

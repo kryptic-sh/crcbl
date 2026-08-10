@@ -280,6 +280,11 @@ impl ComputeProbe {
                     module,
                     entry_point,
                 },
+                // The shader's own number, not a literal: `crcbl-shaders`
+                // checks this constant against the `[numthreads(…)]` in
+                // `compute_probe.slang`, and this backend checks it again
+                // against the SPIR-V it is compiling.
+                workgroup_size: [crcbl_shaders::compute_probe::WORKGROUP_SIZE, 1, 1],
             })
             .expect("a compute pipeline");
         device.destroy_shader_module(module);

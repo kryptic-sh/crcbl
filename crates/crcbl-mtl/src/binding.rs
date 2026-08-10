@@ -114,7 +114,9 @@ use crcbl_hal::{
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBuffer, MTLRenderCommandEncoder, MTLSamplerState, MTLTexture};
+use objc2_metal::{
+    MTLBuffer, MTLComputeCommandEncoder, MTLRenderCommandEncoder, MTLSamplerState, MTLTexture,
+};
 
 use crate::device::{
     DeviceInner, DeviceState, MetalDevice, Owned, lookup, lookup_mut, owned, take_owned, to_ns,
@@ -581,6 +583,45 @@ fn buffer_offset_alignment(uniform: bool, limits: &Limits) -> u64 {
         limits.min_storage_buffer_offset_alignment
     };
     alignment.max(1)
+}
+
+/// Sets every binding of a resolved group on the open **compute** encoder.
+///
+/// Metal gives the compute stage one set of three argument tables rather than
+/// the render encoder's two sets, so this is `setBuffer:offset:atIndex:` and
+/// its two siblings with no per-stage fan-out — and the *index* is the one
+/// [`plan_layout`] already computed, because the flattening rule counts
+/// declarations per table and knows nothing about which stage reads them. A
+/// binding not visible to [`ShaderStages::COMPUTE`] sets nothing, mirroring
+/// what [`apply`] does with a compute-only one.
+pub(crate) fn apply_compute(
+    bindings: &[BoundBinding],
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+) {
+    for binding in bindings {
+        if !binding.visibility.contains(ShaderStages::COMPUTE) {
+            continue;
+        }
+        let index = to_ns(u64::from(binding.index));
+        match &binding.resource {
+            // SAFETY: as `apply` — the index was bounded by `Table::capacity`
+            // when the pipeline layout was planned, the offset was checked
+            // against the buffer's own length when the group was created and
+            // again against the dynamic offset in `bind_group_raw`, and every
+            // resource is kept alive by the `Retained` the group holds.
+            BoundResource::Buffer { raw, offset, .. } => unsafe {
+                encoder.setBuffer_offset_atIndex(Some(raw), to_ns(*offset), index);
+            },
+            // SAFETY: as above, minus the offset.
+            BoundResource::Texture(raw) => unsafe {
+                encoder.setTexture_atIndex(Some(raw), index);
+            },
+            // SAFETY: as above, against the sampler table's capacity.
+            BoundResource::Sampler(raw) => unsafe {
+                encoder.setSamplerState_atIndex(Some(raw), index);
+            },
+        }
+    }
 }
 
 /// Sets every binding of a resolved group on the open render encoder.

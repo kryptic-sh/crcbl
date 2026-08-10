@@ -1099,10 +1099,20 @@ impl Device for WgpuDevice {
     }
 
     // ---------- compute pipelines ----------
+    /// Builds a `wgpu::ComputePipeline`.
+    ///
+    /// [`ComputePipelineDesc::workgroup_size`] is checked against the device's
+    /// limits and no further: wgpu owns the module once it is created and hands
+    /// back no reflection, so this backend has no `@workgroup_size(…)` to
+    /// compare the descriptor with. Nothing is lost by it — WGSL declares the
+    /// size and WebGPU dispatches in workgroups, so a wrong number here changes
+    /// nothing about what runs. It is Metal that reads the field, and
+    /// `crcbl-vk` that catches a value disagreeing with the shader.
     fn create_compute_pipeline(
         &self,
         desc: &ComputePipelineDesc<'_>,
     ) -> Result<ComputePipelineHandle, HalError> {
+        desc.check_workgroup_size(&self.caps.limits)?;
         let layout = {
             let pls = self.pools.pipeline_layouts.lock().unwrap();
             pls.get(desc.layout.cast())

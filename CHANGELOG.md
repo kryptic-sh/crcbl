@@ -1581,6 +1581,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Breaking: `ComputePipelineDesc` carries a `workgroup_size`, and Metal can
+  dispatch.** `crcbl-mtl` refused `bind_compute_pipeline`, `dispatch` and
+  `dispatch_indirect` outright, because
+  `dispatchThreadgroups:threadsPerThreadgroup:` takes the
+  threads-per-threadgroup at the _call_ while SPIR-V, DXIL and WGSL bake it into
+  the module — so MSL had nowhere to declare it and the seam had no field
+  carrying it. `crcbl_hal::ComputePipelineDesc` now has
+  `workgroup_size: [u32; 3]`, which every caller must add; take it from the
+  `WORKGROUP_SIZE` constant `crcbl-shaders` publishes beside each compute shader
+  (`[crcbl_shaders::cull::WORKGROUP_SIZE, 1, 1]`) rather than writing a literal,
+  since that constant is pinned to the shader's own `[numthreads(…)]`.
+
+  Two guards keep the new field from becoming a second, independent number.
+  `ComputePipelineDesc::check_workgroup_size` refuses a zero, an over-limit
+  dimension or too many invocations per workgroup, and every backend calls it;
+  and `crcbl-vk` additionally reads the `LocalSize` out of the SPIR-V it is
+  compiling and fails with `HalError::ShaderCompilation` naming both sizes when
+  the descriptor disagrees with the shader. Metal cannot perform the second
+  check — MSL declares no thread count — which is exactly why it is done where
+  it can be.
+
+  `crcbl-mtl`'s compute pass now opens a real `MTLComputeCommandEncoder` whose
+  lifetime is the pass's, and `bind_group` reaches its argument tables. A copy
+  inside a compute pass is now refused rather than silently ending the pass's
+  encoder and taking its pipeline state with it, and a barrier inside one is
+  ignored exactly as it already was inside a render pass. `Features::COMPUTE` on
+  Metal now means the whole path rather than "compute pipelines exist".
+
 - **Breaking: `crcbl_shaders::mesh::FrameUniforms` no longer has a `model`
   field, and the block is 128 bytes rather than 192.** The per-object transform
   moved into the instance array, so `mesh.slang`'s uniform block holds only what

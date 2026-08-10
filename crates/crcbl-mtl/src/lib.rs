@@ -57,13 +57,21 @@
 //! argument buffer cannot feed. `crcbl_mtl::draw` owns the index-buffer state
 //! and the indirect loop.
 //!
+//! **The dispatch slice makes compute run.** A compute pass opens a real
+//! `MTLComputeCommandEncoder` whose lifetime is the pass's, bind groups reach
+//! its argument tables, and `dispatch`/`dispatch_indirect` are
+//! `dispatchThreadgroups:threadsPerThreadgroup:` and its indirect sibling. The
+//! threads-per-threadgroup Metal takes at the *call* comes from
+//! [`ComputePipelineDesc::workgroup_size`](crcbl_hal::ComputePipelineDesc::workgroup_size),
+//! which the seam carries for this backend's sake and `crcbl-vk` checks against
+//! the SPIR-V it compiles — so a number disagreeing with `[numthreads(…)]`
+//! fails there rather than launching the wrong thread count here.
+//!
 //! What is still refused, with `what` naming what is missing: **query sets**,
-//! **push constants**, **compute dispatches** and **indirect-count draws**. The
-//! last two are not simply unwritten, and the crate says which is which — a
-//! dispatch needs a workgroup size the seam does not carry, and an
-//! indirect-count draw needs an `MTLIndirectCommandBuffer` filled by a compute
-//! pass that would have to run before the render encoder the call happens
-//! inside. See `crcbl_mtl::command`'s `DISPATCH_SLICE` and `indirect_count`.
+//! **push constants** and **indirect-count draws**. The last is not simply
+//! unwritten: an indirect-count draw needs an `MTLIndirectCommandBuffer` filled
+//! by a compute pass that would have to run before the render encoder the call
+//! happens inside. See `crcbl_mtl::command`'s `indirect_count`.
 //!
 //! Nothing in this crate is a stub that reports success — a refused command
 //! recorded into an encoder *fails the encoder*, so `finish` hands back the
@@ -235,11 +243,9 @@
 //!   with argument buffers, which need `crcbl-shaders` to emit MSL declaring
 //!   them.
 //!
-//! [`COMPUTE`](crcbl_hal::Features::COMPUTE) stays on and stays precise:
-//! compute *pipelines* build, and `dispatch` refuses — for a seam reason rather
-//! than a Metal one, since
-//! [`ComputePipelineDesc`](crcbl_hal::ComputePipelineDesc) carries no workgroup
-//! size and Metal takes one at the dispatch call.
+//! [`COMPUTE`](crcbl_hal::Features::COMPUTE) stays on and now means the whole
+//! of it: pipelines build, a pass opens an encoder, and both dispatches are
+//! real calls.
 //! [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE) arrived with
 //! the command slice, on `MTLSharedEvent`.
 //!

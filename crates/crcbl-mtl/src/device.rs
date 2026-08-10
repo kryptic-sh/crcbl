@@ -3371,6 +3371,9 @@ using namespace metal;\n\
                     module: compute_module,
                     entry_point: "computeMain",
                 },
+                // The kernel above declares nothing about thread counts —
+                // MSL cannot — so this is what the dispatch would launch.
+                workgroup_size: [1, 1, 1],
             })
             .expect("a kernel with no bindings builds a compute pipeline");
 
@@ -4490,14 +4493,14 @@ using namespace metal;\n\
     /// Every slice that has not arrived still refuses, by name — so none of
     /// them can be half-implemented without this saying so.
     ///
-    /// **The binding slice emptied most of this list**, and what is left is the
-    /// two things that are not "a slice nobody has written": query sets, whose
-    /// obstacle is `supportsCounterSampling:` answering per sampling point, and
-    /// the compute and indirect-count calls, whose obstacles are named in
-    /// `crcbl_mtl::command`'s `DISPATCH_SLICE` and `indirect_count`. The calls
-    /// that stopped refusing are asserted in
-    /// `the_binding_slice_replaced_refusals_with_real_errors` rather than
-    /// merely dropped from here.
+    /// **The binding and dispatch slices emptied most of this list**, and what
+    /// is left is the two things that are not "a slice nobody has written":
+    /// query sets, whose obstacle is `supportsCounterSampling:` answering per
+    /// sampling point, and the indirect-count draws, whose obstacle is named in
+    /// `crcbl_mtl::command`'s `indirect_count`. The calls that stopped refusing
+    /// are asserted in `the_binding_slice_replaced_refusals_with_real_errors`
+    /// and in `a_compute_dispatch_writes_the_values_it_was_asked_for` rather
+    /// than merely dropped from here.
     #[test]
     fn the_slices_that_have_not_arrived_still_refuse_and_name_themselves() {
         let (_instance, device) = open_device();
@@ -4552,13 +4555,6 @@ using namespace metal;\n\
             }
         }
         let recording: &[Refused] = &[
-            ("dispatches", |encoder| encoder.dispatch(1, 1, 1)),
-            ("indirect dispatches", |encoder| {
-                encoder.dispatch_indirect(Handle::from_bits(1 << 32).expect("generation 1"), 0);
-            }),
-            ("compute pipeline binds", |encoder| {
-                encoder.bind_compute_pipeline(Handle::from_bits(1 << 32).expect("generation 1"));
-            }),
             ("indirect-count draws", |encoder| count(encoder, false)),
             ("indexed indirect-count draws", |encoder| {
                 count(encoder, true)
@@ -4694,6 +4690,129 @@ using namespace metal;\n\
                 "{what} still refuses as unsupported: {error:?}"
             );
         }
+    }
+
+    /// The compute pass **opens a Metal encoder**, and the three calls that
+    /// used to refuse now fail only for the reasons a caller can fix.
+    ///
+    /// The half of the dispatch slice a machine with no working GPU can still
+    /// check: the encoder is created and closed, a well-formed empty pass
+    /// submits, and every misuse comes back as a descriptor or handle error
+    /// rather than as [`HalError::Unsupported`] — which is what "this backend
+    /// cannot do that" means and is now the wrong answer.
+    ///
+    /// **What turns it red.** `dispatch` or `bind_compute_pipeline` regressing
+    /// to `Unsupported`. `begin_compute_pass` opening no encoder — a dispatch
+    /// with nothing bound would then be reported as "outside a compute pass",
+    /// and the two messages are asserted apart. Letting a copy through inside
+    /// the pass, which would end the pass's encoder underneath it and take the
+    /// argument tables with it. Leaving the encoder open at `finish` — Metal
+    /// raises on `commit`, which aborts this process rather than failing the
+    /// test, so the empty-pass submission is the check that it closes.
+    #[test]
+    fn the_compute_pass_opens_an_encoder_and_its_calls_fail_only_as_themselves() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let unissued = Handle::from_bits(1 << 32).expect("generation 1");
+        let encoder_of =
+            || device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+
+        // An empty pass: the encoder opens, closes, and the command buffer
+        // commits — which is the only observation available without a shader.
+        let mut empty = encoder_of();
+        empty.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+            label: Some("empty compute pass"),
+        });
+        empty.end_compute_pass();
+        let commands = empty.finish().expect("an empty compute pass records");
+        device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect("and submits");
+        device.wait_idle().expect("and completes");
+        device.destroy_command_buffer(commands);
+
+        /// One recording call, and the substring its failure must contain.
+        type Misuse = (&'static str, &'static str, fn(&mut dyn CommandEncoder));
+        let misuses: &[Misuse] = &[
+            (
+                "a dispatch outside any pass",
+                "outside a compute pass",
+                |encoder| encoder.dispatch(1, 1, 1),
+            ),
+            (
+                "a dispatch with no pipeline bound",
+                "no compute pipeline bound",
+                |encoder| {
+                    encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+                    encoder.dispatch(1, 1, 1);
+                    encoder.end_compute_pass();
+                },
+            ),
+            (
+                "an indirect dispatch with no pipeline bound",
+                "no compute pipeline bound",
+                |encoder| {
+                    encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+                    encoder.dispatch_indirect(Handle::from_bits(1 << 32).expect("generation 1"), 0);
+                    encoder.end_compute_pass();
+                },
+            ),
+            (
+                "a pipeline bind outside any pass",
+                "outside a compute pass",
+                |encoder| {
+                    encoder
+                        .bind_compute_pipeline(Handle::from_bits(1 << 32).expect("generation 1"));
+                },
+            ),
+        ];
+        for (what, expected, record) in misuses {
+            let mut encoder = encoder_of();
+            record(encoder.as_mut());
+            let Err(error) = encoder.finish() else {
+                panic!("{what} recorded successfully, so the encoder reported a lie");
+            };
+            assert!(
+                !matches!(error, HalError::Unsupported { .. }),
+                "{what} still refuses as unsupported: {error:?}"
+            );
+            assert!(
+                error.to_string().contains(expected),
+                "{what}: expected a message naming {expected:?}, got {error}"
+            );
+        }
+
+        // A copy inside the pass, against a buffer that really exists so the
+        // refusal is about the scope rather than the handle. Opening a blit
+        // encoder here would `endEncoding` the pass's own encoder and take its
+        // argument tables with it.
+        let scratch = device
+            .create_buffer(&buffer(16, MemoryLocation::HostUpload))
+            .expect("a small host buffer");
+        let mut copying = encoder_of();
+        copying.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+        copying.fill_buffer(scratch, 0, 4, 0);
+        copying.end_compute_pass();
+        let error = copying
+            .finish()
+            .expect_err("a copy inside a compute pass is refused");
+        assert!(error.to_string().contains("inside a pass"), "{error}");
+        device.destroy_buffer(scratch);
+
+        // A pipeline handle nobody issued, bound inside a real pass: the
+        // failure is about the handle, which is only reachable because the
+        // encoder exists to bind onto.
+        let mut stale = encoder_of();
+        stale.begin_compute_pass(&crcbl_hal::ComputePassDesc { label: None });
+        stale.bind_compute_pipeline(unissued);
+        stale.end_compute_pass();
+        let error = stale.finish().expect_err("no device issued that pipeline");
+        assert!(
+            matches!(error, HalError::InvalidHandle { kind, .. } if kind == "compute pipeline"),
+            "{error:?}"
+        );
     }
 
     /// The indexed and indirect draws **record**, and their descriptor errors
@@ -5297,5 +5416,481 @@ using namespace metal;\n\
                 "texel {index} is {texel:02X?}, which is neither the triangle nor the clear colour"
             );
         }
+    }
+
+    // --- compute, end to end -------------------------------------------------
+    //
+    // The dispatch half of this backend, mirroring `crcbl-vk`'s
+    // `tests/vk_e2e/compute.rs` so the two backends are checked against the same
+    // shader, the same expectations and the same sentinel. A dispatch returns
+    // nothing, so a backend that recorded no `dispatchThreadgroups:` at all
+    // would submit cleanly and leave a buffer full of `PROBE_SENTINEL`; only
+    // reading the destination back tells the two apart.
+
+    /// Workgroups the probe's buffers are sized for.
+    ///
+    /// Eight, so the indirect dispatch can ask for two and leave six
+    /// workgroups' worth of untouched sentinel behind it — which is what tells
+    /// "the argument buffer was read" apart from "everything ran anyway".
+    #[cfg(feature = "mtl-e2e")]
+    const PROBE_GROUPS: u32 = 8;
+
+    /// Elements the probe transforms.
+    #[cfg(feature = "mtl-e2e")]
+    const PROBE_ELEMENTS: u32 = PROBE_GROUPS * crcbl_shaders::compute_probe::WORKGROUP_SIZE;
+
+    /// Bytes of the probe's source and destination buffers.
+    #[cfg(feature = "mtl-e2e")]
+    const PROBE_BYTES: u64 = PROBE_ELEMENTS as u64 * 4;
+
+    /// What the destination holds before every dispatch.
+    ///
+    /// Four **equal** bytes, because `fill_buffer` here is
+    /// `MTLBlitCommandEncoder::fillBuffer:range:value:` and repeats one byte.
+    /// Not zero — which is its own square, and what fresh memory tends to be —
+    /// and far above the largest square this probe can write, so a sentinel
+    /// left behind can never be mistaken for a result.
+    #[cfg(feature = "mtl-e2e")]
+    const PROBE_SENTINEL: u32 = 0xABAB_ABAB;
+
+    /// The probe's input, one distinct value per index.
+    ///
+    /// Distinct matters: with a constant input, a shader that indexed `source`
+    /// wrongly would still produce the right number in every slot. `index + 1`
+    /// avoids zero, whose square is itself.
+    #[cfg(feature = "mtl-e2e")]
+    fn probe_source() -> Vec<u32> {
+        (0..PROBE_ELEMENTS).map(|index| index + 1).collect()
+    }
+
+    /// What the destination must hold for `elements` dispatched elements, and
+    /// the sentinel beyond them.
+    ///
+    /// Squaring is written out here rather than derived from the shader, which
+    /// is the whole reason `compute_probe.slang` squares: the check states the
+    /// answer for itself instead of accepting whatever the dispatch produced.
+    #[cfg(feature = "mtl-e2e")]
+    fn probe_expected(elements: u32) -> Vec<u32> {
+        probe_source()
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                if (index as u32) < elements {
+                    value * value
+                } else {
+                    PROBE_SENTINEL
+                }
+            })
+            .collect()
+    }
+
+    /// Everything one compute dispatch needs, built through the seam.
+    #[cfg(feature = "mtl-e2e")]
+    struct ComputeProbe {
+        params: BufferHandle,
+        source: BufferHandle,
+        /// Host-readable *and* the shader's storage buffer: `Shared` is what
+        /// both locations map to here, so the result is observed where it was
+        /// written rather than through a copy this test would also have to
+        /// trust. `crcbl_mtl::conv`'s `storage_mode` argues why that is correct
+        /// on an Intel Mac as well as an Apple silicon one.
+        destination: BufferHandle,
+        set: BindGroupLayoutHandle,
+        group: BindGroupHandle,
+        layout: PipelineLayoutHandle,
+        pipeline: ComputePipelineHandle,
+        module: ShaderModuleHandle,
+    }
+
+    #[cfg(feature = "mtl-e2e")]
+    impl ComputeProbe {
+        /// Compiles `compute_probe.slang`'s MSL, builds the pipeline, and
+        /// stages the input in.
+        fn new(device: &MetalDevice) -> Self {
+            use crcbl_shaders::{COMPUTE_PROBE, Stage as ShaderStage};
+
+            let params = device
+                .create_buffer(&BufferDesc {
+                    label: Some("compute probe params"),
+                    size: crcbl_shaders::compute_probe::PARAMS_SIZE as u64,
+                    usage: BufferUsage::UNIFORM,
+                    memory: MemoryLocation::HostUpload,
+                })
+                .expect("a uniform buffer");
+            device
+                .write_buffer(
+                    params,
+                    0,
+                    &crcbl_shaders::compute_probe::Params {
+                        count: PROBE_ELEMENTS,
+                    }
+                    .to_bytes(),
+                )
+                .expect("HostUpload is what write_buffer is for");
+
+            let source_bytes: Vec<u8> = probe_source()
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            let source = device
+                .create_buffer(&BufferDesc {
+                    label: Some("compute probe source"),
+                    size: PROBE_BYTES,
+                    usage: BufferUsage::STORAGE,
+                    memory: MemoryLocation::HostUpload,
+                })
+                .expect("a source buffer");
+            device
+                .write_buffer(source, 0, &source_bytes)
+                .expect("HostUpload is what write_buffer is for");
+
+            let destination = device
+                .create_buffer(&BufferDesc {
+                    label: Some("compute probe destination"),
+                    size: PROBE_BYTES,
+                    usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                    memory: MemoryLocation::HostReadback,
+                })
+                .expect("a destination buffer");
+
+            // The three bindings `compute_probe.slang` declares, in the order
+            // it declares them — which is also the order `crcbl_mtl::binding`
+            // flattens onto `buffer(0)`, `buffer(1)` and `buffer(2)`, and
+            // `msl/compute_probe.metal` is where that can be read off.
+            let set = device
+                .create_bind_group_layout(&BindGroupLayoutDesc {
+                    label: Some("compute probe set 0"),
+                    entries: &[
+                        crcbl_hal::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: crcbl_hal::ShaderStages::COMPUTE,
+                            kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
+                            count: 1,
+                            flags: crcbl_hal::BindingFlags::empty(),
+                        },
+                        crcbl_hal::BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: crcbl_hal::ShaderStages::COMPUTE,
+                            kind: crcbl_hal::BindingKind::StorageBuffer {
+                                read_only: true,
+                                dynamic: false,
+                            },
+                            count: 1,
+                            flags: crcbl_hal::BindingFlags::empty(),
+                        },
+                        crcbl_hal::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: crcbl_hal::ShaderStages::COMPUTE,
+                            kind: crcbl_hal::BindingKind::StorageBuffer {
+                                read_only: false,
+                                dynamic: false,
+                            },
+                            count: 1,
+                            flags: crcbl_hal::BindingFlags::empty(),
+                        },
+                    ],
+                })
+                .expect("the probe's layout");
+            let group = device
+                .create_bind_group(&BindGroupDesc {
+                    label: Some("compute probe"),
+                    layout: set,
+                    entries: &[
+                        BindGroupEntry {
+                            binding: 0,
+                            array_index: 0,
+                            resource: crcbl_hal::BindingResource::whole_buffer(params),
+                        },
+                        BindGroupEntry {
+                            binding: 1,
+                            array_index: 0,
+                            resource: crcbl_hal::BindingResource::whole_buffer(source),
+                        },
+                        BindGroupEntry {
+                            binding: 2,
+                            array_index: 0,
+                            resource: crcbl_hal::BindingResource::whole_buffer(destination),
+                        },
+                    ],
+                    variable_count: None,
+                })
+                .expect("a bind group");
+            let layout = device
+                .create_pipeline_layout(&PipelineLayoutDesc {
+                    label: Some("compute probe"),
+                    bind_group_layouts: &[set],
+                    push_constants: None,
+                })
+                .expect("one set");
+
+            let msl = COMPUTE_PROBE
+                .msl()
+                .expect("the probe ships an MSL artifact");
+            let module = device
+                .create_shader_module(&msl_module(msl, "compute_probe.slang"))
+                .expect("the committed MSL compiles on a real Metal compiler");
+            let pipeline = device
+                .create_compute_pipeline(&ComputePipelineDesc {
+                    label: Some("compute probe"),
+                    layout,
+                    compute: ShaderEntry {
+                        module,
+                        // The manifest's name rather than a literal: it is read
+                        // out of the artifact's `OpEntryPoint` by the compile
+                        // script, so a Slang release that renamed it fails here
+                        // rather than inside Metal.
+                        entry_point: COMPUTE_PROBE
+                            .entry_point(ShaderStage::Compute)
+                            .expect("one compute entry point"),
+                    },
+                    // The shader's own number. This is the field Metal exists
+                    // to be given — MSL declares no thread count — and
+                    // `crcbl-shaders` pins the constant to the
+                    // `[numthreads(…)]` in the source.
+                    workgroup_size: [crcbl_shaders::compute_probe::WORKGROUP_SIZE, 1, 1],
+                })
+                .expect("a compute pipeline");
+
+            Self {
+                params,
+                source,
+                destination,
+                set,
+                group,
+                layout,
+                pipeline,
+                module,
+            }
+        }
+
+        /// Fills the destination with the sentinel, runs `record` inside a
+        /// compute pass, and reads the destination back.
+        ///
+        /// `record` is the only thing that differs between the direct and
+        /// indirect tests, so both go through the same fill, the same pass and
+        /// the same readback — and a difference in the result is a difference
+        /// in the dispatch.
+        fn run(
+            &self,
+            device: &MetalDevice,
+            record: impl FnOnce(&mut dyn CommandEncoder),
+        ) -> Vec<u32> {
+            let queue = device
+                .queue(QueueKind::Graphics)
+                .expect("the graphics queue exists");
+            let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+                label: Some("compute probe"),
+                queue,
+            });
+            encoder.fill_buffer(self.destination, 0, PROBE_BYTES, PROBE_SENTINEL);
+            // A no-op call on this backend by design — the encoder split
+            // `begin_compute_pass` performs *is* the barrier — and recorded
+            // anyway, because that is what a portable caller writes and this
+            // test is also checking that writing it changes nothing.
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[crcbl_hal::BufferBarrier {
+                    buffer: self.destination,
+                    from: ResourceState::TransferDst,
+                    to: ResourceState::ShaderReadWrite,
+                    queue_transfer: None,
+                }],
+                ..Barriers::default()
+            });
+            encoder.begin_compute_pass(&crcbl_hal::ComputePassDesc {
+                label: Some("compute probe"),
+            });
+            encoder.bind_compute_pipeline(self.pipeline);
+            // Inside the pass, because the open scope is the only signal the
+            // seam gives a backend about which bind point a group is for.
+            encoder.bind_group(0, self.group, &[], self.layout);
+            record(encoder.as_mut());
+            encoder.end_compute_pass();
+            let commands = encoder.finish().expect("the recording is complete");
+            device
+                .submit(queue, &SubmitInfo::new(&[commands]))
+                .expect("the queue accepts it");
+            let request = device
+                .request_readback(&ReadbackDesc {
+                    label: Some("compute probe"),
+                    buffer: self.destination,
+                    offset: 0,
+                    size: PROBE_BYTES,
+                    after: None,
+                })
+                .expect("a HostReadback buffer, in range");
+            let bytes = drain(device, request, PROBE_BYTES as usize);
+            device.destroy_readback(request);
+            device.destroy_command_buffer(commands);
+            bytes
+                .chunks_exact(4)
+                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+                .collect()
+        }
+
+        fn destroy(self, device: &MetalDevice) {
+            device.destroy_compute_pipeline(self.pipeline);
+            device.destroy_shader_module(self.module);
+            device.destroy_pipeline_layout(self.layout);
+            device.destroy_bind_group(self.group);
+            device.destroy_bind_group_layout(self.set);
+            device.destroy_buffer(self.destination);
+            device.destroy_buffer(self.source);
+            device.destroy_buffer(self.params);
+        }
+    }
+
+    /// Compares a probe result against what the CPU says it should be, and says
+    /// which element disagreed first.
+    ///
+    /// The element count is asserted before the values: a readback that came
+    /// back short would otherwise satisfy a `zip` over nothing at all.
+    #[cfg(feature = "mtl-e2e")]
+    fn assert_probe(actual: &[u32], expected: &[u32], what: &str) {
+        assert_eq!(
+            actual.len(),
+            PROBE_ELEMENTS as usize,
+            "{what}: the readback is not the whole destination buffer"
+        );
+        assert_eq!(expected.len(), actual.len(), "{what}: expectation length");
+        if let Some((index, (got, want))) = actual
+            .iter()
+            .zip(expected)
+            .enumerate()
+            .find(|(_, (got, want))| got != want)
+        {
+            panic!(
+                "{what}: element {index} is {got} ({got:#x}), expected {want} ({want:#x}). \
+                 {} of {} elements were expected to be written.",
+                expected.iter().filter(|v| **v != PROBE_SENTINEL).count(),
+                expected.len()
+            );
+        }
+    }
+
+    /// **A dispatch that really ran, and really wrote the values it was asked
+    /// for.** The engine's own `compute_probe.slang`, through a real
+    /// `MTLComputeCommandEncoder`.
+    ///
+    /// Every part of the dispatch slice is on the path: the compute pipeline
+    /// with its threadgroup size, the encoder `begin_compute_pass` opens,
+    /// `setComputePipelineState:`, the three argument-table binds
+    /// `crcbl_mtl::binding`'s `apply_compute` performs, and
+    /// `dispatchThreadgroups:threadsPerThreadgroup:` — on top of the buffers,
+    /// the blit fill, the submission and the readback.
+    ///
+    /// **What turns it red.** Recording no dispatch, or opening no encoder to
+    /// record it into — every element comes back [`PROBE_SENTINEL`], which the
+    /// expectation admits nowhere. Binding at the wrong argument-table index —
+    /// the kernel reads an unbound buffer and writes nothing, or writes
+    /// garbage. Passing the wrong `threadsPerThreadgroup` — a smaller one
+    /// leaves the tail of every workgroup's range unwritten, a larger one
+    /// writes past what the params allow and the shader's own bound check
+    /// leaves the tail sentinel; both fail the element-by-element comparison.
+    /// Reading before the command buffer completes — `drain` waits, and a
+    /// readback that resolved early would come back sentinel.
+    ///
+    /// **Needs a device that executes a shader**, like every other gated test
+    /// here: `--all-features` on a machine that cannot run it must stay green,
+    /// and `tests/run-mtl-e2e.sh` is the only thing that turns it on.
+    #[cfg(feature = "mtl-e2e")]
+    #[test]
+    #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn a_compute_dispatch_writes_the_values_it_was_asked_for() {
+        let (_instance, device) = open_device();
+        assert!(
+            device.caps().features.contains(Features::COMPUTE),
+            "this backend reports COMPUTE unconditionally, and this test is what backs it"
+        );
+
+        let probe = ComputeProbe::new(&device);
+        let values = probe.run(&device, |encoder| {
+            encoder.dispatch(PROBE_GROUPS, 1, 1);
+        });
+        assert_probe(&values, &probe_expected(PROBE_ELEMENTS), "a full dispatch");
+        assert!(
+            !values.contains(&PROBE_SENTINEL),
+            "a full dispatch must leave no element unwritten"
+        );
+
+        probe.destroy(&device);
+    }
+
+    /// `dispatch_indirect` reads its workgroup count out of GPU memory, at the
+    /// offset it was given.
+    ///
+    /// The argument buffer carries a **decoy** at offset zero that would
+    /// dispatch every workgroup. So three different failures are
+    /// distinguishable rather than confusable: a backend that ignored the
+    /// offset dispatches eight groups and overwrites the tail; one that ignored
+    /// the argument buffer entirely writes nothing; a correct one writes
+    /// exactly the front of the buffer and leaves the sentinel behind it.
+    ///
+    /// **Needs a device that executes a shader**, as above.
+    #[cfg(feature = "mtl-e2e")]
+    #[test]
+    #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+    fn an_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
+        /// Workgroups the real arguments ask for. Fewer than [`PROBE_GROUPS`],
+        /// so the difference is visible in the readback.
+        const DISPATCHED_GROUPS: u32 = 2;
+        /// Where the real arguments live. Non-zero, and the decoy sits at zero.
+        const ARGS_OFFSET: u64 = 16;
+
+        let (_instance, device) = open_device();
+        let probe = ComputeProbe::new(&device);
+
+        // `MTLDispatchThreadgroupsIndirectArguments`: three `uint32_t`s, fixed
+        // by Metal's own header — and field for field what Vulkan calls
+        // `VkDispatchIndirectCommand`, which is what lets one compute pass feed
+        // both backends.
+        let mut args_bytes = vec![0u8; ARGS_OFFSET as usize + 12];
+        for (slot, value) in [PROBE_GROUPS, 1, 1].iter().enumerate() {
+            args_bytes[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (slot, value) in [DISPATCHED_GROUPS, 1, 1].iter().enumerate() {
+            let at = ARGS_OFFSET as usize + slot * 4;
+            args_bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let args = device
+            .create_buffer(&BufferDesc {
+                label: Some("dispatch args"),
+                size: args_bytes.len() as u64,
+                usage: BufferUsage::INDIRECT,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("an indirect buffer");
+        device
+            .write_buffer(args, 0, &args_bytes)
+            .expect("HostUpload is what write_buffer is for");
+
+        let values = probe.run(&device, |encoder| {
+            encoder.dispatch_indirect(args, ARGS_OFFSET);
+        });
+
+        let dispatched = DISPATCHED_GROUPS * crcbl_shaders::compute_probe::WORKGROUP_SIZE;
+        assert!(
+            dispatched > 0 && dispatched < PROBE_ELEMENTS,
+            "the indirect dispatch must cover part of the buffer, not none and not all"
+        );
+        assert_probe(&values, &probe_expected(dispatched), "an indirect dispatch");
+        // Said again in its own words, because the two halves fail for
+        // different reasons: the front proves work happened, the tail proves
+        // the *count* came from the buffer at the offset that was named.
+        assert!(
+            values[..dispatched as usize]
+                .iter()
+                .all(|value| *value != PROBE_SENTINEL),
+            "the dispatched workgroups wrote nothing"
+        );
+        assert!(
+            values[dispatched as usize..]
+                .iter()
+                .all(|value| *value == PROBE_SENTINEL),
+            "the workgroups past the indirect count ran anyway — the argument buffer or its \
+             offset was not honoured"
+        );
+
+        device.destroy_buffer(args);
+        probe.destroy(&device);
     }
 }

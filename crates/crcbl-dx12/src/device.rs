@@ -4878,6 +4878,7 @@ pub(crate) mod tests {
                             module: unissued(),
                             entry_point: "cs_main",
                         },
+                        workgroup_size: [64, 1, 1],
                     })
                     .expect_err("no pipeline state objects yet"),
             ),
