@@ -528,6 +528,93 @@ jobs:
         shell: pwsh
         run: crates/crcbl-shell/tests/run-win32-e2e.ps1
 
+  # The only job that drives a D3D12 device this repository chose.
+  #
+  # # What a green run here IS evidence of
+  #
+  # Every test in `crcbl-dx12` opens a real `ID3D12Device`, and the harness pins
+  # it to **WARP** — D3D12's software rasteriser, which ships in Windows and is
+  # this backend's lavapipe. So this covers adapter enumeration against a live
+  # DXGI (including `EnumWarpAdapter` and the software/hardware classification),
+  # device and queue creation, buffers in all three `MemoryLocation`s with
+  # host-visible writes and readback, images, image views, samplers and the
+  # descriptor heaps behind them, command allocator and command-list recording,
+  # `ID3D12Fence` waits, deferred retirement of resources a submission still
+  # references, buffer-to-buffer and buffer-to-image copies, a render-pass clear
+  # read back texel by texel, a vertex-pulled triangle WARP actually drew and
+  # read back, and a `DXGI_SWAP_EFFECT_FLIP_DISCARD` swapchain created, acquired,
+  # presented and resized on a real `HWND`.
+  #
+  # It runs the same tests the `windows-latest` leg of `test-cross-platform`
+  # sweeps up, and that duplication is the point rather than an oversight: the
+  # sweep runs them on `adapters()[0]`, which is whatever DXGI listed first, and
+  # this job runs them on the adapter it names. On today's runner those are the
+  # same device; on a runner that grows a GPU they stop being, and only one of
+  # the two jobs would still be testing the software path. `vk-e2e` pins
+  # lavapipe for exactly this reason.
+  #
+  # # What it is NOT evidence of, in the order a render e2e needs them
+  #
+  # **This backend does not draw a `crcbl` frame, and a green tick here must not
+  # be read as saying it does.** `crates/crcbl/tests/render_e2e.rs` — the
+  # forward renderer's frame, compared against a golden — cannot name this
+  # backend at all, and these are what stand in the way:
+  #
+  #   1. **`crcbl::backend` has no `Dx12` variant.** `GpuBackend` registers
+  #      Metal, Vulkan, wgpu and Null; there is no `CRCBL_GPU=dx12` to pass, so
+  #      the umbrella cannot select this backend even to fail.
+  #   2. **`Features::COMPUTE` and `Features::TIMELINE_SEMAPHORE` are not
+  #      reported**, because `create_compute_pipeline`, `dispatch`,
+  #      `create_semaphore` and `wait_semaphores` all refuse. That makes
+  #      `DeviceDesc::for_adapter` — what a generic caller opens a device with —
+  #      an `UnsupportedFeatures` refusal before any frame is attempted.
+  #   3. **Offscreen surfaces are refused**, and offscreen is what a headless
+  #      render suite renders into. Only an `HWND` swapchain works today.
+  #   4. **Indexed draws and index buffers are refused**, so nothing with a real
+  #      mesh can be recorded; the triangle above is vertex-pulled.
+  #   5. **Indirect and indirect-count draws are refused**, so every adapter
+  #      derives `GeometryPath::IndirectPerBatch` — the floor — whatever it can
+  #      actually do.
+  #   6. **Buffer fills and image-to-image copies are refused**, so a graph pass
+  #      cannot clear or blit a transient.
+  #   7. **Query sets, MSAA resolve attachments and mesh pipelines are refused**,
+  #      which is no GPU timing, no multisampled target and no mesh path.
+  #
+  # An `ImageViewDesc` whose format differs from its image's is refused too, and
+  # that one is a decision rather than a gap — `crcbl_dx12::device` argues it.
+  #
+  # There is nothing to install: `windows-latest` boots into a session with a
+  # window station and a desktop, which is what the swapchain tests need, and
+  # WARP is part of the OS.
+  dx12-e2e:
+    name: dx12 e2e (WARP)
+    runs-on: windows-latest
+    # A Windows runner is roughly 2x slower than a Linux one, and this compiles
+    # the backend's test target from cold.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      # `shell: bash` is Git Bash, which `windows-latest` ships; the harness
+      # needs `mktemp`, `tee`, `sed` and `grep` and nothing a Windows shell
+      # lacks. Its header argues the choice against `run-win32-e2e.ps1`'s.
+      #
+      # It exports `CRCBL_DX12_ADAPTER=warp`, and fails when the suite reports
+      # zero tests, when it was cancelled part-way, when it never named the
+      # adapter it opened, or when the adapter it named is not the software
+      # rasteriser that was pinned.
+      - name: Drive a D3D12 device pinned to WARP
+        shell: bash
+        run: crates/crcbl-dx12/tests/run-dx12-e2e.sh
+
   # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
   # project, the project *compiles*, it lints clean, and it runs its loop
   # headless. `docs/plan/11-cli-headless.md` makes the CLI the substrate every

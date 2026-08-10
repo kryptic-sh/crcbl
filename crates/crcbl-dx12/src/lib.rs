@@ -102,6 +102,13 @@
 //! **The answer still comes from a machine, not from this crate.** Nothing here
 //! has ever executed on the development box, which is Linux.
 //!
+//! `tests/run-dx12-e2e.sh` is how that machine is asked. It pins
+//! `CRCBL_DX12_ADAPTER=warp` so every device this crate's tests open is WARP's
+//! rather than whichever adapter DXGI listed first, checks the pin landed off
+//! the suite's own output, and fails a run that tested nothing — the three
+//! things a plain `cargo nextest run -p crcbl-dx12` cannot tell you. `crcbl-vk`
+//! pins lavapipe through `CRCBL_VK_ICD` for the same reason.
+//!
 //! # Every adapter sits at the geometry floor so far, and that is *this backend* speaking
 //!
 //! [`GeometryPath`](crcbl_hal::GeometryPath) is derived from
@@ -211,6 +218,14 @@ mod device;
 mod handle;
 #[cfg(target_os = "windows")]
 mod instance;
+// Which adapter this crate's device tests open, and the environment variable
+// `tests/run-dx12-e2e.sh` pins it with. Test-only — the seam publishes every
+// adapter and the caller chooses, so nothing above it needs this — and
+// deliberately not Windows-only, because it holds no `windows` type and is the
+// one part of the harness that can be exercised on the Linux box this backend
+// is written on.
+#[cfg(test)]
+mod pin;
 #[cfg(target_os = "windows")]
 mod pipeline;
 // The one module that is not Windows-only, and the crate docs say why: it holds

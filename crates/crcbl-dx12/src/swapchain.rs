@@ -429,6 +429,7 @@ mod tests {
 
     use crate::device::Dx12Device;
     use crate::device::tests::open_device;
+    use crate::instance::tests::pinned_adapter;
 
     /// The window and swapchain size. Small, because nothing looks at the
     /// pixels and a back buffer is real memory on a runner with none to spare.
@@ -655,7 +656,7 @@ mod tests {
     #[test]
     fn a_windowed_swapchain_presents_paces_and_resizes_on_a_real_hwnd() {
         let (instance, device) = open_device();
-        let adapter = instance.adapters()[0].id;
+        let adapter = pinned_adapter(&instance);
         let window = TestWindow::open(EXTENT);
 
         // SAFETY: `window` owns a live `HWND` created on this thread, and it
@@ -799,7 +800,7 @@ mod tests {
     #[test]
     fn a_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
         let (instance, device) = open_device();
-        let adapter = instance.adapters()[0].id;
+        let adapter = pinned_adapter(&instance);
         let window = TestWindow::open(EXTENT);
         // SAFETY: as above — `window` outlives everything made from it.
         let surface = unsafe { instance.create_surface(&window.target()) }
@@ -842,7 +843,7 @@ mod tests {
     #[test]
     fn a_descriptor_flip_discard_rejects_is_refused_before_dxgi_sees_it() {
         let (instance, device) = open_device();
-        let adapter = instance.adapters()[0].id;
+        let adapter = pinned_adapter(&instance);
         let window = TestWindow::open(EXTENT);
         // SAFETY: as above.
         let surface = unsafe { instance.create_surface(&window.target()) }.expect("a surface");

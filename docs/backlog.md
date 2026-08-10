@@ -3604,8 +3604,35 @@ backend parity; it is not.
 
 `crates/crcbl/tests/render_e2e.rs` now exists and closes this for any backend
 that can run it. Its Vulkan arm runs in CI on lavapipe; its Metal arm is blocked
-by the entry above; **D3D12 still has no e2e of any kind**, and the Windows
-runner has a real desktop session, so the runner is not the obstacle there.
+by the entry above.
+
+**Correction, 2026-08-10: "D3D12 has no e2e of any kind" was wrong**, and it was
+repeated twice before anyone checked. `crcbl-dx12`'s device tests run on
+`windows-latest` inside `test-cross-platform`, against a real D3D12 device, and
+they include `a_render_pass_clear_reads_back_the_exact_texels` and
+`a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` — verified passing in
+CI. **D3D12 draws a triangle and reads it back; Metal cannot.** What D3D12
+lacked was a _named_ harness with an adapter pin, which `run-dx12-e2e.sh` and
+the `dx12-e2e` job now add. The lesson is the one this file keeps re-teaching:
+grepping for a job name answers a question about job names, not about coverage.
+
+What still stands between D3D12 and `render_e2e.rs`, in the order that test
+would hit them:
+
+1. **`crcbl::backend` has no `Dx12` variant** — there is no `CRCBL_GPU=dx12` to
+   pass, so the harness could not select it even if everything below worked.
+2. **`Features::COMPUTE` and `TIMELINE_SEMAPHORE` are unreported** and
+   `create_compute_pipeline`/`dispatch`/`create_semaphore`/`wait_semaphores` all
+   refuse, so `DeviceDesc::for_adapter` refuses before a frame starts.
+3. **Offscreen surfaces refused** — only an `HWND` swapchain works.
+4. **Indexed draws and index buffers refused.**
+5. **Indirect and indirect-count draws refused**, so every adapter would derive
+   `GeometryPath::IndirectPerBatch`, the floor.
+6. Buffer fills and image-to-image copies refused; then query sets, MSAA resolve
+   attachments, and mesh pipelines.
+
+Also: `crcbl-dx12`'s crate docs still say bind groups and pipelines refuse,
+which the code contradicts.
 
 ### Owed by GPU-driven draw generation
 

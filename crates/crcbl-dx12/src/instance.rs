@@ -773,6 +773,24 @@ pub(crate) mod tests {
         Dx12Instance::open().expect("a Windows machine reports at least WARP")
     }
 
+    /// The adapter every device this suite opens is opened on.
+    ///
+    /// **Every call site that used to write `adapters()[0]` goes through this**,
+    /// because "the first enumerated adapter" is a different machine's answer on
+    /// every machine: WARP on a runner with no GPU, the discrete card on a
+    /// workstation. `tests/run-dx12-e2e.sh` sets [`crate::pin::PIN_VAR`] so the
+    /// harness run is the one it says it is, and [`crate::pin::resolve`] refuses
+    /// rather than falling back — see that module for why a fallback is the
+    /// failure and not the recovery.
+    ///
+    /// Panics with the resolver's own explanation, which carries the whole
+    /// enumeration: a pin that missed is diagnosed by what was there instead.
+    pub(crate) fn pinned_adapter(instance: &Dx12Instance) -> AdapterId {
+        let adapters = instance.adapters();
+        let pin = std::env::var(crate::pin::PIN_VAR).ok();
+        crate::pin::resolve(pin.as_deref(), &adapters).unwrap_or_else(|why| panic!("{why}"))
+    }
+
     /// A device request this backend can actually satisfy today.
     ///
     /// [`DeviceDesc::for_adapter`] requires compute and a timeline semaphore,
@@ -1157,17 +1175,47 @@ pub(crate) mod tests {
         }
     }
 
+    /// **The line `tests/run-dx12-e2e.sh` reads its verdict off.**
+    ///
+    /// A pin is worth having only if something checks it landed, and that check
+    /// cannot be the pin's own code. [`crate::pin::PIN_VAR`] reaching the
+    /// harness's shell and not this process — a stale binary, a wrapper that
+    /// resets the environment, a runner that does not pass it through — resolves
+    /// to the first adapter with nothing anywhere saying so, which is the
+    /// silent-fallback failure the pin exists to prevent wearing a different
+    /// hat. So the adapter this suite actually opened is printed, in the format
+    /// [`AdapterRecord::report`] already defines, and the harness fails when the
+    /// line is absent or names something other than what it pinned.
+    /// `crates/crcbl-vk/tests/run-vk-e2e.sh` makes exactly this check on the
+    /// driver its ICD pin asked for, and for exactly this reason.
+    ///
+    /// nextest captures a passing test's stdout, so read it with
+    /// `--success-output immediate` — which is what the harness passes.
+    #[test]
+    fn the_pinned_adapter_opens_a_device_and_names_itself() {
+        let instance = open();
+        let adapter = pinned_adapter(&instance);
+        let record = instance
+            .records()
+            .iter()
+            .find(|record| record.info.id == adapter)
+            .expect("the pin resolved against this same enumeration");
+        println!("crcbl-dx12 e2e: device on {}", record.report());
+        instance
+            .create_device(&desc(adapter))
+            .expect("a D3D12 device opens on the pinned adapter with no required features");
+    }
+
     /// A device now opens, and arrives through exactly the request/poll pair the
     /// seam specifies — including the second poll being a caller bug rather than
     /// a second device.
     #[test]
     fn a_device_opens_on_the_first_poll_and_only_once() {
         let instance = open();
-        let adapters = instance.adapters();
-        assert!(!adapters.is_empty(), "nothing to check");
+        let adapter = pinned_adapter(&instance);
 
         let mut pending = instance
-            .request_device(&desc(adapters[0].id))
+            .request_device(&desc(adapter))
             .expect("a D3D12 device opens with no required features");
         assert_eq!(pending.backend(), BackendKind::Dx12);
 
@@ -1195,11 +1243,10 @@ pub(crate) mod tests {
     #[test]
     fn the_default_device_desc_is_refused_for_the_gap() {
         let instance = open();
-        let adapters = instance.adapters();
-        assert!(!adapters.is_empty(), "nothing to check");
+        let adapter = pinned_adapter(&instance);
 
         let error = instance
-            .request_device(&DeviceDesc::for_adapter(adapters[0].id))
+            .request_device(&DeviceDesc::for_adapter(adapter))
             .expect_err("this backend reports neither compute nor a timeline semaphore");
         let HalError::UnsupportedFeatures { missing } = error else {
             panic!("expected a feature gap, got {error:?}");
@@ -1219,10 +1266,9 @@ pub(crate) mod tests {
     #[test]
     fn a_compatible_surface_is_refused_as_an_unresolvable_handle() {
         let instance = open();
-        let adapters = instance.adapters();
-        assert!(!adapters.is_empty(), "nothing to check");
+        let adapter = pinned_adapter(&instance);
 
-        let mut with_surface = desc(adapters[0].id);
+        let mut with_surface = desc(adapter);
         // Carries no instance tag, so no instance ever issued it — which is a
         // different answer from a *real* surface's, and the reason
         // `open_device` resolves the handle rather than refusing every one.
@@ -1245,10 +1291,9 @@ pub(crate) mod tests {
     fn a_device_outlives_the_instance_that_made_it() {
         let device = {
             let instance = open();
-            let adapters = instance.adapters();
-            assert!(!adapters.is_empty(), "nothing to check");
+            let adapter = pinned_adapter(&instance);
             instance
-                .create_device(&desc(adapters[0].id))
+                .create_device(&desc(adapter))
                 .expect("a D3D12 device opens with no required features")
         };
         // The instance is gone; the `Arc` inside the device is what keeps its
@@ -1382,7 +1427,7 @@ pub(crate) mod tests {
         );
 
         let error = instance
-            .surface_caps(stale, adapters[0].id)
+            .surface_caps(stale, pinned_adapter(&instance))
             .expect_err("no instance issued that surface handle");
         assert!(
             matches!(error, HalError::InvalidHandle { kind, .. } if kind == "surface"),

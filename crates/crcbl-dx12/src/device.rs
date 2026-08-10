@@ -2831,7 +2831,7 @@ pub(crate) mod tests {
     };
 
     use crate::Dx12Instance;
-    use crate::instance::tests::{desc as device_desc, open as open_instance};
+    use crate::instance::tests::{desc as device_desc, open as open_instance, pinned_adapter};
 
     /// Every [`MemoryLocation`] the seam has, so the buffer tests cover all
     /// three rather than the one that was convenient.
@@ -2843,12 +2843,15 @@ pub(crate) mod tests {
 
     /// A device, opened through this crate's own type so a test can reach the
     /// pools and heaps underneath it.
+    ///
+    /// On the adapter [`pinned_adapter`] names rather than on whichever one DXGI
+    /// listed first, so a `CRCBL_DX12_ADAPTER=warp` run is a WARP run in every
+    /// test and not only in the ones that happened to look.
     pub(crate) fn open_device() -> (Dx12Instance, Dx12Device) {
         let instance = open_instance();
-        let adapters = instance.adapters();
-        assert!(!adapters.is_empty(), "a Windows machine has at least WARP");
+        let adapter = pinned_adapter(&instance);
         let device = instance
-            .open_device(&device_desc(adapters[0].id))
+            .open_device(&device_desc(adapter))
             .expect("a D3D12 device opens with no required features");
         (instance, device)
     }
@@ -4153,13 +4156,17 @@ pub(crate) mod tests {
     #[test]
     fn device_caps_match_the_adapter_they_came_from() {
         let instance = open_instance();
-        let adapters = instance.adapters();
-        assert!(!adapters.is_empty(), "nothing to check");
+        let adapter = pinned_adapter(&instance);
+        let info = instance
+            .adapters()
+            .into_iter()
+            .find(|info| info.id == adapter)
+            .expect("the pin resolved against this same enumeration");
         let device = instance
-            .open_device(&device_desc(adapters[0].id))
+            .open_device(&device_desc(adapter))
             .expect("a D3D12 device opens with no required features");
-        assert_eq!(device.caps().features, adapters[0].caps.features);
-        assert_eq!(device.caps().limits, adapters[0].caps.limits);
+        assert_eq!(device.caps().features, info.caps.features);
+        assert_eq!(device.caps().limits, info.caps.limits);
     }
 
     /// A buffer of every memory location creates and destroys, and a destroyed
@@ -4296,13 +4303,12 @@ pub(crate) mod tests {
     #[test]
     fn a_handle_from_another_device_is_foreign_not_merely_unresolvable() {
         let instance = open_instance();
-        let adapters = instance.adapters();
-        assert!(!adapters.is_empty(), "nothing to check");
+        let adapter = pinned_adapter(&instance);
         let a = instance
-            .open_device(&device_desc(adapters[0].id))
+            .open_device(&device_desc(adapter))
             .expect("device A");
         let b = instance
-            .open_device(&device_desc(adapters[0].id))
+            .open_device(&device_desc(adapter))
             .expect("device B");
 
         let on_a = a
