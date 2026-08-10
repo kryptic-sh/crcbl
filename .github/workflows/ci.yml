@@ -614,6 +614,29 @@ jobs:
       - name: Drive a D3D12 device pinned to WARP
         shell: bash
         run: crates/crcbl-dx12/tests/run-dx12-e2e.sh
+      # # A frame through ForwardRenderer, on D3D12
+      #
+      # Everything above this line is the D3D12 **HAL**. This is the render
+      # layer: `crates/crcbl/tests/render_e2e.rs` draws the cube scene through
+      # `ForwardRenderer` and compares it against the golden the `vk e2e` job
+      # re-derives on lavapipe. Until the slices below it landed, D3D12 refused
+      # somewhere in `ForwardRenderer::build` — offscreen surfaces, then compute
+      # pipelines, then per-stage DXIL, then indexed and indirect draws, then
+      # dynamic offsets.
+      #
+      # **The golden is the risky part, not the frame.** It was blessed on
+      # lavapipe and is compared with `Tolerance::RASTERISER`, calibrated for
+      # the radv/lavapipe difference. WARP is a third rasteriser and nothing
+      # here has measured it. A failure that reports a large pixel delta is a
+      # tolerance question; one that reports a structural mismatch, a blank
+      # frame or a refusal is a real finding about the backend. The comparison
+      # prints both, so the first run distinguishes them.
+      - name: Draw a frame through ForwardRenderer on WARP
+        shell: bash
+        env:
+          CRCBL_GPU: dx12
+          CRCBL_DX12_ADAPTER: warp
+        run: crates/crcbl/tests/run-render-e2e.sh
 
   # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
   # project, the project *compiles*, it lints clean, and it runs its loop
