@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Draw one frame through the engine's own renderer on a named backend and
-# compare it against the checked-in golden.
+# Draw every scene through the engine's own renderers on a named backend and
+# compare each frame against its checked-in golden.
 #
 #   CRCBL_GPU=mtl crates/crcbl/tests/run-render-e2e.sh [extra nextest args…]
 #
@@ -9,8 +9,14 @@
 # `docs/backlog.md`'s "The render layer has only ever run on Vulkan and wgpu".
 # `crcbl-mtl`'s own suite covers the Metal HAL and has never constructed a
 # `ForwardRenderer`; `crcbl-vk`'s `vk_e2e/mesh.rs` covers the renderer and only
-# on Vulkan. `tests/render_e2e.rs` is the same frame on whichever backend
+# on Vulkan. `tests/render_e2e.rs` is the same frames on whichever backend
 # `CRCBL_GPU` names, so the renderer stops being a Vulkan-only claim.
+#
+# One test per scene — cube, sprite and UI — because `sprite.slang` and
+# `ui.slang` are the two shaders that have diverged per target in this repo, and
+# before those scenes were here they were compared across targets only by
+# `run-cross-backend-e2e.sh`, which runs Vulkan against wgpu. See
+# `docs/backlog.md`'s "the four-backend compare is more scenes in `render_e2e`".
 #
 # # Why the backend must be named
 #
@@ -114,8 +120,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# `--success-output immediate` because the two lines this suite prints — the
-# selected `GeometryPath`/`BindingModel`/`LightingPath`, and the golden's own
+# `--success-output immediate` because the lines this suite prints — the
+# selected `GeometryPath`/`BindingModel`/`LightingPath`, and each golden's own
 # numbers — are only interesting on a green run, which is exactly the run
 # nextest captures them on.
 set +e
@@ -143,11 +149,11 @@ if ! crcbl_nextest_summary "${LOG}.plain" "crcbl render e2e" \
     exit 1
 fi
 
-# Which adapter the frame was drawn on, from the suite rather than from the
-# variable this script exported.
-# `the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden` is
-# what prints it; if that test stops printing it, this is what says so rather
-# than a green run quietly losing the check.
+# Which adapter the frames were drawn on, from the suite rather than from the
+# variable this script exported. Every scene's test prints this line and they
+# all open the same device, so the first one is read and the rest are the same
+# answer; if the tests stop printing it, this is what says so rather than a
+# green run quietly losing the check.
 ADAPTER="$(grep -F 'crcbl render e2e: device on adapter ' "${LOG}.plain" | head -1 || true)"
 if [ -z "$ADAPTER" ]; then
     echo "crcbl render e2e: the suite never named the adapter it drew on." >&2
@@ -180,4 +186,4 @@ if [ -n "${CRCBL_ADAPTER:-}" ]; then
     esac
 fi
 
-echo "crcbl render e2e: the forward renderer drew a frame on $CRCBL_GPU"
+echo "crcbl render e2e: every scene drew and matched its golden on $CRCBL_GPU"

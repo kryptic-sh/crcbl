@@ -4796,3 +4796,51 @@ another instance. The three new e2e tests cover buffers, the queue handle and
 surfaces at `Instance` level only. Closing it needs either a windowed test
 target or an offscreen swapchain crossed between two devices — the latter is
 cheap and was simply not in this task's scope.
+
+## What the three-scene `render_e2e` does and does not prove
+
+`docs/backlog.md`'s "Decided: the four-backend compare is more scenes in
+`render_e2e`, not a new job" is implemented: `crates/crcbl/tests/render_e2e.rs`
+now has one `#[test]` per `Scene` — cube, sprite and UI — each with its own
+golden under `crates/crcbl/tests/golden/`. What follows is what that run did not
+settle.
+
+**Metal and D3D12 remain unverified.** Both goldens were blessed on lavapipe and
+both hold bit-identically on `CRCBL_GPU=vk` and `CRCBL_GPU=wgpu` against the
+same ICD, which is the only cross-target evidence obtainable on a Linux machine.
+The `mtl-e2e` and `dx12-e2e` jobs are the first time `sprite.slang` and
+`ui.slang` will be compared against anything on MSL or DXIL, and nobody has seen
+those frames. A large pixel delta there is a tolerance question; a structural
+mismatch or a failed slot assertion is a finding about the backend. The
+comparison prints enough to tell them apart, and
+`every_sprite_slot_is_painted_and_the_gaps_are_not` is the assertion that names
+the `SV_InstanceID` failure mode directly rather than as a summary number.
+
+**`Tolerance::RASTERISER` absorbs a change confined to a small part of the
+frame, and this was measured rather than reasoned about.** Perturbing
+`SPRITE_TINT`'s blue factor in `crates/crcbl/src/screenshot.rs` — a plainly
+visible recolour of one quarter of one sprite — produced
+`361 pixel(s) differ at all (0.7345%), max channel delta 40, 361 over tolerance (0.7345%), mean abs error 0.0734, rmse 1.7140, ssim 0.999908`
+and **passed**, because `max_failing_ratio` is 2% and the structural floor is
+0.99. Shifting the same sprite by 5 world units failed as it should. This is a
+property of the tolerance the cube golden has always run under, not something
+the new scenes introduced, and it is not being changed here: tightening
+`max_failing_ratio` would have to be justified against the radv-versus-lavapipe
+numbers `crcbl-golden`'s docs record, which is a separate piece of work with its
+own measurements. Recorded so the next person does not assume a green golden
+means a byte-identical frame.
+
+**The per-scene anti-vacuity checks are the part with real headroom, and the
+colour floors are not.** The three floors are the cross-backend harness's own
+`CRCBL_CROSS_MIN_COLORS_*` numbers; measured on the blessed frames at 256x192,
+the sprite scene has 17 distinct colours against a floor of 16 and the UI scene
+has 7 against 6. One colour of headroom each is deliberate — that is how those
+floors were calibrated — but it means a scene edit that removes a colour trips
+the floor before it reaches the golden, which is what happened while proving the
+checks can fail.
+
+**The four CI steps are still named "Draw a frame through ForwardRenderer".**
+Three frames now, through three renderers, and only the cube's goes through
+`ForwardRenderer`. The step comments were corrected; the names were left alone
+because they are the labels a run's history is read by and nothing greps them.
+Rename them if the churn is ever worth it.

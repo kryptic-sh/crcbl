@@ -842,14 +842,14 @@ jobs:
           CRCBL_VK_SYNC_VALIDATION: '1'
         run: crates/crcbl-vk/tests/run-vk-e2e.sh
       # **The Vulkan arm of `crates/crcbl/tests/render_e2e.rs`, and the reason
-      # its golden can be trusted.** That test draws the cube scene through
-      # `ForwardRenderer` on whichever backend `CRCBL_GPU` names, and it exists
-      # for the Metal arm in the `mtl-e2e` job — but a golden only stays honest
-      # while something keeps re-deriving it, and the Metal arm currently
-      # cannot (see that job for why). This step is what keeps it from rotting:
-      # the reference was blessed on lavapipe, so this comparison is
-      # bit-identical and any drift is loud rather than absorbed by the
-      # rasteriser tolerance.
+      # its goldens can be trusted.** That test draws the cube, sprite and UI
+      # scenes through the engine's own renderers on whichever backend
+      # `CRCBL_GPU` names, and it exists for the Metal arm in the `mtl-e2e` job
+      # — but a golden only stays honest while something keeps re-deriving it,
+      # and the Metal arm currently cannot (see that job for why). This step is
+      # what keeps them from rotting: the references were blessed on lavapipe,
+      # so this comparison is bit-identical and any drift is loud rather than
+      # absorbed by the rasteriser tolerance.
       #
       # `CRCBL_VK_ICD`, not `VK_DRIVER_FILES` written out here. This step first
       # exported Debian's `lvp_icd.x86_64.json` directly and failed with
@@ -1603,10 +1603,12 @@ jobs:
 
       # # The renderer on Metal
       #
-      # `crates/crcbl/tests/render_e2e.rs` draws one frame of the cube scene
-      # through `ForwardRenderer` and compares it against the golden the `vk e2e`
+      # `crates/crcbl/tests/render_e2e.rs` draws one frame of each of the cube,
+      # sprite and UI scenes and compares them against the goldens the `vk e2e`
       # job re-derives on lavapipe. It closes `docs/backlog.md`'s "the render
-      # layer runs on Vulkan and wgpu" on a second backend.
+      # layer runs on Vulkan and wgpu" on a second backend — and the sprite and
+      # UI frames are the first time `sprite.slang` and `ui.slang` are compared
+      # against anything on MSL at all.
       #
       # **It ran once before, on `878f582`, and hung** — every draw this backend
       # recorded did, because `bind_graphics_pipeline` passed nil to
