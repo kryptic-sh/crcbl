@@ -58,10 +58,30 @@ crcbl_pin_vk_icd() {
         CRCBL_VK_ICD="$found"
     fi
 
+    export CRCBL_VK_ICD
+
+    # **The loader is a native Windows process and wants a native path.** Under
+    # Git Bash the manifest arrives as `C:/lavapipe/...`, and the loader took
+    # that as no pin at all: its first run said
+    # `windows_read_data_files_in_registry: Registry lookup failed to get ICD
+    # manifest files` and then `vkCreateInstance: Found no drivers!` — the
+    # message it prints when the variable was never seen, not when it was seen
+    # and rejected. Both spellings then answered `ERROR_INCOMPATIBLE_DRIVER`,
+    # which is also what a genuinely incompatible manifest gives, so the failure
+    # named neither the path nor the form.
+    local icd_native="$CRCBL_VK_ICD"
+    case "$(uname -s)" in
+        MINGW* | MSYS* | CYGWIN*)
+            if command -v cygpath >/dev/null 2>&1; then
+                icd_native="$(cygpath -w "$CRCBL_VK_ICD")"
+                echo "${label}: native ICD path $icd_native"
+            fi
+            ;;
+    esac
+
     # Both spellings: `VK_DRIVER_FILES` is the current one and
     # `VK_ICD_FILENAMES` is what older loaders read.
-    export CRCBL_VK_ICD
-    export VK_DRIVER_FILES="$CRCBL_VK_ICD"
-    export VK_ICD_FILENAMES="$CRCBL_VK_ICD"
+    export VK_DRIVER_FILES="$icd_native"
+    export VK_ICD_FILENAMES="$icd_native"
     echo "${label}: pinned ICD $CRCBL_VK_ICD"
 }
