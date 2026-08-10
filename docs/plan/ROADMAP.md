@@ -447,9 +447,9 @@ what this sample is meant to _reveal_ the need for.
    games, the same shape, the same reason — which is what bought
    `SpriteRenderer`, an instanced world-space pass, rather than a third
    workaround. Both samples now draw their worlds through it and neither uses
-   `ForwardRenderer` at all. **P7 still owes the 3D half** — instance deltas,
-   GPU culling and indirect draws; this finding is what says a 2D game could not
-   wait for it.
+   `ForwardRenderer` at all. This finding is what says a 2D game could not wait
+   for the 3D half. **That half has since landed** — see the 2026-08-10 entry
+   below; what P7 still owes is meshlets, QEM LOD and the material table.
 
 2. **The browser entry point is per-sample and is the same file twice.**
    `apps/flappy/src/web.rs` is `apps/breakout/src/web.rs` with a different
@@ -1298,6 +1298,42 @@ equivalent here, and that is a coverage gap to state rather than to approximate
 Metal and DX12, and the sample/editor bring-up on both platforms. It inherits a
 shell that already works there instead of writing one. (The MoltenVK spike gate
 it also kept was cancelled on 2026-08-05 — Apple platforms are Metal only.)
+
+## Progress (P7's GPU-driven half, 2026-08-10)
+
+**§3.3 is wired end to end and the frame draws through it.** The forward frame
+is now `cull` → `draw-args` → `forward` → `tonemap`, with every barrier computed
+by the render graph rather than written by hand. What landed, in order:
+
+1. **Geometry and instance pools** (§3.1, §3.2) with timeline-gated upload.
+2. **A GPU mesh table** — `{base_vertex, base_index, index_count, bounds}` per
+   resident mesh, indexed by `GpuInstance::mesh`, which stopped being reserved.
+3. **Frustum culling in a compute pass**, checked against a CPU reference cull
+   that is the oracle rather than a second implementation nobody reads.
+4. **Instance liveness** — `GpuInstance::flags` bit 0, so a removed slot stops
+   being drawn instead of being culled on stale contents.
+5. **Indirect draw generation**, per bucket rather than per instance, with both
+   `GeometryPath` arms run on real hardware.
+
+**Metal compute was the blocker and is fixed.** `crcbl-mtl` refused every
+dispatch; `ComputePipelineDesc` now carries the workgroup size Metal needs at
+the call, and the macOS CI job runs the dispatch and indirect-dispatch tests on
+a real device.
+
+Two things worth carrying forward, both in `docs/backlog.md`:
+
+- **A golden is necessary and not sufficient at this stage.** Breaking
+  `first_index` to zero left the cube golden bit-identical; only the argument
+  readback caught it. Draw-generation changes need the arguments compared, not
+  just the picture.
+- **The cross-backend gate caught its first real divergence** — a pooled mesh at
+  a non-zero base vertex rendered correctly on wgpu and corrupted on Vulkan from
+  one source, because the four targets fold the base into `SV_VertexID`
+  differently. The rule that came out of it (every draw passes zero for both
+  bases) is in `mesh.slang`'s header with the measured table.
+
+Still owed by P7: meshlet geometry as the primary path (§3.5), QEM cluster LOD
+(topic 25), the material table (§3.2), and the P7B/P7C lighting work.
 
 ## Correction (capabilities, scope and networking, 2026-08-09)
 
