@@ -50,16 +50,22 @@
 //! [`Instance::request_device`] and
 //! [`Device::poll_readback`].
 //!
-//! # Open gap: a screenshot does not say which adapter drew it
+//! # Which adapter drew it
 //!
-//! This module picks `adapters().first()` and never reports which one that was,
-//! and `crcbl screenshot` installs no logger, so the backends' own adapter lines
-//! go nowhere. `run-vk-e2e.sh` and `run-wgpu-e2e.sh` both read that line out of
-//! their suites precisely so a pinned ICD the loader ignored is caught; the
-//! cross-backend harness (`tests/run-cross-backend-e2e.sh`) cannot, and pins by
-//! manifest path alone. Recorded here rather than worked around: closing it
-//! means either a `--json` field naming the adapter or a logger in the CLI, and
-//! both are `crcbl-cli`'s call to make.
+//! This module used to pick `adapters().first()` and never report which one
+//! that was. On `windows-latest` that adapter is not a usable device, and the
+//! frame died on its first buffer with `DXGI_ERROR_DEVICE_REMOVED` before
+//! anything was drawn — see [`crate::adapter`], which is now what chooses.
+//! [`crate::adapter::ADAPTER_ENV_VAR`] names a device class, a miss is a hard
+//! failure rather than a fallback, and [`OffscreenSetup::adapter`] reports what
+//! answered so a harness can check the pin landed.
+//!
+//! **The remaining half is the CLI's.** `crcbl screenshot` installs no logger,
+//! so the backends' own adapter lines still go nowhere and the subcommand prints
+//! nothing about the device; closing that means a `--json` field naming the
+//! adapter, which is `crcbl-cli`'s call to make. `tests/run-render-e2e.sh` reads
+//! [`OffscreenSetup::adapter`] out of its suite instead, the way `run-vk-e2e.sh`
+//! reads the adapter line out of its own.
 
 use std::time::Duration;
 
@@ -425,6 +431,9 @@ pub struct OffscreenSetup {
     swapchain: SwapchainHandle,
     queue: QueueHandle,
     format: Format,
+    /// The adapter the device was created on, kept so [`Self::adapter`] can
+    /// answer after the enumeration it came from has been dropped.
+    adapter: crate::hal::AdapterInfo,
     /// The renderer for the [`Scene`] this setup was opened with, and whatever
     /// that scene draws.
     scene: SceneState,
@@ -441,6 +450,15 @@ pub enum OffscreenError {
     /// No adapter, no queue, no format, or a surface-cap query failed.
     #[error("device not usable: {0}")]
     Unusable(&'static str),
+
+    /// [`ADAPTER_ENV_VAR`](crate::adapter::ADAPTER_ENV_VAR) named a device class
+    /// this backend's enumeration does not have exactly one of, or a word that
+    /// is not a class at all.
+    ///
+    /// Never a fallback: a frame drawn on an adapter nobody asked for is a green
+    /// run that is evidence about the wrong device.
+    #[error("{0}")]
+    AdapterPin(#[from] crate::adapter::PinMiss),
 
     /// A HAL call failed.
     #[error("HAL: {0}")]
@@ -485,10 +503,16 @@ impl OffscreenSetup {
     /// [`Scene::default`] is [`Scene::Cube`], the frame this module drew before
     /// there was anything to choose between.
     ///
+    /// Which backend is [`crate::backend`]'s decision and which adapter inside
+    /// it is [`crate::adapter`]'s; [`Self::backend`] and [`Self::adapter`]
+    /// report what both of them answered.
+    ///
     /// Returns `Err` if the frame is not between `1x1` and
     /// [`MAX_DIMENSION`]`x`[`MAX_DIMENSION`], if no GPU is available (lavapipe,
-    /// swiftshader, or a real card), if the device is unusable, or if any HAL
-    /// call fails.
+    /// swiftshader, or a real card), if
+    /// [`ADAPTER_ENV_VAR`](crate::adapter::ADAPTER_ENV_VAR) names no adapter
+    /// this backend enumerated, if the device is unusable, or if any HAL call
+    /// fails.
     pub fn open(width: u32, height: u32, scene: Scene) -> Result<Self, OffscreenError> {
         // Checked before the backend is opened, so an absurd `--size` costs a
         // comparison rather than a device.
@@ -511,9 +535,10 @@ impl OffscreenSetup {
         };
 
         let adapters = instance.adapters();
-        let adapter = adapters
-            .first()
-            .ok_or(OffscreenError::Unusable("no adapter"))?;
+        // Not `.first()`: the first enumerated adapter is not a device that
+        // works on every machine, and a frame drawn on one nobody named is not
+        // evidence. See [`crate::adapter`] for the measurement that moved this.
+        let adapter = crate::adapter::select(crate::adapter::pin().as_deref(), &adapters)?;
 
         let caps = instance
             .surface_caps(surface, adapter.id)
@@ -558,6 +583,7 @@ impl OffscreenSetup {
             swapchain,
             queue,
             format,
+            adapter: adapter.clone(),
             scene,
             pool: TransientPool::new(),
         })
@@ -587,6 +613,21 @@ impl OffscreenSetup {
     #[must_use]
     pub fn backend(&self) -> crate::hal::BackendKind {
         self.device.backend()
+    }
+
+    /// Which adapter of that backend's enumeration the device was created on.
+    ///
+    /// The third of the same family as [`Self::backend`] and [`Self::caps`],
+    /// and the one whose absence cost a CI run: this module took
+    /// `adapters().first()` and said nothing, so a frame that died with
+    /// `DXGI_ERROR_DEVICE_REMOVED` named neither the adapter it had opened nor
+    /// the one it should have. A harness that pins
+    /// [`ADAPTER_ENV_VAR`](crate::adapter::ADAPTER_ENV_VAR) reads this back to
+    /// check the pin landed — a variable that never reached the process and a
+    /// pin that was honoured look identical from outside.
+    #[must_use]
+    pub const fn adapter(&self) -> &crate::hal::AdapterInfo {
+        &self.adapter
     }
 
     /// What the opened device reported it can do.

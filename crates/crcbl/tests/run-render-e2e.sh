@@ -35,6 +35,32 @@
 # so the failure named neither the file nor the mistake. Resolving it here is
 # what stops the next caller repeating that.
 #
+# # Pinning an adapter
+#
+# `CRCBL_ADAPTER` names a device *class* — `cpu`, `integrated`, `discrete` or
+# `virtual` — and `crcbl::adapter` resolves it, refusing rather than falling back
+# when this machine has no adapter of that class. Leave it unset and the frame is
+# drawn on whatever the backend enumerated first, which is what every run before
+# this pin existed did.
+#
+# It is not optional on a machine whose first adapter is not a working device.
+# That is `windows-latest`: the D3D12 HAL suite passes 155/155 on WARP and the
+# frame that followed died on its first buffer with `DXGI_ERROR_DEVICE_REMOVED`,
+# before drawing anything, because nothing above the seam could say which adapter
+# it meant.
+#
+# Set, and this script checks it *arrived* — off the suite's own output rather
+# than off the variable it exported, exactly as `run-dx12-e2e.sh` does. A
+# variable that never reached the test process and a pin that was honoured look
+# identical from outside: in both cases the suite is green.
+#
+# # ENVIRONMENT
+#
+#   CRCBL_GPU       Which backend draws. Required; there is no default.
+#   CRCBL_ADAPTER   Which adapter class inside it. Optional; unset takes the
+#                   first one enumerated.
+#   CRCBL_VK_ICD    Which Vulkan driver, when `CRCBL_GPU=vk`. See above.
+#
 # # The zero-tests check is the point
 #
 # `docs/plan/12-testing.md` calls a silently-skipped e2e suite a known trap, and
@@ -67,6 +93,11 @@ fi
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$REPO"
+
+# Echoed rather than defaulted: unset means "whatever this machine enumerated
+# first", which is a legitimate thing to run deliberately and is what every
+# caller before the pin existed got.
+echo "crcbl render e2e: CRCBL_ADAPTER=${CRCBL_ADAPTER:-<unset>}"
 
 LOG="$(mktemp -t crcbl-render-e2e.XXXXXX.log)"
 cleanup() {
@@ -105,6 +136,43 @@ if ! grep -qE "Summary \[[^]]*\] +[1-9][0-9]* tests? run" "${LOG}.plain"; then
     echo "  this script exists to catch — the feature gate or the ignore" >&2
     echo "  attribute stopped matching the test." >&2
     exit 1
+fi
+
+# Which adapter the frame was drawn on, from the suite rather than from the
+# variable this script exported.
+# `the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden` is
+# what prints it; if that test stops printing it, this is what says so rather
+# than a green run quietly losing the check.
+ADAPTER="$(grep -F 'crcbl render e2e: device on adapter ' "${LOG}.plain" | head -1 || true)"
+if [ -z "$ADAPTER" ]; then
+    echo "crcbl render e2e: the suite never named the adapter it drew on." >&2
+    echo "  The test must print it and this script must be able to find it, or a" >&2
+    echo "  green run claims evidence about a device nobody wrote down." >&2
+    exit 1
+fi
+# `#*` rather than `#`, because the line arrives indented inside nextest's
+# captured-output block.
+echo "crcbl render e2e: ${ADAPTER#*crcbl render e2e: }"
+
+# The pin the test process actually saw is printed on that same line, so this
+# compares two strings rather than re-deriving the class vocabulary in bash. A
+# mismatch means the variable did not reach the test process — the one failure
+# `crcbl::adapter` cannot diagnose for itself, because from inside an unset pin
+# and no pin are the same thing.
+if [ -n "${CRCBL_ADAPTER:-}" ]; then
+    case "$ADAPTER" in
+        *"(CRCBL_ADAPTER=${CRCBL_ADAPTER})"*) ;;
+        *)
+            echo "crcbl render e2e: ######################################################" >&2
+            echo "crcbl render e2e: # THE PIN MISSED. THIS RUN IS NOT THE RUN IT SAYS.   #" >&2
+            echo "crcbl render e2e: ######################################################" >&2
+            echo "crcbl render e2e: CRCBL_ADAPTER=${CRCBL_ADAPTER} was exported and the suite" >&2
+            echo "  reported the line above instead. The variable did not reach the test" >&2
+            echo "  process, so the frame was drawn on whatever was enumerated first and" >&2
+            echo "  every result above is evidence about a device nobody chose." >&2
+            exit 1
+            ;;
+    esac
 fi
 
 echo "crcbl render e2e: the forward renderer drew a frame on $CRCBL_GPU"

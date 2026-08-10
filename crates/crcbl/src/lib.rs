@@ -25,6 +25,7 @@
 //! crcbl::math    → glam          the maths the renderer's types are spelled in
 //! crcbl::log     → log           the logging facade the engine records through
 //! crcbl::backend → (this crate)  runtime GPU backend selection
+//! crcbl::adapter → (this crate)  which adapter inside that backend
 //! crcbl::engine  → (this crate)  the shell↔HAL join every sample repeats
 //! ```
 //!
@@ -159,6 +160,8 @@ pub use log;
 /// [`crcbl-ui`](crcbl_ui): immediate-mode UI toolkit — draw lists, glyph atlas,
 /// HUD skeleton, and widgets.
 pub use crcbl_ui as ui;
+
+pub mod adapter;
 
 pub mod args;
 

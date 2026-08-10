@@ -42,6 +42,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`CRCBL_ADAPTER` picks which adapter a screenshot opens a device on**, for
+  every backend. It names a device _class_ — `cpu`, `integrated`, `discrete` or
+  `virtual` — rather than an index, because an index is a position in one
+  machine's enumeration and moves when a GPU is added or removed. Unset keeps
+  the previous behaviour, whatever the backend enumerated first. A pin that
+  matches no adapter, matches more than one, or is not a class at all is a hard
+  failure naming what _was_ enumerated — never a fallback, for the reason
+  `CRCBL_VK_ICD` exists: a harness that asked for the software rasteriser and
+  silently got a discrete GPU produces a green run about a device nobody chose.
+  The resolver is `crcbl::adapter` (`select`, `pin`, `device_type_from_name`)
+  and `crates/crcbl/tests/run-render-e2e.sh` passes it through.
+
+  The measurement behind it: `crcbl::screenshot` took `adapters().first()`, and
+  on `windows-latest` that adapter is not a usable device — a D3D12 frame died
+  on its first buffer with `DXGI_ERROR_DEVICE_REMOVED` in a job whose D3D12 HAL
+  suite had just passed 155/155 on WARP. `crcbl-dx12`'s own `CRCBL_DX12_ADAPTER`
+  is unchanged and still serves that crate's suite; it is `#[cfg(test)]` and
+  could not reach a harness in another crate.
+
+- **`OffscreenSetup::adapter`** returns the `AdapterInfo` the frame's device was
+  created on, beside the existing `backend()` and `caps()`. A screenshot could
+  not say which of a machine's adapters drew it, so a pin that never reached the
+  process and one that was honoured looked identical from outside.
+
 - **`crcbl-dx12` honours dynamic offsets.** A
   `BindingKind::UniformBuffer { dynamic: true }` or its storage-buffer twin was
   refused at `create_bind_group_layout`, and `bind_group` refused a non-empty

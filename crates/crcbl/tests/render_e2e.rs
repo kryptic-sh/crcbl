@@ -40,6 +40,7 @@
 
 #![cfg(feature = "render-e2e")]
 
+use crcbl::adapter::{ADAPTER_ENV_VAR, device_type_from_name};
 use crcbl::backend::{BACKEND_ENV_VAR, GpuBackend};
 use crcbl::hal::Format;
 use crcbl::screenshot::{OffscreenSetup, Scene};
@@ -83,21 +84,30 @@ fn channel_order(format: Format) -> ChannelOrder {
 /// 1. The backend that opened is the one that was asked for. Every backend
 ///    draws this scene identically by construction, so a Metal run that fell
 ///    back to wgpu would produce a passing frame and prove nothing about Metal.
-/// 2. The device's [`GeometryPath`](crcbl::hal::GeometryPath) is reported, and
+/// 2. The adapter it opened is the class
+///    [`ADAPTER_ENV_VAR`](crcbl::adapter::ADAPTER_ENV_VAR) named, and both the
+///    adapter and the pin are printed. The same argument one layer down: this
+///    frame died on `windows-latest` with `DXGI_ERROR_DEVICE_REMOVED` because
+///    the first enumerated adapter is not a usable device there.
+/// 3. The device's [`GeometryPath`](crcbl::hal::GeometryPath) is reported, and
 ///    the frame is drawn through whichever indirect tail it selects. Metal
 ///    reports no `DRAW_INDIRECT_COUNT` — the flag is absent from the API rather
 ///    than unimplemented — so it selects
 ///    [`IndirectPerBatch`](crcbl::hal::GeometryPath::IndirectPerBatch), the arm
 ///    that until now had only ever run on Vulkan behind a forced selector.
-/// 3. Something drew: at least [`MIN_COLORS`] colours, a corner still holding
+/// 4. Something drew: at least [`MIN_COLORS`] colours, a corner still holding
 ///    the clear, and a centre that is not the clear. A full-screen quad and a
 ///    blank frame both fail these and neither is distinguishable by a tolerance.
-/// 4. The picture is the one that was reviewed.
+/// 5. The picture is the one that was reviewed.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
 fn the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden() {
-    let mut setup =
-        OffscreenSetup::open(EXTENT.0, EXTENT.1, Scene::Cube).expect("a GPU backend opens");
+    // `unwrap_or_else` rather than `expect`, which would format the error with
+    // `Debug` and escape the newlines out of the adapter listing a pin miss
+    // carries — on a runner nobody can log into, that listing is the whole
+    // diagnosis.
+    let mut setup = OffscreenSetup::open(EXTENT.0, EXTENT.1, Scene::Cube)
+        .unwrap_or_else(|why| panic!("a GPU backend opens: {why}"));
 
     let backend = setup.backend();
     let caps = setup.caps();
@@ -111,6 +121,21 @@ fn the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden() {
         caps.lighting_path(),
     );
 
+    // The adapter line, and the raw pin beside it. `run-render-e2e.sh` matches
+    // the pin back against what it exported, because the one failure this test
+    // cannot see is the variable never reaching this process: the pin would be
+    // `None` here, `select` would take the first adapter, and every assertion
+    // below would pass on a device nobody asked for.
+    let adapter = setup.adapter();
+    let requested_adapter = crcbl::adapter::pin();
+    eprintln!(
+        "crcbl render e2e: device on adapter {id} {name:?} type={kind:?} ({ADAPTER_ENV_VAR}={pin})",
+        id = adapter.id.0,
+        name = adapter.name,
+        kind = adapter.device_type,
+        pin = requested_adapter.as_deref().unwrap_or("<unset>"),
+    );
+
     // A pin the loader ignored is the failure this catches, and it is the same
     // class as a suite that runs no tests. Both names go through the mappings
     // that already exist rather than a third table.
@@ -121,6 +146,18 @@ fn the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden() {
             Some(opened),
             GpuBackend::from_name(&requested),
             "{BACKEND_ENV_VAR}={requested} was asked for and {backend} drew the frame"
+        );
+    }
+    // Same shape one layer down: `select` refuses a class it cannot find, so
+    // this can only fire if it resolved to something else — but it is the
+    // assertion that makes the pin's arrival observable rather than assumed.
+    if let Some(requested) = requested_adapter.as_deref() {
+        let want = device_type_from_name(requested)
+            .unwrap_or_else(|| panic!("{ADAPTER_ENV_VAR}={requested} is not a device class"));
+        assert_eq!(
+            adapter.device_type, want,
+            "{ADAPTER_ENV_VAR}={requested} was asked for and adapter {} ({:?}) drew the frame",
+            adapter.name, adapter.device_type
         );
     }
 

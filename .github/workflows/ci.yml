@@ -614,24 +614,43 @@ jobs:
       - name: Drive a D3D12 device pinned to WARP
         shell: bash
         run: crates/crcbl-dx12/tests/run-dx12-e2e.sh
-      # # A frame through ForwardRenderer, on D3D12 — blocked on adapter choice
+      # # A frame through ForwardRenderer, on D3D12
       #
-      # This step ran once, on `dc846ff`, and the result was worth more than the
-      # step. The HAL suite above passed **155/155** on WARP in the same job,
-      # and then the frame failed before drawing anything:
+      # Everything above this line is the D3D12 **HAL**. This is the render
+      # layer: `crates/crcbl/tests/render_e2e.rs` draws the cube scene through
+      # `ForwardRenderer` and compares it against the golden the `vk e2e` job
+      # re-derives on lavapipe.
+      #
+      # **`CRCBL_ADAPTER=cpu` is why this step is here at all.** It ran once
+      # before, on `dc846ff`, and died on its first buffer — before a frame:
       #
       #   a GPU backend opens: Hal(Backend("CreateCommittedResource (buffer)
       #   failed: The GPU device instance has been suspended. … (0x887A0005)"))
       #
-      # `0x887A0005` is `DXGI_ERROR_DEVICE_REMOVED`, on the first buffer, before
-      # a frame. **The renderer is not what failed — adapter selection is.**
-      # `crcbl::screenshot` picks `adapters().first()`, and this runner's first
-      # adapter is not a device that works; the HAL suite passes because
-      # `run-dx12-e2e.sh` pins WARP, and that pin is `#[cfg(test)]` inside
-      # `crcbl-dx12`, so it cannot reach a harness in another crate.
+      # `0x887A0005` is `DXGI_ERROR_DEVICE_REMOVED`, and the renderer was not
+      # what failed: `crcbl::screenshot` took `adapters().first()` and this
+      # runner's first adapter is not a device that works. The step above passed
+      # 155/155 in the same job because `run-dx12-e2e.sh` pins WARP — a pin that
+      # was `#[cfg(test)]` inside `crcbl-dx12` and could not reach a harness in
+      # another crate. `crcbl::adapter` is the general form of it: a device
+      # *class*, for every backend, refusing rather than falling back when the
+      # class is not there. `cpu` is WARP here, the same rasteriser the HAL
+      # suite runs on, and `run-render-e2e.sh` fails if the variable does not
+      # reach the test process.
       #
-      # Removed rather than left red: a step that always fails gates nothing. It
-      # comes back with the adapter pin, which `docs/backlog.md` carries.
+      # **The golden is the remaining risky part.** It was blessed on lavapipe
+      # and is compared with `Tolerance::RASTERISER`, calibrated for the
+      # radv/lavapipe difference. WARP is a third rasteriser and nothing here has
+      # measured it. A failure reporting a large pixel delta is a tolerance
+      # question; one reporting a structural mismatch, a blank frame or a refusal
+      # is a real finding about the backend. The comparison prints both, so the
+      # first run distinguishes them.
+      - name: Draw a frame through ForwardRenderer on WARP
+        shell: bash
+        env:
+          CRCBL_GPU: dx12
+          CRCBL_ADAPTER: cpu
+        run: crates/crcbl/tests/run-render-e2e.sh
 
   # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
   # project, the project *compiles*, it lints clean, and it runs its loop

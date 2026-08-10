@@ -20,9 +20,23 @@
 //! including the Linux one this backend is developed on. That is deliberate:
 //! nothing else in this crate can be exercised off Windows, and the pin is the
 //! piece whose failure mode is silence, so it is the piece most worth being able
-//! to run. It is still `#[cfg(test)]`: the seam already publishes every adapter
-//! and lets the caller choose, so an engine has no use for this and only the
-//! tests do.
+//! to run. It is still `#[cfg(test)]`, and that argument has been narrowed by
+//! measurement: it used to be "the seam already publishes every adapter and lets
+//! the caller choose, so an engine has no use for this". The caller that needed
+//! to choose turned out to live in another crate — `crcbl::screenshot` took
+//! `adapters().first()`, and on `windows-latest` that is not a device that works
+//! — and `#[cfg(test)]` here could not reach it.
+//!
+//! What that caller uses is `crcbl::adapter` and `CRCBL_ADAPTER`: the same
+//! decision over the same [`DeviceType`], above the seam, where one variable
+//! means the same thing on every backend. This module keeps [`PIN_VAR`] rather
+//! than deferring to it, because the direction of the dependency forbids sharing
+//! — `crcbl` depends on `crcbl-dx12`, so a shared resolver would have to sit in
+//! `crcbl-hal`, which is "traits plus POD descriptors" and frozen at P5 exit.
+//! The two are read by different processes (`tests/run-dx12-e2e.sh` against this
+//! crate's suite, `crates/crcbl/tests/run-render-e2e.sh` against the engine's),
+//! and their vocabularies differ — `warp` against a device class — so neither
+//! reads as the other.
 
 use crcbl_hal::{AdapterId, AdapterInfo, DeviceType};
 
