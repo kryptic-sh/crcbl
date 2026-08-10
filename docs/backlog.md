@@ -3506,6 +3506,39 @@ declares no thread count, which is why the field exists) and wgpu keeps no
 module source after `create_shader_module`. Safe only while every compute shader
 is also run under Vulkan, which is true today and will not always be.
 
+### The render layer has only ever run on Vulkan and wgpu
+
+**Coverage gap, stated plainly, and larger than any single slice.** `crcbl-mtl`
+does not depend on `crcbl-render` and no Metal test touches `ForwardRenderer`,
+`cull` or `draw_gen`. `crcbl-dx12` has no e2e job at all — only adapter
+enumeration. So the entire render layer — the frame graph, the cull pass, draw
+generation, the forward and tonemap passes — executes on exactly two things:
+Vulkan (radv locally, lavapipe in CI) and native wgpu on lavapipe.
+
+**A green `mtl e2e` run is therefore not evidence about the renderer.** It
+proves the Metal HAL: dispatch, encoders, bindings, copies. That is what it was
+built to prove and it does it well. It has never constructed a
+`ForwardRenderer`. The same is true of macOS's `build + test` job, whose render
+tests use the null backend.
+
+This was easy to misread this session and is worth stating before someone reads
+a green matrix as backend parity. Two backends the plan calls first-class have
+never drawn a frame through the engine's own renderer.
+
+What closing it takes, roughly in order of value:
+
+- **A Metal e2e that drives `ForwardRenderer`**, the way `crcbl-vk`'s
+  `vk_e2e/mesh.rs` does. That means `crcbl-mtl` (or a new test crate) depending
+  on `crcbl-render`, and a golden comparison on the macOS runner. Note six draw
+  tests already fault on that runner, so expect to find out why before goldens
+  are trustworthy there.
+- **Extending the cross-backend gate to a third backend.** It compares vk
+  against wgpu today and caught a real divergence doing it; a Metal arm would be
+  the natural place for `IndirectPerBatch` — the arm Metal actually takes — to
+  be proven on Metal rather than forced on Vulkan.
+- **Any D3D12 e2e at all.** Windows CI has a real desktop session (`win32 e2e`),
+  so the runner exists; nothing draws through it.
+
 ### Owed by GPU-driven draw generation
 
 §3.3 is wired end to end — `cull` → `draw-args` → `forward` — and every golden
