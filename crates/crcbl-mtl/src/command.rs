@@ -1117,12 +1117,24 @@ impl CommandEncoder for MetalCommandEncoder {
 
     // --- draws ---
 
-    /// `drawPrimitives:vertexStart:vertexCount:instanceCount:baseInstance:`.
+    /// `drawPrimitives:vertexStart:vertexCount:` when the instance range is
+    /// `0..1`, and `…instanceCount:baseInstance:` when it is anything else.
     ///
-    /// The five-argument form always, not the three-argument one: the seam
-    /// hands over an instance *range*, and the short form has no base instance
-    /// to put its start in. Passing `0..1` through the long form costs nothing
-    /// and keeps one code path.
+    /// # Which form, and why it is a live question
+    ///
+    /// The long five-argument form used to be emitted unconditionally, on the
+    /// argument that passing `0..1` through it cost nothing and kept one code
+    /// path. That argument is about cost, and the thing now in doubt is
+    /// correctness: every draw test in the `mtl-e2e` job faults with
+    /// `kIOGPUCommandBufferCallbackErrorHang` on a device that runs compute
+    /// dispatches, render-pass clears, and a standalone Swift triangle written
+    /// against the **short** form. So the short selector is taken wherever it
+    /// carries the whole draw — `crcbl_mtl::draw`'s `single_instance` is that
+    /// test — and the long one only where the extra arguments say something.
+    ///
+    /// Whether that is the fault is what the released draw tests in
+    /// `.github/workflows/ci.yml` report. Neither branch below has run against
+    /// a Metal device; `mtl-e2e` is the first thing that will.
     ///
     /// # The topology comes from the pipeline, and there must be one
     ///
@@ -1143,30 +1155,44 @@ impl CommandEncoder for MetalCommandEncoder {
         if vertices.is_empty() || instances.is_empty() {
             return;
         }
-        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
-        // count. Neither is a bound into an object here — a draw's vertex count
-        // indexes whatever the vertex shader chooses to read, not a buffer this
-        // call names — and both ranges were just checked to be non-empty, which
-        // is the one value (`0`) Metal's own validation layer objects to. The
-        // encoder is kept alive by the `Retained` held across the call.
+        let start = to_ns(u64::from(vertices.start));
+        let count = to_ns(u64::from(vertices.end - vertices.start));
+        // SAFETY: `objc2` marks both of these unsafe because Metal
+        // bounds-checks neither count. Neither is a bound into an object here —
+        // a draw's vertex count indexes whatever the vertex shader chooses to
+        // read, not a buffer this call names — and both ranges were just
+        // checked to be non-empty, which is the one value (`0`) Metal's own
+        // validation layer objects to. The encoder is kept alive by the
+        // `Retained` held across the call.
         unsafe {
-            encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
-                primitive,
-                to_ns(u64::from(vertices.start)),
-                to_ns(u64::from(vertices.end - vertices.start)),
-                to_ns(u64::from(instances.end - instances.start)),
-                to_ns(u64::from(instances.start)),
-            );
+            if crate::draw::single_instance(&instances) {
+                encoder.drawPrimitives_vertexStart_vertexCount(primitive, start, count);
+            } else {
+                encoder.drawPrimitives_vertexStart_vertexCount_instanceCount_baseInstance(
+                    primitive,
+                    start,
+                    count,
+                    to_ns(u64::from(instances.end - instances.start)),
+                    to_ns(u64::from(instances.start)),
+                );
+            }
         }
     }
 
-    /// `drawIndexedPrimitives:…:baseVertex:baseInstance:`, with the index
-    /// buffer [`bind_index_buffer`](CommandEncoder::bind_index_buffer)
+    /// `drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:`
+    /// when the draw has no base vertex and one instance, and
+    /// `…instanceCount:baseVertex:baseInstance:` when it has either — with the
+    /// index buffer [`bind_index_buffer`](CommandEncoder::bind_index_buffer)
     /// recorded.
     ///
-    /// The eight-argument form always, for the reason [`draw`](CommandEncoder::draw)
-    /// takes the five-argument one: the seam hands over a base vertex and an
-    /// instance *range*, and the shorter forms have nowhere to put either.
+    /// The choice is [`draw`](CommandEncoder::draw)'s, with `base_vertex == 0`
+    /// added: the short selector drops `baseVertex` as well as the two instance
+    /// arguments, so it can only stand in for a draw that supplies none of the
+    /// three. The first index is *not* one of them — it rides in
+    /// `indexBufferOffset`, which both forms take, so the bound range's own
+    /// `draw_offset` is what encodes it either way. See
+    /// [`draw`](CommandEncoder::draw) for what taking the short form is testing
+    /// and what has not been observed.
     ///
     /// An indexed draw with no index buffer bound is refused rather than left
     /// to Metal, which has no nil to pass — `indexBuffer` is a non-optional
@@ -1195,23 +1221,31 @@ impl CommandEncoder for MetalCommandEncoder {
                 return;
             }
         };
-        // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither
-        // the index count nor the buffer offset. `draw_offset` just checked the
-        // whole index range against the bound region's own length, which
-        // `bind_index_buffer` computed from the allocation's, and the counts
-        // were checked non-empty above. The buffer and the encoder are kept
-        // alive by the `Retained`s held across the call.
+        let (count, offset) = (to_ns(u64::from(count)), to_ns(offset));
+        // SAFETY: `objc2` marks both of these unsafe because Metal
+        // bounds-checks neither the index count nor the buffer offset.
+        // `draw_offset` just checked the whole index range against the bound
+        // region's own length, which `bind_index_buffer` computed from the
+        // allocation's, and the counts were checked non-empty above. The buffer
+        // and the encoder are kept alive by the `Retained`s held across the
+        // call.
         unsafe {
-            encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount_baseVertex_baseInstance(
-                primitive,
-                to_ns(u64::from(count)),
-                index_type,
-                &raw,
-                to_ns(offset),
-                to_ns(u64::from(instances.end - instances.start)),
-                base_vertex as isize,
-                to_ns(u64::from(instances.start)),
-            );
+            if base_vertex == 0 && crate::draw::single_instance(&instances) {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset(
+                    primitive, count, index_type, &raw, offset,
+                );
+            } else {
+                encoder.drawIndexedPrimitives_indexCount_indexType_indexBuffer_indexBufferOffset_instanceCount_baseVertex_baseInstance(
+                    primitive,
+                    count,
+                    index_type,
+                    &raw,
+                    offset,
+                    to_ns(u64::from(instances.end - instances.start)),
+                    base_vertex as isize,
+                    to_ns(u64::from(instances.start)),
+                );
+            }
         }
     }
 

@@ -20,6 +20,30 @@
 //! is legal outside a render pass here. Metal is not being told anything, so
 //! there is nothing to have nowhere to go.
 //!
+//! # A draw takes the shortest selector that can carry it
+//!
+//! Metal spells `drawPrimitives:` and `drawIndexedPrimitives:` several ways,
+//! differing only in which of `instanceCount`, `baseVertex` and `baseInstance`
+//! they take. This backend picks the shortest one whose arguments are the whole
+//! draw — [`single_instance`] is the test for the instance range, and the
+//! indexed site adds `base_vertex == 0` — and falls back to the long form for
+//! every draw that carries more.
+//!
+//! **This is an open experiment, not a settled preference.** The backend
+//! emitted the long forms unconditionally, and every draw test in the `mtl-e2e`
+//! job faulted with `kIOGPUCommandBufferCallbackErrorHang` on GitHub's
+//! `macos-26-arm64` image while compute dispatches and render-pass clears on
+//! the same device passed. A standalone Swift script drew correctly on that
+//! image using the *short* form, which is what makes the argument form a
+//! suspect rather than a guess. Whether it is the cause is what the released
+//! draw tests in `.github/workflows/ci.yml` answer; nothing off macOS can, and
+//! the choice made here has never executed against a Metal device.
+//!
+//! The indirect selectors are outside all of this: every argument
+//! `drawPrimitives:indirectBuffer:indirectBufferOffset:` and its indexed
+//! sibling take is load-bearing, so there is no shorter form to choose and the
+//! loop below is untouched by the experiment.
+//!
 //! # The indirect path is a **loop**, not an indirect command buffer
 //!
 //! `docs/plan/09-backends-metal-dx12.md`'s mapping table offers "ICBs or
@@ -66,6 +90,8 @@
 //! reported — `baseInstance` is a field Metal reads, not one it requires to be
 //! zero.
 
+use core::ops::Range;
+
 use crcbl_hal::{DrawIndirect, HalError, IndexFormat};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -86,6 +112,22 @@ const DRAW_INDEXED_ARGS_BYTES: u64 = 20;
 /// The argument structures are `uint32_t` fields, and Metal's headers document
 /// `indirectBufferOffset` as a multiple of four.
 const INDIRECT_OFFSET_ALIGNMENT: u64 = 4;
+
+/// Whether an instance range is the one the short draw selectors already mean:
+/// a single instance, starting at zero.
+///
+/// `drawPrimitives:vertexStart:vertexCount:` and
+/// `drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:`
+/// take neither an instance count nor a base instance, so they encode exactly
+/// `0..1` and nothing else. Any other range has to go through the long form,
+/// which has somewhere to put both numbers.
+///
+/// An empty range is not this — `0..0` draws nothing and both call sites return
+/// before they ask. See the module docs for why the shorter selector is
+/// preferred at all.
+pub(crate) const fn single_instance(instances: &Range<u32>) -> bool {
+    instances.start == 0 && instances.end == 1
+}
 
 /// The index buffer a later draw will read, held because Metal takes it at the
 /// draw call. See the module docs.
@@ -311,6 +353,33 @@ mod tests {
         let error = index_draw_offset(8, IndexFormat::Uint32, capacity, 12, 4)
             .expect_err("12..16 does not fit in 14");
         assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+    }
+
+    /// Only `0..1` takes the short draw selectors.
+    ///
+    /// This is the whole of what can be checked without a GPU: which draws lose
+    /// no information by dropping `instanceCount` and `baseInstance`. The call
+    /// sites in `crcbl_mtl::command` are what turn the answer into an encoder
+    /// call, and **that half is not exercised here** — only a device can say
+    /// whether the shorter selector is what stops the hang, and `mtl-e2e` is
+    /// where one is.
+    ///
+    /// **What turns it red.** Testing only the length, so `4..5` — one
+    /// instance, but the fifth — wrongly takes a form with no base instance to
+    /// put the `4` in. Testing only the start, so `0..2` loses an instance.
+    #[test]
+    fn only_one_instance_from_zero_takes_the_short_draw_form() {
+        assert!(single_instance(&(0..1)));
+
+        assert!(
+            !single_instance(&(4..5)),
+            "one instance starting at four still needs a baseInstance"
+        );
+        assert!(
+            !single_instance(&(0..2)),
+            "two instances still need an instanceCount"
+        );
+        assert!(!single_instance(&(1..4)));
     }
 
     /// A single indirect draw ignores the stride; a multi-draw does not.
