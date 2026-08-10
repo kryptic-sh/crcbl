@@ -1,25 +1,30 @@
+//! Slice 14's shared menu, drawn.
+//!
+//! `crcbl_ui::menu` asserts the layout to the pixel and `crcbl_render::menu`
+//! asserts the quads to the float, both with no device in the room. Neither can
+//! show the two things a reviewer actually wants to see: **that the window
+//! frame really is a nine-slice whose corners survive being stretched to a very
+//! different panel, and that a menu is centred in framebuffers of different
+//! shapes.** Both are pictures, and they are stacked into one reference here,
+//! `tests/golden/menu_frame_two_sizes.png`.
+//!
+//! Because a swapchain has one extent and the point is that the two extents
+//! differ, this is the one module that opens two `Headless` fixtures for a
+//! single test and joins their frames afterwards.
+//!
+//! **It is the real art.** The panel, the button skin and the scrim are frames
+//! of `crates/crcbl-render/assets/menu.crpix`, baked by that crate's own
+//! `build.rs` and uploaded by `crcbl_render::MenuArt::register` — not a
+//! lookalike assembled here. That is the whole reason the art lives in
+//! `crcbl-render` rather than under `apps/`: this crate cannot see `apps/`, and
+//! a golden image of a replica would be evidence about the replica.
+
 use crate::harness::Headless;
 use crate::sprite::{SPRITE_CLEAR, background_rgb, close, report_goldens, rgb, sprite_golden};
 use crcbl_hal::{
     BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Extent3d, Format, ImageAspect,
     ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState, SubmitInfo,
 };
-
-// --- slice 14: the shared menu, drawn -----------------------------------------
-//
-// `crcbl_ui::menu` asserts the layout to the pixel and `crcbl_render::menu`
-// asserts the quads to the float, both with no device in the room. Neither can
-// show the two things a reviewer actually wants to see: **that the window frame
-// really is a nine-slice whose corners survive being stretched to a very
-// different panel, and that a menu is centred in framebuffers of different
-// shapes.** Both are pictures, and this is where they are taken.
-//
-// **It is the real art.** The panel, the button skin and the scrim are the
-// `.crpix` files `crates/crcbl-render/assets/` ships, baked by that crate's own
-// `build.rs` and uploaded by `MenuArt::register` — not a lookalike assembled
-// here. That is the whole reason the art lives in `crcbl-render` rather than
-// under `apps/`: this crate cannot see `apps/`, and a golden image of a replica
-// would be evidence about the replica.
 
 /// The two framebuffers the menu golden is taken in.
 ///

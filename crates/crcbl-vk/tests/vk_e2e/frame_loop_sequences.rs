@@ -1,3 +1,23 @@
+//! Regressions from the 2026-08 code review: paths it identified as both wrong
+//! and untested.
+//!
+//! The module exists because these are *sequences* rather than subjects — a
+//! read-only depth attachment, a submit that fails, a readback whose wait
+//! semaphore is destroyed under it, a reconfigure between acquire and present.
+//! Each is something a real frame loop does and the offscreen suite never did,
+//! and none of them belongs to any one of the milestone modules.
+//!
+//! Their failure modes are why they need a driver at all rather than the null
+//! backend: `a_read_only_depth_pass_uses_the_read_only_layout` asserts nothing
+//! but the validation report, and the wedged-retire-timeline one is observable
+//! only as every later `request_readback` returning `Pending` forever.
+//!
+//! One is knowingly partial. `a_reconfigure_between_acquire_and_present_is_survivable`
+//! proves the *handle* half headlessly and says in place why the fence half
+//! needs a compositor: an offscreen ring has an implicit acquire and therefore
+//! no fences to destroy. The sequence is written here anyway because it is the
+//! same one the windowed sandbox runs drive.
+
 use crate::harness::{CLEAR, EXTENT, Headless};
 use crcbl_hal::{
     Barriers, BufferDesc, BufferUsage, ClearValue, ColorAttachment, CommandEncoderDesc,
@@ -6,11 +26,6 @@ use crcbl_hal::{
     ReadbackState, Rect2d, RenderPassDesc, ResourceState, SemaphoreDesc, SemaphoreKind,
     SemaphoreSignal, SemaphoreWait, StoreOp, SubmitInfo, SwapchainDesc,
 };
-
-// --- regressions from the 2026-08 code review -------------------------------
-//
-// Paths the review identified as both wrong and untested. Each one is a
-// sequence a real frame loop performs and the offscreen suite never did.
 
 /// A **read-only** depth attachment must begin rendering in the layout the
 /// image is actually in.

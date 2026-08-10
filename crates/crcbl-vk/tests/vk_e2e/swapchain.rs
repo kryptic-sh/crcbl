@@ -1,3 +1,26 @@
+//! Milestone 1, and everything else the offscreen ring itself has to get right.
+//!
+//! The first test is the milestone — acquire an image, clear it through a real
+//! render pass rather than a `vkCmdClearColorImage`, copy it out and check the
+//! bytes — and the rest are the ring's own obligations: that coming back round
+//! to an image is ordered against the frame that had it last, that a resize
+//! storm keeps the swapchain handle while invalidating the old images, that the
+//! swapchain's own image and view survive a caller trying to destroy them, and
+//! that present-wait and display-timing answer honestly when there is no
+//! `VkSwapchainKHR` behind them at all.
+//!
+//! Those last two are why `Headless` asks for `PRESENT_FEEDBACK` and
+//! `PRESENT_TIMING` as optional features it never needs: where a device grants
+//! them the extensions really are enabled, so a wait that forgot its guard hands
+//! the driver a null swapchain and `Headless::finish` catches it. Both tests
+//! print which driver they ran on, because on a driver without the extensions
+//! they amount to "it returned `Ok`".
+//!
+//! The ring-reuse test is deliberately narrower than the CI job it stands in
+//! for: it puts both trips into one command buffer so record-time validation
+//! finds the hazard, which every layer build has, while the two-submission
+//! instance of the same bug stays CI's to catch.
+
 use std::time::{Duration, Instant};
 
 use crate::harness::{CLEAR, EXTENT, Headless};

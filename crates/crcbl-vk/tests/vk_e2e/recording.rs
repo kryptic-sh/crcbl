@@ -1,3 +1,17 @@
+//! Failures a command encoder must report from `finish`, having never reached a
+//! queue.
+//!
+//! Both tests are about `crcbl-vk`'s own encoder rather than about the seam,
+//! which is why they are here and not in `crcbl-hal`: the null recorder already
+//! bounds-checks the same query ranges, so it cannot reproduce either bug. An
+//! out-of-range reset, timestamp or resolve used to be recorded and handed to
+//! the driver — where the validation layer flags it — and a failing call inside
+//! a labelled pass used to spin `finish`'s label-closing loop forever, an
+//! infinite loop with no output at all.
+//!
+//! The query test records valid commands on the same set afterwards, so a green
+//! run says the *range* was rejected rather than the set being poisoned.
+
 use crate::harness::Headless;
 use crcbl_hal::{
     BufferDesc, BufferUsage, ClearValue, ColorAttachment, CommandEncoderDesc, Features, Instance,

@@ -1,3 +1,24 @@
+//! `crcbl-hal`'s numbered seam obligations, against the reference backend.
+//!
+//! The obligations are stated in `crcbl-hal` and covered there against the null
+//! backend, which can model any device it likes. This module is the other half:
+//! obligations 1, 2b, 3 and 4 against a real driver, where breaking one is a
+//! use-after-free inside the driver rather than a failed assertion — so several
+//! of these tests assert the validation report and nothing else.
+//!
+//! It is the module that opens **two instances at once**, for obligation 3
+//! across instances: handle bits are only unique within the backend that issued
+//! them, so two `VkInstance`s genuinely hand out identical ones, and a surface
+//! crossing between them must be reported as `ForeignObject` rather than as a
+//! stale handle — the two send a reader to different bugs. No vk test opened two
+//! instances at all before this one.
+//!
+//! It is also explicit about the half it cannot reach. An offscreen surface is
+//! `VK_NULL_HANDLE`, so there is no `vkDestroySurfaceKHR` to defer and 2b's
+//! zombie list never engages here; that bookkeeping is asserted in `instance.rs`
+//! instead, because the only surfaces this suite can create are the ones it
+//! cannot exercise.
+
 use crate::harness::{CLEAR, Headless, instance};
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{

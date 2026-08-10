@@ -1,3 +1,27 @@
+//! The gate underneath every other module: proof the validation layer is
+//! **wired**, not merely quiet.
+//!
+//! Every other test in this suite ends in `Headless::finish`, which asserts a
+//! clean report — and every one of them would pass just as happily against a
+//! messenger that was never created, which is the failure mode that turns "zero
+//! validation errors" into a slogan. So this module exists to commit deliberate
+//! violations and assert the layer noticed: one ordinary specification
+//! violation, and one synchronisation hazard, which is a separate opt-in with a
+//! separate failure mode and was silently doing nothing until P1.2.
+//!
+//! Both violations are chosen to be caught at **record** time and thrown away
+//! rather than submitted. A spec violation is undefined behaviour and a software
+//! rasteriser is under no obligation to survive one — an earlier version of the
+//! first test used an oversized render area, which segfaults lavapipe, and that
+//! is the first place radv and lavapipe disagreed.
+//!
+//! The sync test also *measures* how far this machine's layer sees across
+//! submissions and prints the marker line `tests/run-vk-e2e.sh` turns into a
+//! banner. That half is printed rather than asserted, because a layer build
+//! without submit-time validation is not a bug in this repository — but leaving
+//! it unmeasured is worse, since a green local run would then read as "I saw
+//! what CI sees" when it did not.
+
 use crate::harness::Headless;
 use crcbl_hal::{
     BufferDesc, BufferUsage, CommandEncoderDesc, Instance, MemoryLocation, SubmitInfo,

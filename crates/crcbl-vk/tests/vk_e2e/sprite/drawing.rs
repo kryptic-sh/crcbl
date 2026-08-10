@@ -1,3 +1,26 @@
+//! The sprite pass drawing: the right sprite, the right way up, in the right
+//! place, from the right frame — and compositing rather than replacing.
+//!
+//! This is the module the whole slice exists for; before it nothing in the
+//! sprite path had been shown to put a single pixel anywhere. It holds the
+//! placement and blending claims, which is what separates it from `filtering`:
+//! every assertion is at a named pixel computed through
+//! [`world_to_pixel`](crate::sprite::world_to_pixel), or against the
+//! linear-light blend arithmetic, rather than against a picture.
+//!
+//! `every_batch_draws_its_own_instances_rather_than_the_first_batchs` is the
+//! regression that earns the file. `SpriteRenderer::add_pass` emits one draw per
+//! batch with `firstInstance` set to the batch's start, and Slang compiles
+//! `SV_InstanceID` to `InstanceIndex - BaseInstance` on SPIR-V — HLSL's
+//! semantics, where the id excludes the base — so every batch after the first
+//! re-read the *first* batch's instances. It shipped because every other sprite
+//! test registers one sheet, or two whose pixels are identical; this one uses
+//! solid one-texel sheets of different colours, so the sheet that was bound and
+//! the instance that was read are separable.
+//!
+//! Goldens: `tests/golden/sprite.png`, `sprite_multi_sheet.png` and
+//! `sprite_alpha.png`.
+
 use crate::harness::Headless;
 use crate::sprite::{
     FRAME_A, FRAME_A_CORNERS, FRAME_B, FRAME_B_CORNERS, HALF_ALPHA, SOLID_SHEETS, SPRITE_EXTENT,

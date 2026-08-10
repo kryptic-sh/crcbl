@@ -1,3 +1,24 @@
+//! §3.3's second half: the compacted visible list becomes
+//! `draw_indexed_indirect` records and a count buffer.
+//!
+//! Separate from `cull` because it checks against a different oracle — the draw
+//! calls `crcbl_render::forward` used to record itself — which is the only
+//! comparison that can tell a *translation* from a picture that happens to look
+//! right. Every number here is copied out of the buffers the frame actually
+//! drew from, after it drew from them: a golden image cannot say the arguments
+//! are right, because a wrong `first_index` that names the same range and a
+//! right one produce the same pixels.
+//!
+//! The expectation is assembled here from `crcbl_shaders::mesh`'s own constants
+//! rather than read back, because the mesh table and the instance array are
+//! `HostUpload` buffers with no transfer usage — and reading the shader's own
+//! input would only check that two consumers agree.
+//!
+//! `both_geometry_paths_draw_the_same_frame` opens its device *without*
+//! `Features::DRAW_INDIRECT_COUNT` on purpose. `IndirectPerBatch` is the arm
+//! Metal is on and no adapter this suite can see would ever select it, so
+//! without that subtraction the arm would be code no machine here runs.
+
 use crate::harness::Headless;
 use crate::mesh::{MESH_EXTENT, mesh_camera};
 use crcbl_hal::{
@@ -12,31 +33,9 @@ use crcbl_shaders::mesh::{
 };
 use glam::{Mat4, Vec3};
 
-// --- GPU draw generation, against the draws a CPU would have recorded --------
-//
-// `docs/plan/03-gpu-driven-rendering.md` §3.3's second half: the compacted
-// visible list becomes `draw_indexed_indirect` records and a count buffer.
-// `crcbl-vk`'s `cull` suite checks the first half against
-// `crcbl_render::cull::visible_instances`; this checks the second against the
-// draw calls `crcbl_render::forward` used to record itself, which is the only
-// comparison that can tell a *translation* from a picture that happens to look
-// right.
-//
-// Every number below is copied out of the buffers the frame actually drew from,
-// after the frame drew from them. A golden image says the picture is unchanged;
-// it cannot say the arguments are right, because a wrong `first_index` that
-// happens to name the same range and a right one produce the same pixels.
-//
-// # The reference is built here rather than read out of the device
-//
-// The mesh table and the instance array are `HostUpload` storage buffers with no
-// transfer usage, so neither can be copied back — and reading the expectation
-// out of the same table the shader read would check that two consumers agree
-// rather than that either is right. So the expectation is assembled from
-// `crcbl_shaders::mesh`'s own constants and geometry: the pool suballocates in
-// upload order, so the cube is at base vertex 0 and the pyramid starts where it
-// ends. An allocator that stopped doing that fails here rather than silently
-// drawing the other mesh.
+// The pool suballocates in upload order, so the cube is at base vertex 0 and
+// the pyramid starts where it ends. An allocator that stopped doing that fails
+// here rather than silently drawing the other mesh.
 
 /// Where the pyramid sits when the frame is meant to contain it. Beside the
 /// cube and inside the frustum, like `crcbl screenshot --scene cube`.

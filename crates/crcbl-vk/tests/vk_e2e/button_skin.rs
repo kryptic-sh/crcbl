@@ -1,16 +1,21 @@
+//! Slice 7's nine-slice button skins, drawn.
+//!
+//! `crcbl_render::button_skin` asserts the quads to the float and
+//! `crcbl_ui::widget` asserts the layout to the pixel. Neither can show the
+//! thing a reviewer actually wants to see: **the same skin, at two very
+//! different widths, with corners that did not smudge.** That is a picture, and
+//! this is where it is taken — `tests/golden/button_skin_widths.png`.
+//!
+//! It is its own module rather than part of the sprite subtree because it is a
+//! different generator's output, but it borrows that subtree's fixture whole —
+//! `crate::sprite`'s extent, camera, `world_to_pixel` mapping and golden helper
+//! — since a button skin is sprite quads once the geometry is worked out.
+
 use crate::harness::Headless;
 use crate::sprite::{
     SPRITE_EXTENT, assert_background, assert_the_camera_maps_a_world_unit_to_a_pixel, close,
     register_sheet, render_sprites, report_goldens, rgb, sprite_golden, world_to_pixel,
 };
-
-// --- slice 7: nine-slice button skins, drawn ----------------------------------
-//
-// The unit tests in `crcbl_render::button_skin` assert the quads to the float,
-// and the ones in `crcbl_ui::widget` assert the layout to the pixel. Neither can
-// show the thing a reviewer actually wants to see: **the same skin, at two very
-// different widths, with corners that did not smudge.** That is a picture, and
-// this is where it is taken.
 
 /// The button sheet: 96×32, three 32×32 frames side by side, one per
 /// [`ButtonState`].

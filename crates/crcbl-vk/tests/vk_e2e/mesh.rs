@@ -1,3 +1,23 @@
+//! Milestones 3, 4 and 5: the lit mesh, through the render graph.
+//!
+//! Depth testing, the directional light, the `Rgba16Float` scene target and its
+//! tonemap, the orthographic camera, a second mesh at a non-zero base vertex,
+//! and the graph's transient pool under a resize storm — against three
+//! checked-in references, `tests/golden/mesh.png`, `mesh_ortho.png` and
+//! `mesh_second.png`.
+//!
+//! It is also the suite's shared scene, which is why it is one module rather
+//! than several: `queries`, `draw_gen` and `depth_probe` all import its extent,
+//! camera or spin constant instead of inventing their own, so the scene the
+//! goldens were blessed on is the scene those modules measure against.
+//!
+//! The tests worth reading are the ones a golden cannot make. A shader that
+//! returned the vertex colour unchanged would pass a golden the day it was
+//! blessed, so the light is checked as a ratio against the Lambert term in the
+//! HDR target; and getting a transient's lifetime wrong under resize is a
+//! validation error rather than a wrong picture, so that test's assertion is
+//! `Headless::finish`'s report.
+
 use crate::harness::{Headless, instance};
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
@@ -5,8 +25,6 @@ use crcbl_hal::{
     Extent3d, Features, Format, ImageAspect, ImageSubresourceLayers, Instance, MemoryLocation,
     PresentInfo, PresentMode, ResourceState, SubmitInfo, SwapchainDesc,
 };
-
-// --- milestones 3, 4 and 5: the lit mesh, through the render graph -----------
 
 /// The size the mesh suite renders at.
 ///

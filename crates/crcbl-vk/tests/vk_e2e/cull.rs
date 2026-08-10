@@ -1,3 +1,22 @@
+//! `docs/plan/03-gpu-driven-rendering.md` §3.3's GPU frustum cull pass, against
+//! a real driver and against `crcbl_render::cull::visible_instances`.
+//!
+//! Separate from `draw_gen`, which consumes this pass's output, because the two
+//! halves fail differently: a consumer that drew the right picture from the
+//! wrong list would say nothing about this pass. So the visible list and its
+//! counter are copied back to the host and compared against the CPU oracle
+//! directly, which is a check no picture can stand in for.
+//!
+//! The scene places one instance per rejection the pass can make — outside each
+//! of the six planes, inside, straddling an edge, rotated back in, naming a
+//! freed mesh, removed, and never written at all — so a dropped plane, a
+//! missing `abs` in the bounds transform, a missing empty-entry guard or a
+//! missing liveness check each changes a different element of the answer. The
+//! last two tests run the pass over `crcbl_render::InstancePool`'s **own
+//! buffer** rather than over records typed out here, because a removal that
+//! updated the host mirror and never reached the device passes everything
+//! above them.
+
 use crate::harness::Headless;
 use crcbl_hal::{
     Barriers, BufferDesc, BufferUsage, CommandEncoderDesc, MemoryLocation, ResourceState,
@@ -7,29 +26,6 @@ use crcbl_render::cull::{Frustum, visible_instances};
 use crcbl_render::{Camera, InstanceHandle, InstancePool, InstancePoolDesc, Projection};
 use crcbl_shaders::mesh::{GpuInstance, GpuMesh, INSTANCE_STRIDE, MESH_ENTRY_STRIDE};
 use glam::{Mat4, Vec3};
-
-// --- GPU frustum culling ---------------------------------------------------
-//
-// `docs/plan/03-gpu-driven-rendering.md` §3.3's cull pass, against a real
-// driver, checked against `crcbl_render::cull::visible_instances` — which is
-// ordinary Rust and is the oracle.
-//
-// The renderer's draw generation consumes this list — see the `draw_gen` suite
-// — but a consumer that drew the right picture from the wrong list would say
-// nothing about this pass. So the list and the counter are copied back to the
-// host and compared against the oracle directly, which is a check no picture
-// can stand in for.
-//
-// The scene below places one instance per rejection the pass can make — outside
-// each of the six planes, inside, straddling an edge, rotated back in, naming a
-// freed mesh, removed, and never written at all — so a plane dropped from the
-// frustum, an `abs` left off the bounds transform, a missing empty-entry guard
-// or a missing liveness check each changes a different element of the answer.
-//
-// Two of those come from `InstancePool` rather than from a record typed out
-// here, and `a_removed_instance_is_not_in_the_visible_list` runs the pass over
-// that pool's own buffer: a removal that never reached the device is exactly
-// what a scene of hand-written instances cannot notice.
 
 /// What the visible list holds before every dispatch.
 ///

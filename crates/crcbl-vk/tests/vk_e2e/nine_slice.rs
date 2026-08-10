@@ -1,21 +1,28 @@
+//! Slice 6's nine-slice geometry, drawn.
+//!
+//! `crcbl_render::nine_slice` is exact arithmetic over rectangles and its unit
+//! tests assert the quads to the float. What they cannot show is the thing the
+//! feature exists for: that those quads, handed to the real pass on a real
+//! driver, come back as one picture — corners the size they were drawn at,
+//! edges stretched on one axis, and **no seam anywhere between the bands**.
+//!
+//! A seam is the failure mode a rect assertion is worst at. Two quads can share
+//! an edge exactly in world space and still leave a visible line if their UVs
+//! disagree by a texel, or if the sampler bleeds across a band boundary. Both
+//! are pixel facts, and this is where they are checked, against
+//! `tests/golden/sprite_nine_slice.png`.
+//!
+//! Like `button_skin` it draws through the sprite subtree's fixture without
+//! being part of it. Every band's scale is whole on purpose, so under
+//! `SampleMode::Pixel` each is an exactly flat block and the assertions can be
+//! equality on colours — the whole target must hold exactly the sheet's nine
+//! colours and nothing else, which a one-texel seam breaks.
+
 use crate::harness::Headless;
 use crate::sprite::{
     SPRITE_EXTENT, assert_background, assert_the_camera_maps_a_world_unit_to_a_pixel, close,
     register_sheet, render_sprites, report_goldens, rgb, sprite_golden, world_to_pixel,
 };
-
-// --- slice 6: nine-slice geometry, drawn --------------------------------------
-//
-// `crcbl_render::nine_slice` is exact arithmetic over rectangles and its unit
-// tests assert the quads to the float. What they cannot show is the thing the
-// feature exists for: that those quads, handed to the real pass on a real
-// driver, come back as one picture — corners the size they were drawn at, edges
-// stretched on one axis, and **no seam anywhere between the bands**.
-//
-// A seam is the failure mode a rect assertion is worst at. Two quads can share
-// an edge exactly in world space and still leave a visible line if their UVs
-// disagree by a texel, or if the sampler bleeds across a band boundary. Both are
-// pixel facts, and this is where they are checked.
 
 /// The nine-slice test sheet: 48×48 texels, a 3×3 grid of 16-texel blocks, and
 /// **no two blocks alike**.

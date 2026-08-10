@@ -1,3 +1,21 @@
+//! Sharp-bilinear: `SampleMode::Pixel` against `SampleMode::Smooth`.
+//!
+//! Its own module because all three tests are the same discrimination — a
+//! `Smooth` control beside every `Pixel` claim, without which a renderer that
+//! drew nothing, or one that quietly fell through to plain linear, would pass.
+//! And they read straight off sampled pixel values rather than through a
+//! reference, because a golden blessed from a broken build would agree with
+//! itself forever; `tests/golden/sprite_pixel.png` and `sprite_smooth.png` are
+//! reported alongside the arithmetic, not instead of it.
+//!
+//! The third test covers the half the other two cannot see: the snap. Snapping
+//! the quad's corners to the device-pixel grid does not change how many
+//! fragments an axis-aligned rectangle covers — `ceil(a - 0.5)` is `round(a)` —
+//! so a coverage assertion passes with the snap deleted. What it changes is
+//! whether the art's own texel grid slides under sub-pixel motion, which is the
+//! crawl, so the assertion is that a fifth-of-a-pixel move leaves a `Pixel`
+//! frame byte-identical and a `Smooth` one not.
+
 use crate::harness::Headless;
 use crate::sprite::{
     SPRITE_EXTENT, assert_the_camera_maps_a_world_unit_to_a_pixel, close, quad_sheet,

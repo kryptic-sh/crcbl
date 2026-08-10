@@ -1,3 +1,24 @@
+//! The fixture the rest of the suite opens with — not a test module.
+//!
+//! [`Headless`] is an offscreen surface, a device and a swapchain-shaped image
+//! ring. Its device asks for the suite's interesting features
+//! (`GPU_DRIVEN`, `TIMESTAMP_QUERY`, `DEBUG_MARKERS`, `PRESENT_FEEDBACK`,
+//! `PRESENT_TIMING`) as *optional* and requires none of them, so the same
+//! fixture opens on radv and on lavapipe and the tests branch on what actually
+//! came back. [`Headless::readback`] polls against a deadline rather than
+//! sleeping, per `docs/plan/12-testing.md`.
+//!
+//! **Callers must end with [`Headless::finish`] rather than dropping the
+//! fixture.** It tears down in the order `crcbl-hal`'s obligation 2 requires
+//! and then asserts the validation report is clean — which is the assertion
+//! most of this suite's tests are actually resting on, and a test that drops
+//! the fixture instead never asks the layer what it saw.
+//!
+//! [`instance`] prints a `vk e2e: adapter …` line per adapter, and that line is
+//! load-bearing outside this file: `tests/run-vk-e2e.sh` greps the first one to
+//! report which driver really ran, and exits non-zero when the suite never
+//! printed one. Rewording it turns a green suite into a failed harness run.
+
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     CompositeAlpha, Device, DeviceDesc, Features, Format, Instance, PresentMode, ReadbackDesc,

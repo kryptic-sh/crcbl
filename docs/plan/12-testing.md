@@ -249,9 +249,13 @@ skipped, and it is the one a reader needs.
 a body on a spawned thread and AppKit is main-thread-only, which is why it is a
 `harness = false` target; `crates/crcbl/tests/render_e2e.rs` explains why the
 test is in `crcbl` and not in `crcbl-mtl`. Both are facts no reader could
-reconstruct from the code. Known gaps: `crates/crcbl-net/fuzz/tests/corpus.rs`
-has no header, and of the 27 modules under `crates/crcbl-vk/tests/vk_e2e/` only
-`main.rs` has one.
+reconstruct from the code. The rule now holds with no exceptions: every module
+under `crates/crcbl-vk/tests/vk_e2e/` carries one, and so does
+`crates/crcbl-net/fuzz/tests/corpus.rs`, which were the two gaps this section
+used to record. A submodule's header says what _that_ module owns rather than
+repeating the suite preamble its root already carries — `vk_e2e/main.rs` states
+the feature gate, the `#[ignore]` convention, the offscreen path and the
+validation-report assertion once, for all of them.
 
 ## Per-subsystem e2e anchors (the non-negotiables)
 

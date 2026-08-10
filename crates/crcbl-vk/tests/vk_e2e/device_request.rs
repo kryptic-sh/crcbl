@@ -1,3 +1,20 @@
+//! `Instance::request_device`, and what the device it hands back reports about
+//! itself.
+//!
+//! The only module here that does not use [`Headless`](crate::harness::Headless)
+//! — every question in it is about device *creation*, so it opens its own. The
+//! two argument errors are decided before a `VkDevice` exists; the polled
+//! `request_device` path is the one every other test in the suite skips by
+//! going through the blocking `create_device` wrapper; and
+//! `a_device_opens_with_whatever_mesh_and_ray_tracing_the_adapter_reports` is
+//! the only place the mesh-shading and ray-tracing feature chain is asked for
+//! at all, because the harness's own device deliberately does not ask. Without
+//! that test the enable path runs on no machine.
+//!
+//! Nothing here asserts a *best* path, only that the report is consistent with
+//! the limits beside it — which is what a renderer branches on, and the only
+//! claim that holds on both radv and lavapipe.
+
 use crate::harness::instance;
 use crcbl_hal::{
     BindingModel, BufferDesc, BufferUsage, DeviceDesc, Features, GeometryPath, Instance,

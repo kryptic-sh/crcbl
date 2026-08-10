@@ -1,35 +1,32 @@
+//! Slice 16b: sprites that turn.
+//!
+//! `Sprite::rotation` is a number on an instance lane and the arithmetic that
+//! consumes it lives entirely in `sprite.slang`'s vertex stage, so nothing on
+//! the CPU side can check it: a recorder assertion can say the angle reached
+//! the buffer and cannot say the quad turned, let alone that it turned about
+//! its own centre, by that angle, in that direction. The device test asserts
+//! all three from the rotation matrix rather than off the picture, plus that
+//! sharp-bilinear still collapses to flat when the quad is not axis-aligned,
+//! against `tests/golden/sprite_rotation.png`.
+//!
+//! # Why one test here is not `#[ignore]`d
+//!
+//! `the_rotation_frame_of_reference_agrees_with_the_shaders` is pure — no
+//! device, no loader, no Vulkan — and could live in `crcbl-vk`'s `src/` tests
+//! under the rule that puts it there. It stays in the e2e binary on purpose.
+//! [`sprite_local`] is the inverse of the shader's rotation, and an inverted
+//! sign in it would relabel every expected colour *consistently*, so the sweep
+//! beside it would pass while asserting the mirror image. It pins the frame of
+//! reference its neighbours' pixel assertions are written in, and it belongs
+//! next to what it protects; `docs/plan/12-testing.md` cites it as the exemplar
+//! of placement following what a test needs rather than which directory looks
+//! tidier.
+
 use crate::harness::Headless;
 use crate::sprite::{
     assert_background, assert_the_camera_maps_a_world_unit_to_a_pixel, close, quad_sheet,
     register_sheet, render_sprites, report_goldens, rgb, sprite_golden, world_to_pixel,
 };
-
-// --- slice 16b: sprites that turn ---------------------------------------------
-//
-// `Sprite::rotation` is a number on an instance lane, and the arithmetic that
-// consumes it lives entirely in `sprite.slang`'s vertex stage. Nothing on the
-// CPU side can check it: a recorder assertion can say the angle reached the
-// buffer and cannot say the quad turned, let alone that it turned about its own
-// centre by that angle and in that direction.
-//
-// So this section is pixels, and it asserts three separate things:
-//
-// 1. **Where the corners land**, from the rotation matrix rather than from the
-//    picture. 90°, 180° and 270° are exact — `sin` and `cos` of them are exactly
-//    0 and ±1 — so the four corners of a turned quad are predictable to the
-//    pixel, and 45° and 30° are covered by the same arithmetic to within a
-//    fragment.
-// 2. **That the sprite is asymmetric under the rotation being tested.** The rect
-//    is 64 by 32, so a quarter turn changes the outline from wide to tall; the
-//    sheet is four different colours, so a half turn is visible even though it
-//    leaves the outline alone. A square of one colour passes a rotation test
-//    that does nothing at all.
-// 3. **That sharp-bilinear survives being turned.** `sharpen` derives its ramp
-//    width from `fwidth`, which is a per-fragment screen-space derivative, so
-//    the claim is that it needs no angle and still collapses to flat inside each
-//    texel. The interior sweep below asserts exactly that, and a `Smooth` sprite
-//    at the same angle is the control that says the flatness is sharp-bilinear
-//    rather than something every filter would do.
 
 /// The angles the rotation frame draws, in **degrees**, in the order their
 /// centres are listed.

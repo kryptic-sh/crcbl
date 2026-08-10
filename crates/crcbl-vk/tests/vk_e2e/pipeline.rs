@@ -1,3 +1,19 @@
+//! The pipeline-creation surface: bind-group layouts, entry-point resolution
+//! and samplers.
+//!
+//! What these have in common — and why they are one module rather than parts of
+//! the milestones that use them — is that each is decided by `crcbl-vk` before
+//! a driver object exists, and each is a refusal rather than a picture. A
+//! layout carrying `BindingFlags` must be *rejected* by a device without
+//! `DESCRIPTOR_INDEXING` instead of quietly downgraded, and an entry point the
+//! module does not have must be named here rather than surfacing as the
+//! driver's initialisation failure, which names neither the module nor the
+//! stage.
+//!
+//! Which arm the bindless test takes depends on what the device reports, and
+//! both are asserted — which is exactly why this suite is run on radv and on
+//! lavapipe rather than on one of them.
+
 use crate::harness::Headless;
 use crcbl_hal::Features;
 

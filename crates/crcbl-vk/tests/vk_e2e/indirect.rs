@@ -1,3 +1,23 @@
+//! The indirect draw path: Tier B's `draw_indexed_indirect` and Tier A's
+//! `draw_indexed_indirect_count`.
+//!
+//! `crcbl-hal`'s module docs call `draw_indexed_indirect_count` "Tier A's
+//! steady-state draw call — one per pass, regardless of scene size" and say
+//! `draw` "exists mostly for full-screen triangles and bring-up". Until this
+//! module the bring-up path was the only one that had ever reached a driver.
+//!
+//! It is separate from `triangle` while deliberately reusing everything that
+//! suite established — its clear colour, its extent and `triangle.slang`, with
+//! no new shader anywhere. Every test draws the *same* four triangles, one per
+//! quadrant, and varies only the indirect arguments, which is what makes a
+//! backend that honoured them distinguishable from one that ignored them and
+//! drew something reasonable anyway: each argument selects a different subset,
+//! and the quadrants it did not select must still be the clear colour.
+//!
+//! Which arms a run took depends on `MULTI_DRAW_INDIRECT` and
+//! `DRAW_INDIRECT_COUNT`; both tests assert whichever arm the device offers and
+//! name it in the output, so a Tier B machine cannot pass by checking less.
+
 use crate::harness::Headless;
 use crate::triangle::{TRIANGLE_CLEAR, TRIANGLE_EXTENT};
 use crcbl_hal::{
@@ -6,20 +26,6 @@ use crcbl_hal::{
     ImageSubresourceRange, LoadOp, MemoryLocation, PresentInfo, Rect2d, RenderPassDesc,
     ResourceState, StoreOp, SubmitInfo,
 };
-
-// --- the indirect draw path ------------------------------------------------
-//
-// `crcbl-hal`'s module docs call `draw_indexed_indirect_count` "Tier A's
-// steady-state draw call — one per pass, regardless of scene size" and say
-// `draw` "exists mostly for full-screen triangles and bring-up". Until this
-// section, the bring-up path was the only one that had ever reached a driver.
-//
-// Every test here draws the *same* four triangles, one per quadrant, through
-// `triangle.slang` — no new shader — and varies only the indirect arguments.
-// That is what makes a backend which honoured the arguments distinguishable
-// from one which ignored them and drew something reasonable anyway: each
-// argument selects a different subset of the four, and the quadrants it did not
-// select must still be the clear colour.
 
 /// Where each quadrant's triangle sits, in NDC.
 const QUADRANT_CENTRES: [[f32; 2]; 4] = [[-0.5, 0.5], [0.5, 0.5], [-0.5, -0.5], [0.5, -0.5]];

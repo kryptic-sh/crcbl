@@ -1,3 +1,20 @@
+//! The deletion queue, at the three moments its retirement key can be wrong.
+//!
+//! Destroy after recording and before submitting; destroy while a submission
+//! that used the object is still in flight; and destroy an object that two
+//! queued submissions both reference. The first and the last are regressions
+//! against keys that were off by one submission — `submissions()` and
+//! `submissions() + 1` respectively — and all three fail the same way when they
+//! fail: the validation layer's "destroyed while in use", or, with no layer, a
+//! silent use-after-free inside the driver.
+//!
+//! That failure mode is why these live in the e2e binary rather than in
+//! `crcbl-vk`'s `src/` tests: the observable is a layer message about memory
+//! the driver was still reading. The last test says as much about itself —
+//! whether the first submission has completed when the second's poll runs is
+//! timing-dependent, so it is the integration smoke test and `RetireQueue`'s
+//! own unit tests are the deterministic proof.
+
 use crate::harness::Headless;
 use crcbl_hal::{BufferDesc, BufferUsage, CommandEncoderDesc, MemoryLocation, SubmitInfo};
 

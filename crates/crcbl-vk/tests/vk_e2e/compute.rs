@@ -1,19 +1,24 @@
+//! The compute path: `begin_compute_pass`, `bind_compute_pipeline`, `dispatch`,
+//! `dispatch_indirect` and `Device::create_compute_pipeline`, reaching a driver.
+//!
+//! Milestone-independent, which is why it is a module of its own rather than a
+//! section of one of the graphics ones: it is the half of `crcbl-hal` that had
+//! no test reaching a driver at all. Those calls were covered only by
+//! `crcbl-hal`'s null recorder, which records them and executes none — so a
+//! dispatch that did nothing and a dispatch that did the right thing were the
+//! same green test. `crcbl_shaders::COMPUTE_PROBE` exists so the difference can
+//! be read back and asserted.
+//!
+//! `update_bind_group_moves_a_dispatch_onto_a_different_buffer` branches on
+//! whether the device reports `DESCRIPTOR_INDEXING` and asserts both arms — a
+//! rewrite in place on Tier A, a loud refusal on Tier B — and prints which one
+//! it took, so a run cannot check less than it looks.
+
 use crate::harness::Headless;
 use crcbl_hal::{
     Barriers, BufferDesc, BufferUsage, CommandEncoderDesc, Device, Features, MemoryLocation,
     ResourceState, SubmitInfo,
 };
-
-// --- the compute path ------------------------------------------------------
-//
-// Everything below is milestone-independent: it is the half of `crcbl-hal` that
-// had no test reaching a driver at all. `begin_compute_pass`,
-// `bind_compute_pipeline`, `dispatch`, `dispatch_indirect` and
-// `Device::create_compute_pipeline` were covered only by `crcbl-hal`'s null
-// recorder, which records the calls and executes none of them — so a dispatch
-// that did nothing and a dispatch that did the right thing were the same green
-// test. `crcbl_shaders::COMPUTE_PROBE` exists so the difference can be read back
-// and asserted.
 
 /// Workgroups the probe's buffers are sized for.
 ///

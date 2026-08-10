@@ -1,3 +1,17 @@
+//! Timestamp queries, and the per-pass GPU timers built on them.
+//!
+//! `docs/plan/02-vulkan-backend.md` §2.4 asks for a GPU timestamp per pass,
+//! exposed as a frame-timing report. `crcbl-render`'s own tests cover the
+//! report's *shape* with no device in the room; this module is the half that
+//! needs a driver — that the numbers are non-zero, ordered, and attached to the
+//! right pass names — which is the whole reason it is here rather than there.
+//!
+//! It renders `mesh`'s scene, importing that module's extent, camera and spin,
+//! because a timer needs real work to measure and a scene of its own would be a
+//! second thing to keep in step. The seam says timestamps degrade rather than
+//! break where a device has none, so the first test asserts both arms and the
+//! run says which one it took.
+
 use crate::harness::Headless;
 use crate::mesh::{MESH_EXTENT, MESH_SECONDS, mesh_camera};
 use crcbl_hal::{CommandEncoderDesc, Features, PresentInfo, QueryKind, QuerySetDesc, SubmitInfo};

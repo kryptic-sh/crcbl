@@ -1,37 +1,34 @@
+//! The mirrored wizard, rasterised: a reversed `u` range draws the exact
+//! column-reversed image.
+//!
+//! `apps/horde/src/art.rs` turns the player left and right by swapping a
+//! frame's `u` ends — `art::mirrored` — and the CPU test for it asserts the
+//! exact reversal and that the reversed range stays inside the frame's own
+//! interval. What it cannot check is that the *shader* honours the reversal:
+//! the argument that it does is read off `sprite.slang`, where `u` is an
+//! unconditional `lerp(uv.x, uv.z, corner.x)` with no clamp and no `saturate`,
+//! and `sharpen` is written in terms of `fwidth`, which is symmetric. Read off
+//! the source is not the same as seen in a picture.
+//!
+//! It is separate from its siblings because it is a **self-comparison** rather
+//! than a golden: one frame draws frame A of the asymmetric sheet, the next
+//! draws the same sprite mirrored, and the assertion is that the second image
+//! is the first reversed left to right at every pixel. No reference PNG is
+//! checked in — the two frames are each other's reference, which is what makes
+//! the sheet's asymmetry load-bearing here. A sprite that ignored its `uv`
+//! entirely would draw the same picture twice and pass; and frame B sits
+//! immediately to the right of frame A, so a reversed range that strayed
+//! outside frame A's interval bleeds frame B's colours.
+//!
+//! Frame A's internal texel boundary runs down the middle of the sprite, so the
+//! sharp-bilinear ramp at it is part of what is compared — a filter that needed
+//! its `u` axis oriented a particular way would come apart there.
+
 use crate::harness::Headless;
 use crate::sprite::{
     FRAME_A, SPRITE_EXTENT, assert_the_camera_maps_a_world_unit_to_a_pixel, asymmetric_sheet,
     background_rgb, close, register_sheet, render_sprites, rgb,
 };
-
-// --- the mirrored wizard, rasterised ------------------------------------------
-//
-// `apps/horde/src/art.rs` turns the player left and right by swapping a frame's
-// `u` ends — `art::mirrored` — and the CPU test for it asserts the exact
-// reversal and that the reversed range stays inside the frame's own interval.
-// What it cannot check is that the *shader* honours the reversal: the argument
-// that it does is read off `sprite.slang` — `u` is an unconditional
-// `lerp(uv.x, uv.z, corner.x)` with no clamp and no `saturate`, and `sharpen`
-// is written in terms of `fwidth`, which is symmetric. Read off the source is
-// not the same as seen in a picture: nothing has rasterised a mirrored sprite,
-// so nothing has shown that a reversed `u` range draws the exact
-// column-reversed image — including the sharp-bilinear ramp at frame A's
-// internal texel boundary, where a filter that needed its `u` axis oriented a
-// particular way would come apart.
-//
-// So this section is pixels, and it is a **self-comparison** rather than a
-// golden: one frame draws frame A of the asymmetric 4×2 sheet, the next draws
-// the same sprite with `mirrored(FRAME_A)`, and the assertion is that the
-// second image is the first, reversed left to right, at every pixel. No
-// reference PNG is checked in — the two frames are each other's reference.
-//
-// The sheet's asymmetry is what makes the comparison mean anything: frame A is
-// red/green over blue/yellow, so a sprite that ignored its `uv` entirely would
-// draw the same picture twice and a symmetric picture would pass the
-// column-reversed comparison for the wrong reason. Frame B sits immediately to
-// the right of frame A, so a reversed range that strayed outside frame A's
-// interval would bleed frame B's colours — the exact failure the horde CPU test
-// guards at the CPU level.
 
 /// The same frame, mirrored left to right — `art::mirrored`'s swap, reproduced
 /// here because the horde sample is not a dependency of this crate.

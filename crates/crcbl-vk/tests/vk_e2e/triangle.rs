@@ -1,3 +1,22 @@
+//! Milestone 2: a triangle whose vertices come out of a storage buffer, with
+//! **no vertex input state anywhere** in the pipeline.
+//!
+//! Two tests, and they are deliberately different kinds of evidence. The first
+//! asserts geometry rather than exact colour — each frame corner holds a
+//! different vertex's colour and the centre holds a blend of all three —
+//! because that is what distinguishes "the triangle drew" from "something
+//! drew"; a mirrored vertex order or a Y flip breaks at least one of them. The
+//! second is the golden gate against `tests/golden/triangle.png` at
+//! `Tolerance::RASTERISER`, whose numbers `crcbl-golden` measured between radv
+//! and lavapipe rather than guessed.
+//!
+//! The module is also a fixture other modules build on, which is why its
+//! constants are `pub(crate)`: `Headless::open_for_triangle` pins the format
+//! instead of preferring one, `mesh_shader` reuses the clear colour so a
+//! mesh-emitted triangle is comparable with this one, and `indirect` reuses the
+//! clear, the extent and `triangle.slang` so that the indirect path varies
+//! nothing but its arguments.
+
 use crate::harness::{Headless, instance};
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
@@ -7,8 +26,6 @@ use crcbl_hal::{
     PresentInfo, PresentMode, ReadbackDesc, ReadbackState, Rect2d, RenderPassDesc, ResourceState,
     StoreOp, SubmitInfo, SwapchainDesc,
 };
-
-// --- milestone 2: the triangle ---------------------------------------------
 
 /// The size the triangle suite renders at.
 ///

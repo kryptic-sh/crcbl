@@ -1,3 +1,28 @@
+//! Slice 4's sprite pass, and the fixture its four child modules share.
+//!
+//! Everything about sprites before this was a recorder assertion — instance
+//! bytes, batching, draw ranges, teardown. Nothing in `crcbl-sprite` or
+//! `crcbl_render::sprite_pass` had ever been checked against a real image or a
+//! real renderer, and the first honest check of that is a picture through the
+//! pass.
+//!
+//! **This file holds no tests.** It owns the pieces every child depends on and
+//! that must not drift between them: the extent the goldens were blessed at, a
+//! clear colour deliberately neither black nor grey (black is the one
+//! background where a premultiplication mistake is invisible), an orthographic
+//! camera scaled so one world unit is one device pixel, the [`world_to_pixel`]
+//! mapping every placement assertion is written in — checked against the real
+//! matrix by [`assert_the_camera_maps_a_world_unit_to_a_pixel`] rather than
+//! left as a claim — the deliberately asymmetric test sheets, and the
+//! [`sprite_golden`] helper that resolves `tests/golden/<name>.png`.
+//!
+//! The children split by claim rather than by size: `drawing` is the pass
+//! putting pixels where it was told and compositing them, `filtering` is
+//! sharp-bilinear, `rotation` is the vertex stage's rotation, and `mirror` is a
+//! reversed `u` range. `button_skin`, `menu` and `nine_slice` sit outside the
+//! subtree and import this fixture anyway, because they are sprite quads with a
+//! different generator in front of them.
+
 use crate::harness::{Headless, instance};
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
@@ -11,31 +36,10 @@ mod filtering;
 mod mirror;
 mod rotation;
 
-// --- slice 4: the sprite pass, and the first pixels it is shown to draw -------
-//
-// Everything above this line about sprites was a recorder assertion — instance
-// bytes, batching, draw ranges, teardown. `docs/backlog.md` said so under
-// "Coverage gaps": nothing in `crcbl-sprite` or `crcbl_render::sprite_pass` had
-// ever been checked against a real image or a real renderer, and the first
-// honest check of that is a golden image through the pass. This section is it.
-//
-// Four things are asserted, and the last two are the ones that could not have
-// been faked from the CPU side:
-//
-// 1. A sprite is drawn at all, the right way up, in the right place, showing the
-//    frame it named. The test sheet is deliberately **asymmetric** — a different
-//    colour in each corner of each frame — because `sprite.slang`'s vertex stage
-//    warns that a flipped V renders every sprite upside down while looking
-//    entirely plausible on a symmetric image, and a symmetric test image is how
-//    that ships.
-// 2. Alpha blending composites onto what is already there rather than replacing
-//    it, checked against the linear-light blend arithmetic rather than eyeballed.
-// 3. `SampleMode::Pixel` and `SampleMode::Smooth` produce visibly different
-//    pictures at a non-integer scale, in the place and by the amount predicted.
-//    That difference is the only real evidence that sharp-bilinear happened.
-// 4. `Pixel` at a whole scale is **exactly flat inside each texel** — which is
-//    the whole difference between sharp-bilinear and plain linear, and is
-//    asserted on sampled pixel values rather than only through a reference.
+// The test sheets are deliberately **asymmetric** — a different colour in each
+// corner of each frame — because `sprite.slang`'s vertex stage warns that a
+// flipped V renders every sprite upside down while looking entirely plausible
+// on a symmetric image, and a symmetric test image is how that ships.
 
 /// The size the sprite suite renders at.
 ///

@@ -1,3 +1,25 @@
+//! `docs/plan/03-gpu-driven-rendering.md` §3.5's mesh-shading geometry path,
+//! at its smallest: one triangle emitted by a mesh stage, and the same triangle
+//! again through an amplification stage in front of it.
+//!
+//! Not meshlets and not cluster culling — those need a mesh asset system that
+//! does not exist yet. See `crates/crcbl-shaders/shaders/mesh_shader.slang`.
+//!
+//! Separate from `triangle` because the pipeline is a different object built on
+//! a different fixture. `Headless::open_for_mesh_shader` asks for
+//! `Features::MESH_SHADER` and `TASK_SHADER` as *optional* and then asserts
+//! `MESH_SHADER` came back, so a driver without it fails naming this suite
+//! rather than returning an `UnsupportedFeatures` that says nothing about who
+//! wanted the flag. The task stage is a genuinely separate capability: its
+//! absence is reported and the amplification test stands down, while the rest
+//! of the module still runs.
+//!
+//! Its golden is `tests/golden/mesh_shader_triangle.png`. Per
+//! `docs/plan/39-capabilities.md` goldens are per
+//! `(GeometryPath, BindingModel, LightingPath)` combination a backend selects,
+//! and `GeometryPath::MeshShader` had none until this slice, because nothing
+//! could select it.
+
 use crate::harness::{Headless, instance};
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
@@ -7,16 +29,6 @@ use crcbl_hal::{
     MeshPipelineDesc, PresentInfo, PresentMode, Rect2d, RenderPassDesc, ResourceState, ShaderEntry,
     StoreOp, SubmitInfo, SwapchainDesc,
 };
-
-// --- the mesh-shading geometry path ----------------------------------------
-//
-// `docs/plan/03-gpu-driven-rendering.md` §3.5 makes mesh shaders the primary
-// geometry path. This is the smallest end-to-end proof that the path exists:
-// one triangle emitted by a mesh stage, and the same triangle again through an
-// amplification stage in front of it.
-//
-// Not meshlets and not cluster culling — those need a mesh asset system that
-// does not exist yet. See `crates/crcbl-shaders/shaders/mesh_shader.slang`.
 
 /// The size this suite renders at — the same 256×192 as the triangle and mesh
 /// suites, for the same reason: the golden's structural metric works on 8×8

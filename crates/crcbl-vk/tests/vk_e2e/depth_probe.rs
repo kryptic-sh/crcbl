@@ -1,3 +1,20 @@
+//! Reversed-Z, proved rather than asserted.
+//!
+//! `docs/plan/02-vulkan-backend.md` locks reversed-Z, which is the kind of
+//! decision a comment can claim and nothing checks. The one test here renders
+//! two overlapping quads — the near one drawn first, so draw order cannot carry
+//! it — twice, through the same pipeline, the same `CompareOp::Greater` and the
+//! same clear of 0.0, changing only the projection matrix. Under the engine's
+//! projection the near quad wins and the frame is red; under a conventional
+//! `0 at near, 1 at far` one the far quad has the larger depth value, passes
+//! `Greater`, and overwrites it. Both outcomes are asserted, so the test fails
+//! under standard-Z in the direction that names which convention is in force.
+//!
+//! It borrows `mesh`'s extent and shader but is not part of that module,
+//! because it is not a picture of a scene: the conventional projection it
+//! builds for the control is one nothing in the engine ever constructs, and it
+//! exists only so the reversed-Z result has something to be different from.
+
 use crate::harness::Headless;
 use crate::mesh::MESH_EXTENT;
 use crcbl_hal::{
@@ -5,8 +22,6 @@ use crcbl_hal::{
     Format, ImageAspect, ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState,
     SubmitInfo,
 };
-
-// --- reversed-Z, proved rather than asserted --------------------------------
 
 /// Two overlapping quads, the **near one drawn first**, so the depth test is the
 /// only thing deciding what is visible.
