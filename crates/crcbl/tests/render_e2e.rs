@@ -102,6 +102,15 @@ fn channel_order(format: Format) -> ChannelOrder {
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
 fn the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden() {
+    // **Install a logger before opening anything.** Without one, every
+    // `log::info!` a backend emits on the way to a device — the adapter it
+    // chose, the surface it built, whether a validation layer loaded — goes
+    // nowhere. Two sessions were spent diagnosing a D3D12 failure inside
+    // `open` with no backend output at all in the run, for exactly this
+    // reason: the panic message was the only evidence, and it named the call
+    // that noticed rather than the one that caused it.
+    crcbl_core::log::init_logging();
+
     // `unwrap_or_else` rather than `expect`, which would format the error with
     // `Debug` and escape the newlines out of the adapter listing a pin miss
     // carries — on a runner nobody can log into, that listing is the whole
