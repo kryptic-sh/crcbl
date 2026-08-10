@@ -1216,77 +1216,29 @@ jobs:
           crates/crcbl-mtl/tests/run-mtl-e2e.sh --no-fail-fast -E 'not
           test(a_layer_swapchain_acquires_a_drawable_and_presents_it)'
 
-      # # The renderer on Metal: measured, and blocked by this runner
+      # # The renderer on Metal
       #
       # `crates/crcbl/tests/render_e2e.rs` draws one frame of the cube scene
-      # through `ForwardRenderer`, and it was wired here to close
-      # `docs/backlog.md`'s "The render layer has only ever run on Vulkan and
-      # wgpu". **It ran once, on 878f582, and the run is the reason there is no
-      # step below it.** Two things came out of it, both worth more than the
-      # step would have been:
+      # through `ForwardRenderer` and compares it against the golden the `vk e2e`
+      # job re-derives on lavapipe. It closes `docs/backlog.md`'s "the render
+      # layer runs on Vulkan and wgpu" on a second backend.
       #
-      # 1. **Metal selects `IndirectPerBatch / ArrayPages / Rasterised`** — the
-      #    per-batch tail, on the backend that actually degrades to it, rather
-      #    than forced on Vulkan behind a weakened device request.
-      # 2. **Draws hang on this runner and compute does not.** The failure was
-      #    `Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)`
-      #    on **`Apple Paravirtual device`** — a virtualised GPU — with every
-      #    encoder reporting completion: `cull` completed, `draw-args`
-      #    completed, `forward` completed, `tonemap` completed, `crcbl copies`
-      #    completed. The two compute passes are the ones that work; this is the
-      #    same shape as the draw tests that were quarantined above.
+      # **It ran once before, on `878f582`, and hung** — every draw this backend
+      # recorded did, because `bind_graphics_pipeline` passed nil to
+      # `setDepthStencilState:`. That is fixed, and the five draw tests
+      # quarantined for it now pass on this runner, so the reason this step was
+      # held is gone.
       #
-      # **This was a `crcbl-mtl` bug, not a runner limitation**, and the bisect
-      # above named it: `setDepthStencilState:nil`. Every pass that frame
-      # records is colour-only, so every pipeline in it bound nil. The step is
-      # removed because it duplicated a signal the released tests already give,
-      # and a step that can only be red gates nothing while reading as
-      # coverage. The test stays and runs on `vk` and `wgpu`; it is worth
-      # re-wiring here once the run above shows the released draws passing —
-      # not before, because a frame through `ForwardRenderer` is a mixed
-      # command stream and would confuse a first result with several changes in
-      # it.
-      # The same artifact the `vk e2e` job uploads, and wanted here for a
-      # stronger reason: nobody on this team has a Mac, so a golden mismatch on
-      # Metal is otherwise three numbers with no picture behind them. The
-      # reference, what Metal drew, and a red-marked diff of the two tell "the
-      # tolerance is too tight" from "the MSL lowered `SV_VertexID`
-      # differently" without reproducing the run.
-      - name: Upload golden-image diffs
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: golden-diff-metal
-          path: target/golden-diff/
-          if-no-files-found: ignore
-
-  # The anti-rot gate for the committed SPIR-V. `crates/crcbl-shaders` ships
-  # Slang sources *and* the compiled artifacts, because
-  # `docs/plan/02-vulkan-backend.md`'s risk list sanctions exactly that ("Slang
-  # toolchain friction in build.rs. Fallback: check in compiled SPIR-V alongside
-  # sources until the toolchain story is smooth") and because it is what lets
-  # every other job — and every contributor — build with no shader compiler at
-  # all.
-  #
-  # The cost of committing generated files is that they rot, so this job is the
-  # thing that stops them: it installs the *pinned* `slangc`, recompiles every
-  # source, and demands the result be byte-for-byte what is in the repository.
-  # It is a separate job rather than a step in `test-linux` because it is the
-  # only one that needs the toolchain, and burying it in a job that does not
-  # would make the "no compiler required" property invisible.
-  #
-  # The version is pinned in `tools/compile-shaders.sh` and repeated here; two
-  # Slang releases legitimately emit different SPIR-V for identical source, so an
-  # unpinned comparison would fail for a reason that is not drift. Bumping it is
-  # a deliberate act that re-blesses every artifact — and any golden image the
-  # new codegen moves — in the same commit.
-  #
-  # The DXIL half is compiled the same way and pinned harder. Slang's own
-  # `-target dxil` shells out to whichever `dxc` it finds, so the script goes
-  # `slangc -target hlsl` then `dxc` explicitly — and `CRCBL_DXC` never falls
-  # back to `PATH`, because distributions ship Shader Model 6.10 *preview*
-  # builds of `dxc` that abort with an LLVM internal assertion on a trivial
-  # shader.
+      # What is unmeasured is the picture, not the frame. The golden was blessed
+      # on lavapipe and compared with `Tolerance::RASTERISER`, calibrated for the
+      # radv-versus-lavapipe difference; Metal is a third rasteriser nobody has
+      # compared. A large pixel delta is a tolerance question, and a structural
+      # mismatch or a blank frame is a finding about the backend — the comparison
+      # prints enough to tell them apart.
+      - name: Draw a frame through ForwardRenderer on Metal
+        env:
+          CRCBL_GPU: mtl
+        run: crates/crcbl/tests/run-render-e2e.sh
   shaders:
     name: shaders (committed artifacts match their sources)
     runs-on: ubuntu-latest
