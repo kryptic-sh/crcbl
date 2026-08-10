@@ -11,7 +11,7 @@
 //! # What this backend does, and the question it was written to answer
 //!
 //! **Adapter enumeration, the resource half of the seam, a cleared pixel read
-//! back, and a window presented to.** `Dx12Instance` lists every D3D12 adapter
+//! back, a window presented to, and a headless image ring.** `Dx12Instance` lists every D3D12 adapter
 //! with its capabilities filled in, which is the one thing
 //! [`Instance::adapters`](crcbl_hal::Instance::adapters) promises can be
 //! answered before a device exists. `request_device` then opens a real
@@ -25,11 +25,19 @@
 //! from the frame-latency waitable object — see `crcbl_dx12::swapchain` and
 //! `crcbl_dx12::present`.
 //!
+//! `SurfaceTarget::Offscreen` is accepted too — named rather than linked, for
+//! the reason the `Dx12Instance` section below gives about every type in this
+//! crate's Windows-only dependencies — and its "swapchain" is a ring of plain `ID3D12Resource`
+//! textures with no DXGI object behind it. That is what lets a headless
+//! caller — `crcbl screenshot`, and every harness built on it — render a frame
+//! and read it back on a machine with no display, through the *same*
+//! acquire/present path a window uses rather than a second one.
+//!
 //! **Nothing in this crate is a stub that reports success** — a draw recorded
 //! into an encoder *fails the encoder*, so `finish` hands back the refusal
 //! rather than a command buffer that submits and draws nothing. Everything past
 //! the clear that no slice has written — compute pipelines, queries, timeline
-//! semaphores, indexed and indirect draws, an offscreen surface — refuses with
+//! semaphores, indexed and indirect draws — refuses with
 //! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
 //! whose `what` names the slice the answer arrives in, so a caller reads "not
 //! yet" rather than "broken". A refusal that is *permanent* deliberately does

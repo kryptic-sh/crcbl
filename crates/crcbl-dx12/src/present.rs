@@ -42,7 +42,7 @@
 
 use core::time::Duration;
 
-use crcbl_hal::{Format, PresentMode};
+use crcbl_hal::{CompositeAlpha, Format, PresentMode, SurfaceCaps};
 
 /// Formats a flip-model swapchain can be configured with, best first.
 ///
@@ -108,6 +108,114 @@ pub(crate) const MAX_BUFFERS: u32 = 16;
 /// rather than getting `E_INVALIDARG`.
 pub(crate) fn buffer_count(requested: u32) -> u32 {
     requested.clamp(MIN_BUFFERS, MAX_BUFFERS)
+}
+
+/// Formats an **offscreen ring** can be created with, best first.
+///
+/// Nothing here is a DXGI restriction: an offscreen ring is a set of plain
+/// `ID3D12Resource` textures this backend creates itself, so
+/// `DXGI_SWAP_EFFECT_FLIP_DISCARD`'s refusal list has no say and the sRGB
+/// spellings are the resources' own formats rather than a view's cast. What the
+/// list *is* is the set `crcbl-vk`'s offscreen ring offers, in its order, so a
+/// harness that renders the same scene through both backends and compares the
+/// frames gets the same channel order from
+/// [`SurfaceCaps::preferred_format`](crcbl_hal::SurfaceCaps::preferred_format)
+/// rather than a swizzled picture on one of them.
+pub(crate) const OFFSCREEN_FORMATS: &[Format] = &[
+    Format::Rgba8UnormSrgb,
+    Format::Bgra8UnormSrgb,
+    Format::Rgba8Unorm,
+    Format::Bgra8Unorm,
+    Format::Rgba16Float,
+];
+
+/// Whether an offscreen ring can be created with `format`.
+pub(crate) fn is_offscreen_format(format: Format) -> bool {
+    OFFSCREEN_FORMATS.contains(&format)
+}
+
+/// Fewest images an offscreen ring may have.
+///
+/// One, unlike [`MIN_BUFFERS`]: the two-buffer floor is flip-discard's, and a
+/// ring of plain images has no compositor to hold one of them. A screenshot
+/// that wants exactly one target should get one.
+pub(crate) const MIN_RING_IMAGES: u32 = 1;
+
+/// Most images an offscreen ring may have.
+///
+/// Not a platform limit — there is no DXGI object to have one — but a cap on
+/// how much a caller's `image_count` can allocate by accident. The same eight
+/// `crcbl-vk`'s offscreen caps report.
+pub(crate) const MAX_RING_IMAGES: u32 = 8;
+
+/// The image count an offscreen ring request of `requested` is configured at.
+pub(crate) fn ring_image_count(requested: u32) -> u32 {
+    requested.clamp(MIN_RING_IMAGES, MAX_RING_IMAGES)
+}
+
+/// The ring image after `current`, in a ring of `count`.
+///
+/// The whole of what makes a ring a ring, and it lives here rather than beside
+/// the entry it mutates for this module's own reason: it is arithmetic, so it
+/// is checkable on a machine with no D3D12 at all. Getting it wrong is a
+/// screenshot harness reading back the frame before the one it drew, which is a
+/// picture that looks plausible.
+///
+/// A `count` of zero cannot arise — [`ring_image_count`] clamps to
+/// [`MIN_RING_IMAGES`] — and is answered with zero rather than a division by
+/// zero, because "the ring has no images" is a state whose right cursor is the
+/// one an acquire will reject.
+pub(crate) fn next_ring_image(current: u32, count: u32) -> u32 {
+    if count == 0 {
+        return 0;
+    }
+    (current + 1) % count
+}
+
+/// The present modes an offscreen ring offers.
+///
+/// Both are honest and neither does anything: "presenting" a ring image is a
+/// cursor bump with no display behind it, so nothing paces it either way.
+/// [`PresentMode::Fifo`] is there because the seam requires every surface to
+/// have it; [`PresentMode::Immediate`] because a headless caller asking not to
+/// wait for a vblank is asking for exactly what this already does, and refusing
+/// it would push a screenshot tool into `Fifo` for no reason.
+pub(crate) fn offscreen_present_modes() -> Vec<PresentMode> {
+    vec![PresentMode::Fifo, PresentMode::Immediate]
+}
+
+/// The mode an offscreen ring is configured at, given what was asked for.
+///
+/// The seam's fallback rule, as [`resolve_present_mode`] applies it to a
+/// windowed swapchain.
+pub(crate) fn resolve_offscreen_present_mode(requested: PresentMode) -> PresentMode {
+    if offscreen_present_modes().contains(&requested) {
+        requested
+    } else {
+        PresentMode::Fifo
+    }
+}
+
+/// What an offscreen "surface" reports it can do.
+///
+/// There is no window system to ask, so this is a statement about the ring
+/// rather than a query — the same shape and the same reasoning as
+/// `crcbl-vk`'s own `offscreen_surface_caps`. `current_extent` is `None`
+/// because nothing here has an opinion about the size, which is exactly what
+/// the seam's obligation 4 asks a backend to say when the platform does not
+/// supply one.
+pub(crate) fn offscreen_surface_caps() -> SurfaceCaps {
+    SurfaceCaps {
+        formats: OFFSCREEN_FORMATS.to_vec(),
+        present_modes: offscreen_present_modes(),
+        // The one mode a ring of plain images composites in: nothing composites
+        // it at all, and a caller reading these bytes back gets the alpha
+        // channel the render pass wrote.
+        composite_alpha: vec![CompositeAlpha::Opaque],
+        min_image_count: MIN_RING_IMAGES,
+        max_image_count: MAX_RING_IMAGES,
+        current_extent: None,
+    }
 }
 
 /// The value `SetMaximumFrameLatency` is given for a swapchain of `buffers`
@@ -336,6 +444,110 @@ mod tests {
             FLIP_MODEL_FORMATS[0].is_srgb(),
             "the engine presents an sRGB swapchain, so sRGB is offered first"
         );
+    }
+
+    /// **An offscreen ring is not a flip-model swapchain, and its caps say so
+    /// in the two places that matter.**
+    ///
+    /// The seam's own floor first: `Fifo` must be offered, the format list and
+    /// the mode list must both be non-empty — the failure
+    /// `Instance::surface_caps` calls out by name — and `preferred_format` must
+    /// find something, because `crcbl::screenshot` calls exactly that and has
+    /// nothing to fall back on.
+    ///
+    /// Then the two differences from [`FLIP_MODEL_FORMATS`] and
+    /// [`MIN_BUFFERS`], which are what makes this a separate set rather than a
+    /// reuse: a ring may be one image deep, and it may hold `Rgb10a2Unorm`
+    /// never — that format is on the flip-model list and off this one, so a
+    /// list that had quietly been aliased to the other would fail here.
+    ///
+    /// Red when `offscreen_surface_caps` starts reporting
+    /// `FLIP_MODEL_FORMATS`, when `MIN_RING_IMAGES` is raised to flip-discard's
+    /// two, or when `Fifo` is dropped from `offscreen_present_modes`.
+    #[test]
+    fn an_offscreen_ring_reports_its_own_caps_and_not_the_flip_model_ones() {
+        let caps = offscreen_surface_caps();
+        assert!(!caps.formats.is_empty(), "a surface offers something");
+        assert!(
+            caps.present_modes.contains(&PresentMode::Fifo),
+            "the seam requires Fifo of every surface: {:?}",
+            caps.present_modes
+        );
+        assert_eq!(
+            caps.preferred_format(),
+            Some(Format::Rgba8UnormSrgb),
+            "crcbl::screenshot takes the preferred format and it decides the channel order"
+        );
+        assert_eq!(caps.current_extent, None, "nothing here has an opinion");
+        assert_eq!(caps.min_image_count, 1, "a ring may be one image deep");
+        assert!(caps.max_image_count >= caps.min_image_count);
+
+        // The list is its own, not flip-discard's. `Rgb10a2Unorm` is the
+        // witness: a flip-model back buffer may be one and a ring image is not
+        // offered as one.
+        assert!(
+            !caps.formats.contains(&Format::Rgb10a2Unorm),
+            "the offscreen list was aliased to the flip-model one: {:?}",
+            caps.formats
+        );
+        for &format in OFFSCREEN_FORMATS {
+            assert!(is_offscreen_format(format), "{format:?}");
+        }
+        assert!(
+            !is_offscreen_format(Format::D32Float),
+            "a depth format is not a colour ring image"
+        );
+
+        // The clamp, at both ends and in the middle.
+        assert_eq!(ring_image_count(0), MIN_RING_IMAGES);
+        assert_eq!(ring_image_count(1), 1);
+        assert_eq!(ring_image_count(2), 2);
+        assert_eq!(ring_image_count(u32::MAX), MAX_RING_IMAGES);
+
+        // And the cursor wraps rather than running off the end. A ring that
+        // never advanced hands the same image to every frame; one that
+        // advanced without wrapping indexes past `images` on the trip after
+        // the first, which is the acquire error rather than a wrong picture.
+        let count = ring_image_count(2);
+        let mut cursor = 0;
+        let mut walk = vec![cursor];
+        for _ in 0..4 {
+            cursor = next_ring_image(cursor, count);
+            walk.push(cursor);
+        }
+        assert_eq!(walk, vec![0, 1, 0, 1, 0], "a two-image ring must wrap");
+        assert_eq!(
+            next_ring_image(0, 1),
+            0,
+            "a one-image ring's cursor wraps onto itself"
+        );
+        assert_eq!(
+            next_ring_image(7, MAX_RING_IMAGES),
+            0,
+            "the last image of the deepest ring wraps to the first"
+        );
+        // Unreachable through `ring_image_count`, and answered rather than
+        // dividing by zero.
+        assert_eq!(next_ring_image(0, 0), 0);
+
+        // And the mode resolution falls back rather than configuring one the
+        // caps did not offer.
+        assert_eq!(
+            resolve_offscreen_present_mode(PresentMode::Immediate),
+            PresentMode::Immediate
+        );
+        assert_eq!(
+            resolve_offscreen_present_mode(PresentMode::Mailbox),
+            PresentMode::Fifo,
+            "a mode the caps do not offer falls back to the one every surface has"
+        );
+        for mode in caps.present_modes.iter().copied() {
+            assert_eq!(
+                resolve_offscreen_present_mode(mode),
+                mode,
+                "an offered mode must survive resolution"
+            );
+        }
     }
 
     /// The two clamps that keep a descriptor D3D12 would refuse from reaching

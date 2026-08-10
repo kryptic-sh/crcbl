@@ -31,6 +31,42 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`CRCBL_GPU=dx12` selects the Direct3D 12 backend on Windows.**
+  `crcbl::backend::GpuBackend` gains a `Dx12` variant, spelled `dx12` or `d3d12`
+  wherever a backend is named — the environment variable, `--backend`, and
+  `GpuBackend::from_name`. The registry entry exists on Windows alone, exactly
+  as the Metal entry exists on macOS alone, and it is **never auto-selected**:
+  Windows already reaches a GPU through `crcbl-vk`, and D3D12 is the same engine
+  through a different loader rather than a replacement for it, so an
+  unconfigured run there picks Vulkan as before. Off Windows the name still
+  parses and resolving it reports `GpuError::UnknownBackend` naming the backends
+  that build does have.
+
+  The rest of the seam is not there yet: `crcbl-dx12` still refuses compute
+  pipelines, so a `CRCBL_GPU=dx12` run of anything that builds a
+  `ForwardRenderer` fails with
+  `unsupported by the dx12 backend: compute pipelines (the DX12 pipeline slice)`.
+  Adapter enumeration, buffers, images, bind groups, graphics pipelines, a
+  clear, a triangle and a swapchain all work.
+
+- **`crcbl-dx12` accepts `SurfaceTarget::Offscreen`**, so a D3D12 device can
+  render into a texture and read it back with no window — what
+  `crcbl screenshot` and every headless harness need. It used to refuse with
+  "offscreen surfaces (a later DX12 slice)". The "swapchain" on such a surface
+  is a ring of plain `ID3D12Resource` textures with no `IDXGISwapChain3` behind
+  it, driven through the same `acquire_next_frame`/`present` pair a window uses:
+  acquire reads a ring cursor instead of `GetCurrentBackBufferIndex`, present
+  bumps it instead of calling `Present`, and `reconfigure_swapchain` recreates
+  the images instead of calling `ResizeBuffers`.
+
+  `Instance::surface_caps` answers for an offscreen surface from the ring's own
+  capabilities rather than a window's, and they genuinely differ: flip-discard's
+  format list and its two-image floor do not apply, so a ring may be one image
+  deep, offers the same formats in the same order as `crcbl-vk`'s offscreen ring
+  — `Rgba8UnormSrgb` first — and reports no `current_extent`. Presents on a ring
+  are unnumbered, so `wait_until_presented` answers immediately rather than
+  blocking on a waitable object that does not exist.
+
 - **A screenshot now says which backend drew it and what that device selected.**
   `crcbl::screenshot::OffscreenSetup::backend` returns the `BackendKind` the
   registry opened and `OffscreenSetup::caps` returns its `DeviceCaps`, so a

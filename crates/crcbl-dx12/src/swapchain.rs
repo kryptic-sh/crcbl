@@ -31,6 +31,29 @@
 //! half, and `create_swapchain` builds the views itself rather than through the
 //! seam's `create_image_view`, which is where the equal-format rule lives.
 //!
+//! # Offscreen is a swapchain too, and here it is the *absence* of DXGI
+//!
+//! [`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget::Offscreen) produces
+//! a surface with no window, and its "swapchain" is a ring of plain
+//! `ID3D12Resource` textures this backend creates through its own
+//! `create_image` — no `IDXGISwapChain3`, no back buffers, no waitable object.
+//! [`SwapchainEntry::raw`] is `None` for exactly that case and
+//! [`SwapchainEntry::is_offscreen`] is how every call site asks, which is the
+//! same shape `crcbl-vk` gets for free from a null `VkSwapchainKHR`.
+//!
+//! The point of building it swapchain-shaped rather than as a second API is the
+//! one `crcbl-hal`'s `swapchain` module states: `crcbl screenshot` and every
+//! headless harness then run through the *same* acquire/present path a real
+//! window does, instead of a second, less-exercised one. What differs is only
+//! what each call has to do:
+//!
+//! | | Windowed | Offscreen ring |
+//! | --- | --- | --- |
+//! | Acquire | `GetCurrentBackBufferIndex` | [`SwapchainEntry::next_offscreen`] |
+//! | Present | `IDXGISwapChain::Present` | bump that cursor |
+//! | Reconfigure | `ResizeBuffers` | recreate the images |
+//! | Pacing wait | the waitable object | nothing to wait for |
+//!
 //! # DXGI has no `OUT_OF_DATE`, so neither does this backend
 //!
 //! `vkAcquireNextImageKHR` reports a swapchain that no longer matches its
@@ -70,7 +93,10 @@ use crate::present::{self, PresentLedger};
 pub(crate) struct SwapchainEntry {
     /// Device that created it, per obligation 3.
     pub(crate) owner: u64,
-    pub(crate) raw: IDXGISwapChain3,
+    /// The DXGI object, or `None` for an offscreen ring — which has no window
+    /// to present to and therefore no swapchain to present through. See the
+    /// module docs for the table of what each call does instead.
+    pub(crate) raw: Option<IDXGISwapChain3>,
     /// `GetFrameLatencyWaitableObject`, as a plain address.
     ///
     /// A `HANDLE` is a raw pointer `windows-rs` declares neither `Send` nor
@@ -86,10 +112,16 @@ pub(crate) struct SwapchainEntry {
     /// swapchains a process makes and goes at exit. `wgpu-hal` 29's D3D12
     /// backend does not close it either — checked, rather than assumed.
     /// `docs/backlog.md` records it as unsettled.
+    /// Zero for an offscreen ring, which has none to wait on. [`wait`] answers
+    /// immediately on that value, so nothing else has to test for it.
     pub(crate) waitable: usize,
     /// The window, kept so `reconfigure_swapchain` can tell a resize from an
     /// attempt to move the swapchain to a different surface — and so the entry
     /// survives its surface handle being destroyed, which obligation 2 permits.
+    ///
+    /// Zero for an offscreen ring, matching what `crate::instance`'s
+    /// `SurfaceEntry` records, so the same comparison catches a reconfigure
+    /// that tried to move a ring onto a window or the other way round.
     pub(crate) hwnd: usize,
     /// The extent this swapchain was **actually** configured at, reported on
     /// every [`AcquiredFrame::extent`](crcbl_hal::AcquiredFrame::extent) per
@@ -97,8 +129,24 @@ pub(crate) struct SwapchainEntry {
     pub(crate) extent: (u32, u32),
     /// The seam format the *views* carry. The buffers are
     /// [`present::buffer_format`] of it.
+    ///
+    /// An offscreen ring's images carry it directly: there is no flip-discard
+    /// rule to strip the sRGB encoding for, so the resource and the view are
+    /// the one format the caller asked for.
     pub(crate) format: Format,
+    /// Back buffers, or ring images.
+    ///
+    /// Equal to `images.len()` except inside `reconfigure_swapchain`, which
+    /// empties the lists before the replacements exist — deliberately, so an
+    /// acquire that races the rebuild is an error rather than a dead view.
     pub(crate) buffers: u32,
+    /// Which ring image the next acquire hands out, bumped by each present.
+    ///
+    /// Only an offscreen ring uses it: a windowed swapchain asks DXGI, which
+    /// keeps the equivalent cursor itself. `acquire_next_frame` bounds-checks it
+    /// against `images` rather than trusting it, which is what makes the window
+    /// above safe.
+    pub(crate) next_offscreen: u32,
     /// The mode this swapchain resolved to, which is what
     /// [`present::pacing`] is asked about on every present.
     pub(crate) present_mode: PresentMode,
@@ -123,6 +171,24 @@ impl Owned for SwapchainEntry {
     }
 }
 
+impl SwapchainEntry {
+    /// Whether this is the offscreen ring rather than a real DXGI swapchain.
+    ///
+    /// One question, asked in one way, so the four call sites that branch on it
+    /// cannot each pick a different field to read.
+    pub(crate) fn is_offscreen(&self) -> bool {
+        self.raw.is_none()
+    }
+
+    /// Moves the ring cursor on, which is what "presenting" a ring image is.
+    ///
+    /// The arithmetic is [`present::next_ring_image`]'s, where it is checkable
+    /// on a machine with no D3D12; this is only the field it lands in.
+    pub(crate) fn advance_offscreen(&mut self) {
+        self.next_offscreen = present::next_ring_image(self.next_offscreen, self.buffers);
+    }
+}
+
 /// A freshly created DXGI swapchain, before the device has given its buffers
 /// handles.
 #[derive(Debug)]
@@ -134,6 +200,14 @@ pub(crate) struct Created {
     pub(crate) present_mode: PresentMode,
     pub(crate) flags: DXGI_SWAP_CHAIN_FLAG,
 }
+
+/// What [`SwapchainEntry::flags`] holds for an offscreen ring: nothing was
+/// created, so no creation flag was passed.
+///
+/// Named rather than written as a literal at the one construction site,
+/// because `DXGI_SWAP_CHAIN_FLAG(0)` there reads as a flag someone chose not to
+/// set rather than as an object DXGI never made.
+pub(crate) const NO_SWAP_CHAIN_FLAGS: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG(0);
 
 /// The creation flags for a swapchain on this machine.
 ///
@@ -158,13 +232,7 @@ pub(crate) fn flags(tearing: bool) -> DXGI_SWAP_CHAIN_FLAG {
 ///
 /// [`HalError::InvalidDescriptor`], naming the field and why.
 pub(crate) fn check(desc: &SwapchainDesc<'_>) -> Result<((u32, u32), u32), HalError> {
-    if desc.extent.0 == 0 || desc.extent.1 == 0 {
-        return Err(HalError::InvalidDescriptor(format!(
-            "SwapchainDesc::extent is {:?}; an unconfigured or minimized window means \"do not \
-             create a swapchain yet\" rather than \"pick something\"",
-            desc.extent
-        )));
-    }
+    let extent = check_extent(desc)?;
     if !present::is_flip_model_format(desc.format) {
         return Err(HalError::InvalidDescriptor(format!(
             "DXGI_SWAP_EFFECT_FLIP_DISCARD does not accept {:?}; Instance::surface_caps offers \
@@ -181,6 +249,27 @@ pub(crate) fn check(desc: &SwapchainDesc<'_>) -> Result<((u32, u32), u32), HalEr
         )));
     }
 
+    Ok((extent, present::buffer_count(desc.image_count)))
+}
+
+/// The extent half of [`check`] and [`check_offscreen`], which is the half they
+/// share.
+///
+/// Both refusals here are the platform's rather than DXGI's: a zero extent is
+/// no legal texture either, and D3D12's 2D ceiling bounds a ring image exactly
+/// as it bounds a back buffer.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] for a zero extent.
+fn check_extent(desc: &SwapchainDesc<'_>) -> Result<(u32, u32), HalError> {
+    if desc.extent.0 == 0 || desc.extent.1 == 0 {
+        return Err(HalError::InvalidDescriptor(format!(
+            "SwapchainDesc::extent is {:?}; an unconfigured or minimized window means \"do not \
+             create a swapchain yet\" rather than \"pick something\"",
+            desc.extent
+        )));
+    }
     // The one range the platform genuinely pins, and therefore the one place
     // the seam's obligation 2 ("clamp into the platform's permitted range, and
     // report what was configured") has anything to do on Windows. A window
@@ -195,7 +284,39 @@ pub(crate) fn check(desc: &SwapchainDesc<'_>) -> Result<((u32, u32), u32), HalEr
             desc.extent
         );
     }
-    Ok((extent, present::buffer_count(desc.image_count)))
+    Ok(extent)
+}
+
+/// Checks a [`SwapchainDesc`] against what an **offscreen ring** accepts, and
+/// answers the size and image count it will be configured at.
+///
+/// The rules are not [`check`]'s with the DXGI ones removed, they are a
+/// different set: nothing here goes through `CreateSwapChainForHwnd`, so
+/// flip-discard's format refusals and its two-buffer floor do not apply and the
+/// ring may be one image of a format a back buffer could never be. What is
+/// still checked is what `Instance::surface_caps` offered, so a caller that
+/// picked from that list is never refused one call later.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`], naming the field and why.
+pub(crate) fn check_offscreen(desc: &SwapchainDesc<'_>) -> Result<((u32, u32), u32), HalError> {
+    let extent = check_extent(desc)?;
+    if !present::is_offscreen_format(desc.format) {
+        return Err(HalError::InvalidDescriptor(format!(
+            "an offscreen ring cannot be created with {:?}; Instance::surface_caps offers {:?}",
+            desc.format,
+            present::OFFSCREEN_FORMATS
+        )));
+    }
+    if desc.composite_alpha != crcbl_hal::CompositeAlpha::Opaque {
+        return Err(HalError::InvalidDescriptor(format!(
+            "nothing composites an offscreen ring, so {:?} is not configurable; \
+             Instance::surface_caps offers CompositeAlpha::Opaque alone",
+            desc.composite_alpha
+        )));
+    }
+    Ok((extent, present::ring_image_count(desc.image_count)))
 }
 
 /// Creates the DXGI swapchain, sets its frame latency, and takes its waitable
@@ -308,11 +429,18 @@ pub(crate) fn resize(
     extent: (u32, u32),
     buffers: u32,
 ) -> Result<(), SurfaceError> {
-    // SAFETY: `entry.raw` is a live swapchain this device created. The format
+    // An offscreen ring reconfigures by recreating its images, and
+    // `crate::device`'s `reconfigure_swapchain` branches before it reaches
+    // here — so this is a backend invariant, not a case a caller can produce.
+    let raw = entry
+        .raw
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("a windowed swapchain always has a DXGI object"));
+    // SAFETY: `raw` is a live swapchain this device created. The format
     // and flags are the ones it was created with, which is what `ResizeBuffers`
     // requires of a swapchain that carries the waitable-object flag.
     unsafe {
-        entry.raw.ResizeBuffers(
+        raw.ResizeBuffers(
             buffers,
             extent.0,
             extent.1,
@@ -417,10 +545,11 @@ mod tests {
 
     use crcbl_core::SurfaceTarget;
     use crcbl_hal::{
-        Barriers, ClearValue, ColorAttachment, CommandEncoderDesc, CompositeAlpha, Device as _,
-        ImageBarrier, ImageSubresourceRange, Instance as _, LoadOp, PresentInfo, QueueKind, Rect2d,
-        RenderPassDesc, ResourceState, StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle,
-        SwapchainDesc, SwapchainHandle,
+        Barriers, BufferImageCopy, ClearValue, ColorAttachment, CommandEncoderDesc, CompositeAlpha,
+        Device as _, Extent3d, ImageAspect, ImageBarrier, ImageSubresourceLayers,
+        ImageSubresourceRange, Instance as _, LoadOp, Offset3d, PresentInfo, QueueKind,
+        ReadbackDesc, Rect2d, RenderPassDesc, ResourceState, StoreOp, SubmitInfo, SurfaceCaps,
+        SurfaceHandle, SwapchainDesc, SwapchainHandle,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DestroyWindow, SW_SHOWNOACTIVATE, ShowWindow, WS_EX_TOOLWINDOW, WS_POPUP,
@@ -428,7 +557,7 @@ mod tests {
     use windows::core::PCWSTR;
 
     use crate::device::Dx12Device;
-    use crate::device::tests::open_device;
+    use crate::device::tests::{drain, open_device, readback_buffer};
     use crate::instance::tests::pinned_adapter;
 
     /// The window and swapchain size. Small, because nothing looks at the
@@ -887,5 +1016,428 @@ mod tests {
         }
 
         instance.destroy_surface(surface);
+    }
+
+    /// The offscreen ring's extent.
+    ///
+    /// 64 texels wide is not arbitrary: at four bytes a texel that is exactly
+    /// `D3D12_TEXTURE_DATA_PITCH_ALIGNMENT` bytes per row, which is the pitch a
+    /// placed footprint must be a multiple of — the same reason
+    /// `crcbl_dx12::device`'s clear tests use a 64-wide target. Four rows keeps
+    /// the readback small.
+    const RING: (u32, u32) = (64, 4);
+    /// Bytes one whole [`RING`] readback occupies.
+    const RING_BYTES: usize = 64 * 4 * 4;
+    /// Images in the ring. Two, so three frames wrap it and the reuse is
+    /// exercised rather than assumed.
+    const RING_IMAGES: u32 = 2;
+
+    /// The size and depth the reconfigure moves the ring to.
+    ///
+    /// Both dimensions change, so a reconfigure that updated one and not the
+    /// other is a red assertion rather than a coincidence — and the count drops
+    /// to **one**, which is the shape that catches a cursor left past the end
+    /// of the new ring. 32 texels is deliberately *below* the pitch alignment,
+    /// which is fine because nothing reads these back: the assertion is on the
+    /// extent and the index.
+    const RESIZED_RING: (u32, u32) = (32, 8);
+    const RESIZED_RING_IMAGES: u32 = 1;
+
+    /// One clear colour per frame, and the bytes it must land as.
+    ///
+    /// Distinct in every channel and every frame, so "the ring handed back the
+    /// image from the previous trip" and "the copy never happened" are
+    /// different failures rather than one. Each value is a multiple of `17`, so
+    /// the `f32`→`unorm8` round trip is exact and the assertion is on equality
+    /// rather than a tolerance — the same trick `crcbl_dx12::device`'s clear
+    /// tests use.
+    const RING_FRAMES: &[([f32; 4], [u8; 4])] = &[
+        (
+            [17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 1.0],
+            [0x11, 0x22, 0x33, 0xFF],
+        ),
+        (
+            [68.0 / 255.0, 85.0 / 255.0, 102.0 / 255.0, 1.0],
+            [0x44, 0x55, 0x66, 0xFF],
+        ),
+        (
+            [119.0 / 255.0, 136.0 / 255.0, 153.0 / 255.0, 1.0],
+            [0x77, 0x88, 0x99, 0xFF],
+        ),
+    ];
+
+    /// The descriptor `crcbl::screenshot` would build for an offscreen ring,
+    /// with the format pinned rather than preferred.
+    ///
+    /// **Not `preferred_format()`, and the difference is the whole reason this
+    /// test can assert on bytes.** The preferred format is `Rgba8UnormSrgb`; a
+    /// render pass clearing to a linear colour through an sRGB target writes
+    /// *encoded* bytes, so an exact texel comparison would be asserting on the
+    /// driver's transfer function rather than on the ring. That the preferred
+    /// format is the sRGB one is asserted in `crcbl_dx12::present`'s own suite,
+    /// where it costs no device.
+    fn ring(
+        surface: SurfaceHandle,
+        caps: &SurfaceCaps,
+        extent: (u32, u32),
+        images: u32,
+    ) -> SwapchainDesc<'static> {
+        SwapchainDesc {
+            label: Some("crcbl-dx12 e2e offscreen ring"),
+            surface,
+            format: Format::Rgba8Unorm,
+            extent,
+            image_count: images,
+            present_mode: caps.choose_present_mode(&[PresentMode::Fifo]),
+            composite_alpha: CompositeAlpha::Opaque,
+        }
+    }
+
+    /// **The offscreen slice end to end: a surface with no window, a ring of
+    /// plain images, a frame cleared into each and read back texel by texel,
+    /// and the ring coming round to the first image again.**
+    ///
+    /// This is the path every headless harness takes — `crcbl screenshot`,
+    /// `crcbl`'s `OffscreenSetup`, and through it `tests/render_e2e.rs` — so
+    /// it is the one that decides whether D3D12 can be driven without a
+    /// display at all.
+    ///
+    /// # What makes each assertion able to fail
+    ///
+    /// * **The caps are the ring's.** A `min_image_count` of two would mean
+    ///   flip-discard's floor leaked onto a surface that has no swap effect,
+    ///   and `current_extent` of anything would mean a window was consulted.
+    /// * **Each frame reads back its own colour, in every texel.** A ring that
+    ///   handed out the same image every time still passes a first-texel check
+    ///   on frame one and fails on frame two; a copy that never ran leaves the
+    ///   previous frame's colour, which is a different constant every time.
+    /// * **The indices are `0, 1, 0`.** A cursor that never advanced gives
+    ///   `0, 0, 0`; one that advanced without wrapping gives `0, 1, 2` and the
+    ///   third acquire fails outright.
+    /// * **The pacing wait returns at once.** An offscreen present is numbered
+    ///   by nothing, so `wait_until_presented` must answer immediately; if it
+    ///   started blocking on the ring's `waitable` — which is zero — the
+    ///   elapsed assertion is what catches it.
+    /// * **The reconfigure lands and restarts the ring.** The new ring is one
+    ///   image deep and the cursor is at 1 when it happens, so a reconfigure
+    ///   that forgot to reset `next_offscreen` fails the very next acquire with
+    ///   this backend's own out-of-range error rather than silently.
+    ///
+    /// The `TransferSrc` → `Present` barrier at the end of each frame is not
+    /// decoration. D3D12 validates the *declared* before-state of every
+    /// transition, and the next trip round the ring declares `Undefined`, which
+    /// is `D3D12_RESOURCE_STATE_COMMON`. Leaving the image in `COPY_SOURCE`
+    /// would make that a lie the debug layer reports — see the note about
+    /// `crcbl::screenshot` in `docs/backlog.md`.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it. This crate compiles on Windows alone and the development box
+    /// is Linux, so nothing here has ever executed outside a runner. The panics
+    /// name the stage they reached, for the reason `crcbl_dx12::device`'s `run`
+    /// gives.
+    #[test]
+    fn an_offscreen_ring_draws_reads_back_and_comes_round_again() {
+        let (instance, device) = open_device();
+        let adapter = pinned_adapter(&instance);
+
+        // SAFETY: `Offscreen` names no platform object, so there is nothing
+        // here that could dangle and nothing that has to outlive the surface.
+        let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+            .expect("an offscreen surface needs no window");
+
+        let caps = instance
+            .surface_caps(surface, adapter)
+            .expect("a live offscreen surface on a real adapter");
+        assert!(
+            caps.present_modes.contains(&PresentMode::Fifo),
+            "the seam requires Fifo of every surface: {:?}",
+            caps.present_modes
+        );
+        assert_eq!(
+            caps.current_extent, None,
+            "there is no window here to have a client area"
+        );
+        assert_eq!(
+            caps.min_image_count, 1,
+            "flip-discard's two-buffer floor is not a ring's"
+        );
+        assert!(
+            caps.formats.contains(&Format::Rgba8Unorm),
+            "the ring must offer the format this test reads back: {:?}",
+            caps.formats
+        );
+        println!("crcbl-dx12 offscreen caps: {caps:?}");
+
+        let desc = ring(surface, &caps, RING, RING_IMAGES);
+        let format = desc.format;
+        let swapchain = device
+            .create_swapchain(&desc)
+            .expect("a ring of plain images needs no DXGI object");
+
+        let readback = readback_buffer(&device, RING_BYTES);
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+
+        let mut indices: Vec<u32> = Vec::new();
+        for (number, &(colour, texel)) in RING_FRAMES.iter().enumerate() {
+            let id = number as u64 + 1;
+            let frame = device
+                .acquire_next_frame(swapchain)
+                .unwrap_or_else(|error| panic!("stage=acquire id={id}: {error:?}"));
+            assert_eq!(frame.extent, RING, "obligation 3's render area");
+            assert!(
+                frame.acquire_semaphore.is_none() && frame.present_semaphore.is_none(),
+                "an offscreen ring has the implicit acquire too: {frame:?}"
+            );
+            assert!(!frame.suboptimal, "there is no window to stop matching");
+            indices.push(frame.index);
+
+            let range = ImageSubresourceRange::all(format);
+            let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+                label: Some("crcbl-dx12 e2e offscreen frame"),
+                queue,
+            });
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    frame.image,
+                    range,
+                    ResourceState::Undefined,
+                    ResourceState::ColorAttachment,
+                )],
+                ..Barriers::default()
+            });
+            encoder.begin_render_pass(&RenderPassDesc {
+                label: Some("crcbl-dx12 e2e offscreen clear"),
+                color_attachments: &[ColorAttachment {
+                    view: frame.view,
+                    resolve: None,
+                    load: LoadOp::Clear,
+                    store: StoreOp::Store,
+                    clear: ClearValue::color(colour),
+                }],
+                depth_stencil_attachment: None,
+                render_area: Rect2d::from_size(frame.extent.0, frame.extent.1),
+            });
+            encoder.end_render_pass();
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    frame.image,
+                    range,
+                    ResourceState::ColorAttachment,
+                    ResourceState::TransferSrc,
+                )],
+                ..Barriers::default()
+            });
+            encoder.copy_image_to_buffer(&BufferImageCopy {
+                buffer: readback,
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image: frame.image,
+                image_subresource: ImageSubresourceLayers {
+                    aspect: ImageAspect::COLOR,
+                    mip: 0,
+                    base_layer: 0,
+                    layer_count: 1,
+                },
+                image_offset: Offset3d::default(),
+                image_extent: Extent3d::d2(RING.0, RING.1),
+            });
+            // Back to `COMMON`, so the `Undefined` this image is acquired with
+            // next trip is true rather than a state the debug layer will
+            // contradict. See the doc comment above.
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    frame.image,
+                    range,
+                    ResourceState::TransferSrc,
+                    ResourceState::Present,
+                )],
+                ..Barriers::default()
+            });
+            let commands = encoder
+                .finish()
+                .unwrap_or_else(|error| panic!("stage=finish id={id}: {error:?}"));
+            device
+                .submit(queue, &SubmitInfo::new(&[commands]))
+                .unwrap_or_else(|error| panic!("stage=submit id={id}: {error:?}"));
+            device
+                .present(
+                    queue,
+                    &PresentInfo {
+                        swapchain,
+                        waits: &[],
+                        present_id: Some(id),
+                    },
+                )
+                .unwrap_or_else(|error| panic!("stage=present id={id}: {error:?}"));
+            device
+                .wait_idle()
+                .unwrap_or_else(|error| panic!("stage=wait_idle id={id}: {error:?}"));
+
+            let request = device
+                .request_readback(&ReadbackDesc {
+                    label: Some("crcbl-dx12 e2e offscreen readback"),
+                    buffer: readback,
+                    offset: 0,
+                    size: RING_BYTES as u64,
+                    after: None,
+                })
+                .unwrap_or_else(|error| panic!("stage=request_readback id={id}: {error:?}"));
+            let bytes = drain(&device, request, RING_BYTES);
+            assert_eq!(
+                &bytes[..4],
+                &texel,
+                "frame {id}'s first texel is {:?}, not the colour that frame cleared to",
+                &bytes[..4]
+            );
+            assert!(
+                bytes.chunks_exact(4).all(|read| read == texel),
+                "frame {id}'s clear did not reach every texel of the ring image"
+            );
+            device.destroy_readback(request);
+            device.destroy_command_buffer(commands);
+        }
+        assert_eq!(
+            indices,
+            vec![0, 1, 0],
+            "a two-image ring must rotate and wrap"
+        );
+
+        // Nothing numbered an offscreen present, so every id is one this
+        // swapchain object was never given — the seam's immediate answer, and
+        // the one that would cost a whole timeout per frame if it regressed.
+        let started = Instant::now();
+        device
+            .wait_until_presented(swapchain, 1, PRESENT_WAIT)
+            .expect("an offscreen present has nothing to wait for");
+        assert!(
+            started.elapsed() < PRESENT_WAIT / 2,
+            "an offscreen present wait blocked for {:?}",
+            started.elapsed()
+        );
+
+        // **The reconfigure, and the ring restarting with it.** One image deep
+        // with the cursor sitting at 1, so a reset that went missing fails the
+        // acquire below instead of reading past the end.
+        let resized = ring(surface, &caps, RESIZED_RING, RESIZED_RING_IMAGES);
+        device
+            .reconfigure_swapchain(swapchain, &resized)
+            .expect("a ring reconfigures by recreating its images");
+        let frame = device
+            .acquire_next_frame(swapchain)
+            .expect("a ring image at the new size");
+        assert_eq!(
+            frame.extent, RESIZED_RING,
+            "the ring reports the size it was reconfigured at"
+        );
+        assert_eq!(frame.index, 0, "the cursor restarts with the ring");
+
+        // Obligation 2's teardown order: the swapchain, then the surface, then
+        // the device.
+        device.destroy_buffer(readback);
+        device.destroy_swapchain(swapchain);
+        instance.destroy_surface(surface);
+        device.wait_idle().expect("the queue drains");
+    }
+
+    /// **A descriptor the offscreen caps did not offer is refused by name, and
+    /// the flip-model rules are not what refuses it.**
+    ///
+    /// The two lists genuinely differ, so this is not the windowed test with a
+    /// different surface: `Rgb10a2Unorm` is a legal flip-model back buffer and
+    /// is *not* offered for a ring, and an `image_count` of one is refused for
+    /// a window and configured for a ring. Both directions are checked, because
+    /// a `check_offscreen` that had been aliased to `check` would pass one of
+    /// them.
+    ///
+    /// Red when `check_offscreen` starts consulting `is_flip_model_format` (the
+    /// `Rgb10a2Unorm` case then succeeds), and red when the ring's image-count
+    /// clamp is replaced by `present::buffer_count` (the single-image ring then
+    /// comes back with two).
+    #[test]
+    fn an_offscreen_descriptor_is_checked_against_the_rings_own_rules() {
+        let (instance, device) = open_device();
+        let adapter = pinned_adapter(&instance);
+        // SAFETY: as above — `Offscreen` names no platform object.
+        let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+            .expect("an offscreen surface needs no window");
+        let caps = instance
+            .surface_caps(surface, adapter)
+            .expect("a live offscreen surface");
+        let good = ring(surface, &caps, RING, RING_IMAGES);
+
+        let bad: &[(&str, SwapchainDesc<'_>)] = &[
+            (
+                "a zero extent",
+                SwapchainDesc {
+                    extent: (0, 0),
+                    ..good
+                },
+            ),
+            (
+                "a format a ring is not offered in, though flip-discard accepts it",
+                SwapchainDesc {
+                    format: Format::Rgb10a2Unorm,
+                    ..good
+                },
+            ),
+            (
+                "a composite-alpha mode nothing composites a ring in",
+                SwapchainDesc {
+                    composite_alpha: CompositeAlpha::PreMultiplied,
+                    ..good
+                },
+            ),
+        ];
+        assert!(!bad.is_empty(), "nothing to check");
+        for (what, desc) in bad {
+            let error = device
+                .create_swapchain(desc)
+                .expect_err("this descriptor is not configurable");
+            let SurfaceError::Hal(HalError::InvalidDescriptor(message)) = &error else {
+                panic!("{what}: expected a named descriptor refusal, got {error:?}");
+            };
+            println!("crcbl-dx12: offscreen {what} -> {message}");
+        }
+
+        // The other direction: a single-image ring is configured rather than
+        // clamped up to flip-discard's floor.
+        let single = device
+            .create_swapchain(&ring(surface, &caps, RING, 1))
+            .expect("a ring may be one image deep");
+        let first = device.acquire_next_frame(single).expect("its one image");
+        assert_eq!(first.index, 0);
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        device
+            .present(
+                queue,
+                &PresentInfo {
+                    swapchain: single,
+                    waits: &[],
+                    present_id: None,
+                },
+            )
+            .expect("presenting a one-image ring is a cursor bump onto itself");
+        let second = device
+            .acquire_next_frame(single)
+            .expect("a one-image ring hands back the same image");
+        assert_eq!(
+            second.index, 0,
+            "a one-image ring's cursor must wrap onto itself, not run off the end"
+        );
+        assert_eq!(
+            (first.image, first.view),
+            (second.image, second.view),
+            "and it is the same image and view, not a reissued pair"
+        );
+
+        device.destroy_swapchain(single);
+        instance.destroy_surface(surface);
+        device.wait_idle().expect("the queue drains");
     }
 }

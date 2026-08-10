@@ -105,7 +105,7 @@ use crate::binding::{self, BindGroupLayoutRecord, BindGroupRecord, VisibleHeaps}
 use crate::command::Dx12CommandEncoder;
 use crate::descriptor::{Descriptors, Kind, Slot};
 use crate::handle::{self, Owned, Owner};
-use crate::instance::{AdapterRecord, InstanceInner, next_owner_id, not_yet};
+use crate::instance::{AdapterRecord, InstanceInner, OFFSCREEN_HWND, next_owner_id, not_yet};
 use crate::pipeline::{self, GraphicsPipelineEntry, PipelineLayoutEntry, ShaderModuleEntry};
 use crate::present::{self, PresentWait};
 use crate::retire::RetireQueue;
@@ -1206,6 +1206,123 @@ impl Dx12Device {
             return Err(error);
         }
         Ok((images, views))
+    }
+
+    /// The offscreen ring's images: [`register_backbuffers`](Self::register_backbuffers)
+    /// with `create_image` where `GetBuffer` was.
+    ///
+    /// The two are deliberately **not** one function with a flag. What they
+    /// share is the rollback and the loop shape; what differs is every line
+    /// that matters — where the resource comes from, what usage it carries, and
+    /// what format it is created with. A ring image is this backend's own
+    /// texture, so it takes the caller's format directly rather than
+    /// `present::buffer_format`'s linear spelling: the sRGB strip exists only
+    /// because `DXGI_SWAP_EFFECT_FLIP_DISCARD` rejects an `_SRGB` back buffer,
+    /// and there is no swap effect here to reject anything.
+    ///
+    /// The usage set is `crcbl-vk`'s for the same ring, and each bit is load
+    /// bearing: `COLOR_ATTACHMENT` because a frame is rendered into it,
+    /// `TRANSFER_SRC` because a screenshot copies out of it, `TRANSFER_DST`
+    /// because a pass may clear it through a copy, and `SAMPLED` because a
+    /// tonemap reads the previous target.
+    ///
+    /// # Errors
+    ///
+    /// `create_image`'s — a descriptor D3D12 refuses, or an allocation that
+    /// failed — or `create_image_view`'s, which here can only be a descriptor
+    /// heap that will not grow.
+    fn register_ring_images(
+        &self,
+        extent: (u32, u32),
+        count: u32,
+        desc: &SwapchainDesc<'_>,
+    ) -> Result<(Vec<ImageHandle>, Vec<ImageViewHandle>), SurfaceError> {
+        let mut images: Vec<ImageHandle> = Vec::with_capacity(count as usize);
+        let mut views: Vec<ImageViewHandle> = Vec::with_capacity(count as usize);
+        let outcome = (|| -> Result<(), HalError> {
+            for index in 0..count {
+                let label = desc.label.map(|label| format!("{label} [{index}]"));
+                let image = self.create_image(&ImageDesc {
+                    label: label.as_deref(),
+                    image_type: ImageType::D2,
+                    extent: Extent3d::d2(extent.0, extent.1),
+                    format: desc.format,
+                    mip_levels: 1,
+                    samples: 1,
+                    usage: ImageUsage::COLOR_ATTACHMENT
+                        | ImageUsage::TRANSFER_SRC
+                        | ImageUsage::TRANSFER_DST
+                        | ImageUsage::SAMPLED,
+                    memory: MemoryLocation::DeviceLocal,
+                })?;
+                images.push(image);
+                let view = self.create_image_view(&ImageViewDesc {
+                    label: label.as_deref(),
+                    image,
+                    view_type: ImageViewType::D2,
+                    format: desc.format,
+                    range: ImageSubresourceRange::all(desc.format),
+                })?;
+                views.push(view);
+            }
+            Ok(())
+        })();
+        if let Err(error) = outcome {
+            for view in views {
+                self.destroy_image_view(view);
+            }
+            for image in images {
+                self.destroy_image(image);
+            }
+            return Err(SurfaceError::Hal(error));
+        }
+        Ok((images, views))
+    }
+
+    /// Builds the ring of plain images an offscreen surface's "swapchain" is.
+    ///
+    /// Nothing DXGI owns is created: no `IDXGISwapChain3`, so no back buffers,
+    /// no waitable object and no `MakeWindowAssociation`. See
+    /// [`crate::swapchain`] for the table of what each seam call does on one of
+    /// these instead.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`] through `swapchain::check_offscreen` for
+    /// a descriptor the caps did not offer, or
+    /// [`register_ring_images`](Self::register_ring_images)'.
+    fn create_offscreen_ring(
+        &self,
+        desc: &SwapchainDesc<'_>,
+    ) -> Result<SwapchainHandle, SurfaceError> {
+        let (extent, count) = swapchain::check_offscreen(desc)?;
+        let (images, views) = self.register_ring_images(extent, count, desc)?;
+        let entry = SwapchainEntry {
+            owner: self.inner.owner.id,
+            // The field that decides everything else about this entry.
+            raw: None,
+            // Zero is "there is nothing to wait on", which `swapchain::wait`
+            // answers immediately — see `SwapchainEntry::waitable`.
+            waitable: 0,
+            hwnd: OFFSCREEN_HWND,
+            extent,
+            format: desc.format,
+            buffers: count,
+            next_offscreen: 0,
+            present_mode: present::resolve_offscreen_present_mode(desc.present_mode),
+            flags: swapchain::NO_SWAP_CHAIN_FLAGS,
+            images,
+            views,
+            ledger: present::PresentLedger::default(),
+        };
+        log::info!(
+            "crcbl-dx12: offscreen ring {}x{} {:?}, {count} image(s)",
+            extent.0,
+            extent.1,
+            desc.format,
+        );
+        let handle = self.state().swapchains.insert(entry);
+        Ok(handle::stamp(self.inner.owner, handle))
     }
 }
 
@@ -2419,7 +2536,9 @@ impl Device for Dx12Device {
     /// refuses — legal here because a swapchain buffer is the case D3D12
     /// permits it on.
     fn create_swapchain(&self, desc: &SwapchainDesc<'_>) -> Result<SwapchainHandle, SurfaceError> {
-        let hwnd = self.inner.instance.surface_hwnd(desc.surface)?;
+        let Some(hwnd) = self.inner.instance.surface_hwnd(desc.surface)? else {
+            return self.create_offscreen_ring(desc);
+        };
         let created = swapchain::create(
             &self.inner.instance.factory,
             &self.inner.queue,
@@ -2430,12 +2549,13 @@ impl Device for Dx12Device {
         let (images, views) = self.register_backbuffers(&created, desc)?;
         let entry = SwapchainEntry {
             owner: self.inner.owner.id,
-            raw: created.raw,
+            raw: Some(created.raw),
             waitable: created.waitable,
             hwnd: hwnd.0 as usize,
             extent: created.extent,
             format: desc.format,
             buffers: created.buffers,
+            next_offscreen: 0,
             present_mode: created.present_mode,
             flags: created.flags,
             images,
@@ -2484,14 +2604,24 @@ impl Device for Dx12Device {
         desc: &SwapchainDesc<'_>,
     ) -> Result<(), SurfaceError> {
         let hwnd = self.inner.instance.surface_hwnd(desc.surface)?;
-        let (extent, buffers) = swapchain::check(desc)?;
+        // Which surface this descriptor names decides which rules apply, and
+        // the comparison below is what refuses a descriptor that named the
+        // other kind: a window is a non-zero address and a ring is zero, so
+        // "move this swapchain onto an offscreen surface" fails here rather
+        // than half-way through a `ResizeBuffers` on nothing.
+        let offscreen = hwnd.is_none();
+        let (extent, buffers) = if offscreen {
+            swapchain::check_offscreen(desc)?
+        } else {
+            swapchain::check(desc)?
+        };
         let (old_images, old_views) = {
             let state = self.state();
             let entry =
                 handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
-            if entry.hwnd != hwnd.0 as usize {
+            if entry.hwnd != hwnd.map_or(OFFSCREEN_HWND, |hwnd| hwnd.0 as usize) {
                 return Err(SurfaceError::Hal(HalError::InvalidDescriptor(
-                    "reconfigure_swapchain cannot move a swapchain to a different window"
+                    "reconfigure_swapchain cannot move a swapchain to a different surface"
                         .to_string(),
                 )));
             }
@@ -2536,31 +2666,48 @@ impl Device for Dx12Device {
             entry.views.clear();
         }
 
-        let present_mode =
-            present::resolve_present_mode(desc.present_mode, self.inner.instance.allow_tearing);
-        {
-            let state = self.state();
-            let entry =
-                handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
-            swapchain::resize(entry, extent, buffers)?;
-        }
-
-        // Re-fetched after the lock was released, because `create_image_view`
-        // takes it: this device has one non-reentrant `Mutex`.
-        let created = {
-            let state = self.state();
-            let entry =
-                handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
-            swapchain::Created {
-                raw: entry.raw.clone(),
-                waitable: entry.waitable,
-                extent,
-                buffers,
-                present_mode,
-                flags: entry.flags,
+        let (present_mode, images, views) = if offscreen {
+            // There is nothing to resize: a ring is plain images, and the new
+            // extent is simply what the replacements are created at. The old
+            // ones are already gone, which is the same precondition
+            // `ResizeBuffers` has and the reason both paths destroy first.
+            let (images, views) = self.register_ring_images(extent, buffers, desc)?;
+            (
+                present::resolve_offscreen_present_mode(desc.present_mode),
+                images,
+                views,
+            )
+        } else {
+            let present_mode =
+                present::resolve_present_mode(desc.present_mode, self.inner.instance.allow_tearing);
+            {
+                let state = self.state();
+                let entry =
+                    handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
+                swapchain::resize(entry, extent, buffers)?;
             }
+
+            // Re-fetched after the lock was released, because `create_image_view`
+            // takes it: this device has one non-reentrant `Mutex`.
+            let created = {
+                let state = self.state();
+                let entry =
+                    handle::lookup(&state.swapchains, "swapchain", swapchain, self.inner.owner)?;
+                swapchain::Created {
+                    raw: entry
+                        .raw
+                        .clone()
+                        .unwrap_or_else(|| unreachable!("a windowed swapchain has a DXGI object")),
+                    waitable: entry.waitable,
+                    extent,
+                    buffers,
+                    present_mode,
+                    flags: entry.flags,
+                }
+            };
+            let (images, views) = self.register_backbuffers(&created, desc)?;
+            (present_mode, images, views)
         };
-        let (images, views) = self.register_backbuffers(&created, desc)?;
 
         let mut state = self.state();
         let entry = handle::lookup_mut(
@@ -2574,6 +2721,10 @@ impl Device for Dx12Device {
         entry.present_mode = present_mode;
         entry.images = images;
         entry.views = views;
+        // The ring restarts at its first image for the same reason the ledger
+        // restarts: a cursor left past the end of a shorter ring would index
+        // out of `images` on the very next acquire.
+        entry.next_offscreen = 0;
         // The numbering restarts, per `PresentInfo::present_id`.
         entry.ledger = present::PresentLedger::default();
         Ok(())
@@ -2627,7 +2778,13 @@ impl Device for Dx12Device {
     /// `suboptimal` is always `false`, and that is not a stub: DXGI has no
     /// notion of a swapchain that no longer matches its window — see
     /// [`crate::swapchain`] — so there is nothing to report and inventing one
-    /// would put a caller into an unending reconfigure.
+    /// would put a caller into an unending reconfigure. An offscreen ring has
+    /// no window to stop matching in the first place.
+    ///
+    /// **An offscreen ring answers from its own cursor**, and nothing else
+    /// about the call changes: the same handle lookup, the same bounds check,
+    /// the same two `None` semaphores. That is what makes `crcbl screenshot`
+    /// exercise the path a window uses rather than a second one.
     fn acquire_next_frame(
         &self,
         swapchain: SwapchainHandle,
@@ -2636,13 +2793,24 @@ impl Device for Dx12Device {
         self.inner.poll_retire(&mut state);
         let owner = self.inner.owner;
         let entry = handle::lookup(&state.swapchains, "swapchain", swapchain, owner)?;
-        // SAFETY: `entry.raw` is a live swapchain this device created. The call
-        // reads no pointer of ours and returns an index by value.
-        let index = unsafe { entry.raw.GetCurrentBackBufferIndex() };
+        let index = match entry.raw.as_ref() {
+            // SAFETY: `raw` is a live swapchain this device created. The call
+            // reads no pointer of ours and returns an index by value.
+            Some(raw) => unsafe { raw.GetCurrentBackBufferIndex() },
+            // The offscreen ring's own cursor, which `present` bumps. Same
+            // implicit-acquire shape, with the rotation kept here because there
+            // is no DXGI object keeping it.
+            None => entry.next_offscreen,
+        };
         let slot = index as usize;
         let (Some(&image), Some(&view)) = (entry.images.get(slot), entry.views.get(slot)) else {
+            let source = if entry.is_offscreen() {
+                "the offscreen ring's cursor is"
+            } else {
+                "GetCurrentBackBufferIndex answered"
+            };
             return Err(SurfaceError::Hal(HalError::Backend(format!(
-                "GetCurrentBackBufferIndex answered {index} for a swapchain of {} buffers",
+                "{source} {index} for a swapchain of {} image(s)",
                 entry.buffers
             ))));
         };
@@ -2682,9 +2850,23 @@ impl Device for Dx12Device {
         // Resolved, then released: `Present` blocks when the frame queue is
         // full, and this device has one lock over every table.
         let (raw, mode) = {
-            let state = self.state();
-            let entry = handle::lookup(&state.swapchains, "swapchain", present.swapchain, owner)?;
-            (entry.raw.clone(), entry.present_mode)
+            let mut state = self.state();
+            let entry =
+                handle::lookup_mut(&mut state.swapchains, "swapchain", present.swapchain, owner)?;
+            let Some(raw) = entry.raw.clone() else {
+                // "Presenting" a ring image is advancing the ring. The image
+                // stays valid and is reused when the cursor comes back round,
+                // exactly as a back buffer is.
+                //
+                // The id is deliberately not recorded: nothing will ever
+                // complete it, because there is no display and no waitable
+                // object, and an unrecorded id is what makes
+                // `wait_until_presented` answer at once instead of blocking on
+                // a frame that is already as finished as it will ever be.
+                entry.advance_offscreen();
+                return Ok(());
+            };
+            (raw, entry.present_mode)
         };
         swapchain::present(&raw, mode)?;
 
@@ -2870,7 +3052,7 @@ pub(crate) mod tests {
 
     /// A byte no clear and no copy in this file ever writes, so "left untouched"
     /// is distinguishable from "written with zeros".
-    const POISON: u8 = 0xA5;
+    pub(crate) const POISON: u8 = 0xA5;
 
     /// The clear colour, and the bytes it must land as.
     ///
@@ -2902,7 +3084,7 @@ pub(crate) mod tests {
 
     /// A readback buffer pre-filled with [`POISON`], so an assertion on its
     /// contents fails when nothing wrote them.
-    fn readback_buffer(device: &Dx12Device, bytes: usize) -> BufferHandle {
+    pub(crate) fn readback_buffer(device: &Dx12Device, bytes: usize) -> BufferHandle {
         let handle = device
             .create_buffer(&BufferDesc {
                 label: Some("crcbl-dx12 test readback"),
@@ -2979,7 +3161,7 @@ pub(crate) mod tests {
     /// rather than left to `slow-timeout`: a readback that never becomes ready
     /// fails as a named panic naming the stage it reached, where a bare loop
     /// would be a SIGKILL four minutes later with nothing in the log.
-    fn drain(device: &Dx12Device, readback: ReadbackHandle, bytes: usize) -> Vec<u8> {
+    pub(crate) fn drain(device: &Dx12Device, readback: ReadbackHandle, bytes: usize) -> Vec<u8> {
         let mut out = vec![POISON; bytes];
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut polls = 0u64;

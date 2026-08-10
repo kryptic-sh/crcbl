@@ -76,6 +76,18 @@ crcbl-vk = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 crcbl-mtl = { workspace = true }
 
+# Direct3D 12, and only where D3D12 exists. `crcbl-dx12` is `#[cfg(target_os =
+# "windows")]` from its crate root down and pins `windows` to the same target,
+# so the per-target line is the same shape and the same reason as `crcbl-mtl`
+# above, with `src/backend.rs` gating the matching registry entry identically.
+#
+# Unlike Metal, this one is registered *beside* an existing backend rather than
+# instead of nothing: Windows already reaches a GPU through `crcbl-vk`, so the
+# entry is deliberately not auto-selectable and `CRCBL_GPU=dx12` is what asks
+# for it. See `src/backend.rs`.
+[target.'cfg(target_os = "windows")'.dependencies]
+crcbl-dx12 = { workspace = true }
+
 # `crcbl-golden` is a **dev**-dependency: the only reference to it from this
 # crate is an intra-doc link in `screenshot.rs`, and rustdoc resolves those from
 # dev-dependencies. As a normal dependency it linked `png` into every binary

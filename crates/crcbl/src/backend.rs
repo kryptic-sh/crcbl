@@ -53,7 +53,8 @@
 //! There is no Vulkan in a browser, so on `wasm32` the [`GpuBackend::Vulkan`]
 //! entry is `#[cfg]`-ed out and `crcbl-vk` is not even a dependency — see this
 //! crate's manifest. [`GpuBackend::Metal`] is the mirror image: `crcbl-mtl` has
-//! no public items off macOS, so its entry exists only there. The `#[cfg]` is on
+//! no public items off macOS, so its entry exists only there, and
+//! [`GpuBackend::Dx12`] is the same shape on Windows. The `#[cfg]` is on
 //! the *element*, exactly as `crcbl_shell::backend`'s table gates Wayland and
 //! X11 to Linux, so nothing else in this file mentions a target and the walk in
 //! [`PendingInstance::poll`] needs no conditional compilation of its own.
@@ -71,6 +72,14 @@
 //! `open()` there tries Metal and stops, while `CRCBL_GPU=vk` still reaches the
 //! Vulkan backend by name for whoever has a loader and means it. Elsewhere on
 //! native the order is unchanged — Vulkan, and nothing else automatically.
+//!
+//! **Windows is the case where two backends are registered and neither
+//! displaces the other.** `crcbl-dx12`'s own crate docs say D3D12 is not a
+//! replacement for `crcbl-vk` there — it is the same engine reaching a different
+//! loader — so the D3D12 entry is registered and **not** automatic, and
+//! `CRCBL_GPU=dx12` is the only thing that selects it. Making it automatic would
+//! silently move every existing Windows run onto a backend whose feature set is
+//! the smaller of the two.
 //!
 //! The blocking wrappers `open` and `open_backend` do not exist on `wasm32`
 //! either, for the reason `Instance::create_device` does not: the browser's
@@ -97,6 +106,9 @@ pub enum GpuBackend {
     /// `crcbl-mtl` — Metal through `objc2-metal`, and the only path to a GPU on
     /// macOS (P14).
     Metal,
+    /// `crcbl-dx12` — Direct3D 12 through `windows-rs`, Windows' second path to
+    /// a GPU beside [`Vulkan`](Self::Vulkan) (P14).
+    Dx12,
     /// `crcbl-hal`'s recording no-op backend. Renders nothing; never selected
     /// automatically.
     Null,
@@ -112,6 +124,7 @@ impl GpuBackend {
         match self {
             Self::Vulkan => "vk",
             Self::Metal => "mtl",
+            Self::Dx12 => "dx12",
             Self::Null => "null",
             Self::Wgpu => "wgpu",
         }
@@ -120,12 +133,13 @@ impl GpuBackend {
     /// Parses a backend name.
     ///
     /// Accepts the spellings people type: `vk` and `vulkan` are the same thing,
-    /// and so are `mtl` and `metal`, and `null` and `none`.
+    /// and so are `mtl` and `metal`, `dx12` and `d3d12`, and `null` and `none`.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
             "vk" | "vulkan" => Some(Self::Vulkan),
             "mtl" | "metal" => Some(Self::Metal),
+            "dx12" | "d3d12" => Some(Self::Dx12),
             "null" | "none" => Some(Self::Null),
             "wgpu" | "webgpu" => Some(Self::Wgpu),
             _ => None,
@@ -246,6 +260,33 @@ static REGISTRY: &[Registration] = &[
                 crcbl_vk::VkInstance::open()
                     .map(|instance| Box::new(instance) as Box<dyn Instance>)
                     .map_err(HalError::from),
+            )
+        },
+    },
+    // Windows' second path to a GPU, gated on the element exactly as Metal is:
+    // `crcbl-dx12` is `#[cfg(target_os = "windows")]` from its crate root down
+    // and has no public items anywhere else.
+    //
+    // `Dx12Instance::open` returns `Option` for the same reason
+    // `MetalInstance::open` does — "DXGI started nothing this can open" is the
+    // case a registry falls through on — and it is turned into `Unsupported`
+    // here rather than in the backend, for the same reason.
+    #[cfg(target_os = "windows")]
+    Registration {
+        backend: GpuBackend::Dx12,
+        // Registered and never automatic. Windows already reaches a GPU through
+        // `crcbl-vk`, and `crcbl-dx12`'s crate docs say D3D12 is not a
+        // replacement for it: auto-selecting it would move every Windows run
+        // onto the backend with the smaller feature set without anyone asking.
+        auto: false,
+        open: || {
+            ready(
+                crcbl_dx12::Dx12Instance::open()
+                    .map(|instance| Box::new(instance) as Box<dyn Instance>)
+                    .ok_or(HalError::Unsupported {
+                        backend: crcbl_hal::BackendKind::Dx12,
+                        what: "no D3D12 adapter on this system",
+                    }),
             )
         },
     },
@@ -525,6 +566,20 @@ mod tests {
         GpuBackend::Metal,
         #[cfg(not(target_arch = "wasm32"))]
         GpuBackend::Vulkan,
+        #[cfg(target_os = "windows")]
+        GpuBackend::Dx12,
+        GpuBackend::Wgpu,
+        GpuBackend::Null,
+    ];
+
+    /// Every [`GpuBackend`] variant, so the tests that walk "the ones this
+    /// target does *not* register" walk all of them. One list rather than a
+    /// literal per test, because a variant missing from one of them is a case
+    /// silently never checked.
+    const EVERY_BACKEND: &[GpuBackend] = &[
+        GpuBackend::Vulkan,
+        GpuBackend::Metal,
+        GpuBackend::Dx12,
         GpuBackend::Wgpu,
         GpuBackend::Null,
     ];
@@ -545,24 +600,47 @@ mod tests {
     }
 
     /// The other half: a variant that this target does *not* register is
-    /// rejected by name, with a message naming what it does have. On native
-    /// every variant is registered, so this asserts the arm it can.
+    /// rejected by name, with a message naming what it does have.
+    ///
+    /// **This is the arm that carries the `CRCBL_GPU=dx12` promise off
+    /// Windows**, and it is a real arm on every development machine: `Dx12` is
+    /// a variant everywhere, because it is what `CRCBL_GPU=dx12` parses to, and
+    /// it is *registered* only where `crcbl-dx12` is a dependency. So on Linux
+    /// and macOS the honest answer is [`GpuError::UnknownBackend`] naming what
+    /// this build does have, and that is what is asserted rather than left to a
+    /// Windows runner.
     #[test]
     fn a_variant_this_target_lacks_is_rejected_by_name() {
-        for backend in [
-            GpuBackend::Vulkan,
-            GpuBackend::Metal,
-            GpuBackend::Wgpu,
-            GpuBackend::Null,
-        ] {
+        let mut checked = 0;
+        for backend in EVERY_BACKEND.iter().copied() {
             if REGISTERED.contains(&backend) {
                 continue;
             }
-            let Err(GpuError::UnknownBackend { available, .. }) = lookup(REGISTRY, backend) else {
+            checked += 1;
+            let Err(GpuError::UnknownBackend {
+                requested,
+                available,
+            }) = lookup(REGISTRY, backend)
+            else {
                 panic!("{backend} is not in this build's registry but resolved anyway");
             };
-            assert!(!available.is_empty(), "the message names what is there");
+            // The message has to be actionable on its own: what was asked for,
+            // and what this build would have accepted instead. An `available`
+            // that merely existed would pass a length check and tell a
+            // developer nothing.
+            assert_eq!(requested, backend.as_str());
+            for present in REGISTERED {
+                assert!(
+                    available.contains(present.as_str()),
+                    "asking for {backend} listed `{available}`, which omits {present}"
+                );
+            }
         }
+        // Every native target lacks at least one variant — wasm32 lacks Vulkan,
+        // Linux lacks Metal and Dx12 — so a run that checked nothing means the
+        // loop's own filter matched everything and the assertions above never
+        // executed.
+        assert!(checked > 0, "no unregistered variant was reached");
     }
 
     /// And the "no such backend" arm reports what *is* available rather than
@@ -594,20 +672,29 @@ mod tests {
 
     #[test]
     fn backend_names_round_trip_and_accept_what_people_type() {
-        for backend in [
-            GpuBackend::Vulkan,
-            GpuBackend::Metal,
-            GpuBackend::Null,
-            GpuBackend::Wgpu,
-        ] {
+        for backend in EVERY_BACKEND.iter().copied() {
             assert_eq!(GpuBackend::from_name(backend.as_str()), Some(backend));
             assert_eq!(backend.to_string(), backend.as_str());
         }
         assert_eq!(GpuBackend::from_name("vulkan"), Some(GpuBackend::Vulkan));
         assert_eq!(GpuBackend::from_name(" VK "), Some(GpuBackend::Vulkan));
         assert_eq!(GpuBackend::from_name("metal"), Some(GpuBackend::Metal));
+        assert_eq!(GpuBackend::from_name("d3d12"), Some(GpuBackend::Dx12));
+        assert_eq!(GpuBackend::from_name(" DX12 "), Some(GpuBackend::Dx12));
         assert_eq!(GpuBackend::from_name("none"), Some(GpuBackend::Null));
         assert_eq!(GpuBackend::from_name("opengl"), None);
+        // Every name is distinct, so `CRCBL_GPU` can never name two backends —
+        // which an `as_str` arm copied from its neighbour would make possible
+        // while every round-trip above still passed.
+        let names: std::collections::HashSet<&str> = EVERY_BACKEND
+            .iter()
+            .map(|backend| backend.as_str())
+            .collect();
+        assert_eq!(
+            names.len(),
+            EVERY_BACKEND.len(),
+            "two variants share a name"
+        );
     }
 
     /// The tripwire for every backend slice: adding a registration must be a
@@ -632,6 +719,11 @@ mod tests {
     /// which GPU path every existing game takes — or from leaving Vulkan
     /// automatic on a Mac, where it means a failed `dlopen` before every
     /// successful start-up.
+    ///
+    /// Windows is the target where this says the most, because it is the one
+    /// with two native backends registered: the answer there is still Vulkan
+    /// alone, so adding D3D12 changed which backends can be *asked for* and not
+    /// which one an unconfigured game gets.
     #[test]
     fn exactly_one_backend_is_auto_selectable_and_it_depends_on_the_target() {
         let auto: Vec<GpuBackend> = REGISTRY
@@ -677,6 +769,41 @@ mod tests {
         }
     }
 
+    /// **`CRCBL_GPU=dx12` reaches a real D3D12 instance on Windows**, which is
+    /// the half of the registration that only a Windows machine can settle.
+    ///
+    /// The name is resolved through [`GpuBackend::from_name`] rather than
+    /// written as the variant, because "the variant is registered" and "the
+    /// string a harness exports parses to it" are two claims and only the
+    /// second is what `CRCBL_GPU=dx12` depends on.
+    ///
+    /// WARP ships in Windows, so `Ok` is the expected answer; the `Backend` arm
+    /// is kept for a session where DXGI itself will not start — a headless
+    /// service account, say — and it still asserts that the *registry* reached
+    /// D3D12 rather than something else. [`GpuError::UnknownBackend`] is not
+    /// tolerated by either arm: that is the answer this test exists to
+    /// distinguish from a working one.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn dx12_is_registered_on_windows_and_reachable_by_the_name_crcbl_gpu_takes() {
+        let requested = GpuBackend::from_name("dx12").expect("the name CRCBL_GPU=dx12 carries");
+        assert_eq!(requested, GpuBackend::Dx12);
+        match open_backend(requested) {
+            Ok(instance) => {
+                assert_eq!(instance.backend(), crcbl_hal::BackendKind::Dx12);
+                assert!(
+                    !instance.adapters().is_empty(),
+                    "a Windows machine reports at least WARP"
+                );
+            }
+            Err(GpuError::Backend { backend, source }) => {
+                assert_eq!(backend, GpuBackend::Dx12);
+                println!("crcbl: the D3D12 backend is registered and would not open: {source}");
+            }
+            Err(other) => panic!("dx12 is registered on Windows: {other}"),
+        }
+    }
+
     /// On a machine with a driver this genuinely opens the platform's backend,
     /// which is correct and not something to assert against; the point is the
     /// failure path's message, which is what a developer with no driver actually
@@ -699,6 +826,7 @@ mod tests {
         let expected_kind = match expected {
             GpuBackend::Vulkan => crcbl_hal::BackendKind::Vulkan,
             GpuBackend::Metal => crcbl_hal::BackendKind::Metal,
+            GpuBackend::Dx12 => crcbl_hal::BackendKind::Dx12,
             GpuBackend::Wgpu => crcbl_hal::BackendKind::Wgpu,
             GpuBackend::Null => crcbl_hal::BackendKind::Null,
         };

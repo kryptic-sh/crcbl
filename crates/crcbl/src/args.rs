@@ -49,7 +49,8 @@ pub const COMMON_OPTIONS_HELP: &str = "\
     --frames <N>         Stop after N presented frames
     --tick-hz <N>        Simulation rate in Hz (default 60). Sets the server's
                          clock, the ECS timestep and every integrator.
-    --backend <B>        GPU backend: vk, vulkan, mtl, metal, null, none or wgpu
+    --backend <B>        GPU backend: vk, vulkan, mtl, metal, dx12, d3d12,
+                         null, none or wgpu
     --fullscreen         Open borderless instead of windowed. F11 still toggles.
                          A window system may refuse; the summary reports what
                          it actually did, not what was asked for.
@@ -391,7 +392,7 @@ impl Common {
                     Some(backend) => self.backend = Some(backend),
                     None => {
                         return Consumed::Bad(format!(
-                            "unknown backend '{name}' — try `vk`, `mtl`, `null` or `wgpu`"
+                            "unknown backend '{name}' — try `vk`, `mtl`, `dx12`, `null` or `wgpu`"
                         ));
                     }
                 }
@@ -657,6 +658,13 @@ mod tests {
             assert_eq!(
                 parsed(&["--backend", name]).backend,
                 Some(GpuBackend::Metal),
+                "--backend {name}",
+            );
+        }
+        for name in ["dx12", "d3d12"] {
+            assert_eq!(
+                parsed(&["--backend", name]).backend,
+                Some(GpuBackend::Dx12),
                 "--backend {name}",
             );
         }

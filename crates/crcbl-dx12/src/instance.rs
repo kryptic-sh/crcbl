@@ -141,6 +141,14 @@ pub(crate) struct SurfaceEntry {
     /// id, per obligation 3, so any device from that instance may use them.
     owner: u64,
     /// The window's `HWND`, as an address. Never dereferenced here.
+    ///
+    /// **Zero is [`SurfaceTarget::Offscreen`]**, and it is a sentinel rather
+    /// than an `Option` for the reason `crcbl-vk` uses a null `VkSurfaceKHR`
+    /// for the same case: an offscreen surface has no driver object at all, and
+    /// a null window handle is what "there is no window" already spells on this
+    /// platform. [`InstanceInner::surface_hwnd`] is the one place that reading
+    /// happens, and it hands back an `Option` so no call site can pass a null
+    /// `HWND` to DXGI by forgetting.
     hwnd: usize,
     /// Which [`SurfaceTarget`] variant it came from, for logs.
     platform: &'static str,
@@ -151,6 +159,14 @@ impl Owned for SurfaceEntry {
         self.owner
     }
 }
+
+/// What a surface or swapchain entry's window address holds when there is no
+/// window: [`SurfaceTarget::Offscreen`].
+///
+/// Shared with `crate::swapchain`'s `SwapchainEntry::hwnd` rather than written
+/// as a zero in each, because it is one fact — "this is the offscreen case" —
+/// and `reconfigure_swapchain` compares the two against each other.
+pub(crate) const OFFSCREEN_HWND: usize = 0;
 
 /// Everything a device needs to keep alive from the instance that made it.
 ///
@@ -202,6 +218,12 @@ impl InstanceInner {
 
     /// The window a surface handle names, checked against *this* instance.
     ///
+    /// `None` for [`SurfaceTarget::Offscreen`], which names no window: the
+    /// caller's swapchain is then a ring of plain images and nothing DXGI owns.
+    /// Returning an `Option` rather than an `HWND(null)` is what makes that a
+    /// case every call site has to answer — `CreateSwapChainForHwnd` on a null
+    /// window is `E_INVALIDARG`, and `GetClientRect` on one fails too.
+    ///
     /// The three outcomes [`crate::handle`] keeps apart are kept apart here
     /// too: this instance's live surface resolves, this instance's dead one is
     /// [`HalError::InvalidHandle`], and another instance's is
@@ -210,10 +232,13 @@ impl InstanceInner {
     /// # Errors
     ///
     /// As [`handle::lookup`].
-    pub(crate) fn surface_hwnd(&self, surface: SurfaceHandle) -> Result<HWND, HalError> {
+    pub(crate) fn surface_hwnd(&self, surface: SurfaceHandle) -> Result<Option<HWND>, HalError> {
         let surfaces = self.surfaces();
         let entry = handle::lookup(&surfaces, "surface", surface, self.owner)?;
-        Ok(HWND(core::ptr::without_provenance_mut(entry.hwnd)))
+        if entry.hwnd == OFFSCREEN_HWND {
+            return Ok(None);
+        }
+        Ok(Some(HWND(core::ptr::without_provenance_mut(entry.hwnd))))
     }
 }
 
@@ -592,15 +617,23 @@ impl Instance for Dx12Instance {
     ///    thread-affine and `CreateSwapChainForHwnd` installs a message hook on
     ///    it.
     ///
-    /// # Every other target is refused, and two of them differently
+    /// # Offscreen names no window, and touches nothing
     ///
-    /// [`SurfaceTarget::Offscreen`] is `not_yet` and names its slice: a ring
-    /// of plain images is a thing this backend could do and has not written, so
-    /// a caller reads "not here yet" rather than "never". The four
-    /// window-system targets are permanently [`HalError::Unsupported`] —
-    /// D3D12's only presentation target is an `HWND` (a `CoreWindow` and a
-    /// composition surface are the other two DXGI accepts, and neither is a
-    /// variant of this enum), so no slice will ever make them work.
+    /// [`SurfaceTarget::Offscreen`] carries no pointer and no handle, so all
+    /// three obligations above are discharged vacuously for it and the entry
+    /// records `OFFSCREEN_HWND` instead of an address. What it *becomes* is
+    /// decided one call later:
+    /// [`Device::create_swapchain`](crcbl_hal::Device::create_swapchain) builds
+    /// a ring of plain `ID3D12Resource` textures rather than asking DXGI for
+    /// anything, which is what makes `crcbl screenshot` and every headless
+    /// harness run through the same acquire/present path a window does.
+    ///
+    /// # The window-system targets are refused permanently
+    ///
+    /// The four are [`HalError::Unsupported`] rather than `not_yet`: D3D12's
+    /// only presentation target is an `HWND` (a `CoreWindow` and a composition
+    /// surface are the other two DXGI accepts, and neither is a variant of this
+    /// enum), so no slice will ever make them work.
     unsafe fn create_surface(&self, target: &SurfaceTarget) -> Result<SurfaceHandle, HalError> {
         let never = |what| {
             Err(HalError::Unsupported {
@@ -613,9 +646,7 @@ impl Instance for Dx12Instance {
             // deliberately unread: `CreateSwapChainForHwnd` takes the window
             // alone.
             SurfaceTarget::Win32 { hwnd, .. } => hwnd.as_ptr() as usize,
-            SurfaceTarget::Offscreen => {
-                return Err(not_yet("offscreen surfaces (a later DX12 slice)"));
-            }
+            SurfaceTarget::Offscreen => OFFSCREEN_HWND,
             SurfaceTarget::Wayland { .. } | SurfaceTarget::Xcb { .. } => {
                 return never("a Linux window system is crcbl-vk's target, not D3D12's");
             }
@@ -636,7 +667,10 @@ impl Instance for Dx12Instance {
             });
             handle::stamp(self.inner.owner, slot)
         };
-        log::debug!("crcbl-dx12: created a win32 surface {handle:?} on HWND {hwnd:#x}");
+        log::debug!(
+            "crcbl-dx12: created a {} surface {handle:?} on HWND {hwnd:#x}",
+            target.platform_name()
+        );
         Ok(handle)
     }
 
@@ -678,6 +712,13 @@ impl Instance for Dx12Instance {
     /// non-empty constants, `present::FLIP_MODEL_FORMATS` and
     /// `present::present_modes`, and the second always contains
     /// [`PresentMode::Fifo`](crcbl_hal::PresentMode::Fifo).
+    ///
+    /// **An offscreen surface answers from `present::offscreen_surface_caps`
+    /// instead**, and the answer is a different set rather than the same one
+    /// with a null window: a ring of plain images is not a flip-model
+    /// swapchain, so flip-discard's format refusals and its two-buffer floor do
+    /// not apply to it. The adapter is still checked first, for the reason
+    /// below.
     fn surface_caps(
         &self,
         surface: SurfaceHandle,
@@ -691,7 +732,9 @@ impl Instance for Dx12Instance {
         {
             return Err(HalError::NoSuchAdapter(adapter.0));
         }
-        let hwnd = self.inner.surface_hwnd(surface)?;
+        let Some(hwnd) = self.inner.surface_hwnd(surface)? else {
+            return Ok(present::offscreen_surface_caps());
+        };
         Ok(SurfaceCaps {
             formats: present::FLIP_MODEL_FORMATS.to_vec(),
             present_modes: present::present_modes(self.inner.allow_tearing),
@@ -1327,39 +1370,47 @@ pub(crate) mod tests {
         );
     }
 
-    /// **Every target D3D12 cannot present to is refused, and the two kinds of
-    /// refusal stay apart.**
+    /// **Every target D3D12 cannot present to is refused by name, and an
+    /// offscreen one is not among them.**
     ///
-    /// This replaces the slice's blanket refusal, and what it keeps is the half
-    /// that still matters: a caller must be able to tell "this backend will
-    /// never do that" from "that has not been written yet", because only the
-    /// second is worth waiting for. [`SurfaceTarget::Offscreen`] is a ring of
-    /// plain images this backend could build and has not, so it names its
-    /// slice; the four window-system targets are not D3D12's at all, so they
-    /// name the backend that owns each.
+    /// The four window-system targets are not D3D12's at all, so each names the
+    /// backend that owns it and none of them reads as an unwritten slice — a
+    /// caller has to be able to tell "this backend will never do that" from
+    /// "that has not been written yet", because only the second is worth
+    /// waiting for.
     ///
-    /// [`SurfaceTarget::Win32`] is deliberately **not** here. It now succeeds,
+    /// [`SurfaceTarget::Offscreen`] used to be the second kind and is now
+    /// neither: it succeeds, and its capabilities are the ring's own rather
+    /// than a window's. That is asserted here because this is the test the
+    /// refusal used to live in, so a regression to `not_yet` lands on an
+    /// assertion instead of on a deleted one.
+    ///
+    /// [`SurfaceTarget::Win32`] is deliberately **not** here. It succeeds too,
     /// and a surface made from a dangling pointer would be one `surface_caps`
     /// goes on to hand to `GetClientRect` — see
     /// `crcbl_dx12::swapchain`'s tests, which make a real window instead.
     ///
-    /// Red when a refusal loses the backend's name, and red when `Offscreen`
-    /// starts answering with the permanent refusal the other four get.
+    /// Red when a refusal loses the backend's name, when a permanent refusal
+    /// starts naming a slice, and when `Offscreen` stops resolving.
     #[test]
     fn every_target_d3d12_cannot_present_to_is_refused_by_name() {
         let instance = open();
+        let adapter = pinned_adapter(&instance);
         let dangling = core::ptr::NonNull::dangling();
 
-        // SAFETY: `create_surface` matches this variant and returns before it
-        // reads any handle, so nothing is dereferenced.
-        let error = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
-            .expect_err("this backend builds no image ring yet");
-        let text = error.to_string();
-        assert!(text.contains("dx12"), "{text}");
-        assert!(
-            text.contains("offscreen surfaces") && text.contains("slice"),
-            "an unwritten slice must say so, not read as never: {text}"
+        // SAFETY: `Offscreen` names no platform object, so there is nothing
+        // this call could dereference and nothing that has to outlive it.
+        let offscreen = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }
+            .expect("an offscreen surface needs no window");
+        let caps = instance
+            .surface_caps(offscreen, adapter)
+            .expect("a live offscreen surface on a real adapter");
+        assert_eq!(
+            caps,
+            crate::present::offscreen_surface_caps(),
+            "an offscreen surface must answer with the ring's caps, not a window's"
         );
+        instance.destroy_surface(offscreen);
 
         let never = [
             SurfaceTarget::Wayland {
