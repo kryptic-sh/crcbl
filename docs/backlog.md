@@ -3642,6 +3642,47 @@ Things worth carrying out of this investigation:
 since the fix. If they pass, `crcbl-mtl` has working draws in CI for the first
 time and the Metal arm of `render_e2e.rs` becomes worth wiring.
 
+### Vulkan on Windows: written, three rounds measured, held
+
+The `vk e2e (lavapipe, windows)` job exists in git history (`91a1644`, refined
+through `06dbf26`) and is **held out of `ci.yml`** — held, not unfinished. It
+installs a pinned Vulkan SDK for `vulkan-1.dll` and a pinned lavapipe, verifies
+both arrived, resolves the ICD manifest **and its relative `library_path`** to a
+file that exists, and selects all 73 tests. Every guard it carries reported
+truthfully across three runs; nothing ever passed vacuously.
+
+**Two real causes were found and fixed**, and both remain in the tree because
+they are correct independently:
+
+1. The manifest reached the loader in Git Bash's `C:/…` form. `cygpath -w`
+   converts it, and `vulkan-icd.sh` echoes the native form so a later failure
+   names the form as well as the path.
+2. Exporting the loader's variables _from_ Git Bash does not reach a native
+   child. The job sets them at the job level instead, and `crcbl_pin_vk_icd`
+   defers to an existing value — the right precedence anywhere, since a caller
+   who set the loader's own variables meant it.
+
+**What stopped it, and the measurement that settles the diagnosis.** The loader
+still reports `windows_read_data_files_in_registry: Registry lookup failed`, and
+`VK_LOADER_DEBUG=all` produced **no loader debug output whatever**. A loader
+ignoring its own debug switch is not reading its environment at all — so the
+variables are not reaching the process, even though the step's environment dump
+shows them set. That eliminates the manifest, the path form and the driver, and
+leaves the bash-to-native boundary.
+
+**Next thing to try**: run the suite from `pwsh` on this platform rather than
+through the bash harness, so no MSYS environment translation sits between the
+variables and the loader. Note `run-dx12-e2e.sh` runs under `shell: bash` and
+works — but it passes nothing the _loader_ reads; it pins through
+`CRCBL_DX12_ADAPTER`, which our own Rust code reads, not a native DLL. That
+difference is the reason the two jobs are not evidence about each other.
+
+Worth keeping regardless of how it lands: **`ERROR_INCOMPATIBLE_DRIVER` and
+`Registry lookup failed` are each ambiguous across several distinct causes** —
+never read the manifest, read it and declined it, wrong path form, variable
+never arrived. Only the loader's own preceding lines separate them, which is why
+the job runs `vulkaninfo` before the suite and why that probe earned its place.
+
 ### Metal draw coverage in CI: what the ecosystem does
 
 Researched 2026-08-10, because "is this just us?" was worth answering before
