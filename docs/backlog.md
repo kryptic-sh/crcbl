@@ -3,6 +3,24 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### `crcbl-dx12` points at a backlog note about `crcbl::screenshot` that is not here
+
+`an_offscreen_ring_draws_reads_back_and_comes_round_again`, in
+`crates/crcbl-dx12/src/swapchain.rs`, explains its closing `TransferSrc` →
+`Present` barrier with "see the note about `crcbl::screenshot` in
+`docs/backlog.md`". There is no such note, and
+`grep -n screenshot docs/backlog.md` finds nothing about barriers at all — it
+was either never written or deleted with something else.
+
+The defect it was about is fixed:
+`crcbl::screenshot::OffscreenSetup::draw_and_readback` now brackets its copy
+with `Present` → `TransferSrc` and `TransferSrc` → `Present`, and
+`every_readback_barrier_declares_the_state_the_image_is_actually_in` replays the
+null backend's recorded stream to hold it there. So what is left is a dangling
+cross-reference in a doc comment, in a crate outside the paths that fix owned.
+Either repoint it at that test or drop the clause; it is a one-line edit and
+needs a Windows-crate touch, not a decision.
+
 ### The Win32 pointer-clip tests are held out of the ordinary sweep
 
 Three flakes across the session, on **two different tests** and **three

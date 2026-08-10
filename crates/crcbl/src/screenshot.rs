@@ -418,6 +418,16 @@ pub const READBACK_ROW_ALIGNMENT: u32 = 256;
 /// one it should be able to read.
 pub const READBACK_DEADLINE: Duration = Duration::from_secs(10);
 
+/// How many images the offscreen ring holds.
+///
+/// More than one so the path a windowed swapchain takes — acquire a *different*
+/// image, present, come round again — is the path a screenshot takes too. It is
+/// named rather than written into the descriptor because the barrier test below
+/// has to draw more frames than this to reach a re-used image at all, and a lap
+/// count derived from a literal two files away is one that silently stops
+/// meaning what it says.
+const RING_IMAGES: u32 = 2;
+
 /// Holds everything needed to render one frame offscreen: a GPU instance,
 /// device, offscreen swapchain ring, and the chosen scene's renderer.
 ///
@@ -523,8 +533,24 @@ impl OffscreenSetup {
             return Err(OffscreenError::TooLarge { width, height });
         }
 
+        Self::open_on(crate::backend::open()?, width, height, scene)
+    }
+
+    /// [`Self::open`] on an instance that has already been opened.
+    ///
+    /// The split exists so the barrier test below can drive the whole of
+    /// [`Self::draw_and_readback`] against `crcbl_hal::null`, whose recorder is
+    /// the only thing in the tree that can be *asked* what command stream this
+    /// module produced. The size checks stay in [`Self::open`]: they are about
+    /// the caller's `--size`, and refusing before a backend is opened is the
+    /// property their test asserts.
+    fn open_on(
+        instance: Box<dyn Instance>,
+        width: u32,
+        height: u32,
+        scene: Scene,
+    ) -> Result<Self, OffscreenError> {
         let extent = (width, height);
-        let instance = crate::backend::open()?;
 
         let target = SurfaceTarget::Offscreen;
         // SAFETY: `Offscreen` names no platform object, so nothing can dangle.
@@ -568,7 +594,7 @@ impl OffscreenSetup {
                 surface,
                 format,
                 extent,
-                image_count: 2,
+                image_count: RING_IMAGES,
                 present_mode: PresentMode::Fifo,
                 composite_alpha: crate::hal::CompositeAlpha::Opaque,
             })
@@ -762,6 +788,25 @@ impl OffscreenSetup {
         compiled.execute(device, &mut self.pool, encoder.as_mut(), None)?;
 
         // ---- readback: barrier to TransferSrc, copy, barrier back, submit ----
+        //
+        // **Both ends of this pair are `ResourceState::Present`, not
+        // `ColorAttachment`.** The graph does not hand the image back in the
+        // state its last pass left it in: `ForwardRenderer::present_target`
+        // declares `final_state: Present`, and `CompiledGraph::execute` emits a
+        // trailing barrier to reach it. So `Present` is what the image is in
+        // when the copy starts, and declaring anything else is a lie the API
+        // checks — lavapipe's validation layer reported this one as
+        // `VUID-VkImageMemoryBarrier2-oldLayout-01197`, "cannot transition …
+        // from VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL when the previous known
+        // layout is VK_IMAGE_LAYOUT_PRESENT_SRC_KHR".
+        //
+        // And the second barrier is why there is a pair at all. `present` takes
+        // the image back into the ring, and the next trip round declares
+        // `Undefined` — legal from any layout on Vulkan, but on D3D12
+        // `Undefined` and `Present` are both `COMMON` and the declared
+        // before-state is validated, so an image left in `COPY_SOURCE` makes
+        // that next declaration false. `crcbl-dx12`'s own offscreen-ring suite
+        // ends every frame with this same transition for that reason.
 
         let staging = device.create_buffer(&BufferDesc {
             label: Some("screenshot readback"),
@@ -775,7 +820,7 @@ impl OffscreenSetup {
             images: &[ImageBarrier::new(
                 acquired.image,
                 range,
-                ResourceState::ColorAttachment,
+                ResourceState::Present,
                 ResourceState::TransferSrc,
             )],
             ..Barriers::default()
@@ -795,6 +840,16 @@ impl OffscreenSetup {
             },
             image_offset: Offset3d::default(),
             image_extent: Extent3d::d2(extent.0, extent.1),
+        });
+
+        encoder.pipeline_barrier(&Barriers {
+            images: &[ImageBarrier::new(
+                acquired.image,
+                range,
+                ResourceState::TransferSrc,
+                ResourceState::Present,
+            )],
+            ..Barriers::default()
         });
 
         let commands = encoder.finish()?;
@@ -1087,6 +1142,152 @@ mod tests {
                 "{extent:?}: {rects} rect(s), {outlines} outline(s), {texts} text(s)"
             );
         }
+    }
+
+    /// One more frame than the ring is deep, so the last one is drawn into an
+    /// image an earlier one already used.
+    const LAPS: usize = RING_IMAGES as usize + 1;
+
+    /// Every barrier [`OffscreenSetup::draw_and_readback`] records on the
+    /// acquired swapchain image tells the truth, and every image goes back into
+    /// the ring in [`ResourceState::Present`].
+    ///
+    /// # Why this is a state machine and not two `assert_eq!`s
+    ///
+    /// A barrier is a *claim* about the state its image is already in, and both
+    /// halves of a wrong claim are silent here: the frame still renders, the
+    /// pixels still compare equal, and nothing above the seam ever reads the
+    /// state back. This module shipped with `from: ColorAttachment` on the
+    /// pre-copy barrier — the state the *last pass* leaves the target in, not
+    /// the state the graph hands it back in, which is
+    /// [`ForwardRenderer::present_target`]'s `final_state: Present` — and with
+    /// no barrier back at all, and the golden suite passed on every backend. It
+    /// took Vulkan's validation layer to say so, and only on the first of the
+    /// two.
+    ///
+    /// So the observable has to be the command stream itself, which is what
+    /// `crcbl_hal::null`'s recorder is: replaying it with a tracker is the same
+    /// check a driver's validation layer performs, in the plain suite that runs
+    /// with no GPU at all.
+    ///
+    /// # Why three frames
+    ///
+    /// The ring is [`RING_IMAGES`] deep, so the third acquire is the first that
+    /// hands back an image a previous frame already used. A residual state is
+    /// invisible until then: it is legal for the graph to declare `Undefined`
+    /// coming in — every backend accepts that as "discard the contents" — but
+    /// D3D12 spells both `Undefined` and `Present` `D3D12_RESOURCE_STATE_COMMON`
+    /// and validates the *declared* before-state, so an image left in
+    /// `TransferSrc` makes the next trip's declaration false. `Present` at the
+    /// hand-back is what makes it true, and lap three is where the two differ.
+    #[test]
+    fn every_readback_barrier_declares_the_state_the_image_is_actually_in() {
+        use crate::hal::null::{Command, Event, NullInstance, Recorder};
+
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let mut setup = OffscreenSetup::open_on(Box::new(instance), 16, 16, Scene::Cube)
+            .expect("the null backend opens an offscreen setup");
+        for _ in 0..LAPS {
+            setup
+                .draw_and_readback()
+                .expect("the null backend records a frame and reads it back");
+        }
+        setup.finish().expect("the null device reaches idle");
+
+        // The state each swapchain image was last left in, by handle. Two
+        // entries at most, so a list rather than a map.
+        let mut tracked: Vec<(crate::hal::ImageHandle, ResourceState)> = Vec::new();
+        // The image each lap acquired, in order — asserted below to repeat.
+        let mut per_lap: Vec<crate::hal::ImageHandle> = Vec::new();
+        // The lap's own barriers, held until its copy names the image they are
+        // about: the pre-copy barrier is recorded before the copy that
+        // identifies it.
+        let mut pending: Vec<crate::hal::ImageBarrier> = Vec::new();
+        let mut current: Option<crate::hal::ImageHandle> = None;
+
+        for event in recorder.events() {
+            match event {
+                Event::Acquired { .. } => {
+                    assert!(
+                        current.is_none(),
+                        "a lap acquired again before presenting the image it held"
+                    );
+                    pending.clear();
+                }
+                Event::Command {
+                    command: Command::Barrier { images, .. },
+                    ..
+                } => pending.extend(images),
+                Event::Command {
+                    command: Command::CopyImageToBuffer(copy),
+                    ..
+                } => {
+                    assert!(
+                        current.is_none(),
+                        "this frame copies one image back per lap; a second copy \
+                         means the image a barrier is about can no longer be \
+                         identified by it"
+                    );
+                    current = Some(copy.image);
+                    per_lap.push(copy.image);
+                }
+                Event::Presented { .. } => {
+                    let image = current
+                        .take()
+                        .expect("a lap presents the image it copied back");
+                    for barrier in pending.drain(..).filter(|it| it.image == image) {
+                        let slot = tracked.iter_mut().find(|(handle, _)| *handle == image);
+                        let was = slot.as_ref().map_or(ResourceState::Undefined, |(_, s)| *s);
+                        // `Undefined` is the one declaration that is true from
+                        // anywhere: it discards the contents rather than
+                        // claiming to know them.
+                        assert!(
+                            barrier.from == ResourceState::Undefined || barrier.from == was,
+                            "a barrier declared {:?} -> {:?} on a swapchain image that is \
+                             in {was:?}",
+                            barrier.from,
+                            barrier.to,
+                        );
+                        match slot {
+                            Some((_, state)) => *state = barrier.to,
+                            None => tracked.push((image, barrier.to)),
+                        }
+                    }
+                    let (_, state) = tracked
+                        .iter()
+                        .find(|(handle, _)| *handle == image)
+                        .expect("the lap barriered the image it copied");
+                    assert_eq!(
+                        *state,
+                        ResourceState::Present,
+                        "present takes the image back into the ring, and the next trip \
+                         round declares Undefined — which D3D12 spells COMMON and \
+                         validates, so anything but Present here is a state the next \
+                         lap's declaration contradicts"
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            per_lap.len(),
+            LAPS,
+            "every lap must have copied its image back, or the barriers of the \
+             ones that did not were never checked"
+        );
+        assert_eq!(
+            per_lap[0],
+            per_lap[LAPS - 1],
+            "the ring is {RING_IMAGES} deep, so lap {LAPS} must re-use lap 1's image; \
+             a ring that handed out a fresh image every time would never re-read a \
+             residual state"
+        );
+        assert_ne!(
+            per_lap[0], per_lap[1],
+            "consecutive laps must take different ring images"
+        );
     }
 
     /// The null backend exercises the same code paths but renders nothing.

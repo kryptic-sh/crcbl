@@ -1813,6 +1813,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl::screenshot`'s readback barriers lied about the swapchain image's
+  state, and never put it back.** `OffscreenSetup::draw_and_readback` declared
+  its pre-copy transition as coming from `ResourceState::ColorAttachment` — the
+  state the frame's last pass leaves the target in, not the state the graph
+  hands it back in, which is `ForwardRenderer::present_target`'s
+  `final_state: Present` — and then presented the image still in
+  `ResourceState::TransferSrc`. Vulkan reported the first as
+  `VUID-VkImageMemoryBarrier2-oldLayout-01197` on every screenshot ever taken;
+  the second is a D3D12 debug-layer error on the second trip round the ring,
+  where the declared before-state `COMMON` meets an image left in `COPY_SOURCE`.
+  The copy is now bracketed by `Present` → `TransferSrc` and `TransferSrc` →
+  `Present`. Pixels are unchanged — the golden cube still matches to zero
+  differing pixels.
+
 - **The three GPU draw-generation counters are device-local, zeroed by a
   dispatch inside the frame.** `crcbl_render::draw_gen` put its survivor count,
   indirect arguments and draw counts on `MemoryLocation::HostUpload` and bound
