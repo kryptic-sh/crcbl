@@ -3737,56 +3737,64 @@ Three results in one run:
 frame still dies in `OffscreenSetup::open` — see the offscreen-ring entry. So
 the renderer runs on three backends of four.
 
-### D3D12's frame: what is eliminated, and the correction
+### D3D12's frame: diagnosed, two bugs in the resource layer
 
-**Correction first, because this entry twice said something false.** It claimed
-the offscreen ring "was written blind and has never executed anywhere". It has:
-`swapchain::tests::an_offscreen_ring_draws_reads_back_and_comes_round_again`
-landed in the same commit as the ring and **passes on WARP as test 155/155** —
-verified in the CI log for `18862f5`, not inferred. The ring creates, acquires,
-clears, copies out, presents, wraps past its depth and reconfigures, all green.
-
-What the frame actually does, measured twice (`dc846ff`, and `0354eec` with
-`CRCBL_ADAPTER=cpu` pinning WARP, which changed nothing):
+**Named on `a918134`, by asking the device instead of reasoning about it.**
+`GetDeviceRemovedReason` plus the drained debug layer turned an opaque
+`0x887A0005` into two specific, actionable errors:
 
 ```
-a GPU backend opens: HAL: CreateCommittedResource (buffer) failed:
-The GPU device instance has been suspended. … (0x887A0005)
+GetDeviceRemovedReason: DXGI_ERROR_INVALID_CALL — an earlier call from this
+application was invalid and the runtime took the device down for it
+
+id 649: CreateConstantBufferView: pDesc->BufferLocation + SizeInBytes - 1
+  (0x…000000ff) exceeds end of the virtual address range of Resource
+  ('forward params', GPU VA Range: 0x…00000000 - 0x…0000000f)
+
+id 340: CreateUnorderedAccessView: A UnorderedAccessView cannot be created of a
+  Resource that did not specify the D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+  Flag
 ```
 
-**Eliminated by measurement:**
+**Bug 1 — a constant buffer view outruns its buffer.** D3D12 requires a CBV's
+`SizeInBytes` be a multiple of 256, and this backend rounds up to it without the
+allocation being padded to match. `forward params` is 16 bytes and the view asks
+for 256; `forward cull params` is 112 and asks for the same. The fix is that the
+_buffer_ has to be padded when it is going to be viewed as a constant buffer,
+not just the view rounded.
 
-- Adapter choice — pinning the software adapter did not change the outcome.
-- The ring at 64x4 / `Rgba8Unorm` — passes on WARP.
-- **The `TransferSrc`-never-barriered-back lead in
-  `crcbl::screenshot::draw_and_readback`.** It cannot be this failure: nothing
-  is recorded or submitted before `open` fails. It is still a real defect —
-  D3D12 validates a transition's declared before-state where Vulkan does not —
-  and worth fixing, but it is a different bug.
+**Bug 2 — storage buffers are not created for unordered access.** Every UAV on
+them is refused because the resource carries no
+`D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`. A `BufferUsage::STORAGE` to
+resource-flags mapping gap.
 
-**What is left**, and it is narrow: the ring at the shape `OffscreenSetup`
-builds — `caps.preferred_format()` is `Rgba8UnormSrgb` where the passing test
-pins `Rgba8Unorm`, at 256x192 rather than 64x4 — or `create_device`'s
-`GPU_DRIVEN | DEBUG_MARKERS` and `compatible_surface: Some(..)`, which the HAL
-suite's own `open_device` never passes.
+**Everything else is exonerated by measurement**, and the list is worth keeping
+because three sessions were spent narrowing it:
 
-**The next run should name it rather than narrow it again.** Every
-device-removed failure this backend reports now carries
-`GetDeviceRemovedReason`'s answer spelled out plus whatever the debug layer
-stored, and `CRCBL_DX12_VALIDATION` turns that layer on so a validation error is
-reported at the offending call rather than at the next one. A new HAL test
-builds the ring at the screenshot's exact shape, so if that is the cause it goes
-red inside the crate that owns it.
+- The offscreen ring, including at the exact shape `crcbl::screenshot` builds —
+  sRGB, 256x192, no barrier back to `Present` —
+  `the_ring_shape_crcbl_screenshot_builds_leaves_a_usable_device` passes on WARP
+  as 156/159.
+- Adapter choice: pinning the software adapter changed nothing.
+- The `TransferSrc`-never-barriered-back lead: nothing is recorded before `open`
+  fails, so it cannot be this. Still a real defect, still worth fixing.
 
-**Owed:** the frame step is `continue-on-error: true`. That is acceptable only
-because the ring hypothesis is covered by an ungated test in the job's first
-step — the flagged step adds evidence, not coverage. **It must lose the flag
-with the fix**, or it silently stops meaning anything.
+**The lesson, and it cost real time.** Two sessions were spent inferring from an
+error that names the call which _noticed_ rather than the one that caused it —
+DXGI reports removal at the next call. The device could say exactly what
+happened the whole time; nothing asked. `render_e2e.rs` also installed no
+logger, so every `log::info!` the backend emitted was invisible in precisely the
+runs that needed it. Both are fixed. **When a platform offers a diagnostic
+channel, wire it before the third round of guessing.**
 
-**Also owed:** `crates/crcbl/tests/render_e2e.rs` installs no logger, so every
-`log::info!` this backend emits — the adapter report, ring creation, debug-layer
-state — is invisible in exactly the run that needs them. That is why two
-sessions had nothing to read.
+**Confirmed available:** the runner has the D3D12 debug layer —
+`debug layer=true messages readable=true` — which was an open question. Note the
+messages must be _drained_ from the info queue; `EnableDebugLayer` alone writes
+to `OutputDebugString`, which a runner with no debugger attached swallows
+silently.
+
+**Owed:** the frame step is still `continue-on-error: true` and must lose that
+flag with the fix.
 
 ### What WARP has actually proven
 
