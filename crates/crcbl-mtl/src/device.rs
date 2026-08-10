@@ -2217,7 +2217,7 @@ fn resolve_count(requested: u32, base: NSUInteger, total: NSUInteger) -> NSUInte
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::time::Duration;
 
@@ -2245,7 +2245,7 @@ mod tests {
 
     /// A device, opened through this crate's own type so a test can reach the
     /// pools underneath it.
-    fn open_device() -> (MetalInstance, MetalDevice) {
+    pub(crate) fn open_device() -> (MetalInstance, MetalDevice) {
         let instance = open_instance();
         let adapters = instance.adapters();
         assert!(!adapters.is_empty(), "a Mac has at least one adapter");
@@ -2501,10 +2501,10 @@ mod tests {
     /// the attachment been `Rgba8UnormSrgb`, a clear of `0.5` would land as
     /// `188`, not `128`, because the hardware encodes on write. See
     /// `crcbl_mtl::conv`.
-    const CLEAR: [f32; 4] = [17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 1.0];
+    pub(crate) const CLEAR: [f32; 4] = [17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 1.0];
 
     /// What [`CLEAR`] must read back as, per the derivation above.
-    const CLEAR_TEXEL: [u8; 4] = [0x11, 0x22, 0x33, 0xFF];
+    pub(crate) const CLEAR_TEXEL: [u8; 4] = [0x11, 0x22, 0x33, 0xFF];
 
     /// A second colour, for the load/store pair. Same derivation.
     const OTHER: [f32; 4] = [204.0 / 255.0, 187.0 / 255.0, 170.0 / 255.0, 1.0];
@@ -2525,7 +2525,7 @@ mod tests {
     /// `format`: Metal permits a view to reinterpret a texture's format, and a
     /// test that reinterpreted one here by accident would be asserting about a
     /// pair of formats rather than the one it named.
-    fn color_target_of(
+    pub(crate) fn color_target_of(
         device: &MetalDevice,
         extent: Extent3d,
         format: Format,
@@ -2560,7 +2560,7 @@ mod tests {
     }
 
     /// A host-readable buffer, poisoned so an absent copy cannot pass.
-    fn readback_buffer(device: &MetalDevice, size: u64) -> BufferHandle {
+    pub(crate) fn readback_buffer(device: &MetalDevice, size: u64) -> BufferHandle {
         let handle = device
             .create_buffer(&buffer(size, MemoryLocation::HostReadback))
             .expect("a readback buffer");
@@ -2571,7 +2571,7 @@ mod tests {
     }
 
     /// The whole of an `extent`-sized image, copied into the start of a buffer.
-    fn whole_image_copy_of(
+    pub(crate) fn whole_image_copy_of(
         image: ImageHandle,
         into: BufferHandle,
         extent: Extent3d,
@@ -2604,7 +2604,7 @@ mod tests {
     /// genuinely have nothing else to do"; the deadline is what turns a
     /// completion point that is never reached into a failed test instead of a
     /// hung one.
-    fn drain(device: &MetalDevice, readback: ReadbackHandle, size: usize) -> Vec<u8> {
+    pub(crate) fn drain(device: &MetalDevice, readback: ReadbackHandle, size: usize) -> Vec<u8> {
         let mut out = vec![0u8; size];
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -2803,11 +2803,11 @@ mod tests {
     /// The image the triangle is drawn into: square, so "the centre" and "a
     /// corner" are far apart, and 64 texels wide so a row is 256 bytes — the
     /// same comfortable stride [`TARGET`] was chosen for.
-    const CANVAS: Extent3d = Extent3d::d2(64, 64);
+    pub(crate) const CANVAS: Extent3d = Extent3d::d2(64, 64);
 
     #[cfg(feature = "mtl-e2e")]
     /// Bytes one full copy of [`CANVAS`] occupies, at four bytes a texel.
-    const CANVAS_BYTES: usize = 64 * 64 * 4;
+    pub(crate) const CANVAS_BYTES: usize = 64 * 64 * 4;
 
     /// **The triangle's colour, derived exactly as [`CLEAR`] is.**
     ///
@@ -2849,7 +2849,7 @@ mod tests {
     /// Built with [`INK`] formatted in rather than written out, so the colour
     /// the shader returns and the colour the assertions expect cannot drift
     /// apart.
-    fn ink_msl() -> String {
+    pub(crate) fn ink_msl() -> String {
         format!(
             "#include <metal_stdlib>\n\
              using namespace metal;\n\
@@ -2872,7 +2872,7 @@ mod tests {
     }
 
     /// The MSL-only descriptor a Metal caller supplies.
-    fn msl_module<'a>(msl: &'a str, label: &'a str) -> ShaderModuleDesc<'a> {
+    pub(crate) fn msl_module<'a>(msl: &'a str, label: &'a str) -> ShaderModuleDesc<'a> {
         ShaderModuleDesc {
             label: Some(label),
             spirv: &[],
@@ -2883,7 +2883,7 @@ mod tests {
     }
 
     /// The empty pipeline layout, which is the only one this slice can make.
-    fn empty_layout(device: &MetalDevice) -> PipelineLayoutHandle {
+    pub(crate) fn empty_layout(device: &MetalDevice) -> PipelineLayoutHandle {
         device
             .create_pipeline_layout(&PipelineLayoutDesc {
                 label: Some("crcbl-mtl empty layout"),
@@ -5285,6 +5285,26 @@ using namespace metal;\n\
         device.destroy_shader_module(module);
     }
 
+    /// Which of the two framing calls [`draw_canvas_framed`] makes before it
+    /// hands the encoder to the caller.
+    ///
+    /// Metal's defaults for both are already the whole render target, so every
+    /// variant here must produce the *same image* — which is what makes the
+    /// difference between them a clean single-variable experiment rather than a
+    /// change of what is being drawn. `crcbl_mtl::draw_probe` is the only
+    /// caller of anything but [`Both`](Self::Both), and says what it is for.
+    #[cfg(feature = "mtl-e2e")]
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) enum Framing {
+        /// `setViewport:` and then `setScissorRect:`, both covering the canvas.
+        /// What every draw in this backend's own suite records.
+        Both,
+        /// `setViewport:` only.
+        ViewportOnly,
+        /// Neither, leaving Metal's defaults in place.
+        Neither,
+    }
+
     /// Records `paint` into a [`CANVAS`]-sized pass over a `format` target,
     /// copies the result back, and hands over the texels.
     ///
@@ -5297,6 +5317,24 @@ using namespace metal;\n\
     fn draw_canvas(
         device: &MetalDevice,
         format: Format,
+        paint: impl FnOnce(&mut dyn CommandEncoder),
+    ) -> Vec<u8> {
+        draw_canvas_framed(device, format, Framing::Both, paint)
+    }
+
+    /// [`draw_canvas`], with the viewport and scissor calls under the caller's
+    /// control.
+    ///
+    /// Split out for `crcbl_mtl::draw_probe`, which needs two draws that differ
+    /// from the suite's own by exactly one encoder call. Everything else — the
+    /// attachment, the clear, the barrier, the copy, the submit and the
+    /// readback — stays written once, which is the whole reason those probes
+    /// can be read as a controlled experiment.
+    #[cfg(feature = "mtl-e2e")]
+    pub(crate) fn draw_canvas_framed(
+        device: &MetalDevice,
+        format: Format,
+        framing: Framing,
         paint: impl FnOnce(&mut dyn CommandEncoder),
     ) -> Vec<u8> {
         let (image, view) = color_target_of(device, CANVAS, format);
@@ -5320,8 +5358,12 @@ using namespace metal;\n\
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(CANVAS.width, CANVAS.height),
         });
-        encoder.set_viewport(&Viewport::from_size(CANVAS.width, CANVAS.height));
-        encoder.set_scissor(&Rect2d::from_size(CANVAS.width, CANVAS.height));
+        if matches!(framing, Framing::Both | Framing::ViewportOnly) {
+            encoder.set_viewport(&Viewport::from_size(CANVAS.width, CANVAS.height));
+        }
+        if matches!(framing, Framing::Both) {
+            encoder.set_scissor(&Rect2d::from_size(CANVAS.width, CANVAS.height));
+        }
         paint(encoder.as_mut());
         encoder.end_render_pass();
         encoder.pipeline_barrier(&Barriers {
@@ -5371,7 +5413,7 @@ using namespace metal;\n\
     /// silent identity for a format whose layout is neither of these two would
     /// be an assertion that no longer knows what it is comparing.
     #[cfg(feature = "mtl-e2e")]
-    fn texel_in(format: Format, rgba: [u8; 4]) -> [u8; 4] {
+    pub(crate) fn texel_in(format: Format, rgba: [u8; 4]) -> [u8; 4] {
         match format {
             Format::Rgba8Unorm => rgba,
             Format::Bgra8Unorm => [rgba[2], rgba[1], rgba[0], rgba[3]],
@@ -5387,7 +5429,7 @@ using namespace metal;\n\
     /// attachment must hold, so it proves the channel *order* as well as the
     /// coverage — see [`texel_in`].
     #[cfg(feature = "mtl-e2e")]
-    fn assert_ink_triangle(bytes: &[u8], format: Format) {
+    pub(crate) fn assert_ink_triangle(bytes: &[u8], format: Format) {
         assert_eq!(bytes.len(), CANVAS_BYTES, "the readback is the wrong size");
         let ink = texel_in(format, INK_TEXEL);
         let clear = texel_in(format, CLEAR_TEXEL);

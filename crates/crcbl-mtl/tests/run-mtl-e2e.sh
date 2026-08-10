@@ -24,6 +24,21 @@
 # not on shader execution. `.github/workflows/ci.yml` explains why there and
 # passes the filter; this script excludes nothing on its own.
 #
+# # The draw probes, and running one at a time
+#
+# `crcbl_mtl::draw_probe` holds the bisect for the draw hang `docs/backlog.md`
+# describes: five probes that each remove one step from a draw that faults on
+# CI's paravirtual device. Extra arguments go straight to nextest, so a person
+# on a real Mac runs the set, or any one of them, by name:
+#
+#   crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(draw_probe_)'
+#   crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(draw_probe_a_draw_with_no_scissor_call)'
+#
+# **A real Mac is where they mean the most.** Every one of them is expected to
+# pass on an unvirtualised GPU — they draw the same triangle the ordinary suite
+# does — so a probe that fails *there* is a defect in this backend that the
+# paravirtual device merely found first.
+#
 # # The zero-tests check is the point
 #
 # `docs/plan/12-testing.md` calls a silently-skipped e2e suite a known trap, and
