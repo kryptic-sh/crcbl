@@ -46,6 +46,16 @@
 #   CRCBL_VK_ICD              Pin an ICD manifest, e.g. lavapipe's `lvp_icd.json`.
 #                             CI sets this so a runner that grows a GPU does not
 #                             silently stop testing the software path.
+#   CRCBL_VK_EXPECT_ADAPTER   A substring the adapter the suite actually opened
+#                             must contain, e.g. `llvmpipe`. Unset means "do not
+#                             check", which is what a developer running against
+#                             their own hardware wants. It exists because
+#                             `CRCBL_VK_ICD` pins what the loader is *offered*
+#                             and never what it chose: a manifest the loader
+#                             declined and a manifest it never read both leave a
+#                             green run behind. `run-dx12-e2e.sh` makes the same
+#                             distinction, and hardcodes its answer because its
+#                             pin accepts exactly one value.
 #   CRCBL_VK_SYNC_VALIDATION  `1` adds synchronisation validation. CI sets it;
 #                             `docs/plan/02-vulkan-backend.md` names sync bugs
 #                             as this stage's headline risk and this as the
@@ -104,16 +114,53 @@ NOICD
 fi
 
 # Fail early and legibly rather than letting every test panic with the same
-# message. `ldconfig -p` is not universal, so this is a best-effort probe: the
-# suite's own `NoLoader` panic is the real gate.
-if ! ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1' \
-    && [ ! -e /usr/lib/libvulkan.so.1 ] \
-    && [ ! -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ]; then
-    echo "crcbl vk e2e: no libvulkan.so.1 found; install a Vulkan loader" >&2
-    echo "  Debian/Ubuntu: libvulkan1 mesa-vulkan-drivers vulkan-validationlayers" >&2
-    echo "  Arch:          vulkan-icd-loader vulkan-swrast vulkan-validation-layers" >&2
-    exit 1
-fi
+# message. Best-effort on both platforms: the suite's own `NoLoader` panic is the
+# real gate, and this is the line that names the fix.
+#
+# The two arms are not variants of one another. `ash::Entry::load` asks the
+# platform's own loader — `dlopen("libvulkan.so.1")` on one, `LoadLibrary(
+# "vulkan-1.dll")` on the other — and the two search different places, so a probe
+# written for one says nothing at all about the other. There is no Vulkan loader
+# in a stock `windows-latest` image (`actions/runner-images`' Windows README
+# lists none), which is why the CI job there installs one and why an absence has
+# to be a *loud* failure here rather than a suite that quietly fails every test.
+case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*)
+        # Windows resolves a bare DLL name against the process directory, the
+        # system directory and then `PATH`. Git Bash hands `PATH` over in POSIX
+        # form with the system directory already on it, so walking it is the
+        # whole search — and naming the file that was found is what tells a
+        # loader installed by this job from one that was already there.
+        IFS=: read -r -a CRCBL_PATH_DIRS <<<"$PATH"
+        LOADER=""
+        for dir in "${CRCBL_PATH_DIRS[@]}"; do
+            if [ -f "${dir}/vulkan-1.dll" ]; then
+                LOADER="${dir}/vulkan-1.dll"
+                break
+            fi
+        done
+        if [ -z "$LOADER" ]; then
+            echo "crcbl vk e2e: no vulkan-1.dll anywhere on PATH; install a Vulkan loader" >&2
+            echo "  The LunarG SDK carries one, and so does the smaller Vulkan Runtime:" >&2
+            echo "    https://sdk.lunarg.com/sdk/download/<version>/windows/vulkan-runtime-components.zip" >&2
+            echo "  A stock GitHub windows runner has neither." >&2
+            exit 1
+        fi
+        echo "crcbl vk e2e: loader $LOADER"
+        ;;
+    *)
+        # `ldconfig -p` is not universal, hence the two well-known paths beside
+        # it.
+        if ! ldconfig -p 2>/dev/null | grep -q 'libvulkan\.so\.1' \
+            && [ ! -e /usr/lib/libvulkan.so.1 ] \
+            && [ ! -e /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ]; then
+            echo "crcbl vk e2e: no libvulkan.so.1 found; install a Vulkan loader" >&2
+            echo "  Debian/Ubuntu: libvulkan1 mesa-vulkan-drivers vulkan-validationlayers" >&2
+            echo "  Arch:          vulkan-icd-loader vulkan-swrast vulkan-validation-layers" >&2
+            exit 1
+        fi
+        ;;
+esac
 
 if command -v vulkaninfo >/dev/null 2>&1; then
     echo "crcbl vk e2e: --- vulkaninfo --summary ---"
@@ -188,6 +235,33 @@ if [ -n "$DRIVER" ]; then
 else
     echo "crcbl vk e2e: the suite never named an adapter — it did not open a device" >&2
     exit 1
+fi
+
+# And whether that is the implementation the caller came here for. `CRCBL_VK_ICD`
+# offers the loader a manifest; only this line says the loader took it. The two
+# come apart quietly — a manifest for an incompatible driver is refused with the
+# same `ERROR_INCOMPATIBLE_DRIVER` a missing one gets, and a `VK_DRIVER_FILES`
+# that never reached the test process leaves the loader free to pick anything
+# installed. Either way the tests below still run, still pass, and are evidence
+# about a driver nobody chose.
+if [ -n "${CRCBL_VK_EXPECT_ADAPTER:-}" ]; then
+    case "$DRIVER" in
+        *"$CRCBL_VK_EXPECT_ADAPTER"*)
+            echo "crcbl vk e2e: the adapter contains '${CRCBL_VK_EXPECT_ADAPTER}', as expected"
+            ;;
+        *)
+            echo "crcbl vk e2e: ############################################################" >&2
+            echo "crcbl vk e2e: # THE PIN MISSED. THIS RUN IS NOT THE RUN IT SAYS IT IS.   #" >&2
+            echo "crcbl vk e2e: ############################################################" >&2
+            echo "crcbl vk e2e: expected an adapter containing '${CRCBL_VK_EXPECT_ADAPTER}'," >&2
+            echo "              and the suite opened its device on:" >&2
+            echo "                ${DRIVER#vk e2e: }" >&2
+            echo "              CRCBL_VK_ICD=${CRCBL_VK_ICD:-<unset>} was what the loader was" >&2
+            echo "              offered, so either it declined that manifest or the pin never" >&2
+            echo "              reached the test process." >&2
+            exit 1
+            ;;
+    esac
 fi
 
 echo "crcbl vk e2e: $RAN tests ran against a real Vulkan implementation"

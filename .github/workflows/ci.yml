@@ -818,6 +818,248 @@ jobs:
           path: target/golden-diff/
           if-no-files-found: ignore
 
+  # # The same suite, on the platform that actually ships this backend
+  #
+  # `crcbl::backend` registers `Dx12` with `auto: false`, so **Vulkan is what a
+  # Windows game gets unless it asks for something else** — and until this job,
+  # `crcbl-vk` had never been executed on Windows by anything. The
+  # `windows-latest` leg of `test-cross-platform` compiles it and runs the unit
+  # tests, which open no device; `dx12 e2e (WARP)` drives a device on this runner
+  # but through a different backend entirely. Every line of `crcbl-vk` that talks
+  # to a loader, a driver or a swapchain was covered on Linux only.
+  #
+  # It is `vk-e2e`'s twin rather than a variant: same script, same pin, same
+  # rasteriser family. What differs is everything underneath — a different loader
+  # build, a different Mesa build, `LoadLibrary` instead of `dlopen`, and a
+  # validation layer from LunarG rather than from Debian.
+  #
+  # # The runner has neither of the two things Vulkan needs, and they are separate
+  #
+  # 1. **The loader**, `vulkan-1.dll`. `actions/runner-images`' Windows 2025
+  #    README lists no Vulkan SDK, runtime or loader (checked against image
+  #    20260719.202.1), and there is no GPU driver on the image to have brought
+  #    one — so it must be installed. `run-vk-e2e.sh` probes `PATH` for it and
+  #    fails by name, because a missing loader otherwise arrives as every test
+  #    panicking with the same message.
+  # 2. **A driver**, since the runner has no GPU. That is lavapipe, exactly as on
+  #    Linux, pinned below.
+  #
+  # And a third thing this suite in particular needs: **the validation layer**.
+  # `ValidationReport::assert_clean` asserts `enabled` before it asserts clean, so
+  # every test in the suite fails when the layer was never loaded — there is no
+  # configuration of this job that runs the tests without it. Debian packages the
+  # layer (`vulkan-validationlayers`); on Windows it ships in the LunarG SDK and
+  # nowhere else that publishes a binary — Khronos' own
+  # `Vulkan-ValidationLayers` releases carry Android artifacts only.
+  #
+  # # What is installed, from where, and what was rejected
+  #
+  # * **The SDK** comes from `jakoch/install-vulkan-sdk-action`, pinned to
+  #   `v1.6.0` — an exact tag, because that repository publishes no rolling `v1`
+  #   to pin to the way `taiki-e/install-action@v2` is pinned. The SDK version is
+  #   pinned separately, and is what actually decides what lands. Taking the
+  #   action is a supply-chain decision and the alternative was measured before
+  #   making it: LunarG ships the Windows SDK only as a 288 MiB Qt-installer
+  #   executable (`vulkan_sdk.zip` is that `.exe`, served under another name),
+  #   which has to be run elevated with the right silent flags. Nobody on this
+  #   team has a Windows machine to get those flags right on, and a wrong guess
+  #   costs a CI round trip each — which is the one thing this action has already
+  #   debugged.
+  # * **Rejected: `vulkan-runtime-components.zip`.** That one *is* a plain zip
+  #   (18 MiB, `x64/vulkan-1.dll` and `x64/vulkaninfo.exe`, no installer), and it
+  #   would be the obvious pinned download in the style of `slangc` and `dxc`
+  #   above. It carries no layers, and this suite cannot run without them.
+  # * **Rejected: the action's own `install_lavapipe`.** It resolves
+  #   `jakoch/rasterizers`' `versions.json` at run time and takes whatever
+  #   `latest` says — and its Windows entry is the stale `lavapipe-win64` one
+  #   (Mesa 25.2.5), not the current `lavapipe-x64`. An unpinned rasteriser
+  #   silently redecides what the golden-image gate compares against; this file
+  #   pins `slangc`, `dxc`, `spirv-tools` and `cargo-nextest` for that reason and
+  #   lavapipe is no different. The step below downloads the pinned asset itself,
+  #   which is six lines.
+  #
+  # The lavapipe archive's ICD manifest names its driver **relative to itself** —
+  # `..\..\..\bin\vulkan_lvp.dll` — so the extracted layout is load-bearing and
+  # the step verifies the manifest still resolves rather than merely that the two
+  # files exist. No registry registration is involved anywhere here:
+  # `crates/crcbl-vk/tests/vulkan-icd.sh` exports `VK_DRIVER_FILES` and
+  # `VK_ICD_FILENAMES` from `CRCBL_VK_ICD`, and the Windows loader reads both.
+  #
+  # # Nothing below has ever executed
+  #
+  # There is no Windows machine on this team. Every step in this job was written
+  # against documentation, release metadata and archive listings read on Linux;
+  # the two script changes it needs (`run-vk-e2e.sh`'s Windows loader probe and
+  # `CRCBL_VK_EXPECT_ADAPTER`) were exercised on Linux, which says they are
+  # correct bash and nothing about `windows-latest`. Expect a round trip: the
+  # likeliest first failures are the golden images (a different Mesa build), the
+  # SDK's Windows layout under the search above, and whether this layer build
+  # reports the record-time hazard `validation_gate` demands.
+  vk-e2e-windows:
+    name: vk e2e (lavapipe, windows)
+    runs-on: windows-latest
+    # A Windows runner is roughly 2x slower than a Linux one, this compiles the
+    # backend's test targets from cold, the suite renders on a software
+    # rasteriser, and the SDK installer alone is a 288 MiB download and an
+    # install. `vk e2e (lavapipe)` gets 30 minutes on Linux.
+    timeout-minutes: 60
+    env:
+      # Pinned, and the two pins are independent: the SDK decides the loader and
+      # the validation layer, the Mesa build decides the rasteriser the golden
+      # images are compared against. LunarG prunes older SDKs from
+      # `https://vulkan.lunarg.com/sdk/versions/windows.json` over time, so a
+      # bump here is an ordinary maintenance edit — the download step fails
+      # loudly rather than falling back to `latest`.
+      VULKAN_SDK_VERSION: 1.4.357.0
+      LAVAPIPE_RELEASE: '20260730'
+      LAVAPIPE_ASSET: lavapipe-x64-26.1.5.zip
+      LAVAPIPE_ROOT: C:\lavapipe
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.140
+      # Installs to `C:\VulkanSDK\<version>`, exports `VULKAN_SDK`, and puts the
+      # SDK's `bin` on `PATH`. It sets `VK_LAYER_PATH` on Linux and macOS only —
+      # on Windows it leaves layer discovery to the registry keys the installer
+      # writes. The next step does not rely on that: it finds the layer manifest
+      # and exports the variable itself, so a registration that silently did not
+      # happen is a failed step rather than a suite that runs with no layer.
+      - name: Install the pinned LunarG Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1.6.0
+        with:
+          vulkan_version: ${{ env.VULKAN_SDK_VERSION }}
+          install_runtime: true
+      # # The loader and the layer, found rather than assumed
+      #
+      # Both are searched for under `VULKAN_SDK` instead of being spelled out,
+      # because the SDK's layout has moved between releases — 1.4.350.0 relocated
+      # the Linux loader into `lib/VulkanLoader/lib`, and a hardcoded path is how
+      # a version bump turns into a green job that installed nothing. A search
+      # that finds nothing prints the tree and fails, which is the only outcome
+      # that cannot be mistaken for coverage.
+      #
+      # `x86` copies are excluded explicitly: the SDK ships both architectures
+      # and a 32-bit loader on `PATH` in front of the 64-bit one would fail to
+      # load into this process for a reason nothing in the suite could explain.
+      - name: Check the loader and the validation layer actually landed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = $env:VULKAN_SDK
+          if (-not $sdk -or -not (Test-Path $sdk)) {
+              throw "crcbl vk e2e (windows): VULKAN_SDK is '$sdk', which does not exist — the SDK step installed nothing."
+          }
+          Write-Host "crcbl vk e2e (windows): VULKAN_SDK=$sdk"
+
+          $loader = Get-ChildItem -Path $sdk -Recurse -File -Filter 'vulkan-1.dll' -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -notmatch '\\x86\\' } | Select-Object -First 1
+          if (-not $loader) {
+              Get-ChildItem -Path $sdk -Recurse -File -Depth 3 | ForEach-Object { Write-Host "  $($_.FullName)" }
+              throw "crcbl vk e2e (windows): no 64-bit vulkan-1.dll under $sdk — there is no Vulkan loader on this runner."
+          }
+          Write-Host "crcbl vk e2e (windows): loader $($loader.FullName)"
+          Add-Content -Path $env:GITHUB_PATH -Value $loader.DirectoryName
+
+          $manifest = Get-ChildItem -Path $sdk -Recurse -File -Filter 'VkLayer_khronos_validation.json' -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -notmatch '\\x86\\' } | Select-Object -First 1
+          if (-not $manifest) {
+              Get-ChildItem -Path $sdk -Recurse -File -Filter '*.json' | ForEach-Object { Write-Host "  $($_.FullName)" }
+              throw "crcbl vk e2e (windows): no VkLayer_khronos_validation.json under $sdk. Every test in this suite asserts the layer was loaded, so the whole run would fail."
+          }
+          $libraryPath = (Get-Content -Raw $manifest.FullName | ConvertFrom-Json).layer.library_path
+          Write-Host "crcbl vk e2e (windows): layer $($manifest.FullName) -> $libraryPath"
+          if (-not (Get-ChildItem -Path $sdk -Recurse -File -Filter 'VkLayer_khronos_validation.dll' -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -notmatch '\\x86\\' } | Select-Object -First 1)) {
+              throw "crcbl vk e2e (windows): the layer manifest exists but no VkLayer_khronos_validation.dll does."
+          }
+          # Set rather than left to the registry: this is the same argument
+          # `vulkan-icd.sh` makes for the ICD, one level up. The loader honours
+          # it on Windows exactly as it does elsewhere.
+          Add-Content -Path $env:GITHUB_ENV -Value "VK_LAYER_PATH=$($manifest.DirectoryName)"
+      # The archive is `bin/`, `lib/` and `share/vulkan/icd.d/` with no wrapping
+      # directory, and the manifest's `library_path` climbs three levels out of
+      # `share/vulkan/icd.d` to reach `bin` — so extracting it anywhere as a
+      # whole works and extracting the two files individually would not. The
+      # resolved path is checked, not the two files' existence, because that is
+      # the difference between "the archive arrived" and "the loader can follow
+      # it".
+      #
+      # `CRCBL_VK_ICD` is exported with forward slashes: the Win32 API takes
+      # either, and Git Bash's `[ -f ]` in `crcbl_pin_vk_icd` takes only this
+      # one.
+      - name: Install the pinned lavapipe
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          $url = "https://github.com/jakoch/rasterizers/releases/download/$env:LAVAPIPE_RELEASE/$env:LAVAPIPE_ASSET"
+          $zip = Join-Path $env:RUNNER_TEMP 'lavapipe.zip'
+          Write-Host "crcbl vk e2e (windows): downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          New-Item -ItemType Directory -Force -Path $env:LAVAPIPE_ROOT | Out-Null
+          Expand-Archive -Path $zip -DestinationPath $env:LAVAPIPE_ROOT -Force
+
+          $icd = Join-Path $env:LAVAPIPE_ROOT 'share\vulkan\icd.d\lvp_icd.x86_64.json'
+          if (-not (Test-Path $icd)) {
+              Get-ChildItem -Path $env:LAVAPIPE_ROOT -Recurse -File | ForEach-Object { Write-Host "  $($_.FullName)" }
+              throw "crcbl vk e2e (windows): $env:LAVAPIPE_ASSET carried no lvp_icd.x86_64.json where expected."
+          }
+          $libraryPath = (Get-Content -Raw $icd | ConvertFrom-Json).ICD.library_path
+          $driver = [System.IO.Path]::GetFullPath((Join-Path (Split-Path $icd) $libraryPath))
+          Write-Host "crcbl vk e2e (windows): $icd -> $libraryPath -> $driver"
+          if (-not (Test-Path $driver)) {
+              Get-ChildItem -Path $env:LAVAPIPE_ROOT -Recurse -File | ForEach-Object { Write-Host "  $($_.FullName)" }
+              throw "crcbl vk e2e (windows): the ICD manifest resolves to $driver, which does not exist — the archive was not extracted as a whole."
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "CRCBL_VK_ICD=$($icd -replace '\\','/')"
+      # `shell: bash` is Git Bash, the same choice `dx12 e2e (WARP)` makes and
+      # for the same reason: the harness needs `mktemp`, `tee`, `sed` and `grep`,
+      # and running the identical script on both platforms is what keeps the
+      # Windows leg from drifting into a second, less-exercised harness.
+      #
+      # **`CRCBL_VK_EXPECT_ADAPTER` is what makes the pin a check.** `CRCBL_VK_ICD`
+      # offers the loader a manifest; the loader may decline it, and refuses a
+      # missing manifest and an unusable one with the same error. Without this
+      # the suite would still run, still pass, and be evidence about whatever
+      # driver the loader found — which on a runner that grew a GPU tomorrow is
+      # not the software path this job exists to cover. `dx12 e2e (WARP)` checks
+      # its own pin the same way, off the suite's adapter line.
+      #
+      # Between them, the script fails this job when there is no loader on
+      # `PATH`, when `CRCBL_VK_ICD` resolves to nothing, when the suite ran zero
+      # tests, when it never opened a device, when the adapter it opened is not
+      # lavapipe, and when it stopped reporting how far the validation layer can
+      # see. The layer itself is gated inside the suite:
+      # `ValidationReport::assert_clean` fails on a report from an instance that
+      # never loaded one, and `a_deliberate_violation_is_caught_by_the_layer`
+      # commits a real spec violation and asserts the layer noticed.
+      - name: Run the suite against lavapipe
+        shell: bash
+        env:
+          CRCBL_VK_EXPECT_ADAPTER: llvmpipe
+          CRCBL_VK_SYNC_VALIDATION: '1'
+        run: crates/crcbl-vk/tests/run-vk-e2e.sh
+      # The golden images are the likeliest first-run failure and the one that
+      # cannot be diagnosed from a log: this leg renders on a *different* Mesa
+      # build from the Linux leg, and `crcbl-golden`'s `Tolerance::RASTERISER`
+      # was measured between radv and one lavapipe rather than between two. The
+      # reference, what this runner drew, and a red-marked diff are what tell
+      # "the tolerance is too tight" from "Windows draws a different triangle".
+      - name: Upload golden-image diffs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: golden-diff-lavapipe-windows
+          path: target/golden-diff/
+          if-no-files-found: ignore
+
   # The second backend's own e2e suite. `crates/crcbl-wgpu/tests/run-wgpu-e2e.sh`
   # landed with P5.11 — executable, shellcheck-clean and wired into nothing, so
   # the only backend the P5 gate is about was tested by no job at all. This is
