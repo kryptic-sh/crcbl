@@ -3731,7 +3731,7 @@ using namespace metal;\n\
     /// signals. Dropping the monotonicity check — the last one.
     #[test]
     #[ignore = "needs a real Metal device; run tests/run-mtl-e2e.sh"]
-    fn a_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
+    fn a_metal_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
         let (_instance, device) = open_device();
         let queue = device
             .queue(QueueKind::Graphics)

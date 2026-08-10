@@ -32,13 +32,16 @@ use std::time::{Duration, Instant};
 
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
-    Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
-    CommandEncoderDesc, CompositeAlpha, Device, DeviceDesc, DrawIndirect, Extent3d, Features,
-    Format, HalError, ImageAspect, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange,
-    ImageType, ImageUsage, ImageViewDesc, ImageViewType, Instance, LoadOp, MemoryLocation,
-    Offset3d, PipelineLayoutDesc, PresentInfo, PresentMode, PushConstantRange, QueueKind,
-    ReadbackDesc, ReadbackState, Rect2d, RenderPassDesc, ResourceState, ShaderModuleDesc,
-    ShaderStages, StoreOp, SubmitInfo, SurfaceError, SwapchainDesc,
+    Barriers, BufferCopy, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage, ClearValue,
+    ColorAttachment, ColorTargetState, CommandEncoder, CommandEncoderDesc, CompositeAlpha,
+    ComputePassDesc, ComputePipelineDesc, Device, DeviceDesc, DrawIndirect, Extent3d, Features,
+    Format, GraphicsPipelineDesc, HalError, ImageAspect, ImageDesc, ImageSubresourceLayers,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, IndexFormat,
+    Instance, LoadOp, MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc, PresentInfo,
+    PresentMode, PrimitiveState, PushConstantRange, QueueKind, ReadbackDesc, ReadbackState, Rect2d,
+    RenderPassDesc, ResourceState, SemaphoreDesc, SemaphoreKind, SemaphoreSignal, SemaphoreWait,
+    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, SubmitInfo, SurfaceError, SwapchainDesc,
+    Viewport,
 };
 use crcbl_wgpu::WgpuInstance;
 
@@ -63,6 +66,14 @@ const CLEAR_REVERSED: [f32; 4] = [0.75, 0.5, 0.25, 1.0];
 
 /// How long a readback may take before the test calls it a failure.
 const READBACK_DEADLINE: Duration = Duration::from_secs(20);
+
+/// How long a satisfiable timeline wait may take before the test calls it a
+/// failure, in the nanoseconds [`Device::wait_semaphores`] takes.
+///
+/// Separate from [`READBACK_DEADLINE`] because it is passed *to* the seam
+/// rather than enforced around it: this is the value the wait itself is told,
+/// so a backend that never signals fails the test instead of hanging the run.
+const SEMAPHORE_DEADLINE_NS: u64 = 20_000_000_000;
 
 /// Opens an instance, or explains why the suite cannot run.
 ///
@@ -258,6 +269,29 @@ fn drain(device: &dyn Device, readback: crcbl_hal::ReadbackHandle, out: &mut [u8
         }
         std::thread::yield_now();
     }
+}
+
+/// The bytes a host-readable buffer holds, through one readback request.
+///
+/// Requesting, draining and destroying live together because wgpu maps a buffer
+/// **once**: a caller that left the previous request alive is refused rather
+/// than handed the new bytes, which is what
+/// [`a_readback_of_the_wrong_buffer_or_range_is_refused_instead_of_panicking`]
+/// asserts. Every test below reads the same staging buffer more than once.
+fn read_bytes(device: &dyn Device, buffer: BufferHandle, size: u64) -> Vec<u8> {
+    let readback = device
+        .request_readback(&ReadbackDesc {
+            label: Some("wgpu e2e readback"),
+            buffer,
+            offset: 0,
+            size,
+            after: None,
+        })
+        .expect("a readback request");
+    let mut bytes = vec![0u8; size as usize];
+    drain(device, readback, &mut bytes);
+    device.destroy_readback(readback);
+    bytes
 }
 
 /// The slice's deliverable, end to end: a frame rendered offscreen through wgpu
@@ -1314,5 +1348,1171 @@ fn write_buffer_refuses_a_host_readback_buffer() {
     assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error}");
 
     device.destroy_buffer(readback);
+    headless.finish();
+}
+
+// ---------------------------------------------------------------------------
+// The compute path
+// ---------------------------------------------------------------------------
+//
+// `begin_compute_pass`, `bind_compute_pipeline`, `dispatch`,
+// `dispatch_indirect` and `Device::create_compute_pipeline`, reaching a driver.
+// `crates/crcbl-vk/tests/vk_e2e/compute.rs` is the original and `crcbl-mtl` and
+// `crcbl-dx12` carry twins; this backend implemented all five and executed none
+// of them, so a `dispatch` that recorded nothing at all submitted cleanly and
+// left a buffer full of `PROBE_SENTINEL`. Only reading the destination back
+// tells that apart from a dispatch that did the right thing.
+
+/// Workgroups the probe's buffers are sized for.
+///
+/// Eight, so `dispatch_indirect` can ask for two and leave six workgroups'
+/// worth of untouched sentinel behind it — which is what tells "the argument
+/// buffer was read" apart from "everything was dispatched anyway".
+const PROBE_GROUPS: u32 = 8;
+
+/// Elements the probe transforms.
+const PROBE_ELEMENTS: u32 = PROBE_GROUPS * crcbl_shaders::compute_probe::WORKGROUP_SIZE;
+
+/// What the destination buffer holds before every dispatch.
+///
+/// Deliberately not zero, and deliberately not a square: a destination that was
+/// never written must not be confusable with one the shader wrote, and zero is
+/// both its own square and what fresh device memory tends to be. The same value
+/// `crcbl-vk`'s twin uses.
+const PROBE_SENTINEL: u32 = 0xDEAD_BEEF;
+
+/// Bytes one probe buffer occupies.
+const fn probe_bytes() -> u64 {
+    PROBE_ELEMENTS as u64 * 4
+}
+
+/// The probe's input, one distinct value per index.
+///
+/// Distinct matters: with a constant input, a shader that indexed `source`
+/// wrongly would still produce the right number in every slot. `index + 1`
+/// avoids zero, whose square is itself.
+fn probe_source() -> Vec<u32> {
+    (0..PROBE_ELEMENTS).map(|index| index + 1).collect()
+}
+
+/// What the destination must hold for `elements` dispatched elements, and the
+/// sentinel beyond them.
+///
+/// Written out here rather than derived from the shader: squaring is a closed
+/// form the test states for itself, which is the whole reason the probe squares.
+fn probe_expected(elements: u32) -> Vec<u32> {
+    probe_source()
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            if (index as u32) < elements {
+                value * value
+            } else {
+                PROBE_SENTINEL
+            }
+        })
+        .collect()
+}
+
+/// Everything one compute dispatch needs, built through the seam.
+struct ComputeProbe {
+    params: BufferHandle,
+    source: BufferHandle,
+    destination: BufferHandle,
+    /// A host-visible buffer holding [`PROBE_SENTINEL`] in every slot, copied
+    /// over the destination before each dispatch.
+    ///
+    /// The twins reset the destination with `fill_buffer`, which this backend
+    /// **refuses** for a non-zero value: wgpu's only fill is `clear_buffer`, a
+    /// zero fill. Resetting to zero instead would have made "the shader wrote
+    /// nothing" and "the shader wrote zero" the same reading, so the sentinel
+    /// arrives by copy rather than by fill.
+    sentinel: BufferHandle,
+    /// Host-readable copy target, so the result can be asserted rather than
+    /// assumed.
+    staging: BufferHandle,
+    bind_group_layout: crcbl_hal::BindGroupLayoutHandle,
+    bind_group: crcbl_hal::BindGroupHandle,
+    pipeline_layout: crcbl_hal::PipelineLayoutHandle,
+    pipeline: crcbl_hal::ComputePipelineHandle,
+}
+
+impl ComputeProbe {
+    /// Builds the pipeline and stages the input in.
+    fn new(headless: &Headless) -> Self {
+        let device = headless.device.as_ref();
+        let params = crcbl_shaders::compute_probe::Params {
+            count: PROBE_ELEMENTS,
+        }
+        .to_bytes();
+        let source_bytes: Vec<u8> = probe_source()
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+
+        let upload = device
+            .create_buffer(&BufferDesc {
+                label: Some("compute probe upload"),
+                size: (params.len() + source_bytes.len()) as u64,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a staging buffer");
+        device.write_buffer(upload, 0, &params).expect("write");
+        device
+            .write_buffer(upload, params.len() as u64, &source_bytes)
+            .expect("write");
+
+        let sentinel = device
+            .create_buffer(&BufferDesc {
+                label: Some("compute probe sentinel"),
+                size: probe_bytes(),
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a sentinel buffer");
+        let sentinel_bytes: Vec<u8> = std::iter::repeat_n(PROBE_SENTINEL, PROBE_ELEMENTS as usize)
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        device
+            .write_buffer(sentinel, 0, &sentinel_bytes)
+            .expect("write");
+
+        let params_buffer = device
+            .create_buffer(&BufferDesc {
+                label: Some("compute probe params"),
+                size: crcbl_shaders::compute_probe::PARAMS_SIZE as u64,
+                usage: BufferUsage::UNIFORM | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a uniform buffer");
+        let source = device
+            .create_buffer(&BufferDesc {
+                label: Some("compute probe source"),
+                size: probe_bytes(),
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a source buffer");
+        let destination = device
+            .create_buffer(&BufferDesc {
+                label: Some("compute probe destination"),
+                size: probe_bytes(),
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a destination buffer");
+        let staging = device
+            .create_buffer(&BufferDesc {
+                label: Some("compute probe readback"),
+                size: probe_bytes(),
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a readback buffer");
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("compute probe upload"),
+            queue: headless.queue,
+        });
+        encoder.copy_buffer_to_buffer(&BufferCopy {
+            src: upload,
+            src_offset: 0,
+            dst: params_buffer,
+            dst_offset: 0,
+            size: params.len() as u64,
+        });
+        encoder.copy_buffer_to_buffer(&BufferCopy {
+            src: upload,
+            src_offset: params.len() as u64,
+            dst: source,
+            dst_offset: 0,
+            size: probe_bytes(),
+        });
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[
+                crcbl_hal::BufferBarrier {
+                    buffer: params_buffer,
+                    from: ResourceState::TransferDst,
+                    to: ResourceState::ShaderRead,
+                    queue_transfer: None,
+                },
+                crcbl_hal::BufferBarrier {
+                    buffer: source,
+                    from: ResourceState::TransferDst,
+                    to: ResourceState::ShaderRead,
+                    queue_transfer: None,
+                },
+            ],
+            ..Barriers::default()
+        });
+        let commands = encoder.finish().expect("recording succeeded");
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device.wait_idle().expect("idle");
+        device.destroy_command_buffer(commands);
+        device.destroy_buffer(upload);
+
+        let layout_entries = [
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::COMPUTE,
+                kind: crcbl_hal::BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::COMPUTE,
+                kind: crcbl_hal::BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::COMPUTE,
+                kind: crcbl_hal::BindingKind::StorageBuffer {
+                    read_only: false,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+        ];
+        let bind_group_layout = device
+            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+                label: Some("compute probe"),
+                entries: &layout_entries,
+            })
+            .expect("the probe's layout");
+
+        let group_entries = [
+            crcbl_hal::BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(params_buffer),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 1,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(source),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 2,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(destination),
+            },
+        ];
+        let bind_group = device
+            .create_bind_group(&crcbl_hal::BindGroupDesc {
+                label: Some("compute probe"),
+                layout: bind_group_layout,
+                entries: &group_entries,
+                variable_count: None,
+            })
+            .expect("a bind group");
+
+        let set_layouts = [bind_group_layout];
+        let pipeline_layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("compute probe"),
+                bind_group_layouts: &set_layouts,
+                push_constants: None,
+            })
+            .expect("a pipeline layout");
+
+        let module = device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("compute_probe.slang"),
+                wgsl: crcbl_shaders::COMPUTE_PROBE.wgsl(),
+                ..ShaderModuleDesc::default()
+            })
+            .expect("the committed WGSL is accepted");
+        // The manifest's name rather than a literal: it is read out of the
+        // artifact by the compile script, so a Slang release that renamed it
+        // would fail here rather than in a driver.
+        let entry_point = crcbl_shaders::COMPUTE_PROBE
+            .entry_point(crcbl_shaders::Stage::Compute)
+            .expect("the probe has exactly one compute entry point");
+        let pipeline = device
+            .create_compute_pipeline(&ComputePipelineDesc {
+                label: Some("compute probe"),
+                layout: pipeline_layout,
+                compute: ShaderEntry {
+                    module,
+                    entry_point,
+                },
+                // The shader's own number, not a literal: `crcbl-shaders`
+                // checks this constant against the `[numthreads(…)]` in
+                // `compute_probe.slang`.
+                workgroup_size: [crcbl_shaders::compute_probe::WORKGROUP_SIZE, 1, 1],
+            })
+            .expect("a compute pipeline");
+        device.destroy_shader_module(module);
+
+        Self {
+            params: params_buffer,
+            source,
+            destination,
+            sentinel,
+            staging,
+            bind_group_layout,
+            bind_group,
+            pipeline_layout,
+            pipeline,
+        }
+    }
+
+    /// Resets the destination to the sentinel, runs `record` inside a compute
+    /// pass, and reads the destination back.
+    ///
+    /// `record` is the *only* thing that varies between the dispatch and the
+    /// indirect-dispatch tests, so both go through the same barriers and the
+    /// same readback and a difference in the result is a difference in the
+    /// dispatch.
+    fn run(&self, headless: &Headless, record: impl FnOnce(&mut dyn CommandEncoder)) -> Vec<u32> {
+        let device = headless.device.as_ref();
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("compute probe dispatch"),
+            queue: headless.queue,
+        });
+        let buffer_barrier = |buffer, from, to| crcbl_hal::BufferBarrier {
+            buffer,
+            from,
+            to,
+            queue_transfer: None,
+        };
+        // `TransferSrc` as the source state is vacuous on the first run and is
+        // the real prior use on every later one.
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[buffer_barrier(
+                self.destination,
+                ResourceState::TransferSrc,
+                ResourceState::TransferDst,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_buffer_to_buffer(&BufferCopy {
+            src: self.sentinel,
+            src_offset: 0,
+            dst: self.destination,
+            dst_offset: 0,
+            size: probe_bytes(),
+        });
+        // `ShaderReadWrite`, not `ShaderWrite`: a barrier names the access the
+        // *descriptor* permits rather than the one the source performs, and the
+        // destination is bound as a read-write storage buffer.
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[buffer_barrier(
+                self.destination,
+                ResourceState::TransferDst,
+                ResourceState::ShaderReadWrite,
+            )],
+            ..Barriers::default()
+        });
+
+        encoder.begin_compute_pass(&ComputePassDesc {
+            label: Some("compute probe"),
+        });
+        encoder.bind_compute_pipeline(self.pipeline);
+        // Inside the pass, because the open scope is the only signal the seam
+        // gives the backend about which bind point a group is for.
+        encoder.bind_group(0, self.bind_group, &[], self.pipeline_layout);
+        record(encoder.as_mut());
+        encoder.end_compute_pass();
+
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[buffer_barrier(
+                self.destination,
+                ResourceState::ShaderReadWrite,
+                ResourceState::TransferSrc,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_buffer_to_buffer(&BufferCopy {
+            src: self.destination,
+            src_offset: 0,
+            dst: self.staging,
+            dst_offset: 0,
+            size: probe_bytes(),
+        });
+        let commands = encoder.finish().expect("recording succeeded");
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device.wait_idle().expect("idle");
+        device.destroy_command_buffer(commands);
+
+        read_bytes(device, self.staging, probe_bytes())
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+            .collect()
+    }
+
+    fn destroy(self, device: &dyn Device) {
+        device.destroy_compute_pipeline(self.pipeline);
+        device.destroy_pipeline_layout(self.pipeline_layout);
+        device.destroy_bind_group(self.bind_group);
+        device.destroy_bind_group_layout(self.bind_group_layout);
+        device.destroy_buffer(self.staging);
+        device.destroy_buffer(self.sentinel);
+        device.destroy_buffer(self.destination);
+        device.destroy_buffer(self.source);
+        device.destroy_buffer(self.params);
+    }
+}
+
+/// Compares a probe result against what the CPU says it should be, and says
+/// which element disagreed first.
+///
+/// The element count is asserted before the values: a readback that came back
+/// short would otherwise satisfy a `zip` over nothing at all.
+fn assert_probe(actual: &[u32], expected: &[u32], what: &str) {
+    assert_eq!(
+        actual.len(),
+        PROBE_ELEMENTS as usize,
+        "{what}: the readback is not the whole destination buffer"
+    );
+    assert_eq!(expected.len(), actual.len(), "{what}: expectation length");
+    if let Some((index, (got, want))) = actual
+        .iter()
+        .zip(expected)
+        .enumerate()
+        .find(|(_, (got, want))| got != want)
+    {
+        panic!(
+            "{what}: element {index} is {got} ({got:#x}), expected {want} ({want:#x}). \
+             {} of {} elements were expected to be written.",
+            expected.iter().filter(|v| **v != PROBE_SENTINEL).count(),
+            expected.len()
+        );
+    }
+}
+
+/// A dispatch that really ran, and really wrote the values it was asked for.
+///
+/// The distinction this test exists for: `dispatch` returns nothing, so a
+/// backend that recorded no `dispatch_workgroups` at all would submit cleanly
+/// and leave a buffer full of [`PROBE_SENTINEL`]. Only reading the destination
+/// back tells the two apart.
+///
+/// The empty pass at the end is what makes the assertion above about the
+/// *dispatch* rather than about the sentinel copy that precedes it — the same
+/// second arm `crcbl-dx12`'s twin carries.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_wgpu_compute_dispatch_writes_the_values_it_was_asked_for() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    // Not a skip. `Features::COMPUTE` exists for a fallback that has no compute
+    // at all; every adapter wgpu opens a device on has it, so an absence here
+    // is a capability-reporting bug rather than a machine to tiptoe around.
+    assert!(
+        device.caps().features.contains(Features::COMPUTE),
+        "a wgpu device always has compute; adapter caps report {:?}",
+        device.caps().features
+    );
+
+    let probe = ComputeProbe::new(&headless);
+    let values = probe.run(&headless, |encoder| {
+        encoder.dispatch(PROBE_GROUPS, 1, 1);
+    });
+
+    assert_probe(&values, &probe_expected(PROBE_ELEMENTS), "a full dispatch");
+    assert!(
+        !values.contains(&PROBE_SENTINEL),
+        "a full dispatch must leave no element unwritten"
+    );
+
+    let empty = probe.run(&headless, |_| {});
+    assert!(
+        empty.iter().all(|value| *value == PROBE_SENTINEL),
+        "a compute pass with no dispatch in it must write nothing, or the assertion \
+         above was about the sentinel copy rather than about the dispatch; got {:?}…",
+        &empty[..4]
+    );
+
+    probe.destroy(device);
+    headless.finish();
+}
+
+/// `dispatch_indirect` reads its workgroup count out of GPU memory, at the
+/// offset it was given.
+///
+/// The argument buffer carries a **decoy** at offset zero that would dispatch
+/// every workgroup. So three different failures are distinguishable here rather
+/// than confusable: a backend that ignored the offset dispatches eight groups
+/// and overwrites the tail; a backend that ignored the argument buffer entirely
+/// writes nothing; a correct one writes exactly the front of the buffer and
+/// leaves the sentinel behind it.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_wgpu_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let probe = ComputeProbe::new(&headless);
+
+    /// Workgroups the real arguments ask for. Fewer than [`PROBE_GROUPS`], so
+    /// the difference is visible in the readback.
+    const DISPATCHED_GROUPS: u32 = 2;
+    /// Where the real arguments live. Non-zero, and the decoy sits at zero.
+    const ARGS_OFFSET: u64 = 16;
+
+    // Three `u32`s, `x`, `y`, `z` — WebGPU's dispatch-indirect parameters, the
+    // same triple Vulkan and D3D12 spell. `crcbl-hal` does not describe the
+    // argument layout because it is the backend's native one.
+    let mut args_bytes = vec![0u8; ARGS_OFFSET as usize + 12];
+    for (slot, value) in [PROBE_GROUPS, 1, 1].iter().enumerate() {
+        args_bytes[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (slot, value) in [DISPATCHED_GROUPS, 1, 1].iter().enumerate() {
+        let at = ARGS_OFFSET as usize + slot * 4;
+        args_bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    let upload = device
+        .create_buffer(&BufferDesc {
+            label: Some("dispatch args upload"),
+            size: args_bytes.len() as u64,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a staging buffer");
+    device.write_buffer(upload, 0, &args_bytes).expect("write");
+    let args = device
+        .create_buffer(&BufferDesc {
+            label: Some("dispatch args"),
+            size: args_bytes.len() as u64,
+            usage: BufferUsage::INDIRECT | BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("an indirect buffer");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("dispatch args upload"),
+        queue: headless.queue,
+    });
+    encoder.copy_buffer_to_buffer(&BufferCopy {
+        src: upload,
+        src_offset: 0,
+        dst: args,
+        dst_offset: 0,
+        size: args_bytes.len() as u64,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[crcbl_hal::BufferBarrier {
+            buffer: args,
+            from: ResourceState::TransferDst,
+            to: ResourceState::IndirectArgument,
+            queue_transfer: None,
+        }],
+        ..Barriers::default()
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(upload);
+
+    let values = probe.run(&headless, |encoder| {
+        encoder.dispatch_indirect(args, ARGS_OFFSET);
+    });
+
+    let dispatched = DISPATCHED_GROUPS * crcbl_shaders::compute_probe::WORKGROUP_SIZE;
+    assert!(
+        dispatched > 0 && dispatched < PROBE_ELEMENTS,
+        "the indirect dispatch must cover part of the buffer, not none and not all"
+    );
+    assert_probe(&values, &probe_expected(dispatched), "an indirect dispatch");
+    // Said again in its own words, because the two halves fail for different
+    // reasons: the front proves work happened, the tail proves the *count* came
+    // from the buffer at the offset that was named.
+    assert!(
+        values[..dispatched as usize]
+            .iter()
+            .all(|value| *value != PROBE_SENTINEL),
+        "the dispatched workgroups wrote nothing"
+    );
+    assert!(
+        values[dispatched as usize..]
+            .iter()
+            .all(|value| *value == PROBE_SENTINEL),
+        "the workgroups past the indirect count ran anyway — the argument buffer \
+         or its offset was not honoured"
+    );
+
+    device.destroy_buffer(args);
+    probe.destroy(device);
+    headless.finish();
+}
+
+// ---------------------------------------------------------------------------
+// The indexed draw
+// ---------------------------------------------------------------------------
+
+/// The indexed draw's target, square so the three colour probes below sit where
+/// `crcbl-dx12`'s twin puts them and the two runs can be compared by eye.
+const SQUARE: u32 = 64;
+
+/// Bytes one [`SQUARE`]-sided `Rgba8Unorm` image occupies.
+const SQUARE_BYTES: u64 = SQUARE as u64 * SQUARE as u64 * 4;
+
+/// The indexed draw's clear colour, and the texel it must become.
+///
+/// White, which the triangle **cannot** produce: `triangle.slang` interpolates
+/// three saturated primaries barycentrically, so every rasterised texel sums to
+/// roughly 255 across RGB while this one sums to 765. That makes "cleared" and
+/// "drawn" unmistakable without knowing the transfer function — and, being
+/// non-zero, it is also not what an image nothing touched would hold.
+const INDEXED_CLEAR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+/// [`INDEXED_CLEAR`] in `Rgba8Unorm`, which encodes 1.0 exactly.
+const INDEXED_CLEAR_TEXEL: [u8; 4] = [255, 255, 255, 255];
+
+/// The index buffer the draw below is bound: three degenerate indices, then the
+/// real triangle.
+///
+/// The decoy prefix is the whole point. Drawing `0..3` names vertex zero three
+/// times, which is a degenerate triangle that rasterises nothing; drawing
+/// `3..6` names the real corners. A backend that ignored the index buffer and
+/// drew vertices `0,1,2` directly would rasterise the triangle for *both*
+/// ranges, which is exactly what the second half of the test refuses.
+const INDICES: [u32; 6] = [0, 0, 0, 0, 1, 2];
+
+/// Where the real triangle's indices start in [`INDICES`].
+const FIRST_INDEX: u32 = 3;
+
+/// One texel of a [`SQUARE`]-sided `Rgba8Unorm` readback.
+fn texel(pixels: &[u8], x: u32, y: u32) -> [u8; 4] {
+    let at = ((y * SQUARE + x) * 4) as usize;
+    pixels[at..at + 4].try_into().expect("four bytes")
+}
+
+/// The triangle really rasterised, in the orientation WebGPU puts it.
+///
+/// `set_viewport` passes the height through unflipped on this backend, so NDC
+/// `+y` is up and `triangle.slang`'s red apex lands at the **top**. The three
+/// probes sit one near each corner of the triangle, and each must be dominated
+/// by that corner's primary — which a channel swap, a mirror or a vertex-order
+/// mistake each break differently.
+fn assert_triangle_drawn(pixels: &[u8], what: &str) {
+    assert_eq!(
+        pixels.len(),
+        SQUARE_BYTES as usize,
+        "{what}: the readback is not the whole image"
+    );
+    for (x, y) in [(0, 0), (SQUARE - 1, SQUARE - 1), (SQUARE - 1, 0)] {
+        assert_eq!(
+            texel(pixels, x, y),
+            INDEXED_CLEAR_TEXEL,
+            "{what}: ({x},{y}) is outside the triangle and must still be the clear colour"
+        );
+    }
+    let centre = texel(pixels, SQUARE / 2, SQUARE / 2);
+    assert_ne!(
+        centre, INDEXED_CLEAR_TEXEL,
+        "{what}: the centre is still the clear colour, so nothing was rasterised"
+    );
+    assert_eq!(centre[3], 255, "{what}: alpha 1.0 must survive");
+
+    for (x, y, channel, name) in [
+        (SQUARE / 2, 12, 0, "red"),
+        (16, 48, 2, "blue"),
+        (48, 48, 1, "green"),
+    ] {
+        let got = texel(pixels, x, y);
+        let others: Vec<u8> = (0..3).filter(|c| *c != channel).map(|c| got[c]).collect();
+        assert!(
+            others.iter().all(|other| got[channel] > *other),
+            "{what}: ({x},{y}) sits nearest the {name} corner, so {name} must dominate; got {got:?}"
+        );
+        // Barycentric weights sum to one and each corner is a saturated
+        // primary, so a texel inside the triangle sums to full scale. A pass
+        // that blended against the white clear, or wrote a constant, would not.
+        let sum = u32::from(got[0]) + u32::from(got[1]) + u32::from(got[2]);
+        assert!(
+            (250..=260).contains(&sum),
+            "{what}: ({x},{y}) must be a barycentric blend summing to full scale; got {got:?} \
+             summing to {sum}"
+        );
+    }
+}
+
+/// Nothing rasterised at all: every texel is still the clear colour.
+fn assert_nothing_drawn(pixels: &[u8], what: &str) {
+    assert_eq!(
+        pixels.len(),
+        SQUARE_BYTES as usize,
+        "{what}: the readback is not the whole image"
+    );
+    if let Some((index, found)) = pixels
+        .chunks_exact(4)
+        .enumerate()
+        .find(|(_, chunk)| *chunk != INDEXED_CLEAR_TEXEL)
+    {
+        let (x, y) = (index as u32 % SQUARE, index as u32 / SQUARE);
+        panic!(
+            "{what}: ({x},{y}) is {found:?} rather than the clear colour \
+             {INDEXED_CLEAR_TEXEL:?} — something rasterised"
+        );
+    }
+}
+
+/// `draw_indexed` pulls its vertices through the index buffer that was bound,
+/// over the range it was given.
+///
+/// This backend recorded `draw_indexed` and nothing ever executed it. The two
+/// halves are what make the claim precise rather than merely "a triangle
+/// appeared": the real range draws the triangle, and the decoy range — three
+/// copies of vertex zero, a degenerate triangle — must draw **nothing**. A
+/// backend that dropped the index buffer and drew `0,1,2` for both ranges
+/// passes the first half and fails the second.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_wgpu_indexed_draw_reads_the_index_buffer_it_was_bound() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+
+    // This test owns its format rather than reading the adapter's preferred
+    // one: `Rgba8Unorm` needs no channel swap and no sRGB round trip, so the
+    // barycentric sum above is a number rather than an approximation.
+    let format = Format::Rgba8Unorm;
+    let target = device
+        .create_image(&ImageDesc {
+            label: Some("wgpu e2e indexed target"),
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(SQUARE, SQUARE),
+            format,
+            mip_levels: 1,
+            samples: 1,
+            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a render target");
+    let view = device
+        .create_image_view(&ImageViewDesc {
+            label: Some("wgpu e2e indexed view"),
+            image: target,
+            view_type: ImageViewType::D2,
+            format,
+            range: ImageSubresourceRange::all(format),
+        })
+        .expect("a view of the target");
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("wgpu e2e indexed readback"),
+            size: SQUARE_BYTES,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+
+    // The geometry is pulled from a storage buffer — there is no
+    // `bind_vertex_buffer` in this seam — so only the *indices* decide which
+    // vertex the shader reads.
+    let vertex_bytes = crcbl_shaders::triangle::vertex_bytes();
+    let index_bytes: Vec<u8> = INDICES
+        .iter()
+        .flat_map(|index| index.to_le_bytes())
+        .collect();
+    let upload = device
+        .create_buffer(&BufferDesc {
+            label: Some("wgpu e2e indexed upload"),
+            size: (vertex_bytes.len() + index_bytes.len()) as u64,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a staging buffer");
+    device
+        .write_buffer(upload, 0, &vertex_bytes)
+        .expect("write");
+    device
+        .write_buffer(upload, vertex_bytes.len() as u64, &index_bytes)
+        .expect("write");
+
+    let vertices = device
+        .create_buffer(&BufferDesc {
+            label: Some("wgpu e2e triangle vertices"),
+            size: vertex_bytes.len() as u64,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a vertex storage buffer");
+    let indices = device
+        .create_buffer(&BufferDesc {
+            label: Some("wgpu e2e triangle indices"),
+            size: index_bytes.len() as u64,
+            usage: BufferUsage::INDEX | BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("an index buffer");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("wgpu e2e indexed upload"),
+        queue: headless.queue,
+    });
+    encoder.copy_buffer_to_buffer(&BufferCopy {
+        src: upload,
+        src_offset: 0,
+        dst: vertices,
+        dst_offset: 0,
+        size: vertex_bytes.len() as u64,
+    });
+    encoder.copy_buffer_to_buffer(&BufferCopy {
+        src: upload,
+        src_offset: vertex_bytes.len() as u64,
+        dst: indices,
+        dst_offset: 0,
+        size: index_bytes.len() as u64,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[
+            crcbl_hal::BufferBarrier {
+                buffer: vertices,
+                from: ResourceState::TransferDst,
+                to: ResourceState::ShaderRead,
+                queue_transfer: None,
+            },
+            crcbl_hal::BufferBarrier {
+                buffer: indices,
+                from: ResourceState::TransferDst,
+                to: ResourceState::IndexBuffer,
+                queue_transfer: None,
+            },
+        ],
+        ..Barriers::default()
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(upload);
+
+    let layout_entries = [crcbl_hal::BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::VERTEX,
+        kind: crcbl_hal::BindingKind::StorageBuffer {
+            read_only: true,
+            dynamic: false,
+        },
+        count: 1,
+        flags: crcbl_hal::BindingFlags::empty(),
+    }];
+    let bind_group_layout = device
+        .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            label: Some("triangle vertices"),
+            entries: &layout_entries,
+        })
+        .expect("the triangle's layout");
+    let group_entries = [crcbl_hal::BindGroupEntry {
+        binding: 0,
+        array_index: 0,
+        resource: crcbl_hal::BindingResource::whole_buffer(vertices),
+    }];
+    let bind_group = device
+        .create_bind_group(&crcbl_hal::BindGroupDesc {
+            label: Some("triangle vertices"),
+            layout: bind_group_layout,
+            entries: &group_entries,
+            variable_count: None,
+        })
+        .expect("a bind group");
+    let set_layouts = [bind_group_layout];
+    let pipeline_layout = device
+        .create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("triangle"),
+            bind_group_layouts: &set_layouts,
+            push_constants: None,
+        })
+        .expect("a pipeline layout");
+
+    let module = device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("triangle.slang"),
+            wgsl: crcbl_shaders::TRIANGLE.wgsl(),
+            ..ShaderModuleDesc::default()
+        })
+        .expect("the committed WGSL is accepted");
+    let color_targets = [ColorTargetState::opaque(format)];
+    let pipeline = device
+        .create_graphics_pipeline(&GraphicsPipelineDesc {
+            label: Some("triangle"),
+            layout: pipeline_layout,
+            vertex: ShaderEntry {
+                module,
+                entry_point: crcbl_shaders::TRIANGLE
+                    .entry_point(crcbl_shaders::Stage::Vertex)
+                    .expect("the triangle has exactly one vertex entry point"),
+            },
+            fragment: Some(ShaderEntry {
+                module,
+                entry_point: crcbl_shaders::TRIANGLE
+                    .entry_point(crcbl_shaders::Stage::Fragment)
+                    .expect("the triangle has exactly one fragment entry point"),
+            }),
+            // The default cull mode is `None`, so the winding — which this
+            // backend does not flip, unlike `crcbl-vk`'s negative-height
+            // viewport — cannot decide whether the triangle appears. This test
+            // is about the index buffer, not about culling.
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            color_targets: &color_targets,
+        })
+        .expect("a graphics pipeline");
+    device.destroy_shader_module(module);
+
+    let render = |range: std::ops::Range<u32>| -> Vec<u8> {
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("wgpu e2e indexed draw"),
+            queue: headless.queue,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            images: &[crcbl_hal::ImageBarrier::new(
+                target,
+                ImageSubresourceRange::all(format),
+                ResourceState::Undefined,
+                ResourceState::ColorAttachment,
+            )],
+            ..Barriers::default()
+        });
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("clear + indexed triangle"),
+            color_attachments: &[ColorAttachment {
+                view,
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                clear: ClearValue::color(INDEXED_CLEAR),
+            }],
+            depth_stencil_attachment: None,
+            render_area: Rect2d::from_size(SQUARE, SQUARE),
+        });
+        encoder.set_viewport(&Viewport::from_size(SQUARE, SQUARE));
+        encoder.set_scissor(&Rect2d::from_size(SQUARE, SQUARE));
+        encoder.bind_graphics_pipeline(pipeline);
+        encoder.bind_group(0, bind_group, &[], pipeline_layout);
+        encoder.bind_index_buffer(indices, 0, IndexFormat::Uint32);
+        encoder.draw_indexed(range, 0, 0..1);
+        encoder.end_render_pass();
+        encoder.pipeline_barrier(&Barriers {
+            images: &[crcbl_hal::ImageBarrier::new(
+                target,
+                ImageSubresourceRange::all(format),
+                ResourceState::ColorAttachment,
+                ResourceState::TransferSrc,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_image_to_buffer(&BufferImageCopy {
+            buffer: staging,
+            buffer_offset: 0,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image: target,
+            image_subresource: ImageSubresourceLayers {
+                aspect: ImageAspect::COLOR,
+                mip: 0,
+                base_layer: 0,
+                layer_count: 1,
+            },
+            image_offset: Offset3d::default(),
+            image_extent: Extent3d::d2(SQUARE, SQUARE),
+        });
+        let commands = encoder.finish().expect("recording succeeded");
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device.wait_idle().expect("idle");
+        device.destroy_command_buffer(commands);
+        read_bytes(device, staging, SQUARE_BYTES)
+    };
+
+    let drawn = render(FIRST_INDEX..FIRST_INDEX + 3);
+    assert_triangle_drawn(&drawn, "an indexed draw of indices 3..6");
+
+    // The decoy's own three indices are all vertex zero, so drawing them is a
+    // degenerate triangle and nothing rasterises. That is what makes the
+    // assertion above about the *range* rather than about the draw.
+    let decoy = render(0..FIRST_INDEX);
+    assert_nothing_drawn(&decoy, "an indexed draw of the decoy's three zeros");
+
+    device.destroy_graphics_pipeline(pipeline);
+    device.destroy_pipeline_layout(pipeline_layout);
+    device.destroy_bind_group(bind_group);
+    device.destroy_bind_group_layout(bind_group_layout);
+    device.destroy_buffer(indices);
+    device.destroy_buffer(vertices);
+    device.destroy_buffer(staging);
+    device.destroy_image_view(view);
+    device.destroy_image(target);
+    headless.finish();
+}
+
+// ---------------------------------------------------------------------------
+// The timeline semaphore
+// ---------------------------------------------------------------------------
+
+/// A submission's timeline signal reaches the CPU, at the value it was given.
+///
+/// `crcbl-mtl` carries the twin of this claim. This backend has no timeline
+/// object to hand to a driver — wgpu offers none — so `create_semaphore` keeps
+/// a counter beside the `SubmissionIndex` each signal was attached to, and
+/// `semaphore_value` advances it by polling. That is a real mechanism with a
+/// real failure mode: a signal recorded against no submission, or a poll that
+/// never resolved, leaves the counter at its initial value forever and every
+/// waiter blocks. Nothing executed it until now.
+///
+/// The value **9** against an initial **5** is deliberate on both ends: a
+/// backend that merely incremented a counter, or one that reported "signalled"
+/// as a boolean, agrees with a 0→1 test and disagrees with this one.
+///
+/// # Where this backend differs from Metal
+///
+/// A wait on a value *nothing submitted will ever signal* is
+/// [`HalError::Unsupported`] here, where Metal returns `Ok(false)` on the
+/// timeout. That is not a shortcut: a `MTLSharedEvent` can be signalled later
+/// by anything holding it, so waiting is meaningful; wgpu can only wait on a
+/// `SubmissionIndex` that already exists, so the same call would block forever
+/// with nothing to point at. The refusal is asserted below rather than glossed.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_wgpu_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    assert!(
+        device
+            .caps()
+            .features
+            .contains(Features::TIMELINE_SEMAPHORE),
+        "this backend reports TIMELINE_SEMAPHORE unconditionally; caps say {:?}",
+        device.caps().features
+    );
+
+    let semaphore = device
+        .create_semaphore(&SemaphoreDesc {
+            label: Some("wgpu e2e timeline"),
+            kind: SemaphoreKind::Timeline { initial_value: 5 },
+        })
+        .expect("this device reports TIMELINE_SEMAPHORE");
+    assert_eq!(
+        device.semaphore_value(semaphore).expect("a timeline value"),
+        5,
+        "initial_value must be the counter's starting point, not zero"
+    );
+
+    // Nothing has signalled 9 yet, and on this backend nothing can signal it
+    // later either — see the header. The refusal is loud rather than a hang.
+    let error = device
+        .wait_semaphores(
+            &[SemaphoreWait {
+                semaphore,
+                value: 9,
+            }],
+            1_000_000,
+        )
+        .expect_err("nothing submitted will ever reach 9, so there is nothing to wait on");
+    assert!(matches!(error, HalError::Unsupported { .. }), "{error}");
+
+    // Real work, not a bare signal: the point is that the value arrives when
+    // the submission *completes*, so there has to be something to complete.
+    let acquired = device
+        .acquire_next_frame(headless.swapchain)
+        .expect("the ring always has an image");
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("wgpu e2e timeline frame"),
+        queue: headless.queue,
+    });
+    encoder.begin_render_pass(&RenderPassDesc {
+        label: Some("timeline clear"),
+        color_attachments: &[ColorAttachment {
+            view: acquired.view,
+            resolve: None,
+            load: LoadOp::Clear,
+            store: StoreOp::Store,
+            clear: ClearValue::color(CLEAR),
+        }],
+        depth_stencil_attachment: None,
+        render_area: Rect2d::from_size(acquired.extent.0, acquired.extent.1),
+    });
+    encoder.end_render_pass();
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(
+            headless.queue,
+            &SubmitInfo {
+                command_buffers: &[commands],
+                waits: &[],
+                signals: &[SemaphoreSignal {
+                    semaphore,
+                    value: 9,
+                }],
+            },
+        )
+        .expect("a submission may signal a timeline");
+
+    assert!(
+        device
+            .wait_semaphores(
+                &[SemaphoreWait {
+                    semaphore,
+                    value: 9
+                }],
+                SEMAPHORE_DEADLINE_NS
+            )
+            .expect("the wait resolves"),
+        "the submission's signal never reached the semaphore"
+    );
+    assert_eq!(
+        device.semaphore_value(semaphore).expect("a timeline value"),
+        9,
+        "the CPU must read back the value the submission signalled, not the initial one"
+    );
+
+    // Backwards is refused. Without this the counter would never reach the
+    // value a later waiter is blocked on, and the process would hang with
+    // nothing to point at.
+    let encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("wgpu e2e timeline backwards"),
+        queue: headless.queue,
+    });
+    let backwards = encoder.finish().expect("an empty command buffer records");
+    let error = device
+        .submit(
+            headless.queue,
+            &SubmitInfo {
+                command_buffers: &[backwards],
+                waits: &[],
+                signals: &[SemaphoreSignal {
+                    semaphore,
+                    value: 9,
+                }],
+            },
+        )
+        .expect_err("9 has already been signalled, so signalling it again is not monotonic");
+    assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error}");
+
+    device
+        .present(
+            headless.queue,
+            &PresentInfo {
+                swapchain: headless.swapchain,
+                waits: acquired.present_semaphore.as_slice(),
+                present_id: None,
+            },
+        )
+        .expect("present");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(backwards);
+    device.destroy_command_buffer(commands);
+    device.destroy_semaphore(semaphore);
     headless.finish();
 }

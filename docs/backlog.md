@@ -4721,3 +4721,44 @@ them deterministically.
 
 Left undone deliberately. If it is taken up, the cheap version is one shared
 `--screenshot` flag in the sample scaffold rather than five implementations.
+
+### The seam does not describe what `wait_semaphores` does with an impossible wait
+
+Found while writing `crcbl-wgpu`'s timeline-semaphore test, 2026-08-10, and
+verified against all three implementations.
+
+`crates/crcbl-hal/src/device.rs` documents `wait_semaphores` as returning
+`Ok(true)` when the waits are satisfied and `Ok(false)` on timeout — "a timeout
+is a normal outcome for a frame-pacing poll, not an error" — with
+`InvalidHandle` and `DeviceLost` as the only errors. It says nothing about a
+wait on a value **nothing submitted will ever signal**, which is neither
+satisfied nor a timeout.
+
+The backends disagree, and both answers are defensible:
+
+- `crates/crcbl-wgpu/src/device.rs` returns `HalError::Unsupported` naming the
+  cause, because wgpu has no standalone semaphore that could signal the value
+  later, so waiting would hang until the deadline and then lie by calling it a
+  timeout. That error is **not in the seam's documented set**.
+- `crcbl-mtl` treats the same case as an ordinary unsatisfied wait.
+
+**Decided: the seam grows the third outcome rather than wgpu losing it.**
+Failing fast with a reason beats blocking for the full timeout to report a
+timeout that was never going to be anything else — a frame-pacing poll wants to
+know it asked for something impossible, not to pay the deadline first. So
+`wait_semaphores`' docs should name `Unsupported` for an unsatisfiable wait, and
+the other backends should adopt it when next touched.
+
+Not done in the slice that found it: changing a seam contract means changing
+every implementation of it plus the tests that assert the current behaviour, and
+that slice was adding coverage rather than moving a contract. The tests as
+written assert each backend's _current_ answer, so whoever takes this will see
+exactly which ones move.
+
+### `crcbl-dx12` has no timeline-semaphore test because it has no timeline semaphore
+
+Recorded so it is not mistaken for a coverage gap. `crcbl-vk`, `crcbl-mtl` and
+now `crcbl-wgpu` each have
+`a_<backend>_timeline_semaphore_signals_from_a_submission_and_the_cpu_sees_it`;
+D3D12 has none because the feature is unimplemented there, not because the test
+was forgotten.
