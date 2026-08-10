@@ -1,0 +1,29 @@
+[package]
+name = "hud"
+description = "The UI system's living fixture: a game-style HUD built from draw-list primitives and nothing else"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library with two front ends, like every other sample**, and for the first
+# of the two reasons `apps/flappy/Cargo.toml` gives: `src/main.rs` owns argv and
+# the exit code, and everything below it — the ticker, the page, the loop — is
+# the `hud` library both it and this crate's tests link.
+#
+# There is no `crate-type = ["cdylib", "rlib"]` and no `[lib] name` override,
+# because this sample has no browser front end yet. Those two lines exist in the
+# other samples to keep a wasm build from writing two targets to one filename,
+# and adding them here would be paying for a target nothing builds. See
+# `docs/backlog.md` for what the web build owes.
+
+# One engine dependency. No `build-dependencies`: this sample is **exempt from
+# sample rule 11** (`.crpix` art through the sprite pass) and its own plan doc
+# says why — its subject is the widget system, and a sprite sheet in front of it
+# would be showing something else. So there is no `build.rs` and no bake step.
+[dependencies]
+crcbl = { workspace = true }
+
+[lints]
+workspace = true

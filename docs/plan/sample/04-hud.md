@@ -57,12 +57,46 @@ here it is the dogfood case: the panel is built out of these widgets.
 
 ## Milestones
 
-1. **P4 skeleton**: HUD page with the slice-1 primitives (blocks, spans, text,
-   bars) — becomes the UI system's dev fixture immediately.
+1. **P4 skeleton** ✅ **built**: HUD page with the slice-1 primitives (blocks,
+   spans, text, bars) — becomes the UI system's dev fixture immediately.
 2. Grows a widget/property at a time alongside P10 work — every new widget lands
    with its gallery entry + golden frame in the same PR.
 3. **P10 complete**: both pages, two themes, inspector, hot-reload demo; golden
    frames per theme in CI.
+
+### What milestone 1 actually landed
+
+`apps/hud`, modelled on `apps/flappy` minus its art, audio and browser halves —
+`main.rs`, `args.rs`, `game.rs`, `page.rs`, `menu.rs`, `gpu.rs`, `app.rs`.
+
+- **The page** (`page.rs`) is the whole of what this sample draws, and every
+  element on it is a `DrawList::rect`, a `DrawList::rect_outline` or a
+  `DrawList::text`: a vitals panel with health and mana **bars** (a track rect
+  and a fill rect that spans the fraction of the pool that is left), a **wave
+  banner** shown for `BANNER_TICKS` after each turn-over, an **ability row** of
+  four slots each showing ready-or-cooling with a sweep that retreats as the
+  cooldown runs down, and a **damage ticker** whose numbers climb their lane and
+  fade. Laid out against the acquired extent, not against a fixed 960×720.
+- **The ticker** (`game.rs`) is a `GameModule` the authoritative server owns,
+  stepped on the fixed timestep with a client on the other end of an
+  `InMemoryTransport` — sample rule 2, with no exemption taken. Integer counters
+  throughout, with `--seed` indexing `crcbl::core::rand::hash_u64` for the
+  damage rolls, so a run replays bit-identically.
+- **Rule 4's debug panel** is the dogfood case and hud contributes two sections:
+  `hud` (the ticker's counters) and `page` (how many rects, outlines and text
+  spans the frame's page emitted, tallied off the draw list itself).
+- **Rule 11 exemption taken**: no `.crpix`, no `build.rs`, no sprite pass. The
+  frame is a `backdrop` clear, the menu pass and `ui-composite`, which makes it
+  the only sample whose UI pass has nothing in front of it in CI's `vk-e2e` job.
+- **No game input.** Every key is the loop's — `ESC`, `F3`, `F11` — because the
+  page is driven end to end by the ticker. The one menu is the pause panel, and
+  every button on it is one the loop already owns, so `MenuAction` is
+  `Infallible`.
+
+Not built, and each waiting on the styling system rather than on this sample:
+the CSS subset and its stylesheets, the theme switcher, the gallery page, the UI
+inspector, hot reload, and per-theme golden frames. The wasm front end and the
+Pages demo are deferred with them — see `docs/backlog.md`.
 
 ## Exit criteria
 

@@ -52,6 +52,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/hud` — sample 04 at its first milestone.** A HUD page built from the
+  UI system's slice-1 primitives: health and mana bars, a four-slot ability row
+  whose slots read `READY` or sweep down a cooldown, a wave banner and a damage
+  ticker, all driven by a server-owned ticker over `InMemoryTransport` and laid
+  out against the acquired extent rather than a fixed size. It contributes two
+  debug-overlay modules, and the `page` one tallies its rows off the draw list,
+  so the panel reports what the UI pass actually uploaded rather than what the
+  sample believes it drew.
+
+  **Milestone 1 only**, which is what `docs/plan/sample/04-hud.md` scopes to P4.
+  The stylesheet subset, the two themes, the widget gallery, the UI inspector
+  and the hot-reload demo are P10 and wait on a styling system that does not
+  exist; the minimap frame is left out because the hard cap forbids the scene it
+  would frame.
+
 - **`crcbl_render::MaterialTable`, and a material id that indexes something.**
   `docs/plan/03-gpu-driven-rendering.md` §3.2's material table: a storage buffer
   of `GpuMaterial` rows, one `base_color` factor each, which `mesh.slang`'s

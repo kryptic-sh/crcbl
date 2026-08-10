@@ -4950,3 +4950,63 @@ Two findings that are **not** fixed:
   general problem stands, and the place it bites first is a test that searches
   the draw list by label text (`row_value` in each sample's `app.rs`), which
   silently reads the wrong row rather than failing.
+
+## `apps/hud` milestone 1: what was deliberately left out
+
+`docs/plan/sample/04-hud.md` names milestone 1 as "P4 skeleton: HUD page with
+the slice-1 primitives", and that is all that was built. Everything below was in
+scope for the sample overall and is not in the tree.
+
+**Waiting on the styling system, not on this sample.** The CSS subset and its
+`.css` files, the ≥2 themes and their runtime switcher, the widget gallery page,
+the UI inspector, the live-restyle hot-reload showcase, and the per-theme golden
+frames in CI. All of them are P10 in the sample's own doc and all of them rest
+on a layout/styling engine that does not exist: `crcbl-ui` today has `DrawList`,
+`FontAtlas`, `Label`, `Button`, `Style`, `Hud`/`HudPanel`/`Anchor`, `Menu` and
+the `debug` panel, and no stylesheet, cascade, selector or box model anywhere.
+Building any of it now would be machinery with a single speculative consumer.
+The one thing worth recording for whoever starts P10: `page::draw` is one
+function that positions everything from named constants at the top of
+`apps/hud/src/page.rs`, so the styling work replaces that function's body rather
+than restructuring the sample.
+
+**Sample rule 7 (a wasm demo on the Pages site) is not met.** `apps/hud` has no
+`web.rs`, no `[lib] crate-type = ["cdylib", "rlib"]`, no
+`PolledGpu`/`PendingLoop` polled bring-up, and no entry in `web/build.sh`'s
+`DEMOS`, `web/build-pages.py`'s `DEMOS`, `web/tools/browser-e2e.mjs`'s
+`EXPECTATIONS`, `web/pages/`, `web/demos/` or the per-demo steps in
+`.github/workflows/pages.yml`. It **does** compile for `wasm32-unknown-unknown`
+(verified with `cargo check --locked --target wasm32-unknown-unknown -p hud`),
+so the CI `wasm32` job's `--workspace` sweep covers it; what is missing is the
+browser front end and the seven registration sites above. Deferred rather than
+declined — the sample's own exit criteria call for it, and it is the smallest
+wasm artifact of any sample, which is a measurement worth having. Those files
+are outside the paths this task owned.
+
+**Sample rule 8 (spatial audio through `crcbl-audio`) is not met, and this may
+be an honest exemption rather than a gap.** The rule is about _positional game
+events_, and hud has none — no world, no listener, no position. UI click sounds
+would be an audio system this sample invented for the rule's sake rather than
+because anything needs them, and the sample's own scope ("fake data only — no
+server simulation beyond a trivial ticker") does not reach for them. Recorded as
+a decision to confirm rather than one taken: if the answer is that hud should be
+silent, rule 8 should say so the way rule 11 already names hud's exemption.
+
+**No game input, considered and declined.** Binding number keys to fire the
+ability slots early was designed and dropped: the ticker already drives every
+slot through ready and cooling states, the doc's scope says the page is driven
+by "a scripted loop", and a second way to fire an ability would be a second
+thing for the determinism script to have to cover. The consequence is that
+`HostedGame::key_event` is empty for this sample. If a later milestone wants a
+pointer-driven gallery, that is where input arrives.
+
+**The samples' `build.rs` bake half is still copied per sample**, as recorded
+above — hud does not add a fourth copy only because it is rule-11 exempt and has
+no `build.rs` at all. Nothing changed about that finding.
+
+**Not verified:** the sample has never been run in a real window. Every check
+was headless — the null backend, and lavapipe through `--backend vk` — so the
+page's colours, spacing and legibility at a real size are unreviewed, and
+nothing in CI would catch a page that is correct in the draw list and ugly on
+screen. The per-theme golden frames the exit criteria call for are what would
+close that, and they are P10.

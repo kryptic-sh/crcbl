@@ -890,9 +890,9 @@ jobs:
         run: >-
           cargo run --locked --quiet --package bare -- --headless --frames 30
           --backend vk
-      # The other three playable samples, which until now appeared **nowhere**
-      # in this workflow or in `cron.yml`. Their 373 unit tests run in the
-      # workspace sweep, so the game logic is covered — but nothing ever
+      # The remaining samples, which until these steps existed appeared
+      # **nowhere** in this workflow or in `cron.yml`. Their unit tests run in
+      # the workspace sweep, so the game logic is covered — but nothing ever
       # launched the binary, and a unit test cannot reach a driver. Each of
       # these renders a different pass mix through the engine (`space`/`sky`/
       # `arena` plus two `sprites` passes and `ui-composite`), so a validation
@@ -924,6 +924,18 @@ jobs:
           CRCBL_VK_SYNC_VALIDATION: '1'
         run: >-
           cargo run --locked --quiet --package horde -- --headless --frames 60
+          --backend vk
+      # The UI system's own fixture, and the only sample whose frame is a clear
+      # plus `ui-composite` and nothing else — no sprite pass at all. That makes
+      # it the one step here that would catch a UI-pass validation error with no
+      # sprite pass in front of it to have tripped first.
+      - name: Run hud headless against lavapipe
+        env:
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_VALIDATION: '1'
+          CRCBL_VK_SYNC_VALIDATION: '1'
+        run: >-
+          cargo run --locked --quiet --package hud -- --headless --frames 60
           --backend vk
       # `docs/plan/12-testing.md`: "diffs uploaded as CI artifacts on failure".
       # The reference, what lavapipe actually rendered, and a red-marked diff of

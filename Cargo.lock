@@ -820,6 +820,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hud"
+version = "0.1.0"
+dependencies = [
+ "crcbl",
+]
+
+[[package]]
 name = "indexmap"
 version = "2.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
