@@ -2543,6 +2543,24 @@ mod tests {
         );
     }
 
+    // **Held out of the ordinary sweep after three flakes.** This test and
+    // `minimizing_a_captured_window_releases_the_clip` compare a clip rectangle
+    // the system applied against one this process computed, and both operands
+    // move underneath it: the desktop repositions windows, focus is contended
+    // by whatever else the runner is doing, and this runner changes its display
+    // set mid-run — the behaviour that made `refresh_clip` refuse a degenerate
+    // refresh. Two rounds of narrowing the read window (`confined_to_client`,
+    // and re-deriving after a restore) cut the failures down but did not stop
+    // them, and they landed on CI for commits that touched no shell code.
+    //
+    // `#[ignore]` moves them to `run-win32-e2e.ps1`, which passes
+    // `--run-ignored all` and runs on a real interactive desktop — the only
+    // place their preconditions hold. They still gate there; they just stop
+    // failing the workspace sweep, where nothing guarantees a foreground window
+    // or a stable display set. Deleting them was the alternative and is worse:
+    // a process that keeps the cursor clipped after losing focus has taken the
+    // desktop hostage, and that is worth a test.
+    #[ignore = "needs an uncontended interactive desktop; run-win32-e2e.ps1 runs it"]
     #[test]
     fn confining_the_pointer_clips_it_and_losing_focus_gives_the_desktop_back() {
         // The hazard that a compile cannot catch: a process that keeps the
@@ -2625,6 +2643,24 @@ mod tests {
         assert_ne!(clip_rect(), clipped, "and focus does not resurrect it");
     }
 
+    // **Held out of the ordinary sweep after three flakes.** This test and
+    // `minimizing_a_captured_window_releases_the_clip` compare a clip rectangle
+    // the system applied against one this process computed, and both operands
+    // move underneath it: the desktop repositions windows, focus is contended
+    // by whatever else the runner is doing, and this runner changes its display
+    // set mid-run — the behaviour that made `refresh_clip` refuse a degenerate
+    // refresh. Two rounds of narrowing the read window (`confined_to_client`,
+    // and re-deriving after a restore) cut the failures down but did not stop
+    // them, and they landed on CI for commits that touched no shell code.
+    //
+    // `#[ignore]` moves them to `run-win32-e2e.ps1`, which passes
+    // `--run-ignored all` and runs on a real interactive desktop — the only
+    // place their preconditions hold. They still gate there; they just stop
+    // failing the workspace sweep, where nothing guarantees a foreground window
+    // or a stable display set. Deleting them was the alternative and is worse:
+    // a process that keeps the cursor clipped after losing focus has taken the
+    // desktop hostage, and that is worth a test.
+    #[ignore = "needs an uncontended interactive desktop; run-win32-e2e.ps1 runs it"]
     #[test]
     fn minimizing_a_captured_window_releases_the_clip() {
         // A minimized window is 0×0, and `client_screen_rect` maps both corners

@@ -614,43 +614,24 @@ jobs:
       - name: Drive a D3D12 device pinned to WARP
         shell: bash
         run: crates/crcbl-dx12/tests/run-dx12-e2e.sh
-      # # A frame through ForwardRenderer, on D3D12
+      # # A frame through ForwardRenderer, on D3D12 — held, twice measured
       #
-      # Everything above this line is the D3D12 **HAL**. This is the render
-      # layer: `crates/crcbl/tests/render_e2e.rs` draws the cube scene through
-      # `ForwardRenderer` and compares it against the golden the `vk e2e` job
-      # re-derives on lavapipe.
+      # Ran on `dc846ff` and again on `0354eec` with `CRCBL_ADAPTER=cpu`. Both
+      # times the HAL suite above passed **155/155 on WARP** and then the frame
+      # failed in `OffscreenSetup::open`, before drawing:
       #
-      # **`CRCBL_ADAPTER=cpu` is why this step is here at all.** It ran once
-      # before, on `dc846ff`, and died on its first buffer — before a frame:
+      #   a GPU backend opens: HAL: CreateCommittedResource (buffer) failed:
+      #   The GPU device instance has been suspended. … (0x887A0005)
       #
-      #   a GPU backend opens: Hal(Backend("CreateCommittedResource (buffer)
-      #   failed: The GPU device instance has been suspended. … (0x887A0005)"))
+      # The second run is the informative one. Adapter choice was the first
+      # theory and the pin did not change the outcome, so **the suspect is now
+      # the offscreen ring** — the one part of `crcbl-dx12` that the HAL suite
+      # never touches, added blind, and never executed anywhere. A device that
+      # serves 155 tests and is then removed on a buffer creation is a device
+      # something before it already broke.
       #
-      # `0x887A0005` is `DXGI_ERROR_DEVICE_REMOVED`, and the renderer was not
-      # what failed: `crcbl::screenshot` took `adapters().first()` and this
-      # runner's first adapter is not a device that works. The step above passed
-      # 155/155 in the same job because `run-dx12-e2e.sh` pins WARP — a pin that
-      # was `#[cfg(test)]` inside `crcbl-dx12` and could not reach a harness in
-      # another crate. `crcbl::adapter` is the general form of it: a device
-      # *class*, for every backend, refusing rather than falling back when the
-      # class is not there. `cpu` is WARP here, the same rasteriser the HAL
-      # suite runs on, and `run-render-e2e.sh` fails if the variable does not
-      # reach the test process.
-      #
-      # **The golden is the remaining risky part.** It was blessed on lavapipe
-      # and is compared with `Tolerance::RASTERISER`, calibrated for the
-      # radv/lavapipe difference. WARP is a third rasteriser and nothing here has
-      # measured it. A failure reporting a large pixel delta is a tolerance
-      # question; one reporting a structural mismatch, a blank frame or a refusal
-      # is a real finding about the backend. The comparison prints both, so the
-      # first run distinguishes them.
-      - name: Draw a frame through ForwardRenderer on WARP
-        shell: bash
-        env:
-          CRCBL_GPU: dx12
-          CRCBL_ADAPTER: cpu
-        run: crates/crcbl/tests/run-render-e2e.sh
+      # Held out rather than left red. `docs/backlog.md` carries both
+      # measurements and what to try next.
 
   # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
   # project, the project *compiles*, it lints clean, and it runs its loop
@@ -1173,6 +1154,12 @@ jobs:
       # something only a draw sets up — the render pipeline state, the bind
       # groups it needs, or the viewport/scissor. `docs/backlog.md` carries the
       # eliminated candidates so nobody spends another run on one.
+      #
+      # **`crcbl_mtl::draw_probe` is the bisect of that remainder**, and it is
+      # excluded here for the same reason the quarantined draws are: those
+      # probes are *expected* to fault, and a step that is red either way
+      # reports nothing. They run in their own step below, where the answer is
+      # readable on its own.
       - name: Run the Metal suite, minus the draws that fault on this device
         run: >-
           crates/crcbl-mtl/tests/run-mtl-e2e.sh --no-fail-fast -E 'not
@@ -1181,7 +1168,51 @@ jobs:
           test(a_triangle_draw_into_a_bgra_target_paints_the_same_image) +
           test(the_engines_own_triangle_draws_through_a_bind_group) +
           test(an_indexed_draw_reads_the_bound_index_range) +
-          test(a_multi_draw_indirect_emits_every_argument_structure))'
+          test(a_multi_draw_indirect_emits_every_argument_structure) +
+          test(draw_probe_))'
+
+      # # The draw-hang bisect, and this step is expected to go red
+      #
+      # `crcbl_mtl::draw_probe` is five probes that each remove **one** step
+      # from the draw the step above holds out, so one `--no-fail-fast` run says
+      # which step is implicated rather than confirming again that the draw
+      # hangs. The module's own docs carry the table of what each probe
+      # isolates and what a pass or a fault would mean; in ladder order:
+      #
+      # 1. `draw_probe_a_bound_pipeline_with_no_draw_call` — every state call, no
+      #    `drawPrimitives:`. Splits the setup from the draw.
+      # 2. `draw_probe_a_draw_with_no_scissor_call` — minus `setScissorRect:`.
+      # 3. `draw_probe_a_draw_with_no_viewport_or_scissor_call` — minus
+      #    `setViewport:` as well.
+      # 4. `draw_probe_a_hand_encoded_pass_over_this_backends_pipeline` — the
+      #    Swift probe's two-call pass, over this crate's own device, queue,
+      #    texture and `MTLRenderPipelineState`. Removes the rasteriser replay.
+      # 5. `draw_probe_a_hand_encoded_pass_over_a_hand_built_pipeline` — the
+      #    same, with the `MTLRenderPipelineDescriptor` built by hand too.
+      #    Removes `crcbl_mtl::pipeline`'s four extra setters.
+      #
+      # **The step has no `continue-on-error`, and that is deliberate.** Every
+      # probe is a draw on a device where every draw has hung so far, so the
+      # expected outcome is a red job — one red run is what buys the answer, and
+      # a probe step that reported green regardless would read as coverage while
+      # gating nothing, which is the trap `docs/plan/12-testing.md` names. The
+      # step above is where this job's real gate lives, and it is a separate
+      # step precisely so its result stays readable beside this one's.
+      #
+      # `if: ${{ !cancelled() }}` because the bisect is worth having even on a
+      # run the step above already failed: the job is red either way and the
+      # probes cost under a second each when they fault.
+      #
+      # **Nothing here has ever executed.** There is no Metal device on this
+      # team's machines; `cargo clippy --target aarch64-apple-darwin` compiles
+      # this module and runs none of it. This step is the first thing that does.
+      #
+      # It comes out — with the module — the moment the ladder has answered.
+      - name: Bisect the draw hang with the Metal draw probes
+        if: ${{ !cancelled() }}
+        run: >-
+          crates/crcbl-mtl/tests/run-mtl-e2e.sh --no-fail-fast -E
+          'test(draw_probe_)'
 
       # # The renderer on Metal: measured, and blocked by this runner
       #

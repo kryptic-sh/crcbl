@@ -7,8 +7,10 @@
 //!
 //! # Why this exists, in one measurement
 //!
-//! `crate::screenshot`'s [`OffscreenSetup`](crate::screenshot::OffscreenSetup)
-//! took `adapters().first()` and never said which adapter that was. On
+//! `crate::screenshot`'s `OffscreenSetup` took `adapters().first()` and never
+//! said which adapter that was. (Not a doc link: `screenshot` is not compiled
+//! for wasm, where this module still is, and a link that resolves on three
+//! targets and breaks the fourth is a red CI job for a hyperlink.) On
 //! `windows-latest` the first adapter is not a device that works: the D3D12 HAL
 //! suite passed 155/155 on WARP in the same CI job, and the frame that followed
 //! failed on its first buffer with `DXGI_ERROR_DEVICE_REMOVED`, before anything

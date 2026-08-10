@@ -3,36 +3,33 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### The Win32 pointer-clip test keeps failing on rectangles that moved
+### The Win32 pointer-clip tests are held out of the ordinary sweep
 
-Six flakes on this runner across the session;
-`minimizing_a_captured_window_ releases_the_clip` accounts for two of them, on
-**different assertions** of the same test, for commits that touched no shell
-code (`d9ee566`, `28fc1b7` — both renderer-only).
+Three flakes across the session, on **two different tests** and **three
+different assertions**, every time for a commit that touched no shell code
+(`d9ee566`, `28fc1b7`, `0354eec` — all renderer or CI changes).
 
-Root cause is one shape: the test read `client_screen_rect ∩ virtual_screen` at
-one instant and compared it against `clip_rect()` at another. Both operands move
-— the desktop can reposition a window, and this runner changes its display set
-mid-run, which is the same behaviour that made `refresh_clip` refuse a
-degenerate refresh. A desktop change then surfaces as a failure of whichever
-assertion happened to be running, naming the rectangle rather than the cause.
+One shape underneath all of them: the test compares a clip rectangle the system
+applied against one this process computed, and both operands move. The desktop
+repositions windows, the foreground is contended by whatever else the runner is
+doing, and this runner changes its display set mid-run — the behaviour that made
+`refresh_clip` refuse a degenerate refresh.
 
-Both sites now read through `confined_to_client(hwnd)` immediately before
-asserting, and the restore site additionally asserts the rectangle is
-non-degenerate so the comparison cannot pass on two 0×0 rects — which is the
-defect that test exists to catch.
+Two rounds of narrowing helped and did not fix it: reading through
+`confined_to_client` immediately before asserting, and re-deriving the rectangle
+after a restore rather than reusing one from before the minimize. The prediction
+in this entry was "if it flakes a third time, stop patching and quarantine" — it
+did, so both are now `#[ignore]`d.
 
-**Not yet proven fixed.** Narrowing the window is not closing it: a display
-change between `set_pointer_mode`'s own internal read and the test's read would
-still fail. If it flakes a third time, stop patching and quarantine it by name
-in the `win32 e2e` job, the way the Metal draw tests are — the test asserts
-something real, and a test that cannot state its own preconditions on this
-runner is better held out with a reason than left to fail at random.
+**They are not disabled.** `run-win32-e2e.ps1` passes `--run-ignored all` and
+runs on a real interactive desktop, so they still gate there — the only place
+their preconditions actually hold. What they stop doing is failing the workspace
+sweep, where nothing guarantees a foreground window or a stable display set.
+Deleting them would have been worse: a process that keeps the cursor clipped
+after losing focus has taken the desktop hostage.
 
 Still open and unrelated: the **focus** flake (three instances), where
-`focus_and_confirm` loses the foreground to something else on the runner.
-
-## User decisions — keep or override
+`focus_and_confirm` loses the foreground.
 
 ### `GpuInstance::flags` is a bare `u32`, not `bitflags`
 
@@ -3695,49 +3692,43 @@ committed. **Unverified**: only the `dx12-e2e` job can say whether a frame
 actually records, and `render_e2e.rs` is not wired into that job yet — wiring it
 is the next step, and the first thing that would tell us.
 
-### D3D12's frame is blocked on adapter choice, not on the renderer
+### D3D12's frame fails in the offscreen ring, not on adapter choice
 
-**Measured on `dc846ff`.** With `render_e2e.rs` wired into the `dx12-e2e` job,
-the HAL suite passed **155/155 on WARP** and the frame then failed before
-drawing anything:
+**Measured twice.** On `dc846ff` and again on `0354eec` with `CRCBL_ADAPTER=cpu`
+pinning the software adapter, the D3D12 HAL suite passed **155/155 on WARP** and
+the frame then failed inside `OffscreenSetup::open`, before drawing anything:
 
 ```
-a GPU backend opens: Hal(Backend("CreateCommittedResource (buffer) failed:
-The GPU device instance has been suspended. Use GetDeviceRemovedReason to
-determine the appropriate action. (0x887A0005)"))
+a GPU backend opens: HAL: CreateCommittedResource (buffer) failed:
+The GPU device instance has been suspended. … (0x887A0005)
 ```
 
-`0x887A0005` is `DXGI_ERROR_DEVICE_REMOVED`, on the first buffer, before a
-frame. So nothing in `ForwardRenderer` was reached and none of the six D3D12
-slices is implicated.
+**Adapter choice was the first theory and the pin did not change the outcome**,
+so it is not the cause — though the pin is worth having on its own terms and
+found a real gap (`screenshot` picked `adapters().first()` and never said
+which).
 
-**The cause is that the WARP pin cannot reach this path.** `crcbl::screenshot`
-picks `adapters().first()`, and on that runner the first adapter is not a usable
-device. `crcbl-dx12`'s pin resolves `CRCBL_DX12_ADAPTER` and refuses to fall
-back — but it is `#[cfg(test)]`, so it serves only that crate's own suite. Its
-module doc argues test-only is right because "the seam already publishes every
-adapter and lets the caller choose, so an engine has no use for this". **The
-evidence falsifies that**: the caller that needs to choose lives in a different
-crate, and test-only cannot reach it.
+What that leaves: **the offscreen ring**, which is the one part of `crcbl-dx12`
+the HAL suite never touches. It was written blind, has never executed anywhere,
+and creates its ring images through `create_image` with
+`COLOR_ATTACHMENT | TRANSFER_SRC | TRANSFER_DST | SAMPLED` and `DeviceLocal`. A
+device that serves 155 tests and is then removed on a buffer creation is a
+device that something before it already broke — `DXGI_ERROR_DEVICE_REMOVED` is
+reported at the next call, not at the offending one.
 
-The fix is a design choice worth making deliberately rather than patching:
+Next steps, cheapest first:
 
-- **Narrow**: promote the pin to production in `crcbl-dx12` so
-  `CRCBL_DX12_ADAPTER` works everywhere. Smallest, but backend-specific, and
-  `adapters()` returning a reordered list would change what an `AdapterId`
-  denotes.
-- **General**: `crcbl::screenshot` stops taking `.first()` blindly and selects
-  by requested `DeviceType` — a `CRCBL_ADAPTER=cpu|discrete|integrated` pin that
-  works for every backend, mirroring what `CRCBL_VK_ICD` does for Vulkan. More
-  work; removes a class of "which GPU did CI actually use" question that is
-  already noted against `screenshot.rs`
-  (`picks adapters().first() and never reports which one that was`).
-- Either way, **`.first()` with no report is the underlying defect** — it is how
-  a harness silently runs on a different device than intended, which is exactly
-  what the Vulkan ICD pin exists to prevent.
+- **Call `GetDeviceRemovedReason`** and report it. The seam already surfaces the
+  0x887A0005 code; the reason behind it is what names the offending call, and
+  the error message even says to ask.
+- **Enable the D3D12 debug layer** in the harness, which reports the real
+  validation error at the call that caused it rather than at the next one.
+- Add a HAL-level test that creates an offscreen ring and presents through it,
+  so the failure is inside `crcbl-dx12`'s own suite where it can be bisected,
+  rather than at the far end of an engine frame.
 
-The CI step is removed until this lands, because a step that always fails gates
-nothing. Everything it needs is otherwise in place.
+The CI step is held out until then, because a step that always fails gates
+nothing.
 
 ### What WARP has actually proven
 
