@@ -490,6 +490,30 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   `crcbl_dx12::device`'s `a_compute_dispatch_writes_the_values_it_was_asked_for`
 ///   reads the result back. Reporting it before that would have been the
 ///   "unsupported arriving as passed" shape the crate docs name.
+/// * [`Features::DRAW_INDIRECT_COUNT`], [`Features::MULTI_DRAW_INDIRECT`] and
+///   [`Features::INDIRECT_FIRST_INSTANCE`] — **unconditional, and there is no
+///   query to make.** All three are parameters and fields of one call rather
+///   than capability bits: `ExecuteIndirect` takes a `MaxCommandCount` (which is
+///   multi-draw), an optional `pCountBuffer` (which is the GPU-side count), and
+///   reads `StartInstanceLocation` out of `D3D12_DRAW_ARGUMENTS` like every
+///   other field of it. There is no D3D12 device without `ExecuteIndirect`,
+///   which is why the capability structures have no bit for any of them.
+///
+///   They waited for the calls rather than for a query, exactly as
+///   [`Features::COMPUTE`] did: `CommandEncoder::draw_indirect`,
+///   `draw_indexed_indirect` and both `_count` siblings record against the
+///   command signatures `crate::draw` describes, and `crcbl_dx12::device`'s
+///   indirect draw tests read the picture back. Reporting them earlier would
+///   have been the "unsupported arriving as passed" shape the crate docs name —
+///   and `crcbl-mtl` withdrawing a flag no call had earned is the precedent that
+///   made the wait the rule.
+///
+///   **`DRAW_INDIRECT_COUNT` is the one that moves a selector.** With it
+///   reported and no mesh shader, [`GeometryPath::from_features`](crcbl_hal::GeometryPath::from_features)
+///   puts this backend on
+///   [`IndirectCount`](crcbl_hal::GeometryPath::IndirectCount) rather than the
+///   per-batch floor — the arm `crcbl-mtl` cannot reach, because Metal has no
+///   count-from-memory execution to back it.
 /// * [`Features::PRESENT_FEEDBACK`] — **unconditional, and for a stronger
 ///   reason than Metal's.** The mechanism is
 ///   `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` plus
@@ -516,13 +540,6 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///
 /// # Absent, with the reason for each
 ///
-/// * [`Features::DRAW_INDIRECT_COUNT`] and [`Features::MULTI_DRAW_INDIRECT`] —
-///   `ExecuteIndirect` takes a command signature, an argument buffer and an
-///   optional **count buffer**, so the plan's table calls both a direct fit and
-///   this is the one place the mapping is not in doubt. They are still off:
-///   `crcbl-mtl` withdrew a flag rather than keep one no call had earned, and
-///   that precedent stands. `ID3D12GraphicsCommandList::ExecuteIndirect` is the
-///   call, and the command slice is the one that makes it.
 /// * [`Features::TIMELINE_SEMAPHORE`] — `ID3D12Fence` is a monotonic counter
 ///   with no separate binary form, so this one is the seam's timeline almost
 ///   verbatim, and `Device::wait_idle` already drives one. It stays off because
@@ -554,9 +571,6 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   [`Features::POLYGON_MODE_LINE`] — all three are fields of
 ///   `D3D12_RASTERIZER_DESC`, which is part of a pipeline state object. The
 ///   pipeline slice fills it in.
-/// * [`Features::INDIRECT_FIRST_INSTANCE`] — `StartInstanceLocation` is a field
-///   of `D3D12_DRAW_ARGUMENTS` and D3D12 reads it, but it arrives with the
-///   indirect path above.
 /// * [`Features::SHADER_DEBUG_PRINTF`] — the debug layer's GPU-based validation
 ///   is the closest thing, and nothing routes it into `log` yet.
 fn features_of(raw: &RawCaps) -> Features {
@@ -567,13 +581,17 @@ fn features_of(raw: &RawCaps) -> Features {
     if raw.block_compression {
         out |= Features::TEXTURE_COMPRESSION_BC;
     }
-    // No query for any of the four: a GPU virtual address is not optional in
+    // No query for any of the seven: a GPU virtual address is not optional in
     // D3D12, anisotropic sampling is an architectural constant, compute is what
-    // a DIRECT queue accepts by definition, and the frame-latency waitable
-    // object predates D3D12 itself. See above.
+    // a DIRECT queue accepts by definition, the three indirect flags are
+    // parameters and fields of `ExecuteIndirect` rather than capability bits,
+    // and the frame-latency waitable object predates D3D12 itself. See above.
     out |= Features::BUFFER_DEVICE_ADDRESS
         | Features::SAMPLER_ANISOTROPY
         | Features::COMPUTE
+        | Features::DRAW_INDIRECT_COUNT
+        | Features::MULTI_DRAW_INDIRECT
+        | Features::INDIRECT_FIRST_INSTANCE
         | Features::PRESENT_FEEDBACK;
     out
 }
@@ -619,8 +637,6 @@ fn features_of(raw: &RawCaps) -> Features {
 /// * `max_sample_count` — `CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS)`
 ///   answers it **per format**, so it needs a format table. The floor is
 ///   WebGPU's downlevel guarantee and D3D12 clears it everywhere.
-/// * `max_draw_indirect_count` — the floor's value means "one draw per call",
-///   which is exactly right while [`Features::DRAW_INDIRECT_COUNT`] is off.
 /// * `timestamp_period_ns` — keyed off a feature this adapter does not report,
 ///   so it stays at the floor's neutral value.
 ///
@@ -635,6 +651,12 @@ fn features_of(raw: &RawCaps) -> Features {
 /// * `max_sampler_anisotropy` moves to [`D3D12_REQ_MAXANISOTROPY`], the value
 ///   `D3D12_SAMPLER_DESC::MaxAnisotropy` is documented as capped at, now that
 ///   [`Features::SAMPLER_ANISOTROPY`] is reported.
+/// * `max_draw_indirect_count` moves to `u32::MAX` now that
+///   [`Features::DRAW_INDIRECT_COUNT`] is, and that really is the ceiling:
+///   D3D12 states no `D3D12_REQ_*` constant for it because the number is
+///   `ExecuteIndirect`'s own `MaxCommandCount` parameter, a `UINT`. So the
+///   API's ceiling is the type's, and a lower figure here would be this backend
+///   refusing calls D3D12 accepts.
 fn limits_of(features: Features) -> Limits {
     let floor = Limits::minimum();
     Limits {
@@ -657,6 +679,11 @@ fn limits_of(features: Features) -> Limits {
             floor.max_sampler_anisotropy
         },
         max_color_attachments: D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT,
+        max_draw_indirect_count: if features.contains(Features::DRAW_INDIRECT_COUNT) {
+            u32::MAX
+        } else {
+            floor.max_draw_indirect_count
+        },
         max_compute_workgroup_size: [
             D3D12_CS_THREAD_GROUP_MAX_X,
             D3D12_CS_THREAD_GROUP_MAX_Y,

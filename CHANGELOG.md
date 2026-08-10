@@ -42,6 +42,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-dx12` records every draw the seam has.** `bind_index_buffer` sets a
+  `D3D12_INDEX_BUFFER_VIEW`, `draw_indexed` is `DrawIndexedInstanced`, and
+  `draw_indirect`, `draw_indexed_indirect` and both `_count` siblings are
+  `ExecuteIndirect` through command signatures the device caches per
+  `(argument layout, stride)` — D3D12 puts `ByteStride` on the signature rather
+  than on the call, so two callers striding differently need two objects. A draw
+  with no pipeline bound, an indexed one with no index buffer bound, an argument
+  span that runs past its buffer, an unaligned argument or count offset, and a
+  multi-command stride below one argument structure are each refused by name at
+  record time, because `ExecuteIndirect` reports none of them.
+
+- **`crcbl-dx12` reports `DRAW_INDIRECT_COUNT`, `MULTI_DRAW_INDIRECT` and
+  `INDIRECT_FIRST_INSTANCE`**, and `Limits::max_draw_indirect_count` moves off
+  the floor to `u32::MAX` — `ExecuteIndirect`'s own `MaxCommandCount` is a
+  `UINT` and D3D12 states no lower ceiling. All three are parameters and fields
+  of that one call rather than capability bits, and each is reported now that
+  the call behind it is made. **`DRAW_INDIRECT_COUNT` moves a selector**: every
+  D3D12 adapter now derives `GeometryPath::IndirectCount` where it derived
+  `IndirectPerBatch`, so a renderer on this backend takes the arm that reads its
+  draw count out of GPU memory. Metal cannot follow, because it has no
+  count-from-memory execution at all.
+
 - **`crcbl_shaders::Shader::dxil_containers` hands over every DXIL container a
   shader holds**, each paired with its entry-point name, in the shape
   `ShaderModuleDesc::dxil` takes. `Shader::dxil(entry_point)` still answers for

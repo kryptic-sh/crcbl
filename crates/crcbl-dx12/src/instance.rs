@@ -1171,23 +1171,29 @@ pub(crate) mod tests {
         );
     }
 
-    /// Every adapter is Tier B in this slice, and it is this backend's gap
-    /// rather than the adapter's.
+    /// Every flag this backend reports has a call behind it, and every flag it
+    /// withholds is a call it has not written.
     ///
-    /// The flags asserted missing are missing because no call in this crate
-    /// makes them true — `CreateFence` and `ExecuteIndirect` for a *draw* are
-    /// both unwritten — so this test goes red on the day a slice earns one of
-    /// them, which is exactly the day the crate docs' claim that "every adapter
-    /// is Tier B" stops being true and has to be rewritten. The flags asserted
-    /// *present* are the inverse half: dropping one silently is red too, and
-    /// [`Features::COMPUTE`] is on that side now that
-    /// `CreateComputePipelineState` and `Dispatch` are made.
+    /// The flags asserted *missing* are missing because no call in this crate
+    /// makes them true — `CreateFence` handed out as a seam semaphore is the one
+    /// left — so this test goes red on the day a slice earns one, which is
+    /// exactly the day the crate docs' account of the derived path has to be
+    /// rewritten. The flags asserted *present* are the inverse half: dropping
+    /// one silently is red too.
     ///
-    /// The falsifying value on the other side is an adapter that reports one of
-    /// the waiting flags: that is a flag added ahead of the call behind it,
-    /// which is the mistake `crcbl-mtl` had to reverse.
+    /// [`Features::COMPUTE`] joined that side with
+    /// `CreateComputePipelineState` and `Dispatch`, and
+    /// [`Features::MULTI_DRAW_INDIRECT`] and [`Features::DRAW_INDIRECT_COUNT`]
+    /// with `ExecuteIndirect` for a *draw* — which is what moved the derived
+    /// path off the per-batch floor and onto
+    /// [`GeometryPath::IndirectCount`], asserted here so the move cannot happen
+    /// unnoticed in either direction.
+    ///
+    /// The falsifying value on the other side is an adapter that reports the
+    /// waiting flag: that is a flag added ahead of the call behind it, which is
+    /// the mistake `crcbl-mtl` had to reverse.
     #[test]
-    fn every_adapter_sits_at_the_floor_until_the_calls_behind_the_flags_land() {
+    fn every_reported_flag_has_a_call_behind_it_and_the_path_follows() {
         let instance = open();
         assert!(!instance.records().is_empty(), "nothing to check");
         let all = report_all(&instance);
@@ -1196,26 +1202,35 @@ pub(crate) mod tests {
         for record in instance.records() {
             let line = record.report();
             let missing = record.info.caps.missing(Features::GPU_DRIVEN);
-            for earned in [Features::BUFFER_DEVICE_ADDRESS, Features::COMPUTE] {
+            for earned in [
+                Features::BUFFER_DEVICE_ADDRESS,
+                Features::COMPUTE,
+                Features::MULTI_DRAW_INDIRECT,
+                Features::DRAW_INDIRECT_COUNT,
+            ] {
                 assert!(
                     !missing.contains(earned),
                     "{earned:?} has a call behind it and is not reported: {line}"
                 );
             }
-            for waiting in [
-                Features::TIMELINE_SEMAPHORE,
-                Features::MULTI_DRAW_INDIRECT,
-                Features::DRAW_INDIRECT_COUNT,
-            ] {
-                assert!(
-                    missing.contains(waiting),
-                    "{waiting:?} is reported with no call behind it: {line}"
-                );
-            }
+            // One flag left, and named rather than iterated: `Device::create_semaphore`
+            // has to hand an `ID3D12Fence` out and `ID3D12CommandQueue::Wait`
+            // has to consume it on a submission.
+            assert!(
+                missing.contains(Features::TIMELINE_SEMAPHORE),
+                "TIMELINE_SEMAPHORE is reported with no call behind it: {line}"
+            );
             assert_eq!(
                 record.info.caps.geometry_path(),
-                GeometryPath::IndirectPerBatch,
-                "the derived geometry path moved; the crate docs say why it cannot yet: {line}"
+                GeometryPath::IndirectCount,
+                "the derived geometry path moved; the crate docs say what selects it: {line}"
+            );
+            // The ceiling has to move with the flag, or a caller reading it
+            // would cap every indirect-count call at one draw while the backend
+            // executes as many as `ExecuteIndirect` is given.
+            assert!(
+                record.info.caps.limits.max_draw_indirect_count > 1,
+                "DRAW_INDIRECT_COUNT is reported and the limit is still the floor: {line}"
             );
         }
     }

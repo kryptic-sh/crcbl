@@ -3656,14 +3656,22 @@ would hit them:
    now carries `(entry point, container)` pairs, so one module still serves
    every backend and the one that needs a container per entry point picks by
    stage.
-5. **Indexed draws and index buffers refused** — `crcbl-dx12`'s
-   `bind_index_buffer` in `command.rs`. **This is where a D3D12 frame stops
-   today**, on the forward pass's first recorded call after
-   `bind_graphics_pipeline`.
-6. **Indirect and indirect-count draws refused**, immediately behind it in the
-   same pass body. Until both land, D3D12 cannot run the GPU-driven path at all
-   — it would derive `GeometryPath::IndirectPerBatch` and then refuse the call
-   that arm makes.
+5. ~~Indexed draws and index buffers~~ — **done**.
+6. ~~Indirect and indirect-count draws~~ — **done**, and D3D12 reports
+   `DRAW_INDIRECT_COUNT` because `pCountBuffer` is an ordinary parameter of the
+   same `ExecuteIndirect` call the CPU-count path makes — the parameter Metal
+   has nowhere, which is why `crcbl-mtl` refuses it. **So D3D12 derives
+   `GeometryPath::IndirectCount`, not the per-batch floor**, and
+   `max_draw_indirect_count` moves to `u32::MAX`. 6b. **Dynamic offsets refused
+   — and this one was missing from the list.** `ForwardRenderer`'s mesh bind
+   group layout declares binding 3 as
+   `BindingKind::UniformBuffer { dynamic: true }`, and `crcbl-dx12`'s
+   `binding.rs` refuses it: a D3D12 descriptor table has no offset to apply, and
+   the equivalent is a root CBV/SRV/UAV, which is a different root parameter
+   type per binding. The forward pass then hits it again at its
+   `bind_group(0, group, &[constant_offset], layout)`. **This is a
+   root-parameter redesign, not a call**, and it is now what stops a D3D12 frame
+   — found only by implementing the draws and reading the path past them.
 7. Buffer fills and image-to-image copies refused; then query sets, MSAA resolve
    attachments, and mesh pipelines.
 

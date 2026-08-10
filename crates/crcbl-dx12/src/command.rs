@@ -5,16 +5,22 @@
 //!
 //! Barriers, buffer↔buffer and buffer↔image copies, render passes with a real
 //! `ClearRenderTargetView`/`ClearDepthStencilView`, viewport, scissor and
-//! stencil reference — plus pipelines, bind groups, draws, and dispatches both
-//! direct and indirect. [`finish`](CommandEncoder::finish) closes the list and
-//! hands back a pooled [`CommandBufferHandle`] the device can submit.
+//! stencil reference — plus pipelines, bind groups, index buffers, every draw
+//! the seam has (direct, indexed, indirect and indirect-count), and dispatches
+//! both direct and indirect. [`finish`](CommandEncoder::finish) closes the list
+//! and hands back a pooled [`CommandBufferHandle`] the device can submit.
 //!
-//! What still needs a slice — index buffers, indirect *draws*, push constants —
-//! **fails the encoder** rather than recording nothing, so `finish` returns the refusal
-//! instead of a command buffer that submits and draws nothing. That is
-//! `crcbl-mtl`'s rule in its command slice, and it is the failure
+//! What still needs a slice — buffer fills, image↔image copies, MSAA resolve
+//! attachments, query sets, mesh dispatch, push constants — **fails the encoder** rather than recording
+//! nothing, so `finish` returns the refusal instead of a command buffer that
+//! submits and draws nothing. That is `crcbl-mtl`'s rule in its command slice,
+//! and it is the failure
 //! [`Device::take_error`](crcbl_hal::Device::take_error) exists to catch on
 //! WebGPU.
+//!
+//! The indirect path's arithmetic — offsets, strides, spans and the
+//! index-buffer view's size — lives in [`crate::draw`], which holds no `windows`
+//! type and is therefore the one part of it a non-Windows host can test.
 //!
 //! # Failures are recorded and reported at `finish`
 //!
@@ -77,15 +83,15 @@ use crcbl_hal::{
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_BOX, D3D12_CLEAR_FLAG_DEPTH, D3D12_CLEAR_FLAG_STENCIL, D3D12_CLEAR_FLAGS,
-    D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_PLACED_SUBRESOURCE_FOOTPRINT, D3D12_RESOURCE_BARRIER,
-    D3D12_RESOURCE_BARRIER_0, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+    D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_INDEX_BUFFER_VIEW, D3D12_PLACED_SUBRESOURCE_FOOTPRINT,
+    D3D12_RESOURCE_BARRIER, D3D12_RESOURCE_BARRIER_0, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
     D3D12_RESOURCE_BARRIER_FLAG_NONE, D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
     D3D12_RESOURCE_BARRIER_TYPE_UAV, D3D12_RESOURCE_STATES, D3D12_RESOURCE_TRANSITION_BARRIER,
     D3D12_RESOURCE_UAV_BARRIER, D3D12_SUBRESOURCE_FOOTPRINT, D3D12_TEXTURE_COPY_LOCATION,
     D3D12_TEXTURE_COPY_LOCATION_0, D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,
     D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT,
     D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_VIEWPORT, ID3D12CommandAllocator,
-    ID3D12GraphicsCommandList, ID3D12Resource,
+    ID3D12CommandSignature, ID3D12GraphicsCommandList, ID3D12Resource,
 };
 use windows::core::Interface;
 
@@ -94,6 +100,7 @@ use crate::device::{
     AttachmentRef, BoundCompute, BoundPipeline, BufferRef, CommandBufferEntry, DeviceInner,
     ImageRef,
 };
+use crate::draw::{IndirectKind, check_count, plan_index_binding, plan_indirect};
 use crate::instance::not_yet;
 
 /// A batch of resource-state transitions, and the references they borrowed.
@@ -194,14 +201,6 @@ struct CopyRegion {
     size: (u32, u32, u32),
 }
 
-/// Bytes one `D3D12_DISPATCH_ARGUMENTS` occupies: `ThreadGroupCountX`, `Y` and
-/// `Z`. Fixed by D3D12's own struct.
-const DISPATCH_ARGUMENTS: u64 = 12;
-
-/// What an indirect-argument offset must be a multiple of, which is the width of
-/// the words the arguments are made of.
-const DISPATCH_ARGUMENT_ALIGNMENT: u64 = 4;
-
 /// The D3D12 command list implementation of [`CommandEncoder`].
 pub(crate) struct Dx12CommandEncoder {
     device: Arc<DeviceInner>,
@@ -227,6 +226,13 @@ pub(crate) struct Dx12CommandEncoder {
     /// [`pipeline`](Self::pipeline) is, and separately from it because a
     /// `DIRECT` command list carries both bind points at once.
     compute: Option<BoundCompute>,
+    /// Whether an index-buffer view has been set on this list.
+    ///
+    /// Held so an indexed draw can refuse when none has, for the reason
+    /// [`pipeline`](Self::pipeline) is held. Not cleared at a pass boundary:
+    /// `IASetIndexBuffer` is command-list state, so the binding genuinely
+    /// survives one — which is Vulkan's rule and the seam's.
+    index_buffer: bool,
     in_render_pass: bool,
     in_compute_pass: bool,
 }
@@ -258,6 +264,7 @@ impl Dx12CommandEncoder {
             failed: None,
             pipeline: None,
             compute: None,
+            index_buffer: false,
             in_render_pass: false,
             in_compute_pass: false,
         };
@@ -378,6 +385,24 @@ impl Dx12CommandEncoder {
         self.fail(HalError::InvalidDescriptor(format!(
             "{what} outside a compute pass; the seam records compute work inside one, and the \
              open scope is the only signal a backend gets about which bind point a group is for"
+        )));
+        false
+    }
+
+    /// Whether a draw may be recorded, or the refusal saying it may not.
+    ///
+    /// **A draw with no pipeline bound fails the encoder rather than being
+    /// dropped.** D3D12 would draw nothing with no pipeline state object set,
+    /// and nothing is exactly what a caller reading a blank attachment cannot
+    /// tell from a shader that wrote nothing. Shared by every draw entry point
+    /// so the five spell one rule rather than five.
+    fn drawable(&mut self, what: &str) -> bool {
+        if self.pipeline.is_some() {
+            return true;
+        }
+        self.fail(HalError::InvalidDescriptor(format!(
+            "{what} with no graphics pipeline bound; D3D12 would rasterise nothing and report \
+             nothing"
         )));
         false
     }
@@ -1167,8 +1192,49 @@ impl CommandEncoder for Dx12CommandEncoder {
         self.compute = None;
     }
 
-    fn bind_index_buffer(&mut self, _buffer: BufferHandle, _offset: u64, _format: IndexFormat) {
-        self.refuse("indexed draws (the DX12 pipeline slice)");
+    /// Sets the `D3D12_INDEX_BUFFER_VIEW` a later indexed draw reads.
+    ///
+    /// D3D12's view is an address, a byte count and a format rather than a
+    /// buffer and an offset, so the offset is folded into
+    /// `GetGPUVirtualAddress` and the size is what is left of the allocation —
+    /// see [`crate::draw::plan_index_binding`] for the two rules that makes
+    /// checkable, and for why `SizeInBytes` is the only bound an indexed draw
+    /// needs.
+    ///
+    /// **The binding is command-list state and survives a pass boundary**, which
+    /// is Vulkan's rule and not Metal's: `IASetIndexBuffer` is recorded here
+    /// rather than replayed at the draw, so this is legal outside a render pass
+    /// too. `crcbl-mtl` carries the binding across to the draw instead, because
+    /// `drawIndexedPrimitives:` takes the buffer as an argument.
+    fn bind_index_buffer(&mut self, buffer: BufferHandle, offset: u64, format: IndexFormat) {
+        if self.list().is_none() {
+            return;
+        }
+        let Some(resolved) = self.buffer(buffer) else {
+            return;
+        };
+        let size = match plan_index_binding(offset, format, resolved.size) {
+            Ok(size) => size,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        // SAFETY: `resolved.raw` is a live buffer resource this encoder just
+        // retained, and `GetGPUVirtualAddress` takes nothing and reads no state.
+        let base = unsafe { resolved.raw.GetGPUVirtualAddress() };
+        let view = D3D12_INDEX_BUFFER_VIEW {
+            BufferLocation: base + offset,
+            SizeInBytes: size,
+            Format: conv::index_format(format),
+        };
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording, and `view` is a live, fully
+        // initialised local borrowed for the duration of the call. Its address
+        // is inside an allocation this encoder holds a reference to, aligned to
+        // the index width, and its size was bounded by the allocation's own.
+        unsafe { list.IASetIndexBuffer(Some(&raw const view)) };
+        self.index_buffer = true;
     }
 
     /// Binds a bind group's descriptor tables at the root parameters the
@@ -1272,15 +1338,7 @@ impl CommandEncoder for Dx12CommandEncoder {
     /// and nothing is exactly what a caller reading a blank attachment cannot
     /// tell from a shader that wrote nothing.
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        if self.list().is_none() {
-            return;
-        }
-        if self.pipeline.is_none() {
-            self.fail(HalError::InvalidDescriptor(
-                "a draw with no graphics pipeline bound; D3D12 would rasterise nothing and report \
-                 nothing"
-                    .to_string(),
-            ));
+        if self.list().is_none() || !self.drawable("a draw") {
             return;
         }
         let Some(list) = self.list() else { return };
@@ -1297,24 +1355,65 @@ impl CommandEncoder for Dx12CommandEncoder {
         }
     }
 
-    fn draw_indexed(&mut self, _indices: Range<u32>, _base_vertex: i32, _instances: Range<u32>) {
-        self.refuse("indexed draws (the DX12 pipeline slice)");
+    /// `DrawIndexedInstanced`, with the seam's two ranges and its base vertex as
+    /// D3D12's five scalars.
+    ///
+    /// **Both bases are passed through exactly as they arrive**, and D3D12
+    /// excludes both from the ids the shader sees: `SV_VertexID` is the value
+    /// read out of the index buffer and `SV_InstanceID` counts from zero,
+    /// neither picking up `BaseVertexLocation` or `StartInstanceLocation`. That
+    /// is the lowering `crates/crcbl-shaders/shaders/mesh.slang`'s header
+    /// measured, and it is why the engine's own draws pass zero for both: WGSL
+    /// and MSL *include* the bases, so zero is the only value all four targets
+    /// agree on. Nothing here enforces that — it is the caller's rule, and a
+    /// backend that quietly zeroed a base it was handed would be lying to the
+    /// one target that reads it correctly.
+    ///
+    /// A draw with no pipeline or no index buffer bound fails the encoder, for
+    /// the reason [`draw`](Self::draw) gives: D3D12 rasterises nothing and
+    /// reports nothing, and nothing is what a caller reading a blank attachment
+    /// cannot tell from a shader that wrote nothing.
+    fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
+        if self.list().is_none() || !self.drawable("an indexed draw") {
+            return;
+        }
+        if !self.index_buffer {
+            self.fail(HalError::InvalidDescriptor(
+                "an indexed draw with no index buffer bound; D3D12 would read indices through no \
+                 view and rasterise nothing"
+                    .to_string(),
+            ));
+            return;
+        }
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording, and the call takes five scalars.
+        // `saturating_sub` is what makes an empty or inverted range a zero count
+        // rather than a wrap to four billion indices.
+        unsafe {
+            list.DrawIndexedInstanced(
+                indices.end.saturating_sub(indices.start),
+                instances.end.saturating_sub(instances.start),
+                indices.start,
+                base_vertex,
+                instances.start,
+            );
+        }
     }
 
-    fn draw_indirect(&mut self, _draw: &DrawIndirect) {
-        self.refuse("indirect draws (the DX12 pipeline slice)");
+    fn draw_indirect(&mut self, draw: &DrawIndirect) {
+        self.indirect(draw, IndirectKind::Draw);
     }
 
-    fn draw_indexed_indirect(&mut self, _draw: &DrawIndirect) {
-        self.refuse("indirect draws (the DX12 pipeline slice)");
+    fn draw_indexed_indirect(&mut self, draw: &DrawIndirect) {
+        self.indirect(draw, IndirectKind::DrawIndexed);
     }
 
-    fn draw_indirect_count(&mut self, _draw: &DrawIndirectCount) {
-        self.refuse("indirect-count draws (the DX12 pipeline slice)");
+    fn draw_indirect_count(&mut self, draw: &DrawIndirectCount) {
+        self.indirect_count(draw, IndirectKind::Draw);
     }
 
-    fn draw_indexed_indirect_count(&mut self, _draw: &DrawIndirectCount) {
-        self.refuse("indirect-count draws (the DX12 pipeline slice)");
+    fn draw_indexed_indirect_count(&mut self, draw: &DrawIndirectCount) {
+        self.indirect_count(draw, IndirectKind::DrawIndexed);
     }
 
     /// Refused for the same reason `create_mesh_pipeline` is: there is no mesh
@@ -1440,26 +1539,21 @@ impl CommandEncoder for Dx12CommandEncoder {
         let Some(buffer) = self.buffer(args) else {
             return;
         };
-        if !offset.is_multiple_of(DISPATCH_ARGUMENT_ALIGNMENT) {
-            self.fail(HalError::InvalidDescriptor(format!(
-                "dispatch_indirect reads its arguments at offset {offset}, and \
-                 D3D12_DISPATCH_ARGUMENTS is three `u32`s — so the offset must be a multiple of \
-                 {DISPATCH_ARGUMENT_ALIGNMENT} for them to be read at all"
-            )));
-            return;
-        }
-        if offset
-            .checked_add(DISPATCH_ARGUMENTS)
-            .is_none_or(|end| end > buffer.size)
+        let plan = match plan_indirect(IndirectKind::Dispatch, offset, 1, 0, buffer.size) {
+            Ok(Some(plan)) => plan,
+            // Unreachable through a count of one, and dropped rather than
+            // refused if it ever becomes reachable: a call of no commands is not
+            // an error anywhere else in this module either.
+            Ok(None) => return,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let signature = match self
+            .device
+            .indirect_signature(IndirectKind::Dispatch, plan.stride)
         {
-            self.fail(HalError::InvalidDescriptor(format!(
-                "dispatch_indirect reads {DISPATCH_ARGUMENTS} bytes at offset {offset} of a {}-byte \
-                 buffer",
-                buffer.size
-            )));
-            return;
-        }
-        let signature = match self.device.dispatch_signature() {
             Ok(signature) => signature,
             Err(error) => {
                 self.fail(error);
@@ -1468,12 +1562,13 @@ impl CommandEncoder for Dx12CommandEncoder {
         };
         let Some(list) = self.list() else { return };
         // SAFETY: `list` is live and recording, `signature` is a live command
-        // signature this device owns, and `buffer.raw` is a live resource this
-        // encoder retained above. The argument span was checked against the
-        // buffer's own size, and the count buffer is `None` — legal for a
-        // signature whose command count is a constant.
+        // signature this device owns for exactly this layout and stride, and
+        // `buffer.raw` is a live resource this encoder retained above. The
+        // argument span was checked against the buffer's own size, and the count
+        // buffer is `None` — legal for a signature whose command count is a
+        // constant.
         unsafe {
-            list.ExecuteIndirect(&signature, 1, &buffer.raw, offset, None, 0);
+            list.ExecuteIndirect(&signature, plan.count, &buffer.raw, offset, None, 0);
         }
     }
 
@@ -1545,6 +1640,139 @@ impl CommandEncoder for Dx12CommandEncoder {
 }
 
 impl Dx12CommandEncoder {
+    /// `ExecuteIndirect` with a `DRAW` or `DRAW_INDEXED` command signature and a
+    /// count the CPU knows.
+    ///
+    /// The body of [`draw_indirect`](CommandEncoder::draw_indirect) and
+    /// [`draw_indexed_indirect`](CommandEncoder::draw_indexed_indirect), which
+    /// differ only in which argument structure the signature describes.
+    ///
+    /// **`MaxCommandCount` is the whole of `MULTI_DRAW_INDIRECT` here.** One
+    /// call emits `draw_count` draws from `draw_count` argument structures, so
+    /// this is D3D12's native multi-draw rather than a loop standing in for one
+    /// — which is what `crcbl-mtl` has to do, and why its module docs argue that
+    /// the loop *is* the feature there.
+    fn indirect(&mut self, draw: &DrawIndirect, kind: IndirectKind) {
+        if self.list().is_none() || !self.drawable(kind.what()) || !self.indexed_for(kind) {
+            return;
+        }
+        let Some(args) = self.buffer(draw.args) else {
+            return;
+        };
+        let plan = match plan_indirect(kind, draw.offset, draw.draw_count, draw.stride, args.size) {
+            Ok(Some(plan)) => plan,
+            // A draw of nothing, which the seam allows and D3D12 has no call
+            // for: `MaxCommandCount` of zero is not a legal `ExecuteIndirect`.
+            Ok(None) => return,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let Some(signature) = self.signature(kind, plan.stride) else {
+            return;
+        };
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording, `signature` is a live command
+        // signature this device owns for exactly this layout and stride, and
+        // `args.raw` is a live resource this encoder retained above. The span
+        // every structure lies in was checked against the buffer's own size, and
+        // the count buffer is `None` — legal for a signature whose command count
+        // is a constant.
+        unsafe {
+            list.ExecuteIndirect(&signature, plan.count, &args.raw, draw.offset, None, 0);
+        }
+    }
+
+    /// `ExecuteIndirect` with a count buffer, which is the whole of
+    /// [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT).
+    ///
+    /// `pCountBuffer` is a parameter of the same call the CPU-count path makes,
+    /// so the signature is shared and nothing about this is emulated: D3D12
+    /// reads the `u32`, clamps it to `MaxCommandCount`, and executes that many.
+    /// `crcbl-mtl` refuses the same two entry points because Metal has no such
+    /// parameter — see `crcbl_mtl::draw` — which is the difference that puts
+    /// D3D12 on [`IndirectCount`](crcbl_hal::GeometryPath::IndirectCount) and
+    /// Metal on the per-batch arm.
+    fn indirect_count(&mut self, draw: &DrawIndirectCount, kind: IndirectKind) {
+        if self.list().is_none() || !self.drawable(kind.what()) || !self.indexed_for(kind) {
+            return;
+        }
+        let Some(args) = self.buffer(draw.args) else {
+            return;
+        };
+        let Some(count) = self.buffer(draw.count_buffer) else {
+            return;
+        };
+        let plan = match plan_indirect(
+            kind,
+            draw.args_offset,
+            draw.max_draw_count,
+            draw.stride,
+            args.size,
+        ) {
+            Ok(Some(plan)) => plan,
+            // A ceiling of zero reads neither buffer, so neither is checked and
+            // there is nothing to record. See `crate::draw::plan_indirect`.
+            Ok(None) => return,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        if let Err(error) = check_count(kind, draw.count_offset, count.size) {
+            self.fail(error);
+            return;
+        }
+        let Some(signature) = self.signature(kind, plan.stride) else {
+            return;
+        };
+        let Some(list) = self.list() else { return };
+        // SAFETY: as `indirect`, plus `count.raw`, a live resource this encoder
+        // also retained, whose `u32` at `count_offset` was just checked to be
+        // inside it.
+        unsafe {
+            list.ExecuteIndirect(
+                &signature,
+                plan.count,
+                &args.raw,
+                draw.args_offset,
+                &count.raw,
+                draw.count_offset,
+            );
+        }
+    }
+
+    /// Refuses an *indexed* indirect draw with no index buffer bound.
+    ///
+    /// The indirect twin of the check [`draw_indexed`](CommandEncoder::draw_indexed)
+    /// makes, and it has to be a separate one because the argument structure is
+    /// what says how many indices to read: with no view bound D3D12 reads them
+    /// through nothing and rasterises nothing, which is indistinguishable from a
+    /// cull pass that emitted no work.
+    fn indexed_for(&mut self, kind: IndirectKind) -> bool {
+        if kind != IndirectKind::DrawIndexed || self.index_buffer {
+            return true;
+        }
+        self.fail(HalError::InvalidDescriptor(
+            "an indexed indirect draw with no index buffer bound; D3D12 would read indices \
+             through no view and rasterise nothing"
+                .to_string(),
+        ));
+        false
+    }
+
+    /// The command signature for one layout and stride, or the failure recorded.
+    fn signature(&mut self, kind: IndirectKind, stride: u32) -> Option<ID3D12CommandSignature> {
+        match self.device.indirect_signature(kind, stride) {
+            Ok(signature) => Some(signature),
+            Err(error) => {
+                self.fail(error);
+                None
+            }
+        }
+    }
+
     /// The body of both buffer↔image copies, which differ only in which side is
     /// the placed footprint.
     fn record_texture_copy(&mut self, copy: &BufferImageCopy, buffer_is_source: bool) {

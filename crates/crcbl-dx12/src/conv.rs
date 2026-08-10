@@ -52,8 +52,8 @@
 
 use crcbl_hal::{
     BindingKind, BlendFactor, BlendOp, BufferUsage, ColorWrites, CompareOp, CullMode, FilterMode,
-    Format, ImageType, ImageUsage, MemoryLocation, PolygonMode, PrimitiveTopology, ResourceState,
-    SamplerAddressMode, SamplerDesc, ShaderStages, StencilOp,
+    Format, ImageType, ImageUsage, IndexFormat, MemoryLocation, PolygonMode, PrimitiveTopology,
+    ResourceState, SamplerAddressMode, SamplerDesc, ShaderStages, StencilOp,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_PRIMITIVE_TOPOLOGY, D3D_PRIMITIVE_TOPOLOGY_LINELIST, D3D_PRIMITIVE_TOPOLOGY_LINESTRIP,
@@ -116,11 +116,11 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_D32_FLOAT_S8X24_UINT, DXGI_FORMAT_R8_UNORM, DXGI_FORMAT_R8G8_UNORM,
     DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_R10G10B10A2_UNORM,
     DXGI_FORMAT_R11G11B10_FLOAT, DXGI_FORMAT_R16_FLOAT, DXGI_FORMAT_R16_TYPELESS,
-    DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
-    DXGI_FORMAT_R24_UNORM_X8_TYPELESS, DXGI_FORMAT_R24G8_TYPELESS, DXGI_FORMAT_R32_FLOAT,
-    DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS, DXGI_FORMAT_R32_TYPELESS, DXGI_FORMAT_R32_UINT,
-    DXGI_FORMAT_R32G8X24_TYPELESS, DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32_UINT,
-    DXGI_FORMAT_R32G32B32A32_FLOAT,
+    DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R16_UNORM, DXGI_FORMAT_R16G16_FLOAT,
+    DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R24_UNORM_X8_TYPELESS, DXGI_FORMAT_R24G8_TYPELESS,
+    DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS, DXGI_FORMAT_R32_TYPELESS,
+    DXGI_FORMAT_R32_UINT, DXGI_FORMAT_R32G8X24_TYPELESS, DXGI_FORMAT_R32G32_FLOAT,
+    DXGI_FORMAT_R32G32_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT,
 };
 
 /// The seam's texel format as DXGI spells it, for a **view**.
@@ -169,6 +169,20 @@ pub(crate) const fn dxgi_format(format: Format) -> DXGI_FORMAT {
         Format::Bc6hRgbUfloat => DXGI_FORMAT_BC6H_UF16,
         Format::Bc7RgbaUnorm => DXGI_FORMAT_BC7_UNORM,
         Format::Bc7RgbaUnormSrgb => DXGI_FORMAT_BC7_UNORM_SRGB,
+    }
+}
+
+/// The seam's index width as the `DXGI_FORMAT` a `D3D12_INDEX_BUFFER_VIEW`
+/// carries.
+///
+/// A separate function from [`dxgi_format`] because
+/// [`IndexFormat`](crcbl_hal::IndexFormat) is a separate seam type: D3D12
+/// accepts only these two spellings in an index-buffer view, so widening it to
+/// the texel table would offer a caller formats the view cannot take.
+pub(crate) const fn index_format(format: IndexFormat) -> DXGI_FORMAT {
+    match format {
+        IndexFormat::Uint16 => DXGI_FORMAT_R16_UINT,
+        IndexFormat::Uint32 => DXGI_FORMAT_R32_UINT,
     }
 }
 

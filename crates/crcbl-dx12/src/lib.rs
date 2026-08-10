@@ -11,8 +11,9 @@
 //! # What this backend does, and the question it was written to answer
 //!
 //! **Adapter enumeration, the resource half of the seam, a cleared pixel read
-//! back, a triangle drawn, a compute dispatch read back, a window presented to,
-//! and a headless image ring.** `Dx12Instance` lists every D3D12 adapter
+//! back, a triangle drawn — directly, indexed, indirect and with a GPU-side draw
+//! count — a compute dispatch read back, a window presented to, and a headless
+//! image ring.** `Dx12Instance` lists every D3D12 adapter
 //! with its capabilities filled in, which is the one thing
 //! [`Instance::adapters`](crcbl_hal::Instance::adapters) promises can be
 //! answered before a device exists. `request_device` then opens a real
@@ -37,8 +38,8 @@
 //! **Nothing in this crate is a stub that reports success** — a draw recorded
 //! into an encoder *fails the encoder*, so `finish` hands back the refusal
 //! rather than a command buffer that submits and draws nothing. Everything past
-//! the clear that no slice has written — queries, timeline semaphores, indexed
-//! and indirect draws — refuses with
+//! the clear that no slice has written — queries, timeline semaphores, buffer
+//! fills, image-to-image copies, mesh dispatch — refuses with
 //! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
 //! whose `what` names the slice the answer arrives in, so a caller reads "not
 //! yet" rather than "broken". A refusal that is *permanent* deliberately does
@@ -118,21 +119,31 @@
 //! things a plain `cargo nextest run -p crcbl-dx12` cannot tell you. `crcbl-vk`
 //! pins lavapipe through `CRCBL_VK_ICD` for the same reason.
 //!
-//! # Every adapter sits at the geometry floor so far, and that is *this backend* speaking
+//! # Every adapter now derives `IndirectCount`, and that is *this backend* speaking
 //!
 //! [`GeometryPath`](crcbl_hal::GeometryPath) is derived from
 //! [`Features`](crcbl_hal::Features) precisely so a backend cannot claim a path
-//! it has not earned, and the flags it has not earned are still most of
-//! [`GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN). So the derived path is
-//! [`IndirectPerBatch`](crcbl_hal::GeometryPath::IndirectPerBatch) **for every
-//! adapter, including one that could run the whole set** — because
-//! [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE),
-//! [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT) and
-//! [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) all wait on
-//! calls this crate does not make yet, not because any adapter lacks them.
-//! [`COMPUTE`](crcbl_hal::Features::COMPUTE) has left that list: the dispatch
-//! slice made the calls behind it, and a dispatch's result is read back in this
-//! crate's own tests.
+//! it has not earned. The derived path is
+//! [`IndirectCount`](crcbl_hal::GeometryPath::IndirectCount) for every adapter
+//! since the draw slice: `ExecuteIndirect` takes a **count buffer** as an
+//! ordinary parameter, so
+//! [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) has a call
+//! behind it here where `crcbl-mtl` had to withdraw the same flag — Metal has no
+//! count-from-memory execution at all. It is not
+//! [`MeshShader`](crcbl_hal::GeometryPath::MeshShader) because
+//! `create_mesh_pipeline` and `DispatchMesh` are still unwritten, which is a gap
+//! in this crate rather than in any adapter.
+//!
+//! What is left of [`GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN) waiting on a
+//! call is [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE)
+//! alone: `Device::create_semaphore` has to hand one out and
+//! `ID3D12CommandQueue::Wait` has to consume it.
+//! [`COMPUTE`](crcbl_hal::Features::COMPUTE),
+//! [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT),
+//! `DRAW_INDIRECT_COUNT` and
+//! [`INDIRECT_FIRST_INSTANCE`](crcbl_hal::Features::INDIRECT_FIRST_INSTANCE)
+//! have all left that list, each on the slice that made its calls and read the
+//! result back in this crate's own tests.
 //!
 //! **Read the WARP verdict off the SM6.6 line, never off the selected path.**
 //! The path is a statement about how much of this backend is written; the
@@ -162,8 +173,9 @@
 //! [`TEXTURE_COMPRESSION_BC`](crcbl_hal::Features::TEXTURE_COMPRESSION_BC) is
 //! measured per format and gates `create_image`,
 //! [`SAMPLER_ANISOTROPY`](crcbl_hal::Features::SAMPLER_ANISOTROPY) arrived with
-//! `create_sampler`, and [`COMPUTE`](crcbl_hal::Features::COMPUTE) arrived with
-//! `create_compute_pipeline` and `dispatch`.
+//! `create_sampler`, [`COMPUTE`](crcbl_hal::Features::COMPUTE) arrived with
+//! `create_compute_pipeline` and `dispatch`, and the three indirect flags
+//! arrived with the `ExecuteIndirect` draws — see `crcbl_dx12::draw`.
 //!
 //! # `Dx12Instance` exists only on Windows, and is unlinked here on purpose
 //!
@@ -226,6 +238,13 @@ mod conv;
 mod descriptor;
 #[cfg(target_os = "windows")]
 mod device;
+// The index-buffer and indirect-argument arithmetic, for the same reason
+// `present` below is not Windows-only: it holds no `windows` type and no seam
+// handle, so off Windows it exists in the test build alone and `cargo test` on
+// any host checks the offsets, strides and bounds a draw's output could never
+// reveal.
+#[cfg(any(target_os = "windows", test))]
+mod draw;
 // The DXIL container, parsed as bytes. Not Windows-only for the reason
 // `present` below is not: it holds no `windows` type, and off Windows it exists
 // in the test build alone so that `cargo test` on any host checks what this

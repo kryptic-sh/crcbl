@@ -92,6 +92,7 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_COMPARISON_FUNC_ALWAYS, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
     D3D12_FENCE_FLAG_NONE, D3D12_GPU_DESCRIPTOR_HANDLE, D3D12_HEAP_FLAG_NONE,
     D3D12_HEAP_PROPERTIES, D3D12_INDIRECT_ARGUMENT_DESC, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
+    D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED,
     D3D12_MEMORY_POOL_UNKNOWN, D3D12_RANGE, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
     D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_BUFFER, D3D12_SAMPLER_DESC,
     D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12CreateDevice,
@@ -106,6 +107,7 @@ use windows::core::{Interface, PCWSTR};
 use crate::binding::{self, BindGroupLayoutRecord, BindGroupRecord, VisibleHeaps};
 use crate::command::Dx12CommandEncoder;
 use crate::descriptor::{Descriptors, Kind, Slot};
+use crate::draw::IndirectKind;
 use crate::dxil::ShaderModuleEntry;
 use crate::handle::{self, Owned, Owner};
 use crate::instance::{AdapterRecord, InstanceInner, OFFSCREEN_HWND, next_owner_id, not_yet};
@@ -309,13 +311,19 @@ pub(crate) struct DeviceState {
     /// `crate::descriptor` deliberately never creates. See `crate::binding`.
     visible: VisibleHeaps,
     retire: RetireQueue<Retired>,
-    /// The `DISPATCH` command signature every indirect dispatch executes.
+    /// The command signatures `ExecuteIndirect` reads its arguments through,
+    /// created on first use and keyed by what each describes.
     ///
-    /// One per device and created on first use: it describes an argument
-    /// *layout* rather than any pipeline's arguments — three `u32`s, no root
-    /// arguments — so every `dispatch_indirect` on this device can share it, and
-    /// a device that never makes one never creates it.
-    dispatch_signature: Option<ID3D12CommandSignature>,
+    /// One per `(kind, stride)` rather than one per device: a signature
+    /// describes an argument *layout* — a fixed structure, no root arguments —
+    /// so every call sharing a layout and a stride can share the object, and a
+    /// device that records no indirect work creates none. The stride is part of
+    /// the key because D3D12 puts `ByteStride` on the signature rather than on
+    /// the call; see [`crate::draw`].
+    ///
+    /// A `Vec` rather than a map: three kinds, and one stride each for every
+    /// caller that packs its arguments tightly.
+    signatures: Vec<(IndirectKind, u32, ID3D12CommandSignature)>,
     /// The last fence value handed out, by [`Device::submit`] or
     /// [`Device::wait_idle`].
     ///
@@ -472,10 +480,6 @@ pub(crate) struct BoundPipeline {
     pub(crate) topology: D3D_PRIMITIVE_TOPOLOGY,
     pub(crate) stencil_reference: Option<u32>,
 }
-
-/// `ByteStride` of the dispatch command signature: one
-/// `D3D12_DISPATCH_ARGUMENTS`, which is three `u32`s. Fixed by D3D12's struct.
-const DISPATCH_ARGUMENT_STRIDE: u32 = 12;
 
 /// A compute pipeline resolved to what the command list must be told.
 ///
@@ -693,29 +697,43 @@ impl DeviceInner {
         })
     }
 
-    /// The `DISPATCH` command signature, created on first use.
+    /// The command signature one indirect layout and stride is executed
+    /// through, created on first use.
     ///
-    /// **A command signature holding only `DISPATCH` takes no root signature.**
-    /// `CreateCommandSignature`'s second argument is required only when the
-    /// argument layout writes root arguments — a constant, a root CBV, a vertex
-    /// or index buffer view — and this one writes none, so the same object is
-    /// valid against every pipeline this device has. That is what makes one per
-    /// device correct rather than one per pipeline.
+    /// **A command signature holding only `DISPATCH`, `DRAW` or `DRAW_INDEXED`
+    /// takes no root signature.** `CreateCommandSignature`'s second argument is
+    /// required only when the argument layout writes root arguments — a
+    /// constant, a root CBV, a vertex or index buffer view — and none of these
+    /// three writes any, so one object is valid against every pipeline this
+    /// device has. That is what makes the cache key `(kind, stride)` rather than
+    /// the pipeline.
     ///
     /// # Errors
     ///
     /// [`HalError::Backend`] carrying D3D12's own message when creation fails.
-    pub(crate) fn dispatch_signature(&self) -> Result<ID3D12CommandSignature, HalError> {
+    pub(crate) fn indirect_signature(
+        &self,
+        kind: IndirectKind,
+        stride: u32,
+    ) -> Result<ID3D12CommandSignature, HalError> {
         let mut state = self.state();
-        if let Some(signature) = &state.dispatch_signature {
+        if let Some((_, _, signature)) = state
+            .signatures
+            .iter()
+            .find(|(cached, width, _)| *cached == kind && *width == stride)
+        {
             return Ok(signature.clone());
         }
         let argument = D3D12_INDIRECT_ARGUMENT_DESC {
-            Type: D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
+            Type: match kind {
+                IndirectKind::Dispatch => D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
+                IndirectKind::Draw => D3D12_INDIRECT_ARGUMENT_TYPE_DRAW,
+                IndirectKind::DrawIndexed => D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED,
+            },
             ..Default::default()
         };
         let desc = D3D12_COMMAND_SIGNATURE_DESC {
-            ByteStride: DISPATCH_ARGUMENT_STRIDE,
+            ByteStride: stride,
             NumArgumentDescs: 1,
             pArgumentDescs: &raw const argument,
             NodeMask: 0,
@@ -723,7 +741,7 @@ impl DeviceInner {
         let mut created: Option<ID3D12CommandSignature> = None;
         // SAFETY: `desc` is a live local whose `pArgumentDescs` points at
         // `argument`, also a live local, and both outlive the call. The root
-        // signature is `None`, which this layout permits — see above. `created`
+        // signature is `None`, which these layouts permit — see above. `created`
         // is a live local of the interface type asked for.
         unsafe {
             self.raw
@@ -731,7 +749,9 @@ impl DeviceInner {
         }
         .map_err(|error| {
             HalError::Backend(format!(
-                "ID3D12Device::CreateCommandSignature failed for the dispatch signature: {error}"
+                "ID3D12Device::CreateCommandSignature failed for {} at a stride of {stride}: \
+                 {error}",
+                kind.what()
             ))
         })?;
         let signature = created.ok_or_else(|| {
@@ -740,7 +760,7 @@ impl DeviceInner {
                     .to_string(),
             )
         })?;
-        state.dispatch_signature = Some(signature.clone());
+        state.signatures.push((kind, stride, signature.clone()));
         Ok(signature)
     }
 
@@ -1107,7 +1127,7 @@ impl Dx12Device {
             descriptors: Descriptors::new(&raw),
             visible: VisibleHeaps::new(),
             retire: RetireQueue::new(),
-            dispatch_signature: None,
+            signatures: Vec::new(),
             next_fence_value: 0,
         };
         let inner = Arc::new(DeviceInner {
@@ -3141,11 +3161,11 @@ pub(crate) mod tests {
     use crcbl_hal::{
         Barriers, BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource, BufferCopy,
         BufferImageCopy, BufferUsage, ClearValue, ColorAttachment, ColorTargetState, CompareOp,
-        CompositeAlpha, ComputePassDesc, DrawIndirectCount, Extent3d, Features, FilterMode,
-        ImageAspect, ImageBarrier, ImageCopy, ImageSubresourceLayers, ImageViewType, IndexFormat,
-        Instance, LoadOp, MultisampleState, Offset3d, PresentMode, PrimitiveState, QueryKind,
-        Rect2d, RenderPassDesc, ResourceState, SemaphoreKind, SemaphoreSignal, SemaphoreWait,
-        ShaderEntry, ShaderStages, StoreOp,
+        CompositeAlpha, ComputePassDesc, DrawIndirect, DrawIndirectCount, Extent3d, Features,
+        FilterMode, ImageAspect, ImageBarrier, ImageCopy, ImageSubresourceLayers, ImageViewType,
+        IndexFormat, Instance, LoadOp, MultisampleState, Offset3d, PresentMode, PrimitiveState,
+        QueryKind, Rect2d, RenderPassDesc, ResourceState, SemaphoreKind, SemaphoreSignal,
+        SemaphoreWait, ShaderEntry, ShaderStages, StoreOp,
     };
 
     use crate::Dx12Instance;
@@ -3526,6 +3546,117 @@ pub(crate) mod tests {
         bytes[at..at + 4].try_into().expect("four bytes")
     }
 
+    /// Asserts that a [`SQUARE`] readback holds `crcbl_shaders::triangle`'s
+    /// triangle and nothing else.
+    ///
+    /// Shared by every draw entry point this crate implements, because the
+    /// picture is the *same* one whichever call produced it — that is the whole
+    /// claim an indexed or indirect draw makes, so asserting it twice from two
+    /// copies would let the copies drift into two different claims.
+    ///
+    /// # What makes each assertion able to fail
+    ///
+    /// * **A corner is still the clear colour.** The clear already worked before
+    ///   any of these slices, so a draw that covered the whole target — the
+    ///   shape a full-screen fallback or an ignored viewport produces — fails
+    ///   here.
+    /// * **The centre is not the clear colour.** A draw that recorded nothing,
+    ///   or a pipeline bound but never used, leaves the clear behind. For the
+    ///   indexed and indirect calls this is also what a dropped index buffer or
+    ///   an ignored argument offset produces, because both leave a degenerate
+    ///   triangle that rasterises nothing.
+    /// * **The three probes are red, green and blue dominant, in that
+    ///   arrangement.** `crcbl_shaders::triangle` puts one saturated primary at
+    ///   each corner precisely so a Y flip, an X mirror or a vertex-order
+    ///   mistake produces a *different* picture rather than a plausible one. A
+    ///   flat fill fails all three at once; a Y flip swaps the apex probe with
+    ///   the two base probes; an X mirror swaps green and blue.
+    /// * **Every probe's channels sum to about full scale.** Barycentric weights
+    ///   sum to one and each vertex contributes full intensity in exactly one
+    ///   channel, so this holds for any point inside the triangle — and fails if
+    ///   the vertex stage read the wrong offsets in the storage buffer, which is
+    ///   what an index buffer read at the wrong stride or offset makes it do.
+    ///   That is the failure a picture "looking about right" hides.
+    fn assert_triangle_drawn(bytes: &[u8], what: &str) {
+        assert_eq!(
+            texel(bytes, 0, 0),
+            CLEAR_TEXEL,
+            "{what}: the top-left corner is outside the triangle, so the draw covered more than \
+             it should"
+        );
+        assert_eq!(
+            texel(bytes, 63, 63),
+            CLEAR_TEXEL,
+            "{what}: the bottom-right corner is outside the triangle too"
+        );
+        let centre = texel(bytes, 32, 32);
+        assert_ne!(
+            centre, CLEAR_TEXEL,
+            "{what}: the centre is inside the triangle and still holds the clear colour, so \
+             nothing drew"
+        );
+        assert_eq!(
+            centre[3], 0xFF,
+            "{what}: every vertex has alpha 1: {centre:?}"
+        );
+
+        // `(column, row, which channel must dominate, what that corner is)`.
+        // Each row and column is inside the triangle — see the sum assertion
+        // below for the check that says so — and near exactly one of its
+        // corners.
+        let probes = [
+            (32usize, 12usize, 0usize, "the red apex, near the top"),
+            (16, 48, 2, "the blue corner, bottom left"),
+            (48, 48, 1, "the green corner, bottom right"),
+        ];
+        for (x, y, channel, corner) in probes {
+            let texel = texel(bytes, x, y);
+            assert_ne!(
+                texel, CLEAR_TEXEL,
+                "{what}: ({x}, {y}) is inside the triangle and holds the clear colour: {corner}"
+            );
+            for other in 0..3 {
+                if other == channel {
+                    continue;
+                }
+                assert!(
+                    texel[channel] > texel[other],
+                    "{what}: ({x}, {y}) is {texel:?}, which is not dominated by channel \
+                     {channel} — expected {corner}"
+                );
+            }
+            // Barycentric weights sum to one and each vertex is saturated in
+            // exactly one channel, so any interior point sums to full scale.
+            let sum = u32::from(texel[0]) + u32::from(texel[1]) + u32::from(texel[2]);
+            assert!(
+                (250..=260).contains(&sum),
+                "{what}: ({x}, {y}) is {texel:?}, summing to {sum} rather than full scale — the \
+                 vertex stage is not reading the colours the storage buffer holds"
+            );
+        }
+    }
+
+    /// Asserts that a [`SQUARE`] readback holds the clear colour and nothing
+    /// else — the frame a draw of zero instances or zero commands leaves.
+    ///
+    /// The inverse of [`assert_triangle_drawn`], and it is what makes each of
+    /// those assertions mean something: a backend that drew unconditionally
+    /// would pass every one of them and fail here.
+    fn assert_nothing_drawn(bytes: &[u8], what: &str) {
+        if let Some((at, found)) = bytes
+            .chunks_exact(4)
+            .enumerate()
+            .find(|(_, texel)| *texel != CLEAR_TEXEL)
+        {
+            panic!(
+                "{what}: texel ({}, {}) is {found:?} rather than the clear colour, so something \
+                 drew when nothing should have",
+                at % 64,
+                at / 64
+            );
+        }
+    }
+
     /// **The deliverable of DX4: a triangle WARP actually drew, read back and
     /// asserted texel by texel.**
     ///
@@ -3729,57 +3860,7 @@ pub(crate) mod tests {
             })
             .expect("a readback of a HostReadback buffer");
         let bytes = drain(&device, request, SQUARE_BYTES);
-
-        assert_eq!(
-            texel(&bytes, 0, 0),
-            CLEAR_TEXEL,
-            "the top-left corner is outside the triangle, so the draw covered more than it should"
-        );
-        assert_eq!(
-            texel(&bytes, 63, 63),
-            CLEAR_TEXEL,
-            "the bottom-right corner is outside the triangle too"
-        );
-        let centre = texel(&bytes, 32, 32);
-        assert_ne!(
-            centre, CLEAR_TEXEL,
-            "the centre is inside the triangle and still holds the clear colour, so nothing drew"
-        );
-        assert_eq!(centre[3], 0xFF, "every vertex has alpha 1: {centre:?}");
-
-        // `(column, row, which channel must dominate, what that corner is)`.
-        // Each row and column is inside the triangle — see the assertion below
-        // for the check that says so — and near exactly one of its corners.
-        let probes = [
-            (32usize, 12usize, 0usize, "the red apex, near the top"),
-            (16, 48, 2, "the blue corner, bottom left"),
-            (48, 48, 1, "the green corner, bottom right"),
-        ];
-        for (x, y, channel, what) in probes {
-            let texel = texel(&bytes, x, y);
-            assert_ne!(
-                texel, CLEAR_TEXEL,
-                "({x}, {y}) is inside the triangle and holds the clear colour: {what}"
-            );
-            for other in 0..3 {
-                if other == channel {
-                    continue;
-                }
-                assert!(
-                    texel[channel] > texel[other],
-                    "({x}, {y}) is {texel:?}, which is not dominated by channel {channel} — \
-                     expected {what}"
-                );
-            }
-            // Barycentric weights sum to one and each vertex is saturated in
-            // exactly one channel, so any interior point sums to full scale.
-            let sum = u32::from(texel[0]) + u32::from(texel[1]) + u32::from(texel[2]);
-            assert!(
-                (250..=260).contains(&sum),
-                "({x}, {y}) is {texel:?}, summing to {sum} rather than full scale — the vertex \
-                 stage is not reading the colours the storage buffer holds"
-            );
-        }
+        assert_triangle_drawn(&bytes, "a direct draw of three vertices");
 
         device.destroy_readback(request);
         device.destroy_graphics_pipeline(pipeline);
@@ -3791,6 +3872,693 @@ pub(crate) mod tests {
         device.destroy_buffer(readback);
         device.destroy_image_view(view);
         device.destroy_image(target);
+    }
+
+    /// The index pool every indexed draw below reads, and the decoy in front of
+    /// it.
+    ///
+    /// Six `u32`s: three zeros, then the triangle's own `0, 1, 2`. Every draw
+    /// reads indices `3..6`, so a backend that ignored the index buffer, dropped
+    /// the first index, or read from the start of the buffer draws vertex zero
+    /// three times — a degenerate triangle that rasterises nothing and leaves
+    /// the clear behind, which [`assert_triangle_drawn`] fails on.
+    const INDICES: [u32; 6] = [0, 0, 0, 0, 1, 2];
+
+    /// The first index every draw below starts at, which is the decoy's length.
+    const FIRST_INDEX: u32 = 3;
+
+    /// Everything an indexed draw of `crcbl_shaders::triangle` needs, built
+    /// once and drawn through several times.
+    ///
+    /// The same geometry, pipeline and bind group
+    /// `a_pulled_triangle_is_drawn_and_read_back_texel_by_texel` builds, plus an
+    /// index buffer — so what the tests below vary is the *draw call* and
+    /// nothing else, which is the only way the picture can be evidence about
+    /// which call produced it.
+    struct IndexedTriangle {
+        target: ImageHandle,
+        view: ImageViewHandle,
+        readback: BufferHandle,
+        vertices: BufferHandle,
+        indices: BufferHandle,
+        set_layout: BindGroupLayoutHandle,
+        pipeline_layout: PipelineLayoutHandle,
+        group: BindGroupHandle,
+        module: ShaderModuleHandle,
+        pipeline: GraphicsPipelineHandle,
+    }
+
+    impl IndexedTriangle {
+        fn new(device: &Dx12Device) -> Self {
+            use crcbl_shaders::{TRIANGLE, triangle};
+
+            let target = device
+                .create_image(&image(
+                    Format::Rgba8Unorm,
+                    ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
+                    SQUARE,
+                ))
+                .expect("a colour target");
+            let view = device
+                .create_image_view(&whole(target, Format::Rgba8Unorm))
+                .expect("a render target view");
+            let readback = readback_buffer(device, SQUARE_BYTES);
+
+            // Both on the upload heap, which D3D12 leaves in `GENERIC_READ` for
+            // the resource's whole life — a state that already admits a shader
+            // read *and* an index-buffer read, so neither needs a copy or a
+            // barrier. The indirect arguments below are a different story and
+            // get both.
+            let geometry = triangle::vertex_bytes();
+            let vertices = device
+                .create_buffer(&BufferDesc {
+                    label: Some("triangle vertices"),
+                    size: geometry.len() as u64,
+                    usage: BufferUsage::STORAGE,
+                    memory: MemoryLocation::HostUpload,
+                })
+                .expect("a vertex storage buffer");
+            device
+                .write_buffer(vertices, 0, &geometry)
+                .expect("an upload-heap buffer is host-visible");
+
+            let index_bytes: Vec<u8> = INDICES.iter().flat_map(|i| i.to_le_bytes()).collect();
+            let indices = device
+                .create_buffer(&BufferDesc {
+                    label: Some("triangle indices"),
+                    size: index_bytes.len() as u64,
+                    usage: BufferUsage::INDEX,
+                    memory: MemoryLocation::HostUpload,
+                })
+                .expect("an index buffer");
+            device
+                .write_buffer(indices, 0, &index_bytes)
+                .expect("an upload-heap buffer is host-visible");
+
+            let set_layout = device
+                .create_bind_group_layout(&BindGroupLayoutDesc {
+                    label: Some("triangle geometry"),
+                    entries: &[BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: ShaderStages::VERTEX,
+                        kind: BindingKind::StorageBuffer {
+                            read_only: true,
+                            dynamic: false,
+                        },
+                        count: 1,
+                        flags: BindingFlags::empty(),
+                    }],
+                })
+                .expect("one read-only storage buffer");
+            let pipeline_layout = device
+                .create_pipeline_layout(&PipelineLayoutDesc {
+                    label: Some("triangle"),
+                    bind_group_layouts: &[set_layout],
+                    push_constants: None,
+                })
+                .expect("a root signature with one descriptor table");
+            let group = device
+                .create_bind_group(&BindGroupDesc {
+                    label: Some("triangle geometry"),
+                    layout: set_layout,
+                    entries: &[BindGroupEntry {
+                        binding: 0,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(vertices),
+                    }],
+                    variable_count: None,
+                })
+                .expect("a bind group over the vertex buffer");
+            let module = device
+                .create_shader_module(&ShaderModuleDesc {
+                    label: Some("triangle.slang"),
+                    dxil: &TRIANGLE.dxil_containers(),
+                    ..ShaderModuleDesc::default()
+                })
+                .unwrap_or_else(|error| panic!("stage=create_shader_module: {error:?}"));
+            let targets = [ColorTargetState::opaque(Format::Rgba8Unorm)];
+            let pipeline = device
+                .create_graphics_pipeline(&GraphicsPipelineDesc {
+                    label: Some("triangle"),
+                    layout: pipeline_layout,
+                    vertex: ShaderEntry {
+                        module,
+                        entry_point: "vertexMain",
+                    },
+                    fragment: Some(ShaderEntry {
+                        module,
+                        entry_point: "fragmentMain",
+                    }),
+                    primitive: PrimitiveState::default(),
+                    depth_stencil: None,
+                    multisample: MultisampleState::default(),
+                    color_targets: &targets,
+                })
+                .unwrap_or_else(|error| panic!("stage=create_graphics_pipeline: {error:?}"));
+
+            Self {
+                target,
+                view,
+                readback,
+                vertices,
+                indices,
+                set_layout,
+                pipeline_layout,
+                group,
+                module,
+                pipeline,
+            }
+        }
+
+        /// Clears the target, records `record` inside the pass with the
+        /// pipeline, group and index buffer already bound, and reads the frame
+        /// back.
+        ///
+        /// The readback is re-poisoned first, so a run that copied nothing is a
+        /// frame of [`POISON`] rather than the previous run's picture — which is
+        /// what stops one green draw making every later assertion vacuous.
+        fn run(
+            &self,
+            device: &Dx12Device,
+            record: impl FnOnce(&mut dyn CommandEncoder),
+        ) -> Vec<u8> {
+            device
+                .write_buffer(self.readback, 0, &vec![POISON; SQUARE_BYTES])
+                .expect("a readback buffer is host-visible");
+            let pass = clear_pass(
+                self.view,
+                CLEAR,
+                LoadOp::Clear,
+                Rect2d::from_size(SQUARE.width, SQUARE.height),
+            );
+            run(device, |encoder| {
+                encoder.pipeline_barrier(&Barriers {
+                    images: &[ImageBarrier::new(
+                        self.target,
+                        ImageSubresourceRange::all(Format::Rgba8Unorm),
+                        ResourceState::Undefined,
+                        ResourceState::ColorAttachment,
+                    )],
+                    ..Barriers::default()
+                });
+                encoder.begin_render_pass(&pass.desc());
+                // Pipeline before group: setting a root signature resets every
+                // root argument, so the reverse order would bind a table the
+                // next call discards.
+                encoder.bind_graphics_pipeline(self.pipeline);
+                encoder.bind_group(0, self.group, &[], self.pipeline_layout);
+                encoder.bind_index_buffer(self.indices, 0, IndexFormat::Uint32);
+                record(encoder);
+                encoder.end_render_pass();
+                encoder.pipeline_barrier(&Barriers {
+                    images: &[ImageBarrier::new(
+                        self.target,
+                        ImageSubresourceRange::all(Format::Rgba8Unorm),
+                        ResourceState::ColorAttachment,
+                        ResourceState::TransferSrc,
+                    )],
+                    ..Barriers::default()
+                });
+                encoder.copy_image_to_buffer(&BufferImageCopy {
+                    buffer: self.readback,
+                    buffer_offset: 0,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image: self.target,
+                    image_subresource: ImageSubresourceLayers {
+                        aspect: ImageAspect::COLOR,
+                        mip: 0,
+                        base_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_offset: Offset3d::default(),
+                    image_extent: SQUARE,
+                });
+            });
+
+            let request = device
+                .request_readback(&ReadbackDesc {
+                    label: Some("crcbl-dx12 indexed triangle readback"),
+                    buffer: self.readback,
+                    offset: 0,
+                    size: SQUARE_BYTES as u64,
+                    after: None,
+                })
+                .expect("a readback of a HostReadback buffer");
+            let bytes = drain(device, request, SQUARE_BYTES);
+            device.destroy_readback(request);
+            bytes
+        }
+
+        fn destroy(self, device: &Dx12Device) {
+            device.destroy_graphics_pipeline(self.pipeline);
+            device.destroy_shader_module(self.module);
+            device.destroy_bind_group(self.group);
+            device.destroy_pipeline_layout(self.pipeline_layout);
+            device.destroy_bind_group_layout(self.set_layout);
+            device.destroy_buffer(self.indices);
+            device.destroy_buffer(self.vertices);
+            device.destroy_buffer(self.readback);
+            device.destroy_image_view(self.view);
+            device.destroy_image(self.target);
+        }
+    }
+
+    /// One `D3D12_DRAW_INDEXED_ARGUMENTS` as the bytes an argument buffer holds.
+    ///
+    /// Written through `crcbl_shaders::draw_gen::DrawIndexedArgs` rather than by
+    /// hand, because that is the struct `draw_gen.slang` writes and the whole
+    /// claim of the indirect path is that D3D12 reads the *same* five words the
+    /// GPU wrote for every other backend. A private copy here would be a second
+    /// layout that agreed by coincidence.
+    fn indexed_args(index_count: u32, instance_count: u32) -> [u8; ARGS_BYTES] {
+        crcbl_shaders::draw_gen::DrawIndexedArgs {
+            index_count,
+            instance_count,
+            first_index: FIRST_INDEX,
+            // Both bases zero, which is the rule `mesh.slang`'s header sets and
+            // the only value the four shader targets agree on. D3D12 would read
+            // either field happily; the shaders would not agree about what it
+            // meant.
+            vertex_offset: 0,
+            first_instance: 0,
+        }
+        .to_bytes()
+    }
+
+    /// Bytes of one indexed indirect argument structure.
+    const ARGS_BYTES: usize = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE;
+
+    /// Uploads `bytes` into a `DeviceLocal` buffer left in
+    /// [`ResourceState::IndirectArgument`], which is where `ExecuteIndirect`
+    /// requires its arguments and its count to be.
+    ///
+    /// Device-local with a copy and two barriers rather than the upload heap the
+    /// geometry uses: `GENERIC_READ` would already admit the read, and taking
+    /// the easy road would leave the state transition every real GPU-driven
+    /// frame makes — compute writes the arguments, then they are read as
+    /// arguments — untested on this backend.
+    fn indirect_buffer(device: &Dx12Device, label: &'static str, bytes: &[u8]) -> BufferHandle {
+        let upload = device
+            .create_buffer(&BufferDesc {
+                label: Some("indirect upload"),
+                size: bytes.len() as u64,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a staging buffer");
+        device.write_buffer(upload, 0, bytes).expect("write");
+        let handle = device
+            .create_buffer(&BufferDesc {
+                label: Some(label),
+                size: bytes.len() as u64,
+                usage: BufferUsage::INDIRECT | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("an indirect buffer");
+        run(device, |encoder| {
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[buffer_barrier(
+                    handle,
+                    ResourceState::Undefined,
+                    ResourceState::TransferDst,
+                )],
+                ..Barriers::default()
+            });
+            encoder.copy_buffer_to_buffer(&BufferCopy {
+                src: upload,
+                src_offset: 0,
+                dst: handle,
+                dst_offset: 0,
+                size: bytes.len() as u64,
+            });
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[buffer_barrier(
+                    handle,
+                    ResourceState::TransferDst,
+                    ResourceState::IndirectArgument,
+                )],
+                ..Barriers::default()
+            });
+        });
+        device.destroy_buffer(upload);
+        handle
+    }
+
+    /// **`DrawIndexedInstanced` reads the indices it was bound, at the first
+    /// index it was given.**
+    ///
+    /// The index buffer carries a **decoy**: three zeros in front of the
+    /// triangle's own `0, 1, 2`, and the draw reads `3..6`. So three different
+    /// failures are distinguishable rather than confusable — a backend that
+    /// never set the view, one that set it at the wrong offset, and one that
+    /// dropped `StartIndexLocation` all draw vertex zero three times, which
+    /// rasterises nothing and leaves the clear the second assertion rejects.
+    ///
+    /// The base vertex and the base instance are **zero**, and that is the
+    /// engine's rule rather than D3D12's: `crates/crcbl-shaders/shaders/mesh.slang`'s
+    /// header measured `slangc` lowering `SV_VertexID` and `SV_InstanceID` four
+    /// different ways, of which D3D12's excludes both bases and WGSL's and MSL's
+    /// include them, so zero is the only value all four agree on. D3D12 would
+    /// read a non-zero one; the shader would mean something else by it.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it. This crate compiles on Windows alone and the development box
+    /// is Linux, so nothing here has ever executed outside a CI runner.
+    #[test]
+    fn an_indexed_draw_reads_the_index_buffer_it_was_bound() {
+        let (_instance, device) = open_device();
+        let triangle = IndexedTriangle::new(&device);
+
+        let drawn = triangle.run(&device, |encoder| {
+            encoder.draw_indexed(FIRST_INDEX..FIRST_INDEX + 3, 0, 0..1);
+        });
+        assert_triangle_drawn(&drawn, "an indexed draw of indices 3..6");
+
+        // The decoy's own three indices are all vertex zero, so drawing them is
+        // a degenerate triangle and nothing rasterises. That is what makes the
+        // assertion above about the *range* rather than about the draw.
+        let decoy = triangle.run(&device, |encoder| {
+            encoder.draw_indexed(0..FIRST_INDEX, 0, 0..1);
+        });
+        assert_nothing_drawn(&decoy, "an indexed draw of the decoy's three zeros");
+
+        triangle.destroy(&device);
+    }
+
+    /// **`ExecuteIndirect` reads a `DRAW_INDEXED` argument structure out of GPU
+    /// memory, at the offset it was given, as many times as it was told.**
+    ///
+    /// The argument buffer holds two structures: a first that draws **zero**
+    /// instances and a second that draws one. So the picture says which
+    /// structures were read:
+    ///
+    /// * One command at offset zero — the first structure — draws nothing.
+    /// * One command at offset [`ARGS_BYTES`] — the second — draws the triangle,
+    ///   which is a backend that honoured `ArgumentBufferOffset`.
+    /// * Two commands from offset zero draw the triangle too, and *only* if
+    ///   `MaxCommandCount` and the signature's `ByteStride` both landed: a
+    ///   backend that executed one command, or strode by the wrong number, reads
+    ///   the zero-instance structure and nothing else.
+    ///
+    /// That last case is the whole of
+    /// [`Features::MULTI_DRAW_INDIRECT`] on this backend — `ExecuteIndirect`
+    /// emits `MaxCommandCount` draws natively, where `crcbl-mtl` has to loop.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it, for the reason
+    /// [`an_indexed_draw_reads_the_index_buffer_it_was_bound`] gives.
+    #[test]
+    fn an_indexed_indirect_draw_reads_its_arguments_at_the_offset_and_count_it_was_given() {
+        let (_instance, device) = open_device();
+        assert!(
+            device
+                .caps()
+                .features
+                .contains(Features::MULTI_DRAW_INDIRECT),
+            "ExecuteIndirect takes a MaxCommandCount on every D3D12 device; adapter caps report \
+             {:?}",
+            device.caps().features
+        );
+
+        let triangle = IndexedTriangle::new(&device);
+        let mut bytes = Vec::with_capacity(ARGS_BYTES * 2);
+        bytes.extend_from_slice(&indexed_args(3, 0));
+        bytes.extend_from_slice(&indexed_args(3, 1));
+        let args = indirect_buffer(&device, "indexed draw arguments", &bytes);
+        let stride = ARGS_BYTES as u32;
+
+        let first = triangle.run(&device, |encoder| {
+            encoder.draw_indexed_indirect(&DrawIndirect {
+                args,
+                offset: 0,
+                draw_count: 1,
+                stride,
+            });
+        });
+        assert_nothing_drawn(&first, "one command reading the zero-instance structure");
+
+        let second = triangle.run(&device, |encoder| {
+            encoder.draw_indexed_indirect(&DrawIndirect {
+                args,
+                offset: ARGS_BYTES as u64,
+                draw_count: 1,
+                stride,
+            });
+        });
+        assert_triangle_drawn(&second, "one command at the second structure's offset");
+
+        let both = triangle.run(&device, |encoder| {
+            encoder.draw_indexed_indirect(&DrawIndirect {
+                args,
+                offset: 0,
+                draw_count: 2,
+                stride,
+            });
+        });
+        assert_triangle_drawn(&both, "two commands strided over both structures");
+
+        device.destroy_buffer(args);
+        triangle.destroy(&device);
+    }
+
+    /// **`ExecuteIndirect` reads its draw count out of GPU memory, and that is
+    /// the evidence behind [`Features::DRAW_INDIRECT_COUNT`].**
+    ///
+    /// One argument structure that draws the triangle, and two count buffers:
+    /// one holding `1` and one holding `0`. Nothing else differs between the two
+    /// runs, so the picture is a readout of the `u32` the GPU held — a backend
+    /// that passed no count buffer draws the triangle both times, and one that
+    /// read the wrong offset draws it neither.
+    ///
+    /// The flag assertion and the picture are in the same test on purpose: this
+    /// is the flag that selects
+    /// [`GeometryPath::IndirectCount`](crcbl_hal::GeometryPath::IndirectCount)
+    /// for every adapter, so a flag reported over a call that does nothing is
+    /// the "unsupported arriving as passed" shape the crate docs name, and
+    /// neither half passes without the other.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it, for the reason
+    /// [`an_indexed_draw_reads_the_index_buffer_it_was_bound`] gives.
+    #[test]
+    fn an_indexed_indirect_count_draw_reads_its_count_from_gpu_memory() {
+        /// Where the count sits in its buffer. Non-zero, and a `0` sits at zero,
+        /// so a backend that ignored `CountBufferOffset` reads a count of no
+        /// draws and the assertion below fails on the run that must draw.
+        const COUNT_OFFSET: u64 = 4;
+
+        let (_instance, device) = open_device();
+        let caps = device.caps();
+        assert!(
+            caps.features.contains(Features::DRAW_INDIRECT_COUNT),
+            "ExecuteIndirect takes a count buffer on every D3D12 device; adapter caps report {:?}",
+            caps.features
+        );
+        assert_eq!(
+            caps.geometry_path(),
+            crcbl_hal::GeometryPath::IndirectCount,
+            "DRAW_INDIRECT_COUNT is what selects this path, and it is reported"
+        );
+        assert!(
+            caps.limits.max_draw_indirect_count > 1,
+            "a reported DRAW_INDIRECT_COUNT with a ceiling of one draw is not the feature"
+        );
+
+        let triangle = IndexedTriangle::new(&device);
+        let args = indirect_buffer(&device, "counted draw arguments", &indexed_args(3, 1));
+
+        // Two `u32`s, `[0, 1]`: the decoy at offset zero and the real count at
+        // `COUNT_OFFSET`.
+        let counts = |value: u32| {
+            let mut bytes = [0u8; 8];
+            bytes[COUNT_OFFSET as usize..].copy_from_slice(&value.to_le_bytes());
+            bytes
+        };
+        let draw = |count_buffer| DrawIndirectCount {
+            args,
+            args_offset: 0,
+            count_buffer,
+            count_offset: COUNT_OFFSET,
+            max_draw_count: 1,
+            stride: ARGS_BYTES as u32,
+        };
+
+        let one = indirect_buffer(&device, "a count of one", &counts(1));
+        let drawn = triangle.run(&device, |encoder| {
+            encoder.draw_indexed_indirect_count(&draw(one));
+        });
+        assert_triangle_drawn(&drawn, "a GPU-side count of one");
+
+        let zero = indirect_buffer(&device, "a count of zero", &counts(0));
+        let blank = triangle.run(&device, |encoder| {
+            encoder.draw_indexed_indirect_count(&draw(zero));
+        });
+        assert_nothing_drawn(&blank, "a GPU-side count of zero");
+
+        device.destroy_buffer(zero);
+        device.destroy_buffer(one);
+        device.destroy_buffer(args);
+        triangle.destroy(&device);
+    }
+
+    /// Every draw this backend refuses at record time, and one it accepts.
+    ///
+    /// The refusals are the ones `ExecuteIndirect` and `DrawIndexedInstanced`
+    /// would not report: D3D12 bounds-checks no argument span, reports no
+    /// missing index-buffer view, and takes an unaligned offset as a fault
+    /// rather than an error. Each is asserted by the text it names, so a backend
+    /// that refused everything for one reason would fail on the wrong message
+    /// rather than pass.
+    ///
+    /// The accepted draw at the end is what makes the six above about their own
+    /// descriptors rather than about an encoder that refuses draws.
+    #[test]
+    fn the_draws_d3d12_cannot_express_are_refused_by_name() {
+        let (_instance, device) = open_device();
+        let triangle = IndexedTriangle::new(&device);
+        let args = indirect_buffer(&device, "one structure", &indexed_args(3, 1));
+        let stride = ARGS_BYTES as u32;
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+
+        // `(what the error must say, what this is, whether to bind the index
+        // buffer, the call)`.
+        type Refused = (
+            &'static str,
+            &'static str,
+            bool,
+            Box<dyn Fn(&mut dyn CommandEncoder)>,
+        );
+        let cases: Vec<Refused> = vec![
+            (
+                "no index buffer bound",
+                "an indexed draw with no view set",
+                false,
+                Box::new(|encoder: &mut dyn CommandEncoder| {
+                    encoder.draw_indexed(0..3, 0, 0..1);
+                }),
+            ),
+            (
+                "no index buffer bound",
+                "an indexed indirect draw with no view set",
+                false,
+                Box::new(move |encoder: &mut dyn CommandEncoder| {
+                    encoder.draw_indexed_indirect(&DrawIndirect {
+                        args,
+                        offset: 0,
+                        draw_count: 1,
+                        stride,
+                    });
+                }),
+            ),
+            (
+                "runs past a",
+                "two structures in a buffer holding one",
+                true,
+                Box::new(move |encoder: &mut dyn CommandEncoder| {
+                    encoder.draw_indexed_indirect(&DrawIndirect {
+                        args,
+                        offset: 0,
+                        draw_count: 2,
+                        stride,
+                    });
+                }),
+            ),
+            (
+                "ArgumentBufferOffset",
+                "an unaligned argument offset",
+                true,
+                Box::new(move |encoder: &mut dyn CommandEncoder| {
+                    encoder.draw_indexed_indirect(&DrawIndirect {
+                        args,
+                        offset: 2,
+                        draw_count: 1,
+                        stride,
+                    });
+                }),
+            ),
+            (
+                "CountBufferOffset",
+                "an unaligned count offset",
+                true,
+                Box::new(move |encoder: &mut dyn CommandEncoder| {
+                    encoder.draw_indexed_indirect_count(&DrawIndirectCount {
+                        args,
+                        args_offset: 0,
+                        count_buffer: args,
+                        count_offset: 2,
+                        max_draw_count: 1,
+                        stride,
+                    });
+                }),
+            ),
+            (
+                "byte count at offset",
+                "a count read past the end of its buffer",
+                true,
+                Box::new(move |encoder: &mut dyn CommandEncoder| {
+                    encoder.draw_indexed_indirect_count(&DrawIndirectCount {
+                        args,
+                        args_offset: 0,
+                        count_buffer: args,
+                        count_offset: ARGS_BYTES as u64,
+                        max_draw_count: 1,
+                        stride,
+                    });
+                }),
+            ),
+            (
+                "not a multiple of the",
+                "an index buffer bound at an offset the width forbids",
+                false,
+                Box::new(move |encoder: &mut dyn CommandEncoder| {
+                    encoder.bind_index_buffer(triangle.indices, 2, IndexFormat::Uint32);
+                }),
+            ),
+        ];
+        assert!(!cases.is_empty(), "nothing to check");
+
+        for (expected, what, bind, record) in &cases {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+            encoder.bind_graphics_pipeline(triangle.pipeline);
+            if *bind {
+                encoder.bind_index_buffer(triangle.indices, 0, IndexFormat::Uint32);
+            }
+            record(encoder.as_mut());
+            let Err(error) = encoder.finish() else {
+                panic!("{what} recorded successfully, so the encoder reported a lie");
+            };
+            let HalError::InvalidDescriptor(text) = &error else {
+                panic!("{what}: a descriptor D3D12 cannot express is not {error:?}");
+            };
+            assert!(text.contains(expected), "{what}: {text}");
+        }
+
+        // And the draw every refusal above is a variation on still records, so
+        // none of them is this encoder refusing draws.
+        let mut good = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("a well-formed indexed indirect draw"),
+            queue,
+        });
+        good.bind_graphics_pipeline(triangle.pipeline);
+        good.bind_index_buffer(triangle.indices, 0, IndexFormat::Uint32);
+        good.draw_indexed_indirect(&DrawIndirect {
+            args,
+            offset: 0,
+            draw_count: 1,
+            stride,
+        });
+        let commands = good.finish().expect("a well-formed indirect draw records");
+        device.destroy_command_buffer(commands);
+
+        device.destroy_buffer(args);
+        triangle.destroy(&device);
     }
 
     /// [`LoadOp::Load`] keeps what is there and [`LoadOp::Clear`] replaces it,
