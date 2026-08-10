@@ -3635,9 +3635,47 @@ other than a Metal default — `FrontFace::Ccw` against the encoder's `Clockwise
 — and with `CullMode::None` it cannot change the image, so it would be invisible
 in any picture-based test.
 
-Next: bisect the six by removing them one at a time, which is one more run of
-the same probe step. Everything else in the neighbourhood has now been
-eliminated by measurement rather than by argument.
+**Round two is wired** (`5d39f0c`): each probe is the known-good hand-encoded
+pass plus exactly one of the six, with every value read from the resolved
+`BoundPipeline` rather than written as a literal, so a probe passes what the
+replay would. `setDepthStencilState` gets two — nil and a default object —
+because the pass has no depth attachment and those may differ. A whole-replay
+probe backstops the case where no single call is enough, which would mean a
+combination rather than a call.
+
+**Two controls travel with them, and that is the part worth copying.** A bisect
+whose baseline is a _previous log_ cannot tell a real result from a changed
+runner image. So the set carries the old whole-path probe (known red) and the
+hand-encoded pass alone (known green): if the positive control passes, the run
+is void and something outside this crate moved; if the negative control hangs,
+the objects are back in play and no single-call result means anything.
+
+Everything else in the neighbourhood has been eliminated by measurement rather
+than by argument.
+
+### Vulkan on Windows: the pin has to be a native path
+
+The `vk e2e (lavapipe, windows)` job's first run installed the loader and
+lavapipe, resolved the ICD manifest and its relative `library_path`, and then
+failed every test with `ERROR_INCOMPATIBLE_DRIVER`.
+
+The loader named the real cause itself:
+`windows_read_data_files_in_registry: Registry lookup failed to get ICD manifest files`,
+then `vkCreateInstance: Found no drivers!` — **what it prints when
+`VK_DRIVER_FILES` was never seen**, not when it was seen and declined. Under Git
+Bash the manifest was exported as `C:/lavapipe/...`, which the native loader
+does not take. `cygpath -w` converts it and the native form is echoed, so a
+future failure names the form as well as the path.
+
+Worth remembering because `ERROR_INCOMPATIBLE_DRIVER` is _also_ what a genuinely
+incompatible manifest gives — the same error covers "never read it", "read it
+and declined it", and "wrong path form". Only the loader's own preceding line
+distinguishes them, which is why the job prints `vulkaninfo` before the suite.
+
+What that first run did establish: `windows-latest` ships no Vulkan loader (as
+the runner-image README says), the pinned SDK and lavapipe both install, and the
+suite's 73 tests are selected and run. Nothing passed vacuously — every guard
+the job carries reported truthfully.
 
 ### Metal draw coverage in CI: what the ecosystem does
 
