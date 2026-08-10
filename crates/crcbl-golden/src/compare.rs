@@ -61,16 +61,43 @@ impl Tolerance {
 
     /// The bound a golden image is held to across rasterisers.
     ///
-    /// The numbers are **measured, not guessed**: radv and lavapipe differ on
-    /// P1.2's triangle by at most one level per channel, on 3.83% of the frame,
-    /// for a block SSIM of 0.999933. See the crate docs for the full table and
-    /// for why the difference is spread across the interior rather than confined
-    /// to the edges. Each bound here sits at least twice as far out as the
-    /// observed difference, and the tests in this module pin that they are still
-    /// nowhere near loose enough to admit a triangle that moved.
+    /// The numbers are **measured, not guessed**, and the three are sized
+    /// against three different quantities, because a bound is only defensible
+    /// against the thing it actually gates.
+    ///
+    /// `max_channel_delta` gates how far a *matching* frame's pixels drift.
+    /// radv and lavapipe differ on P1.2's triangle by at most one level per
+    /// channel, on 3.83% of the frame; `crcbl-vk`'s `sprite_rotation` golden
+    /// reaches two. So two is the observed maximum rather than twice it, and it
+    /// is the floor as much as the ceiling: dropping it to one turns
+    /// `sprite_rotation`'s 125 drifting pixels into 125 failing ones, which is
+    /// 0.25% of that frame and straight through the ratio below. See the crate
+    /// docs for the full table and for why the drift is spread across the
+    /// interior rather than confined to the edges.
+    ///
+    /// `max_failing_ratio` gates pixels that *exceed* that delta, so it is sized
+    /// against how many of those a passing frame has — which is very nearly
+    /// none. Every one of `crcbl-vk`'s goldens and every scene of `crcbl`'s
+    /// render e2e reports zero on vk and wgpu; dx12 on WARP and metal on a
+    /// paravirtual device report zero on all but one, the cube on metal, which
+    /// reports two pixels of a 256×192 frame — 0.0041%. The bound sits about
+    /// twenty-four times above that worst case, which is room for a driver
+    /// considerably worse than any yet seen and still tight enough to refuse a
+    /// visible recolour of part of one sprite. Both ends are pinned by tests
+    /// rather than by this paragraph, in
+    /// `the_worst_measured_cross_backend_frame_still_passes_with_room_to_spare`
+    /// and `a_localised_recolour_that_the_old_two_percent_ratio_passed_now_fails`.
+    ///
+    /// Note the ratio counts only pixels over `max_channel_delta` — were it to
+    /// count pixels differing at all, the HDR frame's 91% would blow through any
+    /// bound of this order for no defect whatever.
+    ///
+    /// `min_ssim` sits four orders of magnitude below the observed 0.999933,
+    /// and the tests in this module pin that none of the three is loose enough
+    /// to admit a triangle that moved.
     pub const RASTERISER: Self = Self {
         max_channel_delta: 2,
-        max_failing_ratio: 0.02,
+        max_failing_ratio: 0.001,
         min_ssim: 0.99,
     };
 }
@@ -690,6 +717,103 @@ mod tests {
             result
                 .failures()
                 .any(|failure| failure == Failure::TooManyDifferingPixels)
+        );
+    }
+
+    /// **The regression [`Tolerance::max_failing_ratio`] was retuned for.** A
+    /// recolour confined to a small part of the frame is invisible to the
+    /// structural half — it moves a dozen blocks out of hundreds — so the
+    /// failing ratio is the only thing that can catch it, and at 2% it did not.
+    ///
+    /// The magnitude is the one actually measured, not an invented one:
+    /// perturbing `SPRITE_TINT`'s blue factor in `crcbl`'s screenshot scene
+    /// recoloured 361 pixels of a 256×192 frame by a channel delta of 40 — a
+    /// plainly visible recolour of a quarter of one sprite — and **passed**, at
+    /// 0.7345% against a 2% bound.
+    ///
+    /// The patch below reproduces that frame's per-pixel numbers exactly and is
+    /// if anything *harder* on the structural half than the real one was — a
+    /// flat patch on a flat interior scores 0.9956 where the real recolour
+    /// scored 0.999908 — and it still clears the SSIM floor, which is the point.
+    #[test]
+    fn a_localised_recolour_that_the_old_two_percent_ratio_passed_now_fails() {
+        let reference = triangle(256, 192, 0);
+        let mut recoloured = reference.clone();
+        // 19x19 = 361 pixels, wholly inside the triangle, so `+ 40` neither
+        // saturates nor straddles the background: the delta is exactly 40 on
+        // every pixel of the patch and zero on every other pixel of the frame.
+        for y in 104..123 {
+            for x in 112..131 {
+                let pixel = recoloured.pixel(x, y).expect("in range");
+                recoloured.set_pixel(x, y, [pixel[0], pixel[1] + 40, pixel[2], pixel[3]]);
+            }
+        }
+
+        let result = compare(&reference, &recoloured, &Tolerance::RASTERISER);
+        assert_eq!(result.failing_pixels, 361, "{}", result.summary());
+        assert_eq!(result.max_channel_delta, 40, "{}", result.summary());
+        assert!(
+            result
+                .failures()
+                .any(|failure| failure == Failure::TooManyDifferingPixels),
+            "the failing ratio is the half that has to catch this: {}",
+            result.summary()
+        );
+
+        // And it has to catch it alone, because the structural half does not:
+        // under the bound this constant used to carry, the same frame passes
+        // outright — which is what the real run did.
+        let old = Tolerance {
+            max_failing_ratio: 0.02,
+            ..Tolerance::RASTERISER
+        };
+        let under_old = compare(&reference, &recoloured, &old);
+        assert!(
+            under_old.is_match(),
+            "the old ratio passed this, which is the whole reason it moved: {}",
+            under_old.summary()
+        );
+        assert!(
+            under_old.ssim > Tolerance::RASTERISER.min_ssim,
+            "a patch this small must stay above the structural floor, or this \
+             test would be proving the wrong half: {}",
+            under_old.summary()
+        );
+    }
+
+    /// The other end of the same bound, and the one a tightening puts at risk:
+    /// the worst frame any backend has actually produced must still pass, with
+    /// enough room that a slightly worse driver would too.
+    ///
+    /// Metal on a paravirtual device renders the cube scene with two pixels of
+    /// a 256×192 frame wrong by a channel delta of 207. That is the only
+    /// non-zero over-tolerance figure measured anywhere across vk, wgpu, dx12
+    /// and metal, and it is also the one that cannot be reproduced off CI — so
+    /// it is pinned here, where it costs no GPU to check.
+    #[test]
+    fn the_worst_measured_cross_backend_frame_still_passes_with_room_to_spare() {
+        let reference = triangle(256, 192, 0);
+        let mut actual = reference.clone();
+        for (x, y) in [(64, 32), (65, 32)] {
+            let pixel = actual.pixel(x, y).expect("in range");
+            actual.set_pixel(x, y, [pixel[0], pixel[1], pixel[2] + 207, pixel[3]]);
+        }
+
+        let result = compare(&reference, &actual, &Tolerance::RASTERISER);
+        assert_eq!(result.failing_pixels, 2, "{}", result.summary());
+        assert_eq!(result.max_channel_delta, 207, "{}", result.summary());
+        assert!(
+            result.is_match(),
+            "a bound that fails the worst real frame is a false-alarm generator: {}",
+            result.summary()
+        );
+        // The margin, asserted rather than described: tighten the ratio past
+        // this and it is this test that says so, not a CI run on a machine
+        // nobody here has.
+        assert!(
+            result.failing_ratio * 20.0 < Tolerance::RASTERISER.max_failing_ratio,
+            "the worst real frame must keep at least twenty times of headroom: {}",
+            result.summary()
         );
     }
 

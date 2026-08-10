@@ -4816,19 +4816,38 @@ comparison prints enough to tell them apart, and
 `every_sprite_slot_is_painted_and_the_gaps_are_not` is the assertion that names
 the `SV_InstanceID` failure mode directly rather than as a summary number.
 
-**`Tolerance::RASTERISER` absorbs a change confined to a small part of the
-frame, and this was measured rather than reasoned about.** Perturbing
-`SPRITE_TINT`'s blue factor in `crates/crcbl/src/screenshot.rs` — a plainly
-visible recolour of one quarter of one sprite — produced
-`361 pixel(s) differ at all (0.7345%), max channel delta 40, 361 over tolerance (0.7345%), mean abs error 0.0734, rmse 1.7140, ssim 0.999908`
-and **passed**, because `max_failing_ratio` is 2% and the structural floor is
-0.99. Shifting the same sprite by 5 world units failed as it should. This is a
-property of the tolerance the cube golden has always run under, not something
-the new scenes introduced, and it is not being changed here: tightening
-`max_failing_ratio` would have to be justified against the radv-versus-lavapipe
-numbers `crcbl-golden`'s docs record, which is a separate piece of work with its
-own measurements. Recorded so the next person does not assume a green golden
-means a byte-identical frame.
+**`Tolerance::RASTERISER::max_failing_ratio` has been tightened from 2% to 0.1%,
+and CI is the only thing that can confirm it for Metal and D3D12.** The old
+figure was sized against "how many pixels differ at all" while gating "pixels
+differing by more than `max_channel_delta`", and the gap was wide enough to pass
+a plainly visible recolour of a quarter of one sprite — measured, at 0.7345%.
+The new value is derived from the quantity actually gated: every `crcbl-vk`
+golden and every `render_e2e` scene reports **0 over tolerance** on vk and wgpu
+(re-run locally against lavapipe after the change, 74/74 and 3/3 twice), dx12 on
+WARP and metal on a paravirtual device report 0 on all but one, and the
+exception is **metal's cube at 2 pixels — 0.0041%**, which the new bound clears
+by about 24x. The derivation now lives in `Tolerance::RASTERISER`'s doc comment
+and in `crcbl-golden`'s crate docs, and both ends are pinned by
+`a_localised_recolour_that_the_old_two_percent_ratio_passed_now_fails` and
+`the_worst_measured_cross_backend_frame_still_passes_with_room_to_spare` in
+`crates/crcbl-golden/src/compare.rs`.
+
+What is **not** verified: nothing on Metal or D3D12 was re-run, because neither
+can run here. Metal's cube is the closest measurement to the new limit of
+anything ever taken, and its 2 pixels are wrong by a channel delta of 207, so
+`max_failing_ratio` is the only knob that can absorb them — no
+`max_channel_delta` worth having would. If that scene ever drifts to 50 failing
+pixels at 256x192 it goes red where it used to pass, and that is the intended
+behaviour rather than a regression. The `mtl-e2e` and `dx12-e2e` jobs are the
+verdict.
+
+**`max_channel_delta` was left at 2, and the local run says it cannot go
+lower.** `crcbl-vk`'s `sprite_rotation` golden reports
+`125 pixel(s) differ at all (0.2543%), max channel delta 2, 0 over tolerance`
+against lavapipe. Dropping the delta to 1 turns those 125 drifting pixels into
+125 failing ones — 0.2543%, two and a half times the new ratio — so the two
+knobs cannot both be tightened. Considered and declined for that reason, with
+the measurement rather than a guess behind it.
 
 **The per-scene anti-vacuity checks are the part with real headroom, and the
 colour floors are not.** The three floors are the cross-backend harness's own

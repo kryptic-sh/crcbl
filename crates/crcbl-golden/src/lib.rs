@@ -82,15 +82,16 @@
 //!
 //! [`Tolerance::RASTERISER`] is set from those numbers:
 //!
-//! * `max_channel_delta: 2` — twice the observed maximum, so a third driver
-//!   that rounds a little differently still passes.
-//! * `max_failing_ratio: 0.02` — the backstop for pixels that exceed that.
-//!   Nothing reaches it on either frame (0 pixels differ by more than 1), and 2%
-//!   of this frame is roughly twice the triangle's perimeter, so a future driver
-//!   whose fill rule genuinely disagreed along an edge would still pass while a
-//!   triangle that *moved* could not. Note that this ratio counts only pixels
-//!   **over** `max_channel_delta` — if it counted pixels that differ at all, the
-//!   HDR frame's 91% would blow straight through it for no defect at all.
+//! * `max_channel_delta: 2` — the observed maximum, reached by `crcbl-vk`'s
+//!   `sprite_rotation` golden on lavapipe while the triangle and the HDR frame
+//!   stop at one.
+//! * `max_failing_ratio` — the backstop for pixels that exceed that delta.
+//!   Nothing reaches it on either frame (0 pixels differ by more than 1). Note
+//!   that this ratio counts only pixels **over** `max_channel_delta` — if it
+//!   counted pixels that differ at all, the HDR frame's 91% would blow straight
+//!   through it for no defect at all. Its value is derived from the
+//!   cross-backend measurements two sections below, not from these two frames,
+//!   which put no pressure on it at all.
 //! * `min_ssim: 0.99` — four orders of magnitude below the observed 0.999933,
 //!   and, as `compare`'s tests pin, still comfortably strict enough to reject a
 //!   triangle shifted by six pixels.
@@ -129,6 +130,49 @@
 //! match perfectly. The harness refuses a frame with fewer than 16 distinct
 //! colours; the lit cube has 41 at 256×192 and 36 at 97×61, and the null
 //! backend's frame has 1.
+//!
+//! ## `max_failing_ratio` was sized against the wrong quantity, and is not now
+//!
+//! Every measurement above is of how many pixels differ **at all**, and every
+//! one of those numbers is large — 3.83%, 91.37%, 84.23%. The ratio gates a
+//! different quantity entirely: pixels differing by *more* than
+//! `max_channel_delta`, which is 0 in all three. It was nevertheless set to
+//! 0.02, a figure that only reads as sensible against the first quantity, and
+//! the gap between the two was a gate that passed visible changes.
+//!
+//! Not theoretically. Perturbing `SPRITE_TINT`'s blue factor in
+//! `crates/crcbl/src/screenshot.rs` — a plainly visible recolour of a quarter of
+//! one sprite — produced `361 pixel(s) differ at all (0.7345%), max channel
+//! delta 40, 361 over tolerance (0.7345%), mean abs error 0.0734, rmse 1.7140,
+//! ssim 0.999908` and **passed**. 0.73% is under 2%, and a patch that small
+//! barely moves a mean taken over hundreds of blocks.
+//!
+//! So the ratio is now derived from the quantity it actually gates. Across
+//! every backend and scene measured:
+//!
+//! | backend (driver) | scenes | pixels over tolerance |
+//! | --- | --- | --- |
+//! | vk (lavapipe) | `crcbl-vk`'s goldens, cube, sprite, ui | 0 — 0.0000% |
+//! | wgpu (lavapipe) | cube, sprite, ui | 0 — 0.0000% |
+//! | dx12 (WARP) | cube, ui | 0 — 0.0000%, max delta 1 |
+//! | metal (paravirtual) | sprite, ui | 0 — 0.0000%, max delta 1 |
+//! | metal (paravirtual) | cube | **2 — 0.0041%**, max delta 207 |
+//!
+//! One frame in the whole set has any over-tolerance pixel at all, and it has
+//! two. `max_failing_ratio` sits roughly twenty-four times above that, which is
+//! deliberately generous rather than as tight as the data would bear: metal's
+//! cube is the one measurement that cannot be reproduced off CI, it runs on a
+//! *paravirtual* device, and the ratio is the only knob that can absorb a small
+//! cluster of badly-wrong pixels — those two are off by 207, so no
+//! `max_channel_delta` anyone would accept was ever going to admit them.
+//!
+//! It stays a ratio rather than becoming a pixel count because the gate runs at
+//! three sizes — 97×61, 256×192 and 1920×1080 — and the value is chosen so the
+//! smallest still has a workable budget of several pixels, where halving it
+//! would leave 97×61 with the same two pixels metal's cube already spends.
+//! `compare`'s tests pin both ends, the sprite recolour and metal's two pixels,
+//! so a future move in either direction argues with a test rather than with this
+//! paragraph.
 //!
 //! # Blessing
 //!

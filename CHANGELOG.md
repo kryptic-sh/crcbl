@@ -50,6 +50,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   culling decides what draws, so hiding an object and culling it off screen take
   the same path out of the frame.
 
+### Changed
+
+- **`Tolerance::RASTERISER` allows a thousandth of a frame to fail, not a
+  fiftieth.** `max_failing_ratio` was `0.02`, sized against how many pixels
+  differ _at all_ by one level — but it gates pixels differing by **more** than
+  `max_channel_delta`, which should be near zero. A plainly visible sprite
+  recolour passed at 361 differing pixels and a max channel delta of 40, because
+  0.73% of a frame is under 2%. It is now `0.001`, about twenty-four times the
+  worst figure any backend has ever reported (Metal's cube on a paravirtual
+  device, 2 pixels of 49152) and seven times below the recolour that motivated
+  the change. `max_channel_delta` deliberately stays at 2: `crcbl-vk`'s
+  `sprite_rotation` golden reports exactly 2 across 125 pixels, so tightening
+  both knobs at once would turn a passing frame into a 0.25% failure.
+
 ### Added
 
 - **`crcbl-assets` — asset ids, load states, and the IO seam under them.** A new
