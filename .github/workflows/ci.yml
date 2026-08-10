@@ -1415,30 +1415,45 @@ jobs:
 
       # # The draw-hang bisect, and this step is expected to go red
       #
-      # `crcbl_mtl::draw_probe` is five probes that each remove **one** step
-      # from the draw the step above holds out, so one `--no-fail-fast` run says
-      # which step is implicated rather than confirming again that the draw
-      # hangs. The module's own docs carry the table of what each probe
-      # isolates and what a pass or a fault would mean; in ladder order:
+      # **The previous round answered and its probes are gone.** They
+      # established that this backend's render pass hangs with a pipeline bound
+      # and *no draw at all*, that a hand-encoded pass over this crate's own
+      # device, queue, texture and `MTLRenderPipelineState` passes, and that
+      # `setViewport:` and `setScissorRect:` are innocent. What is left is the
+      # six-call rasteriser replay `crcbl_mtl::command`'s
+      # `bind_graphics_pipeline` emits beside `setRenderPipelineState:`.
       #
-      # 1. `draw_probe_a_bound_pipeline_with_no_draw_call` — every state call, no
-      #    `drawPrimitives:`. Splits the setup from the draw.
-      # 2. `draw_probe_a_draw_with_no_scissor_call` — minus `setScissorRect:`.
-      # 3. `draw_probe_a_draw_with_no_viewport_or_scissor_call` — minus
-      #    `setViewport:` as well.
-      # 4. `draw_probe_a_hand_encoded_pass_over_this_backends_pipeline` — the
-      #    Swift probe's two-call pass, over this crate's own device, queue,
-      #    texture and `MTLRenderPipelineState`. Removes the rasteriser replay.
-      # 5. `draw_probe_a_hand_encoded_pass_over_a_hand_built_pipeline` — the
-      #    same, with the `MTLRenderPipelineDescriptor` built by hand too.
-      #    Removes `crcbl_mtl::pipeline`'s four extra setters.
+      # **This round asks which of those six calls it is**, and it is built so
+      # one run can answer. Each probe is that known-good hand-encoded pass plus
+      # **exactly one** of the six, so a hang names a selector:
       #
-      # **The step has no `continue-on-error`, and that is deliberate.** Every
-      # probe is a draw on a device where every draw has hung so far, so the
-      # expected outcome is a red job — one red run is what buys the answer, and
-      # a probe step that reported green regardless would read as coverage while
-      # gating nothing, which is the trap `docs/plan/12-testing.md` names. The
-      # step above is where this job's real gate lives, and it is a separate
+      # 1. `draw_probe_a_bound_pipeline_with_no_draw_call` — the **positive
+      #    control**, kept from the previous round and the only one kept. It is
+      #    the failing path, and it is what says the runner still reproduces the
+      #    bug; if it passes, nothing else in this step can be read.
+      # 2. `draw_probe_a_hand_encoded_pass_and_none_of_the_replay` — the
+      #    **negative control**: the baseline every probe below adds one call
+      #    to, expected to pass as it did last round.
+      # 3. `…_plus_set_cull_mode`, `…_plus_set_front_facing_winding`,
+      #    `…_plus_set_triangle_fill_mode`, `…_plus_set_depth_clip_mode`,
+      #    `…_plus_set_depth_bias` — one call each. The winding is the named
+      #    suspect: the only one of the six asking for a non-default, and
+      #    invisible in any image while nothing is culled.
+      # 4. `…_plus_a_nil_depth_stencil_state` and
+      #    `…_plus_a_default_depth_stencil_state` — the sixth call is a pair,
+      #    because this pass has no depth attachment and passing nil may not be
+      #    the same to the driver as passing a state object.
+      # 5. `…_plus_the_whole_replay` — all six together, so the run cannot come
+      #    back with nothing: it separates "no single call is enough, so it is a
+      #    combination" from "the replay is innocent and `begin_render_pass` is
+      #    the remaining difference".
+      #
+      # **The step has no `continue-on-error`, and that is deliberate.** The
+      # positive control is a path that has hung on this device every time, so
+      # the expected outcome is a red job — one red run is what buys the answer,
+      # and a probe step that reported green regardless would read as coverage
+      # while gating nothing, which is the trap `docs/plan/12-testing.md` names.
+      # The step above is where this job's real gate lives, and it is a separate
       # step precisely so its result stays readable beside this one's.
       #
       # `if: ${{ !cancelled() }}` because the bisect is worth having even on a

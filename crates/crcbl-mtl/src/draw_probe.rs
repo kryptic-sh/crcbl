@@ -1,61 +1,73 @@
 //! **Diagnostic probes for the Metal draw hang, and nothing else.**
 //!
-//! `docs/backlog.md`'s "Metal draws hang, and it is our bug, not the runner"
-//! records the state of the investigation: on GitHub's `macos-26-arm64` runner
-//! (an `Apple Paravirtual device`) a render-pass clear reads back correctly and
-//! **every draw hangs** with `kIOGPUCommandBufferCallbackErrorHang`, every
-//! encoder reporting `completed` and none faulted. The device itself draws —
-//! run 31037470086 drew two triangles there from a standalone Swift script — so
-//! the difference is between that command stream and this backend's.
+//! `docs/backlog.md`'s "The Metal hang is in the encoder's rasteriser replay,
+//! and needs no draw" records where the bisect stands: on GitHub's
+//! `macos-26-arm64` runner (an `Apple Paravirtual device`) a render-pass clear
+//! reads back correctly and this backend's render pass hangs with
+//! `kIOGPUCommandBufferCallbackErrorHang`. The previous round of probes bought
+//! three results and they are not re-run here:
 //!
-//! Three candidates are already dead, and none of them should be retried:
-//! the render-target format (the BGRA twin faulted byte-identically), the
-//! error-options command-buffer descriptor (a passing clear goes through the
-//! same `crate::fault::command_buffer` path), and the draw argument forms (the
-//! short selectors were emitted as an experiment and all four quarantined draws
-//! hung anyway; that change is reverted).
+//! * **The hang needs no draw at all.** Binding a pipeline in our pass is
+//!   enough, so the draw call and its argument forms are out.
+//! * **The objects are out.** A hand-encoded pass over this crate's own
+//!   `MTLDevice`, queue, `MTLTexture`, `MTLRenderPipelineState` and
+//!   [`crate::fault`] command-buffer descriptor passes.
+//! * **`setViewport:` and `setScissorRect:` are out**, by the two probes that
+//!   dropped them.
 //!
-//! # What a draw does that a clear does not
+//! # What is left, and what this round asks
 //!
-//! Nine encoder calls, all between `begin_render_pass` and `end_render_pass`:
+//! The difference between the passing hand-encoded pass and the failing one is
+//! `crate::command`'s `bind_graphics_pipeline`: `setRenderPipelineState:` — which
+//! the passing pass also makes — plus a **six-call rasteriser replay** that it
+//! does not.
 //!
-//! 1. `setViewport:` — `crate::command`'s `set_viewport`.
-//! 2. `setScissorRect:` — `set_scissor`.
-//! 3. `setRenderPipelineState:`, and then the five-call rasteriser replay
-//!    `bind_graphics_pipeline` makes beside it — `setCullMode:`,
-//!    `setFrontFacingWinding:`, `setTriangleFillMode:`, `setDepthClipMode:`,
-//!    `setDepthBias:slopeScale:clamp:` and `setDepthStencilState:`.
-//! 4. `drawPrimitives:…`.
+//! So every probe below is that known-good hand-encoded pass **plus exactly one
+//! of the six**, which makes a hang name a selector rather than a class. One
+//! `--no-fail-fast` run reads straight off the list of failures.
 //!
-//! **Bind groups are not on that list, and that matters for the plan.**
-//! `crate::device`'s `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`
-//! binds no bind group at all — it uses `ink_msl`, whose vertex stage computes
-//! its positions from `[[vertex_id]]` and reads no resource — and it hangs
-//! exactly like the one that does. So "the bind groups a draw needs" was
-//! eliminated before this module was written, by a test that already exists.
-//! The probes below spend their slots on what is left.
-//!
-//! # The ladder
-//!
-//! Each probe differs from its neighbour by **one** step, so a single
-//! `--no-fail-fast` run reads as a bisect rather than as five separate results.
-//! Every one of them draws — or deliberately does not draw — the same triangle
-//! into the same canvas with the same clear, so a pass is the *same assertion*
-//! the quarantined tests make and cannot be a weaker one.
-//!
-//! | Probe | Removes | A pass means |
+//! | Probe | Emits inside the pass | Reading |
 //! |---|---|---|
-//! | [`draw_probe_a_bound_pipeline_with_no_draw_call`] | the `drawPrimitives:` call | the setup calls are innocent; the hang needs a draw |
-//! | [`draw_probe_a_draw_with_no_scissor_call`] | `setScissorRect:` | the scissor call is implicated |
-//! | [`draw_probe_a_draw_with_no_viewport_or_scissor_call`] | `setViewport:` too | the viewport call is implicated |
-//! | [`draw_probe_a_hand_encoded_pass_over_this_backends_pipeline`] | the rasteriser replay, and this crate's encoder wrapper | the replay is implicated |
-//! | [`draw_probe_a_hand_encoded_pass_over_a_hand_built_pipeline`] | this crate's `MTLRenderPipelineDescriptor` | the pipeline descriptor is implicated |
+//! | [`draw_probe_a_bound_pipeline_with_no_draw_call`] | our whole path, no `drawPrimitives:` | **positive control**: expected to hang. Passing means the runner no longer reproduces the bug and nothing below can be read |
+//! | [`draw_probe_a_hand_encoded_pass_and_none_of_the_replay`] | `setRenderPipelineState:` and the draw | **negative control**: expected to pass, as it did last round |
+//! | [`draw_probe_a_hand_encoded_pass_plus_set_cull_mode`] | …plus `setCullMode:` | a hang names `setCullMode:` |
+//! | [`draw_probe_a_hand_encoded_pass_plus_set_front_facing_winding`] | …plus `setFrontFacingWinding:` | a hang names `setFrontFacingWinding:` |
+//! | [`draw_probe_a_hand_encoded_pass_plus_set_triangle_fill_mode`] | …plus `setTriangleFillMode:` | a hang names `setTriangleFillMode:` |
+//! | [`draw_probe_a_hand_encoded_pass_plus_set_depth_clip_mode`] | …plus `setDepthClipMode:` | a hang names `setDepthClipMode:` |
+//! | [`draw_probe_a_hand_encoded_pass_plus_set_depth_bias`] | …plus `setDepthBias:slopeScale:clamp:` | a hang names that call |
+//! | [`draw_probe_a_hand_encoded_pass_plus_a_nil_depth_stencil_state`] | …plus `setDepthStencilState:nil` | a hang names *nil* specifically, and the pair below says so |
+//! | [`draw_probe_a_hand_encoded_pass_plus_a_default_depth_stencil_state`] | …plus `setDepthStencilState:` with a real object | with the probe above, splits "the call" from "the nil argument" |
+//! | [`draw_probe_a_hand_encoded_pass_plus_the_whole_replay`] | …plus all six, in `bind_graphics_pipeline`'s order | the run's backstop; see below |
 //!
-//! **If every one of them faults**, the answer is not in the render encoder at
-//! all: the last probe is the Swift script's command stream reproduced in
-//! Rust, over a texture and a queue this crate made, and its failing would put
-//! the difference in the objects rather than the calls — the `MTLTexture`
-//! descriptor `create_image` builds, or the process itself.
+//! **Every one of the six is image-neutral here**, which is why
+//! [`assert_ink_triangle`] stays the assertion for all of them and each probe
+//! varies one thing: culling is off, the fill mode is `Fill`, the clip mode is
+//! `Clip`, the bias is zero, there is no depth attachment for a depth/stencil
+//! state to affect, and the winding cannot matter while nothing is culled.
+//!
+//! # The run cannot come back with no information
+//!
+//! [`draw_probe_a_hand_encoded_pass_plus_the_whole_replay`] is what makes that
+//! true, because it closes the gap between the two controls:
+//!
+//! * **It hangs and a single-call probe hangs** — that call is the answer.
+//! * **It hangs and every single-call probe passes** — no one call is enough,
+//!   so the fault is in a *combination* of the six, and the next run bisects by
+//!   halves rather than singles.
+//! * **It passes** — then the replay is exonerated entirely, because our pass
+//!   hangs with the same seven calls the hand-encoded one now makes. What is
+//!   left is the part the hand-encoded probes replace wholesale: the
+//!   `MTLRenderPassDescriptor` and `MTLRenderCommandEncoder` that
+//!   `crate::command`'s `begin_render_pass` builds, and
+//!   `setRenderPipelineState:` in *that* encoder rather than in this one. That
+//!   is a real finding and it has nowhere else to hide.
+//!
+//! **The named suspect is `setFrontFacingWinding:`** — it is the only one of
+//! the six asking for anything other than a Metal default, `FrontFace::Ccw`
+//! against the encoder's `MTLWinding::Clockwise`, and with `CullMode::None` it
+//! cannot change the image, so no picture-based test could ever have caught it.
+//! It is a suspect and not a conclusion: the previous round's leading candidate
+//! was wrong, which is why all six get a slot.
 //!
 //! # Running them
 //!
@@ -65,7 +77,7 @@
 //!
 //! ```text
 //! crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(draw_probe_)'
-//! crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(draw_probe_a_draw_with_no_scissor_call)'
+//! crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(draw_probe_a_hand_encoded_pass_plus_set_front_facing_winding)'
 //! ```
 //!
 //! # Delete this module when it has answered
@@ -82,23 +94,22 @@ use crcbl_hal::{
     PipelineLayoutHandle, PrimitiveState, QueueKind, ReadbackDesc, ResourceState, ShaderEntry,
     ShaderModuleHandle, SubmitInfo,
 };
-use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder as _, MTLDevice as _, MTLLibrary,
-    MTLLoadAction, MTLPrimitiveType, MTLRenderCommandEncoder, MTLRenderPassDescriptor,
-    MTLRenderPipelineDescriptor, MTLRenderPipelineState, MTLStoreAction,
+    MTLCommandBuffer, MTLCommandBufferStatus, MTLCommandEncoder as _, MTLDepthStencilDescriptor,
+    MTLDevice as _, MTLLoadAction, MTLPrimitiveType, MTLRenderCommandEncoder,
+    MTLRenderPassDescriptor, MTLRenderPipelineState, MTLStoreAction,
 };
 
 use crate::MetalDevice;
 use crate::conv;
-use crate::device::lookup;
 use crate::device::tests::{
-    CANVAS, CANVAS_BYTES, CLEAR, CLEAR_TEXEL, Framing, assert_ink_triangle, color_target_of, drain,
-    draw_canvas_framed, empty_layout, ink_msl, msl_module, open_device, readback_buffer, texel_in,
+    CANVAS, CANVAS_BYTES, CLEAR, CLEAR_TEXEL, assert_ink_triangle, color_target_of, drain,
+    draw_canvas, empty_layout, ink_msl, msl_module, open_device, readback_buffer, texel_in,
     whole_image_copy_of,
 };
+use crate::pipeline::BoundPipeline;
 
 /// The attachment format every probe uses.
 ///
@@ -163,24 +174,6 @@ impl InkPipeline {
         }
     }
 
-    /// The `MTLLibrary` behind [`module`](Self::module).
-    ///
-    /// Read out of the device's own table rather than compiled a second time,
-    /// so [`draw_probe_a_hand_encoded_pass_over_a_hand_built_pipeline`] varies
-    /// the *pipeline descriptor* and not the library beside it.
-    fn library(&self, device: &MetalDevice) -> Retained<ProtocolObject<dyn MTLLibrary>> {
-        let state = device.inner.state();
-        lookup(
-            &state.shader_modules,
-            "shader module",
-            self.module,
-            &*device.inner,
-        )
-        .expect("the module was created on this device a moment ago")
-        .raw
-        .clone()
-    }
-
     fn destroy(self, device: &MetalDevice) {
         device.destroy_graphics_pipeline(self.pipeline);
         device.destroy_pipeline_layout(self.layout);
@@ -205,37 +198,33 @@ fn assert_clear_canvas(bytes: &[u8]) {
     }
 }
 
-/// **Probe 1 — the setup calls with no draw behind them.**
+/// **The positive control — our own pass, and it is the one that hangs.**
 ///
-/// Identical to the quarantined
-/// `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear` in every
-/// respect but one: the vertex range is empty, and `crate::command`'s `draw`
-/// returns before emitting anything for an empty range. So the command stream
-/// carries `setViewport:`, `setScissorRect:`, `setRenderPipelineState:` and the
-/// whole rasteriser replay, and **no `drawPrimitives:` at all**.
+/// Kept from the previous round unchanged, and the only probe of that round
+/// kept. Everything else there has answered, and a probe that keeps running
+/// after its question is settled is noise in the next run's signal; this one is
+/// still doing work, because it is what says the failure is still there. Every
+/// other probe below is a *pass* when the fault is elsewhere, so a run where
+/// they all pass is unreadable — the runner image being fixed and the replay
+/// being innocent look identical — unless something known-red is red beside
+/// them.
 ///
-/// **It isolates** the draw call — and, with it, shader execution — from
-/// everything a draw sets up.
+/// It records the whole of this backend's path with an empty vertex range, so
+/// the command stream carries `setViewport:`, `setScissorRect:`,
+/// `setRenderPipelineState:` and the entire rasteriser replay, and **no
+/// `drawPrimitives:` at all**.
 ///
-/// * **Passes** — the setup calls are innocent and the hang needs the draw
-///   itself. That kills the viewport/scissor candidate and the
-///   `setRenderPipelineState:` half of the pipeline candidate in one result,
-///   and points at `drawPrimitives:` or at the shaders the pipeline runs.
-/// * **Faults** — the hang does not need a draw at all, which is a much bigger
-///   finding than any of the standing candidates: it would mean one of the
-///   eight state calls hangs this device, and probes 2 to 5 then say which.
-///
-/// **What turns it red for ordinary reasons.** A `draw` that stopped
-/// short-circuiting an empty range would paint the triangle and trip
-/// [`assert_clear_canvas`]; a copy that never ran leaves the poison pattern,
-/// which is not the clear colour either.
+/// * **Hangs** — as it did last round. The bisect below is readable.
+/// * **Passes** — stop reading the rest of the run. Something outside this
+///   crate changed, and the next step is to find out what before spending
+///   another probe slot.
 #[test]
 #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
 fn draw_probe_a_bound_pipeline_with_no_draw_call() {
     let (_instance, device) = open_device();
     let ink = InkPipeline::new(&device, "crcbl-mtl probe: no draw");
 
-    let bytes = draw_canvas_framed(&device, FORMAT, Framing::Both, |encoder| {
+    let bytes = draw_canvas(&device, FORMAT, |encoder| {
         encoder.bind_graphics_pipeline(ink.pipeline);
         // Empty, and `crcbl_mtl::command`'s `draw` documents an empty range as
         // a legitimate "no work this frame" it returns on rather than encodes.
@@ -246,180 +235,238 @@ fn draw_probe_a_bound_pipeline_with_no_draw_call() {
     ink.destroy(&device);
 }
 
-/// **Probe 2 — the same draw, without `setScissorRect:`.**
+/// **The negative control — the hand-encoded pass, with none of the six.**
 ///
-/// One call fewer than the quarantined triangle. Metal's default scissor is
-/// already the whole render target and the canvas pass covers the whole
-/// attachment, so the image must be **identical** — which is what lets
-/// [`assert_ink_triangle`] stay the assertion and makes this a controlled
-/// experiment rather than a different test.
+/// `setRenderPipelineState:`, `drawPrimitives:`, `endEncoding`: two calls
+/// inside the pass, where this backend's path makes eight. It passed last round
+/// and it is the baseline every probe below adds exactly one call to, so it
+/// runs again to establish that the baseline is still a baseline in *this* run
+/// rather than in the previous one's log.
 ///
-/// **It isolates** `crate::command`'s `set_scissor`.
-///
-/// * **Passes** — `setScissorRect:` is implicated, and the fix is in
-///   `set_scissor` (its `Rect2d` arithmetic, or making the whole-target case
-///   emit no call the way `begin_render_pass` already does for its render
-///   area).
-/// * **Faults** — the scissor call is eliminated; read probe 3.
+/// * **Passes** — the additions below are single-variable experiments.
+/// * **Hangs** — the objects are back in play after all, and no result below
+///   means anything. That would contradict the previous round on the same
+///   runner image, so the first thing to check is whether the image moved.
 #[test]
 #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
-fn draw_probe_a_draw_with_no_scissor_call() {
-    let (_instance, device) = open_device();
-    let ink = InkPipeline::new(&device, "crcbl-mtl probe: no scissor");
-
-    let bytes = draw_canvas_framed(&device, FORMAT, Framing::ViewportOnly, |encoder| {
-        encoder.bind_graphics_pipeline(ink.pipeline);
-        encoder.draw(0..3, 0..1);
-    });
-    assert_ink_triangle(&bytes, FORMAT);
-
-    ink.destroy(&device);
+fn draw_probe_a_hand_encoded_pass_and_none_of_the_replay() {
+    hand_encoded_probe("crcbl-mtl probe: no replay", |_, _, _| {});
 }
 
-/// **Probe 3 — the same draw again, without `setViewport:` either.**
+/// **`setCullMode:`**, and nothing else added to the baseline.
 ///
-/// One call fewer than probe 2, and for the same reason the image is
-/// unchanged: Metal's default viewport is the whole render target at depth
-/// `0..1`, which is exactly what `Viewport::from_size` asks for here.
+/// The value is the one `bind_graphics_pipeline` would pass for this pipeline,
+/// read out of its own `RasterState` rather than written here — `CullMode`'s
+/// default is `None`, which is also Metal's, so the image is unchanged.
 ///
-/// **It isolates** `crate::command`'s `set_viewport` — *given* probe 2's
-/// result. Read on its own it removes two calls, which is why both rungs exist:
-/// probe 2 faulting and this one passing names the viewport, and both faulting
-/// clears the pair together.
-///
-/// * **Passes** (with probe 2 faulting) — `setViewport:` is implicated. The
-///   `MTLViewport` this backend builds is the first thing to read: it passes
-///   the seam's `depth_min`/`depth_max` through unchanged, and a paravirtual
-///   device is exactly the kind to object to a degenerate depth range.
-/// * **Faults** — the viewport and the scissor are both eliminated, and what is
-///   left inside the pass is `setRenderPipelineState:`, the rasteriser replay
-///   and the draw. Probes 4 and 5 split those.
+/// * **Hangs** — `setCullMode:` is the call, and the fix is to skip it when it
+///   restates the encoder's default.
+/// * **Passes** — it is not this one.
 #[test]
 #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
-fn draw_probe_a_draw_with_no_viewport_or_scissor_call() {
-    let (_instance, device) = open_device();
-    let ink = InkPipeline::new(&device, "crcbl-mtl probe: no framing");
-
-    let bytes = draw_canvas_framed(&device, FORMAT, Framing::Neither, |encoder| {
-        encoder.bind_graphics_pipeline(ink.pipeline);
-        encoder.draw(0..3, 0..1);
+fn draw_probe_a_hand_encoded_pass_plus_set_cull_mode() {
+    hand_encoded_probe("crcbl-mtl probe: setCullMode:", |_, bound, encoder| {
+        encoder.setCullMode(bound.raster.cull);
     });
-    assert_ink_triangle(&bytes, FORMAT);
-
-    ink.destroy(&device);
 }
 
-/// **Probe 4 — the Swift script's command stream, over this backend's own
-/// objects.**
+/// **`setFrontFacingWinding:`**, and nothing else added to the baseline.
 ///
-/// The render pass is encoded by hand: an `MTLRenderPassDescriptor` with one
-/// colour attachment, `setRenderPipelineState:`, `drawPrimitives:` in its short
-/// form, `endEncoding`. **Two calls inside the pass, where the seam's path
-/// makes nine.** Everything the pass touches is still this crate's: the
-/// `MTLDevice` and `MTLCommandQueue` `MetalDevice::open` made, the `MTLTexture`
-/// `create_image` made, the `MTLRenderPipelineState`
-/// `create_graphics_pipeline` made, the command-buffer descriptor
-/// `crate::fault::command_buffer` sets, and the barrier, copy, submit and
-/// readback that follow.
+/// The named suspect, for the reason the module docs give: `FrontFace::Ccw`
+/// against an encoder that starts at `MTLWinding::Clockwise` makes this the one
+/// call of the six that asks the device to *change* something, and
+/// `CullMode::None` makes that change invisible in the image.
 ///
-/// **It isolates** the rasteriser replay — `setCullMode:`,
-/// `setFrontFacingWinding:`, `setTriangleFillMode:`, `setDepthClipMode:`,
-/// `setDepthBias:slopeScale:clamp:` and `setDepthStencilState:` — given probe
-/// 3. It also drops this crate's encoder wrapper, but that is not a second
-/// variable of any weight: the wrapper's pass, blit, submit and readback are
-/// the ones `a_render_pass_clear_reads_back_the_exact_texels` exercises and
-/// passes with.
-///
-/// * **Passes** (with probe 3 faulting) — the replay is implicated, and
-///   `crate::command`'s `bind_graphics_pipeline` is where to look.
-///   `setFrontFacingWinding:` is the call to suspect first: it is the **only**
-///   one of the six that asks for something other than Metal's own default
-///   here, because `FrontFace`'s default is `Ccw` while the encoder starts at
-///   `MTLWinding::Clockwise`. With `CullMode::None` — also the default — it
-///   cannot change the image, which makes it exactly the sort of redundant
-///   state a virtualised driver could mishandle unnoticed. The rest
-///   (`setCullMode:` `None`, `setTriangleFillMode:` `Fill`,
-///   `setDepthClipMode:` `Clip`, a zero depth bias and a nil depth/stencil
-///   state) each restate a default, so the fix would be to skip them.
-/// * **Faults** — no encoder call this backend makes is the cause, because the
-///   two that remain are the two the working Swift probe made. What is left is
-///   the objects: the pipeline state (probe 5) and the texture.
+/// * **Hangs** — the suspicion was right, and the fix is in
+///   `bind_graphics_pipeline`.
+/// * **Passes** — the suspicion was wrong, which is the outcome the previous
+///   round's leading candidate had.
 #[test]
 #[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
-fn draw_probe_a_hand_encoded_pass_over_this_backends_pipeline() {
+fn draw_probe_a_hand_encoded_pass_plus_set_front_facing_winding() {
+    hand_encoded_probe(
+        "crcbl-mtl probe: setFrontFacingWinding:",
+        |_, bound, encoder| {
+            encoder.setFrontFacingWinding(bound.raster.winding);
+        },
+    );
+}
+
+/// **`setTriangleFillMode:`**, and nothing else added to the baseline.
+///
+/// `PolygonMode`'s default maps to `MTLTriangleFillMode::Fill`, which is the
+/// encoder's own default, so this restates it.
+///
+/// * **Hangs** — `setTriangleFillMode:` is the call.
+/// * **Passes** — it is not this one.
+#[test]
+#[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+fn draw_probe_a_hand_encoded_pass_plus_set_triangle_fill_mode() {
+    hand_encoded_probe(
+        "crcbl-mtl probe: setTriangleFillMode:",
+        |_, bound, encoder| {
+            encoder.setTriangleFillMode(bound.raster.fill);
+        },
+    );
+}
+
+/// **`setDepthClipMode:`**, and nothing else added to the baseline.
+///
+/// `MTLDepthClipMode::Clip` is the encoder's default, and this pass has no
+/// depth attachment for it to act on either way.
+///
+/// * **Hangs** — `setDepthClipMode:` is the call, and a depth mode set on a
+///   pass with no depth attachment would be a plausible thing for a
+///   paravirtual device to mishandle.
+/// * **Passes** — it is not this one.
+#[test]
+#[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+fn draw_probe_a_hand_encoded_pass_plus_set_depth_clip_mode() {
+    hand_encoded_probe("crcbl-mtl probe: setDepthClipMode:", |_, bound, encoder| {
+        encoder.setDepthClipMode(bound.raster.clip);
+    });
+}
+
+/// **`setDepthBias:slopeScale:clamp:`**, and nothing else added to the
+/// baseline.
+///
+/// All three are zero for a pipeline with no depth state, which is Metal's
+/// default and this pipeline's value.
+///
+/// * **Hangs** — that call is it.
+/// * **Passes** — it is not this one.
+#[test]
+#[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+fn draw_probe_a_hand_encoded_pass_plus_set_depth_bias() {
+    hand_encoded_probe(
+        "crcbl-mtl probe: setDepthBias:slopeScale:clamp:",
+        |_, bound, encoder| {
+            let [constant, slope_scale, clamp] = bound.raster.bias;
+            encoder.setDepthBias_slopeScale_clamp(constant, slope_scale, clamp);
+        },
+    );
+}
+
+/// **`setDepthStencilState:` with nil**, and nothing else added to the
+/// baseline.
+///
+/// Exactly what `bind_graphics_pipeline` passes here: this pipeline declares
+/// `depth_stencil: None`, so `bound.depth_stencil` is `None` and the selector
+/// gets a nil argument. The assertion below states that rather than assuming
+/// it, because the whole point of this probe is *which argument* was passed.
+///
+/// * **Hangs** — with the probe below passing, the nil argument is the fault
+///   rather than the selector, and the fix is to skip the call when there is no
+///   state to bind.
+/// * **Hangs, and the probe below hangs too** — the selector itself is the
+///   fault, whatever it is handed.
+/// * **Passes** — it is not this one.
+#[test]
+#[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+fn draw_probe_a_hand_encoded_pass_plus_a_nil_depth_stencil_state() {
+    hand_encoded_probe(
+        "crcbl-mtl probe: setDepthStencilState: nil",
+        |_, bound, encoder| {
+            assert!(
+                bound.depth_stencil.is_none(),
+                "this probe exists to pass nil, and the pipeline has a depth/stencil state"
+            );
+            encoder.setDepthStencilState(bound.depth_stencil.as_deref());
+        },
+    );
+}
+
+/// **`setDepthStencilState:` with a real object**, and nothing else added to
+/// the baseline.
+///
+/// The twin of the probe above, and the only probe here that passes a value
+/// this backend would not: a freshly built `MTLDepthStencilState` left at
+/// `MTLDepthStencilDescriptor`'s defaults, which Apple documents as compare
+/// `Always` and depth writes disabled — *behaviourally* what nil restores. So
+/// the image is unchanged and the pair differs only in nil versus an object.
+///
+/// * **Hangs while the nil probe passes** — the fault is a depth/stencil state
+///   object on a pass with no depth attachment, and this backend is at fault
+///   only for pipelines that declare one.
+/// * **Passes while the nil probe hangs** — nil is the fault; see there.
+/// * **Both pass** — `setDepthStencilState:` is out entirely.
+#[test]
+#[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+fn draw_probe_a_hand_encoded_pass_plus_a_default_depth_stencil_state() {
+    hand_encoded_probe(
+        "crcbl-mtl probe: setDepthStencilState: default",
+        |device, _, encoder| {
+            let descriptor = MTLDepthStencilDescriptor::new();
+            let state = device
+                .inner
+                .raw
+                .newDepthStencilStateWithDescriptor(&descriptor)
+                .expect("a default depth/stencil descriptor makes a state on any Metal device");
+            encoder.setDepthStencilState(Some(&state));
+        },
+    );
+}
+
+/// **All six, in the order `bind_graphics_pipeline` emits them.**
+///
+/// The backstop that keeps the run from returning nothing, and the module docs
+/// give the three readings in full. In one line each: hanging beside a
+/// single-call hang confirms that call; hanging while every single passes means
+/// the fault needs a *combination*; and passing exonerates the replay outright
+/// and moves the search to `crate::command`'s `begin_render_pass` — the one
+/// part of our path a hand-encoded probe replaces wholesale.
+///
+/// The seventh call `bind_graphics_pipeline` can make,
+/// `setStencilReferenceValue:`, is asserted absent rather than omitted
+/// silently: this pipeline declares no stencil state, so the replay it emits
+/// really is six calls, and the assertion goes red if that ever stops being
+/// true instead of leaving this probe quietly reproducing less than it claims.
+#[test]
+#[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
+fn draw_probe_a_hand_encoded_pass_plus_the_whole_replay() {
+    hand_encoded_probe("crcbl-mtl probe: whole replay", |_, bound, encoder| {
+        assert!(
+            bound.raster.stencil_reference.is_none(),
+            "the replay this probe reproduces is six calls, and this pipeline wants a seventh"
+        );
+        encoder.setCullMode(bound.raster.cull);
+        encoder.setFrontFacingWinding(bound.raster.winding);
+        encoder.setTriangleFillMode(bound.raster.fill);
+        encoder.setDepthClipMode(bound.raster.clip);
+        let [constant, slope_scale, clamp] = bound.raster.bias;
+        encoder.setDepthBias_slopeScale_clamp(constant, slope_scale, clamp);
+        encoder.setDepthStencilState(bound.depth_stencil.as_deref());
+    });
+}
+
+/// Runs one probe: the known-good hand-encoded pass, plus whatever `replay`
+/// adds to it.
+///
+/// Every probe in this round is this function with a different `replay`, which
+/// is what makes the set a bisect: the device, the pipeline, the pass, the
+/// draw and the assertion are written once, so the emitted calls are the only
+/// difference between two results. `label` names the pipeline, the command
+/// buffer and the render encoder, so a fault report says which probe produced
+/// it rather than "one of them faulted".
+///
+/// `replay` is handed the device — for the one probe that must build an object
+/// this backend would not — and the resolved [`BoundPipeline`], so each probe
+/// passes the value `bind_graphics_pipeline` would pass rather than a constant
+/// written out here that could drift from it.
+fn hand_encoded_probe(
+    label: &str,
+    replay: impl FnOnce(&MetalDevice, &BoundPipeline, &ProtocolObject<dyn MTLRenderCommandEncoder>),
+) {
     let (_instance, device) = open_device();
-    let ink = InkPipeline::new(&device, "crcbl-mtl probe: hand-encoded");
+    let ink = InkPipeline::new(&device, label);
     let bound = device
         .inner
         .graphics_pipeline_raw(ink.pipeline)
         .expect("the pipeline was created on this device a moment ago");
 
-    let bytes = hand_encoded_canvas(&device, &bound.raw);
-    assert_ink_triangle(&bytes, FORMAT);
-
-    ink.destroy(&device);
-}
-
-/// **Probe 5 — probe 4 with the pipeline descriptor built by hand too.**
-///
-/// The only difference from probe 4 is which
-/// `MTLRenderPipelineDescriptor` reached
-/// `newRenderPipelineStateWithDescriptor:error:`. This one sets the three
-/// things the Swift script set — vertex function, fragment function, colour
-/// attachment 0's pixel format — and nothing else, where
-/// `crate::pipeline`'s `create_graphics_pipeline_impl` additionally sets a
-/// label, `rasterSampleCount`, `alphaToCoverageEnabled` and the attachment's
-/// `writeMask`. The `MTLLibrary` and both `MTLFunction`s are the same objects
-/// probe 4 used, taken from the device's own table, so the shader is not a
-/// variable here.
-///
-/// **It isolates** the render pipeline state object — the candidate
-/// `docs/backlog.md` names first.
-///
-/// * **Passes** (with probe 4 faulting) — the pipeline descriptor is
-///   implicated, and the four extra setters are a short enough list to bisect
-///   by hand on the next run. All four ask for what the descriptor already
-///   defaults to — Apple documents `rasterSampleCount` as 1,
-///   `alphaToCoverageEnabled` as `NO` and a colour attachment's `writeMask` as
-///   all channels — so this outcome would say a *redundant* declaration is
-///   enough to hang this device. That is a strange thing to be true, and it is
-///   the same shape as the replay probe 4 removes; both are what is left after
-///   the ordinary explanations died.
-/// * **Faults** — nothing in this crate is implicated at all. This probe is the
-///   Swift script, in Rust, on the same device, and its hanging would mean the
-///   difference is in the texture `create_image` builds or in the process
-///   rather than in any command this backend records. The next experiment would
-///   be to build the `MTLTexture` here as well.
-#[test]
-#[ignore = "executes a shader on a real Metal device; run tests/run-mtl-e2e.sh"]
-fn draw_probe_a_hand_encoded_pass_over_a_hand_built_pipeline() {
-    let (_instance, device) = open_device();
-    let ink = InkPipeline::new(&device, "crcbl-mtl probe: hand-built pipeline");
-    let library = ink.library(&device);
-
-    let vertex = library
-        .newFunctionWithName(&NSString::from_str("vertexMain"))
-        .expect("ink_msl defines vertexMain");
-    let fragment = library
-        .newFunctionWithName(&NSString::from_str("fragmentMain"))
-        .expect("ink_msl defines fragmentMain");
-    let descriptor = MTLRenderPipelineDescriptor::new();
-    descriptor.setVertexFunction(Some(&vertex));
-    descriptor.setFragmentFunction(Some(&fragment));
-    // SAFETY: `objc2` marks the subscript unsafe because Metal does not
-    // bounds-check the attachment index, and `crate::pipeline` makes the same
-    // call for the same reason. Index 0 is below the array's length on every
-    // Metal device — `MTLRenderPipelineDescriptor` always vends at least one
-    // colour attachment slot.
-    let slot = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
-    slot.setPixelFormat(conv::pixel_format(FORMAT));
-    let state = device
-        .inner
-        .raw
-        .newRenderPipelineStateWithDescriptor_error(&descriptor)
-        .expect("a vertex function, a fragment function and one colour format");
-
-    let bytes = hand_encoded_canvas(&device, &state);
+    let bytes = hand_encoded_canvas(&device, label, &bound.raw, |encoder| {
+        replay(&device, &bound, encoder);
+    });
     assert_ink_triangle(&bytes, FORMAT);
 
     ink.destroy(&device);
@@ -428,9 +475,10 @@ fn draw_probe_a_hand_encoded_pass_over_a_hand_built_pipeline() {
 /// Draws `state`'s triangle into a [`CANVAS`]-sized target with a **hand-built
 /// render encoder**, and reads the texels back.
 ///
-/// The render pass is the whole of what is hand-built. The copy that follows it
-/// goes through this crate's `CommandEncoder`, `submit` and `poll_readback`,
-/// because those are the calls
+/// The render pass is the whole of what is hand-built, and inside it the order
+/// is `crate::command`'s: `setRenderPipelineState:`, then whatever `replay`
+/// emits, then the draw. The copy that follows goes through this crate's
+/// `CommandEncoder`, `submit` and `poll_readback`, because those are the calls
 /// `a_render_pass_clear_reads_back_the_exact_texels` already passes with on the
 /// faulting runner — rewriting them here would add a variable to a probe whose
 /// point is having only one.
@@ -440,7 +488,9 @@ fn draw_probe_a_hand_encoded_pass_over_a_hand_built_pipeline() {
 /// reported with its per-encoder status rather than as a wrong image.
 fn hand_encoded_canvas(
     device: &MetalDevice,
+    label: &str,
     state: &ProtocolObject<dyn MTLRenderPipelineState>,
+    replay: impl FnOnce(&ProtocolObject<dyn MTLRenderCommandEncoder>),
 ) -> Vec<u8> {
     let (image, view) = color_target_of(device, CANVAS, FORMAT);
     let readback = readback_buffer(device, CANVAS_BYTES as u64);
@@ -450,16 +500,17 @@ fn hand_encoded_canvas(
         .expect("the view was created on this device a moment ago");
 
     let descriptor = MTLRenderPassDescriptor::new();
-    // SAFETY: as in `draw_probe_a_hand_encoded_pass_over_a_hand_built_pipeline`
-    // and in `crate::command`'s `begin_render_pass` — index 0 is below the
-    // fixed length of Metal's colour-attachment array.
+    // SAFETY: `objc2` marks the subscript unsafe because Metal does not
+    // bounds-check the attachment index, and `crate::command`'s
+    // `begin_render_pass` makes the same call for the same reason. Index 0 is
+    // below the fixed length of Metal's colour-attachment array.
     let slot = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
     slot.setTexture(Some(&texture));
     slot.setLoadAction(MTLLoadAction::Clear);
     slot.setStoreAction(MTLStoreAction::Store);
     slot.setClearColor(conv::clear_color(CLEAR));
 
-    let command_buffer = crate::fault::command_buffer(&device.inner.queue, "crcbl-mtl probe")
+    let command_buffer = crate::fault::command_buffer(&device.inner.queue, label)
         .expect("the queue vends a command buffer");
     let encoder = command_buffer
         .renderCommandEncoderWithDescriptor(&descriptor)
@@ -467,8 +518,9 @@ fn hand_encoded_canvas(
     // Labelled for the same reason every encoder in this crate is: an unlabelled
     // encoder reports as an empty string in a fault report, which turns the
     // diagnostic back into "one of them faulted".
-    encoder.setLabel(Some(&NSString::from_str("probe-canvas")));
+    encoder.setLabel(Some(&NSString::from_str(label)));
     encoder.setRenderPipelineState(state);
+    replay(&encoder);
     // SAFETY: `objc2` marks this unsafe because Metal bounds-checks neither the
     // vertex start nor the count. Neither indexes an object — `ink_msl`'s
     // vertex stage reads a compile-time array by `[[vertex_id]]` and no buffer

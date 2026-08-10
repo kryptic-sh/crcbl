@@ -27,12 +27,13 @@
 # # The draw probes, and running one at a time
 #
 # `crcbl_mtl::draw_probe` holds the bisect for the draw hang `docs/backlog.md`
-# describes: five probes that each remove one step from a draw that faults on
-# CI's paravirtual device. Extra arguments go straight to nextest, so a person
-# on a real Mac runs the set, or any one of them, by name:
+# describes: a pass that faults on CI's paravirtual device, and beside it the
+# hand-encoded pass that does not, plus one encoder state call at a time.
+# Extra arguments go straight to nextest, so a person on a real Mac runs the
+# set, or any one of them, by name:
 #
 #   crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(draw_probe_)'
-#   crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(draw_probe_a_draw_with_no_scissor_call)'
+#   crates/crcbl-mtl/tests/run-mtl-e2e.sh -E 'test(draw_probe_a_hand_encoded_pass_plus_set_front_facing_winding)'
 #
 # **A real Mac is where they mean the most.** Every one of them is expected to
 # pass on an unvirtualised GPU — they draw the same triangle the ordinary suite

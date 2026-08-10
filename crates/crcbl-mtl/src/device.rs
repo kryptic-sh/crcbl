@@ -5285,26 +5285,6 @@ using namespace metal;\n\
         device.destroy_shader_module(module);
     }
 
-    /// Which of the two framing calls [`draw_canvas_framed`] makes before it
-    /// hands the encoder to the caller.
-    ///
-    /// Metal's defaults for both are already the whole render target, so every
-    /// variant here must produce the *same image* — which is what makes the
-    /// difference between them a clean single-variable experiment rather than a
-    /// change of what is being drawn. `crcbl_mtl::draw_probe` is the only
-    /// caller of anything but [`Both`](Self::Both), and says what it is for.
-    #[cfg(feature = "mtl-e2e")]
-    #[derive(Clone, Copy, Debug)]
-    pub(crate) enum Framing {
-        /// `setViewport:` and then `setScissorRect:`, both covering the canvas.
-        /// What every draw in this backend's own suite records.
-        Both,
-        /// `setViewport:` only.
-        ViewportOnly,
-        /// Neither, leaving Metal's defaults in place.
-        Neither,
-    }
-
     /// Records `paint` into a [`CANVAS`]-sized pass over a `format` target,
     /// copies the result back, and hands over the texels.
     ///
@@ -5313,28 +5293,16 @@ using namespace metal;\n\
     /// `begin_render_pass` and `end_render_pass` — and the attachment's format
     /// — differ. The readback is in `format`'s channel order, which is what
     /// [`assert_ink_triangle`] takes the format for.
-    #[cfg(feature = "mtl-e2e")]
-    fn draw_canvas(
-        device: &MetalDevice,
-        format: Format,
-        paint: impl FnOnce(&mut dyn CommandEncoder),
-    ) -> Vec<u8> {
-        draw_canvas_framed(device, format, Framing::Both, paint)
-    }
-
-    /// [`draw_canvas`], with the viewport and scissor calls under the caller's
-    /// control.
     ///
-    /// Split out for `crcbl_mtl::draw_probe`, which needs two draws that differ
-    /// from the suite's own by exactly one encoder call. Everything else — the
-    /// attachment, the clear, the barrier, the copy, the submit and the
-    /// readback — stays written once, which is the whole reason those probes
-    /// can be read as a controlled experiment.
+    /// The viewport and the scissor are always recorded, both covering the
+    /// whole canvas, because that is what every draw in this backend's own
+    /// suite records. `crcbl_mtl::draw_probe` once varied them; both calls are
+    /// eliminated as suspects in the Metal draw hang and the variants that
+    /// dropped them are gone.
     #[cfg(feature = "mtl-e2e")]
-    pub(crate) fn draw_canvas_framed(
+    pub(crate) fn draw_canvas(
         device: &MetalDevice,
         format: Format,
-        framing: Framing,
         paint: impl FnOnce(&mut dyn CommandEncoder),
     ) -> Vec<u8> {
         let (image, view) = color_target_of(device, CANVAS, format);
@@ -5358,12 +5326,8 @@ using namespace metal;\n\
             depth_stencil_attachment: None,
             render_area: Rect2d::from_size(CANVAS.width, CANVAS.height),
         });
-        if matches!(framing, Framing::Both | Framing::ViewportOnly) {
-            encoder.set_viewport(&Viewport::from_size(CANVAS.width, CANVAS.height));
-        }
-        if matches!(framing, Framing::Both) {
-            encoder.set_scissor(&Rect2d::from_size(CANVAS.width, CANVAS.height));
-        }
+        encoder.set_viewport(&Viewport::from_size(CANVAS.width, CANVAS.height));
+        encoder.set_scissor(&Rect2d::from_size(CANVAS.width, CANVAS.height));
         paint(encoder.as_mut());
         encoder.end_render_pass();
         encoder.pipeline_barrier(&Barriers {
