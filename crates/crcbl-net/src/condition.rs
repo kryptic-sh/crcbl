@@ -753,22 +753,60 @@ mod tests {
     // ── into_inner ───────────────────────────────────────────────────────
 
     #[test]
-    fn into_inner_returns_transport() {
-        let (a, b) = InMemoryTransport::pair();
+    fn into_inner_hands_back_a_transport_that_still_carries_messages() {
+        let (a, mut b) = InMemoryTransport::pair();
         let sim = ConditionSimulator::new(a, SimConditions::default());
-        let inner = sim.into_inner();
-        // b's sender should still be alive (inner still holds one end).
-        drop(inner);
-        drop(b);
+        let mut inner = sim.into_inner();
+
+        // The returned value is the transport itself, still paired with `b`:
+        // dropping it and checking nothing panicked said neither half.
+        inner.send_reliable(msg(9)).unwrap();
+        assert_eq!(
+            drain_all(&mut b).first().map(|m| m.payload.clone()),
+            Some(vec![9])
+        );
+        b.send_reliable(msg(10)).unwrap();
+        assert_eq!(
+            drain_all(&mut inner).first().map(|m| m.payload.clone()),
+            Some(vec![10])
+        );
     }
 
     // ── Debug ────────────────────────────────────────────────────────────
 
     #[test]
-    fn debug_does_not_panic() {
+    fn the_debug_output_reports_the_conditions_and_what_is_still_buffered() {
         let (a, _b) = InMemoryTransport::pair();
-        let sim = ConditionSimulator::new(a, SimConditions::default());
-        let _ = format!("{sim:?}");
+        let mut sim = ConditionSimulator::new(
+            a,
+            SimConditions {
+                latency: Duration::from_millis(30),
+                loss_rate: 0.25,
+                // The seed decides the loss draw, and the default one draws
+                // almost zero — which loses the message this test needs to
+                // still be buffered.
+                seed: 5,
+                ..Default::default()
+            },
+        );
+        // Delayed, so it is still pending when the line is formatted — which is
+        // the state a `Debug` line is read for in the first place.
+        sim.send_reliable(msg(1)).unwrap();
+
+        let debug = format!("{sim:?}");
+        for expected in [
+            "ConditionSimulator",
+            "loss_rate: 0.25",
+            "latency: 30ms",
+            "pending_len: 1",
+            "ready_len: 0",
+            "inner_connected: true",
+        ] {
+            assert!(
+                debug.contains(expected),
+                "{expected:?} missing from {debug}"
+            );
+        }
     }
 
     // ── Convenience constructors ─────────────────────────────────────────
@@ -825,26 +863,45 @@ mod tests {
         assert_eq!(received[0].kind, MessageKind::Unreliable);
     }
 
+    /// Jitter larger than the latency pushes the delay to both sides of zero,
+    /// and both sides are the simulator's to handle: a negative total is
+    /// clamped and released at once, a positive one is held.
+    ///
+    /// This used to sleep for 50 ms and then assert nothing at all, on the
+    /// grounds that the outcome depended on the draw — but the draw is an LCG
+    /// the caller seeds, so the outcome is a function of the seed and both
+    /// seeds below are picked for the side of zero they land on. Neither case
+    /// waits for anything: the clamped one is due the moment it is enqueued,
+    /// and the held one is due in seconds, so the assertion is what the
+    /// simulator did rather than what it managed to do in 50 ms.
     #[test]
-    fn jitter_does_not_panic() {
-        let (a, mut b) = InMemoryTransport::pair();
-        let mut sim = ConditionSimulator::new(
-            a,
-            SimConditions {
-                jitter: Duration::from_secs(10), // huge jitter, may produce negative offset
-                latency: Duration::ZERO,
-                seed: 1,
-                ..Default::default()
-            },
+    fn a_negative_jittered_delay_is_clamped_and_released_while_a_positive_one_is_held() {
+        // Both seeds run the same three draws — loss, duplicate, then jitter —
+        // so the seed is what decides the sign of `(r - 0.5)` on the third.
+        let jittered = |seed: u64| {
+            let (a, mut b) = InMemoryTransport::pair();
+            let mut sim = ConditionSimulator::new(
+                a,
+                SimConditions {
+                    jitter: Duration::from_secs(10),
+                    latency: Duration::ZERO,
+                    seed,
+                    ..Default::default()
+                },
+            );
+            sim.send_reliable(msg(1)).unwrap();
+            sim.recv().unwrap(); // a second drain, in case the first was early
+            drain_all(&mut b)
+        };
+
+        let released = jittered(6);
+        assert_eq!(released.len(), 1, "a delay below zero is due immediately");
+        assert_eq!(released[0].payload, vec![1]);
+
+        assert!(
+            jittered(1).is_empty(),
+            "a delay of seconds is not due yet, and nothing here waited for it"
         );
-        // Should not panic even if jitter > latency (negative total clamped to 0).
-        sim.send_reliable(msg(1)).unwrap();
-        // Allow time for delivery.
-        thread::sleep(Duration::from_millis(50));
-        sim.recv().unwrap(); // drain pending
-        let received = drain_all(&mut b);
-        // Message may or may not be delivered depending on jitter, but no panic.
-        let _ = received;
     }
 
     #[test]

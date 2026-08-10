@@ -432,11 +432,61 @@ mod tests {
         }
     }
 
+    /// The null stream really pulls on its source, and dropping it really
+    /// stops the pulling — the two halves that make it a stand-in for a device
+    /// rather than a constructor that returns.
+    ///
+    /// Both are observable only through a source that counts its own fills,
+    /// and the source is reachable afterwards only because `Arc<T>` is itself
+    /// an [`AudioSource`]. This used to sleep 20 ms and drop, which observed
+    /// neither half — and a fixed sleep is what
+    /// `docs/plan/12-testing.md` says not to wait with. Both waits below poll
+    /// for the condition against a deadline instead.
     #[test]
-    fn null_stream_runs_without_error() {
-        let source = DcSource::new(0.0);
-        let stream = AudioStream::open_null(source);
-        std::thread::sleep(std::time::Duration::from_millis(20));
+    fn the_null_stream_fills_its_source_until_it_is_dropped() {
+        use std::sync::atomic::Ordering::Relaxed;
+        use std::time::{Duration, Instant};
+
+        /// Generous enough that a loaded CI machine does not decide it, short
+        /// enough that a stream that never fills fails rather than hangs.
+        const DEADLINE: Duration = Duration::from_secs(5);
+        /// One poll of the stream's own block period, which is a fraction of a
+        /// millisecond of audio at [`INTERNAL_SAMPLE_RATE`].
+        const POLL: Duration = Duration::from_millis(1);
+        /// Long enough for a live polling thread to have filled again, so two
+        /// equal readings mean it has stopped and not that it was slow.
+        const SETTLE: Duration = Duration::from_millis(50);
+
+        let source = Arc::new(DcSource::new(0.0));
+        let stream = AudioStream::open_null(Arc::clone(&source));
+
+        let deadline = Instant::now() + DEADLINE;
+        while source.fill_count.load(Relaxed) == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the null stream never called its source"
+            );
+            std::thread::sleep(POLL);
+        }
+
         drop(stream);
+
+        // The thread checks the liveness handle once per block, so it may fill
+        // one more time; what it must not do is keep going.
+        let deadline = Instant::now() + DEADLINE;
+        let settled = loop {
+            let before = source.fill_count.load(Relaxed);
+            std::thread::sleep(SETTLE);
+            let after = source.fill_count.load(Relaxed);
+            if before == after {
+                break after;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the null stream kept filling {} blocks after it was dropped",
+                after - before
+            );
+        };
+        assert!(settled > 0, "the loop above waited for at least one fill");
     }
 }

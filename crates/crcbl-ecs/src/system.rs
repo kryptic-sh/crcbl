@@ -441,10 +441,24 @@ mod tests {
         assert!(*called.borrow());
     }
 
+    /// The neighbour above proves the hook is called when one is set; this is
+    /// the other half, and it used to be spelled as "must not panic" — which a
+    /// `debug_draw` that called a *stale* callback would also satisfy.
     #[test]
-    fn debug_draw_none_is_noop() {
+    fn debug_draw_without_a_callback_calls_nothing() {
         let mut sys = System::<i32>::new("test");
-        sys.debug_draw(&DebugCtx); // must not panic
+        let called = std::rc::Rc::new(std::cell::RefCell::new(false));
+        let called2 = called.clone();
+        sys.set_debug_draw(Some(Box::new(move |_ctx| {
+            *called2.borrow_mut() = true;
+        })));
+        sys.set_debug_draw(None);
+
+        sys.debug_draw(&DebugCtx);
+        assert!(
+            !*called.borrow(),
+            "a callback that has been taken away must not still run"
+        );
     }
 
     #[test]

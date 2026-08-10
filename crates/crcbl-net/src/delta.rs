@@ -2148,20 +2148,37 @@ mod tests {
         assert_eq!(baseline.state_hash(), hash);
     }
 
+    /// A decode failure is read out of a log, so the identifier or count that
+    /// says *which* duplicate, tag or overrun it was has to survive into the
+    /// message. `crate::codec` asserts the same for [`DecodeError`], which
+    /// these are converted from.
+    ///
+    /// This test used to format three of the variants and discard the strings,
+    /// under a name announcing that it existed to move a coverage number.
     #[test]
-    fn debug_coverage_delta_types() {
-        let tick = TickId::from_raw(1);
-        let snaps = make_snapshots(&[(1, &[(10, b"x")])]);
-        let delta = DeltaCodec::encode(tick, &snaps, None).expect("valid snapshot");
-
-        let _ = format!("{delta:?}");
-        let _ = format!("{:?}", delta.systems[0]);
-
-        let err = DeltaDecodeError::TooShort;
-        let _ = format!("{err}");
-        let _ = format!("{err:?}");
-
-        let err = DeltaDecodeError::TrailingBytes(5);
-        let _ = format!("{err}");
+    fn each_delta_decode_error_prints_the_value_that_identifies_it() {
+        for (error, expected) in [
+            (DeltaDecodeError::TooShort, "payload too short"),
+            (
+                DeltaDecodeError::InvalidLength(999),
+                "invalid data length: 999",
+            ),
+            (DeltaDecodeError::InvalidFlag(7), "invalid keyframe flag: 7"),
+            (
+                DeltaDecodeError::InvalidMetadata,
+                "inconsistent keyframe and baseline metadata",
+            ),
+            (DeltaDecodeError::TrailingBytes(5), "trailing bytes: 5"),
+            (
+                DeltaDecodeError::DuplicateSystem(3),
+                "duplicate system id: 3",
+            ),
+            (
+                DeltaDecodeError::DuplicateEntity(42),
+                "duplicate entity id: 42",
+            ),
+        ] {
+            assert_eq!(format!("{error}"), expected);
+        }
     }
 }

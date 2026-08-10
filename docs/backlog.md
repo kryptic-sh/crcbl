@@ -4459,3 +4459,35 @@ the rest of that entry's list still stands.
   `element_ids_are_preserved` and their neighbours in `crcbl-phys` and
   `crcbl-net`. The rename's cut was at three words, so these were never read;
   whether they state what the body asserts is unmeasured, not judged fine.
+
+### Fixed sleeps left in tests the assert-nothing slice did not own
+
+The slice that gave the assert-nothing tests real assertions removed two fixed
+sleeps as part of the work — `jitter_does_not_panic`'s 50 ms in
+`crcbl-net/src/condition.rs` and `null_stream_runs_without_error`'s 20 ms in
+`crcbl-audio/src/lib.rs`, both now poll-with-deadline. Its brief named those two
+tests, so the neighbours that sleep the same way were left alone and are
+recorded here rather than left to be re-derived:
+
+- **`source_fill_receives_stereo_buffer`** (`crcbl-audio/src/lib.rs`) sleeps 30
+  ms and drops the stream. Its `CheckSource::fill` asserts the rate and the
+  buffer shape, so the assertions are real — but they run on the stream's
+  polling thread, and a run where the thread never got scheduled inside 30 ms
+  executes none of them and still passes. It is the same shape as the loop with
+  no count that `the_value_column_starts_past_the_longest_label` had. The fix is
+  the one `the_null_stream_fills_its_source_until_it_is_dropped` now uses next
+  to it: count the fills in the source, poll for a non-zero count against a
+  deadline, and assert the count before dropping the stream.
+- **`the_latency_only_constructor_delays_delivery_and_still_delivers`** and
+  **`a_message_under_latency_does_not_arrive_until_the_delay_has_passed`**
+  (`crcbl-net/src/condition.rs`) sleep past a configured latency and then assert
+  delivery. These are the honest use of a sleep — the thing being tested is a
+  wall-clock delay — but they still cost their sleep on every run and would fail
+  on a machine that stalls past the margin. `ConditionSimulator` schedules
+  against `Instant::now()` with no injectable clock, so making them poll would
+  mean either a clock seam in the simulator (a production change) or a poll loop
+  that spins until the message arrives. Neither was in scope.
+
+Also not touched: `docs/plan/12-testing.md`'s frame-poll rule is prose, and
+nothing enforces it. A grep for `thread::sleep` under `crates/*/src` and
+`crates/*/tests` is the whole of the available check.

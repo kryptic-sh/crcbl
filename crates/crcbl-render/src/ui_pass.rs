@@ -697,12 +697,77 @@ mod tests {
         (device, queue)
     }
 
+    /// [`open`] with a recorder attached, for the tests whose claim is about
+    /// what the renderer did rather than what it returned.
+    fn open_recorded() -> (crcbl_hal::null::Recorder, Box<dyn Device>, QueueHandle) {
+        let recorder = crcbl_hal::null::Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let adapter = instance.adapters().remove(0);
+        let device = instance
+            .create_device(&DeviceDesc {
+                label: None,
+                adapter: adapter.id,
+                required_features: Features::GPU_DRIVEN,
+                optional_features: Features::PUSH_CONSTANTS,
+                compatible_surface: None,
+            })
+            .expect("the null backend always opens");
+        let queue = device.queue(QueueKind::Graphics).expect("always present");
+        (recorder, device, queue)
+    }
+
+    /// Bytes written into the current frame's vertex and index rings, read off
+    /// the recorded stream.
+    ///
+    /// Zero for a ring nothing was written to, which is the case an `Ok` from
+    /// [`UiRenderer::begin_frame`] cannot tell apart from a full upload.
+    fn uploaded(recorder: &crcbl_hal::null::Recorder, renderer: &UiRenderer) -> (usize, usize) {
+        use crcbl_hal::null::Event;
+
+        let vertices = renderer.vertex_buffers[renderer.frame];
+        let indices = renderer.index_buffers[renderer.frame];
+        let mut written = (0, 0);
+        for event in recorder.events() {
+            if let Event::BufferWritten {
+                buffer,
+                offset,
+                len,
+            } = event
+            {
+                assert_eq!(offset, 0, "a ring is written from its start");
+                if buffer == vertices {
+                    written.0 += len;
+                } else if buffer == indices {
+                    written.1 += len;
+                }
+            }
+        }
+        written
+    }
+
+    /// Everything [`UiRenderer::new`] created, [`UiRenderer::destroy`] hands
+    /// back.
+    ///
+    /// The recorder is what makes the second half of that a claim: without it
+    /// a leaked sampler, pipeline layout or bind-group layout is invisible with
+    /// no GPU, and this test asserted nothing at all.
     #[test]
     fn ui_renderer_builds_and_leaks_nothing() {
-        let (device, queue) = open();
+        let (recorder, device, queue) = open_recorded();
+        let before = recorder.total_live_objects();
         let renderer = UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb)
             .expect("the null backend accepts everything");
+        assert!(
+            recorder.total_live_objects() > before,
+            "a renderer that created nothing would also leak nothing"
+        );
         renderer.destroy(device.as_ref());
+        assert_eq!(
+            recorder.total_live_objects(),
+            before,
+            "destroy must give back every object new took"
+        );
+        recorder.assert_valid();
     }
 
     /// The glyph atlas upload moved to [`crate::texture`] and must not have
@@ -801,54 +866,94 @@ mod tests {
         recorder.assert_valid();
     }
 
+    /// An empty draw list writes no bytes and leaves the frame with nothing to
+    /// draw.
+    ///
+    /// The `Ok` this used to assert comes back from an upload of any size,
+    /// including one that wrote the *previous* frame's geometry again and left
+    /// its counts in place for the draw call to read.
     #[test]
-    fn begin_frame_with_empty_draw_list_is_harmless() {
-        let (device, queue) = open();
+    fn an_empty_draw_list_uploads_no_bytes_and_leaves_the_counts_at_zero() {
+        let (recorder, device, queue) = open_recorded();
         let mut renderer =
             UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
         let atlas = FontAtlas::built_in();
+        // The atlas upload is `new`'s, not this frame's.
+        recorder.clear();
+
         let dl = DrawList::new();
         renderer
             .begin_frame(device.as_ref(), &dl, &atlas, 1.0)
             .expect("empty draw list upload should succeed");
+
+        assert_eq!(uploaded(&recorder, &renderer), (0, 0));
+        assert_eq!(renderer.last_vertex_count[renderer.frame], 0);
+        assert_eq!(renderer.last_index_count[renderer.frame], 0);
         renderer.destroy(device.as_ref());
+        recorder.assert_valid();
     }
 
+    /// Both primitives really reach the rings, and they are not the same
+    /// geometry.
+    ///
+    /// Two tests here once asserted that `begin_frame` returned `Ok`, which a
+    /// `begin_frame` that returned before touching a buffer does too. The
+    /// observable is the byte count the recorder saw, derived from the
+    /// tessellation rather than spelled out — a literal would rot the first
+    /// time [`Vertex2d`] grew a field. And the two cases must disagree: two
+    /// primitives asserting one number is one case written twice.
     #[test]
-    fn begin_frame_with_rect_uploads_geometry() {
-        let (device, queue) = open();
-        let mut renderer =
-            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+    fn a_rect_and_a_line_of_text_each_upload_exactly_the_geometry_they_tessellate_to() {
         let atlas = FontAtlas::built_in();
-        let mut dl = DrawList::new();
-        dl.rect(
+
+        let mut rect = DrawList::new();
+        rect.rect(
             glam::Vec2::new(10.0, 20.0),
             glam::Vec2::new(110.0, 120.0),
             [1.0, 0.0, 0.0, 1.0],
         );
-        renderer
-            .begin_frame(device.as_ref(), &dl, &atlas, 1.0)
-            .expect("rect upload should succeed");
-        renderer.destroy(device.as_ref());
-    }
-
-    #[test]
-    fn begin_frame_with_text_uploads_geometry() {
-        let (device, queue) = open();
-        let mut renderer =
-            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
-        let atlas = FontAtlas::built_in();
-        let mut dl = DrawList::new();
-        dl.text(
+        let mut text = DrawList::new();
+        text.text(
             glam::Vec2::new(10.0, 10.0),
             "Hello",
             [1.0, 1.0, 1.0, 1.0],
             14.0,
         );
-        renderer
-            .begin_frame(device.as_ref(), &dl, &atlas, 1.0)
-            .expect("text upload should succeed");
-        renderer.destroy(device.as_ref());
+
+        let mut sizes = Vec::new();
+        for (what, dl) in [("a rect", &rect), ("a line of text", &text)] {
+            let (recorder, device, queue) = open_recorded();
+            let mut renderer =
+                UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+            recorder.clear();
+
+            renderer
+                .begin_frame(device.as_ref(), dl, &atlas, 1.0)
+                .expect("upload should succeed");
+
+            let (vertices, indices) = dl.to_triangles(Some(&atlas), 1.0);
+            let expected = (
+                vertices.len() * std::mem::size_of::<Vertex2d>(),
+                indices.len() * std::mem::size_of::<u32>(),
+            );
+            assert!(
+                expected.0 > 0 && expected.1 > 0,
+                "{what} tessellates to nothing, so this case asserts nothing"
+            );
+            assert_eq!(uploaded(&recorder, &renderer), expected, "{what}");
+            assert_eq!(renderer.last_vertex_count[renderer.frame], vertices.len());
+            assert_eq!(renderer.last_index_count[renderer.frame], indices.len());
+
+            sizes.push(expected);
+            renderer.destroy(device.as_ref());
+            recorder.assert_valid();
+        }
+
+        assert_eq!(sizes.len(), 2, "both primitives were measured");
+        assert_ne!(
+            sizes[0], sizes[1],
+            "one quad and five glyphs are not the same geometry"
+        );
     }
 
     /// A UI that has not changed must not churn the GPU: the byte counts and

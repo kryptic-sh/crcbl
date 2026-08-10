@@ -1369,12 +1369,51 @@ mod tests {
         );
     }
 
+    /// A step over an empty world applies nothing and creates nothing.
+    ///
+    /// "Did not panic" was the whole of this before, and a `step` that invented
+    /// a body out of an empty map, or ran its providers over a default body,
+    /// would not have panicked either. The provider counts its own calls
+    /// because that is the only way to see the difference: a force applied to a
+    /// body nothing else can reach leaves no trace in the counts or the hash.
     #[test]
-    fn step_with_no_bodies_does_not_panic() {
+    fn a_step_with_no_bodies_applies_no_force_and_creates_nothing() {
+        use std::cell::Cell;
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher as _;
+        use std::rc::Rc;
+
+        #[derive(Debug)]
+        struct CountingGravity(Rc<Cell<usize>>);
+
+        impl ForceProvider for CountingGravity {
+            fn apply(&self, body: &mut RigidBody, transform: &Transform, dt: f64) {
+                self.0.set(self.0.get() + 1);
+                GravityForce::EARTH.apply(body, transform, dt);
+            }
+        }
+
+        let applications = Rc::new(Cell::new(0));
+
         let mut phys = PhysicsSystem::new();
-        phys.add_force_provider(Box::new(GravityForce::EARTH));
+        phys.add_force_provider(Box::new(CountingGravity(Rc::clone(&applications))));
+
+        let mut before = DefaultHasher::new();
+        SystemTrait::hash_state(&phys, &mut before);
+
         phys.step(1.0 / 60.0);
-        // Just shouldn't panic.
+
+        assert_eq!(
+            applications.get(),
+            0,
+            "there is no body for a force provider to be applied to"
+        );
+        assert_eq!(phys.body_count(), 0);
+        assert_eq!(phys.collider_count(), 0);
+
+        let mut after = DefaultHasher::new();
+        SystemTrait::hash_state(&phys, &mut after);
+        assert_eq!(after.finish(), before.finish(), "the step wrote state");
     }
 
     // ── Schedule integration ────────────────────────────────────────────

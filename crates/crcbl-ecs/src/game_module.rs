@@ -129,11 +129,39 @@ mod tests {
         fn register(&self, _world: &mut World) {}
     }
 
+    /// The default [`GameModule::tick`] is a no-op, and "no-op" is a claim
+    /// about the world it was handed rather than about not panicking: a
+    /// default body that ticked the schedule, or swept, would come back
+    /// without panicking too.
     #[test]
-    fn default_tick_does_not_panic() {
-        let mut module = NoopModule;
+    fn the_default_tick_leaves_the_world_it_is_handed_unchanged() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+
+        fn hash(world: &World) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            world.hash_state(&mut hasher);
+            hasher.finish()
+        }
+
         let mut world = World::new();
-        module.tick(&mut world); // should be a no-op
+        // A world with something in it to disturb: an empty one hashes the
+        // same however badly a tick mangles it.
+        CounterModule::new("counter").register(&mut world);
+        let entity = world.spawn();
+        world.despawn(entity);
+        let (before, entities, dead) = (hash(&world), world.entity_count(), world.dead_queue_len());
+
+        let mut module = NoopModule;
+        module.tick(&mut world);
+
+        assert_eq!(hash(&world), before, "the systems' state moved");
+        assert_eq!(world.entity_count(), entities);
+        assert_eq!(
+            world.dead_queue_len(),
+            dead,
+            "the pending despawn was swept"
+        );
     }
 
     #[test]

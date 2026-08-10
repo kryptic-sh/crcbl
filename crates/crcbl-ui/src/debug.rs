@@ -1072,6 +1072,11 @@ mod tests {
         let scale = panel.style.font_size / NATURAL_FONT_SIZE;
         let widest = atlas.text_width("a-much-longer-label", scale);
         let mut label_x = None;
+        // The loop below only asserts inside its match arms, so a render that
+        // emitted no text — or one whose labels stopped being these literals —
+        // would run the body zero times and pass. The count is what makes the
+        // arms load-bearing.
+        let mut checked = 0;
         for command in dl.commands() {
             if let DrawCommand::Text { pos, text, .. } = command {
                 match text.as_str() {
@@ -1083,11 +1088,18 @@ mod tests {
                             "value at {} overlaps a {widest}px label at {start}",
                             pos.x,
                         );
+                        checked += 1;
                     }
                     _ => {}
                 }
             }
         }
+        assert_eq!(
+            checked,
+            2,
+            "both rows' values must have been placed and checked, in {:?}",
+            dl.commands()
+        );
     }
 
     /// Rows and titles are reused across frames rather than reallocated.

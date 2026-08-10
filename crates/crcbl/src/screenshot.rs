@@ -1290,95 +1290,97 @@ mod tests {
         );
     }
 
-    /// The null backend exercises the same code paths but renders nothing.
-    /// The test exists to prove the module compiles and the HAL seam is
-    /// wired correctly; pixel content is tested by the Vulkan e2e suite.
+    /// The frame the requested [`Scene`] promises, and nothing left behind.
+    ///
+    /// Every scene reaches the same [`OffscreenSetup::draw_and_readback`], and
+    /// what tells them apart is only which passes get hung off the swapchain
+    /// import — so the passes the device actually executed are the observable
+    /// that says the right one ran. A `Sprite` frame that quietly drew a cube,
+    /// or a `Ui` frame whose composite pass dropped out because
+    /// [`UiRenderer::add_pass`](crate::render::UiRenderer::add_pass) found
+    /// nothing to draw, both hand back the same pixel count and the same `Ok`.
+    ///
+    /// This test replaced one that opened the null backend, hand-rolled a
+    /// swapchain and a graph beside this module rather than through it, and
+    /// asserted nothing at all — its own doc comment conceded it proved the
+    /// module compiles. [`crate::backend`] already covers opening the null
+    /// backend by name, and [`crate::render`] covers the forward pass list, so
+    /// what is left for this module to own is the composition above: which
+    /// passes each scene contributes, the shape of the bytes handed back, and
+    /// [`OffscreenSetup::finish`] giving back everything the setup took.
     #[test]
-    fn offscreen_setup_opens_with_null_backend() {
-        // Force the null backend to avoid needing a real GPU.
-        let instance = crate::backend::open_backend(crate::backend::GpuBackend::Null)
-            .expect("null backend is always compiled in");
+    fn every_scene_records_the_passes_it_names_and_gives_back_every_object_at_finish() {
+        use crate::hal::null::{Event, NullInstance, Recorder};
 
-        let surface = unsafe {
-            instance
-                .create_surface(&SurfaceTarget::Offscreen)
-                .expect("null accepts every surface")
-        };
-        let adapters = instance.adapters();
-        let adapter = adapters
-            .first()
-            .expect("null backend always has an adapter");
+        // `(kind, label)` as `Command::opens_pass` reports them.
+        let expected: [(Scene, &[(&str, &str)]); 3] = [
+            (
+                Scene::Cube,
+                &[
+                    ("compute", "clear-counters"),
+                    ("compute", "cull"),
+                    ("compute", "draw-args"),
+                    ("render", "forward"),
+                    ("render", "tonemap"),
+                ],
+            ),
+            (
+                Scene::Sprite,
+                &[("render", "scene background"), ("render", "sprites")],
+            ),
+            (
+                Scene::Ui,
+                &[("render", "scene background"), ("render", "ui-composite")],
+            ),
+        ];
 
-        let caps = instance
-            .surface_caps(surface, adapter.id)
-            .expect("null reports surface caps");
-        let format = caps.preferred_format().expect("null has a format");
+        for (scene, passes) in expected {
+            let recorder = Recorder::new();
+            let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+            let before = recorder.total_live_objects();
 
-        let device = instance
-            .create_device(&DeviceDesc {
-                label: Some("screenshot test"),
-                adapter: adapter.id,
-                required_features: Features::empty(),
-                optional_features: Features::GPU_DRIVEN,
-                compatible_surface: Some(surface),
-            })
-            .expect("null device");
+            let mut setup = OffscreenSetup::open_on(Box::new(instance), 16, 16, scene)
+                .expect("the null backend opens an offscreen setup");
+            recorder.clear(); // the setup's uploads are not this frame's passes
 
-        let queue = device
-            .queue(QueueKind::Graphics)
-            .expect("null has a graphics queue");
+            let (extent, pixels) = setup
+                .draw_and_readback()
+                .expect("the null backend records a frame and reads it back");
+            assert_eq!(extent, (16, 16), "{scene:?}");
+            assert_eq!(
+                pixels.len(),
+                16 * 16 * 4,
+                "{scene:?}: the caller gets tightly packed RGBA, padding dropped"
+            );
 
-        let swapchain = device
-            .create_swapchain(&SwapchainDesc {
-                label: Some("test ring"),
-                surface,
-                format,
-                extent: (16, 16),
-                image_count: 2,
-                present_mode: PresentMode::Fifo,
-                composite_alpha: crate::hal::CompositeAlpha::Opaque,
-            })
-            .expect("null creates a swapchain");
+            let recorded: Vec<(String, String)> = recorder
+                .events()
+                .into_iter()
+                .filter_map(|event| match event {
+                    Event::Command { command, .. } => command.opens_pass().map(|(kind, label)| {
+                        (
+                            kind.to_string(),
+                            label
+                                .expect("every pass this module adds is labelled")
+                                .to_string(),
+                        )
+                    }),
+                    _ => None,
+                })
+                .collect();
+            let expected: Vec<(String, String)> = passes
+                .iter()
+                .map(|(kind, label)| ((*kind).to_string(), (*label).to_string()))
+                .collect();
+            assert_eq!(recorded, expected, "{scene:?}");
 
-        let mut renderer = ForwardRenderer::new(device.as_ref(), queue, format)
-            .expect("null builds the forward renderer");
-
-        // Acquire, record, submit — no readback on the null backend.
-        let acquired = device
-            .acquire_next_frame(swapchain)
-            .expect("null ring has an image");
-
-        let mut graph = RenderGraph::new(queue);
-        let target = graph.import_image(
-            "swapchain",
-            ForwardRenderer::present_target(acquired.image, acquired.view, format, (16, 16)),
-        );
-        let pool = TransientPool::new();
-        let _hdr = renderer.add_passes(&mut graph, target, (16, 16));
-
-        let compiled = graph.compile(&pool).expect("graph compiles");
-        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
-            label: Some("test frame"),
-            queue,
-        });
-        compiled
-            .execute(
-                device.as_ref(),
-                &mut TransientPool::new(),
-                encoder.as_mut(),
-                None,
-            )
-            .expect("graph executes");
-        let commands = encoder.finish().expect("encoding succeeds");
-        device
-            .submit(queue, &SubmitInfo::new(&[commands]))
-            .expect("submit");
-        device.wait_idle().expect("idle");
-
-        device.destroy_command_buffer(commands);
-        device.destroy_swapchain(swapchain);
-        instance.destroy_surface(surface);
-        drop(device);
-        drop(instance);
+            setup.finish().expect("the null device reaches idle");
+            assert_eq!(
+                recorder.total_live_objects(),
+                before,
+                "{scene:?}: finish must give back every object the setup and the frame took"
+            );
+            recorder.assert_valid();
+        }
     }
 }

@@ -313,12 +313,22 @@ mod tests {
         );
     }
 
+    /// A schedule with nothing in it stays that way through a full frame's
+    /// worth of calls.
+    ///
+    /// Each of the three used to be asserted by "did not panic", which is also
+    /// what a `run` that registered a system of its own would have managed.
     #[test]
-    fn empty_schedule_runs_without_panic() {
+    fn a_frame_against_an_empty_schedule_leaves_it_empty() {
         let mut schedule = Schedule::new();
         schedule.run(1.0 / 60.0);
         schedule.sweep(&[]);
         schedule.debug_draw(&DebugCtx);
+
+        assert!(schedule.is_empty());
+        assert_eq!(schedule.len(), 0);
+        assert_eq!(schedule.stats().collect::<Vec<_>>(), Vec::new());
+        assert_eq!(schedule.iter().count(), 0);
     }
 
     #[test]

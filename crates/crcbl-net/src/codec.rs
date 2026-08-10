@@ -1037,39 +1037,47 @@ mod tests {
         );
     }
 
+    /// [`Hello`] derives its `Debug`, so the redaction
+    /// [`ResumeToken`](crate::types::ResumeToken) does for itself is the only
+    /// thing between a logged handshake and a session credential in a log file
+    /// — and a derive is exactly the kind of thing that gets replaced by a
+    /// hand-written impl that spells the bytes out.
+    ///
+    /// `crate::types` asserts the same property for
+    /// [`HandshakeResult::Accept`], the other message that carries one. This
+    /// used to format four values and discard all four.
     #[test]
-    fn hello_and_reject_reason_debug() {
-        let h = Hello {
+    fn a_hellos_debug_output_redacts_the_session_token_it_carries() {
+        let hello = Hello {
             protocol_version: 1,
             engine_build_id: 2,
             schema_hash: 3,
             generation: 1,
-            session_token: Some(ResumeToken::from_bytes([4; 32])),
+            session_token: Some(ResumeToken::from_bytes([0xA5; 32])),
         };
-        let _ = format!("{h:?}");
 
-        let r = RejectReason {
-            code: 1,
-            msg: "test".into(),
-        };
-        let _ = format!("{r:?}");
-
-        let accept = HandshakeResult::Accept {
-            generation: 1,
-            session_id: SessionId(5),
-            resume_token: ResumeToken::from_bytes([0; 32]),
-            server_tick: TickId::from_raw(6),
-        };
-        let _ = format!("{accept:?}");
-
-        let reject = HandshakeResult::Reject {
-            generation: 1,
-            reason: RejectReason {
-                code: 2,
-                msg: "nope".into(),
-            },
-        };
-        let _ = format!("{reject:?}");
+        let debug = format!("{hello:?}");
+        assert!(debug.contains("REDACTED"), "{debug}");
+        assert!(
+            !debug.contains("165"),
+            "the token's bytes, in decimal: {debug}"
+        );
+        assert!(
+            !debug.contains("0xA5"),
+            "the token's bytes, in hex: {debug}"
+        );
+        // The fields that are not secret are the reason to log the line at all.
+        for expected in [
+            "protocol_version: 1",
+            "engine_build_id: 2",
+            "schema_hash: 3",
+            "generation: 1",
+        ] {
+            assert!(
+                debug.contains(expected),
+                "{expected:?} missing from {debug}"
+            );
+        }
     }
 
     #[test]
