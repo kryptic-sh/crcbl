@@ -3737,96 +3737,52 @@ Three results in one run:
 frame still dies in `OffscreenSetup::open` — see the offscreen-ring entry. So
 the renderer runs on three backends of four.
 
-### D3D12's frame: diagnosed, two bugs in the resource layer
+### Settled: the render layer runs on all four backends
 
-**Named on `a918134`, by asking the device instead of reasoning about it.**
-`GetDeviceRemovedReason` plus the drained debug layer turned an opaque
-`0x887A0005` into two specific, actionable errors:
+**D3D12 drew the cube frame on `4907b7e`**, and with the tightest golden match
+of any backend:
 
 ```
-GetDeviceRemovedReason: DXGI_ERROR_INVALID_CALL — an earlier call from this
-application was invalid and the runtime took the device down for it
-
-id 649: CreateConstantBufferView: pDesc->BufferLocation + SizeInBytes - 1
-  (0x…000000ff) exceeds end of the virtual address range of Resource
-  ('forward params', GPU VA Range: 0x…00000000 - 0x…0000000f)
-
-id 340: CreateUnorderedAccessView: A UnorderedAccessView cannot be created of a
-  Resource that did not specify the D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
-  Flag
+dx12 selected IndirectCount / Bindless / Rasterised
+device on adapter 0 "Microsoft Basic Render Driver" type=Cpu (CRCBL_ADAPTER=cpu)
+golden cube on dx12 — 256x192: max channel delta 1, 0 over tolerance (0.0000%),
+ssim 0.999879
 ```
 
-**Bug 1 — a constant buffer view outruns its buffer.** D3D12 requires a CBV's
-`SizeInBytes` be a multiple of 256, and this backend rounds up to it without the
-allocation being padded to match. `forward params` is 16 bytes and the view asks
-for 256; `forward cull params` is 112 and asks for the same. The fix is that the
-_buffer_ has to be padded when it is going to be viewed as a constant buffer,
-not just the view rounded.
+So `render_e2e.rs` now passes on **Vulkan, native wgpu, Metal and D3D12**, and
+the step is a real gate — the `continue-on-error` is gone. One golden, blessed
+on lavapipe, matched by four independent implementations.
 
-**Bug 2 was not what it looked like, and it is not a D3D12 bug.**
-`conv::buffer_flags` was already correct — `STORAGE ∧ DeviceLocal` does set
-`ALLOW_UNORDERED_ACCESS`, with a test asserting it. The buffers whose UAVs D3D12
-refused are **host-visible**: `crcbl_render::draw_gen` puts `visible count`,
-`draw args` and `draw counts` on `MemoryLocation::HostUpload` and binds them
-writable. **D3D12 has no UAV of an upload-heap resource at all** — the flag is
-rejected at creation, and the heap pins the resource to `GENERIC_READ` for its
-lifetime, which a shader cannot write from.
+The two causes, both found by asking the device rather than reasoning about it:
 
-**This is the same compromise this file already recorded** under the GPU-driven
-draw-generation entry: "the three counters are host-visible only because the
-seam allows a fill outside a pass and the graph has no fill step". Vulkan
-tolerates it; D3D12 does not, and it took a device removal to surface that.
+1. **A constant buffer view outran its buffer.** D3D12 requires a CBV's
+   `SizeInBytes` be a multiple of 256; `crcbl-dx12` rounded the _view_ up while
+   the allocation stayed 16 bytes. The allocation is padded now, only for
+   `UNIFORM` usage.
+2. **Three draw-generation buffers were on an upload heap and bound writable.**
+   D3D12 refuses `ALLOW_UNORDERED_ACCESS` on that heap at creation and pins the
+   resource to a state no shader can write from. They are `DeviceLocal` now, and
+   the frame zeroes them with a clear dispatch.
 
-The fix is therefore in `crcbl-render`, not `crcbl-dx12`: **a graph-level fill
-(or a small clear dispatch) so those three can be `DeviceLocal`** — exactly what
-the earlier entry asked for. The alternative, a D3D12 custom heap
-(`GetCustomHeapProperties(0, UPLOAD)` → `Type = CUSTOM`), lifts the flag and
-state pinning but means host-visible storage buffers start needing barriers,
-which `command.rs` currently skips for every non-`DeviceLocal` buffer. That is a
-memory-model change and should not be made to route around a design compromise
-that has a named fix.
+**The second was not a D3D12 bug at all** — it was a compromise this file had
+already recorded under GPU-driven draw generation, kept because `fill_buffer` is
+legal only outside a pass and the graph had no fill step. Vulkan tolerated it
+for months. Worth remembering: **a portability compromise that one backend
+accepts is not a compromise, it is a latent failure with a delay on it.**
 
-Meanwhile `crcbl-dx12` refuses a host-visible buffer bound writable **by name**,
-at both the descriptor-table and root-UAV paths, rather than handing D3D12 a
-`void`-returning call that removes the device at the next one. Read-only storage
-bindings of host-visible buffers still work, which is how the instance and mesh
-tables are read.
+Also settled by that work: a graph-level fill was the obvious fix and the wrong
+one. `fill_buffer` is four separate backend promises — Metal repeats a byte,
+wgpu clears only to zero, `crcbl-dx12` refuses it entirely — so it would have
+moved the blocker one call later. A dispatch's portability is held by
+construction.
 
-**Everything else is exonerated by measurement**, and the list is worth keeping
-because three sessions were spent narrowing it:
+**Two follow-ups this leaves:**
 
-- The offscreen ring, including at the exact shape `crcbl::screenshot` builds —
-  sRGB, 256x192, no barrier back to `Present` —
-  `the_ring_shape_crcbl_screenshot_builds_leaves_a_usable_device` passes on WARP
-  as 156/159.
-- Adapter choice: pinning the software adapter changed nothing.
-- The `TransferSrc`-never-barriered-back lead: nothing is recorded before `open`
-  fails, so it cannot be this. Still a real defect, still worth fixing.
-
-**The lesson, and it cost real time.** Two sessions were spent inferring from an
-error that names the call which _noticed_ rather than the one that caused it —
-DXGI reports removal at the next call. The device could say exactly what
-happened the whole time; nothing asked. `render_e2e.rs` also installed no
-logger, so every `log::info!` the backend emitted was invisible in precisely the
-runs that needed it. Both are fixed. **When a platform offers a diagnostic
-channel, wire it before the third round of guessing.**
-
-**Confirmed available:** the runner has the D3D12 debug layer —
-`debug layer=true messages readable=true` — which was an open question. Note the
-messages must be _drained_ from the info queue; `EnableDebugLayer` alone writes
-to `OutputDebugString`, which a runner with no debugger attached swallows
-silently.
-
-**Owed:** the frame step is still `continue-on-error: true`. It stays until the
-`crcbl-render` fill lands, because until then the frame fails for a reason
-`crcbl-dx12` now reports honestly rather than one it can fix.
-
-**Neighbouring defects found and fixed while there**, same class, one line
-apart: a raw SRV/UAV had no start-alignment check where D3D12 requires a
-multiple of 16, and `NumElements` was clamped with `unwrap_or(u32::MAX)` — a
-clamp that manufactures exactly the "view past the end of the resource" shape
-that bug 1 was. Both latent today, since everything binds whole buffers at
-offset 0.
+- The `dx12 e2e (WARP)` job is misnamed. `CRCBL_ADAPTER=cpu` correctly selects
+  the single `DeviceType::Cpu` adapter, and on this runner that is **Microsoft
+  Basic Render Driver**, not WARP. The pin is right; the label is not.
+- `crcbl-dx12::fill_buffer` is still a refusal, and now nothing in the workspace
+  needs it. Worth recording as a deliberate non-fix rather than an oversight.
 
 ### What WARP has actually proven
 
