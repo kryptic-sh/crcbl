@@ -2655,9 +2655,28 @@ mod tests {
         // answer is that nobody was focused. What this test is about is which
         // rectangle a restore re-clips from, not who ends up focused.
         focus_and_confirm(&mut shell, window, hwnd);
+        // **Recomputed, not the `clipped` from before the minimize.** That one
+        // was intersected with the virtual screen as it was then, and this
+        // runner is known to change its display set mid-run — see the virtual
+        // display that made `refresh_clip` refuse a degenerate refresh. A stale
+        // rectangle turns any such change into a failure of *this* assertion,
+        // which is about which rectangle a restore clips from, not about
+        // whether the desktop stayed put.
+        let restored = super::input::client_screen_rect(hwnd)
+            .expect("a restored window has one")
+            .intersect(virtual_screen());
+        // Recomputing costs the comparison its teeth if the window is somehow
+        // still minimized, because then both sides are the 0×0 area and agree.
+        // The defect this test exists for is a restore that clips from exactly
+        // that, so the rectangle it compares against has to be a real one.
+        assert!(
+            restored.right > restored.left && restored.bottom > restored.top,
+            "the window did not actually restore, so the comparison below \
+             would pass on two degenerate rectangles: {restored:?}"
+        );
         assert_eq!(
             clip_rect(),
-            clipped,
+            restored,
             "restore re-clips from the real client rectangle"
         );
 
