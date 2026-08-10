@@ -1014,6 +1014,12 @@ jobs:
           $libraryPath = (Get-Content -Raw $icd | ConvertFrom-Json).ICD.library_path
           $driver = [System.IO.Path]::GetFullPath((Join-Path (Split-Path $icd) $libraryPath))
           Write-Host "crcbl vk e2e (windows): $icd -> $libraryPath -> $driver"
+          # The loader reads these, and Git Bash could not hand them over:
+          # exporting them there left the loader on its registry lookup,
+          # which is what it does when the variable never arrived. Set here,
+          # the process that reads them is already native.
+          "VK_DRIVER_FILES=$icd"   | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "VK_ICD_FILENAMES=$icd"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           if (-not (Test-Path $driver)) {
               Get-ChildItem -Path $env:LAVAPIPE_ROOT -Recurse -File | ForEach-Object { Write-Host "  $($_.FullName)" }
               throw "crcbl vk e2e (windows): the ICD manifest resolves to $driver, which does not exist — the archive was not extracted as a whole."
@@ -1270,206 +1276,95 @@ jobs:
       # Nothing to install: Metal ships with the OS, and the crate links it
       # through `objc2` rather than `dlopen`ing anything.
       #
-      # **One test is held out, and not for the reason the others were gated.**
+      # **One test is held out, and it is not a claim about this backend.**
       # `a_layer_swapchain_acquires_a_drawable_and_presents_it` is `#[ignore]`d
       # because a detached `CAMetalLayer` in a headless container has no
       # surface to vend a drawable from, so `nextDrawable` returns nil or
-      # blocks — a claim about the window server, not about shader execution.
-      # The probe above measured shader execution and says nothing about
-      # drawables, so whether macos-26 vends one here is an open question this
-      # job deliberately does not gamble on: `--run-ignored all` would sweep
-      # the test up and a block would burn the timeout. Every other `#[ignore]`
-      # in the crate is a shader-execution gate; the one further exclusion below
-      # is a quarantine with its own reason, and everything else runs. The
-      # filter lives here rather than in the script because a person on a real
-      # Mac, with a real window server, should run that test.
+      # blocks. `--run-ignored all` would sweep it up and a block would burn
+      # the timeout, so the filter below names it. Every other `#[ignore]` in
+      # the crate is a shader-execution gate and every one of them runs here.
+      # The filter lives here rather than in the script because a person on a
+      # real Mac, with a real window server, should run that test.
       #
       # **`--no-fail-fast`, because the first run found a hang and then hid the
       # rest of the answer.** Run 31040839716 stopped at test 45 of 106 and
-      # cancelled the remaining 59 — including the other three draw tests,
+      # cancelled the remaining 59 — including three of the four draw tests,
       # which is exactly the set this job exists to report on. A GPU hang here
       # surfaces as a `DeviceLost` error rather than a block, so letting the
       # suite finish costs under a second per faulting test.
       #
-      # # The draw tests were held out, and the reason is not the device
+      # # The draw hang was ours, and the call was `setDepthStencilState:nil`
       #
-      # Run 31042925024 ran the suite out: **102 passed, 4 failed**, and the
-      # four are exactly the tests that make the GPU run a shader. They fault
-      # with `kIOGPUCommandBufferCallbackErrorHang`, every encoder `completed`
-      # and none faulted.
-      #
-      # That is *not* the device being unable to execute — run 31037470086 ran
+      # Six draw tests were quarantined here across three rounds. Every draw
+      # this backend recorded faulted on this runner with
+      # `kIOGPUCommandBufferCallbackErrorHang`, every encoder reporting
+      # `completed` and none faulted — while
+      # `a_render_pass_clear_reads_back_the_exact_texels`, which is behind
+      # neither the feature nor `#[ignore]` and was never filtered, passed in
+      # the same runs. The device was never the limitation: run 31037470086 ran
       # a compute dispatch and two triangle draws on this same image from a
-      # standalone Swift script and all three were correct. So the difference
-      # is between that command stream and this backend's, which makes these
-      # four a `crcbl-mtl` bug rather than a runner limitation, and a real
-      # finding this job earned. `docs/backlog.md` names the two candidates
-      # (render-target format, and the error-options command-buffer
-      # descriptor). They come back the moment that is understood.
+      # standalone Swift script.
       #
-      # **The first candidate is settled, and it was not the format.**
-      # `a_triangle_draw_into_a_bgra_target_paints_the_same_image` is the
-      # held-out triangle with `Format::Bgra8Unorm` in place of
-      # `Format::Rgba8Unorm` and nothing else changed. Run 31080128007 ran it
-      # unfiltered: **110 passed, 1 failed**, and the one is that test, faulting
-      # byte-identically to its RGBA twin. So the render-target format is ruled
-      # out and this test joins the quarantine until the cause is understood.
+      # A ten-probe bisect on `6a59e89` named the call. Each probe was a
+      # hand-encoded pass — this crate's own `MTLDevice`, queue, texture,
+      # `MTLRenderPipelineState` and `crcbl_mtl::fault` command-buffer
+      # descriptor, a combination already shown to pass — plus exactly one of
+      # the calls `crcbl_mtl::command`'s `bind_graphics_pipeline` emits beside
+      # `setRenderPipelineState:`. **Seven passed, three failed**, and one call
+      # is in all three failures:
       #
-      # **The second candidate is settled too, by a test that was already
-      # green.** `a_render_pass_clear_reads_back_the_exact_texels` is behind
-      # neither the feature nor the `#[ignore]` and is not in the filter below,
-      # so it ran and passed in both of those runs — and it goes through
-      # `crate::fault::command_buffer` with
-      # `MTLCommandBufferErrorOptionEncoderExecutionStatus`, a render encoder,
-      # a blit encoder **after** it on the same command buffer, the same
-      # `submit`, and the same `HostReadback` poll. The error-options
-      # descriptor therefore cannot be what distinguishes the failures either,
-      # and neither can `retainedReferences`, the encoder ordering or the
-      # readback path. What is left is the nine encoder calls that exist only
-      # between `begin_render_pass` and `end_render_pass` on a draw — of which
-      # the strongest candidate is that `crcbl_mtl::command` always emits the
-      # *long* draw forms (`…instanceCount:baseInstance:` and its indexed and
-      # indirect siblings), and `crcbl_mtl::adapter::features_of` reports
-      # `MULTI_DRAW_INDIRECT` and `INDIRECT_FIRST_INSTANCE` with no
-      # `supportsFamily:` query behind them.
+      # * `setDepthStencilState:` with **nil** hung. The same call with a
+      #   default `MTLDepthStencilState` object passed, which is what splits
+      #   the selector from its argument.
+      # * `setCullMode:`, `setFrontFacingWinding:`, `setTriangleFillMode:`,
+      #   `setDepthClipMode:` and `setDepthBias:slopeScale:clamp:` each passed
+      #   on its own, so none of them is the fault.
+      # * The other two failures were the whole-replay probe and the positive
+      #   control — this backend's own path with a pipeline bound and no draw
+      #   at all. Both make the nil call, and the singles cleared everything
+      #   else either of them adds.
       #
-      # # This run is the experiment, and either answer is a result
+      # Metal documents nil as "restore the default depth/stencil state", so
+      # this is a driver bug on the paravirtual GPU rather than misuse. It is
+      # fixed on our side regardless, because it costs one object per device:
+      # `crcbl_mtl::pipeline`'s `default_depth_stencil_state` builds an
+      # always-pass, never-write state at device open, every pipeline that
+      # declares no depth/stencil state carries that instead, and the `Option`
+      # that could reach Metal as nil no longer exists in the crate. The
+      # substitution cannot change an image — the state tests nothing and
+      # writes nothing — and `crcbl_mtl::device`'s
+      # `a_pipeline_without_depth_state_binds_the_devices_default_rather_than_nil`
+      # asserts both halves without a draw, so it runs on this device too.
       #
-      # `crcbl_mtl::command` now emits the **short** selectors —
-      # `drawPrimitives:vertexStart:vertexCount:` and
-      # `drawIndexedPrimitives:indexCount:indexType:indexBuffer:indexBufferOffset:`
-      # — for any draw whose instance range is `0..1` with no base vertex.
-      #
-      # Four tests come out of the filter below on that change, because it is
-      # every draw they record:
+      # **Five of the six come out of the filter on that fix**, and they are
+      # every quarantined test that draws:
       # `a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear`,
-      # `a_triangle_draw_into_a_bgra_target_paints_the_same_image` and
-      # `the_engines_own_triangle_draws_through_a_bind_group` all draw `0..3`
-      # over `0..1`, and `an_indexed_draw_reads_the_bound_index_range` draws
-      # indices `3..6` with base vertex 0 over `0..1` — its first index rides in
-      # `indexBufferOffset`, which the short selector takes. Nothing else about
-      # the command stream changed, so this run turns on one variable.
+      # `a_triangle_draw_into_a_bgra_target_paints_the_same_image`,
+      # `the_engines_own_triangle_draws_through_a_bind_group`,
+      # `an_indexed_draw_reads_the_bound_index_range` and
+      # `a_multi_draw_indirect_emits_every_argument_structure`. Every one of
+      # them draws into a colour-only pass, which is exactly the case whose
+      # pipeline bound nil. The sixth is the layer swapchain above, which is
+      # unrelated and stays out.
       #
-      # * **They pass** — the long argument forms were the fault. Those four
-      #   come back for good, and `crates/crcbl/tests/render_e2e.rs`'s Metal arm
-      #   is worth re-wiring, though only partly for the same reason: a
-      #   `ForwardRenderer` frame is mixed, with `crcbl_render::forward`'s
-      #   tonemap draw and `crcbl_render::ui_pass`'s indexed one on the short
-      #   form and the forward pass's `draw_indexed_indirect` on a selector this
-      #   change does not touch.
-      # * **They still fault** — the last standing candidate from
-      #   `docs/backlog.md` is eliminated, the argument form is not it, and this
-      #   comment should say so before the tests go back behind the filter.
+      # **The probes are gone with the answer.** A probe set that keeps running
+      # after it has answered is noise, and its positive control was expected
+      # to fault, which would keep this job red forever.
       #
-      # Nothing was verified locally: there is no Metal device on this team's
-      # machines, `cargo check --target aarch64-apple-darwin` compiles without
-      # executing, and the only local test of the change is a unit test in
-      # `crcbl_mtl::draw` over the predicate that picks the form. **This job is
-      # the first thing that runs it.**
-      #
-      # **`a_multi_draw_indirect_emits_every_argument_structure` stays behind
-      # the filter, and not out of caution.** The indirect selectors —
-      # `drawPrimitives:indirectBuffer:indirectBufferOffset:` and its indexed
-      # sibling — have no short form at all: every argument they take is
-      # load-bearing, so that path's encoder calls are byte-identical to the run
-      # in which it faulted. Releasing it would guarantee a red job whichever
-      # way the experiment goes, for a reason this change cannot have altered,
-      # and a job that is red either way reports nothing.
-      #
-      # One name in the list is older and unrelated:
-      # `a_layer_swapchain_acquires_a_drawable_and_presents_it` is `#[ignore]`d
-      # because a detached `CAMetalLayer` in a headless container vends no
-      # drawable — a claim about the window server, not shader execution. It
-      # would block rather than fault, so `--run-ignored all` sweeping it up
-      # would burn the timeout. A person with a real window server runs it,
-      # which is why the filter lives here and not in the script.
-      # **The short-form experiment is over and it failed.** `025cf90` emitted
-      # `drawPrimitives:vertexStart:vertexCount:` for a single instance from
-      # zero and released these four, on the theory that the long forms'
-      # `instanceCount:baseInstance:` were the fault — the Swift probe that drew
-      # correctly on this device used the short form. All four hung identically,
-      # `canvas` and `crcbl copies` both `completed`, so the draw *form* is not
-      # what distinguishes a working command stream from ours. The code is
-      # reverted and they are quarantined again.
-      #
-      # What that leaves: a clear works and a draw does not, so the fault is in
-      # something only a draw sets up — the render pipeline state, the bind
-      # groups it needs, or the viewport/scissor. `docs/backlog.md` carries the
-      # eliminated candidates so nobody spends another run on one.
-      #
-      # **`crcbl_mtl::draw_probe` is the bisect of that remainder**, and it is
-      # excluded here for the same reason the quarantined draws are: those
-      # probes are *expected* to fault, and a step that is red either way
-      # reports nothing. They run in their own step below, where the answer is
-      # readable on its own.
-      - name: Run the Metal suite, minus the draws that fault on this device
+      # **Nothing here has been verified.** There is no Metal device on this
+      # team's machines; `cargo clippy --target aarch64-apple-darwin` compiles
+      # this crate and runs none of it. This job is the first thing that runs
+      # the fix. Two earlier hypotheses released these same tests and were
+      # wrong — the render-target format (settled by the BGRA twin faulting
+      # byte-identically to its RGBA one, run 31080128007) and the long draw
+      # argument forms (settled by `025cf90`, whose short selectors hung
+      # identically). This one differs in that a probe reproduced the hang from
+      # a single call and its twin did not, rather than being inferred from
+      # what was left.
+      - name: Run the Metal suite, minus the one test with no window server
         run: >-
           crates/crcbl-mtl/tests/run-mtl-e2e.sh --no-fail-fast -E 'not
-          (test(a_layer_swapchain_acquires_a_drawable_and_presents_it) +
-          test(a_triangle_draw_paints_the_centre_and_leaves_the_corners_clear) +
-          test(a_triangle_draw_into_a_bgra_target_paints_the_same_image) +
-          test(the_engines_own_triangle_draws_through_a_bind_group) +
-          test(an_indexed_draw_reads_the_bound_index_range) +
-          test(a_multi_draw_indirect_emits_every_argument_structure) +
-          test(draw_probe_))'
-
-      # # The draw-hang bisect, and this step is expected to go red
-      #
-      # **The previous round answered and its probes are gone.** They
-      # established that this backend's render pass hangs with a pipeline bound
-      # and *no draw at all*, that a hand-encoded pass over this crate's own
-      # device, queue, texture and `MTLRenderPipelineState` passes, and that
-      # `setViewport:` and `setScissorRect:` are innocent. What is left is the
-      # six-call rasteriser replay `crcbl_mtl::command`'s
-      # `bind_graphics_pipeline` emits beside `setRenderPipelineState:`.
-      #
-      # **This round asks which of those six calls it is**, and it is built so
-      # one run can answer. Each probe is that known-good hand-encoded pass plus
-      # **exactly one** of the six, so a hang names a selector:
-      #
-      # 1. `draw_probe_a_bound_pipeline_with_no_draw_call` — the **positive
-      #    control**, kept from the previous round and the only one kept. It is
-      #    the failing path, and it is what says the runner still reproduces the
-      #    bug; if it passes, nothing else in this step can be read.
-      # 2. `draw_probe_a_hand_encoded_pass_and_none_of_the_replay` — the
-      #    **negative control**: the baseline every probe below adds one call
-      #    to, expected to pass as it did last round.
-      # 3. `…_plus_set_cull_mode`, `…_plus_set_front_facing_winding`,
-      #    `…_plus_set_triangle_fill_mode`, `…_plus_set_depth_clip_mode`,
-      #    `…_plus_set_depth_bias` — one call each. The winding is the named
-      #    suspect: the only one of the six asking for a non-default, and
-      #    invisible in any image while nothing is culled.
-      # 4. `…_plus_a_nil_depth_stencil_state` and
-      #    `…_plus_a_default_depth_stencil_state` — the sixth call is a pair,
-      #    because this pass has no depth attachment and passing nil may not be
-      #    the same to the driver as passing a state object.
-      # 5. `…_plus_the_whole_replay` — all six together, so the run cannot come
-      #    back with nothing: it separates "no single call is enough, so it is a
-      #    combination" from "the replay is innocent and `begin_render_pass` is
-      #    the remaining difference".
-      #
-      # **The step has no `continue-on-error`, and that is deliberate.** The
-      # positive control is a path that has hung on this device every time, so
-      # the expected outcome is a red job — one red run is what buys the answer,
-      # and a probe step that reported green regardless would read as coverage
-      # while gating nothing, which is the trap `docs/plan/12-testing.md` names.
-      # The step above is where this job's real gate lives, and it is a separate
-      # step precisely so its result stays readable beside this one's.
-      #
-      # `if: ${{ !cancelled() }}` because the bisect is worth having even on a
-      # run the step above already failed: the job is red either way and the
-      # probes cost under a second each when they fault.
-      #
-      # **Nothing here has ever executed.** There is no Metal device on this
-      # team's machines; `cargo clippy --target aarch64-apple-darwin` compiles
-      # this module and runs none of it. This step is the first thing that does.
-      #
-      # It comes out — with the module — the moment the ladder has answered.
-      - name: Bisect the draw hang with the Metal draw probes
-        if: ${{ !cancelled() }}
-        run: >-
-          crates/crcbl-mtl/tests/run-mtl-e2e.sh --no-fail-fast -E
-          'test(draw_probe_)'
+          test(a_layer_swapchain_acquires_a_drawable_and_presents_it)'
 
       # # The renderer on Metal: measured, and blocked by this runner
       #
@@ -1489,18 +1384,18 @@ jobs:
       #    encoder reporting completion: `cull` completed, `draw-args`
       #    completed, `forward` completed, `tonemap` completed, `crcbl copies`
       #    completed. The two compute passes are the ones that work; this is the
-      #    same shape as the draw tests quarantined above.
+      #    same shape as the draw tests that were quarantined above.
       #
-      # **This is a `crcbl-mtl` bug, not a runner limitation**, on the same
-      # evidence that clears the device above: run 31037470086 drew two
-      # triangles on this image from a standalone Swift script. The step is
-      # removed because it duplicates a signal the quarantined tests already
-      # give, and a step that can only be red gates nothing while reading as
-      # coverage — not because the answer is unobtainable. The test stays and
-      # runs on `vk` and `wgpu`; it comes back here the moment the draw stream
-      # is fixed. The short-form experiment above is what decides that, and this
-      # step stays out of it so the run turns on one change and one set of
-      # tests. `docs/backlog.md` carries the surviving candidate.
+      # **This was a `crcbl-mtl` bug, not a runner limitation**, and the bisect
+      # above named it: `setDepthStencilState:nil`. Every pass that frame
+      # records is colour-only, so every pipeline in it bound nil. The step is
+      # removed because it duplicated a signal the released tests already give,
+      # and a step that can only be red gates nothing while reading as
+      # coverage. The test stays and runs on `vk` and `wgpu`; it is worth
+      # re-wiring here once the run above shows the released draws passing —
+      # not before, because a frame through `ForwardRenderer` is a mixed
+      # command stream and would confuse a first result with several changes in
+      # it.
       # The same artifact the `vk e2e` job uploads, and wanted here for a
       # stronger reason: nobody on this team has a Mac, so a golden mismatch on
       # Metal is otherwise three numbers with no picture behind them. The

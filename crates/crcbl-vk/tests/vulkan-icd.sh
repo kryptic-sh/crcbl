@@ -81,7 +81,16 @@ crcbl_pin_vk_icd() {
 
     # Both spellings: `VK_DRIVER_FILES` is the current one and
     # `VK_ICD_FILENAMES` is what older loaders read.
-    export VK_DRIVER_FILES="$icd_native"
-    export VK_ICD_FILENAMES="$icd_native"
+    #
+    # **An existing value wins.** Exporting these from Git Bash did not reach
+    # the loader at all — the native path form was one cause and fixing it left
+    # `windows_read_data_files_in_registry: Registry lookup failed` unchanged,
+    # which is the loader saying it never saw the variable. So on Windows CI
+    # sets them in the job environment, where the process that reads them is
+    # already native, and this only fills them in when nobody else has. That is
+    # also the right precedence on any platform: a caller who set the loader's
+    # own variables meant it.
+    export VK_DRIVER_FILES="${VK_DRIVER_FILES:-$icd_native}"
+    export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-$icd_native}"
     echo "${label}: pinned ICD $CRCBL_VK_ICD"
 }
