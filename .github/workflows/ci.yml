@@ -402,8 +402,8 @@ jobs:
       - name: The DX12 adapter report, named rather than swept up
         if: runner.os == 'Windows'
         run: >-
-          cargo nextest run --locked -p crcbl-dx12 --run-ignored all
-          --no-tests fail --success-output immediate
+          cargo nextest run --locked -p crcbl-dx12 --run-ignored all --no-tests
+          fail --success-output immediate
 
   # The only job that runs the Wayland backend against a real compositor.
   # `docs/plan/12-testing.md` schedules "scripted resize/mode-switch sequences
@@ -1295,6 +1295,27 @@ jobs:
         env:
           CRCBL_WGPU_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl-wgpu/tests/run-wgpu-e2e.sh
+      # # wgpu was the one backend whose renderer never ran its own e2e
+      #
+      # `run-render-e2e.sh` is invoked for `vk`, `dx12` and `mtl` and was never
+      # invoked for `wgpu`. That did not mean wgpu never drew — the
+      # `cross-backend-e2e` job renders every scene on it — but it meant every
+      # draw wgpu performs in CI happened inside a job that needs **both**
+      # backends working. Break the Vulkan half, or drop that job, and wgpu
+      # loses all draw coverage at once with nothing wgpu-owned to notice: its
+      # own suite creates no graphics pipeline and issues no draw at all.
+      #
+      # This step is the same one the other three backends have, so wgpu's
+      # renderer now fails on its own account. It is cheap here because the
+      # crate is already compiled by the step above, and the ICD is pinned
+      # through `CRCBL_VK_ICD` rather than `CRCBL_WGPU_ICD` because the harness
+      # resolves it with `crcbl_pin_vk_icd`, which exports `VK_DRIVER_FILES` —
+      # what wgpu's own Vulkan backend reads.
+      - name: Draw a frame through ForwardRenderer on wgpu
+        env:
+          CRCBL_GPU: wgpu
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: crates/crcbl/tests/run-render-e2e.sh
 
   # `docs/plan/12-testing.md`'s P5 row: "Cross-backend image compare (vk↔wgpu)",
   # which its per-subsystem anchors call "the tier system's regression net" and
