@@ -96,10 +96,19 @@
 // — which is the shape §3.3 emits and the reason this is the arrangement now
 // rather than after the cull pass is written.
 //
-// What stays in `DrawConstants` is the instance index, and only it: the draw
-// still has to say which instance it is, because `SV_InstanceID` is zero on
-// every target for the reason above and nothing else in the frame carries that
-// number.
+// # The instance comes from the visible list, and the draw says where its run
+// starts
+//
+// Since 2026-08 the draws are `draw_gen.slang`'s: one per bucket, `first
+// instance` zero and an instance count the GPU wrote. `SV_InstanceID` is then
+// `0..instance_count` on all four targets — which is what the base being zero
+// buys — and it walks the bucket's run of `visible_instances` rather than
+// naming an instance itself.
+//
+// So `DrawConstants` carries the run's *start*, decided when the bucket table
+// is built, and the instance index arrives from a buffer the cull pass filled.
+// A draw therefore covers however many instances survived culling without the
+// CPU learning the number, which is what §3.3 is for.
 
 /// One vertex of a hardcoded mesh, matching `crcbl_shaders::mesh::MeshVertex`.
 ///
@@ -216,7 +225,8 @@ struct GpuMesh
     float max_z;
 };
 
-/// Which instance this draw draws, matching `crcbl_shaders::mesh::DrawConstants`.
+/// Where this draw's run of visible instances starts, matching
+/// `crcbl_shaders::mesh::DrawConstants`.
 ///
 /// One block per draw, reached through a dynamic offset — the same mechanism,
 /// for the same reason, as `sprite.slang`'s `SpriteConstants::base`. The header
@@ -224,10 +234,10 @@ struct GpuMesh
 /// base vertex that used to sit beside it is in `meshes` instead.
 struct DrawConstants
 {
-    /// This draw's instance in the instance array, added to `SV_InstanceID` —
-    /// which is zero on every draw this pass records, because each one is a
-    /// single instance with no base instance.
-    uint base_instance;
+    /// This draw's bucket's first slot in `visible_instances`, added to
+    /// `SV_InstanceID` — which counts from zero on every target, because every
+    /// draw this pass records passes zero for its first instance.
+    uint base;
     /// Pads the block to a multiple of 16 bytes, which `std140` requires of a
     /// uniform buffer's size and which naga enforces where a driver would not.
     ///
@@ -254,6 +264,12 @@ ConstantBuffer<DrawConstants> draw;
 [[vk::binding(4, 0)]]
 StructuredBuffer<GpuMesh> meshes;
 
+/// The per-bucket runs of surviving instance indices `draw_gen.slang` scatters
+/// into. Read-only here: this stage picks its instance out of a run and edits
+/// nothing.
+[[vk::binding(5, 0)]]
+StructuredBuffer<uint> visible_instances;
+
 struct VertexOutput
 {
     float4 position : SV_Position;
@@ -263,9 +279,9 @@ struct VertexOutput
 };
 
 [shader("vertex")]
-VertexOutput vertexMain(uint index: SV_VertexID, uint instance_index: SV_InstanceID)
+VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID)
 {
-    GpuInstance instance = instances[instance_index + draw.base_instance];
+    GpuInstance instance = instances[visible_instances[draw.base + instance_id]];
     // The instance names its mesh and the mesh names its vertices: nothing on
     // this path came from the draw call, which is what §3.3's cull pass needs
     // in order to emit draws the CPU never looked at.

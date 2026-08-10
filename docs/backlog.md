@@ -3506,6 +3506,46 @@ declares no thread count, which is why the field exists) and wgpu keeps no
 module source after `create_shader_module`. Safe only while every compute shader
 is also run under Vulkan, which is true today and will not always be.
 
+### Owed by GPU-driven draw generation
+
+§3.3 is wired end to end — `cull` → `draw-args` → `forward` — and every golden
+is bit-identical through it. What is not settled:
+
+- **Metal and D3D12 have never run `draw_gen.slang`.** The MSL compiles, its
+  bindings land at `buffer(0..8)` in declaration order, and it has no
+  module-scope `threadgroup`. Nothing has executed it. Note the arm Metal needs,
+  `IndirectPerBatch`, is proven **on Vulkan hardware, not on Metal** — a forced
+  selector on one backend is not the same evidence as the backend that actually
+  degrades to it.
+- **radv appears to ignore `drawCount == 0`.** Seen while falsifying:
+  `vkCmdDrawIndexedIndirect` with `draw_count: 0` still drew the geometry, and
+  only removing the call blanked the frame. Nothing depends on it — the
+  per-batch arm always passes 1 and relies on `instance_count == 0` — but a
+  future empty-draw optimisation must not assume the count is honoured. Not
+  investigated further; unknown whether it is radv, the loader, or our own
+  recording.
+- **`GeometryPath::MeshShader` has no tail** (§3.5). It degrades to an indirect
+  one and logs, exercised on the null backend only.
+- **Per-bucket capacity is the whole instance capacity**, so _N_ buckets cost
+  _N_ × 16K × 4 bytes per frame slot. §3.3's own correction wants scene-stat
+  sizing plus an overflow counter before the bucket table grows.
+- **The mesh→bucket lookup is a linear scan** in `draw_gen.slang` — correct at
+  any size, O(buckets) per instance. A mesh→bucket map is what a large table
+  wants.
+- **The three counters are host-visible only because the seam allows a fill
+  outside a pass and the graph has no fill step.** A graph-level fill, or a tiny
+  clear dispatch, would let them be device-local.
+- **The browser will take `IndirectPerBatch`** — WebGPU has neither indirect
+  feature — and that has not been tested there. Native wgpu selects
+  `IndirectCount`, so the browser's arm is not the one CI exercises.
+- **A golden is not sufficient for this stage.** Breaking `first_index` to zero
+  left the cube golden **bit-identical** and was caught only by the argument
+  readback. Worth remembering before treating an unchanged picture as proof that
+  a draw-generation change was correct.
+- Incidental: `mesh.png` has only **4 distinct colours** (flat-shaded faces),
+  which is why the cross-path anti-vacuity floor is `> 4` and not the
+  cross-backend script's 16.
+
 ### Owed by the GPU cull pass
 
 - **The visible list has no consumer**, deliberately: indirect draw generation

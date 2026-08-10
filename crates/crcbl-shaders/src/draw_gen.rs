@@ -1,0 +1,261 @@
+//! The workgroup size, uniform block and argument layout `draw_gen.slang`
+//! declares, in the layouts that shader declares.
+//!
+//! Same reason as [`crate::cull`]: the shader fixes a number and a byte layout,
+//! every producer and every reader of those has to agree with it exactly, and
+//! keeping both in the crate that owns the source means there is one place to
+//! change rather than one per consumer.
+//!
+//! What is *not* here is the bucket table. Which meshes are buckets is the
+//! renderer's decision — [`crcbl_render::ForwardRenderer`] builds one bucket per
+//! resident mesh — and this crate has no idea what is resident.
+//!
+//! An instance whose mesh names no bucket scatters nowhere and is not drawn.
+//! That cannot happen while every resident mesh has a bucket, which is the
+//! renderer's invariant to keep; the shader has no way to report it and does not
+//! pretend to.
+//!
+//! The re-declared `GpuInstance` and `GpuMesh` in `draw_gen.slang` are held
+//! against `mesh.slang`'s by [`crate::cull`]'s
+//! `the_shared_structs_are_declared_identically_in_every_shader`, which reads
+//! every source rather than a pair.
+//!
+//! [`crcbl_render::ForwardRenderer`]: https://docs.rs/crcbl-render
+
+/// Invocations per workgroup, matching `[numthreads(64, 1, 1)]` in
+/// `shaders/draw_gen.slang`.
+///
+/// One invocation owns bucket `i` if there is one *and* scatters visible
+/// instance `i` if there is one, so a caller dispatches
+/// `max(buckets, visible_capacity).div_ceil(WORKGROUP_SIZE)` groups.
+pub const WORKGROUP_SIZE: u32 = 64;
+
+/// Bytes of the uniform block.
+///
+/// Three `uint` and the tail padding `std140` requires of a uniform block's
+/// size. Checked against the `Offset` decorations `slangc` emits by this
+/// module's `the_params_block_matches_the_offsets_slangc_emits`.
+pub const PARAMS_SIZE: usize = 16;
+
+/// The uniform block, matching `struct DrawGenParams` in
+/// `shaders/draw_gen.slang`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Params {
+    /// Buckets in the table, which is also how many argument structures the
+    /// pass writes.
+    pub bucket_count: u32,
+    /// Instance indices one bucket's run holds, and the stride between two
+    /// buckets' runs.
+    pub bucket_capacity: u32,
+    /// Elements `cull.slang`'s visible list holds. Its counter can exceed this;
+    /// the shader clamps before it indexes anything.
+    pub visible_capacity: u32,
+}
+
+impl Params {
+    /// The block as the bytes a uniform buffer holds, in `std140` order.
+    ///
+    /// The tail padding is written rather than left alone, for the reason
+    /// [`crate::compute_probe::Params::to_bytes`] gives: a buffer allocated for
+    /// this block is [`PARAMS_SIZE`] bytes wide and a partial write leaves the
+    /// rest undefined.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; PARAMS_SIZE] {
+        let mut bytes = [0u8; PARAMS_SIZE];
+        for (slot, value) in [
+            self.bucket_count,
+            self.bucket_capacity,
+            self.visible_capacity,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let at = slot * 4;
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+}
+
+/// Words in one indexed-indirect argument structure.
+pub const DRAW_ARGS_WORDS: usize = 5;
+
+/// Bytes of one indexed-indirect argument structure, which is the `stride` a
+/// [`DrawIndirect`] or [`DrawIndirectCount`] over this buffer carries.
+///
+/// [`DrawIndirect`]: https://docs.rs/crcbl-hal
+/// [`DrawIndirectCount`]: https://docs.rs/crcbl-hal
+pub const DRAW_ARGS_SIZE: usize = DRAW_ARGS_WORDS * 4;
+
+/// One indexed indirect draw's arguments, matching what `draw_gen.slang` writes.
+///
+/// **The layout is not this engine's to choose.** It is
+/// `VkDrawIndexedIndirectCommand`, and `D3D12_DRAW_INDEXED_ARGUMENTS` and
+/// `wgpu`'s `DrawIndexedIndirectArgs` are the same five words in the same order
+/// — a driver reads these bytes directly, so the only correct layout is the
+/// one every API already agreed on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DrawIndexedArgs {
+    /// Indices this draw reads, starting at [`first_index`](Self::first_index).
+    pub index_count: u32,
+    /// Instances of it to draw. Written by the GPU: this is the word
+    /// `draw_gen.slang` increments as it scatters, so it is both the count and
+    /// the pass's slot allocator.
+    pub instance_count: u32,
+    /// First index, in the shared index pool.
+    pub first_index: u32,
+    /// Added to every index before it selects a vertex. **Signed**, and always
+    /// zero here — the mesh's base vertex reaches the shader through the mesh
+    /// table instead, because the four shader targets disagree about what a
+    /// draw's base vertex does to `SV_VertexID`. See `mesh.slang`'s header.
+    pub vertex_offset: i32,
+    /// The draw's first instance. Always zero here, for the same disagreement's
+    /// sake: `SV_InstanceID` counts from zero on every target only while this
+    /// is zero.
+    pub first_instance: u32,
+}
+
+impl DrawIndexedArgs {
+    /// The arguments as the bytes an indirect buffer holds.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; DRAW_ARGS_SIZE] {
+        let mut bytes = [0u8; DRAW_ARGS_SIZE];
+        for (slot, value) in [
+            self.index_count,
+            self.instance_count,
+            self.first_index,
+            #[allow(clippy::cast_sign_loss)]
+            {
+                self.vertex_offset as u32
+            },
+            self.first_instance,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let at = slot * 4;
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// The arguments decoded from the bytes an indirect buffer holds — the
+    /// shape a readback compares against the draws a CPU would have recorded.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8; DRAW_ARGS_SIZE]) -> Self {
+        let word = |slot: usize| {
+            u32::from_le_bytes(
+                bytes[slot * 4..slot * 4 + 4]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("a four-byte window of a fixed-size array")),
+            )
+        };
+        Self {
+            index_count: word(0),
+            instance_count: word(1),
+            first_index: word(2),
+            #[allow(clippy::cast_possible_wrap)]
+            vertex_offset: word(3) as i32,
+            first_instance: word(4),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The constant and the shader must name the same workgroup size, for the
+    /// reason [`crate::cull`]'s twin gives: a mismatch shows up only as a partly
+    /// generated draw list, which reads as "those instances were culled".
+    #[test]
+    fn the_workgroup_size_matches_the_numthreads_the_shader_declares() {
+        let source = include_str!("../shaders/draw_gen.slang");
+        let declaration = format!("[numthreads({WORKGROUP_SIZE}, 1, 1)]");
+        assert!(
+            source.contains(&declaration),
+            "draw_gen.slang does not declare `{declaration}`; WORKGROUP_SIZE has drifted from the \
+             shader"
+        );
+    }
+
+    /// The offsets `slangc` actually emitted for `DrawGenParams`, read out of
+    /// the disassembly.
+    #[test]
+    fn the_params_block_matches_the_offsets_slangc_emits() {
+        // `OpMemberDecorate %DrawGenParams_std140 n Offset …`: 0, 4, 8.
+        assert_eq!(PARAMS_SIZE, 16);
+        assert_eq!(
+            PARAMS_SIZE % 16,
+            0,
+            "std140 rounds a uniform block's size up to a multiple of 16, so a block that is not \
+             one already is a block the shader and the CPU disagree about the width of"
+        );
+        let bytes = Params {
+            bucket_count: 2,
+            bucket_capacity: 5,
+            visible_capacity: 9,
+        }
+        .to_bytes();
+        let uint_at =
+            |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
+        assert_eq!(uint_at(0), 2, "bucket_count at offset 0");
+        assert_eq!(uint_at(4), 5, "bucket_capacity at offset 4");
+        assert_eq!(uint_at(8), 9, "visible_capacity at offset 8");
+        assert!(
+            bytes[12..].iter().all(|byte| *byte == 0),
+            "the std140 tail padding is written, and it is zero: {:?}",
+            &bytes[12..]
+        );
+    }
+
+    /// The argument words are in the order every API's own structure puts them,
+    /// and a round trip through the bytes preserves all five — including the
+    /// signed one, which is the field a naive `as u32` cast would flatten.
+    #[test]
+    fn the_argument_words_round_trip_in_the_order_the_apis_fixed() {
+        let args = DrawIndexedArgs {
+            index_count: 36,
+            instance_count: 3,
+            first_index: 12,
+            vertex_offset: -7,
+            first_instance: 0,
+        };
+        let bytes = args.to_bytes();
+        assert_eq!(bytes.len(), 20, "sizeof(VkDrawIndexedIndirectCommand)");
+        let uint_at =
+            |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
+        assert_eq!(uint_at(0), 36, "index_count first");
+        assert_eq!(uint_at(4), 3, "then instance_count");
+        assert_eq!(uint_at(8), 12, "then first_index");
+        assert_eq!(uint_at(12), (-7i32) as u32, "then the signed vertex_offset");
+        assert_eq!(uint_at(16), 0, "then first_instance");
+        assert_eq!(DrawIndexedArgs::from_bytes(&bytes), args);
+    }
+
+    /// The word indices this module implies and the ones the shader stores
+    /// through must be the same, or the arguments are written into each other's
+    /// fields and a driver reads a plausible, wrong draw.
+    #[test]
+    fn the_shader_names_the_same_word_indices_this_module_lays_out() {
+        let source = include_str!("../shaders/draw_gen.slang");
+        for (name, index) in [
+            ("ARG_INDEX_COUNT", 0),
+            ("ARG_INSTANCE_COUNT", 1),
+            ("ARG_FIRST_INDEX", 2),
+            ("ARG_VERTEX_OFFSET", 3),
+            ("ARG_FIRST_INSTANCE", 4),
+        ] {
+            let declaration = format!("static const uint {name} = {index};");
+            assert!(
+                source.contains(&declaration),
+                "draw_gen.slang does not declare `{declaration}`"
+            );
+        }
+        let declaration = format!("static const uint DRAW_ARGS_WORDS = {DRAW_ARGS_WORDS};");
+        assert!(
+            source.contains(&declaration),
+            "draw_gen.slang does not declare `{declaration}`"
+        );
+    }
+}

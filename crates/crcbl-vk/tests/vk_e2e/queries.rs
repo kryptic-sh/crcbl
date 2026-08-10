@@ -144,8 +144,10 @@ fn per_pass_gpu_timers_report_real_numbers() {
             .iter()
             .map(|pass| pass.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["forward", "tonemap"],
-        "the report must name the passes the graph ran, in order"
+        vec!["cull", "draw-args", "forward", "tonemap"],
+        "the report must name the passes the graph ran, in order — the two \
+         compute dispatches that generate the draws included, which is what the \
+         per-pass HUD is for"
     );
     assert!(
         timings.total_nanos() > 0,

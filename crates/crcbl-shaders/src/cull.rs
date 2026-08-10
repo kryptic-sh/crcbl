@@ -146,30 +146,36 @@ mod tests {
         );
     }
 
-    /// `cull.slang` re-declares `GpuInstance` and `GpuMesh` because there is no
-    /// shared header — the compile script hashes one source per artifact, so an
-    /// `#include` would be a file whose edits nothing notices. This is what
-    /// keeps the two copies from drifting: it compares the *fields*, so a
-    /// reworded doc comment is not a failure and a renamed, retyped, reordered,
-    /// added or removed field is.
+    /// `cull.slang` and `draw_gen.slang` re-declare `GpuInstance` and `GpuMesh`
+    /// because there is no shared header — the compile script hashes one source
+    /// per artifact, so an `#include` would be a file whose edits nothing
+    /// notices. This is what keeps the copies from drifting: it compares the
+    /// *fields*, so a reworded doc comment is not a failure and a renamed,
+    /// retyped, reordered, added or removed field is.
     ///
-    /// A drift here is not a compile error anywhere. Both files build; the two
+    /// A drift here is not a compile error anywhere. Every file builds; the
     /// shaders simply read different bytes out of the same buffer.
     #[test]
-    fn the_shared_structs_are_declared_identically_in_both_shaders() {
+    fn the_shared_structs_are_declared_identically_in_every_shader() {
         let mesh = include_str!("../shaders/mesh.slang");
-        let cull = include_str!("../shaders/cull.slang");
+        let others = [
+            ("cull.slang", include_str!("../shaders/cull.slang")),
+            ("draw_gen.slang", include_str!("../shaders/draw_gen.slang")),
+        ];
         for name in ["GpuInstance", "GpuMesh"] {
-            let (left, right) = (struct_fields(mesh, name), struct_fields(cull, name));
-            assert_eq!(
-                left, right,
-                "`struct {name}` differs between mesh.slang and cull.slang; the two shaders would \
-                 read the same buffer with different layouts"
-            );
+            let declared = struct_fields(mesh, name);
             assert!(
-                !left.is_empty(),
+                !declared.is_empty(),
                 "`struct {name}` was not found in mesh.slang, so this comparison checked nothing"
             );
+            for (source, text) in others {
+                assert_eq!(
+                    declared,
+                    struct_fields(text, name),
+                    "`struct {name}` differs between mesh.slang and {source}; the two shaders \
+                     would read the same buffer with different layouts"
+                );
+            }
         }
     }
 

@@ -24,9 +24,10 @@
 //!   `crcbl-vk`'s `cull` e2e reads the list back and compares it against this,
 //!   over instances placed inside, outside each plane, and straddling.
 //!
-//! Nothing in the renderer consumes the visible list yet — [`crate::forward`]
-//! records the same draws it always has. Indirect draw generation is the next
-//! slice; this one buys the cull math and its proof.
+//! [`crate::draw_gen`] is what consumes the visible list: it turns the survivors
+//! into per-bucket indirect draw arguments, which [`crate::forward`] draws from.
+//! This module stays the *proof* rather than the path — nothing in a frame calls
+//! [`visible_instances`], and that is the point of an oracle.
 //!
 //! # A rotated box is not a box
 //!

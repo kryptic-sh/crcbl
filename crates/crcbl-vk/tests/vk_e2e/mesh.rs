@@ -47,6 +47,18 @@ impl Headless {
     /// [`Headless::open_for_triangle`] on why the format is pinned rather than
     /// preferred.
     pub(crate) fn open_for_mesh() -> Self {
+        Self::open_for_mesh_with(Features::GPU_DRIVEN)
+    }
+
+    /// The same ring, with a chosen optional feature set.
+    ///
+    /// **The set decides the forward pass's emit tail.** A device opened
+    /// without [`Features::DRAW_INDIRECT_COUNT`] selects
+    /// [`GeometryPath::IndirectPerBatch`](crcbl_hal::GeometryPath::IndirectPerBatch),
+    /// which is the path Metal is on and which no adapter this suite can see
+    /// would otherwise select — so asking for less is the only way to run that
+    /// arm on real hardware at all.
+    pub(crate) fn open_for_mesh_with(optional: Features) -> Self {
         let instance = instance();
         let adapter = instance.adapters().remove(0);
         // SAFETY: `Offscreen` names no platform object at all.
@@ -57,9 +69,7 @@ impl Headless {
                 label: Some("vk e2e mesh"),
                 adapter: adapter.id,
                 required_features: Features::empty(),
-                optional_features: Features::GPU_DRIVEN
-                    | Features::TIMESTAMP_QUERY
-                    | Features::DEBUG_MARKERS,
+                optional_features: optional | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
                 compatible_surface: Some(surface),
             })
             .expect("a device opens");
@@ -90,9 +100,9 @@ impl Headless {
 }
 
 /// What one mesh frame produced.
-struct MeshFrame {
+pub(crate) struct MeshFrame {
     /// The tonemapped swapchain image.
-    image: crcbl_golden::Image,
+    pub(crate) image: crcbl_golden::Image,
     /// The raw `Rgba16Float` scene target, as half-floats.
     hdr: Vec<u8>,
 }
@@ -163,7 +173,7 @@ fn half_to_f32(bits: u16) -> f32 {
 /// Deliberately `crcbl_render::ForwardRenderer` and `crcbl_render::RenderGraph`
 /// rather than a hand-built copy: a golden image is only evidence about the code
 /// the sandbox runs if it *is* the code the sandbox runs.
-fn render_mesh(
+pub(crate) fn render_mesh(
     headless: &Headless,
     renderer: &mut crcbl_render::ForwardRenderer,
     pool: &mut crcbl_render::TransientPool,
@@ -758,10 +768,18 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
                 let _ = renderer.add_passes(&mut graph, target, extent);
                 graph.compile(&pool).expect("a legal frame")
             };
-            // Every pass renders at the size that was just configured, which is
-            // the graph deriving its render area from the attachments rather
-            // than from anything remembered.
+            // Every *render* pass renders at the size that was just
+            // configured, which is the graph deriving its render area from the
+            // attachments rather than from anything remembered. A compute pass
+            // has no attachments and so no area — asserting one on the cull and
+            // draw-argument dispatches would be asserting on a zero the graph
+            // fills in for them.
+            let mut rendered = 0;
             for pass in compiled.passes() {
+                if pass.kind() != crcbl_render::PassKind::Render {
+                    continue;
+                }
+                rendered += 1;
                 assert_eq!(
                     (pass.render_area().width, pass.render_area().height),
                     extent,
@@ -769,6 +787,10 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
                     pass.label()
                 );
             }
+            assert!(
+                rendered >= 2,
+                "the forward and tonemap passes, or this loop checked nothing"
+            );
             compiled
                 .execute(device, &mut pool, encoder.as_mut(), None)
                 .expect("executed");

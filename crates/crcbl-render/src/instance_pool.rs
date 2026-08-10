@@ -184,6 +184,9 @@ pub struct InstancePool {
     /// allocator that gets the generation-retirement rule subtly different.
     slots: Pool<()>,
     capacity: u32,
+    /// One past the highest element [`InstancePool::insert`] has ever handed
+    /// out — what [`InstancePool::slot_count`] reports.
+    high_water: u32,
 }
 
 impl InstancePool {
@@ -267,6 +270,7 @@ impl InstancePool {
             mirror: vec![0; desc.capacity as usize * INSTANCE_STRIDE],
             slots: Pool::new(),
             capacity: desc.capacity,
+            high_water: 0,
         })
     }
 
@@ -298,6 +302,24 @@ impl InstancePool {
         self.slots.is_empty()
     }
 
+    /// Array elements anything walking the pool has to cover: one past the
+    /// highest slot ever handed out.
+    ///
+    /// **Not [`InstancePool::len`]**, which counts live instances and so shrinks
+    /// when one is removed while the slots above it stay occupied. A cull
+    /// dispatch sized by `len` would silently stop testing the instances past
+    /// the gap, which reads as "those were culled".
+    ///
+    /// It never shrinks, because a slot handed out once may be handed out again
+    /// and nothing compacts the array. Every element below it is either a live
+    /// instance or a dead record — [`InstancePool::remove`] leaves one, and
+    /// [`InstancePool::new`] clears the buffers so an untouched slot is one too
+    /// — which is what makes walking the whole range safe.
+    #[must_use]
+    pub const fn slot_count(&self) -> u32 {
+        self.high_water
+    }
+
     /// Takes a slot, writes `instance` into it **live**, and marks it dirty
     /// everywhere.
     ///
@@ -322,6 +344,7 @@ impl InstancePool {
             });
         }
         let handle: InstanceHandle = self.slots.insert(()).cast();
+        self.high_water = self.high_water.max(handle.index() + 1);
         self.write_live(handle.index(), instance);
         Ok(handle)
     }
@@ -868,6 +891,41 @@ mod tests {
         let reused = pool.insert(&instance(3)).expect("the freed slot");
         assert_eq!(pool.index(reused), Some(0), "the low slot comes back");
         assert_eq!(pool.index(first), None, "and the old handle is retired");
+
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// The number a cull dispatch is sized by covers every occupied slot, and
+    /// **it does not shrink when one is freed**.
+    ///
+    /// That is the whole difference from [`InstancePool::len`]: remove the
+    /// middle instance of three and `len` says two, while the third is still at
+    /// element 2 and a walk of `0..2` would never test it. A dispatch sized that
+    /// way drops an instance from the picture and reports it as culled.
+    #[test]
+    fn the_slot_count_covers_every_occupied_element_and_never_shrinks() {
+        let (recorder, device) = open();
+        let mut pool = pool(device.as_ref(), 8);
+        assert_eq!(pool.slot_count(), 0, "an empty pool has nothing to walk");
+
+        let handles: Vec<InstanceHandle> = (0..3)
+            .map(|index| pool.insert(&instance(index)).expect("room"))
+            .collect();
+        assert_eq!(pool.slot_count(), 3);
+
+        assert!(pool.remove(handles[1]));
+        assert_eq!(pool.len(), 2, "two are live");
+        assert_eq!(
+            pool.slot_count(),
+            3,
+            "and the highest is still at element 2, so a walk must still reach it"
+        );
+
+        // A reused slot does not raise it either: the element was already
+        // covered.
+        pool.insert(&instance(9)).expect("the freed slot");
+        assert_eq!(pool.slot_count(), 3);
 
         pool.destroy(device.as_ref());
         recorder.assert_valid();

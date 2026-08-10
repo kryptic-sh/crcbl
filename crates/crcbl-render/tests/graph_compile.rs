@@ -1637,19 +1637,21 @@ fn declaring_one_image_twice_in_a_pass_is_an_error() {
 /// notice. That is precisely how the WGSL artifacts sat unused between P5.3 and
 /// P5.9. This runs with no ICD, no driver and no GPU.
 ///
-/// # DXIL is absent, and the absence is asserted rather than tolerated
+/// # DXIL depends on how many entry points the module has
 ///
-/// Every pass here creates **one** module and names it from two
-/// `ShaderEntry`s — a vertex stage and a fragment stage. A DXIL container holds
-/// exactly one entry point (`dxc` compiles a single `-E`, and a D3D12 pipeline
-/// takes one blob per stage), so there is no container that is "the DXIL for
-/// mesh.slang" and `None` is the truthful answer, not a dropped format.
+/// A DXIL container holds exactly one entry point — `dxc` compiles a single
+/// `-E`, and a D3D12 pipeline takes one blob per stage. So the forward
+/// renderer's *graphics* modules, each named from a vertex `ShaderEntry` and a
+/// fragment one, have no container that is "the DXIL for mesh.slang", and
+/// `None` is the truthful answer rather than a dropped format. Its two
+/// **compute** modules have one entry point each, so there is a right answer for
+/// them and they pass it.
 ///
-/// So the expectation is spelled out rather than written as
-/// `ShaderSources::all()`, and the *second* assertion is the one that keeps it
-/// honest: it fails the day a pass starts creating a module per stage and can
-/// offer DXIL, which forces this expectation to be widened deliberately instead
-/// of drifting. `docs/backlog.md` carries that work.
+/// The expectation is therefore per module rather than one constant, and both
+/// arms are asserted to have been *reached*: a rule that silently matched no
+/// module would pass having checked nothing, which is the shape this whole test
+/// exists to avoid. `docs/backlog.md` carries the per-stage graphics modules
+/// that would let the first arm widen.
 #[test]
 fn the_engine_passes_offer_every_shader_artifact_they_have() {
     use crcbl_hal::ShaderSources;
@@ -1668,19 +1670,35 @@ fn the_engine_passes_offer_every_shader_artifact_they_have() {
         !created.is_empty(),
         "the forward renderer created no shader modules at all"
     );
-    let expected = ShaderSources::SPIRV | ShaderSources::WGSL | ShaderSources::MSL;
+    // The two single-entry-point modules, by the label their creator gives them
+    // — which is the shader's own name.
+    let compute = ["cull", "draw_gen"];
+    let text = ShaderSources::SPIRV | ShaderSources::WGSL | ShaderSources::MSL;
+    let (mut graphics_seen, mut compute_seen) = (0, 0);
     for (label, sources) in created {
-        assert_eq!(
-            sources,
-            expected,
-            "{}: offered only {sources}",
-            label.as_deref().unwrap_or("<unlabelled>")
-        );
+        let name = label.as_deref().unwrap_or("<unlabelled>");
+        let expected = if compute.contains(&name) {
+            compute_seen += 1;
+            ShaderSources::all()
+        } else {
+            graphics_seen += 1;
+            text
+        };
+        assert_eq!(sources, expected, "{name}: offered only {sources}");
     }
+    assert_eq!(
+        compute_seen,
+        compute.len(),
+        "both compute modules must have been created, or the DXIL arm checked nothing"
+    );
+    assert!(
+        graphics_seen > 0,
+        "and at least one graphics module, or the arm without DXIL checked nothing"
+    );
     assert_ne!(
-        expected,
+        text,
         ShaderSources::all(),
-        "a pass can now offer DXIL, so the expectation above is stale — widen it \
+        "a graphics pass can now offer DXIL, so the expectation above is stale — widen it \
          and delete the backlog entry for per-stage shader modules"
     );
 }

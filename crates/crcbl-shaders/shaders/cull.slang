@@ -10,12 +10,12 @@
 // the form it wants: instance indices, ascending nowhere in particular, with a
 // count beside them.
 //
-// **Nothing in the renderer consumes the list yet.** `crcbl_render::forward`
-// still records its draws the way it always has, and this pass is checked by
-// reading the list back and comparing it against a CPU reference —
-// `crcbl_render::cull`, which is ordinary Rust and is the oracle. A dispatch
-// whose output nobody reads is indistinguishable from a dispatch that did
-// nothing, which is why the readback exists before the consumer does.
+// **`draw_gen.slang` is what consumes the list**, scattering the survivors into
+// per-bucket runs and writing the indirect arguments a draw reads. This pass is
+// still checked on its own, by reading the list back and comparing it against a
+// CPU reference — `crcbl_render::cull`, which is ordinary Rust and is the
+// oracle — because a consumer that drew the right picture from the wrong list
+// would say nothing about this one.
 //
 // # Every slot is tested, so every slot has to say whether it is one
 //

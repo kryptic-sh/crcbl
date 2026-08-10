@@ -14,11 +14,11 @@ use glam::{Mat4, Vec3};
 // driver, checked against `crcbl_render::cull::visible_instances` — which is
 // ordinary Rust and is the oracle.
 //
-// **Nothing in the renderer consumes the visible list yet**, which is exactly
-// why this file exists. A dispatch that runs and writes a buffer nobody reads
-// is indistinguishable from a dispatch that does nothing, so the list and the
-// counter are copied back to the host and compared here, before there is a
-// consumer to notice they were wrong.
+// The renderer's draw generation consumes this list — see the `draw_gen` suite
+// — but a consumer that drew the right picture from the wrong list would say
+// nothing about this pass. So the list and the counter are copied back to the
+// host and compared against the oracle directly, which is a check no picture
+// can stand in for.
 //
 // The scene below places one instance per rejection the pass can make — outside
 // each of the six planes, inside, straddling an edge, rotated back in, naming a

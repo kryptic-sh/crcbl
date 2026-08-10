@@ -14,7 +14,51 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Breaking
+
+- **`mesh.slang` gained a sixth binding and `DrawConstants` changed meaning.**
+  Binding 5 is the per-bucket run of surviving instance indices the vertex stage
+  now reads its instance out of, and `DrawConstants::base_instance` is
+  `DrawConstants::base`: where this draw's run starts, not which instance it is.
+  A caller building its own bind group for that shader — `crcbl-vk`'s depth
+  probe is the only one — has to bind a run and pass a base. The byte layout is
+  unchanged.
+
+- **`ForwardRenderer::set_pyramid(None)` removes the instance** rather than
+  skipping a draw. An instance in the pool is an object in the scene now that
+  culling decides what draws, so hiding an object and culling it off screen take
+  the same path out of the frame.
+
 ### Added
+
+- **The forward pass draws from GPU-generated indirect arguments.** `cull.slang`
+  and a new `draw_gen.slang` run as two compute passes in front of the forward
+  pass, and the pass records **one indirect call per bucket whatever the scene
+  holds** rather than one draw per object — topic 03 §3.3, both halves. Adding
+  or removing an object is an instance in `InstancePool` and changes no recorded
+  command; how many instances a bucket draws, and which, is written by the GPU
+  into buffers the draw reads. The barriers between the three passes, including
+  the transition into `ResourceState::IndirectArgument`, are the render graph's.
+
+  New: `crcbl_render::draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws}` owns the
+  two dispatches and their buffers, `crcbl_shaders::draw_gen` owns the workgroup
+  size, uniform block and `DrawIndexedArgs` layout
+  (`VkDrawIndexedIndirectCommand`, which D3D12 and `wgpu` spell the same way),
+  and `ForwardRenderer::{draws, frame}` expose the generated buffers so a caller
+  can read the culling statistics back.
+
+  Which call the pass records comes from `GeometryPath`: `IndirectCount` issues
+  `draw_indexed_indirect_count` per bucket with a GPU-written count, and
+  `IndirectPerBatch` — Metal, whose API has multi-draw-indirect and no GPU-side
+  count — issues `draw_indexed_indirect` with a count of one and leans on the
+  bucket's instance count being zero. Both draw the same frame byte for byte.
+  `GeometryPath::MeshShader` has no tail here yet and degrades to an indirect
+  one, with a log line saying so.
+
+- **`InstancePool::slot_count`**, the array elements a walk of the pool has to
+  cover: one past the highest slot ever handed out, which — unlike `len` — does
+  not shrink when an instance is removed from the middle. The cull dispatch is
+  sized by it.
 
 - **A removed instance stops being drawn.** `GpuInstance::flags` gains its first
   defined bit, `GpuInstance::LIVE` (bit 0): set, the element is a live instance;

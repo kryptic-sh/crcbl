@@ -40,6 +40,7 @@ mod compute;
 mod cull;
 mod depth_probe;
 mod device_request;
+mod draw_gen;
 mod frame_loop_sequences;
 mod harness;
 mod indirect;

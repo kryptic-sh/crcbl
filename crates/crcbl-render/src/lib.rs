@@ -60,12 +60,13 @@
 //! # What this crate is *not*, at P1
 //!
 //! No backend registry (see below), no materials, no scene, no scheduler. The
-//! one thing on that list that has since moved is culling, and only half of it:
-//! [`cull`] is §3.3's frustum test and the reference `cull.slang` is checked
-//! against, and **no pass in this crate runs it** — [`forward`] records the same
-//! draws it always has. The graph is a linear pass list with computed barriers, which is
-//! what §2.4's risk list asks for by name: "No multi-queue scheduling, no
-//! reordering. Resist."
+//! one thing on that list that has since moved is culling, and it moved whole:
+//! [`cull`] is §3.3's frustum test and the CPU reference `cull.slang` is checked
+//! against, [`draw_gen`] runs that shader and turns its survivors into indirect
+//! draw arguments, and [`forward`] draws from those rather than recording a draw
+//! per object. The graph is still a linear pass list with computed barriers,
+//! which is what §2.4's risk list asks for by name: "No multi-queue scheduling,
+//! no reordering. Resist."
 //!
 //! ## The registry deliberately did not move here
 //!
@@ -117,6 +118,7 @@
 pub mod button_skin;
 pub mod camera;
 pub mod cull;
+pub mod draw_gen;
 pub mod forward;
 pub mod graph;
 pub mod instance_pool;
@@ -152,6 +154,7 @@ pub use crcbl_ui::text::FontAtlas;
 /// crate's button API should not have to add a second dependency to call it.
 pub use crcbl_ui::{ButtonState, SkinInsets};
 pub use cull::{Aabb, Frustum, visible_instances};
+pub use draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 pub use forward::ForwardRenderer;
 pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,

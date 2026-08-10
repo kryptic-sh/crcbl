@@ -357,14 +357,14 @@ impl GpuMesh {
     }
 }
 
-/// Which instance one draw call draws, matching `struct DrawConstants` in
-/// `shaders/mesh.slang`.
+/// Where one draw call's run of visible instances starts, matching
+/// `struct DrawConstants` in `shaders/mesh.slang`.
 ///
 /// **This would be `draw_indexed`'s own base instance if the four targets
 /// agreed about what that does to `SV_InstanceID`, and they do not.** That
 /// shader's header measures the disagreement on all four; the consequence for a
-/// producer of these bytes is that every draw passes zero for its own bases and
-/// puts the real instance here.
+/// producer of these bytes is that every draw passes zero for its own bases, and
+/// the instance is looked up rather than named.
 ///
 /// The base *vertex* used to sit beside it and does not any more: it is
 /// [`GpuMesh::base_vertex`], reached through the drawn instance's
@@ -373,9 +373,10 @@ impl GpuMesh {
 /// which is exactly what §3.3's cull pass cannot promise.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrawConstants {
-    /// The draw's instance in the instance array. Added to `SV_InstanceID`,
-    /// which is zero for every draw the forward pass records.
-    pub base_instance: u32,
+    /// The draw's bucket's first slot in the list `draw_gen.slang` scatters
+    /// surviving instances into. `SV_InstanceID` counts from zero within the
+    /// draw and indexes the run from here.
+    pub base: u32,
 }
 
 impl DrawConstants {
@@ -383,7 +384,7 @@ impl DrawConstants {
     #[must_use]
     pub fn to_bytes(&self) -> [u8; DRAW_CONSTANTS_SIZE] {
         let mut bytes = [0u8; DRAW_CONSTANTS_SIZE];
-        bytes[0..4].copy_from_slice(&self.base_instance.to_le_bytes());
+        bytes[0..4].copy_from_slice(&self.base.to_le_bytes());
         // The three trailing `uint`s are padding and stay zero.
         bytes
     }
@@ -930,10 +931,10 @@ mod tests {
              block that is not one already is a block the shader and the CPU \
              disagree about the width of"
         );
-        let bytes = DrawConstants { base_instance: 1 }.to_bytes();
+        let bytes = DrawConstants { base: 1 }.to_bytes();
         let uint_at =
             |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
-        assert_eq!(uint_at(0), 1, "base_instance at offset 0");
+        assert_eq!(uint_at(0), 1, "base at offset 0");
         for pad in [4, 8, 12] {
             assert_eq!(
                 uint_at(pad),

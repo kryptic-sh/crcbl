@@ -161,6 +161,10 @@ pub mod compute_probe;
 /// that shader declares.
 pub mod cull;
 
+/// The workgroup size, uniform block and indirect-argument layout
+/// `draw_gen.slang` declares, in the layouts that shader declares.
+pub mod draw_gen;
+
 /// The geometry and uniform block `mesh.slang` reads, in the layouts that
 /// shader declares.
 pub mod mesh;
