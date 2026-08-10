@@ -3662,18 +3662,48 @@ would hit them:
    same `ExecuteIndirect` call the CPU-count path makes — the parameter Metal
    has nowhere, which is why `crcbl-mtl` refuses it. **So D3D12 derives
    `GeometryPath::IndirectCount`, not the per-batch floor**, and
-   `max_draw_indirect_count` moves to `u32::MAX`. 6b. **Dynamic offsets refused
-   — and this one was missing from the list.** `ForwardRenderer`'s mesh bind
-   group layout declares binding 3 as
-   `BindingKind::UniformBuffer { dynamic: true }`, and `crcbl-dx12`'s
-   `binding.rs` refuses it: a D3D12 descriptor table has no offset to apply, and
-   the equivalent is a root CBV/SRV/UAV, which is a different root parameter
-   type per binding. The forward pass then hits it again at its
-   `bind_group(0, group, &[constant_offset], layout)`. **This is a
-   root-parameter redesign, not a call**, and it is now what stops a D3D12 frame
-   — found only by implementing the draws and reading the path past them.
-7. Buffer fills and image-to-image copies refused; then query sets, MSAA resolve
-   attachments, and mesh pipelines.
+   `max_draw_indirect_count` moves to `u32::MAX`.
+7. ~~Dynamic offsets~~ — **done**, and this one was never on the list until
+   implementing the draws made it visible. A `dynamic: true` binding leaves its
+   set's descriptor table and becomes a root descriptor, whose setter takes a
+   bare GPU virtual address, so the offset is one addition. Root budget is
+   costed at layout creation — 64 DWORDs, a table 1, a root descriptor 2 — and a
+   `const` assert ties the constant to `D3D12_MAX_ROOT_COST` in the build that
+   has the symbol.
+8. Buffer fills and image-to-image copies refused; then query sets, MSAA resolve
+   attachments, and mesh pipelines. **None of these is on a frame's path** —
+   each is either never called above the seam or gated on a feature D3D12 does
+   not report.
+
+**Reading the source, nothing on the cube frame's path refuses any more.** Every
+encoder method the render layer calls is implemented and every DXIL it needs is
+committed. **Unverified**: only the `dx12-e2e` job can say whether a frame
+actually records, and `render_e2e.rs` is not wired into that job yet — wiring it
+is the next step, and the first thing that would tell us.
+
+### What WARP has actually proven
+
+Worth separating from what is merely implemented, because this backend is
+written blind and only CI ever executes it.
+
+Proven on hardware:
+
+- Compute dispatch, indirect dispatch, and a workgroup size refused for
+  disagreeing with the container's `[numthreads]`.
+- **Indexed draws, indirect draws, and indirect-count draws reading a GPU-side
+  count** — all four passed on `c4e8655`.
+- The root-signature register fix, implicitly: `compute_probe`'s pipeline could
+  not have been created at all under the old `[[vk::binding]]`-derived rule.
+
+Not proven on any device: dynamic offsets, offscreen surfaces, and a recorded
+frame.
+
+**A rot to expect.** `c4e8655` reddened WARP on
+`the_slices_that_have_not_arrived_still_refuse_and_name_themselves`, which
+asserts the unimplemented calls still answer `Unsupported`. Three of them had
+just started working. That test's own comment calls it "the half that rots" —
+every DX12 slice from here has to prune it, and the failure is legible when it
+happens.
 
 Also: `crcbl-dx12`'s crate docs still say bind groups and pipelines refuse,
 which the code contradicts.
