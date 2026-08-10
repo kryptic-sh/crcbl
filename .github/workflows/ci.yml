@@ -661,15 +661,17 @@ jobs:
       # bit-identical and any drift is loud rather than absorbed by the
       # rasteriser tolerance.
       #
-      # The ICD is exported directly rather than through a `CRCBL_VK_ICD`-style
-      # resolver: `run-render-e2e.sh` deliberately owns no fourth copy of
-      # `run-vk-e2e.sh`'s `resolve_icd`, and pinning is the caller's job. The
-      # path is Debian's spelling, which is what this runner has.
+      # `CRCBL_VK_ICD`, not `VK_DRIVER_FILES` written out here. This step first
+      # exported Debian's `lvp_icd.x86_64.json` directly and failed with
+      # `ERROR_INCOMPATIBLE_DRIVER`, which the loader also says for a manifest
+      # naming a driver it cannot use — so the message named neither the file
+      # nor the mistake. `run-render-e2e.sh` now resolves the name through the
+      # same `crcbl_pin_vk_icd` this job's other steps use, which is what makes
+      # the two spellings a non-issue instead of a runner-specific guess.
       - name: Draw a frame through ForwardRenderer on lavapipe
         env:
           CRCBL_GPU: vk
-          VK_DRIVER_FILES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl/tests/run-render-e2e.sh
       # The first playable sample, against a real driver. `run-vk-e2e.sh` drives
       # `--package sandbox` and every other harness script does too, so until
@@ -1000,40 +1002,32 @@ jobs:
           test(an_indexed_draw_reads_the_bound_index_range) +
           test(a_multi_draw_indirect_emits_every_argument_structure))'
 
-      # # The renderer, on Metal, for the first time
+      # # The renderer on Metal: measured, and blocked by this runner
       #
-      # Everything above this line is the Metal **HAL**. `docs/backlog.md`'s
-      # "The render layer has only ever run on Vulkan and wgpu" is the gap it
-      # leaves: no Metal test had ever constructed a `ForwardRenderer`, so the
-      # frame graph, the cull pass, draw generation, forward and tonemap
-      # executed on exactly two things, and a green `mtl e2e` was not evidence
-      # about any of them. `crates/crcbl/tests/render_e2e.rs` closes that — one
-      # frame of the cube scene, read back and compared against the golden the
-      # `vk e2e` job re-derives on lavapipe.
+      # `crates/crcbl/tests/render_e2e.rs` draws one frame of the cube scene
+      # through `ForwardRenderer`, and it was wired here to close
+      # `docs/backlog.md`'s "The render layer has only ever run on Vulkan and
+      # wgpu". **It ran once, on 878f582, and the run is the reason there is no
+      # step below it.** Two things came out of it, both worth more than the
+      # step would have been:
       #
-      # **This is also the arm that proves `GeometryPath::IndirectPerBatch` on
-      # the backend that actually selects it.** Metal reports no
-      # `DRAW_INDIRECT_COUNT` — the flag is absent from the API rather than
-      # unimplemented — so it takes the per-batch tail, which until now had only
-      # ever run on Vulkan behind a deliberately weakened device request. The
-      # test prints the selected path on a green run.
+      # 1. **Metal selects `IndirectPerBatch / ArrayPages / Rasterised`** — the
+      #    per-batch tail, on the backend that actually degrades to it, rather
+      #    than forced on Vulkan behind a weakened device request.
+      # 2. **Draws hang on this runner and compute does not.** The failure was
+      #    `Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)`
+      #    on **`Apple Paravirtual device`** — a virtualised GPU — with every
+      #    encoder reporting completion: `cull` completed, `draw-args`
+      #    completed, `forward` completed, `tonemap` completed, `crcbl copies`
+      #    completed. The two compute passes are the ones that work; this is the
+      #    same shape as the six draw tests quarantined above.
       #
-      # **Expect this step to fault the first time, and read that as the
-      # measurement.** The forward pass records `draw_indexed_indirect`, which
-      # is the same encoder call as
-      # `a_multi_draw_indirect_emits_every_argument_structure` in the
-      # quarantine above — so on the evidence this should fail with
-      # `kIOGPUCommandBufferCallbackErrorHang` exactly as those do, and it will
-      # keep failing until that bug is found. It is wired live rather than
-      # pre-quarantined on purpose: the quarantine above is a list of tests that
-      # were *observed* to fault, and adding a test to it on an inference would
-      # make it a list of guesses. A red run here converts the inference into a
-      # measurement for the cost of one run, which is how the four tests above
-      # were characterised in the first place.
-      - name: Draw a frame through ForwardRenderer on Metal
-        env:
-          CRCBL_GPU: mtl
-        run: crates/crcbl/tests/run-render-e2e.sh
+      # So the blocker is the runner's GPU, not a call this backend makes, and a
+      # step that can only ever be red gates nothing while reading as coverage.
+      # It is removed rather than left failing or set `continue-on-error`. The
+      # test is not: it runs on `vk` and `wgpu` today, and on a real Apple GPU
+      # with `CRCBL_GPU=mtl crates/crcbl/tests/run-render-e2e.sh`, which is the
+      # one thing that would settle whether any of this is our bug.
       # The same artifact the `vk e2e` job uploads, and wanted here for a
       # stronger reason: nobody on this team has a Mac, so a golden mismatch on
       # Metal is otherwise three numbers with no picture behind them. The

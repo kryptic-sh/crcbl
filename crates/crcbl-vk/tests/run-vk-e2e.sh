@@ -83,40 +83,11 @@ REPO_ROOT="$(cd "${CRATE_DIR}/../.." && pwd)"
 export CRCBL_VK_VALIDATION="${CRCBL_VK_VALIDATION:-1}"
 export CRCBL_VK_SYNC_VALIDATION="${CRCBL_VK_SYNC_VALIDATION:-1}"
 
-if [ -n "${CRCBL_VK_ICD:-}" ]; then
-    if [ ! -f "$CRCBL_VK_ICD" ]; then
-        # Distributions disagree about the suffix: Debian ships
-        # `lvp_icd.x86_64.json` and Arch ships `lvp_icd.json`. Rather than
-        # encode one, look next to the name that was asked for. A miss is still
-        # a hard failure — a pinned ICD that silently fell back to whatever the
-        # loader found would defeat the point of pinning it.
-        ICD_DIR="$(dirname "$CRCBL_VK_ICD")"
-        # `lvp_icd.x86_64.json` and `lvp_icd.json` share the stem before the
-        # first dot of the *basename*; anything matching it in the same
-        # directory is the same driver under a different packaging convention.
-        ICD_STEM="$(basename "$CRCBL_VK_ICD")"
-        ICD_STEM="${ICD_STEM%%.*}"
-        FOUND=""
-        for CANDIDATE in "${ICD_DIR}/${ICD_STEM}".json "${ICD_DIR}/${ICD_STEM}".*.json; do
-            if [ -f "$CANDIDATE" ]; then
-                FOUND="$CANDIDATE"
-                break
-            fi
-        done
-        if [ -z "$FOUND" ]; then
-            echo "crcbl vk e2e: CRCBL_VK_ICD=$CRCBL_VK_ICD does not exist, and no sibling matched" >&2
-            ls -la "$(dirname "$CRCBL_VK_ICD")" >&2 || true
-            exit 1
-        fi
-        echo "crcbl vk e2e: $CRCBL_VK_ICD is absent; using $FOUND"
-        CRCBL_VK_ICD="$FOUND"
-    fi
-    # Both spellings: `VK_DRIVER_FILES` is the current one and
-    # `VK_ICD_FILENAMES` is what older loaders read.
-    export VK_DRIVER_FILES="$CRCBL_VK_ICD"
-    export VK_ICD_FILENAMES="$CRCBL_VK_ICD"
-    echo "crcbl vk e2e: pinned ICD $CRCBL_VK_ICD"
-else
+# shellcheck source=crates/crcbl-vk/tests/vulkan-icd.sh
+source "${CRATE_DIR}/tests/vulkan-icd.sh"
+crcbl_pin_vk_icd "crcbl vk e2e"
+
+if [ -z "${CRCBL_VK_ICD:-}" ]; then
     # Say so. The header above claims this script is what a developer runs to
     # see what CI sees, and with no ICD pinned that claim is false: the loader
     # picks whatever is installed, which on a workstation is the discrete GPU

@@ -3506,38 +3506,63 @@ declares no thread count, which is why the field exists) and wgpu keeps no
 module source after `create_shader_module`. Safe only while every compute shader
 is also run under Vulkan, which is true today and will not always be.
 
-### The render layer has only ever run on Vulkan and wgpu
+### Metal draws hang on the CI runner's virtual GPU
 
-**Coverage gap, stated plainly, and larger than any single slice.** `crcbl-mtl`
-does not depend on `crcbl-render` and no Metal test touches `ForwardRenderer`,
-`cull` or `draw_gen`. `crcbl-dx12` has no e2e job at all — only adapter
-enumeration. So the entire render layer — the frame graph, the cull pass, draw
-generation, the forward and tonemap passes — executes on exactly two things:
-Vulkan (radv locally, lavapipe in CI) and native wgpu on lavapipe.
+**Measured on 878f582, and it reframes the macOS coverage question.**
+`crates/crcbl/tests/render_e2e.rs` drew one frame through `ForwardRenderer` on
+Metal and failed with:
 
-**A green `mtl e2e` run is therefore not evidence about the renderer.** It
-proves the Metal HAL: dispatch, encoders, bindings, copies. That is what it was
-built to prove and it does it well. It has never constructed a
-`ForwardRenderer`. The same is true of macOS's `build + test` job, whose render
-tests use the null backend.
+```
+Caused GPU Hang Error (00000003:kIOGPUCommandBufferCallbackErrorHang)
+[MTLCommandBufferErrorDomain 2] on `Apple Paravirtual device`;
+encoders in recorded order: `cull` completed, `draw-args` completed,
+`forward` completed, `tonemap` completed, `crcbl copies` completed
+```
 
-This was easy to misread this session and is worth stating before someone reads
-a green matrix as backend parity. Two backends the plan calls first-class have
-never drawn a frame through the engine's own renderer.
+Three things follow:
 
-What closing it takes, roughly in order of value:
+- **The device is `Apple Paravirtual device`** — a virtualised GPU, not real
+  Apple silicon. The six draw tests already quarantined in the `mtl-e2e` job
+  fault the same way. **Compute does not**: the dispatch and indirect-dispatch
+  tests pass on the same runner, and here both compute encoders completed.
+- **Every encoder reported completion** and the command buffer still reported a
+  hang, which is not the shape of a bad encoder call.
+- The standing hypothesis that the _long_ draw forms
+  (`…instanceCount:baseInstance:`) are at fault is **weakened, not confirmed**.
+  It was worth testing — the short forms exist in objc2-metal 0.3.2 and the
+  branch is three lines — but changing how every Metal draw is emitted on a
+  guess, when the evidence points at the virtualisation, is churn. **Left undone
+  deliberately; the experiment is still the cheapest discriminator if someone
+  wants it.**
 
-- **A Metal e2e that drives `ForwardRenderer`**, the way `crcbl-vk`'s
-  `vk_e2e/mesh.rs` does. That means `crcbl-mtl` (or a new test crate) depending
-  on `crcbl-render`, and a golden comparison on the macOS runner. Note six draw
-  tests already fault on that runner, so expect to find out why before goldens
-  are trustworthy there.
-- **Extending the cross-backend gate to a third backend.** It compares vk
-  against wgpu today and caught a real divergence doing it; a Metal arm would be
-  the natural place for `IndirectPerBatch` — the arm Metal actually takes — to
-  be proven on Metal rather than forced on Vulkan.
-- **Any D3D12 e2e at all.** Windows CI has a real desktop session (`win32 e2e`),
-  so the runner exists; nothing draws through it.
+**What this means for the plan: Metal draw coverage is not obtainable from
+GitHub's macOS runners.** Compute is. Settling whether any of this is our bug
+needs one run of `CRCBL_GPU=mtl crates/crcbl/tests/run-render-e2e.sh` on real
+Apple hardware — a machine, or a self-hosted runner. That is a decision with a
+cost attached, so it is yours.
+
+**Confirmed on Metal along the way:** it selects
+`IndirectPerBatch / ArrayPages / Rasterised`. The per-batch tail is the arm
+Metal actually takes, which until this run had only ever been exercised on
+Vulkan behind a deliberately weakened device request.
+
+### The render layer runs on Vulkan and wgpu
+
+`crcbl-mtl` does not depend on `crcbl-render`, and `crcbl-dx12` has no e2e job
+at all — only adapter enumeration. So the frame graph, the cull pass, draw
+generation, forward and tonemap execute on Vulkan (radv locally, lavapipe in CI)
+and native wgpu, and nowhere else.
+
+**A green `mtl e2e` run is not evidence about the renderer.** It proves the
+Metal HAL — dispatch, encoders, bindings, copies — which is what it was built to
+prove. It has never constructed a `ForwardRenderer`, and neither has macOS's
+`build + test` job, whose render tests use the null backend. Easy to misread as
+backend parity; it is not.
+
+`crates/crcbl/tests/render_e2e.rs` now exists and closes this for any backend
+that can run it. Its Vulkan arm runs in CI on lavapipe; its Metal arm is blocked
+by the entry above; **D3D12 still has no e2e of any kind**, and the Windows
+runner has a real desktop session, so the runner is not the obstacle there.
 
 ### Owed by GPU-driven draw generation
 

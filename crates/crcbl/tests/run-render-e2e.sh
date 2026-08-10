@@ -21,12 +21,19 @@
 # without it, because `crcbl::backend::open`'s automatic order would otherwise
 # silently answer the question for you.
 #
-# # Pinning a driver is the caller's job
+# # Pinning a driver
 #
 # Vulkan's ICD is chosen by `VK_DRIVER_FILES` / `VK_ICD_FILENAMES` at instance
-# creation, and this script deliberately does not resolve or export them: a
-# fourth copy of `run-vk-e2e.sh`'s `resolve_icd` is a fourth thing to keep in
-# step. Export them around the call — `.github/workflows/ci.yml` does.
+# creation. Set `CRCBL_VK_ICD` and this script resolves both, through the same
+# `crcbl_pin_vk_icd` `run-vk-e2e.sh` uses — one copy, sourced, rather than a
+# second that drifts.
+#
+# It did not always: the ICD was the caller's job and the CI step wrote Debian's
+# `lvp_icd.x86_64.json` straight into the environment. On a runner whose file
+# was Arch's `lvp_icd.json` the loader answered `ERROR_INCOMPATIBLE_DRIVER`,
+# which is also what it says for a manifest that names an incompatible driver —
+# so the failure named neither the file nor the mistake. Resolving it here is
+# what stops the next caller repeating that.
 #
 # # The zero-tests check is the point
 #
@@ -37,6 +44,13 @@
 # empty.
 
 set -euo pipefail
+
+CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_ROOT="$(cd "${CRATE_DIR}/../.." && pwd)"
+
+# shellcheck source=crates/crcbl-vk/tests/vulkan-icd.sh
+source "${REPO_ROOT}/crates/crcbl-vk/tests/vulkan-icd.sh"
+crcbl_pin_vk_icd "crcbl render e2e"
 
 if [ -z "${CRCBL_GPU:-}" ]; then
     cat >&2 <<'NOBACKEND'
