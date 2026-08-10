@@ -5010,3 +5010,83 @@ page's colours, spacing and legibility at a real size are unreviewed, and
 nothing in CI would catch a page that is correct in the draw list and ugly on
 screen. The per-theme golden frames the exit criteria call for are what would
 close that, and they are P10.
+
+### `crcbl-assets` after stage 6 task 2
+
+`AssetId`, `AssetHandle`, the `Loading | Ready | Failed` state machine,
+`AssetSource` and `DirSource` landed in `crates/crcbl-assets`. What did not, and
+what was decided along the way.
+
+**`AssetId` is still hash-of-path, which the plan's own correction says is
+wrong.** `AssetId::from_path` derives the id from the canonical key, so renaming
+`props/crate.glb` gives it a different id and orphans every reference. The
+corrected model in `docs/plan/06-assets-scenes.md` is a sidecar
+`crate.glb.meta.ron` carrying a random 128-bit GUID, created on first import.
+Nothing can create one here — first import is the importer, which is task 3 — so
+the type was made 128 bits wide and given `AssetId::from_bits` so a sidecar GUID
+drops in without the type changing. What is missing is the sidecar reader, a
+writer that mints a GUID, and a registry path that prefers the sidecar's id over
+the path's. Do it in the same slice as the importer, before any content exists
+to be renamed.
+
+**No `FetchSource` asset source, deliberately.** Stage 10 owns the browser asset
+path. `crates/crcbl-assets/src/source.rs` shows the whole implementation in its
+module docs — a newtype over `crcbl_store::web::FetchSource` delegating `read` —
+because that type already canonicalises the key, already enqueues on a miss and
+already answers `StorageError::Pending`. It is not written because a wrapper
+with no consumer is a wrapper nobody has exercised. The claim that it needs no
+caller changes is a design argument, **not** something a test proves: no
+`AssetSource` other than `DirSource` and the crate's own scripted test source
+exists.
+
+**A blanket `impl<S: StorageSource> AssetSource for S` was considered and
+declined.** It would have made every storage backend an asset source for free,
+and it is recorded here because it will look obvious to the next reader. Two
+reasons against: an asset source must not be writable, and coherence — a blanket
+impl claims the trait for every present and future `StorageSource`, so
+`PackSource` (a baked blob, not directory-shaped storage) could not implement
+`AssetSource` on its own terms.
+
+**Asset keys are restricted to `[A-Za-z0-9._-]` and `/`, on native too.**
+`DirSource` runs `crcbl_store::web::canonical_key` before touching the
+filesystem, so `my asset.png` and `café.png` are refused even though the
+filesystem would serve them. Deliberate: those load natively and 404 over HTTP,
+and the failure would surface at the point it is hardest to fix. The cost is
+that an artist cannot name a file with a space. If that becomes a real
+complaint, the fix is percent-encoding in the fetch backend, not a second key
+rule here — two rules is how the two backends drift apart.
+
+**No `Unloaded` state and no GPU retire.** The plan lists
+`Unloaded → Loading → Ready | Failed`; only the last three are built, because
+nothing can produce `Unloaded` — an unrequested asset has no entry and a
+released one is removed. It comes back with hot reload (task 5), which turns a
+`Ready` entry back into one with no bytes, and with the refcounted release's
+other half: the retire calls into the stage 2 deletion queue, which need a
+GPU-resident asset to retire and therefore the importer.
+
+**`Ready` and `Failed` are terminal, with no retry.** A failed asset stays
+failed until a caller releases and re-requests it. No backoff, no retry budget,
+no distinction between a 404 and a transient network error — the last of those
+would matter for a browser source and does not exist yet.
+
+**Nothing depends on `crcbl-assets`.** Like `crcbl-scene`, it is a workspace
+member every `cargo build --workspace` compiles for nothing until task 3 gives
+it a consumer. Same trade-off, same argument as that crate's header.
+
+**Not reviewed or built:** the exit criterion "no synchronous IO anywhere in
+engine crates (CI: deny `std::fs` outside `DirSource` + tooling)". There is no
+such CI gate, and `crcbl-assets` did not add one — `DirSource` reaches the
+filesystem through `crcbl_store::NativeStorage` rather than calling `std::fs`
+itself, so a lint written literally against `std::fs` would not name the crate
+the criterion is about. Whoever writes that gate has to decide what it actually
+forbids.
+
+**Not reviewed:** thread-safety. `AssetSource` requires only `Debug`, where
+`crcbl_store::StorageSource` requires `Send`. Nothing loads assets off the frame
+thread today and `crcbl-jobs` has not been pointed at this seam, so the bound
+was left off rather than guessed at. Adding it later is a breaking change for
+any implementor that is not `Send`.
+
+**Not reviewed:** budgets. The registry has no size cap, no eviction and no
+limit on how many loads can be outstanding; `poll` walks every `Loading` entry
+every call, which is fine for tens and unmeasured for thousands.

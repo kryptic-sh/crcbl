@@ -52,6 +52,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-assets` — asset ids, load states, and the IO seam under them.** A new
+  workspace member carrying `AssetId` (128-bit, printed as 32 hex digits,
+  derived from the canonical asset key), `AssetRegistry` with
+  `crcbl_core::Handle`-based handles and a `Loading | Ready | Failed` state
+  machine, the `AssetSource` trait — one `read` that is defined never to block
+  and answers `StorageError::Pending` while IO is outstanding — and `DirSource`,
+  the native implementation over a directory. Keys are validated with
+  `crcbl_store::web::canonical_key`, the same rule the browser fetch backend
+  applies, so a name that loads from a directory is a name that can be served
+  over HTTP; anything that would escape the asset root, or that HTTP would read
+  as a query, fragment, scheme or another origin, is refused. Nothing decodes an
+  asset yet: this layer hands out bytes, and the glTF/PNG/WAV importers are the
+  next slice.
+
 - **`apps/hud` — sample 04 at its first milestone.** A HUD page built from the
   UI system's slice-1 primitives: health and mana bars, a four-slot ability row
   whose slots read `READY` or sweep down a cooldown, a wave banner and a damage

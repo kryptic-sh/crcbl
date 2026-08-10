@@ -1,0 +1,30 @@
+[package]
+name = "crcbl-assets"
+description = "Crucible asset ids, load states and the IO seam beneath them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# `Handle` and `Pool`: an asset handle is a generational pool handle, not a
+# second handle type. See `registry.rs` for why the pool's stale-handle
+# behaviour is the whole of the "released asset" story.
+crcbl-core = { workspace = true }
+# The IO layer this crate is a narrow read-only view of. `DirSource` wraps
+# `NativeStorage`, `StorageError` is the error type (`Pending` included, which
+# is the async contract), and `web::canonical_key` is the key rule both this
+# crate and the browser backend enforce — one function, so a key that names an
+# asset natively names the same asset over HTTP.
+crcbl-store = { workspace = true }
+# `AssetId` is a digest of the canonical key. `crcbl-shaders` is
+# dependency-free and already carries a NIST-vector-tested SHA-256, which
+# `crcbl-store` reuses for the same reason: a second implementation is a second
+# thing to keep correct.
+crcbl-shaders = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

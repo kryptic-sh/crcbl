@@ -179,3 +179,43 @@ binary blob for shipping and wasm (solves the many-small-fetches problem;
   `UNORM` **image view alias** over the sRGB image and do the encode/decode
   manually in the compute shader (the standard approach), or fall back to
   render-pass downsampling. Stated so it isn't discovered at P9.
+
+## Landed: task 2 (2026-08-11)
+
+`crates/crcbl-assets` — a new workspace member, not `crcbl-scene`. Assets are
+read-only content shipped with the game; `crcbl-store` is data the player
+produces; a scene _references_ assets, so the dependency runs `crcbl-scene` →
+`crcbl-assets` and putting the registry in the scene crate would invert it.
+Nothing depends on the crate yet, which it shares with the `crcbl-scene` stub
+and for the same reason.
+
+- **`AssetId`** — 128 bits, `Display`/`Debug` as 32 hex digits, derived by
+  `AssetId::from_path` as the leading 16 bytes of the SHA-256 of the canonical
+  key (`crcbl_shaders::sha256`, already NIST-vector-tested and already reused by
+  `crcbl-store`). 128 rather than the 64 the asset-model section says, because
+  the corrections section replaces path hashing with a sidecar GUID and
+  `AssetId::from_bits` is where such a GUID arrives without the type changing
+  shape. The sidecars themselves need the importer and are not here.
+- **The handle is `crcbl_core::Handle<Asset>`**, issued by a `crcbl_core::Pool`.
+  No second handle type, and no `<T>` parameter: `Mesh`/`Texture` arrive with
+  the importers, and a phantom parameter with one instantiation checks nothing.
+- **States: `Loading | Ready | Failed`.** No `Unloaded` — an asset nobody
+  requested has no entry and a released one is removed, so nothing can hold that
+  state and no test could reach it. It returns when hot reload (task 5) or the
+  deletion-queue retire path can produce it.
+- **`AssetSource`** — one method,
+  `read(&Path) -> Result<Vec<u8>, StorageError>`, defined never to block; a
+  source without the bytes answers `StorageError::Pending` and the caller polls.
+  That is `crcbl_store::web::FetchSource`'s existing contract verbatim, so the
+  stage-10 browser source is a delegating wrapper and no caller changes.
+  Deliberately not a blanket impl over `StorageSource`: that would claim the
+  trait for every storage backend and leave `PackSource` unable to implement it
+  on its own terms.
+- **`DirSource`** — `crcbl_store::NativeStorage` narrowed to a read. Keys go
+  through `crcbl_store::web::canonical_key` first, so `DirSource` and a future
+  `FetchSource` accept exactly one key set and an asset tree that loads from a
+  directory is one that can be served over HTTP.
+- **`AssetRegistry`** — dedupes by `AssetId`, refcounts, `poll()` advances every
+  `Loading` entry and returns how many are still waiting. The refcount is the
+  plan's "refcounted release" minus the GPU retire calls, which need the stage 2
+  deletion queue and a GPU-resident asset to retire.

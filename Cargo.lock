@@ -283,6 +283,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-assets"
+version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+ "crcbl-shaders",
+ "crcbl-store",
+ "tempfile",
+]
+
+[[package]]
 name = "crcbl-audio"
 version = "0.1.0"
 dependencies = [
