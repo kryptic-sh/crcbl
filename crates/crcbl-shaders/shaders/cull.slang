@@ -72,8 +72,9 @@ struct GpuInstance
     /// resolves this instance's base vertex through it, which is what lets one
     /// draw cover instances of different meshes.
     uint mesh;
-    /// Which material to shade with. **Reserved**: the material table is the
-    /// other half of §3.2 and is not built.
+    /// Which material to shade with: an index into the material table
+    /// `mesh.slang` shades through. Nothing here reads it — this pass decides
+    /// what is on screen, not what colour it is.
     uint material;
     /// Which sector `transform` is relative to. **Reserved**: the f64
     /// sector→camera offset table and the addition that would make this mean

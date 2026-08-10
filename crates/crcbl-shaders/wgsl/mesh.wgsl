@@ -64,6 +64,13 @@ struct FrameUniforms_std140_0
 };
 
 @binding(0) @group(0) var<uniform> frame_0 : FrameUniforms_std140_0;
+struct GpuMaterial_std430_0
+{
+    @align(16) base_color_0 : vec4<f32>,
+};
+
+@binding(6) @group(0) var<storage, read> materials_0 : array<GpuMaterial_std430_0>;
+
 struct VertexOutput_0
 {
     @builtin(position) position_1 : vec4<f32>,
@@ -83,7 +90,7 @@ fn vertexMain(@builtin(vertex_index) index_0 : u32, @builtin(instance_index) ins
     output_0.position_1 = (((world_0) * (mat4x4<f32>(frame_0.view_proj_0.data_1[i32(0)][i32(0)], frame_0.view_proj_0.data_1[i32(1)][i32(0)], frame_0.view_proj_0.data_1[i32(2)][i32(0)], frame_0.view_proj_0.data_1[i32(3)][i32(0)], frame_0.view_proj_0.data_1[i32(0)][i32(1)], frame_0.view_proj_0.data_1[i32(1)][i32(1)], frame_0.view_proj_0.data_1[i32(2)][i32(1)], frame_0.view_proj_0.data_1[i32(3)][i32(1)], frame_0.view_proj_0.data_1[i32(0)][i32(2)], frame_0.view_proj_0.data_1[i32(1)][i32(2)], frame_0.view_proj_0.data_1[i32(2)][i32(2)], frame_0.view_proj_0.data_1[i32(3)][i32(2)], frame_0.view_proj_0.data_1[i32(0)][i32(3)], frame_0.view_proj_0.data_1[i32(1)][i32(3)], frame_0.view_proj_0.data_1[i32(2)][i32(3)], frame_0.view_proj_0.data_1[i32(3)][i32(3)]))));
     output_0.world_position_0 = world_0.xyz;
     output_0.world_normal_0 = (((vertex_0.normal_0.xyz) * (mat3x3<f32>(_S1[i32(0)].xyz, _S1[i32(1)].xyz, _S1[i32(2)].xyz))));
-    output_0.color_1 = vertex_0.color_0;
+    output_0.color_1 = vertex_0.color_0 * materials_0[instance_0.material_0].base_color_0;
     return output_0;
 }
 

@@ -26,8 +26,13 @@
 //!   else*: no second pipeline, no branch in this file, no shader permutation.
 //!
 //! Explicitly not here: bindless at scale (P3), shadows and real post (P7),
-//! materials (topic 37), asset loading (P9). The mesh is a constant in
+//! material authoring (topic 37), asset loading (P9). The mesh is a constant in
 //! `crcbl-shaders` because rung 3 says "hardcoded cube/sphere".
+//!
+//! What *is* here since 2026-08 is [`crate::material_table`]: §3.2's material
+//! table, holding factors and no texture indices, with
+//! [`mesh::GpuInstance::material`] selecting a row. Two rows are resident, and
+//! the second exists to be seen — see [`ForwardRenderer::set_tinted_pyramid`].
 //!
 //! What *was* on that list until 2026-08 is GPU culling and the indirect draw
 //! count, and both are here now: [`crate::draw_gen`] runs `cull.slang` and
@@ -119,6 +124,7 @@ use crate::cull::Frustum;
 use crate::draw_gen::{DrawGen, DrawGenDesc};
 use crate::graph::{ImageId, ImportedImage, RenderGraph};
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc};
+use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
 use crate::transient::TransientImageDesc;
 
@@ -163,6 +169,25 @@ const POOL_MESH_CAPACITY: u32 = 1024;
 /// meshes" — rather than against them, because the buffers are reserved at
 /// start-up and never grown.
 const POOL_INSTANCE_CAPACITY: u32 = 16 * 1024;
+
+/// Materials the material table holds.
+///
+/// Two are resident, on the same terms as the two meshes: the buffer is
+/// reserved at start-up and never grown, so it is sized against a scene rather
+/// than against what P1 draws. Distinct materials, not instances of them — a
+/// material id names one row however many instances carry it, which is the
+/// property that makes the table worth having.
+const POOL_MATERIAL_CAPACITY: u32 = 1024;
+
+/// The second material's base colour, and the whole of what makes it visible.
+///
+/// A factor per channel with no two alike, so multiplying by it moves every
+/// colour it touches: a tint that left a channel at `1.0` would leave the
+/// pyramid's white base looking like a lighting difference, and one that left
+/// them equal would be a brightness change a shading bug could also produce.
+/// See [`ForwardRenderer::set_tinted_pyramid`], which is the pair this exists
+/// for.
+const PYRAMID_TINT: [f32; 4] = [0.15, 0.45, 1.0, 1.0];
 
 /// Buckets in the draw table, which is how many indirect calls the forward pass
 /// records — **whatever the scene holds**.
@@ -249,11 +274,29 @@ pub struct ForwardRenderer {
     /// cull pass is what decides what is drawn. See
     /// [`ForwardRenderer::set_pyramid`].
     pyramid_instance: Option<InstanceHandle>,
+    /// A second instance of the pyramid mesh, shaded through the table's other
+    /// row. See [`ForwardRenderer::set_tinted_pyramid`], which is what puts it
+    /// in the scene and what it is for.
+    tinted_pyramid_instance: Option<InstanceHandle>,
     /// The mesh ids those instances carry. Kept because every write of an
     /// instance writes the whole record, and an instance that lost its mesh id
     /// would resolve to entry 0 — which is a mesh, and the wrong one.
     cube_mesh: u32,
     pyramid_mesh: u32,
+
+    /// §3.2's material table, and the two rows in it.
+    ///
+    /// One buffer shared by every frame's bind group, not a ring — see
+    /// [`crate::material_table`], which is where that decision lives.
+    materials: MaterialTable,
+    /// The row every instance carries unless something asks for another, whose
+    /// factors are all `1.0`. Kept for the reason the mesh ids above are: a
+    /// `set` writes the whole record, and an instance that lost its material id
+    /// would name row 0 by accident — which is a material, and only *happens*
+    /// to be this one.
+    untinted_material: u32,
+    /// The row [`PYRAMID_TINT`] went into.
+    tinted_material: u32,
 
     /// The cull and draw-argument passes, and the indirect arguments they
     /// produce.
@@ -312,6 +355,8 @@ struct Rollback {
     pool: Option<MeshPool>,
     /// The instance pool, which owns one buffer per frame in flight.
     instances: Option<InstancePool>,
+    /// The material table, which owns one buffer.
+    materials: Option<MaterialTable>,
     /// The cull and draw-argument passes, which own two pipelines and a ring of
     /// buffers each — and which clean themselves up on their own failure path,
     /// so this only carries one that was built.
@@ -342,6 +387,9 @@ impl Rollback {
         }
         if let Some(draws) = self.draws {
             draws.destroy(device);
+        }
+        if let Some(table) = self.materials {
+            table.destroy(device);
         }
         if let Some(pool) = self.instances {
             pool.destroy(device);
@@ -399,7 +447,14 @@ impl ForwardRenderer {
         let mesh_table = pool.table_buffer();
         rollback.pool = Some(pool);
 
-        let (instances, cube_instance) = Self::build_instances(device, cube_mesh)?;
+        // The material table, before the instances: an instance is written with
+        // the material id it carries, so the row has to exist to be named.
+        let (materials, untinted_material, tinted_material) = Self::build_materials(device)?;
+        let material_buffer = materials.buffer();
+        rollback.materials = Some(materials);
+
+        let (instances, cube_instance) =
+            Self::build_instances(device, cube_mesh, untinted_material)?;
         // Same handle-then-hand-over dance as the geometry pool above: the
         // buffers are `Copy` and are read out before the pool becomes the
         // rollback's, which it must be before the first `?` below — after which
@@ -505,6 +560,24 @@ impl ForwardRenderer {
                     // here and written by the draw-argument pass, which is a
                     // different bind group and a different pass — the graph is
                     // what orders the two.
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: 6,
+                // The vertex stage, because that is where `mesh.slang` reads
+                // it: a base colour is one value per instance and the colour it
+                // scales is already interpolated, so the fragment stage needs
+                // neither the buffer nor a varying to carry it. That shader's
+                // binding says why in full.
+                visibility: ShaderStages::VERTEX,
+                kind: BindingKind::StorageBuffer {
+                    // The material table. One buffer in every frame's group,
+                    // like the mesh table above and unlike the instance ring:
+                    // a material is written when it is created, not per frame.
                     read_only: true,
                     dynamic: false,
                 },
@@ -623,6 +696,13 @@ impl ForwardRenderer {
                     // frame and the previous frame may still be drawing from
                     // the other slot.
                     resource: BindingResource::whole_buffer(runs[frame]),
+                },
+                BindGroupEntry {
+                    binding: 6,
+                    array_index: 0,
+                    // The same table in every frame's group, on the mesh
+                    // table's terms rather than the instance array's.
+                    resource: BindingResource::whole_buffer(material_buffer),
                 },
             ];
             let group = device.create_bind_group(&BindGroupDesc {
@@ -790,8 +870,15 @@ impl ForwardRenderer {
                 .unwrap_or_else(|| unreachable!("the pool was placed in the rollback above")),
             cube_instance,
             pyramid_instance: None,
+            tinted_pyramid_instance: None,
             cube_mesh,
             pyramid_mesh,
+            materials: rollback
+                .materials
+                .take()
+                .unwrap_or_else(|| unreachable!("the table was placed in the rollback above")),
+            untinted_material,
+            tinted_material,
             draws: rollback.draws.take().unwrap_or_else(|| {
                 unreachable!("draw generation was placed in the rollback above")
             }),
@@ -839,6 +926,62 @@ impl ForwardRenderer {
         }
     }
 
+    /// Creates the material table and fills its two rows, returning it and the
+    /// ids of both.
+    ///
+    /// Self-cleaning for the same reason [`ForwardRenderer::build_geometry`] is:
+    /// the table is not the rollback's until this has returned.
+    ///
+    /// The untinted row is created **first**, so it is row 0 — which is what
+    /// [`mesh::GpuInstance::default`] names, and therefore what an instance
+    /// written without a material id would shade with. Nothing here relies on
+    /// that: every instance below is written with an id read out of this table.
+    /// It is a defence in depth, not the contract, because a caller assembling
+    /// a `GpuInstance` by hand is one who has not read either.
+    fn build_materials(device: &dyn Device) -> Result<(MaterialTable, u32, u32), HalError> {
+        let mut materials = MaterialTable::new(
+            device,
+            &MaterialTableDesc {
+                label: Some("forward"),
+                capacity: POOL_MATERIAL_CAPACITY,
+            },
+        )?;
+        match Self::material_rows(device, &mut materials) {
+            Ok((untinted, tinted)) => Ok((materials, untinted, tinted)),
+            Err(error) => {
+                materials.destroy(device);
+                Err(error)
+            }
+        }
+    }
+
+    /// Fills the two rows and returns the ids an instance carries.
+    ///
+    /// Split out of [`ForwardRenderer::build_materials`] only so the table can
+    /// be released on a failure without the borrow that filling it takes, which
+    /// is the same shape [`ForwardRenderer::residents`] has.
+    fn material_rows(
+        device: &dyn Device,
+        materials: &mut MaterialTable,
+    ) -> Result<(u32, u32), HalError> {
+        let untinted = materials.insert(device, &mesh::GpuMaterial::UNTINTED)?;
+        let tinted = materials.insert(
+            device,
+            &mesh::GpuMaterial {
+                base_color: PYRAMID_TINT,
+            },
+        )?;
+        // A table this size cannot have refused either handle, so both resolve
+        // — but the ids are asked for rather than assumed, because the number
+        // an instance carries is this one and nothing else knows it.
+        match (materials.index(untinted), materials.index(tinted)) {
+            (Some(untinted), Some(tinted)) => Ok((untinted, tinted)),
+            _ => Err(HalError::Backend(
+                "a material inserted into an empty table did not resolve".to_string(),
+            )),
+        }
+    }
+
     /// Creates the instance pool and puts the cube in it.
     ///
     /// Self-cleaning for the same reason [`ForwardRenderer::build_geometry`] is:
@@ -855,8 +998,13 @@ impl ForwardRenderer {
     /// mesh at table entry 0. [`ForwardRenderer::begin_frame`] rewrites the
     /// transform before the first draw and writes the id back with it.
     ///
-    /// The remaining ids stay zero because nothing reads them yet — see
-    /// [`crcbl_shaders::mesh::GpuInstance`] on which fields are reserved.
+    /// It carries its **material** id for the same reason it carries its mesh
+    /// id: a row nobody wrote shades black, so an instance that named one by
+    /// omission would be an invisible object rather than an untinted one.
+    ///
+    /// The sector id stays zero because nothing reads it yet — see
+    /// [`crcbl_shaders::mesh::GpuInstance`], which is the field that is still
+    /// reserved.
     ///
     /// The instance's index is not asserted to be anything in particular. It
     /// used to be — the cube had to land at 0, because a draw could address no
@@ -865,6 +1013,7 @@ impl ForwardRenderer {
     fn build_instances(
         device: &dyn Device,
         cube_mesh: u32,
+        material: u32,
     ) -> Result<(InstancePool, InstanceHandle), HalError> {
         let mut instances = InstancePool::new(
             device,
@@ -877,6 +1026,7 @@ impl ForwardRenderer {
         match instances.insert(&mesh::GpuInstance {
             transform: Mat4::IDENTITY.to_cols_array(),
             mesh: cube_mesh,
+            material,
             ..mesh::GpuInstance::default()
         }) {
             Ok(cube) => Ok((instances, cube)),
@@ -972,9 +1122,11 @@ impl ForwardRenderer {
             self.cube_instance,
             &mesh::GpuInstance {
                 transform: model.to_cols_array(),
-                // A `set` writes the whole record, so the mesh id is written
-                // with it or the cube resolves to entry 0 by accident.
+                // A `set` writes the whole record, so the mesh and material ids
+                // are written with it or the cube resolves to entry 0 of each
+                // by accident — one of which is a mesh and the other a colour.
                 mesh: self.cube_mesh,
+                material: self.untinted_material,
                 ..mesh::GpuInstance::default()
             },
         );
@@ -1041,35 +1193,52 @@ impl ForwardRenderer {
     /// Takes effect at the next [`ForwardRenderer::begin_frame`], which is what
     /// uploads the change.
     pub fn set_pyramid(&mut self, model: Option<Mat4>) {
-        let Some(model) = model else {
-            if let Some(handle) = self.pyramid_instance.take() {
-                self.instances.remove(handle);
-            }
-            return;
-        };
-        let instance = mesh::GpuInstance {
+        let instance = model.map(|model| mesh::GpuInstance {
             transform: model.to_cols_array(),
             // Without this the pyramid's instance names table entry 0, which is
             // the cube — and it would draw a second cube here rather than
             // nothing, which is the failure the whole second resident exists to
             // make visible.
             mesh: self.pyramid_mesh,
+            material: self.untinted_material,
             ..mesh::GpuInstance::default()
-        };
-        match self.pyramid_instance {
-            Some(handle) => {
-                self.instances.set(handle, &instance);
-            }
-            // A pool with room for thousands and one instance in it, so this
-            // fails only if a caller has filled it. Logged and left hidden
-            // rather than propagated: the signature says nothing about a pool,
-            // and a frame that draws one fewer object is better than a frame
-            // loop that stops.
-            None => match self.instances.insert(&instance) {
-                Ok(handle) => self.pyramid_instance = Some(handle),
-                Err(error) => log::error!("forward: the pyramid has no instance slot: {error}"),
-            },
-        }
+        });
+        place(
+            &mut self.instances,
+            &mut self.pyramid_instance,
+            instance.as_ref(),
+            "the pyramid",
+        );
+    }
+
+    /// Puts a **second instance of the pyramid mesh** in the frame at `model`,
+    /// shaded through a material of its own, or takes it back out with `None`.
+    ///
+    /// **This is what makes `GpuInstance::material` observable**, and it is why
+    /// it is here at all. The two pyramids carry the same mesh id, the same
+    /// orientation and the same size; the *only* field they differ in is the
+    /// material, so a frame in which they are the same colour is a frame where
+    /// the id indexed nothing. That is a claim no single-material scene can
+    /// make — a tint applied to the one pyramid would pass just as well if the
+    /// shader keyed the colour off the mesh id.
+    ///
+    /// [`ForwardRenderer::set_pyramid`]'s sibling in every other respect: off
+    /// by default, `None` removes the instance rather than skipping a draw, and
+    /// the change takes effect at the next [`ForwardRenderer::begin_frame`].
+    /// See that method for why each of those is what it is.
+    pub fn set_tinted_pyramid(&mut self, model: Option<Mat4>) {
+        let instance = model.map(|model| mesh::GpuInstance {
+            transform: model.to_cols_array(),
+            mesh: self.pyramid_mesh,
+            material: self.tinted_material,
+            ..mesh::GpuInstance::default()
+        });
+        place(
+            &mut self.instances,
+            &mut self.tinted_pyramid_instance,
+            instance.as_ref(),
+            "the tinted pyramid",
+        );
     }
 
     /// Adds the forward and tonemap passes to `graph`, rendering into `target`,
@@ -1339,8 +1508,49 @@ impl ForwardRenderer {
         }
         device.destroy_buffer(self.draw_constants);
         self.draws.destroy(device);
+        self.materials.destroy(device);
         self.instances.destroy(device);
         self.pool.destroy(device);
+    }
+}
+
+/// Puts `instance` in `slot`, or takes whatever is there back out when it is
+/// `None`.
+///
+/// The body [`ForwardRenderer::set_pyramid`] and
+/// [`ForwardRenderer::set_tinted_pyramid`] share: both hold an optional handle
+/// into the same pool and both mean the same three things by it — insert when
+/// there is nothing there, rewrite when there is, and remove on `None`.
+///
+/// A free function rather than a method because it takes the pool and the slot
+/// as separate borrows, which a `&mut self` method could not: both are fields
+/// of the same renderer.
+///
+/// `what` names the object in the one message this can produce. A pool with
+/// room for thousands is full only if a caller filled it, and the failure is
+/// logged rather than propagated: neither signature says anything about a pool,
+/// and a frame that draws one fewer object is better than a frame loop that
+/// stops.
+fn place(
+    instances: &mut InstancePool,
+    slot: &mut Option<InstanceHandle>,
+    instance: Option<&mesh::GpuInstance>,
+    what: &str,
+) {
+    let Some(instance) = instance else {
+        if let Some(handle) = slot.take() {
+            instances.remove(handle);
+        }
+        return;
+    };
+    match *slot {
+        Some(handle) => {
+            instances.set(handle, instance);
+        }
+        None => match instances.insert(instance) {
+            Ok(handle) => *slot = Some(handle),
+            Err(error) => log::error!("forward: {what} has no instance slot: {error}"),
+        },
     }
 }
 
@@ -1573,6 +1783,90 @@ mod tests {
             "and the second's starts a whole run later — the stride is the \
              capacity, so a bucket that filled up still cannot reach the next"
         );
+        renderer.destroy(device.as_ref());
+    }
+
+    /// **The two pyramids differ in exactly one field, and it is the material
+    /// id — which names a row holding a different colour.**
+    ///
+    /// The whole of what §3.2's table buys, stated as the two things that have
+    /// to be true at once. Placed at the *same* transform, so "differ only in
+    /// material" is literal rather than nearly: same mesh id, same matrix, same
+    /// flags, and a `GpuInstance` comparison that would fail on any other
+    /// field. And the ids they carry name rows the device actually holds —
+    /// asserted on the bytes in the buffer, because a table the renderer agrees
+    /// with itself about is not a table a shader can read.
+    ///
+    /// The two rows are asserted to differ, or the pair would be evidence of
+    /// nothing: two instances naming two rows of the same colour draw the same
+    /// picture whether or not either id was ever used.
+    #[test]
+    fn the_two_pyramids_differ_only_in_their_material() {
+        let (recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        let at = Mat4::from_translation(Vec3::new(-1.0, 0.0, 0.0));
+        renderer.set_pyramid(Some(at));
+        renderer.set_tinted_pyramid(Some(at));
+
+        let instance = |handle: Option<InstanceHandle>| {
+            renderer
+                .instances
+                .get(handle.expect("the instance was inserted"))
+                .expect("and it is live")
+        };
+        let plain = instance(renderer.pyramid_instance);
+        let tinted = instance(renderer.tinted_pyramid_instance);
+        assert_ne!(
+            plain.material, tinted.material,
+            "the two pyramids must not share a material row"
+        );
+        assert_eq!(
+            mesh::GpuInstance {
+                material: tinted.material,
+                ..plain
+            },
+            tinted,
+            "the two instances must differ in the material id and in nothing else"
+        );
+
+        let bytes = recorder
+            .buffer_bytes(renderer.materials.buffer())
+            .expect("the table is live");
+        let row = |index: u32| {
+            let at = index as usize * crcbl_shaders::mesh::MATERIAL_STRIDE;
+            mesh::GpuMaterial::from_bytes(
+                bytes[at..at + crcbl_shaders::mesh::MATERIAL_STRIDE]
+                    .try_into()
+                    .expect("one row"),
+            )
+        };
+        assert_eq!(
+            row(plain.material),
+            mesh::GpuMaterial::UNTINTED,
+            "the plain pyramid's row must be the factor that changes nothing"
+        );
+        assert_eq!(
+            row(tinted.material),
+            mesh::GpuMaterial {
+                base_color: PYRAMID_TINT
+            },
+            "the tinted pyramid's row must be the tint"
+        );
+        assert_ne!(
+            row(plain.material),
+            row(tinted.material),
+            "two rows holding the same colour would make the pair prove nothing"
+        );
+
+        // And the second pyramid leaves the frame the way the first does: the
+        // instance is removed, not a draw skipped.
+        renderer.set_tinted_pyramid(None);
+        assert!(
+            renderer.tinted_pyramid_instance.is_none(),
+            "the instance must be given back, or an object nobody asked for stays in the scene"
+        );
+
         renderer.destroy(device.as_ref());
     }
 

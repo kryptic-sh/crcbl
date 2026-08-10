@@ -153,10 +153,10 @@ struct FrameUniforms
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
 ///
 /// `docs/plan/03-gpu-driven-rendering.md` §3.2's "transform, mesh id, material
-/// id, flags", plus the sector id its 2026-07-27 correction adds. Nothing in
-/// *this* shader reads anything but the transform and the mesh id — see the
-/// Rust struct, which carries the full account of what each field is for and
-/// which slice consumes it.
+/// id, flags", plus the sector id its 2026-07-27 correction adds. This shader
+/// reads the transform, the mesh id and the material id — see the Rust struct,
+/// which carries the full account of what each field is for and which slice
+/// consumes it.
 struct GpuInstance
 {
     /// Model → sector. Rigid (rotation + translation), so its upper-left 3×3
@@ -166,8 +166,9 @@ struct GpuInstance
     /// resolves this instance's base vertex through it, which is what lets one
     /// draw cover instances of different meshes.
     uint mesh;
-    /// Which material to shade with. **Reserved**: the material table is the
-    /// other half of §3.2 and is not built.
+    /// Which material to shade with: an index into `materials` below. The
+    /// vertex stage multiplies that row's base colour into the vertex albedo,
+    /// so two instances of the same mesh differing only here are two colours.
     uint material;
     /// Which sector `transform` is relative to. **Reserved**: the f64
     /// sector→camera offset table and the addition that would make this mean
@@ -225,6 +226,27 @@ struct GpuMesh
     float max_z;
 };
 
+/// One material's shading factors, matching `crcbl_shaders::mesh::GpuMaterial`.
+///
+/// `docs/plan/03-gpu-driven-rendering.md` §3.2's material table, and **only its
+/// factors half**: that section pairs the table with "a bindless texture array
+/// (`BindingModel::Bindless`) or texture array pages (`ArrayPages`)", and which
+/// of those two a texture index would mean is a decision this record does not
+/// take. A texture column carried here ahead of that decision would be a field
+/// nothing reads, so there is not one — the same plan warns against a
+/// "premature material system", and `docs/plan/37-materials.md` owns the shape
+/// a real one has.
+struct GpuMaterial
+{
+    /// Linear RGBA factor multiplied into the vertex albedo.
+    ///
+    /// One `float4` rather than a `float3` and a scalar, for `GpuMesh`'s
+    /// reason inverted: `std430` aligns a `float4` to 16 and this struct is one
+    /// member long, so the row is 16 bytes with no padding anywhere and its
+    /// stride cannot be rounded up to something the CPU side does not write.
+    float4 base_color;
+};
+
 /// Where this draw's run of visible instances starts, matching
 /// `crcbl_shaders::mesh::DrawConstants`.
 ///
@@ -270,6 +292,18 @@ StructuredBuffer<GpuMesh> meshes;
 [[vk::binding(5, 0)]]
 StructuredBuffer<uint> visible_instances;
 
+/// The material table §3.2 asks for, indexed by `GpuInstance::material`.
+///
+/// Read in the **vertex** stage rather than the fragment one, and that is not
+/// an economy: `VertexOutput::color` is interpolated, the factor is one value
+/// per instance, and interpolation is linear — so scaling the corners and
+/// scaling the interpolated result are the same picture. Reading it here keeps
+/// the material out of the varyings and off the fragment stage's binding list.
+/// A factor that stops being constant across a primitive — anything a texture
+/// fetch feeds — is what moves this, and that is the texture half.
+[[vk::binding(6, 0)]]
+StructuredBuffer<GpuMaterial> materials;
+
 struct VertexOutput
 {
     float4 position : SV_Position;
@@ -298,16 +332,21 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     // `GpuInstance::transform` rather than shipping a second matrix per
     // instance that nothing needs until non-uniform scale exists.
     output.world_normal = mul((float3x3)instance.transform, vertex.normal.xyz);
-    output.color = vertex.color;
+    // The instance names its material exactly as it names its mesh, so two
+    // instances of one mesh can be two colours with no CPU in the loop and no
+    // second draw.
+    output.color = vertex.color * materials[instance.material].base_color;
     return output;
 }
 
 /// Blinn-Phong specular exponent.
 ///
-/// One constant rather than a material parameter: `docs/plan/02-vulkan-backend.md`
-/// §2.5 rung 4 is "enough to see geometry properly; real material model comes
-/// with stage 3/5", and a one-field material system would be a guess at the
-/// shape `docs/plan/37-materials.md` owns.
+/// One constant rather than a material column, **even now that there is a table
+/// to put it in**: `docs/plan/02-vulkan-backend.md` §2.5 rung 4 is "enough to
+/// see geometry properly; real material model comes with stage 3/5", so how
+/// specular is parameterised at all is part of the shading model
+/// `docs/plan/37-materials.md` owns. `GpuMaterial` carries what §3.2 asks a
+/// material table to carry and nothing a caller would not vary.
 static const float SPECULAR_POWER = 32.0;
 
 /// How much of the light colour the specular lobe contributes.

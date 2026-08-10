@@ -57,6 +57,7 @@ struct DepthProbe {
     /// the vertex stage resolves its base vertex through here on every draw in
     /// the engine, this one included.
     mesh_table: crcbl_hal::BufferHandle,
+    materials: crcbl_hal::BufferHandle,
     /// A one-entry run of visible instances, holding the index 0.
     ///
     /// `mesh.slang` reads its instance out of a run rather than naming one,
@@ -236,6 +237,25 @@ impl DepthProbe {
             )
             .expect("write");
 
+        // One untinted row, so `instance.material == 0` multiplies the albedo
+        // by 1.0 and this probe's depth answers stay the answers it recorded
+        // before §3.2 existed.
+        let materials = device
+            .create_buffer(&BufferDesc {
+                label: Some("probe materials"),
+                size: crcbl_shaders::mesh::MATERIAL_STRIDE as u64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a material table");
+        device
+            .write_buffer(
+                materials,
+                0,
+                &crcbl_shaders::mesh::GpuMaterial::UNTINTED.to_bytes(),
+            )
+            .expect("write");
+
         let mesh_table = device
             .create_buffer(&BufferDesc {
                 label: Some("probe mesh table"),
@@ -335,6 +355,20 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl_hal::BindingFlags::empty(),
             },
+            // The material table, §3.2's factors half. This probe shades
+            // nothing per material, but a pipeline layout that does not cover
+            // a binding the module declares is refused outright, so the entry
+            // has to exist even though one untinted row is all it points at.
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: crcbl_hal::ShaderStages::VERTEX,
+                kind: crcbl_hal::BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
         ];
         let layout = device
             .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
@@ -372,6 +406,11 @@ impl DepthProbe {
                 binding: 5,
                 array_index: 0,
                 resource: crcbl_hal::BindingResource::whole_buffer(visible_instances),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 6,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(materials),
             },
         ];
         let group = device
@@ -434,6 +473,7 @@ impl DepthProbe {
             instances,
             draw_constants,
             mesh_table,
+            materials,
             visible_instances,
             layout,
             group,
@@ -449,6 +489,7 @@ impl DepthProbe {
         device.destroy_bind_group_layout(self.layout);
         device.destroy_buffer(self.visible_instances);
         device.destroy_buffer(self.mesh_table);
+        device.destroy_buffer(self.materials);
         device.destroy_buffer(self.draw_constants);
         device.destroy_buffer(self.instances);
         device.destroy_buffer(self.uniforms);

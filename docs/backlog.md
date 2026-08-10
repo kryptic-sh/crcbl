@@ -4844,3 +4844,61 @@ Three frames now, through three renderers, and only the cube's goes through
 `ForwardRenderer`. The step comments were corrected; the names were left alone
 because they are the labels a run's history is read by and nothing greps them.
 Rename them if the churn is ever worth it.
+
+## The material table landed with its factors half only
+
+`crcbl_render::MaterialTable` is `docs/plan/03-gpu-driven-rendering.md` §3.2's
+material table SSBO, `crcbl_shaders::mesh::GpuMaterial` is a row, and
+`mesh.slang` binding 6 is where the vertex stage reads one. What is deliberately
+not there, and what it would take:
+
+**Texture indices.** §3.2's own sentence is "the table holds texture indices +
+factors", and a texture column cannot be written until the engine decides
+whether an index names a `BindingModel::Bindless` slot or an
+`ArrayPages`&nbsp;page — `crcbl_hal::caps` has both and the renderer commits to
+neither. That is a larger decision than this table, it is the one P3's bindless
+work exists to take, and a column added ahead of it is a field nothing reads.
+Adding it afterwards is a `u32` in `GpuMaterial`, a fetch in the fragment stage
+and a re-bless; the indexing mechanism it would ride on is already paid for and
+proven on `vk` and `wgpu`.
+
+**A material is a start-up write.** `MaterialTable` is one host-visible buffer
+with no ring — the mesh table's shape, not `InstancePool`'s — because nothing
+rewrites a row between frames. `MaterialTable::set` therefore carries the same
+caveat `MeshPool::upload` does, stated in its docs: called while a frame is in
+flight it is a read-after-write hazard across submissions. **The first animated
+material is what makes this a ring**, and it is the moment
+`instance_pool::DirtyRanges` becomes worth sharing, because there would then be
+two callers that coalesce runs rather than one that writes single rows.
+
+**Specular stayed a constant.** `mesh.slang`'s `SPECULAR_POWER` and
+`SPECULAR_STRENGTH` are documented as belonging in a material and were left
+where they are: moving them needs the fragment stage to reach the table, which
+means either a `nointerpolation` integer varying (a per-target lowering this
+repo has been burned by twice) or two more floats through `VertexOutput`, and
+nothing varies them. `docs/plan/37-materials.md` owns the shading model they are
+part of.
+
+## `mesh.slang`'s seventh binding has two callers outside `crcbl-render`
+
+Adding the material table gave `mesh.slang` a binding 6, and two places outside
+the renderer describe that shader's bindings for themselves. **Both are known
+broken by that change and were left alone deliberately — the slice that added
+the binding was scoped to `crcbl-render`, `crcbl-shaders` and `crcbl`:**
+
+- **`crcbl-dx12`'s
+  `dxil::tests::registers_are_assigned_per_class_in_declaration_order`**
+  hard-codes the register classes each committed container declares. Its `mesh`
+  case reads `&[Cbv, Srv, Srv, Cbv, Srv, Srv]` and the container now declares
+  one more `Srv`. The test fails on any host — it reads committed DXIL and needs
+  no device — with `left: […(Srv, 3)] right: […(Srv, 3), (Srv, 4)]`.
+- **`crcbl-vk`'s `vk_e2e/depth_probe.rs`** builds its own bind-group layout and
+  bind group for `mesh.slang`, bindings 0 through 5. A pipeline layout that does
+  not cover a binding the shader declares is refused at
+  `vkCreateGraphicsPipelines`, so it needs a seventh entry — a read-only storage
+  buffer visible to the vertex stage — and a `GpuMaterial` row for it to point
+  at. The suite is feature-gated and `#[ignore]`d, so a workspace run does not
+  catch this; `crates/crcbl-vk/tests/run-vk-e2e.sh` does.
+
+Neither is a design question: both are the mechanical half of "change a shared
+interface and you own its callers", left for whoever owns those crates.

@@ -103,6 +103,12 @@ pub enum Scene {
     /// for the reason the module docs give: it is the only geometry in the tree
     /// at a non-zero base vertex, so it is the only thing this comparison can
     /// use to tell the four targets' `SV_VertexID` lowerings apart.
+    ///
+    /// **There are two of it**, mirrored across the cube, and they are the same
+    /// mesh at the same orientation differing in nothing but their material id
+    /// — which is what makes this frame the observable for
+    /// `docs/plan/03-gpu-driven-rendering.md` §3.2's material table. See
+    /// `TINTED_PYRAMID_AT`, which is where the second one goes and why.
     #[default]
     Cube,
     /// Four sprites over three [`SpriteRenderer`] batches: `sprite.slang`.
@@ -121,6 +127,22 @@ pub enum Scene {
 /// what makes "the pyramid drew the cube's vertices" a visibly different
 /// picture rather than an overlap.
 const PYRAMID_AT: glam::Vec3 = glam::Vec3::new(-1.05, 0.0, 0.0);
+
+/// Where [`Scene::Cube`] puts the **second** pyramid: mirrored across the cube
+/// from [`PYRAMID_AT`], so the frame is symmetric and the pair is side by side.
+///
+/// The two are the same mesh at the same orientation and the same size, and the
+/// only field their instances differ in is the material id — which is the whole
+/// of what makes this frame evidence about §3.2's material table. A frame in
+/// which the two pyramids are the same colour is a frame where that id indexed
+/// nothing, and it is a *visibly* different frame rather than a subtly wrong
+/// one.
+///
+/// Mirrored rather than placed anywhere else because the gap
+/// [`PYRAMID_AT`]'s docs measure is the same gap on the other side: the frame
+/// is about 3.1 world units wide at `z = 0`, the cube spans `±0.5` and each
+/// pyramid `±0.4`, so both sit fully inside it without touching the cube.
+const TINTED_PYRAMID_AT: glam::Vec3 = glam::Vec3::new(1.05, 0.0, 0.0);
 
 /// The colour [`Scene::Sprite`] and [`Scene::Ui`] composite onto, in **linear**
 /// light — which is what a clear value on an sRGB attachment means.
@@ -311,6 +333,7 @@ impl SceneState {
             Scene::Cube => {
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
                 renderer.set_pyramid(Some(glam::Mat4::from_translation(PYRAMID_AT)));
+                renderer.set_tinted_pyramid(Some(glam::Mat4::from_translation(TINTED_PYRAMID_AT)));
                 Self::Cube {
                     camera: Camera::default().with_projection(Projection::Perspective {
                         fov_y: std::f32::consts::FRAC_PI_3,

@@ -56,6 +56,14 @@ pub const INSTANCE_STRIDE: usize = 80;
 /// round up without anything else noticing.
 pub const MESH_ENTRY_STRIDE: usize = 36;
 
+/// Bytes per [`GpuMaterial`], and the stride of the material-table storage
+/// buffer.
+///
+/// One `float4`. Checked against the `ArrayStride 16` and the `Offset`
+/// decoration `slangc` emits by this module's
+/// `the_material_layout_matches_the_offsets_slangc_emits`.
+pub const MATERIAL_STRIDE: usize = 16;
+
 /// Bytes in one draw's constant block.
 ///
 /// One `uint` and three more of padding. `std140` requires a uniform block's
@@ -127,15 +135,20 @@ impl FrameUniforms {
 /// adds. [`crcbl_render::InstancePool`] is what writes these, one storage buffer
 /// element per instance, by delta upload.
 ///
-/// # Two of the five fields are reserved, and that is deliberate
+/// # One of the five fields is reserved, and that is deliberate
 ///
-/// [`GpuInstance::transform`] and [`GpuInstance::mesh`] are read by the vertex
-/// stage and [`GpuInstance::flags`] by the cull pass. The other two are here
+/// [`GpuInstance::transform`], [`GpuInstance::mesh`] and
+/// [`GpuInstance::material`] are read by the vertex stage and
+/// [`GpuInstance::flags`] by the cull pass. [`GpuInstance::sector`] is here
 /// because **changing this layout after a shader, a cull pass and a draw
 /// generator all index it is the expensive path**, and adding a field is the
-/// cheap one now. Each field's own docs say which slice consumes it; neither of
-/// them is working camera-relative rendering or a material system, and neither
-/// should be read as evidence that one exists.
+/// cheap one now. Its own docs say which slice consumes it; it is not working
+/// camera-relative rendering and should not be read as evidence that one
+/// exists.
+///
+/// The material id was the other one until 2026-08, and what moved it was the
+/// table it names: see [`GpuMaterial`], which is §3.2's factors and not its
+/// textures.
 ///
 /// [`crcbl_render::InstancePool`]: https://docs.rs/crcbl-render
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -165,10 +178,20 @@ pub struct GpuInstance {
     /// resolves to an entry that is all zeroes, which is the empty range rather
     /// than another mesh's.
     pub mesh: u32,
-    /// Which material to shade with.
+    /// Which material to shade with: an index into the material table, whose
+    /// rows are [`GpuMaterial`].
     ///
-    /// **Reserved and unconsumed.** The material table is the other half of
-    /// §3.2 and is not built; nothing indexes anything with this yet.
+    /// The vertex stage multiplies that row's [`GpuMaterial::base_color`] into
+    /// the vertex albedo, so two instances of the same mesh differing only here
+    /// are two colours in one draw — which is the whole of what an id that
+    /// indexes a table buys, and what nothing could observe while this was
+    /// reserved.
+    ///
+    /// [`MaterialTable`](https://docs.rs/crcbl-render) is what hands these out.
+    /// A row nothing has written is all zeroes, which is a **black** material
+    /// rather than a harmless one: unlike a mesh id, whose zero entry is the
+    /// empty range and draws nothing, there is no material value that means
+    /// "no material", so every instance names one it was given.
     pub material: u32,
     /// Which sector [`GpuInstance::transform`] is relative to.
     ///
@@ -353,6 +376,93 @@ impl GpuMesh {
             index_count: uint_at(8),
             bounds_min: [float_at(12), float_at(16), float_at(20)],
             bounds_max: [float_at(24), float_at(28), float_at(32)],
+        }
+    }
+}
+
+/// One material's shading factors, matching `struct GpuMaterial` in
+/// `shaders/mesh.slang`.
+///
+/// `docs/plan/03-gpu-driven-rendering.md` §3.2's material table:
+/// [`GpuInstance::material`] indexes an array of these and the vertex stage
+/// multiplies [`GpuMaterial::base_color`] into the vertex albedo.
+/// [`MaterialTable`](https://docs.rs/crcbl-render) is what writes them.
+///
+/// # The factors half, and deliberately not the textures
+///
+/// §3.2 pairs the table with "a bindless texture array
+/// ([`BindingModel::Bindless`]) or texture array pages ([`ArrayPages`])", and
+/// says the table "holds texture indices + factors". This is the factors, and
+/// there is no texture column: which of those two binding models a texture
+/// index would *mean* is a decision nothing in the engine has taken, so a
+/// column for one would be a field nothing reads — which is the premature
+/// material system the same plan warns against, and the shape
+/// `docs/plan/37-materials.md` owns.
+///
+/// # A zeroed row is black, and there is no empty value
+///
+/// [`GpuMesh`] has one — `index_count == 0` is an entry naming no mesh — and
+/// this record deliberately has nothing equivalent. Every RGBA factor is a
+/// material somebody could want, including all zeroes, so "unwritten" and
+/// "black" are the same bytes and nothing can tell them apart. The consequence
+/// is a contract rather than a defect: an instance names a material it was
+/// given, and a row nobody wrote shades black, which is visible immediately
+/// rather than plausible.
+///
+/// `PartialEq` but not `Eq`, for [`GpuMesh`]'s reason: the fields are floats.
+///
+/// [`BindingModel::Bindless`]: https://docs.rs/crcbl-hal
+/// [`ArrayPages`]: https://docs.rs/crcbl-hal
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GpuMaterial {
+    /// Linear RGBA factor multiplied into the vertex albedo.
+    ///
+    /// Linear, like every other colour that reaches the scene target: the
+    /// tonemap pass and the swapchain's sRGB encode are what turn this into
+    /// pixels, so `[1.0; 4]` is the material that changes nothing.
+    pub base_color: [f32; 4],
+}
+
+impl GpuMaterial {
+    /// The material that changes nothing: every factor `1.0`.
+    ///
+    /// Named because a table's rows are black until something writes them, so
+    /// *some* row has to be the one an instance carries when nobody has asked
+    /// for a colour — and `[1.0; 4]` spelled at each such call site is a
+    /// number a reader has to recognise rather than read.
+    pub const UNTINTED: Self = Self {
+        base_color: [1.0; 4],
+    };
+
+    /// The bytes one material-table element holds, in `std430` order.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; MATERIAL_STRIDE] {
+        let mut bytes = [0u8; MATERIAL_STRIDE];
+        let mut at = 0usize;
+        for value in &self.base_color {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        debug_assert_eq!(at, MATERIAL_STRIDE);
+        bytes
+    }
+
+    /// The inverse of [`GpuMaterial::to_bytes`].
+    ///
+    /// So a test can decode what the table actually holds rather than trusting
+    /// a host-side copy of it, which is the same reason
+    /// [`GpuMesh::from_bytes`] exists.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8; MATERIAL_STRIDE]) -> Self {
+        let float_at = |offset: usize| {
+            f32::from_le_bytes(
+                bytes[offset..offset + 4]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
+            )
+        };
+        Self {
+            base_color: [float_at(0), float_at(4), float_at(8), float_at(12)],
         }
     }
 }
@@ -996,6 +1106,49 @@ mod tests {
         // origin — a shape the cull pass must never decide anything on.
         assert_eq!(GpuMesh::default().to_bytes(), [0u8; MESH_ENTRY_STRIDE]);
         assert_eq!(GpuMesh::default().index_count, 0);
+    }
+
+    /// The offsets and the stride `slangc` actually emitted for `GpuMaterial`,
+    /// read out of the disassembly.
+    ///
+    /// The stride is what this is really for. A one-member `std430` struct is
+    /// the case an implementation is most free to lay out differently from the
+    /// bare vector it wraps, and a table the CPU writes at `index * 16` while a
+    /// shader reads it at some other multiple agrees for row 0 and for nothing
+    /// after it — which is the second material, which is the only reason the
+    /// table exists at all.
+    #[test]
+    fn the_material_layout_matches_the_offsets_slangc_emits() {
+        // `OpDecorate %_runtimearr_GpuMaterial_std430 ArrayStride 16`, and
+        // `OpMemberDecorate %GpuMaterial_std430 0 Offset 0`. The WGSL declares
+        // one `vec4<f32>` and the MSL one `packed_float4`, which is the same
+        // sixteen bytes.
+        assert_eq!(MATERIAL_STRIDE, 16);
+
+        let material = GpuMaterial {
+            base_color: [0.25, 0.5, 0.75, 1.0],
+        };
+        let bytes = material.to_bytes();
+        assert_eq!(bytes.len(), MATERIAL_STRIDE);
+        let float_at =
+            |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
+        for (channel, expected) in material.base_color.iter().enumerate() {
+            assert_eq!(
+                float_at(channel * 4),
+                *expected,
+                "base_color[{channel}] at offset {}",
+                channel * 4
+            );
+        }
+        assert_eq!(GpuMaterial::from_bytes(&bytes), material);
+
+        // A row nothing has written is black, not untinted — the contract the
+        // type's docs state, and the one that makes a forgotten material
+        // visible instead of harmless.
+        assert_eq!(GpuMaterial::default().to_bytes(), [0u8; MATERIAL_STRIDE]);
+        assert_eq!(GpuMaterial::default().base_color, [0.0; 4]);
+        assert_eq!(GpuMaterial::UNTINTED.base_color, [1.0; 4]);
+        assert_ne!(GpuMaterial::UNTINTED, GpuMaterial::default());
     }
 
     /// Every pyramid face is wound counter-clockwise as seen from outside, on

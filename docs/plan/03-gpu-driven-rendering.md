@@ -65,6 +65,28 @@ only the emit tail and the material lookup differ.
 - Camera/frame constants in one uniform buffer; everything else is storage
   buffers indexed by ids the GPU reads.
 
+**2026-08 — the table landed, and its factors half only.**
+`crcbl_render::MaterialTable` is the SSBO, `crcbl_shaders::mesh::GpuMaterial` is
+a row, and `GpuInstance::material` indexes it: `mesh.slang`'s vertex stage
+multiplies the row's `base_color` into the vertex albedo at binding 6. So the
+id, which had been reserved since the record was written, now means something on
+all four targets.
+
+**There are no texture indices, deliberately.** A row would have to say whether
+its index is a `Bindless` slot or an `ArrayPages` page, and the engine has
+chosen neither; a column carried ahead of that choice is a field nothing reads,
+which is the "premature material system" the risk list below warns about. The
+factors half proves the whole indexing path — cull, draw generation, the vertex
+stage, four backends — and is observable in
+`crates/crcbl/tests/golden/cube.png`, where two instances of one mesh differing
+in nothing but their material id are two colours. Adding the texture column
+later is a field; the mechanism is already paid for.
+
+The table is one buffer with no ring, unlike the instance array beside it: a
+material is written when it is created, which is the mesh table's lifetime, so
+the delta upload this section asks for applies to the instances and not to this.
+An animated material is what makes it a ring.
+
 ### 3.3 GPU culling + draw generation
 
 - Compute pass: frustum cull against instance AABBs → compacted visible instance

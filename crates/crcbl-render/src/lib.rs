@@ -59,8 +59,13 @@
 //!
 //! # What this crate is *not*, at P1
 //!
-//! No backend registry (see below), no materials, no scene, no scheduler. The
-//! one thing on that list that has since moved is culling, and it moved whole:
+//! No backend registry (see below), no material *system*, no scene, no
+//! scheduler. [`material_table`] is §3.2's table and only that — a row of
+//! factors an instance's id selects, with the texture half of the same sentence
+//! deliberately absent; the authoring, templates and permutations a material
+//! system means are `docs/plan/37-materials.md`'s and are not here.
+//!
+//! The one thing on that list that has since moved whole is culling:
 //! [`cull`] is §3.3's frustum test and the CPU reference `cull.slang` is checked
 //! against, [`draw_gen`] runs that shader and turns its survivors into indirect
 //! draw arguments, and [`forward`] draws from those rather than recording a draw
@@ -123,6 +128,7 @@ pub mod forward;
 pub mod graph;
 pub mod instance_pool;
 pub mod layers;
+pub mod material_table;
 pub mod menu;
 pub mod mesh_pool;
 pub mod nine_slice;
@@ -165,6 +171,9 @@ pub use instance_pool::{
     Instance, InstanceHandle, InstancePool, InstancePoolDesc, InstancePoolError,
 };
 pub use layers::{Layer, LayerStack, Parallax};
+pub use material_table::{
+    Material, MaterialHandle, MaterialTable, MaterialTableDesc, MaterialTableError,
+};
 pub use menu::{MenuArt, MenuRenderer, menu_camera, menu_view_projection};
 pub use mesh_pool::{
     Mesh, MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshRange, UPLOAD_TIMEOUT,

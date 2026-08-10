@@ -740,7 +740,10 @@ mod tests {
                 "mesh",
                 &crcbl_shaders::MESH,
                 &["vertexMain", "fragmentMain"],
-                &[Cbv, Srv, Srv, Cbv, Srv, Srv],
+                // The trailing `Srv` is the material table (binding 6), which
+                // §3.2 added after the mesh table — declaration order, so it
+                // lands last.
+                &[Cbv, Srv, Srv, Cbv, Srv, Srv, Srv],
             ),
             (
                 "sprite",

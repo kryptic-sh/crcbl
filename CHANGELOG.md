@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`mesh.slang` gained a seventh binding: the material table.** Binding 6 is a
+  read-only storage buffer of `crcbl_shaders::mesh::GpuMaterial`, indexed by
+  `GpuInstance::material` in the vertex stage. Anything building its own bind
+  group or bind-group layout for that shader has to name it — a pipeline layout
+  that does not cover a binding the shader declares is refused at pipeline
+  creation — and anything asserting the shader's declared registers gains one
+  `Srv`. `GpuInstance::material` therefore stops being a reserved field: an
+  instance now has to carry the id of a material that exists, because an
+  unwritten table row is a base colour of zero and shades black.
+
 - **`ShaderModuleDesc::dxil` is a list of `(entry point, container)` pairs**,
   `&[(&str, &[u8])]`, where it was `Option<&[u8]>`. A DXIL container holds one
   entry point, so a module drawing with a vertex and a fragment stage now offers
@@ -41,6 +51,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the same path out of the frame.
 
 ### Added
+
+- **`crcbl_render::MaterialTable`, and a material id that indexes something.**
+  `docs/plan/03-gpu-driven-rendering.md` §3.2's material table: a storage buffer
+  of `GpuMaterial` rows, one `base_color` factor each, which `mesh.slang`'s
+  vertex stage multiplies into the vertex albedo. Two instances of one mesh
+  differing in nothing but `GpuInstance::material` are two colours in one draw,
+  which the cube golden now shows — `ForwardRenderer::set_tinted_pyramid` is the
+  second pyramid there for exactly that.
+
+  **The factors half only.** §3.2 pairs the table with a bindless texture array
+  or texture array pages, and there is no texture column: which of the two an
+  index would mean is a decision the engine has not taken, and a column carried
+  ahead of it is a field nothing reads. One buffer and no ring, unlike the
+  instance array — a material is written when it is created, so
+  `MaterialTable::set` is a start-up call on the terms `MeshPool::upload` is.
 
 - **`CRCBL_DX12_VALIDATION` turns the D3D12 debug layer on or off**, and it is
   on by default in a debug build and off in a release one — the shape
