@@ -4491,3 +4491,145 @@ recorded here rather than left to be re-derived:
 Also not touched: `docs/plan/12-testing.md`'s frame-poll rule is prose, and
 nothing enforces it. A grep for `thread::sleep` under `crates/*/src` and
 `crates/*/tests` is the whole of the available check.
+
+## What the coverage audit found and this session did not fix
+
+Audited 2026-08-10 across five angles: tests that cannot fail, the seam's
+documented obligations, backend parity, backend-agnostic coverage, and crates
+with thin coverage. The "tests that cannot fail" findings all shipped — see
+`git log` for the thirteen. What is below is what did not, each with the
+evidence that produced it, so the next session does not re-derive it.
+
+Two results are deliberately recorded as **non**-gaps, because both look like
+gaps and re-auditing them costs a day: `crcbl-scene` has zero tests and is
+correct — `src/lib.rs` is thirteen lines of doc and no items, and it says the
+`Scene` type arrives with its phase. And the "ECS replication roundtrip"
+`docs/plan/12-testing.md` asks for exists already, as
+`a_lossless_run_leaves_the_clients_state_hash_equal_to_the_servers` in
+`crates/crcbl-net/tests/replication.rs`, with loss and reorder variants beside
+it.
+
+### `crcbl-wgpu` does not implement seam obligation 3 at all
+
+`grep -c ForeignObject crates/crcbl-wgpu/src/*.rs` returns zero. Every other
+backend implements it: `crcbl-vk` in `device.rs`, and `crcbl-mtl` and
+`crcbl-dx12` across more than twenty sites each.
+`crates/crcbl-hal/src/device.rs` states the obligation imperatively — backends
+**must** stamp an owner identity into their own side table, one `u64` per
+tracked object, compared on every lookup. `crates/crcbl-wgpu/src/resources.rs`
+carries no owner field on any slot; the only `device_id` in the crate is a wgpu
+adapter-info field used for logging.
+
+So a handle from one wgpu device passed to another is undefined there and
+detected everywhere else. This is the one backend where the seam's own rule is
+unimplemented rather than untested, and no test would fix it.
+
+**Needs a decision before it needs an implementer:** the side table costs a
+lookup on every resolve, and `crcbl-wgpu` is the backend the wasm build uses.
+Whether the browser target pays that cost is the question; the answer decides
+whether this is one implementation or two.
+
+### Obligations tested on exactly one backend
+
+- **Deferred driver-object destruction** (`crcbl-hal/src/device.rs`, the
+  obligation that `destroy_surface` invalidates the handle at once while the
+  driver object lives until the last swapchain dies) is properly tested only on
+  Vulkan, by `a_surface_with_a_live_swapchain_defers_its_driver_object` and the
+  two negatives beside it. `crcbl-dx12` has the survival half
+  (`a_dxgi_swapchain_keeps_working_after_its_surface_handle_is_destroyed`) and
+  not the deferral half. `crcbl-mtl` has neither:
+  `crates/crcbl-mtl/src/swapchain.rs` argues the obligation is discharged more
+  simply because Metal has no separate surface object, which is plausible and is
+  a claim rather than a test. `crcbl-wgpu` has neither.
+
+- **Clamp-and-report** (a swapchain clamps the shell's requested extent into the
+  platform range and reports the result on `AcquiredFrame::extent`) is tested on
+  Vulkan and Metal and on neither D3D12 nor wgpu. On D3D12 the platform does pin
+  the range on a real `HWND`, so this is a real gap; the fixture
+  `a_windowed_swapchain_presents_paces_and_resizes_on_a_real_hwnd` already
+  builds the window a test would need.
+
+- **A caller renders at `AcquiredFrame::extent`** is asserted by nothing at all.
+  `crates/crcbl-hal/src/swapchain.rs` states it as a caller obligation and says
+  using the requested size instead is the bug the field exists to prevent, and
+  that it only appears while a window is being dragged. The engine does adopt
+  it, but no test drives an acquire whose returned extent differs from the
+  requested one and then checks the recorded render area. On the null backend
+  the two are always equal, so the bug is structurally invisible there.
+
+### `SurfaceError::OutOfDate` cannot be produced by the null backend
+
+Every `SurfaceError` the null backend constructs is `SurfaceError::Hal(..)` —
+all fifteen sites in `crates/crcbl-hal/src/null/mod.rs`. The engine's handlers
+for `OutOfDate` exist in `crates/crcbl/src/engine.rs` and are reachable only on
+a real driver during a real resize, which is why `crcbl-vk`'s suite has to carry
+`a_reconfigure_between_acquire_and_present_is_survivable` and the resize-storm
+test.
+
+**This is the highest-leverage item on the list.** `Recorder` already has an
+injection surface — `set_readback_latency`, `set_device_latency`,
+`report_device_error`, `fail_next_reconfigures` — so one more hook in that shape
+turns three engine branches from GPU-only into tests that run on every machine.
+The same hook, made to return a clamped extent, is what the extent obligation
+above needs.
+
+### Device loss has no test on any backend, and no policy to test
+
+`HalError::DeviceLost` is produced in more than twenty places across the four
+backends. Nothing constructs it in the null backend, and `Recorder`'s
+`report_device_error` is explicitly recoverable and one-shot —
+`crcbl/src/engine.rs` asserts that taking the error clears it — so "this device
+is gone and stays gone" cannot be expressed. The engine has no device-loss
+recovery path either, so this is absent behaviour rather than untested
+behaviour. **Decide the policy first** — recreate the device, or surface it and
+quit — and the test is cheap once decided.
+
+### Neither Metal nor D3D12 proves its validation layer caught anything
+
+`crcbl-vk` sets the standard: every test ends in `finish`, which calls
+`validation_report().assert_clean()`, and that method fails when the layer was
+**not** enabled — because a test that passes for want of a layer proves nothing.
+On top of that, `vk_e2e/validation_gate.rs` commits a deliberate violation and
+asserts the layer caught it.
+
+- **Metal has no validation at all.** No `MTL_DEBUG_LAYER` or
+  `MTL_SHADER_VALIDATION` anywhere in `crates/crcbl-mtl` or the workflows, and
+  no `debug.rs` in that crate. Seventy-one Metal device tests currently say
+  nothing about API misuse. Metal reports through `MTLCommandBuffer.error`
+  rather than a callback, so capturing it needs a small design decision;
+  `crates/crcbl-mtl/src/fault.rs` already builds synthetic `NSError`s and is the
+  natural home.
+- **D3D12 has the machinery and does not assert on it.**
+  `crates/crcbl-dx12/src/debug.rs` enables the layer and drains its info queue,
+  and one test reads the flag — but no dx12 test asserts a clean report at
+  teardown, and there is no deliberate-violation twin. The layer can be on, its
+  messages drained, and every one of the seventy-three device tests still green
+  with a validation error raised.
+
+### The cross-backend image compare covers two backends of four
+
+`docs/plan/12-testing.md` already concedes this and it still holds: the job is
+Vulkan versus wgpu, both on lavapipe. Metal and D3D12 render the same scenes but
+each against its own golden, never against each other. The bug class the compare
+exists to catch is a shader whose semantics differ per target — the two it has
+actually caught, `SV_InstanceID` and `SV_VertexID`, were both SPIR-V versus
+WGSL, and both have MSL and DXIL analogues nothing would find.
+
+**Needs a decision:** comparing an image rendered on a macOS runner against one
+from a Windows runner means blessing a shared reference in the repo and having
+each platform's job compare against it, with the distinct-colour floor
+`run-cross-backend-e2e.sh` already defines per scene as the anti-vacuity guard.
+
+### Coverage the testing plan asks for and nothing provides
+
+- **No sample owns a golden frame.** `docs/plan/12-testing.md` says every sample
+  CI-runs its determinism check _and at least one golden frame_. The determinism
+  half is met — every sample has a replay-hash test — but all fifteen goldens in
+  the tree are engine scenes. A sample golden needs each sample to expose a
+  screenshot path first, which was not checked.
+- **The ECS churn soak with a leak assert does not exist.** The plan asks for it
+  by name. Nothing in `crcbl-ecs` spawns and despawns over many ticks and then
+  asserts nothing leaked. One seeded loop, no GPU.
+- **`crcbl-ui` owes a hit-test grid and has two points.**
+  `button_hit_test_inside` and `button_hit_test_outside` exist; the sweep the
+  plan names does not.
