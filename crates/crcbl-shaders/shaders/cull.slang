@@ -17,6 +17,16 @@
 // whose output nobody reads is indistinguishable from a dispatch that did
 // nothing, which is why the readback exists before the consumer does.
 //
+// # Every slot is tested, so every slot has to say whether it is one
+//
+// The dispatch walks `0..instance_count` and the array is a pool: an element
+// between two live instances may be a slot whose instance was removed, still
+// holding the transform and mesh id it had when it was. `GpuInstance::flags`
+// bit 0 is what tells them apart, and the entry point asks it before it reads
+// anything else in the record. Without that the pass culls — and keeps —
+// removed instances on stale data, which is a contract "pass the right
+// `instance_count`" cannot make a caller able to keep once slots are reused.
+//
 // # The structs are declared again here, and that is the rule
 //
 // `GpuInstance` and `GpuMesh` are also declared in `mesh.slang`. There is no
@@ -70,11 +80,19 @@ struct GpuInstance
     /// anything are §3.3's, so today every instance is in sector 0 and
     /// `transform` is effectively model → world.
     uint sector;
-    /// Per-instance bits. **Reserved**: no bit is defined. It costs nothing —
-    /// the struct is 16-byte aligned, so without it the three ids would be
-    /// followed by four bytes of padding instead.
+    /// Per-instance bits. Bit 0 is `INSTANCE_LIVE` below, and it is the only
+    /// one defined: clear means this element holds a removed instance's
+    /// leftovers, and the entry point rejects it before reading anything else.
     uint flags;
 };
+
+/// `GpuInstance::flags` bit 0: this element is a live instance, matching
+/// `crcbl_shaders::mesh::GpuInstance::LIVE`.
+///
+/// A named constant rather than a literal `1` at the test below, for the reason
+/// `PLANE_COUNT` is one: a bare bit in an expression is a number the next bit
+/// this word gains has no way to be checked against.
+static const uint INSTANCE_LIVE = 1;
 
 /// One resident mesh's range in the geometry pools **and its local-space
 /// bounds**, matching `crcbl_shaders::mesh::GpuMesh` and `mesh.slang`'s copy.
@@ -177,6 +195,17 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
     }
 
     GpuInstance instance = instances[index];
+    // A slot whose instance has been removed keeps whatever transform and mesh
+    // id it last had — `crcbl_render::InstancePool::remove` rewrites the flags
+    // word and nothing else — so this is the first thing asked and the rest of
+    // the record is never interpreted without it. First rather than second
+    // because it is also what keeps a stale `instance.mesh` from indexing the
+    // table below.
+    if ((instance.flags & INSTANCE_LIVE) == 0)
+    {
+        return;
+    }
+
     GpuMesh mesh = meshes[instance.mesh];
     // A mesh id whose entry has been cleared — `MeshPool::free` writes all
     // zeroes — names no geometry, and the all-zero bounds are a degenerate box

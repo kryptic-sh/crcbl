@@ -5,6 +5,25 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 
 ## User decisions — keep or override
 
+### `GpuInstance::flags` is a bare `u32`, not `bitflags`
+
+**Recommendation taken, yours to override.** `LIVE = 1 << 0` is the first
+defined bit and more are coming (§3.3's own needs, topic 18's per-instance
+toggles), so `crcbl_hal::Features`-style `bitflags` is the house pattern and
+would normally win.
+
+It lost on one fact: the type has to live where the layout lives, and
+**`crcbl-shaders` has no dependencies at all, deliberately** — its `Cargo.toml`
+says so, because the library is what a not-yet-written backend consumes.
+`bitflags` would be its first, and taking a new dependency is your call. The
+alternative — a wrapper type in `crcbl-render` — would be a second
+representation of the same word, which is the drift `crcbl-shaders` exists to
+prevent.
+
+So: an associated const `GpuInstance::LIVE`, documented as bit 0. Revisit when
+topic 18's toggles land; the cost of the switch is one dependency on
+`crcbl-shaders` and nothing else.
+
 Calls made on judgement during the 2026-08-09 planning session, listed so they
 can be confirmed or reversed without re-deriving anything. **Each says what was
 decided, why, and what reversing it costs.** Delete an entry once it is
@@ -3464,29 +3483,28 @@ the transport seam over a third transport shape.
   Slang's behaviour than is worth encoding for a guard whose false positives
   cost one declaration move. Reopen if a real shader finds it costly.
 
-### Metal compute: shipped, and what CI has to confirm
+### Metal compute works, confirmed on hardware
 
-`ComputePipelineDesc` now carries `workgroup_size`, `crcbl-mtl` implements
-`bind_compute_pipeline`/`dispatch`/`dispatch_indirect`, and `DISPATCH_SLICE` is
-gone. **No line of that Metal code has ever executed on this machine** — there
-is no Metal device here, and
-`cargo check`/`clippy --target aarch64-apple-darwin` compile it while running
-none of it. Only the macOS CI job can say whether it works.
+`ComputePipelineDesc` carries `workgroup_size`, `crcbl-mtl` implements
+`bind_compute_pipeline`/`dispatch`/`dispatch_indirect`, and the macOS CI job ran
+all three new tests on a real device:
+`a_compute_dispatch_writes_the_values_it_ was_asked_for`,
+`an_indirect_dispatch_reads_its_workgroup_count_from_the_buffer` and
+`the_compute_pass_opens_an_encoder_and_its_calls_fail_only_as_themselves` all
+PASS (112 tests run, 6 skipped). **Compute is no longer a Vulkan-and-wgpu
+capability.** `indirect_count` is a separate Metal refusal and still stands.
 
-Worth knowing before reading a green run: the mtl e2e job already **excludes six
-draw tests by name** because they fault on that runner
-(`.github/workflows/ci.yml`). The new compute tests are not excluded, so they do
-run — but a device that faults on six draws is not a device to assume anything
-about.
+The 6 skipped are the pre-existing draw tests that fault on that runner
+(excluded by name in `.github/workflows/ci.yml`) — unrelated to compute, but
+worth knowing the device is not fully healthy before reading any green macOS
+run.
 
-The one guard that _is_ proven locally:
+**A wrong workgroup size is caught on Vulkan and nowhere else.**
 `crcbl_vk::spirv::require_workgroup_size` reads `OpExecutionMode … LocalSize`
-and refuses a descriptor whose size disagrees with the shader's `[numthreads]`.
-Vulkan alone can do this — Metal cannot (MSL declares no thread count, which is
-why the field exists) and wgpu keeps no module source after
-`create_shader_module`. So **a wrong workgroup size is caught on Vulkan and
-nowhere else**, which is fine only while every compute shader is also run under
-Vulkan. It is today. It will not always be.
+and refuses a descriptor that disagrees with the shader. Metal cannot (MSL
+declares no thread count, which is why the field exists) and wgpu keeps no
+module source after `create_shader_module`. Safe only while every compute shader
+is also run under Vulkan, which is true today and will not always be.
 
 ### Owed by the GPU cull pass
 

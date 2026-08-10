@@ -16,6 +16,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A removed instance stops being drawn.** `GpuInstance::flags` gains its first
+  defined bit, `GpuInstance::LIVE` (bit 0): set, the element is a live instance;
+  clear, it is a slot whose instance was removed and is still holding the
+  transform and mesh id it had. `cull.slang` asks that bit before it reads
+  anything else in the record, and `crcbl_render::cull::visible_instances` — the
+  CPU oracle — does the same, so a freed slot is no longer culled (and possibly
+  kept) on stale data. The layout is unchanged: `flags` was already there and
+  already 4 bytes at offset 76.
+
+  `InstancePool` owns the bit rather than its callers. `insert` and `set` set it
+  whatever the caller passed, `remove` clears it and marks the slot dirty so the
+  next `begin_frame` carries the removal to the device, and **nothing else about
+  a removed record is rewritten** — a zeroed instance would be a live-looking
+  cube at the origin for any consumer that skipped the check.
+  `InstancePool::new` now also clears its buffers, so a slot nothing has written
+  reads as dead rather than as whatever the driver left there; a pass that walks
+  the array from element zero is what makes that difference visible.
+
+  The consequence for a caller is that the cull pass may be dispatched over the
+  pool's whole capacity: correctness no longer rests on an `instance_count` that
+  happens to stop before the first freed slot.
+
 - **GPU frustum culling, checked against a CPU reference.** `crcbl-shaders`' new
   `cull.slang` is `docs/plan/03-gpu-driven-rendering.md` §3.3's compute pass:
   one thread per instance, the mesh's local-space AABB transformed by the

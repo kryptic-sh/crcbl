@@ -63,15 +63,42 @@
 //! next. [`InstancePoolError::PoolFull`] therefore names one number where
 //! [`crate::mesh_pool::MeshPoolError::PoolExhausted`] names three.
 //!
-//! # What a removed instance leaves behind
+//! # What a removed instance leaves behind, and the one bit that says so
 //!
-//! [`InstancePool::remove`] frees the slot and retires the handle; it does
-//! **not** rewrite the element on the GPU, which keeps whatever the removed
-//! instance last had. That is safe today because nothing walks the array —
-//! the draw addresses one instance the caller names — and it is a real gap the
-//! moment §3.3's cull pass iterates it. The bit that would answer "is this slot
-//! live" is [`crcbl_shaders::mesh::GpuInstance::flags`], which is reserved and
-//! defines nothing, so there is no honest way to write it here yet.
+//! [`InstancePool::remove`] frees the slot and retires the handle, and it
+//! rewrites **one field** of the element: it clears
+//! [`GpuInstance::LIVE`] from the record's flags and marks
+//! the slot dirty, so the next [`InstancePool::begin_frame`] carries the
+//! removal to the GPU. Everything else the removed instance held — its
+//! transform, its mesh id — stays exactly as it was.
+//!
+//! That is the whole contract, and it is what §3.3's cull pass needs: the pass
+//! walks the array from element zero, so a freed slot has to be able to say it
+//! is one. `cull.slang` asks the bit before it reads anything else in the
+//! record, and [`crate::cull::visible_instances`] — the CPU oracle — does the
+//! same.
+//!
+//! **The bit is the pool's, not the caller's.** [`InstancePool::insert`] and
+//! [`InstancePool::set`] set it whatever the caller passed, so an instance
+//! cannot arrive dead by omission, and a caller cannot clear it without going
+//! through `remove`. The other bits of the word are the caller's and are left
+//! alone.
+//!
+//! ## Why the record is not zeroed
+//!
+//! [`crate::mesh_pool::MeshPool::free`] clears its table entry to all zeroes,
+//! and the analogous move here would be to zero the whole instance. It is the
+//! wrong one. What the mesh table is doing is *writing the empty value of the
+//! field that answers the question* — `index_count` — and the fields it clears
+//! with it are ones a stale entry would otherwise be misread through; the
+//! parallel here is clearing the liveness bit, which is that same write.
+//!
+//! Zeroing the rest would make it worse rather than tidier. A zeroed transform
+//! is a degenerate box at the origin and a zeroed mesh id names table entry 0,
+//! which is an ordinary resident mesh — so a consumer that skipped the liveness
+//! check would see a removed instance as *visible whenever the origin is*,
+//! where leaving the record alone at least leaves it wherever it was. The
+//! failure a shortcut produces should not be the one that looks plausible.
 
 use core::ops::Range;
 
@@ -160,12 +187,20 @@ pub struct InstancePool {
 }
 
 impl InstancePool {
-    /// Creates the ring, with every buffer uninitialised.
+    /// Creates the ring, with every buffer **cleared**.
     ///
-    /// Uninitialised rather than zeroed: an element is written before anything
-    /// addresses it, because [`InstancePool::insert`] marks it dirty in every
-    /// slot and [`InstancePool::begin_frame`] flushes a slot before that slot is
-    /// drawn from.
+    /// Cleared rather than left as the driver handed it over, and for
+    /// [`crate::mesh_pool::MeshPool`]'s reason rather than for tidiness: a slot
+    /// nothing has written is read by anything that walks the array, and "a
+    /// zeroed element is a dead instance" is only a contract if it holds for
+    /// the slots no one has touched as well as for the ones
+    /// [`InstancePool::remove`] clears. A driver's leftovers are not zeroes,
+    /// and a leftover with [`GpuInstance::LIVE`] set is an instance the cull
+    /// pass keeps, at a transform nobody chose.
+    ///
+    /// This is why it was not always so: until the flags word had a defined
+    /// bit, zeroing bought nothing an element written before it is addressed
+    /// did not already have.
     ///
     /// The device buffers are created **before** the host mirror, so a capacity
     /// no device could hold arrives as a [`HalError`] naming the buffer rather
@@ -190,19 +225,32 @@ impl InstancePool {
         );
         let stem = desc.label.unwrap_or("instance pool");
         let size = u64::from(desc.capacity) * INSTANCE_STRIDE as u64;
+        let cleared = vec![0u8; desc.capacity as usize * INSTANCE_STRIDE];
         let mut buffers = Vec::with_capacity(desc.frames_in_flight);
         for frame in 0..desc.frames_in_flight {
-            match device.create_buffer(&BufferDesc {
-                label: Some(&format!("{stem} instances {frame}")),
-                size,
-                // Host-visible, so a delta is a `write_buffer` rather than a
-                // staging copy needing a barrier inside a frame. `crate::graph`
-                // is the only thing allowed to record a barrier during a frame,
-                // and a per-frame transfer submit is what §3.1's start-up
-                // upload path deliberately is not.
-                usage: BufferUsage::STORAGE,
-                memory: MemoryLocation::HostUpload,
-            }) {
+            let created = device
+                .create_buffer(&BufferDesc {
+                    label: Some(&format!("{stem} instances {frame}")),
+                    size,
+                    // Host-visible, so a delta is a `write_buffer` rather than a
+                    // staging copy needing a barrier inside a frame.
+                    // `crate::graph` is the only thing allowed to record a
+                    // barrier during a frame, and a per-frame transfer submit is
+                    // what §3.1's start-up upload path deliberately is not.
+                    usage: BufferUsage::STORAGE,
+                    memory: MemoryLocation::HostUpload,
+                })
+                // A buffer created and not cleared is one the failure path below
+                // has to release, so the clear happens here rather than in a
+                // second loop over the finished ring.
+                .and_then(|buffer| match device.write_buffer(buffer, 0, &cleared) {
+                    Ok(()) => Ok(buffer),
+                    Err(error) => {
+                        device.destroy_buffer(buffer);
+                        Err(error)
+                    }
+                });
+            match created {
                 Ok(buffer) => buffers.push(buffer),
                 Err(error) => {
                     for buffer in buffers {
@@ -250,7 +298,12 @@ impl InstancePool {
         self.slots.is_empty()
     }
 
-    /// Takes a slot, writes `instance` into it, and marks it dirty everywhere.
+    /// Takes a slot, writes `instance` into it **live**, and marks it dirty
+    /// everywhere.
+    ///
+    /// [`GpuInstance::LIVE`] is set whatever `instance.flags` carried — see the
+    /// [module docs](self) on why the bit is the pool's rather than the
+    /// caller's.
     ///
     /// # Errors
     ///
@@ -269,7 +322,7 @@ impl InstancePool {
             });
         }
         let handle: InstanceHandle = self.slots.insert(()).cast();
-        self.write(handle.index(), instance);
+        self.write_live(handle.index(), instance);
         Ok(handle)
     }
 
@@ -277,6 +330,10 @@ impl InstancePool {
     ///
     /// Returns whether the handle named a live instance; a stale one writes
     /// nothing rather than overwriting whatever took its slot.
+    ///
+    /// [`GpuInstance::LIVE`] is set, exactly as [`InstancePool::insert`] sets
+    /// it: a live instance cannot be made dead by rewriting it, only by
+    /// [`InstancePool::remove`].
     ///
     /// A rewrite with the same bytes still marks the slot dirty. Filtering that
     /// would trade a comparison per write for an upload that mostly does not
@@ -287,22 +344,20 @@ impl InstancePool {
         if !self.slots.contains(handle.cast()) {
             return false;
         }
-        self.write(handle.index(), instance);
+        self.write_live(handle.index(), instance);
         true
     }
 
     /// What `handle`'s slot currently holds, decoded from the host mirror, or
     /// `None` if the handle is stale.
+    ///
+    /// The record carries [`GpuInstance::LIVE`], because the pool put it there:
+    /// this is what the buffer holds, not what the caller passed.
     #[must_use]
     pub fn get(&self, handle: InstanceHandle) -> Option<GpuInstance> {
-        if !self.slots.contains(handle.cast()) {
-            return None;
-        }
-        let at = handle.index() as usize * INSTANCE_STRIDE;
-        let bytes: &[u8; INSTANCE_STRIDE] = self.mirror[at..at + INSTANCE_STRIDE]
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("the mirror is capacity × INSTANCE_STRIDE"));
-        Some(GpuInstance::from_bytes(bytes))
+        self.slots
+            .contains(handle.cast())
+            .then(|| self.read(handle.index()))
     }
 
     /// Which element of the array `handle` is, or `None` if the handle is stale.
@@ -314,13 +369,27 @@ impl InstancePool {
         self.slots.contains(handle.cast()).then(|| handle.index())
     }
 
-    /// Frees `handle`'s slot for reuse and retires the handle.
+    /// Frees `handle`'s slot for reuse, retires the handle, and clears the
+    /// element's [`GpuInstance::LIVE`] bit.
     ///
-    /// Returns whether the handle named a live instance. The element's bytes are
-    /// left as they are on the GPU — see the [module docs](self) on what that
-    /// does and does not cost.
+    /// Returns whether the handle named a live instance. The rest of the
+    /// element's bytes are left as they are — see the [module docs](self) on
+    /// why clearing the bit is the whole of what a removal owes the GPU, and why
+    /// zeroing the record would be worse than leaving it.
+    ///
+    /// The clear reaches the device the way every other write does, through
+    /// [`InstancePool::begin_frame`]: the slot is marked dirty in every buffer's
+    /// range set, so a removal costs the same one small upload per frame in
+    /// flight that a rewrite does.
     pub fn remove(&mut self, handle: InstanceHandle) -> bool {
-        self.slots.remove(handle.cast()).is_some()
+        if self.slots.remove(handle.cast()).is_none() {
+            return false;
+        }
+        let index = handle.index();
+        let mut removed = self.read(index);
+        removed.flags &= !GpuInstance::LIVE;
+        self.write(index, &removed);
+        true
     }
 
     /// Rotates to the next frame's buffer and writes that buffer's outstanding
@@ -364,6 +433,31 @@ impl InstancePool {
     fn in_use(&self) -> u32 {
         let used = self.slots.len() + self.slots.retired_slots();
         u32::try_from(used).unwrap_or(u32::MAX)
+    }
+
+    /// What the mirror holds at `index`, live or not.
+    ///
+    /// Decoded rather than kept beside the bytes, for the reason the mirror is
+    /// bytes at all: a second copy of an instance is a second thing to drift
+    /// from the one the buffer gets.
+    fn read(&self, index: u32) -> GpuInstance {
+        let at = index as usize * INSTANCE_STRIDE;
+        let bytes: &[u8; INSTANCE_STRIDE] = self.mirror[at..at + INSTANCE_STRIDE]
+            .try_into()
+            .unwrap_or_else(|_| unreachable!("the mirror is capacity × INSTANCE_STRIDE"));
+        GpuInstance::from_bytes(bytes)
+    }
+
+    /// [`InstancePool::write`] with [`GpuInstance::LIVE`] forced on, which is
+    /// what every caller-supplied record goes through.
+    fn write_live(&mut self, index: u32, instance: &GpuInstance) {
+        self.write(
+            index,
+            &GpuInstance {
+                flags: instance.flags | GpuInstance::LIVE,
+                ..*instance
+            },
+        );
     }
 
     /// Puts `instance` into the mirror at `index` and marks it dirty in every
@@ -461,7 +555,12 @@ mod tests {
         .expect("the null backend accepts every descriptor")
     }
 
-    /// An instance whose transform is distinguishable from every other `n`.
+    /// An instance whose transform is distinguishable from every other `n`, as
+    /// a **caller** hands it over.
+    ///
+    /// Its flags do not carry [`GpuInstance::LIVE`] for the `n` the tests below
+    /// use, which is what makes [`stored`] a different value and the pool's
+    /// forcing of the bit observable.
     fn instance(n: u32) -> GpuInstance {
         GpuInstance {
             transform: [n as f32; 16],
@@ -470,6 +569,42 @@ mod tests {
             sector: n + 2,
             flags: n + 3,
         }
+    }
+
+    /// [`instance`] as the pool stores it: the caller's record, live.
+    ///
+    /// Refuses an `n` whose flags happen to carry the bit already, because a
+    /// comparison against such a record would pass whether or not the pool set
+    /// it — which is the one way an assertion about the bit can be vacuous.
+    fn stored(n: u32) -> GpuInstance {
+        let caller = instance(n);
+        assert_eq!(
+            caller.flags & GpuInstance::LIVE,
+            0,
+            "instance({n}) already carries the live bit; pick another n"
+        );
+        GpuInstance {
+            flags: caller.flags | GpuInstance::LIVE,
+            ..caller
+        }
+    }
+
+    /// Element `index` of the buffer at `slot`, decoded from the bytes that
+    /// actually reached the device.
+    ///
+    /// Read back rather than taken from the pool's mirror, so an assertion is
+    /// evidence about what a shader would read and not about the pool's
+    /// bookkeeping agreeing with itself.
+    fn on_device(recorder: &Recorder, pool: &InstancePool, slot: usize, index: u32) -> GpuInstance {
+        let bytes = recorder
+            .buffer_bytes(pool.buffers()[slot])
+            .expect("the buffer is live");
+        let at = index as usize * INSTANCE_STRIDE;
+        GpuInstance::from_bytes(
+            bytes[at..at + INSTANCE_STRIDE]
+                .try_into()
+                .expect("one element"),
+        )
     }
 
     /// Every `BufferWritten` this recorder saw, as `(offset, len)`.
@@ -757,6 +892,31 @@ mod tests {
         recorder.assert_valid();
     }
 
+    /// **Every buffer is cleared when the pool is created**, which is the other
+    /// half of the removal contract: the cull pass walks from element zero, so
+    /// the slots above the ones in use have to answer too, and a zeroed element
+    /// is a dead instance.
+    ///
+    /// Asserted on the seam calls rather than on the bytes, and that is the
+    /// only assertion available here: this recorder zero-fills a mappable
+    /// buffer at creation, so a byte comparison would pass whether or not the
+    /// pool ever wrote one. What a real driver leaves in a fresh host-visible
+    /// allocation is its own business, which is why `crcbl-vk`'s `cull` e2e
+    /// dispatches over a pool's whole capacity with only three slots inserted.
+    #[test]
+    fn every_buffer_is_cleared_when_the_pool_is_created() {
+        let (recorder, device) = open();
+        let pool = pool(device.as_ref(), 16);
+        assert_eq!(
+            writes(&recorder),
+            vec![(0, 16 * INSTANCE_STRIDE); FRAMES],
+            "each buffer in the ring must be cleared, whole, before anything reads it"
+        );
+
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
     /// What goes in comes out, field for field, and a removed handle stops
     /// resolving. The four ids are the same width and would permute silently,
     /// so the round trip is checked rather than assumed.
@@ -765,10 +925,10 @@ mod tests {
         let (recorder, device) = open();
         let mut pool = pool(device.as_ref(), 16);
         let handle = pool.insert(&instance(7)).expect("room");
-        assert_eq!(pool.get(handle), Some(instance(7)));
+        assert_eq!(pool.get(handle), Some(stored(7)));
 
         assert!(pool.set(handle, &instance(11)));
-        assert_eq!(pool.get(handle), Some(instance(11)));
+        assert_eq!(pool.get(handle), Some(stored(11)));
 
         assert!(pool.remove(handle));
         assert_eq!(
@@ -778,6 +938,106 @@ mod tests {
         );
         assert!(!pool.set(handle, &instance(12)), "and cannot be written");
         assert!(!pool.remove(handle), "and cannot be removed twice");
+
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **Removing an instance clears its live bit on the device, and changes
+    /// nothing else about the record.**
+    ///
+    /// The whole slice: a slot the cull pass walks past has to be able to say
+    /// it is free, and the bit is the only thing a removal is allowed to
+    /// rewrite. Asserted on the bytes in the buffer rather than on the mirror,
+    /// because a removal that never reached a buffer is a removal the GPU does
+    /// not know about.
+    #[test]
+    fn removing_an_instance_clears_its_live_bit_on_the_device() {
+        let (recorder, device) = open();
+        let mut pool = pool(device.as_ref(), 16);
+        let first = pool.insert(&instance(1)).expect("room");
+        let second = pool.insert(&instance(3)).expect("room");
+        settle(&mut pool, device.as_ref());
+        for slot in 0..FRAMES {
+            assert_eq!(
+                on_device(&recorder, &pool, slot, 0),
+                stored(1),
+                "buffer {slot} did not receive the live instance"
+            );
+        }
+
+        assert!(pool.remove(first));
+        settle(&mut pool, device.as_ref());
+        for slot in 0..FRAMES {
+            let removed = on_device(&recorder, &pool, slot, 0);
+            assert_eq!(
+                removed.flags & GpuInstance::LIVE,
+                0,
+                "buffer {slot} still holds a live instance at the removed slot: {removed:?}"
+            );
+            // And the rest of the record is exactly what it was. The pool
+            // deliberately does not zero it — see the module docs — so a test
+            // that only checked the bit would pass on an implementation that
+            // wrote a degenerate instance at the origin instead.
+            assert_eq!(
+                removed,
+                GpuInstance {
+                    flags: stored(1).flags & !GpuInstance::LIVE,
+                    ..stored(1)
+                },
+                "buffer {slot} rewrote more than the flags word"
+            );
+            assert_eq!(
+                on_device(&recorder, &pool, slot, 1),
+                stored(3),
+                "buffer {slot} disturbed the instance beside the removed one"
+            );
+        }
+
+        assert_eq!(
+            pool.get(second),
+            Some(stored(3)),
+            "and the other handle still resolves"
+        );
+
+        // A second removal of the retired handle writes nothing at all, so a
+        // caller cannot clear the live bit of whatever has since taken the slot.
+        let before = writes(&recorder).len();
+        assert!(!pool.remove(first));
+        settle(&mut pool, device.as_ref());
+        assert_eq!(
+            writes(&recorder).len(),
+            before,
+            "removing a retired handle must upload nothing"
+        );
+
+        pool.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **A slot reused after a removal is live again, holding its new
+    /// contents.** The other direction of the same defect: a liveness bit that
+    /// stuck would make the pool leak capacity that looks allocated and draws
+    /// nothing.
+    #[test]
+    fn a_reused_slot_is_live_again_with_its_new_contents() {
+        let (recorder, device) = open();
+        let mut pool = pool(device.as_ref(), 16);
+        let first = pool.insert(&instance(1)).expect("room");
+        assert!(pool.remove(first));
+        settle(&mut pool, device.as_ref());
+
+        let reused = pool.insert(&instance(5)).expect("the freed slot");
+        assert_eq!(pool.index(reused), Some(0), "the low slot comes back");
+        settle(&mut pool, device.as_ref());
+        for slot in 0..FRAMES {
+            assert_eq!(
+                on_device(&recorder, &pool, slot, 0),
+                stored(5),
+                "buffer {slot} holds neither the new instance nor the live bit"
+            );
+        }
+        assert_eq!(pool.get(reused), Some(stored(5)));
 
         pool.destroy(device.as_ref());
         recorder.assert_valid();

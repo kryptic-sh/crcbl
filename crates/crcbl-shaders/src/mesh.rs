@@ -130,11 +130,12 @@ impl FrameUniforms {
 /// # Two of the five fields are reserved, and that is deliberate
 ///
 /// [`GpuInstance::transform`] and [`GpuInstance::mesh`] are read by the vertex
-/// stage. The other two are here because **changing this layout after a shader,
-/// a cull pass and a draw generator all index it is the expensive path**, and
-/// adding a field is the cheap one now. Each field's own docs say which slice
-/// consumes it; neither of them is working camera-relative rendering or a
-/// material system, and neither should be read as evidence that one exists.
+/// stage and [`GpuInstance::flags`] by the cull pass. The other two are here
+/// because **changing this layout after a shader, a cull pass and a draw
+/// generator all index it is the expensive path**, and adding a field is the
+/// cheap one now. Each field's own docs say which slice consumes it; neither of
+/// them is working camera-relative rendering or a material system, and neither
+/// should be read as evidence that one exists.
 ///
 /// [`crcbl_render::InstancePool`]: https://docs.rs/crcbl-render
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -179,15 +180,35 @@ pub struct GpuInstance {
     /// format is cheap to extend today and expensive to extend once §3.3's
     /// shaders index it.
     pub sector: u32,
-    /// Per-instance bits.
+    /// Per-instance bits. [`GpuInstance::LIVE`] is the only one defined; the
+    /// rest are reserved.
     ///
-    /// **Reserved and unconsumed: no bit is defined.** It is free — the struct
-    /// is 16-byte aligned, so without it the three ids above would be followed
-    /// by four bytes of padding instead of by this.
+    /// A `u32` rather than a `bitflags` type, which is what
+    /// [`crcbl_hal::Features`] would be the pattern to follow: this crate has
+    /// **no dependencies at all**, deliberately — see its `Cargo.toml` — and
+    /// `bitflags` would be the first. The field is the byte layout a shader
+    /// reads either way, so the choice is about what the Rust side spells, and
+    /// nothing here is willing to spend the crate's defining property on it.
+    ///
+    /// [`crcbl_hal::Features`]: https://docs.rs/crcbl-hal
     pub flags: u32,
 }
 
 impl GpuInstance {
+    /// [`GpuInstance::flags`] bit 0: this element is a **live instance**.
+    ///
+    /// Clear means the slot holds a removed instance's leftovers, and
+    /// `cull.slang` rejects it before it reads anything else in the record —
+    /// which is what makes an array walked from element zero safe to walk.
+    /// [`InstancePool`](https://docs.rs/crcbl-render) owns the bit: it sets it
+    /// on every write and clears it on removal, so a caller neither has to
+    /// remember to set it nor can accidentally clear it.
+    ///
+    /// **A zeroed record is therefore dead**, which is the direction that fails
+    /// safely: a slot nothing has written is a slot nothing draws.
+    /// [`GpuInstance::default`] has no bit set for that reason.
+    pub const LIVE: u32 = 1 << 0;
+
     /// The bytes one storage-buffer element holds, in `std430` order.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; INSTANCE_STRIDE] {
@@ -734,6 +755,32 @@ mod tests {
         // And the decode agrees with the encode, field for field — four `u32`s
         // in a row would permute silently, and this is what says they did not.
         assert_eq!(GpuInstance::from_bytes(&bytes), instance);
+    }
+
+    /// The liveness bit is bit 0 of the flags word, and a default record does
+    /// not have it.
+    ///
+    /// The default is the half that matters: an element nothing has written is
+    /// all zeroes, and this is what says such an element reads as *dead* rather
+    /// than as a live instance at the origin drawing mesh 0.
+    #[test]
+    fn a_default_instance_is_not_live() {
+        assert_eq!(GpuInstance::LIVE, 1);
+        assert_eq!(GpuInstance::default().flags & GpuInstance::LIVE, 0);
+        assert_eq!(GpuInstance::default().to_bytes(), [0u8; INSTANCE_STRIDE]);
+
+        // And the bit survives the round trip through the bytes a shader reads,
+        // at the offset the layout test pins the flags word to.
+        let live = GpuInstance {
+            flags: GpuInstance::LIVE,
+            ..GpuInstance::default()
+        };
+        let bytes = live.to_bytes();
+        assert_eq!(
+            u32::from_le_bytes(bytes[76..80].try_into().expect("4")),
+            GpuInstance::LIVE
+        );
+        assert_eq!(GpuInstance::from_bytes(&bytes), live);
     }
 
     /// The transform is written the way `glam` produces a column-major matrix,

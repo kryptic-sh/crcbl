@@ -70,6 +70,10 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
         return;
     }
     var instance_0 : GpuInstance_std430_0 = instances_0[index_0];
+    if((((instance_0.flags_0) & (u32(1)))) == u32(0))
+    {
+        return;
+    }
     var mesh_1 : GpuMesh_std430_0 = meshes_0[instance_0.mesh_0];
     if((mesh_1.index_count_0) == u32(0))
     {

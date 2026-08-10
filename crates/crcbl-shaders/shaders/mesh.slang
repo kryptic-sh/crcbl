@@ -144,9 +144,10 @@ struct FrameUniforms
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
 ///
 /// `docs/plan/03-gpu-driven-rendering.md` §3.2's "transform, mesh id, material
-/// id, flags", plus the sector id its 2026-07-27 correction adds. The three ids
-/// are written by the CPU and read by nothing yet — see the Rust struct, which
-/// carries the full account of what each is for and which slice consumes it.
+/// id, flags", plus the sector id its 2026-07-27 correction adds. Nothing in
+/// *this* shader reads anything but the transform and the mesh id — see the
+/// Rust struct, which carries the full account of what each field is for and
+/// which slice consumes it.
 struct GpuInstance
 {
     /// Model → sector. Rigid (rotation + translation), so its upper-left 3×3
@@ -164,9 +165,10 @@ struct GpuInstance
     /// anything are §3.3's, so today every instance is in sector 0 and
     /// `transform` is effectively model → world.
     uint sector;
-    /// Per-instance bits. **Reserved**: no bit is defined. It costs nothing —
-    /// the struct is 16-byte aligned, so without it the three ids would be
-    /// followed by four bytes of padding instead.
+    /// Per-instance bits. Bit 0 says the element is a live instance rather than
+    /// a removed one's leftovers, and `cull.slang` — which is the only thing
+    /// that walks the array — is what reads it. A draw addresses the instance
+    /// it was told to, so nothing here does.
     uint flags;
 };
 

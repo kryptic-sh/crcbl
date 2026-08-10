@@ -4,7 +4,7 @@ use crcbl_hal::{
     SubmitInfo,
 };
 use crcbl_render::cull::{Frustum, visible_instances};
-use crcbl_render::{Camera, Projection};
+use crcbl_render::{Camera, InstanceHandle, InstancePool, InstancePoolDesc, Projection};
 use crcbl_shaders::mesh::{GpuInstance, GpuMesh, INSTANCE_STRIDE, MESH_ENTRY_STRIDE};
 use glam::{Mat4, Vec3};
 
@@ -21,10 +21,15 @@ use glam::{Mat4, Vec3};
 // consumer to notice they were wrong.
 //
 // The scene below places one instance per rejection the pass can make — outside
-// each of the six planes, inside, straddling an edge, rotated back in, and
-// naming a freed mesh — so a plane dropped from the frustum, an `abs` left off
-// the bounds transform, or a missing empty-entry guard each changes a different
-// element of the answer.
+// each of the six planes, inside, straddling an edge, rotated back in, naming a
+// freed mesh, removed, and never written at all — so a plane dropped from the
+// frustum, an `abs` left off the bounds transform, a missing empty-entry guard
+// or a missing liveness check each changes a different element of the answer.
+//
+// Two of those come from `InstancePool` rather than from a record typed out
+// here, and `a_removed_instance_is_not_in_the_visible_list` runs the pass over
+// that pool's own buffer: a removal that never reached the device is exactly
+// what a scene of hand-written instances cannot notice.
 
 /// What the visible list holds before every dispatch.
 ///
@@ -77,11 +82,16 @@ fn meshes() -> Vec<GpuMesh> {
     vec![unit_cube(), GpuMesh::default(), bar()]
 }
 
-/// One instance of mesh `mesh` under `transform`.
+/// One **live** instance of mesh `mesh` under `transform`.
+///
+/// Live rather than default: a zeroed record is a dead one — see
+/// [`GpuInstance::LIVE`] — which is what an element no instance occupies reads
+/// as, and a scene built out of those would be culled entirely.
 fn instance(mesh: u32, transform: Mat4) -> GpuInstance {
     GpuInstance {
         transform: transform.to_cols_array(),
         mesh,
+        flags: GpuInstance::LIVE,
         ..GpuInstance::default()
     }
 }
@@ -125,6 +135,19 @@ fn scene() -> Vec<GpuInstance> {
         // 10: naming the cleared table entry, at the origin. Culled by the
         //     index count, not by the frustum.
         instance(1, Mat4::IDENTITY),
+        // 11: a removed instance — the record `InstancePool::remove` leaves
+        //     behind, which keeps the transform and mesh id it had. At the
+        //     origin and drawing the cube, so it is culled by the liveness bit
+        //     and by nothing else: instance 0 is the same record with the bit
+        //     set, and it survives.
+        GpuInstance {
+            flags: 0,
+            ..instance(0, Mat4::IDENTITY)
+        },
+        // 12: an element nothing ever wrote, which is all zeroes — a live
+        //     instance of mesh 0 at a degenerate transform if the bit is not
+        //     asked, and the origin is exactly where the camera is looking.
+        GpuInstance::default(),
     ]
 }
 
@@ -155,7 +178,12 @@ fn aspect() -> f32 {
 /// Everything the cull pass needs on the device, plus the readback path.
 struct CullProbe {
     params: crcbl_hal::BufferHandle,
+    /// The instance array. Created by [`CullProbe::new`] and destroyed with the
+    /// probe, or somebody else's — see [`CullProbe::over`], where it is an
+    /// [`InstancePool`]'s and outlives this.
     instances: crcbl_hal::BufferHandle,
+    /// Whether [`CullProbe::destroy`] releases `instances`.
+    owns_instances: bool,
     meshes: crcbl_hal::BufferHandle,
     visible: crcbl_hal::BufferHandle,
     counter: crcbl_hal::BufferHandle,
@@ -184,6 +212,7 @@ struct CullResult {
 }
 
 impl CullProbe {
+    /// A probe over an instance array of its own, written from `instances`.
     fn new(
         headless: &Headless,
         instances: &[GpuInstance],
@@ -192,19 +221,8 @@ impl CullProbe {
     ) -> Self {
         let device = headless.device.as_ref();
         let instance_count = u32::try_from(instances.len()).expect("a small scene");
-
-        // Host-visible for all three inputs, exactly as `crcbl_render`'s own
-        // pools are: the instance array and the mesh table are `HostUpload`
-        // storage buffers there, and the uniform block is one everywhere in the
-        // engine. A staging copy would need barriers this test is not about.
-        let params = device
-            .create_buffer(&BufferDesc {
-                label: Some("cull params"),
-                size: crcbl_shaders::cull::PARAMS_SIZE as u64,
-                usage: BufferUsage::UNIFORM,
-                memory: MemoryLocation::HostUpload,
-            })
-            .expect("a uniform buffer");
+        // Host-visible, exactly as `crcbl_render::InstancePool`'s buffers are —
+        // which is what the other constructor hands over instead of this.
         let instance_buffer = device
             .create_buffer(&BufferDesc {
                 label: Some("cull instances"),
@@ -222,6 +240,38 @@ impl CullProbe {
                 )
                 .expect("write");
         }
+        let mut probe = Self::over(headless, instance_buffer, instance_count, meshes, capacity);
+        probe.owns_instances = true;
+        probe
+    }
+
+    /// A probe over an instance array somebody else owns and keeps writing —
+    /// [`InstancePool`]'s, whose buffer this binds directly.
+    ///
+    /// The pool's own bytes rather than a copy of what they ought to be: a
+    /// removal that cleared the mirror and never reached the device is exactly
+    /// what a host copy could not tell apart from one that worked.
+    fn over(
+        headless: &Headless,
+        instance_buffer: crcbl_hal::BufferHandle,
+        instance_count: u32,
+        meshes: &[GpuMesh],
+        capacity: u32,
+    ) -> Self {
+        let device = headless.device.as_ref();
+
+        // Host-visible for both remaining inputs, exactly as `crcbl_render`'s
+        // own pools are: the mesh table is a `HostUpload` storage buffer there,
+        // and the uniform block is one everywhere in the engine. A staging copy
+        // would need barriers this test is not about.
+        let params = device
+            .create_buffer(&BufferDesc {
+                label: Some("cull params"),
+                size: crcbl_shaders::cull::PARAMS_SIZE as u64,
+                usage: BufferUsage::UNIFORM,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a uniform buffer");
         let mesh_buffer = device
             .create_buffer(&BufferDesc {
                 label: Some("cull mesh table"),
@@ -386,6 +436,7 @@ impl CullProbe {
         Self {
             params,
             instances: instance_buffer,
+            owns_instances: false,
             meshes: mesh_buffer,
             visible,
             counter,
@@ -551,10 +602,12 @@ impl CullProbe {
             self.counter,
             self.visible,
             self.meshes,
-            self.instances,
             self.params,
         ] {
             device.destroy_buffer(buffer);
+        }
+        if self.owns_instances {
+            device.destroy_buffer(self.instances);
         }
     }
 }
@@ -750,5 +803,235 @@ fn an_overflowing_list_still_counts_every_survivor() {
     );
 
     probe.destroy(&headless);
+    headless.finish();
+}
+
+// --- the pool's own removals -----------------------------------------------
+//
+// The two tests below run the pass over `crcbl_render::InstancePool`'s **own
+// buffer**, so what is culled is what `insert`, `remove` and `begin_frame`
+// actually put on the device. A removal that updated the host mirror and never
+// reached the GPU passes every test above this line.
+//
+// The dispatch covers the pool's whole capacity rather than the three slots the
+// scene uses, which puts the slots nothing ever wrote inside the tested range.
+// Those are all zeroes — a live-looking instance of mesh 0 at a degenerate
+// transform on the origin, if the liveness bit is not asked.
+
+/// Slots in the pooled scene's array; three are used and the rest are never
+/// written.
+const POOL_CAPACITY: u32 = 8;
+
+/// A cube at `at`, as a caller hands one to the pool: **without** the liveness
+/// bit, which is [`InstancePool`]'s to set.
+///
+/// That is the ownership `InstancePool::insert` documents, and handing over a
+/// record that already carries the bit would make a pool that never set one
+/// indistinguishable from the pool this suite is testing.
+fn pooled(at: Vec3) -> GpuInstance {
+    GpuInstance {
+        flags: 0,
+        ..instance(0, Mat4::from_translation(at))
+    }
+}
+
+/// The pooled scene: a cube at the origin, a second cube beside it, and a third
+/// twenty metres to the right that only [`turned_camera`] can see.
+///
+/// One buffer in the ring, so [`InstancePool::begin_frame`] always rotates to
+/// the same one and the bind group can name it once. Which buffer a write lands
+/// in is `instance_pool`'s own suite's subject, not this one's.
+fn pooled_scene(headless: &Headless) -> (InstancePool, [InstanceHandle; 3]) {
+    let device = headless.device.as_ref();
+    let mut pool = InstancePool::new(
+        device,
+        &InstancePoolDesc {
+            label: Some("cull pool"),
+            capacity: POOL_CAPACITY,
+            frames_in_flight: 1,
+        },
+    )
+    .expect("a small pool");
+    let handles = [
+        Vec3::ZERO,
+        Vec3::new(0.5, 0.0, 0.0),
+        Vec3::new(20.0, 0.0, 0.0),
+    ]
+    .map(|at| pool.insert(&pooled(at)).expect("room"));
+    assert_eq!(
+        handles.map(|handle| pool.index(handle)),
+        [Some(0), Some(1), Some(2)],
+        "the three cubes are the first three slots, which the assertions below name"
+    );
+    (pool, handles)
+}
+
+/// The pool's array as the host believes it stands, for the CPU oracle.
+///
+/// Live records come from the pool itself; a removed slot's is the caller's
+/// last record with the bit cleared, which is [`InstancePool::remove`]'s whole
+/// documented effect. Slots nothing wrote are [`GpuInstance::default`].
+fn host_array(pool: &InstancePool, handles: &[Option<InstanceHandle>]) -> Vec<GpuInstance> {
+    let mut array = vec![GpuInstance::default(); pool.capacity() as usize];
+    for (index, handle) in handles.iter().enumerate() {
+        if let Some(live) = handle.and_then(|handle| pool.get(handle)) {
+            array[index] = live;
+        }
+    }
+    array
+}
+
+/// **A removed instance is not in the visible list.** The slice's headline
+/// claim, against a real driver and through the pool that makes it.
+///
+/// The removed instance is a unit cube at the origin, which the camera is
+/// looking straight at from two metres — so it is not merely absent, it is
+/// absent while being the most visible thing in the scene. Its live twin sits
+/// half a metre away and stays in the list, which is what says the pass still
+/// ran.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run via tests/run-vk-e2e.sh"]
+fn a_removed_instance_is_not_in_the_visible_list() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let meshes = meshes();
+    let (mut pool, handles) = pooled_scene(&headless);
+    let [removed, control, distant] = handles;
+
+    let slot = pool
+        .begin_frame(device)
+        .expect("the upload reaches the buffer");
+    let probe = CullProbe::over(
+        &headless,
+        pool.buffers()[slot],
+        pool.capacity(),
+        &meshes,
+        VISIBLE_CAPACITY,
+    );
+    let frustum = Frustum::from_view_projection(scene_camera().view_projection(aspect()));
+
+    let live = [Some(removed), Some(control), Some(distant)];
+    let before = probe.run(&headless, &frustum);
+    assert_eq!(
+        before.visible,
+        vec![0, 1],
+        "both cubes in front of the camera are visible, and the one at x = 20 is not"
+    );
+    assert_eq!(
+        before.visible,
+        visible_instances(&frustum, &host_array(&pool, &live), &meshes),
+        "the reference agrees before anything is removed"
+    );
+    // The slots nothing was ever inserted into are inside the dispatch, and
+    // none of them is in the list: an unwritten element is a dead instance.
+    assert_eq!(before.count, 2);
+
+    assert!(pool.remove(removed));
+    pool.begin_frame(device)
+        .expect("the removal reaches the buffer");
+    let after = probe.run(&headless, &frustum);
+    assert!(
+        !after.visible.contains(&0),
+        "the removed instance is still being drawn: {:?}",
+        after.visible
+    );
+    assert_eq!(
+        after.visible,
+        vec![1],
+        "and its live neighbour is not disturbed"
+    );
+    assert_eq!(
+        after.count, 1,
+        "the counter is the survivors, so the removal is not merely unwritten to the list"
+    );
+    let mut expected = host_array(&pool, &[None, Some(control), Some(distant)]);
+    // The removed slot keeps its transform and mesh id and loses the bit, which
+    // is what the pool documents and what the reference is run over here.
+    expected[0] = pooled(Vec3::ZERO);
+    assert_eq!(
+        after.visible,
+        visible_instances(&frustum, &expected, &meshes),
+        "the reference learned liveness too, and agrees"
+    );
+
+    probe.destroy(&headless);
+    pool.destroy(device);
+    headless.finish();
+}
+
+/// **A slot reused after a removal is live again, and draws its new contents.**
+///
+/// The other direction of the same defect: a liveness bit that stuck would make
+/// the pool leak capacity that looks allocated and draws nothing.
+///
+/// The reused slot is given a transform the *default* camera cannot see and the
+/// turned one cannot miss, so its presence in the turned camera's list says
+/// both halves at once — a dead slot is absent from every camera's list, and
+/// the contents it replaced were at the origin, which the turned camera cannot
+/// see either.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run via tests/run-vk-e2e.sh"]
+fn a_slot_reused_after_a_removal_draws_its_new_contents() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let meshes = meshes();
+    let (mut pool, handles) = pooled_scene(&headless);
+    let [removed, control, distant] = handles;
+
+    let slot = pool
+        .begin_frame(device)
+        .expect("the upload reaches the buffer");
+    let probe = CullProbe::over(
+        &headless,
+        pool.buffers()[slot],
+        pool.capacity(),
+        &meshes,
+        VISIBLE_CAPACITY,
+    );
+    let ahead = Frustum::from_view_projection(scene_camera().view_projection(aspect()));
+    let turned = Frustum::from_view_projection(turned_camera().view_projection(aspect()));
+
+    assert!(pool.remove(removed));
+    let reused = pool
+        .insert(&pooled(Vec3::new(20.0, 0.0, 0.0)))
+        .expect("the freed slot");
+    assert_eq!(pool.index(reused), Some(0), "the low slot comes back");
+    pool.begin_frame(device)
+        .expect("the reuse reaches the buffer");
+
+    let from_ahead = probe.run(&headless, &ahead);
+    assert!(
+        !from_ahead.visible.contains(&0),
+        "the slot's new contents are twenty metres to the right, and this camera cannot \
+         see them: {:?}",
+        from_ahead.visible
+    );
+    let from_the_side = probe.run(&headless, &turned);
+    assert!(
+        from_the_side.visible.contains(&0),
+        "the reused slot is not live, or is still being culled on the contents it \
+         replaced: {:?}",
+        from_the_side.visible
+    );
+    assert!(
+        !from_the_side.visible.contains(&1),
+        "and the cube at the origin is behind this camera: {:?}",
+        from_the_side.visible
+    );
+
+    let live = [Some(reused), Some(control), Some(distant)];
+    for (what, frustum, result) in [
+        ("ahead", &ahead, &from_ahead),
+        ("turned", &turned, &from_the_side),
+    ] {
+        assert_eq!(
+            result.visible,
+            visible_instances(frustum, &host_array(&pool, &live), &meshes),
+            "the reference disagrees with the {what} camera"
+        );
+    }
+
+    probe.destroy(&headless);
+    pool.destroy(device);
     headless.finish();
 }

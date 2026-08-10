@@ -197,7 +197,15 @@ impl Frustum {
 /// against.** It resolves each instance's mesh exactly as the shader does —
 /// `GpuInstance::mesh` indexes `meshes`, the entry carries the local-space
 /// bounds, the instance transform makes them world-space — and applies the same
-/// two rejections in the same order.
+/// rejections in the same order.
+///
+/// An instance without
+/// [`GpuInstance::LIVE`](crcbl_shaders::mesh::GpuInstance::LIVE) in its
+/// [`flags`](GpuInstance::flags) is **not** visible, and that is asked first:
+/// the array is a pool, so an element between two live instances may be a slot
+/// [`InstancePool::remove`](crate::instance_pool::InstancePool::remove) freed,
+/// still holding the transform and mesh id it had when it was live. Nothing
+/// else in the record is looked at until that bit says it means anything.
 ///
 /// An instance whose mesh entry has a zero
 /// [`index_count`](GpuMesh::index_count) is **not** visible: that is the
@@ -219,6 +227,9 @@ pub fn visible_instances(
 ) -> Vec<u32> {
     let mut visible = Vec::new();
     for (index, instance) in instances.iter().enumerate() {
+        if instance.flags & GpuInstance::LIVE == 0 {
+            continue;
+        }
         let Some(mesh) = meshes.get(instance.mesh as usize) else {
             continue;
         };
@@ -262,10 +273,15 @@ mod tests {
         }
     }
 
-    /// An instance of mesh 0 at `translation`.
+    /// A **live** instance of mesh 0 at `translation`.
+    ///
+    /// Live rather than default, because a default record is dead — see
+    /// [`GpuInstance::LIVE`] — and a test scene built from dead instances would
+    /// cull everything and assert nothing.
     fn at(translation: Vec3) -> GpuInstance {
         GpuInstance {
             transform: Mat4::from_translation(translation).to_cols_array(),
+            flags: GpuInstance::LIVE,
             ..GpuInstance::default()
         }
     }
@@ -399,7 +415,41 @@ mod tests {
         assert!(frustum.intersects(&laid_down), "{laid_down:?}");
     }
 
-    /// The reference's two rejections, neither of which is the frustum test.
+    /// **A removed instance is not visible**, whatever the frustum says about
+    /// where it last was.
+    ///
+    /// The instance is at the origin, which the camera is pointed at, and it is
+    /// the same record as the live one beside it in every respect but the bit —
+    /// so the only thing that can be deciding this is the bit.
+    #[test]
+    fn an_instance_without_the_live_bit_is_not_visible() {
+        let frustum = frustum();
+        let meshes = [unit_cube()];
+        let live = at(Vec3::ZERO);
+        let removed = GpuInstance {
+            flags: live.flags & !GpuInstance::LIVE,
+            ..live
+        };
+        assert_eq!(
+            visible_instances(&frustum, &[live, removed], &meshes),
+            vec![0],
+            "the live instance survives and its dead twin does not"
+        );
+        // And the other order, so this is the flag and not the index.
+        assert_eq!(
+            visible_instances(&frustum, &[removed, live], &meshes),
+            vec![1]
+        );
+        // A record that is all zeroes is dead too — that is the slot a pool
+        // hands out before anything writes it.
+        assert!(
+            visible_instances(&frustum, &[GpuInstance::default()], &meshes).is_empty(),
+            "a default instance is not live"
+        );
+    }
+
+    /// The reference's other two rejections, neither of which is the frustum
+    /// test.
     #[test]
     fn an_instance_whose_mesh_entry_is_empty_is_not_visible() {
         let frustum = frustum();
