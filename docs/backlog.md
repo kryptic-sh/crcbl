@@ -3600,6 +3600,45 @@ It set up a pipeline state and drew; ours does the same plus bind groups and a
 viewport. Removing our extras one at a time, on a device that faults in under a
 second, converges faster than reasoning about it does.
 
+### The Metal hang is in the encoder's rasteriser replay, and needs no draw
+
+**Bisected on `a849436`, and this narrows it from a class to six calls.** Five
+probes, one CI run:
+
+| Probe                                                         | Result     |
+| ------------------------------------------------------------- | ---------- |
+| Our encoder: pipeline bound, **no draw call at all**          | **hangs**  |
+| Our encoder: draw with no scissor                             | hangs      |
+| Our encoder: draw with no viewport or scissor                 | hangs      |
+| Hand-encoded pass over **this backend's own** pipeline object | **passes** |
+| Hand-encoded pass over a hand-built pipeline                  | **passes** |
+
+Read together these say a great deal:
+
+- **The hang does not need a draw.** Binding a pipeline in our pass is enough.
+  Everything about draws — the call, its arguments, the forms — is exonerated,
+  which retroactively explains why the short-form experiment changed nothing.
+- **The objects are exonerated.** The two hand-encoded probes use our
+  `MTLDevice`, queue, `MTLTexture`, `MTLRenderPipelineState` and our
+  `fault::command_buffer` descriptor, and they pass. So it is not the device,
+  the texture's usage or storage mode, the pipeline descriptor, or the
+  error-options descriptor.
+- **Viewport and scissor are exonerated**, by the two probes that drop them.
+
+**What is left: the six-call rasteriser replay `crcbl_mtl::command` emits inside
+a render pass.** That is the entire difference between the passing hand-encoded
+probe (two calls) and the failing one (the replay plus a bound pipeline).
+
+The named suspect within it, and the reason it is named:
+**`setFrontFacingWinding:`** is the only one of the six asking for anything
+other than a Metal default — `FrontFace::Ccw` against the encoder's `Clockwise`
+— and with `CullMode::None` it cannot change the image, so it would be invisible
+in any picture-based test.
+
+Next: bisect the six by removing them one at a time, which is one more run of
+the same probe step. Everything else in the neighbourhood has now been
+eliminated by measurement rather than by argument.
+
 ### Metal draw coverage in CI: what the ecosystem does
 
 Researched 2026-08-10, because "is this just us?" was worth answering before
