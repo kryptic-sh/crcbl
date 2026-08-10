@@ -3,6 +3,35 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### The Win32 pointer-clip test keeps failing on rectangles that moved
+
+Six flakes on this runner across the session;
+`minimizing_a_captured_window_ releases_the_clip` accounts for two of them, on
+**different assertions** of the same test, for commits that touched no shell
+code (`d9ee566`, `28fc1b7` — both renderer-only).
+
+Root cause is one shape: the test read `client_screen_rect ∩ virtual_screen` at
+one instant and compared it against `clip_rect()` at another. Both operands move
+— the desktop can reposition a window, and this runner changes its display set
+mid-run, which is the same behaviour that made `refresh_clip` refuse a
+degenerate refresh. A desktop change then surfaces as a failure of whichever
+assertion happened to be running, naming the rectangle rather than the cause.
+
+Both sites now read through `confined_to_client(hwnd)` immediately before
+asserting, and the restore site additionally asserts the rectangle is
+non-degenerate so the comparison cannot pass on two 0×0 rects — which is the
+defect that test exists to catch.
+
+**Not yet proven fixed.** Narrowing the window is not closing it: a display
+change between `set_pointer_mode`'s own internal read and the test's read would
+still fail. If it flakes a third time, stop patching and quarantine it by name
+in the `win32 e2e` job, the way the Metal draw tests are — the test asserts
+something real, and a test that cannot state its own preconditions on this
+runner is better held out with a reason than left to fail at random.
+
+Still open and unrelated: the **focus** flake (three instances), where
+`focus_and_confirm` loses the foreground to something else on the runner.
+
 ## User decisions — keep or override
 
 ### `GpuInstance::flags` is a bare `u32`, not `bitflags`

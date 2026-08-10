@@ -1862,6 +1862,22 @@ mod tests {
         }
     }
 
+    /// The rectangle a confined pointer should be held to, read **now**.
+    ///
+    /// Both halves move underneath a test: the desktop can reposition a window,
+    /// and this runner changes its display set mid-run — the behaviour that
+    /// made [`Win32Shell::refresh_clip`] refuse a degenerate refresh. Capturing
+    /// either half early and comparing it later turns a desktop change into a
+    /// failure of whatever assertion happened to be running, which is how
+    /// `minimizing_a_captured_window_releases_the_clip` failed twice on CI for
+    /// commits that touched no shell code. Callers read this immediately before
+    /// they assert, so the comparison is against the desktop that exists.
+    fn confined_to_client(hwnd: Handle) -> Rect {
+        super::input::client_screen_rect(hwnd)
+            .expect("a live window has a client rectangle")
+            .intersect(virtual_screen())
+    }
+
     /// Whether any window of this process has the clipboard open.
     ///
     /// The observable behind "closed on every path out": the guard's `Drop` is
@@ -2623,12 +2639,18 @@ mod tests {
         let hwnd = hwnd_of(&shell, window);
 
         focus_and_confirm(&mut shell, window, hwnd);
-        let client = super::input::client_screen_rect(hwnd).expect("a live window has one");
-        let clipped = client.intersect(virtual_screen());
 
         shell
             .set_pointer_mode(window, PointerMode::Confined)
             .expect("POINTER_CONFINE is claimed");
+        // **Read after the clip exists, never before it.** Both operands move:
+        // the window can be repositioned by the desktop, and this runner
+        // changes its display set mid-run — the same behaviour that made
+        // `refresh_clip` refuse a degenerate refresh. A rectangle captured
+        // before the call and compared after it turns any of that into a
+        // failure of this assertion, which is about whether confining clips to
+        // the client area at all.
+        let clipped = confined_to_client(hwnd);
         assert_eq!(clip_rect(), clipped, "the pointer is bounded by the window");
 
         // SAFETY: this shell's own window; SW_MINIMIZE is a documented command.
@@ -2655,16 +2677,10 @@ mod tests {
         // answer is that nobody was focused. What this test is about is which
         // rectangle a restore re-clips from, not who ends up focused.
         focus_and_confirm(&mut shell, window, hwnd);
-        // **Recomputed, not the `clipped` from before the minimize.** That one
-        // was intersected with the virtual screen as it was then, and this
-        // runner is known to change its display set mid-run — see the virtual
-        // display that made `refresh_clip` refuse a degenerate refresh. A stale
-        // rectangle turns any such change into a failure of *this* assertion,
-        // which is about which rectangle a restore clips from, not about
-        // whether the desktop stayed put.
-        let restored = super::input::client_screen_rect(hwnd)
-            .expect("a restored window has one")
-            .intersect(virtual_screen());
+        // Recomputed, for the reason the confine above is: `clipped` describes
+        // a desktop that may have moved since, and this assertion is about
+        // which rectangle a restore clips from.
+        let restored = confined_to_client(hwnd);
         // Recomputing costs the comparison its teeth if the window is somehow
         // still minimized, because then both sides are the 0×0 area and agree.
         // The defect this test exists for is a restore that clips from exactly
