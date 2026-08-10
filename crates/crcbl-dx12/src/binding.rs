@@ -82,6 +82,24 @@
 //!   slot left.
 //! * [`BindingFlags::UPDATE_AFTER_BIND`] — see above.
 //!
+//! # The register a binding lands on comes from the artifact, not from its
+//! number
+//!
+//! `[[vk::binding(binding, set)]]` reaches SPIR-V and nothing else. Slang's HLSL
+//! output drops it, and `dxc` numbers each register class from zero in
+//! declaration order across the whole source, in space 0 — so a set holding a
+//! `ConstantBuffer`, a `StructuredBuffer` and an `RWStructuredBuffer` at
+//! bindings 0, 1 and 2 is `b0`/`t0`/`u0` in the container, not `b0`/`t1`/`u2`.
+//! A root signature naming registers the shader does not read is rejected by
+//! pipeline creation, so this is not a subtlety a caller can absorb.
+//!
+//! [`ranges`] therefore assigns registers with [`dxil::Registers`], threaded
+//! across a pipeline layout's sets in order, and `crate::dxil` checks the rule
+//! against every committed container on any host. It is correct because
+//! `crcbl-shaders`' `declaration_order` lint already requires each source to
+//! declare its resources in ascending `(set, binding)` order — the same
+//! guarantee `crcbl-mtl` leans on for its flat argument tables.
+//!
 //! What is **not** honoured is a dynamic offset:
 //! [`BindingKind::UniformBuffer`](crcbl_hal::BindingKind::UniformBuffer)'s
 //! `dynamic` and its storage-buffer twin are refused at layout creation. A
@@ -111,6 +129,7 @@ use windows::Win32::Graphics::Direct3D12::{
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_R32_TYPELESS;
 
 use crate::conv;
+use crate::dxil;
 use crate::handle::Owned;
 
 /// Descriptors in the one shader-visible CBV/SRV/UAV heap.
@@ -466,24 +485,67 @@ fn check_entry(
     Ok(())
 }
 
-/// The `D3D12_DESCRIPTOR_RANGE` array a root parameter points at.
+/// The `D3D12_DESCRIPTOR_RANGE` arrays one set's two root parameters point at:
+/// its views and its samplers.
 ///
-/// `RegisterSpace` is the **set index**, which is how Slang's
-/// `[[vk::binding(binding, set)]]` reaches HLSL: set 0 becomes `register(t0)` in
-/// the default space, and set *n* becomes `space{n}`. So the seam's set index
-/// and the artifact's register space are the same number by construction rather
-/// than through a mapping either side could get wrong.
-pub(crate) fn ranges(plans: &[RangePlan], set: u32) -> Vec<D3D12_DESCRIPTOR_RANGE> {
-    plans
-        .iter()
-        .map(|plan| D3D12_DESCRIPTOR_RANGE {
+/// **The register is not the binding number, and the space is not the set.**
+/// `[[vk::binding(binding, set)]]` is a Vulkan attribute; Slang's HLSL output
+/// ignores it and lets `dxc` number each register class from zero in
+/// declaration order, in space 0. So the two are assigned by running
+/// [`dxil::Registers`] over the layout — threaded across a pipeline layout's
+/// sets by the caller, because the count does not restart at a set boundary.
+/// `crate::dxil` measures the rule against every committed container.
+///
+/// Both tables are built in one call because the registers they take come from
+/// one running count, and splitting it would put the order of two calls in
+/// charge of what the artifact is compared against.
+pub(crate) fn ranges(
+    layout: &BindGroupLayoutRecord,
+    registers: &mut dxil::Registers,
+) -> (Vec<D3D12_DESCRIPTOR_RANGE>, Vec<D3D12_DESCRIPTOR_RANGE>) {
+    // Views and samplers never share a register class — a sampler is `s` and
+    // nothing else is — so the two tables can be numbered one after the other
+    // and still agree with a source that interleaved them by binding number.
+    (
+        assign(&layout.views, registers),
+        assign(&layout.samplers, registers),
+    )
+}
+
+/// One table's ranges, taking registers in ascending binding order.
+///
+/// Ascending *binding* rather than declaration order: `dxc` numbers in the
+/// source's declaration order, and `crcbl-shaders`' `declaration_order` lint is
+/// what makes the two the same. Sorting here means a caller that declared its
+/// entries out of order still gets the registers the artifact has, rather than a
+/// root signature that is wrong in a way only a Windows runner would report.
+fn assign(plans: &[RangePlan], registers: &mut dxil::Registers) -> Vec<D3D12_DESCRIPTOR_RANGE> {
+    let mut order: Vec<usize> = (0..plans.len()).collect();
+    order.sort_by_key(|index| plans[*index].binding);
+    let mut ranges = vec![D3D12_DESCRIPTOR_RANGE::default(); plans.len()];
+    for index in order {
+        let plan = &plans[index];
+        ranges[index] = D3D12_DESCRIPTOR_RANGE {
             RangeType: plan.range_type,
             NumDescriptors: plan.declared,
-            BaseShaderRegister: plan.binding,
-            RegisterSpace: set,
+            BaseShaderRegister: registers.take(register_class(plan.range_type), plan.declared),
+            RegisterSpace: 0,
             OffsetInDescriptorsFromTableStart: plan.offset,
-        })
-        .collect()
+        };
+    }
+    ranges
+}
+
+/// Which HLSL register file a descriptor range takes its register from.
+fn register_class(range: D3D12_DESCRIPTOR_RANGE_TYPE) -> dxil::RegisterClass {
+    match range {
+        D3D12_DESCRIPTOR_RANGE_TYPE_CBV => dxil::RegisterClass::Cbv,
+        D3D12_DESCRIPTOR_RANGE_TYPE_SRV => dxil::RegisterClass::Srv,
+        D3D12_DESCRIPTOR_RANGE_TYPE_UAV => dxil::RegisterClass::Uav,
+        // The enum has four values and `descriptor_range_type` produces the
+        // three above, so this is the sampler and cannot be anything else.
+        _ => dxil::RegisterClass::Sampler,
+    }
 }
 
 /// Allocates a bind group's blocks, and fills every view descriptor with a null
@@ -1033,18 +1095,74 @@ mod tests {
         }
     }
 
-    /// The register space is the set index, which is the agreement that makes a
-    /// Slang `[[vk::binding(b, s)]]` reach the register the artifact declares.
+    /// **A binding's register is its position among the bindings of its own
+    /// class, and every set is space 0.**
+    ///
+    /// This replaces an assertion that the register *was* the binding number and
+    /// the space *was* the set index. That claim was checked against nothing but
+    /// itself and is false of every artifact this workspace commits — see
+    /// `crate::dxil`'s `registers_are_assigned_per_class_in_declaration_order`,
+    /// which reads the register out of the container's own resource table. A
+    /// root signature built the old way names `t1` and `u2` for a shader that
+    /// reads `t0` and `u0`, which pipeline creation rejects.
     #[test]
-    fn ranges_put_the_set_index_in_the_register_space() {
-        let entries = [entry(3, BindingKind::SampledImage)];
-        let layout = plan(&entries).expect("one binding");
-        let ranges = ranges(&layout.views, 2);
-        assert_eq!(ranges.len(), 1);
-        assert_eq!(ranges[0].BaseShaderRegister, 3);
-        assert_eq!(ranges[0].RegisterSpace, 2);
-        assert_eq!(ranges[0].NumDescriptors, 1);
-        assert_eq!(ranges[0].OffsetInDescriptorsFromTableStart, 0);
+    fn a_bindings_register_is_its_index_among_its_own_class() {
+        let entries = [
+            entry(0, BindingKind::UniformBuffer { dynamic: false }),
+            entry(
+                1,
+                BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+            ),
+            entry(2, BindingKind::Sampler),
+            entry(
+                3,
+                BindingKind::StorageBuffer {
+                    read_only: false,
+                    dynamic: false,
+                },
+            ),
+            entry(4, BindingKind::SampledImage),
+        ];
+        let layout = plan(&entries).expect("five bindings");
+        let mut registers = dxil::Registers::default();
+        let (views, samplers) = ranges(&layout, &mut registers);
+
+        // In `views` order, which is declaration order: b0, t0, u0, t1.
+        assert_eq!(views.len(), 4);
+        assert_eq!(views[0].BaseShaderRegister, 0, "the only CBV is b0");
+        assert_eq!(views[1].BaseShaderRegister, 0, "the first SRV is t0");
+        assert_eq!(views[2].BaseShaderRegister, 0, "the only UAV is u0");
+        assert_eq!(
+            views[3].BaseShaderRegister, 1,
+            "the second SRV is t1, and the UAV between them did not consume a t"
+        );
+        assert_eq!(samplers.len(), 1);
+        assert_eq!(samplers[0].BaseShaderRegister, 0, "the only sampler is s0");
+        for range in views.iter().chain(&samplers) {
+            assert_eq!(
+                range.RegisterSpace, 0,
+                "Slang's HLSL output puts every set in space 0"
+            );
+        }
+        assert_eq!(views[0].NumDescriptors, 1);
+        assert_eq!(views[0].OffsetInDescriptorsFromTableStart, 0);
+
+        // The counter carries across sets, so a second layout continues where
+        // the first stopped — which is what makes a two-set pipeline layout
+        // agree with a source `dxc` numbered end to end.
+        let more = [entry(
+            0,
+            BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+        )];
+        let second = plan(&more).expect("one binding");
+        let (views, _) = ranges(&second, &mut registers);
+        assert_eq!(views[0].BaseShaderRegister, 2, "the third SRV is t2");
     }
 
     /// A block's addresses are its start times the stride, in both spaces —

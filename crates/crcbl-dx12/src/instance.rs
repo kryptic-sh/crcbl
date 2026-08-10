@@ -837,8 +837,8 @@ pub(crate) mod tests {
     /// A device request this backend can actually satisfy today.
     ///
     /// [`DeviceDesc::for_adapter`] requires compute and a timeline semaphore,
-    /// neither of which this backend reports until the pipeline and command
-    /// slices land — see `the_default_device_desc_is_refused_for_the_gap` below,
+    /// and this backend reports the first but not the second until the command
+    /// slice lands — see `the_default_device_desc_is_refused_for_the_gap` below,
     /// which is the test that pins that.
     pub(crate) fn desc(adapter: AdapterId) -> DeviceDesc<'static> {
         DeviceDesc {
@@ -1174,17 +1174,18 @@ pub(crate) mod tests {
     /// Every adapter is Tier B in this slice, and it is this backend's gap
     /// rather than the adapter's.
     ///
-    /// The four flags asserted missing are missing because no call in this crate
-    /// makes them true — `CreateComputePipelineState`, `CreateFence` and
-    /// `ExecuteIndirect` are all unwritten — so this test goes red on the day a
-    /// slice earns one of them, which is exactly the day the crate docs' claim
-    /// that "every adapter is Tier B" stops being true and has to be rewritten.
-    /// [`Features::BUFFER_DEVICE_ADDRESS`] is asserted *present* in the same
-    /// loop, so dropping it silently is red too.
+    /// The flags asserted missing are missing because no call in this crate
+    /// makes them true — `CreateFence` and `ExecuteIndirect` for a *draw* are
+    /// both unwritten — so this test goes red on the day a slice earns one of
+    /// them, which is exactly the day the crate docs' claim that "every adapter
+    /// is Tier B" stops being true and has to be rewritten. The flags asserted
+    /// *present* are the inverse half: dropping one silently is red too, and
+    /// [`Features::COMPUTE`] is on that side now that
+    /// `CreateComputePipelineState` and `Dispatch` are made.
     ///
     /// The falsifying value on the other side is an adapter that reports one of
-    /// the four: that is a flag added ahead of the call behind it, which is the
-    /// mistake `crcbl-mtl` had to reverse.
+    /// the waiting flags: that is a flag added ahead of the call behind it,
+    /// which is the mistake `crcbl-mtl` had to reverse.
     #[test]
     fn every_adapter_sits_at_the_floor_until_the_calls_behind_the_flags_land() {
         let instance = open();
@@ -1195,12 +1196,13 @@ pub(crate) mod tests {
         for record in instance.records() {
             let line = record.report();
             let missing = record.info.caps.missing(Features::GPU_DRIVEN);
-            assert!(
-                !missing.contains(Features::BUFFER_DEVICE_ADDRESS),
-                "every D3D12 device has GPU virtual addresses: {line}"
-            );
+            for earned in [Features::BUFFER_DEVICE_ADDRESS, Features::COMPUTE] {
+                assert!(
+                    !missing.contains(earned),
+                    "{earned:?} has a call behind it and is not reported: {line}"
+                );
+            }
             for waiting in [
-                Features::COMPUTE,
                 Features::TIMELINE_SEMAPHORE,
                 Features::MULTI_DRAW_INDIRECT,
                 Features::DRAW_INDIRECT_COUNT,
@@ -1275,14 +1277,15 @@ pub(crate) mod tests {
         assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
     }
 
-    /// The seam's convenience constructor requires compute and a timeline
-    /// semaphore, and this backend reports neither until the pipeline and
-    /// command slices land — so `for_adapter` is refused, by name, on real
-    /// hardware.
+    /// The seam's convenience constructor requires compute **and** a timeline
+    /// semaphore, and this backend now has only the first — so `for_adapter` is
+    /// still refused, and the refusal names exactly what is left.
     ///
-    /// This is the visible consequence of the reporting decision the crate docs
-    /// argue for; if the backend ever starts reporting the waiting features,
-    /// this test says so rather than letting the change go unnoticed.
+    /// The two halves are asserted separately on purpose. Compute is required
+    /// *and satisfied*, so it must be absent from the gap; a device that
+    /// reported it and could not dispatch would pass a test that only looked at
+    /// the whole set. The timeline semaphore is what remains, and this test is
+    /// what says so rather than letting the change go unnoticed.
     #[test]
     fn the_default_device_desc_is_refused_for_the_gap() {
         let instance = open();
@@ -1290,13 +1293,17 @@ pub(crate) mod tests {
 
         let error = instance
             .request_device(&DeviceDesc::for_adapter(adapter))
-            .expect_err("this backend reports neither compute nor a timeline semaphore");
+            .expect_err("this backend reports no timeline semaphore");
         let HalError::UnsupportedFeatures { missing } = error else {
             panic!("expected a feature gap, got {error:?}");
         };
         assert!(
-            missing.contains(Features::COMPUTE | Features::TIMELINE_SEMAPHORE),
-            "the calls behind these are what this backend still owes: {missing:?}"
+            missing.contains(Features::TIMELINE_SEMAPHORE),
+            "the call behind this is what this backend still owes: {missing:?}"
+        );
+        assert!(
+            !missing.contains(Features::COMPUTE),
+            "compute is required by for_adapter and this backend has it: {missing:?}"
         );
     }
 

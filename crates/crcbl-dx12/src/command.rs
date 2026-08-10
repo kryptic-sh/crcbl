@@ -5,12 +5,12 @@
 //!
 //! Barriers, buffer↔buffer and buffer↔image copies, render passes with a real
 //! `ClearRenderTargetView`/`ClearDepthStencilView`, viewport, scissor and
-//! stencil reference. [`finish`](CommandEncoder::finish) closes the list and
+//! stencil reference — plus pipelines, bind groups, draws, and dispatches both
+//! direct and indirect. [`finish`](CommandEncoder::finish) closes the list and
 //! hands back a pooled [`CommandBufferHandle`] the device can submit.
 //!
-//! Everything that needs a pipeline state object or a root signature — draws,
-//! dispatches, bind groups, push constants, index buffers — **fails the
-//! encoder** rather than recording nothing, so `finish` returns the refusal
+//! What still needs a slice — index buffers, indirect *draws*, push constants —
+//! **fails the encoder** rather than recording nothing, so `finish` returns the refusal
 //! instead of a command buffer that submits and draws nothing. That is
 //! `crcbl-mtl`'s rule in its command slice, and it is the failure
 //! [`Device::take_error`](crcbl_hal::Device::take_error) exists to catch on
@@ -91,7 +91,8 @@ use windows::core::Interface;
 
 use crate::conv;
 use crate::device::{
-    AttachmentRef, BoundPipeline, BufferRef, CommandBufferEntry, DeviceInner, ImageRef,
+    AttachmentRef, BoundCompute, BoundPipeline, BufferRef, CommandBufferEntry, DeviceInner,
+    ImageRef,
 };
 use crate::instance::not_yet;
 
@@ -193,6 +194,14 @@ struct CopyRegion {
     size: (u32, u32, u32),
 }
 
+/// Bytes one `D3D12_DISPATCH_ARGUMENTS` occupies: `ThreadGroupCountX`, `Y` and
+/// `Z`. Fixed by D3D12's own struct.
+const DISPATCH_ARGUMENTS: u64 = 12;
+
+/// What an indirect-argument offset must be a multiple of, which is the width of
+/// the words the arguments are made of.
+const DISPATCH_ARGUMENT_ALIGNMENT: u64 = 4;
+
 /// The D3D12 command list implementation of [`CommandEncoder`].
 pub(crate) struct Dx12CommandEncoder {
     device: Arc<DeviceInner>,
@@ -214,6 +223,10 @@ pub(crate) struct Dx12CommandEncoder {
     /// contents: the pipeline's own state was replayed onto the command list at
     /// bind time, which is where D3D12 keeps it.
     pipeline: Option<BoundPipeline>,
+    /// The compute pipeline currently bound, if any. Held for the reason
+    /// [`pipeline`](Self::pipeline) is, and separately from it because a
+    /// `DIRECT` command list carries both bind points at once.
+    compute: Option<BoundCompute>,
     in_render_pass: bool,
     in_compute_pass: bool,
 }
@@ -244,6 +257,7 @@ impl Dx12CommandEncoder {
             retained: Vec::new(),
             failed: None,
             pipeline: None,
+            compute: None,
             in_render_pass: false,
             in_compute_pass: false,
         };
@@ -345,6 +359,27 @@ impl Dx12CommandEncoder {
             return false;
         }
         true
+    }
+
+    /// Whether a compute command may be recorded here.
+    ///
+    /// The mirror of [`outside_a_pass`](Self::outside_a_pass), and the same
+    /// argument: `crcbl-hal`'s `null` recorder makes a dispatch outside a
+    /// compute pass a validation error, so a graph that mis-nests fails its own
+    /// unit suite — and a backend that accepted it would make the two disagree.
+    ///
+    /// D3D12 itself would take the call: a `DIRECT` list has both bind points
+    /// open at all times. That is exactly why this has to be checked here rather
+    /// than left to the runtime, which reports nothing.
+    fn inside_a_compute_pass(&mut self, what: &str) -> bool {
+        if self.in_compute_pass {
+            return true;
+        }
+        self.fail(HalError::InvalidDescriptor(format!(
+            "{what} outside a compute pass; the seam records compute work inside one, and the \
+             open scope is the only signal a backend gets about which bind point a group is for"
+        )));
+        false
     }
 
     /// Records one batch of transitions, if there is anything to record.
@@ -1124,6 +1159,12 @@ impl CommandEncoder for Dx12CommandEncoder {
             }
         }
         self.pipeline = Some(bound);
+        // **A command list has one pipeline state object, not one per bind
+        // point.** Setting this one replaced whatever a compute pass left, so a
+        // later dispatch that did not rebind would run *this* object as a
+        // compute shader. Forgetting here is what turns that into the refusal
+        // `dispatch` already writes.
+        self.compute = None;
     }
 
     fn bind_index_buffer(&mut self, _buffer: BufferHandle, _offset: u64, _format: IndexFormat) {
@@ -1139,6 +1180,14 @@ impl CommandEncoder for Dx12CommandEncoder {
     /// already refuses a `dynamic` binding. A caller reaching here with offsets
     /// is holding a layout no bind group in this backend could conform to, and
     /// dropping them would bind the wrong region of one large buffer.
+    ///
+    /// **Which bind point the table lands on is decided by the open scope**, and
+    /// nothing else: the seam gives a backend no other signal, which is why it
+    /// asks a caller to bind its groups inside the pass they are for. That is
+    /// `crcbl-vk`'s rule verbatim, and here it is the difference between
+    /// `SetComputeRootDescriptorTable` and its graphics twin — a `DIRECT`
+    /// command list has both, and the wrong one leaves the dispatch reading the
+    /// last draw's arguments.
     fn bind_group(
         &mut self,
         index: u32,
@@ -1168,6 +1217,7 @@ impl CommandEncoder for Dx12CommandEncoder {
         for resource in &bound.retained {
             self.retain(resource);
         }
+        let compute = self.in_compute_pass;
         let Some(list) = self.list() else { return };
         // SAFETY: `list` is live and recording. `bound.heaps` is a live slice of
         // shader-visible heaps this device owns, borrowed for the call and
@@ -1179,11 +1229,12 @@ impl CommandEncoder for Dx12CommandEncoder {
             if !bound.heaps.is_empty() {
                 list.SetDescriptorHeaps(&bound.heaps);
             }
-            if let Some((root, base)) = bound.views {
-                list.SetGraphicsRootDescriptorTable(root, base);
-            }
-            if let Some((root, base)) = bound.samplers {
-                list.SetGraphicsRootDescriptorTable(root, base);
+            for (root, base) in bound.views.into_iter().chain(bound.samplers) {
+                if compute {
+                    list.SetComputeRootDescriptorTable(root, base);
+                } else {
+                    list.SetGraphicsRootDescriptorTable(root, base);
+                }
             }
         }
     }
@@ -1292,20 +1343,138 @@ impl CommandEncoder for Dx12CommandEncoder {
         self.in_compute_pass = true;
     }
 
+    /// Closes the scope, and forgets the pipeline it was bound in.
+    ///
+    /// Forgetting matters: the state object stays set on the command list, so a
+    /// dispatch in a *later* pass with nothing bound would run the previous
+    /// pass's shader against the previous pass's root arguments. Clearing here
+    /// makes that the refusal [`dispatch`](Self::dispatch) already writes.
     fn end_compute_pass(&mut self) {
         self.in_compute_pass = false;
+        self.compute = None;
     }
 
-    fn bind_compute_pipeline(&mut self, _pipeline: ComputePipelineHandle) {
-        self.refuse("compute pipelines (the DX12 pipeline slice)");
+    /// Binds a compute pipeline state object and its root signature.
+    ///
+    /// The compute twin of
+    /// [`bind_graphics_pipeline`](Self::bind_graphics_pipeline), and everything
+    /// that method's docs say about `SetPipelineState` not setting a root
+    /// signature holds here — with the extra trap that a `DIRECT` command list
+    /// carries a **graphics and a compute** root signature at once, so binding
+    /// the graphics one would leave the dispatch reading whatever the last draw
+    /// bound.
+    fn bind_compute_pipeline(&mut self, pipeline: ComputePipelineHandle) {
+        if self.list().is_none() || !self.inside_a_compute_pass("bind_compute_pipeline") {
+            return;
+        }
+        let bound = match self.device.compute_pipeline(pipeline) {
+            Ok(bound) => bound,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is a live command list in the recording state, and each
+        // interface is one this encoder holds a reference to for the duration of
+        // the call.
+        unsafe {
+            list.SetComputeRootSignature(&bound.root_signature);
+            list.SetPipelineState(&bound.raw);
+        }
+        self.compute = Some(bound);
+        // The mirror of `bind_graphics_pipeline`'s last line, and the same
+        // reason: one command list, one pipeline state object.
+        self.pipeline = None;
     }
 
-    fn dispatch(&mut self, _x: u32, _y: u32, _z: u32) {
-        self.refuse("compute dispatches (the DX12 pipeline slice)");
+    /// `Dispatch`, in workgroups.
+    ///
+    /// **A dispatch with no compute pipeline bound fails the encoder**, for the
+    /// reason [`draw`](Self::draw) gives: D3D12 runs nothing and reports
+    /// nothing, and nothing is what a caller reading an unwritten buffer cannot
+    /// tell from a shader that wrote nothing.
+    fn dispatch(&mut self, x: u32, y: u32, z: u32) {
+        if self.list().is_none() || !self.inside_a_compute_pass("dispatch") {
+            return;
+        }
+        if self.compute.is_none() {
+            self.fail(HalError::InvalidDescriptor(
+                "a dispatch with no compute pipeline bound; D3D12 would run nothing and report \
+                 nothing"
+                    .to_string(),
+            ));
+            return;
+        }
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording, and the call takes three
+        // scalars.
+        unsafe { list.Dispatch(x, y, z) };
     }
 
-    fn dispatch_indirect(&mut self, _args: BufferHandle, _offset: u64) {
-        self.refuse("compute dispatches (the DX12 pipeline slice)");
+    /// `ExecuteIndirect` with a `DISPATCH` command signature and one command.
+    ///
+    /// D3D12 has no `vkCmdDispatchIndirect`. What it has is `ExecuteIndirect`,
+    /// which reads *any* argument layout a command signature describes — so the
+    /// seam's call is the degenerate case: one command, whose arguments are a
+    /// `D3D12_DISPATCH_ARGUMENTS`, and no count buffer. See
+    /// [`DeviceInner::dispatch_signature`](crate::device::DeviceInner::dispatch_signature)
+    /// for the object, which is created once per device.
+    ///
+    /// The span is checked against the buffer's own size before the call.
+    /// `ExecuteIndirect` reads twelve bytes at the offset and bounds-checks
+    /// neither, so a short buffer is a GPU fault where this is an error a caller
+    /// can catch — the same trade `crcbl-mtl` makes for the same reason.
+    fn dispatch_indirect(&mut self, args: BufferHandle, offset: u64) {
+        if self.list().is_none() || !self.inside_a_compute_pass("dispatch_indirect") {
+            return;
+        }
+        if self.compute.is_none() {
+            self.fail(HalError::InvalidDescriptor(
+                "an indirect dispatch with no compute pipeline bound; D3D12 would run nothing and \
+                 report nothing"
+                    .to_string(),
+            ));
+            return;
+        }
+        let Some(buffer) = self.buffer(args) else {
+            return;
+        };
+        if !offset.is_multiple_of(DISPATCH_ARGUMENT_ALIGNMENT) {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "dispatch_indirect reads its arguments at offset {offset}, and \
+                 D3D12_DISPATCH_ARGUMENTS is three `u32`s — so the offset must be a multiple of \
+                 {DISPATCH_ARGUMENT_ALIGNMENT} for them to be read at all"
+            )));
+            return;
+        }
+        if offset
+            .checked_add(DISPATCH_ARGUMENTS)
+            .is_none_or(|end| end > buffer.size)
+        {
+            self.fail(HalError::InvalidDescriptor(format!(
+                "dispatch_indirect reads {DISPATCH_ARGUMENTS} bytes at offset {offset} of a {}-byte \
+                 buffer",
+                buffer.size
+            )));
+            return;
+        }
+        let signature = match self.device.dispatch_signature() {
+            Ok(signature) => signature,
+            Err(error) => {
+                self.fail(error);
+                return;
+            }
+        };
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording, `signature` is a live command
+        // signature this device owns, and `buffer.raw` is a live resource this
+        // encoder retained above. The argument span was checked against the
+        // buffer's own size, and the count buffer is `None` — legal for a
+        // signature whose command count is a constant.
+        unsafe {
+            list.ExecuteIndirect(&signature, 1, &buffer.raw, offset, None, 0);
+        }
     }
 
     // --- queries ---

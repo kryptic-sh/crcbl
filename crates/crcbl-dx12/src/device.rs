@@ -88,12 +88,14 @@ use windows::Win32::Foundation::{CloseHandle, E_OUTOFMEMORY, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Direct3D::{D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY};
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_COMMAND_LIST_TYPE_DIRECT, D3D12_COMMAND_QUEUE_DESC, D3D12_COMMAND_QUEUE_FLAG_NONE,
-    D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_COMPARISON_FUNC_ALWAYS, D3D12_CPU_DESCRIPTOR_HANDLE,
-    D3D12_CPU_PAGE_PROPERTY_UNKNOWN, D3D12_FENCE_FLAG_NONE, D3D12_GPU_DESCRIPTOR_HANDLE,
-    D3D12_HEAP_FLAG_NONE, D3D12_HEAP_PROPERTIES, D3D12_MEMORY_POOL_UNKNOWN, D3D12_RANGE,
-    D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_BUFFER,
-    D3D12_SAMPLER_DESC, D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_TEXTURE_LAYOUT_UNKNOWN,
-    D3D12CreateDevice, ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue,
+    D3D12_COMMAND_QUEUE_PRIORITY_NORMAL, D3D12_COMMAND_SIGNATURE_DESC,
+    D3D12_COMPARISON_FUNC_ALWAYS, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+    D3D12_FENCE_FLAG_NONE, D3D12_GPU_DESCRIPTOR_HANDLE, D3D12_HEAP_FLAG_NONE,
+    D3D12_HEAP_PROPERTIES, D3D12_INDIRECT_ARGUMENT_DESC, D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
+    D3D12_MEMORY_POOL_UNKNOWN, D3D12_RANGE, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+    D3D12_RESOURCE_DESC, D3D12_RESOURCE_DIMENSION_BUFFER, D3D12_SAMPLER_DESC,
+    D3D12_TEXTURE_LAYOUT_ROW_MAJOR, D3D12_TEXTURE_LAYOUT_UNKNOWN, D3D12CreateDevice,
+    ID3D12CommandAllocator, ID3D12CommandList, ID3D12CommandQueue, ID3D12CommandSignature,
     ID3D12DescriptorHeap, ID3D12Device, ID3D12Fence, ID3D12GraphicsCommandList, ID3D12Object,
     ID3D12PipelineState, ID3D12Resource, ID3D12RootSignature,
 };
@@ -106,7 +108,9 @@ use crate::command::Dx12CommandEncoder;
 use crate::descriptor::{Descriptors, Kind, Slot};
 use crate::handle::{self, Owned, Owner};
 use crate::instance::{AdapterRecord, InstanceInner, OFFSCREEN_HWND, next_owner_id, not_yet};
-use crate::pipeline::{self, GraphicsPipelineEntry, PipelineLayoutEntry, ShaderModuleEntry};
+use crate::pipeline::{
+    self, ComputePipelineEntry, GraphicsPipelineEntry, PipelineLayoutEntry, ShaderModuleEntry,
+};
 use crate::present::{self, PresentWait};
 use crate::retire::RetireQueue;
 use crate::swapchain::{self, SwapchainEntry};
@@ -296,6 +300,7 @@ pub(crate) struct DeviceState {
     bind_groups: Pool<BindGroupRecord>,
     pipeline_layouts: Pool<PipelineLayoutEntry>,
     graphics_pipelines: Pool<GraphicsPipelineEntry>,
+    compute_pipelines: Pool<ComputePipelineEntry>,
     /// Swapchains are **device**-scoped while the surfaces they present to are
     /// instance-scoped, which is `crcbl-hal`'s obligation 2 and the reason this
     /// pool is here and `crate::instance`'s surface pool is not.
@@ -305,6 +310,13 @@ pub(crate) struct DeviceState {
     /// `crate::descriptor` deliberately never creates. See `crate::binding`.
     visible: VisibleHeaps,
     retire: RetireQueue<Retired>,
+    /// The `DISPATCH` command signature every indirect dispatch executes.
+    ///
+    /// One per device and created on first use: it describes an argument
+    /// *layout* rather than any pipeline's arguments — three `u32`s, no root
+    /// arguments — so every `dispatch_indirect` on this device can share it, and
+    /// a device that never makes one never creates it.
+    dispatch_signature: Option<ID3D12CommandSignature>,
     /// The last fence value handed out, by [`Device::submit`] or
     /// [`Device::wait_idle`].
     ///
@@ -460,6 +472,21 @@ pub(crate) struct BoundPipeline {
     pub(crate) root_signature: ID3D12RootSignature,
     pub(crate) topology: D3D_PRIMITIVE_TOPOLOGY,
     pub(crate) stencil_reference: Option<u32>,
+}
+
+/// `ByteStride` of the dispatch command signature: one
+/// `D3D12_DISPATCH_ARGUMENTS`, which is three `u32`s. Fixed by D3D12's struct.
+const DISPATCH_ARGUMENT_STRIDE: u32 = 12;
+
+/// A compute pipeline resolved to what the command list must be told.
+///
+/// The same pair as [`BoundPipeline`] and for the same reason, minus the two
+/// pieces of graphics state D3D12 keeps outside a pipeline state object: a
+/// dispatch has no topology and no stencil reference.
+#[derive(Debug)]
+pub(crate) struct BoundCompute {
+    pub(crate) raw: ID3D12PipelineState,
+    pub(crate) root_signature: ID3D12RootSignature,
 }
 
 /// A bind group resolved to the root parameters and GPU addresses it binds.
@@ -664,6 +691,80 @@ impl DeviceInner {
             root_signature: entry.root_signature.clone(),
             topology: entry.topology,
             stencil_reference: entry.stencil_reference,
+        })
+    }
+
+    /// The `DISPATCH` command signature, created on first use.
+    ///
+    /// **A command signature holding only `DISPATCH` takes no root signature.**
+    /// `CreateCommandSignature`'s second argument is required only when the
+    /// argument layout writes root arguments — a constant, a root CBV, a vertex
+    /// or index buffer view — and this one writes none, so the same object is
+    /// valid against every pipeline this device has. That is what makes one per
+    /// device correct rather than one per pipeline.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::Backend`] carrying D3D12's own message when creation fails.
+    pub(crate) fn dispatch_signature(&self) -> Result<ID3D12CommandSignature, HalError> {
+        let mut state = self.state();
+        if let Some(signature) = &state.dispatch_signature {
+            return Ok(signature.clone());
+        }
+        let argument = D3D12_INDIRECT_ARGUMENT_DESC {
+            Type: D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH,
+            ..Default::default()
+        };
+        let desc = D3D12_COMMAND_SIGNATURE_DESC {
+            ByteStride: DISPATCH_ARGUMENT_STRIDE,
+            NumArgumentDescs: 1,
+            pArgumentDescs: &raw const argument,
+            NodeMask: 0,
+        };
+        let mut created: Option<ID3D12CommandSignature> = None;
+        // SAFETY: `desc` is a live local whose `pArgumentDescs` points at
+        // `argument`, also a live local, and both outlive the call. The root
+        // signature is `None`, which this layout permits — see above. `created`
+        // is a live local of the interface type asked for.
+        unsafe {
+            self.raw
+                .CreateCommandSignature(&raw const desc, None, &raw mut created)
+        }
+        .map_err(|error| {
+            HalError::Backend(format!(
+                "ID3D12Device::CreateCommandSignature failed for the dispatch signature: {error}"
+            ))
+        })?;
+        let signature = created.ok_or_else(|| {
+            HalError::Backend(
+                "ID3D12Device::CreateCommandSignature reported success and no signature"
+                    .to_string(),
+            )
+        })?;
+        state.dispatch_signature = Some(signature.clone());
+        Ok(signature)
+    }
+
+    /// Resolves a compute pipeline for the encoder. See
+    /// [`graphics_pipeline`](Self::graphics_pipeline).
+    ///
+    /// # Errors
+    ///
+    /// As [`handle::lookup`].
+    pub(crate) fn compute_pipeline(
+        &self,
+        handle: ComputePipelineHandle,
+    ) -> Result<BoundCompute, HalError> {
+        let state = self.state();
+        let entry = handle::lookup(
+            &state.compute_pipelines,
+            "compute pipeline",
+            handle,
+            self.owner,
+        )?;
+        Ok(BoundCompute {
+            raw: entry.raw.clone(),
+            root_signature: entry.root_signature.clone(),
         })
     }
 
@@ -1002,10 +1103,12 @@ impl Dx12Device {
             bind_groups: Pool::new(),
             pipeline_layouts: Pool::new(),
             graphics_pipelines: Pool::new(),
+            compute_pipelines: Pool::new(),
             swapchains: Pool::new(),
             descriptors: Descriptors::new(&raw),
             visible: VisibleHeaps::new(),
             retire: RetireQueue::new(),
+            dispatch_signature: None,
             next_fence_value: 0,
         };
         let inner = Arc::new(DeviceInner {
@@ -2205,19 +2308,23 @@ impl Device for Dx12Device {
         }
         let mut state = self.state();
         let mut sets = Vec::with_capacity(desc.bind_group_layouts.len());
-        for (index, handle) in desc.bind_group_layouts.iter().enumerate() {
+        // One running count for the whole signature, because `dxc` numbers a
+        // source's registers end to end and does not restart at a set boundary.
+        // See `crate::binding`.
+        let mut registers = crate::dxil::Registers::default();
+        for handle in desc.bind_group_layouts {
             let record = handle::lookup(
                 &state.bind_group_layouts,
                 "bind group layout",
                 *handle,
                 self.inner.owner,
             )?;
-            let set = u32::try_from(index).unwrap_or(u32::MAX);
+            let (views, samplers) = binding::ranges(record, &mut registers);
             sets.push((
                 *handle,
                 pipeline::RootTables {
-                    views: binding::ranges(&record.views, set),
-                    samplers: binding::ranges(&record.samplers, set),
+                    views,
+                    samplers,
                     visibility: record.visibility,
                 },
             ));
@@ -2309,14 +2416,44 @@ impl Device for Dx12Device {
         handle::take_owned(&mut state.graphics_pipelines, pipeline, self.inner.owner);
     }
 
+    /// Builds a `D3D12_COMPUTE_PIPELINE_STATE_DESC` and the object from it.
+    ///
+    /// The workgroup size is checked twice and each check catches something the
+    /// other cannot: [`ComputePipelineDesc::check_workgroup_size`] against this
+    /// device's limits, which is the half every backend performs, and
+    /// `crate::pipeline`'s against the `[numthreads(…)]` the container declares,
+    /// which is the half only a backend that can see the artifact's own number
+    /// can.
     fn create_compute_pipeline(
         &self,
-        _desc: &ComputePipelineDesc<'_>,
+        desc: &ComputePipelineDesc<'_>,
     ) -> Result<ComputePipelineHandle, HalError> {
-        Err(not_yet("compute pipelines (the DX12 pipeline slice)"))
+        desc.check_workgroup_size(&self.inner.caps.limits)?;
+        let mut state = self.state();
+        let layout = handle::lookup(
+            &state.pipeline_layouts,
+            "pipeline layout",
+            desc.layout,
+            self.inner.owner,
+        )?;
+        let module = handle::lookup(
+            &state.shader_modules,
+            "shader module",
+            desc.compute.module,
+            self.inner.owner,
+        )?;
+        let entry = pipeline::compute(&self.inner.raw, desc, layout, module, self.inner.owner.id)?;
+        if let Some(label) = desc.label {
+            label_object(&entry.raw, label);
+        }
+        let handle = state.compute_pipelines.insert(entry);
+        Ok(handle::stamp(self.inner.owner, handle))
     }
 
-    fn destroy_compute_pipeline(&self, _pipeline: ComputePipelineHandle) {}
+    fn destroy_compute_pipeline(&self, pipeline: ComputePipelineHandle) {
+        let mut state = self.state();
+        handle::take_owned(&mut state.compute_pipelines, pipeline, self.inner.owner);
+    }
 
     // --- queries ---
 
@@ -3005,11 +3142,11 @@ pub(crate) mod tests {
     use crcbl_hal::{
         Barriers, BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource, BufferCopy,
         BufferImageCopy, BufferUsage, ClearValue, ColorAttachment, ColorTargetState, CompareOp,
-        CompositeAlpha, DrawIndirectCount, Extent3d, Features, FilterMode, ImageAspect,
-        ImageBarrier, ImageCopy, ImageSubresourceLayers, ImageViewType, IndexFormat, Instance,
-        LoadOp, MultisampleState, Offset3d, PresentMode, PrimitiveState, QueryKind, Rect2d,
-        RenderPassDesc, ResourceState, SemaphoreKind, SemaphoreSignal, SemaphoreWait, ShaderEntry,
-        ShaderStages, StoreOp,
+        CompositeAlpha, ComputePassDesc, DrawIndirectCount, Extent3d, Features, FilterMode,
+        ImageAspect, ImageBarrier, ImageCopy, ImageSubresourceLayers, ImageViewType, IndexFormat,
+        Instance, LoadOp, MultisampleState, Offset3d, PresentMode, PrimitiveState, QueryKind,
+        Rect2d, RenderPassDesc, ResourceState, SemaphoreKind, SemaphoreSignal, SemaphoreWait,
+        ShaderEntry, ShaderStages, StoreOp,
     };
 
     use crate::Dx12Instance;
@@ -5057,20 +5194,6 @@ pub(crate) mod tests {
                     .expect_err("no shared fence yet"),
             ),
             (
-                "compute pipelines",
-                device
-                    .create_compute_pipeline(&ComputePipelineDesc {
-                        label: None,
-                        layout: unissued(),
-                        compute: ShaderEntry {
-                            module: unissued(),
-                            entry_point: "cs_main",
-                        },
-                        workgroup_size: [64, 1, 1],
-                    })
-                    .expect_err("no pipeline state objects yet"),
-            ),
-            (
                 "semaphore waits",
                 device
                     .wait_semaphores(
@@ -5121,7 +5244,6 @@ pub(crate) mod tests {
                     stride: 20,
                 });
             }),
-            ("dispatches", |encoder| encoder.dispatch(1, 1, 1)),
             ("index buffers", |encoder| {
                 encoder.bind_index_buffer(unissued(), 0, IndexFormat::Uint32);
             }),
@@ -5295,6 +5417,20 @@ pub(crate) mod tests {
                     })
                     .expect_err("that pipeline layout was never issued"),
             ),
+            (
+                "compute pipelines",
+                device
+                    .create_compute_pipeline(&ComputePipelineDesc {
+                        label: None,
+                        layout: unissued(),
+                        compute: ShaderEntry {
+                            module: unissued(),
+                            entry_point: "computeMain",
+                        },
+                        workgroup_size: [crcbl_shaders::compute_probe::WORKGROUP_SIZE, 1, 1],
+                    })
+                    .expect_err("that pipeline layout was never issued"),
+            ),
         ];
         assert!(!landed.is_empty(), "nothing to check");
         for (what, error) in &landed {
@@ -5316,6 +5452,22 @@ pub(crate) mod tests {
                 encoder.push_constants(ShaderStages::ALL, 0, &[0u8; 4], unissued());
             }),
             ("draws", |encoder| encoder.draw(0..3, 0..1)),
+            // Each opens the pass first, because the scope is what decides the
+            // bind point and a compute command outside one is a descriptor
+            // error rather than a handle one — which would pass this test
+            // without ever reaching the code it is about.
+            ("compute pipelines", |encoder| {
+                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                encoder.bind_compute_pipeline(unissued());
+            }),
+            ("dispatches", |encoder| {
+                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                encoder.dispatch(1, 1, 1);
+            }),
+            ("indirect dispatches", |encoder| {
+                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                encoder.dispatch_indirect(unissued(), 0);
+            }),
         ];
         assert!(!recording.is_empty(), "nothing to check");
         for (what, record) in recording {
@@ -5632,5 +5784,784 @@ pub(crate) mod tests {
         );
         assert_eq!(poisoned, [POISON; 4], "a refused poll wrote to the output");
         device.destroy_buffer(readback);
+    }
+
+    // --- the compute path ---
+    //
+    // The D3D12 half of `crcbl-vk`'s `vk_e2e/compute.rs` and `crcbl-mtl`'s
+    // dispatch tests: the same shader, the same expectations and the same
+    // sentinel. `dispatch` returns nothing, so a backend that recorded no
+    // `Dispatch` at all would submit cleanly and leave a buffer full of
+    // [`PROBE_SENTINEL`] — only reading the destination back tells the two
+    // apart, which is why `compute_probe.slang` exists.
+
+    /// Workgroups the probe's buffers are sized for.
+    ///
+    /// Eight, so the indirect dispatch can ask for two and leave six
+    /// workgroups' worth of untouched sentinel behind it — which is what tells
+    /// "the argument buffer was read" apart from "everything was dispatched
+    /// anyway".
+    const PROBE_GROUPS: u32 = 8;
+
+    /// Elements the probe transforms.
+    const PROBE_ELEMENTS: u32 = PROBE_GROUPS * crcbl_shaders::compute_probe::WORKGROUP_SIZE;
+
+    /// What the destination holds before every dispatch.
+    ///
+    /// Deliberately not zero and deliberately not a square: a destination that
+    /// was never written must not be confusable with one the shader wrote, and
+    /// zero is both its own square and what fresh device memory tends to be.
+    const PROBE_SENTINEL: u32 = 0xDEAD_BEEF;
+
+    /// Bytes one probe buffer occupies.
+    const fn probe_bytes() -> u64 {
+        PROBE_ELEMENTS as u64 * 4
+    }
+
+    /// The probe's input, one distinct value per index.
+    ///
+    /// Distinct matters: with a constant input, a shader that indexed `source`
+    /// wrongly would still produce the right number in every slot. `index + 1`
+    /// avoids zero, whose square is itself.
+    fn probe_source() -> Vec<u32> {
+        (0..PROBE_ELEMENTS).map(|index| index + 1).collect()
+    }
+
+    /// What the destination must hold for `elements` dispatched elements, and
+    /// the sentinel beyond them.
+    ///
+    /// Written out here rather than derived from the shader: squaring is a
+    /// closed form the test states for itself, which is the whole reason the
+    /// probe squares.
+    fn probe_expected(elements: u32) -> Vec<u32> {
+        probe_source()
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                if (index as u32) < elements {
+                    value * value
+                } else {
+                    PROBE_SENTINEL
+                }
+            })
+            .collect()
+    }
+
+    /// Everything one compute dispatch needs, built through the seam.
+    struct ComputeProbe {
+        params: BufferHandle,
+        source: BufferHandle,
+        destination: BufferHandle,
+        /// The upload-heap buffer the sentinel is copied from before each run.
+        ///
+        /// A copy rather than `fill_buffer`, which this backend still refuses —
+        /// so the reset is a transfer the encoder already records rather than a
+        /// second slice this test would have to wait for.
+        sentinel: BufferHandle,
+        /// Host-readable copy target, so the result can be asserted rather than
+        /// assumed.
+        staging: BufferHandle,
+        set_layout: BindGroupLayoutHandle,
+        group: BindGroupHandle,
+        pipeline_layout: PipelineLayoutHandle,
+        pipeline: ComputePipelineHandle,
+    }
+
+    impl ComputeProbe {
+        /// Builds the pipeline, stages the input in, and leaves every buffer in
+        /// the state [`run`](Self::run) expects.
+        ///
+        /// The destination is left in `TransferSrc` rather than `Undefined`
+        /// because D3D12 checks a transition's *before* state: every run starts
+        /// from the same place only if the setup ends where a run ends.
+        fn new(device: &Dx12Device) -> Self {
+            let params = crcbl_shaders::compute_probe::Params {
+                count: PROBE_ELEMENTS,
+            }
+            .to_bytes();
+            let source_bytes: Vec<u8> = probe_source()
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+
+            let staged = device
+                .create_buffer(&BufferDesc {
+                    label: Some("compute probe upload"),
+                    size: params.len() as u64 + probe_bytes(),
+                    usage: BufferUsage::TRANSFER_SRC,
+                    memory: MemoryLocation::HostUpload,
+                })
+                .expect("a staging buffer");
+            device.write_buffer(staged, 0, &params).expect("write");
+            device
+                .write_buffer(staged, params.len() as u64, &source_bytes)
+                .expect("write");
+
+            let sentinel = device
+                .create_buffer(&BufferDesc {
+                    label: Some("compute probe sentinel"),
+                    size: probe_bytes(),
+                    usage: BufferUsage::TRANSFER_SRC,
+                    memory: MemoryLocation::HostUpload,
+                })
+                .expect("a sentinel buffer");
+            let sentinel_bytes: Vec<u8> =
+                core::iter::repeat_n(PROBE_SENTINEL, PROBE_ELEMENTS as usize)
+                    .flat_map(u32::to_le_bytes)
+                    .collect();
+            device
+                .write_buffer(sentinel, 0, &sentinel_bytes)
+                .expect("write");
+
+            let device_buffer = |label, usage| {
+                device
+                    .create_buffer(&BufferDesc {
+                        label: Some(label),
+                        size: probe_bytes(),
+                        usage,
+                        memory: MemoryLocation::DeviceLocal,
+                    })
+                    .unwrap_or_else(|error| panic!("stage=create_buffer({label}): {error:?}"))
+            };
+            let params_buffer = device
+                .create_buffer(&BufferDesc {
+                    label: Some("compute probe params"),
+                    size: crcbl_shaders::compute_probe::PARAMS_SIZE as u64,
+                    usage: BufferUsage::UNIFORM | BufferUsage::TRANSFER_DST,
+                    memory: MemoryLocation::DeviceLocal,
+                })
+                .expect("a uniform buffer");
+            let source = device_buffer(
+                "compute probe source",
+                BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+            );
+            let destination = device_buffer(
+                "compute probe destination",
+                BufferUsage::STORAGE | BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+            );
+            let staging = readback_buffer(device, probe_bytes() as usize);
+
+            run(device, |encoder| {
+                encoder.pipeline_barrier(&Barriers {
+                    buffers: &[
+                        buffer_barrier(
+                            params_buffer,
+                            ResourceState::Undefined,
+                            ResourceState::TransferDst,
+                        ),
+                        buffer_barrier(
+                            source,
+                            ResourceState::Undefined,
+                            ResourceState::TransferDst,
+                        ),
+                    ],
+                    ..Barriers::default()
+                });
+                encoder.copy_buffer_to_buffer(&BufferCopy {
+                    src: staged,
+                    src_offset: 0,
+                    dst: params_buffer,
+                    dst_offset: 0,
+                    size: params.len() as u64,
+                });
+                encoder.copy_buffer_to_buffer(&BufferCopy {
+                    src: staged,
+                    src_offset: params.len() as u64,
+                    dst: source,
+                    dst_offset: 0,
+                    size: probe_bytes(),
+                });
+                encoder.pipeline_barrier(&Barriers {
+                    buffers: &[
+                        buffer_barrier(
+                            params_buffer,
+                            ResourceState::TransferDst,
+                            ResourceState::ShaderRead,
+                        ),
+                        buffer_barrier(
+                            source,
+                            ResourceState::TransferDst,
+                            ResourceState::ShaderRead,
+                        ),
+                        buffer_barrier(
+                            destination,
+                            ResourceState::Undefined,
+                            ResourceState::TransferSrc,
+                        ),
+                    ],
+                    ..Barriers::default()
+                });
+            });
+            device.destroy_buffer(staged);
+
+            let set_layout = device
+                .create_bind_group_layout(&BindGroupLayoutDesc {
+                    label: Some("compute probe"),
+                    entries: &[
+                        BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: ShaderStages::COMPUTE,
+                            kind: BindingKind::UniformBuffer { dynamic: false },
+                            count: 1,
+                            flags: BindingFlags::empty(),
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 1,
+                            visibility: ShaderStages::COMPUTE,
+                            kind: BindingKind::StorageBuffer {
+                                read_only: true,
+                                dynamic: false,
+                            },
+                            count: 1,
+                            flags: BindingFlags::empty(),
+                        },
+                        BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: ShaderStages::COMPUTE,
+                            kind: BindingKind::StorageBuffer {
+                                read_only: false,
+                                dynamic: false,
+                            },
+                            count: 1,
+                            flags: BindingFlags::empty(),
+                        },
+                    ],
+                })
+                .expect("the probe's layout");
+            let pipeline_layout = device
+                .create_pipeline_layout(&PipelineLayoutDesc {
+                    label: Some("compute probe"),
+                    bind_group_layouts: &[set_layout],
+                    push_constants: None,
+                })
+                .expect("a root signature with one descriptor table");
+            let group = device
+                .create_bind_group(&BindGroupDesc {
+                    label: Some("compute probe"),
+                    layout: set_layout,
+                    entries: &[
+                        BindGroupEntry {
+                            binding: 0,
+                            array_index: 0,
+                            resource: BindingResource::whole_buffer(params_buffer),
+                        },
+                        BindGroupEntry {
+                            binding: 1,
+                            array_index: 0,
+                            resource: BindingResource::whole_buffer(source),
+                        },
+                        BindGroupEntry {
+                            binding: 2,
+                            array_index: 0,
+                            resource: BindingResource::whole_buffer(destination),
+                        },
+                    ],
+                    variable_count: None,
+                })
+                .expect("a bind group over the probe's three buffers");
+
+            let module = device
+                .create_shader_module(&ShaderModuleDesc {
+                    label: Some("compute_probe.slang"),
+                    dxil: crcbl_shaders::COMPUTE_PROBE.dxil(PROBE_ENTRY),
+                    ..ShaderModuleDesc::default()
+                })
+                .expect("the committed DXIL is accepted");
+            let pipeline = device
+                .create_compute_pipeline(&ComputePipelineDesc {
+                    label: Some("compute probe"),
+                    layout: pipeline_layout,
+                    compute: ShaderEntry {
+                        module,
+                        entry_point: PROBE_ENTRY,
+                    },
+                    // The shader's own number, not a literal: `crcbl-shaders`
+                    // checks this constant against the `[numthreads(…)]` in
+                    // `compute_probe.slang`, and this backend checks it again
+                    // against the container it is handing to D3D12.
+                    workgroup_size: [crcbl_shaders::compute_probe::WORKGROUP_SIZE, 1, 1],
+                })
+                .unwrap_or_else(|error| panic!("stage=create_compute_pipeline: {error:?}"));
+            device.destroy_shader_module(module);
+
+            Self {
+                params: params_buffer,
+                source,
+                destination,
+                sentinel,
+                staging,
+                set_layout,
+                group,
+                pipeline_layout,
+                pipeline,
+            }
+        }
+
+        /// Resets the destination to the sentinel, runs `record` inside a
+        /// compute pass, and reads the destination back.
+        ///
+        /// `record` is the *only* thing that varies between the direct and
+        /// indirect tests, so both go through the same barriers and the same
+        /// readback — and a difference in the result is a difference in the
+        /// dispatch.
+        fn run(
+            &self,
+            device: &Dx12Device,
+            record: impl FnOnce(&mut dyn CommandEncoder),
+        ) -> Vec<u32> {
+            run(device, |encoder| {
+                encoder.pipeline_barrier(&Barriers {
+                    buffers: &[buffer_barrier(
+                        self.destination,
+                        ResourceState::TransferSrc,
+                        ResourceState::TransferDst,
+                    )],
+                    ..Barriers::default()
+                });
+                encoder.copy_buffer_to_buffer(&BufferCopy {
+                    src: self.sentinel,
+                    src_offset: 0,
+                    dst: self.destination,
+                    dst_offset: 0,
+                    size: probe_bytes(),
+                });
+                // `ShaderReadWrite`, not `ShaderWrite`: a barrier names the
+                // access the *descriptor* permits rather than the one the
+                // source performs, and an unordered-access view is both.
+                encoder.pipeline_barrier(&Barriers {
+                    buffers: &[buffer_barrier(
+                        self.destination,
+                        ResourceState::TransferDst,
+                        ResourceState::ShaderReadWrite,
+                    )],
+                    ..Barriers::default()
+                });
+
+                encoder.begin_compute_pass(&ComputePassDesc {
+                    label: Some("compute probe"),
+                });
+                encoder.bind_compute_pipeline(self.pipeline);
+                // Inside the pass, because the open scope is the only signal the
+                // seam gives the backend about which bind point a group is for.
+                encoder.bind_group(0, self.group, &[], self.pipeline_layout);
+                record(encoder);
+                encoder.end_compute_pass();
+
+                encoder.pipeline_barrier(&Barriers {
+                    buffers: &[buffer_barrier(
+                        self.destination,
+                        ResourceState::ShaderReadWrite,
+                        ResourceState::TransferSrc,
+                    )],
+                    ..Barriers::default()
+                });
+                encoder.copy_buffer_to_buffer(&BufferCopy {
+                    src: self.destination,
+                    src_offset: 0,
+                    dst: self.staging,
+                    dst_offset: 0,
+                    size: probe_bytes(),
+                });
+            });
+
+            let request = device
+                .request_readback(&ReadbackDesc {
+                    label: Some("compute probe readback"),
+                    buffer: self.staging,
+                    offset: 0,
+                    size: probe_bytes(),
+                    after: None,
+                })
+                .expect("a readback of a HostReadback buffer");
+            let bytes = drain(device, request, probe_bytes() as usize);
+            device.destroy_readback(request);
+            bytes
+                .chunks_exact(4)
+                .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+                .collect()
+        }
+
+        fn destroy(self, device: &Dx12Device) {
+            device.destroy_compute_pipeline(self.pipeline);
+            device.destroy_bind_group(self.group);
+            device.destroy_pipeline_layout(self.pipeline_layout);
+            device.destroy_bind_group_layout(self.set_layout);
+            device.destroy_buffer(self.staging);
+            device.destroy_buffer(self.sentinel);
+            device.destroy_buffer(self.destination);
+            device.destroy_buffer(self.source);
+            device.destroy_buffer(self.params);
+        }
+    }
+
+    /// The probe's entry point, which is also its container's file name.
+    const PROBE_ENTRY: &str = "computeMain";
+
+    /// One buffer barrier, on the one queue this backend creates.
+    fn buffer_barrier(
+        buffer: BufferHandle,
+        from: ResourceState,
+        to: ResourceState,
+    ) -> crcbl_hal::BufferBarrier {
+        crcbl_hal::BufferBarrier {
+            buffer,
+            from,
+            to,
+            queue_transfer: None,
+        }
+    }
+
+    /// Compares a probe result against what the CPU says it should be, and says
+    /// which element disagreed first.
+    ///
+    /// The element count is asserted before the values: a readback that came
+    /// back short would otherwise satisfy a `zip` over nothing at all.
+    fn assert_probe(actual: &[u32], expected: &[u32], what: &str) {
+        assert_eq!(
+            actual.len(),
+            PROBE_ELEMENTS as usize,
+            "{what}: the readback is not the whole destination buffer"
+        );
+        assert_eq!(expected.len(), actual.len(), "{what}: expectation length");
+        if let Some((index, (got, want))) = actual
+            .iter()
+            .zip(expected)
+            .enumerate()
+            .find(|(_, (got, want))| got != want)
+        {
+            panic!(
+                "{what}: element {index} is {got} ({got:#x}), expected {want} ({want:#x}). \
+                 {} of {} elements were expected to be written.",
+                expected
+                    .iter()
+                    .filter(|value| **value != PROBE_SENTINEL)
+                    .count(),
+                expected.len()
+            );
+        }
+    }
+
+    /// **A dispatch that really ran, and really wrote the values it was asked
+    /// for** — and the evidence behind [`Features::COMPUTE`].
+    ///
+    /// This is what the flag is reported from. `crcbl_dx12::adapter` reports
+    /// compute unconditionally, and a feature whose calls do nothing is the
+    /// "unsupported arriving as passed" shape the crate docs name, so the
+    /// assertion on the flag and the assertion on the buffer are in the same
+    /// test on purpose: neither passes without the other.
+    ///
+    /// Every stage this goes through is named in its panic — see [`run`] — for
+    /// the reason the triangle test gives: a WARP that cannot execute a compute
+    /// shader must fail legibly rather than as a timeout.
+    ///
+    /// # What only CI can settle
+    ///
+    /// All of it. This crate compiles on Windows alone and the development box
+    /// is Linux.
+    #[test]
+    fn a_compute_dispatch_writes_the_values_it_was_asked_for() {
+        let (_instance, device) = open_device();
+        // Not a skip. Every D3D12 device accepts compute work on its DIRECT
+        // queue, so an absence here is a capability-reporting bug rather than a
+        // machine this suite should tiptoe around.
+        assert!(
+            device.caps().features.contains(Features::COMPUTE),
+            "every D3D12 device has compute; adapter caps report {:?}",
+            device.caps().features
+        );
+
+        let probe = ComputeProbe::new(&device);
+        let values = probe.run(&device, |encoder| {
+            encoder.dispatch(PROBE_GROUPS, 1, 1);
+        });
+
+        assert_probe(&values, &probe_expected(PROBE_ELEMENTS), "a full dispatch");
+        assert!(
+            !values.contains(&PROBE_SENTINEL),
+            "a full dispatch must leave no element unwritten"
+        );
+
+        // And a pass with no dispatch in it writes nothing, which is what makes
+        // the assertion above about the dispatch rather than about the copy that
+        // reset the buffer.
+        let empty = probe.run(&device, |_| {});
+        assert!(
+            empty.iter().all(|value| *value == PROBE_SENTINEL),
+            "a compute pass with no dispatch in it wrote to the destination"
+        );
+
+        probe.destroy(&device);
+    }
+
+    /// `dispatch_indirect` reads its workgroup count out of GPU memory, at the
+    /// offset it was given.
+    ///
+    /// The argument buffer carries a **decoy** at offset zero that would
+    /// dispatch every workgroup. So three different failures are
+    /// distinguishable rather than confusable: a backend that ignored the offset
+    /// dispatches eight groups and overwrites the tail; one that ignored the
+    /// argument buffer entirely writes nothing; a correct one writes exactly the
+    /// front of the buffer and leaves the sentinel behind it.
+    ///
+    /// It is also the only test of the command signature: `ExecuteIndirect` is
+    /// how D3D12 spells this call, and a signature with the wrong stride or the
+    /// wrong argument type reads three words from somewhere else in the buffer.
+    #[test]
+    fn dispatch_indirect_reads_its_workgroup_count_from_the_buffer() {
+        /// Workgroups the real arguments ask for. Fewer than [`PROBE_GROUPS`],
+        /// so the difference is visible in the readback.
+        const DISPATCHED_GROUPS: u32 = 2;
+        /// Where the real arguments live. Non-zero, and the decoy sits at zero.
+        const ARGS_OFFSET: u64 = 16;
+
+        let (_instance, device) = open_device();
+        let probe = ComputeProbe::new(&device);
+
+        // `D3D12_DISPATCH_ARGUMENTS`: three `u32`s, `x`, `y`, `z`. Fixed by
+        // D3D12 rather than by this engine — `crcbl-hal` does not spell the
+        // argument layout, because it is the backend's native one, and this is a
+        // `crcbl-dx12` test.
+        let mut args_bytes = vec![0u8; ARGS_OFFSET as usize + 12];
+        for (slot, value) in [PROBE_GROUPS, 1, 1].iter().enumerate() {
+            args_bytes[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        for (slot, value) in [DISPATCHED_GROUPS, 1, 1].iter().enumerate() {
+            let at = ARGS_OFFSET as usize + slot * 4;
+            args_bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+
+        let upload = device
+            .create_buffer(&BufferDesc {
+                label: Some("dispatch args upload"),
+                size: args_bytes.len() as u64,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a staging buffer");
+        device.write_buffer(upload, 0, &args_bytes).expect("write");
+        let args = device
+            .create_buffer(&BufferDesc {
+                label: Some("dispatch args"),
+                size: args_bytes.len() as u64,
+                usage: BufferUsage::INDIRECT | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("an indirect buffer");
+
+        run(&device, |encoder| {
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[buffer_barrier(
+                    args,
+                    ResourceState::Undefined,
+                    ResourceState::TransferDst,
+                )],
+                ..Barriers::default()
+            });
+            encoder.copy_buffer_to_buffer(&BufferCopy {
+                src: upload,
+                src_offset: 0,
+                dst: args,
+                dst_offset: 0,
+                size: args_bytes.len() as u64,
+            });
+            encoder.pipeline_barrier(&Barriers {
+                buffers: &[buffer_barrier(
+                    args,
+                    ResourceState::TransferDst,
+                    ResourceState::IndirectArgument,
+                )],
+                ..Barriers::default()
+            });
+        });
+        device.destroy_buffer(upload);
+
+        let values = probe.run(&device, |encoder| {
+            encoder.dispatch_indirect(args, ARGS_OFFSET);
+        });
+
+        let dispatched = DISPATCHED_GROUPS * crcbl_shaders::compute_probe::WORKGROUP_SIZE;
+        assert!(
+            dispatched > 0 && dispatched < PROBE_ELEMENTS,
+            "the indirect dispatch must cover part of the buffer, not none and not all"
+        );
+        assert_probe(&values, &probe_expected(dispatched), "an indirect dispatch");
+        // Said again in its own words, because the two halves fail for different
+        // reasons: the front proves work happened, the tail proves the *count*
+        // came from the buffer at the offset that was named.
+        assert!(
+            values[..dispatched as usize]
+                .iter()
+                .all(|value| *value != PROBE_SENTINEL),
+            "the dispatched workgroups wrote nothing"
+        );
+        assert!(
+            values[dispatched as usize..]
+                .iter()
+                .all(|value| *value == PROBE_SENTINEL),
+            "the workgroups past the indirect count ran anyway — the argument buffer or its \
+             offset was not honoured"
+        );
+
+        device.destroy_buffer(args);
+        probe.destroy(&device);
+    }
+
+    /// **A `workgroup_size` that is not the one the container declares is
+    /// refused, and an indirect dispatch that would read past its buffer is
+    /// too.**
+    ///
+    /// The first is the check the seam's field exists to make possible and that
+    /// only a backend which can see `[numthreads(…)]` can make — see
+    /// `crate::dxil`. Without it a caller that wrote `[32, 1, 1]` against this
+    /// `[numthreads(64, 1, 1)]` shader would compute half as many groups as the
+    /// work needs and leave the back half of every buffer untouched, on every
+    /// backend at once.
+    ///
+    /// The second is the bounds check `ExecuteIndirect` does not do. Both are
+    /// asserted beside a descriptor that *is* accepted, so neither is a backend
+    /// refusing everything.
+    #[test]
+    fn a_workgroup_size_the_container_disagrees_with_is_refused_by_name() {
+        let (_instance, device) = open_device();
+        let probe = ComputeProbe::new(&device);
+        let module = device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("compute_probe.slang"),
+                dxil: crcbl_shaders::COMPUTE_PROBE.dxil(PROBE_ENTRY),
+                ..ShaderModuleDesc::default()
+            })
+            .expect("the committed DXIL is accepted");
+        let desc = |workgroup_size| ComputePipelineDesc {
+            label: Some("disagreeing probe"),
+            layout: probe.pipeline_layout,
+            compute: ShaderEntry {
+                module,
+                entry_point: PROBE_ENTRY,
+            },
+            workgroup_size,
+        };
+
+        let declared = crcbl_shaders::compute_probe::WORKGROUP_SIZE;
+        let error = device
+            .create_compute_pipeline(&desc([declared / 2, 1, 1]))
+            .expect_err("half the declared thread count is not the shader's own number");
+        let HalError::ShaderCompilation(text) = &error else {
+            panic!("a descriptor that disagrees with the artifact is not {error:?}");
+        };
+        assert!(text.contains("numthreads"), "{text}");
+
+        // The same descriptor with the shader's own number is accepted, so the
+        // refusal above is the comparison firing rather than this backend
+        // refusing every compute pipeline.
+        let agreeing = device
+            .create_compute_pipeline(&desc([declared, 1, 1]))
+            .expect("the container's own thread count");
+        device.destroy_compute_pipeline(agreeing);
+        device.destroy_shader_module(module);
+
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let short = device
+            .create_buffer(&BufferDesc {
+                label: Some("too short for dispatch arguments"),
+                size: 8,
+                usage: BufferUsage::INDIRECT,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("an eight-byte buffer");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+        encoder.begin_compute_pass(&ComputePassDesc { label: None });
+        encoder.bind_compute_pipeline(probe.pipeline);
+        encoder.dispatch_indirect(short, 0);
+        encoder.end_compute_pass();
+        let error = encoder
+            .finish()
+            .expect_err("twelve bytes of arguments do not fit in eight");
+        let HalError::InvalidDescriptor(text) = &error else {
+            panic!("a short argument buffer is not {error:?}");
+        };
+        assert!(text.contains("dispatch_indirect"), "{text}");
+
+        device.destroy_buffer(short);
+        probe.destroy(&device);
+    }
+
+    /// The compute scope's own rules, at record time.
+    ///
+    /// `crcbl-hal`'s null recorder rejects a nested pass, an unclosed one and a
+    /// dispatch outside one, and the seam says a backend "may assume these
+    /// hold". This backend does not merely assume: it reports all three, so a
+    /// graph that mis-nests fails here rather than recording a dispatch onto the
+    /// graphics bind point — which D3D12 would accept and quietly get wrong.
+    #[test]
+    fn compute_commands_outside_a_pass_and_with_no_pipeline_are_refused() {
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+
+        type Refused = (&'static str, &'static str, fn(&mut dyn CommandEncoder));
+        let cases: &[Refused] = &[
+            ("outside a compute pass", "dispatch", |encoder| {
+                encoder.dispatch(1, 1, 1);
+            }),
+            (
+                "outside a compute pass",
+                "bind_compute_pipeline",
+                |encoder| {
+                    encoder.bind_compute_pipeline(unissued());
+                },
+            ),
+            ("no compute pipeline bound", "dispatch", |encoder| {
+                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                encoder.dispatch(1, 1, 1);
+            }),
+            (
+                "no compute pipeline bound",
+                "dispatch_indirect",
+                |encoder| {
+                    encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                    encoder.dispatch_indirect(unissued(), 0);
+                },
+            ),
+            ("do not nest", "a nested compute pass", |encoder| {
+                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+            }),
+            ("compute pass still open", "an unclosed pass", |encoder| {
+                encoder.begin_compute_pass(&ComputePassDesc { label: None });
+            }),
+        ];
+        assert!(!cases.is_empty(), "nothing to check");
+        for (expected, what, record) in cases {
+            let mut encoder =
+                device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+            record(encoder.as_mut());
+            let Err(error) = encoder.finish() else {
+                panic!("{what} recorded successfully, so the encoder reported a lie");
+            };
+            let HalError::InvalidDescriptor(text) = &error else {
+                panic!("{what}: a mis-scoped command is not {error:?}");
+            };
+            assert!(text.contains(expected), "{what}: {text}");
+        }
+
+        // A well-formed empty pass still records on the same device, so the six
+        // failures above are the shape of each call rather than the encoder.
+        let mut good = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("well-formed compute pass"),
+            queue,
+        });
+        good.begin_compute_pass(&ComputePassDesc {
+            label: Some("empty"),
+        });
+        good.end_compute_pass();
+        let commands = good.finish().expect("an empty compute pass records");
+        device
+            .submit(queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device.wait_idle().expect("idle");
+        device.destroy_command_buffer(commands);
     }
 }

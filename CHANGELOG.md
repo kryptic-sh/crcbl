@@ -42,12 +42,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   parses and resolving it reports `GpuError::UnknownBackend` naming the backends
   that build does have.
 
-  The rest of the seam is not there yet: `crcbl-dx12` still refuses compute
-  pipelines, so a `CRCBL_GPU=dx12` run of anything that builds a
-  `ForwardRenderer` fails with
-  `unsupported by the dx12 backend: compute pipelines (the DX12 pipeline slice)`.
-  Adapter enumeration, buffers, images, bind groups, graphics pipelines, a
-  clear, a triangle and a swapchain all work.
+  The rest of the seam is not there yet: a `CRCBL_GPU=dx12` run of anything that
+  builds a `ForwardRenderer` now gets as far as the mesh pass's shader module,
+  which `crcbl-render` builds with `dxil: None` because one DXIL container holds
+  one entry point and that module has two — so it fails with "shader module
+  `mesh.slang` was given SPIR-V, WGSL and MSL, but this backend can only compile
+  DXIL". Adapter enumeration, buffers, images, bind groups, graphics and compute
+  pipelines, a clear, a triangle, a dispatch and a swapchain all work.
+
+- **`crcbl-dx12` runs compute.** `Device::create_compute_pipeline` builds a
+  `D3D12_COMPUTE_PIPELINE_STATE_DESC` from the same root signature and the same
+  validated DXIL container the graphics path uses, and
+  `CommandEncoder::bind_compute_pipeline`, `dispatch` and `dispatch_indirect`
+  record against it — the last through an `ExecuteIndirect` command signature
+  the device creates once. A bind group issued inside a compute pass now lands
+  on the compute bind point rather than the graphics one, which is the only
+  signal the seam carries. `Features::COMPUTE` is reported as of this change and
+  not before it, and the test behind the flag dispatches `compute_probe.slang`
+  and reads back what it wrote.
+
+  The seam's `ComputePipelineDesc::workgroup_size` is checked against the
+  artifact, not just against the device's limits: `[numthreads(x, y, z)]` is in
+  every signed container's `PSV0` part, so a descriptor that disagrees with the
+  shader is refused by name here exactly as `crcbl-vk` refuses it from SPIR-V.
 
 - **`crcbl-dx12` accepts `SurfaceTarget::Offscreen`**, so a D3D12 device can
   render into a texture and read it back with no window — what
@@ -1689,6 +1706,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   reset the pair, and the renderer lerps between the pair or snaps on a flagged
   tick — the naive "lerp the positions too" would fly a wrapped body back across
   the whole field.
+
+### Fixed
+
+- **`crcbl-dx12` built root signatures naming registers its shaders do not
+  read.** `BaseShaderRegister` was the seam's binding number and `RegisterSpace`
+  was the set index, on the theory that `[[vk::binding(binding, set)]]` reaches
+  HLSL unchanged. It does not: the attribute is Vulkan-only, and `dxc` numbers
+  each register class from zero in declaration order across the whole source, in
+  space 0 — so a set holding a `ConstantBuffer`, a `StructuredBuffer` and an
+  `RWStructuredBuffer` at bindings 0, 1 and 2 is `b0`/`t0`/`u0` in the container
+  and was being described as `b0`/`t1`/`u2`. Pipeline creation rejects that, so
+  every shader in this workspace whose set mixes resource classes — `mesh`,
+  `cull`, `draw_gen`, `compute_probe`, `sprite`, `ui` — could not have been used
+  from this backend. Only `triangle.slang`, whose set is one storage buffer,
+  happened to work.
+
+  Registers are now assigned per class in ascending `(set, binding)` order,
+  threaded across a whole pipeline layout, and the rule is checked against the
+  resource table in every committed DXIL container by a test that needs no
+  Windows.
 
 ### Changed
 

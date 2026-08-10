@@ -11,7 +11,8 @@
 //! # What this backend does, and the question it was written to answer
 //!
 //! **Adapter enumeration, the resource half of the seam, a cleared pixel read
-//! back, a window presented to, and a headless image ring.** `Dx12Instance` lists every D3D12 adapter
+//! back, a triangle drawn, a compute dispatch read back, a window presented to,
+//! and a headless image ring.** `Dx12Instance` lists every D3D12 adapter
 //! with its capabilities filled in, which is the one thing
 //! [`Instance::adapters`](crcbl_hal::Instance::adapters) promises can be
 //! answered before a device exists. `request_device` then opens a real
@@ -36,8 +37,8 @@
 //! **Nothing in this crate is a stub that reports success** — a draw recorded
 //! into an encoder *fails the encoder*, so `finish` hands back the refusal
 //! rather than a command buffer that submits and draws nothing. Everything past
-//! the clear that no slice has written — compute pipelines, queries, timeline
-//! semaphores, indexed and indirect draws — refuses with
+//! the clear that no slice has written — queries, timeline semaphores, indexed
+//! and indirect draws — refuses with
 //! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported)
 //! whose `what` names the slice the answer arrives in, so a caller reads "not
 //! yet" rather than "broken". A refusal that is *permanent* deliberately does
@@ -121,15 +122,17 @@
 //!
 //! [`GeometryPath`](crcbl_hal::GeometryPath) is derived from
 //! [`Features`](crcbl_hal::Features) precisely so a backend cannot claim a path
-//! it has not earned, and the flags it has not earned are still the majority of
+//! it has not earned, and the flags it has not earned are still most of
 //! [`GPU_DRIVEN`](crcbl_hal::Features::GPU_DRIVEN). So the derived path is
 //! [`IndirectPerBatch`](crcbl_hal::GeometryPath::IndirectPerBatch) **for every
 //! adapter, including one that could run the whole set** — because
-//! [`COMPUTE`](crcbl_hal::Features::COMPUTE),
 //! [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE),
 //! [`MULTI_DRAW_INDIRECT`](crcbl_hal::Features::MULTI_DRAW_INDIRECT) and
 //! [`DRAW_INDIRECT_COUNT`](crcbl_hal::Features::DRAW_INDIRECT_COUNT) all wait on
 //! calls this crate does not make yet, not because any adapter lacks them.
+//! [`COMPUTE`](crcbl_hal::Features::COMPUTE) has left that list: the dispatch
+//! slice made the calls behind it, and a dispatch's result is read back in this
+//! crate's own tests.
 //!
 //! **Read the WARP verdict off the SM6.6 line, never off the selected path.**
 //! The path is a statement about how much of this backend is written; the
@@ -153,13 +156,14 @@
 //! `crcbl_dx12::adapter` says so on the flag itself, so the withdrawal is a
 //! decision someone has already been warned about rather than a surprise.
 //!
-//! The other three reported flags do have a call behind them:
+//! The other reported flags do have a call behind them:
 //! [`BUFFER_DEVICE_ADDRESS`](crcbl_hal::Features::BUFFER_DEVICE_ADDRESS) is not
 //! optional in D3D12 and has no query to make,
 //! [`TEXTURE_COMPRESSION_BC`](crcbl_hal::Features::TEXTURE_COMPRESSION_BC) is
-//! measured per format and gates `create_image`, and
+//! measured per format and gates `create_image`,
 //! [`SAMPLER_ANISOTROPY`](crcbl_hal::Features::SAMPLER_ANISOTROPY) arrived with
-//! `create_sampler`.
+//! `create_sampler`, and [`COMPUTE`](crcbl_hal::Features::COMPUTE) arrived with
+//! `create_compute_pipeline` and `dispatch`.
 //!
 //! # `Dx12Instance` exists only on Windows, and is unlinked here on purpose
 //!
@@ -222,6 +226,12 @@ mod conv;
 mod descriptor;
 #[cfg(target_os = "windows")]
 mod device;
+// The DXIL container, parsed as bytes. Not Windows-only for the reason
+// `present` below is not: it holds no `windows` type, and off Windows it exists
+// in the test build alone so that `cargo test` on any host checks what this
+// crate believes about the artifacts it consumes.
+#[cfg(any(target_os = "windows", test))]
+mod dxil;
 #[cfg(target_os = "windows")]
 mod handle;
 #[cfg(target_os = "windows")]

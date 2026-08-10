@@ -16,10 +16,10 @@
 //! modules where the other backends create one. `crcbl_hal::shader` documents
 //! the difference on the field itself.
 //!
-//! # The container is validated here, because the alternative is a driver
-//! rejecting it
+//! # The container is validated in [`crate::dxil`], because the alternative is a
+//! driver rejecting it
 //!
-//! [`Dxil`] parses the fixed part of the `DxilContainerHeader` — the format's
+//! That module parses the fixed part of the `DxilContainerHeader` — the format's
 //! own layout, not this crate's — and refuses:
 //!
 //! * bytes that do not open with the `DXBC` magic, or whose declared container
@@ -37,6 +37,10 @@
 //! asserts the same three properties over every committed artifact with no
 //! Windows in the loop. This is the check on the *caller's* bytes, which need
 //! not have come from there.
+//!
+//! It lives there rather than here because it holds no `windows` type, so it is
+//! the half of this file a Linux box can run — which is also where the
+//! thread-group size a compute pipeline is checked against is read from.
 //!
 //! # A pipeline layout is a root signature, and the sets are its parameters
 //!
@@ -91,25 +95,27 @@
 use core::mem::ManuallyDrop;
 
 use crcbl_hal::{
-    ColorTargetState, DepthStencilState, GraphicsPipelineDesc, HalError, MultisampleState,
-    PipelineLayoutDesc, PrimitiveState, ShaderModuleDesc, ShaderSources, ShaderStages,
+    ColorTargetState, ComputePipelineDesc, DepthStencilState, GraphicsPipelineDesc, HalError,
+    MultisampleState, PipelineLayoutDesc, PrimitiveState, ShaderModuleDesc, ShaderSources,
+    ShaderStages,
 };
 use windows::Win32::Graphics::Direct3D::{D3D_PRIMITIVE_TOPOLOGY, ID3DBlob};
 use windows::Win32::Graphics::Direct3D12::{
     D3D_ROOT_SIGNATURE_VERSION_1, D3D12_BLEND_DESC, D3D12_COMPARISON_FUNC_ALWAYS,
-    D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF, D3D12_DEPTH_STENCIL_DESC,
-    D3D12_DEPTH_STENCILOP_DESC, D3D12_DEPTH_WRITE_MASK_ALL, D3D12_DEPTH_WRITE_MASK_ZERO,
-    D3D12_DESCRIPTOR_RANGE, D3D12_GRAPHICS_PIPELINE_STATE_DESC,
+    D3D12_COMPUTE_PIPELINE_STATE_DESC, D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF,
+    D3D12_DEPTH_STENCIL_DESC, D3D12_DEPTH_STENCILOP_DESC, D3D12_DEPTH_WRITE_MASK_ALL,
+    D3D12_DEPTH_WRITE_MASK_ZERO, D3D12_DESCRIPTOR_RANGE, D3D12_GRAPHICS_PIPELINE_STATE_DESC,
     D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED, D3D12_INPUT_LAYOUT_DESC, D3D12_LOGIC_OP_NOOP,
     D3D12_PIPELINE_STATE_FLAG_NONE, D3D12_RASTERIZER_DESC, D3D12_RENDER_TARGET_BLEND_DESC,
     D3D12_ROOT_DESCRIPTOR_TABLE, D3D12_ROOT_PARAMETER, D3D12_ROOT_PARAMETER_0,
     D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE, D3D12_ROOT_SIGNATURE_DESC,
-    D3D12_ROOT_SIGNATURE_FLAG_NONE, D3D12_SHADER_BYTECODE, D3D12SerializeRootSignature,
-    ID3D12Device, ID3D12PipelineState, ID3D12RootSignature,
+    D3D12_ROOT_SIGNATURE_FLAG_NONE, D3D12SerializeRootSignature, ID3D12Device, ID3D12PipelineState,
+    ID3D12RootSignature,
 };
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_UNKNOWN, DXGI_SAMPLE_DESC};
 
 use crate::conv;
+use crate::dxil::Dxil;
 use crate::handle::Owned;
 
 /// Colour attachments a D3D12 pipeline state object can declare.
@@ -117,149 +123,6 @@ use crate::handle::Owned;
 /// The array's own length in `D3D12_GRAPHICS_PIPELINE_STATE_DESC`, which is what
 /// makes a longer `color_targets` a refusal rather than a silent truncation.
 const RENDER_TARGETS: usize = 8;
-
-/// A validated DXIL container.
-///
-/// Holds the bytes so the module owns them: a `D3D12_SHADER_BYTECODE` is a
-/// borrowed pointer, and the caller's slice does not outlive
-/// `create_shader_module`.
-#[derive(Debug)]
-pub(crate) struct Dxil {
-    bytes: Vec<u8>,
-    /// `DXIL::ShaderKind` from the container's `DXIL` part.
-    kind: u32,
-}
-
-/// `DXIL::ShaderKind` for a pixel shader. Fixed by the container format.
-const KIND_PIXEL: u32 = 0;
-/// `DXIL::ShaderKind` for a vertex shader.
-const KIND_VERTEX: u32 = 1;
-/// `DXIL::ShaderKind` for a compute shader.
-const KIND_COMPUTE: u32 = 5;
-
-impl Dxil {
-    /// Parses and validates a container. See the module docs for what is
-    /// refused and why each is refused *here*.
-    ///
-    /// The layout is the format's, fixed outside this repository:
-    ///
-    /// ```text
-    /// 0  u32     magic "DXBC"
-    /// 4  [u8;16] digest, all-zero until libdxil.so signs it
-    /// 20 u16 u16 container version
-    /// 24 u32     container size in bytes
-    /// 28 u32     part count
-    /// 32 u32[]   part offsets; each part is a fourcc, a u32 size, then data
-    /// ```
-    ///
-    /// The `DXIL` part's data opens with a `DxilProgramHeader`, whose first word
-    /// packs the shader kind and model as `kind << 16 | major << 4 | minor`.
-    ///
-    /// # Errors
-    ///
-    /// [`HalError::ShaderCompilation`] naming which of the container's
-    /// invariants failed, with `label` so the message points at the module
-    /// rather than at the backend.
-    fn parse(bytes: &[u8], label: &str) -> Result<Self, HalError> {
-        let refuse = |why: &str| {
-            HalError::ShaderCompilation(format!(
-                "the DXIL for shader module `{label}` {why}; it is {} bytes",
-                bytes.len()
-            ))
-        };
-        let word = |at: usize| -> Option<u32> {
-            bytes
-                .get(at..at + 4)
-                .map(|four| u32::from_le_bytes([four[0], four[1], four[2], four[3]]))
-        };
-        if bytes.get(..4) != Some(b"DXBC") {
-            return Err(refuse("does not open with the DXBC container magic"));
-        }
-        // `get` rather than an index: four bytes of magic do not promise twenty
-        // of header, and a slice index would panic on a file that is exactly the
-        // magic — which is what a zero-length download truncated to its first
-        // block looks like.
-        let Some(digest) = bytes.get(4..20) else {
-            return Err(refuse("is too short to hold a container digest"));
-        };
-        if digest == [0u8; 16] {
-            return Err(refuse(
-                "has an all-zero container digest, so dxc never signed it — every D3D12 driver \
-                 refuses an unsigned container",
-            ));
-        }
-        let declared = word(24).ok_or_else(|| refuse("is too short to hold a container header"))?;
-        if declared as usize != bytes.len() {
-            return Err(refuse(&format!(
-                "declares a container of {declared} bytes, so it is truncated or mis-sliced"
-            )));
-        }
-        let parts = word(28).ok_or_else(|| refuse("declares no part table"))?;
-        for part in 0..parts as usize {
-            let offset =
-                word(32 + part * 4).ok_or_else(|| refuse("has a truncated part table"))? as usize;
-            if bytes.get(offset..offset + 4) == Some(b"DXIL") {
-                let version =
-                    word(offset + 8).ok_or_else(|| refuse("has a truncated DXIL part"))?;
-                return Ok(Self {
-                    bytes: bytes.to_vec(),
-                    kind: version >> 16,
-                });
-            }
-        }
-        Err(refuse("has no DXIL part, so it carries no bytecode"))
-    }
-
-    /// The bytecode, as D3D12 takes it.
-    ///
-    /// Borrowed from `self`, so the returned value must not outlive the module —
-    /// which is why every caller builds it inside the same statement that hands
-    /// the pipeline descriptor to D3D12.
-    fn bytecode(&self) -> D3D12_SHADER_BYTECODE {
-        D3D12_SHADER_BYTECODE {
-            pShaderBytecode: self.bytes.as_ptr().cast(),
-            BytecodeLength: self.bytes.len(),
-        }
-    }
-
-    /// Checks the container is for `stage`, or says which it is for.
-    fn expect(&self, stage: ShaderStages, entry_point: &str) -> Result<(), HalError> {
-        let wanted = match stage {
-            ShaderStages::VERTEX => KIND_VERTEX,
-            ShaderStages::FRAGMENT => KIND_PIXEL,
-            _ => KIND_COMPUTE,
-        };
-        if self.kind == wanted {
-            return Ok(());
-        }
-        Err(HalError::ShaderCompilation(format!(
-            "the module bound as `{entry_point}` for the {} stage holds a {} container; a DXIL \
-             container is compiled for one entry point at one stage, so this is the wrong \
-             artifact rather than the wrong entry-point name",
-            stage_name(stage),
-            stage_name_of_kind(self.kind),
-        )))
-    }
-}
-
-/// How a message names a stage.
-const fn stage_name(stage: ShaderStages) -> &'static str {
-    match stage {
-        ShaderStages::VERTEX => "vertex",
-        ShaderStages::FRAGMENT => "fragment",
-        _ => "compute",
-    }
-}
-
-/// How a message names a container's own shader kind.
-const fn stage_name_of_kind(kind: u32) -> &'static str {
-    match kind {
-        KIND_PIXEL => "pixel",
-        KIND_VERTEX => "vertex",
-        KIND_COMPUTE => "compute",
-        _ => "non-graphics",
-    }
-}
 
 /// A shader module: one validated DXIL container.
 #[derive(Debug)]
@@ -317,7 +180,29 @@ pub(crate) struct GraphicsPipelineEntry {
     pub(crate) stencil_reference: Option<u32>,
 }
 
+/// A compute pipeline: the state object and the signature it was built against.
+///
+/// No topology and no stencil reference, which is the whole difference from
+/// [`GraphicsPipelineEntry`]: D3D12 leaves nothing about a dispatch on the
+/// command list except the root arguments every pipeline needs.
+#[derive(Debug)]
+pub(crate) struct ComputePipelineEntry {
+    pub(crate) owner: u64,
+    pub(crate) raw: ID3D12PipelineState,
+    /// As [`GraphicsPipelineEntry::root_signature`], and set through
+    /// `SetComputeRootSignature` rather than the graphics call — a command list
+    /// carries one of each, and setting the wrong one leaves the dispatch with
+    /// whatever the last draw bound.
+    pub(crate) root_signature: ID3D12RootSignature,
+}
+
 impl Owned for ShaderModuleEntry {
+    fn owner(&self) -> u64 {
+        self.owner
+    }
+}
+
+impl Owned for ComputePipelineEntry {
     fn owner(&self) -> u64 {
         self.owner
     }
@@ -658,6 +543,85 @@ fn release_root_signature(state: &mut D3D12_GRAPHICS_PIPELINE_STATE_DESC) {
     unsafe { ManuallyDrop::drop(&mut state.pRootSignature) };
 }
 
+/// Builds a `D3D12_COMPUTE_PIPELINE_STATE_DESC` and the object from it.
+///
+/// Nearly all of the machinery is [`graphics`]': the same root signature, the
+/// same validated DXIL container, the same `ManuallyDrop` discipline on
+/// `pRootSignature`. What is absent is everything a rasteriser needs — there is
+/// no blend, depth, sample or attachment state on a compute pipeline, and
+/// nothing is left on the command list for [`bind_compute_pipeline`] to replay.
+///
+/// # The workgroup size is checked against the container, not merely the limits
+///
+/// [`ComputePipelineDesc::workgroup_size`] exists because MSL cannot declare a
+/// thread count. DXIL can, and does: `[numthreads(x, y, z)]` is in the `PSV0`
+/// part of every container `dxc` signs, so a descriptor that disagrees with the
+/// artifact is caught here — the same check `crcbl-vk` makes from
+/// `OpExecutionMode LocalSize`. See [`crate::dxil`] for how it is read and for
+/// the arm where a container is too old to say.
+///
+/// [`bind_compute_pipeline`]: crcbl_hal::CommandEncoder::bind_compute_pipeline
+///
+/// # Errors
+///
+/// [`HalError::ShaderCompilation`] for a container that is not a compute shader
+/// or whose thread-group size is not the one the descriptor declares, and
+/// [`HalError::PipelineCreation`] carrying D3D12's own message when the driver
+/// refuses the object — which is what a root signature that does not cover the
+/// registers the shader reads arrives as.
+pub(crate) fn compute(
+    device: &ID3D12Device,
+    desc: &ComputePipelineDesc<'_>,
+    layout: &PipelineLayoutEntry,
+    module: &ShaderModuleEntry,
+    owner: u64,
+) -> Result<ComputePipelineEntry, HalError> {
+    let label = desc.label.unwrap_or("<unlabelled>");
+    module
+        .dxil
+        .expect(ShaderStages::COMPUTE, desc.compute.entry_point)?;
+    if let Some(declared) = module.dxil.numthreads()
+        && declared != desc.workgroup_size
+    {
+        return Err(HalError::ShaderCompilation(format!(
+            "`{label}` asks for a workgroup of {:?} and `{}`'s container declares \
+             [numthreads({}, {}, {})]; the shader's own number is the one the dispatch runs, so \
+             the descriptor would launch a different grid than it computed",
+            desc.workgroup_size, desc.compute.entry_point, declared[0], declared[1], declared[2],
+        )));
+    }
+
+    // As `graphics`: every fallible step happens before the descriptor exists,
+    // so no `?` can leak the reference `pRootSignature` clones.
+    let mut state = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+        pRootSignature: ManuallyDrop::new(Some(layout.raw.clone())),
+        CS: module.dxil.bytecode(),
+        NodeMask: 0,
+        Flags: D3D12_PIPELINE_STATE_FLAG_NONE,
+        ..Default::default()
+    };
+    // SAFETY: `state` is a live, fully initialised descriptor borrowed for the
+    // call. Its `CS` pointer borrows `module`, which outlives this statement,
+    // and `pRootSignature` holds a reference released just below.
+    // `ID3D12PipelineState` is the IID asked for.
+    let created: Result<ID3D12PipelineState, _> =
+        unsafe { device.CreateComputePipelineState(&raw const state) };
+    // SAFETY: `pRootSignature` was written exactly once, by the initialiser
+    // above, and this is its matching release. The descriptor is not read again.
+    unsafe { ManuallyDrop::drop(&mut state.pRootSignature) };
+    let raw = created.map_err(|error| {
+        HalError::PipelineCreation(format!(
+            "ID3D12Device::CreateComputePipelineState rejected `{label}`: {error}"
+        ))
+    })?;
+
+    Ok(ComputePipelineEntry {
+        owner,
+        raw,
+        root_signature: layout.raw.clone(),
+    })
+}
+
 /// Blend state for every declared colour target.
 ///
 /// `IndependentBlendEnable` is always on, because the seam gives blend state per
@@ -793,88 +757,6 @@ fn depth_stencil_state(
 mod tests {
     use super::*;
     use crcbl_hal::{BlendState, ColorWrites, CompareOp, Format, StencilState};
-
-    /// A minimal signed container, built to the format's own layout: magic, a
-    /// non-zero digest, a version, the size, one part offset, and a `DXIL` part
-    /// whose program header names `kind`.
-    fn container(kind: u32) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"DXBC");
-        bytes.extend_from_slice(&[0xAB; 16]);
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&0u16.to_le_bytes());
-        // Size and part count are patched below, once the length is known.
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-        bytes.extend_from_slice(&36u32.to_le_bytes());
-        bytes.extend_from_slice(b"DXIL");
-        bytes.extend_from_slice(&8u32.to_le_bytes());
-        bytes.extend_from_slice(&((kind << 16) | (6 << 4) | 6).to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        let size = u32::try_from(bytes.len()).expect("a small container");
-        bytes[24..28].copy_from_slice(&size.to_le_bytes());
-        bytes
-    }
-
-    /// A well-formed container parses, and its shader kind comes out.
-    ///
-    /// The positive case is asserted first so every refusal below is the check
-    /// firing rather than the parser refusing everything.
-    #[test]
-    fn a_signed_container_parses_and_reports_its_stage() {
-        let vertex = Dxil::parse(&container(KIND_VERTEX), "triangle").expect("a vertex container");
-        assert_eq!(vertex.kind, KIND_VERTEX);
-        vertex
-            .expect(ShaderStages::VERTEX, "vertexMain")
-            .expect("a vertex container in the vertex slot");
-
-        let error = vertex
-            .expect(ShaderStages::FRAGMENT, "fragmentMain")
-            .expect_err("a vertex container is not a pixel shader");
-        let HalError::ShaderCompilation(text) = &error else {
-            panic!("{error:?}");
-        };
-        assert!(text.contains("fragmentMain"), "{text}");
-        assert!(text.contains("vertex container"), "{text}");
-
-        let bytecode = vertex.bytecode();
-        assert_eq!(bytecode.BytecodeLength, vertex.bytes.len());
-        assert!(!bytecode.pShaderBytecode.is_null());
-    }
-
-    /// **Every way a container can be wrong is refused, by name.**
-    ///
-    /// The unsigned case is the one this exists for: an all-zero digest is what
-    /// a `dxc` that could not load `libdxil.so` produces, it hashes and commits
-    /// like any other artifact, and the only other thing that would ever notice
-    /// is a driver at pipeline creation.
-    #[test]
-    fn a_container_that_is_not_signed_dxil_is_refused_by_name() {
-        let mut unsigned = container(KIND_VERTEX);
-        unsigned[4..20].fill(0);
-
-        let mut truncated = container(KIND_VERTEX);
-        truncated.truncate(truncated.len() - 4);
-
-        let mut no_dxil_part = container(KIND_VERTEX);
-        no_dxil_part[36..40].copy_from_slice(b"STAT");
-
-        let cases: &[(&str, &[u8])] = &[
-            ("DXBC container magic", b"not a container at all"),
-            ("all-zero container digest", &unsigned),
-            ("truncated or mis-sliced", &truncated),
-            ("no DXIL part", &no_dxil_part),
-        ];
-        assert!(!cases.is_empty(), "nothing to check");
-        for (expected, bytes) in cases {
-            let error = Dxil::parse(bytes, "triangle").expect_err(expected);
-            let HalError::ShaderCompilation(text) = &error else {
-                panic!("{expected}: a bad artifact is not {error:?}");
-            };
-            assert!(text.contains(expected), "{expected}: {text}");
-            assert!(text.contains("triangle"), "the label must survive: {text}");
-        }
-    }
 
     /// A descriptor with no DXIL says which formats it had, rather than which
     /// slice is missing — the seam's own message, so it reads the same on every

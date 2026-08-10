@@ -480,6 +480,16 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   per-device answer. Reported now that `Device::create_sampler` builds a
 ///   `D3D12_SAMPLER_DESC` with a `MaxAnisotropy` in it; `crcbl-mtl` withheld it
 ///   until exactly the same point and for the same reason.
+/// * [`Features::COMPUTE`] — **unconditional, and there is no query to make.**
+///   Every D3D12 device creates a `DIRECT` queue, and a `DIRECT` queue accepts
+///   compute work; there is no D3D12 device without
+///   `CreateComputePipelineState`, which is why the D3D12 capability structures
+///   have no bit for it. It waited for the call rather than for a query:
+///   `Device::create_compute_pipeline` builds the state object,
+///   `CommandEncoder::dispatch` and `dispatch_indirect` record against it, and
+///   `crcbl_dx12::device`'s `a_compute_dispatch_writes_the_values_it_was_asked_for`
+///   reads the result back. Reporting it before that would have been the
+///   "unsupported arriving as passed" shape the crate docs name.
 /// * [`Features::PRESENT_FEEDBACK`] — **unconditional, and for a stronger
 ///   reason than Metal's.** The mechanism is
 ///   `DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` plus
@@ -513,8 +523,6 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   `crcbl-mtl` withdrew a flag rather than keep one no call had earned, and
 ///   that precedent stands. `ID3D12GraphicsCommandList::ExecuteIndirect` is the
 ///   call, and the command slice is the one that makes it.
-/// * [`Features::COMPUTE`] — `ID3D12Device::CreateComputePipelineState` is the
-///   call; the pipeline slice makes it.
 /// * [`Features::TIMELINE_SEMAPHORE`] — `ID3D12Fence` is a monotonic counter
 ///   with no separate binary form, so this one is the seam's timeline almost
 ///   verbatim, and `Device::wait_idle` already drives one. It stays off because
@@ -559,11 +567,14 @@ fn features_of(raw: &RawCaps) -> Features {
     if raw.block_compression {
         out |= Features::TEXTURE_COMPRESSION_BC;
     }
-    // No query for any of the three: a GPU virtual address is not optional in
-    // D3D12, anisotropic sampling is an architectural constant, and the
-    // frame-latency waitable object predates D3D12 itself. See above.
-    out |=
-        Features::BUFFER_DEVICE_ADDRESS | Features::SAMPLER_ANISOTROPY | Features::PRESENT_FEEDBACK;
+    // No query for any of the four: a GPU virtual address is not optional in
+    // D3D12, anisotropic sampling is an architectural constant, compute is what
+    // a DIRECT queue accepts by definition, and the frame-latency waitable
+    // object predates D3D12 itself. See above.
+    out |= Features::BUFFER_DEVICE_ADDRESS
+        | Features::SAMPLER_ANISOTROPY
+        | Features::COMPUTE
+        | Features::PRESENT_FEEDBACK;
     out
 }
 
