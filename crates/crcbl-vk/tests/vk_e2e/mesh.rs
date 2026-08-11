@@ -21,9 +21,9 @@
 use crate::harness::{Headless, instance};
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
-    BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, CompositeAlpha, DeviceDesc,
-    Extent3d, Features, Format, ImageAspect, ImageSubresourceLayers, Instance, MemoryLocation,
-    PresentInfo, PresentMode, ResourceState, SubmitInfo, SwapchainDesc,
+    Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, CompositeAlpha,
+    DeviceDesc, Extent3d, Features, Format, ImageAspect, ImageSubresourceLayers, Instance,
+    MemoryLocation, PresentInfo, PresentMode, ResourceState, SubmitInfo, SwapchainDesc,
 };
 
 /// The size the mesh suite renders at.
@@ -652,14 +652,19 @@ fn a_mesh_at_a_non_zero_base_vertex_draws_its_own_geometry() {
 /// left of the cube at [`two_mesh_camera`]'s distance, and clear of it.
 const OPEN_BOX_AT: glam::Vec3 = PYRAMID_AT;
 
+/// What one arm of the multi-cluster comparison drew, and how.
+struct OpenBoxFrame {
+    /// The path the renderer **built**, which is the claim that matters — see
+    /// [`the_mesh_shader_path_matches_the_indirect_path_s_golden`].
+    path: crcbl_hal::GeometryPath,
+    /// Whether §3.5's amplification stage was in front of it.
+    culls_clusters: bool,
+    image: crcbl_golden::Image,
+}
+
 /// One frame of the cube and the open box, on whichever geometry path
 /// `optional` selects, with the device opened and closed around it.
-///
-/// Returns the path the renderer **built** rather than the one the device
-/// offers — see
-/// [`the_mesh_shader_path_matches_the_indirect_path_s_golden`] on why those are
-/// different claims and why only the first one is evidence.
-fn render_open_box(optional: Features) -> (crcbl_hal::GeometryPath, crcbl_golden::Image) {
+fn render_open_box(optional: Features) -> OpenBoxFrame {
     let headless = Headless::open_for_mesh_with(optional);
     let mut pool = crcbl_render::TransientPool::new();
     let mut renderer = crcbl_render::ForwardRenderer::new(
@@ -669,6 +674,7 @@ fn render_open_box(optional: Features) -> (crcbl_hal::GeometryPath, crcbl_golden
     )
     .expect("the forward renderer builds");
     let path = renderer.geometry_path();
+    let culls_clusters = renderer.culls_clusters();
     renderer.set_open_box(Some(glam::Mat4::from_translation(OPEN_BOX_AT)));
 
     let frame = render_mesh(&headless, &mut renderer, &mut pool, &two_mesh_camera());
@@ -676,7 +682,11 @@ fn render_open_box(optional: Features) -> (crcbl_hal::GeometryPath, crcbl_golden
     renderer.destroy(headless.device.as_ref());
     pool.destroy(headless.device.as_ref());
     headless.finish();
-    (path, frame.image)
+    OpenBoxFrame {
+        path,
+        culls_clusters,
+        image: frame.image,
+    }
 }
 
 /// How many pixels of the frame's left third the given channel leads by a clear
@@ -727,12 +737,21 @@ fn leading_channel_texels(image: &crcbl_golden::Image, channel: usize, margin: u
 ///   with no red and no blue anywhere in it: the same triangle count, the same
 ///   buffer sizes, a different picture. That failure is invisible on the cube.
 /// * **The golden**, which is the picture that was reviewed.
+/// * **And the culled frame is the same picture.** A third arm asks for
+///   `Features::TASK_SHADER` as well, which is what makes the renderer build
+///   §3.5's per-cluster cull — and from this camera that cull rejects two of
+///   the box's five clusters. Both are walls seen from behind, so both were
+///   contributing no pixels and the frame must come out identical. That is the
+///   whole of requirement one: **culling on does not move the picture**, and
+///   `a_camera_that_hides_clusters_reduces_the_surviving_count` is the other
+///   half, because a cull that rejected nothing at all would pass this too.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn a_multi_cluster_mesh_draws_the_same_frame_through_both_geometry_paths() {
-    let (mesh_path, through_mesh_stage) =
-        render_open_box(Features::GPU_DRIVEN | Features::MESH_SHADER);
-    let (indirect_path, through_index_buffer) = render_open_box(Features::GPU_DRIVEN);
+    let mesh = render_open_box(Features::GPU_DRIVEN | Features::MESH_SHADER);
+    let indirect = render_open_box(Features::GPU_DRIVEN);
+    let (mesh_path, through_mesh_stage) = (mesh.path, mesh.image);
+    let (indirect_path, through_index_buffer) = (indirect.path, indirect.image);
     assert_eq!(
         mesh_path,
         crcbl_hal::GeometryPath::MeshShader,
@@ -744,12 +763,42 @@ fn a_multi_cluster_mesh_draws_the_same_frame_through_both_geometry_paths() {
         "both arms built the same path, so this is a self-comparison rather than a \
          comparison of two paths"
     );
+    assert!(
+        !mesh.culls_clusters,
+        "asking for MESH_SHADER without TASK_SHADER must build the un-amplified \
+         mesh stage — this arm is the device with mesh shaders and no task shaders, \
+         and it has to keep drawing"
+    );
 
     assert_eq!(
         through_mesh_stage.pixels(),
         through_index_buffer.pixels(),
         "{mesh_path:?} and {indirect_path:?} draw the open box differently"
     );
+
+    // The third arm: the same frame with §3.5's per-cluster cull in front of
+    // it. Two of the box's five clusters are rejected from this camera and the
+    // picture must not move by a single texel.
+    let culled =
+        render_open_box(Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER);
+    if culled.culls_clusters {
+        assert_eq!(
+            culled.path,
+            crcbl_hal::GeometryPath::MeshShader,
+            "the amplification stage belongs in front of a mesh stage"
+        );
+        assert_eq!(
+            culled.image.pixels(),
+            through_mesh_stage.pixels(),
+            "per-cluster culling moved the picture; the clusters it rejects from \
+             this camera are walls seen from behind, which contribute no pixels"
+        );
+    } else {
+        eprintln!(
+            "vk e2e: no TASK_SHADER on this device; the per-cluster cull did not run \
+             and this arm compared nothing"
+        );
+    }
 
     // The cube is still where the camera points, so nothing here can pass by
     // drawing the box over the whole frame.
@@ -781,6 +830,285 @@ fn a_multi_cluster_mesh_draws_the_same_frame_through_both_geometry_paths() {
         "vk e2e: golden multi-cluster mesh — {}",
         comparison.summary()
     );
+}
+
+/// The camera every face of the open box is front-on from: above it, and
+/// between its walls.
+///
+/// Its faces point **inward**, so this is the only kind of viewpoint from which
+/// a correct cull rejects nothing — which is exactly the case
+/// [`per_cluster_culling_rejects_the_clusters_a_camera_hides`] needs, and the
+/// one an over-eager cone test fails. Far enough up that the cube two units
+/// away is still inside the frame, so the baseline below is one rather than
+/// zero.
+fn inside_the_open_box_camera() -> crcbl_render::Camera {
+    crcbl_render::Camera {
+        eye: OPEN_BOX_AT + glam::Vec3::new(0.2, 3.2, 0.3),
+        target: OPEN_BOX_AT,
+        up: glam::Vec3::Y,
+        projection: crcbl_render::Projection::default(),
+    }
+}
+
+/// A camera **inside** the box looking level at its `-Z` wall, where the
+/// rejections are the frustum's alone.
+///
+/// Every face still points at the eye, so the cone rejects nothing here. What
+/// falls out is the floor — whose bounding sphere sits directly beneath a
+/// camera looking horizontally, entirely below the bottom plane — and the `+Z`
+/// wall, whose sphere is entirely behind the eye. The cube is ninety degrees
+/// off the view direction and outside the frame altogether, which is what makes
+/// this camera's baseline zero.
+fn behind_the_open_box_wall_camera() -> crcbl_render::Camera {
+    crcbl_render::Camera {
+        eye: OPEN_BOX_AT + glam::Vec3::new(0.0, 0.4, -0.3),
+        target: OPEN_BOX_AT + glam::Vec3::new(0.0, 0.4, -1.0),
+        up: glam::Vec3::Y,
+        projection: crcbl_render::Projection::default(),
+    }
+}
+
+/// A camera above the box and just outside two of its walls, where the
+/// **radius term** of the cone rule is what keeps those two.
+///
+/// The only place that term reaches a number this suite can read. On this mesh
+/// every cluster is a flat face at `cone_cutoff == 1.0`, so the conservative
+/// rule and the radius-free one differ exactly where the camera has crossed a
+/// face's own plane — here the `+X` and `+Z` walls, whose centre-to-camera dot
+/// products land between zero and the bounding radius.
+/// `crcbl_render::cull`'s `the_radius_term_keeps_two_clusters_the_point_form_drops`
+/// works out both counts on the same camera; a shader that dropped `+ radius`
+/// reports three of five here instead of five.
+fn across_the_open_box_wall_camera() -> crcbl_render::Camera {
+    crcbl_render::Camera {
+        eye: OPEN_BOX_AT + glam::Vec3::new(0.8, 3.0, 0.8),
+        target: OPEN_BOX_AT,
+        up: glam::Vec3::Y,
+        projection: crcbl_render::Projection::default(),
+    }
+}
+
+/// Renders one frame and reads back how many clusters §3.5's amplification
+/// stage kept.
+///
+/// **The counter is `DrawGen::visible_count`'s cluster word**, which is topic 03
+/// §3.6's one permitted readback — the same buffer the instance survivor count
+/// lives in, so this adds no second copy to the frame. It is zeroed by the
+/// clearing dispatch at the top of every frame, so the number is this frame's
+/// and not an accumulation.
+///
+/// The copy is its own submission after [`render_mesh`]'s: the graph leaves the
+/// buffer in [`ResourceState::ShaderRead`], which is where the next frame on
+/// that slot expects it, so this moves it out and puts it straight back.
+fn surviving_clusters(
+    headless: &Headless,
+    renderer: &mut crcbl_render::ForwardRenderer,
+    pool: &mut crcbl_render::TransientPool,
+    camera: &crcbl_render::Camera,
+) -> u32 {
+    let _ = render_mesh(headless, renderer, pool, camera);
+
+    let device = headless.device.as_ref();
+    let stats = renderer.draws().visible_count(renderer.frame());
+    let word = u64::from(crcbl_shaders::cull::CLUSTER_SURVIVOR_WORD) * 4;
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("cluster survivor readback"),
+            size: 4,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("cluster survivor copy"),
+        queue: headless.queue,
+    });
+    let barrier = |from: ResourceState, to: ResourceState| {
+        [crcbl_hal::BufferBarrier {
+            buffer: stats,
+            from,
+            to,
+            queue_transfer: None,
+        }]
+    };
+    let out = barrier(ResourceState::ShaderRead, ResourceState::TransferSrc);
+    let back = barrier(ResourceState::TransferSrc, ResourceState::ShaderRead);
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &out,
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+        src: stats,
+        src_offset: word,
+        dst: staging,
+        dst_offset: 0,
+        size: 4,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &back,
+        ..Barriers::default()
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+
+    let mut bytes = [0u8; 4];
+    headless.readback(staging, 4, &mut bytes);
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(staging);
+    u32::from_le_bytes(bytes)
+}
+
+/// **§3.5's per-cluster cull, counted** — the check a golden image cannot make.
+///
+/// Culling that rejects nothing passes every golden, and so does culling that
+/// rejects exactly the clusters contributing no pixels, which is what this
+/// scene's rejections *are*. Pixels therefore cannot tell a working cull from a
+/// no-op, and the surviving-cluster count is what can.
+///
+/// Every number below is asserted twice over: once with the open box in the
+/// scene and once without it, so each is attributed to the box rather than to
+/// the cube that shares the frame. The box is five clusters, one per face.
+///
+/// | camera | without the box | with it | what rejected the difference |
+/// | --- | --- | --- | --- |
+/// | above and inside the walls | 1 | 6 | **nothing** — all five survive |
+/// | the golden's, out beyond `+X` and `+Z` | 1 | 4 | the **cone**, two walls |
+/// | inside, level at the `-Z` wall | 0 | 3 | the **frustum**, two clusters |
+/// | above and just outside two walls | 1 | 6 | nothing — the **radius term** |
+///
+/// The second row is the cull doing work; the first is what catches an
+/// over-eager cone test, and it is the assertion most easily left out. The last
+/// is the same shape one step finer: it is the only count in this suite that
+/// moves if the cone rule loses its radius term, which is the correction this
+/// slice made. Which clusters go in each case is worked out in
+/// `crcbl_render::cull` — `the_open_box_loses_the_clusters_each_of_the_three_test_cameras_hides`
+/// and `the_radius_term_keeps_two_clusters_the_point_form_drops` — on the same
+/// geometry and the same aspect, because a total on its own does not say which.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn per_cluster_culling_rejects_the_clusters_a_camera_hides() {
+    let headless = Headless::open_for_mesh_with(
+        Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,
+    );
+    if !headless.device.caps().supports(Features::TASK_SHADER) {
+        eprintln!(
+            "vk e2e: no TASK_SHADER on this device; per-cluster culling cannot run. radv and \
+             lavapipe both report it, and `docs/backlog.md` is where a driver that does not belongs"
+        );
+        headless.finish();
+        return;
+    }
+
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds an amplification stage");
+    assert!(
+        renderer.culls_clusters(),
+        "the renderer must have *built* the amplification stage, or every count \
+         below is the un-amplified path's and says nothing about culling"
+    );
+
+    let at = glam::Mat4::from_translation(OPEN_BOX_AT);
+    let faces = crcbl_shaders::mesh::OPEN_BOX_FACES.len() as u32;
+
+    // Each row: the camera, the count with the box out of the scene, and the
+    // count with it in. The first is what the cube contributes and is measured
+    // rather than assumed.
+    let mut counts = Vec::new();
+    for (label, camera) in [
+        ("above and inside the walls", inside_the_open_box_camera()),
+        ("the golden's", two_mesh_camera()),
+        ("inside, level at a wall", behind_the_open_box_wall_camera()),
+        (
+            "above and across two walls",
+            across_the_open_box_wall_camera(),
+        ),
+    ] {
+        renderer.set_open_box(None);
+        let without = surviving_clusters(&headless, &mut renderer, &mut pool, &camera);
+        renderer.set_open_box(Some(at));
+        let with = surviving_clusters(&headless, &mut renderer, &mut pool, &camera);
+        eprintln!("vk e2e: clusters from {label}: {without} without the box, {with} with it");
+        counts.push((without, with));
+    }
+
+    let [
+        (inside_without, inside_with),
+        (golden_without, golden_with),
+        (wall_without, wall_with),
+        (across_without, across_with),
+    ] = counts[..]
+    else {
+        unreachable!("four cameras, four rows")
+    };
+
+    // **Nothing is rejected that should not be.** Every face of the box is
+    // front-on from this camera and every one is inside the frame, so all five
+    // survive — the assertion an over-eager cone test fails and a golden image
+    // cannot make.
+    assert_eq!(
+        inside_without, 1,
+        "the cube is one cluster and it is in frame"
+    );
+    assert_eq!(
+        inside_with,
+        inside_without + faces,
+        "from inside the walls every cluster of the box is front-facing, so a \
+         correct cull rejects none of them"
+    );
+
+    // **Clusters really are rejected.** Two of the five walls are seen from
+    // behind here, and the frame this camera draws is the golden one — which is
+    // how the picture stays identical while the count drops.
+    assert_eq!(golden_without, 1, "the same cube, the golden's own camera");
+    assert_eq!(
+        golden_with, 4,
+        "the +X and +Z walls face away from the golden's camera, so three of the \
+         box's five clusters survive beside the cube's one"
+    );
+    assert!(
+        golden_with < inside_with,
+        "the two cameras must disagree, or the cull rejected nothing anywhere: \
+         {golden_with} against {inside_with}"
+    );
+
+    // **And the frustum half rejects on its own.** Every face still points at
+    // this eye, so nothing here is the cone's doing: the floor is under the
+    // frame and the `+Z` wall is behind it.
+    assert_eq!(
+        wall_without, 0,
+        "the cube is ninety degrees off this view direction and out of frame"
+    );
+    assert_eq!(
+        wall_with, 3,
+        "the floor's sphere is entirely below the bottom plane and the +Z wall's \
+         entirely behind the eye, leaving three of five"
+    );
+
+    // **And the cone rule's radius term is load-bearing here.** This camera has
+    // crossed the planes of the `+X` and `+Z` walls, so their centre-to-camera
+    // dot products are positive but smaller than the bounding radius — kept by
+    // the rule as documented, dropped by the radius-free form the doc used to
+    // carry. It is the only count in this suite that the term moves.
+    assert_eq!(across_without, 1, "the cube is in frame from up here too");
+    assert_eq!(
+        across_with,
+        across_without + faces,
+        "the conservative cone rule keeps all five; a shader that lost the \
+         `+ radius` term reports {} instead",
+        across_without + faces - 2
+    );
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
 }
 
 /// Milestone 4, measured rather than eyeballed: the directional light produces a

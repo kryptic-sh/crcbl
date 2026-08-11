@@ -102,7 +102,7 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
         }
         plane_0 = plane_0 + u32(1);
     }
-    var slot_0 : u32 = atomicAdd(&(visible_count_0[i32(0)]), u32(1));
+    var slot_0 : u32 = atomicAdd(&(visible_count_0[u32(0)]), u32(1));
     if(slot_0 < (cull_0.capacity_0))
     {
         visible_0[slot_0] = index_0;

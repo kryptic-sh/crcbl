@@ -56,8 +56,21 @@
 // rather than an approximation of it — a culled instance draws nothing here for
 // the same reason an instance count of zero draws nothing there.
 //
-// Per-cluster culling — frustum, normal cone — is §3.5's second bullet and a
-// slice of its own. `Meshlet::bounds` is read by nothing below.
+// # Per-cluster culling lives in the amplification stage, and only there
+//
+// §3.5's second bullet — frustum and normal-cone rejection per cluster — is
+// `taskMain` below, which runs one workgroup per (cluster, instance slot) and
+// dispatches the mesh stage for the pairs that survive. **The instance cull is
+// unchanged and still runs first**: `cull.slang` decides which instances exist
+// at all, `draw_gen.slang` compacts them, and this rejects clusters *within* a
+// survivor.
+//
+// `Features::TASK_SHADER` is a capability separate from `MESH_SHADER`, so a
+// device that has the mesh stage and not the amplification stage must keep
+// drawing. That is what `meshMain` is: the un-amplified entry point, which
+// culls nothing and emits every cluster of every surviving instance, exactly as
+// it did before this stage existed. `amplifiedMeshMain` is the same body behind
+// a payload — see `emit_cluster`, which is the whole of both.
 //
 // # The zero-base rule does not apply here, and that is worth saying
 //
@@ -166,9 +179,8 @@ struct Meshlet
     uint triangle_offset;
     /// How many triangles it holds. At most [`MAX_CLUSTER_TRIANGLES`].
     uint triangle_count;
-    /// Bounding sphere and normal cone. **Read by nothing here**: per-cluster
-    /// culling is a slice of its own, and the record carries them because they
-    /// share a cluster's lifetime.
+    /// Bounding sphere and normal cone, in the mesh's own space. Read by
+    /// `cluster_survives`, which is the amplification stage's whole job.
     float center_x;
     float center_y;
     float center_z;
@@ -191,6 +203,55 @@ struct DrawIndexedArgs
     uint first_index;
     int vertex_offset;
     uint first_instance;
+};
+
+/// Planes in a frustum, as `cull.slang` declares it.
+static const uint PLANE_COUNT = 6;
+
+/// The frustum this frame culls against, matching `struct CullParams` in
+/// `cull.slang` and `crcbl_shaders::cull::Params`.
+///
+/// **The same buffer the instance cull reads**, bound a second time rather than
+/// copied: the two rejections are one camera's, and a frustum that reached the
+/// two stages differently would keep an instance and drop every cluster of it.
+/// `crcbl_shaders::cull`'s `the_shared_structs_are_declared_identically_in_
+/// every_shader` is what holds this declaration to that one.
+struct CullParams
+{
+    /// The camera frustum's six half-spaces, `xyz` the (unnormalized) outward
+    /// plane normal and `w` its offset. A point is inside the plane when
+    /// `dot(xyz, p) + w >= 0`.
+    float4 planes[PLANE_COUNT];
+    /// Instances the cull pass tested. Read by nothing here — the mesh path
+    /// takes its instance bound from `draw_args` instead.
+    uint instance_count;
+    /// Elements the visible list can hold. Read by nothing here either.
+    uint capacity;
+};
+
+/// Which element of `cull_stats` counts surviving clusters.
+///
+/// Element 0 is `cull.slang`'s surviving *instances*, so this is the one word
+/// this shader owns. The same number as
+/// `crcbl_shaders::cull::CLUSTER_SURVIVOR_WORD`, held in step with it by that
+/// module's `the_shaders_index_the_culling_stats_at_the_words_this_crate_says`.
+static const uint CLUSTER_SURVIVOR_WORD = 1;
+
+/// What `taskMain` hands `amplifiedMeshMain`: which pair of the dispatch
+/// survived.
+///
+/// The two group indices rather than a resolved cluster record, because a
+/// payload is per surviving group and the mesh stage can re-read what it needs
+/// from the same buffers — where a copied record would be a second layout to
+/// keep in step with `struct Meshlet` above.
+struct ClusterPayload
+{
+    /// The cluster's index within this bucket's mesh's run, which is
+    /// `SV_GroupID.x` of the task group that kept it.
+    uint cluster;
+    /// The slot in this bucket's run of surviving instances, which is that
+    /// group's `SV_GroupID.y`.
+    uint instance;
 };
 
 /// Where this bucket's run of visible instances starts, and which clusters its
@@ -282,6 +343,25 @@ StructuredBuffer<uint> cluster_corners;
 [[vk::binding(12, 0)]]
 StructuredBuffer<DrawIndexedArgs> draw_args;
 
+/// This frame's frustum — the amplification stage's alone.
+///
+/// **Bound only when there is an amplification stage**: a device without
+/// `Features::TASK_SHADER` builds a pipeline whose layout stops at binding 12,
+/// and `meshMain` reads neither this nor `cull_stats` below.
+[[vk::binding(13, 0)]]
+ConstantBuffer<CullParams> cull;
+
+/// The frame's culling statistics, which this stage adds its surviving-cluster
+/// count to at `CLUSTER_SURVIVOR_WORD`.
+///
+/// The buffer `cull.slang` counts surviving instances into, one element along —
+/// topic 03 §3.6's delayed readback ring is this one buffer, and a second
+/// counter of its own would be a second readback. `Atomic<uint>` rather than
+/// `InterlockedAdd` for `cull.slang`'s reason: spelled as a type it lowers on
+/// every target.
+[[vk::binding(14, 0)]]
+RWStructuredBuffer<Atomic<uint> > cull_stats;
+
 /// What the mesh stage emits and `mesh.slang`'s `fragmentMain` consumes.
 ///
 /// **Member order is the interface**, not just the layout: locations are
@@ -307,42 +387,126 @@ uint corner_at(uint corner)
     return (word >> ((corner & 3) * 8)) & 0xffu;
 }
 
-[shader("mesh")]
-[outputtopology("triangle")]
-[numthreads(THREADS, 1, 1)]
-void meshMain(
-    uint lane: SV_GroupThreadID,
-    uint3 group: SV_GroupID,
+/// How many workgroups a group of the dispatch is worth: `1` while both its
+/// indices are inside what the frame actually holds, and `0` past either.
+///
+/// A group the CPU's dispatch bound covered and the frame does not: either its
+/// instance did not survive the instance cull, or the bucket's mesh has fewer
+/// clusters than the dispatch was sized for. **The bound is not the answer** —
+/// see the header — and this is where the two meet.
+///
+/// **Arithmetic rather than a comparison**, because both entry points below put
+/// the result in front of a call the DXIL validator wants unbranched:
+/// `SetMeshOutputCounts` refuses to be reached through a branch on dxc 1.9, and
+/// Slang lowers every `?:` into an `if`/`else` pair. `min(1, max(a, b) - b)` is
+/// `1` exactly when `a > b`, and the `max` is what stops the unsigned
+/// subtraction wrapping.
+uint group_is_live(uint3 group)
+{
+    uint drawn = draw_args[draw.bucket].instance_count;
+    return min(1u, max(drawn, group.y) - group.y)
+         * min(1u, max(draw.cluster_count, group.x) - group.x);
+}
+
+/// Whether a cluster of an instance may contribute a pixel: `1` to draw it, `0`
+/// to reject it.
+///
+/// **The cull is in world space**, which is where the frustum already is: the
+/// planes are `cull.slang`'s own for this frame, and `frame.camera_position` is
+/// world-space too. `GpuInstance::transform` is rigid — its own documented
+/// obligation, the same one the normal transform above rests on — so the
+/// bounding sphere moves exactly: the centre by the whole matrix, the radius
+/// not at all, and the cone axis by the 3x3 with its length intact.
+///
+/// # Frustum
+///
+/// The ordinary sphere-against-half-space test. The planes are **not**
+/// normalized and must not be — `cull.slang`'s header says why, and the far
+/// plane of an infinite reversed-Z projection has a zero normal — so the
+/// radius is scaled by the plane normal's length rather than the plane by its
+/// reciprocal. A zero normal makes the term zero and leaves `w >= 0`, which is
+/// the degenerate plane rejecting nothing, exactly as it should.
+///
+/// # Normal cone
+///
+/// With `a = acos(cone_cutoff)` the cone's half angle, `d = center - camera`
+/// and `r` the radius, every triangle of the cluster faces away when
+///
+/// ```text
+/// cone_cutoff > 0 && dot(cone_axis, d) > sqrt(1 - cone_cutoff^2) * length(d) + r
+/// ```
+///
+/// **The `+ r` is the whole of what makes this safe.** Without it the test
+/// treats every triangle as sharing the centre's view direction, which is right
+/// only for a cluster of zero radius: a cluster with a real radius close to the
+/// camera can then hold a front-facing triangle and still be rejected, which is
+/// dropped geometry. `crcbl_shaders::meshlet::ClusterBounds::cone_cutoff`
+/// carries the derivation, and `crcbl_render::cull::cluster_survives_cull` is
+/// the same rule in Rust with the cases that pin it.
+///
+/// The `cone_cutoff > 0` half is not redundant beside the radius term:
+/// `sqrt(1 - cutoff^2)` is even in `cutoff`, so it cannot tell a narrow cone
+/// from a cone wider than a hemisphere, and the latter holds a front-facing
+/// normal for every possible view.
+uint cluster_survives(Meshlet cluster, float4x4 transform)
+{
+    float3 center = mul(transform, float4(cluster.center_x, cluster.center_y, cluster.center_z, 1.0)).xyz;
+    float radius = cluster.radius;
+
+    for (uint plane = 0; plane < PLANE_COUNT; ++plane)
+    {
+        float4 half_space = cull.planes[plane];
+        if (dot(half_space.xyz, center) + half_space.w < -radius * length(half_space.xyz))
+        {
+            return 0u;
+        }
+    }
+
+    float3 axis = mul((float3x3)transform,
+                      float3(cluster.cone_axis_x, cluster.cone_axis_y, cluster.cone_axis_z));
+    float3 to_center = center - frame.camera_position.xyz;
+    float sine = sqrt(max(0.0, 1.0 - cluster.cone_cutoff * cluster.cone_cutoff));
+    if (cluster.cone_cutoff > 0.0
+        && dot(axis, to_center) > sine * length(to_center) + radius)
+    {
+        return 0u;
+    }
+
+    return 1u;
+}
+
+/// One cluster of one instance, emitted — the body both mesh entry points are.
+///
+/// `[ForceInline]`, and it is load-bearing on two of the three targets for the
+/// reason `mesh_shader.slang`'s `emit` records: mesh output arrays crossing a
+/// function boundary abort Slang's Metal backend and produce HLSL dxc rejects
+/// with "Not all elements of output SV_Position were written". Inlined, all
+/// three take it — and the alternative is two copies of this body, which is the
+/// drift the arrangement exists to prevent.
+///
+/// `active` is `0` for a group with nothing to draw, which emits no vertices
+/// and no primitives. The amplification stage passes `1` unconditionally: a
+/// group it dispatched is one it kept.
+[ForceInline]
+void emit_cluster(
+    uint lane,
+    uint cluster_index,
+    uint instance_slot,
+    uint active,
     out vertices VertexOutput verts[MAX_CLUSTER_VERTICES],
     out indices uint3 tris[MAX_CLUSTER_TRIANGLES])
 {
-    // A workgroup the dispatch bound covered and the frame does not: either its
-    // instance did not survive culling, or the bucket's mesh has fewer clusters
-    // than the dispatch was sized for. It emits nothing, which is what makes an
-    // over-sized dispatch the same picture as an exact one.
-    //
-    // Both bounds are workgroup-uniform, so every thread agrees — which
-    // `SetMeshOutputCounts` requires, and which is why the instance count is
-    // read once here rather than per lane.
-    uint drawn = draw_args[draw.bucket].instance_count;
-
-    // **One `SetMeshOutputCounts`, with no control flow in front of it.** DXIL
-    // validation refuses more than one call — "SetMeshOutputCounts cannot be
-    // called multiple times" — and dxc 1.9 reports that for a *single* call
-    // reached through a branch as well, which is what a `?:` becomes: Slang
-    // lowers every select into an `if`/`else` pair, so the emitted HLSL had the
-    // call in a joined block and the validator refused it. Hence arithmetic.
-    //
-    // `min(1, max(a, b) - b)` is `1` exactly when `a > b`, and it is
-    // unsigned-safe because the `max` is what stops the subtraction wrapping.
-    uint active = min(1u, max(drawn, group.y) - group.y)
-                * min(1u, max(draw.cluster_count, group.x) - group.x);
-
     // An inactive group reads cluster `cluster_base`, which is in bounds
     // because a bucket names a mesh and a mesh has at least one cluster. It
     // reads *something* rather than nothing so the load stays in front of the
     // call too.
-    Meshlet cluster = clusters[draw.cluster_base + group.x * active];
+    //
+    // **One `SetMeshOutputCounts`, with no control flow in front of it.** DXIL
+    // validation refuses more than one call — "SetMeshOutputCounts cannot be
+    // called multiple times" — and dxc 1.9 reports that for a *single* call
+    // reached through a branch as well. Both bounds are workgroup-uniform, so
+    // every thread agrees, which is what the call requires.
+    Meshlet cluster = clusters[cluster_index];
     SetMeshOutputCounts(cluster.vertex_count * active, cluster.triangle_count * active);
     if (active == 0u)
     {
@@ -352,7 +516,7 @@ void meshMain(
     // The instance names its mesh and the mesh names its vertices, exactly as
     // in `mesh.slang`: nothing on this path came from the dispatch, which is
     // what lets one bucket cover whatever culling left it.
-    GpuInstance instance = instances[visible_instances[draw.base + group.y]];
+    GpuInstance instance = instances[visible_instances[draw.base + instance_slot]];
     GpuMesh mesh = meshes[instance.mesh];
 
     for (uint v = lane; v < cluster.vertex_count; v += THREADS)
@@ -382,4 +546,83 @@ void meshMain(
         // above is indexed by too — so the triple needs no base added to it.
         tris[t] = uint3(corner_at(corner), corner_at(corner + 1), corner_at(corner + 2));
     }
+}
+
+/// The un-amplified mesh stage: **every** cluster of every surviving instance,
+/// culled by nothing.
+///
+/// What a device with `Features::MESH_SHADER` and no `Features::TASK_SHADER`
+/// draws through, and it is unchanged by the amplification stage existing. A
+/// mesh entry point that declared `in payload` would require a task stage
+/// upstream, which is why this and `amplifiedMeshMain` are two entry points
+/// rather than one with a parameter.
+[shader("mesh")]
+[outputtopology("triangle")]
+[numthreads(THREADS, 1, 1)]
+void meshMain(
+    uint lane: SV_GroupThreadID,
+    uint3 group: SV_GroupID,
+    out vertices VertexOutput verts[MAX_CLUSTER_VERTICES],
+    out indices uint3 tris[MAX_CLUSTER_TRIANGLES])
+{
+    uint active = group_is_live(group);
+    emit_cluster(lane, draw.cluster_base + group.x * active, group.y, active, verts, tris);
+}
+
+/// §3.5's per-cluster cull: one workgroup per (cluster, instance slot), and a
+/// mesh workgroup only for the pairs that survive.
+///
+/// One thread, because the decision is one cluster's and there is nothing to
+/// parallelise over. `DispatchMesh` is called **exactly once and unbranched**,
+/// with a group count of `1` or `0` — the DXIL rule `SetMeshOutputCounts` has,
+/// and the reason nothing above it is a branch either.
+///
+/// A group past either bound reads the bucket's first cluster and instance slot
+/// zero, which are in bounds and whose values it then multiplies away. That is
+/// what keeps `visible_instances` — whose slots past the survivor count hold
+/// whatever the buffer last had — from ever reaching `instances` as an index.
+///
+/// The counter is added to with the survival flag itself rather than under an
+/// `if`, so the add of zero is the branch: one instruction, no control flow in
+/// front of the dispatch, and the same statement for every group.
+[shader("amplification")]
+[numthreads(1, 1, 1)]
+void taskMain(uint3 group: SV_GroupID)
+{
+    uint active = group_is_live(group);
+    Meshlet cluster = clusters[draw.cluster_base + group.x * active];
+    uint instance_index = visible_instances[draw.base + group.y * active] * active;
+    GpuInstance instance = instances[instance_index];
+
+    uint keep = active * cluster_survives(cluster, instance.transform);
+    cull_stats[CLUSTER_SURVIVOR_WORD].add(keep);
+
+    ClusterPayload payload;
+    payload.cluster = group.x;
+    payload.instance = group.y;
+    DispatchMesh(keep, 1, 1, payload);
+}
+
+/// The mesh stage behind `taskMain`: `meshMain`'s body, for a pair the
+/// amplification stage already decided to keep.
+///
+/// `SV_GroupID` here counts within the one workgroup `DispatchMesh` launched
+/// and says nothing about which cluster this is, which is what the payload is
+/// for.
+[shader("mesh")]
+[outputtopology("triangle")]
+[numthreads(THREADS, 1, 1)]
+void amplifiedMeshMain(
+    uint lane: SV_GroupThreadID,
+    in payload ClusterPayload amplification,
+    out vertices VertexOutput verts[MAX_CLUSTER_VERTICES],
+    out indices uint3 tris[MAX_CLUSTER_TRIANGLES])
+{
+    emit_cluster(
+        lane,
+        draw.cluster_base + amplification.cluster,
+        amplification.instance,
+        1u,
+        verts,
+        tris);
 }

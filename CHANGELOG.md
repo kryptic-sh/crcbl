@@ -207,6 +207,36 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Per-cluster culling in the amplification stage — §3.5's second bullet.**
+  `mesh_cluster.slang` gained a task stage that rejects a cluster on the frustum
+  and on its normal cone, `ForwardRenderer::culls_clusters()` reports whether it
+  is running, and the surviving-cluster count rides `draw_gen`'s existing
+  delayed readback as a second word beside the instance count — §3.6 promises
+  one readback in the frame loop and this keeps it at one. The instance cull is
+  unchanged and still runs first.
+
+  `Features::TASK_SHADER` is separate from `MESH_SHADER`: a device with mesh
+  shaders and no task shaders builds no task stage, culls nothing, and draws
+  exactly as before.
+
+  **The documented cull rule was wrong and is fixed in the same change.**
+  `ClusterBounds::cone_cutoff` stated the point-sized form, which treats every
+  triangle as sharing the centre's view direction — so a cluster with a real
+  radius close to the camera could hold a front-facing triangle and still be
+  rejected. The conservative form adds the radius:
+  `dot(axis, center - camera) > sqrt(1 - cutoff²) · |center - camera| + radius`.
+  A randomised check over 400 000 samples dropped a front-facing cluster **0**
+  times with the corrected form and **11 225** times with the old one. The
+  `cone_cutoff > 0` guard is still needed beside it: `sqrt(1 - cutoff²)` is even
+  in `cutoff`, so it cannot tell a narrow cone from one wider than a hemisphere.
+
+  Culling that rejects nothing passes every golden, so the tests count instead
+  of looking. Four cameras, each measured with the box in the scene and out of
+  it so the numbers are attributable: all five clusters survive from two cameras
+  that see every face, the cone rejects two from the golden's camera, and the
+  frustum rejects two from inside the box. The fourth camera exists only to pin
+  the radius term — dropping `+ radius` leaves the other three counts untouched.
+
 - **A mesh that clusters into more than one meshlet, and renders.** Both
   resident meshes were a single cluster each, so a cluster with a non-zero
   `vertex_offset` _within_ a mesh was covered by unit tests and by no rendered

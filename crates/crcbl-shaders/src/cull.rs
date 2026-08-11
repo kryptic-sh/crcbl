@@ -24,6 +24,39 @@ pub const WORKGROUP_SIZE: u32 = 64;
 /// Planes in a frustum, and the length of [`Params::planes`].
 pub const PLANE_COUNT: usize = 6;
 
+/// Words in the frame's culling-statistics buffer.
+///
+/// **One buffer, two counters, and topic 03 §3.6's single permitted readback.**
+/// `cull.slang` adds surviving instances into
+/// [`INSTANCE_SURVIVOR_WORD`] and `mesh_cluster.slang`'s amplification stage
+/// adds surviving clusters into [`CLUSTER_SURVIVOR_WORD`]; a counter of its own
+/// for the second would be a second buffer to zero, to barrier and to copy back
+/// every frame.
+///
+/// `clear_counters.slang` is told this number rather than assuming it — see
+/// [`crate::clear_counters::Params::stats_words`] — because a clearing pass
+/// that zeroed a prefix would leave one of the two carrying the previous
+/// frame's total, which reads as a plausible count rather than as a failure.
+pub const STATS_WORDS: u32 = 2;
+
+/// Which word of the culling statistics counts surviving **instances** — the
+/// one `cull.slang` writes.
+pub const INSTANCE_SURVIVOR_WORD: u32 = 0;
+
+/// Which word counts surviving **clusters** — the one `mesh_cluster.slang`'s
+/// amplification stage writes.
+///
+/// Zero on a device without `Features::TASK_SHADER`, and on the two indirect
+/// geometry paths: there is no amplification stage to add to it, and nothing
+/// else in the frame culls a cluster.
+pub const CLUSTER_SURVIVOR_WORD: u32 = 1;
+
+// Two words, and each counter owns one of them. A third counter would need
+// `STATS_WORDS` raised with it, and this is what says so at build time.
+const _: () = assert!(INSTANCE_SURVIVOR_WORD < STATS_WORDS);
+const _: () = assert!(CLUSTER_SURVIVOR_WORD < STATS_WORDS);
+const _: () = assert!(INSTANCE_SURVIVOR_WORD != CLUSTER_SURVIVOR_WORD);
+
 /// Bytes of the uniform block.
 ///
 /// Six `float4` (96) then two `uint`, rounded up to the 16-byte multiple
@@ -146,21 +179,25 @@ mod tests {
         );
     }
 
-    /// `cull.slang` and `draw_gen.slang` re-declare `GpuInstance` and `GpuMesh`
-    /// because there is no shared header — the compile script hashes one source
-    /// per artifact, so an `#include` would be a file whose edits nothing
-    /// notices. This is what keeps the copies from drifting: it compares the
-    /// *fields*, so a reworded doc comment is not a failure and a renamed,
-    /// retyped, reordered, added or removed field is.
+    /// `cull.slang`, `draw_gen.slang` and `mesh_cluster.slang` re-declare
+    /// `GpuInstance` and `GpuMesh` because there is no shared header — the
+    /// compile script hashes one source per artifact, so an `#include` would be
+    /// a file whose edits nothing downstream notices. This is what keeps the
+    /// copies from drifting: it compares the *fields*, so a reworded doc
+    /// comment is not a failure and a renamed, retyped, reordered, added or
+    /// removed field is.
     ///
     /// A drift here is not a compile error anywhere. Every file builds; the
     /// shaders simply read different bytes out of the same buffer.
     #[test]
     fn the_shared_structs_are_declared_identically_in_every_shader() {
         let mesh = include_str!("../shaders/mesh.slang");
+        let cull = include_str!("../shaders/cull.slang");
+        let cluster = include_str!("../shaders/mesh_cluster.slang");
         let others = [
-            ("cull.slang", include_str!("../shaders/cull.slang")),
+            ("cull.slang", cull),
             ("draw_gen.slang", include_str!("../shaders/draw_gen.slang")),
+            ("mesh_cluster.slang", cluster),
         ];
         for name in ["GpuInstance", "GpuMesh"] {
             let declared = struct_fields(mesh, name);
@@ -176,6 +213,54 @@ mod tests {
                      would read the same buffer with different layouts"
                 );
             }
+        }
+
+        // `CullParams` has no copy in `mesh.slang` at all — the raster path
+        // never sees a frustum — so its pair is compared on its own. The two
+        // stages read the *same* uniform buffer, so a layout drift would hand
+        // the amplification stage the instance count where a plane belongs.
+        let planes = struct_fields(cull, "CullParams");
+        assert!(
+            !planes.is_empty(),
+            "`struct CullParams` was not found in cull.slang, so this compared nothing"
+        );
+        assert_eq!(
+            planes,
+            struct_fields(cluster, "CullParams"),
+            "`struct CullParams` differs between cull.slang and mesh_cluster.slang; the \
+             instance cull and the cluster cull would read one buffer with two layouts"
+        );
+    }
+
+    /// **The two shaders that add to the culling statistics index the words
+    /// this crate says they do**, and neither can be checked by a compiler.
+    ///
+    /// Both counters live in one buffer, so a shader writing the other's word
+    /// produces a plausible number for the wrong thing and a zero for the right
+    /// one — and `clear_counters.slang` would zero both either way, so nothing
+    /// downstream looks wrong enough to investigate.
+    #[test]
+    fn the_shaders_index_the_culling_stats_at_the_words_this_crate_says() {
+        for (source, text, name, value) in [
+            (
+                "cull.slang",
+                include_str!("../shaders/cull.slang"),
+                "INSTANCE_SURVIVOR_WORD",
+                INSTANCE_SURVIVOR_WORD,
+            ),
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+                "CLUSTER_SURVIVOR_WORD",
+                CLUSTER_SURVIVOR_WORD,
+            ),
+        ] {
+            let declaration = format!("static const uint {name} = {value};");
+            assert!(
+                text.contains(&declaration),
+                "{source} must declare `{declaration}`, or it counts into the other \
+                 shader's word"
+            );
         }
     }
 

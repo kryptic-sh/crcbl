@@ -144,6 +144,18 @@ pub struct GeneratedDraws {
     /// The per-bucket runs of surviving instance indices, which the vertex
     /// stage reads. Declare it as a shader read.
     pub runs_id: BufferId,
+    /// The frame's culling statistics, as the graph knows them — the buffer
+    /// [`DrawGen::visible_count`] hands out.
+    ///
+    /// Here because §3.5's amplification stage **writes** it: it counts
+    /// surviving clusters into
+    /// [`CLUSTER_SURVIVOR_WORD`](crcbl_shaders::cull::CLUSTER_SURVIVOR_WORD),
+    /// so the pass that runs it declares
+    /// [`ResourceState::ShaderReadWrite`] on this id and the graph orders that
+    /// write after the draw-argument pass's read. A caller on a geometry path
+    /// with no amplification stage declares nothing and the counter keeps the
+    /// zero the clearing pass wrote.
+    pub visible_count_id: BufferId,
 }
 
 /// The cull and draw-argument dispatches, and everything they need.
@@ -282,6 +294,7 @@ impl DrawGen {
             &clear_counters::Params {
                 args_words,
                 counts_words: bucket_count,
+                stats_words: cull_shader::STATS_WORDS,
             }
             .to_bytes(),
         )?;
@@ -316,9 +329,15 @@ impl DrawGen {
             // `TRANSFER_DST` on the three the clearing dispatch owns, so a test
             // can poison them — see the module docs. They are device-local like
             // everything else here: nothing writes them from the host any more.
+            //
+            // **Two words, not one**, and they belong to different passes: the
+            // cull dispatch counts surviving instances into the first and
+            // `mesh_cluster.slang`'s amplification stage counts surviving
+            // clusters into the second. One buffer keeps §3.6's ring at one
+            // readback — see [`crcbl_shaders::cull::STATS_WORDS`].
             visible_count.push(buffer(
-                &format!("visible count {frame}"),
-                4,
+                &format!("cull stats {frame}"),
+                u64::from(cull_shader::STATS_WORDS) * 4,
                 BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC | BufferUsage::TRANSFER_DST,
                 MemoryLocation::DeviceLocal,
             )?);
@@ -589,11 +608,21 @@ impl DrawGen {
         self.visible[frame]
     }
 
-    /// `frame`'s survivor count, in element 0.
+    /// `frame`'s culling statistics: surviving instances in
+    /// [`INSTANCE_SURVIVOR_WORD`](crcbl_shaders::cull::INSTANCE_SURVIVOR_WORD)
+    /// and surviving clusters in
+    /// [`CLUSTER_SURVIVOR_WORD`](crcbl_shaders::cull::CLUSTER_SURVIVOR_WORD).
     ///
-    /// The **true** count, which can exceed [`DrawGen::visible_capacity`] — so
-    /// it is also where a scene that outgrew the list says so. Topic 03 §3.6's
-    /// culling-stats readback is this buffer, on a delayed ring.
+    /// **Topic 03 §3.6's culling-stats readback is this buffer, on a delayed
+    /// ring — the one readback the frame loop is allowed.** Both counters live
+    /// here rather than in a buffer each so that stays one copy per frame.
+    ///
+    /// The instance count is the **true** one, which can exceed
+    /// [`DrawGen::visible_capacity`] — so it is also where a scene that outgrew
+    /// the list says so. The cluster count is what §3.5's amplification stage
+    /// kept, and is zero on every path that has no amplification stage: the two
+    /// indirect tails, and a device with `Features::MESH_SHADER` and no
+    /// `Features::TASK_SHADER`.
     ///
     /// # Panics
     ///
@@ -808,6 +837,7 @@ impl DrawGen {
             counts: self.counts[frame],
             counts_id: counts,
             runs_id: runs,
+            visible_count_id: visible_count,
         }
     }
 

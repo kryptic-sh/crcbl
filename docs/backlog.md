@@ -5931,18 +5931,26 @@ left:
   lavapipe at zero differing pixels. wgpu, WARP and Metal do not: each reports
   no `MESH_SHADER`, so those jobs keep drawing through an indirect tail and are
   the coverage that the fallback still works.
-- **`ClusterBounds`' documented cull rule is correct but not conservative, and
-  the doc does not say so.** The derivation on `cone_cutoff` — reject when
-  `cone_cutoff > 0 && dot(axis, v) > sqrt(1 - cutoff²)` — is right for a
-  **point**-sized cluster: it treats every triangle as sharing the centre's view
-  direction. A cluster with a non-zero `radius` close to the camera can
-  therefore have a front-facing triangle and still be rejected, which drops
-  geometry that should be drawn. meshoptimizer's form adds the radius term:
-  `dot(axis, center - camera) > sqrt(1 - cutoff²) · |center - camera| + radius`.
-  `radius` is already in the record, so this is one term. **Found before
-  anything implemented the rule**, so nothing in the tree is quietly different
-  from the prose today — but the amplification slice must fix the doc and the
-  shader together, or it will faithfully transcribe a rule that drops geometry.
+- **Settled: the cone cull rule needed a radius term, and it now has one.** The
+  documented form was the point-sized one — it treats every triangle as sharing
+  the centre's view direction, so a cluster with a real radius close to the
+  camera could hold a front-facing triangle and be rejected anyway. The
+  conservative form adds `+ radius`, and the derivation on
+  `ClusterBounds::cone_cutoff` now carries it. Measured over 400 000 random
+  samples: the corrected form dropped a front-facing cluster **0** times, the
+  old one **11 225**. The `cone_cutoff > 0` guard is **not** subsumed by it —
+  `sqrt(1 - cutoff²)` is even in `cutoff` and cannot tell a narrow cone from one
+  wider than a hemisphere.
+
+  **On shipped geometry the term only ever adds slack**, which is why it needs a
+  constructed test rather than a picture: no mesh in the engine has a
+  `cone_cutoff` strictly between 0 and 1 — a flat face gets `1.0`, a closed
+  shape gets `OMNIDIRECTIONAL_CUTOFF` — and at `cutoff == 1` the two forms
+  differ only where the camera has crossed the face's plane, i.e. for a
+  genuinely back-facing cluster.
+  `a_cluster_the_point_form_would_reject_survives_the_conservative_one` is the
+  host-side case that actually pins the correction.
+
 - **`CRCBL_BLESS` is suite-wide and there is no way to scope it to one golden.**
   Setting it re-blesses every golden the run reaches, so it cannot be used to
   regenerate a single image — and a suite-wide bless run also fails fast on the
@@ -5965,22 +5973,26 @@ left:
   nothing past it. `crcbl-hal` has no `draw_mesh_tasks_indirect`; adding one is
   a seam change and is the natural follow-up, and it is also the prerequisite
   for culling to actually reduce work rather than just skip output.
-- **No amplification stage, so no per-cluster culling.** `ClusterBounds` — the
-  sphere and the normal cone the builder computes — is uploaded and **read by
-  nothing**. That is §3.5's second bullet and its own slice. The mesh it needs
-  now exists (`crcbl_shaders::mesh`'s open box, five clusters), so what is left
-  is the task stage itself, plus the radius correction to the cull rule above.
-  Note `Features::TASK_SHADER` is a separate capability from `MESH_SHADER`: a
-  device with mesh shaders and no task shaders must keep working through the
-  un-amplified path.
-- **The counts the culling slice must assert**, so the shape is not re-derived:
-  the picture must not move with culling on from a camera that sees everything
-  (same golden, not a new one); from a camera where clusters face away or fall
-  outside, the surviving count must be **strictly less** and asserted as a
-  number; and from a camera seeing everything the count must **equal** the total
-  — that last one is what catches an over-eager cone test and is the assertion
-  most likely to be left out. `crcbl_render::draw_gen`'s `visible_count` delayed
-  readback ring is the mechanism to copy rather than inventing a second one.
+- **Frustum rejection of these clusters is inherently marginal**, and the counts
+  should be read with that in mind. A flat 1x1 face's AABB-midpoint bounding
+  sphere has radius 0.707 — comparable to the whole mesh — so cluster spheres
+  always straddle a side plane, and the _instance_ AABB cull is tighter than the
+  cluster sphere cull. The only decisive rejections available are below or
+  behind a camera inside the box, which is what the third test camera uses
+  (margins of roughly 0.12–0.24 world units, about five orders of magnitude
+  above f32 noise). A tighter bounding sphere — Ritter's or Welzl's, already
+  flagged as not done on `ClusterBounds::center` — is what would change this.
+- **The cluster count is per-frame-total, not per-bucket.** A per-bucket
+  breakdown needs a wider stats buffer; the tests work around it by measuring
+  each camera twice, with the open box in the scene and out of it, and
+  attributing the difference.
+- **`cargo clippy --all-targets` does not compile `crcbl-vk`'s e2e target** — it
+  needs `--features vk-e2e`, so the bare command `CLAUDE.md` documents will not
+  see a borrow error in `crates/crcbl-vk/tests/vk_e2e/**`. One got through both
+  documented clippy gates in this session and surfaced only inside
+  `run-vk-e2e.sh`. `cargo clippy --all-targets --all-features` **does** cover
+  it, since `vk-e2e` is a real feature in that crate's manifest; the habit worth
+  keeping is the `--all-features` form.
 - **The cluster buffers are `HostUpload`, written once at build.** Device-local
   storage is what a bake cache that streams clusters would want.
 - **No bake cache, no input hashing, no cluster LOD/QEM.**

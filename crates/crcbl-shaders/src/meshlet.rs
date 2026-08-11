@@ -91,11 +91,11 @@ const _: () = assert!(MAX_CLUSTER_VERTICES <= u8::MAX as usize + 1);
 /// A cluster's bounding sphere and normal cone, matching
 /// `struct ClusterBounds` in `shaders/mesh_cluster.slang`.
 ///
-/// **Nothing reads these yet.** Per-cluster culling in the amplification stage
-/// is §3.5's second bullet and a slice of its own; they are in the record
-/// because they share a cluster's lifetime exactly — decided when the cluster
-/// is built, gone when it is — and a second table would be a second thing to
-/// keep in step.
+/// Read by §3.5's per-cluster cull — `mesh_cluster.slang`'s amplification stage
+/// — and by nothing else. They are in the record rather than in a table of
+/// their own because they share a cluster's lifetime exactly: decided when the
+/// cluster is built, gone when it is, and a second table would be a second
+/// thing to keep in step.
 ///
 /// `PartialEq` but **not** `Eq`, like [`GpuMesh`](crate::mesh::GpuMesh) beside
 /// it: these are floats, and a type claiming total equality over an `f32` is
@@ -139,21 +139,50 @@ pub struct ClusterBounds {
     ///
     /// # The cull this is for
     ///
-    /// Nothing culls anything with it yet. A consumer that wants to reject a
-    /// wholly back-facing cluster tests, with `v` the unit direction from the
-    /// camera to [`center`](Self::center):
+    /// `mesh_cluster.slang`'s amplification stage rejects a wholly back-facing
+    /// cluster, and [`crcbl_render::cull::cluster_survives_cull`] is the same
+    /// rule in Rust. With `d = center - camera` and `r` the
+    /// [`radius`](Self::radius), both in one space:
     ///
     /// ```text
-    /// cone_cutoff > 0.0 && dot(cone_axis, v) > sqrt(1.0 - cone_cutoff * cone_cutoff)
+    /// cone_cutoff > 0.0
+    ///     && dot(cone_axis, d) > sqrt(1.0 - cone_cutoff * cone_cutoff) * length(d) + r
     /// ```
     ///
-    /// With `a = acos(cone_cutoff)` the cone's half angle and `t` the angle
-    /// between `cone_axis` and `v`, every normal in the cone faces away from
-    /// the camera exactly when `t + a < pi/2`, which is the inequality above.
-    /// The `cone_cutoff > 0.0` half is what that derivation needs: at
-    /// `a >= pi/2` the cone already holds a front-facing normal for every `v`,
-    /// and the inequality on its own would then reject clusters that must be
-    /// drawn.
+    /// **The `+ r` is what makes it safe, and it is not decoration.** Take it
+    /// away and the test is `dot(cone_axis, v) > sqrt(1 - cone_cutoff²)` with
+    /// `v` the unit direction from the camera to the centre — which is the
+    /// exact test for a cluster of *zero* radius, because it treats every
+    /// triangle as sharing the centre's view direction. A cluster with a real
+    /// radius close to the camera can hold a front-facing triangle and still be
+    /// rejected by that form, which is geometry dropped out of the picture in
+    /// the case nobody tries. Over uniformly sampled configurations the
+    /// radius-free form drops geometry in a few per cent of them, and the form
+    /// above in none.
+    ///
+    /// # Why it is right
+    ///
+    /// Write `a = acos(cone_cutoff)` for the cone's half angle, `t` for the
+    /// angle between `cone_axis` and `d`, and let `p` be any point of the
+    /// cluster and `n` any normal of the cone. The triangle at `p` faces away
+    /// from the camera when `dot(n, p - camera) > 0`; every point of the
+    /// cluster is inside the sphere, so `dot(n, p - camera) >= dot(n, d) - r`,
+    /// and the whole cluster is back-facing as soon as
+    /// `min over the cone of dot(n, d) > r`. That minimum is
+    /// `length(d) * cos(t + a)`, and expanding the cosine gives
+    /// `cone_cutoff * dot(cone_axis, d) - sqrt(1 - cone_cutoff²) * |d × cone_axis| > r`.
+    /// The inequality above implies that one for every `cone_cutoff` in
+    /// `(0, 1]`, and the two coincide at `r == 0` and at `cone_cutoff == 1` —
+    /// so it is conservative everywhere and exact where the geometry is a point
+    /// or a plane.
+    ///
+    /// The `cone_cutoff > 0.0` half survives the correction unchanged, and the
+    /// radius term does not subsume it: `sqrt(1 - cone_cutoff²)` is even in
+    /// `cone_cutoff`, so it cannot tell a narrow cone from one wider than a
+    /// hemisphere — and at `a >= pi/2` the cone holds a front-facing normal for
+    /// every possible view.
+    ///
+    /// [`crcbl_render::cull::cluster_survives_cull`]: https://docs.rs/crcbl-render
     pub cone_cutoff: f32,
 }
 

@@ -427,6 +427,10 @@ pub struct ForwardRenderer {
     /// How many clusters each bucket's mesh has, which is the x extent of its
     /// dispatch. Zero on the indirect tails, where nothing dispatches.
     bucket_clusters: [u32; BUCKET_COUNT as usize],
+    /// Whether the mesh pipeline was built with §3.5's amplification stage in
+    /// front of it — see [`ForwardRenderer::culls_clusters`], which is where
+    /// what it means is written down.
+    culls_clusters: bool,
 
     // Per-frame uniforms, one set per frame in flight.
     uniforms: Vec<BufferHandle>,
@@ -579,6 +583,17 @@ impl ForwardRenderer {
         // frame came out of the mesh stage" a fact about the object graph
         // rather than a claim about a branch.
         let emit = EmitTail::from_caps(&device.caps());
+        // **A second capability, asked separately.** `Features::TASK_SHADER` is
+        // not implied by `MESH_SHADER`, so §3.5's per-cluster cull is an
+        // amplification stage this renderer builds where the device has one and
+        // leaves out where it does not — and a device without it keeps drawing
+        // through `mesh_cluster.slang`'s un-amplified `meshMain`, which culls
+        // nothing and emits every cluster. Same picture, more work.
+        let culls_clusters = emit.is_mesh()
+            && device
+                .caps()
+                .features
+                .contains(crcbl_hal::Features::TASK_SHADER);
 
         let (pool, cube_mesh, pyramid_mesh, open_box_mesh) = Self::build_geometry(device, queue)?;
         // The handles are `Copy`, so they can be read out before the pool
@@ -672,6 +687,15 @@ impl ForwardRenderer {
         let args: Vec<BufferHandle> = (0..instance_buffers.len())
             .map(|frame| draws.args(frame))
             .collect();
+        // What the amplification stage reads and writes, and nothing else does:
+        // this frame's frustum, and the culling statistics its surviving
+        // clusters are counted into.
+        let cull_params: Vec<BufferHandle> = (0..instance_buffers.len())
+            .map(|frame| draws.cull_params(frame))
+            .collect();
+        let cull_stats: Vec<BufferHandle> = (0..instance_buffers.len())
+            .map(|frame| draws.visible_count(frame))
+            .collect();
         rollback.draws = Some(draws);
 
         // §3.5's clusters, on the path that reads them and on no other. The
@@ -708,10 +732,18 @@ impl ForwardRenderer {
         // and every backend refuses a layout carrying it on a device without
         // `Features::MESH_SHADER` — which is exactly the device that never
         // reaches this arm.
-        let geometry = if emit.is_mesh() {
-            ShaderStages::MESH
-        } else {
-            ShaderStages::VERTEX
+        //
+        // **`TASK` joins it when there is an amplification stage**, and the
+        // union is deliberately over every binding rather than the eight
+        // `taskMain` actually reads. Slang's Metal backend materialises every
+        // global in every entry point of a module — the argument bindings 6 to
+        // 8 already carry — so a layout that named only the task stage's own
+        // reads would be a layout `msl/mesh_cluster.metal` disagrees with, on a
+        // runner this team cannot debug on.
+        let geometry = match (emit.is_mesh(), culls_clusters) {
+            (true, true) => ShaderStages::MESH.union(ShaderStages::TASK),
+            (true, false) => ShaderStages::MESH,
+            (false, _) => ShaderStages::VERTEX,
         };
         let mut mesh_entries = vec![
             BindGroupLayoutEntry {
@@ -873,6 +905,37 @@ impl ForwardRenderer {
                 count: 1,
                 flags: BindingFlags::empty(),
             }));
+        }
+        if culls_clusters {
+            // §3.5's per-cluster cull needs two things `meshMain` does not, and
+            // they exist only where an amplification stage does: the frustum,
+            // and somewhere to count what survived.
+            mesh_entries.push(BindGroupLayoutEntry {
+                binding: 13,
+                visibility: geometry,
+                // **The same block the instance cull reads**, not a copy: one
+                // camera, one frustum, and no way for the two rejections to
+                // disagree about which. `dynamic: false` because there is one
+                // block per frame rather than one per bucket.
+                kind: BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: BindingFlags::empty(),
+            });
+            mesh_entries.push(BindGroupLayoutEntry {
+                binding: 14,
+                visibility: geometry,
+                kind: BindingKind::StorageBuffer {
+                    // **The one writable binding this pass has.** The stage adds
+                    // to a counter, so `read_only: false` is the truth rather
+                    // than a hint, and it is what makes the graph order this
+                    // write after the draw-argument pass's read of the same
+                    // buffer.
+                    read_only: false,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            });
         }
         let mesh_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("mesh frame"),
@@ -1066,6 +1129,23 @@ impl ForwardRenderer {
                     },
                 ]);
             }
+            if culls_clusters {
+                entries.extend([
+                    BindGroupEntry {
+                        binding: 13,
+                        array_index: 0,
+                        // This frame's frustum, for the ring's reason: the cull
+                        // pass rewrites it every frame and the previous frame
+                        // may still be reading the other slot.
+                        resource: BindingResource::whole_buffer(cull_params[frame]),
+                    },
+                    BindGroupEntry {
+                        binding: 14,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(cull_stats[frame]),
+                    },
+                ]);
+            }
             let group = device.create_bind_group(&BindGroupDesc {
                 label: Some("mesh frame"),
                 layout: mesh_layout,
@@ -1135,7 +1215,22 @@ impl ForwardRenderer {
             // page sample — is the same code both paths run rather than a copy
             // that agrees today. `mesh_cluster.slang`'s header carries the
             // argument, and its `VertexOutput` is what the two agree through.
-            let cluster_entry = entry(&MESH_CLUSTER, Stage::Mesh)?;
+            // **Named rather than looked up by stage**, because the module has
+            // two mesh entry points and a stage lookup would refuse an
+            // ambiguous one — see `named_entry`. Which of the two this builds
+            // is the whole of the amplification decision.
+            let cluster_entry = named_entry(
+                &MESH_CLUSTER,
+                if culls_clusters {
+                    "amplifiedMeshMain"
+                } else {
+                    "meshMain"
+                },
+                Stage::Mesh,
+            )?;
+            let task_entry = culls_clusters
+                .then(|| named_entry(&MESH_CLUSTER, "taskMain", Stage::Task))
+                .transpose()?;
             let cluster_module = device.create_shader_module(&ShaderModuleDesc {
                 label: Some("mesh_cluster.slang"),
                 spirv: MESH_CLUSTER.spirv(),
@@ -1148,12 +1243,15 @@ impl ForwardRenderer {
             let pipeline = device.create_mesh_pipeline(&MeshPipelineDesc {
                 label: Some("forward mesh cluster"),
                 layout: mesh_pipeline_layout,
-                // **No amplification stage.** Per-cluster culling is what one
-                // would be for and that is §3.5's own later slice, so a task
-                // stage here would be a stage that dispatched its mesh stage
-                // and did nothing else — and `Features::TASK_SHADER` is a
-                // separate capability this path would then need.
-                task: None,
+                // §3.5's per-cluster cull, where the device has the stage to
+                // run it in. `None` is not a degradation: `meshMain` draws the
+                // same picture out of the same clusters, having rejected none
+                // of them, which is what a device with `Features::MESH_SHADER`
+                // and no `Features::TASK_SHADER` gets.
+                task: task_entry.map(|entry_point| ShaderEntry {
+                    module: cluster_module,
+                    entry_point,
+                }),
                 mesh: ShaderEntry {
                     module: cluster_module,
                     entry_point: cluster_entry,
@@ -1306,6 +1404,7 @@ impl ForwardRenderer {
             emit,
             clusters: rollback.clusters.take(),
             bucket_clusters,
+            culls_clusters,
             uniforms,
             draw_constants,
             mesh_groups,
@@ -1854,7 +1953,16 @@ impl ForwardRenderer {
             // barrier for is a shader read — and the per-bucket draw *counts*
             // are not read at all, because nothing here is a draw whose count
             // could come from memory.
-            pass.read_buffer(generated.args_id)
+            let pass = pass.read_buffer(generated.args_id);
+            if self.culls_clusters {
+                // The amplification stage counts its survivors into the
+                // culling statistics, which the draw-argument pass read a
+                // moment ago — so this is a write-after-read the graph has to
+                // order, and declaring it is the whole of how it learns to.
+                pass.use_buffer(generated.visible_count_id, ResourceState::ShaderReadWrite)
+            } else {
+                pass
+            }
         } else {
             pass.use_buffer(generated.args_id, ResourceState::IndirectArgument)
                 .use_buffer(generated.counts_id, ResourceState::IndirectArgument)
@@ -2052,6 +2160,30 @@ impl ForwardRenderer {
         }
     }
 
+    /// Whether this renderer **built** §3.5's per-cluster cull — an
+    /// amplification stage in front of the mesh stage, rejecting a surviving
+    /// instance's back-facing and off-screen clusters.
+    ///
+    /// `false` on the two indirect tails, which draw index ranges and have no
+    /// stage to put it in, and on a device with `Features::MESH_SHADER` and no
+    /// `Features::TASK_SHADER` — a real and supported state, not a degradation:
+    /// that device draws every cluster of every surviving instance and the
+    /// picture is the same one.
+    ///
+    /// The instance cull runs on every path either way, and is unaffected by
+    /// this.
+    ///
+    /// It is asked of the renderer rather than of the device for
+    /// [`ForwardRenderer::geometry_path`]'s reason: this reports what was
+    /// built, so `true` means
+    /// [`DrawGen::visible_count`](crate::draw_gen::DrawGen::visible_count)'s
+    /// cluster word is a number the frame produced rather than the zero the
+    /// clearing pass left.
+    #[must_use]
+    pub const fn culls_clusters(&self) -> bool {
+        self.culls_clusters
+    }
+
     /// Which frame-in-flight slot the last [`ForwardRenderer::begin_frame`]
     /// rotated to, which is the slot every per-frame buffer is indexed by.
     #[must_use]
@@ -2165,6 +2297,35 @@ fn entry(shader: &crcbl_shaders::Shader, stage: Stage) -> Result<&'static str, H
         HalError::ShaderCompilation(format!(
             "{}.slang exposes no unambiguous {stage:?} entry point; the committed SPIR-V and its \
              manifest disagree, which crates/crcbl-shaders/tools/compile-shaders.sh would fix",
+            shader.name()
+        ))
+    })
+}
+
+/// The entry point called `name`, checked to be `stage`'s.
+///
+/// [`entry`] cannot serve `mesh_cluster.slang`: it has **two** mesh entry
+/// points — one behind the amplification stage and one without it — and a
+/// lookup by stage answers `None` for two matches rather than picking one, for
+/// the good reason that picking one would draw the wrong geometry.
+///
+/// The stage is still checked rather than taken on trust: a name that resolved
+/// to the wrong stage would be a pipeline built with an amplification stage in
+/// its mesh slot, and the failure would arrive as a driver error rather than as
+/// this sentence.
+fn named_entry(
+    shader: &crcbl_shaders::Shader,
+    name: &'static str,
+    stage: Stage,
+) -> Result<&'static str, HalError> {
+    let found = shader
+        .entry_points()
+        .iter()
+        .find(|entry| entry.name() == name && entry.stage() == stage);
+    found.map(crcbl_shaders::EntryPoint::name).ok_or_else(|| {
+        HalError::ShaderCompilation(format!(
+            "{}.slang exposes no {stage:?} entry point called `{name}`; the committed SPIR-V and \
+             its manifest disagree, which crates/crcbl-shaders/tools/compile-shaders.sh would fix",
             shader.name()
         ))
     })
@@ -2734,6 +2895,113 @@ mod tests {
                 (counted_calls, per_batch_calls),
                 (expected_counted, expected_per_batch),
                 "{path:?} must record one call of its own kind per bucket and none of the other"
+            );
+
+            frame.finish(device.as_ref(), renderer);
+        }
+    }
+
+    /// Opens a null device offering `optional` on top of the mesh path, and
+    /// asserts it really selected that path.
+    ///
+    /// Asked for rather than merely reported, because a device grants what it
+    /// enabled: leaving mesh shaders out of the optional set opens a device on
+    /// an indirect tail and tests nothing.
+    fn open_mesh_path(recorder: &Recorder, optional: Features) -> (Box<dyn Device>, QueueHandle) {
+        let caps = crcbl_hal::DeviceCaps {
+            features: Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,
+            limits: crcbl_hal::Limits::desktop(),
+        };
+        let instance = NullInstance::new(caps).with_recorder(recorder.clone());
+        let adapter = instance.adapters().remove(0);
+        assert_eq!(
+            adapter.caps.geometry_path(),
+            GeometryPath::MeshShader,
+            "a device with mesh shaders selects them, which is the case this is about"
+        );
+        let device = instance
+            .create_device(&DeviceDesc {
+                label: None,
+                adapter: adapter.id,
+                required_features: Features::COMPUTE,
+                optional_features: Features::GPU_DRIVEN | Features::MESH_SHADER | optional,
+                compatible_surface: None,
+            })
+            .expect("the null backend always opens");
+        assert_eq!(
+            device.caps().geometry_path(),
+            GeometryPath::MeshShader,
+            "and the opened device still selects it"
+        );
+        let queue = device.queue(QueueKind::Graphics).expect("always present");
+        (device, queue)
+    }
+
+    /// **`Features::TASK_SHADER` is what decides whether §3.5's per-cluster cull
+    /// is built, and a device without it still draws.**
+    ///
+    /// The two capabilities are separate, and the adapter above offers both — so
+    /// asking for one and not the other is a device state a real driver has and
+    /// this can reach. Neither arm is a skip:
+    ///
+    /// * With the task stage, the renderer builds the amplification stage and
+    ///   [`ForwardRenderer::culls_clusters`] says so. The null backend refuses a
+    ///   task stage on a device without the flag, so an arm that computed this
+    ///   wrongly would fail to build rather than pass quietly.
+    /// * Without it, the renderer builds `meshMain` — the un-amplified entry
+    ///   point — and draws every cluster of every surviving instance. That is
+    ///   the path that existed before this slice and it is unchanged, dispatch
+    ///   extents included.
+    #[test]
+    fn the_task_stage_is_built_only_where_the_device_has_one() {
+        use crcbl_hal::null::Command;
+
+        for (optional, expected) in [(Features::TASK_SHADER, true), (Features::empty(), false)] {
+            let recorder = Recorder::new();
+            let (device, queue) = open_mesh_path(&recorder, optional);
+            let mut renderer = ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
+                .expect("the forward renderer builds on both device shapes");
+            assert_eq!(
+                device.caps().supports(Features::TASK_SHADER),
+                expected,
+                "the device must actually differ between the arms, or both test the same thing"
+            );
+            assert_eq!(
+                renderer.culls_clusters(),
+                expected,
+                "the amplification stage is built exactly where the device has one"
+            );
+            assert_eq!(
+                renderer.geometry_path(),
+                GeometryPath::MeshShader,
+                "both arms are the mesh path; only the stage in front of it differs"
+            );
+
+            let slots = renderer.instances.slot_count();
+            let clusters = renderer.bucket_clusters;
+            let frame = frame(device.as_ref(), &mut renderer, queue);
+
+            // **The dispatch is the same either way**, which is what makes the
+            // cull a rejection inside the existing shape rather than a second
+            // one: the CPU still records one call per bucket over the same two
+            // upper bounds, and the amplification stage is what turns a group
+            // into no work.
+            let dispatched: Vec<(u32, u32, u32)> = recorder
+                .commands()
+                .into_iter()
+                .filter_map(|command| match command {
+                    Command::DrawMeshTasks { x, y, z } => Some((x, y, z)),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                dispatched,
+                vec![
+                    (clusters[CUBE_BUCKET], slots, 1),
+                    (clusters[PYRAMID_BUCKET], slots, 1),
+                    (clusters[OPEN_BOX_BUCKET], slots, 1)
+                ],
+                "one dispatch per bucket on both arms, sized to that bucket's clusters"
             );
 
             frame.finish(device.as_ref(), renderer);

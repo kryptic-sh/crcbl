@@ -1,12 +1,14 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// Zeroing the three counters `cull.slang` and `draw_gen.slang` only ever add
-// to, from inside the frame graph.
+// Zeroing the counters `cull.slang`, `draw_gen.slang` and
+// `mesh_cluster.slang`'s amplification stage only ever add to, from inside the
+// frame graph.
 //
-// Both of those passes accumulate: the survivor count and each bucket's
-// instance count are atomic adds, so a counter carrying the previous frame's
-// total makes an argument structure claim more instances than its run holds.
-// Something has to write the zero, and this is that something.
+// All three accumulate: the two survivor counts and each bucket's instance
+// count are atomic adds, so a counter carrying the previous frame's total makes
+// an argument structure claim more instances than its run holds, or a culling
+// statistic report a frame that has already been drawn. Something has to write
+// the zero, and this is that something.
 //
 // # Why a dispatch, and not the fill the seam already has
 //
@@ -35,11 +37,8 @@
 // two dispatches is two passes. The render graph computes it from what each
 // pass declares.
 
-/// The two lengths this pass cannot derive for itself, matching
+/// The three lengths this pass cannot derive for itself, matching
 /// `crcbl_shaders::clear_counters::Params`.
-///
-/// The third, the survivor count, is one word by construction and needs no
-/// parameter.
 struct ClearParams
 {
     /// Words in the indirect-argument buffer: one bucket's structure is
@@ -49,20 +48,25 @@ struct ClearParams
     uint args_words;
     /// Words in the per-bucket draw-count buffer, which is one per bucket.
     uint counts_words;
+    /// Words in the culling-statistics buffer, which is
+    /// `crcbl_shaders::cull::STATS_WORDS`. A parameter rather than a literal
+    /// because two different shaders own one word each of it, and a shader that
+    /// zeroed a prefix would leave the other's counter carrying last frame's
+    /// total.
+    uint stats_words;
     /// Pads the block to a multiple of 16 bytes, which `std140` requires of a
     /// uniform buffer's size.
     uint pad0;
-    /// The second half of that padding.
-    uint pad1;
 };
 
 [[vk::binding(0, 0)]]
 ConstantBuffer<ClearParams> clear;
 
-/// `cull.slang`'s survivor count, in element 0 — the one word this pass zeroes
-/// without being told how many there are.
+/// The frame's culling statistics: `cull.slang`'s surviving instances in
+/// element 0 and `mesh_cluster.slang`'s surviving clusters in element 1. Both
+/// are atomic adds, so both start here at zero.
 [[vk::binding(1, 0)]]
-RWStructuredBuffer<uint> visible_count;
+RWStructuredBuffer<uint> cull_stats;
 
 /// The indirect arguments, as the flat array of words `draw_gen.slang` writes
 /// them through. Zeroed whole rather than only at the accumulating word: the
@@ -90,9 +94,9 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
 {
     uint index = thread.x;
 
-    if (index == 0)
+    if (index < clear.stats_words)
     {
-        visible_count[0] = 0;
+        cull_stats[index] = 0;
     }
     if (index < clear.args_words)
     {

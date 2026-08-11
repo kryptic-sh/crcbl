@@ -95,6 +95,14 @@ struct GpuInstance
 /// this word gains has no way to be checked against.
 static const uint INSTANCE_LIVE = 1;
 
+/// Which element of `visible_count` this pass adds to.
+///
+/// The same number as `crcbl_shaders::cull::INSTANCE_SURVIVOR_WORD`, held in
+/// step with it by that module's
+/// `the_shaders_index_the_culling_stats_at_the_words_this_crate_says` — which
+/// is also what pins `mesh_cluster.slang` to the element beside this one.
+static const uint INSTANCE_SURVIVOR_WORD = 0;
+
 /// One resident mesh's range in the geometry pools **and its local-space
 /// bounds**, matching `crcbl_shaders::mesh::GpuMesh` and `mesh.slang`'s copy.
 struct GpuMesh
@@ -163,8 +171,13 @@ StructuredBuffer<GpuMesh> meshes;
 [[vk::binding(3, 0)]]
 RWStructuredBuffer<uint> visible;
 
-/// How many survivors there were, in element 0. The caller zeroes it before the
-/// dispatch.
+/// How many survivors there were, in element `INSTANCE_SURVIVOR_WORD`.
+/// `clear_counters.slang` zeroes it before the dispatch.
+///
+/// The buffer is the frame's culling statistics rather than this pass's own
+/// counter: `mesh_cluster.slang`'s amplification stage counts surviving
+/// *clusters* into the element beside this one, so the frame has one readback
+/// rather than two.
 ///
 /// This is the *true* count, which can exceed `CullParams::capacity`: the
 /// atomic increments unconditionally and only the write into `visible` is
@@ -244,7 +257,7 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
         }
     }
 
-    uint slot = visible_count[0].add(1);
+    uint slot = visible_count[INSTANCE_SURVIVOR_WORD].add(1);
     if (slot < cull.capacity)
     {
         visible[slot] = index;
