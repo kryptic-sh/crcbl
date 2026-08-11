@@ -2232,10 +2232,12 @@ impl Device for Dx12Device {
             // value picked here.
             MipLODBias: 0.0,
             MaxAnisotropy: anisotropy.max(1),
-            // A non-comparison sampler ignores this field, but the debug layer
-            // reads a zero as `D3D12_COMPARISON_FUNC_NONE`, which is a sampler
-            // feedback value and not a comparison at all. `ALWAYS` is the
-            // neutral one.
+            // A non-comparison sampler ignores this field, and `ALWAYS` is the
+            // neutral filler for it. The debug layer says so out loud —
+            // `CREATE_SAMPLER_COMPARISON_FUNC_IGNORED`, "This is OK, as the
+            // ComparisonFunc will simply be ignored" — which is why that id is
+            // in `crate::debug`'s `ALLOWED`, with the argument and with what
+            // would retire it.
             ComparisonFunc: desc
                 .compare
                 .map_or(D3D12_COMPARISON_FUNC_ALWAYS, conv::comparison_func),
@@ -4058,6 +4060,17 @@ pub(crate) mod tests {
         group: BindGroupHandle,
         module: ShaderModuleHandle,
         pipeline: GraphicsPipelineHandle,
+        /// The state [`Self::run`] last left [`Self::target`] in, so the barrier
+        /// that opens the next run declares where the image really is.
+        ///
+        /// **A barrier is a claim about the state its image is already in, and
+        /// D3D12 validates the claim.** Every run ends with the copy, so the
+        /// second and later ones start from [`ResourceState::TransferSrc`] —
+        /// declaring [`ResourceState::Undefined`] again would say `COMMON` of an
+        /// image sitting in `COPY_SOURCE`, which is
+        /// `ID3D12CommandQueue::ExecuteCommandLists`' "before state … does not
+        /// match with the state specified in preceding ResourceBarrier".
+        left_in: core::cell::Cell<ResourceState>,
     }
 
     impl IndexedTriangle {
@@ -4179,6 +4192,7 @@ pub(crate) mod tests {
                 group,
                 module,
                 pipeline,
+                left_in: core::cell::Cell::new(ResourceState::Undefined),
             }
         }
 
@@ -4189,6 +4203,10 @@ pub(crate) mod tests {
         /// The readback is re-poisoned first, so a run that copied nothing is a
         /// frame of [`POISON`] rather than the previous run's picture — which is
         /// what stops one green draw making every later assertion vacuous.
+        ///
+        /// The opening barrier comes from [`Self::left_in`] rather than from
+        /// [`ResourceState::Undefined`] every time, which is what makes a second
+        /// run's transition true; see that field.
         fn run(
             &self,
             device: &Dx12Device,
@@ -4208,7 +4226,7 @@ pub(crate) mod tests {
                     images: &[ImageBarrier::new(
                         self.target,
                         ImageSubresourceRange::all(Format::Rgba8Unorm),
-                        ResourceState::Undefined,
+                        self.left_in.get(),
                         ResourceState::ColorAttachment,
                     )],
                     ..Barriers::default()
@@ -4247,6 +4265,7 @@ pub(crate) mod tests {
                     image_extent: SQUARE,
                 });
             });
+            self.left_in.set(ResourceState::TransferSrc);
 
             let request = device
                 .request_readback(&ReadbackDesc {

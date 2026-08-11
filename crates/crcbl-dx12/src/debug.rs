@@ -57,6 +57,17 @@
 //! no validation. Asking for the layer and not getting it stays a failure: that
 //! is the case where a reader would otherwise believe the checking happened.
 //!
+//! # A message id is argued past one at a time, or not at all
+//!
+//! [`ALLOWED`] is the whole of it: a table of `D3D12_MESSAGE_ID`s with the
+//! argument for each, applied **only at [`Severity::Warning`]**. It is not a
+//! severity filter and must never become one — a run that stopped failing on
+//! warnings would stop being the line `crcbl-vk` is held to, and every id in the
+//! table would then be joined by every id nobody had looked at. An allowed
+//! message is still counted, in [`ValidationReport::allowed`], so "the layer
+//! said nothing" and "the layer said things this crate has an answer for" stay
+//! different claims.
+//!
 //! # Nothing clears the info queue, and that is deliberate
 //!
 //! An earlier [`diagnosis`] drained the queue and cleared it, so the messages
@@ -73,7 +84,9 @@ use std::sync::OnceLock;
 
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Direct3D12::{
-    D3D12_INFO_QUEUE_FILTER, D3D12_INFO_QUEUE_FILTER_DESC, D3D12_MESSAGE, D3D12_MESSAGE_SEVERITY,
+    D3D12_INFO_QUEUE_FILTER, D3D12_INFO_QUEUE_FILTER_DESC, D3D12_MESSAGE,
+    D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE,
+    D3D12_MESSAGE_ID_CREATE_SAMPLER_COMPARISON_FUNC_IGNORED, D3D12_MESSAGE_SEVERITY,
     D3D12_MESSAGE_SEVERITY_CORRUPTION, D3D12_MESSAGE_SEVERITY_ERROR, D3D12_MESSAGE_SEVERITY_INFO,
     D3D12_MESSAGE_SEVERITY_MESSAGE, D3D12_MESSAGE_SEVERITY_WARNING, D3D12GetDebugInterface,
     ID3D12Debug, ID3D12Device, ID3D12InfoQueue,
@@ -185,6 +198,92 @@ impl Severity {
     }
 }
 
+/// `D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE`.
+///
+/// Spelled as a number here for the reason [`Severity`] is this crate's own
+/// enum: [`ALLOWED`] and everything asked of it have to be readable — and
+/// testable — on a machine with no D3D12 at all. The `const` assertion below is
+/// what keeps the number and the constant equal, and it is checked by the
+/// `x86_64-pc-windows-msvc` build.
+const CLEAR_VALUE_NOT_GIVEN: i32 = 820;
+
+/// `D3D12_MESSAGE_ID_CREATE_SAMPLER_COMPARISON_FUNC_IGNORED`. See
+/// [`CLEAR_VALUE_NOT_GIVEN`] for why it is a number.
+const SAMPLER_COMPARISON_FUNC_IGNORED: i32 = 1361;
+
+// **The number is the constant, or this does not compile.** A table written
+// against literals is one nothing checks; this is the check, and it runs
+// wherever the crate is built for Windows.
+#[cfg(target_os = "windows")]
+const _: () = assert!(
+    CLEAR_VALUE_NOT_GIVEN == D3D12_MESSAGE_ID_CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE.0
+        && SAMPLER_COMPARISON_FUNC_IGNORED
+            == D3D12_MESSAGE_ID_CREATE_SAMPLER_COMPARISON_FUNC_IGNORED.0,
+    "a debug-layer message id in ALLOWED is not the D3D12 constant it names"
+);
+
+/// A warning this crate has an answer for, and the answer.
+///
+/// The `reason` is the whole point of the type: an id on its own is a number
+/// somebody once decided to ignore, and a year later nobody can tell a settled
+/// argument from a silenced failure.
+struct AllowedMessage {
+    /// The `D3D12_MESSAGE_ID` this covers.
+    id: i32,
+    /// Why a message with that id is not a defect in this backend.
+    reason: &'static str,
+}
+
+/// Every message id `ValidationReport::assert_clean` passes over, with the
+/// argument for each.
+///
+/// **Per id, and warnings only.** Neither half is incidental: an entry that
+/// covered a whole severity would be the blanket suppression this gate exists to
+/// prevent, and an entry that covered every severity of one id would let the
+/// same number arrive as an `ERROR` and still pass. [`allowance`] enforces both.
+const ALLOWED: &[AllowedMessage] = &[
+    AllowedMessage {
+        id: CLEAR_VALUE_NOT_GIVEN,
+        reason: "ClearRenderTargetView on an image created with no pOptimizedClearValue. The \
+                 layer grades it itself — 'the clear operation is typically slower as a result; \
+                 but will still clear to the desired value' — so it is a fast-path advisory and \
+                 not a misuse. Passing a value is not the fix: D3D12 treats one as a promise and \
+                 reports this same id again, as MISMATCHINGCLEARVALUE, whenever a pass clears to \
+                 anything else, and the seam learns the colour at begin_render_pass from \
+                 ColorAttachment::clear, which is after the image exists. Device::create_image is \
+                 the one place that passes None; a backend that started passing a value would \
+                 have to revisit this entry, because the mismatch form is a real defect.",
+    },
+    AllowedMessage {
+        id: SAMPLER_COMPARISON_FUNC_IGNORED,
+        reason: "CreateSampler with a ComparisonFunc beside a filter that does not compare. The \
+                 layer grades this one too — 'This is OK, as the ComparisonFunc will simply be \
+                 ignored' — and ignored is what the seam means: SamplerDesc::compare == None is \
+                 'this sampler does not compare', so the sampler behaves exactly as asked and \
+                 the field Device::create_sampler fills is one D3D12 never reads. \
+                 D3D12_COMPARISON_FUNC_NONE (0) is the enumerant that would say it outright, and \
+                 deleting this entry for it is the right end state — but this backend asks for \
+                 feature level 11_0 and nothing here has established which runtimes take a zero \
+                 in a classic D3D12_SAMPLER_DESC rather than filing CREATE_SAMPLER_INVALID for \
+                 it, which would be trading an advisory for an error on the machines this crate \
+                 cannot test on.",
+    },
+];
+
+/// The argument for passing over this message, or `None` if there is not one.
+///
+/// Warnings only, so an id in [`ALLOWED`] arriving as an `ERROR` or a
+/// `CORRUPTION` fails exactly as it would have without the table.
+fn allowance(severity: Severity, id: i32) -> Option<&'static str> {
+    if !matches!(severity, Severity::Warning) {
+        return None;
+    }
+    ALLOWED
+        .iter()
+        .find(|allowed| allowed.id == id)
+        .map(|allowed| allowed.reason)
+}
+
 /// One message the debug layer stored against a device.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ValidationMessage {
@@ -229,6 +328,10 @@ pub(crate) struct ValidationReport {
     pub(crate) errors: u64,
     /// Warnings seen, including any past the cap.
     pub(crate) warnings: u64,
+    /// Warnings [`allowance`] had an argument for, counted rather than dropped
+    /// silently: a report that passed over two messages and one that saw none
+    /// are different claims about a device.
+    pub(crate) allowed: u64,
     /// Whether the debug layer was on **and** this device's messages were
     /// readable. False for either half missing, since neither leaves anything
     /// to report.
@@ -262,10 +365,12 @@ impl ValidationReport {
         );
         assert!(
             self.is_clean(),
-            "the D3D12 debug layer reported {} corruption, {} error(s) and {} warning(s):\n{}",
+            "the D3D12 debug layer reported {} corruption, {} error(s) and {} warning(s) \
+             ({} more were allowed by name in crcbl_dx12::debug::ALLOWED):\n{}",
             self.corruption,
             self.errors,
             self.warnings,
+            self.allowed,
             self.summary(),
         );
     }
@@ -287,8 +392,16 @@ impl ValidationReport {
     /// second list of severities here that could disagree with it. Chatter is
     /// denied at the storage filter [`attach`] files, so reaching here at all
     /// means the filter did not take.
+    ///
+    /// A warning [`allowance`] answers is counted as such and kept out of both
+    /// the failure counts and the quoted list — the argument for it is in
+    /// [`ALLOWED`] rather than in a panic message nobody is meant to read.
     fn record(&mut self, message: ValidationMessage) {
         if !message.severity.is_failure() {
+            return;
+        }
+        if allowance(message.severity, message.id).is_some() {
+            self.allowed += 1;
             return;
         }
         match message.severity {
@@ -595,8 +708,9 @@ pub(crate) fn diagnosis(device: &ID3D12Device) -> String {
         // silent: "36 error(s)" beside 32 messages is the difference between a
         // list that is the whole story and one that is the start of it.
         lines.push(format!(
-            "the debug layer holds {} corruption, {} error(s) and {} warning(s) for this device",
-            layer.corruption, layer.errors, layer.warnings
+            "the debug layer holds {} corruption, {} error(s) and {} warning(s) for this device, \
+             plus {} allowed by name in crcbl_dx12::debug::ALLOWED",
+            layer.corruption, layer.errors, layer.warnings, layer.allowed
         ));
     }
     if !layer.enabled {
@@ -905,6 +1019,74 @@ mod tests {
     #[test]
     fn a_silent_layer_that_was_on_passes() {
         recorded(&[], true).assert_clean();
+    }
+
+    /// **An allow-listed id is passed over at `WARNING` and at nothing else.**
+    ///
+    /// The second half is the one that keeps the table from being a suppression:
+    /// the debug layer files more than one condition under
+    /// [`CLEAR_VALUE_NOT_GIVEN`] — the advisory this crate has an answer for,
+    /// and `MISMATCHINGCLEARVALUE`, which it does not — so an id that stopped
+    /// failing whatever its severity would be the second one going quiet too.
+    #[test]
+    fn an_allow_listed_warning_is_passed_over_and_a_louder_one_is_not() {
+        let passed = recorded(&[message(Severity::Warning, CLEAR_VALUE_NOT_GIVEN)], true);
+        assert!(passed.is_clean(), "{}", passed.summary());
+        assert_eq!(passed.allowed, 1, "an allowed message is counted, not lost");
+        assert!(passed.messages.is_empty());
+        passed.assert_clean();
+
+        for severity in [Severity::Error, Severity::Corruption, Severity::Unknown(9)] {
+            let report = recorded(&[message(severity, CLEAR_VALUE_NOT_GIVEN)], true);
+            assert!(
+                !report.is_clean(),
+                "{severity:?} {CLEAR_VALUE_NOT_GIVEN} was waved through by an allow-list that \
+                 only covers warnings"
+            );
+            assert_eq!(report.allowed, 0);
+        }
+
+        // And an id nobody argued for still fails at the severity the table
+        // does cover, or the table would be a severity filter wearing a list.
+        let unlisted = recorded(&[message(Severity::Warning, 1)], true);
+        assert!(!unlisted.is_clean());
+    }
+
+    /// **Every entry in [`ALLOWED`] carries an argument, and no id is listed
+    /// twice.**
+    ///
+    /// An empty reason is the shape this table fails as: a number added in a
+    /// hurry reads exactly like a settled one, and [`allowance`] would find it
+    /// either way. A duplicate id is the other: two arguments for one number
+    /// means one of them is dead and nobody can tell which.
+    #[test]
+    fn every_allowed_message_carries_the_argument_for_it() {
+        /// Shorter than this is a label, not an argument: the entries here name
+        /// the layer's own wording, what the fix would be, and why it is not
+        /// taken, and none of that fits in a sentence.
+        const MIN_REASON_CHARS: usize = 200;
+
+        assert!(!ALLOWED.is_empty(), "an empty table has nothing to check");
+        let mut ids: Vec<i32> = Vec::with_capacity(ALLOWED.len());
+        for allowed in ALLOWED {
+            assert!(
+                allowed.reason.len() >= MIN_REASON_CHARS,
+                "message id {} is allowed with no argument for it: {:?}",
+                allowed.id,
+                allowed.reason
+            );
+            assert_eq!(
+                allowance(Severity::Warning, allowed.id),
+                Some(allowed.reason),
+                "message id {} is in the table and not found in it",
+                allowed.id
+            );
+            ids.push(allowed.id);
+        }
+        let listed = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), listed, "an id is allowed twice: {ids:?}");
     }
 
     /// A buffer two rows tall, which D3D12 refuses and the debug layer objects

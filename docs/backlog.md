@@ -5076,36 +5076,6 @@ any implementor that is not `Send`.
 limit on how many loads can be outstanding; `poll` walks every `Loading` entry
 every call, which is fine for tens and unmeasured for thousands.
 
-### The golden comparator trades one ratio against two failure modes
-
-Tightening `max_failing_ratio` to 0.001 turned the D3D12 job red on its first
-run, and the diff that job now uploads explains why: WARP puts **76 pixels of
-the sprite scene over `max_channel_delta`, 0.1546%, at up to delta 13**, every
-one of them on a sprite quad's edge, with the sprites themselves the right
-colours in the right places. That is legitimate disagreement between two
-software rasterisers about an edge texel, and the bound is now 0.005 to clear
-it.
-
-**The uncomfortable part is how little room is left.** The widest legitimate
-variance measured is 0.1546% and the regression the bound exists to catch is
-0.7345% — a gap of about five. One ratio is being asked to separate "many pixels
-slightly wrong", which is a driver, from "few pixels very wrong", which is a
-bug, and those are different questions. A comparator that scored them separately
-— say, a budget on total absolute error alongside a much tighter count of
-badly-wrong pixels — would have far more room on both sides than this one knob
-can.
-
-Not attempted here. It is a redesign of `crcbl_golden::compare`'s scoring, every
-golden in the tree is calibrated against the current one, and the change that
-found this was meant to size a constant rather than rewrite the comparator.
-
-**Also worth keeping:** the derivation for 0.001 was built from a table of
-per-backend figures that did not include D3D12's sprite scene, because that
-number had never appeared in a log anybody had read. It was not wrong about the
-data it had. It is the ordinary shape of a bound calibrated on the backends that
-are easy to measure, and the reason the Metal and D3D12 jobs now upload their
-diffs.
-
 ### Accepted: CI will not have a real Metal GPU, and that is not a task
 
 Recorded as a decision so it stops reading as work somebody could pick up.
@@ -5136,34 +5106,72 @@ The mitigation is the one already in place: a person on a real Mac can run
 `run-mtl-e2e.sh` unchanged, and that remains the only thing that covers a
 non-virtual GPU. Nothing else is owed here.
 
-### Queued: split the golden comparator's scoring
+### The split comparator: what CI has to confirm, and what was declined
 
-The decision to take, with its evidence, so the slice does not have to
-rediscover it.
+The scoring split landed — `Tolerance` carries `gross_channel_delta: 24` and
+`max_gross_ratio: 0.001` beside a `max_failing_ratio` relaxed to 0.01, and
+`compare` counts each pixel against both thresholds on its one existing visit.
+What is left is verification nobody here can run, plus the alternatives that
+were tried on paper and rejected, so they are not re-proposed.
 
-One `max_failing_ratio` is being asked to separate two unrelated failures: a
-driver that disagrees about many pixels slightly, and a bug that gets a few
-pixels badly wrong. The measurements bracket it tightly — WARP's sprite frame is
-0.1546% of pixels over the delta and legitimate, the recolour that must fail is
-0.7345%, so the whole usable range is about fivefold. Every golden in the tree
-is calibrated against the current scoring, which is why this is a slice rather
-than a constant.
+**Not verified locally, and CI is the only verdict: the two frames the bound is
+sized against.** Neither backend runs on this machine.
 
-**The shape to build:** score the two questions separately rather than trading
-one knob against both. A budget on _total absolute error_ across the frame
-tolerates broad one-or-two-level drift without caring how many pixels carry it,
-while a much tighter count of pixels over a _large_ delta catches the localised
-recolour that broad drift can currently hide under. Both numbers are already
-computed — `mean abs error` and `max channel delta` appear in every comparison
-line — so this is a scoring change rather than new measurement.
+- **D3D12 / WARP's sprite scene** — 76 pixels of 49 152 over the delta at up
+  to 13. It now clears the drift budget by 6.5× where it used to clear one ratio
+  by 3.2×, and its 13 is under `gross_channel_delta`, so it scores nothing at
+  all on the gross budget. The exposure is the second of those: if a future
+  sprite scene puts WARP's edge disagreements past delta 24 on more than 0.1% of
+  the frame, D3D12 goes red where the old ratio passed it. Delta 13 on an edge
+  texel is a function of the contrast across that edge, not of driver quality,
+  so a higher-contrast sprite could plausibly reach it. Nothing measured has.
+- **Metal's cube on a paravirtual device** — 2 pixels at delta 207, 0.0041%.
+  This is the one legitimate frame that scores on the gross budget at all, and
+  it sits 24× under it. At 97×61, the smallest size the gate runs at, that
+  budget is five pixels.
 
-**What it must not do:** loosen anything. `crates/crcbl-golden/src/compare.rs`'s
-tests are the specification, and the two that pin the ends —
-`warps_sprite_edges_pass_and_are_what_the_ratio_is_sized_against` and
-`a_localised_recolour_that_the_old_two_percent_ratio_passed_now_fails` — must
-both still hold under the new scoring, with more room on each side rather than
-less. If they cannot, the new scoring is worse than the knob it replaced and
-should not land.
+Both are pinned by fixtures in `compare.rs`'s tests
+(`warps_sprite_edges_pass_and_are_what_the_ratio_is_sized_against`,
+`the_worst_measured_cross_backend_frame_still_passes_with_room_to_spare`) that
+reproduce the reported per-pixel numbers, so a future tightening argues with a
+test. A fixture is not the frame, though: it reproduces the counts and deltas,
+not the pixels.
+
+**The one place this is looser than what it replaced.** A frame with between
+0.5% and 1% of its pixels off by 3 to 24 levels was refused by the 0.005 ratio
+and passes now. That band is empty in every measurement across vk, wgpu, dx12
+and metal, and the alternative is leaving WARP 3.2× from a false alarm on the
+backend nobody here can debug. Recorded because it is a real trade, not a free
+win: the criterion the split had to meet was more room on **both** sides, and
+more room on the legitimate side necessarily means a looser drift budget.
+
+**Declined: a budget on `mean_abs_error`**, which is the shape this entry used
+to propose and which the data refutes. P1.3's HDR frame is legitimate at 0.2284
+mean abs error — 91% of the frame off by one level, a quantisation boundary the
+whole background lands on — and the sprite recolour that must fail is 0.0734.
+Any total-error budget loose enough for the first passes the second by a factor
+of three, whichever way it is normalised, because total error cannot tell a
+level spread over the frame from a patch that is badly wrong. Separation has to
+be on **per-pixel magnitude**, which is what a second delta threshold does.
+Restricting the sum to pixels already over `max_channel_delta` does work — it
+separates WARP from the recolour by 16× — but only 4× on each side, which is
+under the bar the split had to clear, and it costs a metric nothing else reads.
+
+**Declined: scoring how _localised_ the differing pixels are.** It is the real
+physical difference — WARP's 76 are scattered along quad edges, the recolour's
+361 are a 19×19 block — and `differing_bounds` already computes a box. It was
+not built because metal's legitimate 2 pixels are adjacent, so density does not
+separate that pair; because a real bug need not be contiguous; and because it
+needs a second traversal or a running per-region accumulator where the two delta
+thresholds cost one comparison inside the existing loop. If the gross budget
+ever proves too blunt, this is the next idea, not a new ratio.
+
+**Worth keeping from the entry this replaces:** the original derivation was
+built from a table of per-backend figures that did not include D3D12's sprite
+scene, because that number had never appeared in a log anybody had read. It was
+not wrong about the data it had. That is the ordinary shape of a bound
+calibrated on the backends that are easy to measure, and the reason the Metal
+and D3D12 jobs upload their diffs.
 
 ### Re-affirmed: no Vulkan on macOS, and two facts the original decision lacked
 
@@ -5497,3 +5505,43 @@ does too.
   columns in `GpuMaterial` and the shading-model decision
   `docs/plan/37-materials.md` owns — which is the part that was never
   mechanical.
+
+### D3D12 allow-list: two entries, and what retires each
+
+`crcbl_dx12::debug::ALLOWED` is a table of message ids the validation gate
+passes over, each with the argument for it, consulted only for
+`Severity::Warning` — the same id arriving as an error or corruption fails as
+before, and allowed messages are counted and named so "silent" and "answered
+for" stay distinct.
+
+**Id 820, `CLEARRENDERTARGETVIEW_MISMATCHINGCLEARVALUE`.** The layer files two
+different things under this number: "you passed no optimized clear value"
+(advisory) and "the value you promised is not the one you cleared to" (a real
+defect). This backend passes `None` for `pOptimizedClearValue`, so today only
+the first can occur. **The entry is safe only while that stays true** — the
+moment `Device::create_image` passes a value, this allowance hides the defect.
+Removing it needs a clear-value field on `crcbl_hal::ImageDesc` and a decision
+about what a pass that clears to a different colour should do, since the promise
+is per-resource and the colour arrives per-pass at `begin_render_pass`.
+
+**Id 1361, `CREATE_SAMPLER_COMPARISON_FUNC_IGNORED`.** `create_sampler` writes
+`D3D12_COMPARISON_FUNC_ALWAYS` as filler when `SamplerDesc::compare` is `None`.
+The right value is `D3D12_COMPARISON_FUNC_NONE` — zero, the enumerant that says
+exactly what the seam means, and the old comment claiming zero is "a sampler
+feedback value" was wrong and is corrected. **Not switched**, because this
+backend asks for `D3D_FEATURE_LEVEL_11_0` and it is not established which
+runtimes accept a zero in a classic `D3D12_SAMPLER_DESC` rather than filing
+`CREATE_SAMPLER_INVALID`; that would trade an advisory for an error on machines
+nothing here can test, and the CI runner being Windows Server 2025 would prove
+nothing about older ones. Settle that and this entry goes.
+
+### Verified, not a problem: the D3D12 info queue does not leak across tests
+
+Recorded so it is not re-investigated. `debug::read_queue` reads from index 0
+and never clears, which looks like it would let one test's messages fail
+another's teardown. It does not: every device test opens its own `ID3D12Device`
+through `device::tests::open_device`, and `debug::attach` clears _that device's_
+queue at creation, so a report means "since this device was created" by
+construction. Evidence: in run 31454155654, message 597 — the gate's own
+deliberate violation — appears exactly once, inside the expected panic of the
+test that raises it, and that test passed.

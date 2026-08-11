@@ -1423,21 +1423,26 @@ mod tests {
     ///
     /// [`an_offscreen_ring_draws_reads_back_and_comes_round_again`] already
     /// covers a ring end to end, so this is deliberately not that test with
-    /// different numbers. Three things differ, and each is a thing the engine
-    /// does and this crate had never executed:
+    /// different numbers. Two things differ, and each is a thing the engine does
+    /// and this crate had never executed:
     ///
     /// * **The format is [`SurfaceCaps::preferred_format`]'s**, which is the
     ///   sRGB one — the sibling test pins `Rgba8Unorm` precisely so it can
     ///   assert texels, so no ring image had ever been created as `_SRGB`.
     /// * **The extent is the engine's frame**, not four rows.
-    /// * **No barrier puts the image back**, which is what
-    ///   `OffscreenSetup::draw_and_readback` records: it leaves the image in
-    ///   `TransferSrc` and the next trip round the ring declares `Undefined`.
-    ///   D3D12 validates a transition's *declared* before-state where Vulkan
-    ///   does not, so this is the one recording difference between the backend
-    ///   that works and the one that does not. The sibling test barriers back
-    ///   on purpose and says so; this one must not, or it stops being the
-    ///   engine's frame.
+    ///
+    /// # The one thing that no longer differs
+    ///
+    /// This test used to end each frame with the image left in `TransferSrc`,
+    /// because `OffscreenSetup::draw_and_readback` recorded no barrier back and
+    /// the next trip round the ring then declared `Undefined` of an image in
+    /// `COPY_SOURCE` — which D3D12, validating a transition's *declared*
+    /// before-state where Vulkan does not, reports as message 527 against
+    /// `ExecuteCommandLists`. `fix(crcbl): bracket the screenshot copy with true
+    /// barriers` made that module record the `TransferSrc` → `Present`
+    /// transition, so this frame records it too: reproducing the old shape would
+    /// be asserting on a recording nothing makes, and the debug-layer report
+    /// every device test in this crate ends on would fail on it.
     ///
     /// # What makes it able to fail
     ///
@@ -1586,9 +1591,19 @@ mod tests {
                 image_offset: Offset3d::default(),
                 image_extent: Extent3d::d2(SHOT.0, SHOT.1),
             });
-            // **And nothing puts the image back.** See this test's docs: the
-            // engine's frame ends here, so a barrier here would test a
-            // recording the engine does not make.
+            // **And the image goes back**, which is where the engine's frame
+            // ends: `OffscreenSetup::draw_and_readback` records this same
+            // transition, so the `Undefined` the next trip round the ring
+            // declares is `COMMON` of an image that really is in `COMMON`.
+            encoder.pipeline_barrier(&Barriers {
+                images: &[ImageBarrier::new(
+                    frame.image,
+                    range,
+                    ResourceState::TransferSrc,
+                    ResourceState::Present,
+                )],
+                ..Barriers::default()
+            });
             let commands = encoder
                 .finish()
                 .unwrap_or_else(|error| panic!("stage=finish id={id}: {error}"));
