@@ -5844,16 +5844,31 @@ lives in `crcbl_shaders::meshlet`, the builder stayed in `crcbl-scene` and
 re-exports it, and `crcbl-render` gained no dependency on `crcbl-scene`. What is
 left:
 
-- **No app selects the path**, so nothing a user sees goes through it.
-  `Features::GPU_DRIVEN` does not include `MESH_SHADER` — `caps.rs`'s own test
-  asserts that — and `crcbl::GpuContextDesc::default` asks for `GPU_DRIVEN`, so
-  the samples and `crates/crcbl/tests/golden/cube.png` run `IndirectCount` on an
-  RX 7900 XTX that reports `MESH_SHADER | TASK_SHADER`. Only the two vk device
-  tests request the flag. Adding it to that default is one line in
-  `crates/crcbl/src/engine.rs` and it is what puts §3.5's exit criterion in
-  front of the sandbox — held back deliberately so it lands as its own change
-  with a CI run either side, because it switches which path every capable device
-  draws through.
+- **Five of the seven samples still do not select the path.** `apps/sandbox` and
+  `apps/bare` inherit `crcbl::GpuContextDesc::default` and now run
+  `GeometryPath::MeshShader`; `apps/hud`, `horde`, `breakout`, `flappy` and
+  `asteroids` each spell their own `optional_features` in their `gpu.rs`, so
+  they stay on `IndirectCount` on mesh-capable hardware. Five samples now
+  disagree with two about what the primary geometry path is. It is a one-token
+  addition per file; it was not done with the flip because the flip's paths were
+  the two device-request sites, not the samples.
+- **`Features::GPU_DRIVEN`'s doc says it is never a requirement** while
+  `crcbl-render/src/{ui_pass,sprite_pass,texture}.rs` and
+  `crcbl-render/tests/graph_compile.rs` pass it as `required_features`. Harmless
+  today, and it is exactly what would have made folding `MESH_SHADER` into the
+  bundle fatal — those calls open against a null backend that reports no mesh
+  shaders, so they would have started failing. The doc and the callers should be
+  reconciled; either way the bundle-versus-list decision stands.
+- **`crates/crcbl-vk/tests/run-cross-backend-e2e.sh` does not echo its ICD pin**
+  the way `run-render-e2e.sh` does, so which adapter it used is not observable
+  from its output. It passed 6/6, but with `CRCBL_VK_ICD` set it still drew vk
+  on the discrete card here.
+- **Lavapipe reports `VK_EXT_mesh_shader`** (Mesa 23.2 and later), so CI's Linux
+  and Windows vk jobs take the mesh path too — verified locally with
+  `VK_DRIVER_FILES=…/lvp_icd.json vulkaninfo` and by a full local run on
+  lavapipe at zero differing pixels. wgpu, WARP and Metal do not: each reports
+  no `MESH_SHADER`, so those jobs keep drawing through an indirect tail and are
+  the coverage that the fallback still works.
 - **Both resident meshes are one cluster each** (24 vertices / 12 triangles, and
   16 / 6, against bounds of 64 / 124). So a cluster with a non-zero
   `vertex_offset` _within_ a mesh is exercised by the builder's tests and by

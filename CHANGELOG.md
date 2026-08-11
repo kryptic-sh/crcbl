@@ -207,6 +207,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A mesh-capable device now actually draws through the mesh path.**
+  `MESH_SHADER` is requested as an optional feature at both sites that open a
+  device with `GPU_DRIVEN` — `crcbl::GpuContextDesc::default` and the new
+  `OffscreenSetup::OPTIONAL_FEATURES` — so `apps/sandbox`, `apps/bare` and the
+  golden-frame harness select `GeometryPath::MeshShader` where the adapter
+  offers it. `OffscreenSetup::open_with` is new public API for naming a
+  different set.
+
+  **It is named beside `Features::GPU_DRIVEN`, deliberately not added to it.**
+  That bundle is used as `required_features` in four places against a null
+  backend that reports no mesh shaders, so folding `MESH_SHADER` in would refuse
+  those devices outright — and it would make every `gpu_driven()` test select
+  the mesh path, deleting the only coverage the other two `GeometryPath` arms
+  have. The bundle is the data-layout axis; geometry is a separate selector.
+
+  The golden tests now assert the device took the best path its adapter offers,
+  because a golden passing is equally consistent with nothing having changed.
+  Every scene `render_e2e` covers — `ui`, `sprite`, `cube` — is compared byte
+  for byte between the two paths in one process, and all three are identical on
+  an RX 7900 XTX and on lavapipe. No golden moved.
+
 - **The forward pass draws through a mesh pipeline, and it is the same
   picture.** `docs/plan/03-gpu-driven-rendering.md` §3.5's geometry path exists:
   `EmitTail::Mesh` is selected from `GeometryPath::MeshShader`,

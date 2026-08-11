@@ -59,7 +59,7 @@
 
 use crcbl::adapter::{ADAPTER_ENV_VAR, device_type_from_name};
 use crcbl::backend::{BACKEND_ENV_VAR, GpuBackend};
-use crcbl::hal::Format;
+use crcbl::hal::{Features, Format, GeometryPath};
 use crcbl::screenshot::{OffscreenSetup, Scene};
 use crcbl_golden::{ChannelOrder, Golden, Image};
 
@@ -266,6 +266,24 @@ fn draw_scene_and_match_its_golden(
         pin = requested_adapter.as_deref().unwrap_or("<unset>"),
     );
 
+    // **The device took the best path its adapter offers.** The frame alone
+    // cannot say — every path draws this scene identically, which is what
+    // `the_*_scene_draws_the_same_frame_on_every_geometry_path` checks — so a
+    // request that omitted a selector's flag would leave the renderer on a
+    // lesser tail and every assertion below would still pass. That is not
+    // hypothetical: `Features::MESH_SHADER` is not part of `GPU_DRIVEN`, so
+    // until `OffscreenSetup::OPTIONAL_FEATURES` named it, an adapter reporting
+    // mesh shaders drew this frame through `IndirectCount` and nothing said so.
+    assert_eq!(
+        caps.geometry_path(),
+        adapter.caps.geometry_path(),
+        "adapter {} offers {:?} and the device opened on {:?} — a selector's flag \
+         was not asked for, so the frame took a lesser tail than this machine can run",
+        adapter.name,
+        adapter.caps.geometry_path(),
+        caps.geometry_path(),
+    );
+
     // A pin the loader ignored is the failure this catches, and it is the same
     // class as a suite that runs no tests. Both names go through the mappings
     // that already exist rather than a third table.
@@ -327,6 +345,195 @@ fn draw_scene_and_match_its_golden(
     eprintln!(
         "crcbl render e2e: golden {golden} on {backend} — {}",
         comparison.summary()
+    );
+}
+
+/// The cube on both geometry paths this machine can reach — see
+/// [`draw_scene_on_every_geometry_path`].
+///
+/// **This is the scene the comparison is about.** [`Scene::Cube`] is the only one
+/// of the three drawn by `crcbl-render`'s `ForwardRenderer`, and that renderer is
+/// the only thing above the seam that branches on
+/// [`GeometryPath`](crcbl::hal::GeometryPath): a mesh device records
+/// `draw_mesh_tasks` against a mesh pipeline with no vertex stage and no index
+/// buffer, where the others record an indirect call reading the same pool through
+/// a vertex stage. Three instances, a material table and a base-colour page, none
+/// of which `crcbl-vk`'s own `mesh.png` scene has.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_cube_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::Cube,
+        "cube",
+        MIN_COLORS_CUBE,
+        the_cube_scene_drew_its_geometry_and_both_material_columns,
+    );
+}
+
+/// The sprite scene on both geometry paths — see
+/// [`draw_scene_on_every_geometry_path`].
+///
+/// `crcbl-render`'s sprite pass reads no
+/// [`GeometryPath`](crcbl::hal::GeometryPath), so the two arms here differ only in
+/// whether the *device* was opened with mesh shading enabled. That is the claim
+/// worth having and it is not the cube's: enabling an extension changes a Vulkan
+/// device's pipeline cache, its enabled feature struct and, on some drivers, its
+/// shader compiler — and nothing else in this tree would notice if that moved a
+/// pass that never asked for it.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_sprite_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::Sprite,
+        "sprite",
+        MIN_COLORS_SPRITE,
+        every_sprite_slot_is_painted_and_the_gaps_are_not,
+    );
+}
+
+/// The UI scene on both geometry paths — see
+/// [`draw_scene_on_every_geometry_path`], and
+/// [`the_sprite_scene_draws_the_same_frame_on_every_geometry_path`] for what an
+/// arm proves about a pass that reads no geometry path.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_ui_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::Ui,
+        "ui",
+        MIN_COLORS_UI,
+        the_ui_panel_is_painted_and_the_bar_blends_over_two_backgrounds,
+    );
+}
+
+/// Draws `scene` twice — once on the best [`GeometryPath`] this adapter reports
+/// and once on the path it selects without [`Features::MESH_SHADER`] — and
+/// asserts the two frames are **byte for byte the same picture**.
+///
+/// # Why this has to exist before the mesh path is selected by default
+///
+/// `docs/plan/03-gpu-driven-rendering.md` §3.5 calls the mesh shader the primary
+/// geometry path and its design rule is that "the lesser path is a constraint on
+/// data layout, not a separate renderer". `crcbl-vk`'s
+/// `every_geometry_path_draws_the_same_frame` already checks that on the vk
+/// suite's own scene: one mesh, one pyramid, no material table. It says nothing
+/// about the scene this crate's goldens are blessed on, which has three instances
+/// across two buckets, a material table and a sampled base-colour page — every
+/// piece of per-draw data the mesh stage has to fetch for itself because there is
+/// no input assembler to hand it one.
+///
+/// So this is the check that lets `OffscreenSetup::OPTIONAL_FEATURES` ask for
+/// mesh shading at all. A second, per-path golden would have hidden exactly what
+/// it is for: a difference here is a **bug in the mesh path**, not two legitimate
+/// pictures.
+///
+/// # The arms are asked for by subtraction
+///
+/// An adapter reports what it reports, so the only way one machine reaches more
+/// than one path is to open a device *without* the flag that selects the better
+/// one — `crcbl-vk`'s `Headless::open_for_mesh_with` and this crate's
+/// [`OffscreenSetup::open_with`] exist for that and nothing else.
+///
+/// # On a device with no mesh shaders
+///
+/// Both arms land on the same path, and the test says so rather than passing
+/// quietly: the arms are asserted to differ **exactly when the adapter reports
+/// the flag**, so "this backend has no mesh shaders" is a checked claim instead
+/// of a skip. `crcbl-wgpu`, `crcbl-dx12` and `crcbl-mtl` all report none — see
+/// each backend's `caps` — so on those three this is a self-comparison and the
+/// printed line is what says so.
+fn draw_scene_on_every_geometry_path(
+    scene: Scene,
+    name: &str,
+    min_colors: usize,
+    inspect: fn(&Image),
+) {
+    crcbl_core::log::init_logging();
+
+    let mut frames: Vec<(GeometryPath, Image)> = Vec::new();
+    let mut adapter_offers_mesh = None;
+
+    for optional in [
+        OffscreenSetup::OPTIONAL_FEATURES.union(Features::MESH_SHADER),
+        OffscreenSetup::OPTIONAL_FEATURES.difference(Features::MESH_SHADER),
+    ] {
+        let mut setup = OffscreenSetup::open_with(EXTENT.0, EXTENT.1, scene, optional)
+            .unwrap_or_else(|why| panic!("a GPU backend opens for the {name} scene: {why}"));
+        let path = setup.caps().geometry_path();
+        let offers_mesh = setup
+            .adapter()
+            .caps
+            .features
+            .contains(Features::MESH_SHADER);
+        eprintln!(
+            "crcbl render e2e: {name} on {backend} adapter {adapter:?} — asked for \
+             MESH_SHADER: {asked}, adapter has it: {offers_mesh}, drew through {path:?}",
+            backend = setup.backend(),
+            adapter = setup.adapter().name,
+            asked = optional.contains(Features::MESH_SHADER),
+        );
+        assert_eq!(
+            *adapter_offers_mesh.get_or_insert(offers_mesh),
+            offers_mesh,
+            "the two arms opened different adapters, so they are not a comparison"
+        );
+
+        let format = setup.format();
+        let ((width, height), pixels) = setup
+            .draw_and_readback()
+            .unwrap_or_else(|why| panic!("the {name} frame renders on {path:?}: {why}"));
+        setup.finish().expect("the device reaches idle");
+
+        assert_eq!((width, height), EXTENT, "{path:?} drew a different extent");
+        frames.push((
+            path,
+            Image::from_readback(width, height, &pixels, channel_order(format))
+                .expect("the readback is exactly one image"),
+        ));
+    }
+
+    let adapter_offers_mesh = adapter_offers_mesh.expect("both arms opened a device");
+    let (best_path, best) = &frames[0];
+    let (lesser_path, lesser) = &frames[1];
+
+    // **The anti-vacuity claim, and it is two claims.** Two blank frames match
+    // perfectly, so the frame has to hold the scene before comparing it means
+    // anything — that is `min_colors` and `inspect`, the same pair the golden
+    // test uses. And two frames drawn by the same code match perfectly too, so
+    // the paths have to actually differ: derived from the adapter rather than
+    // written down, because a backend reporting no mesh shaders is a legitimate
+    // run of this test and a silent one is not.
+    let colors = best.distinct_colors(min_colors);
+    assert!(
+        colors >= min_colors,
+        "a {name} frame with {colors} distinct colour(s) (counted to {min_colors}) is not \
+         evidence — comparing it against another frame like it proves nothing"
+    );
+    inspect(best);
+    assert_eq!(
+        best_path != lesser_path,
+        adapter_offers_mesh,
+        "the adapter {} mesh shading and the two arms selected {best_path:?} and \
+         {lesser_path:?} — one of those two facts is wrong, and a self-comparison \
+         that reads as a cross-path one is worse than no test",
+        if adapter_offers_mesh {
+            "reports"
+        } else {
+            "reports no"
+        },
+    );
+
+    // Byte equality, not the golden's rasteriser tolerance: this is one adapter
+    // and one driver drawing one scene, so every differing pixel is a difference
+    // the two submissions made.
+    assert_eq!(
+        best.pixels(),
+        lesser.pixels(),
+        "{best_path:?} and {lesser_path:?} draw the {name} scene differently"
+    );
+    eprintln!(
+        "crcbl render e2e: {name} is byte-identical on {best_path:?} and {lesser_path:?} \
+         ({colors} distinct colour(s))"
     );
 }
 

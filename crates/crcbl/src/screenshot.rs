@@ -574,6 +574,23 @@ pub enum OffscreenError {
 }
 
 impl OffscreenSetup {
+    /// What [`Self::open`] asks the device for, optionally.
+    ///
+    /// [`Features::MESH_SHADER`] is in here because
+    /// `docs/plan/03-gpu-driven-rendering.md` §3.5 makes the mesh path the
+    /// **primary** geometry path and a device is only on it if something asked:
+    /// the flag is not part of [`Features::GPU_DRIVEN`] — that bundle is the
+    /// data-layout axis, and folding a second selector into it would make it a
+    /// tier again — so it has to be named beside it. Every scene here draws
+    /// identically on either path, which `tests/render_e2e.rs` checks by drawing
+    /// each one twice through [`Self::open_with`].
+    ///
+    /// Optional, never required: a device without any of these opens and draws
+    /// the same picture through a lesser tail.
+    pub const OPTIONAL_FEATURES: Features = Features::GPU_DRIVEN
+        .union(Features::MESH_SHADER)
+        .union(Features::DEBUG_MARKERS);
+
     /// Opens the auto-selected GPU backend, creates an offscreen surface,
     /// adapter, device, swapchain, and `scene`'s renderer for a frame of
     /// `(width, height)` pixels.
@@ -592,6 +609,30 @@ impl OffscreenSetup {
     /// this backend enumerated, if the device is unusable, or if any HAL call
     /// fails.
     pub fn open(width: u32, height: u32, scene: Scene) -> Result<Self, OffscreenError> {
+        Self::open_with(width, height, scene, Self::OPTIONAL_FEATURES)
+    }
+
+    /// [`Self::open`] asking the device for `optional_features` instead of
+    /// [`Self::OPTIONAL_FEATURES`].
+    ///
+    /// The features are optional here for the same reason they are there: a
+    /// device that lacks one still opens and still draws. What this adds is the
+    /// ability to open a device *without* something the adapter has, which is
+    /// the only way a caller on one machine can reach more than one
+    /// [`GeometryPath`](crate::hal::GeometryPath) — every path but the best one
+    /// the adapter reports is otherwise code no run here executes. `crcbl-vk`'s
+    /// `Headless::open_for_mesh_with` is the same knob one layer down, and
+    /// `tests/render_e2e.rs` uses this one to draw each scene twice and compare.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::open`].
+    pub fn open_with(
+        width: u32,
+        height: u32,
+        scene: Scene,
+        optional_features: Features,
+    ) -> Result<Self, OffscreenError> {
         // Checked before the backend is opened, so an absurd `--size` costs a
         // comparison rather than a device.
         if width == 0 || height == 0 {
@@ -601,7 +642,13 @@ impl OffscreenSetup {
             return Err(OffscreenError::TooLarge { width, height });
         }
 
-        Self::open_on(crate::backend::open()?, width, height, scene)
+        Self::open_on(
+            crate::backend::open()?,
+            width,
+            height,
+            scene,
+            optional_features,
+        )
     }
 
     /// [`Self::open`] on an instance that has already been opened.
@@ -617,6 +664,7 @@ impl OffscreenSetup {
         width: u32,
         height: u32,
         scene: Scene,
+        optional_features: Features,
     ) -> Result<Self, OffscreenError> {
         let extent = (width, height);
 
@@ -647,7 +695,7 @@ impl OffscreenSetup {
                 label: Some("crcbl screenshot"),
                 adapter: adapter.id,
                 required_features: Features::empty(),
-                optional_features: Features::GPU_DRIVEN | Features::DEBUG_MARKERS,
+                optional_features,
                 compatible_surface: Some(surface),
             })
             .map_err(OffscreenError::Hal)?;
@@ -1254,8 +1302,14 @@ mod tests {
 
         let recorder = Recorder::new();
         let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
-        let mut setup = OffscreenSetup::open_on(Box::new(instance), 16, 16, Scene::Cube)
-            .expect("the null backend opens an offscreen setup");
+        let mut setup = OffscreenSetup::open_on(
+            Box::new(instance),
+            16,
+            16,
+            Scene::Cube,
+            OffscreenSetup::OPTIONAL_FEATURES,
+        )
+        .expect("the null backend opens an offscreen setup");
         for _ in 0..LAPS {
             setup
                 .draw_and_readback()
@@ -1407,8 +1461,14 @@ mod tests {
             let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
             let before = recorder.total_live_objects();
 
-            let mut setup = OffscreenSetup::open_on(Box::new(instance), 16, 16, scene)
-                .expect("the null backend opens an offscreen setup");
+            let mut setup = OffscreenSetup::open_on(
+                Box::new(instance),
+                16,
+                16,
+                scene,
+                OffscreenSetup::OPTIONAL_FEATURES,
+            )
+            .expect("the null backend opens an offscreen setup");
             recorder.clear(); // the setup's uploads are not this frame's passes
 
             let (extent, pixels) = setup

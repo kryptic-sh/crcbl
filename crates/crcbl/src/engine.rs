@@ -585,7 +585,18 @@ impl Default for GpuContextDesc<'_> {
             // extension chain that could have told it otherwise. Optional like
             // the rest — neither is in `GPU_DRIVEN`, and a device without them just
             // keeps the open-loop frame limiter and the `Unknown` cadence.
+            // `MESH_SHADER` is named beside the bundle rather than inside it.
+            // `docs/plan/03-gpu-driven-rendering.md` §3.5 makes it the primary
+            // geometry path, so a capable device has to be *asked* — but it is a
+            // selector axis of its own and `GPU_DRIVEN` is the data-layout one,
+            // and a device that folded them together would refuse mesh-less
+            // hardware over a flag it does not need. Optional, so a device
+            // without it degrades to an indirect tail and draws the same frame:
+            // `crcbl/tests/render_e2e.rs` compares the two paths per scene, and
+            // `crcbl-vk`'s `every_geometry_path_draws_the_same_frame` compares
+            // all three.
             optional_features: Features::GPU_DRIVEN
+                | Features::MESH_SHADER
                 | Features::TIMESTAMP_QUERY
                 | Features::DEBUG_MARKERS
                 | Features::PRESENT_FEEDBACK
