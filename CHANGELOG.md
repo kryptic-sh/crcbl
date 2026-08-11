@@ -241,6 +241,43 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_scene::simplify` — QEM mesh simplification, topic 25's auto-LOD
+  generator.** `simplify(positions, indices, target_triangles)` returns a
+  `Simplified` carrying the decimated mesh and its `max_error`. Iterative edge
+  collapse ordered by Garland–Heckbert quadric error, cited to the 1997 paper in
+  the module docs so the arithmetic can be checked against it, with unweighted
+  quadrics exactly as the paper defines them.
+
+  The collapsed vertex goes to the quadric-optimal position; a singular **or
+  near-singular** matrix falls back to the best of the two endpoints and the
+  midpoint. The near-singular half matters: a finite-check alone is not enough,
+  because a nearly-singular quadric inverts to a finite but absurd answer — the
+  test derives a case whose escaped vertex lands about 10⁶ units from a mesh
+  whose planes all pass within one unit of the origin.
+
+  Deterministic as topic 25 requires, and deliberately so: no hash-map iteration
+  anywhere, a strict total order on candidates keyed by cost then endpoints then
+  versions, survivors renumbered in ascending original index, faces emitted in
+  original order, `f64` internally.
+
+  Guardrails: border and non-manifold vertices are locked, faces that would
+  invert or become slivers are refused, and the **link condition** — the two
+  endpoints sharing exactly two neighbours — is enforced. That last one is not
+  in the plan's list and the closed-mesh requirement silently depends on it:
+  without it a torus at 25 % gains an edge with four faces and stops being
+  closed.
+
+  `max_error` is the largest `sqrt((Q_a + Q_b)(v̄))` over the collapses
+  performed, in model units — the square root of the summed squared distances to
+  the planes folded into those quadrics. **It is not a certified Hausdorff
+  bound**, and the docs say so.
+
+  **Not attribute-aware.** UV and normal seams, material boundaries and skin
+  weights are all constraints on data this function is never handed; a seam that
+  shares positions is invisible to it and will drift. That is the plan's own
+  named auto-LOD risk and it is recorded rather than implied away. No cluster
+  hierarchy, no runtime selection, no consumer yet.
+
 - **Per-cluster culling in the amplification stage — §3.5's second bullet.**
   `mesh_cluster.slang` gained a task stage that rejects a cluster on the frustum
   and on its normal cone, `ForwardRenderer::culls_clusters()` reports whether it

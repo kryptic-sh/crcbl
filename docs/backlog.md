@@ -5758,6 +5758,43 @@ a wasm regression in this code would not be observed by anything. The refusals
 that do not need an array layout — the flags gate, `count: 0`, the in-band
 layout error — run on every adapter, so that half is not skip-shaped.
 
+## What `crcbl_scene::simplify` owes, and one workspace-wide trap it found
+
+Topic 25's QEM simplifier exists host-side with no consumer. What is left:
+
+- **`glam`'s `DMat3: Default` is the identity, not zero**, so a derived
+  `Default` on a quadric seeds every vertex with the three coordinate planes. It
+  was caught only by the hand-derived quadric tests — the structural ones
+  (closed mesh, border kept, deterministic) all passed with the bug in place.
+  `Quadric::ZERO` is spelled out with that reason. **This applies anywhere in
+  the workspace that derives `Default` through a glam matrix**, which is why it
+  is here rather than only in that file.
+- **Flip rejection is per-collapse, not a global invariant.** A face can rotate
+  a little under each of several individually-accepted collapses until it has
+  come all the way round; demonstrated by popping in descending cost order,
+  where a height field ends up with a face pointing at `-Z` and every single
+  collapse having passed the check. The cheapest-first order is what keeps the
+  local test a workable stand-in. A global orientation check is the fix.
+- **A rejected candidate is dropped, not deferred** — an edge refused now is
+  only reconsidered if an endpoint is later merged into. Cheap, terminates,
+  leaves some collapses unmade.
+- **`max_error` is not a certified Hausdorff bound**, so the plan's "reported
+  error ≥ sampled Hausdorff" property test does not exist. Runtime selection
+  will lean on this number, so that test is owed before it does.
+- **Never measured on a real asset.** Every fixture is synthetic — torus, height
+  field, tetrahedron — there is no glTF corpus case and no benchmark, and the
+  cost is O(E) in candidates with re-pushes per collapse.
+- **Position welding is absent**: vertices compare by index, so duplicated
+  coincident vertices read as disjoint surfaces whose every shared edge is a
+  border and therefore locked.
+- **One mutation is provably unobservable rather than untested.** Making
+  `max_error` record the last collapse instead of the largest stays green,
+  because the heap pops cheapest-first and a collapse only ever adds a positive
+  semi-definite quadric, so popped costs are non-decreasing and max equals last.
+  That ordering is asserted directly by
+  `the_costs_of_the_collapses_performed_never_decrease` rather than left as
+  prose, and `.max()` is kept because it is what the metric is defined as.
+
 ## The shared layout validator: two Metal decisions, and what only CI can prove
 
 `BindGroupLayoutDesc::check_entries` and `BindGroupLayoutEntry::resolved_count`
