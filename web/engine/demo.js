@@ -183,6 +183,32 @@ export function bootDemo(spec) {
       return;
     }
 
+    // `navigator.gpu` existing is only half the question, and the half that is
+    // never the one that fails on a real machine. The property is there on
+    // every Chrome build; `requestAdapter()` still resolves to `null` when the
+    // GPU process cannot reach a device — a blocklisted driver, a
+    // `--render-node-override` naming the wrong node on a hybrid-graphics
+    // laptop, a session with no GPU. Asked here rather than left to the engine
+    // for two reasons: the answer arrives before the megabytes of wasm below
+    // it, and it is the only place that can say it in a sentence aimed at a
+    // person instead of at whoever reads the backend's error.
+    let adapter = null;
+    let refusal = '';
+    try {
+      adapter = await navigator.gpu.requestAdapter();
+    } catch (error) {
+      refusal = String(error);
+    }
+    if (!adapter) {
+      say(
+        'This browser has WebGPU, but no GPU to run it on.',
+        refusal ||
+          'navigator.gpu.requestAdapter() returned no adapter. The browser’s own GPU report — chrome://gpu, or about:support in Firefox — says why, but read past the WebGPU line: it can say “Hardware accelerated” while every adapter is still refused. On Linux, Chrome runs WebGPU on Vulkan, so a “Vulkan: Disabled” line there is the usual reason.',
+        true
+      );
+      return;
+    }
+
     say('Loading the engine…');
     const exports = await init();
     const memory = /** @type {WebAssembly.Memory} */ (exports.memory);

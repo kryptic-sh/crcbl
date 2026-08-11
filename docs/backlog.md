@@ -5055,6 +5055,43 @@ them hud's:
   problem. The fix when that happens is in group A's control in
   `web/run-browser-e2e.sh`, not in any sample.
 
+  **It is not the null-adapter bug**, which was the obvious guess when both
+  turned out to involve Chromium 151. Measured with the gate's own control page:
+  in every failing box the control receives a real `[object GPUAdapter]` and
+  draws hundreds of frames, and `toDataURL()` still returns transparent black —
+  it is a canvas pixel-readback regression, not an adapter one. The measurement
+  is trustworthy because one box (`--headless --hardware`) returns the right
+  colour, so the control is not simply broken. The flag table in that script's
+  own header was measured on Chromium 150 and no longer describes 151.
+
+- **A browser that hands out no adapter is guarded twice, and there is a race
+  between the guards.** `WgpuInstance::new_async` probes with wgpu's
+  `is_browser_webgpu_supported` before enumerating, and `web/engine/demo.js`
+  probes before downloading the wasm. If `requestAdapter()` succeeds for a probe
+  and returns null for wgpu's own enumeration a moment later, `new_async` still
+  traps — proven reachable with a call-counting double that lets the first _n_
+  requests through. Closing it properly needs an upstream fix: `wgpu::Adapter`
+  exposes no accessor for its inner `GPUAdapter` (`api/adapter.rs` has only
+  `as_custom`), and every other reader — `features()`, `limits()` — is the same
+  structural getter with the same uncatchable failure.
+
+- **Worth filing upstream against wgpu**: the vendored
+  `Gpu::request_adapter{,_with_options}` bindings type a nullable WebIDL return
+  (`Promise<GPUAdapter?>`) as `js_sys::JsOption`, which is undefined-only by
+  documented design — `wasm-bindgen`'s own `sys.rs` says "JavaScript `null` is a
+  distinct present value". Either the binding needs a null-aware wrapper or
+  `future_request_adapter` should test `is_null_or_undefined`.
+
+- **No standing regression guard for the null adapter.** The double that
+  reproduces it lives in a scratchpad, not the repo. Making it permanent means a
+  group-A sub-check that patches `requestAdapter` and asserts the named message,
+  which is a real change to a harness with a documented one-demo-per-run shape —
+  left out rather than decided unilaterally.
+
+- **Neither WebGPU-refusal branch in `web/engine/demo.js` calls `settle()`**, so
+  the Stop button stays enabled and does nothing. Pre-existing on the sibling
+  branch; the new branch matched it rather than fixing half.
+
 - **`web/engine/demo.js` has no way for a demo to say it saves nothing.** On
   `STOPPED` it prints `` `${savedLabel} saved.` `` unconditionally, so hud
   passes `savedLabel: 'Nothing'` and its status bar reads "Nothing saved." —

@@ -2198,6 +2198,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A browser with `navigator.gpu` and no adapter killed demo boot with an
+  uncaught `TypeError`.** Reported against the live site on Chromium 151 under
+  Wayland with `--render-node-override` on a hybrid Intel/NVIDIA laptop, whose
+  `chrome://gpu` reads `Vulkan: Disabled` — and Chrome runs WebGPU on Vulkan
+  there, so every adapter request is refused.
+
+  `GPU.requestAdapter()` resolves to **`null`** in that case, and wgpu 30 loses
+  it: the vendored binding types the nullable WebIDL return as
+  `js_sys::JsOption<GpuAdapter>`, whose `into_option` counts only `undefined` as
+  absent, so JS `null` arrives as `Some(null)`. `enumerate_adapters` then yields
+  a one-element list holding it and `Adapter::get_info()` reads `.info` off
+  `null`. Nothing generated for a structural getter has a `try`, so the
+  `TypeError` unwound through wasm uncatchably instead of reaching the "no
+  usable adapter" arm `WgpuInstance::new_async` already had.
+
+  It now asks the browser for an adapter before enumerating anything — wgpu's
+  own `is_browser_webgpu_supported`, which tests the result for null before
+  reading a property off it — and returns `None` with a named reason in the log.
+  No adapter metadata is invented. `web/engine/demo.js` also asks, before
+  downloading the engine, and says "This browser has WebGPU, but no GPU to run
+  it on" with a pointer to the browser's own GPU report, warning that its WebGPU
+  line can read "Hardware accelerated" while every adapter is still refused.
+
 - **The portable bindless declaration failed on wgpu and overflowed on D3D12.**
   `BindGroupLayoutEntry::count` of `u32::MAX` is the seam's "as many as you
   can": `crcbl-vk` clamped it to `Limits::max_bindless_descriptors` and the null

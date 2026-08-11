@@ -39,7 +39,36 @@ impl WgpuInstance {
     ///
     /// Available on every target, including wasm32, because
     /// `Instance::enumerate_adapters` is a future on the WebGPU backend.
+    ///
+    /// On wasm32 the browser is asked for an adapter before anything is
+    /// enumerated, and `None` is the answer when it has none to give — a
+    /// browser that exposes `navigator.gpu` and still refuses every adapter is
+    /// ordinary, and it is not a case the enumeration below survives.
     pub async fn new_async() -> Option<Self> {
+        // `GPU.requestAdapter()` resolves to **null** where the browser has no
+        // adapter — a blocklisted driver, a render node the GPU process cannot
+        // open, a session with no device at all. wgpu 30 reads that promise as
+        // `js_sys::JsOption<GpuAdapter>`, and `JsOption::into_option` counts
+        // only `undefined` as absent: JS `null` arrives as `Some(null)`,
+        // `enumerate_adapters` yields a one-element list holding it, and the
+        // `get_info()` below reads `.info` off `null`. Nothing generated for
+        // that structural getter has a `try`, so the `TypeError` unwinds
+        // through wasm uncatchably and takes the frame down instead of
+        // reaching the "no usable adapter" arm this function already has.
+        //
+        // The probe is wgpu's own: it requests an adapter and tests the result
+        // for null before anything reads a property off it. It is *not* a
+        // native guard — the helper is documented to return `false` on every
+        // non-wasm target — so this must stay behind the cfg.
+        #[cfg(target_arch = "wasm32")]
+        if !wgpu::util::is_browser_webgpu_supported().await {
+            log::warn!(
+                "crcbl-wgpu: this browser has navigator.gpu but requestAdapter() \
+                 returned no adapter, so there is nothing to enumerate"
+            );
+            return None;
+        }
+
         let instance = wgpu::Instance::default();
 
         let adapters: Vec<_> = instance
