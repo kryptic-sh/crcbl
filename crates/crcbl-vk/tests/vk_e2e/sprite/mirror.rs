@@ -96,25 +96,13 @@ fn a_mirrored_frame_is_the_column_reversed_image() {
         &headless,
         &mut renderer,
         &mut pool,
-        &[crcbl_render::Sprite {
-            sheet,
-            rect,
-            rotation: 0.0,
-            uv: FRAME_A,
-            tint: [1.0; 4],
-        }],
+        &[crcbl_render::Sprite::new(sheet, rect, FRAME_A)],
     );
     let mirror = render_sprites(
         &headless,
         &mut renderer,
         &mut pool,
-        &[crcbl_render::Sprite {
-            sheet,
-            rect,
-            rotation: 0.0,
-            uv: mirrored(FRAME_A),
-            tint: [1.0; 4],
-        }],
+        &[crcbl_render::Sprite::new(sheet, rect, mirrored(FRAME_A))],
     );
 
     // --- the golden: the mirrored image is the plain image, column-reversed ---

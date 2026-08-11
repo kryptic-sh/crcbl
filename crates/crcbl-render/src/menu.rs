@@ -227,14 +227,11 @@ impl MenuArt {
         let target = |min, max| screen_rect_to_target(min, max, viewport, [0.0, 0.0]);
 
         let (scrim_min, scrim_max) = layout.scrim();
-        out.push(Sprite {
-            sheet: self.sheet,
-            rect: target(scrim_min, scrim_max),
-            // A menu is screen furniture; nothing in it turns.
-            rotation: 0.0,
-            uv: self.scrim_uv,
-            tint: layout.style().scrim_color,
-        });
+        // Unrotated: a menu is screen furniture; nothing in it turns.
+        out.push(
+            Sprite::new(self.sheet, target(scrim_min, scrim_max), self.scrim_uv)
+                .with_tint(layout.style().scrim_color),
+        );
 
         let panel = self.panel.with_texels_per_unit(1.0 / scale);
         let (panel_min, panel_max) = layout.panel();

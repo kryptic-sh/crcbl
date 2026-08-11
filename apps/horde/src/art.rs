@@ -209,9 +209,6 @@ const GROUND_FRAMES: [&str; GROUND_VARIANTS] = ["grass-a", "grass-b", "grass-c",
 /// would make every screenshot of this game a different picture for no reason.
 const GROUND_SEED: u64 = 0x0000_0047_5241_5353;
 
-/// "The sheet as authored" — no tinting anywhere in this game.
-const UNTINTED: [f32; 4] = [1.0; 4];
-
 /// The frame the wizard stands on.
 const IDLE_FRAME: &str = "player";
 
@@ -555,16 +552,14 @@ impl Scene {
             ys.flat_map(move |ty| {
                 xs.clone().map(move |tx| {
                     let art = grass[ground_variant(tx, ty)];
-                    Sprite {
-                        sheet: art.sheet,
-                        rect: rect(tile_centre(tx, ty), GROUND_TILE / 2.0),
-                        // Square, and the same way up in every tile: rotating
-                        // the quad would be a fifth variant for free and a
-                        // rotated *blade*, which grows up.
-                        rotation: 0.0,
-                        uv: art.uv,
-                        tint: UNTINTED,
-                    }
+                    // Unrotated: square, and the same way up in every tile.
+                    // Rotating the quad would be a fifth variant for free and a
+                    // rotated *blade*, which grows up.
+                    Sprite::new(
+                        art.sheet,
+                        rect(tile_centre(tx, ty), GROUND_TILE / 2.0),
+                        art.uv,
+                    )
                 })
             }),
         );
@@ -585,14 +580,14 @@ impl Scene {
                 .props
                 .iter()
                 .filter(move |prop| near(prop.position))
-                .map(move |prop| Sprite {
-                    sheet: prop_art[prop_index(prop.kind)].sheet,
-                    rect: rect(prop.position, PROP_HALF_EXTENT),
-                    // Square quad, round shape: a rotation would be an instance
-                    // field spent on a picture nobody could tell had turned.
-                    rotation: 0.0,
-                    uv: prop_art[prop_index(prop.kind)].uv,
-                    tint: UNTINTED,
+                // Unrotated: square quad, round shape, so a rotation would be an
+                // instance field spent on a picture nobody could tell had turned.
+                .map(move |prop| {
+                    Sprite::new(
+                        prop_art[prop_index(prop.kind)].sheet,
+                        rect(prop.position, PROP_HALF_EXTENT),
+                        prop_art[prop_index(prop.kind)].uv,
+                    )
                 }),
         );
         let prop_count = self.stack.sprites(self.props_layer).len();
@@ -639,14 +634,10 @@ impl Scene {
                 .bolts
                 .iter()
                 .filter(move |shot| visible(shot.position))
-                .map(move |shot| Sprite {
-                    sheet: bolt.sheet,
-                    rect: rect(shot.position, BOLT_HALF_EXTENT),
-                    // Round, and with no attitude of its own; turning it would
-                    // be a rotation nobody could see.
-                    rotation: 0.0,
-                    uv: bolt.uv,
-                    tint: UNTINTED,
+                // Unrotated: round, and with no attitude of its own, so turning
+                // it would be a rotation nobody could see.
+                .map(move |shot| {
+                    Sprite::new(bolt.sheet, rect(shot.position, BOLT_HALF_EXTENT), bolt.uv)
                 }),
         );
 
@@ -814,13 +805,7 @@ const fn kind_index(kind: EnemyKind) -> usize {
 
 /// One actor's sprite: the shared frame, at the shared size, centred on `at`.
 fn actor(art: FrameArt, at: DVec3) -> Sprite {
-    Sprite {
-        sheet: art.sheet,
-        rect: rect(at, ACTOR_HALF_EXTENT),
-        rotation: 0.0,
-        uv: art.uv,
-        tint: UNTINTED,
-    }
+    Sprite::new(art.sheet, rect(at, ACTOR_HALF_EXTENT), art.uv)
 }
 
 /// A world-space centre and a half-extent as a sprite rectangle: `[x, y, w, h]`,
@@ -2586,13 +2571,7 @@ mod tests {
     #[test]
     fn a_batch_is_a_run_of_one_sheet_and_not_a_distinct_sheet_count() {
         with_scene(|scene| {
-            let sprite = |art: FrameArt| Sprite {
-                sheet: art.sheet,
-                rect: [0.0; 4],
-                rotation: 0.0,
-                uv: art.uv,
-                tint: UNTINTED,
-            };
+            let sprite = |art: FrameArt| Sprite::new(art.sheet, [0.0; 4], art.uv);
             let (a, b) = (sprite(scene.player), sprite(scene.bolt));
             assert_ne!(a.sheet, b.sheet, "the fixture needs two sheets");
 

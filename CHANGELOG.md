@@ -16,6 +16,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_render::Sprite` is `#[non_exhaustive]` and is built through
+  `Sprite::new(sheet, rect, uv)`.** A struct literal from outside `crcbl-render`
+  no longer compiles, and neither does `..base` functional update; `rotation`
+  and `tint` are `with_rotation` and `with_tint`, both `const` and both
+  returning the sprite. The fields stay `pub` and are still readable — `Sprite`
+  has no invariant to protect, so this is about construction only.
+
+  It exists because every new field was a breaking change to every caller:
+  adding `rotation` broke nine literals that had nothing to do with turning, and
+  the sample count is going up. The next field is now a non-event for anything
+  outside the crate. The measurement behind the split, over all 34 construction
+  sites: `sheet`, `rect` and `uv` are set by every one of them, while `rotation`
+  is non-zero at five and `tint` non-white at five.
+
+  `new` takes two adjacent `[f32; 4]`s, which is the argument-swap hazard
+  `SheetDesc`'s own documentation names and the compiler cannot see. What
+  catches it is the instance-layout test asserting `rect` at byte 0 and `uv` at
+  byte 16 from distinct values, and the sprite golden frames — a swap inside
+  `new` reds seven unit tests and
+  `the_sprite_scene_draws_through_the_sprite_renderer_and_matches_its_golden`.
+  Call sites remain on their own, and `new`'s docs say so.
+
 - **`crcbl_hal::BindingKind::SampledImage` is now a struct variant carrying the
   view dimension**: `SampledImage { view_type: ImageViewType }`. Every
   construction has to name it (`ImageViewType::D2` reproduces the old

@@ -293,14 +293,15 @@ fn sprite_scene(sheets: [SheetId; 2]) -> [Sprite; 4] {
         2 => [0.0, 0.0, 1.0, 1.0],
         _ => SPRITE_FRAME_A,
     };
-    std::array::from_fn(|index| Sprite {
-        sheet: sheets[SPRITE_ORDER[index]],
-        rect: SPRITE_RECTS[index],
-        rotation: 0.0,
-        uv: uv(index),
+    std::array::from_fn(|index| {
+        let sprite = Sprite::new(sheets[SPRITE_ORDER[index]], SPRITE_RECTS[index], uv(index));
         // Only the last one is tinted, so the two rectangles that share frame A
         // are the same picture in different colours.
-        tint: if index == 3 { SPRITE_TINT } else { [1.0; 4] },
+        if index == 3 {
+            sprite.with_tint(SPRITE_TINT)
+        } else {
+            sprite
+        }
     })
 }
 

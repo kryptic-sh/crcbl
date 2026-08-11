@@ -185,14 +185,38 @@ and the crates named above, not by trusting the roadmap's own status column,
 which still carries the pre-closure narrative for 2. What is left below has no
 phase attached to it.
 
-- **`Sprite` is a public-field struct, so every new field is a breaking
-  change.** Adding `rotation` broke five literals in `apps/*/src/art.rs` and
-  four inside `crcbl-render` itself, none of which had anything to do with
-  turning. The next field — a pivot, a z, a flip — breaks them all again, and
-  the sample count is going up. The fix is a constructor plus `with_*` methods
-  (or `#[non_exhaustive]` and `..Default::default()`), decided before the field
-  after next rather than after it. Not done in the rotation slice because it
-  would have put an API refactor of every caller inside a rendering change.
+- **`rect` and `uv` are both `[f32; 4]` and adjacent in `Sprite::new`, and
+  nothing but a picture catches a swap.** This is the hazard `SheetDesc`'s doc
+  comment names — "two adjacent `u32`s that can be swapped at the call site are
+  a bug the compiler cannot see" — reintroduced knowingly when `Sprite` gained a
+  constructor, because the alternative (defaulting `uv` to the whole sheet)
+  trades a swapped-argument wrong picture for a silently-whole-sheet one. What
+  catches it today: `the_instance_layout_is_exactly_what_the_shader_reads`
+  asserts the two lanes at their byte offsets from distinct values, and the
+  sprite goldens catch it at any call site the golden scenes reach. **A call
+  site no golden covers is not covered** — every sample's `art.rs` is in that
+  set.
+
+  The real fix is newtypes — a `WorldRect` and a `SheetUv`, so the compiler
+  refuses the swap — and it ripples through every `[f32; 4]`-returning helper in
+  the samples, which is why it was not attempted inside an API refactor. Worth
+  doing when something else is already touching those helpers.
+
+- **`SheetDesc` was considered for the same treatment and declined.** Its own
+  doc argues it is already the safe form: five named fields is what a positional
+  constructor would be a regression from, and its `label`/`pixels` borrow `'a`,
+  so a `new` would carry the lifetime into a builder chain for nothing. The
+  measurement agrees — every construction names all five fields, so there is no
+  "the default is fine here" population for `with_*` to serve. The half worth
+  having is `#[non_exhaustive]` **alone**, and that is a decision to take when a
+  sixth field (a mip count, a swizzle) is actually proposed; taking it now would
+  break every call site to buy nothing today.
+
+- **`SpriteInstance` in `crcbl_render::sprite_pass` is the same public-literal
+  exposure, on the GPU-side twin.** It cannot take `#[non_exhaustive]` without
+  thought, because its `bytemuck::Pod` derive and the `..Default` idiom around
+  it are load-bearing. Nothing constructs one outside `crcbl-render` today.
+  Noted, not investigated.
 
 - **The four samples still spell the audio entry point three different ways**,
   and the mixer-adoption slice deliberately did not unify them.

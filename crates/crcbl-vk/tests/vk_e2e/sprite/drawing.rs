@@ -69,20 +69,8 @@ fn a_sprite_is_drawn_the_right_way_up_in_the_right_place_from_the_right_frame() 
         &mut renderer,
         &mut pool,
         &[
-            crcbl_render::Sprite {
-                sheet,
-                rect: first,
-                rotation: 0.0,
-                uv: FRAME_A,
-                tint: [1.0; 4],
-            },
-            crcbl_render::Sprite {
-                sheet,
-                rect: second,
-                rotation: 0.0,
-                uv: FRAME_B,
-                tint: [1.0; 4],
-            },
+            crcbl_render::Sprite::new(sheet, first, FRAME_A),
+            crcbl_render::Sprite::new(sheet, second, FRAME_B),
         ],
     );
 
@@ -225,13 +213,7 @@ fn every_batch_draws_its_own_instances_rather_than_the_first_batchs() {
     let sprites: Vec<crcbl_render::Sprite> = rects
         .iter()
         .zip(named)
-        .map(|(rect, sheet)| crcbl_render::Sprite {
-            sheet: sheets[sheet],
-            rect: *rect,
-            rotation: 0.0,
-            uv: [0.0, 0.0, 1.0, 1.0],
-            tint: [1.0; 4],
-        })
+        .map(|(rect, sheet)| crcbl_render::Sprite::new(sheets[sheet], *rect, [0.0, 0.0, 1.0, 1.0]))
         .collect();
 
     let image = render_sprites(&headless, &mut renderer, &mut pool, &sprites);
@@ -317,13 +299,7 @@ fn alpha_blending_composites_the_sprite_onto_what_is_already_there() {
         &headless,
         &mut renderer,
         &mut pool,
-        &[crcbl_render::Sprite {
-            sheet,
-            rect,
-            rotation: 0.0,
-            uv: [0.0, 0.0, 1.0, 1.0],
-            tint: [1.0; 4],
-        }],
+        &[crcbl_render::Sprite::new(sheet, rect, [0.0, 0.0, 1.0, 1.0])],
     );
 
     // Screen: x 96..160, y 64..128, so each texel is a 32-pixel square and the

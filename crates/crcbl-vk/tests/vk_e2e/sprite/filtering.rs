@@ -74,13 +74,7 @@ fn pixel_and_smooth_differ_where_and_by_how_much_sharp_bilinear_predicts() {
     // 45 units for 2 texels: 22.5 pixels per texel, and a fractional origin so
     // the quad's edges do not land on the pixel grid by accident either.
     let rect = [-22.3f32, -22.7, 45.0, 45.0];
-    let sprite = |sheet| crcbl_render::Sprite {
-        sheet,
-        rect,
-        rotation: 0.0,
-        uv: [0.0, 0.0, 1.0, 1.0],
-        tint: [1.0; 4],
-    };
+    let sprite = |sheet| crcbl_render::Sprite::new(sheet, rect, [0.0, 0.0, 1.0, 1.0]);
     let pixel_image = render_sprites(&headless, &mut renderer, &mut pool, &[sprite(sharp)]);
     let smooth_image = render_sprites(&headless, &mut renderer, &mut pool, &[sprite(smooth)]);
 
@@ -234,13 +228,7 @@ fn pixel_mode_is_exactly_flat_inside_each_texel_at_a_whole_scale() {
 
     // 64 pixels for 2 texels: 32 device pixels per texel, on the grid.
     let rect = [-32.0f32, -32.0, 64.0, 64.0];
-    let sprite = |sheet| crcbl_render::Sprite {
-        sheet,
-        rect,
-        rotation: 0.0,
-        uv: [0.0, 0.0, 1.0, 1.0],
-        tint: [1.0; 4],
-    };
+    let sprite = |sheet| crcbl_render::Sprite::new(sheet, rect, [0.0, 0.0, 1.0, 1.0]);
     let pixel_image = render_sprites(&headless, &mut renderer, &mut pool, &[sprite(sharp)]);
     let smooth_image = render_sprites(&headless, &mut renderer, &mut pool, &[sprite(smooth)]);
 
@@ -363,13 +351,7 @@ fn a_sub_pixel_move_leaves_a_pixel_sprite_alone_and_moves_a_smooth_one() {
     // test is not accidentally about one axis.
     let here = [-22.4f32, -22.7, 45.0, 45.0];
     let nudged = [-22.2f32, -22.7, 45.0, 45.0];
-    let sprite = |sheet, rect| crcbl_render::Sprite {
-        sheet,
-        rect,
-        rotation: 0.0,
-        uv: [0.0, 0.0, 1.0, 1.0],
-        tint: [1.0; 4],
-    };
+    let sprite = |sheet, rect| crcbl_render::Sprite::new(sheet, rect, [0.0, 0.0, 1.0, 1.0]);
 
     let sharp_here = render_sprites(&headless, &mut renderer, &mut pool, &[sprite(sharp, here)]);
     let sharp_there = render_sprites(

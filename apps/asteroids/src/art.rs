@@ -107,9 +107,6 @@ pub const TEXELS_PER_UNIT: f32 = 10.0;
 /// scenery, and space that read as a colour would compete with the rocks.
 pub const SPACE: [f32; 4] = [0.00152, 0.00152, 0.00304, 1.0];
 
-/// "The sheet as authored" — no tinting anywhere in this game.
-const UNTINTED: [f32; 4] = [1.0; 4];
-
 /// How much of a world unit the ship's sprite covers, as a half-extent.
 ///
 /// **Larger than [`SHIP_RADIUS`](crate::game::SHIP_RADIUS), and that is the point.** `game.rs` says so in
@@ -297,12 +294,10 @@ impl Scene {
                     .flat_map(move |rock| {
                         let centre =
                             drawn_centre(rock.prev_position, rock.position, rock.teleported, alpha);
-                        let sprite = move |at: DVec3| Sprite {
-                            sheet: art.sheet,
-                            rect: rock_rect(at, rock),
-                            rotation: lerp_angle(rock.prev_angle, rock.angle, alpha) as f32,
-                            uv: art.uv,
-                            tint: UNTINTED,
+                        let sprite = move |at: DVec3| {
+                            Sprite::new(art.sheet, rock_rect(at, rock), art.uv).with_rotation(
+                                lerp_angle(rock.prev_angle, rock.angle, alpha) as f32,
+                            )
                         };
                         // The rock, plus a ghost at every wrapped offset for a
                         // seam it straddles — see [`wrapped_offsets`]. Without
@@ -316,44 +311,45 @@ impl Scene {
         let bullet = self.bullet;
         self.stack.extend(
             self.play,
-            render.bullets.iter().map(move |shot| Sprite {
-                sheet: bullet.sheet,
-                rect: bullet_rect(drawn_centre(
-                    shot.prev_position,
-                    shot.position,
-                    shot.teleported,
-                    alpha,
-                )),
-                // A shot is round and has no attitude of its own; turning it
-                // would be a rotation nobody could see.
-                rotation: 0.0,
-                uv: bullet.uv,
-                tint: UNTINTED,
+            // Unrotated: a shot is round and has no attitude of its own, so
+            // turning it would be a rotation nobody could see.
+            render.bullets.iter().map(move |shot| {
+                Sprite::new(
+                    bullet.sheet,
+                    bullet_rect(drawn_centre(
+                        shot.prev_position,
+                        shot.position,
+                        shot.teleported,
+                        alpha,
+                    )),
+                    bullet.uv,
+                )
             }),
         );
 
         let flash = self.flash;
         self.stack.extend(
             self.play,
-            render.flashes.iter().map(move |flash_at| Sprite {
-                sheet: flash.sheet,
-                rect: rect(
-                    flash_at.position,
-                    flash_at.size.radius(),
-                    flash_at.size.radius(),
-                ),
-                // A burst has no attitude; turning it would be a rotation
-                // nobody sees.
-                rotation: 0.0,
-                // Frame 1 for the first half of the flash's life, frame 2 for
-                // the second — the same state-picked frame swap the ship's
-                // flame uses, driven by the game's age rather than by a clip.
-                uv: if flash_at.life > FLASH_LIFE * 0.5 {
-                    flash.first
-                } else {
-                    flash.second
-                },
-                tint: UNTINTED,
+            // Unrotated: a burst has no attitude, so turning it would be a
+            // rotation nobody sees.
+            render.flashes.iter().map(move |flash_at| {
+                Sprite::new(
+                    flash.sheet,
+                    rect(
+                        flash_at.position,
+                        flash_at.size.radius(),
+                        flash_at.size.radius(),
+                    ),
+                    // Frame 1 for the first half of the flash's life, frame 2
+                    // for the second — the same state-picked frame swap the
+                    // ship's flame uses, driven by the game's age rather than
+                    // by a clip.
+                    if flash_at.life > FLASH_LIFE * 0.5 {
+                        flash.first
+                    } else {
+                        flash.second
+                    },
+                )
             }),
         );
 
@@ -362,27 +358,29 @@ impl Scene {
         if render.ship_alive {
             self.stack.push(
                 self.play,
-                Sprite {
-                    sheet: self.ship.sheet,
-                    rect: ship_rect(drawn_centre(
+                Sprite::new(
+                    self.ship.sheet,
+                    ship_rect(drawn_centre(
                         render.ship_prev_pos,
                         render.ship,
                         render.ship_teleported,
                         alpha,
                     )),
-                    // Straight through, with no offset: `assets/ship.crpix` draws
-                    // the nose up the frame and `game::heading_vector` puts a
-                    // heading of zero along +Y, so the sprite's angle *is* the
-                    // ship's heading.
-                    rotation: lerp_angle(render.ship_heading_prev, render.ship_heading, alpha)
-                        as f32,
-                    uv: if render.thrusting {
+                    if render.thrusting {
                         self.ship.flame
                     } else {
                         self.ship.hull
                     },
-                    tint: UNTINTED,
-                },
+                )
+                // Straight through, with no offset: `assets/ship.crpix` draws
+                // the nose up the frame and `game::heading_vector` puts a
+                // heading of zero along +Y, so the sprite's angle *is* the
+                // ship's heading.
+                .with_rotation(lerp_angle(
+                    render.ship_heading_prev,
+                    render.ship_heading,
+                    alpha,
+                ) as f32),
             );
         }
 

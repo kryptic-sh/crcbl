@@ -310,12 +310,12 @@ impl Scene {
 
         for band in [self.hills, self.ground] {
             let factor = self.stack.parallax(band.layer).factor();
-            let sprites = tiles(band.width, factor, camera, half_width).map(move |x| Sprite {
-                sheet: band.sheet,
-                rect: [x, band.bottom, band.width, band.height],
-                rotation: 0.0,
-                uv: band.uv,
-                tint: UNTINTED,
+            let sprites = tiles(band.width, factor, camera, half_width).map(move |x| {
+                Sprite::new(
+                    band.sheet,
+                    [x, band.bottom, band.width, band.height],
+                    band.uv,
+                )
             });
             self.stack.extend(band.layer, sprites);
         }
@@ -347,21 +347,18 @@ impl Scene {
             frame.rect.w as f32 / TEXELS_PER_UNIT,
             frame.rect.h as f32 / TEXELS_PER_UNIT,
         );
-        Sprite {
-            sheet: self.bird.sheet,
-            rect: [
+        Sprite::new(
+            self.bird.sheet,
+            [
                 bird.x as f32 - width / 2.0,
                 bird.y as f32 - height / 2.0,
                 width,
                 height,
             ],
-            rotation: 0.0,
-            uv: self
-                .description()
+            self.description()
                 .uv(index)
                 .expect("the index came from this sheet"),
-            tint: UNTINTED,
-        }
+        )
     }
 
     fn description(&self) -> &Sheet {

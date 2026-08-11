@@ -268,7 +268,23 @@ pub struct SheetDesc<'a> {
 /// [`LayerStack`](crate::layers::LayerStack) groups sprites into bands and
 /// flattens them back to front when the *caller* asks it to, so the frame this
 /// slice receives is still exactly the order it was handed.
+///
+/// # Building one, and why there is no literal
+///
+/// [`Sprite::new`] takes the three things a sprite cannot be drawn without — the
+/// sheet, the rectangle and the UVs — and the two that mean something specific
+/// when left alone arrive through [`with_rotation`](Self::with_rotation) and
+/// [`with_tint`](Self::with_tint).
+///
+/// The type is `#[non_exhaustive]`, so a caller outside this crate cannot write
+/// the struct literal or use functional-update syntax. That is deliberate:
+/// `rotation` was added to a five-field literal and broke every construction in
+/// the workspace, none of which had anything to do with turning, and the next
+/// field would break them all again. The fields stay `pub`, so reading and
+/// assigning one is unchanged; it is only *construction* that now goes through
+/// the constructor, which is what makes the field after this one a non-event.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct Sprite {
     /// Which registered sheet this sprite samples.
     pub sheet: SheetId,
@@ -310,6 +326,49 @@ pub struct Sprite {
 }
 
 impl Sprite {
+    /// A sprite that draws `uv` of `sheet` into `rect`, unrotated and untinted.
+    ///
+    /// [`rotation`](Self::rotation) starts at `0.0` and [`tint`](Self::tint) at
+    /// `[1.0; 4]` — both the value that means "do nothing", so a sprite built
+    /// here and drawn is the sheet as authored, at the rectangle asked for.
+    ///
+    /// # Two `[f32; 4]`s the compiler cannot tell apart
+    ///
+    /// `rect` is **world units**, minimum corner first and Y up; `uv` is
+    /// **normalised sheet coordinates**, top-left corner first. Swapping them at
+    /// a call site compiles and draws a wrong picture — the hazard
+    /// [`SheetDesc`] became a struct to avoid. Nothing here can catch it. What
+    /// does is the golden images under `crates/crcbl-vk/tests/golden/` and
+    /// `crates/crcbl/tests/golden/`, and the sample suites that assert on a
+    /// resolved sprite's `rect` and `uv` — so a sprite call site is not a place
+    /// to take the argument order on trust.
+    #[must_use]
+    pub const fn new(sheet: SheetId, rect: [f32; 4], uv: [f32; 4]) -> Self {
+        Self {
+            sheet,
+            rect,
+            rotation: 0.0,
+            uv,
+            tint: [1.0; 4],
+        }
+    }
+
+    /// The same sprite, turned by `radians` — [`rotation`](Self::rotation)'s
+    /// units, pivot and effect on [`SampleMode`] in full.
+    #[must_use]
+    pub const fn with_rotation(mut self, radians: f32) -> Self {
+        self.rotation = radians;
+        self
+    }
+
+    /// The same sprite, with [`tint`](Self::tint) multiplied into every texel it
+    /// samples.
+    #[must_use]
+    pub const fn with_tint(mut self, tint: [f32; 4]) -> Self {
+        self.tint = tint;
+        self
+    }
+
     /// The bytes the shader reads for this sprite.
     ///
     /// `sheet` is the [`sheet_lane`] of the sheet this sprite names, which the
@@ -1258,13 +1317,7 @@ mod tests {
     }
 
     fn sprite(sheet: SheetId) -> Sprite {
-        Sprite {
-            sheet,
-            rect: [0.0, 0.0, 1.0, 1.0],
-            rotation: 0.0,
-            uv: [0.0, 0.0, 1.0, 1.0],
-            tint: [1.0; 4],
-        }
+        Sprite::new(sheet, [0.0, 0.0, 1.0, 1.0], [0.0, 0.0, 1.0, 1.0])
     }
 
     /// A stand-in for a swapchain image, imported exactly as an acquired frame
@@ -1405,14 +1458,12 @@ mod tests {
         );
 
         // Distinct in every lane, so a transposed or rotated field cannot
-        // compare equal by accident.
-        let sprite = Sprite {
-            sheet: SheetId(0),
-            rect: [-3.5, 12.0, 64.0, 32.0],
-            rotation: 1.25,
-            uv: [0.25, 0.5, 0.75, 1.0],
-            tint: [0.1, 0.2, 0.3, 0.4],
-        };
+        // compare equal by accident — and, because it is built through
+        // `Sprite::new`, a `rect` and a `uv` swapped inside the constructor
+        // fail here too. The call sites are still on their own; see `new`.
+        let sprite = Sprite::new(SheetId(0), [-3.5, 12.0, 64.0, 32.0], [0.25, 0.5, 0.75, 1.0])
+            .with_rotation(1.25)
+            .with_tint([0.1, 0.2, 0.3, 0.4]);
         let instance = sprite.instance(sheet_lane(16, 8, SampleMode::Pixel));
         let bytes = bytemuck::bytes_of(&instance);
         assert_eq!(bytes.len(), INSTANCE_STRIDE);
@@ -1520,13 +1571,8 @@ mod tests {
     #[test]
     fn a_zero_rotation_writes_the_same_instance_bytes_as_a_sprite_without_one() {
         let lane = sheet_lane(16, 8, SampleMode::Pixel);
-        let flat = Sprite {
-            sheet: SheetId(0),
-            rect: [-3.5, 12.0, 64.0, 32.0],
-            rotation: 0.0,
-            uv: [0.25, 0.5, 0.75, 1.0],
-            tint: [0.1, 0.2, 0.3, 0.4],
-        };
+        let flat = Sprite::new(SheetId(0), [-3.5, 12.0, 64.0, 32.0], [0.25, 0.5, 0.75, 1.0])
+            .with_tint([0.1, 0.2, 0.3, 0.4]);
         // What `instance` built before this slice: the sheet lane copied
         // verbatim, trailing pad and all.
         let before = SpriteInstance {
@@ -1544,10 +1590,7 @@ mod tests {
 
         // And a turned one differs in the last four bytes and nowhere else — so
         // the angle cost no space and displaced nothing.
-        let turned = Sprite {
-            rotation: core::f32::consts::FRAC_PI_2,
-            ..flat
-        };
+        let turned = flat.with_rotation(core::f32::consts::FRAC_PI_2);
         let turned_instance = turned.instance(lane);
         let turned_bytes = bytemuck::bytes_of(&turned_instance);
         let flat_bytes = bytemuck::bytes_of(&before);

@@ -75,17 +75,18 @@ fn rotation_sprites(sheet: crcbl_render::SheetId) -> Vec<crcbl_render::Sprite> {
     ROTATION_DEGREES
         .iter()
         .zip(ROTATION_CENTRES)
-        .map(|(degrees, centre)| crcbl_render::Sprite {
-            sheet,
-            rect: [
-                centre[0] - ROTATION_SIZE[0] / 2.0,
-                centre[1] - ROTATION_SIZE[1] / 2.0,
-                ROTATION_SIZE[0],
-                ROTATION_SIZE[1],
-            ],
-            rotation: degrees.to_radians(),
-            uv: [0.0, 0.0, 1.0, 1.0],
-            tint: [1.0; 4],
+        .map(|(degrees, centre)| {
+            crcbl_render::Sprite::new(
+                sheet,
+                [
+                    centre[0] - ROTATION_SIZE[0] / 2.0,
+                    centre[1] - ROTATION_SIZE[1] / 2.0,
+                    ROTATION_SIZE[0],
+                    ROTATION_SIZE[1],
+                ],
+                [0.0, 0.0, 1.0, 1.0],
+            )
+            .with_rotation(degrees.to_radians())
         })
         .collect()
 }
@@ -328,10 +329,9 @@ fn a_rotated_sprite_turns_about_its_own_centre_by_the_angle_it_was_given() {
     // renderer that ignored the sample mode would produce if linear filtering
     // happened to be flat here. The same sprite at the same angle, from a sheet
     // registered `Smooth`, is the frame where it is not flat.
-    let smooth_sprite = crcbl_render::Sprite {
-        sheet: smooth,
-        ..sprites[1]
-    };
+    // `rotation_sprites` is a function of the sheet alone, so index 1 of the
+    // smooth set is `sprites[1]` with its sheet swapped and nothing else moved.
+    let smooth_sprite = rotation_sprites(smooth)[1];
     let smooth_image = render_sprites(&headless, &mut renderer, &mut pool, &[smooth_sprite]);
 
     let radians = ROTATION_DEGREES[1].to_radians();

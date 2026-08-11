@@ -223,36 +223,24 @@ impl Scene {
         let brick_art = self.bricks;
         self.stack.extend(
             self.play,
-            bricks.iter().map(move |centre| Sprite {
-                sheet: brick_art.sheet,
-                rect: brick_rect(*centre),
-                rotation: 0.0,
-                uv: brick_art.uv[brick_frame(centre.y)],
-                tint: UNTINTED,
+            bricks.iter().map(move |centre| {
+                Sprite::new(
+                    brick_art.sheet,
+                    brick_rect(*centre),
+                    brick_art.uv[brick_frame(centre.y)],
+                )
             }),
         );
 
         self.stack.push(
             self.play,
-            Sprite {
-                sheet: self.paddle.sheet,
-                rect: paddle_rect(paddle_x),
-                rotation: 0.0,
-                uv: self.paddle.uv,
-                tint: UNTINTED,
-            },
+            Sprite::new(self.paddle.sheet, paddle_rect(paddle_x), self.paddle.uv),
         );
         // Last, so a ball resting on the paddle's face is in front of it rather
         // than half swallowed by it.
         self.stack.push(
             self.play,
-            Sprite {
-                sheet: self.ball.sheet,
-                rect: ball_rect(ball),
-                rotation: 0.0,
-                uv: self.ball.uv,
-                tint: UNTINTED,
-            },
+            Sprite::new(self.ball.sheet, ball_rect(ball), self.ball.uv),
         );
 
         // The camera is at the origin and both layers are `Parallax::WORLD`, so
