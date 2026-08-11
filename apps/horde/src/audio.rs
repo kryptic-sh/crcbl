@@ -8,15 +8,17 @@
 //!
 //! # Where the listener stands, and why this game moves it
 //!
-//! **On the player**, which walks. Breakout pans on one axis with a listener it
-//! does not name; flappy's bird sits a third of the way across a scrolling view,
-//! so its pan is a small constant; asteroids puts the listener at the origin
-//! because its camera is nailed there. This arena is 96 × 72 units against a
-//! view of about 37 × 28 and the camera follows the player, so the only listener
-//! that agrees with the picture is the player's own position — which means
-//! [`Audio::play_at`] takes **both** coordinates of it, and that is a fourth
-//! convention in four games. See the S3 findings note in
-//! `docs/plan/ROADMAP.md`.
+//! **On the player**, which walks. Breakout and asteroids nail their listener
+//! to a fixed camera and place it once at start-up; flappy's moves on one axis.
+//! This arena is 96 × 72 units against a view of about 37 × 28 and the camera
+//! follows the player, so the only listener that agrees with the picture is the
+//! player's own position — the one sample whose listener moves on **both**
+//! axes.
+//!
+//! That is [`Audio::set_listener`], called once a frame from `crate::game`
+//! before the frame's cues are drained. [`Audio::play_at`] takes a world
+//! position and nothing else, exactly as the other three samples' does: the
+//! convention is a line in the frame rather than an argument on every cue.
 //!
 //! [`compute_cue`]: crcbl::audio::spatial::compute_cue
 //!
@@ -54,7 +56,7 @@
 use std::sync::Arc;
 
 use crcbl::audio::mixer::{Mixer, SoundBank, VoiceMix};
-use crcbl::audio::spatial::{CueGrammar, compute_cue};
+use crcbl::audio::spatial::{CueGrammar, Listener};
 use crcbl::audio::synth;
 use crcbl::audio::{AudioSample, AudioStream};
 use crcbl::math::DVec3;
@@ -85,6 +87,9 @@ const SOUND_COUNT: usize = 6;
 
 /// How loud a cue is against the volume the grammar asks for. See breakout's.
 const MASTER_GAIN: f32 = 0.5;
+
+/// How far behind the play plane the listener stands. See breakout's.
+const LISTENER_STANDOFF: f32 = 1.0;
 
 /// How many voices may be sounding at once.
 ///
@@ -178,7 +183,7 @@ impl Audio {
             crcbl::log::info!("audio: no output device available; the game will be silent");
         }
 
-        Self {
+        let audio = Self {
             bank,
             plays: vec![0; SOUND_COUNT],
             dropped: 0,
@@ -186,15 +191,31 @@ impl Audio {
             played: Vec::new(),
             mixer,
             _stream: stream,
-        }
+        };
+        // The player starts at the origin and the game moves the listener every
+        // frame after; placing it here is what stops a cue raised before the
+        // first `set_listener` being computed against the mixer's default, which
+        // sits *in* the play plane rather than back from it.
+        audio.set_listener(DVec3::ZERO);
+        audio
     }
 
-    /// Plays a cue for something happening at `at`, heard from `listener`.
+    /// Puts the listener on the player, at `at`. See the module docs.
     ///
-    /// Both positions, unlike in the other three samples, because this game's
-    /// listener moves: it is the player, and the camera follows them. See the
-    /// module docs.
-    pub fn play_at(&mut self, id: u32, listener: DVec3, at: DVec3) {
+    /// Called once a frame, before the frame's cues are played.
+    pub fn set_listener(&self, at: DVec3) {
+        self.mixer.set_listener(Listener::new([
+            at.x as f32,
+            at.y as f32,
+            at.z as f32 - LISTENER_STANDOFF,
+        ]));
+    }
+
+    /// Plays a cue for something happening at `at` in world space.
+    ///
+    /// No listener argument: [`Audio::set_listener`] put the ear on the player,
+    /// and the [`Mixer`] has held it since.
+    pub fn play_at(&mut self, id: u32, at: DVec3) {
         // An id the bank does not know is simply absent, so there is no `id - 1`
         // to underflow on the lookup — only on the counter below, which is
         // reached solely for an id the bank *did* answer to.
@@ -224,15 +245,8 @@ impl Audio {
             return;
         }
 
-        let cue = compute_cue(
-            [0.0, 0.0, 0.0],
-            [
-                (at.x - listener.x) as f32,
-                (at.y - listener.y) as f32,
-                // A metre in front, so a sound at the listener's own position is
-                // still at a defined direction rather than a zero vector.
-                1.0,
-            ],
+        let cue = self.mixer.cue(
+            [at.x as f32, at.y as f32, at.z as f32],
             &CueGrammar::default(),
         );
         self.mixer.play(voice.with_mix(VoiceMix {
@@ -357,8 +371,8 @@ mod tests {
     #[test]
     fn an_unknown_cue_is_ignored_rather_than_underflowing() {
         let mut audio = Audio::new(true);
-        audio.play_at(0, DVec3::ZERO, DVec3::ZERO);
-        audio.play_at(9999, DVec3::ZERO, DVec3::ZERO);
+        audio.play_at(0, DVec3::ZERO);
+        audio.play_at(9999, DVec3::ZERO);
         assert_eq!(audio.voices(), 0);
         // `plays` still spells `id - 1`, so it still has the underflow to avoid,
         // and it must not report a play for a cue that was refused.
@@ -366,7 +380,7 @@ mod tests {
         assert_eq!(audio.plays(9999), 0);
         assert_eq!(audio.plays(SOUND_SHOT), 0);
 
-        audio.play_at(SOUND_SHOT, DVec3::ZERO, DVec3::ZERO);
+        audio.play_at(SOUND_SHOT, DVec3::ZERO);
         assert_eq!(audio.voices(), 1);
         assert_eq!(audio.plays(SOUND_SHOT), 1);
         for other in [
@@ -386,7 +400,7 @@ mod tests {
     #[test]
     fn a_cue_stays_counted_after_its_voice_is_gone() {
         let mut audio = Audio::new(true);
-        audio.play_at(SOUND_SHOT, DVec3::ZERO, DVec3::ZERO);
+        audio.play_at(SOUND_SHOT, DVec3::ZERO);
         assert_eq!(audio.plays(SOUND_SHOT), 1);
 
         // Reap it by hand rather than waiting on the audio thread, so the test
@@ -417,14 +431,14 @@ mod tests {
     fn a_full_mixer_refuses_the_voice_and_still_counts_the_cue() {
         let mut audio = Audio::new(true);
         for _ in 0..MAX_VOICES {
-            audio.play_at(SOUND_KILL, DVec3::ZERO, DVec3::ZERO);
+            audio.play_at(SOUND_KILL, DVec3::ZERO);
         }
         assert_eq!(audio.voices(), MAX_VOICES);
         assert_eq!(audio.plays(SOUND_KILL), MAX_VOICES as u64);
         assert_eq!(audio.dropped(), 0, "the cap fired early");
 
         for _ in 0..7 {
-            audio.play_at(SOUND_KILL, DVec3::ZERO, DVec3::ZERO);
+            audio.play_at(SOUND_KILL, DVec3::ZERO);
         }
         assert_eq!(audio.voices(), MAX_VOICES, "the cap let a voice through");
         assert_eq!(
@@ -439,7 +453,7 @@ mod tests {
         let mut block = vec![0.0f32; 48_000 * 2];
         crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
         assert_eq!(audio.voices(), 0, "a whole second did not drain the queue");
-        audio.play_at(SOUND_KILL, DVec3::ZERO, DVec3::ZERO);
+        audio.play_at(SOUND_KILL, DVec3::ZERO);
         assert_eq!(audio.voices(), 1);
     }
 
@@ -452,7 +466,7 @@ mod tests {
     fn the_debug_section_shows_the_refusal_count() {
         let mut audio = Audio::new(true);
         for _ in 0..MAX_VOICES + 3 {
-            audio.play_at(SOUND_KILL, DVec3::ZERO, DVec3::ZERO);
+            audio.play_at(SOUND_KILL, DVec3::ZERO);
         }
         assert_eq!(audio.dropped(), 3, "the cap refused the wrong number");
 
@@ -487,6 +501,27 @@ mod tests {
         );
     }
 
+    /// **The listener is placed before anything can be played through it.** The
+    /// game puts it on the player every frame, but a cue raised before the first
+    /// frame must not be computed against the mixer's default at the origin,
+    /// which sits *in* the play plane and so answers a cue on top of it with no
+    /// direction.
+    #[test]
+    fn the_listener_is_behind_the_play_plane_from_the_first_cue() {
+        let audio = Audio::new(true);
+        assert_eq!(
+            audio.mixer.listener().position,
+            [0.0, 0.0, -LISTENER_STANDOFF],
+        );
+
+        // …and it follows the player rather than staying put.
+        audio.set_listener(DVec3::new(-7.0, 3.0, 0.0));
+        assert_eq!(
+            audio.mixer.listener().position,
+            [-7.0, 3.0, -LISTENER_STANDOFF],
+        );
+    }
+
     /// The grammar is actually consulted: a cue away from the listener is not
     /// the same cue as one on top of it, **and the listener is the player**.
     ///
@@ -494,22 +529,21 @@ mod tests {
     /// test above would still pass — the sample would ship "spatial audio" that
     /// was a constant. The second half is this game's own: an identical world
     /// position must sound different depending on where the player is standing,
-    /// which is the half a copy of asteroids' listener-at-the-origin version
-    /// would fail.
+    /// which is the half a copy of asteroids' fixed-camera version would fail —
+    /// and which is now the half that says [`Audio::set_listener`] reaches the
+    /// cue at all, since the listener has stopped being an argument.
     #[test]
     fn where_a_cue_happens_and_where_the_player_stands_both_change_how_it_sounds() {
         let mut audio = Audio::new(true);
-        let origin = DVec3::ZERO;
-        audio.play_at(SOUND_KILL, origin, origin);
-        audio.play_at(SOUND_KILL, origin, DVec3::new(-14.0, 6.0, 0.0));
-        audio.play_at(SOUND_KILL, origin, DVec3::new(14.0, 6.0, 0.0));
-        // The same emitter as the second, heard by a player standing right on
-        // top of it.
-        audio.play_at(
-            SOUND_KILL,
-            DVec3::new(-14.0, 6.0, 0.0),
-            DVec3::new(-14.0, 6.0, 0.0),
-        );
+        let far_corner = DVec3::new(-14.0, 6.0, 0.0);
+        audio.set_listener(DVec3::ZERO);
+        audio.play_at(SOUND_KILL, DVec3::ZERO);
+        audio.play_at(SOUND_KILL, far_corner);
+        audio.play_at(SOUND_KILL, DVec3::new(14.0, 6.0, 0.0));
+        // The same emitter as the second, heard by a player who has walked
+        // right on top of it.
+        audio.set_listener(far_corner);
+        audio.play_at(SOUND_KILL, far_corner);
         let mixes = audio.mixer.voice_mixes();
         assert_eq!(mixes.len(), 4, "a cue went missing");
         let (near, left, right, moved) = (mixes[0].1, mixes[1].1, mixes[2].1, mixes[3].1);

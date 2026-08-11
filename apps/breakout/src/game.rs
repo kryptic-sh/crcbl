@@ -1003,7 +1003,7 @@ impl Game {
             let mut logic = lock(&self.shared);
             self.sound_played_this_tick = !logic.sounds.is_empty();
             for (id, x) in logic.sounds.drain(..).collect::<Vec<_>>() {
-                self.audio.play_panned(id, x);
+                self.audio.play_at(id, DVec3::new(f64::from(x), 0.0, 0.0));
             }
             (
                 logic.score,

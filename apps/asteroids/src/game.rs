@@ -2010,7 +2010,7 @@ impl Game {
             logic.cues.drain(..).collect()
         };
         for (id, x, y) in cues {
-            self.audio.play_at(id, x, y);
+            self.audio.play_at(id, DVec3::new(x, y, 0.0));
         }
 
         let was = self.state;
@@ -2034,8 +2034,7 @@ impl Game {
         // re-aimed at the ship on every tick after that, and is stopped the tick
         // the key comes up. `crate::audio::Audio::set_thrust` owns all of that —
         // the simulation only says whether the ship is burning.
-        self.audio
-            .set_thrust(self.thrusting, self.ship.x, self.ship.y);
+        self.audio.set_thrust(self.thrusting, self.ship);
         debug_assert_eq!(
             ticks_after,
             ticks_before + u64::from(server_ticks),

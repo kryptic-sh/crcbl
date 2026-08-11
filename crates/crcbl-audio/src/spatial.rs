@@ -105,10 +105,51 @@ impl SpatialCue {
     };
 }
 
+/// Where a cue is heard from.
+///
+/// # Why this is a type and not three floats
+///
+/// The coordinate convention above says the listener **faces `+Z`**, and
+/// [`compute_cue`] takes it at its word: azimuth is the angle from `+Z` in the
+/// XZ plane, so `nz` is "how far ahead" and `nx` is "how far right" with nothing
+/// in between to turn them. A listener that can *rotate* needs a forward vector,
+/// and this type is what can gain that field — every existing caller keeps
+/// working, because `new` fixes the orientation it fixes today.
+///
+/// `#[non_exhaustive]`, so a caller outside this crate cannot write the struct
+/// literal or use functional-update syntax, which is what makes that field a
+/// non-event rather than a break at every construction site. The field stays
+/// `pub`, so reading and assigning it is unchanged.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct Listener {
+    /// World-space position: `+X` right, `+Y` up, `+Z` forward.
+    pub position: [f32; 3],
+}
+
+impl Listener {
+    /// The world origin, facing `+Z`.
+    ///
+    /// What a [`Mixer`](crate::mixer::Mixer) hears from until something calls
+    /// [`Mixer::set_listener`](crate::mixer::Mixer::set_listener).
+    pub const ORIGIN: Self = Self::new([0.0; 3]);
+
+    /// A listener standing at `position`, facing `+Z`.
+    #[must_use]
+    pub const fn new(position: [f32; 3]) -> Self {
+        Self { position }
+    }
+}
+
 /// Computes a spatial cue for `emitter` relative to `listener`.
 ///
 /// Both positions are in world space.  Returns interpolated gains, ITD,
 /// pitch, and distance-attenuated volume.
+///
+/// **Takes the listener explicitly and reads no shared state**, which is what
+/// makes it testable at a hundred positions in a loop.  The listener a game
+/// *remembers* lives on the [`Mixer`](crate::mixer::Mixer), and
+/// [`Mixer::cue`](crate::mixer::Mixer::cue) is what hands it to this function.
 pub fn compute_cue(listener: [f32; 3], emitter: [f32; 3], grammar: &CueGrammar) -> SpatialCue {
     let dx = emitter[0] - listener[0];
     let dy = emitter[1] - listener[1];

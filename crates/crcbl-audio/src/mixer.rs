@@ -7,6 +7,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::spatial::{CueGrammar, Listener, SpatialCue, compute_cue};
 use crate::{AudioSample, AudioSource, CHANNELS, INTERNAL_SAMPLE_RATE};
 
 /// Clamp a caller-supplied parameter, substituting `fallback` when it is NaN or
@@ -377,6 +378,10 @@ impl Voice {
 /// Implements [`AudioSource`] so it can be handed directly to
 /// [`AudioStream`](crate::AudioStream) — through an [`Arc`], which is what
 /// leaves the game a handle to go on playing through. See [`Mixer::play`].
+///
+/// It is also where the [`Listener`] lives. [`Mixer::set_listener`] is called
+/// once a frame and [`Mixer::cue`] answers for a world position, so a game says
+/// where its ear is in one place instead of passing it to every cue it raises.
 pub struct Mixer {
     voices: Mutex<Vec<(VoiceId, Voice)>>,
     /// Voices mid-release: stopped but playing their one fade-to-silence
@@ -384,20 +389,64 @@ pub struct Mixer {
     /// them — [`Mixer::stop`] frees the slot on the spot — and the next
     /// [`fill`](AudioSource::fill) mixes the ramp and drops each one.
     releasing: Mutex<Vec<(VoiceId, Voice)>>,
+    /// Where [`Mixer::cue`] hears from. Behind the same kind of [`Mutex`] the
+    /// voice lists are, for the same reason: every entry point on this type
+    /// takes `&self`, so the interior mutability is not optional and a second
+    /// mechanism beside the one already here would only be a second thing to
+    /// reason about.
+    listener: Mutex<Listener>,
     /// The next handle to hand out. Monotonic; ids are never reused, so a
     /// stale [`VoiceId`] can never name a later voice.
     next_id: AtomicU64,
 }
 
 impl Mixer {
-    /// Create an empty mixer.
+    /// Create an empty mixer, hearing from [`Listener::ORIGIN`].
     #[must_use]
     pub fn new() -> Self {
         Self {
             voices: Mutex::new(Vec::new()),
             releasing: Mutex::new(Vec::new()),
+            listener: Mutex::new(Listener::ORIGIN),
             next_id: AtomicU64::new(1),
         }
+    }
+
+    /// Move the ear every later [`Mixer::cue`] hears from.
+    ///
+    /// **Set it once a frame, before the frame's cues.** That is the whole
+    /// difference this makes: a cue is `(sound, world position)` again, and
+    /// where the listener stands is a fact about the game stated in one place
+    /// rather than an argument threaded through every call site. A listener
+    /// that never moves — a fixed camera — is set once, at start-up.
+    ///
+    /// **It does not re-aim what is already playing.** A voice is mixed at the
+    /// parameters it was given; moving the listener changes the *next* cue.
+    /// A held sound on a moving emitter — or a moving listener — is re-aimed
+    /// by handing [`Mixer::set_mix`] a freshly computed [`Mixer::cue`], which
+    /// is what a game already has to do for the emitter's own movement.
+    pub fn set_listener(&self, listener: Listener) {
+        *self.lock_listener() = listener;
+    }
+
+    /// Where this mixer is hearing from.
+    ///
+    /// [`Listener::ORIGIN`] until [`Mixer::set_listener`] says otherwise.
+    #[must_use]
+    pub fn listener(&self) -> Listener {
+        *self.lock_listener()
+    }
+
+    /// The cue for an emitter at `emitter`, heard from this mixer's listener.
+    ///
+    /// The one call that reads the remembered listener: [`compute_cue`] stays a
+    /// pure function of two positions and this is what supplies the first of
+    /// them. Feed the result to [`Voice::with_mix`] through
+    /// [`VoiceMix::from`] when the sound starts, and to [`Mixer::set_mix`] on
+    /// every frame it needs re-aiming after that.
+    #[must_use]
+    pub fn cue(&self, emitter: [f32; 3], grammar: &CueGrammar) -> SpatialCue {
+        compute_cue(self.listener().position, emitter, grammar)
     }
 
     /// Start a voice, and answer with the handle that steers it.
@@ -495,6 +544,12 @@ impl Mixer {
     /// does for the voice list.
     fn lock_releasing(&self) -> std::sync::MutexGuard<'_, Vec<(VoiceId, Voice)>> {
         self.releasing.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Lock the listener, recovering from poisoning, as [`Mixer::lock`] does
+    /// for the voice list.
+    fn lock_listener(&self) -> std::sync::MutexGuard<'_, Listener> {
+        self.listener.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -618,9 +673,11 @@ impl std::fmt::Debug for Mixer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let count = self.voice_count();
         let releasing = self.lock_releasing().len();
+        let listener = self.listener();
         f.debug_struct("Mixer")
             .field("voice_count", &count)
             .field("releasing_count", &releasing)
+            .field("listener", &listener)
             .finish()
     }
 }
@@ -632,8 +689,6 @@ impl std::fmt::Debug for Mixer {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use crate::spatial::{CueGrammar, SpatialCue, compute_cue};
 
     /// Interleaved stereo data whose left and right channels differ, so a
     /// decoder that reads the wrong channel is visible.
@@ -985,6 +1040,103 @@ mod tests {
         let ahead = compute_cue([0.0, 0.0, 0.0], [0.0, 0.0, 0.5], &grammar);
         assert_eq!(VoiceMix::from(&ahead).itd_samples, 0.0);
         assert_eq!(VoiceMix::from(&SpatialCue::REFERENCE).itd_samples, 0.0);
+    }
+
+    /// **The remembered listener reaches a played voice**, and it reaches it
+    /// the right way round.
+    ///
+    /// One emitter, never moved, played twice from opposite sides. The
+    /// observable is the mix the *mixer* is holding — not what `cue` returned —
+    /// so a `set_listener` that stored the value and a `cue` that went on
+    /// hearing from the origin would leave these two mixes identical, which is
+    /// what every assertion here is written against: same gains, same ITD, no
+    /// side at all.
+    #[test]
+    fn moving_the_listener_moves_where_the_next_cue_is_heard() {
+        let grammar = CueGrammar::default();
+        let emitter = [0.0, 0.0, 0.0];
+        let mixer = Mixer::new();
+        let play = |mixer: &Mixer| {
+            let cue = mixer.cue(emitter, &grammar);
+            mixer.play(Voice::new(vec![0.5f32; 64 * CHANNELS]).with_mix(VoiceMix::from(&cue)))
+        };
+
+        // Standing to the *left* of the emitter, so the emitter is off to the
+        // right: right ear louder, left ear delayed (negative ITD).
+        mixer.set_listener(Listener::new([-5.0, 0.0, -1.0]));
+        let from_the_left = play(&mixer);
+        // …and to the right of it, which is the mirror image of that.
+        mixer.set_listener(Listener::new([5.0, 0.0, -1.0]));
+        let from_the_right = play(&mixer);
+
+        let mixes = mixer.voice_mixes();
+        assert_eq!(mixes.len(), 2, "a voice went missing");
+        assert_eq!(mixes[0].0, from_the_left);
+        assert_eq!(mixes[1].0, from_the_right);
+        let (left, right) = (mixes[0].1, mixes[1].1);
+
+        assert!(
+            left.gains.1 > left.gains.0,
+            "an emitter to the listener's right should be louder on the right: {:?}",
+            left.gains,
+        );
+        assert!(
+            left.itd_samples < 0.0,
+            "an emitter to the right delays the left ear: {}",
+            left.itd_samples,
+        );
+        assert!(
+            right.gains.0 > right.gains.1,
+            "and one to the listener's left, louder on the left: {:?}",
+            right.gains,
+        );
+        assert!(
+            right.itd_samples > 0.0,
+            "an emitter to the left delays the right ear: {}",
+            right.itd_samples,
+        );
+        // Mirrored positions, so the two are each other's reflection: this is
+        // the assertion a cue that ignored the listener fails hardest, because
+        // it would make both sides equal rather than opposite.
+        assert!(
+            (left.gains.0 - right.gains.1).abs() < 1e-6
+                && (left.gains.1 - right.gains.0).abs() < 1e-6,
+            "the two listeners are mirrored: {:?} vs {:?}",
+            left.gains,
+            right.gains,
+        );
+        assert!((left.itd_samples + right.itd_samples).abs() < 1e-6);
+    }
+
+    /// **A mixer nobody has placed hears from the world origin**, and that is a
+    /// position rather than a sentinel: setting it explicitly changes nothing.
+    ///
+    /// The alternative — refusing to cue, or going silent, until a listener
+    /// arrives — would fail exactly the games that are right: a fixed camera
+    /// sets its listener once at start-up, and nothing here can tell that from
+    /// never having been set. So the fallback is a real, documented place, and
+    /// what makes a forgotten `set_listener` findable is [`Mixer::listener`]
+    /// reading back what is actually in force.
+    #[test]
+    fn a_mixer_with_no_listener_hears_from_the_origin() {
+        let grammar = CueGrammar::default();
+        let emitter = [5.0, 2.0, -3.0];
+        let mixer = Mixer::new();
+
+        assert_eq!(mixer.listener(), Listener::ORIGIN);
+        assert_eq!(Listener::ORIGIN.position, [0.0; 3]);
+        assert_eq!(
+            mixer.cue(emitter, &grammar),
+            compute_cue([0.0, 0.0, 0.0], emitter, &grammar),
+            "a fresh mixer cued from somewhere other than the origin",
+        );
+
+        mixer.set_listener(Listener::ORIGIN);
+        assert_eq!(
+            mixer.cue(emitter, &grammar),
+            compute_cue([0.0, 0.0, 0.0], emitter, &grammar),
+            "saying the origin out loud changed the answer",
+        );
     }
 
     /// A positive ITD delays the right channel by exactly that many frames,

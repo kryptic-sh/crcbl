@@ -8,8 +8,10 @@
 //!
 //! # Where the listener stands, and why this game finally makes it matter
 //!
-//! At the origin, which is the middle of the field and where the camera sits —
-//! see `crate::gpu`'s `camera`, which is fixed there and never moves.
+//! At the middle of the field, [`LISTENER_STANDOFF`] back from the play plane,
+//! which is where the camera sits — see `crate::gpu`'s `camera`, which is fixed
+//! there and never moves. Being fixed, it is placed on the [`Mixer`] once in
+//! [`Audio::new`] and the frame never touches it again.
 //!
 //! That is the same *place* breakout and flappy put their listener and a
 //! completely different *situation*. Breakout pans on one axis with a listener
@@ -50,8 +52,9 @@ use std::sync::Arc;
 
 use crcbl::audio::AudioStream;
 use crcbl::audio::mixer::{Mixer, SoundBank, VoiceId, VoiceMix};
-use crcbl::audio::spatial::{CueGrammar, compute_cue};
+use crcbl::audio::spatial::{CueGrammar, Listener};
 use crcbl::audio::synth;
+use crcbl::math::DVec3;
 
 /// The engine, while thrust is held. One looping voice; see the module docs.
 pub const SOUND_THRUST: u32 = 1;
@@ -75,6 +78,12 @@ const MASTER_GAIN: f32 = 0.5;
 /// was audible about half the time it was burning, and a loop at the one-shot
 /// level sits on top of the gun rather than under it.
 const ENGINE_GAIN: f32 = 0.25;
+
+/// How far behind the play plane the listener stands. See breakout's.
+const LISTENER_STANDOFF: f32 = 1.0;
+
+/// The camera, nailed to the middle of the field. See the module docs.
+const LISTENER: Listener = Listener::new([0.0, 0.0, -LISTENER_STANDOFF]);
 
 /// Owns the cues and the output stream.
 #[derive(Debug)]
@@ -144,6 +153,11 @@ impl Audio {
         // The stream takes a handle, not the mixer: this copy is what stays
         // behind to play voices through.
         let mixer = Arc::new(Mixer::new());
+        // This camera does not move, so the listener is placed once here rather
+        // than pushed every frame. Set before any cue can be raised, so no cue
+        // is ever computed against the mixer's default, which sits *in* the play
+        // plane rather than back from it.
+        mixer.set_listener(LISTENER);
         let stream = if headless {
             Some(AudioStream::open_null(Arc::clone(&mixer)))
         } else {
@@ -164,14 +178,13 @@ impl Audio {
         }
     }
 
-    /// Plays a cue for something happening at `(x, y)` in world space.
+    /// Plays a cue for something happening at `at` in world space.
     ///
-    /// The listener is the camera, at the origin — see the module docs. There is
-    /// no listener argument because, unlike in flappy, there is nothing for it
-    /// to vary with: this camera does not move.
+    /// The listener is the camera, held by the [`Mixer`] since [`Audio::new`]
+    /// placed it — see the module docs.
     ///
     /// One-shots only. The engine is [`Audio::set_thrust`]'s.
-    pub fn play_at(&mut self, id: u32, x: f64, y: f64) {
+    pub fn play_at(&mut self, id: u32, at: DVec3) {
         // An id the bank does not know is simply absent, so there is no `id - 1`
         // to underflow on the lookup — only on the counter below, which is
         // reached solely for an id the bank *did* answer to.
@@ -180,8 +193,8 @@ impl Audio {
             return;
         };
         self.mixer
-            .play(voice.with_mix(self.cue_mix(x, y, MASTER_GAIN)));
-        self.count(id, x, y);
+            .play(voice.with_mix(self.cue_mix(at, MASTER_GAIN)));
+        self.count(id, at);
     }
 
     /// Starts, re-aims or stops the engine.
@@ -194,7 +207,7 @@ impl Audio {
     /// Re-aiming every tick is the point: the ship crosses a 32-unit field in a
     /// couple of seconds, so a pan and a volume fixed at ignition would be
     /// audibly wrong long before the burn ends.
-    pub fn set_thrust(&mut self, burning: bool, x: f64, y: f64) {
+    pub fn set_thrust(&mut self, burning: bool, at: DVec3) {
         if !burning {
             if let Some(id) = self.thrust.take() {
                 self.mixer.stop(id);
@@ -202,7 +215,7 @@ impl Audio {
             return;
         }
 
-        let mix = self.cue_mix(x, y, ENGINE_GAIN);
+        let mix = self.cue_mix(at, ENGINE_GAIN);
         // `set_mix` answers `false` for a handle whose voice is gone, which is
         // the restart condition: a looping voice only ends if something stopped
         // it, so this is also what recovers if anything ever does.
@@ -215,7 +228,7 @@ impl Audio {
             return;
         };
         self.thrust = Some(self.mixer.play(voice.with_looping().with_mix(mix)));
-        self.count(SOUND_THRUST, x, y);
+        self.count(SOUND_THRUST, at);
     }
 
     /// Whether the engine is sounding right now.
@@ -244,16 +257,10 @@ impl Audio {
         self.mixer.voice_count()
     }
 
-    /// The mix for a cue at `(x, y)`, heard from the camera at the origin.
-    fn cue_mix(&self, x: f64, y: f64, gain: f32) -> VoiceMix {
-        let cue = compute_cue(
-            [0.0, 0.0, 0.0],
-            [
-                x as f32, y as f32,
-                // A metre in front, so a sound at the listener's own position is
-                // still at a defined direction rather than a zero vector.
-                1.0,
-            ],
+    /// The mix for a cue at `at`, heard from wherever the mixer's listener is.
+    fn cue_mix(&self, at: DVec3, gain: f32) -> VoiceMix {
+        let cue = self.mixer.cue(
+            [at.x as f32, at.y as f32, at.z as f32],
             &CueGrammar::default(),
         );
         VoiceMix {
@@ -262,8 +269,8 @@ impl Audio {
         }
     }
 
-    /// Records that cue `id` was emitted at `(x, y)`.
-    fn count(&mut self, id: u32, x: f64, y: f64) {
+    /// Records that cue `id` was emitted at `at`.
+    fn count(&mut self, id: u32, at: DVec3) {
         // `plays` is as long as the bank and neither ever grows, so an index
         // that found a sound finds a counter.
         if let Some(count) = id
@@ -273,9 +280,9 @@ impl Audio {
             *count += 1;
         }
         #[cfg(test)]
-        self.played.push((id, x, y));
+        self.played.push((id, at.x, at.y));
         #[cfg(not(test))]
-        let _ = (x, y);
+        let _ = at;
     }
 
     /// Every cue played so far, with the world position it was played at.
@@ -408,12 +415,27 @@ mod tests {
         );
     }
 
+    /// **The camera is the listener from the first cue.** It is placed in
+    /// [`Audio::new`] rather than pushed each frame, so this is what says the
+    /// placing happened at all — without it every cue would be computed against
+    /// the mixer's default at the origin, which sits *in* the play plane and so
+    /// answers a cue on top of it with no direction.
+    #[test]
+    fn the_camera_is_the_listener_from_the_first_cue() {
+        let audio = Audio::new(true);
+        assert_eq!(audio.mixer.listener(), LISTENER);
+        assert_eq!(
+            audio.mixer.listener().position,
+            [0.0, 0.0, -LISTENER_STANDOFF],
+        );
+    }
+
     /// An id nothing answers to is ignored rather than underflowing or panicking.
     #[test]
     fn an_unknown_cue_is_ignored_rather_than_underflowing() {
         let mut audio = Audio::new(true);
-        audio.play_at(0, 0.0, 0.0);
-        audio.play_at(9999, 0.0, 0.0);
+        audio.play_at(0, DVec3::ZERO);
+        audio.play_at(9999, DVec3::ZERO);
         assert_eq!(audio.voices(), 0);
         // `plays` still spells `id - 1`, so it still has the underflow to avoid,
         // and it must not report a play for a cue that was refused.
@@ -421,7 +443,7 @@ mod tests {
         assert_eq!(audio.plays(9999), 0);
         assert_eq!(audio.plays(SOUND_SHOT), 0);
 
-        audio.play_at(SOUND_SHOT, 0.0, 0.0);
+        audio.play_at(SOUND_SHOT, DVec3::ZERO);
         assert_eq!(audio.voices(), 1);
         assert_eq!(audio.plays(SOUND_SHOT), 1);
         assert_eq!(audio.plays(SOUND_THRUST), 0, "only the shot was played");
@@ -434,7 +456,7 @@ mod tests {
     #[test]
     fn a_cue_stays_counted_after_its_voice_is_gone() {
         let mut audio = Audio::new(true);
-        audio.play_at(SOUND_SHOT, 0.0, 0.0);
+        audio.play_at(SOUND_SHOT, DVec3::ZERO);
         assert_eq!(audio.plays(SOUND_SHOT), 1);
 
         // Reap it by hand rather than waiting on the audio thread, so the test
@@ -468,7 +490,7 @@ mod tests {
         let mut audio = Audio::new(true);
         assert!(!audio.thrust_playing(), "the engine started on its own");
 
-        audio.set_thrust(true, 0.0, 0.0);
+        audio.set_thrust(true, DVec3::ZERO);
         assert!(audio.thrust_playing());
         assert_eq!(audio.plays(SOUND_THRUST), 1);
         assert_eq!(audio.voices(), 1);
@@ -486,12 +508,12 @@ mod tests {
                 "the engine went silent after {tenth} tenths of a second",
             );
             // Held, so the game keeps saying so — and it is still one voice.
-            audio.set_thrust(true, 0.0, 0.0);
+            audio.set_thrust(true, DVec3::ZERO);
             assert_eq!(audio.voices(), 1, "a second engine voice was started");
             assert_eq!(audio.plays(SOUND_THRUST), 1, "the burn was recounted");
         }
 
-        audio.set_thrust(false, 0.0, 0.0);
+        audio.set_thrust(false, DVec3::ZERO);
         assert!(
             !audio.thrust_playing(),
             "the key came up and it kept running"
@@ -515,7 +537,7 @@ mod tests {
         );
 
         // A second burn is a second play, and a new voice.
-        audio.set_thrust(true, 0.0, 0.0);
+        audio.set_thrust(true, DVec3::ZERO);
         assert_eq!(audio.plays(SOUND_THRUST), 2);
         assert!(audio.thrust_playing());
     }
@@ -528,7 +550,7 @@ mod tests {
     #[test]
     fn the_engine_pans_with_the_ship_without_restarting() {
         let mut audio = Audio::new(true);
-        audio.set_thrust(true, -14.0, 0.0);
+        audio.set_thrust(true, DVec3::new(-14.0, 0.0, 0.0));
         let left = audio.mixer.voice_mixes();
         assert_eq!(left.len(), 1);
         assert!(
@@ -537,7 +559,7 @@ mod tests {
             left[0].1.gains,
         );
 
-        audio.set_thrust(true, 14.0, 0.0);
+        audio.set_thrust(true, DVec3::new(14.0, 0.0, 0.0));
         let right = audio.mixer.voice_mixes();
         assert_eq!(right.len(), 1, "the engine restarted instead of turning");
         assert_eq!(right[0].0, left[0].0, "a new voice, not the same one");
@@ -560,9 +582,9 @@ mod tests {
     #[test]
     fn where_a_cue_happens_changes_how_it_sounds() {
         let mut audio = Audio::new(true);
-        audio.play_at(SOUND_EXPLOSION, 0.0, 0.0);
-        audio.play_at(SOUND_EXPLOSION, -14.0, 6.0);
-        audio.play_at(SOUND_EXPLOSION, 14.0, 6.0);
+        audio.play_at(SOUND_EXPLOSION, DVec3::ZERO);
+        audio.play_at(SOUND_EXPLOSION, DVec3::new(-14.0, 6.0, 0.0));
+        audio.play_at(SOUND_EXPLOSION, DVec3::new(14.0, 6.0, 0.0));
         let mixes = audio.mixer.voice_mixes();
         assert_eq!(mixes.len(), 3, "a cue went missing");
         let (near, left, right) = (mixes[0].1, mixes[1].1, mixes[2].1);
@@ -613,10 +635,10 @@ mod tests {
             "a fresh mixer has played nothing and is sounding nothing",
         );
 
-        audio.play_at(SOUND_SHOT, 0.0, 0.0);
-        audio.play_at(SOUND_SHOT, 4.0, 0.0);
-        audio.play_at(SOUND_EXPLOSION, -3.0, 2.0);
-        audio.set_thrust(true, 0.0, 0.0);
+        audio.play_at(SOUND_SHOT, DVec3::ZERO);
+        audio.play_at(SOUND_SHOT, DVec3::new(4.0, 0.0, 0.0));
+        audio.play_at(SOUND_EXPLOSION, DVec3::new(-3.0, 2.0, 0.0));
+        audio.set_thrust(true, DVec3::ZERO);
         section.clear();
         audio.debug_section(&mut section);
         assert_eq!(
@@ -634,7 +656,7 @@ mod tests {
         // The key comes up: the burn is still counted, and the engine row is
         // the half that changes. A section built on `burns` alone would read
         // identically to the line above.
-        audio.set_thrust(false, 0.0, 0.0);
+        audio.set_thrust(false, DVec3::ZERO);
         section.clear();
         audio.debug_section(&mut section);
         assert_eq!(section.rows()[2], row("burns", "1"), "the burn happened");

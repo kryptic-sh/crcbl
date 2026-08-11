@@ -16,6 +16,36 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **The mixer remembers a listener, so a cue no longer carries one.**
+  `crcbl_audio::spatial::Listener` is new — `#[non_exhaustive]`, built through
+  `Listener::new(position)` — and `Mixer` gained `set_listener`, `listener` and
+  `cue(emitter, grammar)`. `compute_cue` is unchanged and still takes an
+  explicit listener: it is a pure function, and `Mixer::cue` is what supplies
+  the remembered one.
+
+  It exists because the engine had no listener at all, which left every game
+  inventing where the ear was: the four samples spelled the same call three
+  different ways — `play_panned(id, emitter_x)`,
+  `play_at(id, listener_x, x, y)`, `play_at(id, x, y)` and
+  `play_at(id, listener, at)`. All four are now `play_at(id, world_position)`,
+  and each sample's listener convention is one `set_listener` line at the right
+  point in its frame instead of a parameter on every cue: breakout and asteroids
+  place theirs once in `Audio::new` because their camera never moves, flappy
+  pushes one axis per tick, and horde reads the player's position under the same
+  lock as the cue queue, so a cue raised on a tick is heard from where the
+  player was on that tick.
+
+  `Listener` is a type rather than three floats for a specific reason:
+  `compute_cue` derives azimuth as the angle from +Z, which assumes the
+  listener's orientation is fixed. A listener that can turn needs a forward
+  vector, and that is the field this type exists to gain without breaking
+  callers.
+
+  With no listener set, cues are heard from `Listener::ORIGIN` — a real place,
+  readable back through `Mixer::listener()`, not a sentinel. Refusing to cue
+  until one arrives would have fired on the two samples that are _right_ to set
+  theirs once and never touch it again.
+
 - **`crcbl_render::Sprite` is `#[non_exhaustive]` and is built through
   `Sprite::new(sheet, rect, uv)`.** A struct literal from outside `crcbl-render`
   no longer compiles, and neither does `..base` functional update; `rotation`

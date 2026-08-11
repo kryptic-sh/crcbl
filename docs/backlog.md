@@ -218,19 +218,50 @@ phase attached to it.
   it are load-bearing. Nothing constructs one outside `crcbl-render` today.
   Noted, not investigated.
 
-- **The four samples still spell the audio entry point three different ways**,
-  and the mixer-adoption slice deliberately did not unify them.
-  `play_panned(id, emitter_x)` in breakout, `play_at(id, listener_x, x, y)` in
-  flappy, `play_at(id, x, y)` in asteroids and `play_at(id, listener, at)` in
-  horde. Each is right for its game's listener convention — fixed at the camera,
-  fixed with one moving axis, fixed at the origin, riding the player — and the
-  engine has no listener at all: `spatial::compute_cue` takes the listener
-  position on every call and nothing in `crcbl-audio` remembers one. That is the
-  real missing piece, and it is a design question rather than a refactor: a
-  `Listener` on the mixer, set once a frame, would collapse all four signatures
-  to `play_at(id, world_position)`. Not attempted here because it changes what
-  the spatial grammar's API means, and the adoption slice was already touching
-  four samples.
+- **The listener standoff moved from the emitters onto the listener, and the
+  subtraction changed precision with it.** Every sample used to compute
+  `compute_cue([0,0,0], [dx, dy, 1.0])` — the listener at the origin, and "one
+  unit in front" added to _each emitter's_ Z with the same comment copied into
+  three files. That standoff is a fact about the camera, so it now sits on the
+  listener (`LISTENER_STANDOFF` in each sample, listener at `z = -1`, emitters
+  at their true Z).
+
+  `emitter − listener` is arithmetically the same, but **not bit-identical**,
+  and the agent's report claiming it was is wrong. The samples that subtracted
+  first — horde and flappy — did `(at.x - listener.x) as f64→f32`, one rounding;
+  the new path casts each coordinate to `f32` and subtracts inside
+  `compute_cue`, two roundings. The error is bounded by the coordinate
+  magnitude, and horde's arena is `ARENA_HALF_WIDTH` 48 by `ARENA_HALF_HEIGHT`
+  36, so it is on the order of 1e-5 on a direction that gets normalised — far
+  below audibility and below every assertion in the suite, which is why nothing
+  moved. Recorded because "bit identical" is what someone would otherwise assume
+  when reading the diff, and it would be the wrong thing to rely on if these
+  coordinates ever grow.
+
+- **`CueGrammar` is a parameter of `Mixer::cue` that every call site passes
+  `&CueGrammar::default()` to** — five of them. By the workspace's own rule that
+  is a parameter nothing varies, and putting the grammar on the mixer beside the
+  listener would collapse `cue(emitter, &CueGrammar::default())` to
+  `cue(emitter)`. Deliberately not taken with the listener: "this mixer's
+  grammar" is a bigger claim than "this mixer's listener", and it was not part
+  of the decision that was delegated.
+
+- **`Listener` has a position and no orientation**, so `compute_cue` still
+  hard-codes "the listener faces +Z" and its module docs say so. That is the
+  field the type was made `#[non_exhaustive]` to be able to gain; nothing needs
+  it until a game turns its camera.
+
+- **`docs/code-review.md` cites two latent panics in `play_panned` that are not
+  there and now cannot be.** The entry names
+  `apps/breakout/src/audio.rs:130,169` for an `id as usize - 1` underflow and a
+  `fade_env` underflow. The first was already fixed before this session — the
+  current code takes `bank.create_voice(id)` behind a `let Some(…)` guard and
+  its comment says in so many words that the `id - 1` index it used to have is
+  gone — and `play_panned` itself no longer exists, so the citation is doubly
+  stale. Left alone because it is unclear whether that file is a living findings
+  list to be pruned or a dated snapshot to be preserved; **that is the decision
+  needed**, and it applies to the whole document rather than this one entry. The
+  `fade_env` half was not re-checked.
 
 - **Nothing has listened to the migrated cues on a real device.** Every sample's
   audio was rewritten onto `crcbl_audio::mixer` and the checks are all

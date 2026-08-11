@@ -1018,9 +1018,9 @@ impl Game {
             // one's. `listener` is the camera's centre; see `crate::audio`.
             let cues: Vec<_> = logic.cues.drain(..).collect();
             drop(logic);
+            self.audio.set_listener(self.bird.x);
             for (id, x, y) in cues {
-                let listener = self.bird.x;
-                self.audio.play_at(id, listener, x, y);
+                self.audio.play_at(id, DVec3::new(x, y, 0.0));
             }
             let logic = lock(&self.shared);
             (

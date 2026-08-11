@@ -19,6 +19,11 @@
 //! the ground. That is rules 1 and 3 of the grammar doing what they are for,
 //! and it is audible without being a gimmick.
 //!
+//! The camera scrolls with the bird, so this is the sample whose listener
+//! genuinely moves — on one axis. [`Audio::set_listener`] is that whole
+//! convention, called once a frame from `crate::game` before the frame's cues
+//! are drained; [`Audio::play_at`] takes a world position and nothing else.
+//!
 //! [`compute_cue`]: crcbl::audio::spatial::compute_cue
 //!
 //! # What this file used to be
@@ -33,8 +38,9 @@ use std::sync::Arc;
 
 use crcbl::audio::AudioStream;
 use crcbl::audio::mixer::{Mixer, SoundBank, VoiceMix};
-use crcbl::audio::spatial::{CueGrammar, compute_cue};
+use crcbl::audio::spatial::{CueGrammar, Listener};
 use crcbl::audio::synth;
+use crcbl::math::DVec3;
 
 /// The wing-beat.
 pub const SOUND_FLAP: u32 = 1;
@@ -43,6 +49,9 @@ pub const SOUND_DEATH: u32 = 2;
 
 /// How loud a cue is against the volume the grammar asks for. See breakout's.
 const MASTER_GAIN: f32 = 0.5;
+
+/// How far behind the play plane the listener stands. See breakout's.
+const LISTENER_STANDOFF: f32 = 1.0;
 
 /// Owns the cues and the output stream.
 #[derive(Debug)]
@@ -80,18 +89,34 @@ impl Audio {
             crcbl::log::info!("audio: no output device available; the game will be silent");
         }
 
-        Self {
+        let audio = Self {
             bank,
             plays: vec![0; 2],
             mixer,
             _stream: stream,
-        }
+        };
+        // The camera starts at the origin and the game moves it every frame
+        // after; placing it here is what stops a cue raised before the first
+        // `set_listener` being computed against the mixer's default, which sits
+        // *in* the play plane rather than back from it.
+        audio.set_listener(0.0);
+        audio
     }
 
-    /// Plays a cue for something happening at `(x, y)` in world space, heard
-    /// from a listener at `listener_x` — see the module docs for why that is the
-    /// camera's centre and not the bird.
-    pub fn play_at(&mut self, id: u32, listener_x: f64, x: f64, y: f64) {
+    /// Puts the listener at `x`, the camera's centre — the one axis this
+    /// sample's listener moves on. See the module docs.
+    ///
+    /// Called once a frame, before the frame's cues are played.
+    pub fn set_listener(&self, x: f64) {
+        self.mixer
+            .set_listener(Listener::new([x as f32, 0.0, -LISTENER_STANDOFF]));
+    }
+
+    /// Plays a cue for something happening at `at` in world space.
+    ///
+    /// No listener argument: [`Audio::set_listener`] said where the ear is, and
+    /// the [`Mixer`] has held it since.
+    pub fn play_at(&mut self, id: u32, at: DVec3) {
         // An id the bank does not know is simply absent, so there is no `id - 1`
         // to underflow on the lookup — only on the counter below, which is
         // reached solely for an id the bank *did* answer to.
@@ -99,15 +124,8 @@ impl Audio {
             crcbl::log::debug!("audio: no sound registered at id {id}");
             return;
         };
-        let cue = compute_cue(
-            [0.0, 0.0, 0.0],
-            [
-                (x - listener_x) as f32,
-                y as f32,
-                // A metre in front, so a sound at the listener's own position is
-                // still at a defined direction rather than a zero vector.
-                1.0,
-            ],
+        let cue = self.mixer.cue(
+            [at.x as f32, at.y as f32, at.z as f32],
             &CueGrammar::default(),
         );
         self.mixer.play(voice.with_mix(VoiceMix {
@@ -183,8 +201,8 @@ mod tests {
     #[test]
     fn an_unknown_cue_is_ignored_rather_than_underflowing() {
         let mut audio = Audio::new(true);
-        audio.play_at(0, 0.0, 0.0, 0.0);
-        audio.play_at(9999, 0.0, 0.0, 0.0);
+        audio.play_at(0, DVec3::ZERO);
+        audio.play_at(9999, DVec3::ZERO);
         assert_eq!(audio.voices(), 0);
         // `plays` still spells `id - 1`, so it still has the underflow to avoid,
         // and it must not report a play for a cue that was refused.
@@ -192,7 +210,7 @@ mod tests {
         assert_eq!(audio.plays(9999), 0);
         assert_eq!(audio.plays(SOUND_FLAP), 0);
 
-        audio.play_at(SOUND_FLAP, 0.0, 0.0, 0.0);
+        audio.play_at(SOUND_FLAP, DVec3::ZERO);
         assert_eq!(audio.voices(), 1);
         assert_eq!(audio.plays(SOUND_FLAP), 1);
         assert_eq!(audio.plays(SOUND_DEATH), 0, "only the flap was played");
@@ -204,7 +222,7 @@ mod tests {
     #[test]
     fn a_cue_stays_counted_after_its_voice_is_gone() {
         let mut audio = Audio::new(true);
-        audio.play_at(SOUND_FLAP, 0.0, 0.0, 0.0);
+        audio.play_at(SOUND_FLAP, DVec3::ZERO);
         assert_eq!(audio.plays(SOUND_FLAP), 1);
 
         // Reap it by hand rather than waiting on the audio thread, so the test
@@ -243,9 +261,9 @@ mod tests {
             "a fresh mixer has played nothing and is sounding nothing",
         );
 
-        audio.play_at(SOUND_FLAP, 0.0, 0.0, 0.0);
-        audio.play_at(SOUND_FLAP, 0.0, 0.0, 0.0);
-        audio.play_at(SOUND_DEATH, 0.0, 0.0, 0.0);
+        audio.play_at(SOUND_FLAP, DVec3::ZERO);
+        audio.play_at(SOUND_FLAP, DVec3::ZERO);
+        audio.play_at(SOUND_DEATH, DVec3::ZERO);
         section.clear();
         audio.debug_section(&mut section);
         assert_eq!(
@@ -291,8 +309,8 @@ mod tests {
     #[test]
     fn where_a_cue_happens_changes_how_it_sounds() {
         let mut audio = Audio::new(true);
-        audio.play_at(SOUND_FLAP, 0.0, 0.0, 0.0);
-        audio.play_at(SOUND_FLAP, 0.0, -8.0, 5.0);
+        audio.play_at(SOUND_FLAP, DVec3::ZERO);
+        audio.play_at(SOUND_FLAP, DVec3::new(-8.0, 5.0, 0.0));
         let mixes = audio.mixer.voice_mixes();
         assert_eq!(mixes.len(), 2, "a cue went missing");
         let (near, far) = (mixes[0].1, mixes[1].1);
@@ -306,6 +324,58 @@ mod tests {
             "a cue further away should be quieter: {} vs {}",
             far.volume,
             near.volume
+        );
+    }
+
+    /// **The listener is placed before anything can be played through it.** The
+    /// game pushes it every frame, but a cue raised before the first frame must
+    /// not be computed against the mixer's default at the origin, which sits
+    /// *in* the play plane and so answers a cue on top of it with no direction.
+    #[test]
+    fn the_listener_is_behind_the_play_plane_from_the_first_cue() {
+        let audio = Audio::new(true);
+        assert_eq!(
+            audio.mixer.listener().position,
+            [0.0, 0.0, -LISTENER_STANDOFF],
+        );
+    }
+
+    /// **Where the camera is changes how a fixed cue sounds**, which is the
+    /// half of this sample's convention that moves.
+    ///
+    /// One emitter, never moved, played from either side of it. The listener is
+    /// no longer an argument, so this is the only test that can say the
+    /// [`Audio::set_listener`] call in `crate::game`'s frame does anything: a
+    /// `set_listener` that stored the value without the mixer using it leaves
+    /// the two mixes identical.
+    #[test]
+    fn where_the_camera_is_changes_how_a_fixed_cue_sounds() {
+        let mut audio = Audio::new(true);
+        let emitter = DVec3::new(0.0, 0.0, 0.0);
+
+        audio.set_listener(-6.0);
+        audio.play_at(SOUND_FLAP, emitter);
+        audio.set_listener(6.0);
+        audio.play_at(SOUND_FLAP, emitter);
+
+        let mixes = audio.mixer.voice_mixes();
+        assert_eq!(mixes.len(), 2, "a cue went missing");
+        let (from_left, from_right) = (mixes[0].1, mixes[1].1);
+        assert!(
+            from_left.gains.1 > from_left.gains.0,
+            "a camera left of the flap hears it on the right: {:?}",
+            from_left.gains,
+        );
+        assert!(
+            from_right.gains.0 > from_right.gains.1,
+            "and a camera right of it, on the left: {:?}",
+            from_right.gains,
+        );
+        assert!(
+            from_left.itd_samples < 0.0 && from_right.itd_samples > 0.0,
+            "the interaural delay did not swap ears: {} then {}",
+            from_left.itd_samples,
+            from_right.itd_samples,
         );
     }
 }

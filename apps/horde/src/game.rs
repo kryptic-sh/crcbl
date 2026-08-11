@@ -3279,8 +3279,9 @@ impl Game {
             let listener = logic.player_pos;
             (logic.cues.drain(..).collect::<Vec<_>>(), listener)
         };
+        self.audio.set_listener(listener);
         for (id, at) in cues {
-            self.audio.play_at(id, listener, at);
+            self.audio.play_at(id, at);
         }
 
         let was = self.state;
