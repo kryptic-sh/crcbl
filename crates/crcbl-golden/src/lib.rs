@@ -80,6 +80,14 @@
 //! ratio here is a backstop for pixels that *exceed* the delta, and nothing has
 //! ever reached it.
 //!
+//! The HDR row also rules out the score a reader reaches for next. **A budget on
+//! `mean_abs_error` cannot work**: this frame's legitimate one-level drift is
+//! 0.2284, and the sprite recolour four sections below — a plainly visible
+//! regression — is 0.0734. Any total-error budget loose enough for the first
+//! passes the second by a factor of three, whichever way it is normalised.
+//! Separating drift from defects has to be done on *per-pixel magnitude*, which
+//! is what `gross_channel_delta` does.
+//!
 //! [`Tolerance::RASTERISER`] is set from those numbers:
 //!
 //! * `max_channel_delta: 2` — the observed maximum, reached by `crcbl-vk`'s
@@ -92,6 +100,9 @@
 //!   through it for no defect at all. Its value is derived from the
 //!   cross-backend measurements two sections below, not from these two frames,
 //!   which put no pressure on it at all.
+//! * `gross_channel_delta` and `max_gross_ratio` — the second budget, for
+//!   pixels that are not drifting but wrong. Both frames put zero pixels past
+//!   it, for the same reason they put zero past the delta.
 //! * `min_ssim: 0.99` — four orders of magnitude below the observed 0.999933,
 //!   and, as `compare`'s tests pin, still comfortably strict enough to reject a
 //!   triangle shifted by six pixels.
@@ -131,7 +142,7 @@
 //! colours; the lit cube has 41 at 256×192 and 36 at 97×61, and the null
 //! backend's frame has 1.
 //!
-//! ## `max_failing_ratio` was sized against the wrong quantity, and is not now
+//! ## One ratio was doing two jobs, and now two budgets do one each
 //!
 //! Every measurement above is of how many pixels differ **at all**, and every
 //! one of those numbers is large — 3.83%, 91.37%, 84.23%. The ratio gates a
@@ -147,32 +158,48 @@
 //! ssim 0.999908` and **passed**. 0.73% is under 2%, and a patch that small
 //! barely moves a mean taken over hundreds of blocks.
 //!
-//! So the ratio is now derived from the quantity it actually gates. Across
-//! every backend and scene measured:
+//! Tightening the ratio to refuse it worked and cost too much. Across every
+//! backend and scene measured:
 //!
 //! | backend (driver) | scenes | pixels over tolerance |
 //! | --- | --- | --- |
 //! | vk (lavapipe) | `crcbl-vk`'s goldens, cube, sprite, ui | 0 — 0.0000% |
 //! | wgpu (lavapipe) | cube, sprite, ui | 0 — 0.0000% |
 //! | dx12 (WARP) | cube, ui | 0 — 0.0000%, max delta 1 |
+//! | dx12 (WARP) | sprite | **76 — 0.1546%**, max delta 13 |
 //! | metal (paravirtual) | sprite, ui | 0 — 0.0000%, max delta 1 |
 //! | metal (paravirtual) | cube | **2 — 0.0041%**, max delta 207 |
 //!
-//! One frame in the whole set has any over-tolerance pixel at all, and it has
-//! two. `max_failing_ratio` sits roughly twenty-four times above that, which is
-//! deliberately generous rather than as tight as the data would bear: metal's
-//! cube is the one measurement that cannot be reproduced off CI, it runs on a
-//! *paravirtual* device, and the ratio is the only knob that can absorb a small
-//! cluster of badly-wrong pixels — those two are off by 207, so no
-//! `max_channel_delta` anyone would accept was ever going to admit them.
+//! Read as one column those look compatible: 0.1546% legitimate, 0.7345% a
+//! regression, so a ratio between them exists. It is a factor of five wide, and
+//! at 0.005 it left 3.2 times of room above WARP and 1.47 below the recolour —
+//! one knob separating "many pixels slightly wrong", which is a driver, from "a
+//! few pixels very wrong", which is a bug.
 //!
-//! It stays a ratio rather than becoming a pixel count because the gate runs at
-//! three sizes — 97×61, 256×192 and 1920×1080 — and the value is chosen so the
-//! smallest still has a workable budget of several pixels, where halving it
-//! would leave 97×61 with the same two pixels metal's cube already spends.
-//! `compare`'s tests pin both ends, the sprite recolour and metal's two pixels,
-//! so a future move in either direction argues with a test rather than with this
-//! paragraph.
+//! **Read as two columns they separate completely.** WARP's 76 pixels are off
+//! by at most 13; the recolour's 361 are off by 40; metal's two are off by 207.
+//! So the pixels are counted twice, against two thresholds:
+//!
+//! * `max_failing_ratio: 0.01` — pixels past `max_channel_delta`. Sized against
+//!   WARP's 0.1546% alone, with six times of room, because it no longer has to
+//!   refuse anything.
+//! * `gross_channel_delta: 24`, `max_gross_ratio: 0.001` — pixels past a delta
+//!   drift does not reach. Metal's cube is the only legitimate frame that
+//!   scores here at all, at 0.0041%, twenty-four times under; the recolour is
+//!   at 0.7345%, seven times over.
+//!
+//! Both stay ratios rather than pixel counts because the gate runs at three
+//! sizes — 97×61, 256×192 and 1920×1080 — and one in a thousand still leaves
+//! the smallest a budget of five pixels where metal's cube spends two.
+//! `compare`'s tests pin every end named here, so a future move in any
+//! direction argues with a test rather than with this paragraph.
+//!
+//! What this deliberately does **not** buy is strictness everywhere. A frame
+//! with between 0.5% and 1% of its pixels off by 3 to 24 levels was refused by
+//! the 0.005 ratio and passes now. Nothing measured has ever landed in that
+//! band, and buying it back means putting WARP three times from a false alarm
+//! on the one backend nobody here can debug — which is the trade the single
+//! ratio was making silently.
 //!
 //! # Blessing
 //!

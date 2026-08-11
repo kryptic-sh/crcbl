@@ -16,6 +16,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_golden::Tolerance` gained `gross_channel_delta` and
+  `max_gross_ratio`, and `Comparison` gained `gross_pixels` and `gross_ratio`.**
+  Anything constructing a `Tolerance` literally has to name the two new fields;
+  `Tolerance::EXACT` and `Tolerance::RASTERISER` are unchanged as names and
+  every consumer in this workspace uses those. `Failure` gained a
+  `TooManyGrossPixels` variant, so a `match` over it that was exhaustive is not
+  any more, and `Comparison::summary()`'s line gained an
+  `N grossly wrong (X.XXXX%)` field between "over tolerance" and "mean abs
+  error" — a script parsing that line by position has to move.
+
+  The comparator now scores **two** questions instead of trading one ratio
+  against both. `max_failing_ratio` bounds how much of the frame may drift past
+  `max_channel_delta`, and `max_gross_ratio` bounds how much may be past
+  `gross_channel_delta`, out where drift does not reach. A driver that disagrees
+  about many pixels slightly and a bug that gets a few pixels badly wrong are no
+  longer measured against each other.
+
+  This is what `Tolerance::RASTERISER` is now made of: `max_channel_delta: 2`
+  and `max_failing_ratio: 0.01` for drift, `gross_channel_delta: 24` and
+  `max_gross_ratio: 0.001` for defects, `min_ssim: 0.99` for structure. Every
+  one is measured. A plainly visible sprite recolour — 361 pixels of a 256×192
+  frame at delta 40, 0.7345% — used to pass a comparator whose only count-based
+  bound was 2% of the frame; a single ratio tightened to refuse it had to sit
+  between that recolour and WARP's legitimate sprite edges (76 pixels at delta
+  13, 0.1546%), leaving 3.2× of room on one side and 1.47× on the other. Split
+  in two, the same three frames have **6.5×** (WARP, on the drift budget),
+  **7.3×** (the recolour, on the gross budget) and **24×** (metal's cube, 2
+  pixels at delta 207, on the gross budget). The one band that loosens is
+  0.5%–1% of a frame off by 3 to 24 levels, which nothing measured on any
+  backend has ever occupied.
+
 - **`mesh.slang` gained a seventh binding: the material table.** Binding 6 is a
   read-only storage buffer of `crcbl_shaders::mesh::GpuMaterial`, indexed by
   `GpuInstance::material` in the **fragment** stage, which the vertex stage
@@ -73,23 +104,6 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Also fixed underneath it: a failed `MTLCommandBuffer` reported through nothing
   but its own `status`, so a submission nobody waited on failed in total
   silence. Failures are now tracked per submission and logged as errors.
-
-- **`Tolerance::RASTERISER` allows a thousandth of a frame to fail, not a
-  fiftieth.** `max_failing_ratio` was `0.02`, sized against how many pixels
-  differ _at all_ by one level — but it gates pixels differing by **more** than
-  `max_channel_delta`, which should be near zero. A plainly visible sprite
-  recolour passed at 361 differing pixels and a max channel delta of 40, because
-  0.73% of a frame is under 2%. It is now `0.001`, about twenty-four times the
-  worst figure any backend has ever reported (Metal's cube on a paravirtual
-  device, 2 pixels of 49152) and seven times below the recolour that motivated
-  the change. `max_channel_delta` deliberately stays at 2: `crcbl-vk`'s
-  `sprite_rotation` golden reports exactly 2 across 125 pixels, so tightening
-  both knobs at once would turn a passing frame into a 0.25% failure.
-
-  The value is `0.005`, and it is three times WARP's sprite frame — 76 pixels at
-  delta 13, 0.1546%, all on quad edges — which is the widest legitimate
-  disagreement any backend has shown and was found by tightening this ratio too
-  far first. Both that frame and the recolour are now pinned by tests.
 
 ### Added
 

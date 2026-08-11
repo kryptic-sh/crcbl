@@ -19,6 +19,10 @@
 //! the structural one catches "wrong picture", and a real rasteriser difference
 //! passes both because it is a handful of edge pixels off by a little.
 //!
+//! The per-pixel bound is itself two bounds — see [`Tolerance`], which explains
+//! why "many pixels slightly wrong" and "a few pixels badly wrong" are counted
+//! against separate budgets instead of one ratio being asked to split them.
+//!
 //! # SSIM, on blocks
 //!
 //! [`ssim`] is computed over non-overlapping 8×8 luma blocks and averaged —
@@ -34,6 +38,20 @@
 use crate::image::Image;
 
 /// The bounds a comparison must satisfy.
+///
+/// # Two thresholds, because there are two failures
+///
+/// A second rasteriser gets **many pixels slightly wrong**; a rendering bug
+/// gets **a few pixels badly wrong**. Those are different questions, and one
+/// ratio asked to answer both has to sit above every legitimate driver and
+/// below every regression at once — which is a range, and a narrow one.
+///
+/// So the pixels are counted twice, against two thresholds and two budgets:
+/// `max_failing_ratio` bounds how much of the frame may drift past
+/// `max_channel_delta`, and `max_gross_ratio` bounds how much of it may be past
+/// `gross_channel_delta` — far out, where drift does not reach. A comparison
+/// must satisfy both, and neither has to be compromised to make room for the
+/// other.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tolerance {
     /// Largest per-channel absolute difference a pixel may have and still be
@@ -44,7 +62,25 @@ pub struct Tolerance {
     /// Not zero, because that is what makes the per-pixel bound survive two
     /// rasterisers: the pixels that differ are the ones on a triangle's edge,
     /// and how many there are scales with the perimeter, not the area.
+    ///
+    /// The "many pixels slightly wrong" half, and only that half — a localised
+    /// recolour is [`max_gross_ratio`](Self::max_gross_ratio)'s job — so it is
+    /// sized against how far a legitimate driver disagreement spreads and
+    /// nothing else.
     pub max_failing_ratio: f64,
+    /// Per-channel absolute difference above which a pixel is not drift at all.
+    ///
+    /// The second, higher threshold. [`max_channel_delta`](Self::max_channel_delta)
+    /// asks "did this pixel drift?"; this asks "is this pixel *wrong*?", and
+    /// the answers go to separate budgets.
+    pub gross_channel_delta: u8,
+    /// Fraction of pixels allowed to exceed `gross_channel_delta`, in
+    /// `0.0..=1.0`.
+    ///
+    /// Not zero either — a legitimate frame does reach it — but far tighter
+    /// than [`max_failing_ratio`](Self::max_failing_ratio), because a pixel
+    /// that far out is only ever tolerable in ones and twos.
+    pub max_gross_ratio: f64,
     /// Smallest mean block SSIM that still counts as the same picture, in
     /// `0.0..=1.0`.
     pub min_ssim: f64,
@@ -56,14 +92,16 @@ impl Tolerance {
     pub const EXACT: Self = Self {
         max_channel_delta: 0,
         max_failing_ratio: 0.0,
+        gross_channel_delta: 0,
+        max_gross_ratio: 0.0,
         min_ssim: 1.0,
     };
 
     /// The bound a golden image is held to across rasterisers.
     ///
-    /// The numbers are **measured, not guessed**, and the three are sized
-    /// against three different quantities, because a bound is only defensible
-    /// against the thing it actually gates.
+    /// The numbers are **measured, not guessed**, and each is sized against a
+    /// different quantity, because a bound is only defensible against the thing
+    /// it actually gates.
     ///
     /// `max_channel_delta` gates how far a *matching* frame's pixels drift.
     /// radv and lavapipe differ on P1.2's triangle by at most one level per
@@ -78,36 +116,61 @@ impl Tolerance {
     /// `max_failing_ratio` gates pixels that *exceed* that delta, so it is sized
     /// against how many of those a passing frame has. On vk and wgpu that is
     /// zero, for every one of `crcbl-vk`'s goldens and every scene of `crcbl`'s
-    /// render e2e. It is not zero on the two backends this team cannot run
-    /// locally, and both figures are measurements rather than estimates: metal
-    /// on a paravirtual device puts two pixels of the cube over the delta —
-    /// 0.0041% — and **WARP puts 76 pixels of the sprite scene over it,
-    /// 0.1546%, at up to delta 13**. That second number is the one the bound
-    /// has to clear, and it was found by tightening this ratio and reading the
-    /// diff the run uploaded: the pixels sit on sprite quad edges, the sprites
-    /// themselves are the right colours in the right places, and two software
-    /// rasterisers disagreeing about an edge texel is what this tolerance
-    /// exists to absorb.
+    /// render e2e. The widest spread measured anywhere is **WARP's sprite
+    /// scene: 76 pixels of 49 152 over the delta, 0.1546%, at up to delta 13**,
+    /// every one of them on a sprite quad's edge with the sprites themselves
+    /// the right colours in the right places. Two software rasterisers
+    /// disagreeing about an edge texel is exactly what this ratio absorbs, so
+    /// one percent is a little over six times that frame — room for a driver
+    /// substantially worse than the worst one anybody has run.
     ///
-    /// So the bound is about three times WARP's worst frame, and still refuses
-    /// the recolour that motivated tightening it — 361 pixels at delta 40,
-    /// 0.7345%. **That is only a fivefold gap between legitimate variance and a
-    /// caught regression**, which is thinner than it looks and is the real
-    /// argument for a comparator that separates "many pixels slightly wrong"
-    /// from "few pixels very wrong" rather than trading one ratio off against
-    /// both. `docs/backlog.md` carries that. Every end is pinned by a test
-    /// rather than by this paragraph.
+    /// It can afford that room because it is no longer the only gate. When it
+    /// also had to refuse a localised recolour it sat at 0.005, three times
+    /// above WARP and only 1.47 times below the recolour, and the whole usable
+    /// range between the two was a factor of five.
     ///
-    /// Note the ratio counts only pixels over `max_channel_delta` — were it to
-    /// count pixels differing at all, the HDR frame's 91% would blow through any
-    /// bound of this order for no defect whatever.
+    /// `gross_channel_delta` and `max_gross_ratio` are that second gate, and
+    /// they are what the recolour argues with now. The regression measured is
+    /// **361 pixels of a 256×192 frame at delta 40, 0.7345%** — perturbing
+    /// `SPRITE_TINT`'s blue factor in `crcbl`'s screenshot scene, a plainly
+    /// visible recolour of a quarter of one sprite. Delta 40 is three times
+    /// WARP's 13 and nothing legitimate has ever put that many pixels that far
+    /// out, so:
+    ///
+    /// * `gross_channel_delta: 24` sits between the two, near their geometric
+    ///   mean of 22.8, leaning towards WARP because a false alarm on the one
+    ///   backend nobody here can debug costs more than a regression two other
+    ///   gates also see. WARP's edges are 1.8 times under it; the recolour is
+    ///   1.7 times over.
+    /// * `max_gross_ratio: 0.001` clears the only legitimate frame that reaches
+    ///   this threshold at all — **metal on a paravirtual device puts two
+    ///   pixels of the cube 207 levels out, 0.0041%** — by a factor of 24, and
+    ///   refuses the recolour's 0.7345% by a factor of 7. It stays a ratio
+    ///   rather than a pixel count because the gate runs at 97×61, 256×192 and
+    ///   1920×1080, and one in a thousand still leaves the smallest of those a
+    ///   budget of five pixels where metal's cube spends two.
+    ///
+    /// **So the gap that used to be fivefold is now 6.5 on the legitimate side
+    /// and 7.3 on the regression side**, and the two are no longer measured
+    /// against each other. Both ends are pinned by a test in this module rather
+    /// than by this paragraph.
+    ///
+    /// Note that both ratios count only pixels *over* a delta — were either to
+    /// count pixels differing at all, the HDR frame's 91% would blow through
+    /// any bound of this order for no defect whatever. That is also why there
+    /// is no budget on `mean_abs_error`, which is the obvious third score and
+    /// does not work: the HDR frame's legitimate one-level drift is 0.2284,
+    /// three times the recolour's 0.0734, so a budget loose enough for the
+    /// first can never refuse the second.
     ///
     /// `min_ssim` sits four orders of magnitude below the observed 0.999933,
-    /// and the tests in this module pin that none of the three is loose enough
-    /// to admit a triangle that moved.
+    /// and the tests in this module pin that no bound here is loose enough to
+    /// admit a triangle that moved.
     pub const RASTERISER: Self = Self {
         max_channel_delta: 2,
-        max_failing_ratio: 0.005,
+        max_failing_ratio: 0.01,
+        gross_channel_delta: 24,
+        max_gross_ratio: 0.001,
         min_ssim: 0.99,
     };
 }
@@ -119,6 +182,14 @@ pub enum Failure {
     SizeMismatch,
     /// Too many pixels exceeded [`Tolerance::max_channel_delta`].
     TooManyDifferingPixels,
+    /// Too many pixels exceeded [`Tolerance::gross_channel_delta`].
+    ///
+    /// The other half of the same question: [`TooManyDifferingPixels`] is
+    /// "the frame drifted too widely", this is "part of the frame is simply
+    /// wrong". A comparison can report either, both, or neither.
+    ///
+    /// [`TooManyDifferingPixels`]: Self::TooManyDifferingPixels
+    TooManyGrossPixels,
     /// The structural metric fell below [`Tolerance::min_ssim`].
     StructuralMismatch,
 }
@@ -148,6 +219,16 @@ pub struct Comparison {
     pub failing_pixels: u64,
     /// `failing_pixels` over the pixel count.
     pub failing_ratio: f64,
+    /// Pixels with any channel exceeding [`Tolerance::gross_channel_delta`].
+    ///
+    /// A subset of [`failing_pixels`](Self::failing_pixels) whenever the
+    /// tolerance's gross threshold is the higher of the two, which is what it
+    /// is for. Reported alongside rather than instead, because "300 pixels
+    /// drifted and none is far out" and "300 drifted and all 300 are far out"
+    /// are the two cases the pair of budgets exists to tell apart.
+    pub gross_pixels: u64,
+    /// `gross_pixels` over the pixel count.
+    pub gross_ratio: f64,
     /// Mean absolute per-channel difference, over RGB and alpha.
     pub mean_abs_error: f64,
     /// Root-mean-square per-channel difference.
@@ -180,7 +261,8 @@ impl Comparison {
         let pixel_count = u64::from(self.width.max(1)) * u64::from(self.height.max(1));
         let mut text = format!(
             "{}x{}: {} pixel(s) differ at all ({:.4}%), max channel delta {}, {} over \
-             tolerance ({:.4}%), mean abs error {:.4}, rmse {:.4}, ssim {:.6}",
+             tolerance ({:.4}%), {} grossly wrong ({:.4}%), mean abs error {:.4}, rmse {:.4}, \
+             ssim {:.6}",
             self.width,
             self.height,
             self.differing_pixels,
@@ -188,6 +270,8 @@ impl Comparison {
             self.max_channel_delta,
             self.failing_pixels,
             self.failing_ratio * 100.0,
+            self.gross_pixels,
+            self.gross_ratio * 100.0,
             self.mean_abs_error,
             self.rmse,
             self.ssim,
@@ -217,6 +301,8 @@ pub fn compare(reference: &Image, actual: &Image, tolerance: &Tolerance) -> Comp
             differing_pixels: u64::from(reference.width()) * u64::from(reference.height()),
             failing_pixels: u64::from(reference.width()) * u64::from(reference.height()),
             failing_ratio: 1.0,
+            gross_pixels: u64::from(reference.width()) * u64::from(reference.height()),
+            gross_ratio: 1.0,
             mean_abs_error: f64::from(u8::MAX),
             rmse: f64::from(u8::MAX),
             ssim: 0.0,
@@ -228,6 +314,7 @@ pub fn compare(reference: &Image, actual: &Image, tolerance: &Tolerance) -> Comp
     let mut max_channel_delta = 0u8;
     let mut differing_pixels = 0u64;
     let mut failing_pixels = 0u64;
+    let mut gross_pixels = 0u64;
     let mut sum_abs = 0f64;
     let mut sum_squares = 0f64;
 
@@ -250,16 +337,26 @@ pub fn compare(reference: &Image, actual: &Image, tolerance: &Tolerance) -> Comp
         if pixel_worst > tolerance.max_channel_delta {
             failing_pixels += 1;
         }
+        // The second threshold, on the same visit: this is the whole cost of
+        // scoring drift and defects separately.
+        if pixel_worst > tolerance.gross_channel_delta {
+            gross_pixels += 1;
+        }
     }
 
     let channels = (pixel_count * 4).max(1) as f64;
     let failing_ratio = failing_pixels as f64 / pixel_count.max(1) as f64;
+    let gross_ratio = gross_pixels as f64 / pixel_count.max(1) as f64;
     let ssim = ssim(reference, actual);
 
     let mut failures = [None, None, None];
     let mut next = 0;
     if failing_ratio > tolerance.max_failing_ratio {
         failures[next] = Some(Failure::TooManyDifferingPixels);
+        next += 1;
+    }
+    if gross_ratio > tolerance.max_gross_ratio {
+        failures[next] = Some(Failure::TooManyGrossPixels);
         next += 1;
     }
     if ssim < tolerance.min_ssim {
@@ -273,6 +370,8 @@ pub fn compare(reference: &Image, actual: &Image, tolerance: &Tolerance) -> Comp
         differing_pixels,
         failing_pixels,
         failing_ratio,
+        gross_pixels,
+        gross_ratio,
         mean_abs_error: sum_abs / channels,
         rmse: (sum_squares / channels).sqrt(),
         ssim,
@@ -591,6 +690,8 @@ mod tests {
         let structural_only = Tolerance {
             max_channel_delta: 255,
             max_failing_ratio: 1.0,
+            gross_channel_delta: 255,
+            max_gross_ratio: 1.0,
             min_ssim: 0.99,
         };
         let result = compare(&reference, &shifted, &structural_only);
@@ -624,6 +725,8 @@ mod tests {
         let structural_only = Tolerance {
             max_channel_delta: 255,
             max_failing_ratio: 1.0,
+            gross_channel_delta: 255,
+            max_gross_ratio: 1.0,
             min_ssim: 0.99,
         };
         let blind = compare(&reference, &recoloured, &structural_only);
@@ -703,6 +806,11 @@ mod tests {
 
     /// The failing *ratio* is what admits edge noise, so it must be enforced —
     /// the same per-pixel delta applied to every pixel is not edge noise.
+    ///
+    /// Delta 9 is under `gross_channel_delta`, so this is the case only the
+    /// drift budget can see: every pixel is wrong and not one of them is
+    /// grossly wrong. It is why splitting the score did not make
+    /// `max_failing_ratio` redundant.
     #[test]
     fn the_failing_ratio_is_enforced_rather_than_the_delta_alone() {
         let reference = triangle(64, 48, 0);
@@ -728,18 +836,33 @@ mod tests {
                 .failures()
                 .any(|failure| failure == Failure::TooManyDifferingPixels)
         );
+        assert_eq!(
+            result.gross_pixels,
+            0,
+            "the gross gate must not be what caught this, or the drift budget \
+             would be untested: {}",
+            result.summary()
+        );
     }
 
-    /// **The regression [`Tolerance::max_failing_ratio`] was retuned for.** A
-    /// recolour confined to a small part of the frame is invisible to the
-    /// structural half — it moves a dozen blocks out of hundreds — so the
-    /// failing ratio is the only thing that can catch it, and at 2% it did not.
+    /// **The regression the gross gate exists for.** A recolour confined to a
+    /// small part of the frame is invisible to the structural half — it moves a
+    /// dozen blocks out of hundreds — so a per-pixel budget is the only thing
+    /// that can catch it, and at 2% of the frame none did.
     ///
     /// The magnitude is the one actually measured, not an invented one:
     /// perturbing `SPRITE_TINT`'s blue factor in `crcbl`'s screenshot scene
     /// recoloured 361 pixels of a 256×192 frame by a channel delta of 40 — a
     /// plainly visible recolour of a quarter of one sprite — and **passed**, at
     /// 0.7345% against a 2% bound.
+    ///
+    /// It is [`Tolerance::max_gross_ratio`] that refuses it now, not
+    /// [`Tolerance::max_failing_ratio`], and that is the point of the split:
+    /// 0.7345% of the frame is a perfectly ordinary amount for a *driver* to
+    /// disagree about, and delta 40 is not. Scoring the two separately is what
+    /// lets the budget that catches this sit seven times below it while the one
+    /// that has to admit WARP sits six times above it — where a single ratio
+    /// had 1.47 and 3.2.
     ///
     /// The patch below reproduces that frame's per-pixel numbers exactly and is
     /// if anything *harder* on the structural half than the real one was — a
@@ -761,32 +884,54 @@ mod tests {
 
         let result = compare(&reference, &recoloured, &Tolerance::RASTERISER);
         assert_eq!(result.failing_pixels, 361, "{}", result.summary());
+        assert_eq!(result.gross_pixels, 361, "{}", result.summary());
         assert_eq!(result.max_channel_delta, 40, "{}", result.summary());
         assert!(
             result
                 .failures()
-                .any(|failure| failure == Failure::TooManyDifferingPixels),
-            "the failing ratio is the half that has to catch this: {}",
+                .any(|failure| failure == Failure::TooManyGrossPixels),
+            "the gross budget is the half that has to catch this: {}",
+            result.summary()
+        );
+        // The margin, asserted rather than described. Seven times over the
+        // budget is the room the split bought on this side; the single ratio
+        // this replaced cleared the same frame by 1.47.
+        assert!(
+            result.gross_ratio > 7.0 * Tolerance::RASTERISER.max_gross_ratio,
+            "a regression this plain must fail by a wide margin, not squeak \
+             past: {}",
             result.summary()
         );
 
-        // And it has to catch it alone, because the structural half does not:
-        // under the bound this constant used to carry, the same frame passes
-        // outright — which is what the real run did.
+        // And the gross budget has to catch it alone, because neither other
+        // half does. The drift budget admits it — 0.73% of a frame differing is
+        // an ordinary amount for two drivers to disagree about, which is
+        // exactly why a single ratio could not separate the two questions.
+        assert!(
+            result.failing_ratio < Tolerance::RASTERISER.max_failing_ratio,
+            "if the drift budget also caught this, the split would be untested \
+             here: {}",
+            result.summary()
+        );
+        assert!(
+            result.ssim > Tolerance::RASTERISER.min_ssim,
+            "a patch this small must stay above the structural floor, or this \
+             test would be proving the wrong half: {}",
+            result.summary()
+        );
+
+        // Under the whole of the old scoring — one ratio, no gross budget — the
+        // same frame passes outright, which is what the real run did.
         let old = Tolerance {
             max_failing_ratio: 0.02,
+            gross_channel_delta: u8::MAX,
+            max_gross_ratio: 1.0,
             ..Tolerance::RASTERISER
         };
         let under_old = compare(&reference, &recoloured, &old);
         assert!(
             under_old.is_match(),
             "the old ratio passed this, which is the whole reason it moved: {}",
-            under_old.summary()
-        );
-        assert!(
-            under_old.ssim > Tolerance::RASTERISER.min_ssim,
-            "a patch this small must stay above the structural floor, or this \
-             test would be proving the wrong half: {}",
             under_old.summary()
         );
     }
@@ -817,11 +962,15 @@ mod tests {
             "a bound that fails the worst real frame is a false-alarm generator: {}",
             result.summary()
         );
+        // 207 is far past any drift threshold, so this is the one legitimate
+        // frame the *gross* budget has to admit, and it is that budget's
+        // headroom that matters rather than the drift budget's.
+        assert_eq!(result.gross_pixels, 2, "{}", result.summary());
         // The margin, asserted rather than described: tighten the ratio past
         // this and it is this test that says so, not a CI run on a machine
         // nobody here has.
         assert!(
-            result.failing_ratio * 20.0 < Tolerance::RASTERISER.max_failing_ratio,
+            result.gross_ratio * 20.0 < Tolerance::RASTERISER.max_gross_ratio,
             "the worst real frame must keep at least twenty times of headroom: {}",
             result.summary()
         );
@@ -834,9 +983,15 @@ mod tests {
     /// the D3D12 job went red, and the diff it uploaded put every failing pixel
     /// on a sprite quad's edge with the sprites themselves correct. Two
     /// software rasterisers disagreeing about an edge texel is exactly what
-    /// this tolerance absorbs, so the bound has to clear it — but only just, so
-    /// this test is what fails if somebody tightens the ratio again without the
-    /// Windows runner in front of them.
+    /// this tolerance absorbs, so the bound has to clear it — and this test is
+    /// what fails if somebody tightens either budget without the Windows runner
+    /// in front of them.
+    ///
+    /// It clears **both** budgets, on different grounds, and asserting each is
+    /// the point: six times under the drift budget on count, and under the
+    /// gross threshold on magnitude, so its 76 pixels never reach the gross
+    /// budget at all. Under the single ratio it replaced, the same frame had
+    /// 3.2 times of room and nothing else.
     #[test]
     fn warps_sprite_edges_pass_and_are_what_the_ratio_is_sized_against() {
         // 76 of 49152 pixels at delta 13: the run's own numbers.
@@ -870,6 +1025,19 @@ mod tests {
             result.is_match(),
             "WARP's measured sprite frame must pass, or the D3D12 job is a \
              false-alarm generator nobody here can debug: {}",
+            result.summary()
+        );
+        assert!(
+            result.failing_ratio * 6.0 < Tolerance::RASTERISER.max_failing_ratio,
+            "the widest legitimate frame must keep at least six times of \
+             headroom on the drift budget: {}",
+            result.summary()
+        );
+        assert_eq!(
+            result.gross_pixels,
+            0,
+            "an edge texel two rasterisers disagree about is not a grossly \
+             wrong pixel, and the gross budget must not see it: {}",
             result.summary()
         );
     }
@@ -1044,6 +1212,8 @@ mod tests {
             "64x48",
             "differ at all",
             "max channel delta",
+            "over tolerance",
+            "grossly wrong",
             "ssim",
             "rmse",
             "failed:",

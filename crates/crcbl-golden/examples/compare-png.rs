@@ -85,13 +85,15 @@ fn run(args: &Args) -> Result<bool, String> {
 
     println!(
         "compare-png[{}]: {} vs {} — tolerance {} (max channel delta {}, max failing ratio {}, \
-         min ssim {})",
+         gross channel delta {}, max gross ratio {}, min ssim {})",
         args.label,
         args.left.display(),
         args.right.display(),
         args.tolerance_name,
         args.tolerance.max_channel_delta,
         args.tolerance.max_failing_ratio,
+        args.tolerance.gross_channel_delta,
+        args.tolerance.max_gross_ratio,
         args.tolerance.min_ssim,
     );
 
@@ -166,13 +168,15 @@ fn report_where(args: &Args, left: &Image, right: &Image, comparison: &Compariso
         return;
     }
 
-    // Where, at two thresholds: everything that differs at all, and everything
-    // that exceeds the tolerance. A box that covers the frame at the first
-    // threshold and eight pixels at the second is a completely different bug
-    // from one that covers the frame at both.
+    // Where, at each threshold the tolerance scores: everything that differs at
+    // all, everything that drifted past the tolerance, and everything that is
+    // grossly wrong. A box that covers the frame at the first threshold and
+    // eight pixels at the last is a completely different bug from one that
+    // covers the frame at all three.
     for (threshold, what) in [
         (0u8, "differing at all"),
         (args.tolerance.max_channel_delta, "over tolerance"),
+        (args.tolerance.gross_channel_delta, "grossly wrong"),
     ] {
         match differing_bounds(left, right, threshold) {
             Some((x, y, width, height)) => eprintln!(
