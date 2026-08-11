@@ -4983,15 +4983,23 @@ horde 3 028 644, which is the measurement this entry said was worth having.
 Four things that slice found in the shared web tooling and did not fix, none of
 them hud's:
 
-- **The browser gate cannot run its default way on this machine any more.**
-  Chromium 151 returns `rgb(0,0,0)` from group A's readback control under Xvfb
-  for **both** the `hardware` and `swiftshader` adapters, so a bare
-  `./web/run-browser-e2e.sh` fails its own control and correctly refuses to
-  interpret anything after it. `--headless --hardware` works and is what every
-  local run above used. **CI runs Xvfb + SwiftShader**, the row that worked on
-  Chromium 150; nothing has proven it still works on 151, so if GitHub's runner
-  image moves to it the Pages job fails group A for all five demos at once. That
-  is the failure to expect and it will not look like a hud problem.
+- **The browser gate cannot run its default way on this machine any more, and
+  the difference is the browser version.** Chromium 151 returns `rgb(0,0,0)`
+  from group A's readback control under Xvfb for **both** the `hardware` and
+  `swiftshader` adapters, so a bare `./web/run-browser-e2e.sh` fails its own
+  control and correctly refuses to interpret anything after it.
+  `--headless --hardware` works and is what every local run uses.
+
+  CI is not affected **today**, and that is measured rather than assumed: the
+  Pages run on `ac40d6a` logs
+  `browser: /usr/bin/google-chrome (Google Chrome 150.0.7871.128)` and all five
+  demos passed on `swiftshader` under Xvfb, hud at 27/27. So the working
+  combination is Chrome 150, and the runner image is what holds it there. **When
+  GitHub's image moves to 151 the Pages job fails group A for all five demos at
+  once** — the whole gate, not one demo — and it will not look like a demo
+  problem. The fix when that happens is in group A's control in
+  `web/run-browser-e2e.sh`, not in any sample.
+
 - **`web/engine/demo.js` has no way for a demo to say it saves nothing.** On
   `STOPPED` it prints `` `${savedLabel} saved.` `` unconditionally, so hud
   passes `savedLabel: 'Nothing'` and its status bar reads "Nothing saved." —
