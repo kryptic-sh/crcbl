@@ -74,6 +74,17 @@ dxil = vertexMain:dxil/mesh.vertexMain.dxil:7855edcc6572b02d71e7cc9c845afe17a3c4
 dxil = fragmentMain:dxil/mesh.fragmentMain.dxil:bc7609add61dfda0333b434de4161d2315f34b53525fd84bc14bee8db4c33d65
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
+[mesh_cluster]
+source = shaders/mesh_cluster.slang
+source-sha256 = d0335cd11841745cabb1b37be91f72eecc62e6fc1add8524615f04ead32fd52d
+targets = spirv, msl, dxil
+spirv = spirv/mesh_cluster.spv
+spirv-sha256 = a7779566fd9041ecc47011d4099591fbd7653486f17449bafe413b5a9bf89709
+msl = msl/mesh_cluster.metal
+msl-sha256 = 1734fce55312017e5da7f9430379058de69135ca4b52742a58c0362201ffc867
+dxil = meshMain:dxil/mesh_cluster.meshMain.dxil:e14d8bf39cc91545af70f0e8bead1a54fe9bbfd4934b9b9de77b837660bf9dc9
+entry-points = meshMain:meshext
+
 [mesh_shader]
 source = shaders/mesh_shader.slang
 source-sha256 = bd0d73df3ad7564888f0d0b7e0288154a6bdf907f5da2473b752a0e9d6830f98

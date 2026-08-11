@@ -397,6 +397,84 @@ fn a_lit_mesh_through_the_graph_matches_its_golden_image() {
     headless.finish();
 }
 
+/// **The mesh-shader path draws the frame the indirect path's golden already
+/// pins** — the same reference file, not one of its own.
+///
+/// `docs/plan/03-gpu-driven-rendering.md` §3.5 makes mesh shaders the primary
+/// geometry path and its own design rule is that "the lesser path is a
+/// constraint on data layout, not a separate renderer". A second golden for
+/// this path would pass whatever the path happened to draw, which is the check
+/// that cannot fail; the whole claim is that the picture is the *same* one, so
+/// the reference has to be the same one.
+///
+/// # How this says the mesh stage actually ran
+///
+/// A path that silently degraded to an indirect tail would match this golden
+/// too, so the golden is not the evidence — [`ForwardRenderer::geometry_path`]
+/// is. It reports what the renderer **built**, and a renderer that built the
+/// mesh path built a mesh pipeline out of `mesh_cluster.slang` and created no
+/// raster pipeline at all. There is nothing for the pass to have fallen through
+/// to, so a frame that matched came out of a mesh stage.
+///
+/// `crcbl-render`'s own `a_mesh_shader_device_draws_through_a_mesh_pipeline` is
+/// the other half: it reads the recorded command stream and fails on an
+/// indirect draw or an index-buffer bind.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_mesh_shader_path_matches_the_indirect_path_s_golden() {
+    let headless = Headless::open_for_mesh_with(Features::GPU_DRIVEN | Features::MESH_SHADER);
+    assert_eq!(
+        headless.device.caps().geometry_path(),
+        crcbl_hal::GeometryPath::MeshShader,
+        "this test needs a device that selects the mesh path; radv reports \
+         VK_EXT_mesh_shader and `docs/backlog.md` is where a driver that does not belongs"
+    );
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds a mesh pipeline");
+    assert_eq!(
+        renderer.geometry_path(),
+        crcbl_hal::GeometryPath::MeshShader,
+        "the renderer must have built the mesh path — this is the assertion that \
+         makes the golden below evidence about a mesh stage rather than about a \
+         fall-through"
+    );
+
+    let frame = render_mesh(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &mesh_camera(crcbl_render::Projection::default()),
+    );
+
+    let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/mesh.png");
+    let golden = crcbl_golden::Golden::new(reference);
+    let outcome = golden
+        .check(&frame.image)
+        .expect("the reference is readable");
+    let comparison = match outcome.into_result() {
+        Ok(comparison) => comparison,
+        Err(message) => {
+            renderer.destroy(headless.device.as_ref());
+            pool.destroy(headless.device.as_ref());
+            headless.device.wait_idle().expect("idle");
+            panic!("{message}");
+        }
+    };
+    eprintln!(
+        "vk e2e: golden mesh through the mesh-shader path — {}",
+        comparison.summary()
+    );
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
 /// Milestone 5: the orthographic camera is a **projection-matrix swap and
 /// nothing else**.
 ///

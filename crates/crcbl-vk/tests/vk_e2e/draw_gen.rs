@@ -645,28 +645,39 @@ fn a_bucket_fills_and_empties_as_its_instance_comes_and_goes() {
     teardown(headless, renderer, pool);
 }
 
-/// **Both `GeometryPath` arms draw the same frame, byte for byte.**
+/// **Every `GeometryPath` draws the same frame, byte for byte.**
 ///
 /// `docs/plan/03-gpu-driven-rendering.md`'s design rule is that "the lesser path
 /// is a constraint on data layout, not a separate renderer", and the exit
 /// criterion is that every path renders the sandbox scene. This is that
-/// criterion for the two indirect arms, on real hardware, in one process: the
-/// same renderer, the same scene, the same camera, and the only difference is
-/// which call the forward pass records.
+/// criterion, on real hardware, in one process: the same renderer, the same
+/// scene, the same camera, and the only difference is what the forward pass
+/// records — a mesh dispatch, an indirect-count call, or a per-batch indirect
+/// call.
 ///
-/// `IndirectPerBatch` is what Metal is on — its API has multi-draw-indirect and
-/// no GPU-side count — and no adapter this suite can see would ever select it,
-/// so the device is opened without [`Features::DRAW_INDIRECT_COUNT`] on purpose.
-/// Without that, the arm would be code no machine here runs.
+/// **Two of the three arms have to be asked for by subtraction**, because this
+/// adapter reports everything. `IndirectPerBatch` is what Metal is on — its API
+/// has multi-draw-indirect and no GPU-side count — so its device is opened
+/// without [`Features::DRAW_INDIRECT_COUNT`]; `IndirectCount` is what a device
+/// with no mesh shaders selects, so its device is opened without
+/// [`Features::MESH_SHADER`]. Without those subtractions two of the three arms
+/// would be code no machine here runs.
 ///
 /// Byte equality rather than a tolerance: this is one driver, one adapter and
-/// one scene, so anything but identical output is a difference the two calls
-/// made.
+/// one scene, so anything but identical output is a difference the three calls
+/// made. The mesh arm is the interesting one — it emits the same triangles from
+/// a mesh stage reading cluster records, where the other two read the index
+/// pool through a vertex stage — and it is exactly what §3.5 means by the
+/// fallback not being second-class.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn both_geometry_paths_draw_the_same_frame() {
+fn every_geometry_path_draws_the_same_frame() {
     let mut frames = Vec::new();
     for (optional, expected) in [
+        (
+            Features::GPU_DRIVEN | Features::MESH_SHADER,
+            GeometryPath::MeshShader,
+        ),
         (Features::GPU_DRIVEN, GeometryPath::IndirectCount),
         (
             Features::GPU_DRIVEN.difference(Features::DRAW_INDIRECT_COUNT),
@@ -677,13 +688,20 @@ fn both_geometry_paths_draw_the_same_frame() {
         assert_eq!(
             headless.device.caps().geometry_path(),
             expected,
-            "the device must be on the path this arm is about, or the two halves of \
+            "the device must be on the path this arm is about, or two halves of \
              this comparison are the same code twice"
         );
         let mut pool = TransientPool::new();
         let mut renderer =
             ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
                 .expect("the forward renderer builds");
+        assert_eq!(
+            renderer.geometry_path(),
+            expected,
+            "and the renderer must have *built* that path: a mesh-shader device that \
+             degraded to an indirect tail would draw an identical frame and make this \
+             comparison vacuous"
+        );
         renderer.set_pyramid(Some(Mat4::from_translation(PYRAMID_AT)));
         let frame = crate::mesh::render_mesh(
             &headless,
@@ -691,25 +709,27 @@ fn both_geometry_paths_draw_the_same_frame() {
             &mut pool,
             &mesh_camera(Projection::default()),
         );
-        frames.push(frame.image);
+        frames.push((expected, frame.image));
         teardown(headless, renderer, pool);
     }
 
-    let (counted, per_batch) = (&frames[0], &frames[1]);
     // Anti-vacuity: two blank frames match perfectly, so the frame has to have
     // something in it before the comparison means anything. The count is small
     // because every face of both meshes is flat-shaded — measured here, a
     // cleared frame is 1 and this scene's committed golden (the cube alone) is
     // 4, so anything at or below that is a frame the pyramid did not reach.
-    let colours = counted.distinct_colors(64);
+    let (first_path, first) = &frames[0];
+    let colours = first.distinct_colors(64);
     assert!(
         colours > 4,
         "the frame is missing geometry ({colours} distinct colours), so comparing \
          it against another frame like it proves nothing"
     );
-    assert_eq!(
-        counted.pixels(),
-        per_batch.pixels(),
-        "the two geometry paths must draw the same pixels"
-    );
+    for (path, image) in &frames[1..] {
+        assert_eq!(
+            first.pixels(),
+            image.pixels(),
+            "{first_path:?} and {path:?} must draw the same pixels"
+        );
+    }
 }

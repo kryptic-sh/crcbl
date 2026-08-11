@@ -13,6 +13,16 @@
 //! Every one of those is a later slice. Read this module as the input to that
 //! work rather than as a working mesh-shader path.
 //!
+//! # The record is `crcbl-shaders`', and the builder is this crate's
+//!
+//! [`Meshlet`] and [`ClusterBounds`] live in [`crcbl_shaders::meshlet`] and are
+//! re-exported here.
+//! `crcbl-render` has to read them and must not depend on this crate — it would
+//! pull `gltf` into the renderer — so the record sits in the one crate both
+//! sides already share, beside `GpuMaterial` and `MeshVertex`, and the builder
+//! stays here where its first producer ([`GltfPrimitive`](crate::GltfPrimitive))
+//! is.
+//!
 //! # The layout
 //!
 //! The meshoptimizer/NVIDIA three-array layout, because it is what a mesh
@@ -39,32 +49,10 @@
 
 use glam::Vec3;
 
-/// The most vertices one cluster may reference.
-///
-/// [`MeshletBuild::triangles`] names a corner with a `u8` index into the
-/// cluster's own vertex run, so 256 is the hard ceiling. This sits well below
-/// it at the figure the mesh-shader ecosystem converged on, which keeps a
-/// cluster's vertex list inside a wavefront's worth of work.
-pub const MAX_CLUSTER_VERTICES: usize = 64;
-
-/// The most triangles one cluster may hold.
-///
-/// The largest multiple of four at or below the 126 that D3D12's mesh-shader
-/// output cap and Vulkan's `maxMeshOutputPrimitives` commonly report. A
-/// multiple of four makes a *full* cluster's corner run a whole number of
-/// four-byte words, which is the ecosystem's convention.
-///
-/// It does not by itself four-byte-align every cluster's run:
-/// [`MAX_CLUSTER_VERTICES`] can close a cluster at any triangle count, and the
-/// next run starts wherever that one ended. A GPU slice that wants to read
-/// corners as `u32` words has to pad each run, which this builder deliberately
-/// does not do — padding is machinery for a consumer that does not exist yet.
-pub const MAX_CLUSTER_TRIANGLES: usize = 124;
-
-// A corner is a `u8` index into a cluster's vertex run, so the bound above is
-// what makes every `as u8` in this module lossless. This fails the build if it
-// ever stops being true.
-const _: () = assert!(MAX_CLUSTER_VERTICES <= u8::MAX as usize + 1);
+pub use crcbl_shaders::meshlet::{
+    ClusterBounds, MAX_CLUSTER_TRIANGLES, MAX_CLUSTER_VERTICES, MESHLET_STRIDE, Meshlet,
+    MeshletTooLarge,
+};
 
 /// How much of a cluster's summed normal weight must survive cancellation for
 /// that sum to name a direction.
@@ -78,12 +66,27 @@ const CONE_AXIS_EPSILON: f32 = 1e-4;
 
 /// Why a triangle list could not be clustered.
 ///
-/// Both variants are caller bugs rather than data the builder could recover
+/// The first two are caller bugs rather than data the builder could recover
 /// from, and both are refused instead of clustered, because an index the
 /// position array does not have has no bounds and a partial triangle has no
-/// corners.
+/// corners. The third is the mesh being larger than the *record* can describe,
+/// which is a property of the input rather than a mistake in it.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum MeshletError {
+    /// A cluster's offsets outgrew the `uint`s [`Meshlet`] holds.
+    ///
+    /// The record is what a shader reads, so its offsets are 32-bit where this
+    /// builder counts in `usize`. The narrowing happens as each cluster is
+    /// closed and is checked rather than cast: a wrapped offset would name
+    /// another cluster's corners, which draws a plausible picture of the wrong
+    /// geometry rather than failing.
+    ///
+    /// Reaching it takes a mesh of more than four billion cluster-vertices —
+    /// no `u32` index buffer can address one — so this is a bound the type
+    /// system states rather than a case the bake is expected to hit.
+    #[error("a cluster outgrew the record: {0}")]
+    TooLarge(#[from] MeshletTooLarge),
+
     /// The index buffer's length is not a whole number of triangles.
     #[error("{count} indices is not a whole number of triangles")]
     PartialTriangle {
@@ -99,108 +102,6 @@ pub enum MeshletError {
         /// How many positions the mesh actually has.
         vertices: usize,
     },
-}
-
-/// A cluster's bounding sphere and normal cone.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ClusterBounds {
-    /// Centre of the bounding sphere, in the positions' own space.
-    ///
-    /// The midpoint of the cluster's vertex AABB. That makes the sphere below
-    /// a *valid* bound and not the minimal one: Ritter's and Welzl's are both
-    /// tighter, and neither is worth transcribing for a first cut.
-    pub center: [f32; 3],
-
-    /// Distance from [`center`](Self::center) to the cluster's furthest
-    /// vertex. Never negative, and zero only for a cluster whose vertices
-    /// coincide.
-    pub radius: f32,
-
-    /// The unit direction the cluster's triangles face on average.
-    ///
-    /// The normalised sum of the triangles' *un-normalised* cross products,
-    /// so the average is weighted by area — a cross product's length is twice
-    /// its triangle's area. Area weighting is the choice here because it lets
-    /// a large face set the axis instead of letting a cluster's tessellation
-    /// slivers drag it, and because it is what makes the sum of a closed
-    /// shape's normals cancel exactly.
-    ///
-    /// [`OMNIDIRECTIONAL_AXIS`](Self::OMNIDIRECTIONAL_AXIS) when that sum
-    /// cancelled and named no direction.
-    pub cone_axis: [f32; 3],
-
-    /// The cosine of the cone's half angle: the smallest
-    /// `dot(cone_axis, unit triangle normal)` over the cluster's triangles,
-    /// clamped to `-1.0..=1.0` so a rounding overshoot cannot escape the range
-    /// the cull rule below takes a square root inside.
-    ///
-    /// `1.0` is a cluster whose triangles all face exactly one way. A value at
-    /// or below zero is a cone spanning a hemisphere or more, which no view
-    /// direction can reject;
-    /// [`OMNIDIRECTIONAL_CUTOFF`](Self::OMNIDIRECTIONAL_CUTOFF) is the extreme
-    /// of that, a cone that cancelled into the whole sphere of directions.
-    ///
-    /// # The cull this is for
-    ///
-    /// Nothing in this module culls anything — there is no GPU here yet. A
-    /// consumer that wants to reject a wholly back-facing cluster tests, with
-    /// `v` the unit direction from the camera to [`center`](Self::center):
-    ///
-    /// ```text
-    /// cone_cutoff > 0.0 && dot(cone_axis, v) > sqrt(1.0 - cone_cutoff * cone_cutoff)
-    /// ```
-    ///
-    /// With `a = acos(cone_cutoff)` the cone's half angle and `t` the angle
-    /// between `cone_axis` and `v`, every normal in the cone faces away from
-    /// the camera exactly when `t + a < pi/2`, which is the inequality above.
-    /// The `cone_cutoff > 0.0` half is what that derivation needs: at
-    /// `a >= pi/2` the cone already holds a front-facing normal for every `v`,
-    /// and the inequality on its own would then reject clusters that must be
-    /// drawn.
-    pub cone_cutoff: f32,
-}
-
-impl ClusterBounds {
-    /// The [`cone_axis`](Self::cone_axis) of a cluster whose normals cancelled.
-    ///
-    /// Any unit vector is a correct axis for a cone of
-    /// [`OMNIDIRECTIONAL_CUTOFF`](Self::OMNIDIRECTIONAL_CUTOFF), since that
-    /// cone is every direction whatever its axis. It is a unit vector rather
-    /// than a zero one so that a consumer which normalises the axis anyway
-    /// cannot produce a NaN from it.
-    pub const OMNIDIRECTIONAL_AXIS: [f32; 3] = [0.0, 0.0, 1.0];
-
-    /// The [`cone_cutoff`](Self::cone_cutoff) meaning "this cone is the whole
-    /// sphere of directions": the cluster is never backface-cullable.
-    ///
-    /// This is what a cluster whose triangle normals cancel gets — a closed
-    /// shape small enough to fit one cluster, or a fan of opposing faces — and
-    /// what a cluster of nothing but zero-area triangles gets, since a zero
-    /// cross product names no direction either. Both cases have to land on a
-    /// defined value: a NaN here would make the cull rule's comparison false
-    /// on some targets and true on others, silently dropping geometry.
-    pub const OMNIDIRECTIONAL_CUTOFF: f32 = -1.0;
-}
-
-/// One cluster: where its two runs live, and its bounds.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Meshlet {
-    /// First entry of this cluster's run in [`MeshletBuild::vertices`].
-    pub vertex_offset: usize,
-
-    /// How many original vertex indices this cluster references. At most
-    /// [`MAX_CLUSTER_VERTICES`].
-    pub vertex_count: usize,
-
-    /// First entry of this cluster's run in [`MeshletBuild::triangles`].
-    pub triangle_offset: usize,
-
-    /// How many triangles this cluster holds; its corner run is three times
-    /// this long. At most [`MAX_CLUSTER_TRIANGLES`].
-    pub triangle_count: usize,
-
-    /// Bounding sphere and normal cone over this cluster's own geometry.
-    pub bounds: ClusterBounds,
 }
 
 /// The three arrays [`build_meshlets`] produces.
@@ -243,16 +144,28 @@ impl MeshletBuild {
         &self.clusters
     }
 
-    fn push_cluster(&mut self, positions: &[[f32; 3]], vertices: &[u32], corners: &[u8]) {
-        self.clusters.push(Meshlet {
-            vertex_offset: self.vertices.len(),
-            vertex_count: vertices.len(),
-            triangle_offset: self.triangles.len(),
-            triangle_count: corners.len() / 3,
-            bounds: cluster_bounds(positions, vertices, corners),
-        });
+    /// Appends one cluster and its two runs, narrowing the host offsets to the
+    /// `uint`s the record holds.
+    ///
+    /// [`Meshlet::new`](crcbl_shaders::meshlet::Meshlet::new) is where the
+    /// narrowing is checked, which is why this is fallible at all — see
+    /// [`MeshletError::TooLarge`].
+    fn push_cluster(
+        &mut self,
+        positions: &[[f32; 3]],
+        vertices: &[u32],
+        corners: &[u8],
+    ) -> Result<(), MeshletError> {
+        self.clusters.push(Meshlet::new(
+            self.vertices.len(),
+            vertices.len(),
+            self.triangles.len(),
+            corners.len() / 3,
+            cluster_bounds(positions, vertices, corners),
+        )?);
         self.vertices.extend_from_slice(vertices);
         self.triangles.extend_from_slice(corners);
+        Ok(())
     }
 }
 
@@ -271,6 +184,12 @@ impl MeshletBuild {
 /// triangles, and [`MeshletError::IndexOutOfRange`] when an index names a
 /// vertex `positions` does not have. Both are checked before any clustering
 /// happens, so a refused mesh produces nothing rather than a prefix.
+///
+/// [`MeshletError::TooLarge`] when a cluster's offsets outgrow the `uint`s the
+/// record holds. That one is checked as each cluster is closed rather than up
+/// front, because it is a property of the *output* — see
+/// [`Meshlet::new`](crcbl_shaders::meshlet::Meshlet::new), which is the only
+/// place this crate narrows a `usize` at all.
 ///
 /// A mesh with no indices is not an error: it yields no clusters and three
 /// empty arrays.
@@ -308,7 +227,7 @@ pub fn build_meshlets(
 
     for triangle in indices.chunks_exact(3) {
         if closes_cluster(&vertices, &corners, triangle) {
-            build.push_cluster(positions, &vertices, &corners);
+            build.push_cluster(positions, &vertices, &corners)?;
             vertices.clear();
             corners.clear();
         }
@@ -324,7 +243,7 @@ pub fn build_meshlets(
         }
     }
     if !vertices.is_empty() {
-        build.push_cluster(positions, &vertices, &corners);
+        build.push_cluster(positions, &vertices, &corners)?;
     }
 
     Ok(build)
@@ -444,19 +363,19 @@ mod tests {
     fn decoded(build: &MeshletBuild) -> Vec<[u32; 3]> {
         let mut triangles = Vec::new();
         for cluster in build.clusters() {
+            let vertex_count = cluster.vertex_count as usize;
+            let triangle_count = cluster.triangle_count as usize;
             assert!(
-                cluster.vertex_count <= MAX_CLUSTER_VERTICES,
-                "cluster references {} vertices",
-                cluster.vertex_count
+                vertex_count <= MAX_CLUSTER_VERTICES,
+                "cluster references {vertex_count} vertices"
             );
             assert!(
-                cluster.triangle_count <= MAX_CLUSTER_TRIANGLES,
-                "cluster holds {} triangles",
-                cluster.triangle_count
+                triangle_count <= MAX_CLUSTER_TRIANGLES,
+                "cluster holds {triangle_count} triangles"
             );
-            let vertices = &build.vertices()[cluster.vertex_offset..][..cluster.vertex_count];
+            let vertices = &build.vertices()[cluster.vertex_offset as usize..][..vertex_count];
             let corners =
-                &build.triangles()[cluster.triangle_offset..][..cluster.triangle_count * 3];
+                &build.triangles()[cluster.triangle_offset as usize..][..triangle_count * 3];
             for triangle in corners.chunks_exact(3) {
                 triangles.push([0, 1, 2].map(|corner| {
                     let local = usize::from(triangle[corner]);
@@ -567,6 +486,69 @@ mod tests {
             }
         }
         (vertices.to_vec(), indices)
+    }
+
+    /// **The clusters `crcbl-shaders` ships for its own two meshes are the
+    /// ones this builder produces**, array for array.
+    ///
+    /// `crcbl_shaders::meshlet::cube_clusters` and its pyramid sibling are what
+    /// `crcbl-render`'s mesh-shader path uploads, and they are cooked *there*
+    /// because the renderer cannot reach this crate — §3.5 makes the meshlet
+    /// build a bake step for that reason. This is the check that makes that
+    /// arrangement honest: cooked data with the producer beside it, in the one
+    /// crate that can see both.
+    ///
+    /// It fails if the builder's clustering changes, if either mesh grows past
+    /// a cluster, if a bound in the committed record drifts by one ulp, or if
+    /// either mesh's vertex order stops being the dense ascending one that
+    /// makes its corner run its own index buffer.
+    #[test]
+    fn the_hardcoded_meshes_cluster_the_way_the_shaders_crate_says() {
+        for (name, vertices, indices, cooked) in [
+            (
+                "cube",
+                crcbl_shaders::mesh::cube_vertices(),
+                crcbl_shaders::mesh::cube_indices(),
+                crcbl_shaders::meshlet::cube_clusters(),
+            ),
+            (
+                "pyramid",
+                crcbl_shaders::mesh::pyramid_vertices(),
+                crcbl_shaders::mesh::pyramid_indices(),
+                crcbl_shaders::meshlet::pyramid_clusters(),
+            ),
+        ] {
+            let positions: Vec<[f32; 3]> = vertices
+                .iter()
+                .map(|vertex| [vertex.position[0], vertex.position[1], vertex.position[2]])
+                .collect();
+            let built = build_meshlets(&positions, &indices).expect("a demo mesh clusters");
+
+            assert_eq!(
+                built.clusters(),
+                cooked.clusters,
+                "{name}: the committed clusters are not what the builder produces"
+            );
+            assert_eq!(
+                built.vertices(),
+                cooked.vertices,
+                "{name}: the committed vertex run is not the builder's"
+            );
+            assert_eq!(
+                built.triangles(),
+                cooked.corners,
+                "{name}: the committed corner run is not the builder's"
+            );
+            // Anti-vacuity: three empty arrays would compare equal to three
+            // empty arrays, and a mesh that clustered into nothing is exactly
+            // what a broken builder produces.
+            assert_eq!(built.clusters().len(), 1, "{name} is one whole cluster");
+            assert_eq!(
+                built.triangles().len(),
+                indices.len(),
+                "{name}: every triangle reached a cluster"
+            );
+        }
     }
 
     #[test]
@@ -721,7 +703,12 @@ mod tests {
         let counts: Vec<_> = build
             .clusters()
             .iter()
-            .map(|cluster| (cluster.vertex_count, cluster.triangle_count))
+            .map(|cluster| {
+                (
+                    cluster.vertex_count as usize,
+                    cluster.triangle_count as usize,
+                )
+            })
             .collect();
         assert_eq!(
             counts,
@@ -744,7 +731,12 @@ mod tests {
         let counts: Vec<_> = build
             .clusters()
             .iter()
-            .map(|cluster| (cluster.vertex_count, cluster.triangle_count))
+            .map(|cluster| {
+                (
+                    cluster.vertex_count as usize,
+                    cluster.triangle_count as usize,
+                )
+            })
             .collect();
         assert_eq!(
             counts,

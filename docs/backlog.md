@@ -5836,35 +5836,47 @@ What it does not do, in the order it would be wanted:
 - **The bounding sphere is the AABB midpoint and the furthest vertex**, which is
   valid and not minimal. Ritter's or Welzl's would be tighter and neither was
   worth transcribing for a first cut.
-- **Nothing consumes it**: no GPU upload, no amplification or mesh shader, no
-  bake cache or input hashing, no `crcbl-render` wiring. `EmitTail::from_caps`
-  in `crcbl_render::forward` still degrades `GeometryPath::MeshShader` to an
-  indirect tail and logs that it did.
 
-### The consuming slice has to answer a layering question first
+### What the mesh-shader path owes, now that it draws
 
-`crcbl-render` does **not** depend on `crcbl-scene` and should not start:
-`crcbl-scene` pulls in `gltf`, and a renderer that depends on the glTF importer
-to describe its own geometry has the direction backwards. Verified by reading
-both manifests — `crcbl-render` names `crcbl-core`, `crcbl-hal`,
-`crcbl-shaders`, `crcbl-sprite` and `crcbl-ui`; `crcbl-scene` names
-`crcbl-assets` and `crcbl-shaders`. The two meet only at `crcbl-shaders`.
+The layering question is settled the way it was recorded: the `Meshlet` record
+lives in `crcbl_shaders::meshlet`, the builder stayed in `crcbl-scene` and
+re-exports it, and `crcbl-render` gained no dependency on `crcbl-scene`. What is
+left:
 
-So the `Meshlet` record — the thing a mesh shader indexes — belongs in
-`crcbl-shaders` beside `GpuMaterial` and `MeshVertex`, which is already the home
-for records both sides of that split have to agree on. The **builder** stays in
-`crcbl-scene`: it is a bake-side producer, and §3.5 calls it a bake step.
-
-Deliberately not done yet, because the second caller has not arrived and moving
-a type with one user is churn. The consuming slice is the one that should move
-it, and it should move it rather than adding a dependency edge or duplicating
-the record. Recorded here so that slice does not rediscover the constraint by
-adding the edge first.
-
-**A related question that slice inherits:** meshlets as a _bake_ artifact means
-the renderer receives prebuilt clusters in cooked mesh data and never calls
-`build_meshlets` at all — which is what §3.5 describes and what keeps the
-dependency direction clean. Building them at `MeshPool::upload` time instead
-would be simpler today and would put the builder on the runtime path, where its
-determinism guarantee buys nothing and its cost is per-load. The bake shape is
-the one to aim at; note it was never actually decided, only implied by §3.5.
+- **No app selects the path**, so nothing a user sees goes through it.
+  `Features::GPU_DRIVEN` does not include `MESH_SHADER` — `caps.rs`'s own test
+  asserts that — and `crcbl::GpuContextDesc::default` asks for `GPU_DRIVEN`, so
+  the samples and `crates/crcbl/tests/golden/cube.png` run `IndirectCount` on an
+  RX 7900 XTX that reports `MESH_SHADER | TASK_SHADER`. Only the two vk device
+  tests request the flag. Adding it to that default is one line in
+  `crates/crcbl/src/engine.rs` and it is what puts §3.5's exit criterion in
+  front of the sandbox — held back deliberately so it lands as its own change
+  with a CI run either side, because it switches which path every capable device
+  draws through.
+- **Both resident meshes are one cluster each** (24 vertices / 12 triangles, and
+  16 / 6, against bounds of 64 / 124). So a cluster with a non-zero
+  `vertex_offset` _within_ a mesh is exercised by the builder's tests and by
+  `ClusterPool::concatenate`'s, but by no rendered frame. The mesh-relative to
+  pool-relative shift **is** rendered, because the pyramid's runs start after
+  the cube's. A mesh that needs several clusters is what would close it.
+- **The dispatch is CPU-bounded, not indirect.**
+  `draw_mesh_tasks(cluster_count, slot_count, 1)`, with the shader reading the
+  real survivor count from `draw_args[bucket].instance_count` and emitting
+  nothing past it. `crcbl-hal` has no `draw_mesh_tasks_indirect`; adding one is
+  a seam change and is the natural follow-up, and it is also the prerequisite
+  for culling to actually reduce work rather than just skip output.
+- **No amplification stage, so no per-cluster culling.** `ClusterBounds` — the
+  sphere and the normal cone the builder computes — is uploaded and **read by
+  nothing**. That is §3.5's second bullet and its own slice.
+- **The cluster buffers are `HostUpload`, written once at build.** Device-local
+  storage is what a bake cache that streams clusters would want.
+- **No bake cache, no input hashing, no cluster LOD/QEM.**
+- **Still undecided, and inherited from the builder:** whether meshlets are a
+  bake artifact the renderer receives prebuilt (what §3.5 describes, and what
+  keeps the dependency direction clean) or something built at `MeshPool::upload`
+  time. Today neither — `crcbl-render`'s clusters come from constants in
+  `crcbl_shaders::meshlet` (`cube_clusters`, `pyramid_clusters`), pinned against
+  the real builder by `crcbl-scene`'s
+  `the_hardcoded_meshes_cluster_the_way_the_shaders_crate_says`. That pinning is
+  what stops the two drifting; it is not a substitute for deciding.

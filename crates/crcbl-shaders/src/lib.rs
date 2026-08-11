@@ -179,6 +179,10 @@ pub mod draw_gen;
 /// shader declares.
 pub mod mesh;
 
+/// The cluster record `mesh_cluster.slang` indexes, in the layout that shader
+/// declares. `crcbl_scene::meshlet` is what builds them.
+pub mod meshlet;
+
 /// The geometry `triangle.slang` pulls, in the layout that shader declares.
 pub mod triangle;
 

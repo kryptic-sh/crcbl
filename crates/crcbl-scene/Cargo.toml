@@ -26,7 +26,7 @@ log = { workspace = true }
 gltf = { workspace = true }
 # `MeshletError`, which is not a `StorageError`: the meshlet builder reads no
 # bytes, so every storage variant but `Other` is unreachable from it and
-# `Other(String)` would erase which of the two caller bugs it hit.
+# `Other(String)` would erase which caller bug it hit.
 thiserror = { workspace = true }
 
 [lints]

@@ -125,14 +125,15 @@ use crcbl_hal::{
     BufferUsage, ColorTargetState, CullMode, DepthStencilState, Device, DrawIndirect,
     DrawIndirectCount, FilterMode, Format, GeometryPath, GraphicsPipelineDesc,
     GraphicsPipelineHandle, HalError, ImageViewHandle, ImageViewType, IndexFormat, LoadOp,
-    MemoryLocation, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
-    QueueHandle, ResourceState, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry,
-    ShaderModuleDesc, ShaderStages, StoreOp,
+    MemoryLocation, MeshPipelineDesc, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle,
+    PrimitiveState, QueueHandle, ResourceState, SamplerAddressMode, SamplerDesc, SamplerHandle,
+    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp,
 };
-use crcbl_shaders::{MESH, Stage, TONEMAP, mesh};
+use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, mesh};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::camera::{Camera, DirectionalLight};
+use crate::cluster_pool::ClusterPool;
 use crate::cull::Frustum;
 use crate::draw_gen::{DrawGen, DrawGenDesc};
 use crate::graph::{ImageId, ImportedImage, RenderGraph};
@@ -288,6 +289,11 @@ const PYRAMID_BUCKET: usize = 1;
 /// be a capability query per draw.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EmitTail {
+    /// [`GeometryPath::MeshShader`]: one `draw_mesh_tasks` per bucket, of a
+    /// **mesh** pipeline — no vertex stage, no index buffer and no indirect
+    /// arguments anywhere in the call. §3.5's primary geometry path; see
+    /// `shaders/mesh_cluster.slang`.
+    Mesh,
     /// [`GeometryPath::IndirectCount`]: the draw count comes from GPU memory
     /// too, so the CPU never learns whether a bucket drew anything.
     Count,
@@ -301,28 +307,22 @@ enum EmitTail {
 impl EmitTail {
     /// What `caps` selects.
     ///
-    /// [`GeometryPath::MeshShader`] has no tail here — §3.5's amplification
-    /// stage is a slice of its own — so a device that selects it degrades to
-    /// whichever indirect tail its features allow, and says so. The picture is
-    /// the same one; what it loses is per-cluster culling, which nothing in this
-    /// pass does yet anyway.
-    fn from_caps(caps: &crcbl_hal::DeviceCaps) -> Self {
-        let indirect = if caps.supports(crcbl_hal::Features::DRAW_INDIRECT_COUNT) {
-            Self::Count
-        } else {
-            Self::PerBatch
-        };
+    /// One value per [`GeometryPath`] since 2026-08: the mesh-shader path used
+    /// to degrade to an indirect tail and log that it had, because there was no
+    /// mesh pipeline to select.
+    const fn from_caps(caps: &crcbl_hal::DeviceCaps) -> Self {
         match caps.geometry_path() {
+            GeometryPath::MeshShader => Self::Mesh,
             GeometryPath::IndirectCount => Self::Count,
             GeometryPath::IndirectPerBatch => Self::PerBatch,
-            GeometryPath::MeshShader => {
-                log::info!(
-                    "crcbl-render: the device selects GeometryPath::MeshShader, which the forward \
-                     pass has no tail for yet; drawing through {indirect:?} instead"
-                );
-                indirect
-            }
         }
+    }
+
+    /// Whether this tail draws through a mesh pipeline, which decides the bind
+    /// group layout, the pipeline kind and the constant block — everything the
+    /// two shapes of this pass differ in.
+    const fn is_mesh(self) -> bool {
+        matches!(self, Self::Mesh)
     }
 }
 
@@ -395,9 +395,18 @@ pub struct ForwardRenderer {
     /// The cull and draw-argument passes, and the indirect arguments they
     /// produce.
     draws: DrawGen,
-    /// Which indirect call the forward pass records — the device's
-    /// [`GeometryPath`], resolved once.
+    /// Which call the forward pass records — the device's [`GeometryPath`],
+    /// resolved once.
     emit: EmitTail,
+    /// §3.5's clusters, and **only on [`EmitTail::Mesh`]**: the two indirect
+    /// tails draw the same geometry out of the index pool and read none of
+    /// this. `None` is therefore the ordinary state on most devices rather than
+    /// a failure, and it is also what makes a fall-through impossible — see
+    /// [`ForwardRenderer::geometry_path`].
+    clusters: Option<ClusterPool>,
+    /// How many clusters each bucket's mesh has, which is the x extent of its
+    /// dispatch. Zero on the indirect tails, where nothing dispatches.
+    bucket_clusters: [u32; BUCKET_COUNT as usize],
 
     // Per-frame uniforms, one set per frame in flight.
     uniforms: Vec<BufferHandle>,
@@ -458,6 +467,9 @@ struct Rollback {
     /// buffers each — and which clean themselves up on their own failure path,
     /// so this only carries one that was built.
     draws: Option<DrawGen>,
+    /// The cluster buffers, which own three buffers and are built on the
+    /// mesh-shader path alone.
+    clusters: Option<ClusterPool>,
 }
 
 impl Rollback {
@@ -484,6 +496,9 @@ impl Rollback {
         }
         for handle in self.buffers {
             device.destroy_buffer(handle);
+        }
+        if let Some(clusters) = self.clusters {
+            clusters.destroy(device);
         }
         if let Some(draws) = self.draws {
             draws.destroy(device);
@@ -536,6 +551,15 @@ impl ForwardRenderer {
         target_format: Format,
         rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
+        // Resolved before anything is created, because it decides the *shape*
+        // of what is created — the bind group layout, which pipeline kind the
+        // pass builds, and what a bucket's constant block says. A device on the
+        // mesh path never builds the raster pipeline and a device on either
+        // indirect tail never builds the mesh one, which is what makes "the
+        // frame came out of the mesh stage" a fact about the object graph
+        // rather than a claim about a branch.
+        let emit = EmitTail::from_caps(&device.caps());
+
         let (pool, cube_mesh, pyramid_mesh) = Self::build_geometry(device, queue)?;
         // The handles are `Copy`, so they can be read out before the pool
         // becomes the rollback's — which it must be before the first `?` below,
@@ -624,7 +648,31 @@ impl ForwardRenderer {
         let runs: Vec<BufferHandle> = (0..instance_buffers.len())
             .map(|frame| draws.runs(frame))
             .collect();
+        let args: Vec<BufferHandle> = (0..instance_buffers.len())
+            .map(|frame| draws.args(frame))
+            .collect();
         rollback.draws = Some(draws);
+
+        // §3.5's clusters, on the path that reads them and on no other. The
+        // records are `crcbl-shaders`' — cooked, because the builder is
+        // `crcbl-scene`'s and the renderer must not depend on that crate — and
+        // they arrive in bucket-mesh order so a bucket's range is its own
+        // index. See `crate::cluster_pool`.
+        let mut bucket_clusters = [0u32; BUCKET_COUNT as usize];
+        if emit.is_mesh() {
+            let mut cooked: [crcbl_shaders::meshlet::MeshClusters; BUCKET_COUNT as usize] =
+                Default::default();
+            cooked[CUBE_BUCKET] = crcbl_shaders::meshlet::cube_clusters();
+            cooked[PYRAMID_BUCKET] = crcbl_shaders::meshlet::pyramid_clusters();
+            let clusters = ClusterPool::new(device, "forward", &cooked)?;
+            for (bucket, count) in bucket_clusters.iter_mut().enumerate() {
+                *count = clusters
+                    .range(bucket)
+                    .unwrap_or_else(|| unreachable!("one cluster range per bucket, in order"))
+                    .count;
+            }
+            rollback.clusters = Some(clusters);
+        }
 
         // --- the mesh pass ---
         //
@@ -632,17 +680,28 @@ impl ForwardRenderer {
         // because a lit mesh is not a Tier A feature. The bindless shape — a
         // trailing `VARIABLE_COUNT | PARTIALLY_BOUND | UPDATE_AFTER_BIND`
         // texture array — is topic 03's, at P3.
-        let mesh_entries = [
+        // **Which stage pulls the geometry**, and the only thing the two shapes
+        // of this layout disagree about for bindings 0 to 8. `ShaderStages::MESH`
+        // is outside `GRAPHICS` and `ALL`, so it is named rather than implied,
+        // and every backend refuses a layout carrying it on a device without
+        // `Features::MESH_SHADER` — which is exactly the device that never
+        // reaches this arm.
+        let geometry = if emit.is_mesh() {
+            ShaderStages::MESH
+        } else {
+            ShaderStages::VERTEX
+        };
+        let mut mesh_entries = vec![
             BindGroupLayoutEntry {
                 binding: 0,
-                visibility: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+                visibility: geometry.union(ShaderStages::FRAGMENT),
                 kind: BindingKind::UniformBuffer { dynamic: false },
                 count: 1,
                 flags: BindingFlags::empty(),
             },
             BindGroupLayoutEntry {
                 binding: 1,
-                visibility: ShaderStages::VERTEX,
+                visibility: geometry,
                 kind: BindingKind::StorageBuffer {
                     // The shader says `StructuredBuffer`, not
                     // `RWStructuredBuffer`, so this is the truth rather than a
@@ -655,7 +714,7 @@ impl ForwardRenderer {
             },
             BindGroupLayoutEntry {
                 binding: 2,
-                visibility: ShaderStages::VERTEX,
+                visibility: geometry,
                 kind: BindingKind::StorageBuffer {
                     // `StructuredBuffer` again: the vertex stage reads its
                     // instance and writes nothing. The *host* writes this one
@@ -669,7 +728,7 @@ impl ForwardRenderer {
             },
             BindGroupLayoutEntry {
                 binding: 3,
-                visibility: ShaderStages::VERTEX,
+                visibility: geometry,
                 // `dynamic: true`, and it is the whole mechanism: it is what
                 // lets a draw say where its run of instances starts without
                 // `draw_indexed`'s own base instance, which the module docs and
@@ -681,7 +740,7 @@ impl ForwardRenderer {
             },
             BindGroupLayoutEntry {
                 binding: 4,
-                visibility: ShaderStages::VERTEX,
+                visibility: geometry,
                 kind: BindingKind::StorageBuffer {
                     // The mesh table. `StructuredBuffer` again — the vertex
                     // stage looks its mesh up and writes nothing — and one
@@ -695,7 +754,7 @@ impl ForwardRenderer {
             },
             BindGroupLayoutEntry {
                 binding: 5,
-                visibility: ShaderStages::VERTEX,
+                visibility: geometry,
                 kind: BindingKind::StorageBuffer {
                     // The per-bucket runs of surviving instances. Read-only
                     // here and written by the draw-argument pass, which is a
@@ -719,7 +778,7 @@ impl ForwardRenderer {
                 // in `msl/mesh.metal` still takes `materials [[buffer(6)]]`
                 // whether it reads it or not, so dropping VERTEX would break
                 // Metal alone, on a runner this team cannot debug on.
-                visibility: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+                visibility: geometry.union(ShaderStages::FRAGMENT),
                 kind: BindingKind::StorageBuffer {
                     // The material table. One buffer in every frame's group,
                     // like the mesh table above and unlike the instance ring:
@@ -737,7 +796,7 @@ impl ForwardRenderer {
                 // every global in every entry point — `vertexMain` in
                 // `msl/mesh.metal` takes the texture whether it reads it or
                 // not, so a layout without VERTEX would break Metal alone.
-                visibility: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+                visibility: geometry.union(ShaderStages::FRAGMENT),
                 // **`D2Array`, and the layout is where wgpu wants to hear it.**
                 // The other three backends read the dimension off the bound
                 // view and never consult this; WebGPU compares the two at
@@ -760,12 +819,39 @@ impl ForwardRenderer {
             },
             BindGroupLayoutEntry {
                 binding: 8,
-                visibility: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+                visibility: geometry.union(ShaderStages::FRAGMENT),
                 kind: BindingKind::Sampler,
                 count: 1,
                 flags: BindingFlags::empty(),
             },
         ];
+        if emit.is_mesh() {
+            // §3.5's four extra reads, and only on the path that has them.
+            // Adding them unconditionally would make every device declare four
+            // buffers `mesh.slang` does not name — and WebGPU, which checks a
+            // bind group against its layout entry for entry, would then need
+            // four buffers created for a path that never reads them.
+            //
+            // `read_only: true` on all four, which is the truth rather than a
+            // hint: the mesh stage indexes them and writes nothing, and it is
+            // what lets the graph merge read-after-read.
+            let cluster_read = BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            };
+            mesh_entries.extend((9..=12).map(|binding| BindGroupLayoutEntry {
+                binding,
+                // **Not the fragment stage.** These four are the geometry
+                // stage's alone, and `mesh_cluster.slang` has no fragment entry
+                // point of its own to materialise them into — its fragment
+                // stage is `mesh.slang`'s, which names bindings 0 to 8 and
+                // nothing above them.
+                visibility: geometry,
+                kind: cluster_read,
+                count: 1,
+                flags: BindingFlags::empty(),
+            }));
+        }
         let mesh_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("mesh frame"),
             entries: &mesh_entries,
@@ -776,7 +862,15 @@ impl ForwardRenderer {
         // block has to fit inside one stride. Read from the device rather than
         // assumed, exactly as `crate::sprite_pass` does: 256 on WebGPU, 64 on a
         // typical desktop Vulkan driver.
+        //
+        // **Both blocks are sixteen bytes**, so the stride is one number rather
+        // than one per path: `mesh::DrawConstants` is a `uint` and three of
+        // padding, and `meshlet::ClusterDrawConstants` is four `uint`s that say
+        // something. Which of the two a bucket's block holds is decided below.
         let alignment = device.caps().limits.min_uniform_buffer_offset_alignment;
+        const _: () = assert!(
+            mesh::DRAW_CONSTANTS_SIZE == crcbl_shaders::meshlet::CLUSTER_DRAW_CONSTANTS_SIZE
+        );
         let draw_stride = u32::try_from(
             (mesh::DRAW_CONSTANTS_SIZE as u64).next_multiple_of(alignment),
         )
@@ -803,17 +897,34 @@ impl ForwardRenderer {
             .unwrap_or_else(|| unreachable!("draw generation was placed in the rollback above"));
         let mut bucket_constants = [0u32; BUCKET_COUNT as usize];
         for (bucket, offset) in bucket_constants.iter_mut().enumerate() {
+            let index = bucket;
             let bucket =
                 u32::try_from(bucket).unwrap_or_else(|_| unreachable!("a table of two buckets"));
             *offset = bucket * draw_stride;
-            device.write_buffer(
-                draw_constants,
-                u64::from(*offset),
-                &mesh::DrawConstants {
-                    base: draws.bucket_base(bucket),
+            let base = draws.bucket_base(bucket);
+            // The mesh path's block says three more things — where this
+            // bucket's mesh's clusters are, how many it has, and which element
+            // of the indirect arguments holds its instance count — because a
+            // dispatch carries none of them and a `draw_indexed_indirect` does
+            // not need them. All three are fixed when the bucket table is,
+            // exactly like `base`.
+            let block = if emit.is_mesh() {
+                crcbl_shaders::meshlet::ClusterDrawConstants {
+                    base,
+                    cluster_base: rollback
+                        .clusters
+                        .as_ref()
+                        .and_then(|clusters| clusters.range(index))
+                        .unwrap_or_else(|| unreachable!("the mesh path built a cluster pool"))
+                        .base,
+                    cluster_count: bucket_clusters[index],
+                    bucket,
                 }
-                .to_bytes(),
-            )?;
+                .to_bytes()
+            } else {
+                mesh::DrawConstants { base }.to_bytes()
+            };
+            device.write_buffer(draw_constants, u64::from(*offset), &block)?;
         }
 
         let mut uniforms = Vec::with_capacity(FRAMES_IN_FLIGHT);
@@ -826,7 +937,7 @@ impl ForwardRenderer {
                 memory: MemoryLocation::HostUpload,
             })?;
             rollback.buffers.push(buffer);
-            let entries = [
+            let mut entries = vec![
                 BindGroupEntry {
                     binding: 0,
                     array_index: 0,
@@ -901,6 +1012,38 @@ impl ForwardRenderer {
                     resource: BindingResource::Sampler(base_color_sampler),
                 },
             ];
+            if let Some(clusters) = rollback.clusters.as_ref() {
+                entries.extend([
+                    BindGroupEntry {
+                        binding: 9,
+                        array_index: 0,
+                        // The same three buffers in every frame's group, on the
+                        // mesh table's terms: clusters are written when the
+                        // pool is built and never again.
+                        resource: BindingResource::whole_buffer(clusters.clusters()),
+                    },
+                    BindGroupEntry {
+                        binding: 10,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(clusters.vertices()),
+                    },
+                    BindGroupEntry {
+                        binding: 11,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(clusters.corners()),
+                    },
+                    BindGroupEntry {
+                        binding: 12,
+                        array_index: 0,
+                        // **This frame's arguments, read as data.** The mesh
+                        // path records no indirect call at all; what it wants
+                        // out of this buffer is the one word only the GPU knows
+                        // — how many instances survived into each bucket — and
+                        // it is this frame's slot for the ring's reason.
+                        resource: BindingResource::whole_buffer(args[frame]),
+                    },
+                ]);
+            }
             let group = device.create_bind_group(&BindGroupDesc {
                 label: Some("mesh frame"),
                 layout: mesh_layout,
@@ -944,36 +1087,88 @@ impl ForwardRenderer {
             dxil: &MESH.dxil_containers(),
         })?;
         let mesh_targets = [ColorTargetState::opaque(Format::Rgba16Float)];
-        let mesh_pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {
-            label: Some("forward mesh"),
-            layout: mesh_pipeline_layout,
-            vertex: ShaderEntry {
-                module: mesh_module,
-                entry_point: mesh_vertex,
-            },
-            fragment: Some(ShaderEntry {
-                module: mesh_module,
-                entry_point: mesh_fragment,
-            }),
-            primitive: PrimitiveState {
-                // Back-face culling is on from the first mesh. The cube's
-                // winding is asserted by `crcbl-shaders`' own tests, so a face
-                // that vanished would be a *test* failure rather than a
-                // debugging session — and a mesh drawn without culling would let
-                // a winding mistake survive into P7's geometry pool.
-                cull_mode: CullMode::Back,
-                ..PrimitiveState::default()
-            },
-            // Milestone 3's depth test, and the seam's default is already
-            // reversed-Z: `Greater` against `D32Float`, writes on. The clear
-            // value that agrees with it comes from the graph
-            // (`PassBuilder::clear_depth`), and the projection matrix that
-            // agrees with *both* comes from `crate::camera`.
-            depth_stencil: Some(DepthStencilState::default()),
-            multisample: MultisampleState::default(),
-            color_targets: &mesh_targets,
-        });
+        // Shared by both pipeline shapes, because the only thing that differs
+        // is which stage produces the geometry.
+        //
+        // Back-face culling is on from the first mesh. The cube's winding is
+        // asserted by `crcbl-shaders`' own tests, so a face that vanished would
+        // be a *test* failure rather than a debugging session — and a mesh
+        // drawn without culling would let a winding mistake survive into P7's
+        // geometry pool. The mesh stage emits its corner triples in the index
+        // buffer's own order, so the winding it produces is the same one.
+        let primitive = PrimitiveState {
+            cull_mode: CullMode::Back,
+            ..PrimitiveState::default()
+        };
+        // Milestone 3's depth test, and the seam's default is already
+        // reversed-Z: `Greater` against `D32Float`, writes on. The clear value
+        // that agrees with it comes from the graph (`PassBuilder::clear_depth`),
+        // and the projection matrix that agrees with *both* comes from
+        // `crate::camera`.
+        let depth_stencil = Some(DepthStencilState::default());
+        let (mesh_pipeline, cluster_module) = if emit.is_mesh() {
+            // **The mesh stage's module is `mesh_cluster.slang`; the fragment
+            // stage's is still `mesh.slang`'s.** A pipeline takes a module per
+            // stage, so the shading — Lambert, Blinn, the material row, the
+            // page sample — is the same code both paths run rather than a copy
+            // that agrees today. `mesh_cluster.slang`'s header carries the
+            // argument, and its `VertexOutput` is what the two agree through.
+            let cluster_entry = entry(&MESH_CLUSTER, Stage::Mesh)?;
+            let cluster_module = device.create_shader_module(&ShaderModuleDesc {
+                label: Some("mesh_cluster.slang"),
+                spirv: MESH_CLUSTER.spirv(),
+                // `None`, and it is the whole reason this is a second file:
+                // WGSL cannot express a mesh stage at all.
+                wgsl: MESH_CLUSTER.wgsl(),
+                msl: MESH_CLUSTER.msl(),
+                dxil: &MESH_CLUSTER.dxil_containers(),
+            })?;
+            let pipeline = device.create_mesh_pipeline(&MeshPipelineDesc {
+                label: Some("forward mesh cluster"),
+                layout: mesh_pipeline_layout,
+                // **No amplification stage.** Per-cluster culling is what one
+                // would be for and that is §3.5's own later slice, so a task
+                // stage here would be a stage that dispatched its mesh stage
+                // and did nothing else — and `Features::TASK_SHADER` is a
+                // separate capability this path would then need.
+                task: None,
+                mesh: ShaderEntry {
+                    module: cluster_module,
+                    entry_point: cluster_entry,
+                },
+                fragment: Some(ShaderEntry {
+                    module: mesh_module,
+                    entry_point: mesh_fragment,
+                }),
+                primitive,
+                depth_stencil,
+                multisample: MultisampleState::default(),
+                color_targets: &mesh_targets,
+            });
+            (pipeline, Some(cluster_module))
+        } else {
+            let pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("forward mesh"),
+                layout: mesh_pipeline_layout,
+                vertex: ShaderEntry {
+                    module: mesh_module,
+                    entry_point: mesh_vertex,
+                },
+                fragment: Some(ShaderEntry {
+                    module: mesh_module,
+                    entry_point: mesh_fragment,
+                }),
+                primitive,
+                depth_stencil,
+                multisample: MultisampleState::default(),
+                color_targets: &mesh_targets,
+            });
+            (pipeline, None)
+        };
         device.destroy_shader_module(mesh_module);
+        if let Some(module) = cluster_module {
+            device.destroy_shader_module(module);
+        }
         let mesh_pipeline = mesh_pipeline?;
         rollback.pipelines.push(mesh_pipeline);
 
@@ -1084,7 +1279,9 @@ impl ForwardRenderer {
             draws: rollback.draws.take().unwrap_or_else(|| {
                 unreachable!("draw generation was placed in the rollback above")
             }),
-            emit: EmitTail::from_caps(&device.caps()),
+            emit,
+            clusters: rollback.clusters.take(),
+            bucket_clusters,
             uniforms,
             draw_constants,
             mesh_groups,
@@ -1542,6 +1739,16 @@ impl ForwardRenderer {
         let indices = self.pool.index_buffer();
         let emit = self.emit;
         let stride = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE as u32;
+        // **The mesh path's dispatch bound, and it is a bound rather than an
+        // answer.** `draw_mesh_tasks` takes its group counts as arguments —
+        // the seam has no indirect form of it — so the y extent is every slot
+        // the instance pool has ever handed out, and the mesh stage reads the
+        // bucket's real survivor count out of the arguments and emits nothing
+        // past it. Same number `begin_frame` gives the cull dispatch, for the
+        // same reason: a removed instance leaves a hole and the live ones above
+        // it are still in the array.
+        let instance_bound = self.instances.slot_count();
+        let clusters = self.bucket_clusters;
         // One call per bucket, always — the number the CPU records does not
         // depend on what is in the scene, which is the whole of what §3.3 asks
         // for. An empty bucket's arguments carry an instance count of zero.
@@ -1560,66 +1767,98 @@ impl ForwardRenderer {
             })
             .collect();
 
-        graph
+        let pass = graph
             .add_render_pass("forward")
             .clear_color(scene_color, SCENE_CLEAR)
             .clear_depth(scene_depth)
-            // The three buffers the draws come out of. Declaring them is what
-            // makes the graph transition the arguments out of the compute
-            // pass's `ShaderReadWrite` — the seam calls that the single most
-            // important barrier in a GPU-driven frame, and its absence produces
+            // The buffers the draws come out of. Declaring them is what makes
+            // the graph transition them out of the compute pass's
+            // `ShaderReadWrite` — the seam calls that the single most important
+            // barrier in a GPU-driven frame, and its absence produces
             // "sometimes nothing draws".
-            .read_buffer(generated.runs_id)
-            .use_buffer(generated.args_id, ResourceState::IndirectArgument)
-            .use_buffer(generated.counts_id, ResourceState::IndirectArgument)
-            .execute(move |ctx| {
-                let encoder = ctx.encoder();
-                encoder.bind_graphics_pipeline(pipeline);
+            .read_buffer(generated.runs_id);
+        let pass = if emit.is_mesh() {
+            // **The same arguments, read as data rather than executed.** The
+            // mesh path issues no indirect call, so the buffer it needs the
+            // barrier for is a shader read — and the per-bucket draw *counts*
+            // are not read at all, because nothing here is a draw whose count
+            // could come from memory.
+            pass.read_buffer(generated.args_id)
+        } else {
+            pass.use_buffer(generated.args_id, ResourceState::IndirectArgument)
+                .use_buffer(generated.counts_id, ResourceState::IndirectArgument)
+        };
+        pass.execute(move |ctx| {
+            let encoder = ctx.encoder();
+            encoder.bind_graphics_pipeline(pipeline);
+            if !emit.is_mesh() {
                 // The index pool is bound whole, at offset zero, for every mesh
                 // in it: the mesh's place is the draw's first index and its
                 // table entry, not a buffer offset. That is what makes one bind
                 // enough for the scene P7 puts in here.
+                //
+                // A mesh pipeline has no index buffer at all — the corner
+                // triples come out of the cluster records — so binding one
+                // would be a bind no stage could read.
                 encoder.bind_index_buffer(indices, 0, IndexFormat::Uint32);
-                for (constant_offset, args_offset, count_offset) in calls {
-                    // The block written at build for this bucket: where its run
-                    // of surviving instances starts. `SV_InstanceID` walks the
-                    // run from there, each entry names an instance, the
-                    // instance names its mesh, and the mesh table says where
-                    // that mesh's vertices start — none of which the draw call
-                    // carries.
-                    encoder.bind_group(0, group, &[constant_offset], layout);
-                    match emit {
-                        EmitTail::Count => {
-                            encoder.draw_indexed_indirect_count(&DrawIndirectCount {
-                                args: generated.args,
-                                args_offset,
-                                count_buffer: generated.counts,
-                                count_offset,
-                                // One argument structure per bucket, so this is
-                                // the ceiling rather than a guess: the count in
-                                // the buffer is zero or one and the GPU decides
-                                // which.
-                                max_draw_count: 1,
-                                stride,
-                            });
-                        }
-                        EmitTail::PerBatch => {
-                            encoder.draw_indexed_indirect(&DrawIndirect {
-                                args: generated.args,
-                                offset: args_offset,
-                                // Read the bucket's one structure unconditionally
-                                // — a device without a GPU-side count cannot ask
-                                // whether there is anything in it, and an
-                                // instance count of zero draws nothing anyway.
-                                // That is why the two paths are the same picture
-                                // and not an approximation of each other.
-                                draw_count: 1,
-                                stride,
-                            });
+            }
+            for (bucket, (constant_offset, args_offset, count_offset)) in
+                calls.into_iter().enumerate()
+            {
+                // The block written at build for this bucket: where its run
+                // of surviving instances starts. `SV_InstanceID` walks the
+                // run from there, each entry names an instance, the
+                // instance names its mesh, and the mesh table says where
+                // that mesh's vertices start — none of which the draw call
+                // carries. The mesh path's block says the same and three
+                // things more; see `meshlet::ClusterDrawConstants`.
+                encoder.bind_group(0, group, &[constant_offset], layout);
+                match emit {
+                    EmitTail::Mesh => {
+                        // One workgroup per (cluster, instance slot). Both
+                        // extents are upper bounds the CPU knows without
+                        // looking at the scene, and a group past either one
+                        // emits no vertices — so the picture is the culled
+                        // set, exactly as it is on the two tails below.
+                        //
+                        // A pool with no slots is a dispatch of no workgroups,
+                        // which Metal rejects outright rather than treating as
+                        // a no-op, so it is not recorded at all.
+                        if instance_bound > 0 && clusters[bucket] > 0 {
+                            encoder.draw_mesh_tasks(clusters[bucket], instance_bound, 1);
                         }
                     }
+                    EmitTail::Count => {
+                        encoder.draw_indexed_indirect_count(&DrawIndirectCount {
+                            args: generated.args,
+                            args_offset,
+                            count_buffer: generated.counts,
+                            count_offset,
+                            // One argument structure per bucket, so this is
+                            // the ceiling rather than a guess: the count in
+                            // the buffer is zero or one and the GPU decides
+                            // which.
+                            max_draw_count: 1,
+                            stride,
+                        });
+                    }
+                    EmitTail::PerBatch => {
+                        encoder.draw_indexed_indirect(&DrawIndirect {
+                            args: generated.args,
+                            offset: args_offset,
+                            // Read the bucket's one structure unconditionally
+                            // — a device without a GPU-side count cannot ask
+                            // whether there is anything in it, and an
+                            // instance count of zero draws nothing anyway.
+                            // That is why the two paths are the same picture
+                            // and not an approximation of each other.
+                            draw_count: 1,
+                            stride,
+                        });
+                    }
                 }
-            });
+            }
+        });
 
         // The tonemap group names a *graph-owned* view, so it can only be built
         // once the graph has realised one. It is cached against the view handle
@@ -1722,6 +1961,26 @@ impl ForwardRenderer {
         &self.draws
     }
 
+    /// Which [`GeometryPath`] this renderer was **built for** — not what the
+    /// device reports, but what it actually built.
+    ///
+    /// The two are the same by construction and that is the point of asking the
+    /// renderer rather than the device: [`GeometryPath::MeshShader`] here means
+    /// `build` created a mesh pipeline out of `mesh_cluster.slang` and its
+    /// cluster buffers, and created **no** raster pipeline for the pass to fall
+    /// back to. So a frame this renderer drew came out of a mesh stage, and a
+    /// silent degradation is not a state it has — which is the claim a golden
+    /// image on its own could never make, because a fall-through draws the same
+    /// picture.
+    #[must_use]
+    pub const fn geometry_path(&self) -> GeometryPath {
+        match self.emit {
+            EmitTail::Mesh => GeometryPath::MeshShader,
+            EmitTail::Count => GeometryPath::IndirectCount,
+            EmitTail::PerBatch => GeometryPath::IndirectPerBatch,
+        }
+    }
+
     /// Which frame-in-flight slot the last [`ForwardRenderer::begin_frame`]
     /// rotated to, which is the slot every per-frame buffer is indexed by.
     #[must_use]
@@ -1774,6 +2033,9 @@ impl ForwardRenderer {
             device.destroy_buffer(buffer);
         }
         device.destroy_buffer(self.draw_constants);
+        if let Some(clusters) = self.clusters {
+            clusters.destroy(device);
+        }
         self.draws.destroy(device);
         self.materials.destroy(device);
         self.instances.destroy(device);
@@ -2407,15 +2669,24 @@ mod tests {
         }
     }
 
-    /// A device selecting [`GeometryPath::MeshShader`] has no tail here yet, and
-    /// **degrades to an indirect one rather than recording nothing**.
+    /// **A device selecting [`GeometryPath::MeshShader`] draws through a mesh
+    /// pipeline, and records no indirect draw and no index-buffer bind at all.**
     ///
-    /// The shape this guards against is a `match` arm that silently draws no
-    /// draws at all — "not supported here" arriving as a black screen. §3.5's
-    /// amplification stage is a slice of its own; until it exists this device
-    /// draws the same picture through the tail its other features allow.
+    /// The three halves are one claim. That it dispatched says the path is
+    /// wired; that it recorded *no* `DrawIndexedIndirect` of either kind says it
+    /// did not quietly fall through to a tail that draws the same picture; and
+    /// that it bound no index buffer says the geometry really came out of the
+    /// cluster records rather than out of the index pool. Until 2026-08 this
+    /// device degraded and logged that it had, which is exactly the shape —
+    /// "not implemented" arriving as a passing frame — the three together rule
+    /// out.
+    ///
+    /// The dispatch extents are checked too: x is the bucket's mesh's cluster
+    /// count, y the instance pool's slot count. A dispatch of `(1, 1, 1)` would
+    /// draw one cluster of one instance and look perfectly healthy on a scene
+    /// with one of each.
     #[test]
-    fn a_mesh_shader_device_still_draws_through_an_indirect_tail() {
+    fn a_mesh_shader_device_draws_through_a_mesh_pipeline() {
         use crcbl_hal::null::Command;
 
         let recorder = Recorder::new();
@@ -2450,22 +2721,48 @@ mod tests {
         let queue = device.queue(QueueKind::Graphics).expect("always present");
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        assert_eq!(
+            renderer.geometry_path(),
+            GeometryPath::MeshShader,
+            "the renderer must have *built* the mesh path, not merely been offered it"
+        );
+        let slots = renderer.instances.slot_count();
+        let clusters = renderer.bucket_clusters;
         let frame = frame(device.as_ref(), &mut renderer, queue);
 
-        let draws = recorder
-            .commands()
-            .into_iter()
-            .filter(|command| {
-                matches!(
-                    command,
-                    Command::DrawIndexedIndirectCount(_) | Command::DrawIndexedIndirect(_)
-                )
-            })
-            .count();
+        let mut dispatched = Vec::new();
+        let mut index_binds = 0;
+        for command in recorder.commands() {
+            match command {
+                Command::DrawMeshTasks { x, y, z } => dispatched.push((x, y, z)),
+                Command::DrawIndexedIndirectCount(_) | Command::DrawIndexedIndirect(_) => {
+                    panic!(
+                        "the mesh path recorded an indirect draw, which is the silent \
+                         fall-through this test exists to rule out"
+                    )
+                }
+                Command::BindIndexBuffer { .. } => index_binds += 1,
+                _ => {}
+            }
+        }
         assert_eq!(
-            u32::try_from(draws).expect("a small count"),
-            BUCKET_COUNT,
-            "every bucket must still be drawn"
+            dispatched,
+            vec![
+                (clusters[CUBE_BUCKET], slots, 1),
+                (clusters[PYRAMID_BUCKET], slots, 1)
+            ],
+            "one dispatch per bucket, sized to that bucket's mesh's clusters and to \
+             every instance slot"
+        );
+        assert!(
+            clusters.iter().all(|&count| count > 0),
+            "a bucket with no clusters dispatches nothing, so this comparison would \
+             pass against an empty pool: {clusters:?}"
+        );
+        assert_eq!(
+            index_binds, 0,
+            "a mesh pipeline has no index buffer; binding one would mean the geometry \
+             came from the index pool after all"
         );
 
         frame.finish(device.as_ref(), renderer);

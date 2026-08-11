@@ -207,6 +207,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The forward pass draws through a mesh pipeline, and it is the same
+  picture.** `docs/plan/03-gpu-driven-rendering.md` §3.5's geometry path exists:
+  `EmitTail::Mesh` is selected from `GeometryPath::MeshShader`,
+  `crcbl_render::cluster_pool` uploads a mesh's clusters, and
+  `mesh_cluster.slang`'s mesh stage emits them.
+  `ForwardRenderer::geometry_path()` reports which path a renderer resolved.
+
+  The GPU-facing record is new — `crcbl_shaders::meshlet::Meshlet` with
+  `MESHLET_STRIDE` and `ClusterBounds`, beside `GpuMaterial` and `MeshVertex`,
+  whose offsets are pinned against what `spirv-dis` reports the shader expects.
+  `crcbl_scene::meshlet::build_meshlets` is still the builder and re-exports it;
+  the record lives in `crcbl-shaders` because `crcbl-render` must not depend on
+  `crcbl-scene`, which would pull `gltf` into the renderer. The builder's
+  `usize` offsets narrow through `Meshlet::new`, the only constructor, which
+  refuses an offset a `u32` cannot hold rather than truncating it.
+
+  **The mesh path matches the indirect paths' own golden, not one of its own** —
+  `tests/golden/mesh.png` at zero differing pixels on an RX 7900 XTX, and
+  `every_geometry_path_draws_the_same_frame` compares all three paths byte for
+  byte in one process. A new golden for a new path would have passed whatever
+  that path happened to draw.
+
+  **No app selects it yet.** `Features::GPU_DRIVEN` does not include
+  `MESH_SHADER`, and `crcbl::GpuContextDesc::default` asks for `GPU_DRIVEN`, so
+  the samples and `crates/crcbl/tests/golden/cube.png` still run `IndirectCount`
+  on hardware that could do better. Only the vk device tests request the flag.
+
+  Not built, deliberately: per-cluster culling in an amplification stage (there
+  is no amplification stage at all — `ClusterBounds` is uploaded and read by
+  nothing), cluster LOD, and any bake cache.
+
 - **`apps/hud` runs in a browser, so every sample now has a demo on the Pages
   site.** It gained a `web.rs`, a `cdylib` library named `crcbl_hud`, the polled
   `PolledGpu`/`PendingLoop` bring-up the other samples use, and an entry at each
