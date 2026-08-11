@@ -1,10 +1,10 @@
 //! Milestones 3, 4 and 5: the lit mesh, through the render graph.
 //!
 //! Depth testing, the directional light, the `Rgba16Float` scene target and its
-//! tonemap, the orthographic camera, a second mesh at a non-zero base vertex,
-//! and the graph's transient pool under a resize storm — against three
-//! checked-in references, `tests/golden/mesh.png`, `mesh_ortho.png` and
-//! `mesh_second.png`.
+//! tonemap, the orthographic camera, a second mesh at a non-zero base vertex, a
+//! third that is more than one cluster, and the graph's transient pool under a
+//! resize storm — against four checked-in references, `tests/golden/mesh.png`,
+//! `mesh_ortho.png`, `mesh_second.png` and `mesh_clusters.png`.
 //!
 //! It is also the suite's shared scene, which is why it is one module rather
 //! than several: `queries`, `draw_gen` and `depth_probe` all import its extent,
@@ -645,6 +645,142 @@ fn a_mesh_at_a_non_zero_base_vertex_draws_its_own_geometry() {
     renderer.destroy(headless.device.as_ref());
     pool.destroy(headless.device.as_ref());
     headless.finish();
+}
+
+/// Where the multi-cluster golden puts the open box — [`PYRAMID_AT`]'s place,
+/// because no frame here holds both and the reasoning about it is the same:
+/// left of the cube at [`two_mesh_camera`]'s distance, and clear of it.
+const OPEN_BOX_AT: glam::Vec3 = PYRAMID_AT;
+
+/// One frame of the cube and the open box, on whichever geometry path
+/// `optional` selects, with the device opened and closed around it.
+///
+/// Returns the path the renderer **built** rather than the one the device
+/// offers — see
+/// [`the_mesh_shader_path_matches_the_indirect_path_s_golden`] on why those are
+/// different claims and why only the first one is evidence.
+fn render_open_box(optional: Features) -> (crcbl_hal::GeometryPath, crcbl_golden::Image) {
+    let headless = Headless::open_for_mesh_with(optional);
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds");
+    let path = renderer.geometry_path();
+    renderer.set_open_box(Some(glam::Mat4::from_translation(OPEN_BOX_AT)));
+
+    let frame = render_mesh(&headless, &mut renderer, &mut pool, &two_mesh_camera());
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+    (path, frame.image)
+}
+
+/// How many pixels of the frame's left third the given channel leads by a clear
+/// margin.
+///
+/// Ratios between channels rather than an exact colour, for the reason
+/// [`a_mesh_at_a_non_zero_base_vertex_draws_its_own_geometry`] gives: what
+/// survives Lambert, Blinn and the tonemap is which channel leads.
+fn leading_channel_texels(image: &crcbl_golden::Image, channel: usize, margin: u32) -> usize {
+    (0..MESH_EXTENT.1)
+        .flat_map(|y| (0..MESH_EXTENT.0 / 3).map(move |x| (x, y)))
+        .filter_map(|(x, y)| image.pixel(x, y))
+        .filter(|pixel| {
+            let value = u32::from(pixel[channel]);
+            (0..3)
+                .filter(|other| *other != channel)
+                .all(|other| value > u32::from(pixel[other]) + margin)
+        })
+        .count()
+}
+
+/// **A mesh of several clusters, drawn through both geometry paths, into one
+/// golden.**
+///
+/// `docs/plan/03-gpu-driven-rendering.md` §3.5's unit of work is a cluster, and
+/// until this frame no rendered frame had more than one of them per mesh: the
+/// cube is 24 vertices and the pyramid 16, against a bound of 64. So a mesh
+/// stage that ignored [`Meshlet::vertex_offset`] and
+/// [`Meshlet::triangle_offset`] *within* a mesh drew a correct picture of both,
+/// and `crcbl_shaders::meshlet::open_box_clusters` is the geometry that stops
+/// that being true — five clusters, one per face, four of them at offsets that
+/// are not zero.
+///
+/// [`Meshlet::vertex_offset`]: crcbl_shaders::meshlet::Meshlet::vertex_offset
+/// [`Meshlet::triangle_offset`]: crcbl_shaders::meshlet::Meshlet::triangle_offset
+///
+/// # What each assertion rules out
+///
+/// * **The two paths agree byte for byte.** One adapter, one driver, one scene:
+///   every differing pixel would be a difference the two submissions made. This
+///   is the comparison that gives the mesh path something to be wrong against,
+///   because the indirect path reads the index buffer and never touches a
+///   cluster record at all.
+/// * **Three hues, in the box's own third of the frame.** The visible faces are
+///   the floor, the `-X` wall and the `-Z` wall — grey, red-led and blue-led,
+///   and no two clusters of this mesh share a colour. A mesh stage that lost the
+///   per-cluster offsets emits face zero five times over, which is a grey square
+///   with no red and no blue anywhere in it: the same triangle count, the same
+///   buffer sizes, a different picture. That failure is invisible on the cube.
+/// * **The golden**, which is the picture that was reviewed.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_multi_cluster_mesh_draws_the_same_frame_through_both_geometry_paths() {
+    let (mesh_path, through_mesh_stage) =
+        render_open_box(Features::GPU_DRIVEN | Features::MESH_SHADER);
+    let (indirect_path, through_index_buffer) = render_open_box(Features::GPU_DRIVEN);
+    assert_eq!(
+        mesh_path,
+        crcbl_hal::GeometryPath::MeshShader,
+        "this test needs a device that selects the mesh path; radv reports \
+         VK_EXT_mesh_shader and `docs/backlog.md` is where a driver that does not belongs"
+    );
+    assert_ne!(
+        indirect_path, mesh_path,
+        "both arms built the same path, so this is a self-comparison rather than a \
+         comparison of two paths"
+    );
+
+    assert_eq!(
+        through_mesh_stage.pixels(),
+        through_index_buffer.pixels(),
+        "{mesh_path:?} and {indirect_path:?} draw the open box differently"
+    );
+
+    // The cube is still where the camera points, so nothing here can pass by
+    // drawing the box over the whole frame.
+    let centre = through_mesh_stage.pixel(128, 96).expect("inside");
+    assert!(
+        u32::from(centre[0]) + u32::from(centre[1]) + u32::from(centre[2]) > 60,
+        "the centre must still be the cube, got {centre:?}"
+    );
+
+    let red = leading_channel_texels(&through_mesh_stage, 0, 30);
+    let blue = leading_channel_texels(&through_mesh_stage, 2, 30);
+    eprintln!("vk e2e: open box — {red} red-led and {blue} blue-led texel(s) in its third");
+    assert!(
+        red > 200 && blue > 200,
+        "the open box's `-X` wall is red-led and its `-Z` wall blue-led, and only \
+         {red} and {blue} texel(s) of them are here — a mesh stage that drew cluster \
+         zero five times leaves this third one flat grey"
+    );
+
+    let reference =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/mesh_clusters.png");
+    let golden = crcbl_golden::Golden::new(reference);
+    let comparison = golden
+        .check(&through_mesh_stage)
+        .expect("the reference is readable")
+        .into_result()
+        .unwrap_or_else(|message| panic!("{message}"));
+    eprintln!(
+        "vk e2e: golden multi-cluster mesh — {}",
+        comparison.summary()
+    );
 }
 
 /// Milestone 4, measured rather than eyeballed: the directional light produces a

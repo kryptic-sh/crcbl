@@ -16,7 +16,7 @@
 //! `gltf`, and a renderer that depended on the glTF importer to describe its own
 //! geometry would have the direction backwards. So a caller hands this module
 //! cooked clusters. [`crcbl_shaders::meshlet::cube_clusters`] and its pyramid
-//! sibling are the cooked form of the two meshes the forward pass has resident,
+//! siblings are the cooked form of the meshes the forward pass has resident,
 //! and `crcbl-scene`'s own test is what checks them against the real builder.
 //!
 //! # It is only built on the mesh-shader path

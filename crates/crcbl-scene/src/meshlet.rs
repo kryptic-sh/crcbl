@@ -498,24 +498,39 @@ mod tests {
     /// arrangement honest: cooked data with the producer beside it, in the one
     /// crate that can see both.
     ///
-    /// It fails if the builder's clustering changes, if either mesh grows past
-    /// a cluster, if a bound in the committed record drifts by one ulp, or if
-    /// either mesh's vertex order stops being the dense ascending one that
-    /// makes its corner run its own index buffer.
+    /// It fails if the builder's clustering changes, if a mesh grows past the
+    /// cluster count the crate cooked for it, if a bound in the committed
+    /// record drifts by one ulp, or if a mesh's vertex order stops being the
+    /// dense ascending one that makes its corner run its own index buffer.
+    ///
+    /// **The open box is the one that is more than one cluster**, and it is the
+    /// only one here whose committed record is computed rather than written
+    /// out — see `crcbl_shaders::meshlet::open_box_clusters`. Comparing it for
+    /// equality is what makes that computation a claim about this builder
+    /// rather than about a second implementation of it.
     #[test]
     fn the_hardcoded_meshes_cluster_the_way_the_shaders_crate_says() {
-        for (name, vertices, indices, cooked) in [
+        for (name, vertices, indices, cooked, expected_clusters) in [
             (
                 "cube",
                 crcbl_shaders::mesh::cube_vertices(),
                 crcbl_shaders::mesh::cube_indices(),
                 crcbl_shaders::meshlet::cube_clusters(),
+                1,
             ),
             (
                 "pyramid",
                 crcbl_shaders::mesh::pyramid_vertices(),
                 crcbl_shaders::mesh::pyramid_indices(),
                 crcbl_shaders::meshlet::pyramid_clusters(),
+                1,
+            ),
+            (
+                "open box",
+                crcbl_shaders::mesh::open_box_vertices(),
+                crcbl_shaders::mesh::open_box_indices(),
+                crcbl_shaders::meshlet::open_box_clusters(),
+                crcbl_shaders::mesh::OPEN_BOX_FACES.len(),
             ),
         ] {
             let positions: Vec<[f32; 3]> = vertices
@@ -542,12 +557,29 @@ mod tests {
             // Anti-vacuity: three empty arrays would compare equal to three
             // empty arrays, and a mesh that clustered into nothing is exactly
             // what a broken builder produces.
-            assert_eq!(built.clusters().len(), 1, "{name} is one whole cluster");
+            assert_eq!(
+                built.clusters().len(),
+                expected_clusters,
+                "{name} is {expected_clusters} cluster(s)"
+            );
             assert_eq!(
                 built.triangles().len(),
                 indices.len(),
                 "{name}: every triangle reached a cluster"
             );
+            // And the mesh that exists to be several clusters is several: a
+            // cluster after the first starts part way into the mesh's own
+            // vertex run, which is the case no single-cluster mesh can produce
+            // however many of them are resident.
+            for cluster in built.clusters().iter().skip(1) {
+                assert!(
+                    cluster.vertex_offset > 0 && cluster.triangle_offset > 0,
+                    "{name}: cluster after the first is at offsets ({}, {}), so nothing here \
+                     exercises a run that does not start at zero",
+                    cluster.vertex_offset,
+                    cluster.triangle_offset
+                );
+            }
         }
     }
 

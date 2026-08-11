@@ -207,6 +207,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A mesh that clusters into more than one meshlet, and renders.** Both
+  resident meshes were a single cluster each, so a cluster with a non-zero
+  `vertex_offset` _within_ a mesh was covered by unit tests and by no rendered
+  frame — and per-cluster culling would have had nothing to reject.
+  `crcbl_shaders::mesh` gains an open box: a unit cube missing its `+Y` face,
+  each remaining face divided into 4×4 quads with unshared vertices, which
+  clusters into **five**, one per face. `ForwardRenderer` grew a third bucket to
+  draw it, resident but not instanced by default, so no existing golden moved.
+
+  Every coordinate is a multiple of a quarter, which is deliberate: the test
+  that pins the cooked clusters against the real builder compares bounds for
+  equality, and a trig-derived mesh would differ in the last place between
+  glibc, macOS and MSVC — a failure only a CI runner could show you. The one
+  irrational value is a radius of `sqrt(0.5)`, a single correctly-rounded
+  operation.
+
+  The box is open and inward-facing so that a camera exists from which every one
+  of its clusters is front-facing. A closed shape has none, and that camera is
+  what the culling work needs to assert nothing is rejected that should not be.
+
 - **Every sample that builds a renderer now asks for the mesh path too.**
   `horde`, `breakout`, `flappy` and `asteroids` each spell their own
   `optional_features` and were the four that stayed on `IndirectCount` after the

@@ -5931,12 +5931,34 @@ left:
   lavapipe at zero differing pixels. wgpu, WARP and Metal do not: each reports
   no `MESH_SHADER`, so those jobs keep drawing through an indirect tail and are
   the coverage that the fallback still works.
-- **Both resident meshes are one cluster each** (24 vertices / 12 triangles, and
-  16 / 6, against bounds of 64 / 124). So a cluster with a non-zero
-  `vertex_offset` _within_ a mesh is exercised by the builder's tests and by
-  `ClusterPool::concatenate`'s, but by no rendered frame. The mesh-relative to
-  pool-relative shift **is** rendered, because the pyramid's runs start after
-  the cube's. A mesh that needs several clusters is what would close it.
+- **`ClusterBounds`' documented cull rule is correct but not conservative, and
+  the doc does not say so.** The derivation on `cone_cutoff` — reject when
+  `cone_cutoff > 0 && dot(axis, v) > sqrt(1 - cutoff²)` — is right for a
+  **point**-sized cluster: it treats every triangle as sharing the centre's view
+  direction. A cluster with a non-zero `radius` close to the camera can
+  therefore have a front-facing triangle and still be rejected, which drops
+  geometry that should be drawn. meshoptimizer's form adds the radius term:
+  `dot(axis, center - camera) > sqrt(1 - cutoff²) · |center - camera| + radius`.
+  `radius` is already in the record, so this is one term. **Found before
+  anything implemented the rule**, so nothing in the tree is quietly different
+  from the prose today — but the amplification slice must fix the doc and the
+  shader together, or it will faithfully transcribe a rule that drops geometry.
+- **`CRCBL_BLESS` is suite-wide and there is no way to scope it to one golden.**
+  Setting it re-blesses every golden the run reaches, so it cannot be used to
+  regenerate a single image — and a suite-wide bless run also fails fast on the
+  first test that objects, which is what stopped one from doing damage here. The
+  safe way to regenerate one golden is to delete that file and run **only** its
+  test (`run-vk-e2e.sh -E 'test(name)'`), because a missing reference is created
+  by `Golden::check` and reported as `Blessed { created: true }`, which the
+  harness turns into a failure saying the run proved nothing. Worth knowing
+  before someone reaches for `CRCBL_BLESS=1` to fix one image.
+- **The open box's golden is blessed on lavapipe**, like every other vk golden,
+  so CI compares it at zero differing pixels and a local radv run drifts instead
+  — 94.55 % of pixels differ at `max channel delta 1`, `0 over tolerance`. That
+  is the split comparator working as designed, but it means this golden sits on
+  the drift budget rather than near it: if `Tolerance::RASTERISER`'s
+  `max_channel_delta` is ever tightened to 1, this is the first golden that
+  fails, and it will fail only on the discrete card.
 - **The dispatch is CPU-bounded, not indirect.**
   `draw_mesh_tasks(cluster_count, slot_count, 1)`, with the shader reading the
   real survivor count from `draw_args[bucket].instance_count` and emitting
@@ -5945,7 +5967,20 @@ left:
   for culling to actually reduce work rather than just skip output.
 - **No amplification stage, so no per-cluster culling.** `ClusterBounds` — the
   sphere and the normal cone the builder computes — is uploaded and **read by
-  nothing**. That is §3.5's second bullet and its own slice.
+  nothing**. That is §3.5's second bullet and its own slice. The mesh it needs
+  now exists (`crcbl_shaders::mesh`'s open box, five clusters), so what is left
+  is the task stage itself, plus the radius correction to the cull rule above.
+  Note `Features::TASK_SHADER` is a separate capability from `MESH_SHADER`: a
+  device with mesh shaders and no task shaders must keep working through the
+  un-amplified path.
+- **The counts the culling slice must assert**, so the shape is not re-derived:
+  the picture must not move with culling on from a camera that sees everything
+  (same golden, not a new one); from a camera where clusters face away or fall
+  outside, the surviving count must be **strictly less** and asserted as a
+  number; and from a camera seeing everything the count must **equal** the total
+  — that last one is what catches an over-eager cone test and is the assertion
+  most likely to be left out. `crcbl_render::draw_gen`'s `visible_count` delayed
+  readback ring is the mechanism to copy rather than inventing a second one.
 - **The cluster buffers are `HostUpload`, written once at build.** Device-local
   storage is what a bake cache that streams clusters would want.
 - **No bake cache, no input hashing, no cluster LOD/QEM.**

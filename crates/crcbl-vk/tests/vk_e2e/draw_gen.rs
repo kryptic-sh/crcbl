@@ -62,6 +62,10 @@ const RUN_SAMPLE: u64 = 8;
 /// The mesh table as the pool builds it, in upload order: the cube first, the
 /// pyramid immediately after it.
 ///
+/// **The two the scenes below instance**, and not every resident: the renderer
+/// also uploads the open box into a third bucket, which nothing here puts in a
+/// frame. A reference covering it would have to model a mesh no scene draws.
+///
 /// The bounds are the box around the vertices the pool is handed, which is what
 /// `MeshPool::upload` records — recomputed here from the same geometry rather
 /// than copied from the pool, so the two are independent.
@@ -553,10 +557,15 @@ fn a_culled_bucket_generates_no_draw_and_says_so_in_the_count() {
 ///
 /// [`SENTINEL`] is what the frame has to have overwritten. Every assertion below
 /// is a number a single frame produces, and none of them survives the poison
-/// leaking through: the survivor count would be `SENTINEL + 2`, each bucket's
-/// instance count `SENTINEL + 1`, and a draw count would stay at `SENTINEL`
-/// outright, because `draw_gen.slang` stores its `1` only for the invocation
-/// that took slot zero and no invocation would.
+/// leaking through: the survivor count would be `SENTINEL + 2`, an occupied
+/// bucket's instance count `SENTINEL + 1`, and a draw count would stay at
+/// `SENTINEL` outright, because `draw_gen.slang` stores its `1` only for the
+/// invocation that took slot zero and no invocation would.
+///
+/// **The empty bucket is the sharpest number here**, not a gap. The renderer's
+/// third resident — the open box — has no instance in this scene, so its
+/// arguments have nothing to add to `SENTINEL` and a clearing pass that never
+/// ran leaves them holding the poison undisguised.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn a_poisoned_counter_reaches_the_frame_at_zero() {
@@ -579,17 +588,23 @@ fn a_poisoned_counter_reaches_the_frame_at_zero() {
         "both instances survive, and the count is this frame's alone rather than \
          {SENTINEL:#010x} counted up from"
     );
-    for (bucket, args) in generated.args.iter().enumerate() {
-        assert_eq!(
-            args.instance_count, 1,
-            "bucket {bucket} draws its one instance: {:?}",
-            generated.args
-        );
-    }
+    // The cube's bucket, the pyramid's, and the open box's — which this scene
+    // puts nothing in. See the note above on why that zero is evidence.
+    assert_eq!(
+        generated
+            .args
+            .iter()
+            .map(|args| args.instance_count)
+            .collect::<Vec<u32>>(),
+        vec![1, 1, 0],
+        "each bucket claims the instances this scene put in it, rather than \
+         {SENTINEL:#010x} counted up from: {:?}",
+        generated.args
+    );
     assert_eq!(
         generated.counts,
-        vec![1, 1],
-        "and each bucket's draw count is the `1` the pass stored, not the poison it \
+        vec![1, 1, 0],
+        "and each bucket's draw count is what the pass stored, not the poison it \
          was left holding"
     );
 

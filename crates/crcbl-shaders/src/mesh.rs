@@ -846,6 +846,186 @@ pub fn pyramid_vertex_bytes() -> Vec<u8> {
     )
 }
 
+// ---------------------------------------------------------------------------
+// The third mesh
+// ---------------------------------------------------------------------------
+
+/// How many quads each face of the open box is divided into, per axis.
+///
+/// **This number is the whole reason the mesh exists.** A face is
+/// `OPEN_BOX_SUBDIVISIONS²` quads of four vertices each, and at four that is
+/// [`MAX_CLUSTER_VERTICES`](crate::meshlet::MAX_CLUSTER_VERTICES) exactly — so
+/// `crcbl_scene::meshlet::build_meshlets` closes a cluster on every face
+/// boundary and each cluster comes out as one flat face. The cube and the
+/// pyramid are one cluster each, which makes per-cluster culling
+/// indistinguishable from whole-mesh culling; this is the mesh that is several.
+///
+/// A smaller number would leave one cluster spanning two perpendicular faces,
+/// whose normal cone is then wide enough to reject nothing. A larger one would
+/// overrun the vertex bound part way through a face — a legal decomposition,
+/// and one whose cluster boundaries no longer line up with anything a reader
+/// can see.
+pub const OPEN_BOX_SUBDIVISIONS: usize = 4;
+
+/// Quads in one face of the open box.
+pub const OPEN_BOX_QUADS_PER_FACE: usize = OPEN_BOX_SUBDIVISIONS * OPEN_BOX_SUBDIVISIONS;
+
+// Four vertices per quad, none shared, is what makes a face exactly one
+// cluster. The build fails here rather than in a golden image if either bound
+// moves.
+const _: () = assert!(OPEN_BOX_QUADS_PER_FACE * 4 == crate::meshlet::MAX_CLUSTER_VERTICES);
+const _: () = assert!(OPEN_BOX_QUADS_PER_FACE * 2 <= crate::meshlet::MAX_CLUSTER_TRIANGLES);
+
+/// The open box's five faces, wound counter-clockwise **seen from inside** —
+/// which is the side each one's normal points, exactly as [`FACES`]' are.
+///
+/// A box with its `+Y` face missing, so the five that remain face *inward* and
+/// a camera above it looks into the shape rather than at it. That is not
+/// decoration either: cone culling can only reject a cluster whose whole cone
+/// faces away, so a mesh worth culling needs a camera position from which every
+/// cluster is front-facing — which a closed shape has none of, and the inside
+/// of an open one has plenty.
+///
+/// The corners are the unit cube's own, the ones [`FACES`] is built from, and
+/// every subdivision of them is a quarter of an edge — so each position, each
+/// face centre and each bounding radius is exact in `f32`. No
+/// trigonometry appears anywhere in this mesh for that reason: `sinf` and
+/// `cosf` are the platform's, they differ in the last place between them, and
+/// `crcbl-scene`'s pin test compares the cooked bounds for **equality**.
+pub const OPEN_BOX_FACES: [Face; 5] = [
+    Face {
+        name: "floor",
+        normal: [0.0, 1.0, 0.0],
+        color: [0.75, 0.72, 0.68],
+        corners: [[-H, -H, H], [H, -H, H], [H, -H, -H], [-H, -H, -H]],
+    },
+    Face {
+        name: "-X wall",
+        normal: [1.0, 0.0, 0.0],
+        color: [0.85, 0.35, 0.30],
+        corners: [[-H, -H, -H], [-H, H, -H], [-H, H, H], [-H, -H, H]],
+    },
+    Face {
+        name: "+X wall",
+        normal: [-1.0, 0.0, 0.0],
+        color: [0.30, 0.70, 0.45],
+        corners: [[H, -H, H], [H, H, H], [H, H, -H], [H, -H, -H]],
+    },
+    Face {
+        name: "-Z wall",
+        normal: [0.0, 0.0, 1.0],
+        color: [0.35, 0.45, 0.85],
+        corners: [[-H, -H, -H], [H, -H, -H], [H, H, -H], [-H, H, -H]],
+    },
+    Face {
+        name: "+Z wall",
+        normal: [0.0, 0.0, -1.0],
+        color: [0.85, 0.70, 0.25],
+        corners: [[H, -H, H], [-H, -H, H], [-H, H, H], [H, H, H]],
+    },
+];
+
+/// Vertices in the open box: four per quad, none shared with its neighbours.
+///
+/// Sharing them would be smaller and would make a face fewer than
+/// [`MAX_CLUSTER_VERTICES`](crate::meshlet::MAX_CLUSTER_VERTICES) vertices, so
+/// a cluster would span more than one face — and it would give the shared
+/// corners an averaged normal, which is the opposite of what flat faces and a
+/// tight normal cone need.
+pub const OPEN_BOX_VERTEX_COUNT: usize = OPEN_BOX_FACES.len() * OPEN_BOX_QUADS_PER_FACE * 4;
+
+/// Indices in the open box: two triangles per quad.
+pub const OPEN_BOX_INDEX_COUNT: usize = OPEN_BOX_FACES.len() * OPEN_BOX_QUADS_PER_FACE * 6;
+
+/// A point on a quad, `s` of the way along the `corners[0] -> corners[1]` edge
+/// and `t` of the way along `corners[0] -> corners[3]`.
+///
+/// Bilinear, so a point of a planar quad stays in its plane — which is what
+/// gives every subdivided face one flat normal and therefore a normal cone of
+/// zero half-angle. `a + (b - a) * s` rather than `a * (1 - s) + b * s`: both
+/// are exact for the values here, and only the first is exactly `a` at `s = 0`
+/// and exactly `b` at `s = 1`. Written out rather than through `f32::mul_add`,
+/// because a fused multiply-add rounds once where this rounds twice and only
+/// one of the two is what a reader checking these coordinates by hand does.
+fn bilinear(corners: &[[f32; 3]; 4], s: f32, t: f32) -> [f32; 3] {
+    let lerp = |a: [f32; 3], b: [f32; 3], u: f32| [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * u);
+    lerp(
+        lerp(corners[0], corners[1], s),
+        lerp(corners[3], corners[2], s),
+        t,
+    )
+}
+
+/// The third mesh: a box with its lid off, every face divided into
+/// [`OPEN_BOX_QUADS_PER_FACE`] quads.
+///
+/// The cube and the pyramid are one cluster each — 24 and 16 vertices against a
+/// bound of 64 — so nothing in this crate's geometry could tell per-cluster
+/// culling from whole-mesh culling, and no rendered frame exercised a cluster
+/// at a non-zero `vertex_offset` *within* one mesh. This mesh is five clusters,
+/// one per face, each facing a different way.
+///
+/// Quads are emitted a face at a time, rows first, and each carries the whole
+/// of the material's page layer across the face it belongs to — [`FACES`]'
+/// arrangement, so a texture that differs per material differs over each face
+/// rather than over each quad.
+#[must_use]
+pub fn open_box_vertices() -> Vec<MeshVertex> {
+    let step = 1.0 / OPEN_BOX_SUBDIVISIONS as f32;
+    let mut vertices = Vec::with_capacity(OPEN_BOX_VERTEX_COUNT);
+    for face in &OPEN_BOX_FACES {
+        for row in 0..OPEN_BOX_SUBDIVISIONS {
+            for column in 0..OPEN_BOX_SUBDIVISIONS {
+                // The quad's own corner order is `QUAD_UV`'s, so the winding it
+                // inherits is the face's and the two triangles below are the
+                // `0 1 2, 0 2 3` every other mesh here uses.
+                for uv in &QUAD_UV {
+                    let s = (column as f32 + uv[0]) * step;
+                    let t = (row as f32 + uv[1]) * step;
+                    let position = bilinear(&face.corners, s, t);
+                    vertices.push(MeshVertex {
+                        position: [position[0], position[1], position[2], 1.0],
+                        normal: [face.normal[0], face.normal[1], face.normal[2], 0.0],
+                        color: [face.color[0], face.color[1], face.color[2], 1.0],
+                        uv: [s, t, 0.0, 0.0],
+                    });
+                }
+            }
+        }
+    }
+    vertices
+}
+
+/// The open box's indices: `0 1 2, 0 2 3` per quad, in the order
+/// [`open_box_vertices`] emitted them.
+#[must_use]
+pub fn open_box_indices() -> Vec<u32> {
+    let mut indices = Vec::with_capacity(OPEN_BOX_INDEX_COUNT);
+    for quad in 0..OPEN_BOX_FACES.len() * OPEN_BOX_QUADS_PER_FACE {
+        let base = u32::try_from(quad * 4).expect("a few hundred vertices fit in a u32");
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    indices
+}
+
+/// [`open_box_vertices`] as the bytes a storage buffer holds, on the same terms
+/// as [`cube_vertex_bytes`].
+#[must_use]
+pub fn open_box_vertex_bytes() -> Vec<u8> {
+    let vertices = open_box_vertices();
+    crate::pack_f32_le(
+        vertices.iter().flat_map(|vertex| {
+            vertex
+                .position
+                .iter()
+                .chain(&vertex.normal)
+                .chain(&vertex.color)
+                .chain(&vertex.uv)
+        }),
+        vertices.len() * VERTEX_STRIDE,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1361,6 +1541,117 @@ mod tests {
                      cube's vertices would be hard to see",
                     face.name
                 );
+            }
+        }
+    }
+
+    /// The open box's counts, its index range, and the property that makes it
+    /// evidence rather than a third box: no colour it carries belongs to
+    /// another mesh here.
+    #[test]
+    fn the_open_box_is_nothing_like_the_other_two() {
+        assert_eq!(open_box_vertices().len(), OPEN_BOX_VERTEX_COUNT);
+        assert_eq!(open_box_indices().len(), OPEN_BOX_INDEX_COUNT);
+        assert_eq!(
+            open_box_vertex_bytes().len(),
+            OPEN_BOX_VERTEX_COUNT * VERTEX_STRIDE
+        );
+        let vertices = open_box_vertices();
+        for index in open_box_indices() {
+            assert!(
+                (index as usize) < vertices.len(),
+                "index {index} addresses past the {} vertices",
+                vertices.len()
+            );
+        }
+        for (position, face) in OPEN_BOX_FACES.iter().enumerate() {
+            for other in &OPEN_BOX_FACES[position + 1..] {
+                assert_ne!(
+                    face.color, other.color,
+                    "{} and {} share a colour, so a face drawn in another's place \
+                     would be invisible",
+                    face.name, other.name
+                );
+            }
+            for cube in &FACES {
+                assert_ne!(face.color, cube.color, "{} is a cube colour", face.name);
+            }
+            for pyramid in PYRAMID_SIDE_COLORS.iter().chain([&PYRAMID_BASE_COLOR]) {
+                assert_ne!(face.color, *pyramid, "{} is a pyramid colour", face.name);
+            }
+        }
+    }
+
+    /// **Every triangle of a face faces exactly the way that face says**, which
+    /// is what makes each cluster's normal cone a single direction and its
+    /// cutoff exactly `1.0` — see `crcbl_shaders::meshlet::open_box_clusters`,
+    /// whose committed bounds are computed from that claim.
+    ///
+    /// Checked over the *generated* triangles rather than over
+    /// [`OPEN_BOX_FACES`]' four declared corners, because the subdivision is
+    /// what could go wrong: a bilinear step that left the plane, or a quad
+    /// emitted with its corners transposed, gives a face several normals and a
+    /// cone wide enough to cull nothing at all.
+    #[test]
+    fn every_open_box_triangle_faces_the_way_its_face_says() {
+        let vertices = open_box_vertices();
+        let indices = open_box_indices();
+        let per_face = OPEN_BOX_QUADS_PER_FACE * 6;
+        for (triangle, corners) in indices.chunks_exact(3).enumerate() {
+            let face = &OPEN_BOX_FACES[triangle * 3 / per_face];
+            let corner = |slot: usize| {
+                let position = vertices[corners[slot] as usize].position;
+                [position[0], position[1], position[2]]
+            };
+            let normal = triangle_normal(corner(0), corner(1), corner(2));
+            for axis in 0..3 {
+                assert!(
+                    (normal[axis] - face.normal[axis]).abs() < 1e-6,
+                    "triangle {triangle} of the {} faces {normal:?}, not {:?}",
+                    face.name,
+                    face.normal
+                );
+                // And the vertex normals agree with the winding, or the face
+                // still draws and is lit inside out.
+                for slot in 0..3 {
+                    let declared = vertices[corners[slot] as usize].normal;
+                    assert!(
+                        (declared[axis] - face.normal[axis]).abs() < 1e-6,
+                        "vertex {} of triangle {triangle} declares {declared:?}",
+                        corners[slot]
+                    );
+                }
+            }
+        }
+    }
+
+    /// **Every coordinate of this mesh is a multiple of a quarter**, which is
+    /// exact in `f32` on every target.
+    ///
+    /// That is the property `crcbl_shaders::meshlet::open_box_clusters` rests
+    /// on and `crcbl-scene`'s pin test cashes in: it compares cooked bounds
+    /// against the builder's for **equality**, so a coordinate that was merely
+    /// close — anything through `sinf`/`cosf`, whose last place is the
+    /// platform's business — would make that comparison a portability failure
+    /// waiting for a runner this team cannot log into.
+    #[test]
+    fn every_open_box_coordinate_is_exact_in_f32() {
+        for vertex in open_box_vertices() {
+            for axis in 0..3 {
+                let quarters = vertex.position[axis] * 4.0;
+                assert_eq!(
+                    quarters,
+                    quarters.trunc(),
+                    "position {:?} is not on the quarter grid",
+                    vertex.position
+                );
+            }
+            // The texture coordinates run the same grid over `0..=1`, so a face
+            // samples the whole of its layer exactly as the cube's does.
+            for axis in 0..2 {
+                let quarters = vertex.uv[axis] * OPEN_BOX_SUBDIVISIONS as f32;
+                assert_eq!(quarters, quarters.trunc(), "uv {:?}", vertex.uv);
+                assert!((0.0..=1.0).contains(&vertex.uv[axis]), "uv {:?}", vertex.uv);
             }
         }
     }

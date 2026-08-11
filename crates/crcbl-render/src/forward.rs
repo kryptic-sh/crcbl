@@ -109,6 +109,21 @@
 //! samples draw is still the cube alone, which is why their golden images did
 //! not move either.
 //!
+//! # A third resident, and how it finds its own clusters
+//!
+//! The same argument one layer down. A mesh that fits **one** cluster cannot
+//! tell a per-cluster offset that works from one that is lost, and the cube and
+//! the pyramid fit one each — 24 and 16 vertices against a bound of 64. So the
+//! pool's third resident is [`mesh::open_box_vertices`], five clusters of one
+//! flat face each, four of them at a `Meshlet::vertex_offset` that is not zero.
+//! It is [`crate::cluster_pool`]'s counterpart to what the pyramid is for
+//! [`crate::mesh_pool`], and it is what §3.5's per-cluster culling will need
+//! before a surviving-cluster count can mean anything.
+//!
+//! It arrives on [`ForwardRenderer::set_open_box`]' terms exactly: resident from
+//! `new`, in the scene only when a caller asks, so no golden moved for it
+//! either.
+//!
 //! # Uniforms are a ring, and they have to be
 //!
 //! The camera spins, so the uniform block is rewritten every frame — and the
@@ -157,10 +172,10 @@ pub const FRAMES_IN_FLIGHT: usize = 2;
 
 /// Vertices the geometry pool holds.
 ///
-/// Two meshes are resident today, and the pool exists so that stops being the
-/// interesting number. It is device-local memory reserved at start-up and never
-/// grown — [`crate::mesh_pool`] says why — so it is sized for the scene P7 puts
-/// in it rather than for the meshes P1 draws.
+/// A handful of meshes are resident today, and the pool exists so that stops
+/// being the interesting number. It is device-local memory reserved at start-up
+/// and never grown — [`crate::mesh_pool`] says why — so it is sized for the
+/// scene P7 puts in it rather than for the meshes P1 draws.
 const POOL_VERTEX_CAPACITY: u32 = 64 * 1024;
 
 /// Indices the geometry pool holds. Four per vertex is the usual ratio for
@@ -179,15 +194,15 @@ const POOL_MESH_CAPACITY: u32 = 1024;
 
 /// Instances the instance pool holds, per frame in flight.
 ///
-/// Two are resident, for the same reason the geometry pools hold two meshes.
-/// Sized against topic 03's exit criterion — "sandbox scene: 10k+ instanced
-/// meshes" — rather than against them, because the buffers are reserved at
-/// start-up and never grown.
+/// A handful are resident, for the same reason the geometry pools hold a
+/// handful of meshes. Sized against topic 03's exit criterion — "sandbox scene:
+/// 10k+ instanced meshes" — rather than against them, because the buffers are
+/// reserved at start-up and never grown.
 const POOL_INSTANCE_CAPACITY: u32 = 16 * 1024;
 
 /// Materials the material table holds.
 ///
-/// Two are resident, on the same terms as the two meshes: the buffer is
+/// A handful are resident, on the same terms as the meshes: the buffer is
 /// reserved at start-up and never grown, so it is sized against a scene rather
 /// than against what P1 draws. Distinct materials, not instances of them — a
 /// material id names one row however many instances carry it, which is the
@@ -273,14 +288,15 @@ const PAGE_LAYERS: [&[u8; PAGE_LAYER_BYTES]; 2] = [&UNTEXTURED_TEXELS, &CHECKER_
 /// records — **whatever the scene holds**.
 ///
 /// One per resident mesh, because an argument structure's index range is per
-/// draw and instances of two meshes cannot share one. Two meshes are resident;
-/// see [`crate::draw_gen`] on what a bucket is and what a longer key would buy.
-const BUCKET_COUNT: u32 = 2;
+/// draw and instances of different meshes cannot share one. See
+/// [`crate::draw_gen`] on what a bucket is and what a longer key would buy.
+const BUCKET_COUNT: u32 = 3;
 
-/// The cube's bucket, and the pyramid's. Named rather than written as `0` and
-/// `1` where the bucket table is filled in.
+/// The cube's bucket, the pyramid's, and the open box's. Named rather than
+/// written as `0`, `1` and `2` where the bucket table is filled in.
 const CUBE_BUCKET: usize = 0;
 const PYRAMID_BUCKET: usize = 1;
+const OPEN_BOX_BUCKET: usize = 2;
 
 /// Which indirect call the forward pass records per bucket.
 ///
@@ -329,7 +345,7 @@ impl EmitTail {
 /// Everything the forward frame owns, created once.
 #[derive(Debug)]
 pub struct ForwardRenderer {
-    // Geometry: the global pools, and the two meshes resident in them. Each
+    // Geometry: the global pools, and the meshes resident in them. Each
     // range is resolved once, at build, and `MeshPool::mesh` only hands one out
     // for a mesh whose upload has completed — so there is no way to reach a
     // draw below with a mesh the GPU has not received.
@@ -360,11 +376,15 @@ pub struct ForwardRenderer {
     /// A third, shaded through a row that differs from the first's in nothing
     /// but its page layer. See [`ForwardRenderer::set_textured_pyramid`].
     textured_pyramid_instance: Option<InstanceHandle>,
+    /// The open box's instance while a caller is asking for one, on the
+    /// pyramid's terms exactly. See [`ForwardRenderer::set_open_box`].
+    open_box_instance: Option<InstanceHandle>,
     /// The mesh ids those instances carry. Kept because every write of an
     /// instance writes the whole record, and an instance that lost its mesh id
     /// would resolve to entry 0 — which is a mesh, and the wrong one.
     cube_mesh: u32,
     pyramid_mesh: u32,
+    open_box_mesh: u32,
 
     /// §3.2's material table, and the two rows in it.
     ///
@@ -560,7 +580,7 @@ impl ForwardRenderer {
         // rather than a claim about a branch.
         let emit = EmitTail::from_caps(&device.caps());
 
-        let (pool, cube_mesh, pyramid_mesh) = Self::build_geometry(device, queue)?;
+        let (pool, cube_mesh, pyramid_mesh, open_box_mesh) = Self::build_geometry(device, queue)?;
         // The handles are `Copy`, so they can be read out before the pool
         // becomes the rollback's — which it must be before the first `?` below,
         // or a failed pipeline would leak two device-local buffers. The index
@@ -635,6 +655,7 @@ impl ForwardRenderer {
         let mut bucket_meshes = [0u32; BUCKET_COUNT as usize];
         bucket_meshes[CUBE_BUCKET] = cube_mesh;
         bucket_meshes[PYRAMID_BUCKET] = pyramid_mesh;
+        bucket_meshes[OPEN_BOX_BUCKET] = open_box_mesh;
         let draws = DrawGen::new(
             device,
             &DrawGenDesc {
@@ -664,6 +685,7 @@ impl ForwardRenderer {
                 Default::default();
             cooked[CUBE_BUCKET] = crcbl_shaders::meshlet::cube_clusters();
             cooked[PYRAMID_BUCKET] = crcbl_shaders::meshlet::pyramid_clusters();
+            cooked[OPEN_BOX_BUCKET] = crcbl_shaders::meshlet::open_box_clusters();
             let clusters = ClusterPool::new(device, "forward", &cooked)?;
             for (bucket, count) in bucket_clusters.iter_mut().enumerate() {
                 *count = clusters
@@ -899,7 +921,7 @@ impl ForwardRenderer {
         for (bucket, offset) in bucket_constants.iter_mut().enumerate() {
             let index = bucket;
             let bucket =
-                u32::try_from(bucket).unwrap_or_else(|_| unreachable!("a table of two buckets"));
+                u32::try_from(bucket).unwrap_or_else(|_| unreachable!("a table of a few buckets"));
             *offset = bucket * draw_stride;
             let base = draws.bucket_base(bucket);
             // The mesh path's block says three more things — where this
@@ -1265,8 +1287,10 @@ impl ForwardRenderer {
             pyramid_instance: None,
             tinted_pyramid_instance: None,
             textured_pyramid_instance: None,
+            open_box_instance: None,
             cube_mesh,
             pyramid_mesh,
+            open_box_mesh,
             materials: rollback
                 .materials
                 .take()
@@ -1298,7 +1322,7 @@ impl ForwardRenderer {
         })
     }
 
-    /// Creates the geometry pool and makes the cube resident in it.
+    /// Creates the geometry pool and makes every resident mesh resident in it.
     ///
     /// Separate from [`ForwardRenderer::build`] because it is **self-cleaning**:
     /// the pool is not the rollback's until this has returned, so a failure
@@ -1306,7 +1330,7 @@ impl ForwardRenderer {
     fn build_geometry(
         device: &dyn Device,
         queue: QueueHandle,
-    ) -> Result<(MeshPool, u32, u32), HalError> {
+    ) -> Result<(MeshPool, u32, u32, u32), HalError> {
         let mut pool = MeshPool::new(
             device,
             &MeshPoolDesc {
@@ -1317,7 +1341,7 @@ impl ForwardRenderer {
             },
         )?;
         match Self::residents(device, queue, &mut pool) {
-            Ok((cube, pyramid)) => Ok((pool, cube, pyramid)),
+            Ok((cube, pyramid, open_box)) => Ok((pool, cube, pyramid, open_box)),
             Err(error) => {
                 pool.destroy(device);
                 Err(error.into())
@@ -1466,8 +1490,8 @@ impl ForwardRenderer {
         }
     }
 
-    /// Uploads both meshes and returns their ranges and mesh ids — **only**
-    /// once the transfers have completed.
+    /// Uploads every resident mesh and returns their mesh ids — **only** once
+    /// the transfers have completed.
     ///
     /// The calls are §3.1's upload path in order: the copies are recorded and
     /// submitted against timeline values, [`MeshPool::flush`] is what makes those
@@ -1478,11 +1502,17 @@ impl ForwardRenderer {
     /// non-zero base vertex — which is the whole reason it is here, and what the
     /// module docs call the one thing that can tell a working base vertex from a
     /// cancelled one.
+    ///
+    /// The open box is third and is here for the same shape of reason one layer
+    /// down: it is the only resident that is **more than one cluster**, so it is
+    /// the only one whose mesh-shader dispatch has a cluster at a non-zero
+    /// `Meshlet::vertex_offset` *within* one mesh. See
+    /// [`crcbl_shaders::meshlet::open_box_clusters`].
     fn residents(
         device: &dyn Device,
         queue: QueueHandle,
         pool: &mut MeshPool,
-    ) -> Result<(u32, u32), MeshPoolError> {
+    ) -> Result<(u32, u32, u32), MeshPoolError> {
         let cube = pool.upload(
             device,
             queue,
@@ -1497,6 +1527,13 @@ impl ForwardRenderer {
             &mesh::pyramid_vertex_bytes(),
             &mesh::pyramid_indices(),
         )?;
+        let open_box = pool.upload(
+            device,
+            queue,
+            "open box",
+            &mesh::open_box_vertex_bytes(),
+            &mesh::open_box_indices(),
+        )?;
         pool.flush(device)?;
         // The table index is the only number that leaves here — where the
         // geometry actually is reaches the GPU through the mesh table, and the
@@ -1508,7 +1545,7 @@ impl ForwardRenderer {
             (Some(_), Some(id)) => Ok(id),
             _ => Err(MeshPoolError::NotResident { handle }),
         };
-        Ok((resolve(cube)?, resolve(pyramid)?))
+        Ok((resolve(cube)?, resolve(pyramid)?, resolve(open_box)?))
     }
 
     /// Rotates to the next frame's uniform buffer and instance buffer, writes
@@ -1703,6 +1740,40 @@ impl ForwardRenderer {
         );
     }
 
+    /// Puts the pool's third mesh — the open box — in the frame at `model`, or
+    /// takes it back out with `None`.
+    ///
+    /// **This is what makes a cluster at a non-zero `vertex_offset` observable
+    /// in a rendered frame**, and it is why the mesh is here at all. The cube
+    /// and the pyramid are one cluster each, so on
+    /// [`GeometryPath::MeshShader`] every workgroup they draw reads cluster
+    /// zero of its mesh and a run that starts at zero; the open box is five
+    /// clusters, one per face, and four of them are not. A mesh stage that
+    /// dropped the offset draws the first face five times over — the same
+    /// triangle count, the same buffer sizes, a different picture.
+    ///
+    /// It is also the mesh §3.5's per-cluster culling needs: with one cluster
+    /// per mesh, rejecting a cluster and rejecting the whole mesh are the same
+    /// act and no count can tell them apart.
+    ///
+    /// [`ForwardRenderer::set_pyramid`]'s sibling in every other respect: off
+    /// by default, `None` removes the instance rather than skipping a draw, and
+    /// the change takes effect at the next [`ForwardRenderer::begin_frame`].
+    pub fn set_open_box(&mut self, model: Option<Mat4>) {
+        let instance = model.map(|model| mesh::GpuInstance {
+            transform: model.to_cols_array(),
+            mesh: self.open_box_mesh,
+            material: self.untinted_material,
+            ..mesh::GpuInstance::default()
+        });
+        place(
+            &mut self.instances,
+            &mut self.open_box_instance,
+            instance.as_ref(),
+            "the open box",
+        );
+    }
+
     /// Adds the forward and tonemap passes to `graph`, rendering into `target`,
     /// and returns the HDR scene target they went through.
     ///
@@ -1758,7 +1829,7 @@ impl ForwardRenderer {
             .enumerate()
             .map(|(bucket, constant_offset)| {
                 let bucket = u32::try_from(bucket)
-                    .unwrap_or_else(|_| unreachable!("a fixed table of two buckets"));
+                    .unwrap_or_else(|_| unreachable!("a fixed table of a few buckets"));
                 (
                     *constant_offset,
                     self.draws.args_offset(bucket),
@@ -2749,7 +2820,8 @@ mod tests {
             dispatched,
             vec![
                 (clusters[CUBE_BUCKET], slots, 1),
-                (clusters[PYRAMID_BUCKET], slots, 1)
+                (clusters[PYRAMID_BUCKET], slots, 1),
+                (clusters[OPEN_BOX_BUCKET], slots, 1)
             ],
             "one dispatch per bucket, sized to that bucket's mesh's clusters and to \
              every instance slot"
@@ -2758,6 +2830,16 @@ mod tests {
             clusters.iter().all(|&count| count > 0),
             "a bucket with no clusters dispatches nothing, so this comparison would \
              pass against an empty pool: {clusters:?}"
+        );
+        // **The x extents are not all the same number**, which is what makes
+        // the comparison above a statement about each bucket's own mesh. Two
+        // single-cluster meshes would let a dispatch hard-coded to one cluster
+        // pass it; the open box is five, one per face.
+        assert_eq!(
+            clusters[OPEN_BOX_BUCKET] as usize,
+            crcbl_shaders::mesh::OPEN_BOX_FACES.len(),
+            "the open box dispatches one workgroup per face, and that is the only \
+             resident whose cluster count is not one: {clusters:?}"
         );
         assert_eq!(
             index_binds, 0,

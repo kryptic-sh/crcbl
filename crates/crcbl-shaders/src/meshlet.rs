@@ -497,6 +497,95 @@ pub fn pyramid_clusters() -> MeshClusters {
     )
 }
 
+/// The open box's clusters — **one per face**, and the first mesh here that is
+/// more than one cluster at all.
+///
+/// [`OPEN_BOX_SUBDIVISIONS`](crate::mesh::OPEN_BOX_SUBDIVISIONS) is what makes
+/// that true: a face is four by four quads of four unshared vertices, which is
+/// [`MAX_CLUSTER_VERTICES`] exactly, so the builder's greedy walk closes a
+/// cluster on every face boundary. That gives every cluster after the first a
+/// non-zero [`Meshlet::vertex_offset`] *within one mesh* — which the cube and
+/// the pyramid, being one cluster each, cannot produce however many of them are
+/// resident.
+///
+/// # Why this is a loop and the other two are literals
+///
+/// The cube's and the pyramid's bounds are written out because there is one set
+/// of them each. Five faces is where that stops being readable, and a face's
+/// bounds are arithmetic rather than a measurement — see `face_bounds`. Every
+/// value it produces is exact in `f32` for this mesh's coordinates, so
+/// `crcbl-scene`'s `the_hardcoded_meshes_cluster_the_way_the_shaders_crate_says`
+/// still compares this against the real builder for equality, exactly as it
+/// does the two above.
+#[must_use]
+pub fn open_box_clusters() -> MeshClusters {
+    let quads = crate::mesh::OPEN_BOX_QUADS_PER_FACE;
+    let corners_per_face = quads * 6;
+    let mut clusters = Vec::with_capacity(crate::mesh::OPEN_BOX_FACES.len());
+    let mut corners = Vec::with_capacity(crate::mesh::OPEN_BOX_INDEX_COUNT);
+    for (face, geometry) in crate::mesh::OPEN_BOX_FACES.iter().enumerate() {
+        clusters.push(
+            Meshlet::new(
+                face * MAX_CLUSTER_VERTICES,
+                MAX_CLUSTER_VERTICES,
+                face * corners_per_face,
+                quads * 2,
+                face_bounds(geometry),
+            )
+            .unwrap_or_else(|error| unreachable!("a few hundred vertices of demo mesh: {error}")),
+        );
+        // A corner indexes its own cluster's vertex run, so every face
+        // triangulates from zero again — which is the whole difference between
+        // a corner and an index, and the thing a cluster at a non-zero
+        // `vertex_offset` is what makes observable.
+        for quad in 0..quads {
+            let base = u8::try_from(quad * 4)
+                .unwrap_or_else(|_| unreachable!("a cluster holds at most 256 vertices"));
+            corners.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+    MeshClusters {
+        clusters,
+        vertices: (0..crate::mesh::OPEN_BOX_VERTEX_COUNT as u32).collect(),
+        corners,
+    }
+}
+
+/// One flat rectangular face's bounding sphere and normal cone, which for the
+/// open box is one cluster's.
+///
+/// Arithmetic a reader can check rather than a summary of a loop, because a
+/// planar rectangle makes all three answers closed forms:
+///
+/// * the AABB's midpoint is the midpoint of either diagonal, and
+///   `corners[0]`/`corners[2]` are one;
+/// * the vertex furthest from it is a corner, at half the diagonal — a
+///   subdivision of a rectangle puts no interior point outside its corners; and
+/// * every triangle of a planar face faces the face's own way, so the cone is
+///   that single direction and its cutoff is exactly `1.0`.
+///
+/// Each is exact in `f32` for this mesh's coordinates — every one of them is a
+/// multiple of a sixteenth, and the radius is one correctly-rounded `sqrt` of a
+/// sum that is itself exact — so the equality the pin test asserts is a
+/// property of the numbers rather than luck.
+fn face_bounds(face: &crate::mesh::Face) -> ClusterBounds {
+    let center = [0, 1, 2].map(|axis| (face.corners[0][axis] + face.corners[2][axis]) * 0.5);
+    let radius = [0, 1, 2]
+        .iter()
+        .map(|&axis| {
+            let delta = face.corners[0][axis] - center[axis];
+            delta * delta
+        })
+        .sum::<f32>()
+        .sqrt();
+    ClusterBounds {
+        center,
+        radius,
+        cone_axis: face.normal,
+        cone_cutoff: 1.0,
+    }
+}
+
 /// The single-cluster decomposition of a mesh that fits one cluster whole.
 ///
 /// A mesh inside both bounds is clustered by the builder into exactly one
@@ -726,6 +815,55 @@ mod tests {
                 .try_into()
                 .expect("one whole element");
             assert_eq!(Meshlet::from_bytes(&element), *cluster, "element {index}");
+        }
+    }
+
+    /// **The open box's clusters decode back to its own index buffer**, in
+    /// order and with nothing dropped or repeated.
+    ///
+    /// `crcbl-scene`'s pin test compares these clusters against the real
+    /// builder, which is the check that the *partition* is the one the engine
+    /// would produce. This is the other half and it needs no other crate: that
+    /// the partition describes **this mesh's triangles**. A `vertex_offset`
+    /// short by one cluster, a corner run that restarted at the wrong place, or
+    /// a triangulation emitted the other way round each survive a comparison
+    /// against a builder that made the same mistake, and none of them survive
+    /// this.
+    #[test]
+    fn the_open_box_clusters_decode_back_to_its_index_buffer() {
+        let cooked = open_box_clusters();
+        assert!(
+            cooked.clusters.len() > 1,
+            "the mesh exists to be several clusters, and is {}",
+            cooked.clusters.len()
+        );
+
+        let mut decoded = Vec::with_capacity(crate::mesh::OPEN_BOX_INDEX_COUNT);
+        for cluster in &cooked.clusters {
+            let run =
+                &cooked.vertices[cluster.vertex_offset as usize..][..cluster.vertex_count as usize];
+            let corners = &cooked.corners[cluster.triangle_offset as usize..]
+                [..cluster.triangle_count as usize * 3];
+            for &corner in corners {
+                decoded.push(run[usize::from(corner)]);
+            }
+        }
+        assert_eq!(
+            decoded,
+            crate::mesh::open_box_indices(),
+            "the clusters describe geometry the mesh does not have"
+        );
+
+        // Anti-vacuity for the offsets themselves: every cluster after the
+        // first starts part way into both runs, which is the case the two
+        // single-cluster meshes above cannot produce.
+        for (index, cluster) in cooked.clusters.iter().enumerate().skip(1) {
+            assert!(
+                cluster.vertex_offset > 0 && cluster.triangle_offset > 0,
+                "cluster {index} starts at ({}, {})",
+                cluster.vertex_offset,
+                cluster.triangle_offset
+            );
         }
     }
 
