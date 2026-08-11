@@ -3294,7 +3294,6 @@ pub(crate) mod tests {
         SemaphoreWait, ShaderEntry, ShaderStages, StoreOp,
     };
 
-    use crate::Dx12Instance;
     use crate::instance::tests::{desc as device_desc, open as open_instance, pinned_adapter};
 
     /// Every [`MemoryLocation`] the seam has, so the buffer tests cover all
@@ -3311,13 +3310,22 @@ pub(crate) mod tests {
     /// On the adapter [`pinned_adapter`] names rather than on whichever one DXGI
     /// listed first, so a `CRCBL_DX12_ADAPTER=warp` run is a WARP run in every
     /// test and not only in the ones that happened to look.
-    pub(crate) fn open_device() -> (Dx12Instance, Dx12Device) {
+    ///
+    /// **The instance comes back wrapped in [`debug::Validated`], and that is
+    /// the teardown every device test in this crate now has.** It derefs to
+    /// [`Dx12Instance`](crate::Dx12Instance), so a caller reads exactly as
+    /// before; what it adds is a
+    /// `Drop` that asserts the debug layer was on and said nothing. Wiring it
+    /// here rather than at the end of each test is the only version that cannot
+    /// be forgotten by the seventy-fourth one.
+    pub(crate) fn open_device() -> (debug::Validated, Dx12Device) {
         let instance = open_instance();
         let adapter = pinned_adapter(&instance);
         let device = instance
             .open_device(&device_desc(adapter))
             .expect("a D3D12 device opens with no required features");
-        (instance, device)
+        let validated = debug::Validated::new(instance, &device.inner.raw);
+        (validated, device)
     }
 
     /// The render target every clear test uses.

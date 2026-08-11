@@ -52,6 +52,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Every backend now holds Vulkan's line on validation, and the tests assert
+  it.** `crcbl-dx12`'s device tests assert a clean D3D12 debug-layer report at
+  teardown, with warnings counting as failures and an **absent** layer failing
+  rather than passing — `CRCBL_DX12_VALIDATION=0` is the opt-out for a machine
+  without Windows' Graphics Tools. `debug::diagnosis` no longer clears the info
+  queue, so an error quoted inside a `HalError` is the same one that fails
+  teardown instead of consuming it.
+
+  `crcbl-mtl` gained a validation report asserted at every device test's
+  teardown, and it is **weaker than the other two by nature, not by omission**:
+  Metal has no queryable validation channel, so it asserts that the debug layer
+  interposed on the device and that no command buffer ended in
+  `MTLCommandBufferStatus::Error`. An API misuse aborts the process rather than
+  being reportable. `CRCBL_MTL_VALIDATION` is its requirement flag.
+
+  Also fixed underneath it: a failed `MTLCommandBuffer` reported through nothing
+  but its own `status`, so a submission nobody waited on failed in total
+  silence. Failures are now tracked per submission and logged as errors.
+
 - **`Tolerance::RASTERISER` allows a thousandth of a frame to fail, not a
   fiftieth.** `max_failing_ratio` was `0.02`, sized against how many pixels
   differ _at all_ by one level — but it gates pixels differing by **more** than

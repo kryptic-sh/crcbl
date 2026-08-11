@@ -289,6 +289,39 @@ pub(crate) struct DeviceState {
     /// A readback clones it, so a later submission replacing it here does not
     /// take the completion point out from under a request already in flight.
     last_submission: Option<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+    /// Every command buffer this device has committed and not yet seen finish.
+    ///
+    /// Separate from [`last_submission`](Self::last_submission), which is one
+    /// object and exists to give a readback something to wait on. This is the
+    /// set, and it exists because **a failed `MTLCommandBuffer` reports through
+    /// nothing but its own `status`**: no callback, no exception, no later call
+    /// that fails because of it. A submission whose result nobody reads fails in
+    /// total silence, and until this there was no path on which one was noticed.
+    ///
+    /// It does not grow without bound: [`crate::fault::sweep`] empties every
+    /// entry that has finished, and runs before each submission, so what is
+    /// retained is what is genuinely still running.
+    pub(crate) in_flight: Vec<Retained<ProtocolObject<dyn MTLCommandBuffer>>>,
+    /// The ones that failed. See [`crate::fault::FaultLog`].
+    pub(crate) faults: crate::fault::FaultLog,
+}
+
+impl DeviceState {
+    /// Files every command buffer that has finished, and every failure among
+    /// them. See [`crate::fault::sweep`].
+    ///
+    /// A method on the state rather than a call at each site, because
+    /// `fault::sweep` borrows two of its fields at once and a `MutexGuard` will
+    /// not split a borrow the way a `&mut DeviceState` does.
+    pub(crate) fn sweep(&mut self) {
+        crate::fault::sweep(&mut self.in_flight, &mut self.faults);
+    }
+
+    /// Adds one committed command buffer to the in-flight set, sweeping first.
+    pub(crate) fn track(&mut self, command_buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>) {
+        self.sweep();
+        self.in_flight.push(command_buffer);
+    }
 }
 
 /// An image handle resolved to everything a copy or a pass needs from it.
@@ -665,6 +698,16 @@ impl MetalDevice {
         if let Some(label) = desc.label {
             queue.setLabel(Some(&NSString::from_str(label)));
         }
+        // What validation this device is running under, stated once at open.
+        // `crcbl_dx12::debug::enable_debug_layer` and `crcbl_vk::debug` both log
+        // the equivalent, and for the same reason: Metal's switches are
+        // environment variables set before the process started, so without a
+        // line here a log gives a reader no way to tell a validated run from an
+        // unvalidated one.
+        log::info!(
+            "crcbl-mtl: {}",
+            crate::fault::ValidationReport::of(&raw, &crate::fault::FaultLog::default()).line()
+        );
         // Before any pipeline exists, because every pipeline without a
         // depth/stencil state binds it and nil is not an alternative here.
         let default_depth_stencil = crate::pipeline::default_depth_stencil_state(&raw)?;
@@ -2112,6 +2155,12 @@ impl Device for MetalDevice {
         for raw in &committed {
             raw.commit();
         }
+        // Retained so that a failure is noticed even when nothing ever waits on
+        // this submission — see `DeviceState::in_flight`. The sweep inside
+        // `track` is what keeps that set bounded.
+        for raw in &committed {
+            state.track(raw.clone());
+        }
         // Committed only now, for the same reason `crcbl-vk` bumps its
         // submission counter after `vkQueueSubmit2` rather than before: a value
         // recorded for a submission that never reached the driver would leave
@@ -2238,7 +2287,7 @@ fn resolve_count(requested: u32, base: NSUInteger, total: NSUInteger) -> NSUInte
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::time::Duration;
 
@@ -2251,7 +2300,6 @@ mod tests {
     };
     use objc2_metal::MTLHazardTrackingMode;
 
-    use crate::MetalInstance;
     use crate::instance::tests::{desc as device_desc, open as open_instance};
     // Only the hardware suite draws, and only a draw sets a viewport.
     #[cfg(feature = "mtl-e2e")]
@@ -2267,14 +2315,23 @@ mod tests {
 
     /// A device, opened through this crate's own type so a test can reach the
     /// pools underneath it.
-    fn open_device() -> (MetalInstance, MetalDevice) {
+    ///
+    /// **The instance comes back wrapped in [`crate::fault::Validated`], and
+    /// that is the teardown every device test in this crate now has.** It
+    /// derefs to [`MetalInstance`], so a caller reads exactly as before; what it
+    /// adds is a `Drop` that asserts Metal's validation layer was interposed and
+    /// that no command buffer this device submitted failed. Wiring it here
+    /// rather than at the end of each test is the only version that cannot be
+    /// forgotten by the seventy-second one.
+    pub(crate) fn open_device() -> (crate::fault::Validated, MetalDevice) {
         let instance = open_instance();
         let adapters = instance.adapters();
         assert!(!adapters.is_empty(), "a Mac has at least one adapter");
         let device = instance
             .open_device(&device_desc(adapters[0].id))
             .expect("a Metal device opens with no required features");
-        (instance, device)
+        let validated = crate::fault::Validated::new(instance, &device);
+        (validated, device)
     }
 
     fn buffer(size: u64, memory: MemoryLocation) -> BufferDesc<'static> {

@@ -942,6 +942,12 @@ impl MetalDevice {
         // Not `MTLDrawable::present`: see the module docs.
         command_buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
         command_buffer.commit();
+        // Tracked, because a present that faults is still a submission that
+        // failed and nothing else would ever look at this one's `status` —
+        // `DeviceState::in_flight` is the whole of that path. The lock is
+        // reacquired rather than held across the Metal calls above, which is why
+        // it was dropped in the first place.
+        self.inner.state().track(command_buffer.clone());
         // Deliberately **not** recorded as `DeviceState::last_submission`. That
         // field is what a `ReadbackDesc::after` of `None` waits on, and this
         // command buffer does not complete until the compositor has taken the

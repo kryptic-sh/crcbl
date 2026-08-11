@@ -671,6 +671,14 @@ jobs:
       # output again, that the suite said whether the debug layer was on. See
       # that script's header for why the layer matters more here than a
       # validation layer usually does.
+      #
+      # **And that is now a gate rather than a report.** Every device test in the
+      # crate ends by asserting a clean `ID3D12InfoQueue` — zero errors and zero
+      # warnings, `crcbl-vk`'s line — and, before it looks at the messages, that
+      # the layer was on at all. So a runner without Windows' *Graphics Tools*
+      # optional feature fails this job loudly instead of passing while checking
+      # nothing; `CRCBL_DX12_VALIDATION=0` is the one way to run it there, and
+      # the log then says the run checked no validation.
       - name: Drive a D3D12 device pinned to WARP
         shell: bash
         run: crates/crcbl-dx12/tests/run-dx12-e2e.sh
@@ -1621,6 +1629,23 @@ jobs:
       # identically). This one differs in that a probe reproduced the hang from
       # a single call and its twin did not, rather than being inferred from
       # what was left.
+      #
+      # # This is the first Metal run under validation
+      #
+      # The harness exports `MTL_DEBUG_LAYER=1`, both of its violation modes as
+      # `abort`, and `MTL_SHADER_VALIDATION=1`, and prints what it set — so a
+      # green run states what it checked instead of inheriting it. None of the
+      # seventy-odd device tests has ever run under any of that.
+      #
+      # **Metal reports differently from the other two backends and the gate is
+      # honestly weaker.** There is no message list to count: an API misuse is
+      # printed and then aborts, so it arrives here as a killed test process
+      # rather than as a failed assertion. What `crcbl_mtl::fault` asserts at
+      # every device test's teardown is that Metal really interposed its
+      # validation layer, and that no command buffer the device submitted ended
+      # in `MTLCommandBufferStatus::Error` — which is where shader validation's
+      # findings and every GPU fault arrive. That crate's `fault` module argues
+      # all of it; `run-mtl-e2e.sh`'s header repeats the summary.
       - name: Run the Metal suite, minus the one test with no window server
         run: >-
           crates/crcbl-mtl/tests/run-mtl-e2e.sh --no-fail-fast -E 'not
@@ -1647,9 +1672,19 @@ jobs:
       # compared. A large pixel delta is a tolerance question, and a structural
       # mismatch or a blank frame is a finding about the backend — the comparison
       # prints enough to tell them apart.
+      #
+      # Metal's validation switches are set here too, because this step does not
+      # go through `run-mtl-e2e.sh` and would otherwise be the one Metal run in
+      # the matrix with no checking at all — the same reason the D3D12 twin of
+      # this step sets `CRCBL_DX12_VALIDATION`. `abort` on both modes means an
+      # API misuse ends the run rather than scrolling past in the log.
       - name: Draw a frame through ForwardRenderer on Metal
         env:
           CRCBL_GPU: mtl
+          MTL_DEBUG_LAYER: '1'
+          MTL_DEBUG_LAYER_ERROR_MODE: abort
+          MTL_DEBUG_LAYER_WARNING_MODE: abort
+          MTL_SHADER_VALIDATION: '1'
         run: crates/crcbl/tests/run-render-e2e.sh
 
       - name: Upload golden-image diffs

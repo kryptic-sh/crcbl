@@ -5289,3 +5289,53 @@ now that the workspace pins `toml = "1.1"`. The gate still passes (the check is
 `deny` and the unmatched skips are warnings), so this is tidying, not a failure.
 Noticed while adding `gltf`; not fixed because `deny.toml` was outside that
 task's paths.
+
+### What the backend validation gates do not cover
+
+`crcbl-dx12` and `crcbl-mtl` now assert a clean validation report at every
+device test's teardown, the line `crcbl-vk` has always held. What that does and
+does not buy, per backend, because the three are not equivalent and a reader
+should not assume they are.
+
+**Metal's is genuinely weaker, and not parity.** Metal has no queryable
+validation channel. `MTL_DEBUG_LAYER` is read when the framework loads, before
+any of this code runs, so nothing in `crcbl-mtl` can turn it on for itself; an
+API misuse is printed to stderr and then handled per
+`MTL_DEBUG_LAYER_ERROR_MODE`, with no message list, no callback and no count. So
+`assert_clean` there asserts two things only: that Metal interposed the layer on
+this device, and that no command buffer it submitted ended in
+`MTLCommandBufferStatus::Error`. **An API misuse never reaches the second**, and
+the first is read from a private detail — the layer replaces the device object's
+class with `MTLDebugDevice`, and `layer_wrapped_device` reads that name. If a
+macOS release renames the wrapper the assertion fails naming the class it saw,
+which is diagnosable, but it is the one fragile assumption in that crate.
+
+**There is no Metal deliberate-violation gate**, unlike the other two, and that
+is a finding rather than an omission: a violation aborts the process, so there
+is nothing to assert against. The fault half of the teardown guard is therefore
+exercised by nothing today — only a real GPU fault would prove it fires.
+
+**`MTL_SHADER_VALIDATION` is asked for and reported, never asserted.** Whether
+it took is not knowable in-process. `MTLShaderValidation::Enabled` exists
+per-pipeline-descriptor in `objc2-metal` 0.3.2 and is the programmatic
+alternative, but it still cannot be read back.
+
+**Metal's extra validations are off**: `MTL_DEBUG_LAYER_VALIDATE_LOAD_ACTIONS`
+and `_STORE_ACTIONS` catch reading an attachment nothing wrote and are the
+reasonable next step once the base layer is known green. `_UNRETAINED_RESOURCES`
+is irrelevant here — the command buffers are retained.
+
+**D3D12's info queue has a message-count limit (1024 by default) and nothing
+clears it any more**, now that `diagnosis` reads rather than drains — which is
+what stops a validation error quoted in a `HalError` from consuming the one that
+should fail teardown. A healthy run stores zero messages, so this is
+theoretical; a device producing more than the limit would start dropping _new_
+ones. `attach` could raise it with `SetMessageCountLimit`. Left alone as
+premature.
+
+**Never executed anywhere:** whether the 73 D3D12 and 71 Metal device tests are
+actually clean under their layers, whether the D3D12 gate's message really names
+`CreateCommittedResource`, whether the Metal suite survives `abort` on warnings,
+and whether the paravirtual device supports shader validation at all. The layer
+itself is confirmed present — a `main` run reports `debug layer=true` on
+`windows-latest` — but none of these crates executes on this machine.

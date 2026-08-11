@@ -70,15 +70,37 @@
 #                        `crcbl-vk`'s harness sets `CRCBL_VK_VALIDATION` for the
 #                        same reason.
 #
+#                        Set it to `0` on a machine without Windows' **Graphics
+#                        Tools** optional feature. See below: that is the one
+#                        way to run this suite there, and it is a loud one.
+#
 # # Why the debug layer matters more here than a validation layer usually does
 #
 # `DXGI_ERROR_DEVICE_REMOVED` is reported at the **next** call, not the offending
 # one, so without the layer a failure names a symptom and the call that caused it
 # is somewhere earlier with nothing pointing at it. The layer reports at the
-# call. It needs Windows' **Graphics Tools** optional feature; without it
-# `crcbl_dx12::debug` warns, prints `debug layer=false` on the line this script
-# checks, and the run still happens — a missing optional component is not a
-# reason to refuse to test.
+# call.
+#
+# # A missing layer is a failure of the machine, and it is reported as one
+#
+# Every device test in this crate now ends by asserting that the layer was on and
+# said nothing — `crcbl_dx12::debug`'s `ValidationReport::assert_clean`, which
+# keeps `crcbl-vk`'s semantics exactly: **the layer being absent fails before the
+# messages are even looked at**, because a suite that passed for want of a layer
+# proves nothing about validation.
+#
+# That is in tension with this script's older promise that a machine without the
+# *Graphics Tools* feature can still run the suite, and the tension resolves like
+# this: **absence is a failure of the environment, not of the test, so it is the
+# environment that has to say so.** `CRCBL_DX12_VALIDATION=0` is that statement.
+# With it the suite runs end to end and asserts nothing about validation, and the
+# `debug layer=false` line below says exactly that in the log. Without it —
+# meaning the layer was *asked for* and did not arrive — every device test fails,
+# which is the right outcome: that is the case where a reader of a green log
+# would otherwise believe checking had happened.
+#
+# So the promise still holds, and now costs one variable rather than a silent
+# downgrade of what the run means.
 #
 # # Why bash, when `run-win32-e2e.ps1` argued for PowerShell
 #
@@ -155,6 +177,35 @@ set -e
 # run where everything had in fact passed.
 crcbl_nextest_plain "$LOG" "${LOG}.plain"
 
+# Whether validation was on, off the suite's own output rather than off the
+# variable this script exported — the same rule the adapter check below follows,
+# and for the same reason: a variable that never reached the test process and a
+# layer Windows does not have both look alike from outside.
+#
+# Read **before** the failure gate, not after it, because on a machine without
+# the Graphics Tools feature this is the whole explanation for the wall of
+# failures that follows, and it would otherwise be printed only on the runs that
+# did not need it.
+VALIDATION="$(grep -F 'crcbl-dx12 e2e: debug layer=' "${LOG}.plain" | head -1 || true)"
+case "$VALIDATION" in
+    *"debug layer=false"*)
+        echo "crcbl dx12 e2e: the D3D12 debug layer is NOT on for this run." >&2
+        case "$(printf '%s' "$CRCBL_DX12_VALIDATION" | tr '[:upper:]' '[:lower:]')" in
+            0 | false | no | off) ;;
+            *)
+                echo "crcbl dx12 e2e: ############################################################" >&2
+                echo "crcbl dx12 e2e: # THE LAYER WAS ASKED FOR AND DID NOT ARRIVE.              #" >&2
+                echo "crcbl dx12 e2e: ############################################################" >&2
+                echo "                CRCBL_DX12_VALIDATION=${CRCBL_DX12_VALIDATION} asked for it, so every device" >&2
+                echo "                test below fails at teardown rather than passing while" >&2
+                echo "                checking nothing. Install Windows' Graphics Tools optional" >&2
+                echo "                feature, or re-run with CRCBL_DX12_VALIDATION=0 to say" >&2
+                echo "                plainly that this run checks no validation." >&2
+                ;;
+        esac
+        ;;
+esac
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl dx12 e2e: the suite failed (exit $STATUS)" >&2
     exit "$STATUS"
@@ -207,13 +258,9 @@ case "$ADAPTER" in
         ;;
 esac
 
-# Whether validation was on, off the suite's own output — the same rule the
-# adapter check above follows, and for the same reason: a variable that never
-# reached the test process and a layer Windows does not have both look like a
-# green run from outside. This is a *report*, not a gate: a machine without the
-# Graphics Tools feature must still be able to run the suite, so the line being
-# absent is the failure and `debug layer=false` is merely news.
-VALIDATION="$(grep -F 'crcbl-dx12 e2e: debug layer=' "${LOG}.plain" | head -1 || true)"
+# The line itself has to exist. `$VALIDATION` was read above, before the failure
+# gate; what is left here is the check that the suite said anything at all, which
+# only means something on a run that got this far.
 if [ -z "$VALIDATION" ]; then
     echo "crcbl dx12 e2e: the suite never said whether validation was on." >&2
     echo "                crcbl_dx12::debug's" >&2
@@ -225,9 +272,13 @@ fi
 echo "crcbl dx12 e2e: ${VALIDATION#*crcbl-dx12 e2e: }"
 case "$VALIDATION" in
     *"debug layer=false"*)
-        echo "crcbl dx12 e2e: the D3D12 debug layer is NOT on for this run. A validation" >&2
-        echo "                error will be reported one call late, if at all. Install the" >&2
-        echo "                Graphics Tools optional feature to fix that." >&2
+        echo "crcbl dx12 e2e: ############################################################" >&2
+        echo "crcbl dx12 e2e: # THIS RUN CHECKED NO VALIDATION.                          #" >&2
+        echo "crcbl dx12 e2e: ############################################################" >&2
+        echo "                The tests above passed against an unvalidated device: an" >&2
+        echo "                API misuse would have gone unreported, and a device-removed" >&2
+        echo "                failure would name no call. Install Windows' Graphics Tools" >&2
+        echo "                optional feature to get the layer back." >&2
         ;;
 esac
 

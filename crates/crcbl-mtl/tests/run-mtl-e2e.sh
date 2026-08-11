@@ -58,6 +58,53 @@
 # `docs/plan/12-testing.md` calls a silently-skipped e2e suite a known trap, and
 # a suite that is both feature-gated and `#[ignore]`d has two ways to run
 # nothing. Parsing the summary is what closes that.
+#
+# # ENVIRONMENT
+#
+#   MTL_DEBUG_LAYER      Metal's API-validation layer. Defaulted to `1` here
+#                        rather than inherited, so this run states what it
+#                        checked instead of depending on a shell nobody reads —
+#                        `run-vk-e2e.sh` defaults `CRCBL_VK_VALIDATION` and
+#                        `run-dx12-e2e.sh` defaults `CRCBL_DX12_VALIDATION` for
+#                        the same reason. **It has to be set before the process
+#                        starts**: Metal reads it when the framework loads, so
+#                        no code in `crcbl-mtl` can turn it on for itself.
+#   MTL_DEBUG_LAYER_ERROR_MODE
+#   MTL_DEBUG_LAYER_WARNING_MODE
+#                        What the layer does about a violation: `ignore`,
+#                        `assert`, `abort` or `nslog`. Both default to `abort`
+#                        here, and the warning one is not an oversight —
+#                        `crcbl-vk`'s line is zero errors **and** zero warnings,
+#                        and this backend is held to the same one.
+#   MTL_SHADER_VALIDATION
+#                        GPU-side bounds checking inside a running kernel.
+#                        Defaulted to `1`. Whether the device supports it is not
+#                        knowable from inside the process — Metal says so on
+#                        stderr and carries on — so this is asked for and
+#                        reported, never asserted.
+#   CRCBL_MTL_VALIDATION Whether the suite *requires* the layer to have been
+#                        interposed. Defaulted to `1`; set it to `0` to run
+#                        against an unvalidated device and have the log say so.
+#
+# # What Metal can and cannot report, and what this suite therefore asserts
+#
+# Neither Vulkan's messenger callback nor D3D12's info queue has a Metal
+# equivalent. An API misuse is **printed and then acted on** — at `abort`, the
+# process dies — so there is no message list to count and no assertion this
+# suite can make about one. What `crcbl_mtl::fault` asserts at every device
+# test's teardown is the two things that *are* observable:
+#
+#   * Metal really did interpose its validation layer on the device, read off
+#     the device object's Objective-C class, and
+#   * no command buffer the device submitted ended in `MTLCommandBufferStatus`
+#     `Error` — which is where shader validation's findings and every GPU fault
+#     arrive, and which nothing else in this backend noticed for a submission
+#     whose result no test waited on.
+#
+# **That is weaker than the other two backends' gates and is not claimed to be
+# parity.** A violation caught by API validation reaches this script as a killed
+# test process, not as a failed assertion. `crates/crcbl-mtl/src/fault.rs` argues
+# the whole of it.
 
 set -euo pipefail
 
@@ -84,16 +131,30 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Metal's own switches, exported rather than passed as flags because they are
+# read by the test process — by the Metal framework inside it, in fact, before
+# any of this crate's code runs. Defaulted rather than required so that running
+# this script *is* running what CI runs.
+export MTL_DEBUG_LAYER="${MTL_DEBUG_LAYER:-1}"
+export MTL_DEBUG_LAYER_ERROR_MODE="${MTL_DEBUG_LAYER_ERROR_MODE:-abort}"
+export MTL_DEBUG_LAYER_WARNING_MODE="${MTL_DEBUG_LAYER_WARNING_MODE:-abort}"
+export MTL_SHADER_VALIDATION="${MTL_SHADER_VALIDATION:-1}"
+# And this suite's own: whether a run that did not get the layer fails.
+export CRCBL_MTL_VALIDATION="${CRCBL_MTL_VALIDATION:-1}"
+echo "crcbl mtl e2e: MTL_DEBUG_LAYER=${MTL_DEBUG_LAYER}" \
+    "MTL_DEBUG_LAYER_ERROR_MODE=${MTL_DEBUG_LAYER_ERROR_MODE}" \
+    "MTL_DEBUG_LAYER_WARNING_MODE=${MTL_DEBUG_LAYER_WARNING_MODE}"
+echo "crcbl mtl e2e: MTL_SHADER_VALIDATION=${MTL_SHADER_VALIDATION}" \
+    "CRCBL_MTL_VALIDATION=${CRCBL_MTL_VALIDATION}"
+
+# `--success-output immediate` publishes the validation report line, which
+# nextest would otherwise capture on exactly the run a reader wants to read it
+# on. `run-dx12-e2e.sh` passes it for the same line.
 set +e
 cargo nextest run --locked -p crcbl-mtl --features mtl-e2e \
-    --run-ignored only --no-tests fail "$@" 2>&1 | tee "$LOG"
+    --run-ignored only --no-tests fail --success-output immediate "$@" 2>&1 | tee "$LOG"
 STATUS=${PIPESTATUS[0]}
 set -e
-
-if [ "$STATUS" -ne 0 ]; then
-    echo "crcbl mtl e2e: the suite failed" >&2
-    exit "$STATUS"
-fi
 
 # The colour-stripped copy is load-bearing, exactly as it is in
 # `crates/crcbl-vk/tests/run-vk-e2e.sh`: CI sets `CARGO_TERM_COLOR: always`, so
@@ -103,11 +164,62 @@ fi
 # `102 tests run: 102 passed`.
 crcbl_nextest_plain "$LOG" "${LOG}.plain"
 
+# What validation the suite actually ran under, off its own output rather than
+# off the variables this script exported — the rule `run-dx12-e2e.sh` follows for
+# its adapter and its debug layer, and for the same reason: a variable that never
+# reached the test process and a layer Metal declined to install both look like a
+# green run from outside.
+#
+# Read **before** the failure gate, because when the layer is missing and
+# CRCBL_MTL_VALIDATION asked for it, this is the whole explanation for the wall
+# of failures that follows.
+VALIDATION="$(grep -F 'crcbl-mtl e2e: api validation=' "${LOG}.plain" | head -1 || true)"
+case "$VALIDATION" in
+    *"api validation=false"*)
+        echo "crcbl mtl e2e: ############################################################" >&2
+        echo "crcbl mtl e2e: # METAL DID NOT INTERPOSE ITS VALIDATION LAYER.            #" >&2
+        echo "crcbl mtl e2e: ############################################################" >&2
+        echo "               An API misuse would have gone unreported. The class Metal" >&2
+        echo "               handed back is on the api-validation line this script prints" >&2
+        echo "               at the end; if MTL_DEBUG_LAYER was set, macOS has renamed the" >&2
+        echo "               wrapper and crcbl_mtl::fault's layer_wrapped_device needs" >&2
+        echo "               updating." >&2
+        case "$(printf '%s' "$CRCBL_MTL_VALIDATION" | tr '[:upper:]' '[:lower:]')" in
+            0 | false | no | off)
+                echo "               CRCBL_MTL_VALIDATION=${CRCBL_MTL_VALIDATION} asked for no validation, so the" >&2
+                echo "               tests below passed against an unvalidated device." >&2
+                ;;
+            *)
+                echo "               CRCBL_MTL_VALIDATION=${CRCBL_MTL_VALIDATION} asked for it, so every device test" >&2
+                echo "               fails at teardown rather than passing while checking nothing." >&2
+                ;;
+        esac
+        ;;
+esac
+
+if [ "$STATUS" -ne 0 ]; then
+    echo "crcbl mtl e2e: the suite failed" >&2
+    exit "$STATUS"
+fi
+
 # nextest reports its own totals; counting lines of its output would silently
 # pick up headers and land a number that is close and wrong.
 if ! crcbl_nextest_summary "${LOG}.plain" "crcbl mtl e2e" \
     "The mtl-e2e feature or the ignore attribute stopped matching the tests."; then
     exit 1
 fi
+
+# The line itself has to exist. `$VALIDATION` was read above, before the failure
+# gate; what is left here is the check that the suite said anything at all, which
+# only means something on a run that got this far.
+if [ -z "$VALIDATION" ]; then
+    echo "crcbl mtl e2e: the suite never said what validation it ran under." >&2
+    echo "               crcbl_mtl::fault's" >&2
+    echo "               a_fresh_device_says_what_validation_it_is_running_under" >&2
+    echo "               must print it and this script must be able to find it, or a green" >&2
+    echo "               run claims evidence it does not have." >&2
+    exit 1
+fi
+echo "crcbl mtl e2e: ${VALIDATION#*crcbl-mtl e2e: }"
 
 echo "crcbl mtl e2e: the hardware suite ran $CRCBL_NEXTEST_TESTS_RUN tests against a Metal device"
