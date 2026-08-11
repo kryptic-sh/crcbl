@@ -50,9 +50,18 @@ use core::fmt;
 pub use registry::{Asset, AssetHandle, AssetRegistry, AssetState};
 pub use source::{AssetSource, DirSource};
 
+/// The error every fallible call in this crate returns, re-exported from
+/// [`crcbl_store`].
+///
+/// Not a new type and not an alias: it is `crcbl-store`'s own error, and it is
+/// here because [`AssetSource::read`] hands one back, so a crate that
+/// implements or calls the trait has to be able to name it. Without the
+/// re-export that crate would depend on `crcbl-store` — the persistence layer —
+/// for a type it only sees because it loads assets.
+pub use crcbl_store::StorageError;
+
 use std::path::Path;
 
-use crcbl_store::StorageError;
 use crcbl_store::web::canonical_key;
 
 /// A stable, machine-independent name for one asset.

@@ -23,6 +23,19 @@ repository = "https://github.com/kryptic-sh/crcbl"
 ash = "0.38"
 bitflags = "2.9"
 glam = "0.33"
+# glTF 2.0 import (`crcbl-scene`). `default-features = false` is load-bearing,
+# and is the shape `bevy_gltf` uses for the same crate: the default `import`
+# feature does blocking `std::fs` reads, which bypasses `crcbl_assets::
+# AssetSource` and cannot work in a browser, and it pulls in `image` — a second
+# image decoder beside the PNG path `crcbl-sprite` already has. `utils` is the
+# accessor readers (`Primitive::reader`), which is the whole reason to use the
+# crate rather than the JSON; `names` is what lets a skipped primitive be
+# reported by the name its author gave it. None of the `KHR_*` extension
+# features are on: an extension nothing reads is a field nothing reads.
+gltf = { version = "1.4.1", default-features = false, features = [
+  "names",
+  "utils",
+] }
 # Entropy for `crcbl-server`'s resume tokens. Deliberately featureless here:
 # the browser backend (`wasm_js`, i.e. `crypto.getRandomValues` via `js-sys`)
 # is enabled from `crates/crcbl-server/Cargo.toml`'s `cfg(target_arch =

@@ -71,6 +71,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-scene` — glTF 2.0 import, through the asset seam.**
+  `crcbl_scene::import_gltf(source, key)` reads a `.gltf` or `.glb` and every
+  external `.bin` it names through `crcbl_assets::AssetSource`, and returns a
+  `GltfScene`: meshes as triangle lists (positions, normals, `TEXCOORD_0`,
+  indices), materials as `crcbl_shaders::mesh::GpuMaterial` rows, and the node
+  hierarchy flattened into instances carrying a composed column-major model →
+  world matrix. glTF's `baseColorFactor` is linear RGBA and so is
+  `GpuMaterial::base_color`, so the material mapping is an assignment with no
+  colour conversion. Nothing touches `std::fs`: a source that answers
+  `StorageError::Pending` makes the import `Pending` too, which is what lets it
+  work in a browser. No GPU upload, no textures and no scene format yet — those
+  are the rest of `docs/plan/06-assets-scenes.md`'s step 3 and its step 4.
+
+  **The crate does its own validation rather than using `gltf`'s**, because
+  `gltf` 1.4.1's validation panics on inputs it exists to reject: an
+  out-of-range `POSITION` accessor index aborts in
+  `gltf_json::mesh::primitive_validate_hook`, and a `.glb` header declaring a
+  total length below its own 12 bytes subtracts with overflow in
+  `Glb::from_slice`. Every accessor, buffer view and index the importer reads is
+  bounds-checked first, so no file contents can panic it: a truncated `.glb`, a
+  chunk length that overruns, a buffer view past the end of its buffer, an
+  accessor count that overflows its own byte span, an index past its vertex
+  array, a node hierarchy with a cycle and a buffer URI that escapes the asset
+  root are all errors. `data:` URI buffers and sparse accessors are refused as
+  `StorageError::Unsupported`; primitives that are not triangle lists are logged
+  and skipped.
+
+- **`crcbl_assets::StorageError`** is re-exported, so a crate that implements or
+  calls `AssetSource` can name the error it returns without depending on
+  `crcbl-store`.
+
 - **`crcbl-assets` — asset ids, load states, and the IO seam under them.** A new
   workspace member carrying `AssetId` (128-bit, printed as 32 hex digits,
   derived from the canonical asset key), `AssetRegistry` with

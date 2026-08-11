@@ -5220,3 +5220,72 @@ layers together. Downloading any of it from a `build.rs` was considered and is
 the wrong mechanism regardless: it breaks `--offline` and sandboxed builds, runs
 in every job including the ones that need nothing, and is invisible to the
 `cargo deny` gate this workspace already has.
+
+### glTF import: what the first half left, and what it found upstream
+
+`crcbl_scene::import_gltf` parses; nothing uploads. Written down here because
+each item below is a decision or a gap rather than a line of work someone can
+pick up from the code alone.
+
+**`gltf` 1.4.1 panics on malformed input, in two places, and both were
+reproduced rather than inferred.** `gltf_json::mesh::primitive_validate_hook`
+indexes `root.accessors` with the primitive's `POSITION` index directly, after
+the derive has already _reported_ that index as out of bounds — so
+`gltf::Gltf::from_slice` aborts on a file it was called to reject
+(`index out of bounds`). `gltf::binary::Glb::from_slice` computes
+`header.length as usize - 12` before checking anything, so a `.glb` declaring a
+total length below its own header subtracts with overflow. Both are debug-build
+panics and release-build silent wrongness. The consequence is structural:
+`crcbl_scene::gltf_check` exists because upstream validation cannot be trusted
+to return, and `Gltf::from_slice_without_validation` is what the importer calls.
+If either is fixed upstream, the argument in that module's header is what to
+re-read before deleting anything — and the checks would still be needed, because
+several of them (buffer views inside their buffers, accessor spans inside their
+views, indices inside their own vertex array) are things `gltf` never checked at
+all. Not reported upstream yet; that is the open action.
+
+**A scaled glTF node produces a non-rigid `GltfInstance::transform`, and
+`GpuInstance::transform` requires rigid.** The shader transforms normals with
+the matrix's 3×3 part and no inverse-transpose, so a node with non-uniform scale
+would light wrongly once uploaded. The importer preserves the scale deliberately
+— dropping it here would take the choice away — and the upload step has to pick
+one of: bake the scale into the vertices at import (loses instancing of a shared
+mesh at different scales), carry a separate normal matrix per instance (a wider
+`GpuInstance`), or refuse scaled nodes. Nothing has picked yet, and nothing
+renders a glTF, so nothing is wrong today.
+
+**Malformed files are `StorageError::Other(String)`.** That is deliberate reuse
+— a second error enum beside `StorageError` would make every caller of the
+importer match twice — but it means a caller cannot tell "this file is corrupt"
+from "the disk is on fire" except by reading the message. The smallest addition
+that would change it is one variant, `StorageError::Malformed { key, reason }`,
+in `crcbl-store`; it is not there because no caller branches on the difference.
+Revisit when one does (a hot-reload path that wants to keep the last good
+version is the likely first).
+
+**`data:` URI buffers and sparse accessors are refused, not implemented.** The
+first needs a base64 decoder; the `gltf` crate's is only reachable through its
+`import` feature, which is the feature that also does blocking file IO and pulls
+in `image`, so enabling it is not an option and the decode would be ours.
+Blender exports "glTF Embedded" this way, so a real asset will eventually hit
+it. Sparse accessors are refused partly on YAGNI and partly because `gltf`'s
+sparse iterator has the same `count - 1` underflow the dense one has, in three
+more places.
+
+**Not covered by anything yet:** a real-world glTF. Every fixture is
+hand-assembled in `crates/crcbl-scene/src/gltf_fixture.rs` — one triangle, one
+material, two nodes — which is what makes the malformed cases readable in a diff
+but means no Khronos sample, no exporter output and no large file has ever been
+through this code. [12-testing.md](12-testing.md)'s anchor list wants a vendored
+Khronos subset at P9; that is where the "does it load Sponza" question gets
+answered, and until then "it parses glTF" means "it parses the subset the
+fixtures cover".
+
+**`deny.toml`'s `multiple-versions` skip list has three stale entries.**
+`cargo deny check` and `cargo deny --all-features check` both warn
+`unmatched-skip` for `toml_edit@0.22.27`, `toml_datetime@0.6.11` and
+`winnow@0.7.15` — the "toml 0.8 via crcbl-store" stack, which no longer exists
+now that the workspace pins `toml = "1.1"`. The gate still passes (the check is
+`deny` and the unmatched skips are warnings), so this is tidying, not a failure.
+Noticed while adding `gltf`; not fixed because `deny.toml` was outside that
+task's paths.

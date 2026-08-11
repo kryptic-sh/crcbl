@@ -219,3 +219,57 @@ and for the same reason.
   `Loading` entry and returns how many are still waiting. The refcount is the
   plan's "refcounted release" minus the GPU retire calls, which need the stage 2
   deletion queue and a GPU-resident asset to retire.
+
+## Landed: task 3, first half — glTF parsing (2026-08-11)
+
+`crates/crcbl-scene`, which stops being a placeholder. Not `crcbl-assets`: that
+crate is the IO seam and its own docs say decoding belongs to whoever owns the
+format, which is how PNG ended up in `crcbl-sprite` and WAV in `crcbl-audio`.
+glTF's owner is the crate whose package description has said "scene format and
+glTF import" since the workspace skeleton, that [12-testing.md](12-testing.md)'s
+anchor list assigns the glTF corpus to, and whose dependency direction
+(`crcbl-scene` → `crcbl-assets`) the task-2 note above already states. A third
+crate would have been a new name for the same responsibility beside a crate that
+had already claimed it.
+
+**Parsing only.** No GPU pool upload, no textures, no mip generation, no RON
+scene format, no hot reload, no `crcbl import`. Skins and animations are in the
+file and are not read: a type nothing fills is worse than no type, and the
+format choice already covers them.
+
+- **`import_gltf(&dyn AssetSource, &Path) -> Result<GltfScene, StorageError>`.**
+  The document and every external `.bin` it names go through the seam, so a
+  browser source answering `Pending` makes the import `Pending` and the caller
+  retries — the "no synchronous IO anywhere in engine crates" exit criterion,
+  met by not enabling the `gltf` crate's `import` feature, which does its own
+  blocking `std::fs` reads and drags in a second image decoder.
+- **Buffer URIs resolve relative to the document's key and through the source**,
+  so `crcbl_store::web::canonical_key` governs them: a `.bin` outside the asset
+  root, a percent-encoded name, a Windows path are all `InvalidPath` rather than
+  reads. `data:` URI buffers are `Unsupported` — decoding base64 would have
+  meant the `gltf` crate's `base64` feature, which only exists as part of
+  `import`.
+- **`GltfScene::materials` is `[crcbl_shaders::mesh::GpuMaterial]`**, not a
+  parallel material type. glTF's `pbrMetallicRoughness.baseColorFactor` is
+  linear RGBA by specification and `GpuMaterial::base_color` is documented as
+  linear RGBA, so the mapping is an assignment; both defaults are `[1.0; 4]`
+  too. The colour-space question the texture half will have is a different one —
+  factors are linear, base-colour _textures_ are sRGB.
+- **`GltfInstance::transform` is column-major `[f32; 16]`**, the layout
+  `GpuInstance::transform` holds, and is **not** guaranteed rigid: glTF nodes
+  carry scale and this preserves it, while that field requires rotation and
+  translation only because the mesh shader has no inverse-transpose. Deciding
+  what to do about a scaled node belongs to the upload step; see
+  `docs/backlog.md`.
+- **The importer validates the document itself** (`crcbl_scene::gltf_check`) and
+  parses with `Gltf::from_slice_without_validation`, because `gltf` 1.4.1's own
+  validation **panics on inputs it exists to reject** — reproduced, not reasoned
+  about: an out-of-range `POSITION` accessor index indexes `root.accessors`
+  directly in `primitive_validate_hook`, and a `.glb` whose header declares a
+  length under 12 subtracts with overflow in `Glb::from_slice`. Everything the
+  importer reads is bounds-checked before the typed API — which is full of
+  `unwrap`, `unreachable!` and `debug_assert` reachable from file contents —
+  sees it.
+- **`StorageError` is reused rather than joined by a second enum**; malformed
+  files are `Other` with the key and the reason. `docs/backlog.md` records what
+  a dedicated variant would buy and why nothing needs it yet.
