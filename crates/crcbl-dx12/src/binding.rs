@@ -118,8 +118,9 @@
 //! address a group holds for it is the buffer's plus the entry's offset.
 
 use crcbl_hal::{
-    BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    BindGroupLayoutHandle, BindingFlags, BindingKind, HalError, MemoryLocation, ShaderStages,
+    BackendKind, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
+    BindGroupLayoutHandle, BindingFlags, BindingKind, DeviceCaps, HalError, MemoryLocation,
+    ShaderStages,
 };
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_BUFFER_SRV, D3D12_BUFFER_SRV_FLAG_RAW, D3D12_BUFFER_UAV, D3D12_BUFFER_UAV_FLAG_RAW,
@@ -446,26 +447,40 @@ impl VisibleHeaps {
 
 /// Turns a [`BindGroupLayoutDesc`] into the ranges a root signature declares.
 ///
+/// Every rule the seam states is checked first, by
+/// [`BindGroupLayoutDesc::check_entries`] — including the visibility check,
+/// which matters here because this backend reports no `Features::MESH_SHADER`
+/// and [`conv::shader_visibility`] would otherwise widen a mesh stage to
+/// `D3D12_SHADER_VISIBILITY_ALL` and say nothing. It is called here rather than
+/// by `create_bind_group_layout` so that the refusal is reachable from this
+/// module's own tests, which have no D3D12 device to open.
+///
 /// # Errors
 ///
-/// [`HalError::InvalidDescriptor`] for a descriptor D3D12 has no encoding for:
-/// a duplicate binding number, a zero-length binding, a dynamic-offset binding
-/// that is an array or a bindless one, or a [`BindingFlags::VARIABLE_COUNT`]
-/// entry that is not both last in the slice and highest-numbered — the rule
-/// [`BindGroupLayoutDesc::entries`] states, and which every "the variable
-/// binding is `entries.last()`" reading depends on.
+/// Whatever [`BindGroupLayoutDesc::check_entries`] returns, plus
+/// [`HalError::InvalidDescriptor`] for a dynamic-offset binding that is an
+/// array or carries a [`BindingFlags`] — neither of which a root descriptor can
+/// encode. See [`check_entry`].
 pub(crate) fn plan_layout(
     desc: &BindGroupLayoutDesc<'_>,
+    caps: &DeviceCaps,
     owner: u64,
 ) -> Result<BindGroupLayoutRecord, HalError> {
+    desc.check_entries(caps, BackendKind::Dx12)?;
+
     let mut views: Vec<RangePlan> = Vec::new();
     let mut samplers: Vec<RangePlan> = Vec::new();
     let mut roots: Vec<RootPlan> = Vec::new();
     let mut visibility = ShaderStages::empty();
     let mut variable = None;
 
-    for (index, entry) in desc.entries.iter().enumerate() {
-        check_entry(desc, index, entry)?;
+    for entry in desc.entries {
+        check_entry(entry)?;
+        // A `VARIABLE_COUNT` binding becomes D3D12's own unbounded range, so
+        // the seam's `u32::MAX` needs no number there. Anywhere else it does:
+        // the table offsets below are sums of counts, and a raw sentinel makes
+        // the next offset overflow and the heap block unallocatable.
+        let count = entry.resolved_count(&caps.limits);
         let range_type = conv::descriptor_range_type(entry.kind);
         if is_dynamic(entry.kind) {
             roots.push(RootPlan {
@@ -485,9 +500,9 @@ pub(crate) fn plan_layout(
         table.push(RangePlan {
             binding: entry.binding,
             range_type: range_type.unwrap_or(D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER),
-            count: if unbounded { 0 } else { entry.count },
+            count: if unbounded { 0 } else { count },
             offset: next_offset(table),
-            declared: if unbounded { u32::MAX } else { entry.count },
+            declared: if unbounded { u32::MAX } else { count },
         });
         if unbounded {
             variable = Some((entry.binding, in_views));
@@ -523,27 +538,14 @@ fn next_offset(ranges: &[RangePlan]) -> u32 {
     ranges.last().map_or(0, |range| range.offset + range.count)
 }
 
-/// Everything about one layout entry D3D12 cannot express, named.
-fn check_entry(
-    desc: &BindGroupLayoutDesc<'_>,
-    index: usize,
-    entry: &BindGroupLayoutEntry,
-) -> Result<(), HalError> {
-    if desc.entries[..index]
-        .iter()
-        .any(|earlier| earlier.binding == entry.binding)
-    {
-        return Err(HalError::InvalidDescriptor(format!(
-            "binding {} is declared twice in one bind group layout",
-            entry.binding
-        )));
-    }
-    if entry.count == 0 {
-        return Err(HalError::InvalidDescriptor(format!(
-            "binding {} has a count of zero, which is a range no shader can index",
-            entry.binding
-        )));
-    }
+/// What only **D3D12** cannot express about one layout entry, named.
+///
+/// The portable rules — a zero count, a duplicate binding number, the two
+/// halves of the `VARIABLE_COUNT` rule — are
+/// [`BindGroupLayoutDesc::check_entries`]'s, and were stated here a second time
+/// until they drifted. What is left is the root descriptor, which is a concept
+/// this API has and the others do not.
+fn check_entry(entry: &BindGroupLayoutEntry) -> Result<(), HalError> {
     if is_dynamic(entry.kind) {
         // A root descriptor is one address, so there is nothing for a second
         // element to be reached by — and the seam gives one offset per dynamic
@@ -562,24 +564,6 @@ fn check_entry(
                 "binding {} takes a dynamic offset and declares {:?}; every one of those flags \
                  describes a descriptor heap, and a root descriptor is not in one",
                 entry.binding, entry.flags
-            )));
-        }
-    }
-    if entry.flags.contains(BindingFlags::VARIABLE_COUNT) {
-        if index + 1 != desc.entries.len() {
-            return Err(HalError::InvalidDescriptor(format!(
-                "binding {} is VARIABLE_COUNT but is not the last entry of its layout",
-                entry.binding
-            )));
-        }
-        if desc
-            .entries
-            .iter()
-            .any(|other| other.binding > entry.binding)
-        {
-            return Err(HalError::InvalidDescriptor(format!(
-                "binding {} is VARIABLE_COUNT but is not the highest binding number of its layout",
-                entry.binding
             )));
         }
     }
@@ -1134,6 +1118,15 @@ mod tests {
     use crcbl_core::Handle;
     use crcbl_hal::{BindingResource, ImageViewType};
 
+    /// A device with the resource-binding tier this backend targets: bindless,
+    /// and no mesh stage — which is what `crcbl-dx12`'s adapter reports.
+    fn caps() -> DeviceCaps {
+        DeviceCaps {
+            features: crcbl_hal::Features::GPU_DRIVEN,
+            limits: crcbl_hal::Limits::desktop(),
+        }
+    }
+
     fn entry(binding: u32, kind: BindingKind) -> BindGroupLayoutEntry {
         BindGroupLayoutEntry {
             binding,
@@ -1150,6 +1143,7 @@ mod tests {
                 label: None,
                 entries,
             },
+            &caps(),
             7,
         )
     }
@@ -1281,36 +1275,101 @@ mod tests {
         );
     }
 
-    /// Everything D3D12 cannot express is refused by name, and each for its own
-    /// reason — a single "unsupported layout" would send a reader to the wrong
-    /// half of the descriptor.
+    /// A layout the **seam** forbids is refused here too, because
+    /// [`plan_layout`] runs [`BindGroupLayoutDesc::check_entries`].
+    ///
+    /// This backend has no device to open on this machine, so a shared checker
+    /// nothing calls would look identical to one every backend calls — the
+    /// guard whose scope matches nothing. This is where that is told apart.
+    ///
+    /// **What turns it red.** Deleting the `check_entries` call from
+    /// [`plan_layout`]: each of these layouts then plans cleanly, because
+    /// nothing left in this module states these rules.
     #[test]
-    fn a_layout_d3d12_cannot_express_is_refused_by_name() {
+    fn the_seams_own_rules_arrive_through_plan_layout() {
+        let image = BindingKind::SampledImage {
+            view_type: ImageViewType::D2,
+        };
         let cases: Vec<(&str, Vec<BindGroupLayoutEntry>)> = vec![
             (
-                "twice",
+                "count 0",
+                vec![BindGroupLayoutEntry {
+                    count: 0,
+                    ..entry(0, image)
+                }],
+            ),
+            (
+                "declared twice",
+                vec![entry(0, image), entry(0, BindingKind::Sampler)],
+            ),
+            (
+                "not the last entry",
                 vec![
-                    entry(
-                        0,
-                        BindingKind::SampledImage {
-                            view_type: ImageViewType::D2,
-                        },
-                    ),
-                    entry(0, BindingKind::Sampler),
+                    BindGroupLayoutEntry {
+                        flags: BindingFlags::VARIABLE_COUNT,
+                        ..entry(0, image)
+                    },
+                    entry(1, BindingKind::Sampler),
                 ],
             ),
             (
-                "count of zero",
+                "not the highest-numbered binding",
+                vec![
+                    entry(5, BindingKind::Sampler),
+                    BindGroupLayoutEntry {
+                        flags: BindingFlags::VARIABLE_COUNT,
+                        ..entry(1, image)
+                    },
+                ],
+            ),
+            (
+                "max_bindless_descriptors",
                 vec![BindGroupLayoutEntry {
-                    count: 0,
-                    ..entry(
-                        0,
-                        BindingKind::SampledImage {
-                            view_type: ImageViewType::D2,
-                        },
-                    )
+                    count: caps().limits.max_bindless_descriptors + 1,
+                    ..entry(0, image)
                 }],
             ),
+        ];
+        assert!(!cases.is_empty(), "nothing to check");
+        for (expected, entries) in cases {
+            let error = plan(&entries).expect_err(expected);
+            let HalError::InvalidDescriptor(text) = &error else {
+                panic!("{expected}: a layout the seam forbids is not {error:?}");
+            };
+            assert!(text.contains(expected), "{expected}: {text}");
+        }
+
+        // A mesh-visible binding, which is `Unsupported` rather than
+        // `InvalidDescriptor` — this backend reports no mesh stage.
+        let mesh = [BindGroupLayoutEntry {
+            visibility: ShaderStages::MESH,
+            ..entry(0, image)
+        }];
+        let error = plan(&mesh).expect_err("this backend reports no MESH_SHADER");
+        assert!(
+            matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Dx12),
+            "{error:?}"
+        );
+    }
+
+    /// What only D3D12 cannot express is refused by name, and each for its own
+    /// reason — a single "unsupported layout" would send a reader to the wrong
+    /// half of the descriptor.
+    ///
+    /// The portable causes a layout can also fail for — a zero count, a
+    /// duplicate binding number, a misplaced `VARIABLE_COUNT` — are
+    /// `BindGroupLayoutDesc::check_entries`', tested where that lives; that
+    /// this backend runs them is
+    /// [`the_seams_own_rules_arrive_through_plan_layout`].
+    ///
+    /// **What turns it red.** Accepting a dynamic-offset array, which would
+    /// take the seam's one offset per binding and apply it to element zero
+    /// while every other element read the wrong address. Accepting bindless
+    /// flags on a root descriptor, which is not in a descriptor heap for any of
+    /// them to describe.
+    #[test]
+    fn a_layout_d3d12_cannot_express_is_refused_by_name() {
+        let cases: Vec<(&str, Vec<BindGroupLayoutEntry>)> = vec![
             (
                 "one offset per dynamic binding rather than per element",
                 vec![BindGroupLayoutEntry {
@@ -1331,36 +1390,6 @@ mod tests {
                     )
                 }],
             ),
-            (
-                "not the last entry",
-                vec![
-                    BindGroupLayoutEntry {
-                        flags: BindingFlags::VARIABLE_COUNT,
-                        ..entry(
-                            0,
-                            BindingKind::SampledImage {
-                                view_type: ImageViewType::D2,
-                            },
-                        )
-                    },
-                    entry(1, BindingKind::Sampler),
-                ],
-            ),
-            (
-                "highest binding number",
-                vec![
-                    entry(5, BindingKind::Sampler),
-                    BindGroupLayoutEntry {
-                        flags: BindingFlags::VARIABLE_COUNT,
-                        ..entry(
-                            1,
-                            BindingKind::SampledImage {
-                                view_type: ImageViewType::D2,
-                            },
-                        )
-                    },
-                ],
-            ),
         ];
         assert!(!cases.is_empty(), "nothing to check");
         for (expected, entries) in cases {
@@ -1370,6 +1399,59 @@ mod tests {
             };
             assert!(text.contains(expected), "{expected}: {text}");
         }
+
+        // The same dynamic binding at count 1 with no flags is fine, so both
+        // refusals are about what was added and not about dynamic offsets.
+        plan(&[entry(0, BindingKind::UniformBuffer { dynamic: true })])
+            .expect("one dynamic uniform buffer");
+    }
+
+    /// The seam's `u32::MAX` is a request to clamp, and a table offset is a sum
+    /// of counts — so a range that kept the sentinel would make every later
+    /// range in its table start past the end of the heap.
+    ///
+    /// **What turns it red.** Planning `entry.count` instead of
+    /// `resolved_count`: the first assertion reads back 4 294 967 295, and the
+    /// second overflows the `offset + count` in `next_offset`. A
+    /// `VARIABLE_COUNT` binding is the case that must *not* change — D3D12 has
+    /// its own unbounded spelling and the count it contributes is zero.
+    #[test]
+    fn the_count_sentinel_is_resolved_before_it_reaches_a_descriptor_range() {
+        let limits = caps().limits;
+        let image = BindingKind::SampledImage {
+            view_type: ImageViewType::D2,
+        };
+
+        let flat = [BindGroupLayoutEntry {
+            count: u32::MAX,
+            ..entry(0, image)
+        }];
+        let layout = plan(&flat).expect("the sentinel is a request to clamp");
+        assert_eq!(layout.views[0].count, limits.max_bindless_descriptors);
+        assert_eq!(layout.views[0].declared, limits.max_bindless_descriptors);
+
+        // A second range after it, so the offset arithmetic is exercised rather
+        // than assumed.
+        let pair = [
+            flat[0],
+            BindGroupLayoutEntry {
+                count: 2,
+                ..entry(1, image)
+            },
+        ];
+        let layout = plan(&pair).expect("two ranges");
+        assert_eq!(layout.views[1].offset, limits.max_bindless_descriptors);
+        assert_eq!(layout.view_descriptors, limits.max_bindless_descriptors + 2);
+
+        // With `VARIABLE_COUNT` the sentinel stays D3D12's unbounded range.
+        let unbounded = [BindGroupLayoutEntry {
+            count: u32::MAX,
+            flags: BindingFlags::VARIABLE_COUNT | BindingFlags::PARTIALLY_BOUND,
+            ..entry(0, image)
+        }];
+        let layout = plan(&unbounded).expect("a bindless layout");
+        assert_eq!(layout.views[0].declared, u32::MAX);
+        assert_eq!(layout.views[0].count, 0);
     }
 
     /// **A binding's register is its position among the bindings of its own

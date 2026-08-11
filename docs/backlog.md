@@ -5607,34 +5607,11 @@ layout creation, `variable_count` is checked against the layout's variable
 binding and the entries supplied, `count: 0` is refused, and
 `create_bind_group_layout` is error-scoped. What is left:
 
-- **`count: u32::MAX` is not clamped, so the seam's portable bindless spelling
-  fails here and works on vk.** `u32::MAX` is the documented "as many as you
-  can"; `crcbl_vk::pipeline`'s `layout_binding_count` clamps it to
-  `max_bindless_descriptors` and the null backend mirrors that, while
-  `crcbl-wgpu` passes it to wgpu verbatim and gets a hard rejection:
-  `"Too many bindings of type BindingArrayElements in Stage ShaderStages(FRAGMENT), limit is 1000000, count was 4294967295. Check the limit max_binding_array_elements_per_shader_stage"`.
-  That message is clear and correctly attributed now that the call is checked —
-  the problem is that it is an `Err` at all when vk returns a layout. This is a
-  divergence in what the seam accepts, not a diagnosis gap.
-  `crcbl_wgpu::instance`'s `hal_limits_for` already maps
-  `max_bindless_descriptors` from `max_binding_array_elements_per_shader_stage`,
-  so the clamp is a short mirror of vk's — deliberately deferred because it is a
-  behaviour change to layout creation and wanted a separate decision. **This is
-  the shape a bindless slice actually writes**, so it is the first thing that
-  slice will hit.
 - **`update_bind_group` is still `Unsupported` on wgpu** — WebGPU bind groups
   are immutable and there is no update-after-bind path, so the seam's streaming
   bindless write is create-only here. It is the other half of what `array_index`
   exists for: a page of descriptors that grows as content loads has to be
   rebuilt rather than written into.
-- **Four copies of the `VARIABLE_COUNT` ordering check now exist and there is no
-  shared one.** `crcbl_vk::pipeline`'s `validate_bind_group_layout`,
-  `crcbl_dx12::binding`'s `check_entry`, the null backend's
-  `create_bind_group_layout`, and now wgpu's. (`crcbl-mtl` has none — its
-  `plan_set` refuses every `BindingFlags` outright, so no such layout reaches
-  it.) The rule is stated once on `BindGroupLayoutDesc::entries` and enforced
-  four times; a validator on the seam that each backend calls is the fix, and it
-  was not attempted here because it touches every backend at once.
 
 **Not verified: the browser.** Binding arrays are a native-only wgpu feature and
 `DESCRIPTOR_INDEXING` will be absent under WebGPU, so the array-shaped tests
@@ -5642,6 +5619,46 @@ take their skip branch there. No browser run was made, and the skip branch means
 a wasm regression in this code would not be observed by anything. The refusals
 that do not need an array layout — the flags gate, `count: 0`, the in-band
 layout error — run on every adapter, so that half is not skip-shaped.
+
+## The shared layout validator: two Metal decisions, and what only CI can prove
+
+`BindGroupLayoutDesc::check_entries` and `BindGroupLayoutEntry::resolved_count`
+replaced four drifted copies. Decisions taken while doing it, so they are not
+re-argued:
+
+- **`crcbl-mtl` refuses the `u32::MAX` count sentinel where the other four clamp
+  it.** Metal reports `max_bindless_descriptors: 0` — flat argument tables have
+  no runtime-sized array — so clamping would hand back a **one**-element array
+  on a backend that cannot do bindless at all, which is exactly the quiet
+  downgrade the seam exists to forbid. `plan_set`'s table-capacity `checked_add`
+  refuses it by name instead. Reversible in about a line plus a `limits`
+  parameter on `plan_set` if this ever looks wrong.
+- **`crcbl-mtl`'s own flags refusal is now unreachable through
+  `create_bind_group_layout`.** The seam's check fires first, so a caller asking
+  for bindless on Metal gets the generic "descriptor-indexing flags on a device
+  without DESCRIPTOR_INDEXING" rather than `plan_set`'s Metal-specific "flat
+  argument tables have no runtime-sized array". Kept that way because one
+  message per mistake across all backends is the point of the extraction, and
+  the generic one names the actionable fact. `plan_set` keeps the refusal and
+  its own tests exercise it directly; flipping the order is the fix if the
+  specific wording turns out to matter more.
+- **`crcbl-vk`'s
+  `a_bindless_capable_layout_is_accepted_or_refused_according_to_the_tier` only
+  `eprintln!`s the misplaced-`VARIABLE_COUNT` error** rather than asserting on
+  it. It does fail if the refusal stops happening — that is how the vk call site
+  was proven — but it would not notice the message becoming useless.
+
+**Coverage, stated as a gap rather than implied.** The validator is proven
+_called_ on three backends by a real run: the seam and null backend on the host,
+`crcbl-vk` on an RX 7900 XTX, `crcbl-wgpu` on lavapipe — neutering
+`check_entries` to return `Ok(())` reddens ten seam tests plus one test in each
+of those two device suites. **`crcbl-dx12` and `crcbl-mtl` are type-checked only
+here.** `crcbl-dx12` is entirely `#[cfg(target_os = "windows")]`, so a Linux
+`cargo test -p crcbl-dx12` never compiles `binding::tests` at all, and
+`--target x86_64-pc-windows-msvc` has no linker on this box; the `--target`
+clippy runs are a type-check and nothing more. Those two backends' new tests
+first _execute_ on CI's Windows and macOS runners, which is where their evidence
+comes from.
 
 ## `BindingKind::StorageImage` still cannot name its format or its dimension
 

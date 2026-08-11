@@ -27,8 +27,8 @@
 use crcbl_core::Handle;
 
 use crate::{
-    Format, HalError, ImageViewHandle, ImageViewType, Limits, SamplerHandle, ShaderEntry,
-    ShaderStages, resource::BufferHandle,
+    BackendKind, DeviceCaps, Features, Format, HalError, ImageViewHandle, ImageViewType, Limits,
+    SamplerHandle, ShaderEntry, ShaderStages, resource::BufferHandle,
 };
 
 /// Marker type for pipeline-layout handles. Uninhabited.
@@ -145,10 +145,39 @@ pub struct BindGroupLayoutEntry {
     pub kind: BindingKind,
     /// Array length. `1` for a scalar binding; larger for an array; combined
     /// with [`BindingFlags::VARIABLE_COUNT`] for a bindless array, where it is
-    /// the upper bound.
+    /// the upper bound. Zero is rejected: a binding holding no descriptors is
+    /// one no shader can index.
+    ///
+    /// [`u32::MAX`] is the sentinel for **"as many as this device can"**, not a
+    /// request for 4 294 967 295 descriptors — it is the number the portable
+    /// bindless declaration is written with, because the caller cannot know a
+    /// device's ceiling before it opens one. Every backend resolves it through
+    /// [`resolved_count`](BindGroupLayoutEntry::resolved_count), and it is the
+    /// one value exempt from the
+    /// [`max_bindless_descriptors`](Limits::max_bindless_descriptors) check in
+    /// [`BindGroupLayoutDesc::check_entries`].
     pub count: u32,
     /// Descriptor-indexing behaviour.
     pub flags: BindingFlags,
+}
+
+impl BindGroupLayoutEntry {
+    /// The descriptor count this binding is actually created with.
+    ///
+    /// Resolves the [`count`](Self::count) sentinel: [`u32::MAX`] becomes the
+    /// device's own
+    /// [`max_bindless_descriptors`](Limits::max_bindless_descriptors), and any
+    /// other count is left alone. The floor of one is what keeps a device
+    /// reporting no bindless descriptors at all from turning the sentinel into
+    /// a zero-length array, which is a layout no backend will create.
+    #[must_use]
+    pub fn resolved_count(&self, limits: &Limits) -> u32 {
+        if self.count == u32::MAX {
+            limits.max_bindless_descriptors.max(1)
+        } else {
+            self.count
+        }
+    }
 }
 
 /// Creation parameters for a bind-group layout.
@@ -169,7 +198,120 @@ pub struct BindGroupLayoutDesc<'a> {
     /// is [`HalError::InvalidDescriptor`].
     ///
     /// Duplicate binding numbers are rejected.
+    ///
+    /// [`check_entries`](BindGroupLayoutDesc::check_entries) is where all of
+    /// that is enforced, once, for every backend.
     pub entries: &'a [BindGroupLayoutEntry],
+}
+
+impl BindGroupLayoutDesc<'_> {
+    /// Checks [`entries`](Self::entries) against the rules that field states
+    /// and against what the device can actually express.
+    ///
+    /// **Every backend calls this**, and none of them states the rules again.
+    /// Each used to write them out for itself, and they drifted apart on which
+    /// rules were present at all and on what the refusal said — so a layout
+    /// that failed by name on one backend was silently built on another. That
+    /// is duplicated *knowledge*: one change to the rule has to alter every
+    /// enforcement of it, which is what makes this a seam function rather than
+    /// a helper.
+    ///
+    /// A backend still refuses what only *it* cannot express, and those checks
+    /// stay where they are: D3D12's root descriptors take one GPU address, so
+    /// an array of dynamic-offset buffers is refused in `crcbl-dx12`; Metal
+    /// binds flat argument tables of a fixed size, so `crcbl-mtl` bounds a
+    /// layout by them and refuses every [`BindingFlags`] outright.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`], naming the binding, for a
+    /// [`count`](BindGroupLayoutEntry::count) of zero, a binding number
+    /// declared twice, a [`BindingFlags::VARIABLE_COUNT`] entry that is not
+    /// both last and highest-numbered, or an explicit count above
+    /// [`Limits::max_bindless_descriptors`] — which the `u32::MAX` sentinel is
+    /// exempt from, being a request to clamp rather than an over-large one.
+    ///
+    /// [`HalError::Unsupported`] when the device lacks
+    /// [`Features::DESCRIPTOR_INDEXING`] and an entry sets any
+    /// [`BindingFlags`], or when an entry's
+    /// [`visibility`](BindGroupLayoutEntry::visibility) names a stage the
+    /// device does not report — see
+    /// [`ShaderStages::check_supported`](crate::ShaderStages::check_supported).
+    pub fn check_entries(&self, caps: &DeviceCaps, backend: BackendKind) -> Result<(), HalError> {
+        let indexing = caps.features.contains(Features::DESCRIPTOR_INDEXING);
+        for (index, entry) in self.entries.iter().enumerate() {
+            // Before the driver sees it. `VK_SHADER_STAGE_MESH_BIT_EXT` in a
+            // set layout on a device without `meshShader` is a validation error
+            // that arrives from `vkCreateDescriptorSetLayout` naming neither
+            // the binding it came from nor the capability that is missing.
+            entry.visibility.check_supported(caps.features, backend)?;
+            if entry.count == 0 {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "binding {} has count 0; a binding must hold at least one descriptor",
+                    entry.binding
+                )));
+            }
+            if self.entries[..index]
+                .iter()
+                .any(|earlier| earlier.binding == entry.binding)
+            {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "binding {} is declared twice in one bind group layout",
+                    entry.binding
+                )));
+            }
+            if !entry.flags.is_empty() && !indexing {
+                // [`BindingFlags`] is explicit that this must be loud: "a
+                // bindless array quietly downgraded to a fixed one reads
+                // garbage at index 4097."
+                return Err(HalError::Unsupported {
+                    backend,
+                    what: "descriptor-indexing flags on a device without DESCRIPTOR_INDEXING",
+                });
+            }
+            if entry.flags.contains(BindingFlags::VARIABLE_COUNT) {
+                // Both halves, and each says which one it is: a layout that
+                // breaks one is not the same caller bug as one that breaks the
+                // other, and the reader has to know which to move.
+                if index + 1 != self.entries.len() {
+                    return Err(HalError::InvalidDescriptor(format!(
+                        "binding {} sets VARIABLE_COUNT but is not the last entry of its layout; \
+                         every \"the variable binding is `entries.last()`\" reading in a backend \
+                         depends on it being last",
+                        entry.binding
+                    )));
+                }
+                if self
+                    .entries
+                    .iter()
+                    .any(|other| other.binding > entry.binding)
+                {
+                    return Err(HalError::InvalidDescriptor(format!(
+                        "binding {} sets VARIABLE_COUNT but is not the highest-numbered binding of \
+                         its layout; a runtime-sized array is only legal on the highest-numbered \
+                         binding of a set",
+                        entry.binding
+                    )));
+                }
+            }
+            // `u32::MAX` is exempt: it is a request to clamp, not a request for
+            // four billion descriptors, and checking it here rejected the one
+            // shape the bindless model is written in — found by `crcbl-vk`'s
+            // e2e suite on radv, where the ceiling is 8 388 606 and the
+            // sentinel is larger. See `BindGroupLayoutEntry::resolved_count`.
+            if indexing
+                && entry.count != u32::MAX
+                && entry.count > 1
+                && entry.count > caps.limits.max_bindless_descriptors.max(1)
+            {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "binding {} asks for {} descriptors but max_bindless_descriptors is {}",
+                    entry.binding, entry.count, caps.limits.max_bindless_descriptors
+                )));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A resource being bound into a slot.
@@ -263,7 +405,7 @@ pub struct BindGroupDesc<'a> {
 /// `setBytes`, so it is the common cross-API term rather than a vk-only one —
 /// and renaming it would not close the real gap, which is that WebGPU lacks the
 /// feature entirely. That gap is a **capability fact**, and it belongs in
-/// [`DeviceCaps`](crate::DeviceCaps) where a backend declares it and a caller
+/// [`DeviceCaps`] where a backend declares it and a caller
 /// branches on it, not in the name of a type that three of four backends
 /// implement natively.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1078,6 +1220,247 @@ mod tests {
         desc([64, 1, 1])
             .check_workgroup_size(&limits)
             .expect("the size every compute shader in this workspace declares");
+    }
+
+    fn caps(features: Features) -> DeviceCaps {
+        DeviceCaps {
+            features,
+            limits: Limits::desktop(),
+        }
+    }
+
+    fn binding(binding: u32, flags: BindingFlags, count: u32) -> BindGroupLayoutEntry {
+        BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::VERTEX,
+            kind: BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            count,
+            flags,
+        }
+    }
+
+    fn check(entries: &[BindGroupLayoutEntry], caps: &DeviceCaps) -> Result<(), HalError> {
+        BindGroupLayoutDesc {
+            label: Some("guard"),
+            entries,
+        }
+        .check_entries(caps, BackendKind::Null)
+    }
+
+    /// A legal layout passes — the half without which every rejection below is
+    /// satisfied by a checker that refuses everything.
+    ///
+    /// The triangle's own layout is one read-only storage buffer with no flags,
+    /// and it must be legal on **both** tiers: vertex pulling is not a Tier A
+    /// feature, it is the engine's only geometry path.
+    #[test]
+    fn the_vertex_pulling_layout_is_legal_on_both_tiers() {
+        let entries = [binding(0, BindingFlags::empty(), 1)];
+        check(&entries, &caps(Features::GPU_DRIVEN)).expect("Tier A");
+        check(&entries, &caps(Features::empty())).expect("Tier B too");
+
+        // And the shape the bindless model is actually written in, on a device
+        // that reports the feature.
+        let bindless = [
+            binding(0, BindingFlags::empty(), 1),
+            BindGroupLayoutEntry {
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
+                ..binding(
+                    1,
+                    BindingFlags::VARIABLE_COUNT
+                        | BindingFlags::PARTIALLY_BOUND
+                        | BindingFlags::UPDATE_AFTER_BIND,
+                    u32::MAX,
+                )
+            },
+        ];
+        check(&bindless, &caps(Features::GPU_DRIVEN))
+            .expect("u32::MAX is a request to clamp, not an over-large request");
+    }
+
+    /// A binding holding no descriptors is one no shader can index, and wgpu
+    /// spells "no count" and "a count of one" the same way — so a zero would
+    /// arrive there as an ordinary scalar binding.
+    #[test]
+    fn a_zero_count_is_refused_by_binding_number() {
+        let error = check(
+            &[binding(3, BindingFlags::empty(), 0)],
+            &caps(Features::GPU_DRIVEN),
+        )
+        .expect_err("a binding holding nothing");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+        let text = error.to_string();
+        for expected in ["binding 3", "count 0"] {
+            assert!(text.contains(expected), "{expected:?} missing from {text}");
+        }
+    }
+
+    /// Two entries claiming one binding number is a caller bug, and which of
+    /// the two wins is not something the seam decides.
+    #[test]
+    fn a_duplicated_binding_number_is_refused() {
+        let entries = [
+            binding(3, BindingFlags::empty(), 1),
+            binding(3, BindingFlags::empty(), 1),
+        ];
+        let error = check(&entries, &caps(Features::GPU_DRIVEN)).expect_err("binding 3 twice");
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+        assert!(error.to_string().contains("twice"), "{error}");
+    }
+
+    /// The seam's rule, and the reason it exists: "a bindless array quietly
+    /// downgraded to a fixed one reads garbage at index 4097".
+    ///
+    /// Every flag individually, because one standing for the others is a
+    /// reading the loop would hide.
+    #[test]
+    fn a_device_without_descriptor_indexing_refuses_the_flags_rather_than_ignoring_them() {
+        for flag in [
+            BindingFlags::PARTIALLY_BOUND,
+            BindingFlags::UPDATE_AFTER_BIND,
+            BindingFlags::VARIABLE_COUNT,
+        ] {
+            assert!(!flag.is_empty(), "{flag:?} would prove nothing");
+            let entries = [binding(0, flag, 4)];
+            let error = check(&entries, &caps(Features::empty()))
+                .expect_err("a device without the feature");
+            assert!(
+                matches!(error, HalError::Unsupported { backend, .. } if backend == BackendKind::Null),
+                "{flag:?}: {error:?}"
+            );
+            check(&entries, &caps(Features::GPU_DRIVEN))
+                .unwrap_or_else(|error| panic!("{flag:?} on a device reporting it: {error}"));
+        }
+    }
+
+    /// A binding visible to a mesh stage is legal on a device that reports the
+    /// stage and nowhere else. `GPU_DRIVEN` carries neither mesh flag, which is
+    /// what makes the refusing half a real device rather than a contrived one.
+    #[test]
+    fn a_mesh_visible_binding_needs_the_matching_capability() {
+        for (stage, feature) in [
+            (ShaderStages::MESH, Features::MESH_SHADER),
+            (ShaderStages::TASK, Features::TASK_SHADER),
+        ] {
+            let entries = [BindGroupLayoutEntry {
+                visibility: stage,
+                ..binding(0, BindingFlags::empty(), 1)
+            }];
+            let error = check(&entries, &caps(Features::GPU_DRIVEN))
+                .expect_err("GPU_DRIVEN carries neither mesh flag");
+            assert!(
+                matches!(error, HalError::Unsupported { .. }),
+                "{stage:?}: {error}"
+            );
+            check(&entries, &caps(Features::GPU_DRIVEN | feature))
+                .unwrap_or_else(|error| panic!("{stage:?} on a device reporting it: {error}"));
+        }
+    }
+
+    /// Both halves of the `VARIABLE_COUNT` rule, and each refusal says which
+    /// half it is.
+    ///
+    /// **What turns it red.** Checking only "last in the slice" accepts the
+    /// second case, which every driver refuses. Checking only "highest
+    /// numbered" accepts the first, which leaves `entries.last()` pointing at
+    /// the wrong entry in every backend that reads it that way. Checking
+    /// neither accepts the layout the third case builds legally, so the passing
+    /// half is what keeps the two apart.
+    #[test]
+    fn variable_count_must_be_both_last_and_highest_numbered() {
+        let tier_a = caps(Features::GPU_DRIVEN);
+
+        // Highest-numbered, but not last in the slice.
+        let entries = [
+            binding(7, BindingFlags::VARIABLE_COUNT, 8),
+            binding(2, BindingFlags::empty(), 1),
+        ];
+        let error = check(&entries, &tier_a).expect_err("not the last entry");
+        assert!(
+            error.to_string().contains("not the last entry"),
+            "the half that failed must be named: {error}"
+        );
+
+        // Last in the slice, but binding 2 sits below binding 7.
+        let entries = [
+            binding(7, BindingFlags::empty(), 1),
+            binding(2, BindingFlags::VARIABLE_COUNT, 8),
+        ];
+        let error = check(&entries, &tier_a).expect_err("not the highest binding number");
+        assert!(
+            error
+                .to_string()
+                .contains("not the highest-numbered binding"),
+            "the half that failed must be named: {error}"
+        );
+
+        // Both halves satisfied.
+        let entries = [
+            binding(2, BindingFlags::empty(), 1),
+            binding(7, BindingFlags::VARIABLE_COUNT, 8),
+        ];
+        check(&entries, &tier_a).expect("last and highest");
+    }
+
+    /// The sentinel is exempt from the ceiling it is about to be clamped to;
+    /// an explicit count above it is still a caller bug.
+    ///
+    /// **What turns it red.** Dropping the `u32::MAX` exemption — the sentinel
+    /// is larger than any real device's ceiling, so the portable bindless
+    /// declaration would be refused on every one of them. Dropping the ceiling
+    /// check — an explicit over-large count reaches the driver as a VUID naming
+    /// neither the binding nor the limit.
+    #[test]
+    fn the_count_ceiling_exempts_the_sentinel_and_nothing_else() {
+        let tier_a = caps(Features::GPU_DRIVEN);
+        let ceiling = tier_a.limits.max_bindless_descriptors;
+        assert!(ceiling > 1, "a ceiling of {ceiling} would prove nothing");
+
+        check(&[binding(0, BindingFlags::empty(), u32::MAX)], &tier_a)
+            .expect("the sentinel is a request to clamp");
+        check(&[binding(0, BindingFlags::empty(), ceiling)], &tier_a).expect("exactly the ceiling");
+
+        let error = check(&[binding(0, BindingFlags::empty(), ceiling + 1)], &tier_a)
+            .expect_err("one past the ceiling is not a sentinel");
+        assert!(
+            error.to_string().contains("max_bindless_descriptors"),
+            "the limit must be named: {error}"
+        );
+    }
+
+    /// The sentinel resolves to what the device can do, and never to zero.
+    ///
+    /// **What turns it red.** Resolving `u32::MAX` verbatim — which is what
+    /// `crcbl-wgpu` did, and wgpu refused the layout outright. Clamping an
+    /// ordinary count as well, which would silently shrink a fixed array.
+    /// Dropping the floor of one, which turns the sentinel into a zero-length
+    /// array on a device reporting no bindless descriptors at all.
+    #[test]
+    fn the_sentinel_resolves_to_the_devices_own_ceiling() {
+        let desktop = Limits::desktop();
+        assert!(desktop.max_bindless_descriptors > 1);
+        assert_eq!(
+            binding(0, BindingFlags::VARIABLE_COUNT, u32::MAX).resolved_count(&desktop),
+            desktop.max_bindless_descriptors
+        );
+        assert_eq!(
+            binding(0, BindingFlags::empty(), 16).resolved_count(&desktop),
+            16,
+            "an explicit count is left alone"
+        );
+
+        let minimum = Limits::minimum();
+        assert_eq!(minimum.max_bindless_descriptors, 0);
+        assert_eq!(
+            binding(0, BindingFlags::empty(), u32::MAX).resolved_count(&minimum),
+            1,
+            "a device with no bindless ceiling still owes a creatable binding"
+        );
     }
 
     #[test]

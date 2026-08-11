@@ -687,20 +687,25 @@ pub(crate) fn apply(
 impl MetalDevice {
     /// Places a bind-group layout in the argument tables. See [`plan_set`].
     ///
-    /// The mesh-stage check is here rather than in [`plan_set`] because it is
-    /// the one rule in this path that reads the *device* rather than the
-    /// descriptor: this backend reports no `Features::MESH_SHADER`, so a layout
-    /// naming the mesh stage is refused here rather than becoming a set of
-    /// argument-table slots no pipeline on this backend could ever read.
+    /// The seam's own rules come first, from
+    /// [`BindGroupLayoutDesc::check_entries`] — including the mesh-stage
+    /// visibility check, which is the one rule in this path that reads the
+    /// *device* rather than the descriptor: this backend reports no
+    /// `Features::MESH_SHADER`, so a layout naming the mesh stage is refused
+    /// rather than becoming a set of argument-table slots no pipeline on this
+    /// backend could ever read. [`plan_set`] then adds what only Metal refuses.
+    ///
+    /// This backend withdraws
+    /// [`Features::DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING),
+    /// so a layout carrying any [`BindingFlags`](crcbl_hal::BindingFlags) is
+    /// refused by the seam's check before [`plan_set`]'s own refusal is
+    /// reached. [`plan_set`] keeps it because it is a pure function with no
+    /// caps to consult and its contract is tested without a device.
     pub(crate) fn create_bind_group_layout_impl(
         &self,
         desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
-        for entry in desc.entries {
-            entry
-                .visibility
-                .check_supported(self.inner.caps.features, crcbl_hal::BackendKind::Metal)?;
-        }
+        desc.check_entries(&self.inner.caps, crcbl_hal::BackendKind::Metal)?;
         let plan = plan_set(desc)?;
         let handle = self
             .state()
@@ -957,6 +962,51 @@ mod tests {
     };
     const UNIFORM: BindingKind = BindingKind::UniformBuffer { dynamic: false };
     const DYNAMIC_UNIFORM: BindingKind = BindingKind::UniformBuffer { dynamic: true };
+
+    /// A layout the **seam** forbids is refused by
+    /// `create_bind_group_layout`, because it runs
+    /// `BindGroupLayoutDesc::check_entries`.
+    ///
+    /// [`plan_set`] is a pure function with no caps to consult, so it cannot
+    /// state the rules that read the device — and the mesh-stage refusal is
+    /// the one this backend has nothing else to make: it reports no
+    /// `Features::MESH_SHADER`, and a layout naming the stage would otherwise
+    /// become argument-table slots no pipeline here could ever read.
+    ///
+    /// **What turns it red.** Deleting the `check_entries` call from
+    /// `create_bind_group_layout_impl`: the mesh case is then accepted, because
+    /// nothing else in this backend looks at visibility at all.
+    #[test]
+    fn the_seams_own_rules_arrive_through_create_bind_group_layout() {
+        let (_instance, device) = open_device();
+        assert!(
+            !device
+                .inner
+                .caps
+                .features
+                .contains(crcbl_hal::Features::MESH_SHADER),
+            "this backend reports no mesh stage; the refusal below would prove nothing otherwise"
+        );
+
+        let mesh = [BindGroupLayoutEntry {
+            visibility: ShaderStages::MESH,
+            ..entry(0, STORAGE, 1)
+        }];
+        let error = device
+            .create_bind_group_layout_impl(&layout(&mesh))
+            .expect_err("a mesh-visible binding on a backend with no mesh stage");
+        assert!(
+            matches!(error, HalError::Unsupported { backend, .. }
+                if backend == crcbl_hal::BackendKind::Metal),
+            "{error:?}"
+        );
+
+        // The same binding visible to a stage this backend does report, so the
+        // refusal is about the stage and not about the entry.
+        device
+            .create_bind_group_layout_impl(&layout(&[entry(0, STORAGE, 1)]))
+            .expect("one read-only storage buffer, visible to the graphics stages");
+    }
 
     /// The index of a binding in `plan`, by table and position.
     fn placed(plan: &SetPlan, binding: u32) -> (Table, u32) {

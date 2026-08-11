@@ -1077,56 +1077,7 @@ impl Device for NullDevice {
         &self,
         desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
-        let indexing = self.caps.features.contains(Features::DESCRIPTOR_INDEXING);
-        let mut seen: Vec<u32> = Vec::with_capacity(desc.entries.len());
-        let highest = desc
-            .entries
-            .iter()
-            .map(|entry| entry.binding)
-            .max()
-            .unwrap_or(0);
-        for (index, entry) in desc.entries.iter().enumerate() {
-            entry
-                .visibility
-                .check_supported(self.caps.features, BackendKind::Null)?;
-            if !entry.flags.is_empty() && !indexing {
-                return Err(self.unsupported("descriptor indexing flags"));
-            }
-            if entry.flags.contains(crate::BindingFlags::VARIABLE_COUNT)
-                && (index + 1 != desc.entries.len() || entry.binding != highest)
-            {
-                return Err(HalError::InvalidDescriptor(format!(
-                    "binding {} sets VARIABLE_COUNT but is not both the last entry and the \
-                     highest-numbered binding of the set",
-                    entry.binding
-                )));
-            }
-            if entry.count == 0 {
-                return Err(HalError::InvalidDescriptor(
-                    "binding count must be non-zero".to_string(),
-                ));
-            }
-            if seen.contains(&entry.binding) {
-                return Err(HalError::InvalidDescriptor(format!(
-                    "binding {} is declared twice",
-                    entry.binding
-                )));
-            }
-            seen.push(entry.binding);
-            // `u32::MAX` is the seam's "as many as you can", clamped by the
-            // backend rather than refused — see `crcbl-vk`'s
-            // `layout_binding_count`, which this mirrors deliberately.
-            if indexing
-                && entry.count != u32::MAX
-                && entry.count > 1
-                && entry.count > self.caps.limits.max_bindless_descriptors.max(1)
-            {
-                return Err(HalError::InvalidDescriptor(format!(
-                    "binding {} asks for {} descriptors but max_bindless_descriptors is {}",
-                    entry.binding, entry.count, self.caps.limits.max_bindless_descriptors
-                )));
-            }
-        }
+        desc.check_entries(&self.caps, BackendKind::Null)?;
         let update_after_bind = desc
             .entries
             .iter()
@@ -1889,15 +1840,17 @@ impl LayoutRecord {
     /// How many descriptors a binding actually holds.
     ///
     /// [`BindingFlags::VARIABLE_COUNT`](crate::BindingFlags::VARIABLE_COUNT)
-    /// makes the declared `count` an upper bound, and the seam spells "as many
-    /// as you can" as `u32::MAX` — which is a request to clamp to the device's
-    /// ceiling, not a request for four billion descriptors.
+    /// makes the declared `count` an upper bound, and
+    /// [`BindGroupLayoutEntry::resolved_count`](crate::BindGroupLayoutEntry::resolved_count)
+    /// is where the seam's `u32::MAX` becomes a number. Only the variable
+    /// binding is resolved: every other binding holds exactly the length it
+    /// declared, which is the bound a caller's `array_index` has to clear.
     fn binding_ceiling(&self, binding: u32, caps: &DeviceCaps) -> u32 {
         let Some(entry) = self.entries.iter().find(|slot| slot.binding == binding) else {
             return 0;
         };
-        if entry.count == u32::MAX && self.variable_binding == Some(binding) {
-            caps.limits.max_bindless_descriptors.max(1)
+        if self.variable_binding == Some(binding) {
+            entry.resolved_count(&caps.limits)
         } else {
             entry.count
         }

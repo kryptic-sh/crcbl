@@ -120,111 +120,6 @@ pub(crate) struct SamplerEntry {
 
 // --- pure validation -------------------------------------------------------
 
-/// Checks a bind-group layout against the seam's rules and the device's caps.
-///
-/// Pure, and separated from the driver call for the reason the whole `conv`
-/// module is: these are the *decisions* — which flag combinations are legal on
-/// which tier — and they deserve a unit test rather than a GPU.
-///
-/// # Errors
-///
-/// [`HalError::InvalidDescriptor`] naming the offending binding, or
-/// [`HalError::Unsupported`] when the device is Tier B and the layout asked for
-/// descriptor indexing, or when an entry is visible to a mesh stage the device
-/// does not have.
-pub(crate) fn validate_bind_group_layout(
-    desc: &BindGroupLayoutDesc<'_>,
-    caps: &DeviceCaps,
-) -> Result<(), HalError> {
-    let indexing = caps.features.contains(Features::DESCRIPTOR_INDEXING);
-    let mut seen: Vec<u32> = Vec::with_capacity(desc.entries.len());
-
-    for (index, entry) in desc.entries.iter().enumerate() {
-        // Before the driver sees it. `VK_SHADER_STAGE_MESH_BIT_EXT` in a set
-        // layout on a device without `meshShader` is a validation error, but it
-        // arrives from `vkCreateDescriptorSetLayout` naming neither the binding
-        // it came from nor the capability that is missing. See
-        // `ShaderStages::check_supported`.
-        entry
-            .visibility
-            .check_supported(caps.features, crcbl_hal::BackendKind::Vulkan)?;
-        if entry.count == 0 {
-            return Err(HalError::InvalidDescriptor(format!(
-                "binding {} has count 0; a binding must hold at least one descriptor",
-                entry.binding
-            )));
-        }
-        if seen.contains(&entry.binding) {
-            return Err(HalError::InvalidDescriptor(format!(
-                "binding {} is declared twice",
-                entry.binding
-            )));
-        }
-        seen.push(entry.binding);
-
-        if !entry.flags.is_empty() && !indexing {
-            // The seam is explicit that this must be loud: "A Tier B backend
-            // must reject a layout that sets any of them rather than silently
-            // ignoring it — a bindless array quietly downgraded to a fixed one
-            // reads garbage at index 4097."
-            return Err(HalError::Unsupported {
-                backend: crcbl_hal::BackendKind::Vulkan,
-                what: "descriptor-indexing flags on a device without DESCRIPTOR_INDEXING",
-            });
-        }
-        // Both halves of the rule the seam now states: last in the slice, so
-        // "the variable binding is `entries.last()`" is a true reading, *and*
-        // the highest binding number, which is what Vulkan actually requires.
-        // Checking only the first half accepted layouts the driver refuses.
-        if entry.flags.contains(BindingFlags::VARIABLE_COUNT)
-            && (index + 1 != desc.entries.len()
-                || desc
-                    .entries
-                    .iter()
-                    .any(|other| other.binding > entry.binding))
-        {
-            return Err(HalError::InvalidDescriptor(format!(
-                "binding {} sets VARIABLE_COUNT but is not both the last entry and the \
-                 highest-numbered binding of the set; Vulkan permits a runtime-sized array only \
-                 on the highest-numbered binding",
-                entry.binding
-            )));
-        }
-        // `u32::MAX` is the seam's "as many as you can", not a request for
-        // 4 294 967 295 descriptors, so it is exempt from the ceiling it is
-        // about to be *clamped* to by `layout_binding_count`. Checking it here
-        // rejected the one shape the bindless model is written in — found by
-        // this backend's own e2e suite on radv, where the ceiling is 8 388 606
-        // and the sentinel is larger.
-        if indexing
-            && entry.count != u32::MAX
-            && entry.count > 1
-            && entry.count > caps.limits.max_bindless_descriptors.max(1)
-        {
-            return Err(HalError::InvalidDescriptor(format!(
-                "binding {} asks for {} descriptors but max_bindless_descriptors is {}",
-                entry.binding, entry.count, caps.limits.max_bindless_descriptors
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// The descriptor count a layout binding is actually created with.
-///
-/// [`BindingFlags::VARIABLE_COUNT`] makes the layout's `count` an *upper
-/// bound*, and the seam spells a "give me the maximum" request as
-/// [`u32::MAX`] — which is not a number any driver will allocate. Clamping to
-/// the device's own ceiling is the only reading that produces a set.
-#[must_use]
-pub(crate) fn layout_binding_count(entry: &BindGroupLayoutEntry, caps: &DeviceCaps) -> u32 {
-    if entry.count == u32::MAX {
-        caps.limits.max_bindless_descriptors.max(1)
-    } else {
-        entry.count
-    }
-}
-
 /// How many descriptors to allocate for a `VARIABLE_COUNT` binding.
 ///
 /// The seam now carries a [`BindGroupDesc::variable_count`] field.
@@ -299,7 +194,7 @@ impl VkDevice {
         desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
         let caps = self.inner().caps;
-        validate_bind_group_layout(desc, &caps)?;
+        desc.check_entries(&caps, crcbl_hal::BackendKind::Vulkan)?;
 
         let bindings: Vec<vk::DescriptorSetLayoutBinding<'_>> = desc
             .entries
@@ -308,7 +203,7 @@ impl VkDevice {
                 vk::DescriptorSetLayoutBinding::default()
                     .binding(entry.binding)
                     .descriptor_type(conv::descriptor_type(entry.kind))
-                    .descriptor_count(layout_binding_count(entry, &caps))
+                    .descriptor_count(entry.resolved_count(&caps.limits))
                     .stage_flags(conv::shader_stages(entry.visibility))
             })
             .collect();
@@ -392,7 +287,7 @@ impl VkDevice {
                 )));
             };
             let limit = if Some(entry.binding) == variable_binding {
-                layout_binding_count(declared, &caps)
+                declared.resolved_count(&caps.limits)
             } else {
                 declared.count
             };
@@ -424,7 +319,7 @@ impl VkDevice {
                 .iter()
                 .find(|slot| slot.binding == binding)
                 .unwrap_or_else(|| unreachable!("the variable binding came from these entries"));
-            let ceiling = layout_binding_count(declared, &caps);
+            let ceiling = declared.resolved_count(&caps.limits);
             if count > ceiling {
                 return Err(HalError::InvalidDescriptor(format!(
                     "BindGroupDesc::variable_count is {count}, but binding {binding} holds at \
@@ -443,7 +338,7 @@ impl VkDevice {
             let count = if Some(slot.binding) == variable_binding {
                 variable_count.unwrap_or(1)
             } else {
-                layout_binding_count(slot, &caps)
+                slot.resolved_count(&caps.limits)
             };
             if count == 0 {
                 continue;
@@ -1357,226 +1252,12 @@ fn write_descriptors(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl_hal::{BindGroupLayoutEntry, ImageViewType, Limits};
+    use crcbl_hal::ImageViewType;
 
-    fn caps(features: Features) -> DeviceCaps {
-        DeviceCaps {
-            features,
-            limits: Limits::desktop(),
-        }
-    }
-
-    fn entry(binding: u32, flags: BindingFlags, count: u32) -> BindGroupLayoutEntry {
-        BindGroupLayoutEntry {
-            binding,
-            visibility: ShaderStages::VERTEX,
-            kind: BindingKind::StorageBuffer {
-                read_only: true,
-                dynamic: false,
-            },
-            count,
-            flags,
-        }
-    }
-
-    /// The triangle's own layout: one read-only storage buffer, no flags. It
-    /// must be legal on **both** tiers, because vertex pulling is not a Tier A
-    /// feature — it is the engine's only geometry path.
-    #[test]
-    fn the_vertex_pulling_layout_is_legal_on_both_tiers() {
-        let entries = [entry(0, BindingFlags::empty(), 1)];
-        let desc = BindGroupLayoutDesc {
-            label: Some("vertices"),
-            entries: &entries,
-        };
-        validate_bind_group_layout(&desc, &caps(Features::GPU_DRIVEN)).expect("Tier A");
-        validate_bind_group_layout(&desc, &caps(Features::empty())).expect("Tier B too");
-    }
-
-    /// The seam's rule, and the reason it exists: "a bindless array quietly
-    /// downgraded to a fixed one reads garbage at index 4097".
-    #[test]
-    fn a_tier_b_device_refuses_descriptor_indexing_flags_rather_than_ignoring_them() {
-        for flag in [
-            BindingFlags::PARTIALLY_BOUND,
-            BindingFlags::UPDATE_AFTER_BIND,
-            BindingFlags::VARIABLE_COUNT,
-        ] {
-            let entries = [entry(0, flag, 4)];
-            let desc = BindGroupLayoutDesc {
-                label: None,
-                entries: &entries,
-            };
-            let error = validate_bind_group_layout(&desc, &caps(Features::empty()))
-                .expect_err("Tier B must refuse");
-            assert!(
-                matches!(error, HalError::Unsupported { .. }),
-                "{flag:?}: {error}"
-            );
-            validate_bind_group_layout(&desc, &caps(Features::GPU_DRIVEN))
-                .expect("Tier A accepts it");
-        }
-    }
-
-    /// A binding visible to a mesh stage is legal here and only here: on a
-    /// device that reports the stage.
-    ///
-    /// The same shape as the descriptor-indexing rule above and for the same
-    /// reason — `VK_SHADER_STAGE_MESH_BIT_EXT` on a device without `meshShader`
-    /// fails at `vkCreateDescriptorSetLayout` with a VUID naming neither the
-    /// binding nor the flag, and this is what turns that into a named refusal.
-    /// `GPU_DRIVEN` carries neither mesh flag, which is what makes the first
-    /// half of each pair a real device rather than a contrived one.
-    #[test]
-    fn a_mesh_visible_binding_needs_the_matching_capability() {
-        for (stage, feature) in [
-            (ShaderStages::MESH, Features::MESH_SHADER),
-            (ShaderStages::TASK, Features::TASK_SHADER),
-        ] {
-            let entries = [BindGroupLayoutEntry {
-                visibility: stage,
-                ..entry(0, BindingFlags::empty(), 1)
-            }];
-            let desc = BindGroupLayoutDesc {
-                label: Some("mesh shader vertices"),
-                entries: &entries,
-            };
-            let error = validate_bind_group_layout(&desc, &caps(Features::GPU_DRIVEN))
-                .expect_err("GPU_DRIVEN carries neither mesh flag");
-            assert!(
-                matches!(error, HalError::Unsupported { .. }),
-                "{stage:?}: {error}"
-            );
-            validate_bind_group_layout(&desc, &caps(Features::GPU_DRIVEN | feature))
-                .unwrap_or_else(|error| panic!("{stage:?} on a device reporting it: {error}"));
-        }
-    }
-
-    /// Vulkan permits a runtime-sized array only on the highest-numbered
-    /// binding. Accepting it elsewhere would fail at
-    /// `vkCreateDescriptorSetLayout` with a VUID nobody can act on.
-    #[test]
-    fn variable_count_is_refused_anywhere_but_the_last_binding() {
-        let entries = [
-            entry(0, BindingFlags::VARIABLE_COUNT, 8),
-            entry(1, BindingFlags::empty(), 1),
-        ];
-        let desc = BindGroupLayoutDesc {
-            label: None,
-            entries: &entries,
-        };
-        let error = validate_bind_group_layout(&desc, &caps(Features::GPU_DRIVEN))
-            .expect_err("not the last binding");
-        assert!(error.to_string().contains("VARIABLE_COUNT"), "{error}");
-
-        // Last is fine.
-        let entries = [
-            entry(0, BindingFlags::empty(), 1),
-            entry(1, BindingFlags::VARIABLE_COUNT, 8),
-        ];
-        validate_bind_group_layout(
-            &BindGroupLayoutDesc {
-                label: None,
-                entries: &entries,
-            },
-            &caps(Features::GPU_DRIVEN),
-        )
-        .expect("last binding is legal");
-    }
-
-    #[test]
-    fn a_zero_count_or_duplicated_binding_is_refused() {
-        let zero = [entry(0, BindingFlags::empty(), 0)];
-        assert!(
-            validate_bind_group_layout(
-                &BindGroupLayoutDesc {
-                    label: None,
-                    entries: &zero
-                },
-                &caps(Features::GPU_DRIVEN)
-            )
-            .is_err()
-        );
-
-        let duplicate = [
-            entry(3, BindingFlags::empty(), 1),
-            entry(3, BindingFlags::empty(), 1),
-        ];
-        let error = validate_bind_group_layout(
-            &BindGroupLayoutDesc {
-                label: None,
-                entries: &duplicate,
-            },
-            &caps(Features::GPU_DRIVEN),
-        )
-        .expect_err("a duplicated binding number is a caller bug");
-        assert!(error.to_string().contains("twice"), "{error}");
-    }
-
-    /// `u32::MAX` is the seam's "as many as you can", not a number to allocate.
-    ///
-    /// Regression test. Validation used to compare the raw `count` against
-    /// `max_bindless_descriptors` *before* the clamp, so the sentinel — the one
-    /// value the bindless model is actually written with — was refused on every
-    /// real device, whose ceiling is necessarily below `u32::MAX`. Found by the
-    /// e2e suite on radv, which reports 8 388 606.
-    #[test]
-    fn the_unbounded_count_clamps_to_the_devices_own_ceiling() {
-        let tier_a = caps(Features::GPU_DRIVEN);
-        let unbounded = entry(0, BindingFlags::VARIABLE_COUNT, u32::MAX);
-
-        // The sentinel must survive validation, whatever the ceiling is.
-        let entries = [BindGroupLayoutEntry {
-            kind: BindingKind::SampledImage {
-                view_type: ImageViewType::D2,
-            },
-            flags: BindingFlags::VARIABLE_COUNT
-                | BindingFlags::PARTIALLY_BOUND
-                | BindingFlags::UPDATE_AFTER_BIND,
-            ..unbounded
-        }];
-        validate_bind_group_layout(
-            &BindGroupLayoutDesc {
-                label: Some("the bindless shape"),
-                entries: &entries,
-            },
-            &tier_a,
-        )
-        .expect("u32::MAX is a request to clamp, not an over-large request");
-
-        // An explicit count past the ceiling is still a caller bug.
-        let too_many = [BindGroupLayoutEntry {
-            count: tier_a.limits.max_bindless_descriptors + 1,
-            ..entries[0]
-        }];
-        assert!(
-            validate_bind_group_layout(
-                &BindGroupLayoutDesc {
-                    label: None,
-                    entries: &too_many
-                },
-                &tier_a
-            )
-            .is_err(),
-            "an explicit count past the ceiling is not a sentinel"
-        );
-        assert_eq!(
-            layout_binding_count(&unbounded, &tier_a),
-            tier_a.limits.max_bindless_descriptors
-        );
-        // An explicit count is left alone.
-        let explicit = entry(0, BindingFlags::empty(), 16);
-        assert_eq!(layout_binding_count(&explicit, &tier_a), 16);
-
-        // On a device that reports no bindless descriptors at all the clamp
-        // must still produce a creatable layout, not a zero-length array.
-        let tier_b = DeviceCaps {
-            features: Features::empty(),
-            limits: Limits::minimum(),
-        };
-        assert_eq!(tier_b.limits.max_bindless_descriptors, 0);
-        assert_eq!(layout_binding_count(&unbounded, &tier_b), 1);
-    }
+    // The layout rules themselves are tested where they now live —
+    // `BindGroupLayoutDesc::check_entries` in `crcbl-hal`. That this backend
+    // *calls* it is what `vk_e2e::pipeline`'s bindless probe asserts, on a real
+    // device, because that is the only place the two can be told apart.
 
     /// The inference documented on [`variable_count_from_entries`], pinned so
     /// the gap it works around stays visible.
@@ -1599,42 +1280,6 @@ mod tests {
         assert_eq!(variable_count_from_entries(1, &[at(0, 99), at(1, 0)]), 1);
         // Nothing written is still a legal, allocatable set.
         assert_eq!(variable_count_from_entries(1, &[]), 1);
-    }
-
-    /// Vulkan's rule is "the highest-numbered binding of the set", and checking
-    /// only "the last element of the slice" accepted layouts the driver
-    /// refuses. Both halves, now that the seam states both.
-    #[test]
-    fn variable_count_must_also_be_the_highest_binding_number() {
-        let tier_a = caps(Features::GPU_DRIVEN);
-        // Last in the slice, but binding 2 sits below binding 7.
-        let entries = [
-            entry(7, BindingFlags::empty(), 1),
-            entry(2, BindingFlags::VARIABLE_COUNT, 8),
-        ];
-        let error = validate_bind_group_layout(
-            &BindGroupLayoutDesc {
-                label: None,
-                entries: &entries,
-            },
-            &tier_a,
-        )
-        .expect_err("a runtime-sized array must be the highest-numbered binding");
-        assert!(error.to_string().contains("highest-numbered"), "{error}");
-
-        // Both halves satisfied.
-        let entries = [
-            entry(2, BindingFlags::empty(), 1),
-            entry(7, BindingFlags::VARIABLE_COUNT, 8),
-        ];
-        validate_bind_group_layout(
-            &BindGroupLayoutDesc {
-                label: None,
-                entries: &entries,
-            },
-            &tier_a,
-        )
-        .expect("last and highest");
     }
 
     /// A resource of the wrong shape must be named at the seam's own binding

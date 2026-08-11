@@ -682,16 +682,13 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     ///
     /// # Errors
     ///
-    /// [`HalError::InvalidDescriptor`] if an entry sets a
-    /// [`BindingFlags`](crate::BindingFlags) the device does not support, or if
-    /// [`VARIABLE_COUNT`](crate::BindingFlags::VARIABLE_COUNT) is not on the
-    /// last binding.
-    ///
-    /// [`HalError::Unsupported`] if an entry's
-    /// [`visibility`](crate::BindGroupLayoutEntry::visibility) names a mesh or
-    /// task stage the device does not report — see
-    /// [`ShaderStages::check_supported`](crate::ShaderStages::check_supported),
-    /// which every backend runs here.
+    /// Whatever
+    /// [`BindGroupLayoutDesc::check_entries`](crate::BindGroupLayoutDesc::check_entries)
+    /// returns — every backend runs it here, and it is where the rules
+    /// [`BindGroupLayoutDesc::entries`](crate::BindGroupLayoutDesc::entries)
+    /// states are enforced. A backend may add [`HalError::InvalidDescriptor`]
+    /// or [`HalError::Unsupported`] of its own for a layout only *it* cannot
+    /// express.
     fn create_bind_group_layout(
         &self,
         desc: &BindGroupLayoutDesc<'_>,

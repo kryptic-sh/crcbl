@@ -3729,17 +3729,58 @@ fn a_wgpu_bind_group_layout_wgpu_rejects_arrives_as_an_error_from_the_call() {
     drop(device);
     drop(instance);
 
-    // The seam's "as many as you can" sentinel. `crcbl-vk` clamps it to
-    // `max_bindless_descriptors`; this backend does not, so wgpu sees
-    // `u32::MAX` and refuses it — in band, which is what this asserts. What the
-    // refusal says is printed, because whether the clamp is still owed depends
-    // on how legible it is.
+    // The same proof on a *bindless* device, where the seam's own checks pass
+    // and only wgpu can say no. A storage-buffer array needs wgpu's
+    // `BUFFER_BINDING_ARRAY`, which `wgpu_features_for` never requests —
+    // `DESCRIPTOR_INDEXING` buys the three texture-array features and nothing
+    // else — so this is a layout the backend builds and wgpu rejects.
+    //
+    // Alongside it, the sentinel that used to be the refusal here: `u32::MAX`
+    // is the seam's "as many as you can", and this backend now resolves it
+    // against `max_bindless_descriptors` the way `crcbl-vk` does, so the
+    // portable bindless declaration must *build* rather than come back as
+    // "Too many bindings of type BindingArrayElements … count was 4294967295".
     let (instance, device, surface, _queue, _format) = Headless::open_device();
     if device
         .caps()
         .features
         .contains(Features::DESCRIPTOR_INDEXING)
     {
+        let entries = [crcbl_hal::BindGroupLayoutEntry {
+            binding: ARRAY_BINDING,
+            visibility: ShaderStages::FRAGMENT,
+            kind: crcbl_hal::BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            count: ARRAY_COUNT,
+            flags: crcbl_hal::BindingFlags::empty(),
+        }];
+        let error = device
+            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+                label: Some("wgpu e2e buffer array without the feature"),
+                entries: &entries,
+            })
+            .expect_err("wgpu rejects a buffer array without BUFFER_BINDING_ARRAY");
+        assert!(
+            matches!(error, HalError::Backend(_)),
+            "a refusal from wgpu itself is Backend, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("create_bind_group_layout"),
+            "the call that was refused must be named: {error}"
+        );
+        assert!(
+            device.take_error().is_none(),
+            "an error attributed to the call must not also be reported out of band"
+        );
+
+        let ceiling = device.caps().limits.max_bindless_descriptors;
+        assert!(
+            ceiling > 0 && ceiling < u32::MAX,
+            "a bindless device must report a ceiling for the sentinel to resolve against, got \
+             {ceiling}"
+        );
         let entries = [crcbl_hal::BindGroupLayoutEntry {
             binding: ARRAY_BINDING,
             visibility: ShaderStages::FRAGMENT,
@@ -3750,25 +3791,22 @@ fn a_wgpu_bind_group_layout_wgpu_rejects_arrives_as_an_error_from_the_call() {
             flags: crcbl_hal::BindingFlags::VARIABLE_COUNT
                 | crcbl_hal::BindingFlags::PARTIALLY_BOUND,
         }];
-        let error = device
+        let layout = device
             .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
                 label: Some("wgpu e2e unbounded array"),
                 entries: &entries,
             })
-            .expect_err("u32::MAX descriptors is not a number wgpu will allocate");
-        assert!(
-            matches!(error, HalError::Backend(_)),
-            "a refusal from wgpu itself is Backend, got {error:?}"
-        );
-        println!("wgpu e2e: the count sentinel u32::MAX is refused as: {error}");
+            .expect("the sentinel resolves to the device's own ceiling");
         assert!(
             device.take_error().is_none(),
-            "an error attributed to the call must not also be reported out of band"
+            "a layout wgpu accepted must not have reported anything out of band"
         );
+        device.destroy_bind_group_layout(layout);
+        println!("wgpu e2e: the count sentinel resolved to {ceiling} and the layout built");
     } else {
         println!(
-            "wgpu e2e: this adapter has no descriptor indexing, so the count sentinel has no \
-             bindless layout to appear in; the refusal above still ran"
+            "wgpu e2e: this adapter has no descriptor indexing, so neither the buffer array nor \
+             the count sentinel has a bindless layout to appear in; the refusal above still ran"
         );
     }
     device.wait_idle().expect("idle");

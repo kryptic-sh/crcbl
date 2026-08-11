@@ -116,6 +116,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Bind-group-layout validation is one function on the seam, not five different
+  ones.** `BindGroupLayoutDesc::check_entries(caps, backend)` and
+  `BindGroupLayoutEntry::resolved_count(limits)` are new on `crcbl-hal`, beside
+  the rules they enforce, and every backend calls them: `crcbl_vk::pipeline`'s
+  `validate_bind_group_layout` and `layout_binding_count` are gone, as is the
+  null backend's inline copy and `crcbl-wgpu`'s, and `crcbl-dx12`'s
+  `check_entry` keeps only its root-descriptor rules. The rule was stated once
+  and enforced four times with the wording, the coverage and the error types all
+  drifting between them — a duplicated-binding refusal that named the binding in
+  three backends and not in the fourth, a descriptor-indexing check two of five
+  did not make, and two backends that silently ignored the count ceiling.
+
+  Callers see the same message for the same mistake on every backend now.
+  Notably the `VARIABLE_COUNT` rule reports **which** half failed — "not the
+  last entry" and "not the highest-numbered binding" are separate messages, as
+  D3D12 already did — where three backends emitted one sentence covering both
+  and left the reader to work out which to fix.
+
 - **Every backend now holds Vulkan's line on validation, and the tests assert
   it.** `crcbl-dx12`'s device tests assert a clean D3D12 debug-layer report at
   teardown, with warnings counting as failures and an **absent** layer failing
@@ -2057,6 +2075,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the whole field.
 
 ### Fixed
+
+- **The portable bindless declaration failed on wgpu and overflowed on D3D12.**
+  `BindGroupLayoutEntry::count` of `u32::MAX` is the seam's "as many as you
+  can": `crcbl-vk` clamped it to `Limits::max_bindless_descriptors` and the null
+  backend mirrored that, while `crcbl-wgpu` handed it to wgpu verbatim and got a
+  hard rejection — so the one spelling meant to be portable built a layout on
+  Vulkan and errored on the web backend. Worse on `crcbl-dx12`: a `u32::MAX`
+  binding **without** `BindingFlags::VARIABLE_COUNT` planned a descriptor range
+  of `u32::MAX`, and the running offset then overflowed for every range after
+  it. Both now resolve the sentinel through the seam's `resolved_count`.
+
+  `crcbl-mtl` deliberately still **refuses** it rather than clamping. It reports
+  `max_bindless_descriptors: 0` because flat argument tables have no
+  runtime-sized array, so clamping would hand back a one-element array on a
+  backend that cannot do bindless at all — the quiet downgrade the seam exists
+  to forbid. A named refusal is the honest answer there.
+
+  The field's own documentation did not state the sentinel before this — only
+  the module header mentioned it in passing — which is how two backends came to
+  ignore it. It says so now.
 
 - **`crcbl-wgpu` silently dropped three things the seam says it must refuse.**
   `create_bind_group_layout` read `visibility`, `kind` and `count` and nothing
