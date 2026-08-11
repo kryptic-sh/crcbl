@@ -4537,32 +4537,30 @@ it.
   requested one and then checks the recorded render area. On the null backend
   the two are always equal, so the bug is structurally invisible there.
 
-### `SurfaceError::OutOfDate` cannot be produced by the null backend
+### The null backend can be resized and killed, but not clamped
 
-Every `SurfaceError` the null backend constructs is `SurfaceError::Hal(..)` —
-all fifteen sites in `crates/crcbl-hal/src/null/mod.rs`. The engine's handlers
-for `OutOfDate` exist in `crates/crcbl/src/engine.rs` and are reachable only on
-a real driver during a real resize, which is why `crcbl-vk`'s suite has to carry
-`a_reconfigure_between_acquire_and_present_is_survivable` and the resize-storm
-test.
+**Both halves of this closed.** `crcbl_hal::null::Recorder` gained
+`report_swapchain_out_of_date` and `lose_device` beside the four injectors it
+already had, and `crates/crcbl/src/engine.rs` now tests all three of its
+out-of-date arms — the acquire, the present and the pacing wait's deliberate
+no-op — plus the device-loss policy end to end through `drive`. A
+nineteen-strong mutation sweep over the hooks and those arms left no survivor.
+So `crcbl-vk` no longer carries the only test of a resize, and "this device is
+gone and stays gone" is no longer a state nothing can express.
 
-**This is the highest-leverage item on the list.** `Recorder` already has an
-injection surface — `set_readback_latency`, `set_device_latency`,
-`report_device_error`, `fail_next_reconfigures` — so one more hook in that shape
-turns three engine branches from GPU-only into tests that run on every machine.
-The same hook, made to return a clamped extent, is what the extent obligation
-above needs.
-
-### Device loss has no test on any backend, and no policy to test
-
-`HalError::DeviceLost` is produced in more than twenty places across the four
-backends. Nothing constructs it in the null backend, and `Recorder`'s
-`report_device_error` is explicitly recoverable and one-shot —
-`crcbl/src/engine.rs` asserts that taking the error clears it — so "this device
-is gone and stays gone" cannot be expressed. The engine has no device-loss
-recovery path either, so this is absent behaviour rather than untested
-behaviour. **Decide the policy first** — recreate the device, or surface it and
-quit — and the test is cheap once decided.
+What is left is the third thing the old entry wanted from one hook and did not
+get: **an injector that makes `acquire_next_frame` hand back an extent other
+than the one configured.** The seam's obligation 3 says a caller must use the
+answer rather than the request, and `NullDevice::acquire_next_frame` says in a
+comment that it has no window system to clamp against, so it always answers with
+the configured extent. That leaves `GpuContext::acquire`'s
+`acquired.extent != self.configured_extent` branch — the one that writes the
+compositor's chosen size back into `config` so a later `resize` does not see a
+change that is not one — reachable only on a compositor that actually clamps.
+This was deliberately not built with the other two: nothing about a clamped
+extent is a _failure_, so it does not belong in the fault-injection shape those
+two took, and it wants its own decision about whether the recorder holds a clamp
+rule or a one-shot override.
 
 ### Neither Metal nor D3D12 proves its validation layer caught anything
 
@@ -4659,9 +4657,15 @@ Surfacing it is honest, testable in one assertion, and leaves the harder policy
 available later for whoever has a real reason to want it. A game that wants to
 survive a lost device can restart the engine; nothing in the samples does.
 
-This makes the null-backend hook worth adding: a `Recorder` that can report a
-device as gone _and keep it gone_ is what turns this from a policy nobody can
-observe into one assertion.
+**Implemented and pinned.** `Recorder::lose_device` reports a device as gone and
+keeps it gone, and `a_lost_device_stops_the_driven_loop_with_an_error_naming_it`
+in `crates/crcbl/src/engine.rs` drives `drive` over a real `GpuContext` on it:
+the run ends on the frame that hit the loss, with the driver's own message, with
+its frame budget unspent and with no rebuild attempted. The last of those is
+asserted off the `hal: reconfiguring the swapchain to ` log line rather than off
+the recorder, because a rebuild that failed records no event — so an engine that
+never tried and one that tried and was refused look identical in the stream, and
+those are exactly the two policies this entry chose between.
 
 ### Decided: the four-backend compare is more scenes in `render_e2e`, not a new job
 

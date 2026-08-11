@@ -6479,6 +6479,448 @@ mod tests {
         shell.destroy_window(window).expect("the window goes away");
     }
 
+    // ---- resize and device loss, injected -----------------------------------
+
+    /// A real [`GpuContext`] on the null backend, and the recorder that decides
+    /// when its device misbehaves.
+    ///
+    /// By hand rather than through the registry for the reason the tests above
+    /// spell out one by one: the point is to *hold* the recorder. The window is
+    /// handed back with it because it outlives the context and still has to be
+    /// destroyed.
+    fn null_context(
+        label: &str,
+        pacing: Pacing,
+    ) -> (
+        crcbl_shell::HeadlessShell,
+        WindowId,
+        crcbl_hal::null::Recorder,
+        GpuContext,
+    ) {
+        use crcbl_hal::null::{NullInstance, Recorder};
+
+        let (mut shell, window) = shell();
+        let mut shell_events = 0;
+        let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
+
+        let recorder = Recorder::new();
+        let instance: Box<dyn Instance> =
+            Box::new(NullInstance::gpu_driven().with_recorder(recorder.clone()));
+        let target = shell
+            .surface_target(window)
+            .expect("the window is still alive");
+        let stage = GpuContext::start_device(
+            instance,
+            &target,
+            extent,
+            label,
+            Features::empty(),
+            Features::empty(),
+            pacing,
+        )
+        .expect("the null backend opens everywhere");
+        let mut pending = PendingGpuContext {
+            stage,
+            target,
+            extent,
+            label: label.to_string(),
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            pacing,
+        };
+        let gpu = loop {
+            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
+                break context;
+            }
+        };
+        (shell, window, recorder, gpu)
+    }
+
+    /// One frame on a null context, shaped like every sample's `draw`: acquire,
+    /// an empty command buffer, submit and present — with `Ok(None)` from
+    /// `acquire` reported as [`FrameOutcome::Reconfigured`], which is what
+    /// `apps/bare` and its four siblings all do with it.
+    fn null_frame(gpu: &mut GpuContext) -> Result<FrameOutcome, GpuError> {
+        let Some(acquired) = gpu.acquire()? else {
+            return Ok(FrameOutcome::Reconfigured);
+        };
+        let encoder = gpu
+            .device()
+            .create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                label: Some("null frame"),
+                queue: gpu.queue(),
+            });
+        let command_buffer = encoder.finish()?;
+        gpu.submit_and_present(&acquired, command_buffer)
+    }
+
+    /// The start of the line [`GpuContext::reconfigure`] writes.
+    ///
+    /// A rebuild that *failed* records no event, so the recorder alone cannot
+    /// tell an engine that never tried to rebuild from one that tried and was
+    /// refused — and on a lost device those are the two candidate policies.
+    /// This line is what tells them apart.
+    const RECONFIGURE_LINE: &str = "hal: reconfiguring the swapchain to ";
+
+    /// How many swapchain rebuilds the recorder saw.
+    fn reconfigures(recorder: &crcbl_hal::null::Recorder) -> usize {
+        recorder
+            .events()
+            .iter()
+            .filter(|event| matches!(event, crcbl_hal::null::Event::Reconfigured { .. }))
+            .count()
+    }
+
+    /// How many presents actually reached the swapchain.
+    fn presents(recorder: &crcbl_hal::null::Recorder) -> usize {
+        recorder
+            .events()
+            .iter()
+            .filter(|event| matches!(event, crcbl_hal::null::Event::Presented { .. }))
+            .count()
+    }
+
+    /// **An acquire that reports the swapchain out of date is expected traffic,
+    /// not a failed frame**: it rebuilds and hands the frame back as skipped.
+    ///
+    /// Reachable on a real driver only while someone drags a window edge, which
+    /// is why `crcbl-vk` had to carry the only test of it. The recorder's
+    /// out-of-date latch is what brings it to a machine with no GPU.
+    #[test]
+    fn an_out_of_date_acquire_reconfigures_the_swapchain_and_skips_the_frame() {
+        let (mut shell, window, recorder, mut gpu) =
+            null_context("out-of-date acquire test", Pacing::Vsync);
+
+        // Nothing has been submitted, so no pacing wait is due and `acquire`
+        // is the *only* call that can report this. The frame after it is the
+        // one that would wait, and that case is its own test below.
+        assert_eq!(
+            GpuContext::present_to_wait_for(gpu.submitted, gpu.effective_pacing()),
+            None,
+            "this test is about the acquire, so nothing else must be able to answer first"
+        );
+
+        recorder.report_swapchain_out_of_date();
+        assert!(
+            gpu.acquire()
+                .expect("out of date is expected traffic, not an error")
+                .is_none(),
+            "an out-of-date acquire skips the frame; it does not hand out an image"
+        );
+        assert_eq!(
+            reconfigures(&recorder),
+            1,
+            "the swapchain is rebuilt once, by the arm that caught it"
+        );
+        assert_eq!(presents(&recorder), 0, "a skipped frame presents nothing");
+
+        // Handling it is what cleared it, so the next frame is an ordinary one.
+        assert_eq!(
+            null_frame(&mut gpu).expect("the rebuilt swapchain works"),
+            FrameOutcome::Presented
+        );
+        assert_eq!(
+            reconfigures(&recorder),
+            1,
+            "nothing rebuilt it a second time"
+        );
+        assert_eq!(presents(&recorder), 1);
+
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
+    /// **Present is the usual place a resize is noticed**, and the engine says
+    /// so in a comment; this is the assertion behind the comment.
+    ///
+    /// The frame is recorded and submitted before the present refuses it, so
+    /// the outcome a loop records is [`FrameOutcome::Reconfigured`] — which is
+    /// what [`FrameBudget`] counts against its never-presents cap.
+    #[test]
+    fn an_out_of_date_present_rebuilds_and_reports_the_frame_as_reconfigured() {
+        let (mut shell, window, recorder, mut gpu) =
+            null_context("out-of-date present test", Pacing::Vsync);
+
+        let acquired = gpu
+            .acquire()
+            .expect("acquire")
+            .expect("the swapchain is healthy when the frame starts");
+        // The resize lands after the image was handed out, which is the case
+        // acquire cannot catch.
+        recorder.report_swapchain_out_of_date();
+
+        let encoder = gpu
+            .device()
+            .create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                label: Some("out-of-date present test"),
+                queue: gpu.queue(),
+            });
+        let command_buffer = encoder.finish().expect("an empty command buffer");
+        assert_eq!(
+            gpu.submit_and_present(&acquired, command_buffer)
+                .expect("a resize noticed at present is not a failed frame"),
+            FrameOutcome::Reconfigured
+        );
+        assert_eq!(reconfigures(&recorder), 1);
+        assert_eq!(
+            presents(&recorder),
+            0,
+            "the present that reported the swapchain out of date did not present"
+        );
+
+        assert_eq!(
+            null_frame(&mut gpu).expect("the rebuilt swapchain works"),
+            FrameOutcome::Presented
+        );
+        assert_eq!(reconfigures(&recorder), 1);
+        assert_eq!(presents(&recorder), 1);
+
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
+    /// **The pacing wait's own out-of-date arm**, which is the third and least
+    /// obvious of the three: it does nothing, deliberately, and leaves the
+    /// acquire behind it to reconfigure.
+    ///
+    /// Without that arm the wait's error would propagate and a resize would
+    /// fail the frame — on a code path that only runs once the pipeline is
+    /// `FRAMES_IN_FLIGHT` deep and only on a display that is pacing, which is
+    /// why it needed a swapchain that can be made out of date on demand.
+    #[test]
+    fn an_out_of_date_pacing_wait_leaves_the_acquire_behind_it_to_reconfigure() {
+        let (mut shell, window, recorder, mut gpu) =
+            null_context("out-of-date wait test", Pacing::Vsync);
+
+        // Fill the pipeline, so the next frame really does wait for an older
+        // present rather than skipping the wait the way the first ones do.
+        for _ in 0..=FRAMES_IN_FLIGHT {
+            assert_eq!(
+                null_frame(&mut gpu).expect("a healthy frame"),
+                FrameOutcome::Presented
+            );
+        }
+        assert!(
+            GpuContext::present_to_wait_for(gpu.submitted, gpu.effective_pacing()).is_some(),
+            "the rest of this test asserts nothing unless the next frame is one that waits"
+        );
+        let waits = recorder
+            .events()
+            .iter()
+            .filter(|event| matches!(event, crcbl_hal::null::Event::PresentWaited { .. }))
+            .count();
+        assert!(
+            waits > 0,
+            "and nothing unless the waits are actually reaching the device"
+        );
+
+        recorder.report_swapchain_out_of_date();
+        assert!(
+            gpu.acquire()
+                .expect("a wait that reports a resize is not a failed frame")
+                .is_none(),
+            "the acquire behind it is what reconfigures and skips"
+        );
+        assert_eq!(reconfigures(&recorder), 1);
+        assert_eq!(
+            recorder
+                .events()
+                .iter()
+                .filter(|event| matches!(event, crcbl_hal::null::Event::PresentWaited { .. }))
+                .count(),
+            waits,
+            "the refused wait recorded nothing, so the arm ran on a real refusal"
+        );
+
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
+    /// **A lost device surfaces and stays surfaced.** The decision in
+    /// `docs/backlog.md` is that the engine does not rebuild its way out of one:
+    /// `HalError::DeviceLost` propagates, wearing the presentation vocabulary
+    /// the seam gives it, and every later frame says the same thing.
+    ///
+    /// The contrast with `report_device_error` is the point. That one is
+    /// one-shot by contract — the test above asserts that taking it clears it —
+    /// so until the recorder could express a *permanent* loss, "this device is
+    /// gone and stays gone" had no test on any backend.
+    #[test]
+    fn a_lost_device_fails_every_frame_after_it_and_rebuilds_nothing() {
+        let (mut shell, window, recorder, mut gpu) =
+            null_context("device loss test", Pacing::Vsync);
+
+        // The control: the same context, one healthy frame.
+        assert_eq!(
+            null_frame(&mut gpu).expect("a healthy frame"),
+            FrameOutcome::Presented
+        );
+        let presented = presents(&recorder);
+        assert_eq!(presented, 1);
+
+        // A rebuild that *fails* records no event, so the recorder alone cannot
+        // tell an engine that never tried to rebuild from one that tried and
+        // was refused — and those are the two policies. The log line can, and a
+        // real resize first is what proves this capture would have seen one.
+        let logs = crcbl_core::log::capture();
+        let rebuilds_logged = || {
+            logs.records()
+                .iter()
+                .filter(|record| record.message.starts_with(RECONFIGURE_LINE))
+                .count()
+        };
+        gpu.resize((320, 240))
+            .expect("a resize the device can still do");
+        assert_eq!(rebuilds_logged(), 1, "{:?}", logs.records());
+        let rebuilt = reconfigures(&recorder);
+        assert_eq!(rebuilt, 1, "and the rebuild really happened");
+
+        recorder.lose_device("gpu hang: the driver reset the adapter");
+
+        let mut errors: Vec<GpuError> = Vec::new();
+        for attempt in 0..3u32 {
+            match null_frame(&mut gpu) {
+                Ok(outcome) => panic!("frame {attempt} ran on a device that is gone: {outcome:?}"),
+                Err(error) => errors.push(error),
+            }
+        }
+        assert_eq!(
+            errors.len(),
+            3,
+            "every frame after the loss failed, not just the first"
+        );
+        for error in &errors {
+            assert!(
+                matches!(
+                    error,
+                    GpuError::Surface(SurfaceError::Hal(HalError::DeviceLost(_)))
+                ),
+                "{error}"
+            );
+            assert!(
+                error.to_string().contains("gpu hang"),
+                "the driver's own words are what a player's log has to carry: {error}"
+            );
+        }
+
+        assert_eq!(
+            reconfigures(&recorder),
+            rebuilt,
+            "the engine must not rebuild the swapchain out from under a lost device"
+        );
+        assert_eq!(
+            rebuilds_logged(),
+            1,
+            "and must not so much as attempt one: {:?}",
+            logs.records()
+        );
+        assert_eq!(
+            presents(&recorder),
+            presented,
+            "and nothing reached the screen after the loss"
+        );
+
+        // Teardown reports it too rather than pretending the wait succeeded.
+        let teardown = gpu
+            .destroy()
+            .expect_err("waiting for a dead device to go idle cannot succeed");
+        assert!(
+            matches!(teardown, GpuError::Hal(HalError::DeviceLost(_))),
+            "{teardown}"
+        );
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
+    /// A loop with nothing in it but the device, so [`drive`] stops for one
+    /// reason and there is only one reason it can be.
+    struct DeviceOnlyLoop {
+        gpu: GpuContext,
+        /// Frames actually attempted, shared with the test because `drive`
+        /// consumes the loop and a failed run never reaches `finish`.
+        frames: std::rc::Rc<std::cell::Cell<u64>>,
+        stop_after: u64,
+    }
+
+    impl GameLoop for DeviceOnlyLoop {
+        type Error = GpuError;
+        type Summary = u64;
+
+        fn frame(&mut self) -> Result<Flow, GpuError> {
+            if self.frames.get() >= self.stop_after {
+                return Ok(Flow::Stop(ExitReason::FrameBudget));
+            }
+            self.frames.set(self.frames.get() + 1);
+            null_frame(&mut self.gpu)?;
+            Ok(Flow::Continue)
+        }
+
+        fn finish(self, _exit: ExitReason) -> Result<u64, GpuError> {
+            let frames = self.frames.get();
+            self.gpu.destroy()?;
+            Ok(frames)
+        }
+    }
+
+    /// **The loop stops on a lost device — it does not spin, retry or heal.**
+    ///
+    /// The end-to-end half of the decision above, through the native driver
+    /// rather than through one `GpuContext` call: the run ends after the frame
+    /// that hit the loss, with the driver's message, and with a budget it never
+    /// spent. The healthy run beside it is what proves the count could have
+    /// gone higher.
+    #[test]
+    fn a_lost_device_stops_the_driven_loop_with_an_error_naming_it() {
+        const BUDGET: u64 = 4;
+
+        let (mut shell, window, _recorder, gpu) = null_context("driven control", Pacing::Vsync);
+        let frames = std::rc::Rc::new(std::cell::Cell::new(0));
+        let ran = drive(DeviceOnlyLoop {
+            gpu,
+            frames: std::rc::Rc::clone(&frames),
+            stop_after: BUDGET,
+        })
+        .expect("a healthy null device runs every frame it is given");
+        assert_eq!(
+            ran, BUDGET,
+            "the fixture is able to run more than one frame"
+        );
+        assert_eq!(frames.get(), BUDGET);
+        shell.destroy_window(window).expect("the window goes away");
+
+        let (mut shell, window, recorder, gpu) = null_context("driven loss", Pacing::Vsync);
+        recorder.lose_device("gpu hang: the driver reset the adapter");
+        let frames = std::rc::Rc::new(std::cell::Cell::new(0));
+        let error = drive(DeviceOnlyLoop {
+            gpu,
+            frames: std::rc::Rc::clone(&frames),
+            stop_after: BUDGET,
+        })
+        .expect_err("a lost device is not something a loop drives through");
+        assert!(
+            matches!(
+                error,
+                GpuError::Surface(SurfaceError::Hal(HalError::DeviceLost(_)))
+            ),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("gpu hang"),
+            "the loop stops with an error naming the loss: {error}"
+        );
+        assert_eq!(
+            frames.get(),
+            1,
+            "it stopped on the frame that hit the loss, rather than retrying the other {}",
+            BUDGET - 1
+        );
+        assert_eq!(
+            reconfigures(&recorder),
+            0,
+            "and rebuilt nothing on the way out"
+        );
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
     // ---- the engine-owned loop ---------------------------------------------
 
     /// Which menu the fixture game shows.

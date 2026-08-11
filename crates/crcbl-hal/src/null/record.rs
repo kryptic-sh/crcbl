@@ -622,6 +622,14 @@ pub(super) struct State {
     /// How many `reconfigure_swapchain` calls fail before succeeding again. See
     /// [`Recorder::fail_next_reconfigures`].
     pub(super) reconfigure_failures: u32,
+    /// Whether the surface has moved under the swapchain, so every presentation
+    /// call reports [`SurfaceError::OutOfDate`](crate::SurfaceError::OutOfDate)
+    /// until a reconfigure clears it. See
+    /// [`Recorder::report_swapchain_out_of_date`].
+    pub(super) swapchain_out_of_date: bool,
+    /// Why the device is lost, once it is — and never cleared, which is what
+    /// separates it from `device_errors`. See [`Recorder::lose_device`].
+    pub(super) lost_device: Option<String>,
 }
 
 impl State {
@@ -635,6 +643,8 @@ impl State {
             shader_modules_created: Vec::new(),
             device_errors: std::collections::VecDeque::new(),
             reconfigure_failures: 0,
+            swapchain_out_of_date: false,
+            lost_device: None,
         }
     }
 
@@ -961,6 +971,60 @@ impl Recorder {
         } else {
             false
         }
+    }
+
+    /// Makes every presentation call report
+    /// [`SurfaceError::OutOfDate`](crate::SurfaceError::OutOfDate) until the
+    /// swapchain is reconfigured, as if the window had just been resized.
+    ///
+    /// The sibling of [`fail_next_reconfigures`](Self::fail_next_reconfigures),
+    /// and there for the same reason: the null backend never fails, so a
+    /// caller's **resize path** would otherwise never run. This is the one that
+    /// was missing hardest — every `SurfaceError` this backend built was
+    /// [`SurfaceError::Hal`](crate::SurfaceError::Hal), so the variant the seam
+    /// calls expected traffic could not be produced here at all, and the frame
+    /// loop's reconfigure-and-retry arms were reachable only on a real driver
+    /// while someone dragged a window edge.
+    ///
+    /// **Latched rather than counted**, because that is what a driver does: a
+    /// swapchain whose surface moved is out of date on `acquire_next_frame`, on
+    /// `present` and on `wait_until_presented` alike, and stays out of date
+    /// until it is rebuilt. So a caller that handles it clears it *by* handling
+    /// it and a caller that does not spins, which is the difference worth being
+    /// able to test. `reconfigure_swapchain` is what clears it — a *failed*
+    /// reconfigure does not, since it rebuilt nothing.
+    ///
+    /// [`SurfaceError::Lost`](crate::SurfaceError::Lost) and
+    /// [`Timeout`](crate::SurfaceError::Timeout) get no injector: neither is
+    /// recoverable traffic, so no caller in this workspace does anything with
+    /// them that an assertion could see.
+    pub fn report_swapchain_out_of_date(&self) {
+        self.lock().swapchain_out_of_date = true;
+    }
+
+    /// Loses the device, permanently: every later call that resolves a handle —
+    /// and [`Device::wait_idle`](crate::Device::wait_idle), which resolves none
+    /// — fails with [`HalError::DeviceLost`](crate::HalError::DeviceLost)
+    /// carrying `message`.
+    ///
+    /// The sibling of [`report_device_error`](Self::report_device_error) and
+    /// deliberately its opposite. That one is *recoverable and one-shot*: it
+    /// models a browser delivering a compilation failure late, and taking it
+    /// clears it. This one models a TDR, a GPU hang or a browser reclaiming the
+    /// context — everything created from the device is dead and nothing brings
+    /// it back — which is a state the null backend could not express, so the
+    /// engine's policy for it (`docs/backlog.md`: device loss surfaces, it does
+    /// not self-heal) had no test on any backend.
+    ///
+    /// Nothing clears it. A test that wants a device again opens one.
+    ///
+    /// Object *destruction* still works, as it does on a real driver: a caller
+    /// tearing down after a lost device must be able to release what it holds.
+    /// Creation calls that name no handle — `create_buffer` and the rest — also
+    /// still succeed, because no caller in this workspace reaches one after a
+    /// loss and failing them would be surface nothing exercises.
+    pub fn lose_device(&self, message: impl Into<String>) {
+        self.lock().lost_device = Some(message.into());
     }
 
     /// Records a validation error. Used by the backend; exposed so a test can

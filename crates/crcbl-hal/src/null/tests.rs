@@ -1223,6 +1223,241 @@ fn a_present_wait_is_answered_not_refused_and_still_checks_its_swapchain() {
     instance.destroy_surface(surface);
 }
 
+/// The out-of-date injection, from the seam's side: while the latch is set,
+/// **all three** of the calls a frame makes on a swapchain report
+/// [`SurfaceError::OutOfDate`], and only a reconfigure that actually rebuilt
+/// something clears it.
+///
+/// All three, because a resize does not pick one: a frame loop that handles it
+/// at acquire and not at present — or the reverse — works on the driver it was
+/// written against and stalls on the next one. And a *failed* reconfigure must
+/// not clear it, or a caller whose rebuild ran out of memory would go straight
+/// back to presenting against a swapchain the surface has outgrown.
+#[test]
+fn an_out_of_date_swapchain_fails_every_presentation_call_until_a_reconfigure_clears_it() {
+    let instance = NullInstance::gpu_driven();
+    let recorder = instance.recorder();
+    let device = open(&instance);
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .expect("every device has a graphics queue");
+    // SAFETY: an offscreen target holds no platform pointers.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    let desc = SwapchainDesc {
+        label: None,
+        surface,
+        format: Format::Bgra8UnormSrgb,
+        extent: (8, 8),
+        image_count: 2,
+        present_mode: PresentMode::Fifo,
+        composite_alpha: CompositeAlpha::Opaque,
+    };
+    let swapchain = device.create_swapchain(&desc).expect("swapchain");
+
+    // The control: a swapchain nobody has resized answers all three.
+    let frame = device.acquire_next_frame(swapchain).expect("acquire");
+    device
+        .present(
+            queue,
+            &PresentInfo {
+                swapchain,
+                waits: frame.present_semaphore.as_slice(),
+                present_id: Some(1),
+            },
+        )
+        .expect("present");
+    device
+        .wait_until_presented(swapchain, 1, Duration::from_secs(30))
+        .expect("wait");
+
+    recorder.clear();
+    recorder.report_swapchain_out_of_date();
+
+    let acquire = device
+        .acquire_next_frame(swapchain)
+        .expect_err("the surface moved under the swapchain");
+    assert!(matches!(acquire, SurfaceError::OutOfDate), "{acquire}");
+    let present = device
+        .present(
+            queue,
+            &PresentInfo {
+                swapchain,
+                waits: frame.present_semaphore.as_slice(),
+                present_id: Some(2),
+            },
+        )
+        .expect_err("and present is where a resize is usually noticed");
+    assert!(matches!(present, SurfaceError::OutOfDate), "{present}");
+    let wait = device
+        .wait_until_presented(swapchain, 1, Duration::from_secs(30))
+        .expect_err("and the pacing wait cannot wait for a frame that will not land");
+    assert!(matches!(wait, SurfaceError::OutOfDate), "{wait}");
+    assert_eq!(
+        recorder.events().len(),
+        0,
+        "a refused presentation call must record nothing: {:?}",
+        recorder.events()
+    );
+
+    // The handle is still resolved first, so a swapchain the caller destroyed
+    // reports the caller's own bug rather than the resize sitting on top of it.
+    let doomed = device.create_swapchain(&desc).expect("swapchain");
+    device.destroy_swapchain(doomed);
+    let dead = device
+        .acquire_next_frame(doomed)
+        .expect_err("a destroyed swapchain hands out nothing");
+    assert!(
+        matches!(dead, SurfaceError::Hal(HalError::InvalidHandle { .. })),
+        "an out-of-date latch must not mask a stale handle: {dead}"
+    );
+
+    // A reconfigure that failed rebuilt nothing, so it clears nothing.
+    recorder.fail_next_reconfigures(1);
+    device
+        .reconfigure_swapchain(swapchain, &desc)
+        .expect_err("the injected fault");
+    let still = device
+        .acquire_next_frame(swapchain)
+        .expect_err("a rebuild that did not happen has not fixed anything");
+    assert!(matches!(still, SurfaceError::OutOfDate), "{still}");
+
+    // One that succeeded does.
+    device
+        .reconfigure_swapchain(swapchain, &desc)
+        .expect("reconfigure");
+    device
+        .acquire_next_frame(swapchain)
+        .expect("the rebuilt swapchain matches the surface again");
+
+    device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
+}
+
+/// The device-loss injection, from the seam's side: it reaches every call that
+/// can report it, it does not wear off, and it is not the out-of-band error
+/// channel wearing a different hat.
+///
+/// The last two are the point. `report_device_error` is one-shot and
+/// recoverable by contract — `crcbl/src/engine.rs` asserts that taking the error
+/// clears it — so a hook that latched *there* would have broken the caller it
+/// was meant to leave alone. These are two states with two lifetimes, and the
+/// assertions below are what keep them apart.
+#[test]
+fn a_lost_device_reports_it_from_every_call_that_can_and_never_recovers() {
+    let instance = NullInstance::gpu_driven();
+    let recorder = instance.recorder();
+    let device = open(&instance);
+    let queue = device
+        .queue(QueueKind::Graphics)
+        .expect("every device has a graphics queue");
+    // SAFETY: an offscreen target holds no platform pointers.
+    let surface = unsafe { instance.create_surface(&SurfaceTarget::Offscreen) }.expect("surface");
+    let swapchain = device
+        .create_swapchain(&SwapchainDesc {
+            label: None,
+            surface,
+            format: Format::Bgra8UnormSrgb,
+            extent: (8, 8),
+            image_count: 2,
+            present_mode: PresentMode::Fifo,
+            composite_alpha: CompositeAlpha::Opaque,
+        })
+        .expect("swapchain");
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            label: Some("uploads"),
+            size: 64,
+            usage: BufferUsage::STORAGE,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("create");
+    let encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
+    let command_buffer = encoder.finish().expect("an empty command buffer");
+
+    recorder.lose_device("gpu hang: the driver reset the adapter");
+
+    // A handle-taking call, a queue-taking call, the one that takes neither,
+    // and a presentation call — the four shapes a caller has.
+    let write = device
+        .write_buffer(buffer, 0, &[1u8; 4])
+        .expect_err("the device is gone");
+    let submit = device
+        .submit(
+            queue,
+            &SubmitInfo {
+                command_buffers: &[command_buffer],
+                waits: &[],
+                signals: &[],
+            },
+        )
+        .expect_err("the device is gone");
+    let idle = device.wait_idle().expect_err("the device is gone");
+    let acquire = device
+        .acquire_next_frame(swapchain)
+        .expect_err("the device is gone");
+    for error in [write, submit, idle] {
+        assert!(
+            matches!(&error, HalError::DeviceLost(message) if message.contains("gpu hang")),
+            "the driver's own words have to survive to the caller: {error}"
+        );
+    }
+    assert!(
+        matches!(
+            &acquire,
+            SurfaceError::Hal(HalError::DeviceLost(message)) if message.contains("gpu hang")
+        ),
+        "a presentation call reports it in the presentation vocabulary, as `crcbl-vk` does: \
+         {acquire}"
+    );
+
+    // A queue call naming no work at all still reports it. `vkQueueSubmit` with
+    // an empty batch is still a queue operation, and a dead queue cannot
+    // perform one — this is the only call whose sole gate is the queue's.
+    let bare = device
+        .submit(
+            queue,
+            &SubmitInfo {
+                command_buffers: &[],
+                waits: &[],
+                signals: &[],
+            },
+        )
+        .expect_err("the device is gone");
+    assert!(
+        matches!(&bare, HalError::DeviceLost(message) if message.contains("gpu hang")),
+        "{bare}"
+    );
+
+    // It stays lost. `report_device_error` is the one that clears when taken;
+    // this is the one that cannot be waited out.
+    for attempt in 0..4 {
+        assert!(
+            device.wait_idle().is_err(),
+            "attempt {attempt} succeeded on a device that is gone for good"
+        );
+    }
+
+    // And it is not the out-of-band channel: nothing was queued there, so a
+    // caller draining it hears nothing and learns of the loss from its next
+    // real call, which is where a driver puts it.
+    assert!(
+        device.take_error().is_none(),
+        "device loss must not be delivered as a recoverable out-of-band error"
+    );
+
+    // Teardown still works, as it does on a real driver: a caller holding
+    // objects when the device died must be able to release them.
+    let live = recorder.total_live_objects();
+    device.destroy_buffer(buffer);
+    device.destroy_command_buffer(command_buffer);
+    device.destroy_swapchain(swapchain);
+    instance.destroy_surface(surface);
+    assert!(
+        recorder.total_live_objects() < live,
+        "a lost device that refuses to let go of its objects leaks every one of them"
+    );
+}
+
 /// Regression test. `reconfigure_swapchain` used to destroy the old ring before
 /// building the new one, so a reconfigure that *failed* left the swapchain
 /// naming destroyed images and views — a call that returned `Err` having broken

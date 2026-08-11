@@ -26,6 +26,18 @@
 //! `requestDevice` promises do and what no amount of native hardware will
 //! reproduce.
 //!
+//! # And it can fail on purpose
+//!
+//! For the same reason, one step further: this backend never fails on its own,
+//! so a caller's *error* paths would never run either.
+//! [`report_device_error`](Recorder::report_device_error) queues an out-of-band
+//! failure, [`fail_next_reconfigures`](Recorder::fail_next_reconfigures) refuses
+//! a swapchain rebuild, [`report_swapchain_out_of_date`](Recorder::report_swapchain_out_of_date)
+//! resizes the window out from under the frame loop, and
+//! [`lose_device`](Recorder::lose_device) kills the device for good. The last
+//! two exist because the conditions they model — a resize and a TDR — are
+//! otherwise reachable only on a real driver at a moment nobody can schedule.
+//!
 //! # Always compiled
 //!
 //! Not behind a feature. See the crate docs for the argument — briefly: other
@@ -448,6 +460,7 @@ impl NullDevice {
         name: &'static str,
         owner: u64,
     ) -> Result<(), HalError> {
+        self.check_lost()?;
         let state = self.recorder.lock();
         if state.is_owned_by(kind, bits, owner) {
             Ok(())
@@ -461,6 +474,46 @@ impl NullDevice {
     /// Resolves a device-owned handle.
     fn check(&self, kind: ObjectKind, bits: u64, name: &'static str) -> Result<(), HalError> {
         self.check_owner(kind, bits, name, self.device_id)
+    }
+
+    /// Fails once [`Recorder::lose_device`] has been called, and thereafter.
+    ///
+    /// One insertion point rather than one per method: [`check_owner`] and
+    /// [`check_queue`] are the two funnels every fallible call that names a
+    /// handle already passes through, so gating them is what makes a lost
+    /// device lost everywhere at once — and it lands the error in the right
+    /// vocabulary for free, since the presentation calls wrap what they return
+    /// in [`SurfaceError::Hal`], which is exactly what `crcbl-vk`'s
+    /// `surface_error` does with `VK_ERROR_DEVICE_LOST`.
+    ///
+    /// [`check_owner`]: Self::check_owner
+    /// [`check_queue`]: Self::check_queue
+    fn check_lost(&self) -> Result<(), HalError> {
+        match self.recorder.lock().lost_device.clone() {
+            Some(message) => Err(HalError::DeviceLost(message)),
+            None => Ok(()),
+        }
+    }
+
+    /// Resolves a swapchain handle for one of the three calls a frame makes on
+    /// it, and reports the out-of-date latch first.
+    ///
+    /// `acquire_next_frame`, `present` and `wait_until_presented` all have to
+    /// answer the same way while the surface has moved under the swapchain —
+    /// that is what makes a resize storm a storm rather than one bad call — so
+    /// they ask in one place instead of three.
+    ///
+    /// The handle is resolved *before* the latch is read, so a swapchain that
+    /// was destroyed still reports its own bug rather than an out-of-date one;
+    /// and a lost device beats both, through [`check_lost`](Self::check_lost)
+    /// inside the resolve.
+    fn check_current(&self, swapchain: SwapchainHandle) -> Result<(), SurfaceError> {
+        self.check(ObjectKind::Swapchain, swapchain.to_bits(), "swapchain")
+            .map_err(SurfaceError::Hal)?;
+        if self.recorder.lock().swapchain_out_of_date {
+            return Err(SurfaceError::OutOfDate);
+        }
+        Ok(())
     }
 
     /// Resolves an instance-owned handle — surfaces, and only surfaces.
@@ -610,6 +663,7 @@ impl NullDevice {
     /// `create_command_encoder` used to ignore the argument entirely, so a
     /// handle from another device — or a hand-made one — submitted happily.
     fn check_queue(&self, queue: QueueHandle) -> Result<(), HalError> {
+        self.check_lost()?;
         let bits = queue.to_bits();
         let Some(index) = queue_index_of(self.device_id, queue) else {
             // Another device's queue handle is well-formed but not ours; a
@@ -1376,7 +1430,15 @@ impl Device for NullDevice {
         Ok(true)
     }
 
+    /// Records the wait and returns at once — nothing here is ever outstanding.
+    ///
+    /// The one method that names no handle and can still fail, which is why the
+    /// device-loss gate is spelled out here rather than reached through
+    /// [`NullDevice::check_lost`]'s two funnels. `vkDeviceWaitIdle` reports
+    /// `VK_ERROR_DEVICE_LOST` for the same reason: waiting for a dead device to
+    /// finish is not something that can succeed.
     fn wait_idle(&self) -> Result<(), HalError> {
+        self.check_lost()?;
         self.recorder.lock().events.push(Event::WaitedIdle);
         Ok(())
     }
@@ -1484,6 +1546,11 @@ impl Device for NullDevice {
                 )));
             };
             let previous = core::mem::replace(&mut object.detail, fresh);
+            // The rebuild is what clears the out-of-date latch, so a caller
+            // that handles the resize gets a working swapchain back and one
+            // that ignores it keeps being told. Here rather than at the top of
+            // the method: a reconfigure that failed rebuilt nothing.
+            state.swapchain_out_of_date = false;
             state.events.push(Event::Reconfigured {
                 swapchain,
                 extent: desc.extent,
@@ -1560,8 +1627,7 @@ impl Device for NullDevice {
         &self,
         swapchain: SwapchainHandle,
     ) -> Result<AcquiredFrame, SurfaceError> {
-        self.check(ObjectKind::Swapchain, swapchain.to_bits(), "swapchain")
-            .map_err(SurfaceError::Hal)?;
+        self.check_current(swapchain)?;
         let mut state = self.recorder.lock();
         let Some(object) = state.get_mut(ObjectKind::Swapchain, swapchain.to_bits()) else {
             return Err(SurfaceError::Hal(HalError::invalid_handle(
@@ -1604,12 +1670,7 @@ impl Device for NullDevice {
 
     fn present(&self, queue: QueueHandle, present: &PresentInfo<'_>) -> Result<(), SurfaceError> {
         self.check_queue(queue).map_err(SurfaceError::Hal)?;
-        self.check(
-            ObjectKind::Swapchain,
-            present.swapchain.to_bits(),
-            "swapchain",
-        )
-        .map_err(SurfaceError::Hal)?;
+        self.check_current(present.swapchain)?;
         for semaphore in present.waits {
             self.check(ObjectKind::Semaphore, semaphore.to_bits(), "semaphore")
                 .map_err(SurfaceError::Hal)?;
@@ -1628,15 +1689,16 @@ impl Device for NullDevice {
     /// observe — which is exactly the seam's answer for a device that does not
     /// advertise [`Features::PRESENT_FEEDBACK`], and this one never does. The
     /// handle is still checked, because a caller waiting on a swapchain it
-    /// already destroyed has a bug whether or not anyone was going to block.
+    /// already destroyed has a bug whether or not anyone was going to block —
+    /// and so is the out-of-date latch, because a pacing wait is one of the
+    /// three calls a resize makes fail. See [`check_current`](Self::check_current).
     fn wait_until_presented(
         &self,
         swapchain: SwapchainHandle,
         present_id: u64,
         _timeout: Duration,
     ) -> Result<(), SurfaceError> {
-        self.check(ObjectKind::Swapchain, swapchain.to_bits(), "swapchain")
-            .map_err(SurfaceError::Hal)?;
+        self.check_current(swapchain)?;
         let mut state = self.recorder.lock();
         state.events.push(Event::PresentWaited {
             swapchain,

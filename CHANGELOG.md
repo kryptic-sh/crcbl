@@ -90,6 +90,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The null backend can now be resized and killed on demand.** Two injection
+  hooks join the four `crcbl_hal::null::Recorder` already had.
+  `report_swapchain_out_of_date()` latches the swapchain out of date, so
+  `acquire_next_frame`, `present` and `wait_until_presented` all report
+  `SurfaceError::OutOfDate` until a successful `reconfigure_swapchain` clears it
+  — the variant the seam calls expected traffic and that this backend could not
+  produce at all, since every `SurfaceError` it built was `SurfaceError::Hal`.
+  `lose_device(message)` loses the device permanently: every later call that
+  resolves a handle, plus `Device::wait_idle`, fails with
+  `HalError::DeviceLost(message)` and nothing clears it. It is the deliberate
+  opposite of `report_device_error`, which stays recoverable and one-shot.
+  Between them the engine's three out-of-date arms and its device-loss policy —
+  loss surfaces, the loop stops, nothing is rebuilt — are testable on a machine
+  with no GPU, where before they ran only on a real driver mid-resize.
+
 - **`crcbl-scene` — glTF 2.0 import, through the asset seam.**
   `crcbl_scene::import_gltf(source, key)` reads a `.gltf` or `.glb` and every
   external `.bin` it names through `crcbl_assets::AssetSource`, and returns a
