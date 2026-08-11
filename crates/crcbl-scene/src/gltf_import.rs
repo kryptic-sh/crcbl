@@ -287,6 +287,37 @@ fn parse(bytes: &[u8], key: &Path) -> Result<gltf::Gltf, StorageError> {
 /// A buffer with no `uri` is the `.glb` `BIN` chunk, which the spec allows only
 /// for the first buffer of a binary document; anything else is refused rather
 /// than aliased.
+/// The directory part of an asset key, in URI space.
+///
+/// **Not `Path::parent`.** A key is a URI-relative reference — the same string
+/// a browser would fetch — and `crcbl_store::web::canonical_key` refuses a
+/// backslash precisely so that an asset tree which loads from a directory is
+/// one that can be served over HTTP. `Path::parent` and `Path::join` use the
+/// *platform's* separator, so on Windows they produce `meshes\\triangle.bin`
+/// from a glTF that says `triangle.bin`, and the key is then refused as a path
+/// escape. That is not hypothetical: it is what CI reported the first time this
+/// ran on `windows-latest`.
+///
+/// So this splits on `/` and nothing else, which makes the result the same on
+/// every platform by construction rather than by the separator happening to
+/// match.
+fn uri_parent(key: &Path) -> &str {
+    let key = key.to_str().unwrap_or_default();
+    match key.rfind('/') {
+        Some(cut) => &key[..cut],
+        None => "",
+    }
+}
+
+/// A key naming `uri` beside `parent`, in URI space. See [`uri_parent`].
+fn uri_sibling(parent: &str, uri: &str) -> String {
+    if parent.is_empty() {
+        uri.to_owned()
+    } else {
+        format!("{parent}/{uri}")
+    }
+}
+
 fn resolve_buffers(
     source: &dyn AssetSource,
     key: &Path,
@@ -294,7 +325,7 @@ fn resolve_buffers(
     mut blob: Option<Vec<u8>>,
 ) -> Result<Vec<Vec<u8>>, StorageError> {
     let root = document.document.as_json();
-    let parent = key.parent().unwrap_or_else(|| Path::new(""));
+    let parent = uri_parent(key);
     let mut buffers = Vec::with_capacity(root.buffers.len());
     for (index, buffer) in root.buffers.iter().enumerate() {
         let bytes = match buffer.uri.as_deref() {
@@ -313,7 +344,7 @@ fn resolve_buffers(
                      them in a .bin beside the .gltf",
                 ));
             }
-            Some(uri) => source.read(&parent.join(uri))?,
+            Some(uri) => source.read(Path::new(&uri_sibling(parent, uri)))?,
         };
         let declared = usize::try_from(buffer.byte_length.0).unwrap_or(usize::MAX);
         if bytes.len() < declared {
@@ -513,6 +544,35 @@ mod tests {
     /// The same document with its bytes in a file instead of a chunk. Asserted
     /// against the `.glb` rather than against a second copy of the expected
     /// values, so the two paths cannot drift.
+    /// The sibling key is built in URI space on every platform.
+    ///
+    /// This is the test that would have caught the Windows failure on Linux.
+    /// Asserting the *imported scene* could not: `Path::join` produces the right
+    /// string here and the wrong one on Windows, so the round trip passes on the
+    /// machine the code was written on and fails on the runner. Asserting the
+    /// join itself, over strings, is the same claim on both.
+    #[test]
+    fn a_buffer_beside_a_gltf_is_named_with_a_slash_whatever_the_platform() {
+        assert_eq!(uri_parent(Path::new("meshes/scene.gltf")), "meshes");
+        assert_eq!(uri_parent(Path::new("a/b/scene.gltf")), "a/b");
+        assert_eq!(uri_parent(Path::new("scene.gltf")), "");
+
+        assert_eq!(uri_sibling("meshes", "triangle.bin"), "meshes/triangle.bin");
+        assert_eq!(uri_sibling("a/b", "c.bin"), "a/b/c.bin");
+        // A gltf at the root names its sibling with no prefix at all — not
+        // "/c.bin", which `canonical_key` refuses as an absolute path.
+        assert_eq!(uri_sibling("", "c.bin"), "c.bin");
+
+        // The property the failure was about: nothing this builds contains a
+        // separator `canonical_key` will not accept.
+        for key in [
+            uri_sibling(uri_parent(Path::new("meshes/scene.gltf")), "triangle.bin"),
+            uri_sibling(uri_parent(Path::new("scene.gltf")), "triangle.bin"),
+        ] {
+            assert!(!key.contains('\\'), "{key} carries a platform separator");
+        }
+    }
+
     #[test]
     fn a_gltf_reads_its_buffer_from_the_bin_file_beside_it() {
         let from_file = import_gltf_text(&triangle_json(EXTERNAL_BUFFER), &triangle_bin()).unwrap();

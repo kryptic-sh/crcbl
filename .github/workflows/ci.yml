@@ -1682,8 +1682,10 @@ jobs:
         env:
           CRCBL_GPU: mtl
           MTL_DEBUG_LAYER: '1'
-          MTL_DEBUG_LAYER_ERROR_MODE: abort
-          MTL_DEBUG_LAYER_WARNING_MODE: abort
+          # `nslog`, not `abort`: Metal asserts on an env value it does not
+          # recognise rather than ignoring it, and `abort` is not one it takes.
+          MTL_DEBUG_LAYER_ERROR_MODE: nslog
+          MTL_DEBUG_LAYER_WARNING_MODE: nslog
           MTL_SHADER_VALIDATION: '1'
         run: crates/crcbl/tests/run-render-e2e.sh
 

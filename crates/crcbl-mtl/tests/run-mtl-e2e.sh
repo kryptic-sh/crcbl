@@ -136,8 +136,19 @@ trap cleanup EXIT INT TERM
 # any of this crate's code runs. Defaulted rather than required so that running
 # this script *is* running what CI runs.
 export MTL_DEBUG_LAYER="${MTL_DEBUG_LAYER:-1}"
-export MTL_DEBUG_LAYER_ERROR_MODE="${MTL_DEBUG_LAYER_ERROR_MODE:-abort}"
-export MTL_DEBUG_LAYER_WARNING_MODE="${MTL_DEBUG_LAYER_WARNING_MODE:-abort}"
+# `nslog`, not `abort`. **`abort` is not a value Metal accepts**, and it does
+# not ignore one it does not know: `MTLGetEnvCase` asserts, so every device
+# creation dies with `Assertion failed: (0) … MTLUtils_Internal.h, line 100` and
+# the whole suite SIGABRTs before running. That is what run 31452339144 did, 71
+# of 71. The accepted values are `ignore`, `assert` and `nslog`.
+#
+# `nslog` reports each finding to stderr and lets the process continue, which is
+# what a first run wants: the suite has never executed under this layer, so the
+# job now is to read what it says rather than to die on the first line of it.
+# `assert` is the stricter setting and is where this should end up once the log
+# is clean — `docs/backlog.md` carries that as the follow-up.
+export MTL_DEBUG_LAYER_ERROR_MODE="${MTL_DEBUG_LAYER_ERROR_MODE:-nslog}"
+export MTL_DEBUG_LAYER_WARNING_MODE="${MTL_DEBUG_LAYER_WARNING_MODE:-nslog}"
 export MTL_SHADER_VALIDATION="${MTL_SHADER_VALIDATION:-1}"
 # And this suite's own: whether a run that did not get the layer fails.
 export CRCBL_MTL_VALIDATION="${CRCBL_MTL_VALIDATION:-1}"

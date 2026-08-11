@@ -5062,7 +5062,13 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
     fn a_copy_d3d12_cannot_place_is_refused_by_name() {
-        let (_instance, device) = open_device();
+        let (instance, device) = open_device();
+        // **The dirty report is the point of this test.** The refusal asserted
+        // below is D3D12's own — the seam does not reject this row pitch before
+        // the call, which is exactly why the layer has something to say about
+        // it. So the teardown assertion stands down here, the way `crcbl-vk`'s
+        // gate tests decline to call `Headless::finish`.
+        instance.defuse();
         let queue = device
             .queue(QueueKind::Graphics)
             .expect("the graphics queue exists");

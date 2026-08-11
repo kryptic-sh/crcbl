@@ -5339,3 +5339,38 @@ actually clean under their layers, whether the D3D12 gate's message really names
 and whether the paravirtual device supports shader validation at all. The layer
 itself is confirmed present — a `main` run reports `debug layer=true` on
 `windows-latest` — but none of these crates executes on this machine.
+
+### Metal's debug layer is on `nslog`, and `assert` is the follow-up
+
+The first run of the Metal suite under `MTL_DEBUG_LAYER` set both mode variables
+to `abort`, and all 71 tests died with
+
+```
+Assertion failed: (0), function MTLGetEnvCase, file MTLUtils_Internal.h, line 100.
+```
+
+**That was not the layer finding 71 problems.** `abort` is not a value Metal
+accepts, and Metal does not ignore a value it does not recognise —
+`MTLGetEnvCase` asserts, so every device creation aborted before any test ran.
+The accepted set is `ignore`, `assert`, `nslog`.
+
+Both are `nslog` now, which reports each finding to stderr and lets the process
+continue. That is what a first run needs — the suite has never executed under
+this layer and the job is to read what it says. **It also means an API misuse
+does not fail anything today**: it is a line in a log nobody's assertion reads.
+`assert` is where this should end up once the log is clean, and moving it is the
+follow-up. Until then the enforced half on Metal is what the backend can observe
+in-process — that the layer interposed, and that no command buffer ended in
+error — which is already recorded as weaker than Vulkan's and D3D12's.
+
+### `a_copy_d3d12_cannot_place_is_refused_by_name` provokes a real layer error
+
+Recorded because it is the one D3D12 test whose validation report is dirty on
+purpose, and a future reader will otherwise try to "fix" it.
+
+The refusal it asserts is **D3D12's own**: the seam does not reject a 252-byte
+row pitch before the call, so the copy reaches the driver and the debug layer
+says so. It calls `defuse()`, exactly as `crcbl-vk`'s gate tests decline to call
+`Headless::finish`. The first run with teardown assertions enabled found this
+and nothing else across all 75 tests — one deliberate provocation, correctly
+flagged.
