@@ -34,13 +34,12 @@
 //
 // THE READBACK IS THE PART THAT NEEDED PROVING. Three ways to get a WebGPU
 // canvas's pixels into JS look equivalent and are not, measured on Chromium 150
-// against a page that does nothing but clear a canvas to a known colour:
+// and again on 151, against a page that does nothing but clear a canvas to a
+// known colour:
 //
 //   drawImage(canvas, …) + getImageData   transparent black, always
 //   createImageBitmap(canvas)             transparent black, always
-//   canvas.toDataURL()                    the actual pixels — on a hardware
-//                                         adapter; transparent black on
-//                                         SwiftShader
+//   canvas.toDataURL()                    the actual pixels
 //
 // The first two are the obvious spellings and both of them report a perfectly
 // rendered frame as blank. That is a harness that fails a working engine, which
@@ -48,6 +47,13 @@
 // this same browser with these same flags, and refuses to interpret group D
 // unless the control comes back with the colour it drew. `docs/plan/ROADMAP.md`
 // puts it as "verify the checker, not just the code".
+//
+// That control has since earned its keep. On Chromium 151 it went red under
+// every adapter mode, and what it had caught was not a readback quirk: the
+// browser could not get the canvas out of the WebGPU device and into the
+// compositor, so the snapshot was uninitialised memory — for the demo's canvas
+// exactly as for the control's. The engine was fine and the reader was fine;
+// the two devices did not match. `browserFlags` carries the fix.
 //
 // WHAT GROUP D DOES NOT PROVE: that the frame is the *right* image. There is no
 // reference comparison here — `crcbl screenshot` renders a different scene at a
@@ -213,8 +219,8 @@ const TIMEOUT_MS = Number(
  *
  * `auto` (the default) tries `hardware` and falls back to `swiftshader`, taking
  * the first mode whose *readback control* passes — an adapter that renders but
- * whose pixels cannot be read is no use to this harness, and on Chromium 150
- * SwiftShader is exactly that.
+ * whose pixels cannot be read is no use to this harness, and each Chromium
+ * release so far has had at least one mode that is exactly that.
  */
 const ADAPTER = args.adapter ?? process.env.CRCBL_WEB_E2E_ADAPTER ?? 'auto';
 
@@ -406,10 +412,10 @@ function findBrowser() {
 /**
  * The flags, and why each one is here.
  *
- * Every one of these was measured on Chromium 150 rather than copied. Without
- * the WebGPU pair for the chosen mode, `navigator.gpu.requestAdapter()`
- * resolves to `null` in headless and the demo stops at its own "this browser
- * has no WebGPU" banner.
+ * Every one of these was measured rather than copied — on Chromium 150 first,
+ * and the SwiftShader set again on 151. Without the WebGPU pair for the chosen
+ * mode, `navigator.gpu.requestAdapter()` resolves to `null` in headless and the
+ * demo stops at its own "this browser has no WebGPU" banner.
  */
 function browserFlags(profile, mode) {
   const flags = [
@@ -447,7 +453,30 @@ function browserFlags(profile, mode) {
     // WebGPU when the GPU feature status is `unavailable_software`, which is
     // exactly what a headless run without a display reports.
     // `--enable-unsafe-webgpu` is what lifts that refusal.
-    flags.push('--enable-unsafe-webgpu', '--use-webgpu-adapter=swiftshader');
+    //
+    // The other two point the *shared image* device at SwiftShader too, and on
+    // Chrome 151 they are what makes this mode work at all. A canvas is handed
+    // between two devices — Dawn renders into it, and the compositor reads it
+    // back out for `toDataURL` — and those two have to be the same Vulkan
+    // implementation. `--use-webgpu-adapter=swiftshader` moves only Dawn; the
+    // shared-image device stays on whatever the machine has, and Chrome then
+    // fails to hand the texture across:
+    //
+    //   AssociateMailbox: Accessing an uncleared texture requires passing a
+    //   usage that supports lazy clearing
+    //   GPUDevice: [Invalid Texture] is invalid … While validating
+    //   CopyTextureForBrowser
+    //
+    // The canvas snapshot is uninitialised memory after that — largely
+    // zero-alpha, which is what makes it read as transparent black. Measured on
+    // Chromium 151, and neither flag is enough on its own: with only the
+    // feature, `chrome://gpu` still names the machine's own GL driver.
+    flags.push(
+      '--enable-unsafe-webgpu',
+      '--use-webgpu-adapter=swiftshader',
+      '--enable-features=Vulkan',
+      '--use-vulkan=swiftshader'
+    );
   }
 
   // Chrome's sandbox needs user namespaces, which a root-in-container CI job
@@ -888,8 +917,8 @@ try {
   group('A — the platform');
 
   // Every mode that will be tried, in order of preference. `hardware` first:
-  // it is what a visitor to the Pages URL gets, and on Chromium 150 it is the
-  // only one whose canvas pixels can be read back at all.
+  // it is what a visitor to the Pages URL gets. A CI runner has no GPU, so it
+  // gets no adapter there and falls through to `swiftshader` on the next line.
   const modes = ADAPTER === 'auto' ? ['hardware', 'swiftshader'] : [ADAPTER];
   /** @type {Awaited<ReturnType<typeof preflight>> | null} */
   let chosen = null;

@@ -5038,31 +5038,52 @@ horde 3 028 644, which is the measurement this entry said was worth having.
 Four things that slice found in the shared web tooling and did not fix, none of
 them hud's:
 
-- **The browser gate cannot run its default way on this machine any more, and
-  the difference is the browser version.** Chromium 151 returns `rgb(0,0,0)`
-  from group A's readback control under Xvfb for **both** the `hardware` and
-  `swiftshader` adapters, so a bare `./web/run-browser-e2e.sh` fails its own
-  control and correctly refuses to interpret anything after it.
-  `--headless --hardware` works and is what every local run uses.
+- **Settled: Chrome 151 broke the browser gate, and it was a device mismatch,
+  not a readback quirk.** This entry predicted the failure and it arrived
+  exactly as described — GitHub's runner moved from Chrome 150.0.7871.128 to
+  151.0.7922.108 between `4eb0d65` (Pages green) and `77fa401` (Pages red),
+  group A went red for all five demos at once, and the deploy was **skipped**
+  rather than failed, which is the shape that hides a broken publish.
 
-  CI is not affected **today**, and that is measured rather than assumed: the
-  Pages run on `ac40d6a` logs
-  `browser: /usr/bin/google-chrome (Google Chrome 150.0.7871.128)` and all five
-  demos passed on `swiftshader` under Xvfb, hud at 27/27. So the working
-  combination is Chrome 150, and the runner image is what holds it there. **When
-  GitHub's image moves to 151 the Pages job fails group A for all five demos at
-  once** — the whole gate, not one demo — and it will not look like a demo
-  problem. The fix when that happens is in group A's control in
-  `web/run-browser-e2e.sh`, not in any sample.
+  The cause: a WebGPU canvas is handed between two devices — Dawn renders into
+  it and Chromium's compositor reads it back for `toDataURL` — and those must be
+  the same Vulkan implementation. `--use-webgpu-adapter=swiftshader` moves
+  **only Dawn**; the shared-image device stayed on whatever the machine had, and
+  on 151 the hand-off fails. The snapshot was therefore **uninitialised memory
+  rather than black** — decoding the raw PNG outside the browser gave 2427
+  distinct colours, almost all at alpha 0, which is why it decoded as
+  `rgb(0,0,0)`. Chromium said so in its own stderr:
+  `ReadPixels: Source shared image is not accessible` and
+  `CopyTextureForBrowser from [Invalid Texture]`.
 
-  **It is not the null-adapter bug**, which was the obvious guess when both
-  turned out to involve Chromium 151. Measured with the gate's own control page:
-  in every failing box the control receives a real `[object GPUAdapter]` and
-  draws hundreds of frames, and `toDataURL()` still returns transparent black —
-  it is a canvas pixel-readback regression, not an adapter one. The measurement
-  is trustworthy because one box (`--headless --hardware`) returns the right
-  colour, so the control is not simply broken. The flag table in that script's
-  own header was measured on Chromium 150 and no longer describes 151.
+  The fix is `--enable-features=Vulkan --use-vulkan=swiftshader` in
+  `browserFlags`, pointing the shared-image device at SwiftShader too. Neither
+  flag works alone, and `--use-angle=swiftshader` does **not** substitute — it
+  is specifically Chromium's shared-image Vulkan device that has to match
+  Dawn's. Nothing about how pixels are read changed: `toDataURL` was never the
+  problem, and the control and every render check still read through the same
+  path.
+
+  **It was never confined to the control.** With group A bypassed, the real
+  breakout demo failed identically at its own canvas size with 16 device errors.
+  The control was faithfully representing group D, which is its whole purpose.
+
+  **No browser pin.** The gate passes on 151, and the control is what turned a
+  silent regression into a loud one — a pin would have hidden this rather than
+  fixed it.
+
+- **An unexplained workaround, found and deliberately not used.** Creating a 2D
+  canvas in the page _before_ the WebGPU context and reading it back with
+  `toDataURL` also makes the SwiftShader readback work, with the old flags.
+  Priming it after the fact does not work, the mechanism is unexplained, and it
+  would have to be injected into every demo page. Recorded only in case the flag
+  fix stops working.
+
+- **Xvfb + `--hardware` reads transparent black on this machine** and loses the
+  WebGPU device mid-run, on Chromium 151 with an RX 7900 XTX under RADV. It is
+  harmless because `auto` falls through to SwiftShader — which is also what CI
+  does, since the runner has no GPU at all — but a developer who passes
+  `--hardware` under Xvfb gets a confusing failure. Not investigated.
 
 - **A browser that hands out no adapter is guarded twice, and there is a race
   between the guards.** `WgpuInstance::new_async` probes with wgpu's

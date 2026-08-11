@@ -48,20 +48,26 @@
 # WHY Xvfb AND NOT `--headless`
 #   Chromium's WebGPU canvas can be read back in some configurations and not
 #   others, and the difference is not documented anywhere. Measured on Chromium
-#   150 with a page that does nothing but clear a canvas to a known colour:
+#   151 with a page that does nothing but clear a canvas to a known colour:
 #
 #     display   adapter        canvas.toDataURL()
 #     --------  -------------  ---------------------------------------
 #     headless  hardware       the colour it drew
 #     headless  SwiftShader    transparent black — *silently*
 #     Xvfb      SwiftShader    the colour it drew
-#     Xvfb      hardware       transparent black — *silently*
+#     Xvfb      hardware       transparent black — *silently*; the WebGPU
+#                              device is lost part-way through the run
 #
 #   A CI runner has no GPU, so headless plus SwiftShader is the box CI would
 #   land in, and it is the one that reports a perfectly rendered frame as blank.
 #   Running inside Xvfb moves it to the row that works, which is why this script
 #   starts one; `--headless` skips it for a machine that has no Xvfb or where
 #   the hardware path is what is wanted.
+#
+#   The shape of that table survived Chromium 151; the SwiftShader row that
+#   works did not survive on its own. It read transparent black there too until
+#   `browser-e2e.mjs` learned to put Chromium's *shared image* device on
+#   SwiftShader alongside WebGPU's, which is where the reasoning lives.
 #
 #   None of that is trusted rather than checked: `browser-e2e.mjs` runs the
 #   known-colour clear first, in the same browser with the same flags, and
@@ -86,6 +92,12 @@
 #       --use-angle=vulkan                process falls back to ANGLE
 #                                       SwiftShader GL and `chrome://gpu` still
 #                                       says `webgpu: unavailable_software`
+#     --enable-features=Vulkan          the software mode's other half: the
+#       --use-vulkan=swiftshader          device Chromium hands canvases around
+#                                       on has to be the same one WebGPU renders
+#                                       with, or the compositor cannot read the
+#                                       canvas back and `toDataURL` returns
+#                                       uninitialised memory
 #     XDG_CONFIG_HOME=<throwaway>       not a flag: some distributions' launcher
 #                                       appends `~/.config/chromium-flags.conf`
 #                                       to the command line. One containing
