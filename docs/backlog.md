@@ -4509,26 +4509,6 @@ correct — `src/lib.rs` is thirteen lines of doc and no items, and it says the
 `crates/crcbl-net/tests/replication.rs`, with loss and reorder variants beside
 it.
 
-### `crcbl-wgpu` does not implement seam obligation 3 at all
-
-`grep -c ForeignObject crates/crcbl-wgpu/src/*.rs` returns zero. Every other
-backend implements it: `crcbl-vk` in `device.rs`, and `crcbl-mtl` and
-`crcbl-dx12` across more than twenty sites each.
-`crates/crcbl-hal/src/device.rs` states the obligation imperatively — backends
-**must** stamp an owner identity into their own side table, one `u64` per
-tracked object, compared on every lookup. `crates/crcbl-wgpu/src/resources.rs`
-carries no owner field on any slot; the only `device_id` in the crate is a wgpu
-adapter-info field used for logging.
-
-So a handle from one wgpu device passed to another is undefined there and
-detected everywhere else. This is the one backend where the seam's own rule is
-unimplemented rather than untested, and no test would fix it.
-
-**Needs a decision before it needs an implementer:** the side table costs a
-lookup on every resolve, and `crcbl-wgpu` is the backend the wasm build uses.
-Whether the browser target pays that cost is the question; the answer decides
-whether this is one implementation or two.
-
 ### Obligations tested on exactly one backend
 
 - **Deferred driver-object destruction** (`crcbl-hal/src/device.rs`, the
@@ -4606,27 +4586,33 @@ asserts the layer caught it.
   messages drained, and every one of the seventy-three device tests still green
   with a validation error raised.
 
-### The cross-backend image compare covers two backends of four
+### The dedicated cross-backend job still compares two backends of two
 
-`docs/plan/12-testing.md` already concedes this and it still holds: the job is
-Vulkan versus wgpu, both on lavapipe. Metal and D3D12 render the same scenes but
-each against its own golden, never against each other. The bug class the compare
-exists to catch is a shader whose semantics differ per target — the two it has
-actually caught, `SV_InstanceID` and `SV_VertexID`, were both SPIR-V versus
-WGSL, and both have MSL and DXIL analogues nothing would find.
+**Half of this closed on `41b6e61`**, differently from how it was framed. The
+entry used to say MSL and DXIL were compared against nothing, because
+`run-cross-backend-e2e.sh` renders every scene on Vulkan and wgpu and on nothing
+else. That is no longer the gap: `crates/crcbl/tests/render_e2e.rs` now draws
+`Cube`, `Sprite` and `Ui` on whichever backend `CRCBL_GPU` names, so Metal and
+D3D12 compare all three against the same lavapipe-blessed references the other
+two do. Both matched on their first run, at max channel delta 1.
 
-**Needs a decision:** comparing an image rendered on a macOS runner against one
-from a Windows runner means blessing a shared reference in the repo and having
-each platform's job compare against it, with the distinct-colour floor
-`run-cross-backend-e2e.sh` already defines per scene as the anti-vacuity guard.
+What is left is narrower and worth stating precisely. The vk-versus-wgpu job
+compares two backends' output **to each other**, which catches a divergence
+neither has a golden for; the golden path compares each backend to a
+_reference_, which catches a backend drifting from what was blessed. Those are
+different checks, and only the first is still two-backends-wide. Extending it
+would mean running two backends in one process on one machine — which is what
+that job does — and no runner has both Metal and D3D12.
+
+So the remaining gap is structural rather than owed: a Metal-versus-D3D12
+comparison has nowhere to run. The golden path is the substitute and is already
+in place.
 
 ### Coverage the testing plan asks for and nothing provides
 
-- **No sample owns a golden frame.** `docs/plan/12-testing.md` says every sample
-  CI-runs its determinism check _and at least one golden frame_. The determinism
-  half is met — every sample has a replay-hash test — but all fifteen goldens in
-  the tree are engine scenes. A sample golden needs each sample to expose a
-  screenshot path first, which was not checked.
+- **No sample owns a golden frame** — declined rather than owed, and the
+  reasoning is under "Declined for now: a golden frame per sample" below rather
+  than repeated here.
 - **The ECS churn soak with a leak assert does not exist.** The plan asks for it
   by name. Nothing in `crcbl-ecs` spawns and despawns over many ticks and then
   asserts nothing leaked. One seeded loop, no GPU.
