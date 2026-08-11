@@ -88,12 +88,29 @@ pub struct BindGroupLayoutSlot {
     /// that the map's hashing costs more than the scan saves, and the sorted
     /// order keeps the lookup deterministic.
     counts: Vec<(u32, u32)>,
+    /// The binding carrying [`BindingFlags::VARIABLE_COUNT`](crcbl_hal::BindingFlags::VARIABLE_COUNT),
+    /// if the layout declares one.
+    ///
+    /// Kept for the same reason the counts are — wgpu's layout has no flags to
+    /// read back — and needed because
+    /// [`BindGroupDesc::variable_count`](crcbl_hal::BindGroupDesc::variable_count)
+    /// describes *that* binding and no other. Without it a group could only be
+    /// checked against whichever binding happened to be highest.
+    variable_binding: Option<u32>,
 }
 
 impl BindGroupLayoutSlot {
-    pub fn new(layout: wgpu::BindGroupLayout, mut counts: Vec<(u32, u32)>) -> Self {
+    pub fn new(
+        layout: wgpu::BindGroupLayout,
+        mut counts: Vec<(u32, u32)>,
+        variable_binding: Option<u32>,
+    ) -> Self {
         counts.sort_unstable_by_key(|(binding, _)| *binding);
-        Self { layout, counts }
+        Self {
+            layout,
+            counts,
+            variable_binding,
+        }
     }
 
     /// The array length `binding` declares, or `None` when the layout does not
@@ -103,6 +120,12 @@ impl BindGroupLayoutSlot {
             .iter()
             .find(|(declared, _)| *declared == binding)
             .map(|(_, count)| *count)
+    }
+
+    /// The binding a `variable_count` describes, or `None` when the layout
+    /// declares no `VARIABLE_COUNT` binding at all.
+    pub fn variable_binding(&self) -> Option<u32> {
+        self.variable_binding
     }
 }
 

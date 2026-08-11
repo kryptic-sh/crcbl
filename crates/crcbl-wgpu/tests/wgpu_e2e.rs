@@ -2785,7 +2785,18 @@ fn sampled_views(
 
 /// The layout the array tests bind against: a scalar sampler, and an image
 /// array `count` elements long.
+///
+/// `PARTIALLY_BOUND` only once the binding is genuinely an array: every
+/// [`BindingFlags`](crcbl_hal::BindingFlags) needs `DESCRIPTOR_INDEXING`, so
+/// declaring one on the single-element layout would make the refusals that need
+/// no array at all unbuildable on an adapter without the feature — which is the
+/// half those tests run unconditionally.
 fn array_layout(device: &dyn Device, count: u32) -> crcbl_hal::BindGroupLayoutHandle {
+    let flags = if count > 1 {
+        crcbl_hal::BindingFlags::PARTIALLY_BOUND
+    } else {
+        crcbl_hal::BindingFlags::empty()
+    };
     let entries = [
         crcbl_hal::BindGroupLayoutEntry {
             binding: SCALAR_BINDING,
@@ -2801,7 +2812,7 @@ fn array_layout(device: &dyn Device, count: u32) -> crcbl_hal::BindGroupLayoutHa
                 view_type: ImageViewType::D2,
             },
             count,
-            flags: crcbl_hal::BindingFlags::PARTIALLY_BOUND,
+            flags,
         },
     ];
     device
@@ -2828,6 +2839,7 @@ fn refused(
     device: &dyn Device,
     layout: crcbl_hal::BindGroupLayoutHandle,
     entries: &[crcbl_hal::BindGroupEntry],
+    variable_count: Option<u32>,
     what: &str,
 ) -> String {
     let error = device
@@ -2835,7 +2847,7 @@ fn refused(
             label: Some("wgpu e2e refused"),
             layout,
             entries,
-            variable_count: None,
+            variable_count,
         })
         .err()
         .unwrap_or_else(|| panic!("{what} must be refused, not built"));
@@ -3134,6 +3146,7 @@ fn a_wgpu_array_binding_wgpu_cannot_spell_is_refused_instead_of_packed() {
         device.as_ref(),
         scalar,
         &[view_entry(0, views[0]), view_entry(0, views[1])],
+        None,
         "one slot written twice",
     );
     for expected in ["binding 1", "twice"] {
@@ -3146,6 +3159,7 @@ fn a_wgpu_array_binding_wgpu_cannot_spell_is_refused_instead_of_packed() {
         device.as_ref(),
         scalar,
         &[view_entry(1, views[1])],
+        None,
         "an index past a scalar binding's one slot",
     );
     for expected in ["index 1", "binding 1", "holds 1"] {
@@ -3162,6 +3176,7 @@ fn a_wgpu_array_binding_wgpu_cannot_spell_is_refused_instead_of_packed() {
             array_index: 0,
             resource: crcbl_hal::BindingResource::ImageView(views[0]),
         }],
+        None,
         "an entry naming a binding the layout never declared",
     );
     for expected in ["binding 9", "does not declare"] {
@@ -3184,6 +3199,7 @@ fn a_wgpu_array_binding_wgpu_cannot_spell_is_refused_instead_of_packed() {
             device.as_ref(),
             sparse,
             &[view_entry(0, views[0]), view_entry(2, views[2])],
+            None,
             "an array with a hole in it",
         );
         for expected in ["binding 1", "index 1", "sparse"] {
@@ -3203,6 +3219,7 @@ fn a_wgpu_array_binding_wgpu_cannot_spell_is_refused_instead_of_packed() {
                     resource: crcbl_hal::BindingResource::Sampler(sampler),
                 },
             ],
+            None,
             "one binding holding both an image view and a sampler",
         );
         for expected in ["binding 1", "kind"] {
@@ -3230,6 +3247,529 @@ fn a_wgpu_array_binding_wgpu_cannot_spell_is_refused_instead_of_packed() {
     }
     for image in images {
         device.destroy_image(image);
+    }
+    device.wait_idle().expect("idle");
+    instance.destroy_surface(surface);
+    drop(device);
+    drop(instance);
+}
+
+/// A [`BindingFlags`](crcbl_hal::BindingFlags) this device cannot honour is
+/// refused, and so is a `VARIABLE_COUNT` entry in the wrong place.
+///
+/// `BindGroupLayoutEntry::flags` had no reader in this backend at all: the
+/// layout was built from `visibility`, `kind` and `count`, and every flag was
+/// dropped without a word. Both obligations the seam states were therefore
+/// silently unmet — a device without `DESCRIPTOR_INDEXING` handed back a fixed
+/// array wearing a bindless declaration ("a bindless array quietly downgraded to
+/// a fixed one reads garbage at index 4097"), and a `VARIABLE_COUNT` entry that
+/// was neither last nor highest-numbered was accepted, which is what makes every
+/// "the variable binding is `entries.last()`" reading in a backend wrong.
+///
+/// The feature half runs on **every** adapter, because it runs against a device
+/// that deliberately did not ask for descriptor indexing rather than against an
+/// adapter that happens to lack it. Only the ordering half needs the feature: a
+/// `VARIABLE_COUNT` layout cannot be created at all without it, so there would
+/// be nothing for the ordering rule to fail against.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_wgpu_bind_group_layout_flag_this_device_cannot_honour_is_refused_not_dropped() {
+    // Deliberately not `open_device`, which asks for `GPU_DRIVEN` — that
+    // contains `DESCRIPTOR_INDEXING`, so on an adapter that has it this half
+    // would never be reached.
+    let (instance, device, surface, _queue, _format) =
+        Headless::open_device_with(Features::DEBUG_MARKERS);
+    assert!(
+        !device
+            .caps()
+            .features
+            .contains(Features::DESCRIPTOR_INDEXING),
+        "a device that never asked for descriptor indexing must not report it"
+    );
+
+    // `count` 1 on both bindings, so the flag is the *only* thing this device
+    // cannot express: an array of two would need wgpu's TEXTURE_BINDING_ARRAY
+    // as well, and a refusal would no longer say which of the two caused it.
+    let flagged = |flags| {
+        [
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: SCALAR_BINDING,
+                visibility: ShaderStages::FRAGMENT,
+                kind: crcbl_hal::BindingKind::Sampler,
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: ARRAY_BINDING,
+                visibility: ShaderStages::FRAGMENT,
+                kind: crcbl_hal::BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
+                count: 1,
+                flags,
+            },
+        ]
+    };
+    let entries = flagged(crcbl_hal::BindingFlags::PARTIALLY_BOUND);
+    let error = device
+        .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            label: Some("wgpu e2e flagged layout"),
+            entries: &entries,
+        })
+        .expect_err("a descriptor-indexing flag this device cannot honour must be refused");
+    assert!(
+        matches!(error, HalError::Unsupported { .. }),
+        "a feature the device does not have is Unsupported, got {error:?}"
+    );
+    assert!(
+        error.to_string().contains("DESCRIPTOR_INDEXING"),
+        "the feature that is missing must be named: {error}"
+    );
+
+    // The same layout with the flag cleared, so the refusal above is about the
+    // flag and not about anything else in the descriptor.
+    let entries = flagged(crcbl_hal::BindingFlags::empty());
+    let plain = device
+        .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            label: Some("wgpu e2e unflagged layout"),
+            entries: &entries,
+        })
+        .expect("the same layout without the flag is an ordinary one");
+    device.destroy_bind_group_layout(plain);
+    assert!(
+        device.take_error().is_none(),
+        "a layout this backend refuses must never have reached wgpu"
+    );
+    device.wait_idle().expect("idle");
+    instance.destroy_surface(surface);
+    drop(device);
+    drop(instance);
+
+    // The ordering rule needs a device that *does* honour the flags, or the
+    // refusal above fires first and proves nothing about the ordering.
+    let (instance, device, surface, _queue, _format) = Headless::open_device();
+    if device
+        .caps()
+        .features
+        .contains(Features::DESCRIPTOR_INDEXING)
+    {
+        let scalar = crcbl_hal::BindGroupLayoutEntry {
+            binding: SCALAR_BINDING,
+            visibility: ShaderStages::FRAGMENT,
+            kind: crcbl_hal::BindingKind::Sampler,
+            count: 1,
+            flags: crcbl_hal::BindingFlags::empty(),
+        };
+        let variable = |binding| crcbl_hal::BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::FRAGMENT,
+            kind: crcbl_hal::BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+            },
+            count: ARRAY_COUNT,
+            flags: crcbl_hal::BindingFlags::VARIABLE_COUNT
+                | crcbl_hal::BindingFlags::PARTIALLY_BOUND,
+        };
+        let refuse = |entries: &[crcbl_hal::BindGroupLayoutEntry], what: &str| -> String {
+            let error = device
+                .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+                    label: Some("wgpu e2e variable count ordering"),
+                    entries,
+                })
+                .err()
+                .unwrap_or_else(|| panic!("{what} must be refused, not built"));
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{what}: a layout the seam forbids is InvalidDescriptor, got {error:?}"
+            );
+            error.to_string()
+        };
+
+        // The highest-numbered binding, but not the last element of the slice —
+        // the half a backend checking only Vulkan's own rule would accept.
+        let unsorted = refuse(
+            &[variable(9), scalar],
+            "a VARIABLE_COUNT entry that is not the last element of the slice",
+        );
+        for expected in ["binding 9", "VARIABLE_COUNT", "last entry"] {
+            assert!(
+                unsorted.contains(expected),
+                "{expected:?} missing from {unsorted}"
+            );
+        }
+
+        // The last element of the slice, but outranked by a binding number
+        // above it — the half Vulkan itself refuses.
+        let outranked = refuse(
+            &[
+                crcbl_hal::BindGroupLayoutEntry {
+                    binding: 9,
+                    ..scalar
+                },
+                variable(ARRAY_BINDING),
+            ],
+            "a VARIABLE_COUNT entry that is not the highest binding number",
+        );
+        for expected in ["binding 1", "VARIABLE_COUNT", "highest-numbered"] {
+            assert!(
+                outranked.contains(expected),
+                "{expected:?} missing from {outranked}"
+            );
+        }
+
+        // Both halves satisfied, so it builds — without which the two refusals
+        // above would pass just as well against a backend that refused every
+        // VARIABLE_COUNT layout there is.
+        let legal = device
+            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+                label: Some("wgpu e2e variable count"),
+                entries: &[scalar, variable(ARRAY_BINDING)],
+            })
+            .expect("last in the slice and highest-numbered is the legal placement");
+        device.destroy_bind_group_layout(legal);
+    } else {
+        println!(
+            "wgpu e2e: this adapter has no descriptor indexing, so no VARIABLE_COUNT layout can \
+             be created here for the ordering rule to be checked against; the feature refusal \
+             above still ran"
+        );
+    }
+    assert!(
+        device.take_error().is_none(),
+        "a layout this backend refuses must never have reached wgpu"
+    );
+    device.wait_idle().expect("idle");
+    instance.destroy_surface(surface);
+    drop(device);
+    drop(instance);
+}
+
+/// A [`BindGroupDesc::variable_count`](crcbl_hal::BindGroupDesc::variable_count)
+/// the entries do not bear out is refused, by name.
+///
+/// The field was dropped here without a word. wgpu sizes a binding array from
+/// the entry list itself and this backend's `update_bind_group` is
+/// `Unsupported`, so an explicit `n` chooses no allocation — but an `n` that
+/// disagrees with the entries is a caller bug either way, and a backend that
+/// ignores the field reports one group for two different descriptors.
+///
+/// The first half runs on every adapter: a layout that declares no
+/// `VARIABLE_COUNT` binding has nothing for the field to describe, and saying so
+/// needs no descriptor indexing. Only the counting half needs a `VARIABLE_COUNT`
+/// layout to fail against.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_wgpu_variable_count_the_entries_contradict_is_refused_not_dropped() {
+    let (instance, device, surface, _queue, _format) = Headless::open_device();
+    let (images, views) = sampled_views(device.as_ref(), 1);
+    let sampler = device
+        .create_sampler(&crcbl_hal::SamplerDesc {
+            label: Some("wgpu e2e variable count sampler"),
+            ..crcbl_hal::SamplerDesc::default()
+        })
+        .expect("a filtering sampler");
+    let sampler_entry = crcbl_hal::BindGroupEntry {
+        binding: SCALAR_BINDING,
+        array_index: 0,
+        resource: crcbl_hal::BindingResource::Sampler(sampler),
+    };
+    let filled = [sampler_entry, view_entry(0, views[0])];
+
+    let scalar = array_layout(device.as_ref(), 1);
+    let no_array = refused(
+        device.as_ref(),
+        scalar,
+        &filled,
+        Some(2),
+        "a variable count on a layout that declares no VARIABLE_COUNT binding",
+    );
+    for expected in ["variable_count", "no VARIABLE_COUNT binding"] {
+        assert!(
+            no_array.contains(expected),
+            "{expected:?} missing from {no_array}"
+        );
+    }
+    device.destroy_bind_group_layout(scalar);
+
+    if device
+        .caps()
+        .features
+        .contains(Features::DESCRIPTOR_INDEXING)
+    {
+        let entries = [
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: SCALAR_BINDING,
+                visibility: ShaderStages::FRAGMENT,
+                kind: crcbl_hal::BindingKind::Sampler,
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: ARRAY_BINDING,
+                visibility: ShaderStages::FRAGMENT,
+                kind: crcbl_hal::BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
+                count: ARRAY_COUNT,
+                flags: crcbl_hal::BindingFlags::VARIABLE_COUNT
+                    | crcbl_hal::BindingFlags::PARTIALLY_BOUND,
+            },
+        ];
+        let layout = device
+            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+                label: Some("wgpu e2e variable count"),
+                entries: &entries,
+            })
+            .expect("a VARIABLE_COUNT array on the last and highest binding");
+
+        // One element supplied and one declared used: the count the entries
+        // bear out, so the group builds. Without this the refusals below would
+        // pass against a backend that refused the field outright.
+        let group = device
+            .create_bind_group(&crcbl_hal::BindGroupDesc {
+                label: Some("wgpu e2e variable count agrees"),
+                layout,
+                entries: &filled,
+                variable_count: Some(1),
+            })
+            .expect("a variable count the entries bear out");
+        device.destroy_bind_group(group);
+
+        // Inside the layout's ceiling and still a slot this group never fills.
+        // Vulkan would allocate it and let `update_bind_group` write it later;
+        // wgpu has neither the slot nor the update.
+        let unfilled = refused(
+            device.as_ref(),
+            layout,
+            &filled,
+            Some(ARRAY_COUNT),
+            "a variable count above what the entries fill",
+        );
+        for expected in ["variable_count is 2", "fills 1", "binding 1"] {
+            assert!(
+                unfilled.contains(expected),
+                "{expected:?} missing from {unfilled}"
+            );
+        }
+
+        // Past the layout's own ceiling, which the message names.
+        let over = refused(
+            device.as_ref(),
+            layout,
+            &filled,
+            Some(ARRAY_COUNT + 1),
+            "a variable count above the layout's declared count",
+        );
+        for expected in ["variable_count is 3", "binding 1's 2 elements"] {
+            assert!(over.contains(expected), "{expected:?} missing from {over}");
+        }
+
+        // A group that names the variable binding nowhere fills none of it,
+        // which is a disagreement like any other rather than a case with no
+        // answer.
+        let absent = refused(
+            device.as_ref(),
+            layout,
+            &[sampler_entry],
+            Some(1),
+            "a variable count on a group that never names the variable binding",
+        );
+        for expected in ["variable_count is 1", "fills 0", "binding 1"] {
+            assert!(
+                absent.contains(expected),
+                "{expected:?} missing from {absent}"
+            );
+        }
+        device.destroy_bind_group_layout(layout);
+    } else {
+        println!(
+            "wgpu e2e: this adapter has no descriptor indexing, so no VARIABLE_COUNT layout can \
+             be created here for a variable count to be checked against; the scalar refusal above \
+             still ran"
+        );
+    }
+
+    assert!(
+        device.take_error().is_none(),
+        "a descriptor this backend refuses must never have reached wgpu"
+    );
+    device.destroy_sampler(sampler);
+    for view in views {
+        device.destroy_image_view(view);
+    }
+    for image in images {
+        device.destroy_image(image);
+    }
+    device.wait_idle().expect("idle");
+    instance.destroy_surface(surface);
+    drop(device);
+    drop(instance);
+}
+
+/// A binding declaring no descriptors at all is refused, and the message names
+/// it.
+///
+/// wgpu spells "no count" and "a count of one" the same way — `count: None` on
+/// its layout entry — so a seam `count` of 0 arrived as an ordinary scalar
+/// binding, and `binding::resolve` then clamped its capacity up to 1 and let one
+/// element be written to a binding the layout had reserved nothing for. Every
+/// other backend refuses it in these words; this one built it. Needs no optional
+/// feature, so it runs on every adapter.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_wgpu_binding_declaring_no_descriptors_is_refused_by_number() {
+    let (instance, device, surface, _queue, _format) = Headless::open_device();
+
+    let sized = |count| {
+        [crcbl_hal::BindGroupLayoutEntry {
+            binding: ARRAY_BINDING,
+            visibility: ShaderStages::FRAGMENT,
+            kind: crcbl_hal::BindingKind::Sampler,
+            count,
+            flags: crcbl_hal::BindingFlags::empty(),
+        }]
+    };
+    let entries = sized(0);
+    let error = device
+        .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            label: Some("wgpu e2e empty binding"),
+            entries: &entries,
+        })
+        .expect_err("a binding holding no descriptors must be refused, not built");
+    assert!(
+        matches!(error, HalError::InvalidDescriptor(_)),
+        "a descriptor the seam forbids is InvalidDescriptor, got {error:?}"
+    );
+    let error = error.to_string();
+    for expected in ["binding 1", "count 0"] {
+        assert!(
+            error.contains(expected),
+            "{expected:?} missing from {error}"
+        );
+    }
+
+    // The same binding with one descriptor, so the refusal is about the zero
+    // and not about anything else in the entry.
+    let entries = sized(1);
+    let one = device
+        .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            label: Some("wgpu e2e one descriptor"),
+            entries: &entries,
+        })
+        .expect("one descriptor is the ordinary case");
+    device.destroy_bind_group_layout(one);
+
+    assert!(
+        device.take_error().is_none(),
+        "a layout this backend refuses must never have reached wgpu"
+    );
+    device.wait_idle().expect("idle");
+    instance.destroy_surface(surface);
+    drop(device);
+    drop(instance);
+}
+
+/// A layout **wgpu** rejects comes back as an `Err` from the call that made it,
+/// not as a `take_error` a frame later.
+///
+/// `create_bind_group_layout` was the one creation call on this device left
+/// unguarded. wgpu-core reports a rejected layout to the device's error handler
+/// and still hands back an object, so the seam's caller got `Ok` and a poisoned
+/// layout, and the first symptom was a validation failure in whichever pipeline
+/// or bind group later named it — one call removed from the descriptor that
+/// caused it. `Self::checked` is what attributes it, and the proof that it did
+/// is that `take_error` afterwards has nothing left to report.
+///
+/// The unconditional half asks a device that never requested descriptor indexing
+/// for an array binding, which needs wgpu's `TEXTURE_BINDING_ARRAY`: a refusal
+/// this backend does not make itself, which is the whole point — it has to come
+/// from wgpu to test the wrapper.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_wgpu_bind_group_layout_wgpu_rejects_arrives_as_an_error_from_the_call() {
+    let (instance, device, surface, _queue, _format) =
+        Headless::open_device_with(Features::DEBUG_MARKERS);
+    assert!(
+        !device
+            .caps()
+            .features
+            .contains(Features::DESCRIPTOR_INDEXING),
+        "a device that never asked for descriptor indexing must not report it"
+    );
+
+    let entries = [crcbl_hal::BindGroupLayoutEntry {
+        binding: ARRAY_BINDING,
+        visibility: ShaderStages::FRAGMENT,
+        kind: crcbl_hal::BindingKind::SampledImage {
+            view_type: ImageViewType::D2,
+        },
+        count: ARRAY_COUNT,
+        flags: crcbl_hal::BindingFlags::empty(),
+    }];
+    let error = device
+        .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            label: Some("wgpu e2e array without the feature"),
+            entries: &entries,
+        })
+        .expect_err("wgpu rejects an array binding without TEXTURE_BINDING_ARRAY");
+    assert!(
+        matches!(error, HalError::Backend(_)),
+        "a refusal from wgpu itself is Backend, got {error:?}"
+    );
+    assert!(
+        error.to_string().contains("create_bind_group_layout"),
+        "the call that was refused must be named: {error}"
+    );
+    assert!(
+        device.take_error().is_none(),
+        "an error attributed to the call must not also be reported out of band"
+    );
+    device.wait_idle().expect("idle");
+    instance.destroy_surface(surface);
+    drop(device);
+    drop(instance);
+
+    // The seam's "as many as you can" sentinel. `crcbl-vk` clamps it to
+    // `max_bindless_descriptors`; this backend does not, so wgpu sees
+    // `u32::MAX` and refuses it — in band, which is what this asserts. What the
+    // refusal says is printed, because whether the clamp is still owed depends
+    // on how legible it is.
+    let (instance, device, surface, _queue, _format) = Headless::open_device();
+    if device
+        .caps()
+        .features
+        .contains(Features::DESCRIPTOR_INDEXING)
+    {
+        let entries = [crcbl_hal::BindGroupLayoutEntry {
+            binding: ARRAY_BINDING,
+            visibility: ShaderStages::FRAGMENT,
+            kind: crcbl_hal::BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+            },
+            count: u32::MAX,
+            flags: crcbl_hal::BindingFlags::VARIABLE_COUNT
+                | crcbl_hal::BindingFlags::PARTIALLY_BOUND,
+        }];
+        let error = device
+            .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+                label: Some("wgpu e2e unbounded array"),
+                entries: &entries,
+            })
+            .expect_err("u32::MAX descriptors is not a number wgpu will allocate");
+        assert!(
+            matches!(error, HalError::Backend(_)),
+            "a refusal from wgpu itself is Backend, got {error:?}"
+        );
+        println!("wgpu e2e: the count sentinel u32::MAX is refused as: {error}");
+        assert!(
+            device.take_error().is_none(),
+            "an error attributed to the call must not also be reported out of band"
+        );
+    } else {
+        println!(
+            "wgpu e2e: this adapter has no descriptor indexing, so the count sentinel has no \
+             bindless layout to appear in; the refusal above still ran"
+        );
     }
     device.wait_idle().expect("idle");
     instance.destroy_surface(surface);

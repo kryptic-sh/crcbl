@@ -2058,6 +2058,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-wgpu` silently dropped three things the seam says it must refuse.**
+  `create_bind_group_layout` read `visibility`, `kind` and `count` and nothing
+  else, so a layout setting any `BindingFlags` on a device without
+  `Features::DESCRIPTOR_INDEXING` was built as an ordinary fixed array wearing a
+  bindless declaration, and a `VARIABLE_COUNT` entry that broke the ordering
+  rule — it must be both the last entry of the slice and the highest binding
+  number — was accepted. `create_bind_group` dropped
+  `BindGroupDesc::variable_count` without a word. Each is now refused by name,
+  in the wording `crcbl-vk` and `crcbl-mtl` already use, so all four backends
+  answer the same descriptor the same way.
+
+  `variable_count` is **validated rather than honoured**, and the reason is in
+  the code: on Vulkan the number sizes an allocation that `update_bind_group`
+  fills in later, and wgpu has neither half — a binding array's length _is_ the
+  length of the slice handed to `create_bind_group`, and this backend's
+  `update_bind_group` is `Unsupported` because WebGPU bind groups are immutable.
+  So the number says nothing the entry list has not, and it is checked against
+  the entries and the layout's declared ceiling instead.
+
+  Two smaller ones alongside. `count: 0` is refused rather than mapped to a
+  scalar binding, which vk, D3D12, Metal and the null backend all already did.
+  And `create_bind_group_layout` is now error-scoped like the pipelines and bind
+  groups: wgpu reports a rejected layout to the error handler and **still
+  returns an object**, so a poisoned layout used to arrive as `Ok` and surface
+  as a validation failure in whichever pipeline later named it.
+
 - **`crcbl-wgpu` could not fill an array binding, so every descriptor-indexing
   bind group it built was broken.** `Device::create_bind_group` resolved each
   `crcbl_hal::BindGroupEntry` to a scalar `wgpu::BindingResource` keyed on

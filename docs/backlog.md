@@ -5599,35 +5599,49 @@ all three, which is what real imported content needs. Until then the engine has
 one page of one size, which is enough for the observable and not enough for a
 game.
 
-## `crcbl-wgpu` fills array bindings now; three seam fields it still drops
+## What `crcbl-wgpu`'s binding work still leaves, after the refusals landed
 
-Found while writing `crates/crcbl-wgpu/src/binding.rs`, all silent rather than
-wrong today, and each is a place a future bindless slice would land first.
+The three silent drops found while writing `crates/crcbl-wgpu/src/binding.rs`
+are fixed — `BindingFlags` and the `VARIABLE_COUNT` ordering rule are checked at
+layout creation, `variable_count` is checked against the layout's variable
+binding and the entries supplied, `count: 0` is refused, and
+`create_bind_group_layout` is error-scoped. What is left:
 
-- **`create_bind_group_layout` ignores `BindGroupLayoutEntry::flags` entirely.**
-  It reads `visibility`, `kind` and `count` and nothing else. The seam's
-  `crcbl_hal::BindingFlags` docs say a backend without `DESCRIPTOR_INDEXING`
-  must **reject** a layout setting any of them, and
-  `BindGroupLayoutDesc::entries` says backends check the `VARIABLE_COUNT`
-  ordering rule (last element _and_ highest binding number). Neither happens
-  here. The new tests pass `PARTIALLY_BOUND` and it is simply dropped — harmless
-  while the device enables `PARTIALLY_BOUND_BINDING_ARRAY` whenever
-  `DESCRIPTOR_INDEXING` was granted, but it is a silent ignore and the other
-  backends do not have one.
-- **`create_bind_group` ignores `BindGroupDesc::variable_count`.** `crcbl-mtl`'s
-  `create_bind_group_impl` refuses it with an explanation; this backend drops it
-  without a word. It is the field a runtime-sized array is declared with, so a
-  bindless path would be relying on it.
+- **`count: u32::MAX` is not clamped, so the seam's portable bindless spelling
+  fails here and works on vk.** `u32::MAX` is the documented "as many as you
+  can"; `crcbl_vk::pipeline`'s `layout_binding_count` clamps it to
+  `max_bindless_descriptors` and the null backend mirrors that, while
+  `crcbl-wgpu` passes it to wgpu verbatim and gets a hard rejection:
+  `"Too many bindings of type BindingArrayElements in Stage ShaderStages(FRAGMENT), limit is 1000000, count was 4294967295. Check the limit max_binding_array_elements_per_shader_stage"`.
+  That message is clear and correctly attributed now that the call is checked —
+  the problem is that it is an `Err` at all when vk returns a layout. This is a
+  divergence in what the seam accepts, not a diagnosis gap.
+  `crcbl_wgpu::instance`'s `hal_limits_for` already maps
+  `max_bindless_descriptors` from `max_binding_array_elements_per_shader_stage`,
+  so the clamp is a short mirror of vk's — deliberately deferred because it is a
+  behaviour change to layout creation and wanted a separate decision. **This is
+  the shape a bindless slice actually writes**, so it is the first thing that
+  slice will hit.
 - **`update_bind_group` is still `Unsupported` on wgpu** — WebGPU bind groups
   are immutable and there is no update-after-bind path, so the seam's streaming
-  bindless write is create-only here. Unchanged by this work, but it is the
-  other half of what `array_index` exists for: a page of descriptors that grows
-  as content loads has to be rebuilt rather than written into.
+  bindless write is create-only here. It is the other half of what `array_index`
+  exists for: a page of descriptors that grows as content loads has to be
+  rebuilt rather than written into.
+- **Four copies of the `VARIABLE_COUNT` ordering check now exist and there is no
+  shared one.** `crcbl_vk::pipeline`'s `validate_bind_group_layout`,
+  `crcbl_dx12::binding`'s `check_entry`, the null backend's
+  `create_bind_group_layout`, and now wgpu's. (`crcbl-mtl` has none — its
+  `plan_set` refuses every `BindingFlags` outright, so no such layout reaches
+  it.) The rule is stated once on `BindGroupLayoutDesc::entries` and enforced
+  four times; a validator on the seam that each backend calls is the fix, and it
+  was not attempted here because it touches every backend at once.
 
 **Not verified: the browser.** Binding arrays are a native-only wgpu feature and
-`DESCRIPTOR_INDEXING` will be absent under WebGPU, so both new tests take their
-skip branch there. No browser run was made, and the skip branch means a wasm
-regression in this code would not be observed by anything.
+`DESCRIPTOR_INDEXING` will be absent under WebGPU, so the array-shaped tests
+take their skip branch there. No browser run was made, and the skip branch means
+a wasm regression in this code would not be observed by anything. The refusals
+that do not need an array layout — the flags gate, `count: 0`, the in-band
+layout error — run on every adapter, so that half is not skip-shaped.
 
 ## `BindingKind::StorageImage` still cannot name its format or its dimension
 
@@ -5729,3 +5743,31 @@ What it does not do, in the order it would be wanted:
   bake cache or input hashing, no `crcbl-render` wiring. `EmitTail::from_caps`
   in `crcbl_render::forward` still degrades `GeometryPath::MeshShader` to an
   indirect tail and logs that it did.
+
+### The consuming slice has to answer a layering question first
+
+`crcbl-render` does **not** depend on `crcbl-scene` and should not start:
+`crcbl-scene` pulls in `gltf`, and a renderer that depends on the glTF importer
+to describe its own geometry has the direction backwards. Verified by reading
+both manifests — `crcbl-render` names `crcbl-core`, `crcbl-hal`,
+`crcbl-shaders`, `crcbl-sprite` and `crcbl-ui`; `crcbl-scene` names
+`crcbl-assets` and `crcbl-shaders`. The two meet only at `crcbl-shaders`.
+
+So the `Meshlet` record — the thing a mesh shader indexes — belongs in
+`crcbl-shaders` beside `GpuMaterial` and `MeshVertex`, which is already the home
+for records both sides of that split have to agree on. The **builder** stays in
+`crcbl-scene`: it is a bake-side producer, and §3.5 calls it a bake step.
+
+Deliberately not done yet, because the second caller has not arrived and moving
+a type with one user is churn. The consuming slice is the one that should move
+it, and it should move it rather than adding a dependency edge or duplicating
+the record. Recorded here so that slice does not rediscover the constraint by
+adding the edge first.
+
+**A related question that slice inherits:** meshlets as a _bake_ artifact means
+the renderer receives prebuilt clusters in cooked mesh data and never calls
+`build_meshlets` at all — which is what §3.5 describes and what keeps the
+dependency direction clean. Building them at `MeshPool::upload` time instead
+would be simpler today and would put the builder on the runtime path, where its
+determinism guarantee buys nothing and its cost is per-load. The bake shape is
+the one to aim at; note it was never actually decided, only implied by §3.5.

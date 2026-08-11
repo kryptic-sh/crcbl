@@ -784,15 +784,56 @@ impl Device for WgpuDevice {
         &self,
         desc: &BindGroupLayoutDesc<'_>,
     ) -> Result<BindGroupLayoutHandle, HalError> {
+        let indexing = self
+            .caps
+            .features
+            .contains(hal::Features::DESCRIPTOR_INDEXING);
         let entries: Vec<wgpu::BindGroupLayoutEntry> = desc
             .entries
             .iter()
-            .map(|e| {
+            .enumerate()
+            .map(|(index, e)| {
                 // WebGPU has no mesh stage at all, so `map_shader_stages` has
                 // no bit to map these onto and would hand wgpu a *narrower*
                 // visibility than the caller declared. Refused instead.
                 e.visibility
                     .check_supported(self.caps.features, BackendKind::Wgpu)?;
+                // wgpu spells "no count" and "a count of one" the same way, so
+                // a zero would arrive as an ordinary scalar binding and the
+                // shader would index a descriptor the layout never reserved.
+                // Every other backend refuses it in these words.
+                if e.count == 0 {
+                    return Err(HalError::InvalidDescriptor(format!(
+                        "binding {} has count 0; a binding must hold at least one descriptor",
+                        e.binding
+                    )));
+                }
+                // `BindGroupLayoutEntry::flags` has no wgpu counterpart —
+                // wgpu's entry carries a count and nothing else — so a device
+                // without the feature would build a fixed array wearing a
+                // bindless declaration, which the seam is explicit must be
+                // loud: "a bindless array quietly downgraded to a fixed one
+                // reads garbage at index 4097".
+                if !e.flags.is_empty() && !indexing {
+                    return Err(Self::unsupported(
+                        "descriptor-indexing flags on a device without DESCRIPTOR_INDEXING",
+                    ));
+                }
+                // Both halves of the rule `BindGroupLayoutDesc::entries`
+                // states: the highest binding number, which is what a
+                // runtime-sized array means, *and* last in the slice, without
+                // which every "the variable binding is `entries.last()`"
+                // reading in a backend is silently wrong.
+                if e.flags.contains(hal::BindingFlags::VARIABLE_COUNT)
+                    && (index + 1 != desc.entries.len()
+                        || desc.entries.iter().any(|other| other.binding > e.binding))
+                {
+                    return Err(HalError::InvalidDescriptor(format!(
+                        "binding {} sets VARIABLE_COUNT but is not both the last entry and the \
+                         highest-numbered binding of the set",
+                        e.binding
+                    )));
+                }
                 Ok(wgpu::BindGroupLayoutEntry {
                     binding: e.binding,
                     visibility: conv::map_shader_stages(e.visibility),
@@ -805,25 +846,37 @@ impl Device for WgpuDevice {
                 })
             })
             .collect::<Result<Vec<_>, HalError>>()?;
-        let layout = self
-            .device
-            .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: desc.label,
-                entries: &entries,
-            });
+        // Checked, like the pipelines and the bind groups: wgpu reports a
+        // rejected layout to the device's error handler and still hands back an
+        // object, so an unchecked create returns a poisoned layout whose only
+        // symptom is a validation failure in whichever pipeline or bind group
+        // later names it. See `Self::checked`.
+        let layout = self.checked("create_bind_group_layout", || {
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: desc.label,
+                    entries: &entries,
+                })
+        })?;
         // The declared counts are kept alongside the layout because
         // `create_bind_group` cannot read them back out of wgpu and needs them
         // to choose between the scalar and the array spelling — see
-        // [`crate::binding`].
+        // [`crate::binding`]. The variable binding is kept for the same reason:
+        // `BindGroupDesc::variable_count` describes that binding and no other.
         let counts = desc
             .entries
             .iter()
             .map(|e| (e.binding, e.count))
             .collect::<Vec<_>>();
+        let variable_binding = desc
+            .entries
+            .iter()
+            .find(|e| e.flags.contains(hal::BindingFlags::VARIABLE_COUNT))
+            .map(|e| e.binding);
         Ok(handle::insert(
             &mut self.pools.bind_group_layouts.lock().unwrap(),
             self.owner(),
-            BindGroupLayoutSlot::new(layout, counts),
+            BindGroupLayoutSlot::new(layout, counts, variable_binding),
         ))
     }
     fn destroy_bind_group_layout(&self, h: BindGroupLayoutHandle) {
