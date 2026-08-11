@@ -18,13 +18,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 - **`mesh.slang` gained a seventh binding: the material table.** Binding 6 is a
   read-only storage buffer of `crcbl_shaders::mesh::GpuMaterial`, indexed by
-  `GpuInstance::material` in the vertex stage. Anything building its own bind
-  group or bind-group layout for that shader has to name it — a pipeline layout
-  that does not cover a binding the shader declares is refused at pipeline
-  creation — and anything asserting the shader's declared registers gains one
-  `Srv`. `GpuInstance::material` therefore stops being a reserved field: an
-  instance now has to carry the id of a material that exists, because an
-  unwritten table row is a base colour of zero and shades black.
+  `GpuInstance::material` in the **fragment** stage, which the vertex stage
+  reaches by handing it a `nointerpolation uint material : TEXCOORD0` varying.
+  Anything building its own bind group or bind-group layout for that shader has
+  to name it **and make it visible to the fragment stage** — a pipeline layout
+  that does not cover a binding the shader declares, or covers it for the wrong
+  stage, is refused at pipeline creation — and anything asserting the shader's
+  declared registers gains one `Srv`. `GpuInstance::material` therefore stops
+  being a reserved field: an instance now has to carry the id of a material that
+  exists, because an unwritten table row is a base colour of zero and shades
+  black.
 
 - **`ShaderModuleDesc::dxil` is a list of `(entry point, container)` pairs**,
   `&[(&str, &[u8])]`, where it was `Option<&[u8]>`. A DXIL container holds one

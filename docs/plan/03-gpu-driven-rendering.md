@@ -67,17 +67,31 @@ only the emit tail and the material lookup differ.
 
 **2026-08 — the table landed, and its factors half only.**
 `crcbl_render::MaterialTable` is the SSBO, `crcbl_shaders::mesh::GpuMaterial` is
-a row, and `GpuInstance::material` indexes it: `mesh.slang`'s vertex stage
-multiplies the row's `base_color` into the vertex albedo at binding 6. So the
-id, which had been reserved since the record was written, now means something on
-all four targets.
+a row, and `GpuInstance::material` indexes it: `mesh.slang`'s fragment stage
+multiplies the row's `base_color` into the interpolated albedo at binding 6. So
+the id, which had been reserved since the record was written, now means
+something on all four targets.
+
+**2026-08 — the lookup moved to the fragment stage, on its own, to find out
+whether a flat integer varying lowers the same way everywhere.** It read the
+table in the vertex stage first, which the texture half cannot do: a texture
+fetch is not constant across a primitive, so nothing it feeds can be folded into
+a varying at the corners. Moving the multiply needs the material id in the
+fragment stage, and this file's two worst bugs — `SV_InstanceID`, `SV_VertexID`
+— were both integers the four targets disagreed about, so the move was made by
+itself, with no texture beside it. It commutes with interpolation, so no golden
+was re-blessed: **the cube, sprite and UI frames are bit-identical on `vk` and
+on `wgpu`, and so are `crcbl-vk`'s three mesh goldens.** All four targets emit
+the flat qualifier — SPIR-V `OpDecorate … Flat`, WGSL `@interpolate(flat)`, MSL
+`[[flat]]`, DXIL `nointerpolation` in the input signature — but only `vk` and
+`wgpu` were _rendered_ here; `msl` and `dxil` are CI's verdict.
 
 **There are no texture indices, deliberately.** A row would have to say whether
 its index is a `Bindless` slot or an `ArrayPages` page, and the engine has
 chosen neither; a column carried ahead of that choice is a field nothing reads,
 which is the "premature material system" the risk list below warns about. The
-factors half proves the whole indexing path — cull, draw generation, the vertex
-stage, four backends — and is observable in
+factors half proves the whole indexing path — cull, draw generation, the
+fragment stage, four backends — and is observable in
 `crates/crcbl/tests/golden/cube.png`, where two instances of one mesh differing
 in nothing but their material id are two colours. Adding the texture column
 later is a field; the mechanism is already paid for.

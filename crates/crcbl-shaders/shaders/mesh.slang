@@ -167,8 +167,9 @@ struct GpuInstance
     /// draw cover instances of different meshes.
     uint mesh;
     /// Which material to shade with: an index into `materials` below. The
-    /// vertex stage multiplies that row's base colour into the vertex albedo,
-    /// so two instances of the same mesh differing only here are two colours.
+    /// vertex stage passes it through to the fragment stage, which multiplies
+    /// that row's base colour into the interpolated albedo, so two instances of
+    /// the same mesh differing only here are two colours.
     uint material;
     /// Which sector `transform` is relative to. **Reserved**: the f64
     /// sector→camera offset table and the addition that would make this mean
@@ -294,13 +295,16 @@ StructuredBuffer<uint> visible_instances;
 
 /// The material table §3.2 asks for, indexed by `GpuInstance::material`.
 ///
-/// Read in the **vertex** stage rather than the fragment one, and that is not
-/// an economy: `VertexOutput::color` is interpolated, the factor is one value
-/// per instance, and interpolation is linear — so scaling the corners and
-/// scaling the interpolated result are the same picture. Reading it here keeps
-/// the material out of the varyings and off the fragment stage's binding list.
-/// A factor that stops being constant across a primitive — anything a texture
-/// fetch feeds — is what moves this, and that is the texture half.
+/// Read in the **fragment** stage. It was the vertex stage until 2026-08, and
+/// the move is not a correctness fix: the factor is one value per instance and
+/// interpolation is linear, so scaling the corners and scaling the interpolated
+/// result are the same picture — which is exactly what makes the move safe to
+/// make on its own, with every golden still matching. What it buys is that the
+/// fragment stage can now reach the table at all, which the texture half of
+/// §3.2 needs and a per-vertex read can never provide: a texture fetch is not
+/// constant across a primitive, so nothing it feeds can be folded into a
+/// varying. `VertexOutput::material` is the id that got it here, and its
+/// declaration is where the per-target risk is written down.
 [[vk::binding(6, 0)]]
 StructuredBuffer<GpuMaterial> materials;
 
@@ -310,6 +314,31 @@ struct VertexOutput
     float3 world_position : POSITION0;
     float3 world_normal : NORMAL0;
     float4 color : COLOR0;
+    /// This primitive's material row, straight off `GpuInstance::material`.
+    ///
+    /// # `nointerpolation`, and why it is the whole of this varying's risk
+    ///
+    /// An index is not a quantity: row 1 is not "between" rows 0 and 2, and
+    /// interpolating it produces a fragment that reads a row no vertex named.
+    /// So this is `nointerpolation` and the value the fragment stage sees is
+    /// the provoking vertex's — which is also the only reading under which
+    /// moving the multiply across the stage boundary leaves the picture alone.
+    ///
+    /// The header's account of `SV_VertexID` and `SV_InstanceID` is why that
+    /// sentence is not enough on its own: this file's four targets have twice
+    /// disagreed about what an integer the vertex stage hands the fragment
+    /// stage means, and each time the disagreement was found by rendering one
+    /// scene through two of them rather than by reading the emitted code. A
+    /// flat integer varying is the same class — `spirv` decorates it `Flat`,
+    /// WGSL writes `@interpolate(flat)`, MSL writes `[[flat]]`, DXIL carries an
+    /// interpolation mode per signature element — and the four spellings agree
+    /// only as long as each is actually emitted.
+    ///
+    /// What a wrong lowering looks like here is deliberately loud rather than
+    /// subtle: `crates/crcbl/tests/golden/cube.png` draws its two instances in
+    /// unlike colour families, so a fragment that resolved the wrong row is a
+    /// smear between them and not a shade of the right answer.
+    nointerpolation uint material : TEXCOORD0;
 };
 
 [shader("vertex")]
@@ -332,10 +361,12 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     // `GpuInstance::transform` rather than shipping a second matrix per
     // instance that nothing needs until non-uniform scale exists.
     output.world_normal = mul((float3x3)instance.transform, vertex.normal.xyz);
+    output.color = vertex.color;
     // The instance names its material exactly as it names its mesh, so two
     // instances of one mesh can be two colours with no CPU in the loop and no
-    // second draw.
-    output.color = vertex.color * materials[instance.material].base_color;
+    // second draw. Passed on rather than resolved here: the table is the
+    // fragment stage's to read now, for the reason its binding gives.
+    output.material = instance.material;
     return output;
 }
 
@@ -361,6 +392,13 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     float3 to_light = normalize(frame.light_direction.xyz);
     float3 to_eye = normalize(frame.camera_position.xyz - input.world_position);
 
+    // The material factor, applied here rather than at the corners. `material`
+    // is flat, so every fragment of a primitive resolves the row its instance
+    // named and this is the same product the vertex stage used to compute — up
+    // to the order the multiply and the interpolation happen in, which is a
+    // rounding difference and not a colour one.
+    float4 albedo = input.color * materials[input.material].base_color;
+
     // Lambert.
     float diffuse = max(dot(normal, to_light), 0.0);
 
@@ -371,11 +409,11 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // No light on the back of a surface, whatever the half-vector says.
     specular *= step(0.0, diffuse) * diffuse;
 
-    float3 lit = input.color.rgb * (frame.ambient.rgb + frame.light_color.rgb * diffuse)
+    float3 lit = albedo.rgb * (frame.ambient.rgb + frame.light_color.rgb * diffuse)
                + frame.light_color.rgb * (specular * SPECULAR_STRENGTH);
 
     // Deliberately **not** clamped: the target is `Rgba16Float` and the tonemap
     // pass is what maps this into the swapchain. A `saturate` here would throw
     // away the very range HDR-from-P1 exists to carry — see `tonemap.slang`.
-    return float4(lit, input.color.a);
+    return float4(lit, albedo.a);
 }

@@ -568,12 +568,17 @@ impl ForwardRenderer {
             },
             BindGroupLayoutEntry {
                 binding: 6,
-                // The vertex stage, because that is where `mesh.slang` reads
-                // it: a base colour is one value per instance and the colour it
-                // scales is already interpolated, so the fragment stage needs
-                // neither the buffer nor a varying to carry it. That shader's
-                // binding says why in full.
-                visibility: ShaderStages::VERTEX,
+                // **Both stages, and the union is not belt-and-braces.** The
+                // fragment stage is where `mesh.slang` now reads the table, so
+                // it plainly needs it — a pipeline layout that leaves it out is
+                // refused outright by wgpu and reported as
+                // `VUID-VkGraphicsPipelineCreateInfo-layout-07988` by Vulkan.
+                // The vertex half has to stay because Slang's Metal backend
+                // materialises every global in every entry point: `vertexMain`
+                // in `msl/mesh.metal` still takes `materials [[buffer(6)]]`
+                // whether it reads it or not, so dropping VERTEX would break
+                // Metal alone, on a runner this team cannot debug on.
+                visibility: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
                 kind: BindingKind::StorageBuffer {
                     // The material table. One buffer in every frame's group,
                     // like the mesh table above and unlike the instance ring:

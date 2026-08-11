@@ -361,7 +361,12 @@ impl DepthProbe {
             // has to exist even though one untinted row is all it points at.
             crcbl_hal::BindGroupLayoutEntry {
                 binding: 6,
-                visibility: crcbl_hal::ShaderStages::VERTEX,
+                // Both stages: `mesh.slang` reads the table in the fragment
+                // stage, and Slang's Metal backend still hands it to the vertex
+                // entry point whether it reads it or not. A layout that covers
+                // only one is refused at pipeline creation.
+                visibility: crcbl_hal::ShaderStages::VERTEX
+                    .union(crcbl_hal::ShaderStages::FRAGMENT),
                 kind: crcbl_hal::BindingKind::StorageBuffer {
                     read_only: true,
                     dynamic: false,

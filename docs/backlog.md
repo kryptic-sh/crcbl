@@ -4888,30 +4888,6 @@ repo has been burned by twice) or two more floats through `VertexOutput`, and
 nothing varies them. `docs/plan/37-materials.md` owns the shading model they are
 part of.
 
-## `mesh.slang`'s seventh binding has two callers outside `crcbl-render`
-
-Adding the material table gave `mesh.slang` a binding 6, and two places outside
-the renderer describe that shader's bindings for themselves. **Both are known
-broken by that change and were left alone deliberately — the slice that added
-the binding was scoped to `crcbl-render`, `crcbl-shaders` and `crcbl`:**
-
-- **`crcbl-dx12`'s
-  `dxil::tests::registers_are_assigned_per_class_in_declaration_order`**
-  hard-codes the register classes each committed container declares. Its `mesh`
-  case reads `&[Cbv, Srv, Srv, Cbv, Srv, Srv]` and the container now declares
-  one more `Srv`. The test fails on any host — it reads committed DXIL and needs
-  no device — with `left: […(Srv, 3)] right: […(Srv, 3), (Srv, 4)]`.
-- **`crcbl-vk`'s `vk_e2e/depth_probe.rs`** builds its own bind-group layout and
-  bind group for `mesh.slang`, bindings 0 through 5. A pipeline layout that does
-  not cover a binding the shader declares is refused at
-  `vkCreateGraphicsPipelines`, so it needs a seventh entry — a read-only storage
-  buffer visible to the vertex stage — and a `GpuMaterial` row for it to point
-  at. The suite is feature-gated and `#[ignore]`d, so a workspace run does not
-  catch this; `crates/crcbl-vk/tests/run-vk-e2e.sh` does.
-
-Neither is a design question: both are the mechanical half of "change a shared
-interface and you own its callers", left for whoever owns those crates.
-
 ## The debug-overlay retrofit: what was rejected, and one engine doc that is now stale
 
 Breakout, flappy and asteroids now contribute `DebugModule` sections
@@ -5412,3 +5388,112 @@ the picture; turning `MTL_SHADER_VALIDATION` back on in
 `.github/workflows/ci.yml` is how the investigation starts, and the first thing
 worth trying is `MTL_DEBUG_LAYER_ERROR_MODE=assert` to see whether Metal will
 name it.
+
+## The material lookup moved to the fragment stage, and what that probe learned
+
+`mesh.slang` reads binding 6 in `fragmentMain` now. `VertexOutput` carries
+`nointerpolation uint material : TEXCOORD0` and the vertex stage writes
+`vertex.color` untinted. The move was made on its own, with no texture beside
+it, because a flat integer varying is the third integer this file hands across
+the stage boundary and the other two — `SV_InstanceID`, `SV_VertexID` — both
+lowered differently per target and were both caught by rendering rather than by
+reading the emitted code.
+
+**One edit this needs is outside the slice's paths and was not made.** The
+material table's `BindGroupLayoutEntry` is `ShaderStages::VERTEX`, which is now
+the one stage that does not read it:
+
+- `ForwardRenderer::mesh_layout`'s binding 6 in
+  `crates/crcbl-render/src/forward.rs`.
+- The same binding in the layout `crcbl-vk`'s `vk_e2e/depth_probe.rs` builds for
+  itself.
+
+Both must become `ShaderStages::VERTEX.union(ShaderStages::FRAGMENT)`. **The
+union, not `FRAGMENT` alone**, and that is a Metal constraint rather than
+symmetry: Slang's Metal backend materialises every global in every entry point
+(see "Slang's Metal backend materialises every global shader parameter…"), so
+`vertexMain` in `msl/mesh.metal` still takes `materials [[buffer(6)]]` whether
+it reads it or not. Verified with the change applied in a scratch worktree —
+`vk` and `wgpu` are green and bit-identical with the union.
+
+**Until it lands, `wgpu` cannot draw the cube at all.** Not a validation
+warning: `Device::create_render_pipeline, label = 'forward mesh'` fails with
+"Shader global ResourceBinding { group: 0, binding: 6 } is not available in the
+pipeline layout / Visibility flags don't include the shader stage", and
+`crates/crcbl/tests/run-render-e2e.sh` on `CRCBL_GPU=wgpu` reports
+`3 tests run: 2 passed, 1 failed`.
+
+**Vulkan is looser, and where it is loose depends on who is listening.** The
+pipeline is created and draws the correct frame either way, but the layer emits
+`VUID-VkGraphicsPipelineCreateInfo-layout-07988` — which `run-render-e2e.sh`
+only logs, and which `crcbl_vk::debug` escalates to a panic. So
+`crates/crcbl-vk/tests/run-vk-e2e.sh` reports
+`12/74 tests run: 11 passed, 1 failed`, failing
+`depth_probe::reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not`
+and cancelling the rest — the depth probe's layout, not the renderer's.
+
+**A workspace `cargo nextest run` catches neither** — it was
+`2980 tests run: 2980 passed, 168 skipped` with the shader changed and the
+layouts not. Nothing below the GPU seam checks a bind-group layout's visibility
+against the module bound to it.
+
+### What the probe found, which is not what it was pointed at
+
+**Every one of the four targets emits the flat qualifier**, read out of this
+crate's own regenerated artifacts with slangc 2026.14: SPIR-V decorates both
+sides `Flat`, WGSL writes `@interpolate(flat) @location(3)`, MSL puts `[[flat]]`
+on the fragment's `[[stage_in]]` struct — which is where Metal reads it, not the
+vertex output struct — and DXIL's input signature lists `TEXCOORD 0` as
+`nointerpolation`. No divergence to report.
+
+**Dropping `nointerpolation` does not make a golden go red, and cannot.** Tried
+it, on both backends that run here:
+
+- **SPIR-V repairs it.** Slang drops `Flat` from the vertex _output_ but keeps
+  it on the fragment _input_, which is the decoration that decides
+  interpolation, so `vk` draws a bit-identical frame:
+  `golden cube on vulkan — 256x192: 0 pixel(s) differ at all (0.0000%)`.
+- **WGSL refuses it**, and does so before any frame — naga rejects the module
+  with "`@interpolate(flat)` must be explicitly specified for integer I/O". That
+  is caught by `crcbl-shaders`' own
+  `wgsl_validation::every_committed_wgsl_artifact_validates` on a machine with
+  no GPU, which is a better gate than a golden anyway.
+
+**And the cube scene could not detect a wrong interpolation _mode_ even if one
+existed**, which is worth knowing before trusting it for the next varying. The
+material id is constant across every primitive — all three vertices of a
+triangle belong to one instance — so flat and linear interpolation of it agree
+by construction, and there is no "fragment between two vertices" that could
+resolve a third row. What `nointerpolation` actually buys here is what
+`sprite.slang`'s `sheet.z` note says it buys: an exact integer instead of one
+that arrived through a float unit and truncates a row early.
+
+**What the golden does detect is a fragment resolving the wrong row**, which is
+the failure a texture fetch would produce and the reason the scene's two
+pyramids are in unlike colour families. Pinned by making the fragment stage read
+a fixed `materials[0]` and rendering:
+`256x192: 4105 pixel(s) differ at all (8.3516%), max channel delta 105, 4105 over tolerance (8.3516%), mean abs error 2.0736, rmse 11.1112, ssim 0.991305 — failed: TooManyDifferingPixels`,
+the same line on `vk` and on `wgpu`.
+
+**`msl` and `dxil` were not rendered.** Nothing here runs Metal or D3D12, and
+they are the two whose lowering this probe least exercises. Their artifacts were
+read and carry the right qualifier; CI is the only thing that can say the frame
+does too.
+
+### Two older entries this closes
+
+- **"`mesh.slang`'s seventh binding has two callers outside `crcbl-render`" is
+  spent and should be deleted.** Both bullets shipped: `crcbl-dx12`'s
+  `dxil::tests::registers_are_assigned_per_class_in_declaration_order` reads
+  `&[Cbv, Srv, Srv, Cbv, Srv, Srv, Srv]` and is green in a workspace run, and
+  `vk_e2e/depth_probe.rs` has its seventh entry and is green in
+  `run-vk-e2e.sh`'s `74 tests run: 74 passed`. Left in place only because this
+  slice was told to append to this file rather than restructure it.
+- **"Specular stayed a constant" is now a smaller question than it was.** It
+  says moving `SPECULAR_POWER` and `SPECULAR_STRENGTH` into a material "needs
+  the fragment stage to reach the table, which means either a `nointerpolation`
+  integer varying … or two more floats through `VertexOutput`". The varying
+  exists and the fragment stage reaches the table, so what is left is two `f32`
+  columns in `GpuMaterial` and the shading-model decision
+  `docs/plan/37-materials.md` owns — which is the part that was never
+  mechanical.

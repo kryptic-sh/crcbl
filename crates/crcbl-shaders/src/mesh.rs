@@ -137,9 +137,9 @@ impl FrameUniforms {
 ///
 /// # One of the five fields is reserved, and that is deliberate
 ///
-/// [`GpuInstance::transform`], [`GpuInstance::mesh`] and
-/// [`GpuInstance::material`] are read by the vertex stage and
-/// [`GpuInstance::flags`] by the cull pass. [`GpuInstance::sector`] is here
+/// [`GpuInstance::transform`] and [`GpuInstance::mesh`] are read by the vertex
+/// stage, [`GpuInstance::material`] by the fragment stage the vertex stage
+/// hands it to, and [`GpuInstance::flags`] by the cull pass. [`GpuInstance::sector`] is here
 /// because **changing this layout after a shader, a cull pass and a draw
 /// generator all index it is the expensive path**, and adding a field is the
 /// cheap one now. Its own docs say which slice consumes it; it is not working
@@ -181,11 +181,12 @@ pub struct GpuInstance {
     /// Which material to shade with: an index into the material table, whose
     /// rows are [`GpuMaterial`].
     ///
-    /// The vertex stage multiplies that row's [`GpuMaterial::base_color`] into
-    /// the vertex albedo, so two instances of the same mesh differing only here
-    /// are two colours in one draw — which is the whole of what an id that
-    /// indexes a table buys, and what nothing could observe while this was
-    /// reserved.
+    /// The vertex stage passes it to the fragment stage as a flat varying, and
+    /// the fragment stage multiplies that row's [`GpuMaterial::base_color`]
+    /// into the interpolated albedo, so two instances of the same mesh
+    /// differing only here are two colours in one draw — which is the whole of
+    /// what an id that indexes a table buys, and what nothing could observe
+    /// while this was reserved.
     ///
     /// [`MaterialTable`](https://docs.rs/crcbl-render) is what hands these out.
     /// A row nothing has written is all zeroes, which is a **black** material
