@@ -160,7 +160,15 @@ fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
         // fast or how observable it is. Push constants are not among them —
         // every engine pass takes its constants from a uniform buffer, which is
         // what lets a browser run the same shaders.
+        //
+        // `MESH_SHADER` sits beside the bundle rather than inside it — it is
+        // the geometry axis and `GPU_DRIVEN` the data-layout one — and is asked
+        // for because a device only reports the `GeometryPath` it was granted
+        // the features for, and `docs/plan/sample/00-samples-overview.md` rule
+        // 12 wants each sample on the path its device offers. Every browser
+        // lacks it, degrades to an indirect tail, and draws the same frame.
         optional_features: Features::GPU_DRIVEN
+            | Features::MESH_SHADER
             | Features::TIMESTAMP_QUERY
             | Features::DEBUG_MARKERS,
         ..GpuContextDesc::from(gpu)

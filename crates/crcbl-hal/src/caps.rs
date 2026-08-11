@@ -273,12 +273,26 @@ bitflags::bitflags! {
         ///
         /// Useful as an
         /// [`optional_features`](crate::DeviceDesc::optional_features) bundle,
-        /// so a caller enables whatever of it the adapter turns out to have;
-        /// **never as a requirement**. Demanding the whole set is what topic 39
-        /// removed — it refuses a device over one absent flag while it has the
-        /// rest, which is the opposite of degrading. What a caller genuinely
-        /// cannot run without goes in
+        /// so a caller enables whatever of it the adapter turns out to have.
+        /// **Never a requirement of code that has to run on whatever device it
+        /// finds.** Demanding the whole set there is what topic 39 removed — it
+        /// refuses a device over one absent flag while it has the rest, which
+        /// is the opposite of degrading. What such a caller genuinely cannot
+        /// run without goes in
         /// [`required_features`](crate::DeviceDesc::required_features) by name.
+        ///
+        /// A test that opens
+        /// [`NullInstance::gpu_driven`](crate::null::NullInstance::gpu_driven)
+        /// is the exception, and the reason the rule above names the caller it
+        /// binds rather than saying "never": that preset holds this bundle by
+        /// construction, so there is no hardware to refuse and the requirement
+        /// is a precondition — it asserts the preset asked for is the preset
+        /// that opened. It also grants it, since a null device is opened with
+        /// the adapter's features intersected against
+        /// `required_features | optional_features`. Move it to the optional
+        /// half and a preset that lost a flag opens as a lesser path with those
+        /// tests still green, which is the untested-fallback failure topic 39
+        /// names as its likeliest risk.
         const GPU_DRIVEN = Self::DESCRIPTOR_INDEXING.bits()
             | Self::BUFFER_DEVICE_ADDRESS.bits()
             | Self::DRAW_INDIRECT_COUNT.bits()

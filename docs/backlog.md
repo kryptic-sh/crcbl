@@ -5881,21 +5881,46 @@ lives in `crcbl_shaders::meshlet`, the builder stayed in `crcbl-scene` and
 re-exports it, and `crcbl-render` gained no dependency on `crcbl-scene`. What is
 left:
 
-- **Five of the seven samples still do not select the path.** `apps/sandbox` and
-  `apps/bare` inherit `crcbl::GpuContextDesc::default` and now run
-  `GeometryPath::MeshShader`; `apps/hud`, `horde`, `breakout`, `flappy` and
-  `asteroids` each spell their own `optional_features` in their `gpu.rs`, so
-  they stay on `IndirectCount` on mesh-capable hardware. Five samples now
-  disagree with two about what the primary geometry path is. It is a one-token
-  addition per file; it was not done with the flip because the flip's paths were
-  the two device-request sites, not the samples.
-- **`Features::GPU_DRIVEN`'s doc says it is never a requirement** while
-  `crcbl-render/src/{ui_pass,sprite_pass,texture}.rs` and
-  `crcbl-render/tests/graph_compile.rs` pass it as `required_features`. Harmless
-  today, and it is exactly what would have made folding `MESH_SHADER` into the
-  bundle fatal — those calls open against a null backend that reports no mesh
-  shaders, so they would have started failing. The doc and the callers should be
-  reconciled; either way the bundle-versus-list decision stands.
+- **Only `apps/sandbox` constructs a `ForwardRenderer`, so only sandbox has a
+  mesh to draw.** Worth knowing before reading too much into which samples
+  select which `GeometryPath`: `EmitTail::from_caps` is the sole reader of
+  `geometry_path()` in `crcbl-render`, the sprite pass records a plain
+  `encoder.draw` and the UI pass a plain `encoder.draw_indexed`, and neither
+  branches on a selector. The other samples ask for `MESH_SHADER` to satisfy
+  sample rule 12 and to make the downgrade line name it — not for speed.
+  Measured on horde at 10 000 instances: no difference, with the between-arm gap
+  smaller than the within-arm spread. §3.5's exit criterion is about meshlets
+  and cluster LOD, which none of these samples have.
+- **`apps/hud` reports `IndirectPerBatch` / `ArrayPages` on an RX 7900 XTX**,
+  which sample rule 12 arguably forbids. Its `desc()` omits `GPU_DRIVEN`
+  deliberately — nothing in it issues an indirect draw, and it builds neither
+  renderer — so the flag would have no consumer. Whether rule 12 outranks that
+  reasoning is a decision, not an oversight.
+- **Four samples silently opted out of present-based pacing**, and this is the
+  drift that produced the task above. `horde`, `breakout`, `flappy` and
+  `asteroids` hand-write an `optional_features` that is a **subset** of
+  `crcbl::GpuContextDesc::default`'s: it drops `PRESENT_FEEDBACK` and
+  `PRESENT_TIMING`. `GpuContextDesc`'s own comment says an unasked-for
+  `PRESENT_FEEDBACK` makes `wait_until_presented`'s closed loop dead code, and
+  that is the live state — sandbox logs `hal: pacing on presents, 2 frames deep`
+  and horde logs no such line. The durable fix is to delete the bespoke override
+  in all four and inherit the default; it was left alone because it changes
+  frame pacing for four games and needs verifying against their e2e frame
+  budgets. **Five hand-spelled subsets in five files is the mechanism**, not the
+  four missing flags.
+- **Settled: `Features::GPU_DRIVEN`'s doc was wrong, not its callers.** The doc
+  said "never as a requirement" while nine call sites across five files pass it
+  as `required_features` — `crcbl-render/src/{ui_pass,sprite_pass,texture}.rs`,
+  `tests/graph_compile.rs` and `tests/ui_pass_stream.rs`. Every one is test code
+  opening `NullInstance::gpu_driven()`, a preset that holds the bundle by
+  construction, so there is no hardware to refuse and the requirement is a
+  precondition assert — one with teeth, shown by degrading a preset and watching
+  ten tests fail on `UnsupportedFeatures`. It is also load-bearing: the null
+  backend grants `adapter.features ∩ (required ∪ optional)`, so naming a subset
+  would change the device's selected path and quietly retarget those tests. The
+  rule the doc defends binds a caller that must run on whatever device it finds,
+  and no shipping caller violates it; the doc now says that, and the callers are
+  unchanged.
 - **`crates/crcbl-vk/tests/run-cross-backend-e2e.sh` does not echo its ICD pin**
   the way `run-render-e2e.sh` does, so which adapter it used is not observable
   from its output. It passed 6/6, but with `CRCBL_VK_ICD` set it still drew vk

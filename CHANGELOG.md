@@ -207,6 +207,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Every sample that builds a renderer now asks for the mesh path too.**
+  `horde`, `breakout`, `flappy` and `asteroids` each spell their own
+  `optional_features` and were the four that stayed on `IndirectCount` after the
+  flip below. What this buys is sample rule 12 — "every sample runs on every
+  path the device offers, and says which it took" — and a downgrade line that
+  now names `MESH_SHADER` where a device lacks it. **It is not a performance
+  change**: `apps/sandbox` is the only sample that constructs a
+  `ForwardRenderer`, and `EmitTail::from_caps` is the only reader of
+  `geometry_path()`, so the four draw every sprite through the same unbranched
+  `encoder.draw` as before. Measured on horde at 10 000 instances, three repeats
+  per arm: the between-arm difference is smaller than the within-arm spread, and
+  the GPU timings are identical.
+
+  `apps/hud` is deliberately left out. Its `desc()` omits `GPU_DRIVEN` entirely
+  with a stated reason — nothing in it issues an indirect draw — and it builds
+  neither renderer, so a mesh stage there would be a flag with no consumer.
+
 - **A mesh-capable device now actually draws through the mesh path.**
   `MESH_SHADER` is requested as an optional feature at both sites that open a
   device with `GPU_DRIVEN` — `crcbl::GpuContextDesc::default` and the new
