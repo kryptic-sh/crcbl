@@ -5139,3 +5139,62 @@ number had never appeared in a log anybody had read. It was not wrong about the
 data it had. It is the ordinary shape of a bound calibrated on the backends that
 are easy to measure, and the reason the Metal and D3D12 jobs now upload their
 diffs.
+
+### Accepted: CI will not have a real Metal GPU, and that is not a task
+
+Recorded as a decision so it stops reading as work somebody could pick up.
+
+GitHub's hosted macOS images expose an `Apple Paravirtual device`. Real GPU
+passthrough is an open feature request on their side with no date, so no amount
+of work in this repository changes it. The options that would are a self-hosted
+runner or a Mac in somebody's office, and both are a standing cost for a gap
+that is narrower than it first looks.
+
+**What the paravirtual device does cover**, and this was itself a correction —
+it was long assumed to run no shaders at all, generalised from macos-14, the one
+image whose `MTLCreateSystemDefaultDevice()` returns nil. macos-15 and macos-26
+run compute dispatches and triangle draws correctly, `macos-latest` resolves to
+macos-26, and the Metal suite's device tests pass there. The render e2e draws
+every scene on it and matches goldens blessed on lavapipe.
+
+**What it does not cover**, stated so nothing implies otherwise: a discrete or
+unvirtualised Apple GPU, and anything a real driver does that a paravirtual one
+does not. `crates/crcbl-mtl/tests/run-mtl-e2e.sh`'s header already says this and
+should keep saying it. Metal has no software rasteriser, so unlike Vulkan
+(lavapipe) and D3D12 (WARP) there is no second implementation to cross-check
+against — the cross-backend comparison is the substitute, and it is weaker
+because it compares Metal against a _different API_ rather than against a second
+Metal.
+
+The mitigation is the one already in place: a person on a real Mac can run
+`run-mtl-e2e.sh` unchanged, and that remains the only thing that covers a
+non-virtual GPU. Nothing else is owed here.
+
+### Queued: split the golden comparator's scoring
+
+The decision to take, with its evidence, so the slice does not have to
+rediscover it.
+
+One `max_failing_ratio` is being asked to separate two unrelated failures: a
+driver that disagrees about many pixels slightly, and a bug that gets a few
+pixels badly wrong. The measurements bracket it tightly — WARP's sprite frame is
+0.1546% of pixels over the delta and legitimate, the recolour that must fail is
+0.7345%, so the whole usable range is about fivefold. Every golden in the tree
+is calibrated against the current scoring, which is why this is a slice rather
+than a constant.
+
+**The shape to build:** score the two questions separately rather than trading
+one knob against both. A budget on _total absolute error_ across the frame
+tolerates broad one-or-two-level drift without caring how many pixels carry it,
+while a much tighter count of pixels over a _large_ delta catches the localised
+recolour that broad drift can currently hide under. Both numbers are already
+computed — `mean abs error` and `max channel delta` appear in every comparison
+line — so this is a scoring change rather than new measurement.
+
+**What it must not do:** loosen anything. `crates/crcbl-golden/src/compare.rs`'s
+tests are the specification, and the two that pin the ends —
+`warps_sprite_edges_pass_and_are_what_the_ratio_is_sized_against` and
+`a_localised_recolour_that_the_old_two_percent_ratio_passed_now_fails` — must
+both still hold under the new scoring, with more room on each side rather than
+less. If they cannot, the new scoring is worse than the knob it replaced and
+should not land.
