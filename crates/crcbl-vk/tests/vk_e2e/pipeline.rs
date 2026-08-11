@@ -49,7 +49,9 @@ fn a_bindless_capable_layout_is_accepted_or_refused_according_to_the_tier() {
         crcbl_hal::BindGroupLayoutEntry {
             binding: 1,
             visibility: crcbl_hal::ShaderStages::FRAGMENT,
-            kind: crcbl_hal::BindingKind::SampledImage,
+            kind: crcbl_hal::BindingKind::SampledImage {
+                view_type: crcbl_hal::ImageViewType::D2,
+            },
             // The seam's "as many as you can"; the backend clamps it to the
             // device's own `max_bindless_descriptors`.
             count: u32::MAX,

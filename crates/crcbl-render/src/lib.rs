@@ -61,8 +61,8 @@
 //!
 //! No backend registry (see below), no material *system*, no scene, no
 //! scheduler. [`material_table`] is §3.2's table and only that — a row of
-//! factors an instance's id selects, with the texture half of the same sentence
-//! deliberately absent; the authoring, templates and permutations a material
+//! factors and one base-colour texture layer that an instance's id selects; the
+//! authoring, templates, permutations and the other texture slots a material
 //! system means are `docs/plan/37-materials.md`'s and are not here.
 //!
 //! The one thing on that list that has since moved whole is culling:
@@ -183,7 +183,7 @@ pub use sprite_pass::{
     CONSTANTS_SIZE, INSTANCE_STRIDE, SAMPLE_PIXEL, SAMPLE_SMOOTH, SheetDesc, SheetId, Sprite,
     SpriteConstants, SpriteInstance, SpriteRenderer, sheet_lane,
 };
-pub use texture::{UploadedTexture, upload_texture};
+pub use texture::{UploadedTexture, upload_texture, upload_texture_layers};
 pub use timing::{FrameTimings, PassTimers, PassTiming};
 pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};
 pub use ui_pass::UiRenderer;

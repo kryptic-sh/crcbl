@@ -6,8 +6,8 @@
 
 use crcbl_hal::{
     BackendKind, BlendFactor, BlendOp, BufferUsage, CompareOp, CullMode, FilterMode, Format,
-    FrontFace, HalError, ImageAspect, ImageUsage, IndexFormat, MemoryLocation, PolygonMode,
-    PrimitiveTopology, SamplerAddressMode, ShaderStages, StencilOp,
+    FrontFace, HalError, ImageAspect, ImageUsage, ImageViewType, IndexFormat, MemoryLocation,
+    PolygonMode, PrimitiveTopology, SamplerAddressMode, ShaderStages, StencilOp,
 };
 
 /// The HAL format set is a subset of wgpu's, so this is total — see
@@ -361,16 +361,41 @@ pub fn map_shader_stages(s: ShaderStages) -> wgpu::ShaderStages {
 
 use crcbl_hal::BindingKind;
 
+/// View dimensionality, for the two places wgpu asks for it.
+///
+/// Both must give the same answer for the same declaration: `create_image_view`
+/// stamps it on the `wgpu::TextureView` and [`map_binding_kind`] stamps it on
+/// the bind-group layout, and wgpu compares the pair at pipeline creation. Two
+/// copies of this match are two chances for them to disagree, and the failure
+/// is "expects dimension = D2, but given a view with dimension = D2Array" at
+/// build time.
+pub fn map_view_dimension(t: ImageViewType) -> wgpu::TextureViewDimension {
+    match t {
+        ImageViewType::D1 => wgpu::TextureViewDimension::D1,
+        ImageViewType::D2 => wgpu::TextureViewDimension::D2,
+        ImageViewType::D2Array => wgpu::TextureViewDimension::D2Array,
+        ImageViewType::Cube => wgpu::TextureViewDimension::Cube,
+        ImageViewType::CubeArray => wgpu::TextureViewDimension::CubeArray,
+        ImageViewType::D3 => wgpu::TextureViewDimension::D3,
+    }
+}
+
 /// Binding kinds.
 ///
 /// Fallible because of storage images: wgpu's `BindingType::StorageTexture`
 /// needs the texel format and the view dimension at *layout* creation, and
 /// [`BindingKind::StorageImage`] carries neither. Inventing `Rgba8Unorm` there
 /// produced a layout that silently disagreed with every shader whose storage
-/// image was anything else, so this refuses instead. Sampled images are
-/// assumed 2D, single-sampled and float-filterable, which is what every sampled
-/// binding in the engine is; a shadow-comparison or integer sampled image would
-/// need the same information the seam does not yet carry.
+/// image was anything else, so this refuses instead.
+///
+/// A sampled image's view dimension comes from
+/// [`BindingKind::SampledImage::view_type`], because this is the backend that
+/// needs it: wgpu compares the layout's `view_dimension` against the view's at
+/// pipeline creation and rejects the pair, where the other three read the view
+/// and never look at the layout. Sampled images are still assumed
+/// single-sampled and float-filterable, which is what every sampled binding in
+/// the engine is; a shadow-comparison or integer sampled image would need
+/// information the seam does not yet carry.
 pub fn map_binding_kind(k: BindingKind) -> Result<wgpu::BindingType, HalError> {
     Ok(match k {
         BindingKind::UniformBuffer { dynamic } => wgpu::BindingType::Buffer {
@@ -383,9 +408,9 @@ pub fn map_binding_kind(k: BindingKind) -> Result<wgpu::BindingType, HalError> {
             has_dynamic_offset: dynamic,
             min_binding_size: None,
         },
-        BindingKind::SampledImage => wgpu::BindingType::Texture {
+        BindingKind::SampledImage { view_type } => wgpu::BindingType::Texture {
             sample_type: wgpu::TextureSampleType::Float { filterable: true },
-            view_dimension: wgpu::TextureViewDimension::D2,
+            view_dimension: map_view_dimension(view_type),
             multisampled: false,
         },
         BindingKind::StorageImage { .. } => {
@@ -472,6 +497,42 @@ mod tests {
     #[test]
     fn an_unnameable_wgpu_format_is_none() {
         assert_eq!(unmap_format(wgpu::TextureFormat::Rgba8Snorm), None);
+    }
+
+    /// **A sampled binding's dimension is the one it declared**, not `D2`.
+    ///
+    /// This mapping used to be the constant `D2`, which was invisible while
+    /// every sampled binding in the engine was a `Texture2D` and became a build
+    /// failure the day one was a `Texture2DArray` — "expects dimension = D2,
+    /// but given a view with dimension = D2Array". Asserted for every view type
+    /// the seam has rather than for the array alone, because the defect was a
+    /// *constant*: a mapping that answered `D2Array` to everything would pass a
+    /// one-case test just as well.
+    #[test]
+    fn a_sampled_binding_declares_the_dimension_it_was_given() {
+        for (view_type, expected) in [
+            (ImageViewType::D1, wgpu::TextureViewDimension::D1),
+            (ImageViewType::D2, wgpu::TextureViewDimension::D2),
+            (ImageViewType::D2Array, wgpu::TextureViewDimension::D2Array),
+            (ImageViewType::Cube, wgpu::TextureViewDimension::Cube),
+            (
+                ImageViewType::CubeArray,
+                wgpu::TextureViewDimension::CubeArray,
+            ),
+            (ImageViewType::D3, wgpu::TextureViewDimension::D3),
+        ] {
+            let binding = map_binding_kind(BindingKind::SampledImage { view_type })
+                .expect("a sampled image is expressible");
+            let wgpu::BindingType::Texture { view_dimension, .. } = binding else {
+                panic!("{view_type:?} did not map to a texture binding: {binding:?}");
+            };
+            assert_eq!(
+                view_dimension, expected,
+                "{view_type:?} must reach the layout as {expected:?}"
+            );
+            // And the same answer the view gets, because wgpu compares the two.
+            assert_eq!(map_view_dimension(view_type), expected);
+        }
     }
 
     #[test]

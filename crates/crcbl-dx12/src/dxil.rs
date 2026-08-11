@@ -740,10 +740,12 @@ mod tests {
                 "mesh",
                 &crcbl_shaders::MESH,
                 &["vertexMain", "fragmentMain"],
-                // The trailing `Srv` is the material table (binding 6), which
-                // §3.2 added after the mesh table — declaration order, so it
-                // lands last.
-                &[Cbv, Srv, Srv, Cbv, Srv, Srv, Srv],
+                // The tail is §3.2's material table and the texture page it
+                // indexes, in declaration order: the table (binding 6), the
+                // `Texture2DArray` of base colours (7) and the sampler that
+                // reads it (8). The sampler is the row's first `Sampler`, so it
+                // takes `s0` while the images go on counting `t`s.
+                &[Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler],
             ),
             (
                 "sprite",

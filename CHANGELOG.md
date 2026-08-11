@@ -16,6 +16,36 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_hal::BindingKind::SampledImage` is now a struct variant carrying the
+  view dimension**: `SampledImage { view_type: ImageViewType }`. Every
+  construction has to name it (`ImageViewType::D2` reproduces the old
+  behaviour), and every `match` arm has to become `SampledImage { .. }`.
+
+  It exists because WebGPU takes the dimension in the **layout** rather than off
+  the bound view: `wgpu::BindingType::Texture` has a `view_dimension`, and a
+  layout that says `D2` while the view is `D2Array` is refused at pipeline
+  creation with "expects dimension = D2, but given a view with dimension =
+  D2Array". `crcbl-wgpu` used to hardcode `D2`, which was invisible while every
+  sampled binding in the engine was a `Texture2D` and became a build failure the
+  moment `mesh.slang` declared a `Texture2DArray`. Vulkan, Metal and D3D12 all
+  read the dimension from the view and ignore the field; each backend's
+  conversion says so where it drops it.
+
+- **A material now carries a base-colour texture, and the vertex and material
+  layouts both grew.** `crcbl_shaders::mesh::GpuMaterial` gained
+  `base_color_texture: u32`, so `MATERIAL_STRIDE` is 32 rather than 16 and
+  anything building a `GpuMaterial` literally has to name the field
+  (`..GpuMaterial::UNTINTED` supplies it). `MeshVertex` gained `uv: [f32; 4]`,
+  so `VERTEX_STRIDE` is 64 rather than 48 — every consumer in this workspace
+  uses the constant, but a producer of vertex bytes that did not would now write
+  short rows.
+
+  `mesh.slang` gained binding 7 (`Texture2DArray`) and binding 8
+  (`SamplerState`), both visible to the vertex and fragment stages for the
+  reason binding 6 already was. **Any caller that builds its own bind-group
+  layout for that module must add both**, because a pipeline layout that does
+  not cover a binding the module declares is refused outright.
+
 - **`crcbl_golden::Tolerance` gained `gross_channel_delta` and
   `max_gross_ratio`, and `Comparison` gained `gross_pixels` and `gross_ratio`.**
   Anything constructing a `Tolerance` literally has to name the two new fields;
@@ -106,6 +136,43 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   silence. Failures are now tracked per submission and logged as errors.
 
 ### Added
+
+- **Materials have a base-colour texture, through one `ArrayPages` page.**
+  `docs/plan/03-gpu-driven-rendering.md` §3.2's "texture indices + factors" now
+  has both halves: `crcbl_render::forward` uploads a `D2Array` image whose
+  layers material rows index, `mesh.slang` samples it in the fragment stage and
+  multiplies the texel into the factor and the vertex albedo.
+
+  **One binding model, and it is the one every device can run.** The page is a
+  single image with `count: 1` and no `BindingFlags`, so the layout is legal on
+  vk, wgpu, Metal and D3D12 alike — `BindingModel::Bindless` needs
+  `Features::DESCRIPTOR_INDEXING`, which `crcbl-mtl` withdraws, so a descriptor
+  array would have left Metal with no texture path. Nothing is refused anywhere;
+  a bindless device runs the same declaration and will gain capacity rather than
+  a second code path.
+
+  Colour space is the trap and it is handled by the format: the page is created
+  as `Rgba8UnormSrgb`, which is what glTF defines a base-colour texture to be,
+  so the sampler decodes to linear and the shader multiplies two linear values.
+
+  **`CRCBL_GPU=wgpu` cannot draw the cube scene until `crcbl-hal` can say a
+  sampled image is an array.** `BindingKind::SampledImage` carries no view
+  dimension, so `crcbl-wgpu` declares every one as `D2` and refuses the page's
+  `D2Array` view at `create_bind_group`. Vulkan, Metal and D3D12 take the
+  dimension from the view and are unaffected; the sprite and UI scenes are
+  unaffected on wgpu too. It fails at build with a named error rather than
+  drawing untextured — see `docs/backlog.md`.
+
+- **`crcbl_render::upload_texture_layers`** uploads several equally sized layers
+  into one `D2Array` image, beside `upload_texture`'s single-layer `D2`. It
+  records one copy per layer, because a copy region's extent is 2D on every
+  backend the engine has.
+
+- **`ForwardRenderer::set_textured_pyramid`** puts a third instance of the
+  pyramid mesh in the frame, shaded through a material that differs from
+  `set_pyramid`'s in its page layer and in nothing else — the texture column's
+  observable, beside `set_tinted_pyramid`'s for the factor column. The `cube`
+  golden holds all three, and `tests/golden/cube.png` was re-blessed for it.
 
 - **The null backend can now be resized and killed on demand.** Two injection
   hooks join the four `crcbl_hal::null::Recorder` already had.

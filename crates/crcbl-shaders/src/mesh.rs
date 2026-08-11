@@ -29,8 +29,8 @@
 //!
 //! [`bind_index_buffer`]: https://docs.rs/crcbl-hal
 
-/// Bytes per vertex: three `float4`s, no padding.
-pub const VERTEX_STRIDE: usize = 48;
+/// Bytes per vertex: four `float4`s, no padding.
+pub const VERTEX_STRIDE: usize = 64;
 
 /// Bytes in the frame uniform block.
 ///
@@ -59,10 +59,12 @@ pub const MESH_ENTRY_STRIDE: usize = 36;
 /// Bytes per [`GpuMaterial`], and the stride of the material-table storage
 /// buffer.
 ///
-/// One `float4`. Checked against the `ArrayStride 16` and the `Offset`
-/// decoration `slangc` emits by this module's
+/// One `float4`, one `uint` and three more of padding — 32 rather than 20,
+/// because the row's alignment is the `float4`'s 16 and `std430` rounds the
+/// size up to a multiple of it. Checked against the `ArrayStride` and the
+/// `Offset` decorations `slangc` emits by this module's
 /// `the_material_layout_matches_the_offsets_slangc_emits`.
-pub const MATERIAL_STRIDE: usize = 16;
+pub const MATERIAL_STRIDE: usize = 32;
 
 /// Bytes in one draw's constant block.
 ///
@@ -82,6 +84,14 @@ pub struct MeshVertex {
     pub normal: [f32; 4],
     /// Linear RGBA albedo.
     pub color: [f32; 4],
+    /// Base-colour texture coordinates in `xy`; `zw` unused and written as
+    /// `0.0`.
+    ///
+    /// A whole `float4` for two numbers because the shader's struct is four
+    /// `float4`s with no padding anywhere — see `struct MeshVertex` in
+    /// `shaders/mesh.slang`, where a `float2` would cost the same eight bytes
+    /// of tail padding and put a hole in a layout that has none.
+    pub uv: [f32; 4],
 }
 
 /// The frame's non-geometry inputs, matching `struct FrameUniforms` in
@@ -147,8 +157,8 @@ impl FrameUniforms {
 /// exists.
 ///
 /// The material id was the other one until 2026-08, and what moved it was the
-/// table it names: see [`GpuMaterial`], which is §3.2's factors and not its
-/// textures.
+/// table it names: see [`GpuMaterial`], which is §3.2's factors *and* the
+/// base-colour texture layer they multiply.
 ///
 /// [`crcbl_render::InstancePool`]: https://docs.rs/crcbl-render
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -381,24 +391,26 @@ impl GpuMesh {
     }
 }
 
-/// One material's shading factors, matching `struct GpuMaterial` in
-/// `shaders/mesh.slang`.
+/// One material's shading factors and its base-colour texture, matching
+/// `struct GpuMaterial` in `shaders/mesh.slang`.
 ///
 /// `docs/plan/03-gpu-driven-rendering.md` §3.2's material table:
-/// [`GpuInstance::material`] indexes an array of these and the vertex stage
-/// multiplies [`GpuMaterial::base_color`] into the vertex albedo.
+/// [`GpuInstance::material`] indexes an array of these and the fragment stage
+/// multiplies [`GpuMaterial::base_color`] and the texel
+/// [`GpuMaterial::base_color_texture`] selects into the vertex albedo.
 /// [`MaterialTable`](https://docs.rs/crcbl-render) is what writes them.
 ///
-/// # The factors half, and deliberately not the textures
+/// # The texture index is an `ArrayPages` layer, not a `Bindless` slot
 ///
 /// §3.2 pairs the table with "a bindless texture array
 /// ([`BindingModel::Bindless`]) or texture array pages ([`ArrayPages`])", and
-/// says the table "holds texture indices + factors". This is the factors, and
-/// there is no texture column: which of those two binding models a texture
-/// index would *mean* is a decision nothing in the engine has taken, so a
-/// column for one would be a field nothing reads — which is the premature
-/// material system the same plan warns against, and the shape
-/// `docs/plan/37-materials.md` owns.
+/// says the table "holds texture indices + factors". The index here is the
+/// second of those: `mesh.slang` binds **one** `Texture2DArray` and the number
+/// selects a layer of it. A `Bindless` slot would be an index into a runtime
+/// sized array *of descriptors*, which needs
+/// `Features::DESCRIPTOR_INDEXING` — a feature `crcbl-mtl` withdraws — where a
+/// layer index needs nothing at all. So one column serves every device, and
+/// what a bindless device gains later is capacity, not a different field.
 ///
 /// # A zeroed row is black, and there is no empty value
 ///
@@ -408,24 +420,34 @@ impl GpuMesh {
 /// "black" are the same bytes and nothing can tell them apart. The consequence
 /// is a contract rather than a defect: an instance names a material it was
 /// given, and a row nobody wrote shades black, which is visible immediately
-/// rather than plausible.
+/// rather than plausible. **The texture column does not change that**: a zeroed
+/// row names layer 0, and zero times any texel is still black.
 ///
-/// `PartialEq` but not `Eq`, for [`GpuMesh`]'s reason: the fields are floats.
+/// `PartialEq` but not `Eq`, for [`GpuMesh`]'s reason: one field is floats.
 ///
 /// [`BindingModel::Bindless`]: https://docs.rs/crcbl-hal
 /// [`ArrayPages`]: https://docs.rs/crcbl-hal
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GpuMaterial {
-    /// Linear RGBA factor multiplied into the vertex albedo.
+    /// Linear RGBA factor multiplied into the vertex albedo and the texel.
     ///
     /// Linear, like every other colour that reaches the scene target: the
     /// tonemap pass and the swapchain's sRGB encode are what turn this into
     /// pixels, so `[1.0; 4]` is the material that changes nothing.
     pub base_color: [f32; 4],
+    /// Which layer of the pass's base-colour page this material samples.
+    ///
+    /// **Layer 0 is the untextured value by convention**, and the convention is
+    /// the page owner's to keep: whoever fills the page writes a white texel
+    /// there, so a material that names no texture multiplies by `1.0`.
+    /// [`crcbl_render::forward`](https://docs.rs/crcbl-render) is the one that
+    /// does, and [`GpuMaterial::UNTINTED`] is the row that relies on it.
+    pub base_color_texture: u32,
 }
 
 impl GpuMaterial {
-    /// The material that changes nothing: every factor `1.0`.
+    /// The material that changes nothing: every factor `1.0`, and the page's
+    /// white layer.
     ///
     /// Named because a table's rows are black until something writes them, so
     /// *some* row has to be the one an instance carries when nobody has asked
@@ -433,9 +455,13 @@ impl GpuMaterial {
     /// number a reader has to recognise rather than read.
     pub const UNTINTED: Self = Self {
         base_color: [1.0; 4],
+        base_color_texture: 0,
     };
 
     /// The bytes one material-table element holds, in `std430` order.
+    ///
+    /// The three trailing `uint`s of padding the shader's struct spells out are
+    /// left as the zeroes the array starts as; nothing reads them.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; MATERIAL_STRIDE] {
         let mut bytes = [0u8; MATERIAL_STRIDE];
@@ -444,7 +470,9 @@ impl GpuMaterial {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
-        debug_assert_eq!(at, MATERIAL_STRIDE);
+        bytes[at..at + 4].copy_from_slice(&self.base_color_texture.to_le_bytes());
+        at += 4;
+        debug_assert_eq!(at + 12, MATERIAL_STRIDE);
         bytes
     }
 
@@ -464,6 +492,11 @@ impl GpuMaterial {
         };
         Self {
             base_color: [float_at(0), float_at(4), float_at(8), float_at(12)],
+            base_color_texture: u32::from_le_bytes(
+                bytes[16..20]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
+            ),
         }
     }
 }
@@ -581,16 +614,30 @@ pub const CUBE_VERTEX_COUNT: usize = FACES.len() * 4;
 /// Indices in the cube: two triangles per face.
 pub const CUBE_INDEX_COUNT: usize = FACES.len() * 6;
 
+/// The texture coordinates of a quad's four corners, in the order [`Face`]
+/// declares them and [`cube_indices`] triangulates them.
+///
+/// One copy shared by the cube's faces and the pyramid's base, because both are
+/// the same quad wound the same way — a second table would be a second thing to
+/// get the corner order wrong in.
+const QUAD_UV: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
 /// The cube's vertices, in face order.
+///
+/// Every face carries the whole of the layer — `0..=1` in both axes — so each
+/// of the six samples the material's page layer once over, which is what makes
+/// a texture that differs per material differ over the whole silhouette rather
+/// than in one corner.
 #[must_use]
 pub fn cube_vertices() -> Vec<MeshVertex> {
     let mut vertices = Vec::with_capacity(CUBE_VERTEX_COUNT);
     for face in &FACES {
-        for corner in &face.corners {
+        for (corner, uv) in face.corners.iter().zip(&QUAD_UV) {
             vertices.push(MeshVertex {
                 position: [corner[0], corner[1], corner[2], 1.0],
                 normal: [face.normal[0], face.normal[1], face.normal[2], 0.0],
                 color: [face.color[0], face.color[1], face.color[2], 1.0],
+                uv: [uv[0], uv[1], 0.0, 0.0],
             });
         }
     }
@@ -623,6 +670,7 @@ pub fn cube_vertex_bytes() -> Vec<u8> {
                 .iter()
                 .chain(&vertex.normal)
                 .chain(&vertex.color)
+                .chain(&vertex.uv)
         }),
         vertices.len() * VERTEX_STRIDE,
     )
@@ -712,8 +760,9 @@ pub fn pyramid_vertices() -> Vec<MeshVertex> {
 
     let mut vertices = Vec::with_capacity(PYRAMID_VERTEX_COUNT);
     // The base, in the same corner order as the cube's `-Y` face, so the
-    // `0 1 2, 0 2 3` triangulation below is the one `cube_indices` uses.
-    for corner in base {
+    // `0 1 2, 0 2 3` triangulation below is the one `cube_indices` uses — and
+    // so is `QUAD_UV`, for the same reason.
+    for (corner, uv) in base.iter().zip(&QUAD_UV) {
         vertices.push(MeshVertex {
             position: [corner[0], corner[1], corner[2], 1.0],
             normal: [0.0, -1.0, 0.0, 0.0],
@@ -723,6 +772,7 @@ pub fn pyramid_vertices() -> Vec<MeshVertex> {
                 PYRAMID_BASE_COLOR[2],
                 1.0,
             ],
+            uv: [uv[0], uv[1], 0.0, 0.0],
         });
     }
     // One triangle per side. Corner `i + 1` before corner `i` is what makes the
@@ -731,16 +781,25 @@ pub fn pyramid_vertices() -> Vec<MeshVertex> {
     for (side, color) in PYRAMID_SIDE_COLORS.iter().enumerate() {
         let corners = [base[(side + 1) % base.len()], base[side], apex];
         let normal = triangle_normal(corners[0], corners[1], corners[2]);
-        for corner in corners {
+        for (corner, uv) in corners.iter().zip(&TRIANGLE_UV) {
             vertices.push(MeshVertex {
                 position: [corner[0], corner[1], corner[2], 1.0],
                 normal: [normal[0], normal[1], normal[2], 0.0],
                 color: [color[0], color[1], color[2], 1.0],
+                uv: [uv[0], uv[1], 0.0, 0.0],
             });
         }
     }
     vertices
 }
+
+/// The texture coordinates of a pyramid side: the two base corners along the
+/// bottom edge and the apex at the top middle.
+///
+/// In the order [`pyramid_vertices`] emits a side's corners — base `i + 1`,
+/// base `i`, apex — so the layer is upright on every face rather than rotated a
+/// quarter turn per side.
+const TRIANGLE_UV: [[f32; 2]; 3] = [[0.0, 0.0], [1.0, 0.0], [0.5, 1.0]];
 
 /// The unit normal of the triangle `a b c`, by the right-hand rule — so it
 /// points outward exactly when the winding is counter-clockwise seen from
@@ -781,6 +840,7 @@ pub fn pyramid_vertex_bytes() -> Vec<u8> {
                 .iter()
                 .chain(&vertex.normal)
                 .chain(&vertex.color)
+                .chain(&vertex.uv)
         }),
         vertices.len() * VERTEX_STRIDE,
     )
@@ -921,13 +981,58 @@ mod tests {
     }
 
     #[test]
-    fn the_vertex_layout_is_three_float4s_with_no_padding() {
+    fn the_vertex_layout_is_four_float4s_with_no_padding() {
         let bytes = cube_vertex_bytes();
-        assert_eq!(VERTEX_STRIDE, 12 * size_of::<f32>());
+        assert_eq!(VERTEX_STRIDE, 16 * size_of::<f32>());
         assert_eq!(bytes.len(), CUBE_VERTEX_COUNT * VERTEX_STRIDE);
         assert_eq!(cube_vertices().len(), CUBE_VERTEX_COUNT);
         assert_eq!(cube_indices().len(), CUBE_INDEX_COUNT);
         assert_eq!(cube_index_bytes().len(), CUBE_INDEX_COUNT * 4);
+    }
+
+    /// **The UV is the fourth `float4`, at byte 48 of each vertex**, and every
+    /// mesh really carries one.
+    ///
+    /// Read out of the packed bytes rather than off the struct: the packer
+    /// chains four fields and a chain that forgot the last one would produce a
+    /// buffer of the right *length* only by accident — and would silently give
+    /// every fragment the UV of the vertex after it. Both meshes are checked
+    /// because they are packed by two call sites.
+    #[test]
+    fn every_vertex_carries_its_uv_in_the_fourth_float4() {
+        for (name, vertices, bytes) in [
+            ("cube", cube_vertices(), cube_vertex_bytes()),
+            ("pyramid", pyramid_vertices(), pyramid_vertex_bytes()),
+        ] {
+            for (index, vertex) in vertices.iter().enumerate() {
+                let at = index * VERTEX_STRIDE + 48;
+                let read = |lane: usize| {
+                    f32::from_le_bytes(
+                        bytes[at + lane * 4..at + lane * 4 + 4]
+                            .try_into()
+                            .expect("four bytes"),
+                    )
+                };
+                assert_eq!(
+                    [read(0), read(1), read(2), read(3)],
+                    vertex.uv,
+                    "{name} vertex {index}'s uv is not at byte {at}"
+                );
+            }
+            // And the coordinates actually span the layer rather than sitting
+            // at one corner, which is what makes a page layer visible over a
+            // whole face instead of as a single flat colour.
+            let us: Vec<f32> = vertices.iter().map(|vertex| vertex.uv[0]).collect();
+            let vs: Vec<f32> = vertices.iter().map(|vertex| vertex.uv[1]).collect();
+            assert!(
+                us.contains(&0.0) && us.contains(&1.0),
+                "{name} never reaches both edges of the layer in u"
+            );
+            assert!(
+                vs.contains(&0.0) && vs.contains(&1.0),
+                "{name} never reaches both edges of the layer in v"
+            );
+        }
     }
 
     /// Every face is wound counter-clockwise **as seen from outside**, which is
@@ -1120,14 +1225,16 @@ mod tests {
     /// table exists at all.
     #[test]
     fn the_material_layout_matches_the_offsets_slangc_emits() {
-        // `OpDecorate %_runtimearr_GpuMaterial_std430 ArrayStride 16`, and
-        // `OpMemberDecorate %GpuMaterial_std430 0 Offset 0`. The WGSL declares
-        // one `vec4<f32>` and the MSL one `packed_float4`, which is the same
-        // sixteen bytes.
-        assert_eq!(MATERIAL_STRIDE, 16);
+        // `OpDecorate %_runtimearr_GpuMaterial_std430 ArrayStride 32`, and
+        // `OpMemberDecorate %GpuMaterial_std430 0 Offset 0` / `1 Offset 16`.
+        // Thirty-two rather than twenty: the row's alignment is the `float4`'s
+        // sixteen, so the trailing `uint` is followed by twelve bytes the
+        // shader's own struct spells out as `pad0`/`pad1`/`pad2`.
+        assert_eq!(MATERIAL_STRIDE, 32);
 
         let material = GpuMaterial {
             base_color: [0.25, 0.5, 0.75, 1.0],
+            base_color_texture: 3,
         };
         let bytes = material.to_bytes();
         assert_eq!(bytes.len(), MATERIAL_STRIDE);
@@ -1141,15 +1248,45 @@ mod tests {
                 channel * 4
             );
         }
+        // **The texture index is at offset 16, after the factor.** A row the CPU
+        // wrote at some other offset would still round-trip through
+        // `from_bytes`, so this is asserted against the bytes rather than
+        // against the decode.
+        assert_eq!(
+            u32::from_le_bytes(bytes[16..20].try_into().expect("4")),
+            3,
+            "base_color_texture at offset 16"
+        );
+        assert_eq!(
+            bytes[20..MATERIAL_STRIDE],
+            [0u8; 12],
+            "the three pad words the shader declares must stay zero"
+        );
         assert_eq!(GpuMaterial::from_bytes(&bytes), material);
 
         // A row nothing has written is black, not untinted — the contract the
         // type's docs state, and the one that makes a forgotten material
-        // visible instead of harmless.
+        // visible instead of harmless. Naming layer 0 does not soften it:
+        // zero times the page's white texel is still zero.
         assert_eq!(GpuMaterial::default().to_bytes(), [0u8; MATERIAL_STRIDE]);
         assert_eq!(GpuMaterial::default().base_color, [0.0; 4]);
+        assert_eq!(GpuMaterial::default().base_color_texture, 0);
         assert_eq!(GpuMaterial::UNTINTED.base_color, [1.0; 4]);
+        assert_eq!(
+            GpuMaterial::UNTINTED.base_color_texture,
+            0,
+            "the untextured material names the page's white layer"
+        );
         assert_ne!(GpuMaterial::UNTINTED, GpuMaterial::default());
+
+        // Two materials differing in nothing but their texture are different
+        // rows, which is the whole of what the second column buys.
+        let other = GpuMaterial {
+            base_color_texture: 4,
+            ..material
+        };
+        assert_ne!(other, material);
+        assert_ne!(other.to_bytes(), bytes);
     }
 
     /// Every pyramid face is wound counter-clockwise as seen from outside, on

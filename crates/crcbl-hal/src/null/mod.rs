@@ -1920,8 +1920,10 @@ fn check_resource_kind(
         (
             K::UniformBuffer { .. } | K::StorageBuffer { .. },
             R::Buffer { .. }
-        ) | (K::SampledImage | K::StorageImage { .. }, R::ImageView(_))
-            | (K::Sampler, R::Sampler(_))
+        ) | (
+            K::SampledImage { .. } | K::StorageImage { .. },
+            R::ImageView(_)
+        ) | (K::Sampler, R::Sampler(_))
     );
     if ok {
         Ok(())

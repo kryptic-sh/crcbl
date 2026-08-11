@@ -31,6 +31,12 @@
 //! glTF's missing-factor default is `[1.0; 4]` and so is
 //! [`GpuMaterial::UNTINTED`].
 //!
+//! The row also has a `base_color_texture` column, and **this importer leaves
+//! it at the untextured layer**. glTF's `baseColorTexture` is an image, and
+//! nothing here decodes one, uploads one or owns a layer of the renderer's
+//! page — so a material arrives with its factor and the page's white layer,
+//! which is exactly what an imported material shaded before the column existed.
+//!
 //! # What is parsed and dropped
 //!
 //! Skins and animations are in the format and are not read: the plan has them
@@ -370,6 +376,13 @@ fn build(
         .materials()
         .map(|material| GpuMaterial {
             base_color: material.pbr_metallic_roughness().base_color_factor(),
+            // **The factor only; `base_color_texture` is left untextured.**
+            // glTF's `baseColorTexture` is an image this crate does not decode,
+            // upload or own a page layer in — see `docs/backlog.md`'s "The
+            // material table has both halves". Naming layer 0 is the honest
+            // value for that: it is the page's white layer, so an imported
+            // material shades with its factor and nothing else.
+            ..GpuMaterial::UNTINTED
         })
         .collect();
 
@@ -536,7 +549,8 @@ mod tests {
         assert_eq!(
             scene.materials(),
             [GpuMaterial {
-                base_color: BASE_COLOR
+                base_color: BASE_COLOR,
+                ..GpuMaterial::UNTINTED
             }]
         );
     }

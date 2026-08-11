@@ -1217,7 +1217,7 @@ fn check_resource_kind(
             BindingKind::UniformBuffer { .. } | BindingKind::StorageBuffer { .. },
             BindingResource::Buffer { .. }
         ) | (
-            BindingKind::SampledImage | BindingKind::StorageImage { .. },
+            BindingKind::SampledImage { .. } | BindingKind::StorageImage { .. },
             BindingResource::ImageView(_)
         ) | (BindingKind::Sampler, BindingResource::Sampler(_))
     );
@@ -1357,7 +1357,7 @@ fn write_descriptors(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl_hal::{BindGroupLayoutEntry, Limits};
+    use crcbl_hal::{BindGroupLayoutEntry, ImageViewType, Limits};
 
     fn caps(features: Features) -> DeviceCaps {
         DeviceCaps {
@@ -1527,7 +1527,9 @@ mod tests {
 
         // The sentinel must survive validation, whatever the ceiling is.
         let entries = [BindGroupLayoutEntry {
-            kind: BindingKind::SampledImage,
+            kind: BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+            },
             flags: BindingFlags::VARIABLE_COUNT
                 | BindingFlags::PARTIALLY_BOUND
                 | BindingFlags::UPDATE_AFTER_BIND,
@@ -1654,7 +1656,9 @@ mod tests {
         .expect("a buffer fills a buffer binding");
 
         let error = check_resource_kind(
-            BindingKind::SampledImage,
+            BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+            },
             &BindingResource::whole_buffer(buffer),
             7,
         )
@@ -1665,7 +1669,9 @@ mod tests {
             .expect("a sampler fills a sampler binding");
         assert!(
             check_resource_kind(
-                BindingKind::SampledImage,
+                BindingKind::SampledImage {
+                    view_type: ImageViewType::D2
+                },
                 &BindingResource::Sampler(sampler),
                 0
             )

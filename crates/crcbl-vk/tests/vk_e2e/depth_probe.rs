@@ -66,6 +66,14 @@ struct DepthProbe {
     /// of one instance, so `SV_InstanceID` is 0, the block's base is 0, and this
     /// entry is what sends it to instance 0.
     visible_instances: crcbl_hal::BufferHandle,
+    /// A one-layer `D2Array` page of one white texel, and its view.
+    ///
+    /// `mesh.slang` samples `base_color_textures` unconditionally, so the probe
+    /// has to bind *something*; white is the one thing that leaves the two
+    /// quads the colours this test asserts, because the material row names
+    /// layer 0 and the shader multiplies by what it finds there.
+    base_color_page: crcbl_render::UploadedTexture,
+    base_color_sampler: crcbl_hal::SamplerHandle,
     layout: crcbl_hal::BindGroupLayoutHandle,
     group: crcbl_hal::BindGroupHandle,
     pipeline_layout: crcbl_hal::PipelineLayoutHandle,
@@ -117,6 +125,15 @@ impl DepthProbe {
                     vertices.extend_from_slice(&value.to_le_bytes());
                 }
                 for value in [color[0], color[1], color[2], 1.0] {
+                    vertices.extend_from_slice(&value.to_le_bytes());
+                }
+                // The fourth `float4` of `crcbl_shaders::mesh::MeshVertex`:
+                // the base-colour UV, the corner's own position mapped to
+                // `0..=1`. It selects nothing here — the probe's page has one
+                // white layer — but it has to be *written*, because the stride
+                // is 64 bytes and a vertex short of it would slide every later
+                // vertex's position into the wrong lane.
+                for value in [x * 0.5 + 0.5, y * 0.5 + 0.5, 0.0, 0.0] {
                     vertices.extend_from_slice(&value.to_le_bytes());
                 }
             }
@@ -296,6 +313,32 @@ impl DepthProbe {
             .write_buffer(visible_instances, 0, &0u32.to_le_bytes())
             .expect("write");
 
+        // §3.2's texture side, in its smallest honest form: one layer, one
+        // texel, opaque white. `Rgba8UnormSrgb` for `crcbl_render::forward`'s
+        // reason — the format is the sRGB decode, and `0xFF` decodes to exactly
+        // 1.0 — so the sample multiplies the albedo by one and this probe's
+        // depth answers stay the answers it recorded before there was a page.
+        let base_color_page = crcbl_render::upload_texture_layers(
+            device,
+            headless.queue,
+            "probe base colour",
+            crcbl_hal::Format::Rgba8UnormSrgb,
+            1,
+            1,
+            &[&[0xFF, 0xFF, 0xFF, 0xFF]],
+        )
+        .expect("a one-layer page");
+        let base_color_sampler = device
+            .create_sampler(&crcbl_hal::SamplerDesc {
+                label: Some("probe base colour"),
+                mag_filter: crcbl_hal::FilterMode::Nearest,
+                min_filter: crcbl_hal::FilterMode::Nearest,
+                mip_filter: crcbl_hal::FilterMode::Nearest,
+                address_mode: [crcbl_hal::SamplerAddressMode::ClampToEdge; 3],
+                ..crcbl_hal::SamplerDesc::default()
+            })
+            .expect("a sampler");
+
         let entries = [
             crcbl_hal::BindGroupLayoutEntry {
                 binding: 0,
@@ -374,6 +417,36 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl_hal::BindingFlags::empty(),
             },
+            // The base-colour page and its sampler. **A layout that leaves
+            // these out is not a validation message here — it is a
+            // `SIGSEGV`**: lavapipe takes an undeclared descriptor at face
+            // value and dereferences whatever the set happens to hold, so a
+            // missing entry crashes the runner instead of naming itself.
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 7,
+                // Both stages, for binding 6's reason: Slang's Metal backend
+                // materialises every global in every entry point, so the vertex
+                // half has to stay even though only `fragmentMain` samples it.
+                visibility: crcbl_hal::ShaderStages::VERTEX
+                    .union(crcbl_hal::ShaderStages::FRAGMENT),
+                // `D2Array`, matching the view above and the shader's
+                // `Texture2DArray`. Vulkan reads the dimension off the view and
+                // ignores this, but the seam is one declaration for every
+                // backend and WebGPU refuses a layout that disagrees.
+                kind: crcbl_hal::BindingKind::SampledImage {
+                    view_type: crcbl_hal::ImageViewType::D2Array,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: crcbl_hal::ShaderStages::VERTEX
+                    .union(crcbl_hal::ShaderStages::FRAGMENT),
+                kind: crcbl_hal::BindingKind::Sampler,
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
         ];
         let layout = device
             .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
@@ -416,6 +489,16 @@ impl DepthProbe {
                 binding: 6,
                 array_index: 0,
                 resource: crcbl_hal::BindingResource::whole_buffer(materials),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 7,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::ImageView(base_color_page.view),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 8,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::Sampler(base_color_sampler),
             },
         ];
         let group = device
@@ -480,6 +563,8 @@ impl DepthProbe {
             mesh_table,
             materials,
             visible_instances,
+            base_color_page,
+            base_color_sampler,
             layout,
             group,
             pipeline_layout,
@@ -492,6 +577,8 @@ impl DepthProbe {
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group(self.group);
         device.destroy_bind_group_layout(self.layout);
+        device.destroy_sampler(self.base_color_sampler);
+        self.base_color_page.destroy(device);
         device.destroy_buffer(self.visible_instances);
         device.destroy_buffer(self.mesh_table);
         device.destroy_buffer(self.materials);

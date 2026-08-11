@@ -30,9 +30,22 @@
 //! `crcbl-shaders` because rung 3 says "hardcoded cube/sphere".
 //!
 //! What *is* here since 2026-08 is [`crate::material_table`]: §3.2's material
-//! table, holding factors and no texture indices, with
-//! [`mesh::GpuInstance::material`] selecting a row. Two rows are resident, and
-//! the second exists to be seen — see [`ForwardRenderer::set_tinted_pyramid`].
+//! table, holding **both** halves of "texture indices + factors", with
+//! [`mesh::GpuInstance::material`] selecting a row. Three rows are resident and
+//! two of them exist to be seen: [`ForwardRenderer::set_tinted_pyramid`]'s
+//! differs from the default row in its factor alone, and
+//! [`ForwardRenderer::set_textured_pyramid`]'s in its base-colour page layer
+//! alone.
+//!
+//! The page is the texture side, and it is one `D2Array` image rather than an
+//! array of descriptors — `BindingModel::ArrayPages` rather than `Bindless`.
+//! That is the whole of the binding-model decision §3.2 leaves open, taken
+//! here because a layer index needs nothing of a device where a descriptor
+//! array needs `Features::DESCRIPTOR_INDEXING`, which `crcbl-mtl` withdraws. So
+//! there is one lookup, one layout and one artifact rather than a permutation,
+//! and a device that reports the feature runs the same declaration. What
+//! bindless buys later is capacity, not a second path — see `PAGE_EXTENT` and
+//! the layout entry for binding 7.
 //!
 //! What *was* on that list until 2026-08 is GPU culling and the indirect draw
 //! count, and both are here now: [`crate::draw_gen`] runs `cull.slang` and
@@ -111,10 +124,10 @@ use crcbl_hal::{
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, ColorTargetState, CullMode, DepthStencilState, Device, DrawIndirect,
     DrawIndirectCount, FilterMode, Format, GeometryPath, GraphicsPipelineDesc,
-    GraphicsPipelineHandle, HalError, ImageViewHandle, IndexFormat, LoadOp, MemoryLocation,
-    MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, QueueHandle,
-    ResourceState, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
-    ShaderStages, StoreOp,
+    GraphicsPipelineHandle, HalError, ImageViewHandle, ImageViewType, IndexFormat, LoadOp,
+    MemoryLocation, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
+    QueueHandle, ResourceState, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry,
+    ShaderModuleDesc, ShaderStages, StoreOp,
 };
 use crcbl_shaders::{MESH, Stage, TONEMAP, mesh};
 use glam::{Mat4, Quat, Vec3};
@@ -126,6 +139,7 @@ use crate::graph::{ImageId, ImportedImage, RenderGraph};
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc};
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
+use crate::texture::{UploadedTexture, upload_texture_layers};
 use crate::transient::TransientImageDesc;
 
 /// The clear behind the mesh, in **linear** light.
@@ -188,6 +202,71 @@ const POOL_MATERIAL_CAPACITY: u32 = 1024;
 /// See [`ForwardRenderer::set_tinted_pyramid`], which is the pair this exists
 /// for.
 const PYRAMID_TINT: [f32; 4] = [0.15, 0.45, 1.0, 1.0];
+
+/// The base-colour page's extent, in texels — square, and **two**.
+///
+/// `docs/plan/03-gpu-driven-rendering.md` §3.2's
+/// [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) page is one image with a
+/// layer per material texture, and two texels a side is the smallest extent in
+/// which a layer can be something other than a flat colour. Small on purpose,
+/// and not only because this is demo content:
+///
+/// * A flat layer would make the golden below pass with **no UV at all**. Four
+///   texels is what makes the texture coordinate observable, because a mesh
+///   whose UVs never varied would shade each face in one texel's colour.
+/// * Every texel boundary is a hard edge — the sampler has no mips and filters
+///   nearest, see [`ForwardRenderer::build`] — and a hard edge is where two
+///   rasterisers can land on opposite sides of an interpolated UV. Four texels
+///   put **one** boundary across a face in each axis, at `0.5`, which is as far
+///   from a vertex as an edge can be. A denser checker would put a row of
+///   disagreeable pixels through every face for no more evidence.
+const PAGE_EXTENT: u32 = 2;
+
+/// Bytes in one layer of the page: `PAGE_EXTENT²` RGBA texels.
+const PAGE_LAYER_BYTES: usize = (PAGE_EXTENT * PAGE_EXTENT) as usize * 4;
+
+/// The page layer a material naming no texture samples, which
+/// [`mesh::GpuMaterial::UNTINTED`] is written against.
+///
+/// **Layer 0 is white**, which is the convention that type's docs state and
+/// [`UNTEXTURED_TEXELS`] keeps: an `Rgba8UnormSrgb` texel of `0xFF` decodes to
+/// exactly `1.0`, so a material that names this layer is shaded by the same
+/// product it was before there was a page at all.
+const UNTEXTURED_LAYER: u32 = 0;
+
+/// The layer [`ForwardRenderer::set_textured_pyramid`] shades with.
+const CHECKER_LAYER: u32 = 1;
+
+/// Layer [`UNTEXTURED_LAYER`]: opaque white, in every texel.
+///
+/// sRGB-encoded like the layer beside it — the image is `Rgba8UnormSrgb` — and
+/// `0xFF` is the one value the encoding leaves alone, so the sampler returns
+/// exactly `1.0`.
+const UNTEXTURED_TEXELS: [u8; PAGE_LAYER_BYTES] = [0xFF; PAGE_LAYER_BYTES];
+
+/// Layer [`CHECKER_LAYER`]: four **distinct** greys, one per texel.
+///
+/// Distinct rather than a two-value checker, for the reason `crcbl-vk`'s sprite
+/// suite records about its sheets: a two-value checker is symmetric under both a
+/// flipped U and a flipped V, so either mistake would produce the same picture.
+/// No two of these are equal, so any flip is a different frame.
+///
+/// Grey rather than coloured because the colour axis is already spoken for:
+/// [`PYRAMID_TINT`] is what proves the *factor* column, and a texture that also
+/// changed hue would make the two columns' evidence look alike.
+const CHECKER_TEXELS: [u8; PAGE_LAYER_BYTES] = [
+    0xFF, 0xFF, 0xFF, 0xFF, // (0, 0)
+    0xB0, 0xB0, 0xB0, 0xFF, // (1, 0)
+    0x70, 0x70, 0x70, 0xFF, // (0, 1)
+    0x30, 0x30, 0x30, 0xFF, // (1, 1)
+];
+
+/// The page, layer by layer: element `n` is layer `n`.
+///
+/// The one place the page's length lives, so [`UNTEXTURED_LAYER`] and
+/// [`CHECKER_LAYER`] can be checked against it rather than against a number
+/// written twice.
+const PAGE_LAYERS: [&[u8; PAGE_LAYER_BYTES]; 2] = [&UNTEXTURED_TEXELS, &CHECKER_TEXELS];
 
 /// Buckets in the draw table, which is how many indirect calls the forward pass
 /// records — **whatever the scene holds**.
@@ -278,6 +357,9 @@ pub struct ForwardRenderer {
     /// row. See [`ForwardRenderer::set_tinted_pyramid`], which is what puts it
     /// in the scene and what it is for.
     tinted_pyramid_instance: Option<InstanceHandle>,
+    /// A third, shaded through a row that differs from the first's in nothing
+    /// but its page layer. See [`ForwardRenderer::set_textured_pyramid`].
+    textured_pyramid_instance: Option<InstanceHandle>,
     /// The mesh ids those instances carry. Kept because every write of an
     /// instance writes the whole record, and an instance that lost its mesh id
     /// would resolve to entry 0 — which is a mesh, and the wrong one.
@@ -297,6 +379,18 @@ pub struct ForwardRenderer {
     untinted_material: u32,
     /// The row [`PYRAMID_TINT`] went into.
     tinted_material: u32,
+    /// The row that is [`mesh::GpuMaterial::UNTINTED`] with
+    /// [`CHECKER_LAYER`] in place of [`UNTEXTURED_LAYER`] — the same factor as
+    /// [`ForwardRenderer::untinted_material`] and a different texture, which is
+    /// what makes the texture column observable on its own.
+    textured_material: u32,
+    /// §3.2's texture side: one `D2Array` image whose layers the material rows
+    /// index. One page, bound once, for every material — see the module docs on
+    /// why this is [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) and not
+    /// a bindless descriptor array.
+    base_color_page: UploadedTexture,
+    /// The sampler the page is read through.
+    base_color_sampler: SamplerHandle,
 
     /// The cull and draw-argument passes, and the indirect arguments they
     /// produce.
@@ -350,6 +444,9 @@ struct Rollback {
     pipeline_layouts: Vec<PipelineLayoutHandle>,
     pipelines: Vec<GraphicsPipelineHandle>,
     samplers: Vec<SamplerHandle>,
+    /// Uploaded images, which own a view each and so cannot be rolled back as
+    /// one list of handles.
+    textures: Vec<UploadedTexture>,
     /// The geometry pool, which owns two buffers, a semaphore and anything
     /// still staged — so it cannot be rolled back as a list of handles.
     pool: Option<MeshPool>,
@@ -367,6 +464,9 @@ impl Rollback {
     /// Releases everything, in the same dependency order as
     /// [`ForwardRenderer::destroy`].
     fn run(self, device: &dyn Device) {
+        for texture in self.textures {
+            texture.destroy(device);
+        }
         for handle in self.samplers {
             device.destroy_sampler(handle);
         }
@@ -447,9 +547,50 @@ impl ForwardRenderer {
         let mesh_table = pool.table_buffer();
         rollback.pool = Some(pool);
 
+        // §3.2's texture side, before the table that indexes it: a material row
+        // is written with a layer number, so the layer has to exist to be named.
+        //
+        // **`Rgba8UnormSrgb`, and that is the colour-space decision.** The
+        // texels above are sRGB-encoded, which is what glTF defines a
+        // base-colour texture to be, so the format is what makes the sampler
+        // decode them — and `mesh.slang` then multiplies a linear texel by a
+        // linear `base_color` and lights in linear, exactly as it did before
+        // there was a texture. Taking the decode off the format would mean
+        // multiplying an encoded value by a linear one, which is
+        // `crate::sprite_pass`'s "darkens every half-transparent edge" defect
+        // in a different place.
+        let page_layers = PAGE_LAYERS.map(|texels| texels.as_slice());
+        let base_color_page = upload_texture_layers(
+            device,
+            queue,
+            "material base colour",
+            Format::Rgba8UnormSrgb,
+            PAGE_EXTENT,
+            PAGE_EXTENT,
+            &page_layers,
+        )?;
+        rollback.textures.push(base_color_page);
+
+        // Nearest and clamped, like the tonemap's sampler below and for a
+        // reason of its own: the page has one mip level, because §3.2 makes mip
+        // generation a compute pass of its own, and filtering a page with no
+        // mips buys a shimmer rather than a smoother picture. A second sampler
+        // object rather than sharing that one, so a capture names each for what
+        // it filters.
+        let base_color_sampler = device.create_sampler(&SamplerDesc {
+            label: Some("material base colour"),
+            mag_filter: FilterMode::Nearest,
+            min_filter: FilterMode::Nearest,
+            mip_filter: FilterMode::Nearest,
+            address_mode: [SamplerAddressMode::ClampToEdge; 3],
+            ..SamplerDesc::default()
+        })?;
+        rollback.samplers.push(base_color_sampler);
+
         // The material table, before the instances: an instance is written with
         // the material id it carries, so the row has to exist to be named.
-        let (materials, untinted_material, tinted_material) = Self::build_materials(device)?;
+        let (materials, untinted_material, tinted_material, textured_material) =
+            Self::build_materials(device)?;
         let material_buffer = materials.buffer();
         rollback.materials = Some(materials);
 
@@ -589,6 +730,41 @@ impl ForwardRenderer {
                 count: 1,
                 flags: BindingFlags::empty(),
             },
+            BindGroupLayoutEntry {
+                binding: 7,
+                // Both stages, for binding 6's reason exactly: the fragment
+                // stage samples it, and Slang's Metal backend materialises
+                // every global in every entry point — `vertexMain` in
+                // `msl/mesh.metal` takes the texture whether it reads it or
+                // not, so a layout without VERTEX would break Metal alone.
+                visibility: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+                // **`D2Array`, and the layout is where wgpu wants to hear it.**
+                // The other three backends read the dimension off the bound
+                // view and never consult this; WebGPU compares the two at
+                // pipeline creation and refuses the pair, which is what a
+                // layout claiming `D2` over an array view got — "expects
+                // dimension = D2, but given a view with dimension = D2Array".
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2Array,
+                },
+                // **`count: 1`, and this is the binding-model decision.** One
+                // `D2Array` image whose *layers* the material rows index is
+                // `BindingModel::ArrayPages`; an array of `count` descriptors
+                // indexed per fragment would be `Bindless` and would need
+                // `Features::DESCRIPTOR_INDEXING`, which `crcbl-mtl` withdraws.
+                // So this layout is legal on every device, exactly as the six
+                // buffers above are, and no `BindingFlags` appear anywhere in
+                // this file yet.
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: 8,
+                visibility: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+                kind: BindingKind::Sampler,
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
         ];
         let mesh_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("mesh frame"),
@@ -709,6 +885,21 @@ impl ForwardRenderer {
                     // table's terms rather than the instance array's.
                     resource: BindingResource::whole_buffer(material_buffer),
                 },
+                BindGroupEntry {
+                    binding: 7,
+                    array_index: 0,
+                    // **One entry, `array_index: 0`**, because the page is one
+                    // image and the layer is chosen in the shader. A bindless
+                    // array would be one entry per texture at ascending array
+                    // indices, which is the write path `BindGroupEntry`'s own
+                    // docs describe and the one this pass does not take.
+                    resource: BindingResource::ImageView(base_color_page.view),
+                },
+                BindGroupEntry {
+                    binding: 8,
+                    array_index: 0,
+                    resource: BindingResource::Sampler(base_color_sampler),
+                },
             ];
             let group = device.create_bind_group(&BindGroupDesc {
                 label: Some("mesh frame"),
@@ -791,7 +982,9 @@ impl ForwardRenderer {
             BindGroupLayoutEntry {
                 binding: 0,
                 visibility: ShaderStages::FRAGMENT,
-                kind: BindingKind::SampledImage,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
                 count: 1,
                 flags: BindingFlags::empty(),
             },
@@ -876,6 +1069,7 @@ impl ForwardRenderer {
             cube_instance,
             pyramid_instance: None,
             tinted_pyramid_instance: None,
+            textured_pyramid_instance: None,
             cube_mesh,
             pyramid_mesh,
             materials: rollback
@@ -884,6 +1078,9 @@ impl ForwardRenderer {
                 .unwrap_or_else(|| unreachable!("the table was placed in the rollback above")),
             untinted_material,
             tinted_material,
+            textured_material,
+            base_color_page,
+            base_color_sampler,
             draws: rollback.draws.take().unwrap_or_else(|| {
                 unreachable!("draw generation was placed in the rollback above")
             }),
@@ -943,7 +1140,7 @@ impl ForwardRenderer {
     /// that: every instance below is written with an id read out of this table.
     /// It is a defence in depth, not the contract, because a caller assembling
     /// a `GpuInstance` by hand is one who has not read either.
-    fn build_materials(device: &dyn Device) -> Result<(MaterialTable, u32, u32), HalError> {
+    fn build_materials(device: &dyn Device) -> Result<(MaterialTable, u32, u32, u32), HalError> {
         let mut materials = MaterialTable::new(
             device,
             &MaterialTableDesc {
@@ -952,7 +1149,7 @@ impl ForwardRenderer {
             },
         )?;
         match Self::material_rows(device, &mut materials) {
-            Ok((untinted, tinted)) => Ok((materials, untinted, tinted)),
+            Ok((untinted, tinted, textured)) => Ok((materials, untinted, tinted, textured)),
             Err(error) => {
                 materials.destroy(device);
                 Err(error)
@@ -960,27 +1157,57 @@ impl ForwardRenderer {
         }
     }
 
-    /// Fills the two rows and returns the ids an instance carries.
+    /// Fills the three rows and returns the ids an instance carries.
     ///
     /// Split out of [`ForwardRenderer::build_materials`] only so the table can
     /// be released on a failure without the borrow that filling it takes, which
     /// is the same shape [`ForwardRenderer::residents`] has.
+    ///
+    /// **The three rows are one row and two single-column edits of it**, which
+    /// is what makes each column's evidence its own. The tinted row differs
+    /// from the untinted one in its factor and nothing else; the textured row
+    /// differs from it in its page layer and nothing else. A row that changed
+    /// both would be a frame in which neither column could be told from the
+    /// other.
     fn material_rows(
         device: &dyn Device,
         materials: &mut MaterialTable,
-    ) -> Result<(u32, u32), HalError> {
-        let untinted = materials.insert(device, &mesh::GpuMaterial::UNTINTED)?;
+    ) -> Result<(u32, u32, u32), HalError> {
+        // The layer is named rather than left to `UNTINTED`'s own zero: this
+        // module owns the page, so it is the one that has to say which layer is
+        // the white one, and the two agreeing is a fact worth being able to see
+        // at the call site.
+        let untinted = materials.insert(
+            device,
+            &mesh::GpuMaterial {
+                base_color_texture: UNTEXTURED_LAYER,
+                ..mesh::GpuMaterial::UNTINTED
+            },
+        )?;
         let tinted = materials.insert(
             device,
             &mesh::GpuMaterial {
                 base_color: PYRAMID_TINT,
+                ..mesh::GpuMaterial::UNTINTED
             },
         )?;
-        // A table this size cannot have refused either handle, so both resolve
-        // — but the ids are asked for rather than assumed, because the number
-        // an instance carries is this one and nothing else knows it.
-        match (materials.index(untinted), materials.index(tinted)) {
-            (Some(untinted), Some(tinted)) => Ok((untinted, tinted)),
+        let textured = materials.insert(
+            device,
+            &mesh::GpuMaterial {
+                base_color_texture: CHECKER_LAYER,
+                ..mesh::GpuMaterial::UNTINTED
+            },
+        )?;
+        // A table this size cannot have refused any of the handles, so all
+        // three resolve — but the ids are asked for rather than assumed,
+        // because the number an instance carries is this one and nothing else
+        // knows it.
+        match (
+            materials.index(untinted),
+            materials.index(tinted),
+            materials.index(textured),
+        ) {
+            (Some(untinted), Some(tinted), Some(textured)) => Ok((untinted, tinted, textured)),
             _ => Err(HalError::Backend(
                 "a material inserted into an empty table did not resolve".to_string(),
             )),
@@ -1246,6 +1473,39 @@ impl ForwardRenderer {
         );
     }
 
+    /// Puts a **third instance of the pyramid mesh** in the frame at `model`,
+    /// shaded through a material whose only difference from
+    /// [`ForwardRenderer::set_pyramid`]'s is its base-colour page layer, or
+    /// takes it back out with `None`.
+    ///
+    /// **This is what makes `GpuMaterial::base_color_texture` observable**, and
+    /// it is why it is here at all. It is [`ForwardRenderer::set_tinted_pyramid`]'s
+    /// argument moved one column along: that pair's two rows differ in their
+    /// factor and this pair's differ in their texture, so each column has a pair
+    /// of its own and neither can be mistaken for the other. A frame in which
+    /// this pyramid and the plain one are the same picture is a frame where the
+    /// layer index indexed nothing — and because the layer is four unequal
+    /// texels rather than a flat colour, it is also a frame that fails if the
+    /// texture coordinate never reached the fragment stage.
+    ///
+    /// [`ForwardRenderer::set_pyramid`]'s sibling in every other respect: off
+    /// by default, `None` removes the instance rather than skipping a draw, and
+    /// the change takes effect at the next [`ForwardRenderer::begin_frame`].
+    pub fn set_textured_pyramid(&mut self, model: Option<Mat4>) {
+        let instance = model.map(|model| mesh::GpuInstance {
+            transform: model.to_cols_array(),
+            mesh: self.pyramid_mesh,
+            material: self.textured_material,
+            ..mesh::GpuInstance::default()
+        });
+        place(
+            &mut self.instances,
+            &mut self.textured_pyramid_instance,
+            instance.as_ref(),
+            "the textured pyramid",
+        );
+    }
+
     /// Adds the forward and tonemap passes to `graph`, rendering into `target`,
     /// and returns the HDR scene target they went through.
     ///
@@ -1508,6 +1768,8 @@ impl ForwardRenderer {
             device.destroy_bind_group(group);
         }
         device.destroy_bind_group_layout(self.mesh_layout);
+        self.base_color_page.destroy(device);
+        device.destroy_sampler(self.base_color_sampler);
         for buffer in self.uniforms {
             device.destroy_buffer(buffer);
         }
@@ -1522,10 +1784,12 @@ impl ForwardRenderer {
 /// Puts `instance` in `slot`, or takes whatever is there back out when it is
 /// `None`.
 ///
-/// The body [`ForwardRenderer::set_pyramid`] and
-/// [`ForwardRenderer::set_tinted_pyramid`] share: both hold an optional handle
-/// into the same pool and both mean the same three things by it — insert when
-/// there is nothing there, rewrite when there is, and remove on `None`.
+/// The body [`ForwardRenderer::set_pyramid`],
+/// [`ForwardRenderer::set_tinted_pyramid`] and
+/// [`ForwardRenderer::set_textured_pyramid`] share: each holds an optional
+/// handle into the same pool and each means the same three things by it —
+/// insert when there is nothing there, rewrite when there is, and remove on
+/// `None`.
 ///
 /// A free function rather than a method because it takes the pool and the slot
 /// as separate borrows, which a `&mut self` method could not: both are fields
@@ -1854,7 +2118,8 @@ mod tests {
         assert_eq!(
             row(tinted.material),
             mesh::GpuMaterial {
-                base_color: PYRAMID_TINT
+                base_color: PYRAMID_TINT,
+                ..mesh::GpuMaterial::UNTINTED
             },
             "the tinted pyramid's row must be the tint"
         );
@@ -1863,12 +2128,108 @@ mod tests {
             row(tinted.material),
             "two rows holding the same colour would make the pair prove nothing"
         );
+        // And the tint is the *only* thing that differs between them: a row that
+        // also changed its page layer would make this pair evidence about two
+        // columns at once, which is what the third pyramid exists to avoid.
+        assert_eq!(
+            row(plain.material).base_color_texture,
+            row(tinted.material).base_color_texture,
+            "the factor pair must sample the same page layer"
+        );
 
         // And the second pyramid leaves the frame the way the first does: the
         // instance is removed, not a draw skipped.
         renderer.set_tinted_pyramid(None);
         assert!(
             renderer.tinted_pyramid_instance.is_none(),
+            "the instance must be given back, or an object nobody asked for stays in the scene"
+        );
+
+        renderer.destroy(device.as_ref());
+    }
+
+    /// **The same claim one column along: the plain and textured pyramids
+    /// differ in exactly one field, and the rows it names differ in exactly one
+    /// column — the base-colour page layer.**
+    ///
+    /// [`the_two_pyramids_differ_only_in_their_material`]'s argument for §3.2's
+    /// *texture indices* rather than its *factors*. The factors of the two rows
+    /// are asserted **equal** here, which is the half that makes the pair
+    /// evidence about the texture at all: a textured row that also carried a
+    /// tint would draw a different picture for a reason the frame could not
+    /// distinguish from the tinted pyramid's.
+    ///
+    /// The layer numbers are asserted against the page the renderer actually
+    /// uploaded, so a row naming a layer that does not exist is caught here
+    /// rather than as an out-of-range sample on a device.
+    #[test]
+    fn the_textured_pyramid_differs_only_in_its_page_layer() {
+        let (recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        let at = Mat4::from_translation(Vec3::new(-1.0, 0.0, 0.0));
+        renderer.set_pyramid(Some(at));
+        renderer.set_textured_pyramid(Some(at));
+
+        let instance = |handle: Option<InstanceHandle>| {
+            renderer
+                .instances
+                .get(handle.expect("the instance was inserted"))
+                .expect("and it is live")
+        };
+        let plain = instance(renderer.pyramid_instance);
+        let textured = instance(renderer.textured_pyramid_instance);
+        assert_ne!(
+            plain.material, textured.material,
+            "the two pyramids must not share a material row"
+        );
+        assert_eq!(
+            mesh::GpuInstance {
+                material: textured.material,
+                ..plain
+            },
+            textured,
+            "the two instances must differ in the material id and in nothing else"
+        );
+
+        let bytes = recorder
+            .buffer_bytes(renderer.materials.buffer())
+            .expect("the table is live");
+        let row = |index: u32| {
+            let at = index as usize * crcbl_shaders::mesh::MATERIAL_STRIDE;
+            mesh::GpuMaterial::from_bytes(
+                bytes[at..at + crcbl_shaders::mesh::MATERIAL_STRIDE]
+                    .try_into()
+                    .expect("one row"),
+            )
+        };
+        assert_eq!(
+            row(plain.material).base_color,
+            row(textured.material).base_color,
+            "the texture pair must share a factor, or the pair is evidence about both columns"
+        );
+        assert_eq!(row(plain.material).base_color_texture, UNTEXTURED_LAYER);
+        assert_eq!(row(textured.material).base_color_texture, CHECKER_LAYER);
+        assert_ne!(
+            row(plain.material),
+            row(textured.material),
+            "two rows naming the same layer would make the pair prove nothing"
+        );
+        // The layers those numbers name are layers the page has, and they hold
+        // different texels — a page whose two layers were the same image would
+        // pass every assertion above and draw one picture.
+        assert_ne!(UNTEXTURED_TEXELS, CHECKER_TEXELS);
+        for layer in [UNTEXTURED_LAYER, CHECKER_LAYER] {
+            assert!(
+                (layer as usize) < PAGE_LAYERS.len(),
+                "layer {layer} is past the end of a {}-layer page, which is an out-of-range                  sample nothing below the seam would report",
+                PAGE_LAYERS.len()
+            );
+        }
+
+        renderer.set_textured_pyramid(None);
+        assert!(
+            renderer.textured_pyramid_instance.is_none(),
             "the instance must be given back, or an object nobody asked for stays in the scene"
         );
 

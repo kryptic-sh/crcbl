@@ -56,10 +56,10 @@ use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BlendState, BufferDesc,
     BufferHandle, BufferUsage, ColorTargetState, ColorWrites, Device, FilterMode, Format,
-    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageViewHandle, IndexFormat, LoadOp,
-    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, QueueHandle,
-    SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderStages,
-    StoreOp,
+    GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageViewHandle, ImageViewType,
+    IndexFormat, LoadOp, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
+    QueueHandle, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
+    ShaderStages, StoreOp,
 };
 
 use crcbl_shaders::{Stage, UI};
@@ -228,7 +228,9 @@ impl UiRenderer {
             BindGroupLayoutEntry {
                 binding: 0,
                 visibility: ShaderStages::FRAGMENT,
-                kind: BindingKind::SampledImage,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
                 count: 1,
                 flags: BindingFlags::empty(),
             },

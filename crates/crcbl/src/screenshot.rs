@@ -104,11 +104,14 @@ pub enum Scene {
     /// at a non-zero base vertex, so it is the only thing this comparison can
     /// use to tell the four targets' `SV_VertexID` lowerings apart.
     ///
-    /// **There are two of it**, mirrored across the cube, and they are the same
-    /// mesh at the same orientation differing in nothing but their material id
-    /// — which is what makes this frame the observable for
-    /// `docs/plan/03-gpu-driven-rendering.md` §3.2's material table. See
-    /// `TINTED_PYRAMID_AT`, which is where the second one goes and why.
+    /// **There are three of it**, and they are the same mesh at the same
+    /// orientation differing in nothing but their material id — which is what
+    /// makes this frame the observable for
+    /// `docs/plan/03-gpu-driven-rendering.md` §3.2's material table. The three
+    /// are one row and two single-column edits of it: see `TINTED_PYRAMID_AT`,
+    /// whose row differs in its base-colour *factor*, and
+    /// `TEXTURED_PYRAMID_AT`, whose row differs in its base-colour *texture*.
+    /// One pair per column, so neither column's evidence is the other's.
     #[default]
     Cube,
     /// Four sprites over three [`SpriteRenderer`] batches: `sprite.slang`.
@@ -118,18 +121,38 @@ pub enum Scene {
     Ui,
 }
 
-/// Where [`Scene::Cube`] puts the pyramid, in world units.
+/// How far from the cube's own column each pyramid sits, in world units.
 ///
-/// Left of the cube and clear of it: the camera is two units back with a 60°
-/// vertical field of view, so at `z = 0` the frame is about 2.3 units tall and
-/// 3.1 wide at 4:3. The cube spans `±0.5` and the pyramid `±0.4`, so this
-/// leaves both fully inside the frame with a gap between them — and a gap is
-/// what makes "the pyramid drew the cube's vertices" a visibly different
-/// picture rather than an overlap.
-const PYRAMID_AT: glam::Vec3 = glam::Vec3::new(-1.05, 0.0, 0.0);
+/// The camera is two units back with a 60° vertical field of view, so at
+/// `z = 0` the frame is about 2.3 units tall and 3.1 wide at 4:3. The cube
+/// spans `±0.5` and each pyramid `±0.4`, so a column at `±1.05` sits fully
+/// inside the frame with a gap on both sides of it — and a gap is what makes
+/// "the pyramid drew the cube's vertices" a visibly different picture rather
+/// than an overlap.
+const PYRAMID_COLUMN: f32 = 1.05;
 
-/// Where [`Scene::Cube`] puts the **second** pyramid: mirrored across the cube
-/// from [`PYRAMID_AT`], so the frame is symmetric and the pair is side by side.
+/// How far above or below the cube's own row each pyramid sits.
+///
+/// The pyramids used to share the cube's row, and a **third** of them is what
+/// moved them off it: two rows are what a scene needs to hold two pairs, and
+/// there is no room for a third column — the cube is 0.5 wide and each pyramid
+/// 0.4, so a fourth object beside them would leave the frame.
+///
+/// `0.55` is what fits. A pyramid spans `-0.4 ..= 0.5` about its own origin and
+/// the frame is `±1.15` tall, so a row at `+0.55` reaches `1.05` and one at
+/// `-0.55` reaches `-0.95`: both inside, with `0.2` of clear sky between the
+/// rows so no two pyramids touch.
+const PYRAMID_ROW: f32 = 0.55;
+
+/// Where [`Scene::Cube`] puts the plain pyramid: top left.
+///
+/// It is the one both other pyramids are compared against, and its material is
+/// the untinted, untextured row — so each of the two below differs from *this*
+/// object in exactly one material column.
+const PYRAMID_AT: glam::Vec3 = glam::Vec3::new(-PYRAMID_COLUMN, PYRAMID_ROW, 0.0);
+
+/// Where [`Scene::Cube`] puts the **factor** pyramid: top right, beside
+/// [`PYRAMID_AT`].
 ///
 /// The two are the same mesh at the same orientation and the same size, and the
 /// only field their instances differ in is the material id — which is the whole
@@ -138,11 +161,30 @@ const PYRAMID_AT: glam::Vec3 = glam::Vec3::new(-1.05, 0.0, 0.0);
 /// nothing, and it is a *visibly* different frame rather than a subtly wrong
 /// one.
 ///
-/// Mirrored rather than placed anywhere else because the gap
-/// [`PYRAMID_AT`]'s docs measure is the same gap on the other side: the frame
-/// is about 3.1 world units wide at `z = 0`, the cube spans `±0.5` and each
-/// pyramid `±0.4`, so both sit fully inside it without touching the cube.
-const TINTED_PYRAMID_AT: glam::Vec3 = glam::Vec3::new(1.05, 0.0, 0.0);
+/// Beside it rather than anywhere else so the difference is read across a row:
+/// the two are at the same height, lit by the same directional light, and the
+/// only thing that can make them different colours is the factor in the row
+/// their id names.
+const TINTED_PYRAMID_AT: glam::Vec3 = glam::Vec3::new(PYRAMID_COLUMN, PYRAMID_ROW, 0.0);
+
+/// Where [`Scene::Cube`] puts the **texture** pyramid: below [`PYRAMID_AT`].
+///
+/// [`TINTED_PYRAMID_AT`]'s argument moved one column of the material row along.
+/// This instance's material has [`PYRAMID_AT`]'s factor exactly and a different
+/// base-colour page layer, so the pair above and below each other is the
+/// observable for §3.2's *texture indices* where the pair across the top row is
+/// the observable for its *factors*.
+///
+/// The layer it names is four unequal texels rather than a flat colour, so this
+/// pyramid's faces are quartered where the plain one's are flat — which means
+/// the frame also fails if the texture coordinate never reached the fragment
+/// stage, not only if the index did.
+///
+/// Below rather than beside, because there is no third column: see
+/// [`PYRAMID_ROW`]. The bottom-right corner is left empty for the same reason a
+/// fourth pyramid would prove nothing new — a row differing in *both* columns
+/// is a picture neither pair could be told from.
+const TEXTURED_PYRAMID_AT: glam::Vec3 = glam::Vec3::new(-PYRAMID_COLUMN, -PYRAMID_ROW, 0.0);
 
 /// The colour [`Scene::Sprite`] and [`Scene::Ui`] composite onto, in **linear**
 /// light — which is what a clear value on an sRGB attachment means.
@@ -334,6 +376,8 @@ impl SceneState {
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
                 renderer.set_pyramid(Some(glam::Mat4::from_translation(PYRAMID_AT)));
                 renderer.set_tinted_pyramid(Some(glam::Mat4::from_translation(TINTED_PYRAMID_AT)));
+                renderer
+                    .set_textured_pyramid(Some(glam::Mat4::from_translation(TEXTURED_PYRAMID_AT)));
                 Self::Cube {
                     camera: Camera::default().with_projection(Projection::Perspective {
                         fov_y: std::f32::consts::FRAC_PI_3,

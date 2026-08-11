@@ -109,19 +109,47 @@
 // is built, and the instance index arrives from a buffer the cull pass filled.
 // A draw therefore covers however many instances survived culling without the
 // CPU learning the number, which is what §3.3 is for.
+//
+// # The material table now has both halves, and its texture side is one page
+//
+// §3.2 asks for "a bindless texture array (`BindingModel::Bindless`) or texture
+// array pages (`ArrayPages`)". This file has the second: `base_color_textures`
+// is a single `Texture2DArray` and `GpuMaterial::base_color_texture` names a
+// layer of it. Only one of the two models is here, and the reason is that only
+// one of them every device can run — `crcbl-hal` derives `BindingModel` from
+// `Features::DESCRIPTOR_INDEXING`, `crcbl-mtl` withdraws that feature, and a
+// layer index needs nothing beyond a dynamically indexed sample. A device that
+// *does* report the feature runs this same declaration; what it does not get
+// yet is one array holding every texture in the world, which is P3's.
+//
+// Colour space is the one thing a reader has to take on trust from outside this
+// file, so it is written down in both places: the page is created as
+// `Rgba8UnormSrgb` by `crcbl_render::forward`, which is the format glTF defines
+// base-colour textures to be in, so the sampler returns linear light and the
+// multiply against `base_color` — which is linear, like every colour in this
+// pass — is a multiply of two values in the same space. The tonemap pass and
+// the swapchain's sRGB encode are what turn the product into pixels.
 
 /// One vertex of a hardcoded mesh, matching `crcbl_shaders::mesh::MeshVertex`.
 ///
-/// Three `float4`s rather than a packed `float3` triple: under `std430` a
-/// `float3` is 16-byte aligned *and* 12 bytes wide, so a struct of them has
-/// padding the CPU side has to reproduce exactly. Three `float4`s are 48 bytes
-/// with no padding anywhere, which is a layout that cannot drift. The `w`
-/// components are unused; P9's real vertex format packs them (topic 03 §3.1).
+/// `float4`s rather than packed `float3`/`float2` members: under `std430` a
+/// `float3` is 16-byte aligned *and* 12 bytes wide and a `float2` is 8-byte
+/// aligned, so a struct mixing them has padding the CPU side has to reproduce
+/// exactly. Four `float4`s are 64 bytes with no padding anywhere, which is a
+/// layout that cannot drift. The unused `w` components stay unused; P9's real
+/// vertex format packs them (topic 03 §3.1).
 struct MeshVertex
 {
     float4 position;
     float4 normal;
     float4 color;
+    /// Base-colour texture coordinates in `xy`; `zw` unused.
+    ///
+    /// A whole `float4` for two numbers, deliberately: a `float2` here would be
+    /// eight bytes followed by eight of tail padding, because the struct's own
+    /// alignment is the `float4`s' 16 — so it would cost the same and put a
+    /// hole in a layout whose whole point is not having one.
+    float4 uv;
 };
 
 /// Everything the frame needs that is not geometry, matching
@@ -227,25 +255,35 @@ struct GpuMesh
     float max_z;
 };
 
-/// One material's shading factors, matching `crcbl_shaders::mesh::GpuMaterial`.
+/// One material's shading factors **and its base-colour texture**, matching
+/// `crcbl_shaders::mesh::GpuMaterial`.
 ///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.2's material table, and **only its
-/// factors half**: that section pairs the table with "a bindless texture array
-/// (`BindingModel::Bindless`) or texture array pages (`ArrayPages`)", and which
-/// of those two a texture index would mean is a decision this record does not
-/// take. A texture column carried here ahead of that decision would be a field
-/// nothing reads, so there is not one — the same plan warns against a
-/// "premature material system", and `docs/plan/37-materials.md` owns the shape
-/// a real one has.
+/// `docs/plan/03-gpu-driven-rendering.md` §3.2's material table, which "holds
+/// texture indices + factors". That section pairs it with "a bindless texture
+/// array (`BindingModel::Bindless`) or texture array pages (`ArrayPages`)", and
+/// the index below is an `ArrayPages` **page layer**: `base_color_textures` is
+/// one `Texture2DArray` and the index selects a slice of it. That is the model
+/// every device can run — a descriptor array needs `DESCRIPTOR_INDEXING`, which
+/// Metal does not report — so there is one lookup here rather than a
+/// permutation, which is the same plan's "the lesser path is a constraint on
+/// data layout, not a separate renderer".
 struct GpuMaterial
 {
-    /// Linear RGBA factor multiplied into the vertex albedo.
-    ///
-    /// One `float4` rather than a `float3` and a scalar, for `GpuMesh`'s
-    /// reason inverted: `std430` aligns a `float4` to 16 and this struct is one
-    /// member long, so the row is 16 bytes with no padding anywhere and its
-    /// stride cannot be rounded up to something the CPU side does not write.
+    /// Linear RGBA factor multiplied into the vertex albedo and the texel.
     float4 base_color;
+    /// Which layer of `base_color_textures` this material samples.
+    ///
+    /// Layer 0 by convention holds a white texel, so a material that wants no
+    /// texture leaves this at zero and the multiply below changes nothing —
+    /// `crcbl_render`'s forward pass is what fills that layer and says so.
+    uint base_color_texture;
+    /// Pads the row to 32 bytes, which is what `std430` rounds it to anyway:
+    /// the struct's alignment is the `float4`'s 16, so a 20-byte row would be
+    /// read at a stride of 32 by a shader while the CPU wrote it at 20. Spelled
+    /// out rather than implied, exactly as `DrawConstants` below spells its own.
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 
 /// Where this draw's run of visible instances starts, matching
@@ -299,14 +337,47 @@ StructuredBuffer<uint> visible_instances;
 /// the move is not a correctness fix: the factor is one value per instance and
 /// interpolation is linear, so scaling the corners and scaling the interpolated
 /// result are the same picture — which is exactly what makes the move safe to
-/// make on its own, with every golden still matching. What it buys is that the
-/// fragment stage can now reach the table at all, which the texture half of
+/// make on its own, with every golden still matching. What it bought is that
+/// the fragment stage can reach the table at all, which the texture half of
 /// §3.2 needs and a per-vertex read can never provide: a texture fetch is not
 /// constant across a primitive, so nothing it feeds can be folded into a
-/// varying. `VertexOutput::material` is the id that got it here, and its
-/// declaration is where the per-target risk is written down.
+/// varying. That half is here now — see `base_color_textures` below.
+/// `VertexOutput::material` is the id that got it here, and its declaration is
+/// where the per-target risk is written down.
 [[vk::binding(6, 0)]]
 StructuredBuffer<GpuMaterial> materials;
+
+/// §3.2's texture side: **one `ArrayPages` page**, indexed by
+/// `GpuMaterial::base_color_texture`.
+///
+/// A `Texture2DArray` — one image, one descriptor, a layer per material texture
+/// — rather than an array *of* descriptors, and that is the whole binding-model
+/// decision. A descriptor array is `BindingModel::Bindless` and needs
+/// `Features::DESCRIPTOR_INDEXING`, which `crcbl-mtl` withdraws; a layer index
+/// is an ordinary dynamically-indexed sample that every target has always had,
+/// so this one declaration runs on all four and the layout that binds it sets
+/// no `BindingFlags` at all.
+///
+/// **The layers are sRGB-encoded and the sampler is what decodes them.**
+/// `crcbl_render::forward` creates the image as `Rgba8UnormSrgb`, and the
+/// format is the whole of the decode: the sampler returns linear light, which
+/// is the space `base_color` and the vertex albedo are in, so the three can be
+/// multiplied. Nothing here converts anything — a `pow` in this file would mean
+/// the format was wrong. sRGB is also the format glTF requires of a base-colour
+/// texture, where its base-colour *factor* is linear; the two spaces meeting in
+/// one product is the trap this arrangement removes.
+[[vk::binding(7, 0)]]
+Texture2DArray<float4> base_color_textures;
+
+/// The one sampler the page is read through: nearest, clamped.
+///
+/// Nearest because these are material *pages* rather than photographs — there
+/// is no mip chain (§3.2's mip generation is a compute pass of its own) and a
+/// filtered read of a page with no mips is a shimmer, not a smoother picture.
+/// One sampler and no choice, for `sprite.slang`'s reason: a shader cannot ask
+/// which filter it got, so a second one would be a second pipeline.
+[[vk::binding(8, 0)]]
+SamplerState base_color_sampler;
 
 struct VertexOutput
 {
@@ -339,6 +410,10 @@ struct VertexOutput
     /// unlike colour families, so a fragment that resolved the wrong row is a
     /// smear between them and not a shade of the right answer.
     nointerpolation uint material : TEXCOORD0;
+    /// This fragment's base-colour texture coordinates, straight off the
+    /// vertex. Interpolated, unlike `material` above: a UV *is* a quantity, and
+    /// the point of it is to vary across the primitive.
+    float2 uv : TEXCOORD1;
 };
 
 [shader("vertex")]
@@ -367,6 +442,7 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     // second draw. Passed on rather than resolved here: the table is the
     // fragment stage's to read now, for the reason its binding gives.
     output.material = instance.material;
+    output.uv = vertex.uv.xy;
     return output;
 }
 
@@ -392,12 +468,20 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     float3 to_light = normalize(frame.light_direction.xyz);
     float3 to_eye = normalize(frame.camera_position.xyz - input.world_position);
 
-    // The material factor, applied here rather than at the corners. `material`
-    // is flat, so every fragment of a primitive resolves the row its instance
-    // named and this is the same product the vertex stage used to compute — up
-    // to the order the multiply and the interpolation happen in, which is a
-    // rounding difference and not a colour one.
-    float4 albedo = input.color * materials[input.material].base_color;
+    // The material row, resolved here rather than at the corners. `material` is
+    // flat, so every fragment of a primitive reads the row its instance named.
+    GpuMaterial material = materials[input.material];
+    // Both halves of §3.2's "texture indices + factors", multiplied together.
+    // The sample is why the lookup had to move to this stage at all: a texture
+    // fetch is not constant across a primitive, so nothing it feeds could have
+    // been folded into a varying at the corners.
+    //
+    // The texel arrives **linear** — the page is an sRGB-format image, so the
+    // sampler decoded it — which is the space `base_color` and `input.color`
+    // are in. See the binding above.
+    float4 texel = base_color_textures.Sample(
+        base_color_sampler, float3(input.uv, float(material.base_color_texture)));
+    float4 albedo = input.color * material.base_color * texel;
 
     // Lambert.
     float diffuse = max(dot(normal, to_light), 0.0);

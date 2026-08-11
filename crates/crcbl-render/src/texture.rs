@@ -6,6 +6,23 @@
 //!            └──barrier ▸ copy_buffer_to_image ▸ barrier──▶ sampled image + view
 //! ```
 //!
+//! # One layer or several
+//!
+//! [`upload_texture`] uploads a single-layer `D2` image, which is what a sprite
+//! sheet and a glyph atlas are. [`upload_texture_layers`] uploads several layers
+//! of the same size into one `D2Array` image, which is
+//! `docs/plan/03-gpu-driven-rendering.md` §3.2's
+//! [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) page: one image, one
+//! descriptor, and a layer index in the material row selecting between them.
+//!
+//! Both go through the same body, and the layered one records **one copy per
+//! layer** rather than one covering all of them. That is not caution: a copy
+//! region's extent is a 2D extent on every backend here — `crcbl-dx12` refuses
+//! a `depth_or_layers` other than 1 by name, because `CopyTextureRegion`
+//! addresses one subresource — so the layer travels in
+//! [`ImageSubresourceLayers::base_layer`] and the buffer offset says where that
+//! layer's rows start.
+//!
 //! This is a **startup** path, not a frame path: it records its own barriers
 //! and blocks on [`Device::wait_idle`], which is only legal because no graph
 //! exists yet. See this crate's docs on the one rule — the two staging uploads
@@ -38,7 +55,8 @@ use crcbl_hal::{
 pub struct UploadedTexture {
     /// The device-local image the copy filled.
     pub image: ImageHandle,
-    /// A full-subresource `D2` colour view of [`UploadedTexture::image`].
+    /// A full-subresource colour view of [`UploadedTexture::image`]: `D2` from
+    /// [`upload_texture`], `D2Array` from [`upload_texture_layers`].
     pub view: ImageViewHandle,
 }
 
@@ -86,6 +104,73 @@ pub fn upload_texture(
     height: u32,
     pixels: &[u8],
 ) -> Result<UploadedTexture, HalError> {
+    upload(
+        device,
+        queue,
+        label,
+        format,
+        (width, height),
+        &[pixels],
+        ImageViewType::D2,
+    )
+}
+
+/// Uploads several equally-sized layers into one `D2Array` colour image, and
+/// returns it with an array view onto every layer.
+///
+/// §3.2's [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) page: the index a
+/// material row carries is a layer of the image this returns. One image rather
+/// than one descriptor per texture is what makes the lookup need no
+/// [`Features::DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING),
+/// and therefore run on every backend the engine has — see
+/// [`crate::forward`], which builds the page this crate's only caller binds.
+///
+/// Every slice in `layers` must be exactly one tightly packed
+/// `width * height * texel_size` image, and they become layers 0, 1, … in the
+/// order given. [`upload_texture`]'s account of the label, the row padding and
+/// the release-on-every-path rule applies here unchanged.
+///
+/// # Errors
+///
+/// [`upload_texture`]'s errors, plus [`HalError::InvalidDescriptor`] when
+/// `layers` is empty — a zero-layer image is not a page, and it reaches the
+/// device as a zero extent whose complaint names a different thing. A layer
+/// count past the device's `max_image_array_layers` is the device's to refuse.
+pub fn upload_texture_layers(
+    device: &dyn Device,
+    queue: QueueHandle,
+    label: &str,
+    format: Format,
+    width: u32,
+    height: u32,
+    layers: &[&[u8]],
+) -> Result<UploadedTexture, HalError> {
+    upload(
+        device,
+        queue,
+        label,
+        format,
+        (width, height),
+        layers,
+        ImageViewType::D2Array,
+    )
+}
+
+/// The body both public uploads share: validate, stage every layer into one
+/// buffer, then hand over to [`upload_image`].
+///
+/// `extent` is `(width, height)` as one argument rather than two, which is what
+/// keeps this inside the argument count the public wrappers already sit at.
+fn upload(
+    device: &dyn Device,
+    queue: QueueHandle,
+    label: &str,
+    format: Format,
+    extent: (u32, u32),
+    layers: &[&[u8]],
+    view_type: ImageViewType,
+) -> Result<UploadedTexture, HalError> {
+    let (width, height) = extent;
     // `texel_size`, not `block_size`: it is the number a `BufferImageCopy` is
     // sized against, and it is `None` for exactly the formats this path cannot
     // describe — a combined depth/stencil format, whose two planes need two
@@ -111,15 +196,23 @@ pub fn upload_texture(
             "{label}: texture extent {width}x{height} must be non-zero in both dimensions"
         )));
     }
+    let layer_count = u32::try_from(layers.len()).unwrap_or(u32::MAX);
+    if layer_count == 0 {
+        return Err(HalError::InvalidDescriptor(format!(
+            "{label}: a texture needs at least one layer of pixels"
+        )));
+    }
 
     let row_bytes = u64::from(width) * u64::from(texel);
     let expected = row_bytes * u64::from(height);
-    if pixels.len() as u64 != expected {
-        return Err(HalError::InvalidDescriptor(format!(
-            "{label}: a {width}x{height} {format:?} image is {expected} bytes ({texel} per \
-             texel), got {}",
-            pixels.len()
-        )));
+    for (index, pixels) in layers.iter().enumerate() {
+        if pixels.len() as u64 != expected {
+            return Err(HalError::InvalidDescriptor(format!(
+                "{label}: layer {index} of a {width}x{height} {format:?} image is {expected} \
+                 bytes ({texel} per texel), got {}",
+                pixels.len()
+            )));
+        }
     }
 
     let alignment = device
@@ -128,12 +221,20 @@ pub fn upload_texture(
         .optimal_buffer_copy_offset_alignment
         .max(1);
     let row_pitch = padded_row_pitch(row_bytes, texel, alignment);
-    let size = row_pitch * u64::from(height);
-    let padded = stage_rows(row_bytes, height, row_pitch, pixels).ok_or_else(|| {
-        HalError::InvalidDescriptor(format!(
-            "{label}: a {size}-byte staging image does not fit in this host's address space"
-        ))
-    })?;
+    // Each layer's rows are already a multiple of the alignment, so stacking
+    // them puts every layer's own offset on it too — which is what lets the
+    // copies below name one buffer offset per layer.
+    let layer_bytes = row_pitch * u64::from(height);
+    let size = layer_bytes * u64::from(layer_count);
+    let mut padded = Vec::new();
+    for pixels in layers {
+        let staged = stage_rows(row_bytes, height, row_pitch, pixels).ok_or_else(|| {
+            HalError::InvalidDescriptor(format!(
+                "{label}: a {size}-byte staging image does not fit in this host's address space"
+            ))
+        })?;
+        padded.extend_from_slice(&staged);
+    }
 
     let staging_label = format!("{label} staging");
     let staging = device.create_buffer(&BufferDesc {
@@ -154,6 +255,9 @@ pub fn upload_texture(
             width,
             height,
             row_texels,
+            layer_count,
+            layer_bytes,
+            view_type,
             staging,
         },
         &padded,
@@ -212,6 +316,15 @@ struct UploadArgs<'a> {
     width: u32,
     height: u32,
     row_texels: u32,
+    /// Array layers in the image, and slices in the staging buffer.
+    layer_count: u32,
+    /// Bytes between one layer's first row and the next's, in the staging
+    /// buffer — the padded row pitch times the height.
+    layer_bytes: u64,
+    /// `D2` for one layer, `D2Array` for a page. Not derived from
+    /// `layer_count`: a one-layer array view is a legitimate thing to want, and
+    /// the shader's declaration is what decides which it is.
+    view_type: ImageViewType,
     staging: crcbl_hal::BufferHandle,
 }
 
@@ -229,7 +342,13 @@ fn upload_image(
         label: Some(args.label),
         image_type: ImageType::D2,
         format: args.format,
-        extent: Extent3d::d2(args.width, args.height),
+        extent: Extent3d {
+            width: args.width,
+            height: args.height,
+            // A `D2` image's `depth_or_layers` is its array length, which the
+            // seam says on the field itself.
+            depth_or_layers: args.layer_count,
+        },
         mip_levels: 1,
         samples: 1,
         usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
@@ -239,9 +358,9 @@ fn upload_image(
     let view = match device.create_image_view(&ImageViewDesc {
         label: Some(args.label),
         image,
-        view_type: ImageViewType::D2,
+        view_type: args.view_type,
         format: args.format,
-        range: COLOR_RANGE,
+        range: color_range(args.layer_count),
     }) {
         Ok(view) => view,
         Err(error) => {
@@ -260,14 +379,16 @@ fn upload_image(
     }
 }
 
-/// The whole of a single-mip, single-layer colour image.
-const COLOR_RANGE: ImageSubresourceRange = ImageSubresourceRange {
-    aspect: ImageAspect::COLOR,
-    base_mip: 0,
-    mip_count: 1,
-    base_layer: 0,
-    layer_count: 1,
-};
+/// The whole of a single-mip colour image `layers` layers deep.
+const fn color_range(layers: u32) -> ImageSubresourceRange {
+    ImageSubresourceRange {
+        aspect: ImageAspect::COLOR,
+        base_mip: 0,
+        mip_count: 1,
+        base_layer: 0,
+        layer_count: layers,
+    }
+}
 
 /// Records, submits and drains the staging copy, leaving the image in
 /// [`ResourceState::ShaderRead`].
@@ -283,38 +404,46 @@ fn record_upload(
         queue,
     });
 
+    let range = color_range(args.layer_count);
     // Undefined → TransferDst: the image has never held anything, so its old
-    // contents are explicitly discarded rather than transitioned.
+    // contents are explicitly discarded rather than transitioned. The range
+    // covers every layer, so one barrier serves all the copies below.
     encoder.pipeline_barrier(&crcbl_hal::Barriers {
         images: &[crcbl_hal::ImageBarrier::new(
             image,
-            COLOR_RANGE,
+            range,
             ResourceState::Undefined,
             ResourceState::TransferDst,
         )],
         ..Default::default()
     });
 
-    encoder.copy_buffer_to_image(&BufferImageCopy {
-        buffer: args.staging,
-        buffer_offset: 0,
-        buffer_row_length: args.row_texels,
-        buffer_image_height: args.height,
-        image,
-        image_subresource: ImageSubresourceLayers {
-            aspect: ImageAspect::COLOR,
-            mip: 0,
-            base_layer: 0,
-            layer_count: 1,
-        },
-        image_offset: Offset3d { x: 0, y: 0, z: 0 },
-        image_extent: Extent3d::d2(args.width, args.height),
-    });
+    // One copy per layer. A region's `image_extent` is a 2D extent whatever the
+    // image is — `crcbl-dx12` refuses anything else by name, because
+    // `CopyTextureRegion` addresses one subresource — so the layer is named by
+    // `base_layer` and the buffer offset says where its rows start.
+    for layer in 0..args.layer_count {
+        encoder.copy_buffer_to_image(&BufferImageCopy {
+            buffer: args.staging,
+            buffer_offset: u64::from(layer) * args.layer_bytes,
+            buffer_row_length: args.row_texels,
+            buffer_image_height: args.height,
+            image,
+            image_subresource: ImageSubresourceLayers {
+                aspect: ImageAspect::COLOR,
+                mip: 0,
+                base_layer: layer,
+                layer_count: 1,
+            },
+            image_offset: Offset3d { x: 0, y: 0, z: 0 },
+            image_extent: Extent3d::d2(args.width, args.height),
+        });
+    }
 
     encoder.pipeline_barrier(&crcbl_hal::Barriers {
         images: &[crcbl_hal::ImageBarrier::new(
             image,
-            COLOR_RANGE,
+            range,
             ResourceState::TransferDst,
             ResourceState::ShaderRead,
         )],
@@ -370,15 +499,25 @@ mod tests {
         (device, queue)
     }
 
-    fn the_copy(recorder: &Recorder) -> BufferImageCopy {
+    fn the_copies(recorder: &Recorder) -> Vec<BufferImageCopy> {
         recorder
             .commands()
             .into_iter()
-            .find_map(|command| match command {
+            .filter_map(|command| match command {
                 Command::CopyBufferToImage(copy) => Some(copy),
                 _ => None,
             })
-            .expect("an upload records exactly one buffer-to-image copy")
+            .collect()
+    }
+
+    fn the_copy(recorder: &Recorder) -> BufferImageCopy {
+        let copies = the_copies(recorder);
+        assert_eq!(
+            copies.len(),
+            1,
+            "a single-layer upload records exactly one buffer-to-image copy"
+        );
+        copies[0]
     }
 
     fn bytes_written(recorder: &Recorder) -> usize {
@@ -527,6 +666,93 @@ mod tests {
         assert_eq!(pitch, 12);
         assert_eq!(pitch % 6, 0, "must satisfy the alignment");
         assert_eq!(pitch % 4, 0, "must be a whole number of texels");
+    }
+
+    /// **A page is one image whose layers each get their own copy**, and each
+    /// copy reads the layer's own slice of the staging buffer.
+    ///
+    /// The offsets are what this is for. Every layer's rows are padded, so a
+    /// second layer read at `width * height * texel` — the *unpadded* size —
+    /// would take the tail of the first layer plus part of the second and put
+    /// a plausible smear in the page. Tier B is used because its 256-byte
+    /// alignment is what makes the padded and unpadded strides differ.
+    #[test]
+    fn a_page_copies_each_layer_from_its_own_padded_offset() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_b(&recorder);
+        let layers: Vec<Vec<u8>> = (0..3).map(|_| ramp(ROW_BYTES * HEIGHT as usize)).collect();
+        let refs: Vec<&[u8]> = layers.iter().map(Vec::as_slice).collect();
+
+        let page = upload_texture_layers(
+            device.as_ref(),
+            queue,
+            "material page",
+            Format::Rgba8Unorm,
+            WIDTH,
+            HEIGHT,
+            &refs,
+        )
+        .expect("the null backend accepts this");
+
+        let layer_bytes = PITCH * HEIGHT as usize;
+        assert_eq!(
+            bytes_written(&recorder),
+            layer_bytes * layers.len(),
+            "the staging write is every layer, padded"
+        );
+        let copies = the_copies(&recorder);
+        assert_eq!(
+            copies.len(),
+            layers.len(),
+            "one copy per layer, because a region's extent is 2D on every backend"
+        );
+        for (layer, copy) in copies.iter().enumerate() {
+            assert_eq!(
+                copy.buffer_offset,
+                (layer * layer_bytes) as u64,
+                "layer {layer} must read from its own slice of the staging buffer"
+            );
+            assert_eq!(
+                copy.image_subresource.base_layer, layer as u32,
+                "layer {layer} must be written to layer {layer} of the image"
+            );
+            assert_eq!(copy.image_subresource.layer_count, 1);
+            assert_eq!(copy.buffer_row_length, 128);
+            assert_eq!(
+                copy.image_extent,
+                Extent3d::d2(WIDTH, HEIGHT),
+                "a copy region's extent stays 2D"
+            );
+        }
+
+        page.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// A page with no layers is refused here, by name.
+    ///
+    /// Without the guard it reaches the device as an image whose
+    /// `depth_or_layers` is zero, whose complaint is about an *extent* — a
+    /// different object and a message that does not say what the caller did.
+    #[test]
+    fn a_page_with_no_layers_is_rejected() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_tier_a(&recorder);
+        let error = upload_texture_layers(
+            device.as_ref(),
+            queue,
+            "empty page",
+            Format::Rgba8Unorm,
+            4,
+            4,
+            &[],
+        )
+        .expect_err("a page needs a layer");
+        assert!(
+            error.to_string().contains("at least one layer"),
+            "got: {error}"
+        );
+        assert_eq!(recorder.total_live_objects(), 0);
     }
 
     /// A short or long slice is an error naming both numbers, not a

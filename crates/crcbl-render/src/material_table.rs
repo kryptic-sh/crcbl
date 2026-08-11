@@ -14,20 +14,29 @@
 //! lives in the crate that owns `mesh.slang`, because it is a contract with the
 //! shader.
 //!
-//! # The factors, and deliberately not the textures
+//! # The factors and one texture, which is an [`ArrayPages`] layer
 //!
-//! §3.2's sentence continues "the table holds texture indices + factors", and
-//! this is the factors. A texture index would have to mean either a
-//! [`BindingModel::Bindless`] slot or an [`ArrayPages`] page, the engine has
-//! chosen neither, and a column carried ahead of that choice is a field nothing
-//! reads. The same plan warns against a "premature material system" and
-//! `docs/plan/37-materials.md` owns the shape a real one takes; a factor table
-//! first, with the texture columns *absent* rather than stubbed, is what makes
-//! the id index something today.
+//! §3.2's sentence is "the table holds texture indices + factors", and a row
+//! now holds both: [`GpuMaterial::base_color`] and
+//! [`GpuMaterial::base_color_texture`]. The second is a **layer** of the one
+//! `Texture2DArray` `mesh.slang` binds — an [`ArrayPages`] page — and not a
+//! [`BindingModel::Bindless`] descriptor slot, which is the binding-model
+//! decision this table used to be waiting on. A layer index needs nothing of a
+//! device; a descriptor array needs `DESCRIPTOR_INDEXING`, which `crcbl-mtl`
+//! withdraws. So one column serves every backend, and this table does not have
+//! to know which model the device it is bound on selected.
 //!
-//! What that buys is not a colour: it is the indexing path itself, running on
-//! every backend and observable in a golden image, so the second column costs a
-//! field rather than a mechanism.
+//! **This type does not own the page.** It stores an index and nothing else:
+//! which image the layers live in, how many there are and what layer 0 holds
+//! are [`crate::forward`]'s, exactly as which *mesh* a `GpuInstance::mesh`
+//! names is [`crate::mesh_pool`]'s. What that costs is stated rather than
+//! hidden: a row naming a layer the page does not have samples out of range,
+//! and nothing here can tell.
+//!
+//! Still absent, and still deliberately: every other texture slot a material
+//! could have — normal, metallic-roughness, emissive — and the mip chain that
+//! makes a page filterable, which §3.2 calls a compute pass of its own.
+//! `docs/plan/37-materials.md` owns the shape a real material takes.
 //!
 //! # One buffer, and no ring — unlike [`crate::instance_pool`]
 //!
@@ -85,6 +94,8 @@
 //!
 //! [`BindingModel::Bindless`]: crcbl_hal::BindingModel::Bindless
 //! [`ArrayPages`]: crcbl_hal::BindingModel::ArrayPages
+//! [`GpuMaterial::base_color`]: crcbl_shaders::mesh::GpuMaterial::base_color
+//! [`GpuMaterial::base_color_texture`]: crcbl_shaders::mesh::GpuMaterial::base_color_texture
 
 use crcbl_core::{Handle, Pool};
 use crcbl_hal::{BufferDesc, BufferHandle, BufferUsage, Device, HalError, MemoryLocation};
@@ -390,10 +401,15 @@ mod tests {
     /// A material distinguishable from every other `n`, with no two channels
     /// equal — so a row read at the wrong offset, or a channel written in the
     /// wrong order, is a different value rather than the same one.
+    ///
+    /// The texture layer is `n + 7` rather than `n`, so it is different from the
+    /// row index, from the material number and from every factor in the row: an
+    /// index read out of the wrong word cannot come out right by coincidence.
     fn material(n: u32) -> GpuMaterial {
         let base = n as f32;
         GpuMaterial {
             base_color: [base, base + 0.125, base + 0.25, base + 0.375],
+            base_color_texture: n + 7,
         }
     }
 
@@ -467,6 +483,51 @@ mod tests {
             writes(&recorder)[before..],
             [(4 * MATERIAL_STRIDE as u64, MATERIAL_STRIDE)]
         );
+
+        table.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **A row's texture layer reaches the device, and two rows can differ in
+    /// nothing else.**
+    ///
+    /// §3.2's "texture indices + factors", from the table's side: the number a
+    /// shader reads to pick a page layer is the number a caller inserted, at
+    /// the offset the row's layout puts it. Two materials with an identical
+    /// factor and different layers are what the rendered observable rests on,
+    /// so they are checked here to be two different rows rather than one value
+    /// written twice.
+    #[test]
+    fn a_rows_texture_layer_is_written_beside_its_factor() {
+        let (recorder, device) = open();
+        let mut table = table(device.as_ref(), 4);
+        let untextured = GpuMaterial::UNTINTED;
+        let textured = GpuMaterial {
+            base_color_texture: 2,
+            ..untextured
+        };
+        assert_eq!(
+            untextured.base_color, textured.base_color,
+            "the pair must differ in the texture layer and nothing else"
+        );
+
+        let first = table.insert(device.as_ref(), &untextured).expect("room");
+        let second = table.insert(device.as_ref(), &textured).expect("room");
+
+        assert_eq!(on_device(&recorder, &table, 0), untextured);
+        assert_eq!(on_device(&recorder, &table, 1), textured);
+        assert_eq!(
+            on_device(&recorder, &table, 1).base_color_texture,
+            2,
+            "the layer a caller asked for must be the layer the buffer holds"
+        );
+        assert_ne!(
+            on_device(&recorder, &table, 0),
+            on_device(&recorder, &table, 1),
+            "two rows differing only in their layer must be two different rows"
+        );
+        assert_eq!(table.index(first), Some(0));
+        assert_eq!(table.index(second), Some(1));
 
         table.destroy(device.as_ref());
         recorder.assert_valid();

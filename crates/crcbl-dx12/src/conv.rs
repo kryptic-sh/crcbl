@@ -635,7 +635,11 @@ pub(crate) const fn descriptor_range_type(
                 D3D12_DESCRIPTOR_RANGE_TYPE_UAV
             })
         }
-        BindingKind::SampledImage => Some(D3D12_DESCRIPTOR_RANGE_TYPE_SRV),
+        // The `view_type` is dropped: a descriptor range names a register and a
+        // type, never a dimension. What the shader reads is decided by the
+        // `D3D12_SHADER_RESOURCE_VIEW_DESC` the SRV was created with — see
+        // `crate::device`'s view creation. Only WebGPU wants it in the layout.
+        BindingKind::SampledImage { .. } => Some(D3D12_DESCRIPTOR_RANGE_TYPE_SRV),
         BindingKind::Sampler => None,
     }
 }
@@ -660,6 +664,7 @@ pub(crate) const fn shader_visibility(stages: ShaderStages) -> D3D12_SHADER_VISI
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crcbl_hal::ImageViewType;
     use windows::Win32::Graphics::Direct3D12::{
         D3D12_COMPARISON_FUNC_NONE, D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE,
     };
@@ -1293,7 +1298,9 @@ mod tests {
             Some(D3D12_DESCRIPTOR_RANGE_TYPE_CBV)
         );
         assert_eq!(
-            descriptor_range_type(BindingKind::SampledImage),
+            descriptor_range_type(BindingKind::SampledImage {
+                view_type: ImageViewType::D2
+            }),
             Some(D3D12_DESCRIPTOR_RANGE_TYPE_SRV)
         );
         for (read_only, expected) in [

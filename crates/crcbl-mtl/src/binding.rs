@@ -164,10 +164,16 @@ impl Table {
     /// creation, not a second argument table — and a uniform and a storage
     /// buffer are both `MTLBuffer` bound to the same slots. Both collapses are
     /// Metal's, not this backend's.
+    ///
+    /// [`BindingKind::SampledImage`]'s `view_type` is dropped here and nothing
+    /// else in this backend reads it: an `MTLTexture` carries its own
+    /// `textureType`, set by `conv::view_texture_type` when the view was
+    /// created, and binding one into an argument table takes no dimension.
+    /// Only WebGPU wants it in the layout.
     const fn of(kind: BindingKind) -> Self {
         match kind {
             BindingKind::UniformBuffer { .. } | BindingKind::StorageBuffer { .. } => Self::Buffer,
-            BindingKind::SampledImage | BindingKind::StorageImage { .. } => Self::Texture,
+            BindingKind::SampledImage { .. } | BindingKind::StorageImage { .. } => Self::Texture,
             BindingKind::Sampler => Self::Sampler,
         }
     }
@@ -879,7 +885,7 @@ fn resolve(
             }
         }
         (
-            BindingKind::SampledImage | BindingKind::StorageImage { .. },
+            BindingKind::SampledImage { .. } | BindingKind::StorageImage { .. },
             BindingResource::ImageView(view),
         ) => BoundResource::Texture(owner.view_raw_locked(state, view)?),
         (BindingKind::Sampler, BindingResource::Sampler(sampler)) => {
@@ -979,9 +985,21 @@ mod tests {
     fn a_set_is_flattened_in_binding_order_with_a_counter_per_table() {
         let entries = [
             entry(3, BindingKind::Sampler, 1),
-            entry(1, BindingKind::SampledImage, 4),
+            entry(
+                1,
+                BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
+                4,
+            ),
             entry(0, UNIFORM, 1),
-            entry(2, BindingKind::SampledImage, 1),
+            entry(
+                2,
+                BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
+                1,
+            ),
             entry(4, STORAGE, 1),
         ];
         let plan = plan_set(&layout(&entries)).expect("a layout with no bindless flags");
@@ -1054,7 +1072,13 @@ mod tests {
         let frame = plan_set(&layout(&[entry(0, UNIFORM, 1), entry(1, STORAGE, 1)]))
             .expect("two buffers in set 0");
         let sheet = plan_set(&layout(&[
-            entry(0, BindingKind::SampledImage, 1),
+            entry(
+                0,
+                BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
+                1,
+            ),
             entry(1, BindingKind::Sampler, 1),
         ]))
         .expect("a texture and a sampler in set 1");
@@ -1095,7 +1119,13 @@ mod tests {
             );
             let entries = [BindGroupLayoutEntry {
                 flags: flag,
-                ..entry(0, BindingKind::SampledImage, 8)
+                ..entry(
+                    0,
+                    BindingKind::SampledImage {
+                        view_type: ImageViewType::D2,
+                    },
+                    8,
+                )
             }];
             let error = plan_set(&layout(&entries))
                 .expect_err("a flat argument table has no runtime-sized array");
@@ -1171,7 +1201,13 @@ mod tests {
         let handle = device
             .create_bind_group_layout(&layout(&[
                 entry(0, STORAGE, 1),
-                entry(1, BindingKind::SampledImage, 2),
+                entry(
+                    1,
+                    BindingKind::SampledImage {
+                        view_type: ImageViewType::D2,
+                    },
+                    2,
+                ),
                 entry(2, BindingKind::Sampler, 1),
             ]))
             .expect("a layout with one of each kind");
@@ -1458,7 +1494,13 @@ mod tests {
             .expect("two buffers");
         let second = device
             .create_bind_group_layout(&layout(&[
-                entry(0, BindingKind::SampledImage, 1),
+                entry(
+                    0,
+                    BindingKind::SampledImage {
+                        view_type: ImageViewType::D2,
+                    },
+                    1,
+                ),
                 entry(1, BindingKind::Sampler, 1),
             ]))
             .expect("a texture and a sampler");
@@ -1533,7 +1575,13 @@ mod tests {
             })
             .expect("a whole-image view");
         let handle = device
-            .create_bind_group_layout(&layout(&[entry(0, BindingKind::SampledImage, 1)]))
+            .create_bind_group_layout(&layout(&[entry(
+                0,
+                BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
+                1,
+            )]))
             .expect("one sampled image");
         let group = device
             .create_bind_group(&BindGroupDesc {

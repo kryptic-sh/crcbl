@@ -86,15 +86,55 @@ the flat qualifier — SPIR-V `OpDecorate … Flat`, WGSL `@interpolate(flat)`, 
 `[[flat]]`, DXIL `nointerpolation` in the input signature — but only `vk` and
 `wgpu` were _rendered_ here; `msl` and `dxil` are CI's verdict.
 
-**There are no texture indices, deliberately.** A row would have to say whether
-its index is a `Bindless` slot or an `ArrayPages` page, and the engine has
-chosen neither; a column carried ahead of that choice is a field nothing reads,
-which is the "premature material system" the risk list below warns about. The
-factors half proves the whole indexing path — cull, draw generation, the
-fragment stage, four backends — and is observable in
-`crates/crcbl/tests/golden/cube.png`, where two instances of one mesh differing
-in nothing but their material id are two colours. Adding the texture column
-later is a field; the mechanism is already paid for.
+**2026-08 — the texture column landed, and it is an `ArrayPages` layer.** The
+choice this record was waiting on is taken: `mesh.slang` binds **one**
+`Texture2DArray` at binding 7 with a sampler at binding 8, and
+`GpuMaterial::base_color_texture` names a _layer_ of it. `MeshVertex` grew a
+fourth `float4` carrying the texture coordinate, so a vertex is 64 bytes and a
+material row is 32.
+
+**Only one of the two binding models is implemented, and it is the one every
+device can run.** `BindingModel` is derived per device from
+`Features::DESCRIPTOR_INDEXING`, and `crcbl-mtl` withdraws that feature — so a
+`Bindless` lookup would leave Metal with no texture path at all, and this
+section's own rule is that "the lesser path is a constraint on data layout, not
+a separate renderer". A layer index needs nothing of a device: the layout entry
+is `count: 1` with no `BindingFlags`, exactly like the six storage buffers
+beside it, and vk, wgpu, Metal and D3D12 all take the same declaration. Nothing
+is refused anywhere, because there is nothing to refuse — a `Bindless` device
+runs the `ArrayPages` layout, and what it will gain later is capacity rather
+than a second code path.
+
+Three things bound that claim, all recorded in `docs/backlog.md`. **A page is
+one image**, so every layer shares an extent, a format and a mip count — which
+is the constraint `Bindless` exists to lift, and the reason P3's bindless work
+is still worth doing. **`crcbl-wgpu` could not run the bindless form today even
+if it were written**: its `create_bind_group` ignores
+`BindGroupEntry::array_index` and emits one scalar
+`wgpu::BindingResource::TextureView` per entry, so a second array element would
+collide on the binding number, where `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12`
+all honour it.
+
+And **the seam cannot say a sampled image is an array**, which is what stops
+this landing on wgpu today. `BindingKind::SampledImage` is a unit variant, so
+`crcbl_wgpu::conv::map_binding_kind` hardcodes `TextureViewDimension::D2` and
+refuses the page's `D2Array` view at `create_bind_group`. Vulkan, Metal and
+D3D12 take the dimension from the _view_ and do not care; WebGPU wants it in the
+layout. Until `crcbl-hal` carries it, `CRCBL_GPU=wgpu` cannot draw `Scene::Cube`
+— it fails at build with a named error rather than drawing untextured, which is
+the failure worth having.
+
+The observable is `crates/crcbl/tests/golden/cube.png`, which now holds
+**three** instances of one mesh: one plain, one whose row differs from it in the
+factor alone, and one whose row differs from it in the page layer alone. One
+pair per column, so neither column's evidence is the other's — and the textured
+layer is four unequal texels rather than a flat colour, so the frame also fails
+if the texture coordinate never reached the fragment stage.
+
+Still absent: every other texture slot a material could have, and the mip chain
+that makes a page filterable — mip generation is a compute pass and a slice of
+its own, which is why the page's sampler is nearest. `docs/plan/37-materials.md`
+owns the shape a real material takes.
 
 The table is one buffer with no ring, unlike the instance array beside it: a
 material is written when it is created, which is the mesh table's lifetime, so

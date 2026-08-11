@@ -45,6 +45,7 @@ struct MeshVertex_std430_0
     @align(16) position_0 : vec4<f32>,
     @align(16) normal_0 : vec4<f32>,
     @align(16) color_0 : vec4<f32>,
+    @align(16) uv_0 : vec4<f32>,
 };
 
 @binding(1) @group(0) var<storage, read> vertices_0 : array<MeshVertex_std430_0>;
@@ -67,17 +68,26 @@ struct FrameUniforms_std140_0
 struct GpuMaterial_std430_0
 {
     @align(16) base_color_0 : vec4<f32>,
+    @align(16) base_color_texture_0 : u32,
+    @align(4) pad0_1 : u32,
+    @align(8) pad1_1 : u32,
+    @align(4) pad2_1 : u32,
 };
 
 @binding(6) @group(0) var<storage, read> materials_0 : array<GpuMaterial_std430_0>;
+
+@binding(7) @group(0) var base_color_textures_0 : texture_2d_array<f32>;
+
+@binding(8) @group(0) var base_color_sampler_0 : sampler;
 
 struct VertexOutput_0
 {
     @builtin(position) position_1 : vec4<f32>,
     @location(0) world_position_0 : vec3<f32>,
-    @location(1) world_normal_0 : vec3<f32>,
-    @location(2) color_1 : vec4<f32>,
-    @interpolate(flat) @location(3) material_1 : u32,
+    @location(2) world_normal_0 : vec3<f32>,
+    @location(3) color_1 : vec4<f32>,
+    @interpolate(flat) @location(4) material_1 : u32,
+    @location(1) uv_1 : vec2<f32>,
 };
 
 @vertex
@@ -93,6 +103,7 @@ fn vertexMain(@builtin(vertex_index) index_0 : u32, @builtin(instance_index) ins
     output_0.world_normal_0 = (((vertex_0.normal_0.xyz) * (mat3x3<f32>(_S1[i32(0)].xyz, _S1[i32(1)].xyz, _S1[i32(2)].xyz))));
     output_0.color_1 = vertex_0.color_0;
     output_0.material_1 = instance_0.material_0;
+    output_0.uv_1 = vertex_0.uv_0.xy;
     return output_0;
 }
 
@@ -104,9 +115,10 @@ struct pixelOutput_0
 struct pixelInput_0
 {
     @location(0) world_position_1 : vec3<f32>,
-    @location(1) world_normal_1 : vec3<f32>,
-    @location(2) color_2 : vec4<f32>,
-    @interpolate(flat) @location(3) material_2 : u32,
+    @location(2) world_normal_1 : vec3<f32>,
+    @location(3) color_2 : vec4<f32>,
+    @interpolate(flat) @location(4) material_2 : u32,
+    @location(1) uv_2 : vec2<f32>,
 };
 
 @fragment
@@ -114,9 +126,11 @@ fn fragmentMain( _S2 : pixelInput_0, @builtin(position) position_2 : vec4<f32>) 
 {
     var normal_1 : vec3<f32> = normalize(_S2.world_normal_1);
     var to_light_0 : vec3<f32> = normalize(frame_0.light_direction_0.xyz);
-    var albedo_0 : vec4<f32> = _S2.color_2 * materials_0[_S2.material_2].base_color_0;
-    var _S3 : f32 = max(dot(normal_1, to_light_0), 0.0f);
-    var _S4 : pixelOutput_0 = pixelOutput_0( vec4<f32>(albedo_0.xyz * (frame_0.ambient_0.xyz + frame_0.light_color_0.xyz * vec3<f32>(_S3)) + frame_0.light_color_0.xyz * vec3<f32>((pow(max(dot(normal_1, normalize(to_light_0 + normalize(frame_0.camera_position_0.xyz - _S2.world_position_1))), 0.0f), 32.0f) * (step(0.0f, _S3) * _S3) * 0.34999999403953552f)), albedo_0.w) );
-    return _S4;
+    var material_3 : GpuMaterial_std430_0 = materials_0[_S2.material_2];
+    var _S3 : vec3<f32> = vec3<f32>(_S2.uv_2, f32(material_3.base_color_texture_0));
+    var albedo_0 : vec4<f32> = _S2.color_2 * material_3.base_color_0 * (textureSample((base_color_textures_0), (base_color_sampler_0), ((_S3)).xy, i32(((_S3)).z)));
+    var _S4 : f32 = max(dot(normal_1, to_light_0), 0.0f);
+    var _S5 : pixelOutput_0 = pixelOutput_0( vec4<f32>(albedo_0.xyz * (frame_0.ambient_0.xyz + frame_0.light_color_0.xyz * vec3<f32>(_S4)) + frame_0.light_color_0.xyz * vec3<f32>((pow(max(dot(normal_1, normalize(to_light_0 + normalize(frame_0.camera_position_0.xyz - _S2.world_position_1))), 0.0f), 32.0f) * (step(0.0f, _S4) * _S4) * 0.34999999403953552f)), albedo_0.w) );
+    return _S5;
 }
 

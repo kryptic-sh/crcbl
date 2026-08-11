@@ -1132,7 +1132,7 @@ fn null_view(device: &ID3D12Device, at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 mod tests {
     use super::*;
     use crcbl_core::Handle;
-    use crcbl_hal::BindingResource;
+    use crcbl_hal::{BindingResource, ImageViewType};
 
     fn entry(binding: u32, kind: BindingKind) -> BindGroupLayoutEntry {
         BindGroupLayoutEntry {
@@ -1173,7 +1173,12 @@ mod tests {
                 },
             ),
             entry(1, BindingKind::Sampler),
-            entry(2, BindingKind::SampledImage),
+            entry(
+                2,
+                BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
+            ),
         ];
         let record = plan(&entries).expect("three ordinary bindings");
 
@@ -1231,7 +1236,12 @@ mod tests {
             BindGroupLayoutEntry {
                 flags: BindingFlags::VARIABLE_COUNT | BindingFlags::PARTIALLY_BOUND,
                 count: 4096,
-                ..entry(1, BindingKind::SampledImage)
+                ..entry(
+                    1,
+                    BindingKind::SampledImage {
+                        view_type: ImageViewType::D2,
+                    },
+                )
             },
         ];
         let layout = plan(&entries).expect("a bindless layout");
@@ -1280,7 +1290,12 @@ mod tests {
             (
                 "twice",
                 vec![
-                    entry(0, BindingKind::SampledImage),
+                    entry(
+                        0,
+                        BindingKind::SampledImage {
+                            view_type: ImageViewType::D2,
+                        },
+                    ),
                     entry(0, BindingKind::Sampler),
                 ],
             ),
@@ -1288,7 +1303,12 @@ mod tests {
                 "count of zero",
                 vec![BindGroupLayoutEntry {
                     count: 0,
-                    ..entry(0, BindingKind::SampledImage)
+                    ..entry(
+                        0,
+                        BindingKind::SampledImage {
+                            view_type: ImageViewType::D2,
+                        },
+                    )
                 }],
             ),
             (
@@ -1316,7 +1336,12 @@ mod tests {
                 vec![
                     BindGroupLayoutEntry {
                         flags: BindingFlags::VARIABLE_COUNT,
-                        ..entry(0, BindingKind::SampledImage)
+                        ..entry(
+                            0,
+                            BindingKind::SampledImage {
+                                view_type: ImageViewType::D2,
+                            },
+                        )
                     },
                     entry(1, BindingKind::Sampler),
                 ],
@@ -1327,7 +1352,12 @@ mod tests {
                     entry(5, BindingKind::Sampler),
                     BindGroupLayoutEntry {
                         flags: BindingFlags::VARIABLE_COUNT,
-                        ..entry(1, BindingKind::SampledImage)
+                        ..entry(
+                            1,
+                            BindingKind::SampledImage {
+                                view_type: ImageViewType::D2,
+                            },
+                        )
                     },
                 ],
             ),
@@ -1371,7 +1401,12 @@ mod tests {
                     dynamic: false,
                 },
             ),
-            entry(4, BindingKind::SampledImage),
+            entry(
+                4,
+                BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
+            ),
         ];
         let layout = plan(&entries).expect("five bindings");
         let mut registers = dxil::Registers::default();
@@ -1436,7 +1471,12 @@ mod tests {
                     dynamic: true,
                 },
             ),
-            entry(4, BindingKind::SampledImage),
+            entry(
+                4,
+                BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
+            ),
         ];
         let layout = plan(&entries).expect("two dynamic bindings among three table ones");
 

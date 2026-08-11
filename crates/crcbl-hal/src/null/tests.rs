@@ -536,7 +536,9 @@ fn push_constants_and_bindless_fail_loudly_on_the_portable_preset() {
             entries: &[BindGroupLayoutEntry {
                 binding: 0,
                 visibility: ShaderStages::FRAGMENT,
-                kind: BindingKind::SampledImage,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                },
                 count: 1 << 16,
                 flags: crate::BindingFlags::PARTIALLY_BOUND
                     | crate::BindingFlags::UPDATE_AFTER_BIND
@@ -942,7 +944,9 @@ fn variable_count_must_be_the_last_and_highest_binding() {
     let bindless = BindGroupLayoutEntry {
         binding: 1,
         visibility: ShaderStages::FRAGMENT,
-        kind: BindingKind::SampledImage,
+        kind: BindingKind::SampledImage {
+            view_type: ImageViewType::D2,
+        },
         count: 1 << 16,
         flags: crate::BindingFlags::VARIABLE_COUNT | crate::BindingFlags::PARTIALLY_BOUND,
     };
@@ -2698,7 +2702,9 @@ fn updating_a_group_without_update_after_bind_is_refused() {
     let slot = |flags| BindGroupLayoutEntry {
         binding: 0,
         visibility: ShaderStages::ALL,
-        kind: BindingKind::SampledImage,
+        kind: BindingKind::SampledImage {
+            view_type: ImageViewType::D2,
+        },
         count: 1,
         flags,
     };

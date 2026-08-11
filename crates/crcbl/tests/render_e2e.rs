@@ -143,8 +143,15 @@ fn the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden() {
         Scene::Cube,
         "cube",
         MIN_COLORS_CUBE,
-        the_cube_is_lit_against_an_unpainted_corner,
+        the_cube_scene_drew_its_geometry_and_both_material_columns,
     );
+}
+
+/// [`Scene::Cube`]'s claims, in the order a failure would hit them: something
+/// drew, and each of the material row's two columns did something visible.
+fn the_cube_scene_drew_its_geometry_and_both_material_columns(image: &Image) {
+    the_cube_is_lit_against_an_unpainted_corner(image);
+    the_textured_pyramid_is_quartered_and_the_plain_one_is_flat(image);
 }
 
 /// Four sprites over three batches and two sheets — `sprite.slang` — on the
@@ -341,6 +348,66 @@ fn the_cube_is_lit_against_an_unpainted_corner(image: &Image) {
         u32::from(centre[0]) + u32::from(centre[1]) + u32::from(centre[2]) > 60,
         "the centre must be the cube, not the clear, got {centre:?}"
     );
+}
+
+/// The left-hand column of [`Scene::Cube`], in pixels: wide enough for a
+/// pyramid, narrow enough to exclude the cube.
+///
+/// The pyramids sit at world `x = -1.05` spanning `±0.4`, which at this frame's
+/// 4:3 aspect is `-0.94 ..= -0.42` in NDC — pixels 8 to 74. The cube starts at
+/// NDC `-0.325`, pixel 86. Eighty is between them, so this band is the pyramids
+/// and the clear behind them and nothing else.
+const PYRAMID_BAND: std::ops::Range<u32> = 0..80;
+
+/// **The texture column of the material row, read off the frame.**
+///
+/// `Scene::Cube`'s left column holds two instances of one mesh at one
+/// orientation whose materials differ in nothing but their base-colour page
+/// layer: the upper names the page's white layer, the lower a layer of four
+/// unequal texels. So the upper pyramid's faces are flat — one lit colour each,
+/// because the mesh has flat normals — and the lower one's are quartered.
+///
+/// Counting distinct colours is what tells those apart without knowing which
+/// texel landed where. It is also the assertion that fails if the *UV* is
+/// missing rather than the index: a fragment stage handed a constant texture
+/// coordinate samples one texel over a whole face and produces a flat pyramid
+/// in a different shade, which passes "the two differ" and fails this.
+fn the_textured_pyramid_is_quartered_and_the_plain_one_is_flat(image: &Image) {
+    let half = EXTENT.1 / 2;
+    let plain = distinct_colors_in(image, PYRAMID_BAND, 0..half);
+    let textured = distinct_colors_in(image, PYRAMID_BAND, half..EXTENT.1);
+    eprintln!(
+        "crcbl render e2e: pyramid column — {plain} colour(s) above, {textured} below \
+         (the lower one samples a four-texel layer)"
+    );
+    // Each visible face of the plain pyramid is one flat colour; each face of
+    // the textured one is up to four. Three faces are visible from this camera,
+    // so the gap is several colours wide and not one.
+    assert!(
+        textured >= plain + 4,
+        "the lower pyramid samples a four-texel layer and the upper one a flat white layer, \
+         so it must hold several more distinct colours: {textured} below vs {plain} above"
+    );
+}
+
+/// Distinct RGBA colours inside a rectangle of `image`.
+///
+/// [`Image::distinct_colors`] answers for the whole frame, which cannot separate
+/// one object from another; this is the same question asked of a region.
+fn distinct_colors_in(
+    image: &Image,
+    columns: std::ops::Range<u32>,
+    rows: std::ops::Range<u32>,
+) -> usize {
+    let mut seen = std::collections::HashSet::new();
+    for row in rows {
+        for column in columns.clone() {
+            if let Some(pixel) = image.pixel(column, row) {
+                seen.insert(pixel);
+            }
+        }
+    }
+    seen.len()
 }
 
 /// Where a point in [`Scene::Sprite`]'s world lands in this frame.

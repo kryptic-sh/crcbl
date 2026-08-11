@@ -4854,22 +4854,41 @@ Three frames now, through three renderers, and only the cube's goes through
 because they are the labels a run's history is read by and nothing greps them.
 Rename them if the churn is ever worth it.
 
-## The material table landed with its factors half only
+## The material table has both halves; what is still missing from a material
 
 `crcbl_render::MaterialTable` is `docs/plan/03-gpu-driven-rendering.md` §3.2's
-material table SSBO, `crcbl_shaders::mesh::GpuMaterial` is a row, and
-`mesh.slang` binding 6 is where the vertex stage reads one. What is deliberately
-not there, and what it would take:
+material table SSBO, `crcbl_shaders::mesh::GpuMaterial` is a row, `mesh.slang`
+binding 6 is where the fragment stage reads one, and binding 7 is the
+`Texture2DArray` page a row's `base_color_texture` selects a layer of. The
+texture-indices half of this entry is done and has been deleted. What is still
+deliberately not there, and what it would take:
 
-**Texture indices.** §3.2's own sentence is "the table holds texture indices +
-factors", and a texture column cannot be written until the engine decides
-whether an index names a `BindingModel::Bindless` slot or an
-`ArrayPages`&nbsp;page — `crcbl_hal::caps` has both and the renderer commits to
-neither. That is a larger decision than this table, it is the one P3's bindless
-work exists to take, and a column added ahead of it is a field nothing reads.
-Adding it afterwards is a `u32` in `GpuMaterial`, a fetch in the fragment stage
-and a re-bless; the indexing mechanism it would ride on is already paid for and
-proven on `vk` and `wgpu`.
+**One base-colour texture, and no other slot.** A row has a factor and one page
+layer. Normal, metallic-roughness and emissive maps are each another `u32` in
+`GpuMaterial`, another sample in `fragmentMain` and — for the first one that is
+not colour data — another _page_, because an `ArrayPages` page is one image and
+one format, and a normal map is linear where a base colour is sRGB. That is the
+first thing that makes the single-page shape insufficient, and it should be
+where the second page is introduced rather than a generic page manager arriving
+ahead of a second caller.
+
+**A page is one image, which is the limit `Bindless` exists to lift.** Every
+layer shares an extent, a format and a mip count, so two textures of different
+sizes cannot share a page and `crcbl_render::forward` uploads its layers at
+build with the extent compiled in. Real content does not look like that. See the
+wgpu entry below for what stands between here and the bindless form.
+
+**No mip chain, and the sampler is nearest because of it.** §3.2 makes mip
+generation a compute pass of its own and it is not written, so
+`upload_texture_layers` uploads `mip_levels: 1` and `forward`'s base-colour
+sampler filters nearest — a filtered read of a page with no mips buys a shimmer
+rather than a smoother picture. The first minified material texture is what
+makes the compute pass worth writing.
+
+**Nothing imports a texture.** `crcbl-scene` parses glTF materials and this
+slice did not wire it: the page's layers are two constants in
+`crcbl_render::forward` (`UNTEXTURED_TEXELS`, `CHECKER_TEXELS`). Wiring it needs
+a decoder, a page allocator and a lifetime story for a layer, which is P9's.
 
 **A material is a start-up write.** `MaterialTable` is one host-visible buffer
 with no ring — the mesh table's shape, not `InstancePool`'s — because nothing
@@ -4882,11 +4901,11 @@ two callers that coalesce runs rather than one that writes single rows.
 
 **Specular stayed a constant.** `mesh.slang`'s `SPECULAR_POWER` and
 `SPECULAR_STRENGTH` are documented as belonging in a material and were left
-where they are: moving them needs the fragment stage to reach the table, which
-means either a `nointerpolation` integer varying (a per-target lowering this
-repo has been burned by twice) or two more floats through `VertexOutput`, and
-nothing varies them. `docs/plan/37-materials.md` owns the shading model they are
-part of.
+where they are. The reason they were left has now half expired — the fragment
+stage does reach the table, so the varying that used to be in the way is paid
+for — and what remains is only that nothing varies them. Moving them is two
+floats in `GpuMaterial` and a re-bless. `docs/plan/37-materials.md` owns the
+shading model they are part of.
 
 ## The debug-overlay retrofit: what was rejected, and one engine doc that is now stale
 
@@ -5545,3 +5564,91 @@ queue at creation, so a report means "since this device was created" by
 construction. Evidence: in run 31454155654, message 597 — the gate's own
 deliberate violation — appears exactly once, inside the expected panic of the
 test that raises it, and that test passed.
+
+## The base-colour page landed as `ArrayPages`; `Bindless` needs a wgpu fix first
+
+`docs/plan/03-gpu-driven-rendering.md` §3.2's texture half is implemented as one
+`Texture2DArray` page — `crcbl_render::forward`'s `base_color_page`, bound at
+`mesh.slang` binding 7, with `GpuMaterial::base_color_texture` selecting a
+layer. `BindingModel::Bindless` — one runtime-sized array _of descriptors_,
+indexed per fragment — is not implemented, and that is a decision with a
+measured reason rather than a preference.
+
+**`crcbl-wgpu` cannot fill an array binding at all.** `create_bind_group` in
+`crates/crcbl-wgpu/src/device.rs` builds its `wgpu::BindGroupEntry` list by
+resolving each `crcbl_hal::BindGroupEntry` to a scalar
+`wgpu::BindingResource::TextureView`/`Sampler`/`Buffer` keyed by
+`entry.binding`, and **`BindGroupEntry::array_index` appears nowhere in that
+crate** — grep it. So two entries naming array elements 0 and 1 of one binding
+become two `wgpu::BindGroupEntry`s with the same `binding`, which wgpu rejects;
+there is no `TextureViewArray` arm. `create_bind_group_layout` does map
+`count > 1` onto `NonZero`, so the _layout_ is expressible and the _group_ is
+not — the half that makes this look supported from a distance. `crcbl-vk`
+(`pipeline.rs`, `dst_array_element`), `crcbl-mtl` (`binding.rs`,
+`slot.first + entry.array_index`) and `crcbl-dx12` (`binding.rs`,
+`plan.offset.checked_add`) all honour it.
+
+That is the whole gap: wgpu reports `DESCRIPTOR_INDEXING` (it requires
+`TEXTURE_BINDING_ARRAY`, the non-uniform-indexing feature and
+`PARTIALLY_BOUND_BINDING_ARRAY` together, in `instance.rs`), so a bindless-only
+slice would have selected the bindless path on wgpu and then failed to build the
+bind group. **Fixing it is a `crcbl-wgpu` slice**: group entries have to be
+bucketed by binding number, sorted by `array_index`, and emitted as
+`wgpu::BindingResource::TextureViewArray` / `SamplerArray` / `BufferArray` when
+a binding has more than one. Nothing above the seam has to change for that, and
+nothing above the seam can do it.
+
+**What bindless would then buy**, so the case is on the record: a page is one
+image, so its layers share an extent, a format and a mip count. A descriptor
+array lifts all three, which is what real imported content needs. Until then the
+engine has one page of one size, which is enough for the observable and not
+enough for a game.
+
+## `BindingKind::StorageImage` still cannot name its format or its dimension
+
+`crcbl_wgpu::conv::map_binding_kind` returns `HalError::Unsupported` for every
+storage-image binding, because `wgpu::BindingType::StorageTexture` needs the
+texel format _and_ the view dimension at bind-group-layout creation and
+`BindingKind::StorageImage { read_only }` carries neither.
+
+The sampled half of that hole was closed in 2026-08 — `SampledImage` now carries
+a `view_type` — and the storage half was **considered and deliberately left
+open**: nothing in the engine declares a storage-image binding, so a `format`
+and a `view_type` field there would be two fields nothing reads and 0 call sites
+to prove them against. `SampledImage`'s field earned itself because
+`crcbl_render::forward` binds a `D2Array` through it today.
+
+Close it the same way when a compute pass first wants one — a mip-generation
+pass is the likely first, `docs/plan/03-gpu-driven-rendering.md` §3.2 — and note
+that the format half has no `ImageViewType`-shaped answer already sitting in the
+seam: it needs `Format`, and the arm must reject a `Format` wgpu cannot express
+as a storage format rather than substituting one.
+
+## What a sampled binding still cannot say
+
+`map_binding_kind` assumes every sampled image is float-filterable and
+single-sampled: `wgpu::TextureSampleType::Float { filterable: true }` and
+`multisampled: false`, both constants. That is what every sampled binding in the
+engine is. A shadow-comparison sampler (`TextureSampleType::Depth`), an integer
+texture (`Uint`/`Sint`) or an MSAA source would each need another field on
+`BindingKind::SampledImage`, and each would fail on wgpu the way the array did —
+at pipeline creation, loudly. The other three backends would not notice, so
+**the wgpu suite is the only local gate on it**:
+`CRCBL_GPU=wgpu crates/crcbl/tests/run-render-e2e.sh`.
+
+## The `view_type` field is unverified on Metal and D3D12
+
+`SampledImage { view_type }` is dropped by `crcbl-vk`, `crcbl-mtl` and
+`crcbl-dx12` — each takes the dimension off the bound view, and each says so at
+the arm that drops it (`crcbl_vk::conv::descriptor_type`,
+`crcbl_mtl::binding::Table::of`, `crcbl_dx12::conv::descriptor_range_type`).
+Vulkan is covered locally by `crates/crcbl-vk/tests/run-vk-e2e.sh` on lavapipe.
+
+**Metal and D3D12 are type-checked only**, by
+`cargo clippy -p crcbl-mtl --target aarch64-apple-darwin` and
+`cargo clippy -p crcbl-dx12 --target x86_64-pc-windows-msvc`. Neither runs a
+draw here, so what CI must confirm is that the mesh pass's `D2Array` page really
+samples on both: a macOS runner drawing `Scene::Cube` against its golden, and a
+Windows runner doing the same through `CRCBL_GPU=dx12`. `crcbl-dx12`'s register
+table (`dxil.rs`) is the one D3D12 thing that does run on Linux, and it now pins
+`mesh` at `&[Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler]`.

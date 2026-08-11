@@ -27,8 +27,8 @@
 use crcbl_core::Handle;
 
 use crate::{
-    Format, HalError, ImageViewHandle, Limits, SamplerHandle, ShaderEntry, ShaderStages,
-    resource::BufferHandle,
+    Format, HalError, ImageViewHandle, ImageViewType, Limits, SamplerHandle, ShaderEntry,
+    ShaderStages, resource::BufferHandle,
 };
 
 /// Marker type for pipeline-layout handles. Uninhabited.
@@ -82,7 +82,22 @@ pub enum BindingKind {
         dynamic: bool,
     },
     /// A sampled image.
-    SampledImage,
+    SampledImage {
+        /// Dimensionality the shader declares for it — the `D2` of a
+        /// `Texture2D`, the `D2Array` of a `Texture2DArray`.
+        ///
+        /// Carried here rather than read off the bound view because WebGPU puts
+        /// it in the *layout*: `wgpu::BindingType::Texture` has a
+        /// `view_dimension`, and a layout that says `D2` while the view is
+        /// `D2Array` is refused at pipeline creation, not at bind time. Vulkan,
+        /// Metal and D3D12 all take it from the view instead and ignore this,
+        /// which each backend's conversion says where it drops it.
+        ///
+        /// It must match the view every [`BindingResource::ImageView`] filling
+        /// this slot was created with — see
+        /// [`ImageViewDesc::view_type`](crate::ImageViewDesc::view_type).
+        view_type: ImageViewType,
+    },
     /// A read/write storage image.
     StorageImage {
         /// Whether the shader only reads it.

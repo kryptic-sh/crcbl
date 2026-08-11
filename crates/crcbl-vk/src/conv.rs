@@ -564,7 +564,11 @@ pub fn descriptor_type(kind: crcbl_hal::BindingKind) -> vk::DescriptorType {
         K::UniformBuffer { dynamic: true } => vk::DescriptorType::UNIFORM_BUFFER_DYNAMIC,
         K::StorageBuffer { dynamic: false, .. } => vk::DescriptorType::STORAGE_BUFFER,
         K::StorageBuffer { dynamic: true, .. } => vk::DescriptorType::STORAGE_BUFFER_DYNAMIC,
-        K::SampledImage => vk::DescriptorType::SAMPLED_IMAGE,
+        // The `view_type` is dropped: a `VkDescriptorSetLayoutBinding` has no
+        // dimension field at all, because a `VkImageView` was created with its
+        // own `viewType` and that is what the shader's `OpTypeImage` is matched
+        // against. Only WebGPU wants it in the layout.
+        K::SampledImage { .. } => vk::DescriptorType::SAMPLED_IMAGE,
         K::StorageImage { .. } => vk::DescriptorType::STORAGE_IMAGE,
         K::Sampler => vk::DescriptorType::SAMPLER,
     }

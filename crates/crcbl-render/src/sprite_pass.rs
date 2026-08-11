@@ -75,8 +75,8 @@ use crcbl_hal::{
     BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BlendState, BufferDesc,
     BufferHandle, BufferUsage, ColorTargetState, ColorWrites, DepthStencilState, Device,
-    FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, LoadOp,
-    MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, QueueHandle,
+    FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageViewType,
+    LoadOp, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, QueueHandle,
     SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderStages,
     StoreOp,
 };
@@ -558,7 +558,9 @@ impl SpriteRenderer {
                 BindGroupLayoutEntry {
                     binding: 0,
                     visibility: ShaderStages::FRAGMENT,
-                    kind: BindingKind::SampledImage,
+                    kind: BindingKind::SampledImage {
+                        view_type: ImageViewType::D2,
+                    },
                     count: 1,
                     flags: BindingFlags::empty(),
                 },

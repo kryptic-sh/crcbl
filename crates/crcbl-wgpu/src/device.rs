@@ -656,14 +656,10 @@ impl Device for WgpuDevice {
         let view = tex.create_view(&wgpu::TextureViewDescriptor {
             label: desc.label,
             format: Some(conv::map_format(desc.format)),
-            dimension: Some(match desc.view_type {
-                hal::ImageViewType::D1 => wgpu::TextureViewDimension::D1,
-                hal::ImageViewType::D2 => wgpu::TextureViewDimension::D2,
-                hal::ImageViewType::D2Array => wgpu::TextureViewDimension::D2Array,
-                hal::ImageViewType::Cube => wgpu::TextureViewDimension::Cube,
-                hal::ImageViewType::CubeArray => wgpu::TextureViewDimension::CubeArray,
-                hal::ImageViewType::D3 => wgpu::TextureViewDimension::D3,
-            }),
+            // Through `conv`, because a bind-group layout stamps the same
+            // dimension on its `BindingType::Texture` and wgpu refuses the pair
+            // when the two disagree.
+            dimension: Some(conv::map_view_dimension(desc.view_type)),
             base_mip_level: desc.range.base_mip,
             mip_level_count,
             base_array_layer: desc.range.base_layer,
