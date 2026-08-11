@@ -1,0 +1,4 @@
+{
+  "comment": "Asset keys the shim pre-loads through __crcbl_web_fetch_* before the demo boots. hud has none: it draws no sprite art at all — sample rule 11 exempts it by name — and its font atlas and shaders are compiled into the wasm module. The list is the seam, not the content.",
+  "keys": []
+}

@@ -4,14 +4,15 @@
 //! hud [--headless] [--frames N] [--seed N]
 //! ```
 //!
-//! Argv in, exit code out, and nothing else: the sample itself is the `hud`
-//! library this binary links.
+//! Argv in, exit code out, and nothing else: the sample itself is the
+//! `crcbl_hud` library this binary links, which is also what the browser's wasm
+//! entry point drives.
 //!
 //! Exit codes: 0 ran, 1 it failed, 2 bad arguments.
 
 use std::process::ExitCode;
 
-use hud::{USAGE, parse, run};
+use crcbl_hud::{USAGE, parse, run};
 
 fn main() -> ExitCode {
     crcbl::args::run_front_end(

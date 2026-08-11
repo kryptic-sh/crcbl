@@ -115,6 +115,11 @@ pub fn start(options: &Options) -> Result<Loop, HudError> {
 
 /// Builds the loop on an already-open shell, blocking on both waits.
 ///
+/// The browser cannot use this — a main thread may not sit in
+/// [`wait_for_configure`] — and takes [`PendingLoop`] instead. What the two
+/// share is everything after the waiting, which is `assemble` — private,
+/// because a caller has no `Booted` to hand it.
+///
 /// # Errors
 ///
 /// [`HudError`] if the window never configured, the GPU would not open, or the
@@ -136,8 +141,7 @@ pub fn with_shell<S: Shell + ?Sized>(
     crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
     let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.gpu())?;
-    let game = Game::new(options.common.tick_hz, options.seed).map_err(HudError::Game)?;
-    Ok(Loop::new(
+    assemble(
         Booted {
             shell,
             window,
@@ -145,6 +149,26 @@ pub fn with_shell<S: Shell + ?Sized>(
             clock_source,
             events,
         },
+        options,
+    )
+}
+
+/// The half of start-up that is the same however the GPU arrived.
+///
+/// [`Booted`] is what both bring-up paths hand over, so the ticker is built and
+/// the loop assembled in one place rather than one per path — a second copy is
+/// how the browser build would come to run a subtly different sample.
+///
+/// # Errors
+///
+/// [`HudError`] if the ticker's server could not be built.
+fn assemble<S: Shell + ?Sized>(
+    booted: Booted<S, Gpu>,
+    options: &Options,
+) -> Result<Loop<S>, HudError> {
+    let game = Game::new(options.common.tick_hz, options.seed).map_err(HudError::Game)?;
+    Ok(Loop::new(
+        booted,
         Hud {
             game,
             render_state: RenderState::default(),
@@ -286,6 +310,67 @@ impl HostedGame for Hud {
             summary.commands,
             summary.exit,
         );
+    }
+}
+
+// ---- polled start-up ---------------------------------------------------------
+
+/// A [`Loop`] being started one poll at a time, for a caller that may not
+/// block — which on a browser main thread is every caller.
+///
+/// The state machine, the pump and the resize-during-start-up race are
+/// [`crcbl::engine::PolledBoot`]'s; all that is left here is this sample's
+/// `Options` and the `assemble` call the engine deliberately stops short of.
+#[derive(Debug)]
+pub struct PendingLoop<S: Shell + ?Sized = dyn Shell> {
+    boot: crcbl::engine::PolledBoot<S, Gpu>,
+    options: Options,
+}
+
+impl<S: Shell + ?Sized> PendingLoop<S> {
+    /// Creates the window and starts the wait, without blocking on either half.
+    ///
+    /// `clock_source` is the caller's because the browser's cannot be
+    /// [`Clock::new`]'s: `std::time::Instant::now` panics on
+    /// `wasm32-unknown-unknown`, so a page drives the loop from
+    /// `performance.now()` instead.
+    ///
+    /// # Errors
+    ///
+    /// [`HudError`] if the shell refused the window.
+    pub fn request(
+        mut shell: Box<S>,
+        options: &Options,
+        clock_source: Clock,
+    ) -> Result<Self, HudError> {
+        let window = open_the_window(
+            shell.as_mut(),
+            &clock_source,
+            options.common.display_mode(),
+            options.common.size,
+        )?;
+        Ok(Self {
+            boot: crcbl::engine::PolledBoot::request(
+                shell,
+                window,
+                clock_source,
+                options.common.gpu(),
+            ),
+            options: options.clone(),
+        })
+    }
+
+    /// Advances start-up. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`HudError`] if the window went away before it had a size, if the device
+    /// request failed, or if the ticker could not be built.
+    pub fn poll(&mut self) -> Result<Option<Loop<S>>, HudError> {
+        let Some(booted) = self.boot.poll::<HudError>()? else {
+            return Ok(None);
+        };
+        assemble(booted, &self.options).map(Some)
     }
 }
 

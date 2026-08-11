@@ -147,6 +147,13 @@ pub const WAVE_TICKS: u64 = 600;
 /// How long the wave banner stays on screen after a wave turns over, in ticks.
 pub const BANNER_TICKS: u32 = 120;
 
+/// How often the ticker logs its `[HUD]` line, in ticks.
+///
+/// A second of simulated time at [`DEFAULT_TICK_HZ`], and the same cadence every
+/// other sample uses — `web/tools/browser-e2e.mjs` watches for that heartbeat to
+/// tell a paused demo from a running one, and its window is sized for it.
+pub const HEARTBEAT_TICKS: u64 = 60;
+
 /// How long a damage number stays on the page, in ticks.
 pub const DAMAGE_LIFETIME: u32 = 90;
 
@@ -500,6 +507,11 @@ pub struct Game {
     ticks_run: u64,
     /// The tick period in seconds, for the ability row's countdown labels.
     tick_secs: f32,
+    /// The wave the last [`Game::log_heartbeat`] line reported, so a wave that
+    /// turns over between two heartbeats gets a line of its own. Zero before the
+    /// first tick, which is a wave the ticker never has — so the opening line is
+    /// logged on tick one rather than a second into the run.
+    logged_wave: u32,
 }
 
 impl std::fmt::Debug for Game {
@@ -555,6 +567,7 @@ impl Game {
             sim_time: Duration::ZERO,
             ticks_run: 0,
             tick_secs: tick_period.as_secs_f32(),
+            logged_wave: 0,
         })
     }
 
@@ -576,6 +589,47 @@ impl Game {
             before + u64::from(server_ticks),
             "the ticker must run exactly once per server tick",
         );
+        self.log_heartbeat();
+    }
+
+    /// The `[HUD]` line, on the same cadence and in the same shape breakout,
+    /// flappy, asteroids and horde use: every sixty ticks, which is a second of
+    /// simulated time, plus the tick a wave turns over on so the change is not
+    /// swallowed by the gap.
+    ///
+    /// It is the only thing this sample logs from inside the tick, and
+    /// `web/tools/browser-e2e.mjs` reads two different claims out of it. One is
+    /// the same claim every demo makes — a heartbeat exists while the demo runs
+    /// and stops while it is paused, which is how a browser tells a paused loop
+    /// from a running one. The other is this sample's, and it is the only one
+    /// available here: hud takes **no input**, so nothing external can be shown
+    /// to have reached the simulation, and "the ticker is advancing under its
+    /// own steam" has to be read off a number the ticker moves. `rolls` is that
+    /// number — the rng cursor, which only advances when the script actually
+    /// rolls a hit or a cast, so a ticker that ran and did nothing would leave
+    /// it standing still.
+    fn log_heartbeat(&mut self) {
+        let ticker = lock(&self.shared);
+        let wave_changed = ticker.wave != self.logged_wave;
+        if !wave_changed && !ticker.ticks.is_multiple_of(HEARTBEAT_TICKS) {
+            return;
+        }
+        crcbl::log::info!(
+            "[HUD] tick: {}  wave: {}  hp: {}/{HEALTH_MAX}  mana: {}/{MANA_MAX}  \
+             ready: {}/{ABILITY_COUNT}  dmg: {}  rolls: {}",
+            ticker.ticks,
+            ticker.wave,
+            ticker.health,
+            ticker.mana,
+            ticker
+                .cooldowns
+                .iter()
+                .filter(|cooldown| **cooldown == 0)
+                .count(),
+            ticker.damage.len(),
+            ticker.rolls,
+        );
+        self.logged_wave = ticker.wave;
     }
 
     /// How many times [`Game::tick`] has been called.

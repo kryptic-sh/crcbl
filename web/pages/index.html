@@ -39,6 +39,7 @@ meta-->
     <a class="btn primary" href="demos/flappy/">play flappy →</a>
     <a class="btn primary" href="demos/asteroids/">play asteroids →</a>
     <a class="btn primary" href="demos/horde/">play horde →</a>
+    <a class="btn primary" href="demos/hud/">watch hud →</a>
     <a class="btn" href="https://www.kryptic.sh/projects/crcbl/"
       >about the engine</a
     >
@@ -53,7 +54,8 @@ meta-->
     From the moment it exists, so the browser target cannot quietly rot: a
     broken wasm build is a broken CI, and a broken CI blocks the merge. Each
     build is loaded in a real headless browser that opens a WebGPU device,
-    presses a key and reads the canvas back before it ships.
+    presses a key where there is one to press, and reads the canvas back before
+    it ships.
   </p>
   <ul class="grid">
     <li>
@@ -102,6 +104,18 @@ meta-->
           exists to be measured — the whole crowd is one draw call, and the
           numbers for one thousand through ten thousand are written down beside
           the code.
+        </p>
+      </a>
+    </li>
+    <li>
+      <a class="feat" href="demos/hud/">
+        <div class="icon">P4 · not a game</div>
+        <h4>HUD</h4>
+        <p>
+          The UI system's living fixture, and the one demo here you do not play:
+          bars, an ability row, a wave banner and a damage ticker, built from
+          draw-list rectangles, outlines and text spans and driven end to end by
+          a scripted ticker on the server. It takes no input at all.
         </p>
       </a>
     </li>

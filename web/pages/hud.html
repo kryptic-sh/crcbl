@@ -1,0 +1,99 @@
+<!--meta
+{
+  "out": "demos/hud/index.html",
+  "slug": "hud",
+  "name": "HUD",
+  "title": "HUD — Crucible",
+  "description": "hud, the UI system's living fixture, compiled to wasm32 and drawing through WebGPU.",
+  "nav": [
+    { "href": "/", "label": "all demos" },
+    { "href": "#controls", "label": "controls" },
+    { "href": "https://github.com/kryptic-sh/crcbl/tree/main/apps/hud", "label": "source" }
+  ],
+  "footer": "<a href=\"https://github.com/kryptic-sh/crcbl/tree/main/apps/hud\">apps/hud</a>",
+  "body_end": "<script type=\"module\" src=\"/demos/hud/main.js\"></script>"
+}
+meta-->
+<!--body-->
+<header class="hero">
+  <div class="badges">
+    <span class="badge live">● P4</span>
+    <span class="badge">WebGPU</span>
+    <span class="badge">wasm32</span>
+  </div>
+  <h1><span class="grad">HUD</span></h1>
+  <p class="tagline">
+    A game-style heads-up display with no game behind it: health and mana bars,
+    an ability row that cools down, a wave banner and a damage ticker — every
+    pixel of it built out of the draw list's rectangles, outlines and text spans,
+    and driven by a scripted ticker on the server.
+  </p>
+</header>
+
+<!--include demo-window-->
+
+<section id="controls">
+  <h2>controls</h2>
+  <h3>There are none. That is the sample.</h3>
+  <p>
+    This is the one demo here you do not play. It takes no input:
+    <code>key_event</code> in <code>apps/hud</code> is empty on purpose, because
+    the subject is the widget system and a player between you and it would only
+    be showing something else. Everything on the page is the server's ticker
+    working through a fixed script.
+  </p>
+  <p>
+    The three keys below are the engine loop's, not this sample's, and they are
+    the same three every other demo answers to. Click the canvas first — a canvas
+    has to hold focus to receive them, and letting go of it pauses the loop.
+  </p>
+  <ul class="keys">
+    <!--include demo-loop-keys-->
+  </ul>
+</section>
+
+<section id="why-this-one">
+  <h2>why a sample with nothing to do</h2>
+  <h3>Because the UI has to be dogfooded by something that is not a game.</h3>
+  <p>
+    Every other sample here proves the engine can host a game, and each one draws
+    a HUD as a side effect of being one. This sample is the HUD, and nothing
+    else: it is the fixture the UI system is developed against, so a widget that
+    is awkward to build shows up as an awkward file in <code>apps/hud</code>
+    rather than as a paragraph in a design document.
+  </p>
+  <p>
+    Press <kbd>F3</kbd> for the proof. The debug panel is drawn from the same
+    primitives, into the same draw list, and one of its two sections counts the
+    commands the page it is sitting on top of just emitted — rectangles,
+    outlines and text spans, per frame.
+  </p>
+  <p>
+    It is still a real client/server sample: the ticker is a game module the
+    authoritative server owns, stepped on the fixed timestep, with a client on
+    the other end of an in-memory transport. What it is not yet is styled — the
+    stylesheets, the themes and the runtime switcher this sample exists to
+    exercise are waiting on a layout engine that does not exist, and the page
+    positions itself from named constants until it does.
+  </p>
+</section>
+
+<section id="whats-running">
+  <h2>what is actually running</h2>
+  <h3>The native sample, with three differences the browser forces.</h3>
+  <p>
+    Start-up is polled across several frames, because
+    <code>requestDevice</code> is a promise and the main thread cannot block on
+    it. The frame loop is driven by <code>requestAnimationFrame</code> out here
+    rather than by a <code>loop</code> inside the engine. And the clock is the
+    browser's, because <code>wasm32-unknown-unknown</code> has no
+    <code>Instant</code>.
+  </p>
+  <p>
+    There is no fourth difference about saved data, which every other demo here
+    has: this one keeps nothing, because there is no score to keep. It is also
+    the smallest artifact on the site — no sprite sheet, no audio, no world.
+  </p>
+  <!--include demo-console-note-->
+</section>
+<!--/body-->

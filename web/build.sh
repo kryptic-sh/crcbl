@@ -31,6 +31,7 @@ DEMOS=(
   "flappy:crcbl_flappy:demos/flappy"
   "asteroids:crcbl_asteroids:demos/asteroids"
   "horde:crcbl_horde:demos/horde"
+  "hud:crcbl_hud:demos/hud"
 )
 
 # The `wasm-bindgen` CLI must match the `wasm-bindgen` crate the build resolved,

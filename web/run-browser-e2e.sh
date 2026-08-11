@@ -292,5 +292,10 @@ if [ -z "$CONFIG" ]; then
     exit 1
 fi
 echo "crcbl web e2e: $RAN checks ran in a real browser, ${CONFIG#running against the }"
-echo "crcbl web e2e: $DEMO booted, opened a WebGPU device, took a real key event, and drew moving frames"
+# The key event is not part of this sentence any more, because it is not part of
+# every run: `apps/hud` takes no input at all and its `EXPECTATIONS` row says so,
+# so the driver dispatches no key for it. What every demo does do is the three
+# claims left here, and the per-check lines above name the key where there was
+# one.
+echo "crcbl web e2e: $DEMO booted, opened a WebGPU device, and drew moving frames"
 echo "crcbl web e2e:${ISOLATION#*ok  }"

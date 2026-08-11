@@ -155,6 +155,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/hud` runs in a browser, so every sample now has a demo on the Pages
+  site.** It gained a `web.rs`, a `cdylib` library named `crcbl_hud`, the polled
+  `PolledGpu`/`PendingLoop` bring-up the other samples use, and an entry at each
+  registration site — `web/build.sh`, `web/build-pages.py`,
+  `web/tools/browser-e2e.mjs`, `web/pages/`, `web/demos/` and a step in the
+  Pages workflow. The bin target is unchanged; the library rename means the
+  binary now says `use crcbl_hud::…`.
+
+  It is the smallest wasm artifact of the five at 2 720 934 bytes, against
+  horde's 3 028 644. `Game::log_heartbeat` is new and is the one behavioural
+  addition: hud logged nothing from inside its tick, and the browser gate reads
+  both "a paused demo runs no ticks" and hud's own advancing state off that
+  line.
+
+  hud takes no input, so its gate row asserts no key press and the shared
+  `run-browser-e2e.sh` no longer claims every demo "took a real key event" — the
+  per-check lines still name the key where there was one.
+
 - **`crcbl_scene::meshlet` clusters a triangle list into meshlets.**
   `build_meshlets(positions, indices)` returns the meshoptimizer/NVIDIA
   three-array layout — the original vertex indices run per cluster, three `u8`

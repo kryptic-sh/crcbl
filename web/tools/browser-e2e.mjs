@@ -24,7 +24,9 @@
 //      whether a threaded wasm build could run here at all
 //   B  the engine boots — canvas size, wgpu backend, swapchain, STATUS_RUNNING
 //   C  input drives the simulation — a real click focuses the canvas, a real
-//      Space key launches the ball, and the game's own HUD log line changes
+//      Space key launches the ball, and the game's own HUD log line changes.
+//      A demo with no input at all (`key: null` in EXPECTATIONS) skips the key
+//      and keeps the log line, which is the half it can still make good on
 //   D  it renders — no WebGPU device errors, the canvas is not one flat colour,
 //      and the canvas changes from frame to frame while the ball is in flight
 //   E  focus and pause — a blurred canvas pauses and runs no ticks, focus
@@ -103,6 +105,15 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * whatever HUD line the game happens to log. Keeping them in one table is what
  * lets the same gate cover a second game; before flappy they were breakout's
  * strings inline, which is the shape that only ever works once.
+ *
+ * `key` is **nullable**, and a row that sets it to `null` is saying the demo has
+ * no input at all rather than that nobody got round to writing the checks. Group
+ * C skips its start-key half for such a demo — there is no waiting state to
+ * leave, so a dispatched key and an assertion about what it did would be a check
+ * wired to nothing — and keeps the half that is about the simulation advancing,
+ * which is the claim every demo can make. `started`, `startedLabel` and
+ * `startedFailure` are then unused and left out. `waiting` and `moving` are
+ * required of every row.
  */
 const EXPECTATIONS = {
   breakout: {
@@ -155,6 +166,31 @@ const EXPECTATIONS = {
     startedFailure: 'the state never left WaitingToStart',
     moving: /time: ([\d.]+)/,
     movingLabel: 'the clock advances under its own steam',
+  },
+  // **The demo with no input.** `apps/hud` is the UI system's fixture rather
+  // than a game: its `HostedGame::key_event` is empty by design and its page is
+  // driven end to end by a scripted ticker on the server, so there is no key to
+  // press and no waiting state to leave. `key: null` is what says that, and it
+  // is the difference between "this demo takes no input" and "this row is
+  // half-written".
+  //
+  // `waiting` is therefore not about waiting: it is the shape of hud's own HUD
+  // line at the start of a run, and it is what separates a hud page that got as
+  // far as ticking from every other demo's log and from a page that logged
+  // nothing at all. The wave is `1` because the first line is emitted on tick
+  // one — `Game::log_heartbeat` logs the tick a wave turns over on — and the
+  // second wave is ten seconds of simulated time away.
+  //
+  // `rolls` is the rng cursor and it is the strictest `moving` value any row
+  // here uses. It advances only when the script actually rolls a number — an
+  // incoming hit, or an ability being cast — so a ticker that was being stepped
+  // but doing nothing would leave it standing still, and a frame counter,
+  // a wall clock or the heartbeat's own cadence cannot move it.
+  hud: {
+    key: null,
+    waiting: (line) => line.includes('[HUD] tick: 1  wave: 1'),
+    moving: /rolls: (\d+)/,
+    movingLabel: 'the ticker rolls new numbers under its own steam',
   },
 };
 
@@ -1044,7 +1080,13 @@ try {
     throw new Error(`the demo never started running: ${detail}`);
   }
 
-  group('C — input drives the simulation');
+  // The focus half runs for every demo — a canvas that cannot take the keyboard
+  // is a paused demo whatever it is — and the key half only where there is a key.
+  group(
+    EXPECTED.key
+      ? 'C — input drives the simulation'
+      : 'C — the simulation drives itself'
+  );
 
   const hud = () => consoleLines.filter((line) => line.includes('[HUD]'));
   await until(async () => hud().length > 0);
@@ -1117,49 +1159,57 @@ try {
     `activeElement is "${focused}"`
   );
 
-  // **The focusing click must not also press a button**, which is the check
-  // whose absence let the centred click above survive. Without it, a click that
-  // starts the game reads as a pass here and then poisons the `Space` below —
-  // the key starts a run that is already running, and in horde that is a
-  // restart. Read after the click and before any key, so the only thing it can
-  // be reporting on is the click.
-  await until(async () => hud().length > beforeLaunch || null);
-  const afterFocusClick = hud().at(-1) ?? '';
-  check(
-    'C',
-    'the focusing click pressed no button',
-    EXPECTED.waiting(afterFocusClick),
-    afterFocusClick.trim() || 'no HUD line after the click'
-  );
+  // Everything from here to the `moving` check is about the start key, so a
+  // demo that has none skips it rather than dispatching a key that means
+  // nothing and asserting it did something. `EXPECTATIONS` says which.
+  if (EXPECTED.key) {
+    // **The focusing click must not also press a button**, which is the check
+    // whose absence let the centred click above survive. Without it, a click
+    // that starts the game reads as a pass here and then poisons the `Space`
+    // below — the key starts a run that is already running, and in horde that
+    // is a restart. Read after the click and before any key, so the only thing
+    // it can be reporting on is the click.
+    await until(async () => hud().length > beforeLaunch || null);
+    const afterFocusClick = hud().at(-1) ?? '';
+    check(
+      'C',
+      'the focusing click pressed no button',
+      EXPECTED.waiting(afterFocusClick),
+      afterFocusClick.trim() || 'no HUD line after the click'
+    );
 
-  // The key the demo's own instructions name. `code` is what the engine binds
-  // to; `key` and the virtual key codes are what a real keyboard sends.
-  for (const type of ['keyDown', 'keyUp']) {
-    await page.send('Input.dispatchKeyEvent', {
-      type,
-      code: 'Space',
-      key: ' ',
-      windowsVirtualKeyCode: 32,
-      nativeVirtualKeyCode: 32,
-      ...(type === 'keyDown' ? { text: ' ' } : {}),
-    });
+    // The key the demo's own instructions name. `code` is what the engine binds
+    // to; `key` and the virtual key codes are what a real keyboard sends — and
+    // they are spelled for Space, which is what every keyed row asks for. A row
+    // naming a different key has to bring its own three values with it.
+    for (const type of ['keyDown', 'keyUp']) {
+      await page.send('Input.dispatchKeyEvent', {
+        type,
+        code: EXPECTED.key,
+        key: ' ',
+        windowsVirtualKeyCode: 32,
+        nativeVirtualKeyCode: 32,
+        ...(type === 'keyDown' ? { text: ' ' } : {}),
+      });
+    }
+
+    const launched = await until(async () =>
+      hud()
+        .slice(beforeLaunch)
+        .find((line) => EXPECTED.started(line))
+    );
+    check(
+      'C',
+      EXPECTED.startedLabel,
+      Boolean(launched),
+      (launched ?? EXPECTED.startedFailure).trim()
+    );
   }
-
-  const launched = await until(async () =>
-    hud()
-      .slice(beforeLaunch)
-      .find((line) => EXPECTED.started(line))
-  );
-  check(
-    'C',
-    EXPECTED.startedLabel,
-    Boolean(launched),
-    (launched ?? EXPECTED.startedFailure).trim()
-  );
 
   // The ball's x is in every HUD line, and two different values is the
   // simulation advancing under its own steam — which nothing on the JS side
-  // could fake.
+  // could fake. The one check in this group every demo makes, including the one
+  // that took no key to get here.
   const positions = await until(async () => {
     const seen = new Set(
       hud()
@@ -1174,8 +1224,8 @@ try {
     EXPECTED.movingLabel,
     Boolean(positions),
     positions
-      ? `x took ${positions.size} values: ${[...positions].join(', ')}`
-      : 'x never changed'
+      ? `it took ${positions.size} values: ${[...positions].join(', ')}`
+      : 'it never changed'
   );
 
   group('D — it renders');

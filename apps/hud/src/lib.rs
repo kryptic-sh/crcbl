@@ -36,6 +36,17 @@
 //! it would be showing something other than what it exists to show. There is no
 //! `build.rs` here and no bake step. Rule 4's debug panel still applies, and
 //! here it is the dogfood case — see [`app::Hud`]'s `debug_sections`.
+//!
+//! # Two front ends, one loop
+//!
+//! Like every other sample, this is a library because it has to be reachable
+//! from two places that share nothing else: `src/main.rs` for the native binary,
+//! and `src/web.rs` — compiled only on `wasm32`, which is why it is not linked
+//! on a host build — for a browser driven from `requestAnimationFrame`.
+//! Everything below them is shared verbatim, which for this sample includes the
+//! part that makes it worth publishing: the demo takes **no input at all**, so
+//! what the page shows is the ticker and the widget system and nothing a visitor
+//! did.
 
 pub mod app;
 mod args;
@@ -44,12 +55,15 @@ mod gpu;
 pub mod menu;
 pub mod page;
 
-pub use app::{Hud, HudError, Loop, Summary, run, start, with_shell};
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+
+pub use app::{Hud, HudError, Loop, PendingLoop, Summary, run, start, with_shell};
 pub use args::{Invocation, Options, USAGE, parse};
 pub use game::{
     ABILITIES, ABILITY_COUNT, AbilitySpec, AbilityView, DAMAGE_LANES, DAMAGE_LIFETIME,
     DEFAULT_SEED, DEFAULT_TICK_HZ, Damage, DamageView, Game, GameError, HEALTH_FLOOR, HEALTH_MAX,
-    HudStats, MANA_MAX, RenderState, WAVE_TICKS,
+    HEARTBEAT_TICKS, HudStats, MANA_MAX, RenderState, WAVE_TICKS,
 };
 pub use menu::{MenuKind, Menus};
 pub use page::PageStats;

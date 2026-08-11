@@ -4974,18 +4974,35 @@ function that positions everything from named constants at the top of
 `apps/hud/src/page.rs`, so the styling work replaces that function's body rather
 than restructuring the sample.
 
-**Sample rule 7 (a wasm demo on the Pages site) is not met.** `apps/hud` has no
-`web.rs`, no `[lib] crate-type = ["cdylib", "rlib"]`, no
-`PolledGpu`/`PendingLoop` polled bring-up, and no entry in `web/build.sh`'s
-`DEMOS`, `web/build-pages.py`'s `DEMOS`, `web/tools/browser-e2e.mjs`'s
-`EXPECTATIONS`, `web/pages/`, `web/demos/` or the per-demo steps in
-`.github/workflows/pages.yml`. It **does** compile for `wasm32-unknown-unknown`
-(verified with `cargo check --locked --target wasm32-unknown-unknown -p hud`),
-so the CI `wasm32` job's `--workspace` sweep covers it; what is missing is the
-browser front end and the seven registration sites above. Deferred rather than
-declined — the sample's own exit criteria call for it, and it is the smallest
-wasm artifact of any sample, which is a measurement worth having. Those files
-are outside the paths this task owned.
+**Sample rule 7 is met now** — hud has a `web.rs`, a `cdylib` lib named
+`crcbl_hud`, polled `PolledGpu`/`PendingLoop` bring-up, and an entry at every
+registration site. It is the smallest wasm artifact of any sample at **2 720 934
+bytes**, against breakout 2 947 252, flappy 2 937 308, asteroids 2 970 845 and
+horde 3 028 644, which is the measurement this entry said was worth having.
+
+Four things that slice found in the shared web tooling and did not fix, none of
+them hud's:
+
+- **The browser gate cannot run its default way on this machine any more.**
+  Chromium 151 returns `rgb(0,0,0)` from group A's readback control under Xvfb
+  for **both** the `hardware` and `swiftshader` adapters, so a bare
+  `./web/run-browser-e2e.sh` fails its own control and correctly refuses to
+  interpret anything after it. `--headless --hardware` works and is what every
+  local run above used. **CI runs Xvfb + SwiftShader**, the row that worked on
+  Chromium 150; nothing has proven it still works on 151, so if GitHub's runner
+  image moves to it the Pages job fails group A for all five demos at once. That
+  is the failure to expect and it will not look like a hud problem.
+- **`web/engine/demo.js` has no way for a demo to say it saves nothing.** On
+  `STOPPED` it prints `` `${savedLabel} saved.` `` unconditionally, so hud
+  passes `savedLabel: 'Nothing'` and its status bar reads "Nothing saved." —
+  true, and a workaround. A falsy branch in `demo.js` is the honest fix.
+- **`web/templates/demo-window.html` is one copy for every demo**, so hud's
+  canvas is labelled `aria-label="HUD game"` and the page carries a note about
+  browsers not starting audio until you interact. hud is neither a game nor
+  audible.
+- **CI's shellcheck step covers `tools/*.sh` and `crates/*/tests/*.sh`, not
+  `web/*.sh`.** Both web scripts touched here were checked by hand and are
+  clean, but nothing in CI would have caught it.
 
 **Sample rule 8 (spatial audio through `crcbl-audio`) is not met, and this may
 be an honest exemption rather than a gap.** The rule is about _positional game

@@ -137,8 +137,9 @@ jobs:
           echo "Xvfb: $(command -v Xvfb)"
 
       # THE P5 GATE. Loads the site that was just built in a real browser,
-      # opens a WebGPU device, drives a real Space key into the canvas, and
-      # reads the canvas back to prove it is neither blank nor still.
+      # opens a WebGPU device, drives a real Space key into the canvas of every
+      # demo that has one to press, and reads the canvas back to prove it is
+      # neither blank nor still.
       #
       # A GitHub runner has no GPU, which is why the harness runs the browser
       # inside Xvfb against Chromium's bundled SwiftShader: that is the one
@@ -161,6 +162,13 @@ jobs:
 
       - name: Render horde in a real browser
         run: CRCBL_WEB_E2E_DEMO=horde ./web/run-browser-e2e.sh
+
+      # hud is the one demo that takes no input, so the driver dispatches no key
+      # for it and reads "the simulation is advancing" off the ticker's own rng
+      # cursor instead. Its `EXPECTATIONS` row in `web/tools/browser-e2e.mjs` is
+      # what says so; the step is otherwise identical.
+      - name: Render hud in a real browser
+        run: CRCBL_WEB_E2E_DEMO=hud ./web/run-browser-e2e.sh
 
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed

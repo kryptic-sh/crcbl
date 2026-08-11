@@ -7,16 +7,25 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
-# **A library with two front ends, like every other sample**, and for the first
-# of the two reasons `apps/flappy/Cargo.toml` gives: `src/main.rs` owns argv and
-# the exit code, and everything below it — the ticker, the page, the loop — is
-# the `hud` library both it and this crate's tests link.
+# **A library with two front ends, like every other sample**, and for both of
+# the reasons `apps/breakout/Cargo.toml` gives at length: `src/main.rs` owns argv
+# and the exit code, `src/web.rs` is an `extern "C"` entry point a browser's JS
+# shim drives once per `requestAnimationFrame`, and a bin crate has no linkable
+# artifact for the second.
 #
-# There is no `crate-type = ["cdylib", "rlib"]` and no `[lib] name` override,
-# because this sample has no browser front end yet. Those two lines exist in the
-# other samples to keep a wasm build from writing two targets to one filename,
-# and adding them here would be paying for a target nothing builds. See
-# `docs/backlog.md` for what the web build owes.
+# `cdylib` is what `wasm32-unknown-unknown` links into a `.wasm`; `rlib` is what
+# `main.rs` links against. Both are needed — a `cdylib`-only lib cannot be a
+# dependency of the binary in the same package.
+#
+# The lib is not called `hud`. A lib and a bin of the same name in one package
+# write the same `hud.wasm`, which cargo calls an output filename collision.
+[lib]
+name = "crcbl_hud"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "hud"
+path = "src/main.rs"
 
 # One engine dependency. No `build-dependencies`: this sample is **exempt from
 # sample rule 11** (`.crpix` art through the sprite pass) and its own plan doc

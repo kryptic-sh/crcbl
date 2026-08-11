@@ -20,7 +20,9 @@
 //! last two load the target rather than clearing it, so declaring the UI pass
 //! first would put the pause panel on top of the words it exists to frame.
 
-use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions};
+use crcbl::engine::{
+    FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions, PendingGpuContext,
+};
 use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::prelude::*;
 use crcbl::render::{
@@ -75,6 +77,28 @@ fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
     }
 }
 
+/// A [`Gpu`] being opened one poll at a time — the browser's half of
+/// [`Gpu::open`].
+#[derive(Debug)]
+pub struct PendingGpu {
+    pending: PendingGpuContext,
+}
+
+impl PendingGpu {
+    /// Advances the open. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the device request failed or a renderer refused the
+    /// device it produced.
+    pub fn poll(&mut self) -> Result<Option<Gpu>, GpuError> {
+        match self.pending.poll()? {
+            Some(ctx) => Gpu::from_context(ctx).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
 impl Gpu {
     /// Opens a backend, a surface, a device and a swapchain, and builds the menu
     /// and UI renderers.
@@ -91,6 +115,23 @@ impl Gpu {
         gpu: GpuOptions,
     ) -> Result<Self, GpuError> {
         Self::from_context(GpuContext::open(shell, window, extent, &desc(gpu))?)
+    }
+
+    /// Starts opening the same thing without blocking.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the registry has no such backend or the window went away
+    /// before its surface could be described.
+    pub fn request_open<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        gpu: GpuOptions,
+    ) -> Result<PendingGpu, GpuError> {
+        Ok(PendingGpu {
+            pending: GpuContext::request_open(shell, window, extent, &desc(gpu))?,
+        })
     }
 
     /// Builds this sample's renderers on an already-open context.
@@ -273,6 +314,29 @@ impl Gpu {
             timers.destroy(self.ctx.device());
         }
         self.ctx.destroy()
+    }
+}
+
+/// Lets [`crcbl::engine::PolledBoot`] drive this bundle's arrival.
+///
+/// Two one-line forwards, exactly as every other sample writes them: the methods
+/// below already exist for the blocking path, and the trait is what lets the
+/// engine own the state machine. The extent and the resize are
+/// [`crcbl::engine::GpuSurface`]'s, because a running loop asks the same two.
+impl crcbl::engine::PolledGpu for Gpu {
+    type Pending = PendingGpu;
+
+    fn request<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        gpu: GpuOptions,
+    ) -> Result<Self::Pending, GpuError> {
+        Self::request_open(shell, window, extent, gpu)
+    }
+
+    fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError> {
+        pending.poll()
     }
 }
 
