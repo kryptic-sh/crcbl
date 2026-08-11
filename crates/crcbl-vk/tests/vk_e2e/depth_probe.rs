@@ -89,6 +89,15 @@ struct DepthProbe {
     shadow_atlas: crcbl_hal::ImageHandle,
     shadow_atlas_view: crcbl_hal::ImageViewHandle,
     shadow_sampler: crcbl_hal::SamplerHandle,
+    /// What the last frame left [`DepthProbe::shadow_atlas`] in.
+    ///
+    /// The probe outlives its frames and this image is not a swapchain image, so
+    /// nothing else orders one frame's use of it against the next: re-declaring
+    /// [`ResourceState::Undefined`] every frame would give the incoming layout
+    /// transition `srcStageMask = NONE` and leave it racing the previous frame's
+    /// sampled read. `ForwardRenderer` carries the same field for the same
+    /// reason — see `crcbl_render::ForwardRenderer`'s `shadow_imported`.
+    shadow_imported: ResourceState,
     layout: crcbl_hal::BindGroupLayoutHandle,
     group: crcbl_hal::BindGroupHandle,
     pipeline_layout: crcbl_hal::PipelineLayoutHandle,
@@ -645,6 +654,9 @@ impl DepthProbe {
             shadow_atlas,
             shadow_atlas_view,
             shadow_sampler,
+            // Nothing has touched it yet, so the first frame's graph is what
+            // gives it a layout.
+            shadow_imported: ResourceState::Undefined,
             layout,
             group,
             pipeline_layout,
@@ -676,7 +688,7 @@ impl DepthProbe {
 /// Renders the probe with `view_proj` and reads the frame back.
 fn render_probe(
     headless: &Headless,
-    probe: &DepthProbe,
+    probe: &mut DepthProbe,
     pool: &mut crcbl_render::TransientPool,
     view_proj: glam::Mat4,
 ) -> crcbl_golden::Image {
@@ -743,6 +755,12 @@ fn render_probe(
         // layout before the set is bound. Nothing samples it — see the field —
         // but a descriptor pointing at an image in no layout at all is a
         // validation error whether or not the shader reads it.
+        //
+        // **`initial` is what the last frame left it in, not `Undefined`.** The
+        // probe owns this image across frames and no semaphore orders one frame's
+        // draw against the next frame's transition, so a second `Undefined` is a
+        // barrier with no source scope sitting after a fragment shader read of
+        // the same image: `SYNC-HAZARD-WRITE-AFTER-READ`. See the field.
         let shadow = graph.import_image(
             "probe-shadow-atlas",
             crcbl_render::ImportedImage {
@@ -750,7 +768,7 @@ fn render_probe(
                 view: probe.shadow_atlas_view,
                 format: Format::D32Float,
                 extent: (1, 1),
-                initial: ResourceState::Undefined,
+                initial: std::mem::replace(&mut probe.shadow_imported, ResourceState::ShaderRead),
                 final_state: ResourceState::ShaderRead,
             },
         );
@@ -833,7 +851,7 @@ fn render_probe(
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
     let headless = Headless::open_for_mesh();
-    let probe = DepthProbe::new(&headless);
+    let mut probe = DepthProbe::new(&headless);
     let mut pool = crcbl_render::TransientPool::new();
 
     #[allow(clippy::cast_precision_loss)]
@@ -860,7 +878,7 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
 
     let centre = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2);
 
-    let reversed_frame = render_probe(&headless, &probe, &mut pool, reversed);
+    let reversed_frame = render_probe(&headless, &mut probe, &mut pool, reversed);
     let pixel = reversed_frame.pixel(centre.0, centre.1).expect("inside");
     assert!(
         pixel[0] > pixel[2] && pixel[0] > 100,
@@ -885,7 +903,7 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
          {pixel:?} at {ring:?}"
     );
 
-    let standard_frame = render_probe(&headless, &probe, &mut pool, standard);
+    let standard_frame = render_probe(&headless, &mut probe, &mut pool, standard);
     let pixel = standard_frame.pixel(centre.0, centre.1).expect("inside");
     assert!(
         pixel[2] > pixel[0] && pixel[2] > 100,

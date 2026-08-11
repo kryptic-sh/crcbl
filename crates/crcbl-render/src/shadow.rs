@@ -30,16 +30,16 @@
 //!   depends on the split alone. Rotating the camera cannot change it.
 //! * **The cascade's origin moving by a fraction of a texel.** Fixed by
 //!   quantising the light-space origin to whole texels, which is what
-//!   [`snap_to_texel`] does and what the ortho box below is built around.
+//!   `snap_to_texel` does and what the ortho box below is built around.
 //!
 //! The cost of the sphere is resolution: a sphere of radius `r` centred on the
 //! eye covers everything within `r`, including the half of it behind the camera
 //! that will never be shaded. A frustum-fitted box would be roughly twice as
 //! dense for the same tile. That is the trade, taken deliberately: the tight fit
-//! is the version that has to branch on [`Projection`] — an orthographic camera
-//! has no field of view to build corners from — and a shadow pass that is
-//! correct on one projection and wrong on the other is worse than one that is
-//! uniformly coarser.
+//! is the version that has to branch on [`Projection`](crate::Projection) — an
+//! orthographic camera has no field of view to build corners from — and a shadow
+//! pass that is correct on one projection and wrong on the other is worse than
+//! one that is uniformly coarser.
 
 use glam::{Mat4, Vec3, Vec4Swizzles};
 

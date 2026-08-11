@@ -1188,6 +1188,37 @@ invocation is CI's invocation, and requiring an explicit opt-out to use the real
 GPU. That is probably the better default and was not taken here because it
 changes what an existing command does.
 
+## `ImportedImage::initial` is a contract nothing enforces, and it has been wrong twice
+
+`crcbl_render::graph`'s `ImportedImage::initial` documents what state an image
+is already in when the frame imports it, and a declaration that lies produces a
+barrier with no source scope — `Undefined` maps to
+`(stage NONE, access NONE, layout UNDEFINED)` — so nothing waits for the
+previous frame's reads. That is a write-after-read hazard, and **CI's validation
+layer is the only thing in this project that reports it**.
+
+Got wrong twice now: `crcbl::screenshot`'s readback barriers (fixed earlier this
+session) and `crates/crcbl-vk/tests/vk_e2e/depth_probe.rs`'s 1x1 shadow
+placeholder, which imported `Undefined` on every call while a previous
+`render_probe` had left it in `ShaderRead`. Both were the same shape and neither
+was caught locally.
+
+**The enforceable version**: record each imported image's `final_state` in
+`TransientPool` and reject a contradicting `initial` at `compile()`. What stops
+it being a small change is that a swapchain image legitimately declares
+`Undefined` every frame — the acquire semaphore makes it true — so telling a
+legal `Undefined` from a lie needs a new field on `ImportedImage` and an update
+to every construction site, `apps/bare/src/lib.rs` included.
+
+**Coverage note:** `crcbl_render::forward`'s
+`the_shadow_atlas_enters_each_frame_in_the_state_the_last_one_left_it` now
+replays the null backend's recorded stream over several laps and asserts each
+barrier's `from` equals what the previous one left, so the engine's own atlas is
+guarded on any machine. **Test fixtures are not.** `run-vk-e2e.sh`'s header
+claims the graph-compile suite covers this class; that is true of the engine and
+not of fixtures like `DepthProbe`, which is exactly where the second instance
+lived.
+
 ## This machine's validation layer cannot see the two-submission hazard
 
 `crcbl-vk`'s offscreen-ring write-after-read (fixed — see `CHANGELOG.md`) is

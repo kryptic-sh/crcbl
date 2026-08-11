@@ -4160,6 +4160,143 @@ mod tests {
         recorder.assert_valid();
     }
 
+    /// One more frame than the uniform ring is deep, so at least one lap both
+    /// reuses a slot and follows a lap that already sampled the atlas.
+    const SHADOW_LAPS: usize = FRAMES_IN_FLIGHT + 1;
+
+    /// **Every frame's first barrier on the shadow atlas names what the previous
+    /// frame left it in**, and the same for its placeholder.
+    ///
+    /// # Why this cannot be read off one frame
+    ///
+    /// The atlas is neither a transient nor a swapchain image. The graph cannot
+    /// look its state up in the [`TransientPool`], and no acquire semaphore sits
+    /// between one frame's use of it and the next — so
+    /// [`ForwardRenderer::add_passes`] *declares* it, out of
+    /// [`ForwardRenderer::shadow_imported`], and the declaration is the only
+    /// thing making the transition true.
+    ///
+    /// Declaring [`ResourceState::Undefined`] on a frame after the first is the
+    /// failure this catches. It expands to `srcStageMask = NONE,
+    /// srcAccessMask = NONE` (`crcbl_vk::conv::state_masks`), so the transition
+    /// into the depth-only pass's attachment state orders against nothing — while
+    /// the previous frame's colour pass is still sampling the very same image.
+    /// Vulkan reports it as `SYNC-HAZARD-WRITE-AFTER-READ` with
+    /// `read_barriers: 0`; every other backend resolves it however the driver
+    /// likes.
+    ///
+    /// # Why the command stream is the observable
+    ///
+    /// Nothing above the seam can see a wrong declaration: the frame still
+    /// renders, the golden still matches, and no state is ever read back. So this
+    /// replays the recorded stream with a tracker, which is the same check a
+    /// validation layer performs and needs no GPU at all — the shape
+    /// `crcbl::screenshot`'s
+    /// `every_readback_barrier_declares_the_state_the_image_is_actually_in` uses.
+    /// One difference: `Undefined` is **not** waved through after the first
+    /// touch. It is true for a swapchain image because the acquire's semaphore
+    /// makes it true, and there is no such semaphore here.
+    #[test]
+    fn the_shadow_atlas_enters_each_frame_in_the_state_the_last_one_left_it() {
+        use crcbl_hal::null::Command;
+
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let atlas = renderer.shadow_atlas();
+        let placeholder = renderer.shadow_placeholder;
+        let mut pool = crate::TransientPool::new();
+        let imported = swapchain_image(device);
+        let mut recorded = Vec::with_capacity(SHADOW_LAPS);
+
+        for _ in 0..SHADOW_LAPS {
+            renderer
+                .begin_frame(
+                    device,
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    Mat4::IDENTITY,
+                    (64, 48),
+                )
+                .expect("write");
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            renderer.add_passes(&mut graph, target, (64, 48));
+            let compiled = graph.compile(&pool).expect("a legal frame");
+            let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                label: Some("shadow lap"),
+                queue,
+            });
+            compiled
+                .execute(device, &mut pool, encoder.as_mut(), None)
+                .expect("the graph executed");
+            recorded.push(encoder.finish().expect("recording succeeded"));
+        }
+
+        // The two images the renderer owns across frames. A transient's state is
+        // the pool's business and the fake swapchain image's is the acquire's, so
+        // neither belongs in here.
+        let mut tracked = [
+            (atlas, ResourceState::Undefined),
+            (placeholder, ResourceState::Undefined),
+        ];
+        let mut atlas_writes = 0usize;
+        let mut named = 0usize;
+        for command in recorder.commands() {
+            let Command::Barrier { images, .. } = command else {
+                continue;
+            };
+            for barrier in images {
+                let Some((_, state)) = tracked
+                    .iter_mut()
+                    .find(|(handle, _)| *handle == barrier.image)
+                else {
+                    continue;
+                };
+                assert_eq!(
+                    barrier.from, *state,
+                    "a barrier declared {:?} -> {:?} on an image the frame before it left in \
+                     {:?}. `Undefined` carries no source scope, so a transition declaring it \
+                     orders against nothing and the previous frame's sampled read is still in \
+                     flight underneath it.",
+                    barrier.from, barrier.to, *state
+                );
+                if barrier.image == atlas && barrier.to == ResourceState::DepthStencilWrite {
+                    atlas_writes += 1;
+                }
+                *state = barrier.to;
+                named += 1;
+            }
+        }
+
+        // Both halves of the loop above are silent on an empty stream, so the
+        // shape it walked is asserted rather than assumed: one transition into
+        // the depth-only pass's attachment state per lap, the last one included.
+        assert_eq!(
+            atlas_writes, SHADOW_LAPS,
+            "{named} barrier(s) named the atlas or its placeholder across {SHADOW_LAPS} laps, \
+             {atlas_writes} of them taking the atlas into DepthStencilWrite — the shadow pass \
+             writes it every frame, so anything else means the loop above asserted on a stream \
+             that does not contain the transition it is about"
+        );
+        let (_, ended) = tracked[0];
+        assert_eq!(
+            ended,
+            ResourceState::ShaderRead,
+            "the import promises to hand the atlas back in the state the next frame declares"
+        );
+
+        renderer.destroy(device);
+        for commands in recorded {
+            device.destroy_command_buffer(commands);
+        }
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
     /// One mesh-table entry, decoded from the bytes that reached the device.
     fn mesh_entry(
         recorder: &Recorder,
