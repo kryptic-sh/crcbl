@@ -5184,3 +5184,39 @@ tests are the specification, and the two that pin the ends —
 both still hold under the new scoring, with more room on each side rather than
 less. If they cannot, the new scoring is worse than the knob it replaced and
 should not land.
+
+### Re-affirmed: no Vulkan on macOS, and two facts the original decision lacked
+
+`docs/plan/09-backends-metal-dx12.md`'s 2026-08-05 correction made Apple
+platforms Metal-only and cancelled the MoltenVK spike. It was reconsidered on
+2026-08-11 and **kept**. The plan doc still carries the reasoning; this records
+the reconsideration so the question is not opened a third time, and two things
+found while costing it that the original argument did not use.
+
+**`crcbl-vk` cannot enumerate a portability driver at all.** There is no
+`VK_KHR_portability_enumeration`, no `ENUMERATE_PORTABILITY_BIT_KHR` on the
+instance create flags, and no `VK_KHR_portability_subset` handling anywhere in
+`crates/crcbl-vk/src/`. Without those, `vkEnumeratePhysicalDevices` returns zero
+devices on macOS whether or not MoltenVK is installed. So "install MoltenVK and
+it works" was never true — it is a code change first, and a small one, but it
+means no macOS Vulkan support exists to accidentally regress.
+
+**MoltenVK runs on Metal, so a macOS Vulkan CI job adds no GPU coverage.** It
+would exercise `crcbl-vk`'s portability against the same paravirtual device
+`crcbl-mtl` already uses, not a second driver. That is worth something — it
+would have tested the capability model's degradation, since MoltenVK has neither
+`DRAW_INDIRECT_COUNT` nor `VK_EXT_mesh_shader` — but it is not the independent
+coverage a second backend usually buys, and the original decision's cost (two
+GPU paths on the platform with the least CI capacity) stands unchanged against
+it.
+
+**If it is ever revisited, the tooling question has a trap in it.** `ash-molten`
+statically links MoltenVK and would make a bare `cargo build` sufficient, but it
+bypasses the Vulkan loader, and with no loader there are no validation layers —
+which `crcbl-vk`'s harness asserts the presence of by design, because a suite
+that passes for want of a layer proves nothing. The configuration that keeps
+that guarantee is the LunarG SDK, which ships MoltenVK, the loader and the
+layers together. Downloading any of it from a `build.rs` was considered and is
+the wrong mechanism regardless: it breaks `--offline` and sandboxed builds, runs
+in every job including the ones that need nothing, and is invisible to the
+`cargo deny` gate this workspace already has.
