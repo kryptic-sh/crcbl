@@ -5378,3 +5378,37 @@ says so. It calls `defuse()`, exactly as `crcbl-vk`'s gate tests decline to call
 `Headless::finish`. The first run with teardown assertions enabled found this
 and nothing else across all 75 tests — one deliberate provocation, correctly
 flagged.
+
+### Metal GPU validation changes the UI frame, which points at an out-of-bounds read
+
+Found on the first run of `MTL_SHADER_VALIDATION=1` against the render e2e, and
+it is the most interesting thing the validation work turned up.
+
+With shader validation on — Metal logs it as `Metal GPU Validation Enabled` —
+the `Ui` scene came back with **five distinct colours against a floor of six**,
+so something that draws stopped drawing. The floor is not arbitrary: it is the
+measured count `run-cross-backend-e2e.sh` records for that scene, and the same
+frame passes on vk, wgpu and D3D12.
+
+**Why this reads as a real defect rather than a quirk of the switch.** GPU
+validation traps an out-of-bounds shader access instead of letting it return
+whatever happened to be in memory. A frame that changes when the trap is turned
+on is a frame that was relying on the untrapped read. The obvious shapes are an
+index past a bound array or a sampler reading outside its texture in the UI
+path.
+
+**What narrows it usefully:** the Metal HAL suite runs _with_ shader validation
+and is clean at 71 tests and zero failed submissions. So whatever this is lives
+in the renderer's path — `ui_pass`, `ui.slang`, or what the pass binds — and not
+in `crcbl-mtl` itself. The cube and sprite scenes fail the same step, but their
+failure may be a consequence of the UI test's rather than independent; nobody
+has separated them.
+
+**Not diagnosed here**, because it needs a Mac: nothing in this repository can
+run Metal, and the CI job's output is a colour count rather than a message —
+Metal names no offending access in `nslog` mode for this. The step therefore
+runs with API validation and **without** shader validation, so it keeps gating
+the picture; turning `MTL_SHADER_VALIDATION` back on in
+`.github/workflows/ci.yml` is how the investigation starts, and the first thing
+worth trying is `MTL_DEBUG_LAYER_ERROR_MODE=assert` to see whether Metal will
+name it.

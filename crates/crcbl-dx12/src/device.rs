@@ -1717,9 +1717,25 @@ impl Device for Dx12Device {
                 "write_buffer offset {offset} does not fit this host's address space"
             ))
         })?;
-        let written = D3D12_RANGE {
-            Begin: begin,
-            End: begin + data.len(),
+        // **A readback heap is told nothing was written, even though it was.**
+        // `pWrittenRange` is what the CPU promises the *GPU* will need to see,
+        // and a `D3D12_HEAP_TYPE_READBACK` allocation is stuck in `COPY_DEST`,
+        // so the GPU can never read what the CPU put there. D3D12's debug layer
+        // says so by name — "Readback resources can be written by the CPU but
+        // there's not much utility … The range should be empty (Begin >= End)"
+        // — and it is a warning this backend's tests treat as a failure, which
+        // is how it was found rather than shipped.
+        //
+        // The bytes are still there for the CPU: these heaps are write-back
+        // cached, so the caller's own later read sees them. Only the promise to
+        // the GPU is withdrawn, because it was never true.
+        let written = if entry.location == MemoryLocation::HostReadback {
+            D3D12_RANGE { Begin: 0, End: 0 }
+        } else {
+            D3D12_RANGE {
+                Begin: begin,
+                End: begin + data.len(),
+            }
         };
         // Begin == End says "the CPU read nothing", which is what this call
         // does.
