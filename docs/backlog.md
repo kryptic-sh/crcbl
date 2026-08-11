@@ -5896,18 +5896,29 @@ left:
   deliberately — nothing in it issues an indirect draw, and it builds neither
   renderer — so the flag would have no consumer. Whether rule 12 outranks that
   reasoning is a decision, not an oversight.
-- **Four samples silently opted out of present-based pacing**, and this is the
-  drift that produced the task above. `horde`, `breakout`, `flappy` and
-  `asteroids` hand-write an `optional_features` that is a **subset** of
-  `crcbl::GpuContextDesc::default`'s: it drops `PRESENT_FEEDBACK` and
-  `PRESENT_TIMING`. `GpuContextDesc`'s own comment says an unasked-for
-  `PRESENT_FEEDBACK` makes `wait_until_presented`'s closed loop dead code, and
-  that is the live state — sandbox logs `hal: pacing on presents, 2 frames deep`
-  and horde logs no such line. The durable fix is to delete the bespoke override
-  in all four and inherit the default; it was left alone because it changes
-  frame pacing for four games and needs verifying against their e2e frame
-  budgets. **Five hand-spelled subsets in five files is the mechanism**, not the
-  four missing flags.
+- **`PRESENT_TIMING` is granted and still reports nothing.** radv grants both
+  present flags — there is no downgrade line for them on vk at all — and every
+  run still logs `hal: display timing Unknown; asked for Auto, pacing Vsync`. So
+  the timing half of present support is negotiated and inert on this machine:
+  the extension is there and the query answers `Unknown`. The feedback half is
+  live and proven (`vkWaitForPresentKHR on present 1; the loop is closed`). Not
+  investigated; it is `crcbl-vk`/engine territory.
+- **Nothing automated asserts that a _game_ closes the present loop.**
+  `crates/crcbl-shell/tests/run-wayland-e2e.sh` makes that assertion for
+  `apps/sandbox` only. The four samples' new tests are **drift guards** — they
+  assert `optional_features` equals the engine's — which is not the same as
+  asserting pacing happened; that was verified by hand against a private
+  headless sway session. Extending the wayland harness to cover a game is the
+  fix.
+- **`--headless --hardware` is the browser-gate flag pair that works here, and
+  it is the silent-pass pair on a machine without a GPU.**
+  `web/run-browser-e2e.sh`'s own header argues for Xvfb over `--headless` for
+  exactly that reason: headless plus SwiftShader returns transparent black from
+  the canvas readback rather than failing. It is safe on this box because there
+  is a real GPU (`"hardware" adapter — amd rdna-3`), and it is being used
+  because Chromium 151 broke the Xvfb path. Worth knowing before that flag pair
+  is copied anywhere it would run without a GPU.
+
 - **Settled: `Features::GPU_DRIVEN`'s doc was wrong, not its callers.** The doc
   said "never as a requirement" while nine call sites across five files pass it
   as `required_features` — `crcbl-render/src/{ui_pass,sprite_pass,texture}.rs`,

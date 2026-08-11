@@ -42,7 +42,7 @@
 use crcbl::engine::{
     FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions, PendingGpuContext,
 };
-use crcbl::hal::{CommandEncoderDesc, Features};
+use crcbl::hal::CommandEncoderDesc;
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{
@@ -153,24 +153,17 @@ pub struct Gpu {
 /// One value rather than two copies: the browser path and the native path must
 /// open the *same* device, or a feature only the blocking path requested is a
 /// bug nobody sees until someone loads the page.
+///
+/// The label is the only part that is this game's. The optional features are
+/// [`GpuContextDesc::default`]'s and are deliberately not restated here: a
+/// hand-written copy of that set is a copy that goes stale the moment the
+/// engine asks for one more, which is how this sample ran without
+/// `PRESENT_FEEDBACK` — and so without the closed-loop present pacing
+/// `GpuContext::acquire` is written around — while looking like it had opted
+/// into everything.
 fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
     GpuContextDesc {
         label: "flappy",
-        // Optional, not required: none of these changes what is drawn, only how
-        // fast or how observable it is. Push constants are not among them —
-        // every engine pass takes its constants from a uniform buffer, which is
-        // what lets a browser run the same shaders.
-        //
-        // `MESH_SHADER` sits beside the bundle rather than inside it — it is
-        // the geometry axis and `GPU_DRIVEN` the data-layout one — and is asked
-        // for because a device only reports the `GeometryPath` it was granted
-        // the features for, and `docs/plan/sample/00-samples-overview.md` rule
-        // 12 wants each sample on the path its device offers. Every browser
-        // lacks it, degrades to an indirect tail, and draws the same frame.
-        optional_features: Features::GPU_DRIVEN
-            | Features::MESH_SHADER
-            | Features::TIMESTAMP_QUERY
-            | Features::DEBUG_MARKERS,
         ..GpuContextDesc::from(gpu)
     }
 }
@@ -640,5 +633,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **This sample asks for the engine's optional features, not a copy.**
+    ///
+    /// This sample used to hand-write a subset in [`desc`], as the other games
+    /// did, and the subsets went stale: they were the set from before
+    /// [`GpuContextDesc::default`] asked for `PRESENT_FEEDBACK` and
+    /// `PRESENT_TIMING`, so this game opened a device that could not observe its
+    /// own presents, `GpuContext::acquire`'s closed loop was unreachable, and
+    /// `hal: pacing on presents` was a line only the sandbox ever logged.
+    /// Spelling a set out here again is what this catches.
+    #[test]
+    fn the_features_this_sample_asks_for_are_the_engine_s_own() {
+        let asked = desc(GpuOptions::default());
+        assert_eq!(asked.label, "flappy");
+        assert_eq!(
+            asked.optional_features,
+            GpuContextDesc::default().optional_features,
+            "a subset spelled out here is a copy, and a copy goes stale",
+        );
     }
 }

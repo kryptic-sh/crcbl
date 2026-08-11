@@ -2265,6 +2265,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Four samples had silently lost present-based pacing.** `horde`, `breakout`,
+  `flappy` and `asteroids` each hand-wrote an `optional_features` set that was
+  `crcbl::GpuContextDesc::default`'s **minus `PRESENT_FEEDBACK` and
+  `PRESENT_TIMING`** — stale copies of a default from before those were added. A
+  device opened without `PRESENT_FEEDBACK` cannot observe its own presents, so
+  `GpuContext::acquire`'s closed loop was unreachable in all four: dead code,
+  and nothing said so. `apps/sandbox` logged
+  `hal: pacing on presents, 2 frames deep` and the four games logged nothing.
+
+  All four now inherit the engine's set rather than restating it, and each has a
+  test asserting its `optional_features` equals `GpuContextDesc::default`'s —
+  the copies were the mechanism, so the fix removes the copies rather than
+  adding two flags to four files. Verified past the log line: run windowed
+  against a real Wayland swapchain, each of the four now reaches
+  `crcbl-vk: vkWaitForPresentKHR on present 1; the loop is closed`.
+
+  **No frame budget moved.** Horde at 10 000 instances under its own documented
+  conditions is 0.130 ms CPU before and after, GPU total 0.045–0.046 ms either
+  way, and a windowed 120-frame run is 1.96 s in both. Expected: FIFO already
+  paced the loop through `vkQueuePresentKHR`, so closing the loop changes where
+  the CPU waits, not how long. Browsers and wgpu grant neither flag, so those
+  paths are unchanged and keep the open-loop limiter.
+
 - **A browser with `navigator.gpu` and no adapter killed demo boot with an
   uncaught `TypeError`.** Reported against the live site on Chromium 151 under
   Wayland with `--render-node-override` on a hybrid Intel/NVIDIA laptop, whose
