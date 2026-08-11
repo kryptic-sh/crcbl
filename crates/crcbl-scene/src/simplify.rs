@@ -706,7 +706,7 @@ fn undirected(a: u32, b: u32) -> [u32; 2] {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Every undirected edge of a triangle list and how many faces use it.
@@ -746,7 +746,11 @@ mod tests {
     /// the same valence, every edge is used by exactly two faces, and there is
     /// no seam — so "closed" is a property of the construction rather than of
     /// my index arithmetic being right at two singular points.
-    fn torus(major: usize, minor: usize) -> (Vec<[f32; 3]>, Vec<u32>) {
+    ///
+    /// `pub(crate)` because [`crate::lod`] builds its chains out of the same
+    /// fixture: a curved closed surface is what makes a level's error nonzero,
+    /// and a second copy of this would be a second torus to keep closed.
+    pub(crate) fn torus(major: usize, minor: usize) -> (Vec<[f32; 3]>, Vec<u32>) {
         let (big, small) = (2.0f32, 0.75f32);
         let mut positions = Vec::new();
         for i in 0..major {
@@ -776,7 +780,13 @@ mod tests {
     /// this module locks on, and a height field, so every face's normal has a
     /// positive `z` — which is what makes an inverted face detectable in the
     /// output without tracking which input face it came from.
-    fn height_field(side: usize, height: fn(f32, f32) -> f32) -> (Vec<[f32; 3]>, Vec<u32>) {
+    ///
+    /// `pub(crate)` because [`crate::lod`] needs a mesh whose coarsest level
+    /// stalls above its target, and a locked border is what stalls one.
+    pub(crate) fn height_field(
+        side: usize,
+        height: fn(f32, f32) -> f32,
+    ) -> (Vec<[f32; 3]>, Vec<u32>) {
         let stride = side + 1;
         let positions = (0..stride)
             .flat_map(|y| {
@@ -804,7 +814,7 @@ mod tests {
     /// find collapses the flip guard has to refuse. A gentler field
     /// (`0.9 sin(2x) sin(2y)`, tried first) never produces one at any target
     /// down to an eighth, and its test passes with the guard deleted.
-    fn spikes(x: f32, y: f32) -> f32 {
+    pub(crate) fn spikes(x: f32, y: f32) -> f32 {
         3.0 * (3.1 * x).sin() * (2.9 * y).cos()
     }
 

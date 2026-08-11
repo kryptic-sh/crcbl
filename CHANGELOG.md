@@ -241,6 +241,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_scene::lod` — the LOD chain topic 25 specifies.**
+  `build_lod_chain(positions, indices, ratios)` composes the simplifier and the
+  meshlet builder into levels, each carrying its geometry, its clusters and its
+  error, with `DEFAULT_LOD_RATIOS` the plan's 50/25/12.5/6.25 %. LOD0 is the
+  base verbatim at error zero, so the chain is one longer than the ratio list.
+
+  **Every level is decimated from the base mesh, not from the level above**, and
+  that is the whole design decision. A quadric run accumulates the planes of the
+  mesh _it started from_, so a cascaded level's error is measured against its
+  predecessor rather than against LOD0 — measured on a torus, cascading reports
+  `0.4917831` where decimating from the base reports `0.6015088` for the same
+  level, an 18 % understatement that compounds downward. Runtime selection asks
+  "may this stand in for the full-quality mesh", so every level has to be on one
+  scale or the numbers cannot be compared. Cascading is cheaper and is exactly
+  the option that cannot fill the error column honestly.
+
+  Error is non-decreasing up the chain, asserted per adjacent pair — though note
+  that invariant holds for **both** designs and so does not distinguish them; a
+  separate test re-derives each level from the base to pin the provenance.
+
+  **This chain supports per-instance selection only.** Each level is clustered
+  independently, so two levels' cluster boundaries have no relationship and
+  drawing one level's cluster beside another's cracks along the shared edge.
+  That is the `IndirectCount`/`IndirectPerBatch` granularity;
+  `docs/plan/03-gpu-driven-rendering.md` §3.5's per-cluster selection needs the
+  grouped, boundary-locked, re-split DAG instead, which is a different builder
+  and an open decision.
+
 - **`crcbl_scene::simplify` — QEM mesh simplification, topic 25's auto-LOD
   generator.** `simplify(positions, indices, target_triangles)` returns a
   `Simplified` carrying the decimated mesh and its `max_error`. Iterative edge

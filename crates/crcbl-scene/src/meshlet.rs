@@ -348,7 +348,7 @@ fn triangle_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Every cluster's corners decoded back to original vertex indices, in
@@ -360,7 +360,11 @@ mod tests {
     /// to the wrong original indices, a wrong `triangle_offset` decodes the
     /// wrong corners, and either a dropped or a duplicated triangle changes
     /// the sequence.
-    fn decoded(build: &MeshletBuild) -> Vec<[u32; 3]> {
+    ///
+    /// `pub(crate)` because [`crate::lod`] applies the same invariant to every
+    /// level of a chain, and a second copy of a decoder is a second thing to
+    /// keep right.
+    pub(crate) fn decoded(build: &MeshletBuild) -> Vec<[u32; 3]> {
         let mut triangles = Vec::new();
         for cluster in build.clusters() {
             let vertex_count = cluster.vertex_count as usize;
@@ -392,7 +396,7 @@ mod tests {
     }
 
     /// The input's triangles, to compare [`decoded`] against.
-    fn triangles_of(indices: &[u32]) -> Vec<[u32; 3]> {
+    pub(crate) fn triangles_of(indices: &[u32]) -> Vec<[u32; 3]> {
         indices
             .chunks_exact(3)
             .map(|triangle| [triangle[0], triangle[1], triangle[2]])

@@ -5758,6 +5758,42 @@ a wasm regression in this code would not be observed by anything. The refusals
 that do not need an array layout — the flags gate, `count: 0`, the in-band
 layout error — run on every adapter, so that half is not skip-shaped.
 
+## Decision needed: the LOD chain cannot do per-cluster selection
+
+`crcbl_scene::lod::build_lod_chain` implements what `docs/plan/25-lod.md`'s "LOD
+chains" section specifies — a chain of independently-clustered levels — and that
+shape **cannot** serve what `docs/plan/03-gpu-driven-rendering.md` §3.5 and
+topic 25's own "Runtime selection" section both promise: per-cluster granularity
+on the mesh-shader path, "which is what lets one mesh be several detail levels
+at once across its own surface".
+
+Why it cannot: each level is clustered by walking that level's own index buffer,
+so two levels' cluster boundaries have no relationship to each other, and the
+decimation between them moved and deleted vertices along whichever boundary the
+coarser level ended up with. Drawing LOD1's cluster next to LOD2's puts two
+differently decimated versions of one shared edge side by side — a crack.
+
+So the chain as built is **per-instance selection only**, which is exactly the
+`IndirectCount` / `IndirectPerBatch` granularity topic 25 already describes as
+the coarser, honest fallback. Nothing is wrong with it; it just does not reach
+the mesh-shader path's stated granularity.
+
+**The options, so the decision can be taken without redoing the research:**
+
+1. **Accept per-instance selection everywhere** and amend §3.5 and topic 25 to
+   drop the per-cluster claim. Cheapest, and it makes the mesh-shader path's
+   advantage purely culling rather than culling plus LOD.
+2. **Build the DAG** (Karis, SIGGRAPH 2021): group neighbouring clusters, lock
+   each group's _shared_ boundary while simplifying, re-split into fresh
+   clusters, repeat. Every cut through the resulting DAG is crack-free. This is
+   a different builder, not a parameter on `build_lod_chain`, and it needs the
+   simplifier to accept a locked-edge set it does not currently take.
+3. **Both**, with the chain as the fallback path's source and the DAG as the
+   mesh-shader path's. Two builders to keep agreeing about error metrics.
+
+Recorded because whichever slice next touches LOD will otherwise answer it by
+accident.
+
 ## What `crcbl_scene::simplify` owes, and one workspace-wide trap it found
 
 Topic 25's QEM simplifier exists host-side with no consumer. What is left:

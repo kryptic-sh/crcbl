@@ -30,13 +30,15 @@
 //! `docs/plan/25-lod.md`'s QEM decimation are both bake steps over exactly the
 //! host arrays [`import_gltf`] produces — positions and indices — so they land
 //! in the crate that owns them rather than becoming further names for the same
-//! responsibility. Both are host-side builders alone; nothing consumes either
-//! yet, and each module's docs say what is still missing.
+//! responsibility. [`mod@lod`] is the two of them composed into
+//! `docs/plan/25-lod.md`'s chain of levels and is here for the same reason
+//! again. All three are host-side builders alone; nothing consumes them yet,
+//! and each module's docs say what is still missing.
 //!
 //! # No GPU work here
 //!
-//! [`import_gltf`], [`build_meshlets`] and [`simplify`](simplify()) all end at
-//! host memory: vertex arrays, index arrays,
+//! [`import_gltf`], [`build_meshlets`], [`simplify`](simplify()) and
+//! [`build_lod_chain`] all end at host memory: vertex arrays, index arrays,
 //! [`crcbl_shaders::mesh::GpuMaterial`] rows, cluster records and simplified
 //! levels. Pool upload, textures and mip generation are the second half of
 //! step 3 and belong to the crate that owns the pools.
@@ -45,9 +47,11 @@ pub mod gltf_check;
 #[cfg(test)]
 mod gltf_fixture;
 pub mod gltf_import;
+pub mod lod;
 pub mod meshlet;
 pub mod simplify;
 
 pub use gltf_import::{GltfInstance, GltfMesh, GltfPrimitive, GltfScene, import_gltf};
+pub use lod::{DEFAULT_LOD_RATIOS, LodError, LodLevel, build_lod_chain};
 pub use meshlet::{ClusterBounds, Meshlet, MeshletBuild, MeshletError, build_meshlets};
 pub use simplify::{Simplified, SimplifyError, simplify};
