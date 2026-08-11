@@ -5661,19 +5661,71 @@ at pipeline creation, loudly. The other three backends would not notice, so
 **the wgpu suite is the only local gate on it**:
 `CRCBL_GPU=wgpu crates/crcbl/tests/run-render-e2e.sh`.
 
-## The `view_type` field is unverified on Metal and D3D12
+## Settled: the `D2Array` page samples on Metal and D3D12
 
-`SampledImage { view_type }` is dropped by `crcbl-vk`, `crcbl-mtl` and
-`crcbl-dx12` — each takes the dimension off the bound view, and each says so at
-the arm that drops it (`crcbl_vk::conv::descriptor_type`,
-`crcbl_mtl::binding::Table::of`, `crcbl_dx12::conv::descriptor_range_type`).
-Vulkan is covered locally by `crates/crcbl-vk/tests/run-vk-e2e.sh` on lavapipe.
+Was an open coverage gap — `SampledImage { view_type }` is dropped by
+`crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` (each takes the dimension off the bound
+view, and each says so at the arm that drops it), and neither Metal nor D3D12
+runs a draw on this machine, so both were type-checked only.
 
-**Metal and D3D12 are type-checked only**, by
-`cargo clippy -p crcbl-mtl --target aarch64-apple-darwin` and
-`cargo clippy -p crcbl-dx12 --target x86_64-pc-windows-msvc`. Neither runs a
-draw here, so what CI must confirm is that the mesh pass's `D2Array` page really
-samples on both: a macOS runner drawing `Scene::Cube` against its golden, and a
-Windows runner doing the same through `CRCBL_GPU=dx12`. `crcbl-dx12`'s register
-table (`dxil.rs`) is the one D3D12 thing that does run on Linux, and it now pins
-`mesh` at `&[Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler]`.
+CI confirmed it on `7c4042b`: `golden cube on metal` and `golden cube on dx12`
+each came back **max channel delta 1, 0 over tolerance, 0 grossly wrong**
+against the lavapipe-blessed golden. Metal is the one that mattered — it is the
+only `ArrayPages` device, because it withdraws `Features::DESCRIPTOR_INDEXING` —
+and its cube previously carried `max channel delta 207` with 2 pixels grossly
+wrong, so agreement went strictly up. Kept only as the record that this was
+checked and how; there is nothing owed.
+
+## `crcbl_scene::meshlet`: decisions taken, and what it does not do
+
+The §3.5 bake step exists as `build_meshlets` and has no producer and no
+consumer. Decisions, so they are not re-argued:
+
+- **It lives in `crcbl-scene`, not a crate of its own.** That crate's `lib.rs`
+  already says its job ends at host memory — vertex arrays, index arrays — and a
+  cluster builder is host-side geometry over exactly those. `GltfPrimitive` is
+  its first producer. A crate would have been a fourth name for one
+  responsibility.
+- **It takes `&[[f32; 3]]` and `&[u32]`, not a `GltfPrimitive`.** Keeps it
+  testable from literals and keeps the importer's private struct out of it.
+  Deliberately **no** `GltfPrimitive::meshlets()` — that is a second caller that
+  does not exist yet.
+- **A dedicated `MeshletError`, against the crate's stated
+  `StorageError`-for-everything convention** (argued in
+  `crates/crcbl-scene/Cargo.toml`). The convention is about the IO seam; the
+  builder reads no bytes, so every `StorageError` variant but `Other(String)` is
+  unreachable and `Other` would erase which of the two caller bugs was hit.
+  Reason is recorded in the manifest beside the dependency. Revisit only if a
+  third error enum shows up in this crate.
+- **Greedy sequential clustering**, no dependency. `meshoptimizer` would be a
+  new dependency and that is the user's call; the simple form is deterministic
+  by construction, which is what §3.5 actually requires.
+- **Offsets are `usize`.** Narrowing them for the GPU is the later slice's call,
+  and `u32` here would have needed a third error variant for overflow.
+
+What it does not do, in the order it would be wanted:
+
+- **No spatial pre-sort.** The walk follows index-buffer order and nothing else,
+  so an incoherent mesh gets loose spheres and wide cones that cull almost
+  nothing. This is the single biggest quality gap and it is a pass ahead of
+  `build_meshlets`, not a change to it.
+- **No per-cluster padding of `MeshletBuild::triangles`.**
+  `MAX_CLUSTER_TRIANGLES` keeps a _full_ cluster's corner run a whole number of
+  four-byte words, but a cluster the vertex bound closed early ends anywhere, so
+  the next run is not aligned. A GPU slice that wants to read corners as `u32`
+  has to add the padding; it was left out as machinery for a consumer that does
+  not exist.
+- **Determinism is verified same-process only.**
+  `the_same_mesh_built_twice_gives_identical_clusters` cannot catch
+  cross-machine float drift. A golden artifact is what would, and that belongs
+  to the bake-cache slice.
+- **The bounds are compile-time constants with no runtime configuration.** A
+  device reporting a lower `maxMeshOutputPrimitives` than the ecosystem figure
+  cannot be honoured; that is the capability slice's decision to make.
+- **The bounding sphere is the AABB midpoint and the furthest vertex**, which is
+  valid and not minimal. Ritter's or Welzl's would be tighter and neither was
+  worth transcribing for a first cut.
+- **Nothing consumes it**: no GPU upload, no amplification or mesh shader, no
+  bake cache or input hashing, no `crcbl-render` wiring. `EmitTail::from_caps`
+  in `crcbl_render::forward` still degrades `GeometryPath::MeshShader` to an
+  indirect tail and logs that it did.

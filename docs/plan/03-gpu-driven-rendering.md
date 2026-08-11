@@ -105,24 +105,23 @@ is refused anywhere, because there is nothing to refuse — a `Bindless` device
 runs the `ArrayPages` layout, and what it will gain later is capacity rather
 than a second code path.
 
-Three things bound that claim, all recorded in `docs/backlog.md`. **A page is
-one image**, so every layer shares an extent, a format and a mip count — which
-is the constraint `Bindless` exists to lift, and the reason P3's bindless work
-is still worth doing. **`crcbl-wgpu` could not run the bindless form today even
-if it were written**: its `create_bind_group` ignores
-`BindGroupEntry::array_index` and emits one scalar
-`wgpu::BindingResource::TextureView` per entry, so a second array element would
-collide on the binding number, where `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12`
-all honour it.
+One thing still bounds that claim, and it is the durable one: **a page is one
+image**, so every layer shares an extent, a format and a mip count — which is
+the constraint `Bindless` exists to lift, and the reason P3's bindless work is
+still worth doing. Real imported content does not have one extent.
 
-And **the seam cannot say a sampled image is an array**, which is what stops
-this landing on wgpu today. `BindingKind::SampledImage` is a unit variant, so
-`crcbl_wgpu::conv::map_binding_kind` hardcodes `TextureViewDimension::D2` and
-refuses the page's `D2Array` view at `create_bind_group`. Vulkan, Metal and
-D3D12 take the dimension from the _view_ and do not care; WebGPU wants it in the
-layout. Until `crcbl-hal` carries it, `CRCBL_GPU=wgpu` cannot draw `Scene::Cube`
-— it fails at build with a named error rather than drawing untextured, which is
-the failure worth having.
+Two other bounds stood here and are now closed, which is worth recording so the
+bindless slice does not go looking for them. The seam could not say a sampled
+image is an array — `BindingKind::SampledImage` was a unit variant, so
+`crcbl_wgpu::conv::map_binding_kind` hardcoded `TextureViewDimension::D2` and
+refused the page's `D2Array` view; it now carries `view_type`, which WebGPU
+wants in the layout and which Vulkan, Metal and D3D12 read off the view and
+drop. And `crcbl-wgpu` could not fill an array binding at all: its
+`create_bind_group` ignored `BindGroupEntry::array_index` and emitted one scalar
+resource per entry, so a second array element collided on the binding number.
+`crates/crcbl-wgpu/src/binding.rs` now buckets entries by binding and emits
+wgpu's array spellings, so all four backends honour `array_index` and the
+bindless form is writable whenever it is wanted.
 
 The observable is `crates/crcbl/tests/golden/cube.png`, which now holds
 **three** instances of one mesh: one plain, one whose row differs from it in the

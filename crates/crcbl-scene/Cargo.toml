@@ -15,13 +15,19 @@ crcbl-assets = { workspace = true }
 # `base_color_factor` is linear RGBA and so is `GpuMaterial::base_color`, so the
 # importer produces the shader's own record rather than a parallel copy of it.
 crcbl-shaders = { workspace = true }
-# 4x4 composition for the node hierarchy. A hand-rolled matrix multiply is the
-# kind of transcription the workspace already has a dependency for.
+# 4x4 composition for the node hierarchy, and the cross/dot/normalize `meshlet`
+# builds its cluster bounds out of. A hand-rolled matrix multiply or cross
+# product is the kind of transcription the workspace already has a dependency
+# for.
 glam = { workspace = true }
 # `log::warn!` for the plan's "unsupported features log-and-skip loudly".
 log = { workspace = true }
 # glTF 2.0 parsing. See `[workspace.dependencies]` for the feature argument.
 gltf = { workspace = true }
+# `MeshletError`, which is not a `StorageError`: the meshlet builder reads no
+# bytes, so every storage variant but `Other` is unreachable from it and
+# `Other(String)` would erase which of the two caller bugs it hit.
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

@@ -137,6 +137,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_scene::meshlet` clusters a triangle list into meshlets.**
+  `build_meshlets(positions, indices)` returns the meshoptimizer/NVIDIA
+  three-array layout — the original vertex indices run per cluster, three `u8`
+  corners per triangle indexing into that cluster's own run, and a `Meshlet`
+  record naming both runs plus a `ClusterBounds` — under `MAX_CLUSTER_VERTICES`
+  and `MAX_CLUSTER_TRIANGLES`. It is `docs/plan/03-gpu-driven-rendering.md`
+  §3.5's bake step and it is deterministic: the same two arrays give
+  byte-identical output, which is what §3.5 asks for and what a bake cache will
+  need.
+
+  `ClusterBounds` carries a bounding sphere (AABB midpoint and furthest vertex —
+  valid, deliberately not minimal) and a normal cone whose axis is the
+  area-weighted sum of the triangle normals and whose `cone_cutoff` is the
+  smallest dot product any of them makes with it. A cluster whose normals cancel
+  — a closed shape, a fan of opposing faces, nothing but zero-area triangles —
+  gets `OMNIDIRECTIONAL_CUTOFF` and a unit `OMNIDIRECTIONAL_AXIS` rather than a
+  NaN, because a NaN reaching a backface cull silently drops geometry. The cull
+  rule the cone exists for is written out on `cone_cutoff` for the consumer.
+
+  **This is the builder and nothing else** — no GPU upload, no amplification or
+  mesh shader, no bake cache, no `GeometryPath::MeshShader` emit tail, and no
+  caller. Each is a later slice, and the module says so.
+
 - **Materials have a base-colour texture, through one `ArrayPages` page.**
   `docs/plan/03-gpu-driven-rendering.md` §3.2's "texture indices + factors" now
   has both halves: `crcbl_render::forward` uploads a `D2Array` image whose

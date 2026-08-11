@@ -444,6 +444,7 @@ dependencies = [
  "gltf",
  "log",
  "tempfile",
+ "thiserror 2.0.19",
 ]
 
 [[package]]
