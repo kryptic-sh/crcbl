@@ -2035,6 +2035,33 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-wgpu` could not fill an array binding, so every descriptor-indexing
+  bind group it built was broken.** `Device::create_bind_group` resolved each
+  `crcbl_hal::BindGroupEntry` to a scalar `wgpu::BindingResource` keyed on
+  `binding` alone — `BindGroupEntry::array_index` appeared nowhere in the crate
+  — so two entries naming elements 0 and 1 of one binding arrived as two
+  `wgpu::BindGroupEntry`s with the same binding number. The layout half already
+  mapped the seam's `count` onto wgpu's `Some(NonZero)`, so the layout was
+  expressible while the group was not, and the backend reports
+  `Features::DESCRIPTOR_INDEXING`. Entries are now bucketed by binding, sorted
+  by `array_index`, and emitted as `TextureViewArray` / `SamplerArray` /
+  `BufferArray` when the **layout** declares a count — wgpu picks the spelling
+  off the layout, not off how many entries a group happens to supply.
+
+  Two things a caller can now see. Fills wgpu has no spelling for are refused as
+  `HalError::InvalidDescriptor` naming the binding and the index, rather than
+  packed: a hole (wgpu's arrays are dense, so element _i_ of the slice **is**
+  array element _i_, and closing a gap would silently shift every later element
+  down one), an index written twice, an index past the declared count, one
+  binding filled with more than one kind of resource, and an entry naming a
+  binding the layout never declared. A trailing shortfall — elements `0..n` with
+  `n` below the count — is the one partial fill wgpu accepts and still builds.
+  And `create_bind_group` is now error-scoped like the pipelines already were:
+  wgpu reports a rejected bind group to the error handler and **still returns an
+  object**, so a bad group used to arrive as `Ok` and surface as a validation
+  failure in whichever pass later bound it. It is now
+  `HalError::Backend("wgpu create_bind_group: …")` at the call that made it.
+
 - **`crcbl::screenshot`'s readback barriers lied about the swapchain image's
   state, and never put it back.** `OffscreenSetup::draw_and_readback` declared
   its pre-copy transition as coming from `ResourceState::ColorAttachment` — the

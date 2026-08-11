@@ -69,6 +69,43 @@ pub struct BufferSlot {
     pub memory: MemoryLocation,
 }
 
+/// A wgpu bind-group layout and the array length every binding in it declares.
+///
+/// The counts are kept because a `wgpu::BindGroupLayout` cannot be asked for
+/// them, and [`crate::binding`] needs them: wgpu picks the scalar or the array
+/// spelling of `wgpu::BindingResource` from the **layout's** count, not from how
+/// many entries a bind group happens to fill a binding with. A binding declared
+/// with a count and filled with one element still has to arrive as
+/// `TextureViewArray`.
+///
+/// Cheap to clone — `wgpu::BindGroupLayout` is a handle into wgpu's own
+/// refcounted storage, and a layout here declares a handful of bindings.
+#[derive(Clone)]
+pub struct BindGroupLayoutSlot {
+    pub layout: wgpu::BindGroupLayout,
+    /// `(binding, count)` for every binding the layout declares, sorted by
+    /// binding. A `Vec` and a scan rather than a map: these are short enough
+    /// that the map's hashing costs more than the scan saves, and the sorted
+    /// order keeps the lookup deterministic.
+    counts: Vec<(u32, u32)>,
+}
+
+impl BindGroupLayoutSlot {
+    pub fn new(layout: wgpu::BindGroupLayout, mut counts: Vec<(u32, u32)>) -> Self {
+        counts.sort_unstable_by_key(|(binding, _)| *binding);
+        Self { layout, counts }
+    }
+
+    /// The array length `binding` declares, or `None` when the layout does not
+    /// declare that binding at all.
+    pub fn count(&self, binding: u32) -> Option<u32> {
+        self.counts
+            .iter()
+            .find(|(declared, _)| *declared == binding)
+            .map(|(_, count)| *count)
+    }
+}
+
 /// Per-swapchain state. A wgpu "swapchain" is either a configured surface or —
 /// for [`SurfaceTarget::Offscreen`](crcbl_core::SurfaceTarget::Offscreen) — a
 /// ring of plain textures this backend owns.
@@ -196,7 +233,7 @@ pub struct Pools {
     pub image_views: Lock<Pool<Owned<wgpu::TextureView>>>,
     pub samplers: Lock<Pool<Owned<wgpu::Sampler>>>,
     pub shader_modules: Lock<Pool<Owned<wgpu::ShaderModule>>>,
-    pub bind_group_layouts: Lock<Pool<Owned<wgpu::BindGroupLayout>>>,
+    pub bind_group_layouts: Lock<Pool<Owned<BindGroupLayoutSlot>>>,
     pub bind_groups: Lock<Pool<Owned<wgpu::BindGroup>>>,
     pub pipeline_layouts: Lock<Pool<Owned<wgpu::PipelineLayout>>>,
     pub graphics_pipelines: Lock<Pool<Owned<wgpu::RenderPipeline>>>,

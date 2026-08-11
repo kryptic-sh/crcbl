@@ -174,6 +174,7 @@
 //! `crcbl` umbrella's backend registry is where that shows up, and it is
 //! recorded there.
 
+mod binding;
 mod cell;
 mod command;
 mod conv;

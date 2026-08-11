@@ -19,10 +19,11 @@ use crate::handle::{self, Owned, Owner};
 
 use crcbl_core::Pool;
 
+use crate::binding;
 use crate::conv;
 use crate::resources::{
-    BufferSlot, CommandBufferSlot, MapStatus, OffscreenRing, PendingSignal, Pools, ReadbackSlot,
-    Surfaces, SwapchainKind, SwapchainSlot, WindowedSwapchain,
+    BindGroupLayoutSlot, BufferSlot, CommandBufferSlot, MapStatus, OffscreenRing, PendingSignal,
+    Pools, ReadbackSlot, Surfaces, SwapchainKind, SwapchainSlot, WindowedSwapchain,
 };
 
 /// wgpu requires buffer copy offsets and sizes to be multiples of this.
@@ -810,10 +811,19 @@ impl Device for WgpuDevice {
                 label: desc.label,
                 entries: &entries,
             });
+        // The declared counts are kept alongside the layout because
+        // `create_bind_group` cannot read them back out of wgpu and needs them
+        // to choose between the scalar and the array spelling — see
+        // [`crate::binding`].
+        let counts = desc
+            .entries
+            .iter()
+            .map(|e| (e.binding, e.count))
+            .collect::<Vec<_>>();
         Ok(handle::insert(
             &mut self.pools.bind_group_layouts.lock().unwrap(),
             self.owner(),
-            layout,
+            BindGroupLayoutSlot::new(layout, counts),
         ))
     }
     fn destroy_bind_group_layout(&self, h: BindGroupLayoutHandle) {
@@ -831,77 +841,25 @@ impl Device for WgpuDevice {
             handle::lookup(&layouts, "bind group layout", desc.layout, self.owner())?.clone()
         };
 
-        // Collect cloned wgpu resources so MutexGuards can be dropped.
-        let mut resolved: Vec<(u32, wgpu::Buffer, u64, Option<std::num::NonZeroU64>)> = Vec::new();
-        let mut tex_views: Vec<(u32, wgpu::TextureView)> = Vec::new();
-        let mut samplers: Vec<(u32, wgpu::Sampler)> = Vec::new();
+        // One `wgpu::BindGroupEntry` per binding, with every `array_index` the
+        // seam named folded into it — see [`crate::binding`] for why the two
+        // descriptors do not correspond one to one, and for the holes that have
+        // no wgpu spelling and are refused here.
+        let bound = binding::resolve(desc, &layout, &self.pools, self.owner())?;
 
-        for e in desc.entries {
-            match e.resource {
-                hal::BindingResource::Buffer {
-                    buffer,
-                    offset,
-                    size,
-                } => {
-                    let bufs = self.pools.buffers.lock().unwrap();
-                    let buf = handle::lookup(&bufs, "buffer", buffer, self.owner())?
-                        .buffer
-                        .clone();
-                    let sz = if size == hal::BindingResource::WHOLE_BUFFER {
-                        None
-                    } else {
-                        Some(std::num::NonZero::new(size).ok_or_else(|| {
-                            HalError::InvalidDescriptor(format!(
-                                "binding {} names a zero-sized range of a buffer; use \
-                                 BindingResource::whole_buffer for the whole thing",
-                                e.binding
-                            ))
-                        })?)
-                    };
-                    resolved.push((e.binding, buf, offset, sz));
-                }
-                hal::BindingResource::ImageView(view) => {
-                    let views = self.pools.image_views.lock().unwrap();
-                    tex_views.push((
-                        e.binding,
-                        handle::lookup(&views, "image view", view, self.owner())?.clone(),
-                    ));
-                }
-                hal::BindingResource::Sampler(sampler) => {
-                    let ss = self.pools.samplers.lock().unwrap();
-                    samplers.push((
-                        e.binding,
-                        handle::lookup(&ss, "sampler", sampler, self.owner())?.clone(),
-                    ));
-                }
-            }
-        }
-
-        let entries: Vec<wgpu::BindGroupEntry<'_>> = resolved
-            .iter()
-            .map(|(b, buf, off, sz)| wgpu::BindGroupEntry {
-                binding: *b,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: buf,
-                    offset: *off,
-                    size: *sz,
-                }),
+        // Checked, like the pipelines: wgpu reports a rejected bind group to the
+        // device's error handler and still hands back an object, so an unchecked
+        // create returns a poisoned group whose only symptom is a validation
+        // failure in whichever pass later binds it.
+        let bg = binding::with_entries(&bound, |entries| {
+            self.checked("create_bind_group", || {
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: desc.label,
+                    layout: &layout.layout,
+                    entries,
+                })
             })
-            .chain(tex_views.iter().map(|(b, v)| wgpu::BindGroupEntry {
-                binding: *b,
-                resource: wgpu::BindingResource::TextureView(v),
-            }))
-            .chain(samplers.iter().map(|(b, s)| wgpu::BindGroupEntry {
-                binding: *b,
-                resource: wgpu::BindingResource::Sampler(s),
-            }))
-            .collect();
-
-        let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: desc.label,
-            layout: &layout,
-            entries: &entries,
-        });
+        })?;
         Ok(handle::insert(
             &mut self.pools.bind_groups.lock().unwrap(),
             self.owner(),
@@ -958,7 +916,10 @@ impl Device for WgpuDevice {
         let bgls: Vec<Option<&wgpu::BindGroupLayout>> = desc
             .bind_group_layouts
             .iter()
-            .map(|h| handle::lookup(&layouts, "bind group layout", *h, self.owner()).map(Some))
+            .map(|h| {
+                handle::lookup(&layouts, "bind group layout", *h, self.owner())
+                    .map(|slot| Some(&slot.layout))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let pl = self
             .device

@@ -5565,44 +5565,69 @@ construction. Evidence: in run 31454155654, message 597 — the gate's own
 deliberate violation — appears exactly once, inside the expected panic of the
 test that raises it, and that test passed.
 
-## The base-colour page landed as `ArrayPages`; `Bindless` needs a wgpu fix first
+## The base-colour page is still `ArrayPages`; the wgpu blocker under it is gone
 
 `docs/plan/03-gpu-driven-rendering.md` §3.2's texture half is implemented as one
 `Texture2DArray` page — `crcbl_render::forward`'s `base_color_page`, bound at
 `mesh.slang` binding 7, with `GpuMaterial::base_color_texture` selecting a
 layer. `BindingModel::Bindless` — one runtime-sized array _of descriptors_,
-indexed per fragment — is not implemented, and that is a decision with a
-measured reason rather than a preference.
+indexed per fragment — is still not implemented, but the reason has changed and
+the old reason is worth not re-deriving.
 
-**`crcbl-wgpu` cannot fill an array binding at all.** `create_bind_group` in
-`crates/crcbl-wgpu/src/device.rs` builds its `wgpu::BindGroupEntry` list by
-resolving each `crcbl_hal::BindGroupEntry` to a scalar
-`wgpu::BindingResource::TextureView`/`Sampler`/`Buffer` keyed by
-`entry.binding`, and **`BindGroupEntry::array_index` appears nowhere in that
-crate** — grep it. So two entries naming array elements 0 and 1 of one binding
-become two `wgpu::BindGroupEntry`s with the same `binding`, which wgpu rejects;
-there is no `TextureViewArray` arm. `create_bind_group_layout` does map
-`count > 1` onto `NonZero`, so the _layout_ is expressible and the _group_ is
-not — the half that makes this look supported from a distance. `crcbl-vk`
-(`pipeline.rs`, `dst_array_element`), `crcbl-mtl` (`binding.rs`,
-`slot.first + entry.array_index`) and `crcbl-dx12` (`binding.rs`,
-`plan.offset.checked_add`) all honour it.
+**What was blocking it is fixed.** `crcbl-wgpu` could not fill an array binding
+at all: `create_bind_group` keyed every entry on `binding` alone and
+`BindGroupEntry::array_index` appeared nowhere in the crate, so a bindless slice
+would have selected the bindless path on wgpu (it reports `DESCRIPTOR_INDEXING`)
+and then failed to build the group. `crates/crcbl-wgpu/src/binding.rs` now does
+the bucketing, and
+`a_wgpu_shader_reads_the_array_element_the_bind_group_put_in_each_slot` reads
+both elements out of a two-texture array on lavapipe. All four backends honour
+`array_index`.
 
-That is the whole gap: wgpu reports `DESCRIPTOR_INDEXING` (it requires
-`TEXTURE_BINDING_ARRAY`, the non-uniform-indexing feature and
-`PARTIALLY_BOUND_BINDING_ARRAY` together, in `instance.rs`), so a bindless-only
-slice would have selected the bindless path on wgpu and then failed to build the
-bind group. **Fixing it is a `crcbl-wgpu` slice**: group entries have to be
-bucketed by binding number, sorted by `array_index`, and emitted as
-`wgpu::BindingResource::TextureViewArray` / `SamplerArray` / `BufferArray` when
-a binding has more than one. Nothing above the seam has to change for that, and
-nothing above the seam can do it.
+**What is left is above the seam, and it is a real slice.** Nothing selects
+`BindingModel::Bindless` — `crcbl_render::forward` builds one page
+unconditionally. Going bindless means a descriptor array whose length is a
+runtime bound, a per-material index into it that is a descriptor slot rather
+than a layer, `BindingFlags::VARIABLE_COUNT` and `BindGroupDesc::variable_count`
+actually being used (see the wgpu entry below — that backend ignores the second
+one), and a `mesh.slang` that declares the array. The two paths then have to
+render the same frame, which is the observable.
 
-**What bindless would then buy**, so the case is on the record: a page is one
-image, so its layers share an extent, a format and a mip count. A descriptor
-array lifts all three, which is what real imported content needs. Until then the
-engine has one page of one size, which is enough for the observable and not
-enough for a game.
+**What bindless buys**, so the case stays on the record: a page is one image, so
+its layers share an extent, a format and a mip count. A descriptor array lifts
+all three, which is what real imported content needs. Until then the engine has
+one page of one size, which is enough for the observable and not enough for a
+game.
+
+## `crcbl-wgpu` fills array bindings now; three seam fields it still drops
+
+Found while writing `crates/crcbl-wgpu/src/binding.rs`, all silent rather than
+wrong today, and each is a place a future bindless slice would land first.
+
+- **`create_bind_group_layout` ignores `BindGroupLayoutEntry::flags` entirely.**
+  It reads `visibility`, `kind` and `count` and nothing else. The seam's
+  `crcbl_hal::BindingFlags` docs say a backend without `DESCRIPTOR_INDEXING`
+  must **reject** a layout setting any of them, and
+  `BindGroupLayoutDesc::entries` says backends check the `VARIABLE_COUNT`
+  ordering rule (last element _and_ highest binding number). Neither happens
+  here. The new tests pass `PARTIALLY_BOUND` and it is simply dropped — harmless
+  while the device enables `PARTIALLY_BOUND_BINDING_ARRAY` whenever
+  `DESCRIPTOR_INDEXING` was granted, but it is a silent ignore and the other
+  backends do not have one.
+- **`create_bind_group` ignores `BindGroupDesc::variable_count`.** `crcbl-mtl`'s
+  `create_bind_group_impl` refuses it with an explanation; this backend drops it
+  without a word. It is the field a runtime-sized array is declared with, so a
+  bindless path would be relying on it.
+- **`update_bind_group` is still `Unsupported` on wgpu** — WebGPU bind groups
+  are immutable and there is no update-after-bind path, so the seam's streaming
+  bindless write is create-only here. Unchanged by this work, but it is the
+  other half of what `array_index` exists for: a page of descriptors that grows
+  as content loads has to be rebuilt rather than written into.
+
+**Not verified: the browser.** Binding arrays are a native-only wgpu feature and
+`DESCRIPTOR_INDEXING` will be absent under WebGPU, so both new tests take their
+skip branch there. No browser run was made, and the skip branch means a wasm
+regression in this code would not be observed by anything.
 
 ## `BindingKind::StorageImage` still cannot name its format or its dimension
 

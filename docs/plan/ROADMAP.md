@@ -1348,8 +1348,15 @@ Two things worth carrying forward, both in `docs/backlog.md`:
   differently. The rule that came out of it (every draw passes zero for both
   bases) is in `mesh.slang`'s header with the measured table.
 
+§3.2's material table has since landed with both halves — `MaterialTable` is the
+SSBO, `GpuMaterial` is a row, and a row's `base_color_texture` selects a layer
+of a `Texture2DArray` page the fragment stage samples. It is
+`BindingModel::ArrayPages` on every backend; `Bindless` is unimplemented and
+`docs/backlog.md` holds what is left of it.
+
 Still owed by P7: meshlet geometry as the primary path (§3.5), QEM cluster LOD
-(topic 25), the material table (§3.2), and the P7B/P7C lighting work.
+(topic 25), the bindless form of the material page, and the P7B/P7C lighting
+work.
 
 ## Correction (capabilities, scope and networking, 2026-08-09)
 

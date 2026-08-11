@@ -2715,3 +2715,524 @@ fn a_destroyed_wgpu_handle_does_not_alias_the_buffer_that_replaces_it() {
     drop(device);
     drop(instance);
 }
+
+// ---------------------------------------------------------------------------
+// Array bindings, which is what `BindGroupEntry::array_index` is for
+// ---------------------------------------------------------------------------
+
+/// The scalar binding every array test puts beside its array — a storage buffer
+/// below, a sampler in the layout the refusals fail against.
+///
+/// Both spellings in one group deliberately: wgpu takes a single object for a
+/// binding the layout declared without a count and a slice for one it declared
+/// with, so a group holding both is the shape that catches a backend which
+/// applies one rule to everything.
+const SCALAR_BINDING: u32 = 0;
+
+/// The binding the array tests fill.
+const ARRAY_BINDING: u32 = 1;
+
+/// How many elements the array binding declares when a test fills it whole.
+const ARRAY_COUNT: u32 = 2;
+
+/// The red channel each array element is cleared to, as a byte.
+///
+/// Distinct, and neither 0 nor 255: an element the shader never saw then reads
+/// as a mismatch rather than as whatever fresh device memory happened to hold,
+/// and a backend that bound one texture into both slots reports the same number
+/// twice.
+const ELEMENT_REDS: [u32; 2] = [60, 200];
+
+/// `count` sampled 1x1 images and a view of each.
+///
+/// Distinct images rather than one image viewed twice: two entries resolving to
+/// the same wgpu object would let a backend that dropped one of them still look
+/// correct.
+fn sampled_views(
+    device: &dyn Device,
+    count: u32,
+) -> (Vec<crcbl_hal::ImageHandle>, Vec<crcbl_hal::ImageViewHandle>) {
+    let format = Format::Rgba8Unorm;
+    let mut images = Vec::new();
+    let mut views = Vec::new();
+    for index in 0..count {
+        let image = device
+            .create_image(&ImageDesc {
+                label: Some("wgpu e2e array element"),
+                image_type: ImageType::D2,
+                extent: Extent3d::d2(1, 1),
+                format,
+                mip_levels: 1,
+                samples: 1,
+                usage: ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .unwrap_or_else(|error| panic!("array element {index}: {error}"));
+        let view = device
+            .create_image_view(&ImageViewDesc {
+                label: Some("wgpu e2e array element view"),
+                image,
+                view_type: ImageViewType::D2,
+                format,
+                range: ImageSubresourceRange::all(format),
+            })
+            .unwrap_or_else(|error| panic!("array element {index} view: {error}"));
+        images.push(image);
+        views.push(view);
+    }
+    (images, views)
+}
+
+/// The layout the array tests bind against: a scalar sampler, and an image
+/// array `count` elements long.
+fn array_layout(device: &dyn Device, count: u32) -> crcbl_hal::BindGroupLayoutHandle {
+    let entries = [
+        crcbl_hal::BindGroupLayoutEntry {
+            binding: SCALAR_BINDING,
+            visibility: ShaderStages::FRAGMENT,
+            kind: crcbl_hal::BindingKind::Sampler,
+            count: 1,
+            flags: crcbl_hal::BindingFlags::empty(),
+        },
+        crcbl_hal::BindGroupLayoutEntry {
+            binding: ARRAY_BINDING,
+            visibility: ShaderStages::FRAGMENT,
+            kind: crcbl_hal::BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+            },
+            count,
+            flags: crcbl_hal::BindingFlags::PARTIALLY_BOUND,
+        },
+    ];
+    device
+        .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            label: Some("wgpu e2e array"),
+            entries: &entries,
+        })
+        .expect("a layout with an image array")
+}
+
+/// One entry filling one array element.
+fn view_entry(array_index: u32, view: crcbl_hal::ImageViewHandle) -> crcbl_hal::BindGroupEntry {
+    crcbl_hal::BindGroupEntry {
+        binding: ARRAY_BINDING,
+        array_index,
+        resource: crcbl_hal::BindingResource::ImageView(view),
+    }
+}
+
+/// Fails a bind group and hands back what the seam said, so each refusal below
+/// is one line and its assertions are about the message rather than about the
+/// boilerplate.
+fn refused(
+    device: &dyn Device,
+    layout: crcbl_hal::BindGroupLayoutHandle,
+    entries: &[crcbl_hal::BindGroupEntry],
+    what: &str,
+) -> String {
+    let error = device
+        .create_bind_group(&crcbl_hal::BindGroupDesc {
+            label: Some("wgpu e2e refused"),
+            layout,
+            entries,
+            variable_count: None,
+        })
+        .err()
+        .unwrap_or_else(|| panic!("{what} must be refused, not built"));
+    assert!(
+        matches!(error, HalError::InvalidDescriptor(_)),
+        "{what}: a descriptor this backend cannot express is InvalidDescriptor, got {error:?}"
+    );
+    error.to_string()
+}
+
+/// A compute shader reads back the element the bind group put in each slot.
+///
+/// `BindGroupEntry::array_index` had no reader in this backend at all: every
+/// entry became a `wgpu::BindGroupEntry` keyed on `binding` alone, so two
+/// entries naming elements 0 and 1 of one binding arrived as two entries with
+/// the same binding number and wgpu rejected the whole group. The layout half
+/// already mapped the seam's `count` onto wgpu's `Some(NonZero)`, so the layout
+/// was expressible while the group was not — which is what made this look
+/// supported from a distance.
+///
+/// Creating the group is not enough of an observable on its own: a backend that
+/// bound element 0 twice, or dropped element 1, or ordered the slice by the
+/// order the caller happened to write its entries in, builds a group wgpu
+/// accepts and paints the wrong picture. So the two textures are cleared to
+/// different values and a shader reads both slots, which is the only thing that
+/// tells those apart. The entries are listed element 1 first for the same
+/// reason: wgpu's array is dense and positional, so the backend has to sort by
+/// `array_index` itself.
+///
+/// The WGSL is written here rather than compiled from `crcbl-shaders`. Nothing
+/// in the engine's Slang declares a `binding_array` yet, and a test-local module
+/// needs no toolchain and no committed artifact — the shader-module suite above
+/// already feeds this backend inline WGSL.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_wgpu_shader_reads_the_array_element_the_bind_group_put_in_each_slot() {
+    let (instance, device, surface, queue, _format) = Headless::open_device();
+    if !device
+        .caps()
+        .features
+        .contains(Features::DESCRIPTOR_INDEXING)
+    {
+        println!(
+            "wgpu e2e: this adapter has no descriptor indexing, so an array bind-group layout \
+             cannot be created here at all; skipping"
+        );
+        instance.destroy_surface(surface);
+        drop(device);
+        drop(instance);
+        return;
+    }
+
+    let format = Format::Rgba8Unorm;
+    let (images, views) = sampled_views(device.as_ref(), ARRAY_COUNT);
+    let seen_bytes = ELEMENT_REDS.len() as u64 * 4;
+    let seen = device
+        .create_buffer(&BufferDesc {
+            label: Some("wgpu e2e array readback target"),
+            size: seen_bytes,
+            usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a storage buffer");
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("wgpu e2e array staging"),
+            size: seen_bytes,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+
+    let layout_entries = [
+        crcbl_hal::BindGroupLayoutEntry {
+            binding: SCALAR_BINDING,
+            visibility: ShaderStages::COMPUTE,
+            kind: crcbl_hal::BindingKind::StorageBuffer {
+                read_only: false,
+                dynamic: false,
+            },
+            count: 1,
+            flags: crcbl_hal::BindingFlags::empty(),
+        },
+        crcbl_hal::BindGroupLayoutEntry {
+            binding: ARRAY_BINDING,
+            visibility: ShaderStages::COMPUTE,
+            kind: crcbl_hal::BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+            },
+            count: ARRAY_COUNT,
+            flags: crcbl_hal::BindingFlags::PARTIALLY_BOUND,
+        },
+    ];
+    let layout = device
+        .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
+            label: Some("wgpu e2e array read"),
+            entries: &layout_entries,
+        })
+        .expect("a layout with an image array");
+
+    let scalar_entry = crcbl_hal::BindGroupEntry {
+        binding: SCALAR_BINDING,
+        array_index: 0,
+        resource: crcbl_hal::BindingResource::whole_buffer(seen),
+    };
+    let entries = [
+        view_entry(1, views[1]),
+        scalar_entry,
+        view_entry(0, views[0]),
+    ];
+    let group = device
+        .create_bind_group(&crcbl_hal::BindGroupDesc {
+            label: Some("wgpu e2e array read"),
+            layout,
+            entries: &entries,
+            variable_count: None,
+        })
+        .expect("both elements of the array reach one wgpu binding");
+
+    let set_layouts = [layout];
+    let pipeline_layout = device
+        .create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("wgpu e2e array read"),
+            bind_group_layouts: &set_layouts,
+            push_constants: None,
+        })
+        .expect("a pipeline layout over the array");
+    let module = device
+        .create_shader_module(&ShaderModuleDesc {
+            label: Some("wgpu e2e array read"),
+            wgsl: Some(
+                "enable wgpu_binding_array;\n\
+                 @group(0) @binding(0) var<storage, read_write> seen : array<u32, 2>;\n\
+                 @group(0) @binding(1) var slots : binding_array<texture_2d<f32>, 2>;\n\
+                 @compute @workgroup_size(1)\n\
+                 fn main() {\n\
+                 seen[0] = u32(round(textureLoad(slots[0], vec2<i32>(0, 0), 0).r * 255.0));\n\
+                 seen[1] = u32(round(textureLoad(slots[1], vec2<i32>(0, 0), 0).r * 255.0));\n\
+                 }\n",
+            ),
+            ..ShaderModuleDesc::default()
+        })
+        .expect("naga accepts a binding array behind its own enable directive");
+    let pipeline = device
+        .create_compute_pipeline(&ComputePipelineDesc {
+            label: Some("wgpu e2e array read"),
+            layout: pipeline_layout,
+            compute: ShaderEntry {
+                module,
+                entry_point: "main",
+            },
+            workgroup_size: [1, 1, 1],
+        })
+        .expect("a compute pipeline over the array");
+    device.destroy_shader_module(module);
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("wgpu e2e array read"),
+        queue,
+    });
+    for (index, red) in ELEMENT_REDS.iter().enumerate() {
+        encoder.begin_render_pass(&RenderPassDesc {
+            label: Some("wgpu e2e array element clear"),
+            color_attachments: &[ColorAttachment {
+                view: views[index],
+                resolve: None,
+                load: LoadOp::Clear,
+                store: StoreOp::Store,
+                // Rgba8Unorm, so the store is a plain quantisation and the
+                // shader's `round(r * 255.0)` recovers the byte exactly. An
+                // sRGB format would put a transfer function in between.
+                clear: ClearValue::color([*red as f32 / 255.0, 0.0, 0.0, 1.0]),
+            }],
+            depth_stencil_attachment: None,
+            render_area: Rect2d::from_size(1, 1),
+        });
+        encoder.end_render_pass();
+    }
+    encoder.pipeline_barrier(&Barriers {
+        images: &images
+            .iter()
+            .map(|image| {
+                crcbl_hal::ImageBarrier::new(
+                    *image,
+                    ImageSubresourceRange::all(format),
+                    ResourceState::ColorAttachment,
+                    ResourceState::ShaderRead,
+                )
+            })
+            .collect::<Vec<_>>(),
+        ..Barriers::default()
+    });
+    encoder.begin_compute_pass(&ComputePassDesc {
+        label: Some("wgpu e2e array read"),
+    });
+    encoder.bind_compute_pipeline(pipeline);
+    encoder.bind_group(0, group, &[], pipeline_layout);
+    encoder.dispatch(1, 1, 1);
+    encoder.end_compute_pass();
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[crcbl_hal::BufferBarrier {
+            buffer: seen,
+            from: ResourceState::ShaderReadWrite,
+            to: ResourceState::TransferSrc,
+            queue_transfer: None,
+        }],
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&BufferCopy {
+        src: seen,
+        src_offset: 0,
+        dst: staging,
+        dst_offset: 0,
+        size: seen_bytes,
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(commands);
+    assert!(
+        device.take_error().is_none(),
+        "the array bind group reached a dispatch without wgpu objecting"
+    );
+
+    let read: Vec<u32> = read_bytes(device.as_ref(), staging, seen_bytes)
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
+        .collect();
+    assert_eq!(
+        read,
+        ELEMENT_REDS.to_vec(),
+        "the shader read {read:?} out of the array; slot i must hold the texture the entry with \
+         array_index i named, in that order and no other"
+    );
+
+    // A trailing shortfall — elements 0..n with n below the declared count — is
+    // the one partial fill wgpu accepts, so it must still build. Not dispatched:
+    // reading an element nothing wrote is exactly what PARTIALLY_BOUND does not
+    // promise.
+    let short = device
+        .create_bind_group(&crcbl_hal::BindGroupDesc {
+            label: Some("wgpu e2e array, trailing shortfall"),
+            layout,
+            entries: &[scalar_entry, view_entry(0, views[0])],
+            variable_count: None,
+        })
+        .expect("a partial fill from element zero upwards is legal");
+    device.destroy_bind_group(short);
+
+    device.destroy_compute_pipeline(pipeline);
+    device.destroy_bind_group(group);
+    device.destroy_pipeline_layout(pipeline_layout);
+    device.destroy_bind_group_layout(layout);
+    device.destroy_buffer(staging);
+    device.destroy_buffer(seen);
+    for view in views {
+        device.destroy_image_view(view);
+    }
+    for image in images {
+        device.destroy_image(image);
+    }
+    device.wait_idle().expect("idle");
+    instance.destroy_surface(surface);
+    drop(device);
+    drop(instance);
+}
+
+/// Every array fill wgpu has no spelling for is refused here, by name.
+///
+/// wgpu's binding arrays are **dense**: element *i* of the slice is array
+/// element *i*, and nothing carries an index alongside it. The seam allows a
+/// sparse fill, so a group naming elements 0 and 2 is a legal descriptor with no
+/// wgpu counterpart — and packing it into a two-element slice would bind element
+/// 2's texture into element 1, a wrong picture with no error anywhere. The same
+/// goes for an element written twice, an index past the declared length, and one
+/// binding holding two kinds of resource, whose array spellings are typed.
+///
+/// The scalar half runs on every adapter. Only the array half needs descriptor
+/// indexing, because without it no array layout can be created to fail against.
+#[test]
+#[ignore = "needs a real GPU; run tests/run-wgpu-e2e.sh"]
+fn a_wgpu_array_binding_wgpu_cannot_spell_is_refused_instead_of_packed() {
+    let (instance, device, surface, _queue, _format) = Headless::open_device();
+    let (images, views) = sampled_views(device.as_ref(), 3);
+    let sampler = device
+        .create_sampler(&crcbl_hal::SamplerDesc {
+            label: Some("wgpu e2e array sampler"),
+            ..crcbl_hal::SamplerDesc::default()
+        })
+        .expect("a filtering sampler");
+
+    let scalar = array_layout(device.as_ref(), 1);
+    let twice = refused(
+        device.as_ref(),
+        scalar,
+        &[view_entry(0, views[0]), view_entry(0, views[1])],
+        "one slot written twice",
+    );
+    for expected in ["binding 1", "twice"] {
+        assert!(
+            twice.contains(expected),
+            "{expected:?} missing from {twice}"
+        );
+    }
+    let past_end = refused(
+        device.as_ref(),
+        scalar,
+        &[view_entry(1, views[1])],
+        "an index past a scalar binding's one slot",
+    );
+    for expected in ["index 1", "binding 1", "holds 1"] {
+        assert!(
+            past_end.contains(expected),
+            "{expected:?} missing from {past_end}"
+        );
+    }
+    let undeclared = refused(
+        device.as_ref(),
+        scalar,
+        &[crcbl_hal::BindGroupEntry {
+            binding: 9,
+            array_index: 0,
+            resource: crcbl_hal::BindingResource::ImageView(views[0]),
+        }],
+        "an entry naming a binding the layout never declared",
+    );
+    for expected in ["binding 9", "does not declare"] {
+        assert!(
+            undeclared.contains(expected),
+            "{expected:?} missing from {undeclared}"
+        );
+    }
+    device.destroy_bind_group_layout(scalar);
+
+    if device
+        .caps()
+        .features
+        .contains(Features::DESCRIPTOR_INDEXING)
+    {
+        // Three elements so the hole at 1 is a hole rather than an index past
+        // the end, which would be a different refusal.
+        let sparse = array_layout(device.as_ref(), 3);
+        let hole = refused(
+            device.as_ref(),
+            sparse,
+            &[view_entry(0, views[0]), view_entry(2, views[2])],
+            "an array with a hole in it",
+        );
+        for expected in ["binding 1", "index 1", "sparse"] {
+            assert!(hole.contains(expected), "{expected:?} missing from {hole}");
+        }
+        device.destroy_bind_group_layout(sparse);
+
+        let mixed_layout = array_layout(device.as_ref(), ARRAY_COUNT);
+        let mixed = refused(
+            device.as_ref(),
+            mixed_layout,
+            &[
+                view_entry(0, views[0]),
+                crcbl_hal::BindGroupEntry {
+                    binding: ARRAY_BINDING,
+                    array_index: 1,
+                    resource: crcbl_hal::BindingResource::Sampler(sampler),
+                },
+            ],
+            "one binding holding both an image view and a sampler",
+        );
+        for expected in ["binding 1", "kind"] {
+            assert!(
+                mixed.contains(expected),
+                "{expected:?} missing from {mixed}"
+            );
+        }
+        device.destroy_bind_group_layout(mixed_layout);
+    } else {
+        println!(
+            "wgpu e2e: this adapter has no descriptor indexing, so the array-shaped refusals have \
+             no layout to fail against; the scalar ones above still ran"
+        );
+    }
+
+    assert!(
+        device.take_error().is_none(),
+        "a descriptor this backend refuses must never have reached wgpu"
+    );
+
+    device.destroy_sampler(sampler);
+    for view in views {
+        device.destroy_image_view(view);
+    }
+    for image in images {
+        device.destroy_image(image);
+    }
+    device.wait_idle().expect("idle");
+    instance.destroy_surface(surface);
+    drop(device);
+    drop(instance);
+}
