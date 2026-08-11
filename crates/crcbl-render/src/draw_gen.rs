@@ -5,12 +5,13 @@
 //!  begin_frame ──▶ cull params (this frame's frustum)
 //!
 //!  add_passes ──┬─ compute "clear-counters" ──▶ visible_count, draw_args,
-//!               │                                        │  draw_counts
+//!               │                                  draw_counts, mesh_args
 //!               │                                        │ graph barrier
 //!               ├─ compute "cull"      instances ──▶ visible + visible_count
 //!               │                                        │ graph barrier
 //!               └─ compute "draw-args" visible ──▶ visible_instances
 //!                                              ──▶ draw_args + draw_counts
+//!                                              ──▶ mesh_args
 //!                                                        │ graph barrier
 //!                        the caller's render pass ◀──────┘  IndirectArgument
 //! ```
@@ -45,12 +46,12 @@
 //! `(material template, permutation, pass)` bucket the correction describes is
 //! the same table with a longer key.
 //!
-//! # Three counters a dispatch zeroes, and why it is a dispatch
+//! # The counters a dispatch zeroes, and why it is a dispatch
 //!
-//! Both shaders only ever *add*: the cull pass's survivor counter and each
-//! bucket's instance count are atomics, and an argument buffer left holding last
-//! frame's totals would draw last frame's scene twice over. Something has to
-//! zero them.
+//! Both shaders only ever *add*: the cull pass's survivor counter, each bucket's
+//! instance count and the y extent of its mesh dispatch are atomics, and an
+//! argument buffer left holding last frame's totals would draw last frame's
+//! scene twice over. Something has to zero them.
 //!
 //! The seam has a fill for exactly this — `CommandEncoder::fill_buffer`, "the
 //! idiomatic way to zero an indirect count buffer" — and it is unusable here
@@ -65,17 +66,19 @@
 //! graph's, computed from what the two declare. Every backend that can run the
 //! two passes this zeroes for can run this one, which a fill is not true of.
 //!
-//! **All five buffers are therefore [`MemoryLocation::DeviceLocal`]**, which is
-//! not a tidiness point: D3D12 has no unordered-access view of an upload-heap
-//! resource at all — the flag is rejected at creation and the heap pins the
-//! resource to `GENERIC_READ` for its lifetime — so the three counters being
-//! host-visible and bound writable is what took its device down.
+//! **Every per-frame buffer here is therefore
+//! [`MemoryLocation::DeviceLocal`]**, which is not a tidiness point: D3D12 has
+//! no unordered-access view of an upload-heap resource at all — the flag is
+//! rejected at creation and the heap pins the resource to `GENERIC_READ` for
+//! its lifetime — so the counters being host-visible and bound writable is what
+//! took its device down.
 //!
-//! They carry [`BufferUsage::TRANSFER_DST`] as well as `TRANSFER_SRC`, and for
-//! the same reason: a buffer only ever written by a shader is one nothing can
-//! poison, and a test that cannot poison a counter cannot tell a zero this pass
-//! wrote from the zero the allocation came with. `crcbl-vk`'s `draw_gen`
-//! end-to-end fills all three with a sentinel before the frame.
+//! The ones the clearing pass owns carry [`BufferUsage::TRANSFER_DST`] as well
+//! as `TRANSFER_SRC`, and for the same reason: a buffer only ever written by a
+//! shader is one nothing can poison, and a test that cannot poison a counter
+//! cannot tell a zero this pass wrote from the zero the allocation came with.
+//! `crcbl-vk`'s `draw_gen` end-to-end fills them with a sentinel before the
+//! frame.
 //!
 //! # The overflow is visible, and it is not silent
 //!
@@ -113,6 +116,16 @@ pub struct DrawGenDesc<'a> {
     /// Which mesh each bucket draws, as an index into the mesh table, in bucket
     /// order. One entry per indirect call the caller will record.
     pub bucket_meshes: &'a [u32],
+    /// How many clusters each bucket's mesh has, in the same order — the x
+    /// extent of that bucket's mesh dispatch, and the only word of
+    /// [`GeneratedDraws::mesh_args`] the GPU does not decide.
+    ///
+    /// **Zero on every geometry path with no mesh stage**, where nothing reads
+    /// those arguments. It is still the same length as
+    /// [`bucket_meshes`](Self::bucket_meshes): the pass writes one structure
+    /// per bucket whatever the path, exactly as it writes one draw argument
+    /// per bucket.
+    pub bucket_clusters: &'a [u32],
     /// Instances the pool this culls can hold.
     ///
     /// Sizes the visible list *and* every bucket's run, which is what makes a
@@ -141,6 +154,19 @@ pub struct GeneratedDraws {
     pub counts: BufferHandle,
     /// The same buffer as the graph knows it.
     pub counts_id: BufferId,
+    /// The per-bucket mesh-dispatch arguments,
+    /// [`draw_gen::MESH_ARGS_SIZE`] bytes per bucket: `(clusters, surviving
+    /// instances, 1)`. What
+    /// [`CommandEncoder::draw_mesh_tasks_indirect`](crcbl_hal::CommandEncoder::draw_mesh_tasks_indirect)
+    /// reads on [`GeometryPath::MeshShader`](crcbl_hal::GeometryPath::MeshShader).
+    pub mesh_args: BufferHandle,
+    /// The same buffer as the graph knows it. Declare it in
+    /// [`ResourceState::IndirectArgument`].
+    ///
+    /// A buffer of its own rather than more words on
+    /// [`args`](Self::args), because the mesh path reads *those* as a shader
+    /// read in the same pass and a resource is in one state at a time.
+    pub mesh_args_id: BufferId,
     /// The per-bucket runs of surviving instance indices, which the vertex
     /// stage reads. Declare it as a shader read.
     pub runs_id: BufferId,
@@ -164,6 +190,9 @@ pub struct DrawGen {
     /// Which mesh each bucket draws, as `draw_gen.slang` reads it. Written once:
     /// the bucket table is fixed when it is built.
     bucket_meshes: BufferHandle,
+    /// How many clusters each bucket's mesh has, written once for the same
+    /// reason: a mesh's clusters are decided when it becomes resident.
+    bucket_clusters: BufferHandle,
     /// The block naming the bucket count and the two capacities. Shared by every
     /// frame's group, because none of the three changes.
     gen_params: BufferHandle,
@@ -178,6 +207,7 @@ pub struct DrawGen {
     runs: Vec<BufferHandle>,
     args: Vec<BufferHandle>,
     counts: Vec<BufferHandle>,
+    mesh_args: Vec<BufferHandle>,
     clear_groups: Vec<BindGroupHandle>,
     cull_groups: Vec<BindGroupHandle>,
     gen_groups: Vec<BindGroupHandle>,
@@ -218,6 +248,12 @@ impl DrawGen {
         assert!(
             !desc.bucket_meshes.is_empty(),
             "draw generation with no buckets would generate no draws"
+        );
+        assert_eq!(
+            desc.bucket_clusters.len(),
+            desc.bucket_meshes.len(),
+            "one cluster count per bucket: a shorter table would leave a bucket's mesh dispatch \
+             reading a cluster count that belongs to another bucket, or to nothing"
         );
         let mut rollback = Rollback::default();
         match Self::build(device, desc, &mut rollback) {
@@ -262,6 +298,18 @@ impl DrawGen {
         }
         device.write_buffer(bucket_meshes, 0, &table)?;
 
+        let bucket_clusters = buffer(
+            "bucket clusters",
+            u64::from(bucket_count) * 4,
+            BufferUsage::STORAGE,
+            MemoryLocation::HostUpload,
+        )?;
+        let mut clusters = Vec::with_capacity(desc.bucket_clusters.len() * 4);
+        for count in desc.bucket_clusters {
+            clusters.extend_from_slice(&count.to_le_bytes());
+        }
+        device.write_buffer(bucket_clusters, 0, &clusters)?;
+
         let gen_params = buffer(
             "params",
             draw_gen::PARAMS_SIZE as u64,
@@ -295,6 +343,7 @@ impl DrawGen {
                 args_words,
                 counts_words: bucket_count,
                 stats_words: cull_shader::STATS_WORDS,
+                mesh_args_words: bucket_count * draw_gen::MESH_ARGS_WORDS as u32,
             }
             .to_bytes(),
         )?;
@@ -306,6 +355,7 @@ impl DrawGen {
         let mut runs = Vec::with_capacity(frames);
         let mut args = Vec::with_capacity(frames);
         let mut counts = Vec::with_capacity(frames);
+        let mut mesh_args = Vec::with_capacity(frames);
         for frame in 0..frames {
             cull_params.push(buffer(
                 &format!("cull params {frame}"),
@@ -365,6 +415,19 @@ impl DrawGen {
                     | BufferUsage::TRANSFER_DST,
                 MemoryLocation::DeviceLocal,
             )?);
+            // The mesh path's dispatch extents, on the argument buffer's terms
+            // exactly: written by the same pass, zeroed by the same one, and
+            // read by a driver rather than by a shader — so `INDIRECT`, and
+            // `TRANSFER_SRC` so a test can read back what the GPU decided.
+            mesh_args.push(buffer(
+                &format!("mesh dispatch args {frame}"),
+                u64::from(bucket_count) * draw_gen::MESH_ARGS_SIZE as u64,
+                BufferUsage::STORAGE
+                    | BufferUsage::INDIRECT
+                    | BufferUsage::TRANSFER_SRC
+                    | BufferUsage::TRANSFER_DST,
+                MemoryLocation::DeviceLocal,
+            )?);
         }
 
         // --- the clearing pass ---
@@ -375,6 +438,7 @@ impl DrawGen {
                 storage(1, false),
                 storage(2, false),
                 storage(3, false),
+                storage(4, false),
             ],
         })?;
         rollback.bind_group_layouts.push(clear_layout);
@@ -442,6 +506,10 @@ impl DrawGen {
                 storage(6, false),
                 storage(7, false),
                 storage(8, false),
+                // The per-bucket cluster counts, read only: the mesh dispatch's
+                // x extent is the host's and this pass copies it through.
+                storage(9, true),
+                storage(10, false),
             ],
         })?;
         rollback.bind_group_layouts.push(gen_layout);
@@ -472,6 +540,7 @@ impl DrawGen {
                     bound(1, visible_count[frame]),
                     bound(2, args[frame]),
                     bound(3, counts[frame]),
+                    bound(4, mesh_args[frame]),
                 ],
                 variable_count: None,
             })?;
@@ -509,6 +578,8 @@ impl DrawGen {
                     bound(6, runs[frame]),
                     bound(7, args[frame]),
                     bound(8, counts[frame]),
+                    bound(9, bucket_clusters),
+                    bound(10, mesh_args[frame]),
                 ],
                 variable_count: None,
             })?;
@@ -519,6 +590,7 @@ impl DrawGen {
         rollback.disarm();
         Ok(Self {
             bucket_meshes,
+            bucket_clusters,
             gen_params,
             clear_params,
             cull_params,
@@ -527,6 +599,7 @@ impl DrawGen {
             runs,
             args,
             counts,
+            mesh_args,
             clear_groups,
             cull_groups,
             gen_groups,
@@ -574,6 +647,14 @@ impl DrawGen {
     #[must_use]
     pub const fn count_offset(&self, bucket: u32) -> u64 {
         bucket as u64 * 4
+    }
+
+    /// Byte offset of bucket `bucket`'s mesh-dispatch argument structure — what
+    /// [`DrawIndirect::offset`](crcbl_hal::DrawIndirect::offset) carries in the
+    /// call that reads it.
+    #[must_use]
+    pub const fn mesh_args_offset(&self, bucket: u32) -> u64 {
+        bucket as u64 * draw_gen::MESH_ARGS_SIZE as u64
     }
 
     /// The buffer of per-bucket instance runs for `frame`, which the drawing
@@ -652,6 +733,32 @@ impl DrawGen {
     #[must_use]
     pub fn counts(&self, frame: usize) -> BufferHandle {
         self.counts[frame]
+    }
+
+    /// The per-bucket cluster counts the host wrote at build — the x extent of
+    /// each bucket's mesh dispatch, before the pass copies it into
+    /// [`GeneratedDraws::mesh_args`].
+    ///
+    /// Shared by every frame, because a mesh's clusters are decided when it
+    /// becomes resident. Exposed for the reason the per-frame buffers are: what
+    /// this holds is the only CPU-side half of an extent that is otherwise the
+    /// GPU's, so a test with no GPU can still check it is each bucket's own.
+    #[must_use]
+    pub fn bucket_clusters(&self) -> BufferHandle {
+        self.bucket_clusters
+    }
+
+    /// `frame`'s per-bucket mesh-dispatch arguments. The same buffer
+    /// [`GeneratedDraws::mesh_args`] names, and the thing a test reads back to
+    /// see that the extent the mesh path dispatched is the count culling
+    /// produced rather than the instance pool's size.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    #[must_use]
+    pub fn mesh_args(&self, frame: usize) -> BufferHandle {
+        self.mesh_args[frame]
     }
 
     /// Writes `frame`'s cull parameters — this frame's frustum, and how much of
@@ -759,6 +866,12 @@ impl DrawGen {
             self.counts[frame],
             ResourceState::IndirectArgument,
         );
+        let mesh_args = import(
+            graph,
+            "mesh-dispatch-args",
+            self.mesh_args[frame],
+            ResourceState::IndirectArgument,
+        );
 
         // The zero every atomic below counts up from, and the first thing in the
         // frame that touches any of the three. Its barrier into the cull pass is
@@ -776,6 +889,7 @@ impl DrawGen {
             .use_buffer(visible_count, ResourceState::ShaderReadWrite)
             .use_buffer(args, ResourceState::ShaderReadWrite)
             .use_buffer(counts, ResourceState::ShaderReadWrite)
+            .use_buffer(mesh_args, ResourceState::ShaderReadWrite)
             .execute(move |ctx| {
                 let encoder = ctx.encoder();
                 encoder.bind_compute_pipeline(clear_pipeline);
@@ -824,6 +938,7 @@ impl DrawGen {
             .use_buffer(runs, ResourceState::ShaderReadWrite)
             .use_buffer(args, ResourceState::ShaderReadWrite)
             .use_buffer(counts, ResourceState::ShaderReadWrite)
+            .use_buffer(mesh_args, ResourceState::ShaderReadWrite)
             .execute(move |ctx| {
                 let encoder = ctx.encoder();
                 encoder.bind_compute_pipeline(gen_pipeline);
@@ -836,6 +951,8 @@ impl DrawGen {
             args_id: args,
             counts: self.counts[frame],
             counts_id: counts,
+            mesh_args: self.mesh_args[frame],
+            mesh_args_id: mesh_args,
             runs_id: runs,
             visible_count_id: visible_count,
         }
@@ -860,14 +977,20 @@ impl DrawGen {
         device.destroy_bind_group_layout(self.gen_layout);
         device.destroy_bind_group_layout(self.cull_layout);
         device.destroy_bind_group_layout(self.clear_layout);
-        for buffer in [self.bucket_meshes, self.gen_params, self.clear_params]
-            .into_iter()
-            .chain(self.cull_params)
-            .chain(self.visible)
-            .chain(self.visible_count)
-            .chain(self.runs)
-            .chain(self.args)
-            .chain(self.counts)
+        for buffer in [
+            self.bucket_meshes,
+            self.bucket_clusters,
+            self.gen_params,
+            self.clear_params,
+        ]
+        .into_iter()
+        .chain(self.cull_params)
+        .chain(self.visible)
+        .chain(self.visible_count)
+        .chain(self.runs)
+        .chain(self.args)
+        .chain(self.counts)
+        .chain(self.mesh_args)
         {
             device.destroy_buffer(buffer);
         }

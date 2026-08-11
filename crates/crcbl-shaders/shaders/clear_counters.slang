@@ -37,7 +37,7 @@
 // two dispatches is two passes. The render graph computes it from what each
 // pass declares.
 
-/// The three lengths this pass cannot derive for itself, matching
+/// The buffer lengths this pass cannot derive for itself, matching
 /// `crcbl_shaders::clear_counters::Params`.
 struct ClearParams
 {
@@ -54,9 +54,12 @@ struct ClearParams
     /// zeroed a prefix would leave the other's counter carrying last frame's
     /// total.
     uint stats_words;
-    /// Pads the block to a multiple of 16 bytes, which `std140` requires of a
-    /// uniform buffer's size.
-    uint pad0;
+    /// Words in the mesh-dispatch argument buffer: one bucket's structure is
+    /// `crcbl_shaders::draw_gen::MESH_ARGS_WORDS` of them, one per bucket.
+    /// Zeroed for `args_words`' reason exactly — its y extent is an atomic add
+    /// too — and it also fills the block out to the multiple of 16 bytes
+    /// `std140` requires of a uniform buffer's size.
+    uint mesh_args_words;
 };
 
 [[vk::binding(0, 0)]]
@@ -81,10 +84,16 @@ RWStructuredBuffer<uint> args;
 [[vk::binding(3, 0)]]
 RWStructuredBuffer<uint> draw_counts;
 
+/// The per-bucket mesh-dispatch arguments `draw_gen.slang` writes. Its y extent
+/// is the surviving-instance count and is accumulated by atomic add, so it
+/// starts here at zero like every other counter this pass owns.
+[[vk::binding(4, 0)]]
+RWStructuredBuffer<uint> mesh_args;
+
 /// Invocations per workgroup, matching
 /// `crcbl_shaders::clear_counters::WORKGROUP_SIZE`.
 ///
-/// One invocation covers the same index in all three buffers, so a dispatch is
+/// One invocation covers the same index in every buffer, so a dispatch is
 /// sized for the longest of them. That is `args_words`, which is never zero
 /// while there is at least one bucket — and a bucket table with no buckets
 /// generates no draws and is refused where it is built.
@@ -105,5 +114,9 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
     if (index < clear.counts_words)
     {
         draw_counts[index] = 0;
+    }
+    if (index < clear.mesh_args_words)
+    {
+        mesh_args[index] = 0;
     }
 }

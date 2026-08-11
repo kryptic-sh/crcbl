@@ -20,14 +20,16 @@
 ///
 /// One invocation covers the same index in every buffer the pass zeroes, so a
 /// caller dispatches `args_words.div_ceil(WORKGROUP_SIZE)` groups — the longest
-/// of the three.
+/// of them.
 pub const WORKGROUP_SIZE: u32 = 64;
 
 /// Bytes of the uniform block.
 ///
-/// Three `uint` and the tail padding `std140` requires of a uniform block's
-/// size. Checked against the `Offset` decorations `slangc` emits by this
-/// module's `the_clear_counters_params_block_matches_the_offsets_slangc_emits`.
+/// One `uint` per buffer the pass zeroes, which happens to be exactly the
+/// multiple of 16 bytes `std140` requires of a uniform block's size — so there
+/// is no tail padding left to write. Checked against the `Offset` decorations
+/// `slangc` emits by this module's
+/// `the_clear_counters_params_block_matches_the_offsets_slangc_emits`.
 pub const PARAMS_SIZE: usize = 16;
 
 /// The uniform block, matching `struct ClearParams` in
@@ -49,21 +51,28 @@ pub struct Params {
     /// second counter accumulating across frames, which reads as a plausible
     /// number rather than as a failure.
     pub stats_words: u32,
+    /// Words in the mesh-dispatch argument buffer —
+    /// [`crate::draw_gen::MESH_ARGS_WORDS`] per bucket.
+    ///
+    /// Zeroed for [`args_words`](Self::args_words)' reason: the y extent of a
+    /// bucket's mesh dispatch is an atomic add, so one carrying the previous
+    /// frame's total launches workgroups for instances this frame culled.
+    pub mesh_args_words: u32,
 }
 
 impl Params {
     /// The block as the bytes a uniform buffer holds, in `std140` order.
-    ///
-    /// The tail padding is written rather than left alone, for the reason
-    /// [`crate::compute_probe::Params::to_bytes`] gives: a buffer allocated for
-    /// this block is [`PARAMS_SIZE`] bytes wide and a partial write leaves the
-    /// rest undefined.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; PARAMS_SIZE] {
         let mut bytes = [0u8; PARAMS_SIZE];
-        for (slot, value) in [self.args_words, self.counts_words, self.stats_words]
-            .into_iter()
-            .enumerate()
+        for (slot, value) in [
+            self.args_words,
+            self.counts_words,
+            self.stats_words,
+            self.mesh_args_words,
+        ]
+        .into_iter()
+        .enumerate()
         {
             let at = slot * 4;
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
@@ -97,7 +106,7 @@ mod tests {
     /// disassembly.
     #[test]
     fn the_clear_counters_params_block_matches_the_offsets_slangc_emits() {
-        // `OpMemberDecorate %ClearParams_std140 n Offset …`: 0, 4, 8.
+        // `OpMemberDecorate %ClearParams_std140 n Offset …`: 0, 4, 8, 12.
         assert_eq!(PARAMS_SIZE, 16);
         assert_eq!(
             PARAMS_SIZE % 16,
@@ -109,6 +118,7 @@ mod tests {
             args_words: 10,
             counts_words: 2,
             stats_words: 5,
+            mesh_args_words: 6,
         }
         .to_bytes();
         let uint_at =
@@ -116,10 +126,6 @@ mod tests {
         assert_eq!(uint_at(0), 10, "args_words at offset 0");
         assert_eq!(uint_at(4), 2, "counts_words at offset 4");
         assert_eq!(uint_at(8), 5, "stats_words at offset 8");
-        assert!(
-            bytes[12..].iter().all(|byte| *byte == 0),
-            "the std140 tail padding is written, and it is zero: {:?}",
-            &bytes[12..]
-        );
+        assert_eq!(uint_at(12), 6, "mesh_args_words at offset 12");
     }
 }

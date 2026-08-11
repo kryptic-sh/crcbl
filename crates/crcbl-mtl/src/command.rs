@@ -1244,6 +1244,17 @@ impl CommandEncoder for MetalCommandEncoder {
         ));
     }
 
+    /// Refused with [`draw_mesh_tasks`](Self::draw_mesh_tasks). Metal's own
+    /// form is `drawMeshThreadgroupsWithIndirectBuffer:`, whose buffer holds
+    /// the `MTLDispatchThreadgroupsIndirectArguments` the seam documents —
+    /// there is simply no mesh pipeline here for either to be recorded
+    /// against.
+    fn draw_mesh_tasks_indirect(&mut self, _draw: &DrawIndirect) {
+        self.fail(crate::MetalInstance::not_yet(
+            "drawMeshThreadgroupsWithIndirectBuffer: (the Metal mesh slice)",
+        ));
+    }
+
     // --- compute scope ---
 
     /// Opens a compute pass, **and the `MTLComputeCommandEncoder` that is its

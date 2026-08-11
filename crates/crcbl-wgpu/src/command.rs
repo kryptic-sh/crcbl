@@ -747,6 +747,16 @@ impl CommandEncoder for WgpuCommandEncoder {
         self.unsupported("draw_mesh_tasks (WebGPU has no mesh stage)");
     }
 
+    /// Refused for [`draw_mesh_tasks`](Self::draw_mesh_tasks)' reason, and it
+    /// is the reason rather than a gap: WebGPU has no mesh stage at all, so
+    /// this backend reports no `Features::MESH_SHADER` and no caller on it ever
+    /// reaches a mesh pipeline to record against. Named here rather than left
+    /// silently absent, because a draw that quietly does nothing is what the
+    /// capability model exists to prevent.
+    fn draw_mesh_tasks_indirect(&mut self, _draw: &hal::DrawIndirect) {
+        self.unsupported("draw_mesh_tasks_indirect (WebGPU has no mesh stage)");
+    }
+
     fn begin_compute_pass(&mut self, desc: &hal::ComputePassDesc<'_>) {
         let wgpu_desc = wgpu::ComputePassDescriptor {
             label: desc.label,

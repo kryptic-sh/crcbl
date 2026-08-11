@@ -46,15 +46,20 @@
 //   * `SV_GroupID.y` is the slot in the bucket's run of *surviving* instances,
 //     which `cull.slang` filled and `draw_gen.slang` compacted.
 //
-// The dispatch is sized by the CPU from two upper bounds — the bucket's mesh's
-// cluster count, and how many instances the pool holds — because
-// `draw_mesh_tasks` takes its group counts as arguments and this engine's seam
-// has no indirect form of it yet. **The bound is not the answer**: how many
-// instances actually survived is a number only the GPU has, so every workgroup
-// reads it out of the bucket's indirect-argument structure and the ones past it
-// emit nothing. That is what makes this the same picture as the indirect tails
-// rather than an approximation of it — a culled instance draws nothing here for
-// the same reason an instance count of zero draws nothing there.
+// **Neither extent is the CPU's.** They are two of the three words
+// `draw_gen.slang` writes for this bucket, and the seam's
+// `draw_mesh_tasks_indirect` is what reads them: the x extent is the bucket's
+// mesh's cluster count and the y extent is how many instances survived the
+// instance cull. So a culled instance is not a workgroup that returns early —
+// it is a workgroup that is never launched, which is the difference between
+// culling that skips output and culling that skips work.
+//
+// The bounds check below survives that and is now exactly that: a bound. The
+// extents make it true for every group the driver launches, and it stays
+// because the extents arrive from a buffer rather than from a caller — a wrong
+// argument structure would otherwise reach `visible_instances` past what
+// `draw_gen.slang` wrote, and an out-of-range instance index is a hang rather
+// than a wrong picture.
 //
 // # Per-cluster culling lives in the amplification stage, and only there
 //
@@ -194,8 +199,10 @@ struct Meshlet
 /// One indexed indirect draw's arguments, matching `draw_gen.slang`'s.
 ///
 /// Read here as **data** rather than executed as a draw: `instance_count` is
-/// how many instances survived culling into this bucket, and that number is the
-/// GPU's alone. See the header on why a dispatch bound is not an answer.
+/// how many instances survived culling into this bucket. The same number sizes
+/// this dispatch's y extent, out of `draw_gen.slang`'s separate mesh-argument
+/// structure — so what `group_is_live` does with it below is a range check
+/// rather than the filter it once was.
 struct DrawIndexedArgs
 {
     uint index_count;
@@ -222,8 +229,8 @@ struct CullParams
     /// plane normal and `w` its offset. A point is inside the plane when
     /// `dot(xyz, p) + w >= 0`.
     float4 planes[PLANE_COUNT];
-    /// Instances the cull pass tested. Read by nothing here — the mesh path
-    /// takes its instance bound from `draw_args` instead.
+    /// Instances the cull pass tested. Read by nothing here — the mesh path's
+    /// instance bound is its own dispatch extent.
     uint instance_count;
     /// Elements the visible list can hold. Read by nothing here either.
     uint capacity;
@@ -268,9 +275,10 @@ struct ClusterDrawConstants
     uint base;
     /// This bucket's mesh's first cluster in `clusters`.
     uint cluster_base;
-    /// How many clusters that mesh has. The dispatch is sized to this, and the
-    /// bound is checked again here so a caller that over-dispatched cannot
-    /// draw another mesh's clusters.
+    /// How many clusters that mesh has. The dispatch's x extent is this number
+    /// too, reached through `draw_gen.slang`'s mesh-argument structure, and the
+    /// bound is checked again here so an argument structure naming a larger one
+    /// cannot draw another mesh's clusters.
     uint cluster_count;
     /// Which bucket this is, which is the element of `draw_args` holding the
     /// instance count culling produced.
@@ -390,10 +398,12 @@ uint corner_at(uint corner)
 /// How many workgroups a group of the dispatch is worth: `1` while both its
 /// indices are inside what the frame actually holds, and `0` past either.
 ///
-/// A group the CPU's dispatch bound covered and the frame does not: either its
-/// instance did not survive the instance cull, or the bucket's mesh has fewer
-/// clusters than the dispatch was sized for. **The bound is not the answer** —
-/// see the header — and this is where the two meet.
+/// **A bound rather than a filter**, since the dispatch extents became the same
+/// two numbers: every group the driver launches is inside them. It is kept
+/// because those extents are read out of a buffer — see the header — so this is
+/// the range check on the only untrusted input either stage has, and what it
+/// guards is `visible_instances` being indexed past the run `draw_gen.slang`
+/// filled.
 ///
 /// **Arithmetic rather than a comparison**, because both entry points below put
 /// the result in front of a call the DXIL validator wants unbranched:
@@ -577,10 +587,12 @@ void meshMain(
 /// with a group count of `1` or `0` — the DXIL rule `SetMeshOutputCounts` has,
 /// and the reason nothing above it is a branch either.
 ///
-/// A group past either bound reads the bucket's first cluster and instance slot
-/// zero, which are in bounds and whose values it then multiplies away. That is
-/// what keeps `visible_instances` — whose slots past the survivor count hold
-/// whatever the buffer last had — from ever reaching `instances` as an index.
+/// A group past either bound — which the dispatch extents make unreachable, and
+/// a wrong argument structure would not — reads the bucket's first cluster and
+/// instance slot zero, which are in bounds and whose values it then multiplies
+/// away. That is what keeps `visible_instances` — whose slots past the survivor
+/// count hold whatever the buffer last had — from ever reaching `instances` as
+/// an index.
 ///
 /// The counter is added to with the survival flag itself rather than under an
 /// `if`, so the add of zero is the branch: one instruction, no control flow in

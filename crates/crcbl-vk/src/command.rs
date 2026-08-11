@@ -1066,6 +1066,45 @@ impl CommandEncoder for VkCommandEncoder {
         unsafe { mesh.cmd_draw_mesh_tasks(self.raw, x, y, z) };
     }
 
+    fn draw_mesh_tasks_indirect(&mut self, draw: &DrawIndirect) {
+        if !self.ok() {
+            return;
+        }
+        // Cloned rather than borrowed — three function pointers and a device
+        // handle — because `use_object` below needs `&mut self` and a borrow of
+        // the extension table held across it is a second one.
+        let Some(mesh) = self.device.mesh_shader_ext.clone() else {
+            // Unreachable through the seam, and reported rather than ignored,
+            // for the reason `draw_mesh_tasks` gives above.
+            self.fail(HalError::Unsupported {
+                backend: crcbl_hal::BackendKind::Vulkan,
+                what: "draw_mesh_tasks_indirect on a device without MESH_SHADER",
+            });
+            return;
+        };
+        let state = self.device.state();
+        let Ok(args) = self.device.buffer_raw(&state, draw.args) else {
+            drop(state);
+            self.fail(HalError::invalid_handle("buffer", draw.args));
+            return;
+        };
+        drop(state);
+        self.use_object(args.as_raw());
+        // SAFETY: as `indirect` — `self.raw` is recording inside a render pass
+        // with a mesh pipeline bound and `args` is a live buffer with
+        // `INDIRECT` usage in `IndirectArgument` state. `mesh` was loaded from
+        // this device, whose extension was enabled at creation.
+        unsafe {
+            mesh.cmd_draw_mesh_tasks_indirect(
+                self.raw,
+                args,
+                draw.offset,
+                draw.draw_count,
+                draw.stride,
+            );
+        }
+    }
+
     // --- compute scope ---
 
     fn begin_compute_pass(&mut self, desc: &ComputePassDesc<'_>) {

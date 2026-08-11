@@ -161,6 +161,75 @@ impl DrawIndexedArgs {
     }
 }
 
+/// Words in one mesh-dispatch argument structure.
+pub const MESH_ARGS_WORDS: usize = 3;
+
+/// Bytes of one mesh-dispatch argument structure, which is the `stride` a
+/// [`DrawIndirect`] over this buffer carries.
+///
+/// [`DrawIndirect`]: https://docs.rs/crcbl-hal
+pub const MESH_ARGS_SIZE: usize = MESH_ARGS_WORDS * 4;
+
+/// One mesh-shading dispatch's workgroup counts, matching what `draw_gen.slang`
+/// writes and what `CommandEncoder::draw_mesh_tasks_indirect` reads.
+///
+/// **The layout is not this engine's to choose**, for
+/// [`DrawIndexedArgs`]' reason: it is `VkDrawMeshTasksIndirectCommandEXT`, and
+/// `D3D12_DISPATCH_MESH_ARGUMENTS` and Metal's
+/// `MTLDispatchThreadgroupsIndirectArguments` are the same three words in the
+/// same order.
+///
+/// [`group_count_y`](Self::group_count_y) is the one the GPU decides: it is how
+/// many instances survived culling into this bucket, so a dispatch reading it
+/// launches no workgroups for the ones that did not. The other two are the
+/// bucket's mesh's cluster count and one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MeshTasksArgs {
+    /// Workgroups on x: clusters in the bucket's mesh, one workgroup each.
+    pub group_count_x: u32,
+    /// Workgroups on y: **surviving** instances in the bucket's run, which is
+    /// the same number `DrawIndexedArgs::instance_count` carries and the whole
+    /// reason this structure is read from memory rather than passed.
+    pub group_count_y: u32,
+    /// Workgroups on z, which is one: a (cluster, instance) pair is two
+    /// dimensions and the third is what the APIs' structures all have.
+    pub group_count_z: u32,
+}
+
+impl MeshTasksArgs {
+    /// The arguments as the bytes an indirect buffer holds.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; MESH_ARGS_SIZE] {
+        let mut bytes = [0u8; MESH_ARGS_SIZE];
+        for (slot, value) in [self.group_count_x, self.group_count_y, self.group_count_z]
+            .into_iter()
+            .enumerate()
+        {
+            let at = slot * 4;
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// The arguments decoded from the bytes an indirect buffer holds — the
+    /// shape a readback compares against the dispatch a CPU would have sized.
+    #[must_use]
+    pub fn from_bytes(bytes: &[u8; MESH_ARGS_SIZE]) -> Self {
+        let word = |slot: usize| {
+            u32::from_le_bytes(
+                bytes[slot * 4..slot * 4 + 4]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("a four-byte window of a fixed-size array")),
+            )
+        };
+        Self {
+            group_count_x: word(0),
+            group_count_y: word(1),
+            group_count_z: word(2),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,6 +322,57 @@ mod tests {
             );
         }
         let declaration = format!("static const uint DRAW_ARGS_WORDS = {DRAW_ARGS_WORDS};");
+        assert!(
+            source.contains(&declaration),
+            "draw_gen.slang does not declare `{declaration}`"
+        );
+    }
+
+    /// The mesh-dispatch words are in the order every API's own structure puts
+    /// them, and a round trip preserves all three.
+    ///
+    /// A driver reads these bytes as workgroup counts. Two of them swapped is a
+    /// dispatch of `clusters` instances of `instances` clusters, which on a
+    /// scene with one instance and one cluster is the same number and on any
+    /// other is a frame that draws the wrong amount of geometry.
+    #[test]
+    fn the_mesh_dispatch_words_round_trip_in_the_order_the_apis_fixed() {
+        let args = MeshTasksArgs {
+            group_count_x: 5,
+            group_count_y: 2,
+            group_count_z: 1,
+        };
+        let bytes = args.to_bytes();
+        assert_eq!(bytes.len(), 12, "sizeof(VkDrawMeshTasksIndirectCommandEXT)");
+        let uint_at =
+            |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
+        assert_eq!(uint_at(0), 5, "group_count_x first");
+        assert_eq!(uint_at(4), 2, "then group_count_y");
+        assert_eq!(uint_at(8), 1, "then group_count_z");
+        assert_eq!(MeshTasksArgs::from_bytes(&bytes), args);
+    }
+
+    /// The word indices this module implies and the ones the shader stores
+    /// through must be the same, for
+    /// [`the_shader_names_the_same_word_indices_this_module_lays_out`]'s
+    /// reason.
+    ///
+    /// [`the_shader_names_the_same_word_indices_this_module_lays_out`]: fn@the_shader_names_the_same_word_indices_this_module_lays_out
+    #[test]
+    fn the_shader_names_the_same_mesh_dispatch_word_indices_this_module_lays_out() {
+        let source = include_str!("../shaders/draw_gen.slang");
+        for (name, index) in [
+            ("MESH_ARG_GROUP_X", 0),
+            ("MESH_ARG_GROUP_Y", 1),
+            ("MESH_ARG_GROUP_Z", 2),
+        ] {
+            let declaration = format!("static const uint {name} = {index};");
+            assert!(
+                source.contains(&declaration),
+                "draw_gen.slang does not declare `{declaration}`"
+            );
+        }
+        let declaration = format!("static const uint MESH_ARGS_WORDS = {MESH_ARGS_WORDS};");
         assert!(
             source.contains(&declaration),
             "draw_gen.slang does not declare `{declaration}`"

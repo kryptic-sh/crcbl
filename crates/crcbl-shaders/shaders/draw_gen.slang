@@ -51,6 +51,21 @@
 // zeroes `cull.slang`'s counter, and for the same reason: this pass only ever
 // adds.
 //
+// # The mesh path's dispatch extents are written here too
+//
+// §3.5's geometry path draws no indirect *draw* at all — it launches one
+// workgroup per (cluster, surviving instance) — but the number of survivors is
+// this pass's, so the extents are an indirect argument on exactly the same
+// terms. `mesh_args` below is that structure, one per bucket, and it is what
+// makes the instance cull reduce **work** rather than only output: a CPU-sized
+// dispatch has to cover every slot the instance pool ever handed out and let
+// the groups past the survivors return without emitting.
+//
+// It is a buffer of its own rather than three more words on the structure
+// above, and that is a render-graph constraint rather than tidiness: a mesh
+// pipeline reads `args` as data in the same pass, a resource is in one
+// resource state at a time, and `IndirectArgument` and a shader read are two.
+//
 // # A bucket's run cannot overflow, by arithmetic rather than by assertion
 //
 // Every scattering invocation contributes exactly one instance to exactly one
@@ -142,6 +157,20 @@ static const uint ARG_FIRST_INDEX = 2;
 static const uint ARG_VERTEX_OFFSET = 3;
 static const uint ARG_FIRST_INSTANCE = 4;
 
+/// Words in one mesh-dispatch argument structure, matching
+/// `crcbl_shaders::draw_gen::MESH_ARGS_WORDS`.
+///
+/// The layout is `VkDrawMeshTasksIndirectCommandEXT`, which is also
+/// `D3D12_DISPATCH_MESH_ARGUMENTS` and Metal's
+/// `MTLDispatchThreadgroupsIndirectArguments`: three 32-bit workgroup counts,
+/// in the order the constants below name.
+static const uint MESH_ARGS_WORDS = 3;
+
+/// Indices within one mesh-dispatch argument structure, on `ARG_*`'s terms.
+static const uint MESH_ARG_GROUP_X = 0;
+static const uint MESH_ARG_GROUP_Y = 1;
+static const uint MESH_ARG_GROUP_Z = 2;
+
 /// Everything an invocation needs that is not buffer contents, matching
 /// `crcbl_shaders::draw_gen::Params`.
 ///
@@ -222,6 +251,33 @@ RWStructuredBuffer<Atomic<uint> > args;
 [[vk::binding(8, 0)]]
 RWStructuredBuffer<uint> draw_counts;
 
+/// How many clusters each bucket's mesh has — the x extent of that bucket's
+/// mesh dispatch, and the one number in `mesh_args` below that is not the
+/// GPU's.
+///
+/// Host-written beside `bucket_meshes` and not rewritten per frame, because a
+/// mesh's clusters are decided when it becomes resident. Zero on every
+/// geometry path with no mesh stage, where nothing reads `mesh_args` at all.
+[[vk::binding(9, 0)]]
+StructuredBuffer<uint> bucket_clusters;
+
+/// The per-bucket mesh-dispatch arguments, `MESH_ARGS_WORDS` per bucket, as a
+/// flat array of words.
+///
+/// **This is what makes the cluster cull skip work rather than only output.**
+/// `mesh_cluster.slang`'s stages run one workgroup per (cluster, surviving
+/// instance), and how many instances survived is a number only this pass has —
+/// so a CPU-sized dispatch has to use the instance *pool's* slot count and let
+/// the groups past the survivors return early. Read from here instead, the
+/// groups are never launched.
+///
+/// Flat and atomic for `args`' reason, and the same division of labour: word
+/// `MESH_ARG_GROUP_Y` is incremented by each scattering invocation, exactly as
+/// `ARG_INSTANCE_COUNT` is, and the other two are plain stores by the
+/// invocation that owns the bucket.
+[[vk::binding(10, 0)]]
+RWStructuredBuffer<Atomic<uint> > mesh_args;
+
 /// Invocations per workgroup, matching
 /// `crcbl_shaders::draw_gen::WORKGROUP_SIZE`.
 ///
@@ -250,6 +306,14 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
         // differently — `mesh.slang`'s header measures all four.
         args[at + ARG_VERTEX_OFFSET].store(0);
         args[at + ARG_FIRST_INSTANCE].store(0);
+
+        // The static half of the same bucket's mesh dispatch. The y extent is
+        // the scattering half's, below, for the reason `ARG_INSTANCE_COUNT` is:
+        // nothing inside one dispatch can wait for every other invocation to
+        // have finished counting.
+        uint mesh_at = index * MESH_ARGS_WORDS;
+        mesh_args[mesh_at + MESH_ARG_GROUP_X].store(bucket_clusters[index]);
+        mesh_args[mesh_at + MESH_ARG_GROUP_Z].store(1);
     }
 
     // Clamped by both capacities, which is what makes a bucket's run unable to
@@ -272,6 +336,20 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
             continue;
         }
         uint slot = args[bucket * DRAW_ARGS_WORDS + ARG_INSTANCE_COUNT].add(1);
+        // The mesh dispatch's y extent, counted by the same invocations and to
+        // the same total. Two adds rather than one read of the other word,
+        // because a word another invocation is still incrementing is not a
+        // total yet — and the two are held equal by measurement rather than by
+        // assertion: `crcbl-vk`'s `the_mesh_dispatch_extent_is_the_culled
+        // _instance_count` reads both buffers back and compares them.
+        mesh_args[bucket * MESH_ARGS_WORDS + MESH_ARG_GROUP_Y].add(1);
+        // The mesh dispatch's y extent, counted by the same invocations and to
+        // the same total. Two adds rather than one read of the other word,
+        // because a word another invocation is still incrementing is not a
+        // total yet — and the two are held equal by measurement rather than by
+        // assertion: `crcbl-vk`'s `the_mesh_dispatch_extent_is_the_culled
+        // _instance_count` reads both buffers back and compares them.
+
         visible_instances[bucket * gen.bucket_capacity + slot] = instance_index;
         // Exactly one invocation per bucket takes slot zero, so exactly one
         // writes this — a plain store rather than an atomic, and not a value

@@ -1469,6 +1469,16 @@ impl CommandEncoder for Dx12CommandEncoder {
         self.refuse("DispatchMesh (the DX12 mesh slice)");
     }
 
+    /// Refused with [`draw_mesh_tasks`](Self::draw_mesh_tasks), and it would
+    /// need one thing more than that one does: `ExecuteIndirect` reads
+    /// `D3D12_DISPATCH_MESH_ARGUMENTS` through a command signature, so this
+    /// backend would have to create an `ID3D12CommandSignature` carrying
+    /// `D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH` as well as the pipeline
+    /// state stream `create_mesh_pipeline` does not build.
+    fn draw_mesh_tasks_indirect(&mut self, _draw: &DrawIndirect) {
+        self.refuse("ExecuteIndirect of DISPATCH_MESH (the DX12 mesh slice)");
+    }
+
     // --- compute scope ---
 
     /// Opens a compute *scope*, and records nothing.

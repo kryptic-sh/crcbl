@@ -16,6 +16,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_hal::CommandEncoder` gained `draw_mesh_tasks_indirect`**, so anything
+  implementing that trait outside this workspace has a new method to write. It
+  takes the existing `DrawIndirect`, and the argument buffer holds **three
+  consecutive `u32`s** — group counts x, y, z — 4-aligned, tight stride 12,
+  `draw_count > 1` gated on `MULTI_DRAW_INDIRECT`. `DrawIndirect`'s own docs now
+  say which structure each of the three indirect calls reads.
+
+  Vulkan maps it to `cmd_draw_mesh_tasks_indirect`; the null backend records it;
+  `crcbl-wgpu` returns `Unsupported` naming that WebGPU has no mesh stage; Metal
+  and D3D12 refuse it exactly as they already refuse `draw_mesh_tasks`. **No new
+  `Features` flag** — `VK_EXT_mesh_shader` defines both entry points together,
+  D3D12 mesh tier 1 admits the `DISPATCH_MESH` signature, and a Metal device
+  with mesh functions has the indirect draw, so no API offers one without the
+  other.
+
 - **The mixer remembers a listener, so a cue no longer carries one.**
   `crcbl_audio::spatial::Listener` is new — `#[non_exhaustive]`, built through
   `Listener::new(position)` — and `Mixer` gained `set_listener`, `listener` and
@@ -167,6 +182,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the same path out of the frame.
 
 ### Changed
+
+- **Per-cluster culling now skips work, not just output.** The mesh dispatch was
+  CPU-bounded at `(cluster_count, slot_count, 1)`, so a rejected cluster still
+  had its workgroup launched and returned early. `draw_gen.slang` writes a
+  per-bucket `MeshTasksArgs` — x from a new host-uploaded cluster table, y
+  accumulated by the same atomic that fills `instance_count`, z one — and the
+  forward pass records `draw_mesh_tasks_indirect` against it, so the extents
+  come from GPU memory the cull pass wrote.
+
+  The extents could not ride the existing draw-argument structure: `crcbl-wgpu`
+  refuses a padded stride for `draw_indexed_indirect_count`, and the mesh path
+  reads those arguments as a shader read in the same pass, where a resource has
+  exactly one `ResourceState`. A second buffer was the way through.
+
+  Proven by readback rather than by picture, since a golden cannot see a
+  workgroup that was not launched: the box's bucket goes **1 → 0** when it
+  leaves the scene while the cube's stays 1 — which a pool-sized extent cannot
+  do, because `slot_count` never shrinks. Pinning the extent to the pool
+  capacity instead gives `[16385, 16384, 16385]` and reds the test.
 
 - **Bind-group-layout validation is one function on the seam, not five different
   ones.** `BindGroupLayoutDesc::check_entries(caps, backend)` and

@@ -2244,6 +2244,20 @@ impl CommandEncoder for NullEncoder {
         self.record(Command::DrawMeshTasks { x, y, z });
     }
 
+    fn draw_mesh_tasks_indirect(&mut self, draw: &DrawIndirect) {
+        // A draw for `draw_mesh_tasks`' reason, and a live-buffer check for
+        // `draw_indexed_indirect`'s: the argument buffer is the whole of what
+        // this call names, so a dead handle here is a frame that reads its
+        // group counts from nothing.
+        self.need_render("DrawMeshTasksIndirect");
+        self.need_live(
+            "DrawMeshTasksIndirect",
+            ObjectKind::Buffer,
+            draw.args.to_bits(),
+        );
+        self.record(Command::DrawMeshTasksIndirect(*draw));
+    }
+
     fn begin_compute_pass(&mut self, desc: &ComputePassDesc<'_>) {
         self.record(Command::BeginComputePass {
             label: desc.label.map(ToOwned::to_owned),

@@ -424,9 +424,6 @@ pub struct ForwardRenderer {
     /// a failure, and it is also what makes a fall-through impossible — see
     /// [`ForwardRenderer::geometry_path`].
     clusters: Option<ClusterPool>,
-    /// How many clusters each bucket's mesh has, which is the x extent of its
-    /// dispatch. Zero on the indirect tails, where nothing dispatches.
-    bucket_clusters: [u32; BUCKET_COUNT as usize],
     /// Whether the mesh pipeline was built with §3.5's amplification stage in
     /// front of it — see [`ForwardRenderer::culls_clusters`], which is where
     /// what it means is written down.
@@ -671,6 +668,33 @@ impl ForwardRenderer {
         bucket_meshes[CUBE_BUCKET] = cube_mesh;
         bucket_meshes[PYRAMID_BUCKET] = pyramid_mesh;
         bucket_meshes[OPEN_BOX_BUCKET] = open_box_mesh;
+
+        // §3.5's clusters, on the path that reads them and on no other. The
+        // records are `crcbl-shaders`' — cooked, because the builder is
+        // `crcbl-scene`'s and the renderer must not depend on that crate — and
+        // they arrive in bucket-mesh order so a bucket's range is its own
+        // index. See `crate::cluster_pool`.
+        //
+        // Before the draw generation below rather than after it, because the
+        // per-bucket cluster counts are the x extent of each bucket's mesh
+        // dispatch and that pass writes the argument structure carrying them.
+        let mut bucket_clusters = [0u32; BUCKET_COUNT as usize];
+        if emit.is_mesh() {
+            let mut cooked: [crcbl_shaders::meshlet::MeshClusters; BUCKET_COUNT as usize] =
+                Default::default();
+            cooked[CUBE_BUCKET] = crcbl_shaders::meshlet::cube_clusters();
+            cooked[PYRAMID_BUCKET] = crcbl_shaders::meshlet::pyramid_clusters();
+            cooked[OPEN_BOX_BUCKET] = crcbl_shaders::meshlet::open_box_clusters();
+            let clusters = ClusterPool::new(device, "forward", &cooked)?;
+            for (bucket, count) in bucket_clusters.iter_mut().enumerate() {
+                *count = clusters
+                    .range(bucket)
+                    .unwrap_or_else(|| unreachable!("one cluster range per bucket, in order"))
+                    .count;
+            }
+            rollback.clusters = Some(clusters);
+        }
+
         let draws = DrawGen::new(
             device,
             &DrawGenDesc {
@@ -678,6 +702,7 @@ impl ForwardRenderer {
                 instances: &instance_buffers,
                 mesh_table,
                 bucket_meshes: &bucket_meshes,
+                bucket_clusters: &bucket_clusters,
                 instance_capacity: POOL_INSTANCE_CAPACITY,
             },
         )?;
@@ -697,28 +722,6 @@ impl ForwardRenderer {
             .map(|frame| draws.visible_count(frame))
             .collect();
         rollback.draws = Some(draws);
-
-        // §3.5's clusters, on the path that reads them and on no other. The
-        // records are `crcbl-shaders`' — cooked, because the builder is
-        // `crcbl-scene`'s and the renderer must not depend on that crate — and
-        // they arrive in bucket-mesh order so a bucket's range is its own
-        // index. See `crate::cluster_pool`.
-        let mut bucket_clusters = [0u32; BUCKET_COUNT as usize];
-        if emit.is_mesh() {
-            let mut cooked: [crcbl_shaders::meshlet::MeshClusters; BUCKET_COUNT as usize] =
-                Default::default();
-            cooked[CUBE_BUCKET] = crcbl_shaders::meshlet::cube_clusters();
-            cooked[PYRAMID_BUCKET] = crcbl_shaders::meshlet::pyramid_clusters();
-            cooked[OPEN_BOX_BUCKET] = crcbl_shaders::meshlet::open_box_clusters();
-            let clusters = ClusterPool::new(device, "forward", &cooked)?;
-            for (bucket, count) in bucket_clusters.iter_mut().enumerate() {
-                *count = clusters
-                    .range(bucket)
-                    .unwrap_or_else(|| unreachable!("one cluster range per bucket, in order"))
-                    .count;
-            }
-            rollback.clusters = Some(clusters);
-        }
 
         // --- the mesh pass ---
         //
@@ -1403,7 +1406,6 @@ impl ForwardRenderer {
             }),
             emit,
             clusters: rollback.clusters.take(),
-            bucket_clusters,
             culls_clusters,
             uniforms,
             draw_constants,
@@ -1909,20 +1911,11 @@ impl ForwardRenderer {
         let indices = self.pool.index_buffer();
         let emit = self.emit;
         let stride = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE as u32;
-        // **The mesh path's dispatch bound, and it is a bound rather than an
-        // answer.** `draw_mesh_tasks` takes its group counts as arguments —
-        // the seam has no indirect form of it — so the y extent is every slot
-        // the instance pool has ever handed out, and the mesh stage reads the
-        // bucket's real survivor count out of the arguments and emits nothing
-        // past it. Same number `begin_frame` gives the cull dispatch, for the
-        // same reason: a removed instance leaves a hole and the live ones above
-        // it are still in the array.
-        let instance_bound = self.instances.slot_count();
-        let clusters = self.bucket_clusters;
+        let mesh_stride = crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32;
         // One call per bucket, always — the number the CPU records does not
         // depend on what is in the scene, which is the whole of what §3.3 asks
         // for. An empty bucket's arguments carry an instance count of zero.
-        let calls: Vec<(u32, u64, u64)> = self
+        let calls: Vec<(u32, u64, u64, u64)> = self
             .bucket_constants
             .iter()
             .enumerate()
@@ -1933,6 +1926,7 @@ impl ForwardRenderer {
                     *constant_offset,
                     self.draws.args_offset(bucket),
                     self.draws.count_offset(bucket),
+                    self.draws.mesh_args_offset(bucket),
                 )
             })
             .collect();
@@ -1948,12 +1942,19 @@ impl ForwardRenderer {
             // "sometimes nothing draws".
             .read_buffer(generated.runs_id);
         let pass = if emit.is_mesh() {
-            // **The same arguments, read as data rather than executed.** The
-            // mesh path issues no indirect call, so the buffer it needs the
-            // barrier for is a shader read — and the per-bucket draw *counts*
-            // are not read at all, because nothing here is a draw whose count
-            // could come from memory.
-            let pass = pass.read_buffer(generated.args_id);
+            // **The same arguments, read as data rather than executed**, which
+            // is what the stages use to bound the run of surviving instances
+            // they index. The per-bucket draw *counts* are not read at all,
+            // because nothing here is a draw whose count could come from
+            // memory.
+            //
+            // The dispatch *extents* are a second buffer and a real indirect
+            // read — one structure per bucket, written by the same pass. Two
+            // buffers rather than one because a resource is in exactly one
+            // state per pass and these two are in different ones.
+            let pass = pass
+                .read_buffer(generated.args_id)
+                .use_buffer(generated.mesh_args_id, ResourceState::IndirectArgument);
             if self.culls_clusters {
                 // The amplification stage counts its survivors into the
                 // culling statistics, which the draw-argument pass read a
@@ -1981,9 +1982,7 @@ impl ForwardRenderer {
                 // would be a bind no stage could read.
                 encoder.bind_index_buffer(indices, 0, IndexFormat::Uint32);
             }
-            for (bucket, (constant_offset, args_offset, count_offset)) in
-                calls.into_iter().enumerate()
-            {
+            for (constant_offset, args_offset, count_offset, mesh_args_offset) in calls {
                 // The block written at build for this bucket: where its run
                 // of surviving instances starts. `SV_InstanceID` walks the
                 // run from there, each entry names an instance, the
@@ -1994,18 +1993,29 @@ impl ForwardRenderer {
                 encoder.bind_group(0, group, &[constant_offset], layout);
                 match emit {
                     EmitTail::Mesh => {
-                        // One workgroup per (cluster, instance slot). Both
-                        // extents are upper bounds the CPU knows without
-                        // looking at the scene, and a group past either one
-                        // emits no vertices — so the picture is the culled
-                        // set, exactly as it is on the two tails below.
+                        // One workgroup per (cluster, **surviving** instance),
+                        // and neither extent is the CPU's: they are the three
+                        // words the draw-argument pass wrote for this bucket.
                         //
-                        // A pool with no slots is a dispatch of no workgroups,
-                        // which Metal rejects outright rather than treating as
-                        // a no-op, so it is not recorded at all.
-                        if instance_bound > 0 && clusters[bucket] > 0 {
-                            encoder.draw_mesh_tasks(clusters[bucket], instance_bound, 1);
-                        }
+                        // That is the whole difference between culling that
+                        // skips output and culling that skips work. A dispatch
+                        // sized here would have to cover every slot the
+                        // instance pool ever handed out — a removed instance
+                        // leaves a hole and the live ones above it stay in the
+                        // array — and launch a workgroup for each, which then
+                        // reads the survivor count and returns.
+                        //
+                        // Recorded unconditionally, unlike a CPU-sized
+                        // dispatch: an extent of zero is a legal indirect
+                        // dispatch of no workgroups, so an empty scene needs no
+                        // branch here and the recorded stream stays the same
+                        // whatever the scene holds.
+                        encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                            args: generated.mesh_args,
+                            offset: mesh_args_offset,
+                            draw_count: 1,
+                            stride: mesh_stride,
+                        });
                     }
                     EmitTail::Count => {
                         encoder.draw_indexed_indirect_count(&DrawIndirectCount {
@@ -2977,35 +2987,58 @@ mod tests {
                 "both arms are the mesh path; only the stage in front of it differs"
             );
 
-            let slots = renderer.instances.slot_count();
-            let clusters = renderer.bucket_clusters;
             let frame = frame(device.as_ref(), &mut renderer, queue);
+            // After the frame, because the buffer named is the slot the frame
+            // rotated to — asking before it names the previous slot's ring
+            // entry and the comparison is against a buffer nothing drew from.
+            let expected = mesh_dispatch_calls(&renderer);
 
-            // **The dispatch is the same either way**, which is what makes the
-            // cull a rejection inside the existing shape rather than a second
-            // one: the CPU still records one call per bucket over the same two
-            // upper bounds, and the amplification stage is what turns a group
-            // into no work.
-            let dispatched: Vec<(u32, u32, u32)> = recorder
+            // **The recorded stream is the same either way**, which is what
+            // makes the cull a rejection inside the existing shape rather than
+            // a second one: one indirect dispatch per bucket, reading that
+            // bucket's own arguments, and the amplification stage is what turns
+            // a group into no work.
+            let dispatched: Vec<DrawIndirect> = recorder
                 .commands()
                 .into_iter()
                 .filter_map(|command| match command {
-                    Command::DrawMeshTasks { x, y, z } => Some((x, y, z)),
+                    Command::DrawMeshTasksIndirect(draw) => Some(draw),
                     _ => None,
                 })
                 .collect();
             assert_eq!(
-                dispatched,
-                vec![
-                    (clusters[CUBE_BUCKET], slots, 1),
-                    (clusters[PYRAMID_BUCKET], slots, 1),
-                    (clusters[OPEN_BOX_BUCKET], slots, 1)
-                ],
-                "one dispatch per bucket on both arms, sized to that bucket's clusters"
+                dispatched, expected,
+                "one indirect dispatch per bucket on both arms, each reading its own \
+                 argument structure"
             );
 
             frame.finish(device.as_ref(), renderer);
         }
+    }
+
+    /// The [`DrawIndirect`] the mesh path must record for each bucket, in bucket
+    /// order.
+    ///
+    /// Built from the buffer the draw-argument pass writes and the stride the
+    /// APIs fixed, so a test comparing against it is asserting that the call
+    /// reads *this frame's* arguments at *this bucket's* offset — the two ways
+    /// an indirect dispatch goes wrong while still dispatching something.
+    ///
+    /// **The offsets are multiplied out here rather than asked of
+    /// [`DrawGen::mesh_args_offset`]**, which is the difference between a
+    /// comparison and a tautology: an offset function that returned zero for
+    /// every bucket would agree with itself, and three calls onto one structure
+    /// is a frame that draws one bucket's geometry three times.
+    fn mesh_dispatch_calls(renderer: &ForwardRenderer) -> Vec<DrawIndirect> {
+        let stride = crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32;
+        (0..BUCKET_COUNT)
+            .map(|bucket| DrawIndirect {
+                args: renderer.draws.mesh_args(renderer.frame),
+                offset: u64::from(bucket) * u64::from(stride),
+                draw_count: 1,
+                stride,
+            })
+            .collect()
     }
 
     /// **A device selecting [`GeometryPath::MeshShader`] draws through a mesh
@@ -3020,10 +3053,14 @@ mod tests {
     /// "not implemented" arriving as a passing frame — the three together rule
     /// out.
     ///
-    /// The dispatch extents are checked too: x is the bucket's mesh's cluster
-    /// count, y the instance pool's slot count. A dispatch of `(1, 1, 1)` would
-    /// draw one cluster of one instance and look perfectly healthy on a scene
-    /// with one of each.
+    /// **The extents are not here to be checked, and that is the point.** They
+    /// are three words the draw-argument pass writes, so what this can pin is
+    /// the call reading *this* bucket's structure out of *this* frame's buffer
+    /// — and the CPU-side half of the x extent, the per-bucket cluster table
+    /// the host uploaded, which the null backend keeps the bytes of. What the
+    /// GPU then makes of it needs a GPU: `crcbl-vk`'s
+    /// `the_mesh_dispatch_extent_is_the_culled_instance_count` reads the
+    /// arguments back.
     #[test]
     fn a_mesh_shader_device_draws_through_a_mesh_pipeline() {
         use crcbl_hal::null::Command;
@@ -3065,15 +3102,27 @@ mod tests {
             GeometryPath::MeshShader,
             "the renderer must have *built* the mesh path, not merely been offered it"
         );
-        let slots = renderer.instances.slot_count();
-        let clusters = renderer.bucket_clusters;
         let frame = frame(device.as_ref(), &mut renderer, queue);
+        let expected = mesh_dispatch_calls(&renderer);
+        // The table is written once at build, into a host-visible buffer the
+        // null backend keeps the bytes of — so it is readable whether or not a
+        // shader ever ran.
+        let clusters: Vec<u32> = recorder
+            .buffer_bytes(renderer.draws.bucket_clusters())
+            .expect("the bucket cluster table is one of this recorder's buffers")
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().expect("a four-byte chunk")))
+            .collect();
 
         let mut dispatched = Vec::new();
         let mut index_binds = 0;
         for command in recorder.commands() {
             match command {
-                Command::DrawMeshTasks { x, y, z } => dispatched.push((x, y, z)),
+                Command::DrawMeshTasksIndirect(draw) => dispatched.push(draw),
+                Command::DrawMeshTasks { .. } => panic!(
+                    "the mesh path recorded a CPU-sized dispatch, which is the extent \
+                     the instance cull is supposed to have taken over"
+                ),
                 Command::DrawIndexedIndirectCount(_) | Command::DrawIndexedIndirect(_) => {
                     panic!(
                         "the mesh path recorded an indirect draw, which is the silent \
@@ -3085,24 +3134,24 @@ mod tests {
             }
         }
         assert_eq!(
-            dispatched,
-            vec![
-                (clusters[CUBE_BUCKET], slots, 1),
-                (clusters[PYRAMID_BUCKET], slots, 1),
-                (clusters[OPEN_BOX_BUCKET], slots, 1)
-            ],
-            "one dispatch per bucket, sized to that bucket's mesh's clusters and to \
-             every instance slot"
+            dispatched, expected,
+            "one indirect dispatch per bucket, each reading its own argument structure \
+             out of this frame's buffer"
+        );
+        assert_eq!(
+            clusters.len(),
+            BUCKET_COUNT as usize,
+            "one x extent per bucket: {clusters:?}"
         );
         assert!(
             clusters.iter().all(|&count| count > 0),
-            "a bucket with no clusters dispatches nothing, so this comparison would \
-             pass against an empty pool: {clusters:?}"
+            "a bucket with no clusters dispatches nothing, whatever the arguments say: \
+             {clusters:?}"
         );
         // **The x extents are not all the same number**, which is what makes
-        // the comparison above a statement about each bucket's own mesh. Two
-        // single-cluster meshes would let a dispatch hard-coded to one cluster
-        // pass it; the open box is five, one per face.
+        // the table a statement about each bucket's own mesh. Two
+        // single-cluster meshes would let a table hard-coded to one cluster
+        // pass; the open box is five, one per face.
         assert_eq!(
             clusters[OPEN_BOX_BUCKET] as usize,
             crcbl_shaders::mesh::OPEN_BOX_FACES.len(),
@@ -3201,7 +3250,7 @@ mod tests {
     ///
     /// # This once read the bytes back, and no longer can
     ///
-    /// It used to poison all three counters with `0xAB` and assert `begin_frame`
+    /// It used to poison every counter with `0xAB` and assert `begin_frame`
     /// had written zeroes over them — the poison being the whole test, because
     /// the null backend runs no shader and a counter nothing wrote reads as the
     /// zero it was created with. The counters are device-local now, so nothing
@@ -3210,11 +3259,11 @@ mod tests {
     /// shader cannot observe it at all.
     ///
     /// So the poison moved to where a shader actually runs — `crcbl-vk`'s
-    /// `draw_gen` end-to-end fills all three with a sentinel and reads back the
+    /// `draw_gen` end-to-end fills them with a sentinel and reads back the
     /// generated arguments — and what is checkable *here* is the schedule: that
-    /// the frame contains the clearing pass, that it writes exactly those three
+    /// the frame contains the clearing pass, that it writes exactly those
     /// buffers, and that the graph orders the two accumulating passes after it.
-    /// Each of the three counts below goes red if a buffer is dropped from the
+    /// Each of the counts below goes red if a buffer is dropped from the
     /// clearing pass, and the pass list goes red if the pass leaves the frame.
     #[test]
     fn every_frame_starts_from_zeroed_counters() {
@@ -3249,9 +3298,9 @@ mod tests {
             let barriers = &clear.barriers().buffers;
             assert_eq!(
                 barriers.len(),
-                3,
-                "round {round}: the survivor count, the arguments and the draw counts, \
-                 and nothing else: {barriers:?}"
+                4,
+                "round {round}: the survivor count, the draw arguments, the draw counts \
+                 and the mesh-dispatch arguments, and nothing else: {barriers:?}"
             );
             assert!(
                 barriers
@@ -3259,15 +3308,15 @@ mod tests {
                     .all(|barrier| barrier.to == ResourceState::ShaderReadWrite),
                 "round {round}: every one of them is written by this pass: {barriers:?}"
             );
-            // The two the frame leaves as indirect arguments are the arguments
-            // and the counts; the survivor count rests in a shader read. That
-            // split is what names the three without a handle to compare.
+            // The ones the frame leaves as indirect arguments are the three a
+            // driver reads; the survivor count rests in a shader read. That
+            // split is what names them without a handle to compare.
             assert_eq!(
                 barriers
                     .iter()
                     .filter(|barrier| barrier.from == ResourceState::IndirectArgument)
                     .count(),
-                2,
+                3,
                 "round {round}: out of the state a draw read them in: {barriers:?}"
             );
 
@@ -3294,8 +3343,9 @@ mod tests {
             );
             assert_eq!(
                 after("draw-args"),
-                2,
-                "round {round}: and so do the arguments and the draw counts"
+                3,
+                "round {round}: and so do the draw arguments, the draw counts and the \
+                 mesh-dispatch arguments"
             );
 
             // The compiled graph borrows the renderer's pass bodies, so it has

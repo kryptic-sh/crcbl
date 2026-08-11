@@ -1111,6 +1111,293 @@ fn per_cluster_culling_rejects_the_clusters_a_camera_hides() {
     headless.finish();
 }
 
+/// What one frame's draw-argument pass produced, as far as the mesh path's
+/// dispatch is concerned.
+struct GeneratedDispatch {
+    /// The per-bucket mesh-dispatch arguments — what
+    /// `CommandEncoder::draw_mesh_tasks_indirect` reads.
+    mesh_args: Vec<crcbl_shaders::draw_gen::MeshTasksArgs>,
+    /// The per-bucket indexed-draw arguments, for
+    /// `DrawIndexedArgs::instance_count`: the same survivor count reached
+    /// through the other half of the pass.
+    args: Vec<crcbl_shaders::draw_gen::DrawIndexedArgs>,
+    /// Surviving instances across every bucket, out of the culling statistics.
+    survivors: u32,
+}
+
+/// Renders one frame and reads back everything the draw-argument pass wrote
+/// about the dispatch.
+///
+/// Three device-local buffers into one staging copy, on
+/// [`surviving_clusters`]' terms exactly: its own submission after
+/// [`render_mesh`]'s, each buffer taken out of the state the graph's imports
+/// leave it in and put straight back.
+fn generated_dispatch(
+    headless: &Headless,
+    renderer: &mut crcbl_render::ForwardRenderer,
+    pool: &mut crcbl_render::TransientPool,
+    camera: &crcbl_render::Camera,
+) -> GeneratedDispatch {
+    use crcbl_shaders::draw_gen::{DRAW_ARGS_SIZE, DrawIndexedArgs, MESH_ARGS_SIZE, MeshTasksArgs};
+
+    let _ = render_mesh(headless, renderer, pool, camera);
+
+    let device = headless.device.as_ref();
+    let draws = renderer.draws();
+    let frame = renderer.frame();
+    let buckets = draws.bucket_count();
+    let mesh_bytes = u64::from(buckets) * MESH_ARGS_SIZE as u64;
+    let args_bytes = u64::from(buckets) * DRAW_ARGS_SIZE as u64;
+    let total = mesh_bytes + args_bytes + 4;
+
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("mesh dispatch readback"),
+            size: total,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+
+    // Each source with the state this slot's imports declare it rests in.
+    let sources = [
+        (
+            draws.mesh_args(frame),
+            ResourceState::IndirectArgument,
+            0u64,
+            mesh_bytes,
+            0u64,
+        ),
+        (
+            draws.args(frame),
+            ResourceState::IndirectArgument,
+            0,
+            args_bytes,
+            mesh_bytes,
+        ),
+        (
+            draws.visible_count(frame),
+            ResourceState::ShaderRead,
+            u64::from(crcbl_shaders::cull::INSTANCE_SURVIVOR_WORD) * 4,
+            4,
+            mesh_bytes + args_bytes,
+        ),
+    ];
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("mesh dispatch copy"),
+        queue: headless.queue,
+    });
+    let around = |into_transfer: bool| -> Vec<crcbl_hal::BufferBarrier> {
+        sources
+            .iter()
+            .map(|(buffer, state, ..)| {
+                let (from, to) = if into_transfer {
+                    (*state, ResourceState::TransferSrc)
+                } else {
+                    (ResourceState::TransferSrc, *state)
+                };
+                crcbl_hal::BufferBarrier {
+                    buffer: *buffer,
+                    from,
+                    to,
+                    queue_transfer: None,
+                }
+            })
+            .collect()
+    };
+    let out = around(true);
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &out,
+        ..Barriers::default()
+    });
+    for (buffer, _, src_offset, size, dst_offset) in sources {
+        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+            src: buffer,
+            src_offset,
+            dst: staging,
+            dst_offset,
+            size,
+        });
+    }
+    let back = around(false);
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &back,
+        ..Barriers::default()
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+
+    let mut bytes = vec![0u8; total as usize];
+    headless.readback(staging, total, &mut bytes);
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(staging);
+
+    let at = |offset: usize, len: usize| -> Vec<u8> { bytes[offset..offset + len].to_vec() };
+    let mesh_args = (0..buckets as usize)
+        .map(|bucket| {
+            let block = at(bucket * MESH_ARGS_SIZE, MESH_ARGS_SIZE);
+            MeshTasksArgs::from_bytes(&block.try_into().expect("MESH_ARGS_SIZE bytes"))
+        })
+        .collect();
+    let args = (0..buckets as usize)
+        .map(|bucket| {
+            let block = at(
+                mesh_bytes as usize + bucket * DRAW_ARGS_SIZE,
+                DRAW_ARGS_SIZE,
+            );
+            DrawIndexedArgs::from_bytes(&block.try_into().expect("DRAW_ARGS_SIZE bytes"))
+        })
+        .collect();
+    let survivors = u32::from_le_bytes(
+        bytes[(mesh_bytes + args_bytes) as usize..]
+            .try_into()
+            .expect("four bytes"),
+    );
+    GeneratedDispatch {
+        mesh_args,
+        args,
+        survivors,
+    }
+}
+
+/// **The mesh path's dispatch extents are the count culling produced, not the
+/// size of the instance pool** — the check a golden cannot make, and the whole
+/// difference between culling that skips output and culling that skips work.
+///
+/// A dispatch sized on the CPU has to cover every slot the instance pool ever
+/// handed out, because a removed instance leaves a hole and the live ones above
+/// it stay in the array. The picture is the same either way: the stages read
+/// the survivor count and the groups past it emit nothing. So pixels cannot
+/// tell the two apart, and neither can the recorded command stream, which says
+/// only which buffer the extents come from.
+///
+/// What can is the buffer's contents, and this is three claims about them:
+///
+/// * **Each bucket's y extent is that bucket's own survivor count**, equal to
+///   the `instance_count` the same pass wrote into the indexed-draw arguments —
+///   two words written by two atomic adds, which have to agree and are checked
+///   rather than assumed.
+/// * **They sum to the frame's surviving-instance count**, which is
+///   `cull.slang`'s own counter and the one number here that neither half of
+///   the draw-argument pass computed.
+/// * **They move when the scene does, per bucket.** The box is taken out and
+///   its bucket's extent goes to zero while the cube's stays one — a pool-sized
+///   extent is one number for every bucket and cannot be both, and
+///   `InstancePool::slot_count` never shrinks, so the pool is the same size in
+///   both rounds.
+///
+/// The whole sequence runs twice, which is what pins the clearing pass over
+/// these words too: an extent left accumulating across frames doubles on the
+/// second lap through the ring.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_mesh_dispatch_extent_is_the_culled_instance_count() {
+    let headless = Headless::open_for_mesh_with(
+        Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,
+    );
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds");
+    if renderer.geometry_path() != crcbl_hal::GeometryPath::MeshShader {
+        eprintln!(
+            "vk e2e: this device does not select the mesh path, so it records no indirect \
+             mesh dispatch. radv and lavapipe both report VK_EXT_mesh_shader, and \
+             `docs/backlog.md` is where a driver that does not belongs"
+        );
+        renderer.destroy(headless.device.as_ref());
+        pool.destroy(headless.device.as_ref());
+        headless.finish();
+        return;
+    }
+
+    let at = glam::Mat4::from_translation(OPEN_BOX_AT);
+    let camera = two_mesh_camera();
+    let faces = crcbl_shaders::mesh::OPEN_BOX_FACES.len() as u32;
+
+    for lap in 0..2 {
+        renderer.set_open_box(Some(at));
+        let with = generated_dispatch(&headless, &mut renderer, &mut pool, &camera);
+        renderer.set_open_box(None);
+        let without = generated_dispatch(&headless, &mut renderer, &mut pool, &camera);
+
+        for (label, produced) in [("with the box", &with), ("without it", &without)] {
+            let extents: Vec<u32> = produced
+                .mesh_args
+                .iter()
+                .map(|args| args.group_count_y)
+                .collect();
+            eprintln!("vk e2e: lap {lap}, {label}: y extents {extents:?}");
+
+            for (bucket, (mesh, args)) in produced.mesh_args.iter().zip(&produced.args).enumerate()
+            {
+                assert_eq!(
+                    mesh.group_count_y, args.instance_count,
+                    "lap {lap}, {label}: bucket {bucket}'s dispatch extent and its draw's \
+                     instance count are the same survivor count counted twice, and they \
+                     disagree"
+                );
+                assert_eq!(
+                    mesh.group_count_z, 1,
+                    "lap {lap}, {label}: bucket {bucket}'s z extent"
+                );
+            }
+            assert_eq!(
+                extents.iter().sum::<u32>(),
+                produced.survivors,
+                "lap {lap}, {label}: the extents must account for every instance the cull \
+                 pass counted, and no others"
+            );
+        }
+
+        // The x extents are each bucket's own mesh's cluster count, and the box
+        // is the only resident whose is not one — so a table that handed every
+        // bucket the same number fails here.
+        let x: Vec<u32> = with
+            .mesh_args
+            .iter()
+            .map(|args| args.group_count_x)
+            .collect();
+        assert_eq!(
+            x,
+            vec![1, 1, faces],
+            "lap {lap}: the cube and the pyramid are one cluster each and the open box is \
+             one per face"
+        );
+
+        // **The extent tracks the scene, per bucket.** The box's goes to zero
+        // while the cube's stays one: a dispatch sized by the instance pool
+        // would be the same number for both, in both rounds.
+        let box_bucket = with.mesh_args.len() - 1;
+        assert_eq!(
+            with.mesh_args[box_bucket].group_count_y, 1,
+            "lap {lap}: the box is in the scene and in frame"
+        );
+        assert_eq!(
+            without.mesh_args[box_bucket].group_count_y, 0,
+            "lap {lap}: the box left the scene, so its bucket has nothing to dispatch"
+        );
+        assert_eq!(
+            with.mesh_args[0].group_count_y, without.mesh_args[0].group_count_y,
+            "lap {lap}: the cube did not move, so its extent must not have"
+        );
+        assert_eq!(
+            with.mesh_args[0].group_count_y, 1,
+            "lap {lap}: and the cube's extent is one instance, not the pool's slot count"
+        );
+    }
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
 /// Milestone 4, measured rather than eyeballed: the directional light produces a
 /// real gradient across the cube's faces.
 ///

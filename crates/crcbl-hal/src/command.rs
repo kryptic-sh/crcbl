@@ -493,6 +493,14 @@ pub struct ImageCopy {
 ///
 /// `draw_count > 1` requires
 /// [`Features::MULTI_DRAW_INDIRECT`](crate::Features::MULTI_DRAW_INDIRECT).
+///
+/// **Which structure the words are is the call's, not this type's.**
+/// [`draw_indirect`](CommandEncoder::draw_indirect) reads four words,
+/// [`draw_indexed_indirect`](CommandEncoder::draw_indexed_indirect) five and
+/// [`draw_mesh_tasks_indirect`](CommandEncoder::draw_mesh_tasks_indirect)
+/// three; each method's docs name the API structure it is. `stride` is what
+/// keeps them apart in a buffer, so it is spelled at the call site rather than
+/// derived here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DrawIndirect {
     /// Buffer holding the argument structures. Must be in
@@ -719,6 +727,44 @@ pub trait CommandEncoder: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// [`create_mesh_pipeline`](crate::Device::create_mesh_pipeline) has
     /// already refused without.
     fn draw_mesh_tasks(&mut self, x: u32, y: u32, z: u32);
+
+    /// [`draw_mesh_tasks`](CommandEncoder::draw_mesh_tasks) with the workgroup
+    /// counts read from GPU memory — **the shape a culling pass's output needs
+    /// to reduce work rather than only output**.
+    ///
+    /// # The argument layout
+    ///
+    /// One argument structure is **three consecutive 32-bit words**: the x, y
+    /// and z workgroup counts, in that order, of the same stage
+    /// [`draw_mesh_tasks`](CommandEncoder::draw_mesh_tasks) counts groups of.
+    /// The layout is not this seam's to choose — it is
+    /// `VkDrawMeshTasksIndirectCommandEXT`, `D3D12_DISPATCH_MESH_ARGUMENTS` and
+    /// Metal's `MTLDispatchThreadgroupsIndirectArguments`, which are the same
+    /// three words in the same order, because a driver reads these bytes
+    /// directly.
+    ///
+    /// [`DrawIndirect::stride`] is therefore 12 for a tightly packed buffer, and
+    /// [`DrawIndirect::offset`] must be a multiple of 4.
+    /// [`draw_count`](DrawIndirect::draw_count) `> 1` requires
+    /// [`Features::MULTI_DRAW_INDIRECT`](crate::Features::MULTI_DRAW_INDIRECT),
+    /// exactly as it does for the indexed form.
+    ///
+    /// [`DrawIndirect::args`] must be in
+    /// [`ResourceState::IndirectArgument`] — a buffer the same pass also reads
+    /// as a storage buffer is in one state or the other, never both, so a
+    /// caller that needs both wants two buffers.
+    ///
+    /// # Capability
+    ///
+    /// Requires [`Features::MESH_SHADER`](crate::Features::MESH_SHADER) and
+    /// nothing more. There is no separate flag because none of the three APIs
+    /// has one: `VK_EXT_mesh_shader` defines `vkCmdDrawMeshTasksIndirectEXT`
+    /// alongside `vkCmdDrawMeshTasksEXT`, D3D12 mesh shader tier 1 admits
+    /// `D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH_MESH` in a command signature, and
+    /// a Metal device with mesh functions has
+    /// `drawMeshThreadgroupsWithIndirectBuffer:`. A device that can launch this
+    /// stage at all can launch it from memory.
+    fn draw_mesh_tasks_indirect(&mut self, draw: &DrawIndirect);
 
     // --- compute scope ---
 

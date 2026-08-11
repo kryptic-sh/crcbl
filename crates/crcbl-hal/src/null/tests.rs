@@ -807,6 +807,12 @@ fn the_guaranteed_stages_are_unaffected_on_every_device() {
 /// destroy — and the dispatch lands in the command stream as its own command,
 /// the way `draw` and `draw_indexed` do, so a frame's shape stays assertable
 /// with no GPU in the room.
+///
+/// **Both forms of the dispatch**, because they are the two halves of one
+/// claim: the CPU-counted one carries its extents and the indirect one carries
+/// the buffer and offset a driver would read them from. A renderer that moved
+/// its dispatch onto the GPU records the second, and a stream that could only
+/// show the first would report the move as a missing draw.
 #[test]
 fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
     let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
@@ -848,6 +854,16 @@ fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
     let pipeline = device
         .create_mesh_pipeline(&mesh_desc(module, layout, Some(task)))
         .expect("both stages are reported");
+    // Three `u32`s of group counts, which is what the seam documents one
+    // argument structure to be.
+    let mesh_args = device
+        .create_buffer(&BufferDesc {
+            label: Some("mesh dispatch args"),
+            size: 12,
+            usage: BufferUsage::INDIRECT | BufferUsage::STORAGE,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("buffer");
     recorder.clear();
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
@@ -864,6 +880,13 @@ fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
     // both kinds one handle type, so there is no second bind to get wrong.
     encoder.bind_graphics_pipeline(pipeline);
     encoder.draw_mesh_tasks(3, 2, 1);
+    let indirect = DrawIndirect {
+        args: mesh_args,
+        offset: 12,
+        draw_count: 1,
+        stride: 12,
+    };
+    encoder.draw_mesh_tasks_indirect(&indirect);
     encoder.end_render_pass();
     let commands = encoder.finish().expect("recording succeeded");
 
@@ -873,6 +896,7 @@ fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
             "BeginRenderPass",
             "BindGraphicsPipeline",
             "DrawMeshTasks",
+            "DrawMeshTasksIndirect",
             "EndRenderPass",
         ]
     );
@@ -884,8 +908,17 @@ fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
          command's name: {:?}",
         recorder.commands()
     );
+    assert!(
+        recorder
+            .commands()
+            .contains(&Command::DrawMeshTasksIndirect(indirect)),
+        "the argument buffer and its offset must survive into the stream too — \
+         they are the whole of what the indirect form says: {:?}",
+        recorder.commands()
+    );
 
     device.destroy_command_buffer(commands);
+    device.destroy_buffer(mesh_args);
     // One destroy for both pipeline kinds, which is the other half of sharing
     // the handle type — a mesh pipeline left in the pool here would show up as
     // a leak at teardown.
@@ -896,6 +929,12 @@ fn a_mesh_dispatch_is_recorded_like_any_other_draw() {
 
 /// A mesh dispatch outside a render pass is the same mistake as a `draw`
 /// outside one, and must be reported the same way.
+///
+/// The indirect form is held to one rule more, and it is the rule that form
+/// adds: the argument buffer is the whole of what the call says, so a handle
+/// that names nothing is a dispatch reading its group counts from a dead
+/// allocation. Both are asserted from one recording, because the null backend
+/// records every violation rather than stopping at the first.
 #[test]
 fn a_mesh_dispatch_outside_a_render_pass_is_refused() {
     let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
@@ -911,14 +950,45 @@ fn a_mesh_dispatch_outside_a_render_pass_is_refused() {
     let queue = device.queue(QueueKind::Graphics).expect("graphics queue");
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc { label: None, queue });
     encoder.draw_mesh_tasks(1, 1, 1);
+    // Created and destroyed before the call, so the handle is well-formed and
+    // names nothing — which is what `need_live` is for and what a handle the
+    // test never created could not distinguish.
+    let dead = device
+        .create_buffer(&BufferDesc {
+            label: Some("mesh dispatch args"),
+            size: 12,
+            usage: BufferUsage::INDIRECT,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("buffer");
+    device.destroy_buffer(dead);
+    encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+        args: dead,
+        offset: 0,
+        draw_count: 1,
+        stride: 12,
+    });
     let commands = encoder.finish().expect("recorded, and carried past");
     let errors = recorder.validation_errors();
+    for command in ["DrawMeshTasks", "DrawMeshTasksIndirect"] {
+        assert!(
+            errors.iter().any(|error| matches!(
+                error,
+                ValidationError::OutsidePass {
+                    command: outside,
+                    expected: "render",
+                } if *outside == command
+            )),
+            "{command} outside a pass went unreported: {errors:?}"
+        );
+    }
     assert!(
         errors.iter().any(|error| matches!(
             error,
-            ValidationError::OutsidePass {
-                command: "DrawMeshTasks",
-                expected: "render",
+            ValidationError::DeadHandle {
+                command: "DrawMeshTasksIndirect",
+                kind: ObjectKind::Buffer,
+                ..
             }
         )),
         "{errors:?}"

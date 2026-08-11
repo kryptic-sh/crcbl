@@ -5999,12 +5999,22 @@ left:
   the drift budget rather than near it: if `Tolerance::RASTERISER`'s
   `max_channel_delta` is ever tightened to 1, this is the first golden that
   fails, and it will fail only on the discrete card.
-- **The dispatch is CPU-bounded, not indirect.**
-  `draw_mesh_tasks(cluster_count, slot_count, 1)`, with the shader reading the
-  real survivor count from `draw_args[bucket].instance_count` and emitting
-  nothing past it. `crcbl-hal` has no `draw_mesh_tasks_indirect`; adding one is
-  a seam change and is the natural follow-up, and it is also the prerequisite
-  for culling to actually reduce work rather than just skip output.
+- **`group_is_live` in `mesh_cluster.slang` can no longer return 0** for any
+  group the driver launches, now that the extents are the culled count. It is
+  kept as a range check on buffer-sourced input, and its docs say so rather than
+  claiming to be the filter. Removing it would also drop binding 12
+  (`draw_args`) from that shader, renumber 13 and 14, shrink the forward pass's
+  bind-group layout, and let the mesh path stop declaring `read_buffer(args_id)`
+  — a binding renumber under Metal's declaration-order rule, on a path only
+  Vulkan runs. Deliberately out of scope.
+- **`crates/crcbl-vk/tests/vk_e2e/draw_gen.rs` poisons three of the clearing
+  pass's buffers with a sentinel, and `mesh_args` is not among them.** The
+  extent test's second lap covers the zeroing indirectly — an accumulating
+  extent would double — but the sentinel path does not reach it.
+- **`mesh_args` is imported with `final_state: IndirectArgument` on every
+  geometry path**, so the two indirect tails pay one end-of-frame transition for
+  a buffer they never read. That matches what `counts` already does on the mesh
+  path; not changed.
 - **Frustum rejection of these clusters is inherently marginal**, and the counts
   should be read with that in mind. A flat 1x1 face's AABB-midpoint bounding
   sphere has radius 0.707 — comparable to the whole mesh — so cluster spheres

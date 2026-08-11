@@ -246,6 +246,12 @@ pub enum Command {
         /// Workgroups on Z.
         z: u32,
     },
+    /// [`draw_mesh_tasks_indirect`](crate::CommandEncoder::draw_mesh_tasks_indirect).
+    ///
+    /// The workgroup counts are **not** here, because they are not the CPU's:
+    /// what a test can assert is the buffer and the offset the driver would
+    /// read them from, and the contents are the producing pass's to check.
+    DrawMeshTasksIndirect(DrawIndirect),
     /// [`begin_compute_pass`](crate::CommandEncoder::begin_compute_pass).
     BeginComputePass {
         /// Pass label, if the caller gave one.
@@ -333,6 +339,7 @@ impl Command {
             Self::DrawIndirectCount(_) => "DrawIndirectCount",
             Self::DrawIndexedIndirectCount(_) => "DrawIndexedIndirectCount",
             Self::DrawMeshTasks { .. } => "DrawMeshTasks",
+            Self::DrawMeshTasksIndirect(_) => "DrawMeshTasksIndirect",
             Self::BeginComputePass { .. } => "BeginComputePass",
             Self::EndComputePass => "EndComputePass",
             Self::BindComputePipeline(_) => "BindComputePipeline",
@@ -1242,6 +1249,7 @@ mod tests {
             Command::DrawIndirectCount(indirect_count),
             Command::DrawIndexedIndirectCount(indirect_count),
             Command::DrawMeshTasks { x: 1, y: 1, z: 1 },
+            Command::DrawMeshTasksIndirect(indirect),
             Command::BeginComputePass { label: None },
             Command::EndComputePass,
             Command::BindComputePipeline(handle()),
@@ -1293,6 +1301,7 @@ mod tests {
                 | Command::DrawIndirectCount(_)
                 | Command::DrawIndexedIndirectCount(_)
                 | Command::DrawMeshTasks { .. }
+                | Command::DrawMeshTasksIndirect(_)
                 | Command::BeginComputePass { .. }
                 | Command::EndComputePass
                 | Command::BindComputePipeline(_)
