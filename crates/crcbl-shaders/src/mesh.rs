@@ -32,12 +32,28 @@
 /// Bytes per vertex: four `float4`s, no padding.
 pub const VERTEX_STRIDE: usize = 64;
 
+/// How many cascades the sun's shadow map is split into.
+///
+/// `docs/plan/18-render-features.md`'s shadow section asks for 2–3 cascades.
+/// The same number is `static const uint SHADOW_CASCADES` in
+/// `shaders/mesh.slang` and `shaders/mesh_cluster.slang`, and this module's
+/// `the_cascade_count_matches_the_one_the_shaders_declare` is what keeps the
+/// three from drifting — a block whose array is shorter on one side than the
+/// other puts every member after it at the wrong offset, which no compiler
+/// anywhere sees.
+///
+/// **Four is the ceiling**, set by [`FrameUniforms::cascade_far`] being one
+/// `float4`.
+pub const SHADOW_CASCADES: usize = 2;
+
 /// Bytes in the frame uniform block.
 ///
-/// One `float4x4` (64) then four `float4` (16 each). Checked against the
-/// `Offset` decorations `slangc` emits — 0, 64, 80, 96, 112 — by this module's
+/// One `float4x4` (64), four `float4` (16 each), [`SHADOW_CASCADES`] more
+/// `float4x4` and two closing `float4`. Checked against the `Offset`
+/// decorations `slangc` emits — 0, 64, 80, 96, 112, 128, 256, 272 at two
+/// cascades — by this module's
 /// `the_uniform_block_matches_the_offsets_slangc_emits`.
-pub const FRAME_UNIFORMS_SIZE: usize = 128;
+pub const FRAME_UNIFORMS_SIZE: usize = 128 + 64 * SHADOW_CASCADES + 32;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -114,6 +130,22 @@ pub struct FrameUniforms {
     pub light_color: [f32; 4],
     /// Flat ambient term in `rgb`.
     pub ambient: [f32; 4],
+    /// World → cascade `i`'s shadow clip, column-major, one per cascade.
+    ///
+    /// Read by the **fragment** stage, to put a shaded point back into the
+    /// shadow map's space. The shadow pass itself does not read it: it binds a
+    /// second copy of this whole block whose [`view_proj`](Self::view_proj) *is*
+    /// the cascade matrix, so the depth-only pipeline runs the same vertex and
+    /// mesh stages as the colour pass rather than a second transform path that
+    /// could disagree with it.
+    pub shadow_view_proj: [[f32; 16]; SHADOW_CASCADES],
+    /// Component `i` is how far from the eye cascade `i` reaches, in world
+    /// units. Components past [`SHADOW_CASCADES`] are unread.
+    pub cascade_far: [f32; 4],
+    /// `x`, `y`: one shadow-atlas texel in `u` and in `v` — not equal, because
+    /// the atlas is [`SHADOW_CASCADES`] square tiles side by side. `z`: the
+    /// constant depth bias. `w`: the slope-scaled coefficient on top of it.
+    pub shadow_params: [f32; 4],
 }
 
 impl FrameUniforms {
@@ -133,6 +165,11 @@ impl FrameUniforms {
         put(&self.light_direction);
         put(&self.light_color);
         put(&self.ambient);
+        for matrix in &self.shadow_view_proj {
+            put(matrix);
+        }
+        put(&self.cascade_far);
+        put(&self.shadow_params);
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
     }
@@ -1033,12 +1070,45 @@ mod tests {
     /// The offsets `slangc` actually emitted for `FrameUniforms`, read out of
     /// the disassembly. If the shader's field order changes, this is what says
     /// so before a driver reads the light direction out of the model matrix.
+    /// The cascade count is a number in three files and a compiler sees none of
+    /// the disagreements.
+    ///
+    /// A shader whose `shadow_view_proj` array is longer than the CPU's reads
+    /// `cascade_far` as the tail of a matrix and `shadow_params` as a split
+    /// distance; one that is shorter leaves the last cascade's matrix
+    /// unwritten. Both render a picture.
+    #[test]
+    fn the_cascade_count_matches_the_one_the_shaders_declare() {
+        let declaration = format!("static const uint SHADOW_CASCADES = {SHADOW_CASCADES};");
+        for (name, source) in [
+            ("mesh.slang", include_str!("../shaders/mesh.slang")),
+            (
+                "mesh_cluster.slang",
+                include_str!("../shaders/mesh_cluster.slang"),
+            ),
+        ] {
+            assert!(
+                source.contains(&declaration),
+                "{name} does not declare `{declaration}`; SHADOW_CASCADES has drifted"
+            );
+        }
+        const {
+            assert!(
+                SHADOW_CASCADES >= 1 && SHADOW_CASCADES <= 4,
+                "cascade_far is one float4, so it can name at most four splits, and a shadow pass \
+                 with no cascades is not a shadow pass"
+            );
+        }
+    }
+
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
-        assert_eq!(FRAME_UNIFORMS_SIZE, 128);
-        // `OpMemberDecorate %FrameUniforms_std140 n Offset …`
-        let offsets = [0usize, 64, 80, 96, 112];
-        let sizes = [64usize, 16, 16, 16, 16];
+        assert_eq!(FRAME_UNIFORMS_SIZE, 288, "at two cascades");
+        // `OpMemberDecorate %FrameUniforms_std140 n Offset …`, and
+        // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64`.
+        let cascades = 64 * SHADOW_CASCADES;
+        let offsets = [0usize, 64, 80, 96, 112, 128, 128 + cascades, 144 + cascades];
+        let sizes = [64usize, 16, 16, 16, 16, cascades, 16, 16];
         for (index, (offset, size)) in offsets.iter().zip(&sizes).enumerate() {
             assert_eq!(
                 offset + size,
@@ -1050,12 +1120,23 @@ mod tests {
             );
         }
 
+        // A different value per member, and a different one per *cascade*: a
+        // `to_bytes` that wrote one matrix twice would pass a test whose
+        // cascades were equal, and the cascade array is the member this block
+        // grew.
+        let mut shadow_view_proj = [[0.0f32; 16]; SHADOW_CASCADES];
+        for (index, matrix) in shadow_view_proj.iter_mut().enumerate() {
+            *matrix = [7.0 + index as f32; 16];
+        }
         let uniforms = FrameUniforms {
             view_proj: [1.0; 16],
             camera_position: [3.0; 4],
             light_direction: [4.0; 4],
             light_color: [5.0; 4],
             ambient: [6.0; 4],
+            shadow_view_proj,
+            cascade_far: [20.0; 4],
+            shadow_params: [30.0; 4],
         };
         let bytes = uniforms.to_bytes();
         let at =
@@ -1065,6 +1146,16 @@ mod tests {
         assert_eq!(at(80), 4.0, "light_direction at offset 80");
         assert_eq!(at(96), 5.0, "light_color at offset 96");
         assert_eq!(at(112), 6.0, "ambient at offset 112");
+        for index in 0..SHADOW_CASCADES {
+            assert_eq!(
+                at(128 + 64 * index),
+                7.0 + index as f32,
+                "shadow_view_proj[{index}] at offset {}",
+                128 + 64 * index
+            );
+        }
+        assert_eq!(at(128 + cascades), 20.0, "cascade_far");
+        assert_eq!(at(144 + cascades), 30.0, "shadow_params");
     }
 
     /// The offsets `slangc` actually emitted for `GpuInstance`, read out of the

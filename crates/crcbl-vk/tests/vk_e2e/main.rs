@@ -53,6 +53,7 @@ mod queries;
 mod recording;
 mod retire;
 mod seam_obligations;
+mod shadow;
 mod sprite;
 mod swapchain;
 mod triangle;

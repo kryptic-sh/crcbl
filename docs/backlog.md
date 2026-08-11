@@ -5891,6 +5891,49 @@ that the format half has no `ImageViewType`-shaped answer already sitting in the
 seam: it needs `Format`, and the arm must reject a `Format` wgpu cannot express
 as a storage format rather than substituting one.
 
+## What the sun shadow pass owes
+
+Topic 18's sun CSM landed at two cascades, GPU-driven, on every `GeometryPath`.
+What is left, and what it taught:
+
+- **Going to three cascades is the constant** — the atlas, the uniform block,
+  the cull loop, the viewport loop and the tests are all parametric off
+  `SHADOW_CASCADES` (ceiling 4, because `cascade_far` is one `float4`). It needs
+  a re-bless of `cube.png` and a fresh look at the frame, which is why it was
+  not taken in the same slice.
+- **Single-sided geometry casts no shadow.** The shadow pass rasterises
+  `CullMode::Back` and, with an amplification stage, cone-culls clusters facing
+  away from the light — both correct for a closed caster, both discarding a
+  one-sided wall. The open box's inward-facing faces therefore cast nothing. A
+  two-sided caster mode needs `CullMode::None` on the shadow pipeline **and** a
+  way to tell the amplification stage not to cone-cull for a light.
+- **`apps/*/src/gpu.rs`'s `MAX_TIMED_PASSES = 8` is now too small.** The forward
+  frame records 12 passes — three per cull across three culls, plus shadow,
+  forward and tonemap — so `PassTimers` warns and times the first eight, and
+  `apps/sandbox`'s HUD silently loses the tail. Needs at least 12. The vk e2e
+  timers test now derives its capacity instead of hard-coding it.
+- **Each cascade's `DrawGen` duplicates pipelines it does not need**, building
+  its own clear/cull/draw-argument compute pipelines and full argument buffers
+  when only the cull half is used. Sharing pipelines across instances, or a
+  cull-only constructor, is the follow-up.
+- **The `shadow_placeholder` 1x1 depth image is forced from both sides.**
+  Slang's Metal backend materialises every global into every entry point —
+  `msl/mesh.metal`'s `vertexMain` really does take `shadow_atlas [[texture(1)]]`
+  — so the depth-only pipeline's bind group cannot drop the slot; and WebGPU
+  refuses a texture that is both an attachment and a bind-group resource in one
+  pass, so the slot cannot be filled with the atlas it is writing.
+- **The cascade fit is deliberately coarse.** A sphere centred on the eye also
+  covers the half behind the camera, so a frustum-fitted box would be about
+  twice as dense. Taken on purpose: a tight fit has to branch on `Projection`,
+  and an orthographic camera has no field of view to build corners from.
+- **Slang trap worth keeping:** `Texture2D<float>` lowers to WGSL
+  `texture_2d<f32>`, which `textureSampleCompareLevel` does not accept — the
+  artifact compiles and can never be made into a pipeline. `DepthTexture2D` is
+  the spelling that lowers correctly on all four targets. Written into the
+  shader.
+- **Not verified:** Metal and D3D12 run no draw here, so a comparison sampler on
+  either is type-checked only and CI is the first thing that will exercise it.
+
 ## What a sampled binding still cannot say
 
 `map_binding_kind` assumes every sampled image is float-filterable and

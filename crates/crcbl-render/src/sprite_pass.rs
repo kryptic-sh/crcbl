@@ -77,8 +77,8 @@ use crcbl_hal::{
     BufferHandle, BufferUsage, ColorTargetState, ColorWrites, DepthStencilState, Device,
     FilterMode, Format, GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageViewType,
     LoadOp, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState, QueueHandle,
-    SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc, ShaderStages,
-    StoreOp,
+    SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
+    ShaderStages, StoreOp,
 };
 use crcbl_shaders::{SPRITE, Stage};
 use crcbl_sprite::SampleMode;
@@ -619,6 +619,7 @@ impl SpriteRenderer {
                     visibility: ShaderStages::FRAGMENT,
                     kind: BindingKind::SampledImage {
                         view_type: ImageViewType::D2,
+                        sample_type: SampleType::Float,
                     },
                     count: 1,
                     flags: BindingFlags::empty(),
@@ -626,7 +627,7 @@ impl SpriteRenderer {
                 BindGroupLayoutEntry {
                     binding: 1,
                     visibility: ShaderStages::FRAGMENT,
-                    kind: BindingKind::Sampler,
+                    kind: BindingKind::Sampler { comparison: false },
                     count: 1,
                     flags: BindingFlags::empty(),
                 },

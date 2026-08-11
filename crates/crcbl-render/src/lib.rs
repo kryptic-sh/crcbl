@@ -133,6 +133,7 @@ pub mod material_table;
 pub mod menu;
 pub mod mesh_pool;
 pub mod nine_slice;
+pub mod shadow;
 pub mod sprite_pass;
 pub mod texture;
 pub mod timing;
@@ -181,6 +182,7 @@ pub use mesh_pool::{
     Mesh, MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshRange, UPLOAD_TIMEOUT,
 };
 pub use nine_slice::{NineQuads, NineSliceSource, SliceQuad};
+pub use shadow::Cascades;
 pub use sprite_pass::{
     CONSTANTS_SIZE, INSTANCE_STRIDE, SAMPLE_PIXEL, SAMPLE_SMOOTH, SheetDesc, SheetId, Sprite,
     SpriteConstants, SpriteInstance, SpriteRenderer, sheet_lane,

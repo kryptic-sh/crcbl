@@ -1876,7 +1876,7 @@ fn check_resource_kind(
         ) | (
             K::SampledImage { .. } | K::StorageImage { .. },
             R::ImageView(_)
-        ) | (K::Sampler, R::Sampler(_))
+        ) | (K::Sampler { .. }, R::Sampler(_))
     );
     if ok {
         Ok(())

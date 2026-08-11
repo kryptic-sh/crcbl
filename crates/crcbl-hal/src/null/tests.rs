@@ -10,7 +10,7 @@ use crate::{
     BindGroupLayoutEntry, BindingKind, BindingModel, BufferUsage, ClearValue, ColorAttachment,
     ColorTargetState, DepthStencilState, GeometryPath, ImageSubresourceRange, ImageViewType,
     LightingPath, LoadOp, MultisampleState, PrimitiveState, PushConstantRange, ResourceState,
-    ShaderEntry, StoreOp, depth,
+    SampleType, ShaderEntry, StoreOp, depth,
 };
 
 /// The SPIR-V magic number, so test modules look like modules.
@@ -538,6 +538,7 @@ fn push_constants_and_bindless_fail_loudly_on_the_portable_preset() {
                 visibility: ShaderStages::FRAGMENT,
                 kind: BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
                 count: 1 << 16,
                 flags: crate::BindingFlags::PARTIALLY_BOUND
@@ -1007,7 +1008,7 @@ fn variable_count_must_be_the_last_and_highest_binding() {
     let plain = BindGroupLayoutEntry {
         binding: 0,
         visibility: ShaderStages::FRAGMENT,
-        kind: BindingKind::Sampler,
+        kind: BindingKind::Sampler { comparison: false },
         count: 4,
         flags: crate::BindingFlags::empty(),
     };
@@ -1016,6 +1017,7 @@ fn variable_count_must_be_the_last_and_highest_binding() {
         visibility: ShaderStages::FRAGMENT,
         kind: BindingKind::SampledImage {
             view_type: ImageViewType::D2,
+            sample_type: SampleType::Float,
         },
         count: 1 << 16,
         flags: crate::BindingFlags::VARIABLE_COUNT | crate::BindingFlags::PARTIALLY_BOUND,
@@ -1066,7 +1068,7 @@ fn a_duplicated_binding_number_is_refused() {
     let entry = BindGroupLayoutEntry {
         binding: 3,
         visibility: ShaderStages::FRAGMENT,
-        kind: BindingKind::Sampler,
+        kind: BindingKind::Sampler { comparison: false },
         count: 1,
         flags: crate::BindingFlags::empty(),
     };
@@ -2774,6 +2776,7 @@ fn updating_a_group_without_update_after_bind_is_refused() {
         visibility: ShaderStages::ALL,
         kind: BindingKind::SampledImage {
             view_type: ImageViewType::D2,
+            sample_type: SampleType::Float,
         },
         count: 1,
         flags,

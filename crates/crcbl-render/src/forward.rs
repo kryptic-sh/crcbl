@@ -139,10 +139,11 @@ use crcbl_hal::{
     BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
     BufferUsage, ColorTargetState, CullMode, DepthStencilState, Device, DrawIndirect,
     DrawIndirectCount, FilterMode, Format, GeometryPath, GraphicsPipelineDesc,
-    GraphicsPipelineHandle, HalError, ImageViewHandle, ImageViewType, IndexFormat, LoadOp,
-    MemoryLocation, MeshPipelineDesc, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle,
-    PrimitiveState, QueueHandle, ResourceState, SamplerAddressMode, SamplerDesc, SamplerHandle,
-    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp,
+    GraphicsPipelineHandle, HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType,
+    ImageUsage, ImageViewDesc, ImageViewHandle, ImageViewType, IndexFormat, LoadOp, MemoryLocation,
+    MeshPipelineDesc, MultisampleState, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
+    QueueHandle, Rect2d, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
+    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, Viewport,
 };
 use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, mesh};
 use glam::{Mat4, Quat, Vec3};
@@ -155,6 +156,7 @@ use crate::graph::{ImageId, ImportedImage, RenderGraph};
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc};
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
+use crate::shadow::{self, Cascades};
 use crate::texture::{UploadedTexture, upload_texture_layers};
 use crate::transient::TransientImageDesc;
 
@@ -283,6 +285,18 @@ const CHECKER_TEXELS: [u8; PAGE_LAYER_BYTES] = [
 /// [`CHECKER_LAYER`] can be checked against it rather than against a number
 /// written twice.
 const PAGE_LAYERS: [&[u8; PAGE_LAYER_BYTES]; 2] = [&UNTEXTURED_TEXELS, &CHECKER_TEXELS];
+
+/// The bind-group slot the sun's shadow atlas is read through.
+///
+/// **15, not 9**, and the gap is `mesh_cluster.slang`'s: bindings 9 to 14 belong
+/// to the mesh-shader path, and `mesh.slang`'s `fragmentMain` — which declares
+/// this one — is the fragment stage of *that* pipeline too. A binding number is
+/// a property of the shader source, so the two files have to agree even where
+/// only one of them uses the slot.
+const SHADOW_ATLAS_BINDING: u32 = 15;
+
+/// The bind-group slot the shadow atlas's **comparison** sampler is bound to.
+const SHADOW_SAMPLER_BINDING: u32 = 16;
 
 /// Buckets in the draw table, which is how many indirect calls the forward pass
 /// records — **whatever the scene holds**.
@@ -446,6 +460,65 @@ pub struct ForwardRenderer {
     mesh_pipeline_layout: PipelineLayoutHandle,
     mesh_pipeline: GraphicsPipelineHandle,
 
+    /// Topic 18's sun cascades: one `D32Float` image holding
+    /// [`shadow::CASCADES`] square tiles side by side.
+    ///
+    /// Owned here rather than created by the graph per frame, because its
+    /// extent is a **quality setting and not a window size** — nothing about it
+    /// changes on a resize, so a transient would be re-created for no reason
+    /// and could not be read back by a test that does not own the graph.
+    shadow_atlas: ImageHandle,
+    shadow_atlas_view: ImageViewHandle,
+    /// A 1×1 depth image that exists so the depth-only pipeline's bind group can
+    /// fill [`SHADOW_ATLAS_BINDING`] without naming the atlas it is writing.
+    ///
+    /// Both halves of that sentence are forced:
+    ///
+    /// * **The slot has to be filled.** Slang's Metal backend materialises every
+    ///   global into every entry point — `msl/mesh.metal`'s `vertexMain` takes
+    ///   `shadow_atlas [[texture(1)]]` whether it reads it or not — so a
+    ///   depth-only pipeline sharing this layout still declares the argument. A
+    ///   layout with the slot removed would break Metal alone, on a runner this
+    ///   team cannot debug on, which is the trap binding 6's comment already
+    ///   records.
+    /// * **It cannot be the atlas.** WebGPU refuses a texture that is a render
+    ///   attachment and a bind-group resource in the same pass, and the shadow
+    ///   pass is exactly that pass.
+    ///
+    /// Nothing samples it: the shadow pipeline has no fragment stage. It is
+    /// brought into the graph beside the atlas so its layout transition is the
+    /// graph's like every other, rather than a hand-written barrier.
+    shadow_placeholder: ImageHandle,
+    shadow_placeholder_view: ImageViewHandle,
+    /// The **comparison** sampler the atlas is read through — hardware PCF.
+    shadow_sampler: SamplerHandle,
+    /// The depth-only pipeline the cascades are rendered with: the same geometry
+    /// stage as [`ForwardRenderer::mesh_pipeline`] and no fragment stage at all.
+    shadow_pipeline: GraphicsPipelineHandle,
+    /// One cull and draw-argument pass **per cascade**, which is topic 18's
+    /// "one cull dispatch per cascade against the same instance/geometry pools".
+    ///
+    /// A whole [`DrawGen`] rather than just its cull half: the shadow pass emits
+    /// the same indirect call the colour pass does, so it needs the same
+    /// arguments, and there is no "cull only" constructor to reach for. The cost
+    /// is that each cascade duplicates the clear and draw-argument pipelines.
+    shadow_draws: Vec<DrawGen>,
+    /// `[frame][cascade]`: a copy of the frame block whose `view_proj` **is**
+    /// that cascade's matrix, so the depth-only pipeline runs the unmodified
+    /// vertex and mesh stages rather than a second transform path.
+    shadow_uniforms: Vec<Vec<BufferHandle>>,
+    /// `[frame][cascade]`: the mesh layout again, reading that cascade's
+    /// survivors and that cascade's uniforms.
+    shadow_groups: Vec<Vec<BindGroupHandle>>,
+    /// What the last frame left [`ForwardRenderer::shadow_atlas`] and its
+    /// placeholder in.
+    ///
+    /// [`ResourceState::Undefined`] until the first frame has declared them,
+    /// which is the honest answer for an image nothing has written — importing
+    /// them as `ShaderRead` from the start would skip the one barrier that gives
+    /// them a layout at all.
+    shadow_imported: ResourceState,
+
     tonemap_layout: BindGroupLayoutHandle,
     tonemap_pipeline_layout: PipelineLayoutHandle,
     tonemap_pipeline: GraphicsPipelineHandle,
@@ -474,6 +547,11 @@ struct Rollback {
     pipeline_layouts: Vec<PipelineLayoutHandle>,
     pipelines: Vec<GraphicsPipelineHandle>,
     samplers: Vec<SamplerHandle>,
+    /// The shadow atlas and its placeholder, which are created here rather than
+    /// uploaded — so unlike [`Rollback::textures`] they are a plain handle each,
+    /// with their views beside them.
+    images: Vec<ImageHandle>,
+    image_views: Vec<ImageViewHandle>,
     /// Uploaded images, which own a view each and so cannot be rolled back as
     /// one list of handles.
     textures: Vec<UploadedTexture>,
@@ -488,6 +566,10 @@ struct Rollback {
     /// buffers each — and which clean themselves up on their own failure path,
     /// so this only carries one that was built.
     draws: Option<DrawGen>,
+    /// One more of the same per shadow cascade — a `Vec` rather than an
+    /// `Option`, because a failure part way through the cascades has to release
+    /// the ones already built.
+    shadow_draws: Vec<DrawGen>,
     /// The cluster buffers, which own three buffers and are built on the
     /// mesh-shader path alone.
     clusters: Option<ClusterPool>,
@@ -502,6 +584,12 @@ impl Rollback {
         }
         for handle in self.samplers {
             device.destroy_sampler(handle);
+        }
+        for handle in self.image_views {
+            device.destroy_image_view(handle);
+        }
+        for handle in self.images {
+            device.destroy_image(handle);
         }
         for handle in self.pipelines {
             device.destroy_graphics_pipeline(handle);
@@ -521,6 +609,9 @@ impl Rollback {
         if let Some(clusters) = self.clusters {
             clusters.destroy(device);
         }
+        for draws in self.shadow_draws {
+            draws.destroy(device);
+        }
         if let Some(draws) = self.draws {
             draws.destroy(device);
         }
@@ -534,6 +625,195 @@ impl Rollback {
             pool.destroy(device);
         }
     }
+}
+
+/// What every bind group of the mesh layout names identically.
+///
+/// Split from [`MeshGroup`] rather than folded into it because the split *is*
+/// the claim: a resource here cannot differ between the colour pass's group and
+/// a cascade's, and one there must be looked at.
+struct SharedBindings<'a> {
+    vertices: BufferHandle,
+    draw_constants: BufferHandle,
+    mesh_table: BufferHandle,
+    materials: BufferHandle,
+    page: ImageViewHandle,
+    page_sampler: SamplerHandle,
+    /// `Some` on [`GeometryPath::MeshShader`] and on no other path, which is
+    /// what decides whether bindings 9 to 12 exist at all.
+    clusters: Option<&'a ClusterPool>,
+    culls_clusters: bool,
+    shadow_sampler: SamplerHandle,
+}
+
+/// The half of a mesh-layout bind group that differs between the colour pass and
+/// each shadow cascade.
+///
+/// One description for both, so the two cannot drift: a cascade's group is the
+/// colour pass's with six resources swapped, and swapping the wrong five of them
+/// is a shadow map rendered from the camera — which looks like a shadow map.
+struct MeshGroup {
+    /// Binding 0. The colour pass's frame block, or a cascade's copy whose
+    /// `view_proj` is that cascade's matrix.
+    uniforms: BufferHandle,
+    /// Binding 2. This frame's slot of the instance ring.
+    instances: BufferHandle,
+    /// Binding 5. Whose survivors this group draws.
+    runs: BufferHandle,
+    /// Binding 12, on the mesh path: the same survivors' indirect arguments,
+    /// read as data.
+    args: BufferHandle,
+    /// Binding 13, where there is an amplification stage: the frustum it culls
+    /// clusters against.
+    cull_params: BufferHandle,
+    /// Binding 14, likewise: what it counts survivors into.
+    cull_stats: BufferHandle,
+    /// Binding [`SHADOW_ATLAS_BINDING`]. The atlas for the pass that reads it,
+    /// and the placeholder for the pass that writes it — see
+    /// [`ForwardRenderer::shadow_placeholder`], which is where that is argued.
+    shadow_map: ImageViewHandle,
+}
+
+impl MeshGroup {
+    fn entries(&self, shared: &SharedBindings<'_>) -> Vec<BindGroupEntry> {
+        let mut entries = vec![
+            BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: BindingResource::whole_buffer(self.uniforms),
+            },
+            BindGroupEntry {
+                binding: 1,
+                array_index: 0,
+                resource: BindingResource::whole_buffer(shared.vertices),
+            },
+            BindGroupEntry {
+                binding: 2,
+                array_index: 0,
+                // **This frame's slot of the instance ring, not a shared
+                // buffer.** Binding one buffer here for every group would undo
+                // the ring and reintroduce the cross-submission
+                // read-after-write hazard it exists to prevent.
+                resource: BindingResource::whole_buffer(self.instances),
+            },
+            BindGroupEntry {
+                binding: 3,
+                array_index: 0,
+                // **One block, not the whole buffer.** The binding is dynamic,
+                // so the bind's offset is added on top of this one and both
+                // Vulkan and WebGPU require `offset + dynamic + size` to stay
+                // inside the buffer — bound whole, the very first non-zero
+                // dynamic offset would be out of range.
+                resource: BindingResource::Buffer {
+                    buffer: shared.draw_constants,
+                    offset: 0,
+                    size: mesh::DRAW_CONSTANTS_SIZE as u64,
+                },
+            },
+            BindGroupEntry {
+                binding: 4,
+                array_index: 0,
+                // The same table in every group, unlike the instance array
+                // above it: the pool writes an entry when a mesh is uploaded or
+                // freed, neither of which happens between frames here.
+                resource: BindingResource::whole_buffer(shared.mesh_table),
+            },
+            BindGroupEntry {
+                binding: 5,
+                array_index: 0,
+                // Whose cull this group draws from. This is the binding a
+                // cascade's group differs in most consequentially: it is what
+                // makes the shadow pass draw what the *light* can see rather
+                // than what the camera can.
+                resource: BindingResource::whole_buffer(self.runs),
+            },
+            BindGroupEntry {
+                binding: 6,
+                array_index: 0,
+                resource: BindingResource::whole_buffer(shared.materials),
+            },
+            BindGroupEntry {
+                binding: 7,
+                array_index: 0,
+                // **One entry, `array_index: 0`**, because the page is one
+                // image and the layer is chosen in the shader. A bindless array
+                // would be one entry per texture at ascending array indices,
+                // which is the write path `BindGroupEntry`'s own docs describe
+                // and the one this pass does not take.
+                resource: BindingResource::ImageView(shared.page),
+            },
+            BindGroupEntry {
+                binding: 8,
+                array_index: 0,
+                resource: BindingResource::Sampler(shared.page_sampler),
+            },
+        ];
+        if let Some(clusters) = shared.clusters {
+            entries.extend([
+                BindGroupEntry {
+                    binding: 9,
+                    array_index: 0,
+                    // The same three buffers in every group, on the mesh table's
+                    // terms: clusters are written when the pool is built and
+                    // never again.
+                    resource: BindingResource::whole_buffer(clusters.clusters()),
+                },
+                BindGroupEntry {
+                    binding: 10,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(clusters.vertices()),
+                },
+                BindGroupEntry {
+                    binding: 11,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(clusters.corners()),
+                },
+                BindGroupEntry {
+                    binding: 12,
+                    array_index: 0,
+                    // **Arguments read as data.** The mesh path records no
+                    // indirect draw at all; what it wants out of this buffer is
+                    // the one word only the GPU knows — how many instances
+                    // survived into each bucket.
+                    resource: BindingResource::whole_buffer(self.args),
+                },
+            ]);
+        }
+        if shared.culls_clusters {
+            entries.extend([
+                BindGroupEntry {
+                    binding: 13,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(self.cull_params),
+                },
+                BindGroupEntry {
+                    binding: 14,
+                    array_index: 0,
+                    resource: BindingResource::whole_buffer(self.cull_stats),
+                },
+            ]);
+        }
+        entries.push(BindGroupEntry {
+            binding: SHADOW_ATLAS_BINDING,
+            array_index: 0,
+            resource: BindingResource::ImageView(self.shadow_map),
+        });
+        entries.push(BindGroupEntry {
+            binding: SHADOW_SAMPLER_BINDING,
+            array_index: 0,
+            resource: BindingResource::Sampler(shared.shadow_sampler),
+        });
+        entries
+    }
+}
+
+/// One cascade's per-frame buffers, read out of its [`DrawGen`] before that
+/// generator is handed to the rollback.
+struct CascadeBuffers {
+    runs: Vec<BufferHandle>,
+    args: Vec<BufferHandle>,
+    cull_params: Vec<BufferHandle>,
+    cull_stats: Vec<BufferHandle>,
 }
 
 impl ForwardRenderer {
@@ -862,6 +1142,7 @@ impl ForwardRenderer {
                 // dimension = D2, but given a view with dimension = D2Array".
                 kind: BindingKind::SampledImage {
                     view_type: ImageViewType::D2Array,
+                    sample_type: SampleType::Float,
                 },
                 // **`count: 1`, and this is the binding-model decision.** One
                 // `D2Array` image whose *layers* the material rows index is
@@ -877,7 +1158,7 @@ impl ForwardRenderer {
             BindGroupLayoutEntry {
                 binding: 8,
                 visibility: geometry.union(ShaderStages::FRAGMENT),
-                kind: BindingKind::Sampler,
+                kind: BindingKind::Sampler { comparison: false },
                 count: 1,
                 flags: BindingFlags::empty(),
             },
@@ -940,6 +1221,43 @@ impl ForwardRenderer {
                 flags: BindingFlags::empty(),
             });
         }
+        // Topic 18's cascades, read by the fragment stage and declared last —
+        // above `mesh_cluster.slang`'s range rather than inside it, for the
+        // reason `SHADOW_ATLAS_BINDING` gives.
+        //
+        // Both carry `geometry` in their visibility beside `FRAGMENT`, for
+        // binding 7's reason exactly: Slang's Metal backend materialises every
+        // global into every entry point, and `msl/mesh.metal`'s `vertexMain`
+        // takes `shadow_atlas [[texture(1)]]` and `shadow_sampler
+        // [[sampler(1)]]` whether it reads them or not.
+        mesh_entries.push(BindGroupLayoutEntry {
+            binding: SHADOW_ATLAS_BINDING,
+            visibility: geometry.union(ShaderStages::FRAGMENT),
+            kind: BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+                // **`Depth`, and this is the field the seam grew for this
+                // pass.** WebGPU will only bind a `D32Float` view through a
+                // depth sample type, and its shader side agrees — the WGSL
+                // artifact declares `texture_depth_2d`. The other three
+                // backends take the interpretation off the view's format and
+                // never read this.
+                sample_type: SampleType::Depth,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
+        mesh_entries.push(BindGroupLayoutEntry {
+            binding: SHADOW_SAMPLER_BINDING,
+            visibility: geometry.union(ShaderStages::FRAGMENT),
+            // The sampler-side twin of the line above: `sampler_comparison` in
+            // the WGSL, `SamplerComparisonState` in the HLSL, and a
+            // `compareEnable` on the Vulkan sampler object. The layout has to
+            // say so on WebGPU and cannot on the other three.
+            kind: BindingKind::Sampler { comparison: true },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
+
         let mesh_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("mesh frame"),
             entries: &mesh_entries,
@@ -1015,8 +1333,144 @@ impl ForwardRenderer {
             device.write_buffer(draw_constants, u64::from(*offset), &block)?;
         }
 
+        // --- the shadow map's own resources ---
+        //
+        // Before the bind groups, because every one of them names the atlas or
+        // the placeholder standing in for it.
+        let (atlas_width, atlas_height) = shadow::atlas_extent();
+        let shadow_atlas = device.create_image(&ImageDesc {
+            label: Some("shadow atlas"),
+            image_type: ImageType::D2,
+            format: Format::D32Float,
+            extent: crcbl_hal::Extent3d::d2(atlas_width, atlas_height),
+            mip_levels: 1,
+            samples: 1,
+            // `TRANSFER_SRC` so a test can copy the cascades back and check
+            // that something was written into them. A shadow map that stayed at
+            // its clear value produces a frame that looks entirely plausible —
+            // everything is lit — so the readback is the only thing that can
+            // tell a working pass from one that drew nothing.
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT
+                .union(ImageUsage::SAMPLED)
+                .union(ImageUsage::TRANSFER_SRC),
+            memory: MemoryLocation::DeviceLocal,
+        })?;
+        rollback.images.push(shadow_atlas);
+        let shadow_atlas_view = device.create_image_view(&ImageViewDesc {
+            label: Some("shadow atlas"),
+            image: shadow_atlas,
+            view_type: ImageViewType::D2,
+            format: Format::D32Float,
+            range: ImageSubresourceRange::all(Format::D32Float),
+        })?;
+        rollback.image_views.push(shadow_atlas_view);
+
+        let shadow_placeholder = device.create_image(&ImageDesc {
+            label: Some("shadow placeholder"),
+            image_type: ImageType::D2,
+            format: Format::D32Float,
+            extent: crcbl_hal::Extent3d::d2(1, 1),
+            mip_levels: 1,
+            samples: 1,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT.union(ImageUsage::SAMPLED),
+            memory: MemoryLocation::DeviceLocal,
+        })?;
+        rollback.images.push(shadow_placeholder);
+        let shadow_placeholder_view = device.create_image_view(&ImageViewDesc {
+            label: Some("shadow placeholder"),
+            image: shadow_placeholder,
+            view_type: ImageViewType::D2,
+            format: Format::D32Float,
+            range: ImageSubresourceRange::all(Format::D32Float),
+        })?;
+        rollback.image_views.push(shadow_placeholder_view);
+
+        // **A comparison sampler, and that is the PCF.** Each
+        // `SampleCmpLevelZero` returns the filtered fraction of four texels that
+        // passed the test, so the shader's 3×3 kernel is nine hardware-bilinear
+        // comparisons rather than nine raw fetches it averages itself.
+        //
+        // `Greater` for the engine's reversed-Z, exactly as the depth *test*
+        // is: the receiver survives when it is nearer the light than whatever
+        // the map stored. `SamplerDesc::compare` carries the same warning.
+        //
+        // Clamped on every axis so a receiver just outside a cascade's box
+        // reads the edge rather than wrapping into the opposite corner — the
+        // shader's own bounds check is what actually handles that case, and this
+        // is the second line of defence one texel wide.
+        let shadow_sampler = device.create_sampler(&SamplerDesc {
+            label: Some("shadow comparison"),
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mip_filter: FilterMode::Nearest,
+            address_mode: [SamplerAddressMode::ClampToEdge; 3],
+            compare: Some(crcbl_hal::CompareOp::Greater),
+            ..SamplerDesc::default()
+        })?;
+        rollback.samplers.push(shadow_sampler);
+
+        // §3.3's cull, once per cascade. Each gets its own `DrawGen` and
+        // therefore its own frustum, survivor list and indirect arguments —
+        // which is what "one cull dispatch per cascade against the same
+        // instance/geometry pools" means, and why the instance ring and the
+        // mesh table below are the same handles the camera's cull was given.
+        for _ in 0..shadow::CASCADES {
+            // Into the rollback as each is built, on the same terms as the
+            // camera's: a failure two cascades in has to release the first one,
+            // and the rollback is the only thing that knows about it.
+            let draws = DrawGen::new(
+                device,
+                &DrawGenDesc {
+                    label: Some("shadow cascade"),
+                    instances: &instance_buffers,
+                    mesh_table,
+                    bucket_meshes: &bucket_meshes,
+                    bucket_clusters: &bucket_clusters,
+                    instance_capacity: POOL_INSTANCE_CAPACITY,
+                },
+            )?;
+            rollback.shadow_draws.push(draws);
+        }
+        // The handles are `Copy` and are read out here for the same reason the
+        // camera's are above: the pool they came from is the rollback's now.
+        let cascade_buffers: Vec<CascadeBuffers> = rollback
+            .shadow_draws
+            .iter()
+            .map(|draws| CascadeBuffers {
+                runs: (0..instance_buffers.len())
+                    .map(|frame| draws.runs(frame))
+                    .collect(),
+                args: (0..instance_buffers.len())
+                    .map(|frame| draws.args(frame))
+                    .collect(),
+                cull_params: (0..instance_buffers.len())
+                    .map(|frame| draws.cull_params(frame))
+                    .collect(),
+                cull_stats: (0..instance_buffers.len())
+                    .map(|frame| draws.visible_count(frame))
+                    .collect(),
+            })
+            .collect();
+
         let mut uniforms = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut mesh_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut shadow_uniforms = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut shadow_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        // Everything a group of this layout names that is the same in all of
+        // them. The per-group half is what `MeshGroup` below varies, and the two
+        // exist so the colour pass's group and the shadow pass's are one
+        // description rather than two that agree today.
+        let shared = SharedBindings {
+            vertices,
+            draw_constants,
+            mesh_table,
+            materials: material_buffer,
+            page: base_color_page.view,
+            page_sampler: base_color_sampler,
+            clusters: rollback.clusters.as_ref(),
+            culls_clusters,
+            shadow_sampler,
+        };
         for (frame, &slot_instances) in instance_buffers.iter().enumerate() {
             let buffer = device.create_buffer(&BufferDesc {
                 label: Some("mesh frame uniforms"),
@@ -1025,130 +1479,18 @@ impl ForwardRenderer {
                 memory: MemoryLocation::HostUpload,
             })?;
             rollback.buffers.push(buffer);
-            let mut entries = vec![
-                BindGroupEntry {
-                    binding: 0,
-                    array_index: 0,
-                    resource: BindingResource::whole_buffer(buffer),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    array_index: 0,
-                    resource: BindingResource::whole_buffer(vertices),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    array_index: 0,
-                    // **This frame's slot of the instance ring, not a shared
-                    // buffer.** Binding one buffer here for every group would
-                    // undo the ring and reintroduce the cross-submission
-                    // read-after-write hazard it exists to prevent.
-                    resource: BindingResource::whole_buffer(slot_instances),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    array_index: 0,
-                    // **One block, not the whole buffer.** The binding is
-                    // dynamic, so the bind's offset is added on top of this one
-                    // and both Vulkan and WebGPU require `offset + dynamic +
-                    // size` to stay inside the buffer — bound whole, the very
-                    // first non-zero dynamic offset would be out of range.
-                    resource: BindingResource::Buffer {
-                        buffer: draw_constants,
-                        offset: 0,
-                        size: mesh::DRAW_CONSTANTS_SIZE as u64,
-                    },
-                },
-                BindGroupEntry {
-                    binding: 4,
-                    array_index: 0,
-                    // The same table in every frame's group, unlike the
-                    // instance array above it: the pool writes an entry when a
-                    // mesh is uploaded or freed, neither of which happens
-                    // between frames here.
-                    resource: BindingResource::whole_buffer(mesh_table),
-                },
-                BindGroupEntry {
-                    binding: 5,
-                    array_index: 0,
-                    // This frame's runs, for the reason the instance ring
-                    // above gives: the draw-argument pass rewrites them every
-                    // frame and the previous frame may still be drawing from
-                    // the other slot.
-                    resource: BindingResource::whole_buffer(runs[frame]),
-                },
-                BindGroupEntry {
-                    binding: 6,
-                    array_index: 0,
-                    // The same table in every frame's group, on the mesh
-                    // table's terms rather than the instance array's.
-                    resource: BindingResource::whole_buffer(material_buffer),
-                },
-                BindGroupEntry {
-                    binding: 7,
-                    array_index: 0,
-                    // **One entry, `array_index: 0`**, because the page is one
-                    // image and the layer is chosen in the shader. A bindless
-                    // array would be one entry per texture at ascending array
-                    // indices, which is the write path `BindGroupEntry`'s own
-                    // docs describe and the one this pass does not take.
-                    resource: BindingResource::ImageView(base_color_page.view),
-                },
-                BindGroupEntry {
-                    binding: 8,
-                    array_index: 0,
-                    resource: BindingResource::Sampler(base_color_sampler),
-                },
-            ];
-            if let Some(clusters) = rollback.clusters.as_ref() {
-                entries.extend([
-                    BindGroupEntry {
-                        binding: 9,
-                        array_index: 0,
-                        // The same three buffers in every frame's group, on the
-                        // mesh table's terms: clusters are written when the
-                        // pool is built and never again.
-                        resource: BindingResource::whole_buffer(clusters.clusters()),
-                    },
-                    BindGroupEntry {
-                        binding: 10,
-                        array_index: 0,
-                        resource: BindingResource::whole_buffer(clusters.vertices()),
-                    },
-                    BindGroupEntry {
-                        binding: 11,
-                        array_index: 0,
-                        resource: BindingResource::whole_buffer(clusters.corners()),
-                    },
-                    BindGroupEntry {
-                        binding: 12,
-                        array_index: 0,
-                        // **This frame's arguments, read as data.** The mesh
-                        // path records no indirect call at all; what it wants
-                        // out of this buffer is the one word only the GPU knows
-                        // — how many instances survived into each bucket — and
-                        // it is this frame's slot for the ring's reason.
-                        resource: BindingResource::whole_buffer(args[frame]),
-                    },
-                ]);
+            let entries = MeshGroup {
+                uniforms: buffer,
+                instances: slot_instances,
+                runs: runs[frame],
+                args: args[frame],
+                cull_params: cull_params[frame],
+                cull_stats: cull_stats[frame],
+                // The colour pass reads the finished atlas. Its own pass writes
+                // nothing to it, so there is no conflict to avoid here.
+                shadow_map: shadow_atlas_view,
             }
-            if culls_clusters {
-                entries.extend([
-                    BindGroupEntry {
-                        binding: 13,
-                        array_index: 0,
-                        // This frame's frustum, for the ring's reason: the cull
-                        // pass rewrites it every frame and the previous frame
-                        // may still be reading the other slot.
-                        resource: BindingResource::whole_buffer(cull_params[frame]),
-                    },
-                    BindGroupEntry {
-                        binding: 14,
-                        array_index: 0,
-                        resource: BindingResource::whole_buffer(cull_stats[frame]),
-                    },
-                ]);
-            }
+            .entries(&shared);
             let group = device.create_bind_group(&BindGroupDesc {
                 label: Some("mesh frame"),
                 layout: mesh_layout,
@@ -1158,6 +1500,47 @@ impl ForwardRenderer {
             rollback.bind_groups.push(group);
             uniforms.push(buffer);
             mesh_groups.push(group);
+
+            // The same layout again, once per cascade, differing in exactly the
+            // things a cascade is: which matrix, which survivors, which frustum.
+            let mut frame_shadow_uniforms = Vec::with_capacity(shadow::CASCADES);
+            let mut frame_shadow_groups = Vec::with_capacity(shadow::CASCADES);
+            for buffers in &cascade_buffers {
+                let cascade_uniforms = device.create_buffer(&BufferDesc {
+                    label: Some("shadow cascade uniforms"),
+                    size: mesh::FRAME_UNIFORMS_SIZE as u64,
+                    usage: BufferUsage::UNIFORM,
+                    memory: MemoryLocation::HostUpload,
+                })?;
+                rollback.buffers.push(cascade_uniforms);
+                let entries = MeshGroup {
+                    uniforms: cascade_uniforms,
+                    instances: slot_instances,
+                    runs: buffers.runs[frame],
+                    args: buffers.args[frame],
+                    // The amplification stage culls clusters against whatever
+                    // frustum is in this block, and against
+                    // `frame.camera_position` — which in a cascade's copy is the
+                    // *light*. So the per-cluster cull rejects what faces away
+                    // from the sun, which is the right question for a shadow map
+                    // and the wrong one to have asked with the camera's frustum.
+                    cull_params: buffers.cull_params[frame],
+                    cull_stats: buffers.cull_stats[frame],
+                    shadow_map: shadow_placeholder_view,
+                }
+                .entries(&shared);
+                let group = device.create_bind_group(&BindGroupDesc {
+                    label: Some("shadow cascade"),
+                    layout: mesh_layout,
+                    entries: &entries,
+                    variable_count: None,
+                })?;
+                rollback.bind_groups.push(group);
+                frame_shadow_uniforms.push(cascade_uniforms);
+                frame_shadow_groups.push(group);
+            }
+            shadow_uniforms.push(frame_shadow_uniforms);
+            shadow_groups.push(frame_shadow_groups);
         }
 
         let mesh_set_layouts = [mesh_layout];
@@ -1211,7 +1594,19 @@ impl ForwardRenderer {
         // and the projection matrix that agrees with *both* comes from
         // `crate::camera`.
         let depth_stencil = Some(DepthStencilState::default());
-        let (mesh_pipeline, cluster_module) = if emit.is_mesh() {
+        // The depth-only twin, built beside the colour pipeline out of the same
+        // modules and the same layout, differing in exactly two things: no
+        // fragment stage and no colour target.
+        //
+        // **The geometry stage is identical, and that is the design.** Topic 18
+        // asks for a shadow pass "identical on every `GeometryPath` — depth pass
+        // plus whatever emit tail the device selected", and the way to get that
+        // without a second transform path is to leave `vertexMain` and
+        // `meshMain` alone and hand them a frame block whose `view_proj` is the
+        // cascade's matrix. A cascade that disagreed with the colour pass about
+        // where a vertex is would produce shadows that do not line up with their
+        // casters, which is indistinguishable from a bias problem.
+        let (shadow_pipeline_result, mesh_pipeline, cluster_module) = if emit.is_mesh() {
             // **The mesh stage's module is `mesh_cluster.slang`; the fragment
             // stage's is still `mesh.slang`'s.** A pipeline takes a module per
             // stage, so the shading — Lambert, Blinn, the material row, the
@@ -1268,7 +1663,24 @@ impl ForwardRenderer {
                 multisample: MultisampleState::default(),
                 color_targets: &mesh_targets,
             });
-            (pipeline, Some(cluster_module))
+            let shadow = device.create_mesh_pipeline(&MeshPipelineDesc {
+                label: Some("shadow cascade mesh cluster"),
+                layout: mesh_pipeline_layout,
+                task: task_entry.map(|entry_point| ShaderEntry {
+                    module: cluster_module,
+                    entry_point,
+                }),
+                mesh: ShaderEntry {
+                    module: cluster_module,
+                    entry_point: cluster_entry,
+                },
+                fragment: None,
+                primitive,
+                depth_stencil,
+                multisample: MultisampleState::default(),
+                color_targets: &[],
+            });
+            (shadow, pipeline, Some(cluster_module))
         } else {
             let pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {
                 label: Some("forward mesh"),
@@ -1286,7 +1698,20 @@ impl ForwardRenderer {
                 multisample: MultisampleState::default(),
                 color_targets: &mesh_targets,
             });
-            (pipeline, None)
+            let shadow = device.create_graphics_pipeline(&GraphicsPipelineDesc {
+                label: Some("shadow cascade"),
+                layout: mesh_pipeline_layout,
+                vertex: ShaderEntry {
+                    module: mesh_module,
+                    entry_point: mesh_vertex,
+                },
+                fragment: None,
+                primitive,
+                depth_stencil,
+                multisample: MultisampleState::default(),
+                color_targets: &[],
+            });
+            (shadow, pipeline, None)
         };
         device.destroy_shader_module(mesh_module);
         if let Some(module) = cluster_module {
@@ -1294,6 +1719,8 @@ impl ForwardRenderer {
         }
         let mesh_pipeline = mesh_pipeline?;
         rollback.pipelines.push(mesh_pipeline);
+        let shadow_pipeline = shadow_pipeline_result?;
+        rollback.pipelines.push(shadow_pipeline);
 
         // --- the tonemap pass ---
         let tonemap_entries = [
@@ -1302,6 +1729,7 @@ impl ForwardRenderer {
                 visibility: ShaderStages::FRAGMENT,
                 kind: BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
                 count: 1,
                 flags: BindingFlags::empty(),
@@ -1309,7 +1737,7 @@ impl ForwardRenderer {
             BindGroupLayoutEntry {
                 binding: 1,
                 visibility: ShaderStages::FRAGMENT,
-                kind: BindingKind::Sampler,
+                kind: BindingKind::Sampler { comparison: false },
                 count: 1,
                 flags: BindingFlags::empty(),
             },
@@ -1414,6 +1842,18 @@ impl ForwardRenderer {
             mesh_layout,
             mesh_pipeline_layout,
             mesh_pipeline,
+            shadow_atlas,
+            shadow_atlas_view,
+            shadow_placeholder,
+            shadow_placeholder_view,
+            shadow_sampler,
+            shadow_pipeline,
+            shadow_draws: std::mem::take(&mut rollback.shadow_draws),
+            shadow_uniforms,
+            shadow_groups,
+            // Nothing has written either image yet, so the first frame's graph
+            // is what gives them a layout.
+            shadow_imported: ResourceState::Undefined,
             tonemap_layout,
             tonemap_pipeline_layout,
             tonemap_pipeline,
@@ -1717,25 +2157,67 @@ impl ForwardRenderer {
         // with — is invisible until something at the edge of the screen
         // disappears.
         let view_projection = camera.view_projection(aspect);
+        // Topic 18's cascades. Built from the camera and the light alone, so a
+        // frame that culls against them and a fragment that samples through them
+        // cannot disagree about where they are.
+        let cascades = Cascades::new(camera, direction);
+        let mut shadow_view_proj = [[0.0f32; 16]; shadow::CASCADES];
+        for (matrix, cascade) in shadow_view_proj.iter_mut().zip(&cascades.view_proj) {
+            *matrix = cascade.to_cols_array();
+        }
         let uniforms = mesh::FrameUniforms {
             view_proj: view_projection.to_cols_array(),
             camera_position: camera.eye.extend(1.0).to_array(),
             light_direction: direction.extend(0.0).to_array(),
             light_color: light.color.extend(0.0).to_array(),
             ambient: light.ambient.extend(0.0).to_array(),
+            shadow_view_proj,
+            cascade_far: cascades.far,
+            shadow_params: Cascades::params(),
         };
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
 
+        // Every element the pool has ever handed out, not its live count: a
+        // removed instance leaves a hole and the live ones above it still have
+        // to be tested. `InstancePool::slot_count` carries the difference.
+        let instance_count = self.instances.slot_count();
         self.draws.begin_frame(
             device,
             self.frame,
             &Frustum::from_view_projection(view_projection),
-            // Every element the pool has ever handed out, not its live count: a
-            // removed instance leaves a hole and the live ones above it still
-            // have to be tested. `InstancePool::slot_count` carries the
-            // difference.
-            self.instances.slot_count(),
-        )
+            instance_count,
+        )?;
+
+        // One cull per cascade, against that cascade's own frustum. The
+        // orthographic box gives `Frustum::from_view_projection` six real planes
+        // — unlike the camera's infinite perspective, whose far plane is
+        // degenerate on purpose — so a caster outside the cascade is rejected
+        // before it costs a vertex.
+        for (cascade, draws) in self.shadow_draws.iter().enumerate() {
+            // The same block the fragment stage will sample through, with the
+            // cascade's matrix in `view_proj` and the *light* as the eye: the
+            // amplification stage rejects clusters facing away from whatever is
+            // at `camera_position`, and for a shadow map that must be the sun.
+            let cascade_uniforms = mesh::FrameUniforms {
+                view_proj: shadow_view_proj[cascade],
+                camera_position: (camera.eye + direction * cascades.far[cascade])
+                    .extend(1.0)
+                    .to_array(),
+                ..uniforms
+            };
+            device.write_buffer(
+                self.shadow_uniforms[self.frame][cascade],
+                0,
+                &cascade_uniforms.to_bytes(),
+            )?;
+            draws.begin_frame(
+                device,
+                self.frame,
+                &Frustum::from_view_projection(cascades.view_proj[cascade]),
+                instance_count,
+            )?;
+        }
+        Ok(())
     }
 
     /// Puts the pool's second mesh in the frame at `model`, or takes it back out
@@ -1900,6 +2382,9 @@ impl ForwardRenderer {
             .draws
             .add_passes(graph, self.frame, self.instances.slot_count());
 
+        let imported = std::mem::replace(&mut self.shadow_imported, ResourceState::ShaderRead);
+        let shadow_atlas = self.add_shadow_pass(graph, imported);
+
         let scene_color =
             graph.create_image("scene-color", TransientImageDesc::scene_color(extent));
         let scene_depth =
@@ -1935,6 +2420,14 @@ impl ForwardRenderer {
             .add_render_pass("forward")
             .clear_color(scene_color, SCENE_CLEAR)
             .clear_depth(scene_depth)
+            // **The barrier out of the shadow pass's depth attachment.** The
+            // atlas is in this pass's bind group at `SHADOW_ATLAS_BINDING`, and
+            // without this declaration the graph leaves it in
+            // `DepthStencilWrite` — which Vulkan reports as
+            // `VUID-vkCmdDrawIndexedIndirectCount-imageLayout-00344` naming the
+            // binding, and which every other backend reads as whatever the
+            // depth writes left behind.
+            .read_image(shadow_atlas)
             // The buffers the draws come out of. Declaring them is what makes
             // the graph transition them out of the compute pass's
             // `ShaderReadWrite` — the seam calls that the single most important
@@ -2120,6 +2613,186 @@ impl ForwardRenderer {
         scene_color
     }
 
+    /// Adds the cull dispatches and the depth-only pass that fill the shadow
+    /// atlas, and returns the atlas as the graph knows it.
+    ///
+    /// Every cascade is one viewport of one render pass. A pass per cascade
+    /// would be [`shadow::CASCADES`] clears of the same image and
+    /// [`shadow::CASCADES`] more barriers, and the graph would have to be told
+    /// each of them only touches part of it — where one pass with a viewport per
+    /// tile is what a shadow *atlas* is for in the first place.
+    fn add_shadow_pass(&self, graph: &mut RenderGraph<'_>, imported: ResourceState) -> ImageId {
+        let (atlas_width, atlas_height) = shadow::atlas_extent();
+        let atlas = graph.import_image(
+            "shadow-atlas",
+            ImportedImage {
+                image: self.shadow_atlas,
+                view: self.shadow_atlas_view,
+                format: Format::D32Float,
+                extent: (atlas_width, atlas_height),
+                // What the previous frame left it in — `Undefined` on the first,
+                // which is what makes the graph give it a layout at all.
+                initial: imported,
+                final_state: ResourceState::ShaderRead,
+            },
+        );
+        let placeholder = graph.import_image(
+            "shadow-placeholder",
+            ImportedImage {
+                image: self.shadow_placeholder,
+                view: self.shadow_placeholder_view,
+                format: Format::D32Float,
+                extent: (1, 1),
+                initial: imported,
+                final_state: ResourceState::ShaderRead,
+            },
+        );
+
+        // One cull dispatch per cascade, before the pass that draws from them.
+        let generated: Vec<_> = self
+            .shadow_draws
+            .iter()
+            .map(|draws| draws.add_passes(graph, self.frame, self.instances.slot_count()))
+            .collect();
+
+        let mut pass = graph
+            .add_render_pass("shadow")
+            // **Stored, unlike the scene's depth.** This is the one depth buffer
+            // in the engine that something downstream reads, which is what
+            // `PassBuilder::clear_depth`'s docs said would need a `StoreOp` the
+            // day a prepass existed.
+            .depth(
+                atlas,
+                LoadOp::Clear,
+                StoreOp::Store,
+                crcbl_hal::ClearValue {
+                    depth: crcbl_hal::depth::CLEAR,
+                    ..crcbl_hal::ClearValue::default()
+                },
+            )
+            // Declared so the graph gives it a shader-read layout: it is in
+            // every cascade's bind group, standing in for the atlas this pass is
+            // writing. See `ForwardRenderer::shadow_placeholder`.
+            .read_image(placeholder);
+        for draws in &generated {
+            pass = pass.read_buffer(draws.runs_id);
+            pass = if self.emit.is_mesh() {
+                let pass = pass
+                    .read_buffer(draws.args_id)
+                    .use_buffer(draws.mesh_args_id, ResourceState::IndirectArgument);
+                if self.culls_clusters {
+                    pass.use_buffer(draws.visible_count_id, ResourceState::ShaderReadWrite)
+                } else {
+                    pass
+                }
+            } else {
+                pass.use_buffer(draws.args_id, ResourceState::IndirectArgument)
+                    .use_buffer(draws.counts_id, ResourceState::IndirectArgument)
+            };
+        }
+
+        let groups = self.shadow_groups[self.frame].clone();
+        let pipeline = self.shadow_pipeline;
+        let layout = self.mesh_pipeline_layout;
+        let indices = self.pool.index_buffer();
+        let emit = self.emit;
+        let stride = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE as u32;
+        let mesh_stride = crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32;
+        let calls: Vec<(u32, u64, u64, u64)> = self
+            .bucket_constants
+            .iter()
+            .enumerate()
+            .map(|(bucket, constant_offset)| {
+                let bucket = u32::try_from(bucket)
+                    .unwrap_or_else(|_| unreachable!("a fixed table of a few buckets"));
+                (
+                    *constant_offset,
+                    self.draws.args_offset(bucket),
+                    self.draws.count_offset(bucket),
+                    self.draws.mesh_args_offset(bucket),
+                )
+            })
+            .collect();
+
+        pass.execute(move |ctx| {
+            let encoder = ctx.encoder();
+            encoder.bind_graphics_pipeline(pipeline);
+            if !emit.is_mesh() {
+                encoder.bind_index_buffer(indices, 0, IndexFormat::Uint32);
+            }
+            for (cascade, (group, draws)) in groups.iter().zip(&generated).enumerate() {
+                // The tile this cascade owns. The graph set a viewport over the
+                // whole atlas before this body ran, and this is what narrows it
+                // — the same clip-space matrix mapped into a different sixth of
+                // the image.
+                let (origin_x, origin_y) = shadow::tile_origin(cascade);
+                let rect = Rect2d {
+                    x: i32::try_from(origin_x).unwrap_or(i32::MAX),
+                    y: i32::try_from(origin_y).unwrap_or(i32::MAX),
+                    width: shadow::TILE,
+                    height: shadow::TILE,
+                };
+                encoder.set_viewport(&Viewport {
+                    x: rect.x as f32,
+                    y: rect.y as f32,
+                    width: rect.width as f32,
+                    height: rect.height as f32,
+                    ..Viewport::from_size(rect.width, rect.height)
+                });
+                encoder.set_scissor(&rect);
+                for (constant_offset, args_offset, count_offset, mesh_args_offset) in &calls {
+                    encoder.bind_group(0, *group, &[*constant_offset], layout);
+                    match emit {
+                        EmitTail::Mesh => {
+                            encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                                args: draws.mesh_args,
+                                offset: *mesh_args_offset,
+                                draw_count: 1,
+                                stride: mesh_stride,
+                            });
+                        }
+                        EmitTail::Count => {
+                            encoder.draw_indexed_indirect_count(&DrawIndirectCount {
+                                args: draws.args,
+                                args_offset: *args_offset,
+                                count_buffer: draws.counts,
+                                count_offset: *count_offset,
+                                max_draw_count: 1,
+                                stride,
+                            });
+                        }
+                        EmitTail::PerBatch => {
+                            encoder.draw_indexed_indirect(&DrawIndirect {
+                                args: draws.args,
+                                offset: *args_offset,
+                                draw_count: 1,
+                                stride,
+                            });
+                        }
+                    }
+                }
+            }
+        });
+        atlas
+    }
+
+    /// The shadow atlas, for a caller that wants to read it back.
+    ///
+    /// **The observable this whole slice can otherwise hide behind.** A shadow
+    /// pass that renders nothing leaves every texel at
+    /// [`depth::CLEAR`](crcbl_hal::depth::CLEAR) and produces a frame in which
+    /// everything is lit — which is a perfectly plausible picture and matches
+    /// any golden blessed from it. Copying this image back and finding a texel
+    /// that is not the clear value is what distinguishes the two.
+    ///
+    /// It is created with
+    /// [`ImageUsage::TRANSFER_SRC`](crcbl_hal::ImageUsage::TRANSFER_SRC) for
+    /// exactly that, and its extent is [`shadow::atlas_extent`].
+    #[must_use]
+    pub const fn shadow_atlas(&self) -> crcbl_hal::ImageHandle {
+        self.shadow_atlas
+    }
+
     /// The model matrix for a cube spinning at `seconds` into the run.
     ///
     /// Two axes at incommensurable rates, so the animation never repeats and
@@ -2233,6 +2906,26 @@ impl ForwardRenderer {
         device.destroy_graphics_pipeline(self.tonemap_pipeline);
         device.destroy_pipeline_layout(self.tonemap_pipeline_layout);
         device.destroy_bind_group_layout(self.tonemap_layout);
+
+        device.destroy_graphics_pipeline(self.shadow_pipeline);
+        for groups in self.shadow_groups {
+            for group in groups {
+                device.destroy_bind_group(group);
+            }
+        }
+        for buffers in self.shadow_uniforms {
+            for buffer in buffers {
+                device.destroy_buffer(buffer);
+            }
+        }
+        for draws in self.shadow_draws {
+            draws.destroy(device);
+        }
+        device.destroy_sampler(self.shadow_sampler);
+        device.destroy_image_view(self.shadow_atlas_view);
+        device.destroy_image(self.shadow_atlas);
+        device.destroy_image_view(self.shadow_placeholder_view);
+        device.destroy_image(self.shadow_placeholder);
 
         device.destroy_graphics_pipeline(self.mesh_pipeline);
         device.destroy_pipeline_layout(self.mesh_pipeline_layout);
@@ -2780,13 +3473,17 @@ mod tests {
             let mut seen: Vec<(u32, u64, u64)> = Vec::new();
             let mut dispatches = 0;
             for command in recorder.commands() {
+                if matches!(command, Command::Dispatch { .. }) {
+                    dispatches += 1;
+                }
+            }
+            for command in commands_in_pass(&recorder, "forward") {
                 match command {
                     Command::BindGroup {
                         slot: 0,
                         dynamic_offsets,
                         ..
                     } => offset = dynamic_offsets.first().copied(),
-                    Command::Dispatch { .. } => dispatches += 1,
                     Command::DrawIndexedIndirectCount(draw) => {
                         assert_eq!(draw.stride, stride, "sizeof(VkDrawIndexedIndirectCommand)");
                         assert_eq!(
@@ -2806,9 +3503,10 @@ mod tests {
                 }
             }
             assert_eq!(
-                dispatches, 3,
+                dispatches,
+                3 * (1 + shadow::CASCADES),
                 "the clearing pass, the cull pass and the draw-argument pass, in front of \
-                 the draws"
+                 the draws — once for the camera and once per shadow cascade"
             );
             assert_eq!(
                 seen, expected,
@@ -2883,7 +3581,7 @@ mod tests {
 
             let mut counted_calls = 0;
             let mut per_batch_calls = 0;
-            for command in recorder.commands() {
+            for command in commands_in_pass(&recorder, "forward") {
                 match command {
                     Command::DrawIndexedIndirectCount(_) => counted_calls += 1,
                     Command::DrawIndexedIndirect(draw) => {
@@ -2998,8 +3696,7 @@ mod tests {
             // a second one: one indirect dispatch per bucket, reading that
             // bucket's own arguments, and the amplification stage is what turns
             // a group into no work.
-            let dispatched: Vec<DrawIndirect> = recorder
-                .commands()
+            let dispatched: Vec<DrawIndirect> = commands_in_pass(&recorder, "forward")
                 .into_iter()
                 .filter_map(|command| match command {
                     Command::DrawMeshTasksIndirect(draw) => Some(draw),
@@ -3116,7 +3813,7 @@ mod tests {
 
         let mut dispatched = Vec::new();
         let mut index_binds = 0;
-        for command in recorder.commands() {
+        for command in commands_in_pass(&recorder, "forward") {
             match command {
                 Command::DrawMeshTasksIndirect(draw) => dispatched.push(draw),
                 Command::DrawMeshTasks { .. } => panic!(
@@ -3393,10 +4090,24 @@ mod tests {
             .iter()
             .map(|pass| pass.label().to_string())
             .collect();
+        // The camera's compute triple, then one per shadow cascade, then the
+        // depth-only pass they feed and the colour pass that samples it.
+        let mut expected: Vec<String> = Vec::new();
+        for _ in 0..=shadow::CASCADES {
+            expected.extend(
+                ["clear-counters", "cull", "draw-args"]
+                    .into_iter()
+                    .map(str::to_string),
+            );
+        }
+        expected.extend(
+            ["shadow", "forward", "tonemap"]
+                .into_iter()
+                .map(str::to_string),
+        );
         assert_eq!(
-            passes,
-            ["clear-counters", "cull", "draw-args", "forward", "tonemap"],
-            "the three compute passes come first, and in that order"
+            passes, expected,
+            "each cull's three compute passes come first, and in that order"
         );
 
         let forward = compiled
@@ -3487,6 +4198,41 @@ mod tests {
             device.destroy_image_view(self.imported.view);
             device.destroy_image(self.imported.image);
         }
+    }
+
+    /// Everything one labelled pass recorded, and nothing any other pass did.
+    ///
+    /// **Every draw assertion below is scoped through this**, and the reason is
+    /// topic 18: the frame now records the same indirect call the colour pass
+    /// records once per shadow cascade as well, out of that cascade's own
+    /// arguments. A test filtering the whole stream for `DrawIndexedIndirect`
+    /// would see `(1 + shadow::CASCADES) × BUCKET_COUNT` of them and could not
+    /// say which pass any of them belonged to — so "the forward pass records one
+    /// call per bucket" would become a claim about a total, which a shadow pass
+    /// recording the wrong thing could satisfy.
+    fn commands_in_pass(
+        recorder: &crcbl_hal::null::Recorder,
+        label: &str,
+    ) -> Vec<crcbl_hal::null::Command> {
+        use crcbl_hal::null::Command;
+
+        let mut inside = false;
+        let mut out = Vec::new();
+        for command in recorder.commands() {
+            if let Some((_, recorded)) = command.opens_pass() {
+                inside = recorded == Some(label);
+                continue;
+            }
+            if matches!(command, Command::EndRenderPass | Command::EndComputePass) {
+                inside = false;
+                continue;
+            }
+            if inside {
+                out.push(command);
+            }
+        }
+        assert!(!out.is_empty(), "no pass labelled `{label}` recorded work");
+        out
     }
 
     fn frame(device: &dyn Device, renderer: &mut ForwardRenderer, queue: QueueHandle) -> Frame {

@@ -1435,17 +1435,29 @@ mod tests {
         use crate::hal::null::{Event, NullInstance, Recorder};
 
         // `(kind, label)` as `Command::opens_pass` reports them.
+        //
+        // **The cube scene's compute triple appears once per cull, and there is
+        // one cull per shadow cascade beside the camera's.** Built rather than
+        // written out, so the list tracks
+        // `crcbl_render::shadow::CASCADES` instead of being a literal that
+        // silently stops matching when the count changes — which is the one
+        // thing this assertion exists to notice, since a cascade whose cull
+        // never ran draws an empty tile and an entirely lit frame.
+        let mut cube_passes: Vec<(&str, &str)> = Vec::new();
+        for _ in 0..=crcbl_render::shadow::CASCADES {
+            cube_passes.extend([
+                ("compute", "clear-counters"),
+                ("compute", "cull"),
+                ("compute", "draw-args"),
+            ]);
+        }
+        cube_passes.extend([
+            ("render", "shadow"),
+            ("render", "forward"),
+            ("render", "tonemap"),
+        ]);
         let expected: [(Scene, &[(&str, &str)]); 3] = [
-            (
-                Scene::Cube,
-                &[
-                    ("compute", "clear-counters"),
-                    ("compute", "cull"),
-                    ("compute", "draw-args"),
-                    ("render", "forward"),
-                    ("render", "tonemap"),
-                ],
-            ),
+            (Scene::Cube, &cube_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

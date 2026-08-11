@@ -165,16 +165,20 @@ impl Table {
     /// buffer are both `MTLBuffer` bound to the same slots. Both collapses are
     /// Metal's, not this backend's.
     ///
-    /// [`BindingKind::SampledImage`]'s `view_type` is dropped here and nothing
-    /// else in this backend reads it: an `MTLTexture` carries its own
-    /// `textureType`, set by `conv::view_texture_type` when the view was
-    /// created, and binding one into an argument table takes no dimension.
-    /// Only WebGPU wants it in the layout.
+    /// [`BindingKind::SampledImage`]'s `view_type` and `sample_type` are both
+    /// dropped here and nothing else in this backend reads either: an
+    /// `MTLTexture` carries its own `textureType` and `pixelFormat`, set by
+    /// `conv::view_texture_type` and `conv::pixel_format` when the view was
+    /// created, and binding one into an argument table takes neither a dimension
+    /// nor a format. [`BindingKind::Sampler`]'s `comparison` goes the same way:
+    /// an `MTLSamplerState` decides whether it compares through its descriptor's
+    /// `compareFunction`, which is where `SamplerDesc::compare` lands. Only
+    /// WebGPU wants any of the three in the layout.
     const fn of(kind: BindingKind) -> Self {
         match kind {
             BindingKind::UniformBuffer { .. } | BindingKind::StorageBuffer { .. } => Self::Buffer,
             BindingKind::SampledImage { .. } | BindingKind::StorageImage { .. } => Self::Texture,
-            BindingKind::Sampler => Self::Sampler,
+            BindingKind::Sampler { .. } => Self::Sampler,
         }
     }
 
@@ -893,7 +897,7 @@ fn resolve(
             BindingKind::SampledImage { .. } | BindingKind::StorageImage { .. },
             BindingResource::ImageView(view),
         ) => BoundResource::Texture(owner.view_raw_locked(state, view)?),
-        (BindingKind::Sampler, BindingResource::Sampler(sampler)) => {
+        (BindingKind::Sampler { .. }, BindingResource::Sampler(sampler)) => {
             BoundResource::Sampler(owner.sampler_raw_locked(state, sampler)?)
         }
         (kind, resource) => {
@@ -923,7 +927,7 @@ mod tests {
         BindingFlags, BufferDesc, BufferUsage, ClearValue, ColorAttachment, CommandEncoder,
         CommandEncoderDesc, Device, Extent3d, Format, ImageDesc, ImageType, ImageUsage,
         ImageViewDesc, ImageViewType, Instance, LoadOp, MemoryLocation, PipelineLayoutDesc,
-        QueueKind, Rect2d, RenderPassDesc, SamplerDesc, StoreOp,
+        QueueKind, Rect2d, RenderPassDesc, SampleType, SamplerDesc, StoreOp,
     };
 
     use crate::MetalInstance;
@@ -1034,11 +1038,12 @@ mod tests {
     #[test]
     fn a_set_is_flattened_in_binding_order_with_a_counter_per_table() {
         let entries = [
-            entry(3, BindingKind::Sampler, 1),
+            entry(3, BindingKind::Sampler { comparison: false }, 1),
             entry(
                 1,
                 BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
                 4,
             ),
@@ -1047,6 +1052,7 @@ mod tests {
                 2,
                 BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
                 1,
             ),
@@ -1126,10 +1132,11 @@ mod tests {
                 0,
                 BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
                 1,
             ),
-            entry(1, BindingKind::Sampler, 1),
+            entry(1, BindingKind::Sampler { comparison: false }, 1),
         ]))
         .expect("a texture and a sampler in set 1");
         let placements = plan_layout(&[
@@ -1173,6 +1180,7 @@ mod tests {
                     0,
                     BindingKind::SampledImage {
                         view_type: ImageViewType::D2,
+                        sample_type: SampleType::Float,
                     },
                     8,
                 )
@@ -1255,10 +1263,11 @@ mod tests {
                     1,
                     BindingKind::SampledImage {
                         view_type: ImageViewType::D2,
+                        sample_type: SampleType::Float,
                     },
                     2,
                 ),
-                entry(2, BindingKind::Sampler, 1),
+                entry(2, BindingKind::Sampler { comparison: false }, 1),
             ]))
             .expect("a layout with one of each kind");
         let buffer = device
@@ -1548,10 +1557,11 @@ mod tests {
                     0,
                     BindingKind::SampledImage {
                         view_type: ImageViewType::D2,
+                        sample_type: SampleType::Float,
                     },
                     1,
                 ),
-                entry(1, BindingKind::Sampler, 1),
+                entry(1, BindingKind::Sampler { comparison: false }, 1),
             ]))
             .expect("a texture and a sampler");
         let pipeline_layout = device
@@ -1629,6 +1639,7 @@ mod tests {
                 0,
                 BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
                 1,
             )]))

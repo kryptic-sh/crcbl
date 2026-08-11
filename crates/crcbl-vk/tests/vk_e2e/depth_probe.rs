@@ -20,7 +20,7 @@ use crate::mesh::MESH_EXTENT;
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Device, Extent3d,
     Format, ImageAspect, ImageSubresourceLayers, MemoryLocation, PresentInfo, ResourceState,
-    SubmitInfo,
+    SampleType, SubmitInfo,
 };
 
 /// Two overlapping quads, the **near one drawn first**, so the depth test is the
@@ -74,6 +74,21 @@ struct DepthProbe {
     /// layer 0 and the shader multiplies by what it finds there.
     base_color_page: crcbl_render::UploadedTexture,
     base_color_sampler: crcbl_hal::SamplerHandle,
+    /// A 1×1 `D32Float` image standing in for topic 18's shadow atlas, and its
+    /// **comparison** sampler.
+    ///
+    /// Bound for the same reason the white page above is bound: `mesh.slang`
+    /// declares `shadow_atlas` and `shadow_sampler`, and a layout that leaves a
+    /// declared binding out is refused at pipeline creation — or, as that page's
+    /// comment records, is a `SIGSEGV` on lavapipe rather than a message.
+    ///
+    /// It is never sampled. The uniform block below sets every cascade's reach
+    /// to zero, so every fragment takes `sun_visibility`'s "past the last split"
+    /// path and is fully lit — which is what keeps this probe's depth answers
+    /// the ones it recorded before shadows existed.
+    shadow_atlas: crcbl_hal::ImageHandle,
+    shadow_atlas_view: crcbl_hal::ImageViewHandle,
+    shadow_sampler: crcbl_hal::SamplerHandle,
     layout: crcbl_hal::BindGroupLayoutHandle,
     group: crcbl_hal::BindGroupHandle,
     pipeline_layout: crcbl_hal::PipelineLayoutHandle,
@@ -339,6 +354,38 @@ impl DepthProbe {
             })
             .expect("a sampler");
 
+        let shadow_atlas = device
+            .create_image(&crcbl_hal::ImageDesc {
+                label: Some("probe shadow atlas"),
+                image_type: crcbl_hal::ImageType::D2,
+                extent: Extent3d::d2(1, 1),
+                format: Format::D32Float,
+                mip_levels: 1,
+                samples: 1,
+                usage: crcbl_hal::ImageUsage::DEPTH_STENCIL_ATTACHMENT
+                    .union(crcbl_hal::ImageUsage::SAMPLED),
+                memory: MemoryLocation::DeviceLocal,
+            })
+            .expect("a depth image");
+        let shadow_atlas_view = device
+            .create_image_view(&crcbl_hal::ImageViewDesc {
+                label: Some("probe shadow atlas"),
+                image: shadow_atlas,
+                view_type: crcbl_hal::ImageViewType::D2,
+                format: Format::D32Float,
+                range: crcbl_hal::ImageSubresourceRange::all(Format::D32Float),
+            })
+            .expect("a depth view");
+        let shadow_sampler = device
+            .create_sampler(&crcbl_hal::SamplerDesc {
+                label: Some("probe shadow comparison"),
+                // `Some` is what makes it a comparison sampler, and the layout
+                // below says the same thing in the vocabulary WebGPU needs.
+                compare: Some(crcbl_hal::CompareOp::Greater),
+                ..crcbl_hal::SamplerDesc::default()
+            })
+            .expect("a comparison sampler");
+
         let entries = [
             crcbl_hal::BindGroupLayoutEntry {
                 binding: 0,
@@ -435,6 +482,7 @@ impl DepthProbe {
                 // backend and WebGPU refuses a layout that disagrees.
                 kind: crcbl_hal::BindingKind::SampledImage {
                     view_type: crcbl_hal::ImageViewType::D2Array,
+                    sample_type: SampleType::Float,
                 },
                 count: 1,
                 flags: crcbl_hal::BindingFlags::empty(),
@@ -443,7 +491,26 @@ impl DepthProbe {
                 binding: 8,
                 visibility: crcbl_hal::ShaderStages::VERTEX
                     .union(crcbl_hal::ShaderStages::FRAGMENT),
-                kind: crcbl_hal::BindingKind::Sampler,
+                kind: crcbl_hal::BindingKind::Sampler { comparison: false },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 15,
+                visibility: crcbl_hal::ShaderStages::VERTEX
+                    .union(crcbl_hal::ShaderStages::FRAGMENT),
+                kind: crcbl_hal::BindingKind::SampledImage {
+                    view_type: crcbl_hal::ImageViewType::D2,
+                    sample_type: SampleType::Depth,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 16,
+                visibility: crcbl_hal::ShaderStages::VERTEX
+                    .union(crcbl_hal::ShaderStages::FRAGMENT),
+                kind: crcbl_hal::BindingKind::Sampler { comparison: true },
                 count: 1,
                 flags: crcbl_hal::BindingFlags::empty(),
             },
@@ -499,6 +566,16 @@ impl DepthProbe {
                 binding: 8,
                 array_index: 0,
                 resource: crcbl_hal::BindingResource::Sampler(base_color_sampler),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 15,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::ImageView(shadow_atlas_view),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 16,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::Sampler(shadow_sampler),
             },
         ];
         let group = device
@@ -565,6 +642,9 @@ impl DepthProbe {
             visible_instances,
             base_color_page,
             base_color_sampler,
+            shadow_atlas,
+            shadow_atlas_view,
+            shadow_sampler,
             layout,
             group,
             pipeline_layout,
@@ -577,6 +657,9 @@ impl DepthProbe {
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group(self.group);
         device.destroy_bind_group_layout(self.layout);
+        device.destroy_sampler(self.shadow_sampler);
+        device.destroy_image_view(self.shadow_atlas_view);
+        device.destroy_image(self.shadow_atlas);
         device.destroy_sampler(self.base_color_sampler);
         self.base_color_page.destroy(device);
         device.destroy_buffer(self.visible_instances);
@@ -608,6 +691,15 @@ fn render_probe(
         light_direction: [0.0, 0.0, 1.0, 0.0],
         light_color: [0.8, 0.8, 0.8, 0.0],
         ambient: [0.2, 0.2, 0.2, 0.0],
+        // This probe binds no shadow atlas and draws through a pipeline of its
+        // own, so the cascades are never sampled. Identity matrices and a zero
+        // reach say that plainly: a fragment whose eye distance is past every
+        // split takes the shader's "outside the cascade" path, which is fully
+        // lit — the same picture the probe asserted before shadows existed.
+        shadow_view_proj: [glam::Mat4::IDENTITY.to_cols_array();
+            crcbl_shaders::mesh::SHADOW_CASCADES],
+        cascade_far: [0.0; 4],
+        shadow_params: [0.0; 4],
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())
@@ -647,12 +739,28 @@ fn render_probe(
             "probe-depth",
             crcbl_render::TransientImageDesc::scene_depth(MESH_EXTENT),
         );
+        // Declared so the graph gives the placeholder atlas a shader-read
+        // layout before the set is bound. Nothing samples it — see the field —
+        // but a descriptor pointing at an image in no layout at all is a
+        // validation error whether or not the shader reads it.
+        let shadow = graph.import_image(
+            "probe-shadow-atlas",
+            crcbl_render::ImportedImage {
+                image: probe.shadow_atlas,
+                view: probe.shadow_atlas_view,
+                format: Format::D32Float,
+                extent: (1, 1),
+                initial: ResourceState::Undefined,
+                final_state: ResourceState::ShaderRead,
+            },
+        );
         graph
             .add_render_pass("probe")
             .clear_color(target, [0.0, 0.0, 0.0, 1.0])
             // The reversed-Z clear: `depth::CLEAR` = 0.0, so any geometry beats
             // the empty buffer under `Greater`.
             .clear_depth(depth)
+            .read_image(shadow)
             .execute(|ctx| {
                 let encoder = ctx.encoder();
                 encoder.bind_graphics_pipeline(probe.pipeline);

@@ -16,6 +16,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`BindingKind::SampledImage` gained `sample_type` and `BindingKind::Sampler`
+  became a struct variant with `comparison`.** Every construction has to name
+  them — `SampleType::Float` and `comparison: false` reproduce the old behaviour
+  — and every `match` on `Sampler` becomes `Sampler { .. }`.
+
+  A shadow map needs both and neither was expressible: WebGPU takes the sample
+  type and the sampler's comparison mode in the **layout**, so a `D32Float` view
+  bound as `Float { filterable: true }` is refused at pipeline creation whatever
+  the sampler does. This is the gap `docs/backlog.md` predicted when `view_type`
+  closed the dimension half. `crcbl-wgpu` consumes both; Vulkan, Metal and D3D12
+  read them off the sampler and the view and each says so where it drops them.
+  **The wgpu suite is the only local gate on this** — the other three would not
+  have noticed a mistake.
+
 - **`crcbl_hal::CommandEncoder` gained `draw_mesh_tasks_indirect`**, so anything
   implementing that trait outside this workspace has a new method to write. It
   takes the existing `DrawIndirect`, and the argument buffer holds **three
@@ -240,6 +254,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   silence. Failures are now tracked per submission and logged as errors.
 
 ### Added
+
+- **The sun casts shadows — topic 18's cascaded shadow maps, at two cascades.**
+  `crcbl_render::shadow` computes practical-split distances, a stable
+  sphere-around-the-eye fit and texel-snapped reversed-Z orthographic
+  projections; `ForwardRenderer` renders a depth-only pass into a cascades-wide
+  `D32Float` atlas, one `DrawGen` cull dispatch per cascade as the plan asks,
+  and `mesh.slang`'s `sun_visibility` selects a cascade by eye distance and
+  filters it with 3x3 hardware PCF. It runs on every `GeometryPath` —
+  `mesh_cluster.slang` shares the fragment stage — and `SHADOW_CASCADES` is a
+  constant checked against both shader sources, so three is a number rather than
+  a rewrite.
+
+  The shadow pass reuses the colour pipeline's own vertex and mesh stages
+  unmodified, by binding a second copy of the frame block whose `view_proj` is
+  the cascade matrix. There is no second transform path to drift.
+
+  Shadowing multiplies the sun's diffuse and specular only, so a shadowed
+  surface keeps its ambient and reads as dark rather than black.
+
+  `crates/crcbl/tests/golden/cube.png` was re-blessed on lavapipe because its
+  three co-located pyramids now shadow one another. **Vulkan and wgpu render the
+  new reference identically, at zero differing pixels each** — two independent
+  backends agreeing is what says the picture is right rather than one backend's
+  bug blessed into a file. `mesh.png`, `mesh_second.png` and `mesh_ortho.png`
+  are unchanged at zero differing pixels, which is the evidence there is no
+  acne: a lone cube is pixel-identical to before.
 
 - **`crcbl_scene::lod` — the LOD chain topic 25 specifies.**
   `build_lod_chain(positions, indices, ratios)` composes the simplifier and the

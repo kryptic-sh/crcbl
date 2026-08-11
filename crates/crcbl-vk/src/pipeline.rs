@@ -1114,7 +1114,7 @@ fn check_resource_kind(
         ) | (
             BindingKind::SampledImage { .. } | BindingKind::StorageImage { .. },
             BindingResource::ImageView(_)
-        ) | (BindingKind::Sampler, BindingResource::Sampler(_))
+        ) | (BindingKind::Sampler { .. }, BindingResource::Sampler(_))
     );
     if ok {
         return Ok(());
@@ -1252,7 +1252,7 @@ fn write_descriptors(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl_hal::ImageViewType;
+    use crcbl_hal::{ImageViewType, SampleType};
 
     // The layout rules themselves are tested where they now live —
     // `BindGroupLayoutDesc::check_entries` in `crcbl-hal`. That this backend
@@ -1303,6 +1303,7 @@ mod tests {
         let error = check_resource_kind(
             BindingKind::SampledImage {
                 view_type: ImageViewType::D2,
+                sample_type: SampleType::Float,
             },
             &BindingResource::whole_buffer(buffer),
             7,
@@ -1310,12 +1311,17 @@ mod tests {
         .expect_err("a buffer cannot fill an image binding");
         assert!(error.to_string().contains('7'), "{error}");
 
-        check_resource_kind(BindingKind::Sampler, &BindingResource::Sampler(sampler), 0)
-            .expect("a sampler fills a sampler binding");
+        check_resource_kind(
+            BindingKind::Sampler { comparison: false },
+            &BindingResource::Sampler(sampler),
+            0,
+        )
+        .expect("a sampler fills a sampler binding");
         assert!(
             check_resource_kind(
                 BindingKind::SampledImage {
-                    view_type: ImageViewType::D2
+                    view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
                 &BindingResource::Sampler(sampler),
                 0

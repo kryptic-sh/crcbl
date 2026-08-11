@@ -748,7 +748,18 @@ mod tests {
                 // `Texture2DArray` of base colours (7) and the sampler that
                 // reads it (8). The sampler is the row's first `Sampler`, so it
                 // takes `s0` while the images go on counting `t`s.
-                &[Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler],
+                //
+                // Then topic 18's sun cascades, at bindings 15 and 16 — the gap
+                // is `mesh_cluster.slang`'s and D3D12 does not see it, because
+                // a register is counted per class in declaration order and not
+                // taken from the binding number. So the shadow atlas is `t6`
+                // and its **comparison** sampler is `s1`: HLSL puts a
+                // `SamplerComparisonState` in the same `s#` space as a
+                // `SamplerState`, which is why it is one more `Sampler` here
+                // rather than a class of its own.
+                &[
+                    Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler,
+                ],
             ),
             (
                 "sprite",

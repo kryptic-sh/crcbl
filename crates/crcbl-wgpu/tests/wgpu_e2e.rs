@@ -39,9 +39,9 @@ use crcbl_hal::{
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, IndexFormat,
     Instance, LoadOp, MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc, PresentInfo,
     PresentMode, PrimitiveState, PushConstantRange, QueueKind, ReadbackDesc, ReadbackState, Rect2d,
-    RenderPassDesc, ResourceState, SemaphoreDesc, SemaphoreKind, SemaphoreSignal, SemaphoreWait,
-    ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, SubmitInfo, SurfaceError, SwapchainDesc,
-    Viewport,
+    RenderPassDesc, ResourceState, SampleType, SemaphoreDesc, SemaphoreKind, SemaphoreSignal,
+    SemaphoreWait, ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, SubmitInfo, SurfaceError,
+    SwapchainDesc, Viewport,
 };
 use crcbl_wgpu::WgpuInstance;
 
@@ -2801,7 +2801,7 @@ fn array_layout(device: &dyn Device, count: u32) -> crcbl_hal::BindGroupLayoutHa
         crcbl_hal::BindGroupLayoutEntry {
             binding: SCALAR_BINDING,
             visibility: ShaderStages::FRAGMENT,
-            kind: crcbl_hal::BindingKind::Sampler,
+            kind: crcbl_hal::BindingKind::Sampler { comparison: false },
             count: 1,
             flags: crcbl_hal::BindingFlags::empty(),
         },
@@ -2810,6 +2810,7 @@ fn array_layout(device: &dyn Device, count: u32) -> crcbl_hal::BindGroupLayoutHa
             visibility: ShaderStages::FRAGMENT,
             kind: crcbl_hal::BindingKind::SampledImage {
                 view_type: ImageViewType::D2,
+                sample_type: SampleType::Float,
             },
             count,
             flags,
@@ -2936,6 +2937,7 @@ fn a_wgpu_shader_reads_the_array_element_the_bind_group_put_in_each_slot() {
             visibility: ShaderStages::COMPUTE,
             kind: crcbl_hal::BindingKind::SampledImage {
                 view_type: ImageViewType::D2,
+                sample_type: SampleType::Float,
             },
             count: ARRAY_COUNT,
             flags: crcbl_hal::BindingFlags::PARTIALLY_BOUND,
@@ -3295,7 +3297,7 @@ fn a_wgpu_bind_group_layout_flag_this_device_cannot_honour_is_refused_not_droppe
             crcbl_hal::BindGroupLayoutEntry {
                 binding: SCALAR_BINDING,
                 visibility: ShaderStages::FRAGMENT,
-                kind: crcbl_hal::BindingKind::Sampler,
+                kind: crcbl_hal::BindingKind::Sampler { comparison: false },
                 count: 1,
                 flags: crcbl_hal::BindingFlags::empty(),
             },
@@ -3304,6 +3306,7 @@ fn a_wgpu_bind_group_layout_flag_this_device_cannot_honour_is_refused_not_droppe
                 visibility: ShaderStages::FRAGMENT,
                 kind: crcbl_hal::BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
                 count: 1,
                 flags,
@@ -3356,7 +3359,7 @@ fn a_wgpu_bind_group_layout_flag_this_device_cannot_honour_is_refused_not_droppe
         let scalar = crcbl_hal::BindGroupLayoutEntry {
             binding: SCALAR_BINDING,
             visibility: ShaderStages::FRAGMENT,
-            kind: crcbl_hal::BindingKind::Sampler,
+            kind: crcbl_hal::BindingKind::Sampler { comparison: false },
             count: 1,
             flags: crcbl_hal::BindingFlags::empty(),
         };
@@ -3365,6 +3368,7 @@ fn a_wgpu_bind_group_layout_flag_this_device_cannot_honour_is_refused_not_droppe
             visibility: ShaderStages::FRAGMENT,
             kind: crcbl_hal::BindingKind::SampledImage {
                 view_type: ImageViewType::D2,
+                sample_type: SampleType::Float,
             },
             count: ARRAY_COUNT,
             flags: crcbl_hal::BindingFlags::VARIABLE_COUNT
@@ -3500,7 +3504,7 @@ fn a_wgpu_variable_count_the_entries_contradict_is_refused_not_dropped() {
             crcbl_hal::BindGroupLayoutEntry {
                 binding: SCALAR_BINDING,
                 visibility: ShaderStages::FRAGMENT,
-                kind: crcbl_hal::BindingKind::Sampler,
+                kind: crcbl_hal::BindingKind::Sampler { comparison: false },
                 count: 1,
                 flags: crcbl_hal::BindingFlags::empty(),
             },
@@ -3509,6 +3513,7 @@ fn a_wgpu_variable_count_the_entries_contradict_is_refused_not_dropped() {
                 visibility: ShaderStages::FRAGMENT,
                 kind: crcbl_hal::BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
                 count: ARRAY_COUNT,
                 flags: crcbl_hal::BindingFlags::VARIABLE_COUNT
@@ -3624,7 +3629,7 @@ fn a_wgpu_binding_declaring_no_descriptors_is_refused_by_number() {
         [crcbl_hal::BindGroupLayoutEntry {
             binding: ARRAY_BINDING,
             visibility: ShaderStages::FRAGMENT,
-            kind: crcbl_hal::BindingKind::Sampler,
+            kind: crcbl_hal::BindingKind::Sampler { comparison: false },
             count,
             flags: crcbl_hal::BindingFlags::empty(),
         }]
@@ -3702,6 +3707,7 @@ fn a_wgpu_bind_group_layout_wgpu_rejects_arrives_as_an_error_from_the_call() {
         visibility: ShaderStages::FRAGMENT,
         kind: crcbl_hal::BindingKind::SampledImage {
             view_type: ImageViewType::D2,
+            sample_type: SampleType::Float,
         },
         count: ARRAY_COUNT,
         flags: crcbl_hal::BindingFlags::empty(),
@@ -3786,6 +3792,7 @@ fn a_wgpu_bind_group_layout_wgpu_rejects_arrives_as_an_error_from_the_call() {
             visibility: ShaderStages::FRAGMENT,
             kind: crcbl_hal::BindingKind::SampledImage {
                 view_type: ImageViewType::D2,
+                sample_type: SampleType::Float,
             },
             count: u32::MAX,
             flags: crcbl_hal::BindingFlags::VARIABLE_COUNT

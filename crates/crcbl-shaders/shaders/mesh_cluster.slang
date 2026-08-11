@@ -121,7 +121,19 @@ struct MeshVertex
     float4 uv;
 };
 
+/// Matching `static const uint SHADOW_CASCADES` in `mesh.slang`, because
+/// `FrameUniforms` below sizes an array with it and a block this file thought
+/// was shorter is one whose later members it reads at the wrong offsets.
+static const uint SHADOW_CASCADES = 2;
+
 /// Matching `struct FrameUniforms` in `mesh.slang`.
+///
+/// The shadow members are declared and **not read**: nothing in this file
+/// shades, and the shadow pass reaches its cascade matrix through `view_proj`
+/// rather than through `shadow_view_proj`, exactly as `mesh.slang` says. They
+/// are here because this block and that one must be the same bytes — `mesh.slang`'s
+/// `fragmentMain` is this pipeline's fragment stage and reads them out of the
+/// same buffer.
 struct FrameUniforms
 {
     float4x4 view_proj;
@@ -129,6 +141,9 @@ struct FrameUniforms
     float4 light_direction;
     float4 light_color;
     float4 ambient;
+    float4x4 shadow_view_proj[SHADOW_CASCADES];
+    float4 cascade_far;
+    float4 shadow_params;
 };
 
 /// Matching `struct GpuInstance` in `mesh.slang`.

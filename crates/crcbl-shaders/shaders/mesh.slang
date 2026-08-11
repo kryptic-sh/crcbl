@@ -152,6 +152,20 @@ struct MeshVertex
     float4 uv;
 };
 
+/// How many cascades the sun's shadow map is split into, matching
+/// `crcbl_shaders::mesh::SHADOW_CASCADES`.
+///
+/// `docs/plan/18-render-features.md`'s shadow section asks for "2–3 cascades".
+/// It is one number here and one on the CPU, checked against each other by that
+/// module's `the_cascade_count_matches_the_one_mesh_slang_declares`, because a
+/// shader reading three matrices out of a block the CPU wrote two into reads the
+/// next member as a matrix.
+///
+/// **Four is the ceiling** and it is `cascade_far` below that sets it: the split
+/// distances are one `float4`, so a fifth cascade would have nowhere to say
+/// where it ends.
+static const uint SHADOW_CASCADES = 2;
+
 /// Everything the frame needs that is not geometry, matching
 /// `crcbl_shaders::mesh::FrameUniforms`.
 ///
@@ -176,6 +190,37 @@ struct FrameUniforms
     float4 light_color;
     /// Flat ambient term in `rgb`; `w` unused. A real irradiance probe is P7.
     float4 ambient;
+    /// World → cascade `i`'s shadow clip, one matrix per cascade.
+    ///
+    /// Orthographic and reversed-Z like every other projection here, so a
+    /// caster at the light's near plane stores 1.0 and the far plane stores 0.0
+    /// — which is why the comparison below is `Greater` and not `Less`.
+    ///
+    /// **The shadow pass reads this block through `view_proj`, not through
+    /// here.** Cascade `i` is rendered by binding a second copy of this whole
+    /// struct whose `view_proj` *is* `shadow_view_proj[i]`, which is what lets
+    /// the depth-only pipeline reuse `vertexMain` and `mesh_cluster.slang`'s
+    /// mesh stage unchanged rather than being a second transform path that could
+    /// disagree with the first. This array is the *fragment* stage's copy, for
+    /// putting a shaded point back into the map's space.
+    float4x4 shadow_view_proj[SHADOW_CASCADES];
+    /// Component `i` is how far from the eye cascade `i` reaches, in world
+    /// units; a fragment picks the first cascade whose distance covers it.
+    ///
+    /// Only the first `SHADOW_CASCADES` components are read. The rest are
+    /// written as the last real split so an out-of-range read — which cannot
+    /// happen, but would be silent if it did — selects the widest cascade rather
+    /// than a zero that shadows everything.
+    float4 cascade_far;
+    /// `x`: one shadow-atlas texel in `u`. `y`: one texel in `v`. `z`: the
+    /// constant depth bias. `w`: the slope-scaled coefficient the bias adds on
+    /// top of it, per unit of `tan(acos(N·L))`.
+    ///
+    /// The two texel sizes are not equal: the atlas is `SHADOW_CASCADES` square
+    /// tiles side by side, so `x` is `1 / (tile * cascades)` and `y` is
+    /// `1 / tile`. Deriving one from the other is how the PCF kernel ends up
+    /// sampling a rectangle.
+    float4 shadow_params;
 };
 
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
@@ -379,6 +424,51 @@ Texture2DArray<float4> base_color_textures;
 [[vk::binding(8, 0)]]
 SamplerState base_color_sampler;
 
+/// The sun's cascaded shadow map: `SHADOW_CASCADES` square tiles **side by side
+/// in one 2D image**, tile `i` holding cascade `i`.
+///
+/// # An atlas, not a `Texture2DArray`
+///
+/// One layer per cascade is the textbook shape and it is not the shape here,
+/// because of what is on the *writing* side: the shadow pass renders cascade `i`
+/// by setting a viewport over tile `i` of a single attachment, and a
+/// `crcbl_render::graph` render pass attaches an image, not one of its layers.
+/// An array would need per-layer attachment views the graph does not build.
+///
+/// Bindings 9 to 14 are `mesh_cluster.slang`'s, and this file's `fragmentMain`
+/// is the fragment stage of *that* pipeline too — so the numbering here skips
+/// past them rather than colliding with them. See that file's header.
+///
+/// # `DepthTexture2D`, and not `Texture2D<float>`
+///
+/// The two are the same HLSL declaration and the same D3D12 SRV, and they are
+/// **not** the same WGSL. `Texture2D<float>` lowers to `texture_2d<f32>`, which
+/// `textureSampleCompareLevel` does not accept — WebGPU's comparison sample
+/// takes a `texture_depth_2d` and nothing else, so the artifact compiled but
+/// could never have been created into a pipeline. `DepthTexture2D` is Slang's
+/// name for that type and it lowers correctly on all four: `texture_depth_2d`,
+/// `depth2d<float, access::sample>` in MSL, an `OpTypeImage` with `Depth = 1` in
+/// SPIR-V, and the same `Texture2D` at `t#` in HLSL.
+///
+/// It is the same distinction the seam grew `SampleType::Depth` for, one layer
+/// down: a depth image is a different *kind* of sampled image on the two targets
+/// that have a binding model, and identical on the two that do not.
+[[vk::binding(15, 0)]]
+DepthTexture2D shadow_atlas;
+
+/// The comparison sampler the atlas is read through — **hardware PCF**.
+///
+/// `SamplerComparisonState`, not `SamplerState`: each `SampleCmpLevelZero`
+/// below returns the *filtered fraction of four texels that passed the depth
+/// test*, so the 3×3 kernel is nine hardware-bilinear comparisons rather than
+/// nine raw fetches the shader compares and averages itself. Created with
+/// `CompareOp::Greater` and linear filtering by `crcbl_render::forward`, and
+/// `Greater` is the reversed-Z spelling of "the receiver is nearer the light
+/// than whatever was stored" — see `crcbl_hal::SamplerDesc::compare`, which
+/// carries the same warning.
+[[vk::binding(16, 0)]]
+SamplerComparisonState shadow_sampler;
+
 struct VertexOutput
 {
     float4 position : SV_Position;
@@ -459,6 +549,99 @@ static const float SPECULAR_POWER = 32.0;
 /// How much of the light colour the specular lobe contributes.
 static const float SPECULAR_STRENGTH = 0.35;
 
+/// Ceiling on the slope-scaled part of the depth bias, in shadow-clip depth.
+///
+/// `tan(acos(N·L))` runs to infinity as a surface turns edge-on to the light,
+/// and an unbounded bias there is peter-panning — the contact point of a shadow
+/// slides away from its caster. Bounded rather than removed because the same
+/// term is what keeps a *steeply* lit surface free of acne; the clamp is the
+/// standard pairing.
+static const float SHADOW_SLOPE_BIAS_CLAMP = 5.0;
+
+/// The fraction of the sun this fragment can see: `1.0` fully lit, `0.0` fully
+/// shadowed, and the values between are the PCF filter.
+///
+/// `n_dot_l` is the *unclamped* Lambert term. A surface facing away from the
+/// light is already black from the diffuse term, and asking the shadow map about
+/// it is both wasted work and the place self-shadowing acne is worst, so it
+/// returns early — the caller multiplies the result into a diffuse term that is
+/// zero there anyway.
+float sun_visibility(float3 world_position, float n_dot_l)
+{
+    if (n_dot_l <= 0.0)
+    {
+        return 1.0;
+    }
+
+    // The first cascade whose reach covers this fragment. Distance to the eye
+    // rather than view-space z: the splits are radii around the camera, so a
+    // fragment at the edge of the screen and one straight ahead at the same
+    // distance land in the same cascade and the seam is a sphere rather than a
+    // plane the camera can rotate.
+    float eye_distance = length(world_position - frame.camera_position.xyz);
+    uint cascade = SHADOW_CASCADES - 1;
+    for (uint index = 0; index < SHADOW_CASCADES; ++index)
+    {
+        if (eye_distance < frame.cascade_far[index])
+        {
+            cascade = index;
+            break;
+        }
+    }
+
+    float4 clip = mul(frame.shadow_view_proj[cascade], float4(world_position, 1.0));
+    // Orthographic, so `w` is 1 and the divide is a formality — written out
+    // anyway because nothing in this file may assume which constructor built a
+    // matrix, which is `Projection`'s whole point on the CPU side.
+    float3 ndc = clip.xyz / clip.w;
+    if (any(abs(ndc.xy) > 1.0) || ndc.z <= 0.0)
+    {
+        // Outside this cascade's box, or beyond its far plane. Lit: a shadow map
+        // knows nothing about what it never rendered, and inventing a shadow
+        // there is a black band across everything past the last split.
+        return 1.0;
+    }
+
+    // Y-up NDC to top-left texture space, which is the flip `crcbl_render`'s
+    // projections push into the viewport rather than into the matrix.
+    float2 tile_uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    float2 texel = frame.shadow_params.xy;
+
+    // Slope-scaled bias: `tan(acos(x)) == sqrt(1 - x²) / x`, computed that way
+    // rather than through two transcendentals.
+    float cosine = saturate(n_dot_l);
+    float slope = sqrt(saturate(1.0 - cosine * cosine)) / max(cosine, 1e-4);
+    float bias = frame.shadow_params.z
+               + frame.shadow_params.w * min(slope, SHADOW_SLOPE_BIAS_CLAMP);
+    // **Added, not subtracted.** Reversed-Z: a larger depth is nearer the
+    // light, so moving the receiver's reference *up* is moving it towards the
+    // light, which is the direction that stops a surface shadowing itself.
+    float reference = ndc.z + bias;
+
+    // 3×3 PCF, in tile space so a tap never leaves this cascade for its
+    // neighbour's. The clamp is half a texel inside the tile: the comparison
+    // sampler filters a 2×2 neighbourhood around each tap, so a tap exactly on
+    // the edge would still reach across it.
+    float2 tile_min = float2(0.5, 0.5) * texel * float2(float(SHADOW_CASCADES), 1.0);
+    float visibility = 0.0;
+    for (int y = -1; y <= 1; ++y)
+    {
+        for (int x = -1; x <= 1; ++x)
+        {
+            // The offset is applied in *tile* space and the tile is
+            // `1 / SHADOW_CASCADES` of the atlas wide, so the u step is the
+            // atlas texel scaled back up — one shadow-map texel either way.
+            float2 offset = float2(float(x), float(y)) * texel
+                          * float2(float(SHADOW_CASCADES), 1.0);
+            float2 tap = clamp(tile_uv + offset, tile_min, 1.0 - tile_min);
+            float2 atlas_uv =
+                float2((float(cascade) + tap.x) / float(SHADOW_CASCADES), tap.y);
+            visibility += shadow_atlas.SampleCmpLevelZero(shadow_sampler, atlas_uv, reference);
+        }
+    }
+    return visibility / 9.0;
+}
+
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input) : SV_Target
 {
@@ -484,7 +667,8 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     float4 albedo = input.color * material.base_color * texel;
 
     // Lambert.
-    float diffuse = max(dot(normal, to_light), 0.0);
+    float n_dot_l = dot(normal, to_light);
+    float diffuse = max(n_dot_l, 0.0);
 
     // Blinn: the half-vector form, not Phong's reflection vector. Cheaper, and
     // it is what every later specular model in this engine is a refinement of.
@@ -492,6 +676,15 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     float specular = pow(max(dot(normal, half_vector), 0.0), SPECULAR_POWER);
     // No light on the back of a surface, whatever the half-vector says.
     specular *= step(0.0, diffuse) * diffuse;
+
+    // The cascaded shadow map, and the *only* place it enters the shading.
+    // Topic 18's rule that both lighting paths share one BRDF is what makes it
+    // one multiplier on the sun's direct terms rather than a branch: ambient is
+    // not the sun and keeps its full value in shadow, which is what stops a
+    // shadowed surface from being black.
+    float visibility = sun_visibility(input.world_position, n_dot_l);
+    diffuse *= visibility;
+    specular *= visibility;
 
     float3 lit = albedo.rgb * (frame.ambient.rgb + frame.light_color.rgb * diffuse)
                + frame.light_color.rgb * (specular * SPECULAR_STRENGTH);

@@ -635,12 +635,18 @@ pub(crate) const fn descriptor_range_type(
                 D3D12_DESCRIPTOR_RANGE_TYPE_UAV
             })
         }
-        // The `view_type` is dropped: a descriptor range names a register and a
-        // type, never a dimension. What the shader reads is decided by the
-        // `D3D12_SHADER_RESOURCE_VIEW_DESC` the SRV was created with — see
-        // `crate::device`'s view creation. Only WebGPU wants it in the layout.
+        // The `view_type` and the `sample_type` are both dropped: a descriptor
+        // range names a register and a type, never a dimension or a format. What
+        // the shader reads is decided by the `D3D12_SHADER_RESOURCE_VIEW_DESC`
+        // the SRV was created with — see `crate::device`'s view creation. Only
+        // WebGPU wants either in the layout.
         BindingKind::SampledImage { .. } => Some(D3D12_DESCRIPTOR_RANGE_TYPE_SRV),
-        BindingKind::Sampler => None,
+        // `comparison` is dropped with it: a `D3D12_SAMPLER_DESC` decides
+        // whether it compares through its `ComparisonFunc` and a `_COMPARISON_`
+        // filter, which is `sampler_desc` below reading `SamplerDesc::compare`.
+        // A `SamplerComparisonState` and a `SamplerState` occupy the same `s#`
+        // register space and the same heap.
+        BindingKind::Sampler { .. } => None,
     }
 }
 
@@ -664,7 +670,7 @@ pub(crate) const fn shader_visibility(stages: ShaderStages) -> D3D12_SHADER_VISI
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crcbl_hal::ImageViewType;
+    use crcbl_hal::{ImageViewType, SampleType};
     use windows::Win32::Graphics::Direct3D12::{
         D3D12_COMPARISON_FUNC_NONE, D3D12_TEXTURE_ADDRESS_MODE_MIRROR_ONCE,
     };
@@ -1292,14 +1298,18 @@ mod tests {
     /// descriptor table from mixing heap types by construction.
     #[test]
     fn a_sampler_has_no_view_range_and_writability_picks_srv_or_uav() {
-        assert_eq!(descriptor_range_type(BindingKind::Sampler), None);
+        assert_eq!(
+            descriptor_range_type(BindingKind::Sampler { comparison: false }),
+            None
+        );
         assert_eq!(
             descriptor_range_type(BindingKind::UniformBuffer { dynamic: false }),
             Some(D3D12_DESCRIPTOR_RANGE_TYPE_CBV)
         );
         assert_eq!(
             descriptor_range_type(BindingKind::SampledImage {
-                view_type: ImageViewType::D2
+                view_type: ImageViewType::D2,
+                sample_type: SampleType::Float,
             }),
             Some(D3D12_DESCRIPTOR_RANGE_TYPE_SRV)
         );

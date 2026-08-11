@@ -60,6 +60,37 @@ pub type ComputePipelineHandle = Handle<ComputePipeline>;
 
 // --- descriptors -----------------------------------------------------------
 
+/// What a sampled image's texels mean to the shader that reads them.
+///
+/// Carried on [`BindingKind::SampledImage`] for the same reason
+/// [`view_type`](BindingKind::SampledImage::view_type) is: WebGPU puts it in the
+/// *layout*. `wgpu::BindingType::Texture` has a `sample_type`, a depth-format
+/// texture is only bindable as [`Depth`](SampleType::Depth), and a layout that
+/// says otherwise is refused at pipeline creation. Vulkan, Metal and D3D12 take
+/// the interpretation off the view's format and ignore this — each backend's
+/// conversion says where it drops it.
+///
+/// Two variants and not four: integer and multisampled sampled images are
+/// things no shader in this engine declares, and a variant nothing constructs is
+/// a variant no backend's mapping was ever checked against.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SampleType {
+    /// Ordinary filterable colour texels — a `Texture2D<float4>`.
+    #[default]
+    Float,
+    /// A depth texture read through a comparison sampler: HLSL's
+    /// `Texture2D<float>` beside a `SamplerComparisonState`, WGSL's
+    /// `texture_depth_2d`.
+    ///
+    /// The [`BindingKind::Sampler`] filtering it must set its
+    /// `comparison` flag, and the sampler object
+    /// bound into that slot must carry a
+    /// [`SamplerDesc::compare`](crate::SamplerDesc::compare) — the layout says
+    /// what the shader declared, the descriptor says what the hardware does, and
+    /// WebGPU checks the pair.
+    Depth,
+}
+
 /// What kind of resource a binding slot holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BindingKind {
@@ -97,6 +128,12 @@ pub enum BindingKind {
         /// this slot was created with — see
         /// [`ImageViewDesc::view_type`](crate::ImageViewDesc::view_type).
         view_type: ImageViewType,
+        /// How the shader reads the texels — see [`SampleType`].
+        ///
+        /// It must match the format every [`BindingResource::ImageView`] filling
+        /// this slot was created with: [`SampleType::Depth`] takes a depth
+        /// format and nothing else.
+        sample_type: SampleType,
     },
     /// A read/write storage image.
     StorageImage {
@@ -109,7 +146,22 @@ pub enum BindingKind {
     /// model wants one big image array and a handful of samplers, not a
     /// combinatorial product of the two, and DX12/WebGPU have no combined type
     /// at all.
-    Sampler,
+    Sampler {
+        /// Whether the shader declared it as a comparison sampler — HLSL's
+        /// `SamplerComparisonState`, WGSL's `sampler_comparison` — rather than
+        /// an ordinary filtering one.
+        ///
+        /// Here for the same reason [`SampleType`] is: WebGPU puts it in the
+        /// layout, as `wgpu::SamplerBindingType::Comparison`, and refuses a
+        /// comparison sampler bound through a `Filtering` slot. The other three
+        /// backends take it off the sampler object — which carries
+        /// [`SamplerDesc::compare`](crate::SamplerDesc::compare) — and ignore
+        /// this, saying so at the arm that drops it.
+        ///
+        /// The two must agree: a `true` here filtering a sampler created with
+        /// `compare: None` is a layout describing a sampler that does not exist.
+        comparison: bool,
+    },
 }
 
 bitflags::bitflags! {
@@ -1269,6 +1321,7 @@ mod tests {
             BindGroupLayoutEntry {
                 kind: BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
                 ..binding(
                     1,

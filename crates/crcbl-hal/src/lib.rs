@@ -240,8 +240,8 @@ pub use pipeline::{
     ComputePipeline, ComputePipelineDesc, ComputePipelineHandle, CullMode, DepthBias,
     DepthStencilState, FrontFace, GraphicsPipeline, GraphicsPipelineDesc, GraphicsPipelineHandle,
     MeshPipelineDesc, MultisampleState, PipelineLayout, PipelineLayoutDesc, PipelineLayoutHandle,
-    PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange, StencilFaceState, StencilOp,
-    StencilState, Viewport,
+    PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange, SampleType,
+    StencilFaceState, StencilOp, StencilState, Viewport,
 };
 pub use query::{QueryKind, QuerySet, QuerySetDesc, QuerySetHandle};
 pub use readback::{Readback, ReadbackDesc, ReadbackHandle, ReadbackState};

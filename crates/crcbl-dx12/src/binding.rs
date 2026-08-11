@@ -1116,7 +1116,7 @@ fn null_view(device: &ID3D12Device, at: D3D12_CPU_DESCRIPTOR_HANDLE) {
 mod tests {
     use super::*;
     use crcbl_core::Handle;
-    use crcbl_hal::{BindingResource, ImageViewType};
+    use crcbl_hal::{BindingResource, ImageViewType, SampleType};
 
     /// A device with the resource-binding tier this backend targets: bindless,
     /// and no mesh stage — which is what `crcbl-dx12`'s adapter reports.
@@ -1166,11 +1166,12 @@ mod tests {
                     dynamic: false,
                 },
             ),
-            entry(1, BindingKind::Sampler),
+            entry(1, BindingKind::Sampler { comparison: false }),
             entry(
                 2,
                 BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
             ),
         ];
@@ -1234,6 +1235,7 @@ mod tests {
                     1,
                     BindingKind::SampledImage {
                         view_type: ImageViewType::D2,
+                        sample_type: SampleType::Float,
                     },
                 )
             },
@@ -1289,6 +1291,7 @@ mod tests {
     fn the_seams_own_rules_arrive_through_plan_layout() {
         let image = BindingKind::SampledImage {
             view_type: ImageViewType::D2,
+            sample_type: SampleType::Float,
         };
         let cases: Vec<(&str, Vec<BindGroupLayoutEntry>)> = vec![
             (
@@ -1300,7 +1303,10 @@ mod tests {
             ),
             (
                 "declared twice",
-                vec![entry(0, image), entry(0, BindingKind::Sampler)],
+                vec![
+                    entry(0, image),
+                    entry(0, BindingKind::Sampler { comparison: false }),
+                ],
             ),
             (
                 "not the last entry",
@@ -1309,13 +1315,13 @@ mod tests {
                         flags: BindingFlags::VARIABLE_COUNT,
                         ..entry(0, image)
                     },
-                    entry(1, BindingKind::Sampler),
+                    entry(1, BindingKind::Sampler { comparison: false }),
                 ],
             ),
             (
                 "not the highest-numbered binding",
                 vec![
-                    entry(5, BindingKind::Sampler),
+                    entry(5, BindingKind::Sampler { comparison: false }),
                     BindGroupLayoutEntry {
                         flags: BindingFlags::VARIABLE_COUNT,
                         ..entry(1, image)
@@ -1420,6 +1426,7 @@ mod tests {
         let limits = caps().limits;
         let image = BindingKind::SampledImage {
             view_type: ImageViewType::D2,
+            sample_type: SampleType::Float,
         };
 
         let flat = [BindGroupLayoutEntry {
@@ -1475,7 +1482,7 @@ mod tests {
                     dynamic: false,
                 },
             ),
-            entry(2, BindingKind::Sampler),
+            entry(2, BindingKind::Sampler { comparison: false }),
             entry(
                 3,
                 BindingKind::StorageBuffer {
@@ -1487,6 +1494,7 @@ mod tests {
                 4,
                 BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
             ),
         ];
@@ -1557,6 +1565,7 @@ mod tests {
                 4,
                 BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
             ),
         ];

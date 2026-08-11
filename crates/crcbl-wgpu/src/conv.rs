@@ -7,7 +7,7 @@
 use crcbl_hal::{
     BackendKind, BlendFactor, BlendOp, BufferUsage, CompareOp, CullMode, FilterMode, Format,
     FrontFace, HalError, ImageAspect, ImageUsage, ImageViewType, IndexFormat, MemoryLocation,
-    PolygonMode, PrimitiveTopology, SamplerAddressMode, ShaderStages, StencilOp,
+    PolygonMode, PrimitiveTopology, SampleType, SamplerAddressMode, ShaderStages, StencilOp,
 };
 
 /// The HAL format set is a subset of wgpu's, so this is total — see
@@ -389,13 +389,18 @@ pub fn map_view_dimension(t: ImageViewType) -> wgpu::TextureViewDimension {
 /// image was anything else, so this refuses instead.
 ///
 /// A sampled image's view dimension comes from
-/// [`BindingKind::SampledImage::view_type`], because this is the backend that
-/// needs it: wgpu compares the layout's `view_dimension` against the view's at
-/// pipeline creation and rejects the pair, where the other three read the view
-/// and never look at the layout. Sampled images are still assumed
-/// single-sampled and float-filterable, which is what every sampled binding in
-/// the engine is; a shadow-comparison or integer sampled image would need
-/// information the seam does not yet carry.
+/// [`BindingKind::SampledImage::view_type`] and its sample type from
+/// [`BindingKind::SampledImage::sample_type`], because this is the backend that
+/// needs both: wgpu compares the layout's `view_dimension` and `sample_type`
+/// against the bound view at pipeline creation and rejects the pair, where the
+/// other three read the view and never look at the layout. Same for a sampler's
+/// [`comparison`](BindingKind::Sampler::comparison) flag, which is
+/// `SamplerBindingType::Comparison` here and a property of the sampler *object*
+/// everywhere else.
+///
+/// Sampled images are still assumed single-sampled: MSAA sources are not a thing
+/// any shader in this engine declares. Integer sampled images are the same, and
+/// [`SampleType`] says so.
 pub fn map_binding_kind(k: BindingKind) -> Result<wgpu::BindingType, HalError> {
     Ok(match k {
         BindingKind::UniformBuffer { dynamic } => wgpu::BindingType::Buffer {
@@ -408,8 +413,11 @@ pub fn map_binding_kind(k: BindingKind) -> Result<wgpu::BindingType, HalError> {
             has_dynamic_offset: dynamic,
             min_binding_size: None,
         },
-        BindingKind::SampledImage { view_type } => wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        BindingKind::SampledImage {
+            view_type,
+            sample_type,
+        } => wgpu::BindingType::Texture {
+            sample_type: map_sample_type(sample_type),
             view_dimension: map_view_dimension(view_type),
             multisampled: false,
         },
@@ -420,8 +428,27 @@ pub fn map_binding_kind(k: BindingKind) -> Result<wgpu::BindingType, HalError> {
                        bind-group-layout creation and BindingKind::StorageImage carries neither",
             });
         }
-        BindingKind::Sampler => wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        BindingKind::Sampler { comparison: false } => {
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
+        }
+        BindingKind::Sampler { comparison: true } => {
+            wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison)
+        }
     })
+}
+
+/// Sample types, for the one backend that puts them in the layout.
+///
+/// `filterable: true` for [`SampleType::Float`] because every colour texture in
+/// the engine is read through a filtering sampler. A depth texture is neither
+/// filterable nor unfilterable in WebGPU's vocabulary: `TextureSampleType::Depth`
+/// is its own variant and it is the only one a depth-format view may be bound
+/// through, which is exactly why the seam had to grow a field to say it.
+pub fn map_sample_type(t: SampleType) -> wgpu::TextureSampleType {
+    match t {
+        SampleType::Float => wgpu::TextureSampleType::Float { filterable: true },
+        SampleType::Depth => wgpu::TextureSampleType::Depth,
+    }
 }
 
 #[cfg(test)]
@@ -521,8 +548,11 @@ mod tests {
             ),
             (ImageViewType::D3, wgpu::TextureViewDimension::D3),
         ] {
-            let binding = map_binding_kind(BindingKind::SampledImage { view_type })
-                .expect("a sampled image is expressible");
+            let binding = map_binding_kind(BindingKind::SampledImage {
+                view_type,
+                sample_type: SampleType::Float,
+            })
+            .expect("a sampled image is expressible");
             let wgpu::BindingType::Texture { view_dimension, .. } = binding else {
                 panic!("{view_type:?} did not map to a texture binding: {binding:?}");
             };
@@ -532,6 +562,61 @@ mod tests {
             );
             // And the same answer the view gets, because wgpu compares the two.
             assert_eq!(map_view_dimension(view_type), expected);
+        }
+    }
+
+    /// **A depth texture and a comparison sampler reach the layout as
+    /// themselves**, which on this backend is the difference between a shadow
+    /// map that builds and one that does not.
+    ///
+    /// Both fields were constants here until the shadow pass needed them, and a
+    /// constant passes a one-case test: the float and the depth case are
+    /// asserted together, and so are the filtering and the comparison sampler,
+    /// so a mapping that answered one thing to everything fails whichever
+    /// constant it picked.
+    ///
+    /// wgpu enforces the pairing at pipeline creation — a `texture_depth_2d`
+    /// declared through `Float { filterable: true }` is "sample type Float is
+    /// incompatible with depth", and a `sampler_comparison` through `Filtering`
+    /// is the sampler-side twin — and the other three backends notice neither,
+    /// which is why this assertion lives in this crate.
+    #[test]
+    fn a_depth_texture_and_a_comparison_sampler_are_declared_as_such() {
+        for (sample_type, expected) in [
+            (
+                SampleType::Float,
+                wgpu::TextureSampleType::Float { filterable: true },
+            ),
+            (SampleType::Depth, wgpu::TextureSampleType::Depth),
+        ] {
+            let binding = map_binding_kind(BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+                sample_type,
+            })
+            .expect("a sampled image is expressible");
+            let wgpu::BindingType::Texture {
+                sample_type: mapped,
+                ..
+            } = binding
+            else {
+                panic!("{sample_type:?} did not map to a texture binding: {binding:?}");
+            };
+            assert_eq!(mapped, expected, "{sample_type:?} must reach the layout");
+        }
+
+        for (comparison, expected) in [
+            (false, wgpu::SamplerBindingType::Filtering),
+            (true, wgpu::SamplerBindingType::Comparison),
+        ] {
+            let binding = map_binding_kind(BindingKind::Sampler { comparison })
+                .expect("a sampler is expressible");
+            let wgpu::BindingType::Sampler(mapped) = binding else {
+                panic!("comparison={comparison} did not map to a sampler: {binding:?}");
+            };
+            assert_eq!(
+                mapped, expected,
+                "comparison={comparison} must reach the layout"
+            );
         }
     }
 

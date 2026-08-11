@@ -58,8 +58,8 @@ use crcbl_hal::{
     BufferHandle, BufferUsage, ColorTargetState, ColorWrites, Device, FilterMode, Format,
     GraphicsPipelineDesc, GraphicsPipelineHandle, HalError, ImageViewHandle, ImageViewType,
     IndexFormat, LoadOp, MemoryLocation, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
-    QueueHandle, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
-    ShaderStages, StoreOp,
+    QueueHandle, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry,
+    ShaderModuleDesc, ShaderStages, StoreOp,
 };
 
 use crcbl_shaders::{Stage, UI};
@@ -230,6 +230,7 @@ impl UiRenderer {
                 visibility: ShaderStages::FRAGMENT,
                 kind: BindingKind::SampledImage {
                     view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
                 },
                 count: 1,
                 flags: BindingFlags::empty(),
@@ -237,7 +238,7 @@ impl UiRenderer {
             BindGroupLayoutEntry {
                 binding: 1,
                 visibility: ShaderStages::FRAGMENT,
-                kind: BindingKind::Sampler,
+                kind: BindingKind::Sampler { comparison: false },
                 count: 1,
                 flags: BindingFlags::empty(),
             },

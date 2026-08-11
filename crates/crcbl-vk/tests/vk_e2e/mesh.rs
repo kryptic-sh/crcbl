@@ -1622,14 +1622,27 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
             // draw-argument dispatches would be asserting on a zero the graph
             // fills in for them.
             let mut rendered = 0;
+            let mut shadow_atlas = false;
             for pass in compiled.passes() {
                 if pass.kind() != crcbl_render::PassKind::Render {
                     continue;
                 }
                 rendered += 1;
+                // The shadow pass is the one render pass that does **not**
+                // follow the window: topic 18's atlas is a quality setting, so
+                // a resize must leave its extent alone. Asserting that here
+                // rather than skipping the pass is what makes the claim
+                // checkable — a shadow atlas re-created at the swapchain's size
+                // would still render, and every golden would still pass.
+                let expected = if pass.label() == "shadow" {
+                    shadow_atlas = true;
+                    crcbl_render::shadow::atlas_extent()
+                } else {
+                    extent
+                };
                 assert_eq!(
                     (pass.render_area().width, pass.render_area().height),
-                    extent,
+                    expected,
                     "pass {:?} rendered at the wrong size",
                     pass.label()
                 );
@@ -1637,6 +1650,10 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
             assert!(
                 rendered >= 2,
                 "the forward and tonemap passes, or this loop checked nothing"
+            );
+            assert!(
+                shadow_atlas,
+                "no shadow pass in the frame, so the extent above checked nothing"
             );
             compiled
                 .execute(device, &mut pool, encoder.as_mut(), None)

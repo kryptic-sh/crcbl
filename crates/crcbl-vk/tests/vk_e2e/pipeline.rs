@@ -15,7 +15,7 @@
 //! lavapipe rather than on one of them.
 
 use crate::harness::Headless;
-use crcbl_hal::Features;
+use crcbl_hal::{Features, SampleType};
 
 /// The tier story for bind-group layouts, against whatever this machine is.
 ///
@@ -51,6 +51,7 @@ fn a_bindless_capable_layout_is_accepted_or_refused_according_to_the_tier() {
             visibility: crcbl_hal::ShaderStages::FRAGMENT,
             kind: crcbl_hal::BindingKind::SampledImage {
                 view_type: crcbl_hal::ImageViewType::D2,
+                sample_type: SampleType::Float,
             },
             // The seam's "as many as you can"; the backend clamps it to the
             // device's own `max_bindless_descriptors`.

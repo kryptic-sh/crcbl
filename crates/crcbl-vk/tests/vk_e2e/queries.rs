@@ -16,6 +16,13 @@ use crate::harness::Headless;
 use crate::mesh::{MESH_EXTENT, MESH_SECONDS, mesh_camera};
 use crcbl_hal::{CommandEncoderDesc, Features, PresentInfo, QueryKind, QuerySetDesc, SubmitInfo};
 
+/// How many passes one forward frame records, and therefore how many timers it
+/// takes to see all of them.
+///
+/// Three compute passes per cull — one cull for the camera and one per shadow
+/// cascade — then the depth-only shadow pass, the colour pass and the tonemap.
+const TIMED_PASSES: u32 = 3 * (1 + crcbl_render::shadow::CASCADES as u32) + 3;
+
 /// Timestamp queries, if the device has them: the profiler HUD's foundation,
 /// and the seam says it degrades rather than breaks without them.
 #[test]
@@ -91,7 +98,12 @@ fn per_pass_gpu_timers_report_real_numbers() {
     let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
         .expect("the forward renderer builds");
     let mut timers =
-        crcbl_render::PassTimers::new(device, 2, 8).expect("the device reports timestamps");
+        // Room for every pass the forward frame records: the camera's cull
+        // triple, one per shadow cascade, and the three render passes. A
+        // capacity short of that is not an error — `PassTimers` warns and times
+        // the ones that fit — so a literal here would have turned this
+        // assertion into a check on a truncated prefix.
+        crcbl_render::PassTimers::new(device, 2, TIMED_PASSES).expect("the device reports timestamps");
     let camera = mesh_camera(crcbl_render::Projection::default());
 
     // Enough frames for the timer ring to come round and resolve a slot.
@@ -152,13 +164,23 @@ fn per_pass_gpu_timers_report_real_numbers() {
 
     let timings = timers.latest();
     eprintln!("vk e2e: {}", timings.report());
+    // The camera's cull triple, then one per shadow cascade, then the depth-only
+    // pass they feed and the two that follow it. Built from
+    // `crcbl_render::shadow::CASCADES` rather than written out, so a cascade
+    // whose passes stopped being recorded is a failure here and not a shorter
+    // HUD nobody counted.
+    let mut expected: Vec<&str> = Vec::new();
+    for _ in 0..=crcbl_render::shadow::CASCADES {
+        expected.extend(["clear-counters", "cull", "draw-args"]);
+    }
+    expected.extend(["shadow", "forward", "tonemap"]);
     assert_eq!(
         timings
             .passes
             .iter()
             .map(|pass| pass.label.as_str())
             .collect::<Vec<_>>(),
-        vec!["clear-counters", "cull", "draw-args", "forward", "tonemap"],
+        expected,
         "the report must name the passes the graph ran, in order — the three \
          compute dispatches that generate the draws included, which is what the \
          per-pass HUD is for"
