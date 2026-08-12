@@ -5907,6 +5907,33 @@ harness has a precedent for a demo whose input is not a keypress.
   `clap` and delete it "when this file passes roughly two hundred lines of
   `match`" — a line it was well past before this added 285 more.
 
+## Two CI installs turn a download flake into a hard red, and one cannot self-heal
+
+Both hit on 2026-08-12, within an hour, on commits that could not have caused
+either. Neither is a defect in the tree and both cost a red build and a re-run.
+
+- **`decoder fuzz (libFuzzer)`** — `taiki-e/install-action` could not download a
+  prebuilt `cargo-fuzz 0.13.1` from either GitHub releases or QuickInstall, fell
+  back to building it from source, and **that build cannot succeed on current
+  Rust**: it pulls `proc-macro-error 1.0.4`, which fails with "attributes
+  starting with `rustc` are reserved for use by the `rustc` compiler". So the
+  fallback is not a slow path, it is a broken one, and every download flake is a
+  hard failure. Pinning a `cargo-fuzz` whose source still builds, or caching the
+  binary, would make this self-healing. **Every meaningful step was skipped** —
+  the fuzzer did not run at all.
+- **`shaders (committed artifacts match their sources)`** —
+  `Install the pinned dxc` failed with curl exit 56 (failure receiving network
+  data) and the comparison was skipped. Nothing wrong with the artifacts;
+  verified locally with the pinned compilers before re-running, and the re-run
+  passed.
+
+**The shape worth naming**, because it recurs: a failed install leaves the real
+check **skipped**, and a skipped check is not a passed one. The Pages deploy did
+the same thing earlier in the session — the build failed and the deploy was
+_skipped_, which reads as a green-looking push with nothing shipped. When
+reading a red run, check whether the meaningful step ran at all before
+diagnosing the code.
+
 ## Profiling and benchmarking: decisions taken 2026-08-13, before any code
 
 `docs/plan/40-profiling.md` is new and specifies the whole thing; it is a
