@@ -69,6 +69,19 @@ The GPU side is genuinely good and the rest is not there at all:
   a build that changes what it measures is the classic way to measure the wrong
   thing. The cost when disabled is one relaxed atomic load per span. A
   compile-time switch exists for shipping builds and is off by default in `dev`.
+
+  **And it must not be a Cargo feature** — decided 2026-08-13, after building
+  one and finding out what it did. CI's only two workspace test runs both pass
+  `--all-features`, so an additive `trace-off` feature is _on_ in CI and every
+  test then asserts the compiled-out arm: a green light on code CI never ran.
+  Feature unification means a top-level binary could not turn it back off
+  either. When the switch earns its place it is `--cfg crcbl_trace_off` with a
+  `build.rs` declaring `cargo::rustc-check-cfg`, which does not unify —
+  `--all-features` keeps testing the real code and a shipping build sets
+  `RUSTFLAGS`. Until there is a shipping build to serve there is no switch at
+  all: the runtime gate's measured cost when off is one plain byte load and a
+  tail jump, which is the number this bullet is asking for.
+
 - **Percentiles, not means.** A benchmark reports p50, p95, p99 and max. Frame
   time is a tail problem — a mean hides exactly the stutter a player notices,
   and this project has already recorded a case where a within-arm spread was
@@ -103,9 +116,20 @@ One shape, used everywhere, so a trace has one timeline:
   frame — draws, instances submitted and drawn, clusters, triangles, pool bytes
   resident, staging bytes in flight, jobs run, steals.
 
-Where it lives is an implementation decision the first slice takes and records;
-the constraint is that `crcbl-jobs`, `crcbl-phys`, `crcbl-render` and the
-samples must all be able to open a span without a dependency cycle.
+### Where it lives (taken 2026-08-13)
+
+**`crcbl_core::trace`**, beside `crcbl_core::time` and `crcbl_core::log`. Those
+are the same kind of thing — the facilities every other crate reaches for and
+none of them owns — and `crcbl-core` is already the bottom of the graph: it
+depends on nothing of ours, and every crate that has to open a span depends on
+it already, except `crcbl-jobs`, which gains it.
+
+A separate `crcbl-trace` crate was the alternative and was declined: it would
+buy separation nothing needs, and a new crate is structure to carry forever for
+a module that is a few hundred lines. If the trace machinery ever grows a
+serialiser and a wire format big enough to want its own compile unit, moving it
+is a re-export away — which is not true of the dependency edge, and the
+dependency edge is the part that has to be right now.
 
 ## `crcbl bench`
 

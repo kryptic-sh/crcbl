@@ -6151,11 +6151,39 @@ not re-argued when a slice starts:
 timestamps (`crcbl_render::timing`) wired into `CompiledGraph::execute`, frames
 latent by design, a pass's span deliberately including its barriers, degrading
 to an empty report without `Features::TIMESTAMP_QUERY`, and feeding a
-`DebugModule`. That half is good. What is absent is everything else: **no CPU
-spans at all**, no benchmark harness beyond horde's ad-hoc flags, no baseline or
-comparison, no trace export, no memory or pool-occupancy accounting, no
-`crcbl-jobs` instrumentation, and counters scattered across `SceneStats`,
-`visible_count` and each sample's own rows rather than one place.
+`DebugModule`. That half is good. What is absent is everything else: no
+benchmark harness beyond horde's ad-hoc flags, no baseline or comparison, no
+trace export, no memory or pool-occupancy accounting, no `crcbl-jobs`
+instrumentation, and counters scattered across `SceneStats`, `visible_count` and
+each sample's own rows rather than one place.
+
+**`crcbl_core::trace` landed the mechanism; nothing is instrumented yet.** What
+that slice left owed:
+
+- **Nothing opens a span.** The frame loop, the ECS schedule, physics, upload
+  and record are the next slice, and the debug panel's CPU-vs-GPU row is what
+  makes it visible. Until then the module is exercised only by its own tests.
+- **Enabling the trace in a browser build panics on the first span.**
+  `std::time::Instant::now` compiles on `wasm32-unknown-unknown` and panics at
+  runtime — `std`'s unsupported-platform stub. Left loud rather than papered
+  over with a zero clock, and the gate starts off so a browser build that never
+  enables it never reads the clock. A real browser clock is `performance.now()`
+  through a dependency `crcbl-core` does not have, which is **a decision for the
+  user** when the browser wants a trace.
+- **No environment entry point.** There is `set_enabled` and nothing reads
+  `CRCBL_TRACE` the way `CRCBL_LOG` is read. Deliberate — an env reader with no
+  caller is speculative — and the slice that instruments the frame loop is where
+  it belongs.
+- **`crcbl-jobs` has not gained the `crcbl-core` edge.** Correct today: CI runs
+  `cargo machete`, which fails on an unused dependency, so the edge arrives with
+  the first span opened in a worker.
+- **The compile-time kill switch was built and then deleted.** It was a Cargo
+  feature, and CI's only two workspace test runs both pass `--all-features`, so
+  it would have been _on_ in CI and every test would have asserted the
+  compiled-out arm — green on code CI never ran. When it earns its place it is
+  `--cfg crcbl_trace_off` with a `build.rs`, not a feature;
+  `docs/plan/40-profiling.md` records the argument. Nothing ships from this repo
+  yet, so it has no caller either way.
 
 **`crcbl_render::MAX_TIMED_PASSES` bounds this crate's renderers, not the
 caller's own passes** — a deliberate call, taken 2026-08-13. Every renderer here

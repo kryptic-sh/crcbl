@@ -22,6 +22,10 @@
 //! * [`rand`] — deterministic values from an index, for simulations that
 //!   replay. Deliberately not a generator; see the module docs for why every
 //!   sample independently arrived at the same shape.
+//! * [`trace`] — [`Span`](trace::Span) and [`counter`](trace::counter), the CPU
+//!   half of the profiler: scoped spans with static names, nesting freely and
+//!   carrying the thread they ran on, plus named `u64` counters. Compiled into
+//!   every build and gated at runtime; see the module docs for what that costs.
 //! * [`surface`] — [`SurfaceTarget`], the native window handles the shell
 //!   produces and a HAL backend consumes. It lives here, and not in either of
 //!   those crates, because neither may depend on the other; see the module docs
@@ -34,6 +38,7 @@ pub mod log;
 pub mod rand;
 pub mod surface;
 pub mod time;
+pub mod trace;
 pub mod world;
 
 pub use alloc::FrameArena;

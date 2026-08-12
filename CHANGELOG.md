@@ -334,6 +334,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_core::trace`: CPU spans and counters**, topic 40's span API. A scoped
+  span with a static name, opened and closed by RAII and nesting freely; a
+  counter is its sibling, a named `u64` sampled at the depth it was taken from.
+  `drain()` is the frame boundary and hands back a snapshot per thread.
+
+  **Always compiled and gated at runtime**, because a profiler you must rebuild
+  to use is one nobody turns on mid-investigation. Disabled it costs one relaxed
+  load, a test and a tail jump — read out of the release assembly rather than
+  asserted — and the gate starts off.
+
+  Records are a flat begin/end stream per thread rather than a tree, which is
+  what Chrome Trace, a p50/p95 scan and per-thread tracks all want; each record
+  carries the depth it sat at, so nesting is read rather than walked. A thread's
+  buffer is fixed and **refuses rather than grows or evicts** — evicting the
+  oldest record would take out the frame's own begin — and every refusal is
+  counted and reported. Threads get a small numbered track with their name
+  attached, since a Chrome Trace `tid` and a panel row both need a number and
+  `ThreadId` has none.
+
+  Nothing is instrumented yet: this slice is the mechanism, and the frame loop,
+  the debug row and the trace export are the ones after it.
+
 - **Point lights cast shadows too, through six atlas tiles rather than a cube
   map.** The grid is 4×2 now: two cascades and a six-tile light region. Faces
   are the cube-map order — `+X -X +Y -Y +Z -Z` — built by `shadow::face_axis` on
