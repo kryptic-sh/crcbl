@@ -5789,6 +5789,59 @@ a wasm regression in this code would not be observed by anything. The refusals
 that do not need an array layout — the flags gate, `count: 0`, the in-band
 layout error — run on every adapter, so that half is not skip-shaped.
 
+## Profiling and benchmarking: decisions taken 2026-08-13, before any code
+
+`docs/plan/40-profiling.md` is new and specifies the whole thing; it is a
+cross-cutting track in the roadmap alongside CLI, testing, audio, persistence,
+debug tools and pixel art. Nothing is implemented. The decisions, so they are
+not re-argued when a slice starts:
+
+- **Trace export is Chrome Trace Event JSON**, which Perfetto and
+  `chrome://tracing` both read. Text, no dependency, and `crcbl-cli` already has
+  JSON machinery. **Tracy was considered and declined for now**: it is a client
+  library, therefore a new dependency and the user's call, and its wire protocol
+  is not something to hand-roll. If it is wanted later it is an optional feature
+  over the same span data rather than a second instrumentation pass.
+- **Spans are always compiled and gated at runtime by an atomic**, not compiled
+  out behind a feature. A profiler you have to rebuild to use is one nobody
+  turns on mid-investigation, and a build that changes what it measures is the
+  classic way to measure the wrong thing. A compile-time off switch exists for
+  shipping builds. The cost of this decision — one relaxed atomic load per span
+  when disabled — should be measured rather than asserted, by benchmarking the
+  profiler itself.
+- **Benchmarks report p50/p95/p99/max, not means.** Frame time is a tail problem
+  and a mean hides the stutter a player notices. This session already produced a
+  case where a within-arm spread was wider than the between-arm difference being
+  claimed, which is the same failure in miniature.
+- **CI publishes benchmark numbers and does not gate on them.** A shared runner
+  is far slower and noisier than a dev box — the roadmap says so already — so CI
+  proves the benchmark _runs_ and stores the output as an artifact; comparison
+  happens against a baseline from a known machine. A perf gate that fails for
+  reasons unrelated to the commit is a gate people learn to ignore.
+- **A benchmark's output carries its environment or it is not comparable**:
+  adapter, driver, backend, the three capability selectors, build profile,
+  commit. A comparison against a baseline from different hardware should be
+  refused rather than printed.
+- **The GPU report stays frames-latent.** No benchmark mode "reads it properly"
+  by stalling, because a stall changes what is being measured.
+
+**What the survey found already built**, so no slice rebuilds it: per-pass GPU
+timestamps (`crcbl_render::timing`) wired into `CompiledGraph::execute`, frames
+latent by design, a pass's span deliberately including its barriers, degrading
+to an empty report without `Features::TIMESTAMP_QUERY`, and feeding a
+`DebugModule`. That half is good. What is absent is everything else: **no CPU
+spans at all**, no benchmark harness beyond horde's ad-hoc flags, no baseline or
+comparison, no trace export, no memory or pool-occupancy accounting, no
+`crcbl-jobs` instrumentation, and counters scattered across `SceneStats`,
+`visible_count` and each sample's own rows rather than one place.
+
+**A concrete bug this survey turned up**: `MAX_TIMED_PASSES` is hand-written per
+sample — 4 in `apps/hud`, 8 in `apps/horde` — and the forward frame now records
+**12** passes, so `PassTimers` warns and times the first eight and the tail is
+silently missing from the panel. Already recorded from the shadow slice; noting
+it here because it is the profiler under-reporting itself, which is the worst
+category of the lot.
+
 ## Sidecar meta RON: three items now want it, and the workspace has no RON reader
 
 `docs/plan/06-assets-scenes.md` and topic 25 both assume a `crate.glb.meta.ron`

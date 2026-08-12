@@ -202,6 +202,13 @@ standing requirement on samples, not a feature they opt into — see
 [sample/00-samples-overview.md](sample/00-samples-overview.md). Three
 consequences for how it is built:
 
+- **The perf rows are specified in [40-profiling.md](40-profiling.md)**, not
+  here. That topic owns what is measured and how — CPU frame time beside GPU
+  frame time with percentiles and which of the two is the budget, the per-pass
+  list sorted by cost, the CPU breakdown, counters, memory and pool occupancy,
+  job-system utilisation, and a freeze toggle so a spike can be read rather than
+  chased. This topic owns how they are drawn: they are ordinary
+  `DebugModule`/`DebugSection` rows and get no special treatment.
 - **Frame timing and FPS are unconditional.** Every sample has a frame, so the
   first module has no precondition and no configuration. This is the part
   **pulled forward out of P10** and built before S2, because breakout and flappy

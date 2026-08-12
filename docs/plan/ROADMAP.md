@@ -1165,8 +1165,8 @@ gets recorded in the relevant crate's docs rather than worked around silently.
 
 ## Cross-cutting tracks
 
-Five pillars deliver in slices across every phase (their own docs carry the
-slice tables):
+Six pillars deliver in slices across every phase (their own docs carry the slice
+tables):
 
 - **CLI/headless** ([11-cli-headless.md](11-cli-headless.md)) — `crcbl` binary
   grows a phase at a time; every subsystem is scriptable the phase it lands.
@@ -1186,6 +1186,16 @@ slice tables):
   requirements above; the frame-timing core was pulled forward out of P10 and is
   built, and every sample contributes its own modules through it. The netgraph
   and the rest of the debug suite are still P10.
+- **Profiling and benchmarking** ([40-profiling.md](40-profiling.md)) — CPU
+  spans and counters land beside the per-pass GPU timestamps that already exist,
+  `crcbl bench` arrives with the job system that first needs proving, and the
+  panel's perf rows land with the UI slice that owns the panel. **The tooling
+  goes in before the optimisation phase, not with it** — a profiler bolted on
+  afterwards never covers the code written before it, which is the same argument
+  §1.3 makes for putting timestamp queries in the seam at P0. CI publishes
+  benchmark numbers and deliberately does **not** gate on them; a shared runner
+  is far noisier than a dev box and a perf gate people learn to ignore is worse
+  than none.
 - **Pixel art** ([specs/crcbl/pix.md](../specs/crcbl/pix.md)) — `.crpix` text
   baked at build time and drawn through `SpriteRenderer`. Every sample that
   should have pixel art uses it; see the standing requirements above.
