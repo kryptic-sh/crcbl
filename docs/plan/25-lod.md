@@ -102,9 +102,18 @@ constants a generated case of the same thing, and is a bake output in the sense
 topic 6 means — when the real asset pipeline arrives it replaces the generator,
 not the consumer.
 
-Rejected: a dev-dependency on `crcbl-scene` (helps tests, leaves the shipping
-path with no data), and a conversion in a crate that can see both (the renderer
-still cannot reach it).
+Rejected as a **delivery mechanism**: generating the data from a dev-dependency
+at test time, which gives tests data and leaves the shipping path with none; and
+a conversion in a crate that can see both, which the renderer still cannot
+reach.
+
+A dev-dependency is nevertheless how the generator _runs_, and that is not the
+rejected thing — the shipping path reads the committed artifact either way.
+`crcbl-scene` already depends on `crcbl-shaders`, so cargo refuses a normal
+dependency back and a `[[bin]]` cannot see dev-dependencies; a dev-dependency
+cycle is allowed and an **example** can see one. So the generator is an example
+with `crcbl-scene` as a dev-dependency, and `cargo build -p crcbl-shaders`
+builds that crate alone.
 
 ### What the fallback paths do
 

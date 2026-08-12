@@ -920,23 +920,6 @@ pub(crate) mod tests {
         (positions, indices)
     }
 
-    /// One period of a smooth bump: zero with zero slope at every integer, one
-    /// at every half-integer, and a quartic in between.
-    ///
-    /// `16 f²(1-f)²` for `f` the fractional part of `t`. Its derivative
-    /// `32 f (1-f) (1-2f)` vanishes at both ends of a period, so tiling it
-    /// leaves no crease at the joins — which a sine would also give, and this
-    /// gives without a sine. That matters: `sinf`/`cosf` are not
-    /// correctly-rounded and differ in the last place between glibc, Apple's
-    /// libm and MSVC, so a fixture built from them is a fixture whose vertex
-    /// positions differ per platform. Everything here is `+`, `-`, `*`, `/` and
-    /// [`f32::floor`], all of which IEEE 754 pins exactly.
-    fn bump(t: f32) -> f32 {
-        let f = t - t.floor();
-        let g = f * (1.0 - f);
-        16.0 * g * g
-    }
-
     /// A field of rounded domes on a 9 × 7 lattice, four units tall.
     ///
     /// The dense fixture: [`height_field`] at a size that clusters into tens of
@@ -952,10 +935,18 @@ pub(crate) mod tests {
     ///   not line up with the clustering and no two regions are the same
     ///   geometry twice.
     ///
+    /// **The surface itself is [`crcbl_shaders::dunes::height`]**, not a copy of
+    /// it. `docs/plan/25-lod.md`'s "How a DAG reaches the renderer" made that
+    /// function shipped geometry — the patch whose cluster DAG is committed in
+    /// `crcbl-shaders` — and the crate that ships it is one this crate already
+    /// depends on. So the surface the decimator is *tested* against and the
+    /// surface the engine actually *draws* are one definition, and neither can
+    /// drift from the other without this fixture's pinned counts moving.
+    ///
     /// `pub(crate)` because [`crate::cluster_dag`] is what needs a mesh this
-    /// dense, and a second copy of it would be a second surface to keep exact.
+    /// dense.
     pub(crate) fn dunes(x: f32, y: f32) -> f32 {
-        4.0 * bump(x / 9.0) * bump(y / 7.0)
+        crcbl_shaders::dunes::height(x, y)
     }
 
     /// Adversarial on purpose. Both wavelengths are close to two grid steps and

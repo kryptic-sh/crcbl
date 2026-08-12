@@ -255,6 +255,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A cooked cluster DAG reaches the renderer's crate, and a model built to
+  exercise it.** `crcbl_shaders::dunes` is a 64x64 height-field patch — 4225
+  vertices, 8192 triangles, 64 units across against a 4-unit amplitude — and
+  `crates/crcbl-shaders/clusters/dunes.dag` is its cluster DAG cooked to a
+  committed binary artifact: 7 levels, 103 leaf clusters down to 6.
+
+  The seam mirrors the shader arrangement. `tools/cook-clusters.rs` generates
+  the artifact from `crcbl_scene::cluster_dag::build_cluster_dag`, `--check`
+  regenerates and compares, and CI runs it. **`crcbl-shaders` stays
+  dependency-free**: `crcbl-scene` already depends on it, so cargo refuses a
+  normal dependency back and a `[[bin]]` cannot see dev-dependencies — but a
+  dev-dependency cycle is allowed and an _example_ can see one, so the generator
+  is an example and `cargo build -p crcbl-shaders` builds that crate alone.
+
+  Every DAG invariant is re-asserted **over the committed bytes** rather than an
+  in-memory DAG: coverage, crack-free cuts by the position-bit edge count,
+  monotone error, group spheres containing every sphere below. Nothing was lost
+  in cooking.
+
+  The height function moved into `crcbl-shaders` and `crcbl-scene`'s test
+  fixture delegates to it, so the surface the decimator is tested against and
+  the one the engine draws cannot drift — the 93 existing `crcbl-scene` tests
+  passing unchanged, including ones pinning exact triangle counts, is the
+  evidence the arithmetic is bit-identical. Vertex normals come from the
+  **analytic gradient** of the height, so a decimated level is shaded against
+  the real surface rather than against faces the simplifier moved.
+
+  From an eye at the near edge, the near third of the patch draws levels 0 and 1
+  while the far third draws level 2 — a two-level gap across one draw of one
+  mesh, driven by distance.
+
 - **The cluster DAG carries what a GPU descent needs, and states the selection
   rule.** `ClusterGroup` gained `error()`, `bounds()` and
   `projected_error(eye, pixels_per_unit)`; `GroupBounds` is the group's sphere;

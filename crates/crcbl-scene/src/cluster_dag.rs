@@ -936,7 +936,7 @@ mod tests {
     ///
     /// Written as a literal rather than `0.5 * 192.0 / (PI / 6.0).tan()`
     /// because `tanf` is not correctly rounded and differs in the last place
-    /// between libms — the same argument `simplify`'s `bump` makes — and the
+    /// between libms — the same argument `crcbl_shaders::dunes` makes — and the
     /// counts below are pinned by equality. Nothing here turns on the exact
     /// figure; it sets the scale at which the budget picks a level.
     const PIXELS_PER_UNIT: f32 = 166.0;

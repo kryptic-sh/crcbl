@@ -464,6 +464,8 @@ dependencies = [
 name = "crcbl-shaders"
 version = "0.1.0"
 dependencies = [
+ "crcbl-scene",
+ "glam",
  "naga",
 ]
 

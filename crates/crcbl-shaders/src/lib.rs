@@ -183,6 +183,15 @@ pub mod mesh;
 /// declares. `crcbl_scene::meshlet` is what builds them.
 pub mod meshlet;
 
+/// The dunes patch: the terrain-sized mesh `docs/plan/25-lod.md`'s per-cluster
+/// selection needs, and the geometry [`cluster_dag`]'s committed DAG is built
+/// over.
+pub mod dunes;
+
+/// A mesh's cluster DAG as a committed artifact, and the codec it is committed
+/// in. `crcbl_scene::cluster_dag` is what builds them.
+pub mod cluster_dag;
+
 /// The geometry `triangle.slang` pulls, in the layout that shader declares.
 pub mod triangle;
 

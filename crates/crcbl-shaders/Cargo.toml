@@ -29,3 +29,29 @@ workspace = true
 # no package. `wgsl-in` is not a default feature and is the only one wanted.
 [dev-dependencies]
 naga = { version = "30", features = ["wgsl-in"] }
+# The cluster-DAG builder the committed `clusters/*.dag` artifact comes out of,
+# and a **dev-dependency**, which is the whole arrangement:
+#
+# * a normal dependency would be a cycle — `crcbl-scene` depends on this crate —
+#   and cargo refuses one; a dev-dependency cycle it allows, and this is why
+#   the generator is an `[[example]]` rather than a `[[bin]]` (a bin cannot see
+#   dev-dependencies, an example can);
+# * so `cargo build -p crcbl-shaders` still pulls in nothing at all — `gltf`
+#   included — which is the property the header comment above protects.
+#
+# `docs/plan/25-lod.md`'s "How a DAG reaches the renderer" is what this
+# implements: the artifact is committed, `--check` regenerates and compares, and
+# the consumer never sees the builder.
+crcbl-scene = { workspace = true }
+# `crcbl_scene::ClusterGroup::projected_error` takes a `glam::Vec3`, and the
+# generator compares it against this crate's `[f32; 3]` spelling of the same
+# metric. One conversion, in the one target that has to speak both — the library
+# still names no vector type but its own arrays.
+glam = { workspace = true }
+
+# The DAG generator. `tools/` rather than `examples/` so it sits beside
+# `compile-shaders.sh`, which is the other generator of a committed artifact in
+# this crate and the arrangement this one copies.
+[[example]]
+name = "cook-clusters"
+path = "tools/cook-clusters.rs"

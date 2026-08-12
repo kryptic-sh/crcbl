@@ -34,6 +34,12 @@
 *.wav  binary
 *.qoa  binary
 *.spv  binary
+# `crates/crcbl-shaders/clusters/*.dag`: a cooked cluster DAG, compared byte for
+# byte by `tools/cook-clusters.rs --check`. Git's own heuristic would call it
+# binary anyway — it is full of NULs — but an artifact whose bytes are part of a
+# checked invariant does not rely on a heuristic, for the reason the comment
+# above this block records.
+*.dag  binary
 
 # Git LFS is deliberately NOT enabled yet. Everything binary through P8 is small
 # (golden images are a few KB and get re-blessed often, which LFS handles worse

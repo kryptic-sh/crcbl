@@ -280,6 +280,20 @@ jobs:
       # nextest does not run doctests — without this step every `//!`/`///`
       # example in the engine is unexecuted documentation.
       - run: cargo test --doc --workspace --all-features --locked
+      # `crates/crcbl-shaders/clusters/*.dag` is a committed bake artifact, on
+      # the terms `spirv/` is: the builder that produces it
+      # (`crcbl_scene::cluster_dag`) is in a crate `crcbl-render` may not depend
+      # on, so the DAG reaches the renderer as data. This is the anti-rot gate —
+      # "someone changed the simplifier and forgot to regenerate" — and it is
+      # the same check the `shaders` job runs against the SPIR-V, one directory
+      # over.
+      #
+      # It lives in this job rather than that one because it needs a Rust
+      # toolchain and no shader compiler at all, which is the exact opposite of
+      # what the `shaders` job installs; the tests above have already built
+      # everything it links.
+      - name: Check the committed cluster DAG against its builder
+        run: cargo run --locked -p crcbl-shaders --example cook-clusters -- --check
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@v7
