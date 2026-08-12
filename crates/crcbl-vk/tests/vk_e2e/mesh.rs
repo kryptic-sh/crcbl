@@ -1853,18 +1853,85 @@ fn dunes_distant_camera() -> crcbl_render::Camera {
     }
 }
 
-/// Renders the dunes patch once and returns the cut the GPU chose, with the two
-/// numbers the frame selected under.
+/// The host's copy of the state `docs/plan/25-lod.md`'s hysteresis makes the GPU
+/// carry between frames.
+///
+/// **The oracle stopped being a function of one camera when hysteresis landed**,
+/// and this is what replaces it: a frame's cut depends on every frame before it,
+/// so the host rule has to be walked frame for frame beside the device rather
+/// than evaluated once at the end. One of these is built per renderer, because
+/// the state is the renderer's buffer and a fresh renderer starts from the zeroes
+/// `DrawGen` wrote into it.
+struct DunesHistory {
+    dag: crcbl_shaders::cluster_dag::ClusterDag,
+    /// Which groups were expanded after the last frame this walked, in
+    /// `ClusterDag::level_groups` order.
+    expanded: Vec<bool>,
+}
+
+impl DunesHistory {
+    fn new() -> Self {
+        let dag = crcbl_shaders::cluster_dag::dunes_dag();
+        let expanded = vec![false; dag.group_count()];
+        Self { dag, expanded }
+    }
+
+    /// Renders one frame at `camera` and advances the host state by the same
+    /// frame.
+    ///
+    /// The three numbers come back out of the renderer rather than being
+    /// re-derived here, exactly as they did before: the viewport and the field
+    /// of view are the harness's and the hold budget is the renderer's constant,
+    /// and a test that recomputed either would be comparing two derivations
+    /// instead of two implementations of one rule.
+    fn step(
+        &mut self,
+        headless: &Headless,
+        renderer: &mut crcbl_render::ForwardRenderer,
+        pool: &mut crcbl_render::TransientPool,
+        camera: &crcbl_render::Camera,
+    ) -> [f32; 3] {
+        let _ = render_mesh(headless, renderer, pool, camera);
+        let [pixels_per_unit, expand, hold] = renderer.lod_params();
+        self.expanded = self.dag.expand(
+            camera.eye.to_array(),
+            pixels_per_unit,
+            crcbl_shaders::cluster_select::LodBudgets { expand, hold },
+            &self.expanded,
+        );
+        [pixels_per_unit, expand, hold]
+    }
+
+    /// The cut the host rule says that frame drew, at the per-cluster
+    /// granularity.
+    fn cut(&self) -> Vec<crcbl_shaders::cluster_dag::ClusterAt> {
+        self.dag.cut_from(&self.expanded)
+    }
+
+    /// And at the uniform one.
+    fn level(&self) -> usize {
+        self.dag.uniform_level_from(&self.expanded)
+    }
+}
+
+/// Renders the dunes patch once and returns the cut the GPU chose, the cut the
+/// host rule says it should have chosen, and the numbers the frame selected
+/// under.
 fn dunes_cut(
     headless: &Headless,
     renderer: &mut crcbl_render::ForwardRenderer,
     pool: &mut crcbl_render::TransientPool,
+    history: &mut DunesHistory,
     camera: &crcbl_render::Camera,
     budget: f32,
-) -> (Vec<crcbl_shaders::cluster_dag::ClusterAt>, [f32; 2]) {
+) -> (
+    Vec<crcbl_shaders::cluster_dag::ClusterAt>,
+    Vec<crcbl_shaders::cluster_dag::ClusterAt>,
+    [f32; 3],
+) {
     renderer.set_lod_error_budget(budget);
-    let _ = render_mesh(headless, renderer, pool, camera);
-    (selected_clusters(headless, renderer), renderer.lod_params())
+    let params = history.step(headless, renderer, pool, camera);
+    (selected_clusters(headless, renderer), history.cut(), params)
 }
 
 /// **The GPU descends the DAG to the cut the host rule says**, and one cut of
@@ -1932,29 +1999,35 @@ fn the_gpu_descends_the_dag_to_the_cut_the_host_rule_says() {
         "a device with an amplification stage accepts the patch"
     );
 
-    let eye = dunes_camera().eye.to_array();
     let dag = crcbl_shaders::cluster_dag::dunes_dag();
+    let mut history = DunesHistory::new();
 
     // --- the cut, against the host rule ---
-    let (drawn, [pixels_per_unit, budget]) = dunes_cut(
+    let (drawn, want, [pixels_per_unit, budget, hold]) = dunes_cut(
         &headless,
         &mut renderer,
         &mut pool,
+        &mut history,
         &dunes_camera(),
         DUNES_MIXING_BUDGET,
     );
     assert_eq!(budget, DUNES_MIXING_BUDGET, "the frame took the budget set");
     assert!(
+        hold < budget,
+        "the renderer selected under one threshold ({budget} and {hold}), so this frame \
+         says nothing about hysteresis"
+    );
+    assert!(
         pixels_per_unit > 0.0,
         "a viewport of no height selects nothing"
     );
     eprintln!(
-        "vk e2e: dunes cut — {} cluster(s) at {pixels_per_unit} px/unit, budget {budget}",
+        "vk e2e: dunes cut — {} cluster(s) at {pixels_per_unit} px/unit, budgets \
+         {budget}/{hold}",
         drawn.len()
     );
     assert_eq!(
-        drawn,
-        dag.cut(eye, pixels_per_unit, budget),
+        drawn, want,
         "the amplification stage chose a different cut from the host rule"
     );
 
@@ -2031,7 +2104,18 @@ fn the_gpu_descends_the_dag_to_the_cut_the_host_rule_says() {
             "a budget no group exceeds, from far enough out",
         ),
     ] {
-        let (collapsed, _) = dunes_cut(&headless, &mut renderer, &mut pool, &camera, budget);
+        let (collapsed, collapsed_want, _) = dunes_cut(
+            &headless,
+            &mut renderer,
+            &mut pool,
+            &mut history,
+            &camera,
+            budget,
+        );
+        assert_eq!(
+            collapsed, collapsed_want,
+            "{name}: the GPU and the host rule disagree about the collapsed cut"
+        );
         let levels: std::collections::BTreeSet<usize> =
             collapsed.iter().map(|at| at.level).collect();
         let count = collapsed.len();
@@ -2232,8 +2316,6 @@ fn selected_dunes_level(
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is() {
-    let dag = crcbl_shaders::cluster_dag::dunes_dag();
-
     // --- the mesh arm: the finest level its per-cluster cut reaches ---
     let mut finest: Vec<Option<usize>> = Vec::new();
     {
@@ -2249,10 +2331,18 @@ fn the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is() {
             )
             .expect("the forward renderer builds");
             assert!(renderer.set_dunes(Some(glam::Mat4::IDENTITY)));
+            // Its own history, because the state is this renderer's buffer and
+            // the uniform arm below opens a second device with a second one.
+            let mut history = DunesHistory::new();
             for back in DUNES_RECEDING_CAMERAS {
                 let camera = dunes_camera_back(back);
-                let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera);
+                history.step(&headless, &mut renderer, &mut pool, &camera);
                 let cut = selected_clusters(&headless, &renderer);
+                assert_eq!(
+                    cut,
+                    history.cut(),
+                    "from {back} units back the per-cluster cut is not the host rule's"
+                );
                 finest.push(cut.iter().map(|at| at.level).min());
             }
             renderer.destroy(headless.device.as_ref());
@@ -2286,18 +2376,18 @@ fn the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is() {
         "a device with no mesh stage takes the patch through a uniform cut"
     );
 
+    let mut history = DunesHistory::new();
     let mut chosen: Vec<usize> = Vec::new();
     for (index, back) in DUNES_RECEDING_CAMERAS.into_iter().enumerate() {
         let camera = dunes_camera_back(back);
-        let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera);
-        let [pixels_per_unit, budget] = renderer.lod_params();
+        let [pixels_per_unit, budget, hold] =
+            history.step(&headless, &mut renderer, &mut pool, &camera);
         let level = selected_dunes_level(&headless, &renderer)
             .unwrap_or_else(|| panic!("no bucket drew the patch from {back} units back"));
-        let eye = camera.eye.to_array();
-        let want = dag.uniform_level(eye, pixels_per_unit, budget);
+        let want = history.level();
         eprintln!(
             "vk e2e: dunes from {back} units back — level {level} at {pixels_per_unit} \
-             px/unit, budget {budget} (host rule says {want})"
+             px/unit, budgets {budget}/{hold} (host rule says {want})"
         );
         assert_eq!(
             level, want,
@@ -2324,6 +2414,197 @@ fn the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is() {
     );
 
     renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// How far either side of the boundary the drifting camera steps, as a fraction
+/// of the boundary distance.
+///
+/// A thousandth: far enough that a camera under one threshold crosses the
+/// boundary on every frame, and nowhere near far enough to leave the hysteresis
+/// band, which is a fifth of the budget wide. `crcbl_shaders::cluster_dag`'s
+/// `a_camera_drifting_across_a_threshold_settles_on_one_level` is the same walk
+/// with no device in it.
+const DUNES_DRIFT_SWING: f32 = 1.0e-3;
+
+/// How many frames the drift runs for. Even, so the walk ends where it started.
+const DUNES_DRIFT_FRAMES: usize = 12;
+
+/// The bracket the boundary is bisected inside, in units past the patch's near
+/// edge.
+const DUNES_DRIFT_BRACKET: (f32, f32) = (2.0, 1000.0);
+
+/// **A camera drifting across a level boundary settles**, on a real device, and
+/// the same camera with the band removed does not.
+///
+/// `docs/plan/25-lod.md`: "**Hysteresis** on the threshold (switch-up and
+/// switch-down differ) kills boundary flicker." The flicker is the observable
+/// and this counts it, on the indirect path where the level a frame selected is
+/// something a buffer says outright: `draw_gen.slang` scatters the instance into
+/// the bucket for the level it chose, so the bucket whose instance count came out
+/// non-zero *is* the level.
+///
+/// Three assertions, and the first is what makes the second mean anything:
+///
+/// * **With the band removed the level flicks on nearly every frame.** The band
+///   is removed by making the two budgets equal, which
+///   `ForwardRenderer::set_lod_hold_ratio(1.0)` does — the same code path, one
+///   number apart. A swing that had quietly stopped crossing the boundary would
+///   fail here rather than making the count below look good.
+/// * **With it, the level changes at most once.** Once and not never: the state
+///   starts collapsed and the first frame over the expand budget is a real
+///   switch.
+/// * **And a decisive move still switches**, out to the far end of the bracket
+///   and back.
+///
+/// The boundary is bisected against the committed DAG at the pixels-per-unit the
+/// renderer actually selected under, rather than written down: it is a property
+/// of the artifact and the viewport, and a constant here would be a number to
+/// re-derive whenever either moved.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_camera_drifting_across_a_level_boundary_stops_flickering() {
+    let headless = Headless::open_for_mesh_with(Features::GPU_DRIVEN);
+    assert_ne!(
+        headless.device.caps().geometry_path(),
+        crcbl_hal::GeometryPath::MeshShader,
+        "this arm needs the uniform cut, whose selected level a bucket reports"
+    );
+    let dag = crcbl_shaders::cluster_dag::dunes_dag();
+    let mut pool = crcbl_render::TransientPool::new();
+
+    // One frame from a throwaway renderer, only to learn the pixels-per-unit
+    // this harness's viewport and field of view produce. The boundary depends on
+    // it, and re-deriving it here would be a second derivation to keep in step.
+    let pixels_per_unit = {
+        let mut renderer = crcbl_render::ForwardRenderer::new(
+            headless.device.as_ref(),
+            headless.queue,
+            headless.format,
+        )
+        .expect("the forward renderer builds");
+        assert!(renderer.set_dunes(Some(glam::Mat4::IDENTITY)));
+        let _ = render_mesh(
+            &headless,
+            &mut renderer,
+            &mut pool,
+            &dunes_camera_back(DUNES_DRIFT_BRACKET.0),
+        );
+        let [scale, budget, hold] = renderer.lod_params();
+        assert!(
+            hold < budget,
+            "the renderer ships one threshold ({budget} and {hold}), so there is no band \
+             for this test to be about"
+        );
+        renderer.destroy(headless.device.as_ref());
+        scale
+    };
+
+    // The distance at which the uniform cut changes level, to a tenth of the
+    // swing — so the swing straddles it with room to spare.
+    let budget = crcbl_render::ForwardRenderer::LOD_ERROR_BUDGET;
+    let level_at = |back: f32| {
+        dag.uniform_level(
+            dunes_camera_back(back).eye.to_array(),
+            pixels_per_unit,
+            budget,
+        )
+    };
+    let (mut lo, mut hi) = DUNES_DRIFT_BRACKET;
+    let near = level_at(lo);
+    assert_ne!(
+        near,
+        level_at(hi),
+        "the bracket {DUNES_DRIFT_BRACKET:?} draws one level at {pixels_per_unit} px/unit, \
+         so there is no boundary in it to drift across"
+    );
+    while hi - lo > lo * DUNES_DRIFT_SWING / 10.0 {
+        let mid = 0.5 * (lo + hi);
+        if level_at(mid) == near {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let at = 0.5 * (lo + hi);
+    let swing = at * DUNES_DRIFT_SWING;
+    eprintln!("vk e2e: dunes level boundary at {at} units back, swing {swing}");
+
+    // A square wave straddling the boundary, so every step is a crossing.
+    let path: Vec<f32> = (0..DUNES_DRIFT_FRAMES)
+        .map(|frame| {
+            if frame % 2 == 0 {
+                at - swing
+            } else {
+                at + swing
+            }
+        })
+        .collect();
+
+    let mut walk = |hold_ratio: f32, path: &[f32]| -> (Vec<usize>, usize) {
+        let mut renderer = crcbl_render::ForwardRenderer::new(
+            headless.device.as_ref(),
+            headless.queue,
+            headless.format,
+        )
+        .expect("the forward renderer builds");
+        assert!(renderer.set_dunes(Some(glam::Mat4::IDENTITY)));
+        renderer.set_lod_hold_ratio(hold_ratio);
+        let mut history = DunesHistory::new();
+        let mut levels = Vec::with_capacity(path.len());
+        for &back in path {
+            let camera = dunes_camera_back(back);
+            history.step(&headless, &mut renderer, &mut pool, &camera);
+            let level = selected_dunes_level(&headless, &renderer)
+                .unwrap_or_else(|| panic!("no bucket drew the patch from {back} units back"));
+            assert_eq!(
+                level,
+                history.level(),
+                "from {back} units back under a hold ratio of {hold_ratio} the GPU took \
+                 level {level} and the host rule takes {}",
+                history.level()
+            );
+            levels.push(level);
+        }
+        renderer.destroy(headless.device.as_ref());
+        let flips = levels.windows(2).filter(|pair| pair[0] != pair[1]).count();
+        (levels, flips)
+    };
+
+    // **The band removed**, which is the same code with one number changed.
+    let (sharp_levels, sharp_flips) = walk(1.0, &path);
+    // And the band as the renderer ships it.
+    let (held_levels, held_flips) = walk(crcbl_render::ForwardRenderer::LOD_HOLD_RATIO, &path);
+    eprintln!(
+        "vk e2e: dunes drift — {sharp_flips} flip(s) with one threshold {sharp_levels:?}, \
+         {held_flips} with two {held_levels:?}"
+    );
+    assert!(
+        sharp_flips >= DUNES_DRIFT_FRAMES - 2,
+        "one threshold flipped {sharp_flips} time(s) over {DUNES_DRIFT_FRAMES} frames \
+         ({sharp_levels:?}), so the swing is not crossing the boundary and the count \
+         below would be low for the wrong reason"
+    );
+    assert!(
+        held_flips <= 1,
+        "two thresholds flipped {held_flips} time(s) ({held_levels:?}), which is not \
+         settling"
+    );
+
+    // And a decisive move still switches, under the band the renderer ships.
+    let (decisive, decisive_flips) = walk(
+        crcbl_render::ForwardRenderer::LOD_HOLD_RATIO,
+        &[at, DUNES_DRIFT_BRACKET.1, DUNES_DRIFT_BRACKET.1, at, at],
+    );
+    eprintln!("vk e2e: dunes decisive move — {decisive:?}");
+    assert!(
+        decisive_flips >= 2,
+        "a camera pulled out to {} units and brought back selected {decisive:?}, so \
+         hysteresis is a latch rather than a band",
+        DUNES_DRIFT_BRACKET.1
+    );
+
     pool.destroy(headless.device.as_ref());
     headless.finish();
 }

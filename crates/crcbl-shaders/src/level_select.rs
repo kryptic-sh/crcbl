@@ -16,9 +16,11 @@
 //!
 //! # The rule: the finest level any group is expanded at
 //!
-//! Writing `E(G)` for "group `G`'s projected error exceeds the pixel budget",
-//! [`MeshLevels::uniform_level`](crate::level_select::MeshLevels::uniform_level)
-//! answers
+//! Writing `E(G)` for "group `G` is expanded" —
+//! [`group_is_expanded`](crate::cluster_select::group_is_expanded), which under
+//! `docs/plan/25-lod.md`'s hysteresis reads the previous frame's answer as well
+//! as this frame's projection —
+//! [`MeshLevels::select`](crate::level_select::MeshLevels::select) answers
 //!
 //! ```text
 //! min { level(G) : E(G) }, or the top level when no group is expanded
@@ -59,16 +61,22 @@
 //!
 //! # A mesh with no DAG selects level 0 and reads nothing
 //!
-//! [`MeshLevels::FLAT`](crate::level_select::MeshLevels::FLAT) is the record for a mesh that has no hierarchy — the
-//! cube, the pyramid, the open box — and for a mesh whose hierarchy some other
-//! stage is descending. It names no groups and a top level of zero, so the loop
-//! above runs zero times and answers zero. A renderer therefore carries one
-//! record per mesh whatever the mesh is, and **the mesh-shader path suppresses
-//! this selection by handing over that record** rather than by branching: a
-//! device whose amplification stage picks a cut per cluster must not have a
-//! second, coarser cut applied to the same instance first.
+//! [`MeshLevels::FLAT`](crate::level_select::MeshLevels::FLAT) is the record for
+//! a mesh that has no hierarchy — the cube, the pyramid, the open box. It names
+//! no groups and a top level of zero, so the loop above runs zero times and
+//! answers zero, and a renderer therefore carries one record per mesh whatever
+//! the mesh is.
+//!
+//! **A mesh whose hierarchy some other stage descends is a different case, and
+//! it is not this record.** The mesh-shader path suppresses this selection with
+//! a `top_level` of zero and its **real** group count: a device whose
+//! amplification stage picks a cut per cluster must not have a second, coarser
+//! cut applied to the same instance first — and it must still have its groups
+//! judged, because [`select`](crate::level_select::MeshLevels::select) is where
+//! the expansion state that stage reads is written. A top level of zero puts the
+//! minimum out of reach without taking the groups away.
 
-use crate::cluster_select::GroupCost;
+use crate::cluster_select::{GroupCost, LodBudgets, group_is_expanded};
 
 /// Bytes per [`LevelGroup`], and the stride of the group storage buffer.
 ///
@@ -188,19 +196,17 @@ impl MeshLevels {
     };
 
     /// The level a uniform cut draws this mesh at, from an eye at `eye` under a
-    /// budget of `budget` pixels.
+    /// single budget of `budget` pixels and **no history**.
     ///
-    /// **The rule, and the whole of it**, in the form `draw_gen.slang` runs it:
-    /// the finest level any of this mesh's groups is expanded at, and the top
-    /// level when none is. The module docs carry why that number is the finest
-    /// level the per-cluster descent draws anywhere, and
+    /// [`select`](Self::select) with the two budgets equal and a fresh state, so
+    /// the previous answer stops mattering — the rule as it stood before
+    /// hysteresis, kept because it is what
     /// [`ClusterDag::uniform_level`](crate::cluster_dag::ClusterDag::uniform_level)
-    /// is the same answer taken from the DAG rather than from these records.
+    /// is and what a caller sweeping budgets wants. A frame's real answer is
+    /// [`select`](Self::select)'s, because a frame has a previous frame.
     ///
-    /// `eye` is in the same space as the spheres, exactly as it is for
-    /// [`ClusterSelect::is_drawn`](crate::cluster_select::ClusterSelect::is_drawn)
-    /// — which for an instance means the spheres go through its transform and the
-    /// camera stays where it is.
+    /// `eye` is in the same space as the spheres, which for an instance means
+    /// the spheres go through its transform and the camera stays where it is.
     ///
     /// # Panics
     ///
@@ -214,16 +220,62 @@ impl MeshLevels {
         pixels_per_unit: f32,
         budget: f32,
     ) -> u32 {
-        let mine = &groups[self.first_group as usize..][..self.group_count as usize];
+        let mut state = vec![false; groups.len()];
+        self.select(
+            groups,
+            eye,
+            pixels_per_unit,
+            LodBudgets::sharp(budget),
+            &mut state,
+        )
+    }
+
+    /// One frame of this mesh's selection: every one of its groups' expansion
+    /// updated in `state`, and the level a uniform cut draws returned.
+    ///
+    /// **`computeMain` in `draw_gen.slang` is this function**, one invocation per
+    /// visible instance, and the two halves are deliberately one loop:
+    ///
+    /// * The state is written for **every** group, whatever the level answer is,
+    ///   because the mesh path descends the same groups per cluster and reads
+    ///   exactly this buffer. A mesh whose record has a `top_level` of zero —
+    ///   which is how `docs/plan/25-lod.md`'s per-cluster path suppresses the
+    ///   uniform cut — still needs its groups judged.
+    /// * The level is then the finest level any group came out expanded at, which
+    ///   is [`uniform_level`](Self::uniform_level)'s rule over the state rather
+    ///   than over a second projection.
+    ///
+    /// `state` is indexed by position in `groups`, so a renderer's array is one
+    /// run per mesh and this touches only its own. It is the **previous frame's**
+    /// answers on the way in and this frame's on the way out;
+    /// [`ClusterDag::expand`](crate::cluster_dag::ClusterDag::expand) is the same
+    /// update stated over the hierarchy instead of over these records.
+    ///
+    /// # Panics
+    ///
+    /// If this record names groups `groups` does not hold, or if `state` is not
+    /// parallel to `groups` — a table built wrong rather than a runtime
+    /// condition.
+    pub fn select(
+        &self,
+        groups: &[LevelGroup],
+        eye: [f32; 3],
+        pixels_per_unit: f32,
+        budgets: LodBudgets,
+        state: &mut [bool],
+    ) -> u32 {
+        assert_eq!(
+            state.len(),
+            groups.len(),
+            "the expansion state is not parallel to the group array"
+        );
+        let mine = self.first_group as usize..self.first_group as usize + self.group_count as usize;
         let mut chosen = self.top_level;
-        for group in mine {
-            // A group at or above the answer so far cannot lower it, and the
-            // answer is a minimum — so this skips the projection rather than
-            // only the comparison. The shader's loop has the same line.
-            if group.level >= chosen {
-                continue;
-            }
-            if group.cost.projected_error(eye, pixels_per_unit) > budget {
+        for at in mine {
+            let group = &groups[at];
+            let expanded = group_is_expanded(&group.cost, eye, pixels_per_unit, budgets, state[at]);
+            state[at] = expanded;
+            if expanded && group.level < chosen {
                 chosen = group.level;
             }
         }

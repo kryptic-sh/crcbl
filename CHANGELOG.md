@@ -255,6 +255,45 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **LOD hysteresis, so a camera drifting across a threshold stops flickering.**
+  A group starts expanding above the budget and keeps expanding until its
+  projected error falls to `LOD_HOLD_RATIO` of it. Measured on a
+  boundary-straddling drift: **39 level changes over 40 host frames with one
+  threshold, 0 with two**; on a real GPU, `[0, 1, 0, 1, …]` becomes `[0, 0, …]`.
+  A decisive move still switches.
+
+  **Per-group history, and that is a soundness requirement rather than a
+  saving.** A cut is a cover only while expansion is monotone up the DAG, and a
+  remembered answer can otherwise leave a child collapsed under an expanded
+  parent — a hole. The two-threshold rule is monotone whenever the plain rule
+  is, because a parent's error is at least its children's and its sphere
+  contains theirs, so starting from all-zero every later frame is monotone by
+  induction. Per-cluster history would have been 16.6 MB _and_ wrong; per group
+  is 3.87 MB at the pool's instance capacity.
+
+  The state is **one buffer, deliberately not a ring**: an instance the frustum
+  rejected writes nothing, so its slot in a fresh ring holds a value from frames
+  ago that is not its own history and need not be monotone. Ordering comes from
+  the graph — the draw-argument pass declares it `ShaderReadWrite` and every
+  mesh pass `ShaderRead`, so each frame's first barrier carries a real source
+  scope over the previous frame's writes and reads.
+
+  It also shrank `ClusterSelect` from 48 bytes to 16: a record now names two
+  group _indices_ rather than carrying two copies of a group's error and sphere,
+  so every cluster of a group reads the same word instead of bit-identical
+  copies. Shadow cascades keep their own state, since sharing the camera's would
+  have two eyes undoing each other's band every frame.
+
+### Fixed
+
+- **The mesh path's cut collapsed to the top level, from a bind range that had
+  not grown with its struct.** `ClusterDrawConstants` went 16 to 32 bytes while
+  the bind group still named `DRAW_CONSTANTS_SIZE` for that dynamic uniform —
+  and a uniform read past a bound range is **not a fault, it is a zero**, so the
+  group stride read as 0 and every instance descended against instance zero's
+  state. Both the bind range and the dynamic stride now use one constant sized
+  for the larger of the two blocks.
+
 - **The uniform cut, so every geometry path draws a DAG mesh.** `draw_gen.slang`
   picks one level per instance for `IndirectCount` and `IndirectPerBatch`, and
   `Scene::Dunes` renders on all three paths. Until now per-cluster selection

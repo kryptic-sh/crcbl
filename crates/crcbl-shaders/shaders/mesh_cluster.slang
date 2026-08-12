@@ -144,11 +144,13 @@ struct FrameUniforms
     float4x4 shadow_view_proj[SHADOW_CASCADES];
     float4 cascade_far;
     float4 shadow_params;
-    /// `docs/plan/25-lod.md`'s selection numbers, and the one member of this
-    /// block *this* file reads. `x`: how many pixels one unit of length subtends
-    /// one unit from the eye. `y`: the pixel budget a group's projected error is
-    /// compared against. `z`, `w`: unread padding `std140`'s `float4` alignment
-    /// requires.
+    /// `docs/plan/25-lod.md`'s selection numbers: `x` pixels per unit at one
+    /// unit, `y` the budget a group starts expanding over, `z` the budget it is
+    /// held down to, `w` padding.
+    ///
+    /// **Read by nothing here since hysteresis landed** — the projection moved
+    /// to `draw_gen.slang`, which owns the state it needs — and declared because
+    /// this block is `mesh.slang`'s and the two declarations are held identical.
     float4 lod_params;
 };
 
@@ -229,18 +231,19 @@ static const uint HAS_CONTAINER = 2;
 /// One cluster's half of `docs/plan/25-lod.md`'s DAG descent, matching
 /// `crcbl_shaders::cluster_select::ClusterSelect`.
 ///
-/// **Both spheres are a group's, never this cluster's own**, and that is the
-/// whole correctness argument: every cluster a group touches carries a
-/// bit-identical copy of that group's error and sphere, so every one of them
-/// evaluates the same test from the same bits and the group's parents are drawn
-/// all together or not at all. A per-cluster distance term gives two clusters of
-/// one group two answers to one question and tears the mesh along a boundary
-/// that group locked — invisible until a camera sits where the two answers
-/// differ. `crcbl_scene::cluster_dag`'s module docs carry the argument in full.
+/// **Both halves name a group, never this cluster**, and that is the whole
+/// correctness argument: every cluster a group touches carries the *same index*,
+/// so every one of them reads the same word of `group_state` and the group's
+/// parents are drawn all together or not at all. A per-cluster distance term
+/// gives two clusters of one group two answers to one question and tears the
+/// mesh along a boundary that group locked — invisible until a camera sits where
+/// the two answers differ. `crcbl_scene::cluster_dag`'s module docs carry the
+/// argument in full.
 ///
-/// Scalars rather than `float3`s for `Meshlet`'s reason: under `std430` a
-/// `float3` is 16-byte aligned, so a struct of scalars is the only one whose
-/// stride is the sum of its members.
+/// The judging itself is `draw_gen.slang`'s, once per (instance, group); this
+/// stage reads the answer. That is what hysteresis needed — an answer carried
+/// between frames has to be stored per group, and a group has to have a name to
+/// be stored under.
 struct ClusterSelect
 {
     /// Which of the two groups this cluster has: `HAS_PRODUCER`, `HAS_CONTAINER`.
@@ -249,20 +252,13 @@ struct ClusterSelect
     /// resolved — which level of the DAG its geometry lives in. Zero for level 0
     /// and for every mesh with no DAG.
     uint vertex_base;
-    /// The group whose simplification produced this cluster: what it cost, and
-    /// the sphere that cost is projected from. Read only under `HAS_PRODUCER`.
-    float producer_error;
-    float producer_center_x;
-    float producer_center_y;
-    float producer_center_z;
-    float producer_radius;
+    /// The group whose simplification produced this cluster, as an index into
+    /// the shared group array — the numbering `group_state` is keyed by. Read
+    /// only under `HAS_PRODUCER`.
+    uint producer_group;
     /// The group this cluster is a child of — the one that would simplify it
-    /// away. Read only under `HAS_CONTAINER`.
-    float container_error;
-    float container_center_x;
-    float container_center_y;
-    float container_center_z;
-    float container_radius;
+    /// away — in the same numbering. Read only under `HAS_CONTAINER`.
+    uint container_group;
 };
 
 /// One indexed indirect draw's arguments, matching `draw_gen.slang`'s.
@@ -352,6 +348,14 @@ struct ClusterDrawConstants
     /// Which bucket this is, which is the element of `draw_args` holding the
     /// instance count culling produced.
     uint bucket;
+    /// How many groups one instance's run of `group_state` holds, which is the
+    /// stride between two instances in it.
+    ///
+    /// A frame-wide number in a per-bucket block, and the same value in every
+    /// one of them: this is the only uniform block the amplification stage
+    /// reads, and `draw_gen.slang` — which writes the state — carries the same
+    /// number in its own params block.
+    uint group_stride;
 };
 
 [[vk::binding(0, 0)]]
@@ -468,6 +472,21 @@ StructuredBuffer<ClusterSelect> cluster_select;
 [[vk::binding(18, 0)]]
 RWStructuredBuffer<uint> cluster_selection;
 
+/// `docs/plan/25-lod.md`'s hysteresis state, as `draw_gen.slang` left it this
+/// frame: one word per (instance, group), `1` where that group is expanded.
+///
+/// **Read here and written nowhere**, which is what makes a stage running
+/// thousands of task groups per instance able to use a per-group decision at
+/// all: one invocation of the draw-argument pass owns an instance's whole run
+/// and every task group of that instance reads it. The graph orders the two —
+/// that pass writes, this one reads, and the barrier between them is the same
+/// one `visible_instances` already needs.
+///
+/// Bound whenever `cluster_select` is, because the two are one mechanism: the
+/// record names a group and this says what that group decided.
+[[vk::binding(19, 0)]]
+StructuredBuffer<uint> group_state;
+
 /// What the mesh stage emits and `mesh.slang`'s `fragmentMain` consumes.
 ///
 /// **Member order is the interface**, not just the layout: locations are
@@ -583,65 +602,35 @@ uint cluster_survives(Meshlet cluster, float4x4 transform)
     return 1u;
 }
 
-/// Whether a group is **expanded** — its children drawn rather than its parents
-/// — from an eye at `eye`: `1` to descend into it, `0` to stop above it.
-///
-/// `docs/plan/25-lod.md`'s metric, and
-/// `crcbl_shaders::cluster_select::GroupCost::projected_error` in Slang: the
-/// group's error scaled by `lod_params.x` pixels per unit and divided by the
-/// distance to the nearest point of its sphere, compared against the budget in
-/// `lod_params.y`. The arithmetic is written out term by term rather than as
-/// `length()` so it is the same three operations in the same order as the host
-/// rule it is compared against.
-///
-/// **An eye inside the sphere expands**, because there is no distance to divide
-/// by and "as close as possible, so descend" is both the conservative answer and
-/// the monotone one: an eye inside a sphere is inside every sphere containing
-/// it, and containment is what carries monotone stored error up the DAG.
-uint group_is_expanded(float error, float3 center, float radius, float3 eye)
-{
-    float3 delta = eye - center;
-    float separation = sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
-    float distance = separation - radius;
-    if (distance <= 0.0)
-    {
-        return 1u;
-    }
-    return error * frame.lod_params.x / distance > frame.lod_params.y ? 1u : 0u;
-}
-
 /// Whether this cluster is in the cut: `1` to draw it, `0` to leave it to a
 /// coarser or finer relative.
 ///
 /// The descent, and the whole of it —
 /// `!E(the producer) && E(the container)`, with an absent producer reading as
 /// never expanded and an absent container as always expanded. One task group
-/// answers for one cluster out of that cluster's own record, with **no
-/// communication of any kind**; the reason that is sound, and the reason both
-/// halves name a group rather than this cluster, is on `struct ClusterSelect`
-/// above.
+/// answers for one cluster out of that cluster's own record and two words of
+/// `group_state`, with **no communication of any kind**; the reason that is
+/// sound, and the reason both halves name a group rather than this cluster, is
+/// on `struct ClusterSelect` above.
 ///
-/// **In world space**, exactly as `cluster_survives` is: the sphere's centre goes
-/// through the instance's rigid transform, its radius does not, and the eye is
-/// `frame.camera_position` where it already is. That is the same statement as
-/// putting the camera through the inverse transform, and it needs no inverse.
-uint cluster_is_selected(ClusterSelect select, float4x4 transform)
+/// `E` itself is not computed here. `draw_gen.slang`'s `select_level` decided it
+/// once for this (instance, group) pair and wrote it down, because
+/// `docs/plan/25-lod.md`'s hysteresis makes the answer depend on the previous
+/// frame's — and a stage with one workgroup per cluster has nowhere to keep one.
+///
+/// An absent group's index is zero rather than a sentinel, and zero is in range
+/// for every instance's run, so the read is safe whether or not the compiler
+/// short-circuits the flag test.
+uint cluster_is_selected(ClusterSelect select, uint instance_index)
 {
-    float3 eye = frame.camera_position.xyz;
+    uint base = instance_index * draw.group_stride;
 
-    float3 producer = mul(transform,
-        float4(select.producer_center_x, select.producer_center_y, select.producer_center_z, 1.0)).xyz;
-    uint producer_expanded = (select.flags & HAS_PRODUCER) == 0
-        ? 0u
-        : group_is_expanded(select.producer_error, producer, select.producer_radius, eye);
+    bool producer_expanded = (select.flags & HAS_PRODUCER) != 0
+        && group_state[base + select.producer_group] != 0u;
+    bool container_expanded = (select.flags & HAS_CONTAINER) == 0
+        || group_state[base + select.container_group] != 0u;
 
-    float3 container = mul(transform,
-        float4(select.container_center_x, select.container_center_y, select.container_center_z, 1.0)).xyz;
-    uint container_expanded = (select.flags & HAS_CONTAINER) == 0
-        ? 1u
-        : group_is_expanded(select.container_error, container, select.container_radius, eye);
-
-    return (1u - producer_expanded) * container_expanded;
+    return (!producer_expanded && container_expanded) ? 1u : 0u;
 }
 
 /// One cluster of one instance, emitted — the body both mesh entry points are.
@@ -772,7 +761,7 @@ void taskMain(uint3 group: SV_GroupID)
     GpuInstance instance = instances[instance_index];
 
     uint index = draw.cluster_base + group.x * active;
-    uint selected = cluster_is_selected(cluster_select[index], instance.transform);
+    uint selected = cluster_is_selected(cluster_select[index], instance_index);
     uint keep = active * selected * cluster_survives(cluster, instance.transform);
     cull_stats[CLUSTER_SURVIVOR_WORD].add(keep);
 

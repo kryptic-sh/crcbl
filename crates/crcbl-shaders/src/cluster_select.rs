@@ -1,11 +1,10 @@
 //! The per-cluster record `mesh_cluster.slang`'s amplification stage descends
-//! the DAG with, in the byte layout that shader declares.
+//! the DAG with, and the two budgets a group's expansion is judged against.
 //!
 //! `docs/plan/25-lod.md`'s "Runtime selection" picks a **cut** through a mesh's
 //! [cluster DAG](crate::cluster_dag): the set of clusters covering the surface
-//! exactly once. Writing `E(G)` for "group `G`'s
-//! [projected error](crate::cluster_dag::ClusterGroup::projected_error) exceeds
-//! the pixel budget", a cluster is drawn exactly when
+//! exactly once. Writing `E(G)` for "group `G` is expanded", a cluster is drawn
+//! exactly when
 //!
 //! ```text
 //! !E(the group that produced it) && E(the group that contains it)
@@ -14,56 +13,124 @@
 //! reading an absent producer as never expanded and an absent container as
 //! always expanded. This record is those two groups, resolved per cluster at
 //! bake time so the GPU evaluates the rule with **no communication between
-//! workgroups**: one task group reads one record and decides one cluster.
+//! workgroups**: one task group reads one record, reads two words of group
+//! state, and decides one cluster.
 //!
 //! # Both halves name a group, and that is the whole correctness argument
 //!
-//! Neither sphere here is the cluster's own. `ClusterSelect::producer` is the
-//! sphere and error of the group whose simplification *emitted* this cluster,
-//! and `ClusterSelect::container` is the group this cluster
-//! is a child of — and every cluster one group touches carries a bit-identical
-//! copy of that group's numbers. So every cluster a group produced evaluates the
-//! same `E(G)` from the same bits and moves together, and a cut can never draw
-//! one of a group's parents while descending into another. Scaling by each
-//! cluster's own centre instead is what tears a mesh along a boundary the group
-//! locked; `crcbl_scene::cluster_dag`'s module docs carry that argument in full,
-//! and [`crate::cluster_dag`]'s tests are what hold the artifact to it.
+//! Neither index here is the cluster's own. [`ClusterSelect::producer_group`](crate::cluster_select::ClusterSelect::producer_group) is
+//! the group whose simplification *emitted* this cluster and
+//! [`ClusterSelect::container_group`](crate::cluster_select::ClusterSelect::container_group) is the group this cluster is a child
+//! of —
+//! and every cluster one group touches names that group by the **same index**,
+//! so every one of them reads the same word and moves together. A cut can
+//! therefore never draw one of a group's parents while descending into another.
+//! Scaling by each cluster's own centre instead is what tears a mesh along a
+//! boundary the group locked; `crcbl_scene::cluster_dag`'s module docs carry that
+//! argument in full, and [`crate::cluster_dag`]'s tests are what hold the
+//! artifact to it.
 //!
-//! Duplicating a group's five numbers into every cluster it touches is the
-//! deliberate trade: a group index and a second buffer would be one indirection
-//! per task group and one more array to keep in step, and this record is read
-//! once by a workgroup that does nothing else.
+//! An index rather than a copy of the group's error and sphere, and that is what
+//! hysteresis changed: a decision carried between frames has to be stored
+//! somewhere, and storing it per group needs the group to have a name. The
+//! projection moved with it — [`group_is_expanded`](crate::cluster_select::group_is_expanded)
+//! runs once per (instance, group) in `draw_gen.slang`, and the amplification
+//! stage reads what it left.
+//!
+//! # Hysteresis: two budgets, and the state between them
+//!
+//! `docs/plan/25-lod.md`: "**Hysteresis** on the threshold (switch-up and
+//! switch-down differ) kills boundary flicker."
+//! [`LodBudgets`](crate::cluster_select::LodBudgets) is the pair, and
+//! [`group_is_expanded`](crate::cluster_select::group_is_expanded) is the rule:
+//!
+//! ```text
+//! E'(G) = e(G) > expand || (E(G) && e(G) > hold)
+//! ```
+//!
+//! A group not expanded needs `e` over the **expand** budget to start; one
+//! already expanded keeps going until `e` falls to the **hold** budget. Between
+//! them the previous answer stands, which is what stops a camera drifting across
+//! the boundary from switching level every frame.
+//!
+//! **The band cannot break the cut**, and that is not a hope: `E'` is monotone
+//! up the DAG whenever `E` is. A parent group's error is at least its children's
+//! and its sphere contains theirs, so `e` is monotone and so are both
+//! comparisons; `E'(G)` therefore implies `E'` of every group above `G`,
+//! whichever of the two terms produced it. Starting from "nothing expanded",
+//! every frame after it is monotone by induction — and monotone is exactly what
+//! makes a cut a cover. `crate::cluster_dag`'s
+//! `a_drifting_camera_keeps_a_crack_free_cover_under_hysteresis` is that
+//! statement run frame by frame over the committed DAG.
 //!
 //! # A cluster with no DAG draws unconditionally
 //!
-//! `ClusterSelect::ALWAYS` is the record for a mesh that has no hierarchy at
+//! [`ClusterSelect::ALWAYS`](crate::cluster_select::ClusterSelect::ALWAYS) is the
+//! record for a mesh that has no hierarchy at
 //! all — the cube, the pyramid, the open box. It sets neither flag, so the
 //! producer reads as never expanded and the container as always expanded, and
-//! the rule above collapses to "draw it". A pool therefore carries one record
-//! per cluster whatever the mesh is, rather than a second code path for meshes
-//! that never descend.
+//! the rule above collapses to "draw it" with neither index ever read. A pool
+//! therefore carries one record per cluster whatever the mesh is, rather than a
+//! second code path for meshes that never descend.
 
 use crate::cluster_dag::GroupBounds;
 
-/// Bytes per [`ClusterSelect`], and the stride of the selection storage buffer.
+/// The two pixel budgets one threshold becomes under hysteresis.
 ///
-/// Two `uint` then ten `float`, no padding: a `std430` struct of scalars has a
-/// stride that is exactly the sum of its members, which is the same reason
-/// [`Meshlet`](crate::meshlet::Meshlet) beside it spells its sphere as four
-/// `float`s rather than a `float3` and a `float`. Checked against the
-/// `ArrayStride` and the `Offset` decorations `slangc` emits by this module's
-/// `the_selection_layout_matches_the_offsets_slangc_emits`.
-pub const CLUSTER_SELECT_STRIDE: usize = 48;
+/// `docs/plan/25-lod.md`'s "switch-up and switch-down differ", named for what
+/// each one does to a group rather than for which way a level moves: a group
+/// starts expanding above [`expand`](Self::expand) and stops below
+/// [`hold`](Self::hold).
+///
+/// `PartialEq` but not `Eq`: it holds floats.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LodBudgets {
+    /// What a group's projected error must exceed for an unexpanded group to
+    /// expand — the switch to finer detail.
+    pub expand: f32,
+    /// What it must still exceed for an expanded group to stay expanded. At or
+    /// below [`expand`](Self::expand); equal is [`sharp`](Self::sharp), which is
+    /// no hysteresis at all.
+    pub hold: f32,
+}
 
-/// One group's contribution to the descent: what its simplification costs and
-/// the sphere that cost is projected from.
+impl LodBudgets {
+    /// The pair with no band between them, which is the rule as it was before
+    /// hysteresis: one threshold, and the previous answer ignored.
+    ///
+    /// What [`ClusterDag::cut`](crate::cluster_dag::ClusterDag::cut) runs, and
+    /// the setting a test uses to show the flip-count assertion can fail.
+    #[must_use]
+    pub const fn sharp(budget: f32) -> Self {
+        Self {
+            expand: budget,
+            hold: budget,
+        }
+    }
+
+    /// The pair `budget` becomes when an expanded group is held down to
+    /// `ratio * budget`.
+    ///
+    /// A ratio rather than a second absolute number because the band has to
+    /// scale with the budget: a fixed offset is most of the budget at one pixel
+    /// and none of it at fifty. A `ratio` of one is [`sharp`](Self::sharp).
+    #[must_use]
+    pub fn scaled(budget: f32, ratio: f32) -> Self {
+        Self {
+            expand: budget,
+            hold: budget * ratio,
+        }
+    }
+}
+
+/// One group's contribution to the descent: what its simplification costs, the
+/// sphere that cost is projected from, and the two comparisons that follow.
 ///
-/// The pair [`ClusterGroup::projected_error`] reads, carried per cluster rather
-/// than reached through an index — see the module docs.
+/// The pair [`ClusterGroup::projected_error`] reads, carried by
+/// [`LevelGroup`](crate::level_select::LevelGroup) — the array `draw_gen.slang`
+/// walks once per visible instance.
 ///
-/// `PartialEq` but not `Eq`: it holds floats. No `Default`, because the value a
-/// caller wants for "no group here" is [`ClusterSelect::ALWAYS`]'s pair and a
-/// zero error is not it — see [`ClusterSelect::flags`].
+/// `PartialEq` but not `Eq`: it holds floats.
 ///
 /// [`ClusterGroup::projected_error`]: crate::cluster_dag::ClusterGroup::projected_error
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -103,23 +170,50 @@ impl GroupCost {
     }
 }
 
+/// Whether a group is expanded this frame, given whether it was last frame.
+///
+/// **The hysteresis rule, and the whole of it**, in the form `draw_gen.slang`'s
+/// `group_is_expanded` runs it — see this module's docs for the two budgets and
+/// for why the band cannot break a cut. `was` is the previous frame's answer for
+/// this same (instance, group) pair, and `false` is what a pair with no history
+/// starts at.
+#[must_use]
+pub fn group_is_expanded(
+    cost: &GroupCost,
+    eye: [f32; 3],
+    pixels_per_unit: f32,
+    budgets: LodBudgets,
+    was: bool,
+) -> bool {
+    let error = cost.projected_error(eye, pixels_per_unit);
+    error > budgets.expand || (was && error > budgets.hold)
+}
+
+/// Bytes per [`ClusterSelect`], and the stride of the selection storage buffer.
+///
+/// Four `uint`, no padding: a `std430` struct of scalars has a stride that is
+/// exactly the sum of its members, which is the same reason
+/// [`Meshlet`](crate::meshlet::Meshlet) beside it spells its sphere as four
+/// `float`s rather than a `float3` and a `float`. Checked against the
+/// `ArrayStride` and the `Offset` decorations `slangc` emits by this module's
+/// `the_selection_layout_matches_the_offsets_slangc_emits`.
+pub const CLUSTER_SELECT_STRIDE: usize = 16;
+
 /// One cluster's half of the descent, matching `struct ClusterSelect` in
 /// `shaders/mesh_cluster.slang`.
 ///
-/// `PartialEq` but not `Eq`, for [`GroupCost`]'s reason: it holds floats, and no
-/// `Default` for the same reason it has: [`ALWAYS`](Self::ALWAYS) is the record
-/// a caller with no DAG wants, and it is named rather than derived.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Four words and no floats: what a cluster contributes to the descent is
+/// *which* two groups judge it, and the judging itself happens once per group
+/// in `draw_gen.slang`. See the module docs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ClusterSelect {
     /// Which of the two groups below this cluster actually has —
     /// [`HAS_PRODUCER`](Self::HAS_PRODUCER) and
     /// [`HAS_CONTAINER`](Self::HAS_CONTAINER).
     ///
-    /// A flag rather than a sentinel in the numbers, because both absences have
-    /// to read as a *decision* and neither has a value that would produce it: an
-    /// absent producer must never expand, and a zero error still expands when
-    /// the eye is inside its sphere, where [`GroupCost::projected_error`]
-    /// returns infinity.
+    /// A flag rather than a sentinel index, because both absences have to read
+    /// as a *decision*: an absent producer must never expand and an absent
+    /// container must always be expanded, which no index can say.
     pub flags: u32,
 
     /// Added to [`GpuMesh::base_vertex`](crate::mesh::GpuMesh::base_vertex) when
@@ -133,74 +227,72 @@ pub struct ClusterSelect {
     /// with no DAG at all.
     pub vertex_base: u32,
 
-    /// The group whose simplification produced this cluster. Read only when
-    /// [`HAS_PRODUCER`](Self::HAS_PRODUCER) is set; a level-0 cluster was
-    /// produced by nothing.
-    pub producer: GroupCost,
+    /// The group whose simplification produced this cluster, as an index into
+    /// the shared [`LevelGroup`](crate::level_select::LevelGroup) array — the
+    /// same numbering the per-(instance, group) state is keyed by.
+    ///
+    /// Read only when [`HAS_PRODUCER`](Self::HAS_PRODUCER) is set; a level-0
+    /// cluster was produced by nothing.
+    pub producer_group: u32,
 
     /// The group this cluster is a child of — the one that would simplify it
-    /// away. Read only when [`HAS_CONTAINER`](Self::HAS_CONTAINER) is set; a
-    /// top-level cluster is contained by nothing and is drawn whenever its
-    /// producer is not expanded.
-    pub container: GroupCost,
+    /// away — in the same numbering.
+    ///
+    /// Read only when [`HAS_CONTAINER`](Self::HAS_CONTAINER) is set; a top-level
+    /// cluster is contained by nothing and is drawn whenever its producer is not
+    /// expanded.
+    pub container_group: u32,
 }
 
 impl ClusterSelect {
-    /// [`flags`](Self::flags) bit meaning [`producer`](Self::producer) is a real
-    /// group. The same number as `HAS_PRODUCER` in
-    /// `shaders/mesh_cluster.slang`, held in step with it by
-    /// `the_shader_declares_the_same_selection_flags`.
+    /// [`flags`](Self::flags) bit meaning
+    /// [`producer_group`](Self::producer_group) names a real group. The same
+    /// number as `HAS_PRODUCER` in `shaders/mesh_cluster.slang`, held in step
+    /// with it by `the_shader_declares_the_same_selection_flags`.
     pub const HAS_PRODUCER: u32 = 1;
 
-    /// [`flags`](Self::flags) bit meaning [`container`](Self::container) is a
-    /// real group.
+    /// The same, for the containing group.
     pub const HAS_CONTAINER: u32 = 2;
 
     /// The record for a cluster of a mesh with no DAG: neither group, so the
-    /// descent draws it from every camera.
+    /// descent draws it from every camera and neither index is ever read.
     ///
     /// See the module docs — this is what lets one selection buffer cover a pool
     /// holding both hierarchical and flat meshes.
     pub const ALWAYS: Self = Self {
         flags: 0,
         vertex_base: 0,
-        producer: GroupCost {
-            error: 0.0,
-            bounds: GroupBounds {
-                center: [0.0; 3],
-                radius: 0.0,
-            },
-        },
-        container: GroupCost {
-            error: 0.0,
-            bounds: GroupBounds {
-                center: [0.0; 3],
-                radius: 0.0,
-            },
-        },
+        producer_group: 0,
+        container_group: 0,
     };
 
-    /// Whether this cluster is drawn from an eye at `eye`, under a budget of
-    /// `budget` pixels.
+    /// Whether this cluster is drawn, given which groups are expanded.
     ///
     /// **The descent, and the whole of it**, in the form the amplification stage
-    /// runs it: two projections and two comparisons, with no knowledge of any
-    /// other cluster. `taskMain` in `shaders/mesh_cluster.slang` is the same
-    /// four lines, and
-    /// [`ClusterDag::cut`](crate::cluster_dag::ClusterDag::cut) is what runs
-    /// this over a whole DAG so a test can compare a GPU's answer against it.
+    /// runs it: two flag tests and two array reads, with no knowledge of any
+    /// other cluster and no arithmetic at all. `taskMain` in
+    /// `shaders/mesh_cluster.slang` is the same four lines, and
+    /// [`ClusterDag::cut_from`](crate::cluster_dag::ClusterDag::cut_from) is
+    /// what runs this over a whole DAG so a test can compare a GPU's answer
+    /// against it.
     ///
-    /// `eye` is in the same space as the spheres, which for an instance is the
-    /// camera put through the inverse of its transform — or equivalently, and
-    /// this is what the shader does, the spheres put through the transform and
-    /// the camera left where it is. A uniform scale on that transform belongs in
-    /// `pixels_per_unit`; a non-uniform one does not survive a bounding sphere
-    /// and is not something this metric can express.
+    /// `expanded` is indexed by the same group numbering
+    /// [`producer_group`](Self::producer_group) uses — for one mesh's DAG on its
+    /// own that is [`ClusterDag::level_groups`] order, and for a renderer it is
+    /// that run offset by the mesh's `first_group`.
+    ///
+    /// # Panics
+    ///
+    /// If a flag is set and `expanded` is too short to hold the index beside it,
+    /// which is a table built wrong rather than a runtime condition.
+    ///
+    /// [`ClusterDag::level_groups`]: crate::cluster_dag::ClusterDag::level_groups
     #[must_use]
-    pub fn is_drawn(&self, eye: [f32; 3], pixels_per_unit: f32, budget: f32) -> bool {
-        let expanded = |cost: &GroupCost| cost.projected_error(eye, pixels_per_unit) > budget;
-        let producer_expanded = self.flags & Self::HAS_PRODUCER != 0 && expanded(&self.producer);
-        let container_expanded = self.flags & Self::HAS_CONTAINER == 0 || expanded(&self.container);
+    pub fn is_drawn(&self, expanded: &[bool]) -> bool {
+        let producer_expanded =
+            self.flags & Self::HAS_PRODUCER != 0 && expanded[self.producer_group as usize];
+        let container_expanded =
+            self.flags & Self::HAS_CONTAINER == 0 || expanded[self.container_group as usize];
         !producer_expanded && container_expanded
     }
 
@@ -208,21 +300,17 @@ impl ClusterSelect {
     #[must_use]
     pub fn to_bytes(&self) -> [u8; CLUSTER_SELECT_STRIDE] {
         let mut bytes = [0u8; CLUSTER_SELECT_STRIDE];
-        let mut at = 0usize;
-        let mut put = |word: [u8; 4]| {
-            bytes[at..at + 4].copy_from_slice(&word);
-            at += 4;
-        };
-        put(self.flags.to_le_bytes());
-        put(self.vertex_base.to_le_bytes());
-        for cost in [self.producer, self.container] {
-            put(cost.error.to_le_bytes());
-            for axis in cost.bounds.center {
-                put(axis.to_le_bytes());
-            }
-            put(cost.bounds.radius.to_le_bytes());
+        for (slot, value) in [
+            self.flags,
+            self.vertex_base,
+            self.producer_group,
+            self.container_group,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            bytes[slot * 4..slot * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
-        debug_assert_eq!(at, CLUSTER_SELECT_STRIDE);
         bytes
     }
 
@@ -234,24 +322,17 @@ impl ClusterSelect {
     #[must_use]
     pub fn from_bytes(bytes: &[u8; CLUSTER_SELECT_STRIDE]) -> Self {
         let word = |offset: usize| {
-            bytes[offset..offset + 4]
-                .try_into()
-                .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array"))
-        };
-        let uint_at = |offset: usize| u32::from_le_bytes(word(offset));
-        let float_at = |offset: usize| f32::from_le_bytes(word(offset));
-        let cost = |at: usize| GroupCost {
-            error: float_at(at),
-            bounds: GroupBounds {
-                center: [float_at(at + 4), float_at(at + 8), float_at(at + 12)],
-                radius: float_at(at + 16),
-            },
+            u32::from_le_bytes(
+                bytes[offset..offset + 4]
+                    .try_into()
+                    .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
+            )
         };
         Self {
-            flags: uint_at(0),
-            vertex_base: uint_at(4),
-            producer: cost(8),
-            container: cost(28),
+            flags: word(0),
+            vertex_base: word(4),
+            producer_group: word(8),
+            container_group: word(12),
         }
     }
 }
@@ -271,50 +352,30 @@ mod tests {
     use crate::cluster_dag::dunes_dag;
 
     /// The offsets `slangc` emitted for `ClusterSelect`, read out of the
-    /// disassembly of `spirv/mesh_cluster.spv`. Twelve scalars in a row permute
-    /// silently — a container sphere read as a producer sphere selects a level
+    /// disassembly of `spirv/mesh_cluster.spv`. Four `uint`s in a row permute
+    /// silently — a container index read as a producer index inverts the descent
     /// rather than crashing — so the byte each lands on is pinned rather than
     /// assumed.
     #[test]
     fn the_selection_layout_matches_the_offsets_slangc_emits() {
-        // `OpDecorate %_runtimearr_ClusterSelect_std430 ArrayStride 48`, and
+        // `OpDecorate %_runtimearr_ClusterSelect_std430 ArrayStride 16`, and
         // `OpMemberDecorate %ClusterSelect_std430 n Offset …`.
-        assert_eq!(CLUSTER_SELECT_STRIDE, 48);
+        assert_eq!(CLUSTER_SELECT_STRIDE, 16);
 
         let record = ClusterSelect {
             flags: 1,
             vertex_base: 2,
-            producer: GroupCost {
-                error: 3.0,
-                bounds: GroupBounds {
-                    center: [4.0, 5.0, 6.0],
-                    radius: 7.0,
-                },
-            },
-            container: GroupCost {
-                error: 8.0,
-                bounds: GroupBounds {
-                    center: [9.0, 10.0, 11.0],
-                    radius: 12.0,
-                },
-            },
+            producer_group: 3,
+            container_group: 4,
         };
         let bytes = record.to_bytes();
         assert_eq!(bytes.len(), CLUSTER_SELECT_STRIDE);
         let uint_at =
             |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
-        let float_at =
-            |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
         assert_eq!(uint_at(0), 1, "flags at offset 0");
         assert_eq!(uint_at(4), 2, "vertex_base at offset 4");
-        assert_eq!(float_at(8), 3.0, "producer.error at offset 8");
-        assert_eq!(float_at(12), 4.0, "producer.bounds.center at offset 12");
-        assert_eq!(float_at(20), 6.0, "and it is three floats wide");
-        assert_eq!(float_at(24), 7.0, "producer.bounds.radius at offset 24");
-        assert_eq!(float_at(28), 8.0, "container.error at offset 28");
-        assert_eq!(float_at(32), 9.0, "container.bounds.center at offset 32");
-        assert_eq!(float_at(40), 11.0, "and it is three floats wide");
-        assert_eq!(float_at(44), 12.0, "container.bounds.radius at offset 44");
+        assert_eq!(uint_at(8), 3, "producer_group at offset 8");
+        assert_eq!(uint_at(12), 4, "container_group at offset 12");
 
         // And the decode agrees with the encode, field for field.
         assert_eq!(ClusterSelect::from_bytes(&bytes), record);
@@ -345,32 +406,31 @@ mod tests {
         }
     }
 
-    /// **A cluster with neither group is drawn from every camera**, which is
-    /// what lets a pool hold a mesh with no DAG beside one with a deep DAG.
-    ///
-    /// The eye sweep matters: [`ClusterSelect::ALWAYS`]'s spheres are a point at
-    /// the origin, and an eye *at* the origin is inside them — the case
-    /// [`GroupCost::projected_error`] answers with infinity, and the one a
-    /// record relying on a zero error rather than on its flags would get wrong.
+    /// **A cluster with neither group is drawn whatever the group state says**,
+    /// which is what lets a pool hold a mesh with no DAG beside one with a deep
+    /// DAG — and it holds with an empty state array, because neither index is
+    /// reached at all.
     #[test]
-    fn a_cluster_with_no_dag_is_drawn_from_every_camera() {
-        for eye in [[0.0; 3], [1.0, 2.0, 3.0], [-40.0, 6.0, -40.0]] {
-            for budget in [0.0, 1.0, 32.0, 1.0e9] {
-                assert!(
-                    ClusterSelect::ALWAYS.is_drawn(eye, 166.0, budget),
-                    "a flat mesh's cluster was dropped at {eye:?} under {budget}"
-                );
-            }
+    fn a_cluster_with_no_dag_is_drawn_whatever_is_expanded() {
+        assert!(
+            ClusterSelect::ALWAYS.is_drawn(&[]),
+            "a flat mesh's cluster was dropped with no groups in the world"
+        );
+        for state in [[false, false], [false, true], [true, false], [true, true]] {
+            assert!(
+                ClusterSelect::ALWAYS.is_drawn(&state),
+                "a flat mesh's cluster was dropped under {state:?}"
+            );
         }
-        // And the flags are what did it, not the zeroes: the same record with
-        // both groups declared present is dropped at the origin, where both
-        // project to infinity.
+        // And the flags are what did it, not the zero indices: the same record
+        // with both groups declared present is dropped as soon as group 0
+        // expands.
         let inside = ClusterSelect {
             flags: ClusterSelect::HAS_PRODUCER | ClusterSelect::HAS_CONTAINER,
             ..ClusterSelect::ALWAYS
         };
         assert!(
-            !inside.is_drawn([0.0; 3], 166.0, 32.0),
+            !inside.is_drawn(&[true]),
             "an expanded producer must drop its cluster, or the flags decide nothing"
         );
     }
@@ -383,7 +443,8 @@ mod tests {
     /// and that is exactly the shape two copies drift in — a level chosen
     /// slightly wrong looks like a level. `tools/cook-clusters.rs` holds the
     /// *builder's* spelling to the cooked one for bit equality; this holds the
-    /// cooked one to the record the GPU actually reads, and it closes the chain.
+    /// cooked one to the record `draw_gen.slang` actually reads, and it closes
+    /// the chain.
     #[test]
     fn the_two_projections_are_one_metric_over_the_whole_dag() {
         let dag = dunes_dag();
@@ -412,6 +473,64 @@ mod tests {
             infinite > 0,
             "no eye landed inside a group's sphere, so the infinity branch was \
              never compared"
+        );
+    }
+
+    /// **The band is where the previous answer decides**, and only there.
+    ///
+    /// Three regions, over a real group of the committed DAG: above the expand
+    /// budget both histories expand, below the hold budget neither does, and
+    /// between them the answer is whatever it was. A rule that ignored `was`
+    /// would agree on two of the three, which is why the middle is asserted for
+    /// both histories rather than for one.
+    #[test]
+    fn the_previous_answer_decides_inside_the_band_and_nowhere_else() {
+        let dag = dunes_dag();
+        let group = &dag.levels[0].groups[0];
+        let cost = GroupCost {
+            error: group.error,
+            bounds: group.bounds,
+        };
+        let eye = EYES[1];
+        let error = cost.projected_error(eye, PIXELS_PER_UNIT);
+        assert!(
+            error.is_finite() && error > 0.0,
+            "this eye has to be outside the sphere for the sweep to mean anything, \
+             and the projection came out {error}"
+        );
+        let budgets = LodBudgets {
+            expand: error * 2.0,
+            hold: error / 2.0,
+        };
+        let at = |budgets, was| group_is_expanded(&cost, eye, PIXELS_PER_UNIT, budgets, was);
+
+        // Above the expand budget: expanded either way.
+        let over = LodBudgets::scaled(error / 2.0, 0.5);
+        assert!(
+            at(over, false),
+            "an error over the expand budget must expand"
+        );
+        assert!(at(over, true), "and stay expanded");
+
+        // Below the hold budget: collapsed either way.
+        let under = LodBudgets::scaled(error * 2.0, 1.0);
+        assert!(
+            !at(under, false),
+            "an error under both budgets must not expand"
+        );
+        assert!(!at(under, true), "and must give up if it was");
+
+        // Inside the band: the previous answer, and it is the only thing that
+        // differs between these two calls.
+        assert!(!at(budgets, false), "an unexpanded group in the band waits");
+        assert!(at(budgets, true), "an expanded group in the band holds");
+
+        // And with no band at all the history stops mattering.
+        let sharp = LodBudgets::sharp(error * 2.0);
+        assert_eq!(
+            at(sharp, false),
+            at(sharp, true),
+            "a sharp threshold must answer the same whatever happened last frame"
         );
     }
 

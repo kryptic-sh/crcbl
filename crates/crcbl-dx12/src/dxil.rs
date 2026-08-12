@@ -738,9 +738,10 @@ mod tests {
                 // cluster counts the host uploaded (binding 9, read only) and
                 // the argument structures this pass writes them into (10) —
                 // then `docs/plan/25-lod.md`'s three selection tables (11 to
-                // 13), all host-written and all read only.
+                // 13), all host-written and all read only, and its hysteresis
+                // state (14), which this pass is the only writer of.
                 &[
-                    Cbv, Srv, Srv, Srv, Srv, Srv, Uav, Uav, Uav, Srv, Uav, Srv, Srv, Srv,
+                    Cbv, Srv, Srv, Srv, Srv, Srv, Uav, Uav, Uav, Srv, Uav, Srv, Srv, Srv, Uav,
                 ],
             ),
             (

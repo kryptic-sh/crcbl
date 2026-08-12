@@ -29,9 +29,25 @@
 // `crcbl_shaders::level_select` is both its documentation and its host twin.
 //
 // A mesh with no hierarchy carries a record that resolves to itself, so nothing
-// here branches on whether a mesh has levels — and the mesh path hands over
-// exactly that record for every mesh, which is how a device that already
-// selects per cluster avoids a second, coarser cut on top of it.
+// here branches on whether a mesh has levels — and the mesh path hands over a
+// record whose top level is zero, which resolves to the mesh the instance
+// already names and is how a device that already selects per cluster avoids a
+// second, coarser cut on top of it.
+//
+// # And the hysteresis, for *both* paths
+//
+// That plan also asks for "**hysteresis** on the threshold (switch-up and
+// switch-down differ)", which needs the previous frame's answer and therefore
+// needs somewhere to keep it. `group_state` below is that somewhere: one word
+// per (instance, group), written here and read by `mesh_cluster.slang`.
+//
+// It is written *here* on every geometry path, including the one that takes no
+// uniform cut at all, because this is the only pass with one invocation per
+// visible instance — so every element has exactly one writer, and the
+// amplification stage's thousands of task groups per instance need only read.
+// `select_level` therefore judges every group whatever level it returns, and a
+// mesh-path record suppresses the cut with a top level of zero rather than with
+// a group count of zero.
 //
 // # Why the arguments are per bucket and not per visible instance
 //
@@ -258,20 +274,25 @@ struct DrawGenParams
     /// Elements of `visible` that hold anything — `cull.slang`'s capacity. Its
     /// counter can exceed this, which is how an overflow is visible at all.
     uint visible_capacity;
-    /// Pads the block to a multiple of 16 bytes, which `std140` requires of a
-    /// uniform buffer's size.
-    uint pad0;
+    /// How many groups one instance's run of `group_state` holds — every
+    /// resident mesh's group count summed, and the stride between two instances
+    /// in it. The same number `mesh_cluster.slang`'s
+    /// `ClusterDrawConstants::group_stride` carries, because that stage reads
+    /// what this one writes.
+    uint group_stride;
     /// The eye this frame's uniform cut is selected from, in world space, in
     /// `xyz`. The same name and the same three floats as `mesh.slang`'s
     /// `FrameUniforms::camera_position`, and the renderer writes both from one
     /// camera.
     float4 camera_position;
-    /// `docs/plan/25-lod.md`'s two selection numbers: `x` is how many pixels one
-    /// unit of length subtends one unit from the eye, `y` is the pixel budget a
-    /// group's projected error is compared against.
+    /// `docs/plan/25-lod.md`'s selection numbers: `x` is how many pixels one
+    /// unit of length subtends one unit from the eye, `y` is the pixel budget an
+    /// unexpanded group's projected error must exceed to expand, and `z` is the
+    /// budget an already-expanded group is held down to before it collapses
+    /// again — that plan's "switch-up and switch-down differ".
     ///
     /// Named after `mesh.slang`'s `FrameUniforms::lod_params` because it is that
-    /// block's two numbers, written by the same frame from the same camera —
+    /// block's three numbers, written by the same frame from the same camera —
     /// the two geometry paths select at different granularities and must never
     /// select under different parameters.
     float4 lod_params;
@@ -384,21 +405,51 @@ StructuredBuffer<LevelGroup> level_groups;
 [[vk::binding(13, 0)]]
 StructuredBuffer<uint> level_meshes;
 
-/// Whether a group is **expanded** — its children drawn rather than its parents
-/// — from the eye this frame selects at.
+/// `docs/plan/25-lod.md`'s hysteresis state: one word per (instance, group),
+/// `1` where that instance had that group expanded last frame.
 ///
-/// `docs/plan/25-lod.md`'s metric, and
-/// `crcbl_shaders::cluster_select::GroupCost::projected_error` in Slang. This is
-/// character for character `mesh_cluster.slang`'s `group_is_expanded` with its
-/// `frame.lod_params` spelled `gen.lod_params`, and that is deliberate: the two
-/// geometry paths run the same three arithmetic operations in the same order on
-/// the same numbers, so a level chosen differently is a difference in
-/// *granularity* and never in the metric.
+/// **The one place either geometry path's expansion is decided**, and the reason
+/// a decision that has to survive a frame can be made at all. `select_level`
+/// below reads an element and writes it back; `mesh_cluster.slang`'s
+/// amplification stage only reads, at `instance * group_stride + group`, which
+/// is the same address this pass wrote.
+///
+/// **One buffer, not one per frame in flight**, and that is the whole
+/// cross-frame story:
+///
+/// * *Within* a dispatch there is nothing to order — invocation `i` owns visible
+///   instance `i`'s whole run and no other invocation touches it, so every
+///   element has exactly one reader and one writer.
+/// * *Between* frames the graph is what orders them. The buffer is imported in
+///   `ResourceState::ShaderReadWrite` and declared the same here, and
+///   `ResourceState::needs_barrier` answers `true` for any transition involving
+///   a write — so the first barrier of every frame names a real source scope
+///   covering the last frame's writes and the last frame's mesh-stage reads.
+/// * A **ring** is what would break it, not what would save it: an instance the
+///   frustum rejected writes nothing, so its slot in a fresh ring buffer would
+///   hold whatever was there frames ago, and a state that is not this mesh's own
+///   is a state that need not be monotone up the DAG — which is a crack. One
+///   persistent buffer keeps a culled instance's history instead, and a history
+///   is always monotone because every frame's update preserves it.
+///
+/// Zeroed once when the renderer builds it, which is where the induction starts.
+[[vk::binding(14, 0)]]
+RWStructuredBuffer<uint> group_state;
+
+/// Whether a group is **expanded** — its children drawn rather than its parents
+/// — from the eye this frame selects at, given whether it was last frame.
+///
+/// `docs/plan/25-lod.md`'s metric and its hysteresis, and
+/// `crcbl_shaders::cluster_select::group_is_expanded` in Slang: the projection
+/// against `gen.lod_params.y` to *start* expanding, against `gen.lod_params.z`
+/// to *keep* expanding, and the previous answer deciding between them. Equal
+/// budgets are one threshold and `was` stops mattering, which is what a test
+/// sets to show the band is doing the work.
 ///
 /// **An eye inside the sphere expands**, because there is no distance to divide
 /// by and "as close as possible, so descend" is both the conservative answer and
-/// the monotone one.
-uint group_is_expanded(float error, float3 center, float radius, float3 eye)
+/// the monotone one — and monotone is what keeps the band from tearing a cut.
+uint group_is_expanded(float error, float3 center, float radius, float3 eye, uint was)
 {
     float3 delta = eye - center;
     float separation = sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
@@ -407,39 +458,46 @@ uint group_is_expanded(float error, float3 center, float radius, float3 eye)
     {
         return 1u;
     }
-    return error * gen.lod_params.x / distance > gen.lod_params.y ? 1u : 0u;
+    float projected = error * gen.lod_params.x / distance;
+    bool expanded = projected > gen.lod_params.y
+        || (was != 0u && projected > gen.lod_params.z);
+    return expanded ? 1u : 0u;
 }
 
-/// The level a uniform cut draws `instance` at: the finest level any of its
-/// mesh's groups is expanded at, and the top level when none is.
+/// Judges every one of `instance`'s groups, records the answers, and returns the
+/// level a uniform cut draws it at.
 ///
-/// `crcbl_shaders::level_select::MeshLevels::uniform_level` is this loop in
-/// Rust, and that module's docs carry why this number is the finest level the
+/// `crcbl_shaders::level_select::MeshLevels::select` is this loop in Rust, and
+/// that module's docs carry why the returned number is the finest level the
 /// per-cluster descent draws anywhere — which is what makes the coarse decision
 /// the fine one's own floor rather than an approximation of it.
+///
+/// **Every group is judged, whatever the level answer is**, because the mesh
+/// path descends these same groups per cluster and reads exactly this state. A
+/// mesh whose record carries a `top_level` of zero — which is how that path
+/// suppresses the uniform cut — still needs its groups decided, so there is no
+/// early exit here even though the answer is a minimum.
 ///
 /// **In world space**, exactly as `mesh_cluster.slang`'s descent is: the
 /// sphere's centre goes through the instance's rigid transform, its radius does
 /// not, and the eye stays where it is. That is the same statement as putting the
 /// camera through the inverse transform, and it needs no inverse.
-uint uniform_level(GpuInstance instance)
+uint select_level(GpuInstance instance, uint instance_index)
 {
     MeshLevels levels = mesh_levels[instance.mesh];
     float3 eye = gen.camera_position.xyz;
+    uint base = instance_index * gen.group_stride;
     uint chosen = levels.top_level;
     for (uint i = 0; i < levels.group_count; ++i)
     {
-        LevelGroup group = level_groups[levels.first_group + i];
-        // A group at or above the answer so far cannot lower it, and the answer
-        // is a minimum — so this skips the projection and not only the
-        // comparison.
-        if (group.level >= chosen)
-        {
-            continue;
-        }
+        uint at = levels.first_group + i;
+        LevelGroup group = level_groups[at];
         float3 center = mul(instance.transform,
             float4(group.center_x, group.center_y, group.center_z, 1.0)).xyz;
-        if (group_is_expanded(group.error, center, group.radius, eye) == 1u)
+        uint expanded = group_is_expanded(
+            group.error, center, group.radius, eye, group_state[base + at]);
+        group_state[base + at] = expanded;
+        if (expanded == 1u && group.level < chosen)
         {
             chosen = group.level;
         }
@@ -501,7 +559,8 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
     // here names the mesh that actually draws, which the bucket table then
     // routes exactly as it routes a mesh with no hierarchy. A mesh with none
     // resolves back to itself, so there is no branch for the ordinary case.
-    uint mesh_id = level_meshes[mesh_levels[instance.mesh].first_level + uniform_level(instance)];
+    uint mesh_id = level_meshes[
+        mesh_levels[instance.mesh].first_level + select_level(instance, instance_index)];
     // A linear walk of the bucket table. The table is small and fixed — one
     // entry per resident mesh today — so this is a couple of comparisons; a
     // mesh → bucket map is what a table large enough to notice would want.
@@ -519,12 +578,6 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
         // assertion: `crcbl-vk`'s `the_mesh_dispatch_extent_is_the_culled
         // _instance_count` reads both buffers back and compares them.
         mesh_args[bucket * MESH_ARGS_WORDS + MESH_ARG_GROUP_Y].add(1);
-        // The mesh dispatch's y extent, counted by the same invocations and to
-        // the same total. Two adds rather than one read of the other word,
-        // because a word another invocation is still incrementing is not a
-        // total yet — and the two are held equal by measurement rather than by
-        // assertion: `crcbl-vk`'s `the_mesh_dispatch_extent_is_the_culled
-        // _instance_count` reads both buffers back and compares them.
 
         visible_instances[bucket * gen.bucket_capacity + slot] = instance_index;
         // Exactly one invocation per bucket takes slot zero, so exactly one

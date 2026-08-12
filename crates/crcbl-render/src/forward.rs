@@ -337,6 +337,40 @@ const DUNES_BUCKET: usize = 3;
 /// number.
 const LOD_ERROR_BUDGET: f32 = 1.0;
 
+/// Bytes one bucket's draw-constant block occupies, whichever of the two blocks
+/// it holds.
+///
+/// The larger of [`mesh::DRAW_CONSTANTS_SIZE`] and
+/// [`CLUSTER_DRAW_CONSTANTS_SIZE`](crcbl_shaders::meshlet::CLUSTER_DRAW_CONSTANTS_SIZE),
+/// because which one a bucket holds is the geometry path's decision and the
+/// buffer, its dynamic stride and the range the bind group names are all fixed
+/// before that decision reaches them.
+///
+/// **The bound range is the half that bites.** A range sized for the smaller
+/// block leaves the larger one's tail outside it, and a uniform read past the
+/// bound range is not a fault — it is a zero. Sized at sixteen bytes, the mesh
+/// path's `group_stride` read back as zero and every instance descended against
+/// instance zero's LOD state.
+const DRAW_CONSTANTS_BLOCK: u64 =
+    if mesh::DRAW_CONSTANTS_SIZE > crcbl_shaders::meshlet::CLUSTER_DRAW_CONSTANTS_SIZE {
+        mesh::DRAW_CONSTANTS_SIZE as u64
+    } else {
+        crcbl_shaders::meshlet::CLUSTER_DRAW_CONSTANTS_SIZE as u64
+    };
+
+/// How far below the budget an already-expanded group is held before it
+/// collapses again — `docs/plan/25-lod.md`'s "switch-up and switch-down differ",
+/// as a fraction of [`LOD_ERROR_BUDGET`].
+///
+/// A ratio and not an offset because the band has to scale with the budget: a
+/// fixed number of pixels is most of a one-pixel budget and none of a fifty-pixel
+/// one. A fifth of the budget is a deadband a camera has to move decisively out
+/// of, and one a camera drifting along a boundary never leaves — which is the
+/// flicker the plan is about. `crcbl_shaders::cluster_select::LodBudgets` is the
+/// pair this produces, and a ratio of one is that type's `sharp`: no band, and
+/// the setting that shows the band is what stops the flicker.
+const LOD_HOLD_RATIO: f32 = 0.8;
+
 /// The budget an **orthographic** camera selects under: one no group satisfies,
 /// so every group expands and the base level is drawn whole.
 ///
@@ -504,10 +538,18 @@ pub struct ForwardRenderer {
     /// projected error against. [`LOD_ERROR_BUDGET`] until
     /// [`ForwardRenderer::set_lod_error_budget`] says otherwise.
     lod_error_budget: f32,
+    /// How far below that an expanded group is held before it collapses again.
+    /// [`LOD_HOLD_RATIO`] until
+    /// [`ForwardRenderer::set_lod_hold_ratio`] says otherwise.
+    lod_hold_ratio: f32,
     /// What [`begin_frame`](ForwardRenderer::begin_frame) last wrote into
     /// [`mesh::FrameUniforms::lod_params`], kept so a reader can compute the
     /// same cut host-side without re-deriving it from the camera.
-    lod_params: [f32; 2],
+    ///
+    /// Pixels per unit, the budget a group starts expanding over, and the budget
+    /// it is held down to — `docs/plan/25-lod.md`'s hysteresis, and
+    /// [`LOD_HOLD_RATIO`] is what puts the third below the second.
+    lod_params: [f32; 3],
 
     // Per-frame uniforms, one set per frame in flight.
     uniforms: Vec<BufferHandle>,
@@ -744,6 +786,14 @@ struct MeshGroup {
     /// pass — so what a reader gets is the camera's cut rather than a
     /// cascade's. See [`ForwardRenderer::cluster_selection`].
     cluster_selection: Option<BufferHandle>,
+    /// Binding 19, likewise: `docs/plan/25-lod.md`'s hysteresis state, which the
+    /// draw-argument pass wrote this frame and this one only reads.
+    ///
+    /// **One buffer for the colour pass and every cascade**, and not because
+    /// they happen to share one: they select from the same camera, so a cascade
+    /// that judged the groups again would be a second decision about one
+    /// instance — and a second *writer* of the state.
+    group_state: Option<BufferHandle>,
     /// Binding [`SHADOW_ATLAS_BINDING`]. The atlas for the pass that reads it,
     /// and the placeholder for the pass that writes it — see
     /// [`ForwardRenderer::shadow_placeholder`], which is where that is argued.
@@ -783,7 +833,7 @@ impl MeshGroup {
                 resource: BindingResource::Buffer {
                     buffer: shared.draw_constants,
                     offset: 0,
-                    size: mesh::DRAW_CONSTANTS_SIZE as u64,
+                    size: DRAW_CONSTANTS_BLOCK,
                 },
             },
             BindGroupEntry {
@@ -902,6 +952,13 @@ impl MeshGroup {
                 resource: BindingResource::whole_buffer(selection),
             });
         }
+        if let Some(state) = self.group_state {
+            entries.push(BindGroupEntry {
+                binding: 19,
+                array_index: 0,
+                resource: BindingResource::whole_buffer(state),
+            });
+        }
         entries
     }
 }
@@ -936,6 +993,15 @@ struct CascadeBuffers {
     args: Vec<BufferHandle>,
     cull_params: Vec<BufferHandle>,
     cull_stats: Vec<BufferHandle>,
+    /// This cascade's own hysteresis state, and not the camera's.
+    ///
+    /// A cascade selects from the **light** — its `FrameUniforms` puts the sun
+    /// where the camera would be, which is what makes its per-cluster cull
+    /// reject what faces away from the sun — so its groups are judged against a
+    /// different eye and their history is a different history. Sharing the
+    /// camera's buffer would be two eyes writing one state and each undoing the
+    /// other's band every frame.
+    group_state: BufferHandle,
 }
 
 impl ForwardRenderer {
@@ -1127,19 +1193,35 @@ impl ForwardRenderer {
                 ..level_select::MeshLevels::FLAT
             })
             .collect();
-        let mut level_groups: Vec<level_select::LevelGroup> = Vec::new();
+        let dag = crcbl_shaders::cluster_dag::dunes_dag();
+        let level_groups: Vec<level_select::LevelGroup> = dag.level_groups();
+        let dunes_first_group = 0u32;
+        mesh_levels[dunes_mesh as usize] = level_select::MeshLevels {
+            first_group: dunes_first_group,
+            group_count: u32::try_from(level_groups.len())
+                .unwrap_or_else(|_| unreachable!("a DAG of a few dozen groups")),
+            // **The mesh path suppresses the uniform cut with a top level of
+            // zero, not with a group count of zero**, and the difference is the
+            // hysteresis state: `draw_gen.slang` judges every group it is given
+            // whatever level it answers, and the amplification stage reads those
+            // answers. A record naming no groups would leave the state
+            // untouched and every cluster of the patch collapsed. A top level of
+            // zero makes the level loop's minimum unreachable, so the instance
+            // routes to the mesh it already names — which is level 0.
+            first_level: if emit.is_mesh() {
+                dunes_mesh
+            } else {
+                u32::try_from(level_meshes.len())
+                    .unwrap_or_else(|_| unreachable!("a table of a few meshes"))
+            },
+            top_level: if emit.is_mesh() {
+                0
+            } else {
+                u32::try_from(dunes_levels.len() - 1)
+                    .unwrap_or_else(|_| unreachable!("a DAG of a few levels"))
+            },
+        };
         if !emit.is_mesh() {
-            let dag = crcbl_shaders::cluster_dag::dunes_dag();
-            level_groups = dag.level_groups();
-            mesh_levels[dunes_mesh as usize] = level_select::MeshLevels {
-                first_group: 0,
-                group_count: u32::try_from(level_groups.len())
-                    .unwrap_or_else(|_| unreachable!("a DAG of a few dozen groups")),
-                first_level: u32::try_from(level_meshes.len())
-                    .unwrap_or_else(|_| unreachable!("a table of a few meshes")),
-                top_level: u32::try_from(dunes_levels.len() - 1)
-                    .unwrap_or_else(|_| unreachable!("a DAG of a few levels")),
-            };
             level_meshes.extend_from_slice(&dunes_levels);
         }
 
@@ -1160,8 +1242,7 @@ impl ForwardRenderer {
             // each and their clusters carry `ClusterSelect::ALWAYS`, so the
             // descent draws them from every camera; the DAG is **one entry per
             // level**, laid end to end, and one bucket covers all of them.
-            let dag = crcbl_shaders::cluster_dag::dunes_dag();
-            let selection = dag.selection_records(&dunes_vertex_bases);
+            let selection = dag.selection_records(&dunes_vertex_bases, dunes_first_group);
             let mut cooked = vec![
                 PooledMesh::without_lod(crcbl_shaders::meshlet::cube_clusters()),
                 PooledMesh::without_lod(crcbl_shaders::meshlet::pyramid_clusters()),
@@ -1550,6 +1631,20 @@ impl ForwardRenderer {
                 count: 1,
                 flags: BindingFlags::empty(),
             });
+            mesh_entries.push(BindGroupLayoutEntry {
+                binding: 19,
+                visibility: geometry,
+                kind: BindingKind::StorageBuffer {
+                    // `docs/plan/25-lod.md`'s hysteresis state, and read-only
+                    // here: the draw-argument pass is its only writer, which is
+                    // what lets a stage with one workgroup per cluster use a
+                    // decision that has to survive a frame.
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            });
         }
 
         let mesh_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
@@ -1563,23 +1658,17 @@ impl ForwardRenderer {
         // assumed, exactly as `crate::sprite_pass` does: 256 on WebGPU, 64 on a
         // typical desktop Vulkan driver.
         //
-        // **Both blocks are sixteen bytes**, so the stride is one number rather
-        // than one per path: `mesh::DrawConstants` is a `uint` and three of
-        // padding, and `meshlet::ClusterDrawConstants` is four `uint`s that say
-        // something. Which of the two a bucket's block holds is decided below.
+        // One stride for both blocks, sized for the larger — see
+        // [`DRAW_CONSTANTS_BLOCK`]. Which of the two a bucket's block holds is
+        // decided below.
         let alignment = device.caps().limits.min_uniform_buffer_offset_alignment;
-        const _: () = assert!(
-            mesh::DRAW_CONSTANTS_SIZE == crcbl_shaders::meshlet::CLUSTER_DRAW_CONSTANTS_SIZE
-        );
-        let draw_stride = u32::try_from(
-            (mesh::DRAW_CONSTANTS_SIZE as u64).next_multiple_of(alignment),
-        )
-        .map_err(|_| {
-            HalError::InvalidDescriptor(format!(
-                "min_uniform_buffer_offset_alignment is {alignment}, which no dynamic \
+        let draw_stride =
+            u32::try_from(DRAW_CONSTANTS_BLOCK.next_multiple_of(alignment)).map_err(|_| {
+                HalError::InvalidDescriptor(format!(
+                    "min_uniform_buffer_offset_alignment is {alignment}, which no dynamic \
                          offset can express"
-            ))
-        })?;
+                ))
+            })?;
         let draw_constants = device.create_buffer(&BufferDesc {
             label: Some("mesh draw constants"),
             size: u64::from(draw_stride) * u64::from(bucket_count),
@@ -1614,8 +1703,15 @@ impl ForwardRenderer {
                     cluster_base: bucket_cluster_bases[index],
                     cluster_count: bucket_clusters[index],
                     bucket,
+                    // The same number the draw-argument pass indexes the state
+                    // with, taken from the object that owns the buffer rather
+                    // than recomputed from the group table — the two indexing it
+                    // differently is a cluster reading another instance's
+                    // decision.
+                    group_stride: draws.group_stride(),
                 }
                 .to_bytes()
+                .to_vec()
             } else {
                 // **The bucket's mesh, which is not always the drawn instance's.**
                 // A uniform cut selects one of a DAG's levels and each level is
@@ -1627,6 +1723,7 @@ impl ForwardRenderer {
                     mesh: bucket_meshes[index],
                 }
                 .to_bytes()
+                .to_vec()
             };
             device.write_buffer(draw_constants, u64::from(*offset), &block)?;
         }
@@ -1750,6 +1847,7 @@ impl ForwardRenderer {
                 cull_stats: (0..instance_buffers.len())
                     .map(|frame| draws.visible_count(frame))
                     .collect(),
+                group_state: draws.group_state(),
             })
             .collect();
 
@@ -1788,6 +1886,7 @@ impl ForwardRenderer {
                 cull_params: cull_params[frame],
                 cull_stats: cull_stats[frame],
                 cluster_selection: cluster_selection.get(frame).copied(),
+                group_state: culls_clusters.then(|| draws.group_state()),
                 // The colour pass reads the finished atlas. Its own pass writes
                 // nothing to it, so there is no conflict to avoid here.
                 shadow_map: shadow_atlas_view,
@@ -1835,6 +1934,10 @@ impl ForwardRenderer {
                     // `ForwardRenderer::cluster_selection` the camera's cut and
                     // not the sun's.
                     cluster_selection: cluster_selection.get(frame).copied(),
+                    // **This cascade's own**, unlike the buffer above: see
+                    // `CascadeBuffers::group_state`, which is where the two eyes
+                    // are argued.
+                    group_state: culls_clusters.then_some(buffers.group_state),
                     shadow_map: shadow_placeholder_view,
                 }
                 .entries(&shared);
@@ -2166,10 +2269,11 @@ impl ForwardRenderer {
             },
             cluster_selection,
             lod_error_budget: LOD_ERROR_BUDGET,
+            lod_hold_ratio: LOD_HOLD_RATIO,
             // Overwritten by the first `begin_frame`, which is the only thing
             // that can know the viewport. A zero scale with a budget of zero
             // selects nothing at all, and there is no frame yet to select for.
-            lod_params: [0.0, 0.0],
+            lod_params: [0.0, 0.0, 0.0],
             mesh_groups,
             frame: 0,
             mesh_layout,
@@ -2576,7 +2680,7 @@ impl ForwardRenderer {
         } else {
             self.lod_error_budget
         };
-        self.lod_params = [lod_scale, lod_budget];
+        self.lod_params = [lod_scale, lod_budget, lod_budget * self.lod_hold_ratio];
         // Topic 18's cascades. Built from the camera and the light alone, so a
         // frame that culls against them and a fragment that samples through them
         // cannot disagree about where they are.
@@ -2594,7 +2698,12 @@ impl ForwardRenderer {
             shadow_view_proj,
             cascade_far: cascades.far,
             shadow_params: Cascades::params(),
-            lod_params: [lod_scale, lod_budget, 0.0, 0.0],
+            lod_params: [
+                self.lod_params[0],
+                self.lod_params[1],
+                self.lod_params[2],
+                0.0,
+            ],
         };
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
 
@@ -2852,16 +2961,45 @@ impl ForwardRenderer {
         self.lod_error_budget = budget;
     }
 
+    /// The budget this renderer selects under unless
+    /// [`set_lod_error_budget`](Self::set_lod_error_budget) says otherwise, and
+    /// the ratio the hold budget sits at below whichever one is in force.
+    ///
+    /// Public because a test that drives a camera across a level boundary has to
+    /// know where the boundary is, and where it is depends on both numbers —
+    /// re-deriving either in the test would be a second copy to drift.
+    pub const LOD_ERROR_BUDGET: f32 = LOD_ERROR_BUDGET;
+    /// See [`LOD_ERROR_BUDGET`](Self::LOD_ERROR_BUDGET).
+    pub const LOD_HOLD_RATIO: f32 = LOD_HOLD_RATIO;
+
+    /// How far below the budget an already-expanded group is held before it
+    /// collapses again — `docs/plan/25-lod.md`'s hysteresis, as a fraction of
+    /// the budget.
+    ///
+    /// [`LOD_HOLD_RATIO`](Self::LOD_HOLD_RATIO) until this is called. **A ratio
+    /// of one removes the band**, which makes the two budgets equal and the
+    /// previous frame's answer stop mattering — the setting a test uses to show
+    /// that the band is what stops a drifting camera flickering, on the same
+    /// code path and one number apart.
+    ///
+    /// Takes effect at the next [`begin_frame`](Self::begin_frame), which is
+    /// what writes it into the two params blocks.
+    pub const fn set_lod_hold_ratio(&mut self, ratio: f32) {
+        self.lod_hold_ratio = ratio;
+    }
+
     /// What the last [`begin_frame`](Self::begin_frame) handed the descent:
     /// pixels per unit at one unit from the eye, and the pixel budget.
     ///
-    /// The pair `ClusterSelect::is_drawn` takes, so a caller reading
-    /// [`cluster_selection`](Self::cluster_selection) back can compute the same
-    /// cut host-side out of `ClusterDag::cut` rather than re-deriving the
-    /// numbers from the camera and hoping they agree. `[0.0, 0.0]` before the
-    /// first frame.
+    /// Pixels per unit at one unit from the eye, the budget an unexpanded group
+    /// starts expanding over, and the budget an expanded one is held down to.
+    ///
+    /// What `ClusterDag::expand` takes, so a caller reading
+    /// [`cluster_selection`](Self::cluster_selection) back can run the same
+    /// frames host-side rather than re-deriving the numbers from the camera and
+    /// hoping they agree. `[0.0, 0.0, 0.0]` before the first frame.
     #[must_use]
-    pub const fn lod_params(&self) -> [f32; 2] {
+    pub const fn lod_params(&self) -> [f32; 3] {
         self.lod_params
     }
 
@@ -3042,6 +3180,12 @@ impl ForwardRenderer {
                 // order, and declaring it is the whole of how it learns to.
                 let pass =
                     pass.use_buffer(generated.visible_count_id, ResourceState::ShaderReadWrite);
+                // `docs/plan/25-lod.md`'s hysteresis state, read here and
+                // written by the draw-argument pass a moment ago. Declaring it
+                // is what orders the two — and what puts it back into
+                // `ShaderReadWrite` at the end of the graph, which is where the
+                // next frame's draw-argument pass expects to find it.
+                let pass = pass.read_buffer(generated.group_state_id);
                 match selection {
                     // Declared last of the three, and by the last pass to write
                     // it, which is what makes what survives the frame the
@@ -3287,6 +3431,7 @@ impl ForwardRenderer {
                     .use_buffer(draws.mesh_args_id, ResourceState::IndirectArgument);
                 if self.culls_clusters {
                     pass.use_buffer(draws.visible_count_id, ResourceState::ShaderReadWrite)
+                        .read_buffer(draws.group_state_id)
                 } else {
                     pass
                 }
@@ -4646,9 +4791,13 @@ mod tests {
             );
             assert_eq!(
                 after("draw-args"),
-                3,
+                4,
                 "round {round}: and so do the draw arguments, the draw counts and the \
-                 mesh-dispatch arguments"
+                 mesh-dispatch arguments — plus `docs/plan/25-lod.md`'s hysteresis state, \
+                 which the clearing pass does *not* zero and which is behind the same \
+                 kind of barrier for the opposite reason: it is the one buffer here \
+                 carrying a value out of the previous frame, so what it needs ordering \
+                 against is that frame rather than this one's clear"
             );
 
             // The compiled graph borrows the renderer's pass bodies, so it has

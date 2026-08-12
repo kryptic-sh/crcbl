@@ -204,7 +204,14 @@ its tests rather than values recorded from its own output.
   least its children's, so the descent has a single stopping point per branch
   and no cluster is ever drawn while an ancestor covering it is also drawn.
 - **Hysteresis** on the threshold (switch-up and switch-down differ) kills
-  boundary flicker.
+  boundary flicker: a group starts expanding above the budget and keeps
+  expanding until its error falls to a fraction of it. **The history is per
+  group, and that is a soundness requirement, not a saving** — a cut is a cover
+  only while expansion is monotone up the DAG, and per-cluster history can leave
+  a child collapsed under an expanded parent, which is a hole. The two-threshold
+  rule stays monotone because a parent's error is at least its children's and
+  its sphere contains theirs, so from an all-zero start every later frame is
+  monotone by induction.
 - **Transitions**: instant swap MVP (correct thresholds make pops sub-pixel by
   definition — the error metric _is_ the pop size); dithered crossfade later if
   hero assets demand it (pairs with TAA era).

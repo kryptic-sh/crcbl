@@ -149,6 +149,9 @@ pub struct DrawGenDesc<'a> {
     /// Sizes the visible list *and* every bucket's run, which is what makes a
     /// bucket unable to overflow: at most this many instances survive, and they
     /// are spread across the buckets rather than duplicated into each.
+    ///
+    /// It also sizes `docs/plan/25-lod.md`'s hysteresis state, which is one word
+    /// per (instance slot, group) — see [`DrawGen::group_state`].
     pub instance_capacity: u32,
 }
 
@@ -188,6 +191,15 @@ pub struct GeneratedDraws {
     /// The per-bucket runs of surviving instance indices, which the vertex
     /// stage reads. Declare it as a shader read.
     pub runs_id: BufferId,
+    /// `docs/plan/25-lod.md`'s hysteresis state, as the graph knows it.
+    ///
+    /// Here because a caller whose geometry path has an amplification stage
+    /// **reads** it: `mesh_cluster.slang` looks up the two groups a cluster
+    /// names, so the pass that runs it declares [`ResourceState::ShaderRead`] on
+    /// this id and the graph orders that read after the draw-argument pass's
+    /// write. A caller on a path with no amplification stage declares nothing,
+    /// and the state is then written and read by that pass alone.
+    pub group_state_id: BufferId,
     /// The frame's culling statistics, as the graph knows them — the buffer
     /// [`DrawGen::visible_count`] hands out.
     ///
@@ -220,6 +232,23 @@ pub struct DrawGen {
     /// The two buffer lengths the clearing dispatch zeroes. Shared by every
     /// frame's group, because both are fixed when the bucket table is built.
     clear_params: BufferHandle,
+    /// `docs/plan/25-lod.md`'s hysteresis state: one word per (instance slot,
+    /// group), holding whether that instance had that group expanded.
+    ///
+    /// **One buffer, deliberately not a ring**, and `draw_gen.slang`'s own
+    /// declaration is where that is argued: a frame reads what the last frame
+    /// wrote, an instance the frustum rejected writes nothing at all, and a
+    /// per-frame slot would hand such an instance a state that is neither its
+    /// own nor monotone — which is a crack rather than a stale level. Frames are
+    /// ordered against each other by the graph instead, out of the
+    /// `ShaderReadWrite` both the writing and the reading pass declare on it.
+    ///
+    /// Zeroed at build, which is where the monotonicity induction starts.
+    group_state: BufferHandle,
+    /// How many groups one instance's run of [`group_state`](Self::group_state)
+    /// holds — every resident mesh's group count summed, and at least one so the
+    /// buffer is never zero-length.
+    group_stride: u32,
 
     // One per frame in flight, indexed by the caller's frame slot.
     /// The block naming the bucket count, the two capacities and this frame's
@@ -377,6 +406,33 @@ impl DrawGen {
             4,
         )?;
 
+        // `docs/plan/25-lod.md`'s hysteresis state. **Zeroed here and by
+        // nothing else ever again**: `draw_gen.slang` reads an element before it
+        // writes it, so what the buffer holds on the very first frame is a real
+        // input, and freshly allocated device memory holds whatever it holds. A
+        // state that is not monotone up a DAG is a cut with a hole in it, so
+        // this is the one write that keeps every later frame's induction
+        // standing. `HostUpload` for that reason and no other — nothing writes
+        // it from the host again.
+        //
+        // At least one word per instance even when nothing resident has a
+        // hierarchy, because a zero-length buffer is not a descriptor any
+        // backend binds and both shaders index it unconditionally.
+        let group_stride = u32::try_from(desc.level_groups.len())
+            .map_err(|_| HalError::InvalidDescriptor("more groups than a u32".to_string()))?
+            .max(1);
+        let group_state = buffer(
+            "lod group state",
+            u64::from(capacity) * u64::from(group_stride) * 4,
+            BufferUsage::STORAGE,
+            MemoryLocation::HostUpload,
+        )?;
+        device.write_buffer(
+            group_state,
+            0,
+            &vec![0u8; capacity as usize * group_stride as usize * 4],
+        )?;
+
         let clear_params = buffer(
             "clear params",
             clear_counters::PARAMS_SIZE as u64,
@@ -424,6 +480,7 @@ impl DrawGen {
                     bucket_count,
                     bucket_capacity: capacity,
                     visible_capacity: capacity,
+                    group_stride,
                     ..draw_gen::Params::default()
                 }
                 .to_bytes(),
@@ -587,6 +644,10 @@ impl DrawGen {
                 storage(11, true),
                 storage(12, true),
                 storage(13, true),
+                // The hysteresis state, read *and* written: this pass is the
+                // only writer, and it reads the previous frame's answer out of
+                // the same element it then overwrites.
+                storage(14, false),
             ],
         })?;
         rollback.bind_group_layouts.push(gen_layout);
@@ -660,6 +721,7 @@ impl DrawGen {
                     bound(11, mesh_levels),
                     bound(12, level_groups),
                     bound(13, level_meshes),
+                    bound(14, group_state),
                 ],
                 variable_count: None,
             })?;
@@ -675,6 +737,8 @@ impl DrawGen {
             level_groups,
             level_meshes,
             clear_params,
+            group_state,
+            group_stride,
             gen_params,
             cull_params,
             visible,
@@ -844,6 +908,27 @@ impl DrawGen {
         self.mesh_args[frame]
     }
 
+    /// `docs/plan/25-lod.md`'s hysteresis state, for a caller binding it into a
+    /// mesh pipeline that reads it.
+    ///
+    /// One buffer for every frame in flight, unlike everything else here that a
+    /// caller binds — see [`DrawGen::group_state`](Self::group_state)'s field
+    /// docs, which is where that is argued.
+    #[must_use]
+    pub fn group_state(&self) -> BufferHandle {
+        self.group_state
+    }
+
+    /// The stride between two instances in that buffer, which is what
+    /// [`ClusterDrawConstants::group_stride`] has to carry for the amplification
+    /// stage to index it the same way this pass does.
+    ///
+    /// [`ClusterDrawConstants::group_stride`]: crcbl_shaders::meshlet::ClusterDrawConstants::group_stride
+    #[must_use]
+    pub const fn group_stride(&self) -> u32 {
+        self.group_stride
+    }
+
     /// Writes `frame`'s cull parameters — this frame's frustum, how much of the
     /// instance array to test, and the camera `docs/plan/25-lod.md`'s uniform
     /// cut selects a level from.
@@ -882,7 +967,7 @@ impl DrawGen {
         frustum: &Frustum,
         instance_count: u32,
         camera_position: [f32; 3],
-        lod_params: [f32; 2],
+        lod_params: [f32; 3],
     ) -> Result<(), HalError> {
         device.write_buffer(
             self.gen_params[frame],
@@ -891,6 +976,7 @@ impl DrawGen {
                 bucket_count: self.bucket_count,
                 bucket_capacity: self.capacity,
                 visible_capacity: self.capacity,
+                group_stride: self.group_stride,
                 camera_position,
                 lod_params,
             }
@@ -975,6 +1061,19 @@ impl DrawGen {
             self.mesh_args[frame],
             ResourceState::IndirectArgument,
         );
+        // **Not indexed by `frame`**, and that is the point: this one buffer is
+        // what carries a decision from the previous frame into this one. It
+        // arrives in `ShaderReadWrite` because that is what the last frame left
+        // it in, and `ResourceState::needs_barrier` answers `true` for any
+        // transition touching a write — so the first barrier of this frame
+        // carries a source scope covering that frame's writes and the mesh
+        // stage's reads of them, whether or not that frame is still in flight.
+        let group_state = import(
+            graph,
+            "lod-group-state",
+            self.group_state,
+            ResourceState::ShaderReadWrite,
+        );
 
         // The zero every atomic below counts up from, and the first thing in the
         // frame that touches any of the three. Its barrier into the cull pass is
@@ -1042,6 +1141,7 @@ impl DrawGen {
             .use_buffer(args, ResourceState::ShaderReadWrite)
             .use_buffer(counts, ResourceState::ShaderReadWrite)
             .use_buffer(mesh_args, ResourceState::ShaderReadWrite)
+            .use_buffer(group_state, ResourceState::ShaderReadWrite)
             .execute(move |ctx| {
                 let encoder = ctx.encoder();
                 encoder.bind_compute_pipeline(gen_pipeline);
@@ -1057,6 +1157,7 @@ impl DrawGen {
             mesh_args: self.mesh_args[frame],
             mesh_args_id: mesh_args,
             runs_id: runs,
+            group_state_id: group_state,
             visible_count_id: visible_count,
         }
     }
@@ -1087,6 +1188,7 @@ impl DrawGen {
             self.level_groups,
             self.level_meshes,
             self.clear_params,
+            self.group_state,
         ]
         .into_iter()
         .chain(self.gen_params)

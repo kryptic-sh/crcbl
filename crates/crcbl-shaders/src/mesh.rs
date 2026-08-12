@@ -153,15 +153,19 @@ pub struct FrameUniforms {
     /// `0.5 * viewport_height / tan(0.5 * fov_y)` for a perspective camera, which
     /// is what carries the frame's size and field of view into a screen-space
     /// error. `y`: the pixel budget a group's projected error is compared
-    /// against; a group over it is expanded and its children are drawn.
+    /// against. `z`: the budget an already-expanded group is held down to,
+    /// `docs/plan/25-lod.md`'s hysteresis. `w` is padding, because `std140`
+    /// aligns a `float4` to sixteen bytes.
     ///
-    /// `z` and `w` are **unread padding**, here because `std140` aligns a
-    /// `float4` to sixteen bytes and this block is written by both sides.
-    ///
-    /// A per-frame block rather than a per-bucket one because both numbers are
-    /// the camera's: the viewport can resize between frames, and this ring is
-    /// already one buffer per frame in flight where the draw constants are one
-    /// buffer shared by all of them.
+    /// **Read by no shader since hysteresis landed**, and written all the same:
+    /// a group's expansion is decided once per (instance, group) in
+    /// `draw_gen.slang` — which reads its own copy of these three numbers out of
+    /// [`draw_gen::Params::lod_params`](crate::draw_gen::Params::lod_params) —
+    /// and `mesh_cluster.slang`'s amplification stage reads the answer rather
+    /// than the numbers. They stay in this block because a renderer writes one
+    /// camera's selection numbers in one place and both blocks take them from
+    /// it; a second source is how the two paths would come to select
+    /// differently.
     pub lod_params: [f32; 4],
 }
 

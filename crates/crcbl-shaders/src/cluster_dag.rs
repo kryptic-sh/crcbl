@@ -39,20 +39,28 @@
 //! `the_cooked_dag_draws_a_crack_free_cut_from_every_camera` is it, run over the
 //! committed artifact.
 //!
-//! # This is the data and the rule, not the hysteresis
+//! # The rule, the state it carries, and what is still absent
 //!
 //! [`ClusterDag::cut`](crate::cluster_dag::ClusterDag::cut) is that rule run
 //! over a whole DAG host-side, and
 //! [`ClusterDag::selection_records`](crate::cluster_dag::ClusterDag::selection_records)
 //! is the same two groups resolved per cluster
 //! for a GPU to run it one cluster at a time — see [`crate::cluster_select`],
-//! which is the record `mesh_cluster.slang`'s amplification stage reads. What is
-//! still absent is `docs/plan/25-lod.md`'s hysteresis, its shadow LOD bias and
-//! its bake cache; none of them exists anywhere yet.
+//! which is the record `mesh_cluster.slang`'s amplification stage reads.
+//!
+//! `docs/plan/25-lod.md`'s **hysteresis** is [`ClusterDag::expand`], which turns
+//! last frame's expansion into this frame's under two budgets rather than one;
+//! [`ClusterDag::cut_from`] and [`ClusterDag::uniform_level_from`] are the two
+//! granularities asked of the state it produces. What is still absent is that
+//! plan's shadow LOD bias and its bake cache; neither exists anywhere yet.
+//!
+//! [`ClusterDag::expand`]: crate::cluster_dag::ClusterDag::expand
+//! [`ClusterDag::cut_from`]: crate::cluster_dag::ClusterDag::cut_from
+//! [`ClusterDag::uniform_level_from`]: crate::cluster_dag::ClusterDag::uniform_level_from
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::cluster_select::{ClusterSelect, GroupCost};
+use crate::cluster_select::{ClusterSelect, GroupCost, LodBudgets, group_is_expanded};
 use crate::dunes;
 use crate::level_select::LevelGroup;
 use crate::meshlet::{MESHLET_STRIDE, MeshClusters, Meshlet};
@@ -297,7 +305,82 @@ impl ClusterDag {
     /// without sorting.
     #[must_use]
     pub fn cut(&self, eye: [f32; 3], pixels_per_unit: f32, budget: f32) -> Vec<ClusterAt> {
-        self.descend(|group| group.projected_error(eye, pixels_per_unit) > budget)
+        self.cut_from(&self.states(|group| group.projected_error(eye, pixels_per_unit) > budget))
+    }
+
+    /// How many groups this DAG has, which is the length every expansion state
+    /// this type takes or returns has.
+    #[must_use]
+    pub fn group_count(&self) -> usize {
+        self.levels.iter().map(|here| here.groups.len()).sum()
+    }
+
+    /// Where each level's groups start in [`level_groups`](Self::level_groups)
+    /// order — the numbering every expansion state is indexed by.
+    fn group_bases(&self) -> Vec<usize> {
+        self.levels
+            .iter()
+            .scan(0usize, |at, here| {
+                let base = *at;
+                *at += here.groups.len();
+                Some(base)
+            })
+            .collect()
+    }
+
+    /// Every group's expansion, from a predicate over the group itself.
+    fn states(&self, expanded: impl Fn(&ClusterGroup) -> bool) -> Vec<bool> {
+        self.levels
+            .iter()
+            .flat_map(|here| &here.groups)
+            .map(expanded)
+            .collect()
+    }
+
+    /// One frame of `docs/plan/25-lod.md`'s hysteresis: which groups are
+    /// expanded now, given which were expanded last frame.
+    ///
+    /// [`group_is_expanded`] over every group, in
+    /// [`level_groups`](Self::level_groups) order — the rule `draw_gen.slang`
+    /// runs once per (instance, group) and writes into the state buffer the
+    /// amplification stage then reads. `was` is the previous frame's answer, and
+    /// `&vec![false; dag.group_count()]` is where a mesh with no history starts.
+    ///
+    /// **The result is monotone up the DAG whenever `was` is**, which is what
+    /// makes every frame's [`cut_from`](Self::cut_from) a cover — see
+    /// [`crate::cluster_select`]'s module docs for the induction, and
+    /// `a_drifting_camera_keeps_a_crack_free_cover_under_hysteresis` for it run
+    /// over the committed artifact.
+    ///
+    /// # Panics
+    ///
+    /// If `was` is not [`group_count`](Self::group_count) long, which is a
+    /// caller carrying another mesh's state rather than a runtime condition.
+    #[must_use]
+    pub fn expand(
+        &self,
+        eye: [f32; 3],
+        pixels_per_unit: f32,
+        budgets: LodBudgets,
+        was: &[bool],
+    ) -> Vec<bool> {
+        assert_eq!(
+            was.len(),
+            self.group_count(),
+            "a previous state of another DAG's shape"
+        );
+        self.levels
+            .iter()
+            .flat_map(|here| &here.groups)
+            .zip(was)
+            .map(|(group, &was)| {
+                let cost = GroupCost {
+                    error: group.error,
+                    bounds: group.bounds,
+                };
+                group_is_expanded(&cost, eye, pixels_per_unit, budgets, was)
+            })
+            .collect()
     }
 
     /// The one level a **uniform cut** draws from an eye at `eye` under a
@@ -315,14 +398,33 @@ impl ClusterDag {
     /// once for the mesh instead of once for each of its clusters.
     #[must_use]
     pub fn uniform_level(&self, eye: [f32; 3], pixels_per_unit: f32, budget: f32) -> usize {
+        self.uniform_level_from(
+            &self.states(|group| group.projected_error(eye, pixels_per_unit) > budget),
+        )
+    }
+
+    /// The one level a uniform cut draws, given which groups are expanded.
+    ///
+    /// [`uniform_level`](Self::uniform_level) with the expansion supplied rather
+    /// than computed, so a hysteretic frame asks the same question of the state
+    /// it carries. `MeshLevels::uniform_level` is this over the cooked records.
+    ///
+    /// # Panics
+    ///
+    /// If `expanded` is not [`group_count`](Self::group_count) long.
+    #[must_use]
+    pub fn uniform_level_from(&self, expanded: &[bool]) -> usize {
+        assert_eq!(
+            expanded.len(),
+            self.group_count(),
+            "an expansion state of another DAG's shape"
+        );
         let top = self.levels.len() - 1;
+        let bases = self.group_bases();
         self.levels
             .iter()
-            .position(|here| {
-                here.groups
-                    .iter()
-                    .any(|group| group.projected_error(eye, pixels_per_unit) > budget)
-            })
+            .enumerate()
+            .position(|(level, here)| expanded[bases[level]..][..here.groups.len()].contains(&true))
             .unwrap_or(top)
     }
 
@@ -354,9 +456,10 @@ impl ClusterDag {
 
     /// The clusters an "is this group expanded?" answer draws.
     ///
-    /// [`cut`](Self::cut) with the projection factored out, so a test can sweep
-    /// stored error directly instead of arranging a camera that produces each
-    /// threshold.
+    /// [`cut`](Self::cut) with the projection factored out — the descent over an
+    /// expansion state, which is what [`expand`](Self::expand) produces and what
+    /// the GPU's state buffer holds. `expanded` is indexed in
+    /// [`level_groups`](Self::level_groups) order.
     ///
     /// A cluster no group contains defaults to **not** drawn, which is only
     /// correct on the top level. That is deliberate: a level whose grouping
@@ -364,14 +467,28 @@ impl ClusterDag {
     /// default of "drawn" would quietly produce an overlap instead.
     /// [`selection_records`](Self::selection_records) refuses such a DAG rather
     /// than encoding it, which is what keeps the two agreeing.
-    fn descend(&self, expanded: impl Fn(&ClusterGroup) -> bool) -> Vec<ClusterAt> {
+    ///
+    /// The result is ascending by level and then by cluster, so two cuts compare
+    /// without sorting.
+    ///
+    /// # Panics
+    ///
+    /// If `expanded` is not [`group_count`](Self::group_count) long.
+    #[must_use]
+    pub fn cut_from(&self, expanded: &[bool]) -> Vec<ClusterAt> {
+        assert_eq!(
+            expanded.len(),
+            self.group_count(),
+            "an expansion state of another DAG's shape"
+        );
         let top = self.levels.len() - 1;
+        let bases = self.group_bases();
         let mut drawn = Vec::new();
         for (level, here) in self.levels.iter().enumerate() {
             let count = here.clusters.clusters.len();
             let mut container = vec![level == top; count];
-            for group in &here.groups {
-                let open = expanded(group);
+            for (index, group) in here.groups.iter().enumerate() {
+                let open = expanded[bases[level] + index];
                 for &child in &group.children {
                     container[child as usize] = open;
                 }
@@ -379,8 +496,8 @@ impl ClusterDag {
 
             let mut producer = vec![false; count];
             if level > 0 {
-                for group in &self.levels[level - 1].groups {
-                    let open = expanded(group);
+                for (index, group) in self.levels[level - 1].groups.iter().enumerate() {
+                    let open = expanded[bases[level - 1] + index];
                     for &parent in &group.parents {
                         producer[parent as usize] = open;
                     }
@@ -493,6 +610,12 @@ impl ClusterDag {
     /// DAG is several vertex ranges and a cluster has to say which of them is
     /// its own. See [`ClusterSelect::vertex_base`].
     ///
+    /// `first_group` is where this DAG's groups start in the renderer's shared
+    /// [`LevelGroup`] array, and it is added to every index written — so the
+    /// records name the same groups the per-(instance, group) state is keyed by.
+    /// A caller holding one DAG on its own passes zero, which is
+    /// [`level_groups`](Self::level_groups) order verbatim.
+    ///
     /// # Panics
     ///
     /// If `level_vertex_bases` is not one entry per level, or if the DAG's
@@ -503,16 +626,22 @@ impl ClusterDag {
     /// encoding would silently *draw* — and a DAG that fails them is a bake
     /// defect rather than a runtime condition.
     #[must_use]
-    pub fn selection_records(&self, level_vertex_bases: &[u32]) -> Vec<Vec<ClusterSelect>> {
+    pub fn selection_records(
+        &self,
+        level_vertex_bases: &[u32],
+        first_group: u32,
+    ) -> Vec<Vec<ClusterSelect>> {
         assert_eq!(
             level_vertex_bases.len(),
             self.levels.len(),
             "a vertex base is needed for every level"
         );
         let top = self.levels.len() - 1;
-        let cost = |group: &ClusterGroup| GroupCost {
-            error: group.error,
-            bounds: group.bounds,
+        let bases = self.group_bases();
+        let named = |level: usize, index: usize| {
+            first_group
+                + u32::try_from(bases[level] + index)
+                    .unwrap_or_else(|_| unreachable!("a DAG of a few dozen groups"))
         };
 
         let mut out = Vec::with_capacity(self.levels.len());
@@ -524,19 +653,19 @@ impl ClusterDag {
                 };
                 level.clusters.clusters.len()
             ];
-            for group in &level.groups {
+            for (index, group) in level.groups.iter().enumerate() {
                 for &child in &group.children {
                     let record = &mut records[child as usize];
                     record.flags |= ClusterSelect::HAS_CONTAINER;
-                    record.container = cost(group);
+                    record.container_group = named(depth, index);
                 }
             }
             if depth > 0 {
-                for group in &self.levels[depth - 1].groups {
+                for (index, group) in self.levels[depth - 1].groups.iter().enumerate() {
                     for &parent in &group.parents {
                         let record = &mut records[parent as usize];
                         record.flags |= ClusterSelect::HAS_PRODUCER;
-                        record.producer = cost(group);
+                        record.producer_group = named(depth - 1, index);
                     }
                 }
             }
@@ -1283,7 +1412,7 @@ mod tests {
 
         let mut mixed = 0usize;
         for threshold in &thresholds {
-            let drawn = dag.descend(|group| *threshold < group.error);
+            let drawn = dag.cut_from(&dag.states(|group| *threshold < group.error));
             let interfaces = dag
                 .check_cover(&drawn)
                 .unwrap_or_else(|fault| panic!("a budget of {threshold} draws a cut with {fault}"));
@@ -1475,18 +1604,18 @@ mod tests {
     /// **The per-cluster encoding is the same rule as the descent**, over every
     /// camera and budget the sweep visits.
     ///
-    /// [`ClusterDag::descend`] walks the DAG level by level with both groups in
-    /// hand; [`ClusterSelect::is_drawn`] answers for one cluster with nothing
-    /// but that cluster's own 48 bytes, which is what a task group has. They are
-    /// the same statement only while the resolution in
+    /// [`ClusterDag::cut_from`] walks the DAG level by level with both groups
+    /// in hand; [`ClusterSelect::is_drawn`] answers for one cluster out of two
+    /// group indices, which is what a task group has. They are the same
+    /// statement only while the resolution in
     /// [`ClusterDag::selection_records`] put the right group in each half, and
-    /// the failure that would produce — a container copied where a producer
+    /// the failure that would produce — a container named where a producer
     /// belongs — inverts the descent rather than crashing.
     #[test]
     fn the_per_cluster_records_draw_the_cut_the_descent_does() {
         let dag = dunes_dag();
         let bases: Vec<u32> = (0..dag.levels.len() as u32).collect();
-        let records = dag.selection_records(&bases);
+        let records = dag.selection_records(&bases, 0);
         assert_eq!(records.len(), dag.levels.len());
         for (depth, level) in dag.levels.iter().enumerate() {
             assert_eq!(records[depth].len(), level.clusters.clusters.len());
@@ -1502,10 +1631,16 @@ mod tests {
         for eye in EYES {
             for budget in BUDGETS {
                 let expected = dag.cut(eye, PIXELS_PER_UNIT, budget);
+                let state = dag.expand(
+                    eye,
+                    PIXELS_PER_UNIT,
+                    LodBudgets::sharp(budget),
+                    &vec![false; dag.group_count()],
+                );
                 let mut drawn = Vec::new();
                 for (level, here) in records.iter().enumerate() {
                     for (cluster, record) in here.iter().enumerate() {
-                        if record.is_drawn(eye, PIXELS_PER_UNIT, budget) {
+                        if record.is_drawn(&state) {
                             drawn.push(ClusterAt { level, cluster });
                         }
                     }
@@ -1578,7 +1713,7 @@ mod tests {
     /// than encoded, because the encoding has no way to say "not drawn" and
     /// would draw that cluster beside the parents covering it.
     ///
-    /// The one place [`ClusterDag::descend`]'s default and
+    /// The one place [`ClusterDag::cut_from`]'s default and
     /// [`ClusterSelect`]'s flags could disagree, closed by the assertion rather
     /// than by a comment saying it cannot happen.
     #[test]
@@ -1588,7 +1723,7 @@ mod tests {
         // in no group at all while every other level stays well formed.
         let orphan = dag.levels[0].groups[0].children.pop().expect("a child");
         let bases = vec![0u32; dag.levels.len()];
-        let refusal = std::panic::catch_unwind(|| dag.selection_records(&bases))
+        let refusal = std::panic::catch_unwind(|| dag.selection_records(&bases, 0))
             .expect_err("an uncovered cluster has to be refused");
         let message = refusal
             .downcast_ref::<String>()
@@ -1596,6 +1731,222 @@ mod tests {
         assert!(
             message.contains(&format!("level 0 cluster {orphan} is in no group")),
             "the refusal must name the cluster, and said {message:?}"
+        );
+    }
+
+    /// The eye [`DRIFT_BUDGET`]'s oscillation runs at, `back` units past the
+    /// patch's near edge.
+    ///
+    /// [`EYES`]`[0]` with only the distance free, so the one term that moves
+    /// between two frames of the drift is the one the metric divides by.
+    fn eye_back(back: f32) -> [f32; 3] {
+        [0.0, 4.0, -dunes::DUNES_EXTENT - back]
+    }
+
+    /// The budget the drift is measured under, and how far the hold budget sits
+    /// below it.
+    ///
+    /// The ratio is what the renderer ships (`crcbl_render::LOD_HOLD_RATIO`),
+    /// spelled again here because this crate cannot see that one and the two are
+    /// tuning rather than a shared contract.
+    const DRIFT_BUDGET: f32 = 32.0;
+    const DRIFT_HOLD_RATIO: f32 = 0.8;
+
+    /// How many frames the oscillation runs for, and how many of them are on the
+    /// far side of the boundary.
+    ///
+    /// Even, so the walk ends where it started and a flip count of one cannot be
+    /// "it moved once and the sweep stopped".
+    const DRIFT_FRAMES: usize = 40;
+
+    /// The distance at which a uniform cut changes level, bisected rather than
+    /// written down.
+    ///
+    /// A boundary is a property of the committed artifact and of
+    /// [`PIXELS_PER_UNIT`], so a constant here would be a number to re-derive
+    /// every time either moved. The bracket is [`DRIFT_NEAR`] to [`DRIFT_FAR`],
+    /// which the assertion below confirms straddles one.
+    const DRIFT_NEAR: f32 = 2.0;
+    const DRIFT_FAR: f32 = 1000.0;
+
+    /// Half the width of the oscillation, as a fraction of the boundary
+    /// distance.
+    ///
+    /// Small enough that the projected error moves by far less than the
+    /// hysteresis band — that is what makes "the camera drifts across the
+    /// threshold" the thing under test rather than "the camera leaves the band"
+    /// — and large enough to survive the bisection's own tolerance, which stops
+    /// an order of magnitude below it.
+    const DRIFT_SWING: f32 = 1.0e-3;
+
+    /// Where the level a uniform cut selects changes, to within
+    /// [`DRIFT_SWING`] / 10 of the distance.
+    fn drift_boundary(dag: &ClusterDag) -> f32 {
+        let level = |back: f32| dag.uniform_level(eye_back(back), PIXELS_PER_UNIT, DRIFT_BUDGET);
+        let (near, far) = (level(DRIFT_NEAR), level(DRIFT_FAR));
+        assert_ne!(
+            near, far,
+            "the bracket {DRIFT_NEAR}..{DRIFT_FAR} draws one level, so there is no \
+             boundary in it to drift across"
+        );
+        let (mut lo, mut hi) = (DRIFT_NEAR, DRIFT_FAR);
+        while hi - lo > lo * DRIFT_SWING / 10.0 {
+            let mid = 0.5 * (lo + hi);
+            if level(mid) == near {
+                lo = mid
+            } else {
+                hi = mid
+            }
+        }
+        0.5 * (lo + hi)
+    }
+
+    /// The distances one oscillation visits: a square wave straddling `at`,
+    /// alternating sides every frame so every step is a crossing.
+    fn drift_path(at: f32) -> Vec<f32> {
+        let swing = at * DRIFT_SWING;
+        (0..DRIFT_FRAMES)
+            .map(|frame| {
+                if frame % 2 == 0 {
+                    at - swing
+                } else {
+                    at + swing
+                }
+            })
+            .collect()
+    }
+
+    /// **A camera oscillating across a threshold settles on one level**, where
+    /// the same camera under one threshold changes level every frame.
+    ///
+    /// `docs/plan/25-lod.md`: "**Hysteresis** on the threshold (switch-up and
+    /// switch-down differ) kills boundary flicker." The flicker is the
+    /// observable and this is it, counted: the camera steps back and forth
+    /// across the distance at which a uniform cut changes level, by a thousandth
+    /// of that distance, and the level it selects is recorded each frame.
+    ///
+    /// Three things are asserted, and the first is what makes the second mean
+    /// anything:
+    ///
+    /// * **One threshold flicks the level on nearly every frame.** That number
+    ///   is printed and asserted to be most of the walk, so a swing that had
+    ///   quietly stopped crossing the boundary — which would make the hysteretic
+    ///   count zero for the wrong reason — fails here.
+    /// * **Two thresholds change it at most once.** Once and not never, because
+    ///   the state starts collapsed and the first frame over the expand budget
+    ///   is a real switch.
+    /// * **And a decisive move still switches**, out to [`DRIFT_FAR`] and back,
+    ///   or the feature is "never change level" wearing a band.
+    #[test]
+    fn a_camera_drifting_across_a_threshold_settles_on_one_level() {
+        let dag = dunes_dag();
+        let at = drift_boundary(&dag);
+        let path = drift_path(at);
+
+        let walk = |budgets: LodBudgets, path: &[f32]| {
+            let mut state = vec![false; dag.group_count()];
+            let levels: Vec<usize> = path
+                .iter()
+                .map(|&back| {
+                    state = dag.expand(eye_back(back), PIXELS_PER_UNIT, budgets, &state);
+                    dag.uniform_level_from(&state)
+                })
+                .collect();
+            let flips = levels.windows(2).filter(|pair| pair[0] != pair[1]).count();
+            (levels, flips)
+        };
+
+        let (sharp_levels, sharp_flips) = walk(LodBudgets::sharp(DRIFT_BUDGET), &path);
+        let (held_levels, held_flips) =
+            walk(LodBudgets::scaled(DRIFT_BUDGET, DRIFT_HOLD_RATIO), &path);
+        println!(
+            "drift at {at} units back: {sharp_flips} flip(s) with one threshold, \
+             {held_flips} with two"
+        );
+        assert!(
+            sharp_flips >= DRIFT_FRAMES - 2,
+            "one threshold flipped {sharp_flips} time(s) over {DRIFT_FRAMES} frames \
+             ({sharp_levels:?}), so the swing is not crossing the boundary and the \
+             count below would be low for the wrong reason"
+        );
+        assert!(
+            held_flips <= 1,
+            "two thresholds flipped {held_flips} time(s) ({held_levels:?}), which is \
+             not settling"
+        );
+
+        // And a decisive move still switches: out to the far end of the bracket
+        // and back in, under the same band.
+        let (decisive, decisive_flips) = walk(
+            LodBudgets::scaled(DRIFT_BUDGET, DRIFT_HOLD_RATIO),
+            &[at, DRIFT_FAR, DRIFT_FAR, at, at],
+        );
+        println!("decisive move under two thresholds: {decisive:?}");
+        assert!(
+            decisive_flips >= 2,
+            "a camera pulled out to {DRIFT_FAR} units and brought back selected \
+             {decisive:?}, so hysteresis is not a band, it is a latch"
+        );
+    }
+
+    /// **Every frame of that drift draws a crack-free cover**, at the
+    /// per-cluster granularity the mesh path selects at.
+    ///
+    /// The band is the one thing that could break the DAG's whole reason for
+    /// existing: a cut is a cover only while expansion is monotone up the
+    /// hierarchy, and a per-group memory is exactly what could hold a child
+    /// collapsed under an expanded parent. [`crate::cluster_select`]'s module
+    /// docs carry the induction that says it cannot; this runs it.
+    ///
+    /// The cut's own flicker is counted beside it, for
+    /// `a_camera_drifting_across_a_threshold_settles_on_one_level`'s reason: a
+    /// sweep in which the cut never moved under one threshold either would prove
+    /// nothing about the one where it does not move under two.
+    #[test]
+    fn a_drifting_camera_keeps_a_crack_free_cover_under_hysteresis() {
+        let dag = dunes_dag();
+        let at = drift_boundary(&dag);
+        let path = drift_path(at);
+
+        let walk = |budgets: LodBudgets| {
+            let mut state = vec![false; dag.group_count()];
+            let mut cuts: Vec<Vec<ClusterAt>> = Vec::new();
+            for &back in &path {
+                state = dag.expand(eye_back(back), PIXELS_PER_UNIT, budgets, &state);
+                let drawn = dag.cut_from(&state);
+                dag.check_cover(&drawn).unwrap_or_else(|fault| {
+                    panic!("a cut {back} units back under {budgets:?} has {fault}")
+                });
+                // The two granularities have to keep agreeing under the band,
+                // because `crcbl-vk` compares one device's per-cluster cut
+                // against another's uniform one and would otherwise report a
+                // disagreement that is really this.
+                assert_eq!(
+                    dag.uniform_level_from(&state),
+                    drawn
+                        .iter()
+                        .map(|at| at.level)
+                        .min()
+                        .expect("a cut always draws something"),
+                    "the uniform level is not the finest level the cut draws, \
+                     {back} units back under {budgets:?}"
+                );
+                cuts.push(drawn);
+            }
+            cuts.windows(2).filter(|pair| pair[0] != pair[1]).count()
+        };
+
+        let sharp = walk(LodBudgets::sharp(DRIFT_BUDGET));
+        let held = walk(LodBudgets::scaled(DRIFT_BUDGET, DRIFT_HOLD_RATIO));
+        println!("drift cuts: {sharp} change(s) with one threshold, {held} with two");
+        assert!(
+            sharp >= DRIFT_FRAMES - 2,
+            "the cut moved {sharp} time(s) under one threshold, so this sweep is not \
+             at a boundary at all"
+        );
+        assert!(
+            held <= 1,
+            "the cut moved {held} time(s) under two thresholds, which is not settling"
         );
     }
 

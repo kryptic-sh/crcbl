@@ -32,9 +32,9 @@ pub const WORKGROUP_SIZE: u32 = 64;
 
 /// Bytes of the uniform block.
 ///
-/// Three `uint`, the padding `std140` puts in front of the `float4` that
-/// follows, and two `float4`. Checked against the `Offset` decorations `slangc`
-/// emits by this module's
+/// Four `uint`, which is exactly the 16 bytes `std140` puts in front of the
+/// `float4` that follows, and two `float4`. Checked against the `Offset`
+/// decorations `slangc` emits by this module's
 /// `the_draw_gen_params_block_matches_the_offsets_slangc_emits`.
 pub const PARAMS_SIZE: usize = 48;
 
@@ -54,6 +54,15 @@ pub struct Params {
     /// Elements `cull.slang`'s visible list holds. Its counter can exceed this;
     /// the shader clamps before it indexes anything.
     pub visible_capacity: u32,
+    /// How many groups one instance's run of the LOD hysteresis state holds —
+    /// every resident mesh's group count summed, and the stride between two
+    /// instances in that buffer.
+    ///
+    /// The same number
+    /// [`ClusterDrawConstants::group_stride`](crate::meshlet::ClusterDrawConstants::group_stride)
+    /// carries: this pass writes the state and the amplification stage reads it,
+    /// so the two must index it identically.
+    pub group_stride: u32,
     /// The eye the uniform cut is selected from, in world space.
     ///
     /// The same three floats a frame writes into
@@ -65,8 +74,10 @@ pub struct Params {
     /// the pixel budget a group's projected error is compared against — the two
     /// numbers of
     /// [`FrameUniforms::lod_params`](crate::mesh::FrameUniforms::lod_params),
-    /// for that field's reason.
-    pub lod_params: [f32; 2],
+    /// for that field's reason — followed by the budget an already-expanded
+    /// group is held down to, which is `docs/plan/25-lod.md`'s hysteresis and
+    /// [`LodBudgets`](crate::cluster_select::LodBudgets)' two halves.
+    pub lod_params: [f32; 3],
 }
 
 impl Params {
@@ -84,13 +95,14 @@ impl Params {
             self.bucket_count,
             self.bucket_capacity,
             self.visible_capacity,
+            self.group_stride,
         ]
         .into_iter()
         .enumerate()
         {
             put(slot * 4, value.to_le_bytes());
         }
-        // Offset 12 is `pad0`, and 16 is where `std140` puts the first `float4`.
+        // Offset 16 is where `std140` puts the first `float4`.
         for (axis, value) in self.camera_position.into_iter().enumerate() {
             put(16 + axis * 4, value.to_le_bytes());
         }
@@ -289,8 +301,9 @@ mod tests {
             bucket_count: 2,
             bucket_capacity: 5,
             visible_capacity: 9,
+            group_stride: 11,
             camera_position: [1.5, 2.5, 3.5],
-            lod_params: [4.5, 5.5],
+            lod_params: [4.5, 5.5, 6.5],
         }
         .to_bytes();
         let uint_at =
@@ -300,16 +313,17 @@ mod tests {
         assert_eq!(uint_at(0), 2, "bucket_count at offset 0");
         assert_eq!(uint_at(4), 5, "bucket_capacity at offset 4");
         assert_eq!(uint_at(8), 9, "visible_capacity at offset 8");
-        assert_eq!(uint_at(12), 0, "pad0 at offset 12, and it is written");
+        assert_eq!(uint_at(12), 11, "group_stride at offset 12");
         assert_eq!(float_at(16), 1.5, "camera_position at offset 16");
         assert_eq!(float_at(24), 3.5, "and it is three floats wide");
         assert_eq!(uint_at(28), 0, "the fourth component is padding, and zero");
         assert_eq!(float_at(32), 4.5, "lod_params at offset 32");
-        assert_eq!(float_at(36), 5.5, "and its budget beside it");
+        assert_eq!(float_at(36), 5.5, "and its expand budget beside it");
+        assert_eq!(float_at(40), 6.5, "and the hold budget after that");
         assert!(
-            bytes[40..].iter().all(|byte| *byte == 0),
+            bytes[44..].iter().all(|byte| *byte == 0),
             "the std140 tail padding is written, and it is zero: {:?}",
-            &bytes[40..]
+            &bytes[44..]
         );
     }
 

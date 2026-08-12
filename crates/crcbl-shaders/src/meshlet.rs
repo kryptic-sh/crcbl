@@ -354,17 +354,17 @@ impl Meshlet {
 
 /// Bytes in one bucket's cluster-draw constant block.
 ///
-/// Four `uint`s, which `std140` already makes a multiple of 16 — so unlike
-/// [`DrawConstants`](crate::mesh::DrawConstants) beside it, this block needs no
-/// padding member at all.
-pub const CLUSTER_DRAW_CONSTANTS_SIZE: usize = 16;
+/// Five `uint`s and the three `std140` rounds the block up by — a structure's
+/// size is a multiple of 16 whatever its members are, exactly as
+/// [`DrawConstants`](crate::mesh::DrawConstants) beside it records.
+pub const CLUSTER_DRAW_CONSTANTS_SIZE: usize = 32;
 
 /// What one bucket tells the mesh stage about itself, matching
 /// `struct ClusterDrawConstants` in `shaders/mesh_cluster.slang`.
 ///
 /// A block of its own rather than [`DrawConstants`](crate::mesh::DrawConstants),
-/// because three of its four fields mean nothing to the raster path and a
-/// record carrying them there would be three unread words in every frame that
+/// because four of its five fields mean nothing to the raster path and a
+/// record carrying them there would be four unread words in every frame that
 /// does not use them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ClusterDrawConstants {
@@ -382,10 +382,26 @@ pub struct ClusterDrawConstants {
     /// Which bucket this is, which is the element of the indirect-argument
     /// buffer holding the instance count culling produced.
     pub bucket: u32,
+    /// How many groups one instance's run of the LOD hysteresis state holds —
+    /// the stride between two instances in it, which is every resident mesh's
+    /// group count summed.
+    ///
+    /// **A frame-wide number in a per-bucket block**, and the same value in
+    /// every one of them. It lives here because this is the only uniform block
+    /// the amplification stage reads and the state index is
+    /// `instance * group_stride + group`; nothing about it is per bucket. See
+    /// [`crcbl_shaders::cluster_select`](crate::cluster_select), which is where
+    /// the state and the two budgets over it are described.
+    pub group_stride: u32,
 }
 
 impl ClusterDrawConstants {
     /// The bytes one bucket's block holds, in `std140` order.
+    ///
+    /// The trailing padding is written rather than left alone, for the reason
+    /// [`crate::compute_probe::Params::to_bytes`] gives: a block is
+    /// [`CLUSTER_DRAW_CONSTANTS_SIZE`] bytes wide and a partial write leaves the
+    /// rest undefined.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; CLUSTER_DRAW_CONSTANTS_SIZE] {
         let mut bytes = [0u8; CLUSTER_DRAW_CONSTANTS_SIZE];
@@ -395,11 +411,11 @@ impl ClusterDrawConstants {
             self.cluster_base,
             self.cluster_count,
             self.bucket,
+            self.group_stride,
         ] {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
-        debug_assert_eq!(at, CLUSTER_DRAW_CONSTANTS_SIZE);
         bytes
     }
 }
@@ -709,15 +725,15 @@ mod tests {
     }
 
     /// The offsets `slangc` emitted for `ClusterDrawConstants`, read out of the
-    /// disassembly. Four `uint`s in a row permute silently — a bucket index
+    /// disassembly. Five `uint`s in a row permute silently — a bucket index
     /// read as a cluster base draws another mesh's clusters — so each is
     /// pinned to its byte.
     #[test]
     fn the_cluster_constants_match_the_offsets_slangc_emits() {
         // `OpMemberDecorate %ClusterDrawConstants_std140 n Offset …`: 0, 4, 8,
-        // 12, with no padding member because four words are already a multiple
-        // of the 16 `std140` rounds a block's size up to.
-        assert_eq!(CLUSTER_DRAW_CONSTANTS_SIZE, 16);
+        // 12, 16, and a block size of 32 because `std140` rounds a structure up
+        // to a multiple of 16.
+        assert_eq!(CLUSTER_DRAW_CONSTANTS_SIZE, 32);
         assert_eq!(CLUSTER_DRAW_CONSTANTS_SIZE % 16, 0);
 
         let bytes = ClusterDrawConstants {
@@ -725,6 +741,7 @@ mod tests {
             cluster_base: 2,
             cluster_count: 3,
             bucket: 4,
+            group_stride: 5,
         }
         .to_bytes();
         let uint_at =
@@ -733,6 +750,11 @@ mod tests {
         assert_eq!(uint_at(4), 2, "cluster_base at offset 4");
         assert_eq!(uint_at(8), 3, "cluster_count at offset 8");
         assert_eq!(uint_at(12), 4, "bucket at offset 12");
+        assert_eq!(uint_at(16), 5, "group_stride at offset 16");
+        assert!(
+            bytes[20..].iter().all(|&byte| byte == 0),
+            "the padding has to be written, not left to whatever the buffer held"
+        );
     }
 
     /// The narrowing refuses rather than wraps, and names the field it refused.
