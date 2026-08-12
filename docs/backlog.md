@@ -5922,6 +5922,8 @@ defect in the tree; each cost a red build and a re-run.
   hard failure. Pinning a `cargo-fuzz` whose source still builds, or caching the
   binary, would make this self-healing. **Every meaningful step was skipped** —
   the fuzzer did not run at all.
+- **`vk e2e (lavapipe, windows)`** — `Install the pinned lavapipe` failed and
+  the suite was skipped.
 - **`shaders (committed artifacts match their sources)`** —
   `Install the pinned dxc` failed with curl exit 56 (failure receiving network
   data) and the comparison was skipped. Nothing wrong with the artifacts;
