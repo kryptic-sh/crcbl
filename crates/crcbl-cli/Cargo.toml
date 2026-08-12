@@ -39,3 +39,11 @@ crcbl-golden = { workspace = true }
 # `png` in for `screenshot`, so the feature costs no new crate either way.
 crcbl-sprite = { workspace = true, features = ["load"] }
 crcbl-store = { workspace = true }
+# `lod` reads a glTF and builds its cluster DAG. `crcbl-scene` is the crate that
+# owns both — the importer and `build_cluster_dag` — and the umbrella
+# deliberately does not re-export it, because a *game* links neither; this is a
+# bake tool and names it directly. `crcbl-assets` comes with it rather than
+# through it: the importer takes an `AssetSource`, and `DirSource` is what a
+# path typed on a command line becomes.
+crcbl-assets = { workspace = true }
+crcbl-scene = { workspace = true }

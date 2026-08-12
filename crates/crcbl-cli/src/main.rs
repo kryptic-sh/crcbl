@@ -30,6 +30,7 @@ mod args;
 mod cargo;
 mod crpix_cmd;
 mod json;
+mod lod_cmd;
 mod new;
 mod replay_cmd;
 mod report;
@@ -55,6 +56,7 @@ fn main() -> ExitCode {
                 Command::Screenshot(args) => screenshot::run(args),
                 Command::Replay(args) => replay_cmd::run(args),
                 Command::Crpix(args) => crpix_cmd::run(args),
+                Command::Lod(args) => lod_cmd::run(args),
             };
             report::emit(name, json, result)
         }

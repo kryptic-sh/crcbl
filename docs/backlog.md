@@ -5878,6 +5878,35 @@ synthesised pointer events with `pointerType: 'touch'` — or it will be the one
 input path nothing exercises. Note `apps/hud` already sets `key: null`, so the
 harness has a precedent for a demo whose input is not a keypress.
 
+## What `crcbl lod` left owed
+
+- **`preview` needs a scene that can draw an imported mesh, and none exists.**
+  `crcbl::screenshot::Scene` is a closed enum of three built-in scenes and
+  `OffscreenSetup::open` takes one of them, so "render this glTF at this level"
+  is a new capability rather than a delta on `crcbl screenshot`. That is the
+  prerequisite, and it is also what a golden frame per LOD level would need.
+- **`tools/cook-clusters.rs` duplicates `ClusterDag::cook()`.** The
+  transcription now lives on the type in `crcbl-scene`, where both callers can
+  reach it; the example still has its own private copy and should call the
+  method instead. One file, mechanical.
+- **`stats` only reports nodes the scene draws.** A mesh no node instantiates is
+  invisible to it; `--node` reaches any node in the table.
+- **The importer's skip warnings are invisible from the CLI**, which installs no
+  logger — a primitive dropped for not being a triangle list is silent, and only
+  total emptiness is caught.
+- **`gen` writes one DAG per file**, so a multi-primitive mesh takes one run per
+  primitive.
+- **The asset-key rule bites on the command line.**
+  `crcbl lod stats "my model.gltf"` is refused because a file name must match
+  `[A-Za-z0-9._-]`. The message explains it, but for a bake tool pointed at
+  artist output that is real friction and worth revisiting.
+- **The stall fixture is empirical**: `grid(56)` stalls twice on this decimator
+  where `grid(48)` and `grid(64)` do not. The test says so and says to pick
+  another fixture rather than delete the check if the decimator changes.
+- **`crates/crcbl-cli/src/args.rs` is 1592 lines** and its own docs say to take
+  `clap` and delete it "when this file passes roughly two hundred lines of
+  `match`" — a line it was well past before this added 285 more.
+
 ## Profiling and benchmarking: decisions taken 2026-08-13, before any code
 
 `docs/plan/40-profiling.md` is new and specifies the whole thing; it is a

@@ -22,7 +22,9 @@ pub const EXIT_FAILED: u8 = 1;
 pub const EXIT_USAGE: u8 = 2;
 
 /// A command that worked.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`: a [`Json`] field may hold a float.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Outcome {
     /// What a person reads.
     pub human: String,
@@ -31,7 +33,9 @@ pub struct Outcome {
 }
 
 /// A command that did not work.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`, for [`Outcome`]'s reason.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Failure {
     /// What a person reads. Also the JSON `error` field.
     pub message: String,

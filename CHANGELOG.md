@@ -321,6 +321,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl lod stats` and `crcbl lod gen`** — topic 25's tooling row, host-only.
+  `stats` resolves every mesh the file draws and reports, per level, **where the
+  geometry came from** (the file's own node and which convention declared it, or
+  the DAG depth that generated it) with triangle and cluster counts and the
+  group error range, then the shape of each DAG behind it. `gen` writes the
+  cooked `.dag` artifact and decodes it back before reporting success.
+
+  **Stalls are named rather than averaged away.** A level that kept more than
+  three quarters of the level below it is reported `— STALLED`, and the real
+  dunes patch trips it: levels 4 through 6 go 568 → 412 → 324 triangles with the
+  error unchanged throughout. A report that smoothed that over would be hiding
+  the one thing worth looking for.
+
+  A hand-authored level below LOD0 reports no cluster count and no error, on
+  purpose — it was never clustered or decimated here, so there is no engine
+  number and printing one would invent it. LOD0 is the exception, being both the
+  file's own geometry and DAG level 0.
+
+  A refusal is an error rather than a row: an unimportable file, a level two
+  nodes claim, an `MSFT_lod` id that draws nothing, or a gap the generator
+  cannot reach all exit non-zero with no table. `--json` carries the same facts
+  for the benchmark and editor consumers topic 40 anticipates.
+
+  **`preview` is recognised and refused as unimplemented**, not absent — and the
+  reason is bigger than it looks: `crcbl::screenshot::Scene` is a closed enum of
+  three built-in scenes, so nothing anywhere can render arbitrary imported
+  geometry offscreen. That scene has to exist before a preview can.
+
 - **Shadow LOD bias: the shadow pass selects coarser casters than the camera.**
   `SHADOW_LOD_BIAS` multiplies both selection budgets for the whole pass. On the
   dunes patch at the shipped camera that is 57 clusters at `[13, 26, 18, …]` for

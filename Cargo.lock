@@ -311,7 +311,9 @@ name = "crcbl-cli"
 version = "0.1.0"
 dependencies = [
  "crcbl",
+ "crcbl-assets",
  "crcbl-golden",
+ "crcbl-scene",
  "crcbl-sprite",
  "crcbl-store",
 ]

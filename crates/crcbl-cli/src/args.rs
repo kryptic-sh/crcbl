@@ -66,6 +66,7 @@ COMMANDS:
     screenshot    Offscreen render the scene and write a PNG.
     replay        Read a .crpl replay file and dump its metadata.
     crpix         Convert PNG frames into one .crpix sprite sheet.
+    lod           Report or generate a glTF mesh's LOD chain.
 
 OPTIONS (every command):
         --json    Emit one JSON object instead of human output.
@@ -181,6 +182,43 @@ OPTIONS:
         --json            Emit one JSON object instead of human output.
     -h, --help            Print this text.";
 
+/// `crcbl lod --help`.
+pub const LOD_USAGE: &str = "\
+crcbl lod — report or generate a glTF mesh's LOD chain
+
+USAGE:
+    crcbl lod stats <FILE> [OPTIONS]
+    crcbl lod gen <FILE> -o <FILE> [OPTIONS]
+
+`stats` resolves the LOD chain of every mesh the file draws and reports, per
+level, where the geometry came from — the file's own, or the cluster-DAG
+generator — alongside its triangle and cluster counts and its error range, then
+the shape of each DAG behind it: groups per level, and whether the levels really
+halve or stall.
+
+`gen` builds one mesh primitive's cluster DAG headlessly and writes it as a
+cooked .dag artifact, the format `crates/crcbl-shaders/clusters/*.dag` is in.
+
+`preview` — offscreen renders per level, from `docs/plan/25-lod.md` — is not
+implemented. It is recognized so that asking for it fails saying so rather than
+looking like a typo.
+
+FILE is a .gltf or .glb, and its file name has to be a legal asset key: ASCII
+letters, digits, `.`, `_` and `-`. That is the rule every asset this engine
+loads obeys, so that a tree which loads from a directory also loads over HTTP.
+
+OPTIONS:
+        --node <INDEX>       Work on this node alone. Default: `stats` reports
+                             every node that draws a mesh, `gen` takes the only
+                             one and refuses a file with several.
+        --primitive <INDEX>  (gen) Which primitive of that node's mesh to build
+                             a DAG for. Default: the only one, or a refusal.
+    -o, --output <FILE>      (gen) Write the .dag here. Required; an existing
+                             file is left alone unless --force is given.
+        --force              (gen) Overwrite the output file if it exists.
+        --json               Emit one JSON object instead of human output.
+    -h, --help               Print this text.";
+
 /// What the command line asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Invocation {
@@ -209,6 +247,8 @@ pub enum Command {
     Replay(ReplayArgs),
     /// PNG frames → one .crpix sheet.
     Crpix(CrpixArgs),
+    /// A glTF mesh's LOD chain, reported or generated.
+    Lod(LodArgs),
 }
 
 impl Command {
@@ -221,6 +261,11 @@ impl Command {
             Self::Screenshot(_) => "screenshot",
             Self::Replay(_) => "replay",
             Self::Crpix(_) => "crpix",
+            // One name for the whole subcommand tree, with the branch reported
+            // as a field of its own — see [`LodAction::name`]. A `"command"`
+            // that varied with an inner verb would make every consumer match on
+            // a set of strings that grows with the CLI.
+            Self::Lod(_) => "lod",
         }
     }
 
@@ -233,6 +278,7 @@ impl Command {
             Self::Screenshot(args) => args.json,
             Self::Replay(args) => args.json,
             Self::Crpix(args) => args.json,
+            Self::Lod(args) => args.json,
         }
     }
 }
@@ -353,6 +399,55 @@ pub struct CrpixArgs {
     pub json: bool,
 }
 
+/// Which half of `crcbl lod` was asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LodAction {
+    /// Report the chain and the DAG behind it.
+    Stats,
+    /// Build one primitive's DAG and write the cooked artifact.
+    Gen,
+    /// Offscreen renders per level.
+    ///
+    /// Recognized so it can be *refused* with a reason rather than as an
+    /// unknown subcommand — the difference between "not yet" and "never", the
+    /// same distinction [`Target::Wasm`] is parsed to make.
+    Preview,
+}
+
+impl LodAction {
+    /// The name this branch is reported under in `--json`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Stats => "stats",
+            Self::Gen => "gen",
+            Self::Preview => "preview",
+        }
+    }
+}
+
+/// `crcbl lod`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LodArgs {
+    /// Which branch to run.
+    pub action: LodAction,
+    /// The glTF to read.
+    pub file: PathBuf,
+    /// Restrict to one node of the scene. `gen` needs exactly one and takes it
+    /// from here when the file has several.
+    pub node: Option<usize>,
+    /// Which primitive of that node's mesh `gen` builds. `None` is "the only
+    /// one", which is a refusal when there are several.
+    pub primitive: Option<usize>,
+    /// Where `gen` writes the `.dag`. Always `Some` for
+    /// [`LodAction::Gen`] and always `None` otherwise — the parser refuses the
+    /// combinations that are neither.
+    pub output: Option<PathBuf>,
+    /// Overwrite an existing output file.
+    pub force: bool,
+    /// Machine-readable output.
+    pub json: bool,
+}
+
 /// `crcbl replay --help`.
 pub const REPLAY_USAGE: &str = "\
 crcbl replay — read a .crpl replay file and dump its metadata
@@ -380,6 +475,7 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Invocation {
         Some("screenshot") => parse_screenshot(args),
         Some("replay") => parse_replay(args),
         Some("crpix") => parse_crpix(args),
+        Some("lod") => parse_lod(args),
         Some(other) if other.starts_with('-') => {
             Invocation::BadUsage(format!("unrecognized option `{other}`"))
         }
@@ -761,6 +857,121 @@ fn parse_crpix(mut args: impl Iterator<Item = OsString>) -> Invocation {
     Invocation::Command(Command::Crpix(parsed))
 }
 
+fn parse_lod(mut args: impl Iterator<Item = OsString>) -> Invocation {
+    let Some(first) = args.next() else {
+        return bad("`lod` needs a subcommand (stats, gen)");
+    };
+    let action = match first.to_str() {
+        Some("-h" | "--help") => return Invocation::Help(LOD_USAGE),
+        Some("stats") => LodAction::Stats,
+        Some("gen") => LodAction::Gen,
+        Some("preview") => LodAction::Preview,
+        _ => {
+            return Invocation::BadUsage(format!(
+                "`lod` has no subcommand `{}` (known: stats, gen, preview)",
+                first.to_string_lossy()
+            ));
+        }
+    };
+
+    let mut parsed = LodArgs {
+        action,
+        file: PathBuf::new(),
+        node: None,
+        primitive: None,
+        output: None,
+        force: false,
+        json: false,
+    };
+    let mut file = None;
+
+    while let Some(arg) = args.next() {
+        match arg.to_str() {
+            Some("-h" | "--help") => return Invocation::Help(LOD_USAGE),
+            Some("--json") => parsed.json = true,
+            Some("--force") => parsed.force = true,
+            Some("--node") => match index(&mut args, "--node") {
+                Ok(value) => parsed.node = Some(value),
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            Some("--primitive") => match index(&mut args, "--primitive") {
+                Ok(value) => parsed.primitive = Some(value),
+                Err(message) => return Invocation::BadUsage(message),
+            },
+            // A path, so it stays an `OsString` all the way to `PathBuf`.
+            Some("-o" | "--output") => match args.next() {
+                Some(value) => parsed.output = Some(PathBuf::from(value)),
+                None => return bad("--output needs a path"),
+            },
+            Some(other) if other.starts_with('-') => {
+                return Invocation::BadUsage(format!("`lod` has no option `{other}`"));
+            }
+            // The glTF. A path, so any bytes a filesystem accepts — the *asset
+            // key* rules apply to the file name and are enforced by the command,
+            // where a refusal can explain itself.
+            Some(_) | None if file.is_none() => file = Some(PathBuf::from(arg)),
+            _ => {
+                return Invocation::BadUsage(format!(
+                    "`lod {}` takes one file; `{}` is a second one",
+                    action.name(),
+                    arg.to_string_lossy()
+                ));
+            }
+        }
+    }
+
+    let Some(file) = file else {
+        return Invocation::BadUsage(format!("`lod {}` needs a glTF file", action.name()));
+    };
+    parsed.file = file;
+
+    // Every flag that belongs to one branch is refused on the others rather
+    // than ignored: a flag that silently does nothing teaches that it works.
+    if action == LodAction::Gen {
+        if parsed.output.is_none() {
+            return bad("`lod gen` needs an output path (-o <FILE>)");
+        }
+    } else {
+        if parsed.output.is_some() {
+            return Invocation::BadUsage(format!(
+                "`lod {}` writes nothing, so it has no --output; `lod gen` is the \
+                 half that does",
+                action.name()
+            ));
+        }
+        if parsed.force {
+            return Invocation::BadUsage(format!(
+                "`lod {}` writes nothing, so there is nothing for --force to overwrite",
+                action.name()
+            ));
+        }
+        if parsed.primitive.is_some() {
+            return Invocation::BadUsage(format!(
+                "`lod {}` reports every primitive, so it has no --primitive",
+                action.name()
+            ));
+        }
+    }
+
+    Invocation::Command(Command::Lod(parsed))
+}
+
+/// The next argument as a zero-based index, for `--node` and `--primitive`.
+fn index(args: &mut impl Iterator<Item = OsString>, flag: &str) -> Result<usize, String> {
+    let Some(value) = args.next() else {
+        return Err(format!("{flag} needs an index"));
+    };
+    value
+        .to_str()
+        .and_then(|text| text.parse::<usize>().ok())
+        .ok_or_else(|| {
+            format!(
+                "`{flag}` expects a zero-based index; got `{}`",
+                value.to_string_lossy()
+            )
+        })
+}
+
 /// `L,R,T,B`, in the order [`NineSlice::new`] takes.
 ///
 /// Comma-separated rather than four flags or four positionals because the four
@@ -936,6 +1147,8 @@ mod tests {
             vec!["screenshot", "--json"],
             vec!["replay", "file.crpl", "--json"],
             vec!["crpix", "a.png", "-o", "a.crpix", "--json"],
+            vec!["lod", "stats", "a.gltf", "--json"],
+            vec!["lod", "gen", "a.gltf", "-o", "a.dag", "--json"],
         ] {
             assert!(command(&args).json(), "{args:?} should have set --json");
         }
@@ -1077,11 +1290,83 @@ mod tests {
             // A hold with nothing to hold: `--clip` is what writes the clip.
             vec!["crpix", "a.png", "-o", "out.crpix", "--hold", "6"],
             vec!["crpix", "a.png", "-o", "out.crpix", "--nope"],
+            // `lod` needs a branch and a file, `gen` needs somewhere to write,
+            // and a flag that belongs to one branch is refused on the other
+            // rather than ignored.
+            vec!["lod"],
+            vec!["lod", "frobnicate", "a.gltf"],
+            vec!["lod", "stats"],
+            vec!["lod", "gen"],
+            vec!["lod", "gen", "a.gltf"],
+            vec!["lod", "stats", "a.gltf", "b.gltf"],
+            vec!["lod", "stats", "a.gltf", "-o", "out.dag"],
+            vec!["lod", "stats", "a.gltf", "--force"],
+            vec!["lod", "stats", "a.gltf", "--primitive", "0"],
+            vec!["lod", "stats", "a.gltf", "--node"],
+            vec!["lod", "stats", "a.gltf", "--node", "first"],
+            vec!["lod", "stats", "a.gltf", "--node", "-1"],
+            vec!["lod", "gen", "a.gltf", "-o"],
+            vec!["lod", "gen", "a.gltf", "-o", "out.dag", "--primitive"],
+            vec!["lod", "gen", "a.gltf", "-o", "out.dag", "--nope"],
         ] {
             assert!(
                 matches!(parse_args(&args), Invocation::BadUsage(_)),
                 "{args:?} should be a bad invocation"
             );
+        }
+    }
+
+    /// Every option `lod` advertises reaches the struct the command reads, and
+    /// the branch is what decides which of them are legal.
+    #[test]
+    fn lod_takes_its_branch_its_file_and_the_options_that_belong_to_it() {
+        let Command::Lod(args) = command(&[
+            "lod",
+            "gen",
+            "meshes/car.glb",
+            "-o",
+            "car.dag",
+            "--node",
+            "3",
+            "--primitive",
+            "1",
+            "--force",
+        ]) else {
+            panic!("expected lod");
+        };
+        assert_eq!(args.action, LodAction::Gen);
+        assert_eq!(args.file, PathBuf::from("meshes/car.glb"));
+        assert_eq!(args.output, Some(PathBuf::from("car.dag")));
+        assert_eq!(args.node, Some(3));
+        assert_eq!(args.primitive, Some(1));
+        assert!(args.force);
+
+        let Command::Lod(args) = command(&["lod", "stats", "car.glb"]) else {
+            panic!("expected lod");
+        };
+        assert_eq!(args.action, LodAction::Stats);
+        assert_eq!((args.node, args.primitive, args.output), (None, None, None));
+        assert!(!args.force && !args.json);
+
+        // `preview` parses so that the command can refuse it with a reason;
+        // an unknown branch does not parse at all.
+        let Command::Lod(args) = command(&["lod", "preview", "car.glb"]) else {
+            panic!("expected lod");
+        };
+        assert_eq!(args.action, LodAction::Preview);
+    }
+
+    /// `lod --help` and `lod <branch> --help` are the same text, because there
+    /// is one page and a branch is not a subcommand with options of its own.
+    #[test]
+    fn lod_help_is_reachable_from_the_branch_as_well_as_the_command() {
+        for argv in [
+            vec!["lod", "--help"],
+            vec!["lod", "-h"],
+            vec!["lod", "stats", "--help"],
+            vec!["lod", "gen", "a.gltf", "--help"],
+        ] {
+            assert_eq!(parse_args(&argv), Invocation::Help(LOD_USAGE), "{argv:?}");
         }
     }
 

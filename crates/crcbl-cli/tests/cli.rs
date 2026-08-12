@@ -130,7 +130,15 @@ fn help_and_version_exit_zero() {
     }
     // Per-command help too, since a CLI whose subcommands cannot explain
     // themselves is not scriptable by anyone who has not read the source.
-    for command in ["new", "run", "build", "screenshot", "replay", "crpix"] {
+    for command in [
+        "new",
+        "run",
+        "build",
+        "screenshot",
+        "replay",
+        "crpix",
+        "lod",
+    ] {
         let output = crcbl(temporary.path(), &[command, "--help"]);
         assert_eq!(code(&output), 0, "{command} --help");
         assert!(stdout(&output).contains(command), "{command} --help");
@@ -161,6 +169,17 @@ fn a_malformed_invocation_exits_two() {
         vec!["crpix", "a.png", "-o", "out.crpix", "--sample", "linear"],
         vec!["crpix", "a.png", "-o", "out.crpix", "--nine", "4,4,4"],
         vec!["crpix", "a.png", "-o", "out.crpix", "--hold", "6"],
+        // `lod` without a branch, without a file, and with a flag that belongs
+        // to the other branch. None of these reaches the importer, so none of
+        // them needs a file that exists.
+        vec!["lod"],
+        vec!["lod", "frobnicate", "a.gltf"],
+        vec!["lod", "stats"],
+        vec!["lod", "gen", "a.gltf"],
+        vec!["lod", "stats", "a.gltf", "-o", "out.dag"],
+        vec!["lod", "stats", "a.gltf", "--primitive", "0"],
+        vec!["lod", "stats", "a.gltf", "--node", "first"],
+        vec!["lod", "stats", "a.gltf", "b.gltf"],
     ] {
         let output = crcbl(temporary.path(), &args);
         assert_eq!(code(&output), 2, "{args:?} should be exit 2");
@@ -807,4 +826,614 @@ fn run_outside_a_project_fails_with_a_hint() {
         json.contains("crcbl new"),
         "the error names a next step: {json}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// `crcbl lod`
+// ---------------------------------------------------------------------------
+
+/// A triangle mesh: positions, and a triangle list over them.
+type Mesh = (Vec<[f32; 3]>, Vec<u32>);
+
+/// A `side`×`side` vertex grid over the dune surface, as one triangle list.
+///
+/// Curved rather than flat because a plane simplifies at no quadric cost at all:
+/// every level of its DAG would report an error of zero, and a report that only
+/// ever prints zero cannot be told from one that prints the wrong number.
+///
+/// **The surface is [`crcbl::shaders::dunes::height`]**, which is both the patch
+/// the engine ships a committed DAG for and the fixture `crcbl-scene`'s own
+/// simplifier tests decimate — so this exercises the report against the geometry
+/// the rest of the workspace already reasons about, rather than a third surface.
+/// It is also a quartic and calls no `sin`: the results below depend on which
+/// edges the decimator collapses, and a transcendental would make them depend on
+/// the platform's libm as well.
+fn grid(side: usize) -> Mesh {
+    assert!(side > 1, "a grid of {side} has no quads");
+    let mut positions = Vec::with_capacity(side * side);
+    for row in 0..side {
+        for column in 0..side {
+            let (x, z) = (column as f32, row as f32);
+            positions.push([x, crcbl::shaders::dunes::height(x, z), z]);
+        }
+    }
+
+    let mut indices = Vec::with_capacity((side - 1) * (side - 1) * 6);
+    for row in 0..side - 1 {
+        for column in 0..side - 1 {
+            let corner = (row * side + column) as u32;
+            let below = corner + side as u32;
+            indices.extend_from_slice(&[corner, below, corner + 1]);
+            indices.extend_from_slice(&[corner + 1, below, below + 1]);
+        }
+    }
+    (positions, indices)
+}
+
+/// One node of a fixture document, and the mesh it draws.
+struct LodNode<'a> {
+    /// The node's `name`, which is what the `name_LOD1` convention reads.
+    name: &'a str,
+    /// The mesh it draws, or `None` for a node that draws nothing.
+    mesh: Option<&'a Mesh>,
+    /// The body of its `MSFT_lod` extension, written verbatim so a malformed
+    /// one can be a fixture too.
+    lod_ids: Option<&'a str>,
+}
+
+/// Writes `<stem>.gltf` and the `<stem>.bin` it names, and returns the
+/// document's path. Every node is in the default scene.
+///
+/// # Why this is here rather than shared with `crcbl-scene`
+///
+/// That crate has the same fixture — `gltf_fixture::lod_glb` — and it is
+/// `#[cfg(test)] pub(crate)`, so no other crate's tests can see it. The
+/// alternatives were checking a `.glb` into the repository, which is a blob
+/// nobody reviewing a change could read (the objection `crcbl-scene`'s own
+/// fixture module records), or making that module public surface for a test to
+/// borrow. This writes glTF's *text* form and a little-endian float dump beside
+/// it, so it duplicates no container logic at all: the part `lod_glb` exists for
+/// — `.glb` chunk headers and their padding — is exactly the part not repeated
+/// here.
+fn write_gltf(directory: &Path, stem: &str, nodes: &[LodNode<'_>]) -> PathBuf {
+    let mut bin: Vec<u8> = Vec::new();
+    let (mut meshes, mut accessors, mut views, mut node_json) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+
+    for node in nodes {
+        let mesh = node.mesh.map(|(positions, indices)| {
+            let position_view = views.len();
+            views.push(format!(
+                r#"{{"buffer":0,"byteOffset":{},"byteLength":{}}}"#,
+                bin.len(),
+                positions.len() * 12
+            ));
+            for position in positions {
+                for component in position {
+                    bin.extend_from_slice(&component.to_le_bytes());
+                }
+            }
+            views.push(format!(
+                r#"{{"buffer":0,"byteOffset":{},"byteLength":{}}}"#,
+                bin.len(),
+                indices.len() * 4
+            ));
+            for index in indices {
+                bin.extend_from_slice(&index.to_le_bytes());
+            }
+            accessors.push(format!(
+                r#"{{"bufferView":{position_view},"componentType":5126,"count":{},"type":"VEC3"}}"#,
+                positions.len()
+            ));
+            accessors.push(format!(
+                r#"{{"bufferView":{},"componentType":5125,"count":{},"type":"SCALAR"}}"#,
+                position_view + 1,
+                indices.len()
+            ));
+            meshes.push(format!(
+                r#"{{"name":"{}","primitives":[{{"attributes":{{"POSITION":{position_view}}},"indices":{}}}]}}"#,
+                node.name,
+                position_view + 1
+            ));
+            meshes.len() - 1
+        });
+
+        let mut fields = vec![format!(r#""name":"{}""#, node.name)];
+        if let Some(mesh) = mesh {
+            fields.push(format!(r#""mesh":{mesh}"#));
+        }
+        if let Some(ids) = node.lod_ids {
+            fields.push(format!(r#""extensions":{{"MSFT_lod":{ids}}}"#));
+        }
+        node_json.push(format!("{{{}}}", fields.join(",")));
+    }
+
+    let scene: Vec<String> = (0..nodes.len()).map(|node| node.to_string()).collect();
+    let document = format!(
+        r#"{{"asset":{{"version":"2.0"}},"scene":0,"scenes":[{{"nodes":[{}]}}],"nodes":[{}],
+"meshes":[{}],"accessors":[{}],"bufferViews":[{}],
+"buffers":[{{"byteLength":{},"uri":"{stem}.bin"}}]}}"#,
+        scene.join(","),
+        node_json.join(","),
+        meshes.join(","),
+        accessors.join(","),
+        views.join(","),
+        bin.len(),
+    );
+
+    let path = directory.join(format!("{stem}.gltf"));
+    std::fs::write(&path, document).expect("the fixture document is written");
+    std::fs::write(directory.join(format!("{stem}.bin")), bin).expect("the fixture buffer");
+    path
+}
+
+/// A node drawing `mesh`, with no `MSFT_lod`.
+fn node<'a>(name: &'a str, mesh: &'a Mesh) -> LodNode<'a> {
+    LodNode {
+        name,
+        mesh: Some(mesh),
+        lod_ids: None,
+    }
+}
+
+/// The whole `--json` object of a `lod` run that has to succeed.
+fn lod_json(directory: &Path, args: &[&str]) -> String {
+    let mut argv = vec!["lod"];
+    argv.extend_from_slice(args);
+    argv.push("--json");
+    let output = crcbl(directory, &argv);
+    assert_eq!(
+        code(&output),
+        0,
+        "{argv:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    stdout(&output)
+}
+
+/// A mesh with no hand-authored levels gets a generated chain, and the report
+/// carries what the generator measured — not only that levels exist.
+///
+/// The triangle counts are asserted as a *halving* rather than as literals: the
+/// figures belong to the simplifier and would pin this test to its output, but
+/// "each level is coarser than the one below and roughly half of it" is the
+/// property `docs/plan/25-lod.md` states and the DAG builder targets.
+#[test]
+fn lod_stats_reports_a_generated_chain_and_the_dag_behind_it() {
+    let temporary = TempDir::new("lod-stats");
+    let base = grid(24);
+    let file = write_gltf(temporary.path(), "plain", &[node("car", &base)]);
+
+    let json = lod_json(temporary.path(), &["stats", arg(&file)]);
+    assert_eq!(json.lines().count(), 1, "exactly one line: {json}");
+    assert!(json.starts_with(r#"{"ok":true,"command":"lod""#), "{json}");
+    assert!(has_field(&json, "action", r#""stats""#), "{json}");
+    assert!(
+        has_field(&json, "path", &json_string(&file)),
+        "the file a script picks up is in the object: {json}"
+    );
+
+    // LOD0 is the file's own geometry, and the whole mesh of it.
+    assert!(
+        json.contains(&format!(
+            r#"{{"level":0,"origin":"hand","via":"base","node":0,"node_name":"car","mesh":0,"triangles":{}"#,
+            base.1.len() / 3
+        )),
+        "LOD0 is the base mesh, verbatim: {json}"
+    );
+    // And every level below it is the generator's, at its own DAG depth.
+    for level in 1..4 {
+        assert!(
+            json.contains(&format!(
+                r#"{{"level":{level},"origin":"generated","dag_level":{level},"#
+            )),
+            "LOD{level} is a uniform cut at depth {level}: {json}"
+        );
+    }
+
+    let triangles = numbers(&json, "triangles");
+    // Chain levels first, then the DAG's own — the same mesh twice, so the
+    // sequence restarts. Both halves have to shrink.
+    let (chain, dag) = triangles.split_at(triangles.len() / 2);
+    assert_eq!(chain, dag, "the chain and its DAG are the same four levels");
+    assert!(chain.len() > 2, "a chain of {chain:?} proves nothing");
+    for pair in chain.windows(2) {
+        assert!(
+            pair[1] < pair[0] && pair[1] * 3 > pair[0],
+            "levels {chain:?} do not halve",
+        );
+    }
+
+    // The error curve rises, which is the reason the report exists: a coarser
+    // level costs more, and selection reads exactly this number. Split the same
+    // way, for the same reason.
+    let all = floats(&json, "error_max");
+    let (errors, mirror) = all.split_at(all.len() / 2);
+    assert_eq!(errors, mirror, "the chain and its DAG report one curve");
+    assert_eq!(
+        errors[0], 0.0,
+        "the base mesh departs from itself by nothing"
+    );
+    for pair in errors.windows(2) {
+        assert!(
+            pair[1] > pair[0],
+            "the error curve {errors:?} is not rising"
+        );
+    }
+
+    // Nothing stalled on a mesh that halves cleanly — and the field is there to
+    // say so rather than being absent when the answer is "no".
+    assert!(has_field(&json, "stalled_levels", "0"), "{json}");
+    assert!(has_field(&json, "stalled", "false"), "{json}");
+    assert!(!json.contains(r#""stalled":true"#), "{json}");
+}
+
+/// The provenance half: a hand-authored level says which node it came out of and
+/// what tied it there, and the generator is never run behind it.
+#[test]
+fn lod_stats_names_the_node_a_hand_authored_level_came_from() {
+    let temporary = TempDir::new("lod-hand");
+    let (base, coarse, coarser) = (grid(24), grid(12), grid(7));
+    let file = write_gltf(
+        temporary.path(),
+        "hand",
+        &[
+            node("car", &base),
+            node("car_LOD1", &coarse),
+            node("car_LOD2", &coarser),
+        ],
+    );
+
+    let json = lod_json(temporary.path(), &["stats", arg(&file)]);
+
+    assert!(
+        json.contains(
+            r#"{"level":1,"origin":"hand","via":"name","node":1,"node_name":"car_LOD1","mesh":1"#
+        ),
+        "LOD1 is node 1's geometry, found by its name: {json}"
+    );
+    assert!(
+        json.contains(
+            r#"{"level":2,"origin":"hand","via":"name","node":2,"node_name":"car_LOD2","mesh":2"#
+        ),
+        "{json}"
+    );
+    assert!(
+        !json.contains(r#""origin":"generated""#),
+        "a complete hand-authored chain is never touched by the generator: {json}"
+    );
+    assert!(
+        json.contains(r#""dags":[]"#),
+        "and no DAG was built at all: {json}"
+    );
+    // A hand level below LOD0 was never clustered here, so there is no cluster
+    // count and no error to report — and the report says nothing rather than
+    // inventing one. LOD0's own clusters would be the only ones, and there is
+    // no DAG to have clustered it either.
+    assert!(
+        !json.contains(r#""clusters""#) && !json.contains(r#""error_max""#),
+        "an engine number appeared for geometry the engine never built: {json}"
+    );
+
+    // The three nodes are one chain, not three: nodes 1 and 2 are levels of
+    // node 0 and are not reported again as bases of their own.
+    assert_eq!(
+        json.matches(r#"{"node":0,"#).count() + json.matches(r#"{"node":1,"#).count(),
+        1,
+        "the LOD nodes were reported as chains of their own: {json}"
+    );
+
+    // Naming one explicitly still resolves it, because nothing in either
+    // convention points upwards.
+    let alone = lod_json(temporary.path(), &["stats", arg(&file), "--node", "1"]);
+    assert!(
+        alone.contains(r#""node":1,"node_name":"car_LOD1""#),
+        "{alone}"
+    );
+}
+
+/// A level that did not halve is said to have not halved, in both renderings.
+///
+/// This is the finding the report exists to surface rather than to average away:
+/// a group whose outer boundary is most of its edges keeps what it has, and the
+/// level above it is barely coarser than the level below. It is a real shape —
+/// `crates/crcbl-shaders/clusters/dunes.dag` does it at its top levels — and it
+/// is invisible in a table of triangle counts nobody reads to the end.
+///
+/// **The fixture is chosen because it stalls.** A decimator good enough to halve
+/// this mesh all the way up would fail the assertion below, and the fix then is
+/// a fixture that still stalls, not a check that no longer looks.
+#[test]
+fn lod_stats_says_which_dag_levels_did_not_halve() {
+    let temporary = TempDir::new("lod-stall");
+    // Wide enough that the top of the DAG runs out of interior to simplify;
+    // a fraction of a second even through the unoptimized binary.
+    let base = grid(56);
+    let file = write_gltf(temporary.path(), "wide", &[node("car", &base)]);
+
+    let json = lod_json(temporary.path(), &["stats", arg(&file)]);
+    let kept = floats(&json, "kept");
+    let stalled: Vec<bool> = field_values(&json, "stalled")
+        .map(|value| value == "true")
+        .collect();
+
+    // Level 0 is below nothing and reports no share, so the flags outnumber the
+    // shares by exactly the one level that has none.
+    assert_eq!(
+        stalled.len(),
+        kept.len() + 1,
+        "every level is flagged and every level but the first has a share: {json}"
+    );
+    for (level, &share) in kept.iter().enumerate() {
+        assert_eq!(
+            stalled[level + 1],
+            share > 0.75,
+            "level {} kept {share} and was flagged {}: {json}",
+            level + 1,
+            stalled[level + 1]
+        );
+    }
+    let stalls = stalled.iter().filter(|&&flag| flag).count();
+    assert!(stalls > 0, "the fixture stopped stalling: {json}");
+    assert!(
+        has_field(&json, "stalled_levels", &stalls.to_string()),
+        "the summary counts what the levels reported: {json}"
+    );
+
+    // And a person reading the table sees it without counting anything.
+    let human = stdout(&crcbl(temporary.path(), &["lod", "stats", arg(&file)]));
+    assert_eq!(
+        human.matches("STALLED").count(),
+        stalls,
+        "the table hides a stall the JSON reports:\n{human}"
+    );
+    assert!(
+        human.contains(&format!("{stalls} stalled DAG level")),
+        "and says so in one line at the top:\n{human}"
+    );
+}
+
+/// The trap this command exists to avoid: a plausible table for a file that was
+/// never read. A refused import is a refusal, and stdout carries no report.
+#[test]
+fn lod_stats_refuses_a_file_it_could_not_import() {
+    let temporary = TempDir::new("lod-broken");
+    let broken = temporary.path().join("broken.gltf");
+    std::fs::write(&broken, b"this is not a glTF document").expect("the fixture");
+
+    let output = crcbl(temporary.path(), &["lod", "stats", arg(&broken)]);
+    assert_eq!(code(&output), 1);
+    assert!(
+        stdout(&output).is_empty(),
+        "a refused import printed a report: {}",
+        stdout(&output)
+    );
+    let message = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(message.contains("cannot import"), "{message}");
+    assert!(
+        message.contains("broken.gltf"),
+        "it names the file: {message}"
+    );
+
+    // The same failure is machine-readable, and still carries no chain.
+    let output = crcbl(temporary.path(), &["lod", "stats", arg(&broken), "--json"]);
+    assert_eq!(code(&output), 1);
+    let json = stdout(&output);
+    assert!(json.starts_with(r#"{"ok":false,"command":"lod""#), "{json}");
+    assert!(!json.contains(r#""chains""#), "{json}");
+
+    // And a file that is not there at all is the same kind of answer.
+    let output = crcbl(temporary.path(), &["lod", "stats", "absent.gltf"]);
+    assert_eq!(code(&output), 1);
+    assert!(stdout(&output).is_empty());
+}
+
+/// A level two nodes claim is refused by name, rather than ranked. The naming
+/// convention and `MSFT_lod` are alternatives, not a precedence order.
+#[test]
+fn lod_stats_refuses_a_level_two_nodes_claim() {
+    let temporary = TempDir::new("lod-conflict");
+    let (base, coarse, other) = (grid(24), grid(12), grid(7));
+    let file = write_gltf(
+        temporary.path(),
+        "conflict",
+        &[
+            LodNode {
+                name: "car",
+                mesh: Some(&base),
+                lod_ids: Some(r#"{"ids":[2]}"#),
+            },
+            node("car_LOD1", &coarse),
+            node("something_else", &other),
+        ],
+    );
+
+    let output = crcbl(temporary.path(), &["lod", "stats", arg(&file)]);
+    assert_eq!(code(&output), 1);
+    assert!(stdout(&output).is_empty(), "{}", stdout(&output));
+    let message = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(message.contains("LOD1"), "which level: {message}");
+    assert!(
+        message.contains("node 2") && message.contains("node 1"),
+        "both claimants, by name: {message}"
+    );
+}
+
+/// `gen` writes the cooked artifact, and it is the artifact the renderer's own
+/// decoder reads — checked here by decoding it against the very positions the
+/// fixture was built from, which is also what proves the levels survived the
+/// trip through the importer.
+#[test]
+fn lod_gen_writes_a_dag_the_decoder_reads_back() {
+    let temporary = TempDir::new("lod-gen");
+    let base = grid(24);
+    let file = write_gltf(temporary.path(), "plain", &[node("car", &base)]);
+    let artifact = temporary.path().join("car.dag");
+
+    let json = lod_json(temporary.path(), &["gen", arg(&file), "-o", arg(&artifact)]);
+    assert!(has_field(&json, "action", r#""gen""#), "{json}");
+    assert!(has_field(&json, "path", &json_string(&artifact)), "{json}");
+
+    let bytes = std::fs::read(&artifact).expect("the artifact was written");
+    assert!(
+        has_field(&json, "bytes", &bytes.len().to_string()),
+        "the reported size is the file's: {json}"
+    );
+
+    let dag = crcbl::shaders::cluster_dag::ClusterDag::from_bytes(&bytes, base.0.clone())
+        .expect("the artifact decodes against the mesh it was cooked from");
+    assert!(
+        has_field(&json, "levels", &dag.levels.len().to_string()),
+        "the reported level count is the artifact's: {json}"
+    );
+    assert!(dag.levels.len() > 2, "{} levels", dag.levels.len());
+    assert_eq!(
+        dag.levels[0].positions, base.0,
+        "level 0 is the fixture's own vertices, through the importer unchanged"
+    );
+
+    // The per-level figures in the report are the artifact's, not a second
+    // count: a report that measured something else would agree on the levels
+    // and disagree here.
+    for (depth, level) in dag.levels.iter().enumerate() {
+        let triangles: u32 = level
+            .clusters
+            .clusters
+            .iter()
+            .map(|cluster| cluster.triangle_count)
+            .sum();
+        assert!(
+            json.contains(&format!(
+                r#"{{"level":{depth},"triangles":{triangles},"clusters":{},"groups":{}"#,
+                level.clusters.clusters.len(),
+                level.groups.len()
+            )),
+            "level {depth} of the artifact is not what was reported: {json}"
+        );
+    }
+}
+
+/// A chain the artist supplied whole has no DAG, and `gen` says so instead of
+/// writing an artifact of the base mesh alone.
+#[test]
+fn lod_gen_refuses_a_fully_hand_authored_chain() {
+    let temporary = TempDir::new("lod-gen-hand");
+    let (base, coarse) = (grid(24), grid(12));
+    let file = write_gltf(
+        temporary.path(),
+        "hand",
+        &[node("car", &base), node("car_LOD1", &coarse)],
+    );
+    let artifact = temporary.path().join("car.dag");
+
+    let output = crcbl(
+        temporary.path(),
+        &[
+            "lod",
+            "gen",
+            arg(&file),
+            "-o",
+            arg(&artifact),
+            "--node",
+            "0",
+        ],
+    );
+    assert_eq!(code(&output), 1);
+    let message = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(message.contains("hand-authored"), "{message}");
+    assert!(!artifact.exists(), "nothing should have been written");
+}
+
+/// The output is not touched when it exists and `--force` was not given — and
+/// the check happens before the DAG is built, so a run that refuses cannot have
+/// spent a bake first.
+#[test]
+fn lod_gen_leaves_an_existing_artifact_alone_without_force() {
+    let temporary = TempDir::new("lod-gen-force");
+    let base = grid(24);
+    let file = write_gltf(temporary.path(), "plain", &[node("car", &base)]);
+    let artifact = temporary.path().join("taken.dag");
+    std::fs::write(&artifact, b"do not tread on me").expect("the file exists");
+
+    let output = crcbl(
+        temporary.path(),
+        &["lod", "gen", arg(&file), "-o", arg(&artifact)],
+    );
+    assert_eq!(code(&output), 1);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--force"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&artifact).expect("still there"),
+        b"do not tread on me"
+    );
+
+    // And with `--force` it is replaced by a real artifact.
+    let output = crcbl(
+        temporary.path(),
+        &["lod", "gen", arg(&file), "-o", arg(&artifact), "--force"],
+    );
+    assert_eq!(
+        code(&output),
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        &std::fs::read(&artifact).expect("rewritten")[..8],
+        b"CRCBLDAG"
+    );
+}
+
+/// `preview` is in `docs/plan/25-lod.md` and is not implemented. It fails saying
+/// which of the three is missing, rather than reading as a typo.
+#[test]
+fn lod_preview_is_refused_as_missing_and_not_as_unknown() {
+    let temporary = TempDir::new("lod-preview");
+    let output = crcbl(temporary.path(), &["lod", "preview", "any.gltf", "--json"]);
+    assert_eq!(
+        code(&output),
+        1,
+        "not implemented is a failed command, not a bad invocation"
+    );
+    let json = stdout(&output);
+    assert!(json.starts_with(r#"{"ok":false,"command":"lod""#), "{json}");
+    assert!(has_field(&json, "action", r#""preview""#), "{json}");
+    assert!(json.contains("not implemented"), "{json}");
+}
+
+/// Every `"<key>":<integer>` in the object, in order.
+fn numbers(json: &str, key: &str) -> Vec<usize> {
+    field_values(json, key)
+        .map(|value| value.parse().unwrap_or_else(|_| panic!("{key}: {value}")))
+        .collect()
+}
+
+/// Every `"<key>":<number>` in the object as a float, in order.
+fn floats(json: &str, key: &str) -> Vec<f32> {
+    field_values(json, key)
+        .map(|value| value.parse().unwrap_or_else(|_| panic!("{key}: {value}")))
+        .collect()
+}
+
+/// The raw text of every `"<key>":<value>` up to the next `,` or `}`.
+///
+/// Asserts it found at least one: a probe that silently matched nothing would
+/// make every assertion over its result vacuously true.
+fn field_values<'a>(json: &'a str, key: &str) -> impl Iterator<Item = &'a str> {
+    let needle = format!("\"{key}\":");
+    let values: Vec<&str> = json
+        .match_indices(&needle)
+        .map(|(at, _)| {
+            let rest = &json[at + needle.len()..];
+            let end = rest
+                .find([',', '}'])
+                .unwrap_or_else(|| panic!("{key} at {at} is not terminated: {rest}"));
+            &rest[..end]
+        })
+        .collect();
+    assert!(!values.is_empty(), "no `{key}` in {json}");
+    values.into_iter()
 }

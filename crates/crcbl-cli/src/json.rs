@@ -19,12 +19,22 @@ use std::fmt::{self, Display, Formatter, Write as _};
 /// Ordered rather than a map, because a stable key order makes the output
 /// diffable and `--json | head` readable, and because an object with four keys
 /// does not need a hash table.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`: [`Float`](Self::Float) holds one.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Json {
     /// `true` / `false`.
     Bool(bool),
     /// A JSON number, always an integer here.
     Number(i64),
+    /// A JSON number with a fraction — a geometric error, a ratio.
+    ///
+    /// **A non-finite value is written `null`.** JSON has no infinity and no
+    /// NaN, so the alternatives are a document no parser accepts or a number
+    /// that is not the value; `null` is the one answer a consumer can read and
+    /// tell apart from a real measurement. Nothing this CLI reports is
+    /// *expected* to be non-finite — see [`write_float`].
+    Float(f32),
     /// A string, escaped on the way out.
     String(String),
     /// An array.
@@ -50,6 +60,7 @@ impl Display for Json {
         match self {
             Self::Bool(value) => write!(f, "{value}"),
             Self::Number(value) => write!(f, "{value}"),
+            Self::Float(value) => write_float(f, *value),
             Self::String(value) => write_escaped(f, value),
             Self::Array(items) => {
                 f.write_char('[')?;
@@ -74,6 +85,20 @@ impl Display for Json {
                 f.write_char('}')
             }
         }
+    }
+}
+
+/// Writes a JSON number for an `f32`, or `null` when there is no such number.
+///
+/// `{:?}` and not `{}`: `Debug` for a float is the shortest decimal that reads
+/// back as the same bits, which is exactly what a machine-readable schema wants
+/// — `Display` would print `0.03` for a value that is not 0.03. Both an integral
+/// value (`2.0`) and an exponent (`1e-8`) are spellings RFC 8259 accepts.
+fn write_float(f: &mut Formatter<'_>, value: f32) -> fmt::Result {
+    if value.is_finite() {
+        write!(f, "{value:?}")
+    } else {
+        f.write_str("null")
     }
 }
 
@@ -129,6 +154,31 @@ mod tests {
             r#"{"files":["Cargo.toml","src/main.rs"]}"#
         );
         assert_eq!(Json::Array(vec![]).to_string(), "[]");
+    }
+
+    /// A float is written as the shortest decimal that reads back as itself,
+    /// and the three values JSON cannot spell become `null` rather than a
+    /// document no parser accepts.
+    #[test]
+    fn floats_round_trip_and_the_unspellable_ones_are_null() {
+        for (value, expected) in [
+            (0.0f32, "0.0"),
+            (2.0, "2.0"),
+            (0.03, "0.03"),
+            (-1.5, "-1.5"),
+            (1e-8, "1e-8"),
+        ] {
+            let rendered = Json::Float(value).to_string();
+            assert_eq!(rendered, expected);
+            assert_eq!(
+                rendered.parse::<f32>().expect("a JSON number").to_bits(),
+                value.to_bits(),
+                "{rendered} is not {value} read back"
+            );
+        }
+        for value in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
+            assert_eq!(Json::Float(value).to_string(), "null", "{value}");
+        }
     }
 
     /// The whole reason this module is allowed to exist rather than being a

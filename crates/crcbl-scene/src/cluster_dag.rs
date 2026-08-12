@@ -480,6 +480,58 @@ impl ClusterDag {
     pub fn levels(&self) -> &[DagLevel] {
         &self.levels
     }
+
+    /// This DAG in [`crcbl_shaders::cluster_dag::ClusterDag`], the cooked form
+    /// that has a codec and that the renderer receives a DAG in.
+    ///
+    /// A **transcription and nothing else**: every number below is read straight
+    /// off this DAG, because a converter that computed anything of its own would
+    /// be a second implementation of the builder with no test between them. The
+    /// two type sets mirror each other field for field precisely so that this
+    /// can be true — see [`crcbl_shaders::cluster_dag`]'s own docs for why there
+    /// are two of them at all (this crate depends on that one, and the renderer
+    /// may depend on neither).
+    ///
+    /// This is the whole path from a built DAG to bytes on disk:
+    /// [`to_bytes`](crcbl_shaders::cluster_dag::ClusterDag::to_bytes) is the
+    /// other half, and `crcbl lod gen` is the two of them run over a glTF.
+    #[must_use]
+    pub fn cook(&self) -> crcbl_shaders::cluster_dag::ClusterDag {
+        crcbl_shaders::cluster_dag::ClusterDag {
+            levels: self
+                .levels
+                .iter()
+                .map(|level| crcbl_shaders::cluster_dag::DagLevel {
+                    positions: level.positions.clone(),
+                    clusters: crcbl_shaders::meshlet::MeshClusters {
+                        clusters: level.clusters.clusters().to_vec(),
+                        vertices: level.clusters.vertices().to_vec(),
+                        corners: level.clusters.triangles().to_vec(),
+                    },
+                    errors: level.errors.clone(),
+                    bounds: level.bounds.iter().map(cook_sphere).collect(),
+                    groups: level
+                        .groups
+                        .iter()
+                        .map(|group| crcbl_shaders::cluster_dag::ClusterGroup {
+                            children: group.children.clone(),
+                            parents: group.parents.clone(),
+                            error: group.error,
+                            bounds: cook_sphere(&group.bounds),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// One sphere in the cooked crate's spelling of it.
+fn cook_sphere(bounds: &GroupBounds) -> crcbl_shaders::cluster_dag::GroupBounds {
+    crcbl_shaders::cluster_dag::GroupBounds {
+        center: bounds.center,
+        radius: bounds.radius,
+    }
 }
 
 /// Build a mesh's cluster DAG.
@@ -1788,6 +1840,74 @@ mod tests {
                 index: 7,
                 vertices: 1,
             }))
+        );
+    }
+
+    /// [`ClusterDag::cook`] carries every field across, and the codec on the
+    /// far side is its inverse.
+    ///
+    /// Field by field against the *builder's* DAG rather than only through the
+    /// round trip: a transcription that dropped a group's parents, or read a
+    /// cluster's own sphere where the group's belongs, would encode and decode
+    /// perfectly and be wrong in the one direction that matters.
+    #[test]
+    fn a_cooked_dag_is_the_built_one_and_survives_the_codec() {
+        let (positions, _, dag) = dense_dag();
+        let cooked = dag.cook();
+
+        assert_eq!(cooked.levels.len(), dag.levels().len());
+        assert!(
+            dag.levels().len() > 2,
+            "a DAG of {} levels does not exercise the grouping",
+            dag.levels().len()
+        );
+        let mut groups = 0usize;
+        for (depth, (level, mirror)) in dag.levels().iter().zip(&cooked.levels).enumerate() {
+            assert_eq!(mirror.positions, level.positions(), "level {depth}");
+            assert_eq!(
+                mirror.clusters.clusters,
+                level.clusters().clusters(),
+                "level {depth}"
+            );
+            assert_eq!(
+                mirror.clusters.vertices,
+                level.clusters().vertices(),
+                "level {depth}"
+            );
+            assert_eq!(
+                mirror.clusters.corners,
+                level.clusters().triangles(),
+                "level {depth}"
+            );
+            assert_eq!(mirror.errors, level.errors(), "level {depth}");
+            assert_eq!(
+                mirror.bounds.len(),
+                level.bounds().len(),
+                "level {depth}'s spheres"
+            );
+            for (sphere, source) in mirror.bounds.iter().zip(level.bounds()) {
+                assert_eq!(
+                    (sphere.center, sphere.radius),
+                    (source.center(), source.radius())
+                );
+            }
+            assert_eq!(mirror.groups.len(), level.groups().len(), "level {depth}");
+            for (group, source) in mirror.groups.iter().zip(level.groups()) {
+                assert_eq!(group.children, source.children());
+                assert_eq!(group.parents, source.parents());
+                assert_eq!(group.error, source.error());
+                assert_eq!(group.bounds.center, source.bounds().center());
+                assert_eq!(group.bounds.radius, source.bounds().radius());
+                groups += 1;
+            }
+        }
+        assert!(groups > 0, "no group was compared, so nothing was checked");
+
+        assert_eq!(
+            crcbl_shaders::cluster_dag::ClusterDag::from_bytes(&cooked.to_bytes(), positions)
+                .as_ref(),
+            Ok(&cooked),
+            "the artifact does not read back as what was cooked"
         );
     }
 }
