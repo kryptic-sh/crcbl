@@ -125,6 +125,27 @@ different projection — and a point light is six of exactly that plus face
 selection. Building the simpler one first de-risks the harder one and neither is
 wasted.
 
+### A fourth, taken 2026-08-13 once spot shadows had landed
+
+- **One cull per point light, not one per face.** Spot shadows made the cost of
+  a shadowed light visible: each one needs its own `DrawGen`, and a `DrawGen` is
+  roughly five megabytes — most of it per-instance LOD hysteresis state that is
+  device-local and lives for the renderer's life. Six of those per point light
+  is thirty megabytes for one light, which is not a budget, it is a leak with a
+  schedule.
+
+  A point light's six faces share a frustum in the only sense that matters: the
+  union of them is the light's sphere, and the sphere is what the cull already
+  tests against. So a point light gets **one** `DrawGen` culling against its
+  radius, and its six faces each draw that one visible set through a different
+  matrix into a different tile. A face therefore draws instances behind it,
+  which the rasteriser discards — conservative, and the trade is six dispatches'
+  worth of memory against a little wasted vertex work on five faces.
+
+  This is also the shape a tighter per-face cull would refine later without
+  moving anything: the visible set is already per-light, and narrowing it is a
+  change to one dispatch rather than a change to how many there are.
+
 ## Shadows (MVP — lands with P7)
 
 - **Sun: cascaded shadow maps** (CSM), 2–3 cascades, stable (texel-snapped)
