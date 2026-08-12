@@ -85,6 +85,27 @@ worst error of any cluster that went into it — monotone up the DAG by
 construction, which is what makes a cut well-defined. Detail still varies across
 a level, because different _groups_ differ; it does not vary within one.
 
+### How a DAG reaches the renderer (decided 2026-08-12)
+
+`crcbl-render` cannot see `crcbl-scene` — that would pull `gltf` into the
+renderer, and it is a deliberate boundary — and `crcbl-shaders` has no
+dependencies at all by design. So a DAG built by `build_cluster_dag` has no path
+to `ClusterPool`, and the renderer's clusters are hand-written cooked constants
+(`cube_clusters`, `pyramid_clusters`, `open_box_clusters`).
+
+**The seam is a cooked artifact, mirroring the shader arrangement.** A tool
+generates the DAG from the builder and writes it into `crcbl-shaders`; the
+artifact is committed; a `--check` mode regenerates and compares, and CI runs it
+the way it already runs "shaders (committed artifacts match their sources)".
+That keeps `crcbl-shaders` dependency-free, makes the existing hand-written
+constants a generated case of the same thing, and is a bake output in the sense
+topic 6 means — when the real asset pipeline arrives it replaces the generator,
+not the consumer.
+
+Rejected: a dev-dependency on `crcbl-scene` (helps tests, leaves the shipping
+path with no data), and a conversion in a crate that can see both (the renderer
+still cannot reach it).
+
 ### What the fallback paths do
 
 The DAG subsumes the chain. `IndirectCount` and `IndirectPerBatch` select a
