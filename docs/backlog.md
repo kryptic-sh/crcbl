@@ -5907,10 +5907,11 @@ harness has a precedent for a demo whose input is not a keypress.
   `clap` and delete it "when this file passes roughly two hundred lines of
   `match`" — a line it was well past before this added 285 more.
 
-## Two CI installs turn a download flake into a hard red, and one cannot self-heal
+## Three CI installs turned a download flake into a hard red in one hour
 
-Both hit on 2026-08-12, within an hour, on commits that could not have caused
-either. Neither is a defect in the tree and both cost a red build and a re-run.
+All three hit on 2026-08-12 within an hour, on commits that could not have
+caused any of them, and **every one left its real step skipped**. None is a
+defect in the tree; each cost a red build and a re-run.
 
 - **`decoder fuzz (libFuzzer)`** — `taiki-e/install-action` could not download a
   prebuilt `cargo-fuzz 0.13.1` from either GitHub releases or QuickInstall, fell
