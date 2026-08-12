@@ -54,7 +54,9 @@ pub mod lod;
 pub mod meshlet;
 pub mod simplify;
 
-pub use cluster_dag::{ClusterDag, ClusterDagError, ClusterGroup, DagLevel, build_cluster_dag};
+pub use cluster_dag::{
+    ClusterDag, ClusterDagError, ClusterGroup, DagLevel, GroupBounds, build_cluster_dag,
+};
 pub use gltf_import::{GltfInstance, GltfMesh, GltfPrimitive, GltfScene, import_gltf};
 pub use lod::{DEFAULT_LOD_RATIOS, LodError, LodLevel, build_lod_chain};
 pub use meshlet::{ClusterBounds, Meshlet, MeshletBuild, MeshletError, build_meshlets};

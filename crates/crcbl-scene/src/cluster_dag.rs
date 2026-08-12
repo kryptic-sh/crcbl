@@ -54,13 +54,64 @@
 //! several levels at once, since a uniform cut is a chain level and a chain was
 //! never the thing that cracked.
 //!
-//! # This is the builder and nothing else
+//! # How a camera turns this into a cut
 //!
-//! [`build_cluster_dag`] takes host arrays and returns host arrays. There is no
-//! GPU descent in the amplification stage, no screen-space error projection, no
-//! hysteresis, no shadow bias, no bake cache and no upload; nothing in the
-//! engine calls this yet. Selection — including the rule that turns an error and
-//! a pixel budget into a cut — is the next slice. Read this as its input.
+//! A group is the unit of decision, not a cluster. Each carries one
+//! [`error`](ClusterGroup::error) and one [`bounds`](ClusterGroup::bounds), and
+//! [`ClusterGroup::projected_error`] turns the pair into the pixels the group's
+//! simplification would cost from a given eye. Write `E(G)` for
+//! `G.projected_error(eye, ppu) > budget` — *this group is expanded*, meaning
+//! its children are drawn rather than its parents. A cluster is drawn exactly
+//! when
+//!
+//! ```text
+//! !E(the group that produced it) && E(the group that contains it)
+//! ```
+//!
+//! reading a level-0 cluster's absent producer as never expanded and a top-level
+//! cluster's absent container as always expanded. That is the descent of
+//! `docs/plan/25-lod.md`'s "Runtime selection", written as a local test one
+//! cluster at a time — which is what lets a GPU evaluate it per cluster with no
+//! communication.
+//!
+//! # Why the decision is per group and not per cluster
+//!
+//! Both halves of that test name a **group's** error and a **group's** sphere,
+//! never the cluster's own. Every cluster a group produced therefore evaluates a
+//! bit-identical `E(G)`, so a group's parents are drawn all together or not at
+//! all — and a cut can never draw one of them while descending into another,
+//! which would tear along a boundary that group never locked.
+//!
+//! A per-cluster distance term is exactly what breaks this. Two clusters of one
+//! group have different centres, so scaling one shared error by each cluster's
+//! own distance gives two different answers to one question, and the two
+//! clusters split across a boundary that was simplified as a unit. That is a
+//! crack, and it is invisible until a camera happens to sit at the distance
+//! where the two answers differ.
+//!
+//! # Why the sphere makes the cut well defined
+//!
+//! For the descent to reach exactly one level on every part of the surface,
+//! `E` has to be monotone up the DAG: `E(the producer) ⟹ E(the container)` for
+//! every cluster. Monotone *stored* error is not enough once a distance divides
+//! it — a closer group projects larger from a smaller number. So each group's
+//! sphere is built to **contain the spheres of every group below it**, alongside
+//! the error being built to dominate theirs. A containing sphere is never
+//! further from the eye than a sphere inside it, so the quotient
+//! `error / distance` rises up the DAG for every eye position there is, and the
+//! descent has one stopping point per branch whatever the camera does.
+//! `enclosing` is where the containment is established and
+//! `a_group_is_never_cheaper_or_further_than_the_groups_below_it` is what holds
+//! it.
+//!
+//! # This is the builder and the metric, and nothing else
+//!
+//! [`build_cluster_dag`] takes host arrays and returns host arrays, and
+//! [`ClusterGroup::projected_error`] is arithmetic over two of its fields. There
+//! is no GPU descent in the amplification stage, no hysteresis, no shadow bias,
+//! no bake cache and no upload; nothing in the engine calls any of it yet. The
+//! upload and the amplification-stage descent are the next slice, and the rule
+//! they have to transcribe is the one stated above.
 //!
 //! [`mod@crate::lod`] remains the per-instance chain builder. This subsumes it
 //! in principle (a uniform cut *is* a chain level), but nothing has been moved
@@ -68,6 +119,8 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
+
+use glam::{DVec3, Vec3};
 
 use crate::meshlet::{MeshletBuild, MeshletError, build_meshlets};
 use crate::simplify::{SimplifyError, simplify_with_locked_edges, undirected};
@@ -104,16 +157,134 @@ pub enum ClusterDagError {
     Cluster(#[from] MeshletError),
 }
 
-/// A group of neighbouring clusters, and the clusters simplifying it produced.
+/// The sphere a group's error is projected from.
+///
+/// Separate from [`ClusterBounds`](crate::ClusterBounds), which a cluster
+/// carries for culling: that one bounds one cluster's own geometry and is as
+/// tight as the builder can make it, where this one bounds a whole group's and
+/// is deliberately grown to contain every sphere below it in the DAG. The two
+/// answer different questions and only one of them may be used to decide a
+/// level.
+///
+/// `PartialEq` but not `Eq`: it holds floats.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroupBounds {
+    center: [f32; 3],
+    radius: f32,
+}
+
+impl GroupBounds {
+    /// Centre of the sphere, in the mesh's own space.
+    #[inline]
+    #[must_use]
+    pub fn center(&self) -> [f32; 3] {
+        self.center
+    }
+
+    /// Distance from [`center`](Self::center) to the furthest point the sphere
+    /// has to contain. Never negative.
+    #[inline]
+    #[must_use]
+    pub fn radius(&self) -> f32 {
+        self.radius
+    }
+
+    /// Whether this sphere contains `inner` whole.
+    ///
+    /// The relation the descent depends on, so it is a function rather than an
+    /// assertion written out twice: a sphere containing another is never
+    /// further from any eye than the one it contains, which is what carries
+    /// monotonic error into monotonic *projected* error.
+    #[inline]
+    #[must_use]
+    pub fn contains(&self, inner: Self) -> bool {
+        let separation = f64::from(Vec3::from(self.center).distance(Vec3::from(inner.center)));
+        separation + f64::from(inner.radius) <= f64::from(self.radius)
+    }
+}
+
+/// A sphere containing every one of `parts`, which is never empty.
+///
+/// The centre is the midpoint of the parts' common AABB and the radius is the
+/// furthest any part reaches from it — a valid bound rather than the minimal
+/// one, on [`ClusterBounds`](crate::ClusterBounds)' terms exactly, and for the
+/// same reason: Ritter's and Welzl's are tighter and neither was worth
+/// transcribing for a first cut. It is also order-independent, which a
+/// pairwise-merge formulation would not be.
+///
+/// **The radius is rounded away from zero**, and that is what makes
+/// [`GroupBounds::contains`] hold for every part rather than nearly hold. The
+/// maximum is taken in `f64`, where the error of a `sqrt` and two additions is
+/// some sixteen decimal digits down; narrowing it to `f32` can lose half an ulp
+/// — seven digits down — so one [`f32::next_up`] more than covers the gap the
+/// narrowing opened. Without it a part can sit a rounding step outside the
+/// sphere that is supposed to contain it, and the descent loses monotonicity at
+/// exactly the distance where the two are indistinguishable.
+fn enclosing(parts: &[GroupBounds]) -> GroupBounds {
+    let mut low = DVec3::splat(f64::INFINITY);
+    let mut high = DVec3::splat(f64::NEG_INFINITY);
+    for part in parts {
+        let center = DVec3::new(
+            f64::from(part.center[0]),
+            f64::from(part.center[1]),
+            f64::from(part.center[2]),
+        );
+        low = low.min(center - f64::from(part.radius));
+        high = high.max(center + f64::from(part.radius));
+    }
+
+    let center = ((low + high) * 0.5).as_vec3().to_array();
+    let midpoint = DVec3::new(
+        f64::from(center[0]),
+        f64::from(center[1]),
+        f64::from(center[2]),
+    );
+    let reach = parts
+        .iter()
+        .map(|part| {
+            let offset = DVec3::new(
+                f64::from(part.center[0]),
+                f64::from(part.center[1]),
+                f64::from(part.center[2]),
+            ) - midpoint;
+            offset.length() + f64::from(part.radius)
+        })
+        .fold(0.0f64, f64::max);
+
+    let bounds = GroupBounds {
+        center,
+        radius: (reach as f32).next_up(),
+    };
+    // The postcondition the descent rests on, checked where it is established
+    // rather than only over one fixture's DAG: every mesh anyone builds a
+    // hierarchy for gets it in a debug build, and a rounding rule that stopped
+    // being enough would fail here instead of surfacing as a crack.
+    debug_assert!(
+        parts.iter().all(|&part| bounds.contains(part)),
+        "{bounds:?} does not contain every one of {parts:?}"
+    );
+    bounds
+}
+
+/// A group of neighbouring clusters, the clusters simplifying it produced, and
+/// what that simplification costs.
 ///
 /// The DAG's edges live here rather than on a cluster: grouping is what relates
 /// two levels, and a cluster's parents are *the group's* parents — all of them,
 /// not one each. That is the "several children, several parents" that makes
-/// this a DAG.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// this a DAG. The *cost* lives here for a second reason, set out in this
+/// module's "Why the decision is per group and not per cluster": a group
+/// simplifies as a unit, so one error and one sphere are what every cluster it
+/// touches has to be judged by.
+///
+/// `PartialEq` but not `Eq`, unlike the version of this that carried only two
+/// index lists: it holds floats now.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ClusterGroup {
     children: Vec<u32>,
     parents: Vec<u32>,
+    error: f32,
+    bounds: GroupBounds,
 }
 
 impl ClusterGroup {
@@ -136,6 +307,65 @@ impl ClusterGroup {
     pub fn parents(&self) -> &[u32] {
         &self.parents
     }
+
+    /// How far this group's simplification may have moved the surface, in the
+    /// mesh's own units of length.
+    ///
+    /// The same number every one of this group's [`parents`](Self::parents)
+    /// reports through [`DagLevel::errors`], which is the identity
+    /// `the_error_never_decreases_up_the_dag` asserts — the two spellings exist
+    /// because a descent wants it per group and a cluster-indexed upload wants
+    /// it per cluster, and they are written from one variable.
+    ///
+    /// What the number does *not* claim is set out on
+    /// [`Simplified::max_error`](crate::Simplified::max_error): it is a quadric
+    /// error and has not been shown to dominate a sampled Hausdorff distance.
+    #[inline]
+    #[must_use]
+    pub fn error(&self) -> f32 {
+        self.error
+    }
+
+    /// The sphere [`error`](Self::error) is projected from.
+    ///
+    /// Contains this group's children, its parents, and the bounds of every
+    /// group below it in the DAG — see this module's "Why the sphere makes the
+    /// cut well defined" for what the last of those is load-bearing for.
+    #[inline]
+    #[must_use]
+    pub fn bounds(&self) -> GroupBounds {
+        self.bounds
+    }
+
+    /// What this group's simplification would cost on screen, in pixels, from
+    /// an eye at `eye`.
+    ///
+    /// `pixels_per_unit` is how many pixels one unit of length subtends one unit
+    /// from the eye — `0.5 * viewport_height / tan(0.5 * fov_y)` for a
+    /// perspective camera — so the result is [`error`](Self::error) scaled by
+    /// that and divided by the distance to the nearest point of
+    /// [`bounds`](Self::bounds). Compare it against a pixel budget: over budget
+    /// means descend into this group's children, at or under means its parents
+    /// are close enough.
+    ///
+    /// **Both arguments are in the mesh's own space**, which is where the
+    /// bounds are. An instance's eye is the camera put through the inverse of
+    /// its transform, and a uniform scale on that transform belongs in
+    /// `pixels_per_unit`; a non-uniform one does not survive a bounding sphere
+    /// at all and is not something this metric can express.
+    ///
+    /// [`f32::INFINITY`] when the eye is inside the sphere — there is no
+    /// distance to divide by, and "as close as possible, so descend" is both the
+    /// conservative answer and the monotone one: an eye inside a sphere is
+    /// inside every sphere containing it, so every group above answers the same.
+    #[must_use]
+    pub fn projected_error(&self, eye: Vec3, pixels_per_unit: f32) -> f32 {
+        let distance = eye.distance(Vec3::from(self.bounds.center)) - self.bounds.radius;
+        if distance <= 0.0 {
+            return f32::INFINITY;
+        }
+        self.error * pixels_per_unit / distance
+    }
 }
 
 /// One level of the DAG: a mesh, its clusters, their errors, and the grouping
@@ -146,6 +376,7 @@ pub struct DagLevel {
     indices: Vec<u32>,
     clusters: MeshletBuild,
     errors: Vec<f32>,
+    bounds: Vec<GroupBounds>,
     groups: Vec<ClusterGroup>,
 }
 
@@ -209,6 +440,20 @@ impl DagLevel {
         &self.errors
     }
 
+    /// Per cluster, the sphere [`errors`](Self::errors) is projected from — the
+    /// bounds of the group that produced it, so parallel to that array and
+    /// carrying the same value for every cluster one group produced.
+    ///
+    /// Level 0 was produced by no group, and reads each cluster's own bounding
+    /// sphere. Nothing selects on it — a level-0 cluster's producing error is
+    /// zero, so there is no descending past it — and it is what the groups of
+    /// level 0 are built to enclose.
+    #[inline]
+    #[must_use]
+    pub fn bounds(&self) -> &[GroupBounds] {
+        &self.bounds
+    }
+
     /// How this level's clusters were grouped to build the level above.
     ///
     /// Every cluster of this level is in exactly one group. Empty on the top
@@ -268,6 +513,9 @@ pub fn build_cluster_dag(
     let clusters = build_meshlets(positions, indices)?;
     let mut levels = vec![DagLevel {
         errors: vec![0.0; clusters.clusters().len()],
+        bounds: (0..clusters.clusters().len())
+            .map(|cluster| cluster_sphere(&clusters, cluster))
+            .collect(),
         indices: clusters.all_indices(),
         clusters,
         positions: positions.to_vec(),
@@ -292,15 +540,15 @@ fn coarsen(below: &DagLevel) -> Result<Option<(Vec<ClusterGroup>, DagLevel)>, Cl
     if cluster_count <= 1 {
         return Ok(None);
     }
-    let mut groups = group_clusters(below);
+    let grouping = group_clusters(below);
 
     // The level's faces, laid out group by group, and which group each went
     // into. Grouping is over clusters and a group's clusters need not be
     // adjacent in the index buffer, so this is a reordering and not a slicing.
     let mut ordered = Vec::with_capacity(below.indices.len());
     let mut face_group = Vec::with_capacity(below.indices.len() / 3);
-    for (group, members) in groups.iter().enumerate() {
-        for &cluster in &members.children {
+    for (group, members) in grouping.iter().enumerate() {
+        for &cluster in members {
             let faces = below.clusters.cluster_indices(cluster as usize);
             face_group.extend(std::iter::repeat_n(group, faces.len() / 3));
             ordered.extend_from_slice(&faces);
@@ -316,7 +564,7 @@ fn coarsen(below: &DagLevel) -> Result<Option<(Vec<ClusterGroup>, DagLevel)>, Cl
     )?;
 
     // Split the survivors back into the groups their input triangles were in.
-    let mut faces_of = vec![Vec::new(); groups.len()];
+    let mut faces_of = vec![Vec::new(); grouping.len()];
     for (face, &source) in simplified
         .indices()
         .chunks_exact(3)
@@ -326,26 +574,50 @@ fn coarsen(below: &DagLevel) -> Result<Option<(Vec<ClusterGroup>, DagLevel)>, Cl
     }
 
     let mut clusters = MeshletBuild::empty();
+    let mut groups = Vec::with_capacity(grouping.len());
     let mut errors = Vec::new();
+    let mut bounds = Vec::new();
     let mut indices = Vec::new();
-    for (group, faces) in groups.iter_mut().zip(&faces_of) {
+    for (children, faces) in grouping.into_iter().zip(&faces_of) {
         let split = build_meshlets(simplified.positions(), faces)?;
         let first = clusters.clusters().len();
         clusters.append(&split)?;
-        let error = (first..clusters.clusters().len())
-            .map(|parent| cluster_error(&clusters, parent, simplified.vertex_errors()))
-            .chain(
-                group
-                    .children
-                    .iter()
-                    .map(|&child| below.errors[child as usize]),
-            )
+        let parents: Vec<u32> = (first..clusters.clusters().len())
+            .map(|parent| parent as u32)
+            .collect();
+
+        // Both folds run over the same two sets — what this group produced and
+        // what went into it — because both halves of the descent's monotonicity
+        // are the same statement about a group and the groups below it: it
+        // costs at least what they cost, and it reaches at least as far.
+        let error = parents
+            .iter()
+            .map(|&parent| cluster_error(&clusters, parent as usize, simplified.vertex_errors()))
+            .chain(children.iter().map(|&child| below.errors[child as usize]))
             .fold(0.0f32, f32::max);
-        for parent in first..clusters.clusters().len() {
+        let reach: Vec<GroupBounds> = parents
+            .iter()
+            .map(|&parent| cluster_sphere(&clusters, parent as usize))
+            .chain(children.iter().flat_map(|&child| {
+                [
+                    cluster_sphere(&below.clusters, child as usize),
+                    below.bounds[child as usize],
+                ]
+            }))
+            .collect();
+        let sphere = enclosing(&reach);
+
+        for &parent in &parents {
             errors.push(error);
-            group.parents.push(parent as u32);
-            indices.extend(clusters.cluster_indices(parent));
+            bounds.push(sphere);
+            indices.extend(clusters.cluster_indices(parent as usize));
         }
+        groups.push(ClusterGroup {
+            children,
+            parents,
+            error,
+            bounds: sphere,
+        });
     }
 
     if clusters.clusters().len() >= cluster_count {
@@ -358,9 +630,19 @@ fn coarsen(below: &DagLevel) -> Result<Option<(Vec<ClusterGroup>, DagLevel)>, Cl
             indices,
             clusters,
             errors,
+            bounds,
             groups: Vec::new(),
         },
     )))
+}
+
+/// One cluster's own bounding sphere, as the thing [`enclosing`] folds.
+fn cluster_sphere(clusters: &MeshletBuild, cluster: usize) -> GroupBounds {
+    let bounds = clusters.clusters()[cluster].bounds;
+    GroupBounds {
+        center: bounds.center,
+        radius: bounds.radius,
+    }
 }
 
 /// The worst error charged to any vertex one cluster references.
@@ -415,10 +697,16 @@ fn group_boundary(indices: &[u32], face_group: &[usize]) -> Vec<[u32; 2]> {
 /// is longer than it needs to be and less geometry is free to move. Its virtue
 /// is that it is a partition of the *adjacency* graph and not of space, which
 /// is what step 2 requires, and that it has no dependency.
-fn group_clusters(level: &DagLevel) -> Vec<ClusterGroup> {
+///
+/// It returns the memberships alone rather than [`ClusterGroup`]s, because a
+/// group's parents, error and bounds are all decided by the simplification that
+/// has not happened yet — and a group built here would have to hold three
+/// placeholders until it had, one of which is a sphere that would select
+/// nonsense if anything ever read it early.
+fn group_clusters(level: &DagLevel) -> Vec<Vec<u32>> {
     let adjacency = cluster_adjacency(level);
     let mut group_of: Vec<Option<usize>> = vec![None; adjacency.len()];
-    let mut groups: Vec<ClusterGroup> = Vec::new();
+    let mut groups: Vec<Vec<u32>> = Vec::new();
 
     for seed in 0..adjacency.len() {
         if group_of[seed].is_some() {
@@ -442,16 +730,13 @@ fn group_clusters(level: &DagLevel) -> Vec<ClusterGroup> {
                 .max_by_key(|&(weight, host)| (weight, Reverse(host)))
         {
             group_of[seed] = Some(host);
-            groups[host].children.push(seed as u32);
-            groups[host].children.sort_unstable();
+            groups[host].push(seed as u32);
+            groups[host].sort_unstable();
             continue;
         }
 
         children.sort_unstable();
-        groups.push(ClusterGroup {
-            children: children.into_iter().map(|cluster| cluster as u32).collect(),
-            parents: Vec::new(),
-        });
+        groups.push(children.into_iter().map(|cluster| cluster as u32).collect());
     }
 
     groups
@@ -584,24 +869,77 @@ mod tests {
     /// one region the errors never decrease, so the test "produced-by within,
     /// containing without" holds at exactly one of them.
     fn cut(dag: &ClusterDag, threshold: f32) -> Vec<(usize, usize)> {
+        descend(dag, |group| threshold < group.error())
+    }
+
+    /// The clusters an "is this group expanded?" answer draws.
+    ///
+    /// `docs/plan/25-lod.md`'s descent, and the whole of it: a cluster is drawn
+    /// when the group that *produced* it is not expanded and the group that
+    /// *contains* it is. Both halves ask `expanded` about a **group**, which is
+    /// why one answer per group is all the rule needs and why every cluster a
+    /// group produced moves together.
+    ///
+    /// [`cut`] passes a global error threshold and
+    /// [`camera_cut`] passes the projected-error rule a GPU would run; the
+    /// descent is written once and neither owns a copy of it.
+    ///
+    /// A cluster that no group contains defaults to **not** drawn, which is
+    /// only correct on the top level — every other level's clusters are each in
+    /// exactly one group. That is deliberate: a level whose grouping missed a
+    /// cluster leaves a hole in the cover, which
+    /// [`assert_cut_is_a_crack_free_cover`] reports by name, where a default of
+    /// "drawn" would quietly produce an overlap instead.
+    fn descend(dag: &ClusterDag, expanded: impl Fn(&ClusterGroup) -> bool) -> Vec<(usize, usize)> {
+        let top = dag.levels().len() - 1;
         let mut drawn = Vec::new();
-        for (level, below) in dag.levels().iter().enumerate() {
-            let mut containing = vec![f32::INFINITY; below.clusters().clusters().len()];
-            for group in below.groups() {
-                let above = dag.levels()[level + 1].errors();
-                let error = above[group.parents()[0] as usize];
+        for (level, here) in dag.levels().iter().enumerate() {
+            let count = here.clusters().clusters().len();
+            let mut container = vec![level == top; count];
+            for group in here.groups() {
+                let open = expanded(group);
                 for &child in group.children() {
-                    containing[child as usize] = error;
+                    container[child as usize] = open;
                 }
             }
-            for (cluster, &produced_by) in below.errors().iter().enumerate() {
-                if produced_by <= threshold && threshold < containing[cluster] {
+
+            let mut producer = vec![false; count];
+            if level > 0 {
+                for group in dag.levels()[level - 1].groups() {
+                    let open = expanded(group);
+                    for &parent in group.parents() {
+                        producer[parent as usize] = open;
+                    }
+                }
+            }
+
+            for cluster in 0..count {
+                if !producer[cluster] && container[cluster] {
                     drawn.push((level, cluster));
                 }
             }
         }
         drawn
     }
+
+    /// The clusters a camera at `eye` draws — the rule an amplification stage
+    /// will run, evaluated host-side.
+    fn camera_cut(dag: &ClusterDag, eye: Vec3, budget: f32) -> Vec<(usize, usize)> {
+        descend(dag, |group| {
+            group.projected_error(eye, PIXELS_PER_UNIT) > budget
+        })
+    }
+
+    /// How many pixels one unit of length subtends one unit from the eye, for
+    /// the frames this workspace's goldens are drawn at: a 192-pixel-high
+    /// viewport at a 60-degree vertical field of view.
+    ///
+    /// Written as a literal rather than `0.5 * 192.0 / (PI / 6.0).tan()`
+    /// because `tanf` is not correctly rounded and differs in the last place
+    /// between libms — the same argument `simplify`'s `bump` makes — and the
+    /// counts below are pinned by equality. Nothing here turns on the exact
+    /// figure; it sets the scale at which the budget picks a level.
+    const PIXELS_PER_UNIT: f32 = 166.0;
 
     /// Every threshold at which the cut changes, plus one past the last, so a
     /// sweep visits every distinct cut the DAG admits.
@@ -921,6 +1259,27 @@ mod tests {
                     parents.windows(2).all(|pair| pair[0] == pair[1]),
                     "a group's parents report {parents:?} rather than one error"
                 );
+                // The two spellings of one number: what the group charges, and
+                // what each cluster it produced carries. A descent reads the
+                // first and an upload indexed by cluster reads the second, and
+                // nothing recomputes either — so they are one variable in the
+                // builder and this is what says they still are.
+                assert_eq!(
+                    parents[0],
+                    group.error(),
+                    "a group of level {level} charges {} and its parents carry {}",
+                    group.error(),
+                    parents[0],
+                );
+                for &parent in group.parents() {
+                    assert_eq!(
+                        above.bounds()[parent as usize],
+                        group.bounds(),
+                        "a parent at level {} bounds something other than the group that \
+                         produced it",
+                        level + 1,
+                    );
+                }
                 for &child in group.children() {
                     assert!(
                         parents[0] >= below.errors()[child as usize],
@@ -961,6 +1320,263 @@ mod tests {
             "every group of level 0 reports the same error, so a threshold can \
              never cut between them and no cut is ever mixed"
         );
+    }
+
+    /// The monotonicity the *projected* metric needs, which is strictly more
+    /// than the stored error's.
+    ///
+    /// A group has to cost at least what the groups below it cost **and** reach
+    /// at least as far as they do. The first alone is not enough once a
+    /// distance divides it: a group whose sphere sat closer to the eye than one
+    /// below it would project a larger error from a smaller number, the descent
+    /// would find two stopping points along one branch, and the cut would draw
+    /// a cluster and its ancestor together.
+    ///
+    /// Stated over the pair the descent actually reads — for each cluster, the
+    /// group that produced it against the group that contains it — rather than
+    /// over levels, because that pair is what
+    /// [`ClusterGroup::projected_error`] is asked about and a level is not.
+    #[test]
+    fn a_group_is_never_cheaper_or_further_than_the_groups_below_it() {
+        let (_, _, dag) = dense_dag();
+        assert_levels_got_coarser(&dag);
+
+        let mut checked = 0;
+        for (level, here) in dag.levels().iter().enumerate() {
+            for group in here.groups() {
+                for &child in group.children() {
+                    let child = child as usize;
+                    assert!(
+                        group.error() >= here.errors()[child],
+                        "a group of level {level} costs {} and the group that produced its \
+                         child {child} cost {}",
+                        group.error(),
+                        here.errors()[child],
+                    );
+                    assert!(
+                        group.bounds().contains(here.bounds()[child]),
+                        "a group of level {level} bounds {:?} and does not contain the {:?} \
+                         its child {child} was produced from, so the descent can invert",
+                        group.bounds(),
+                        here.bounds()[child],
+                    );
+                    checked += 1;
+                }
+            }
+        }
+
+        assert!(
+            checked > 20,
+            "only {checked} producer/container pairs exist, so this is not a sweep"
+        );
+        // Anti-vacuity: containment is trivial if every sphere is the same
+        // sphere, and a DAG whose groups all bound the whole mesh would satisfy
+        // every assertion above while making the distance term constant and the
+        // near/far difference below impossible.
+        let radii: Vec<f32> = dag
+            .levels()
+            .iter()
+            .flat_map(|level| level.groups())
+            .map(|group| group.bounds().radius())
+            .collect();
+        let tightest = radii.iter().copied().fold(f32::INFINITY, f32::min);
+        let widest = radii.iter().copied().fold(0.0f32, f32::max);
+        assert!(
+            widest > 2.0 * tightest,
+            "group radii run {tightest} to {widest}, which is one sphere wearing several \
+             names — containment is then trivial and no cut can ever be mixed"
+        );
+    }
+
+    /// The rule a GPU will run, over cameras rather than over thresholds: every
+    /// eye position produces a cut, and every one of those cuts is a crack-free
+    /// cover of the surface.
+    ///
+    /// [`every_cut_is_a_crack_free_cover_of_the_surface`] sweeps a global error
+    /// budget, which is the host-side statement. This is the runtime one, and
+    /// it is a different claim: the budget is now divided by a distance that
+    /// varies across the mesh, so a cut here mixes levels because of *where the
+    /// camera is* rather than because two groups simplified differently. That
+    /// is the case a per-cluster distance term breaks and a per-group one does
+    /// not.
+    #[test]
+    fn every_camera_position_draws_a_crack_free_cut() {
+        let (positions, indices, dag) = dense_dag();
+        assert_levels_got_coarser(&dag);
+        let border = base_border(&positions, &indices);
+
+        let mut mixed = 0;
+        let mut cuts = 0;
+        for &eye in &EYES {
+            for budget in BUDGETS {
+                let drawn = camera_cut(&dag, eye, budget);
+                let interfaces = assert_cut_is_a_crack_free_cover(&dag, &drawn, &border);
+                let levels: BTreeSet<usize> = drawn.iter().map(|&(level, _)| level).collect();
+                if levels.len() > 1 {
+                    mixed += 1;
+                    assert!(
+                        interfaces > 0,
+                        "a cut spanning {levels:?} from {eye:?} whose levels never meet is \
+                         not a mixed cut, it is two meshes"
+                    );
+                }
+                cuts += 1;
+            }
+        }
+
+        assert_eq!(
+            cuts,
+            EYES.len() * BUDGETS.len(),
+            "the sweep has to have run"
+        );
+        assert!(
+            mixed > cuts / 2,
+            "only {mixed} of {cuts} camera cuts held more than one level, so this is \
+             mostly re-testing uniform cuts under a new name"
+        );
+    }
+
+    /// **The thing per-cluster selection is for**, in numbers: one draw of one
+    /// mesh whose near end is at a finer level than its far end.
+    ///
+    /// A ground plane receding from the viewer is the shape that makes this
+    /// visible, and the distance term is what produces it — the stored errors
+    /// barely vary within a level (`simplify` targets a triangle count, so a
+    /// level's error frontier is flat), and a cut that read them alone would be
+    /// uniform at every camera. Split the drawn clusters by how far up the
+    /// patch they sit and the two ends report different levels.
+    ///
+    /// The histograms are pinned rather than compared loosely, because "the
+    /// near end is finer" is satisfied by a cut that is one cluster away from
+    /// uniform, and that is not the claim.
+    #[test]
+    fn a_receding_plane_draws_its_near_end_finer_than_its_far_end() {
+        let (positions, indices, dag) = dense_dag();
+        assert_levels_got_coarser(&dag);
+
+        // The eye stands just off the near edge, low over the surface, so the
+        // far edge is some fifteen times further away than the near one.
+        let eye = EYES[0];
+        let drawn = camera_cut(&dag, eye, MIXING_BUDGET);
+
+        let mut near: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut far: BTreeMap<usize, usize> = BTreeMap::new();
+        for &(level, cluster) in &drawn {
+            let depth = dag.levels()[level].clusters().clusters()[cluster]
+                .bounds
+                .center[1];
+            if depth < NEAR_THIRD {
+                *near.entry(level).or_default() += 1;
+            } else if depth > FAR_THIRD {
+                *far.entry(level).or_default() += 1;
+            }
+        }
+
+        assert_eq!(
+            near,
+            BTreeMap::from([(0, 7)]),
+            "the near third of the plane is not seven leaf clusters"
+        );
+        assert_eq!(
+            far,
+            BTreeMap::from([(1, 5)]),
+            "the far third of the plane is not five clusters of level 1"
+        );
+        // And the two ends are one cut of one mesh, not two pictures: the same
+        // set of clusters covers the whole surface exactly once, with no hole
+        // where the levels meet.
+        let border = base_border(&positions, &indices);
+        let interfaces = assert_cut_is_a_crack_free_cover(&dag, &drawn, &border);
+        assert!(
+            interfaces > 20,
+            "only {interfaces} edges have one level on one side and another on the other, \
+             which is too few to be the seam between the two ends"
+        );
+    }
+
+    /// Pixel budgets the fixture actually changes its cut across.
+    ///
+    /// Below the smallest of these every camera here draws level 0 whole and
+    /// above the largest the DAG has run out of levels, so a sweep outside the
+    /// band would be a sweep over one answer. The band is a property of this
+    /// fixture's errors and its size, not a tuning the engine ships.
+    const BUDGETS: [f32; 5] = [8.0, 16.0, 32.0, 64.0, 128.0];
+
+    /// The budget [`a_receding_plane_draws_its_near_end_finer_than_its_far_end`]
+    /// reads its histograms at: inside the band where level 0's groups and
+    /// level 1's fall on opposite sides of the test at this camera.
+    const MIXING_BUDGET: f32 = 32.0;
+
+    /// Where the near third of the patch ends and the far third begins, in the
+    /// fixture's own units — it spans `0..=DENSE_SIDE` along the axis running
+    /// away from [`EYES`]`[0]`. The middle third is left out of both
+    /// histograms: it is where the two ends change over, and which level a
+    /// cluster there takes is the thing the budget decides rather than the
+    /// thing being asserted.
+    const NEAR_THIRD: f32 = DENSE_SIDE as f32 / 3.0;
+    const FAR_THIRD: f32 = DENSE_SIDE as f32 * 2.0 / 3.0;
+
+    /// Where the near/far sweep puts the camera, in the fixture's own space.
+    ///
+    /// `height_field` lays the patch out on `0..=DENSE_SIDE` in x and y with the
+    /// height on z, so an eye at negative y with a small z is a viewer standing
+    /// at one edge of a ground plane that recedes away from them — the shape
+    /// `docs/plan/25-lod.md`'s per-cluster selection exists for. The rest are
+    /// off a corner, high above, and level with the middle, so the sweep is not
+    /// one camera's arrangement holding.
+    const EYES: [Vec3; 5] = [
+        Vec3::new(16.0, -2.0, 2.0),
+        Vec3::new(16.0, -12.0, 6.0),
+        Vec3::new(-8.0, -8.0, 4.0),
+        Vec3::new(16.0, 16.0, 40.0),
+        Vec3::new(16.0, 16.0, 3.0),
+    ];
+
+    fn sphere(center: [f32; 3], radius: f32) -> GroupBounds {
+        GroupBounds { center, radius }
+    }
+
+    /// [`enclosing`] on three arrangements whose answers are arithmetic rather
+    /// than a measurement, and the round-up that makes
+    /// [`GroupBounds::contains`] hold rather than nearly hold.
+    ///
+    /// Every coordinate here is a small integer, so the AABB, its midpoint and
+    /// each part's reach from it are all exact in `f32` — which is what lets
+    /// the radius be compared against the exact answer's `next_up` instead of
+    /// against a tolerance.
+    #[test]
+    fn a_group_sphere_contains_every_sphere_it_was_built_from() {
+        // One part: the same sphere, one rounding step out.
+        let one = enclosing(&[sphere([1.0, 2.0, 3.0], 4.0)]);
+        assert_eq!(one.center(), [1.0, 2.0, 3.0]);
+        assert_eq!(one.radius(), 4.0f32.next_up());
+        assert!(one.contains(sphere([1.0, 2.0, 3.0], 4.0)));
+
+        // Two disjoint parts: centred between them, reaching both.
+        let pair = enclosing(&[sphere([0.0; 3], 1.0), sphere([10.0, 0.0, 0.0], 1.0)]);
+        assert_eq!(pair.center(), [5.0, 0.0, 0.0]);
+        assert_eq!(pair.radius(), 6.0f32.next_up());
+        assert!(pair.contains(sphere([0.0; 3], 1.0)));
+        assert!(pair.contains(sphere([10.0, 0.0, 0.0], 1.0)));
+
+        // A part wholly inside another: the outer one, ungrown. A merge that
+        // simply summed the two would report 12 here.
+        let nested = enclosing(&[sphere([0.0; 3], 10.0), sphere([1.0, 0.0, 0.0], 1.0)]);
+        assert_eq!(nested.center(), [0.0; 3]);
+        assert_eq!(nested.radius(), 10.0f32.next_up());
+
+        // And the property the descent needs, over a part that is *not* at a
+        // representable distance from the midpoint: the round-up is what makes
+        // this true rather than true-to-a-tolerance.
+        let awkward = [
+            sphere([0.1, 0.2, 0.3], 0.7),
+            sphere([-1.3, 2.7, 0.9], 1.1),
+            sphere([5.5, -0.4, 3.3], 0.2),
+        ];
+        let grown = enclosing(&awkward);
+        for part in awkward {
+            assert!(grown.contains(part), "{grown:?} does not contain {part:?}");
+        }
     }
 
     #[test]

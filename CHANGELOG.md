@@ -255,6 +255,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The cluster DAG carries what a GPU descent needs, and states the selection
+  rule.** `ClusterGroup` gained `error()`, `bounds()` and
+  `projected_error(eye, pixels_per_unit)`; `GroupBounds` is the group's sphere;
+  `DagLevel::bounds()` reports the producing group's sphere per cluster.
+
+  **Monotone stored error does not survive division by a distance** — a closer
+  group projects larger from a smaller number — so a group's sphere is built to
+  **enclose** the spheres of every group below it, in the same fold that raises
+  its error to dominate theirs. A containing sphere is never further from any
+  eye than one inside it, so `error / distance` rises up the DAG for every
+  camera rather than for the ones that happened to get tested. The radius is
+  taken in `f64` and rounded up one `next_up`, because narrowing to `f32` can
+  leave a part a rounding step outside the sphere meant to contain it.
+
+  Both halves of the descent index a **group**, never a cluster, so every
+  cluster a group produced evaluates a bit-identical predicate and a cut cannot
+  split a group across a boundary it never locked. Scaling by each cluster's own
+  sphere instead makes the mesh crack, and there is a test that says so.
+
 - **`build_meshlets` grows clusters across shared edges instead of walking the
   index buffer.** A cluster seeds on a triangle and repeatedly takes the
   edge-adjacent triangle with the most vertex reuse, then nearest the seed's
