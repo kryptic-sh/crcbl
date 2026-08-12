@@ -26,7 +26,8 @@ use crcbl::engine::{
 use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::prelude::*;
 use crcbl::render::{
-    ForwardRenderer, MenuRenderer, PassTimers, RenderGraph, TransientPool, UiRenderer,
+    ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers, RenderGraph, TransientPool,
+    UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -34,10 +35,6 @@ use crcbl::ui::menu::{Menu, MenuLayout};
 use crcbl::ui::text::FontAtlas;
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
-
-/// How many passes the timers make room for. Three are declared; the spare is
-/// what stops a fourth from silently going untimed.
-const MAX_TIMED_PASSES: u32 = 4;
 
 /// This sample's device, its swapchain and the two renderers it draws with.
 #[derive(Debug)]

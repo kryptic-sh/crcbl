@@ -2218,6 +2218,18 @@ mod tests {
                 .map(|(kind, label)| ((*kind).to_string(), (*label).to_string()))
                 .collect();
             assert_eq!(recorded, expected, "{scene:?}");
+            // And the bound every sample sizes its timers with really does
+            // cover them. Asserted here rather than beside the list above
+            // because these are the passes the *device* was handed, which is
+            // the same stream `PassTimers` brackets — a bound short of it times
+            // a prefix of the frame and drops the rest, which is what the
+            // samples' hand-picked `8` had been doing.
+            assert!(
+                recorded.len() <= crcbl_render::MAX_TIMED_PASSES as usize,
+                "{scene:?}: {} passes recorded, past the bound of {}",
+                recorded.len(),
+                crcbl_render::MAX_TIMED_PASSES
+            );
 
             setup.finish().expect("the null device reaches idle");
             assert_eq!(

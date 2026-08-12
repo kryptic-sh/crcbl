@@ -1025,6 +1025,15 @@ impl DrawGen {
         )
     }
 
+    /// How many passes [`add_passes`](Self::add_passes) adds to a frame.
+    ///
+    /// Exact rather than a ceiling: all three are recorded unconditionally, and
+    /// the dispatch a frame has nothing for is a dispatch of no workgroups
+    /// rather than a pass that drops out. What a caller sizing
+    /// [`PassTimers`](crate::timing::PassTimers) adds up — see
+    /// [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES).
+    pub const MAX_PASSES: u32 = 3;
+
     /// Adds the cull and draw-argument passes to `graph` and returns what the
     /// caller's render pass draws from.
     ///

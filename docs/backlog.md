@@ -5932,9 +5932,6 @@ recorded in `docs/plan/18-render-features.md`. What is left:
 - **`mesh.png` is written by two different tests in one run**, so a bless is
   last-writer-wins and the file is not a stable baseline. That is why the
   bit-identical check above compared captured output rather than re-blessing.
-- **`MAX_TIMED_PASSES` is now 8 against 13 recorded passes** in the samples, up
-  from 12 before this slice, so their HUD silently times only the first eight.
-  Already recorded; the number moved again.
 
 ## What punctual-light shadows left owed
 
@@ -6160,12 +6157,14 @@ comparison, no trace export, no memory or pool-occupancy accounting, no
 `crcbl-jobs` instrumentation, and counters scattered across `SceneStats`,
 `visible_count` and each sample's own rows rather than one place.
 
-**A concrete bug this survey turned up**: `MAX_TIMED_PASSES` is hand-written per
-sample — 4 in `apps/hud`, 8 in `apps/horde` — and the forward frame now records
-**12** passes, so `PassTimers` warns and times the first eight and the tail is
-silently missing from the panel. Already recorded from the shadow slice; noting
-it here because it is the profiler under-reporting itself, which is the worst
-category of the lot.
+**`crcbl_render::MAX_TIMED_PASSES` bounds this crate's renderers, not the
+caller's own passes** — a deliberate call, taken 2026-08-13. Every renderer here
+carries a `MAX_PASSES` and the constant is their sum, so a pass added anywhere
+below moves it; but a sample that records a pass of its own — the 2D samples
+each have a clear — is that much over. Today none of them is close (they record
+four against a bound of 22), and the once-per-`PassTimers` warning is the
+backstop if one ever is. The alternative was every sample writing
+`MAX_TIMED_PASSES + 1`, which is the guessing this constant exists to end.
 
 ## Sidecar meta RON: three items now want it, and the workspace has no RON reader
 
@@ -6406,11 +6405,6 @@ What is left, and what it taught:
   one-sided wall. The open box's inward-facing faces therefore cast nothing. A
   two-sided caster mode needs `CullMode::None` on the shadow pipeline **and** a
   way to tell the amplification stage not to cone-cull for a light.
-- **`apps/*/src/gpu.rs`'s `MAX_TIMED_PASSES = 8` is now too small.** The forward
-  frame records 12 passes — three per cull across three culls, plus shadow,
-  forward and tonemap — so `PassTimers` warns and times the first eight, and
-  `apps/sandbox`'s HUD silently loses the tail. Needs at least 12. The vk e2e
-  timers test now derives its capacity instead of hard-coding it.
 - **Each cascade's `DrawGen` duplicates pipelines it does not need**, building
   its own clear/cull/draw-argument compute pipelines and full argument buffers
   when only the cull half is used. Sharing pipelines across instances, or a

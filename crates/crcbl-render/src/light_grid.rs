@@ -430,6 +430,13 @@ impl LightGrid {
         )
     }
 
+    /// How many passes [`add_pass`](Self::add_pass) adds to a frame.
+    ///
+    /// Exact, for [`DrawGen::MAX_PASSES`](crate::draw_gen::DrawGen::MAX_PASSES)'s
+    /// reason: the dispatch is one invocation per froxel and a frame always has
+    /// froxels, so the pass is never the one that drops out.
+    pub const MAX_PASSES: u32 = 1;
+
     /// Adds the clustering pass to `graph` and returns the grid's id, for a
     /// caller that has to declare its own read of it.
     ///

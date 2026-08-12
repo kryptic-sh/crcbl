@@ -42,8 +42,8 @@ use crcbl::math::DVec3;
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{
-    Camera, ForwardRenderer, MenuRenderer, PassTimers, Projection, RenderGraph, SpriteRenderer,
-    TransientPool, UiRenderer,
+    Camera, ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers, Projection, RenderGraph,
+    SpriteRenderer, TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -54,7 +54,6 @@ use crate::art::{SURROUND, Scene};
 use crate::game::RenderState;
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
-const MAX_TIMED_PASSES: u32 = 8;
 
 /// Half the vertical extent of the orthographic camera for a `extent`-sized
 /// viewport, in world units.

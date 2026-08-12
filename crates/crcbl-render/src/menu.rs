@@ -381,6 +381,12 @@ impl MenuRenderer {
             .begin_frame(device, &self.frame, menu_view_projection(extent), extent)
     }
 
+    /// The most passes [`add_pass`](Self::add_pass) adds to a frame.
+    ///
+    /// The sprite pass's own number, because the menu *is* a sprite pass: a
+    /// frame with no menu on it declares nothing at all.
+    pub const MAX_PASSES: u32 = crate::sprite_pass::SpriteRenderer::MAX_PASSES;
+
     /// Adds the menu pass to `graph`, drawing on top of `target`.
     ///
     /// **After the game's passes and before the UI pass** — see the module docs.

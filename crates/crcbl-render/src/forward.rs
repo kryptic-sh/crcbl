@@ -478,6 +478,14 @@ const fn shadow_cull(slot: usize) -> usize {
     shadow::CASCADES + slot
 }
 
+/// The render passes [`ForwardRenderer::add_passes`] records itself: the shadow
+/// atlas's, the forward pass and the tonemap.
+///
+/// Every other pass in the frame belongs to a [`DrawGen`] or to the
+/// [`LightGrid`], which is why this is the only count written here rather than
+/// derived — see [`ForwardRenderer::MAX_PASSES`].
+const RENDER_PASSES: u32 = 3;
+
 /// The budget an **orthographic** camera selects under: one no group satisfies,
 /// so every group expands and the base level is drawn whole.
 ///
@@ -3613,6 +3621,24 @@ impl ForwardRenderer {
         self.draws.args(frame)
     }
 
+    /// The most passes [`add_passes`](Self::add_passes) adds to one frame.
+    ///
+    /// [`DrawGen::MAX_PASSES`] per cull — the camera's, and one per shadow cull
+    /// beside it — plus [`LightGrid::MAX_PASSES`] for the froxel grid and the
+    /// passes that draw. **A ceiling, not a count**: a frame whose shadow slots
+    /// are not all filled runs fewer culls, which is what makes a free tile
+    /// free.
+    ///
+    /// Derived rather than written down, because a number written down is one
+    /// that stops matching the frame the day a pass is added — which is exactly
+    /// how the samples' hand-picked `8` came to time the first eight passes of a
+    /// fourteen-pass frame. A caller sizing
+    /// [`PassTimers`](crate::timing::PassTimers) wants
+    /// [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES), which adds this to
+    /// what the overlay renderers record.
+    pub const MAX_PASSES: u32 =
+        DrawGen::MAX_PASSES * (1 + SHADOW_CULLS as u32) + LightGrid::MAX_PASSES + RENDER_PASSES;
+
     /// Adds the forward and tonemap passes to `graph`, rendering into `target`,
     /// and returns the HDR scene target they went through.
     ///
@@ -5705,6 +5731,195 @@ mod tests {
             "the import promises to hand the atlas back in the state the next frame declares"
         );
 
+        renderer.destroy(device);
+        for commands in recorded {
+            device.destroy_command_buffer(commands);
+        }
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// Compiles one frame and says how many passes it turned out to be.
+    ///
+    /// Compiled and not executed: what a pass costs is not the question here,
+    /// only how many of them the frame declared.
+    fn passes_in_a_frame(
+        device: &dyn Device,
+        queue: QueueHandle,
+        renderer: &mut ForwardRenderer,
+        imported: ImportedImage,
+        pool: &crate::TransientPool,
+    ) -> usize {
+        renderer
+            .begin_frame(
+                device,
+                &Camera::default(),
+                &DirectionalLight::default(),
+                Mat4::IDENTITY,
+                (64, 48),
+            )
+            .expect("write");
+        let mut graph = crate::RenderGraph::new(queue);
+        let target = graph.import_image("target", imported);
+        renderer.add_passes(&mut graph, target, (64, 48));
+        graph.compile(pool).expect("a legal frame").passes().len()
+    }
+
+    /// A spot at `x` that [`shadow::Selection`] will give a tile: finite, a
+    /// radius, a direction and a cone well inside the widest one allowed.
+    fn shadowable_spot(x: f32) -> Light {
+        Light::Spot(crate::light::SpotLight {
+            position: Vec3::new(x, 2.0, 0.0),
+            radius: 8.0,
+            color: Vec3::ONE,
+            direction: -Vec3::Y,
+            inner_angle: 0.3,
+            outer_angle: 0.6,
+        })
+    }
+
+    /// **[`ForwardRenderer::MAX_PASSES`] bounds the frame, and lands on it.**
+    ///
+    /// It is what a caller sizes [`PassTimers`](crate::PassTimers) with, so both
+    /// halves matter: a bound under the widest frame times part of it and drops
+    /// the rest, and a bound well over it buys query sets nothing ever writes.
+    /// Two shadowable spots fill every light slot, which is the most culls a
+    /// frame can run and so the widest frame there is — it must land exactly on
+    /// the constant, and the frame with no shadowed light at all must be short
+    /// of it by exactly the culls those slots would have added.
+    #[test]
+    fn the_pass_bound_is_the_widest_frame_the_renderer_records() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let imported = swapchain_image(device);
+        let mut pool = crate::TransientPool::new();
+
+        let bare = passes_in_a_frame(device, queue, &mut renderer, imported, &pool);
+        assert!(
+            bare < ForwardRenderer::MAX_PASSES as usize,
+            "a frame with no shadowed light runs {bare} passes, which is already the \
+             bound of {} — then the bound does not cover the slots this scene left free",
+            ForwardRenderer::MAX_PASSES
+        );
+
+        renderer.set_lights(&[shadowable_spot(-1.0), shadowable_spot(1.0)]);
+        let widest = passes_in_a_frame(device, queue, &mut renderer, imported, &pool);
+        assert_eq!(
+            renderer.shadow_lights.slots().iter().flatten().count(),
+            shadow::LIGHT_SLOTS,
+            "the two spots must actually hold every slot, or this is the bare frame again \
+             under another name"
+        );
+        assert_eq!(
+            widest,
+            ForwardRenderer::MAX_PASSES as usize,
+            "the widest frame is what the bound is for"
+        );
+        assert_eq!(
+            widest - bare,
+            DrawGen::MAX_PASSES as usize * shadow::LIGHT_SLOTS,
+            "a filled slot costs a cull's passes and nothing else"
+        );
+
+        renderer.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// **Every pass the frame records gets a row in the report.**
+    ///
+    /// The observable the bound exists for: the samples' hand-picked capacity
+    /// timed the first eight passes of a fourteen-pass frame and reported eight
+    /// rows, which reads exactly like a frame that has eight passes. Sized from
+    /// [`MAX_TIMED_PASSES`](crate::MAX_TIMED_PASSES), the report names every
+    /// pass the graph compiled, in order — so a bound one short of the frame
+    /// makes this list short too.
+    #[test]
+    fn every_pass_of_the_frame_gets_a_timing_row() {
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let adapter = instance.adapters().remove(0);
+        // `TIMESTAMP_QUERY` is not part of `GPU_DRIVEN` — topic 10's browsers
+        // may lack it — so a device that wants timers has to ask for it, and
+        // `open` above, which uses `DeviceDesc::for_adapter`, does not.
+        let opened = instance
+            .create_device(&DeviceDesc {
+                label: Some("timed frame"),
+                adapter: adapter.id,
+                required_features: Features::GPU_DRIVEN,
+                optional_features: Features::TIMESTAMP_QUERY,
+                compatible_surface: None,
+            })
+            .expect("the null backend always opens");
+        let queue = opened.queue(QueueKind::Graphics).expect("always present");
+        let device = opened.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        renderer.set_lights(&[shadowable_spot(-1.0), shadowable_spot(1.0)]);
+        let mut timers = crate::PassTimers::new(device, FRAMES_IN_FLIGHT, crate::MAX_TIMED_PASSES)
+            .expect("the tier A null adapter has timestamp queries");
+        let imported = swapchain_image(device);
+        let mut pool = crate::TransientPool::new();
+        let mut recorded = Vec::new();
+        let mut compiled_labels = Vec::new();
+
+        // The ring is one slot longer than the frames in flight and resolves a
+        // slot only when it comes round again, so the first frame's report is
+        // that many frames behind it — see the [`timing`](crate::timing) docs.
+        for _ in 0..FRAMES_IN_FLIGHT + 2 {
+            renderer
+                .begin_frame(
+                    device,
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    Mat4::IDENTITY,
+                    (64, 48),
+                )
+                .expect("write");
+            let mut graph = crate::RenderGraph::new(queue);
+            let target = graph.import_image("target", imported);
+            renderer.add_passes(&mut graph, target, (64, 48));
+            let compiled = graph.compile(&pool).expect("a legal frame");
+            if compiled_labels.is_empty() {
+                compiled_labels = compiled
+                    .passes()
+                    .iter()
+                    .map(|pass| pass.label().to_string())
+                    .collect();
+            }
+            let mut encoder = device.create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                label: Some("timed frame"),
+                queue,
+            });
+            compiled
+                .execute(device, &mut pool, encoder.as_mut(), Some(&mut timers))
+                .expect("the graph executed");
+            recorded.push(encoder.finish().expect("recording succeeded"));
+        }
+
+        let reported: Vec<&str> = timers
+            .latest()
+            .passes
+            .iter()
+            .map(|timing| timing.label.as_str())
+            .collect();
+        assert_eq!(
+            reported,
+            compiled_labels,
+            "the report must name every pass the frame compiled, in order — {} of {} \
+             timed with a capacity of {}",
+            reported.len(),
+            compiled_labels.len(),
+            timers.capacity()
+        );
+
+        timers.destroy(device);
         renderer.destroy(device);
         for commands in recorded {
             device.destroy_command_buffer(commands);

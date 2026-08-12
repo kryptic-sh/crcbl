@@ -36,8 +36,8 @@ use crcbl::hal::CommandEncoderDesc;
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{
-    Camera, ForwardRenderer, MenuRenderer, PassTimers, Projection, RenderGraph, SpriteRenderer,
-    TransientPool, UiRenderer,
+    Camera, ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers, Projection, RenderGraph,
+    SpriteRenderer, TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -48,7 +48,6 @@ use crate::art::{SPACE, Scene, TEXELS_PER_UNIT};
 use crate::game::{RenderState, WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH};
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
-const MAX_TIMED_PASSES: u32 = 8;
 
 /// Slack kept outside the playfield, in world units.
 ///

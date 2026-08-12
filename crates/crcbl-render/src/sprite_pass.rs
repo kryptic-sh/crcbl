@@ -959,6 +959,14 @@ impl SpriteRenderer {
         Ok(())
     }
 
+    /// The most passes [`add_pass`](Self::add_pass) adds to a frame.
+    ///
+    /// The most rather than the count: a frame with no sprites adds none, as the
+    /// method's docs say. What a caller sizing
+    /// [`PassTimers`](crate::timing::PassTimers) adds up — see
+    /// [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES).
+    pub const MAX_PASSES: u32 = 1;
+
     /// Adds the sprite pass to `graph`, drawing on top of `target`.
     ///
     /// One `draw(0..6, 0..count)` per batch, in submission order, with **both**

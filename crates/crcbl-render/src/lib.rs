@@ -194,6 +194,6 @@ pub use sprite_pass::{
     SpriteConstants, SpriteInstance, SpriteRenderer, sheet_lane,
 };
 pub use texture::{UploadedTexture, upload_texture, upload_texture_layers};
-pub use timing::{FrameTimings, PassTimers, PassTiming};
+pub use timing::{FrameTimings, MAX_TIMED_PASSES, PassTimers, PassTiming};
 pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};
 pub use ui_pass::UiRenderer;

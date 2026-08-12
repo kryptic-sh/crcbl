@@ -49,7 +49,9 @@ use crcbl::engine::{
 use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
-use crcbl::render::{FrameTimings, MenuRenderer, PassTimers, TransientPool, UiRenderer};
+use crcbl::render::{
+    FrameTimings, MAX_TIMED_PASSES, MenuRenderer, PassTimers, TransientPool, UiRenderer,
+};
 use crcbl::shell::{LogicalSize, open, open_backend};
 use crcbl::ui::WidgetId;
 use crcbl::ui::draw_list::DrawList;
@@ -93,12 +95,6 @@ const BOX_SIZE: f32 = 64.0;
 
 /// How fast the box travels, in pixels per second of *simulated* time.
 const BOX_SPEED: f64 = 240.0;
-
-/// How many passes get timestamped when the device has timestamp queries.
-///
-/// This game declares three — the clear, the menu and the UI — and the spare is
-/// for the fourth you add.
-const MAX_TIMED_PASSES: u32 = 4;
 
 /// What can stop this game: the loop's own failures, plus the game's.
 ///

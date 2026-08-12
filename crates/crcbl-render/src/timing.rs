@@ -29,6 +29,22 @@
 //! its draws is a real finding, and one that hid its barriers in a neighbour's
 //! bucket would not surface it.
 //!
+//! # How many passes a ring slot holds
+//!
+//! Each slot is sized once, at [`PassTimers::new`], because a query set cannot
+//! grow and resizing one mid-frame would throw away the very submissions the
+//! ring is waiting on. So the capacity is a number the caller has to know before
+//! the first frame — and it is a fact about the renderer, not about the game, so
+//! [`MAX_TIMED_PASSES`] is what a caller passes rather than a number of its own.
+//! A caller whose frame is a graph of its own — `crcbl-vk`'s end-to-end suite
+//! builds one out of a bare [`ForwardRenderer`] and no overlay — sizes it for
+//! that graph instead.
+//!
+//! A frame with more passes than the capacity is timed as far as the capacity
+//! goes and the rest are dropped, with one warning. One, not one per frame: the
+//! condition holds for every frame once it holds for any, and this is a
+//! profiler.
+//!
 //! # Degrading, not breaking
 //!
 //! A device without [`Features::TIMESTAMP_QUERY`] cannot create a timestamp set.
@@ -42,7 +58,33 @@ use core::fmt::Write as _;
 use crcbl_hal::{CommandEncoder, Device, Features, QueryKind, QuerySetDesc, QuerySetHandle};
 use crcbl_ui::debug::{DebugModule, DebugSection};
 
+use crate::forward::ForwardRenderer;
 use crate::graph::CompiledPass;
+use crate::menu::MenuRenderer;
+use crate::sprite_pass::SpriteRenderer;
+use crate::ui_pass::UiRenderer;
+
+/// How many passes one frame of this crate's renderers records, at most.
+///
+/// **What a caller passes [`PassTimers::new`] instead of a number of its own.**
+/// Every renderer here says how many passes it adds — [`ForwardRenderer`],
+/// [`SpriteRenderer`], [`MenuRenderer`] and [`UiRenderer`] each carry a
+/// `MAX_PASSES` — and this is their sum, so a pass added anywhere below moves
+/// this number with it. A game is in no position to know the count: it is a fact
+/// about the renderer, and every sample that guessed it guessed low. The
+/// samples' `8` was picked when a frame had three passes and was still `8` when
+/// the shadow cascades and the light grid had taken it to fourteen, at which
+/// point the timers bracketed the first eight and dropped the rest.
+///
+/// A caller that declares passes of its own — a clear, a readback, a pass of its
+/// own devising — records that many more than this. The samples' clears fit
+/// because none of them also runs a [`ForwardRenderer`], and a caller that
+/// outgrows the bound gets the one warning [`PassTimers`] logs rather than a
+/// silent truncation.
+pub const MAX_TIMED_PASSES: u32 = ForwardRenderer::MAX_PASSES
+    + SpriteRenderer::MAX_PASSES
+    + MenuRenderer::MAX_PASSES
+    + UiRenderer::MAX_PASSES;
 
 /// What one pass cost on the GPU.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,11 +212,19 @@ pub struct PassTimers {
     period_ns: f32,
     frames: u64,
     latest: FrameTimings,
+    /// Whether a frame with more passes than [`PassTimers::capacity`] has
+    /// already been reported. The condition holds for every frame once it holds
+    /// for one, and a line per frame forever is a line nobody reads.
+    warned: bool,
 }
 
 impl PassTimers {
     /// Creates timers for up to `max_passes` passes across `frames_in_flight`
     /// frames, or `None` if the device has no timestamp queries.
+    ///
+    /// `max_passes` is [`MAX_TIMED_PASSES`] for a caller whose frame is this
+    /// crate's renderers, and its own count for one that builds its own graph —
+    /// see the module docs. A frame longer than it is timed as far as it goes.
     ///
     /// `None` is not an error: the seam is explicit that timestamps degrade
     /// rather than break, and the caller's answer is to pass `None` to
@@ -230,6 +280,7 @@ impl PassTimers {
             period_ns,
             frames: 0,
             latest: FrameTimings::default(),
+            warned: false,
         })
     }
 
@@ -264,9 +315,10 @@ impl PassTimers {
         self.resolve(device);
 
         let used = passes.len().min(self.capacity as usize);
-        if passes.len() > used {
+        if passes.len() > used && !self.warned {
+            self.warned = true;
             log::warn!(
-                "graph: {} passes but timers hold {}; the last {} are untimed",
+                "graph: {} passes but timers hold {}; the last {} are untimed (said once)",
                 passes.len(),
                 self.capacity,
                 passes.len() - used

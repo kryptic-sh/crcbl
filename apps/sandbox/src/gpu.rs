@@ -110,8 +110,8 @@ use crcbl::engine::{GpuContext, GpuContextDesc, GpuOptions, Pacing};
 use crcbl::hal::CommandEncoderDesc;
 use crcbl::prelude::*;
 use crcbl::render::{
-    Camera, DirectionalLight, ForwardRenderer, MenuRenderer, PassTimers, RenderGraph,
-    TransientPool, UiRenderer,
+    Camera, DirectionalLight, ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers,
+    RenderGraph, TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -119,12 +119,6 @@ use crcbl::ui::menu::{Menu, MenuLayout};
 use crcbl::ui::text::FontAtlas;
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
-
-/// How many passes the per-pass GPU timers can bracket.
-///
-/// The frame has three — forward, tonemap, UI. Eight leaves room for a debug
-/// pass or two without a resize of the query sets, and costs sixteen timestamps.
-const MAX_TIMED_PASSES: u32 = 8;
 
 /// The sandbox's GPU side: the shared join plus the milestone 3–5 renderer.
 #[derive(Debug)]

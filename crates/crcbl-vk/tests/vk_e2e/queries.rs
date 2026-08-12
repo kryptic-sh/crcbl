@@ -16,14 +16,13 @@ use crate::harness::Headless;
 use crate::mesh::{MESH_EXTENT, MESH_SECONDS, mesh_camera};
 use crcbl_hal::{CommandEncoderDesc, Features, PresentInfo, QueryKind, QuerySetDesc, SubmitInfo};
 
-/// How many passes one forward frame records, and therefore how many timers it
-/// takes to see all of them.
+/// How many timers it takes to see every pass a forward frame records.
 ///
-/// Three compute passes per cull — one cull for the camera and one per shadow
-/// cascade — plus topic 18's clustering dispatch, which the camera has and no
-/// cascade does, then the depth-only shadow pass, the colour pass and the
-/// tonemap.
-const TIMED_PASSES: u32 = 3 * (1 + crcbl_render::shadow::CASCADES as u32) + 4;
+/// The renderer's own bound rather than a formula spelled out again here: this
+/// file had the second copy of that arithmetic, and a second copy is one that
+/// stops matching the day a pass is added — which is the drift
+/// `ForwardRenderer::MAX_PASSES` exists to end.
+const TIMED_PASSES: u32 = crcbl_render::ForwardRenderer::MAX_PASSES;
 
 /// Timestamp queries, if the device has them: the profiler HUD's foundation,
 /// and the seam says it degrades rather than breaks without them.

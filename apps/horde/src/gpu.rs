@@ -39,8 +39,8 @@ use crcbl::math::DVec3;
 use crcbl::math::Vec3;
 use crcbl::prelude::*;
 use crcbl::render::{
-    Camera, ForwardRenderer, MenuRenderer, PassTimers, Projection, RenderGraph, SpriteRenderer,
-    TransientPool, UiRenderer,
+    Camera, ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers, Projection, RenderGraph,
+    SpriteRenderer, TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -51,7 +51,6 @@ use crate::art::{GROUND, Scene, SceneStats, TEXELS_PER_UNIT};
 use crate::game::{ARENA_HALF_HEIGHT, ARENA_HALF_WIDTH, RenderState, VIEW_HALF_HEIGHT, clamp_axis};
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
-const MAX_TIMED_PASSES: u32 = 8;
 
 /// Half the view's horizontal extent, in world units, at `extent`.
 #[must_use]

@@ -487,6 +487,13 @@ impl UiRenderer {
         Ok(())
     }
 
+    /// The most passes [`add_pass`](Self::add_pass) adds to a frame.
+    ///
+    /// The most rather than the count: a frame with an empty draw list adds
+    /// none. What a caller sizing [`PassTimers`](crate::timing::PassTimers) adds
+    /// up — see [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES).
+    pub const MAX_PASSES: u32 = 1;
+
     /// Adds the UI compositing pass to `graph`, drawing on top of `target`.
     ///
     /// The pass reads nothing except its own vertex buffer; it blends onto the

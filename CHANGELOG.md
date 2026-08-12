@@ -555,6 +555,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The samples' profiler HUD was timing the first eight passes of a fourteen-
+  pass frame.** Every sample picked its own `MAX_TIMED_PASSES` — a literal that
+  has to track how many passes the renderer records, and that nothing made track
+  it. `crcbl_render::MAX_TIMED_PASSES` is that number now, summed from a
+  `MAX_PASSES` each renderer states about itself, so a pass added anywhere moves
+  it instead of seven copies drifting. Sandbox goes from 8 timed rows to all 14.
+
+  The warning `PassTimers` logs when its capacity is short now fires once rather
+  than every frame; a caller that sizes its own timers deliberately still gets
+  it.
+
 - **The LOD hysteresis state was host-visible and shader-written, which removes
   a D3D12 device.** Upload and readback heaps refuse `ALLOW_UNORDERED_ACCESS` at
   creation, so there is no unordered access view of one, and `crcbl-dx12`
