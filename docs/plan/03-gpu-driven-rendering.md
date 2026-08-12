@@ -183,6 +183,14 @@ above are what a device without them falls back to.
   its own surface. This is why QEM auto-simplification moves into the MVP — see
   [25-lod.md](25-lod.md); a cluster hierarchy with nothing to select between is
   the culling win without the detail win.
+- **The hierarchy is a DAG, not a chain of levels** (locked 2026-08-12). A chain
+  simplifies each level independently, so two levels' cluster boundaries have no
+  relationship and drawing adjacent clusters at different levels cracks along
+  their shared edge. The build groups neighbouring clusters, locks each group's
+  outer boundary while simplifying its interior, re-splits, and repeats with
+  different groupings — so every cut through the result is crack-free. Topic 25
+  carries the full description and the reasoning; this section depends on it,
+  because per-cluster selection is not deliverable without it.
 - **The fallback is not second-class.** `IndirectCount` and `IndirectPerBatch`
   draw the same clusters as ordinary index ranges, selecting cluster LOD in the
   existing cull compute pass instead of in an amplification stage. Same
