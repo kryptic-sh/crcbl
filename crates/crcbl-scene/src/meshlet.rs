@@ -33,21 +33,61 @@
 //! [`MeshletBuild::clusters`] names both runs plus the cluster's bounds. The
 //! corner being a `u8` is the whole reason [`MAX_CLUSTER_VERTICES`] exists.
 //!
-//! # Greedy sequential clustering, and what it costs
+//! # Clusters grow across shared edges, not along the index buffer
 //!
-//! The build walks the index buffer in triangle order, keeps the current
-//! cluster's vertex set, and closes the cluster when the next triangle would
-//! push it past either bound. That is deterministic by construction — no
-//! hashing, no sort by a float, no iteration over a hash map — which is the
-//! property §3.5 asks for.
+//! The build seeds a cluster on a triangle and then repeatedly takes the
+//! **adjacent** triangle that fits it best, where adjacent means *shares an
+//! edge*: most vertex reuse first, then nearest the triangle it was seeded on,
+//! then the lowest triangle index. When neither bound has room for the chosen
+//! triangle, the cluster is closed and that triangle seeds the next one. A
+//! cluster whose frontier runs dry with room to spare — one that has swallowed
+//! a whole connected component — seeds again from the lowest triangle no
+//! cluster has taken, but only if it can take the whole of *that* triangle's
+//! component too — a cluster jumps only when it can take everything it is
+//! jumping to, or its bounding sphere would span the distance it jumped.
 //!
-//! Its weakness is that it follows the index buffer's order and nothing else.
-//! A mesh whose triangles are already spatially coherent clusters well; one
-//! whose are not gets clusters with poor locality, and therefore loose
-//! bounding spheres and wide normal cones that cull almost nothing. A spatial
-//! pre-sort of the triangles is the improvement, and it is not in this slice.
+//! The alternative was to sort the triangles along a space-filling curve and
+//! keep the sequential walk. Growth across edges is what this does instead, for
+//! two reasons a Morton order cannot give: a curve sorts *space*, so two
+//! surfaces a hair apart interleave along it and land in one cluster whose
+//! bounding sphere spans the gap between them, and the vertex bound — the one
+//! that actually closes most clusters — is about vertex *sharing*, which
+//! adjacency measures directly and proximity only predicts.
+//!
+//! Growing by index order is what this replaced, and it is worth naming what
+//! that cost: a cluster followed the index buffer and nothing else, so a
+//! row-major grid gave clusters one full grid row wide. On the 32 × 32 dune
+//! fixture the mean cluster bounding-sphere radius was 16.0 on a mesh 32
+//! across — every cluster spanning the whole of it — against 6.9 here.
+//! `a_dense_grid_clusters_into_compact_spheres` is what holds that, and the
+//! per-cluster cull and per-cluster LOD selection are what want it: bounds that
+//! name a region rather than the whole mesh.
+//!
+//! What it does **not** buy is a clean tiling. The clusters are grown one at a
+//! time, and discs do not tile a plane, so the last few clusters of a dense
+//! mesh are the interstitial scraps the earlier ones left — two of the dune
+//! fixture's 23, and they still span it. A partitioner that grew every cluster
+//! at once (METIS-class, or Lloyd relaxation over cluster seeds) is what
+//! removes those, and it is not in this slice.
+//!
+//! # Determinism
+//!
+//! §3.5 asks for "same input hash, same clusters", so nothing here may depend
+//! on an iteration order the standard library does not pin. The frontier is a
+//! [`BTreeSet`] rather than a hash set, the adjacency is built through a
+//! [`BTreeMap`], and the one float in the decision — the squared distance from
+//! a candidate's centroid to the cluster's seed — is compared with
+//! [`f32::total_cmp`] and broken on the lowest triangle index, so a tie cannot
+//! be settled by whichever candidate the scan happened to reach first. No
+//! trigonometry enters any of it: `sinf`/`cosf` differ in the last place
+//! between libms, and a cluster boundary that moved with the C library would
+//! not be the same bake on two machines.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use glam::Vec3;
+
+use crate::simplify::undirected;
 
 pub use crcbl_shaders::meshlet::{
     ClusterBounds, MAX_CLUSTER_TRIANGLES, MAX_CLUSTER_VERTICES, MESHLET_STRIDE, Meshlet,
@@ -137,7 +177,7 @@ impl MeshletBuild {
         &self.triangles
     }
 
-    /// The clusters, in the order the walk built them.
+    /// The clusters, in the order the build grew them.
     #[inline]
     #[must_use]
     pub fn clusters(&self) -> &[Meshlet] {
@@ -147,6 +187,18 @@ impl MeshletBuild {
     /// One cluster's triangles as indices into the mesh, three per triangle —
     /// its corner run decoded back through its own vertex run.
     ///
+    /// Every cluster's triangles as indices into the mesh, in cluster order.
+    ///
+    /// The same triangles the build was given, permuted into the order the
+    /// clusters hold them — which is what a level of
+    /// [`crate::cluster_dag`] publishes as its index buffer, so that the
+    /// buffer and the clusters over it describe the geometry in one order.
+    pub(crate) fn all_indices(&self) -> Vec<u32> {
+        (0..self.clusters.len())
+            .flat_map(|cluster| self.cluster_indices(cluster))
+            .collect()
+    }
+
     /// `pub(crate)` because [`crate::cluster_dag`] works in clusters and has to
     /// ask which triangles each one holds: to gather a group's geometry, and to
     /// find which clusters share an edge.
@@ -172,8 +224,8 @@ impl MeshletBuild {
     /// Appends another build's clusters, shifting its offsets onto the end of
     /// this one's arrays.
     ///
-    /// [`build_meshlets`] clusters one triangle list and its walk knows nothing
-    /// about where a cluster ought to stop. [`crate::cluster_dag`] needs each
+    /// [`build_meshlets`] clusters one triangle list and knows nothing about
+    /// where a cluster ought to stop. [`crate::cluster_dag`] needs each
     /// group of a level clustered on its own — a cluster straddling two groups
     /// would have two sets of parents and would not be a DAG node — so it calls
     /// the builder per group and this is what puts those builds back together
@@ -272,58 +324,305 @@ pub fn build_meshlets(
         });
     }
 
+    let neighbours = triangle_neighbours(indices);
     let mut build = MeshletBuild {
         vertices: Vec::new(),
         triangles: Vec::new(),
         clusters: Vec::new(),
     };
-    let mut vertices: Vec<u32> = Vec::with_capacity(MAX_CLUSTER_VERTICES);
-    let mut corners: Vec<u8> = Vec::with_capacity(MAX_CLUSTER_TRIANGLES * 3);
+    let mut pending = Pending::new(&neighbours);
+    let mut open = OpenCluster::new();
 
-    for triangle in indices.chunks_exact(3) {
-        if closes_cluster(&vertices, &corners, triangle) {
-            build.push_cluster(positions, &vertices, &corners)?;
-            vertices.clear();
-            corners.clear();
+    loop {
+        // Adjacent first; only a cluster with nothing left to grow into reaches
+        // the index buffer for a seed, and only that one can land in another
+        // connected component.
+        let (next, seeded) = match open.best(positions, indices) {
+            Some(next) => (next, false),
+            None => match pending.seed() {
+                Some(next) => (next, true),
+                None => break,
+            },
+        };
+        let spills = seeded
+            && !open.vertices.is_empty()
+            && !pending.component_fits(next, MAX_CLUSTER_TRIANGLES - open.corners.len() / 3);
+        if spills || open.closes(face(indices, next)) {
+            build.push_cluster(positions, &open.vertices, &open.corners)?;
+            open = OpenCluster::new();
         }
-        for &index in triangle {
-            let local = vertices
-                .iter()
-                .position(|&seen| seen == index)
-                .unwrap_or_else(|| {
-                    vertices.push(index);
-                    vertices.len() - 1
-                });
-            corners.push(local as u8);
-        }
+        open.take(next, positions, indices, &neighbours, &mut pending);
     }
-    if !vertices.is_empty() {
-        build.push_cluster(positions, &vertices, &corners)?;
+    if !open.vertices.is_empty() {
+        build.push_cluster(positions, &open.vertices, &open.corners)?;
     }
 
     Ok(build)
 }
 
-/// Whether `triangle` would push the open cluster past either bound.
+/// One triangle's three indices.
+fn face(indices: &[u32], triangle: u32) -> &[u32] {
+    &indices[triangle as usize * 3..][..3]
+}
+
+/// A triangle's centroid, which is what the compactness term measures.
+fn centroid(positions: &[[f32; 3]], face: &[u32]) -> Vec3 {
+    face.iter()
+        .map(|&index| Vec3::from(positions[index as usize]))
+        .sum::<Vec3>()
+        / 3.0
+}
+
+/// How many of `face`'s vertices a cluster holding `vertices` does not have.
 ///
-/// An empty cluster always takes the triangle: three vertices and one triangle
-/// are inside both bounds, so the walk cannot stall on a triangle no cluster
-/// will accept.
-fn closes_cluster(vertices: &[u32], corners: &[u8], triangle: &[u32]) -> bool {
-    if vertices.is_empty() {
-        return false;
-    }
-    if corners.len() / 3 >= MAX_CLUSTER_TRIANGLES {
-        return true;
-    }
-    // A triangle that names the same vertex twice costs the bound once, so the
-    // scan looks at the corners already passed as well as the open cluster.
-    let fresh = triangle
-        .iter()
+/// A triangle that names the same vertex twice costs the vertex bound once, so
+/// the scan looks at the corners already passed as well as at the cluster.
+fn fresh_vertices(vertices: &[u32], face: &[u32]) -> usize {
+    face.iter()
         .enumerate()
-        .filter(|&(corner, index)| !vertices.contains(index) && !triangle[..corner].contains(index))
-        .count();
-    vertices.len() + fresh > MAX_CLUSTER_VERTICES
+        .filter(|&(corner, index)| !vertices.contains(index) && !face[..corner].contains(index))
+        .count()
+}
+
+/// Which triangles share an edge with which, ascending and deduplicated.
+///
+/// Shared edges rather than shared vertices, and a [`BTreeMap`] rather than a
+/// hash map for the reason this module's determinism section gives. An edge
+/// with more than two faces on it — a non-manifold seam — makes every pair of
+/// them neighbours, which is what keeps a cluster growing across one instead of
+/// stopping dead at it.
+fn triangle_neighbours(indices: &[u32]) -> Vec<Vec<u32>> {
+    let mut users: BTreeMap<[u32; 2], Vec<u32>> = BTreeMap::new();
+    for (triangle, face) in indices.chunks_exact(3).enumerate() {
+        for corner in 0..3 {
+            let sharing = users
+                .entry(undirected(face[corner], face[(corner + 1) % 3]))
+                .or_default();
+            // A degenerate triangle names one edge twice, and a triangle is not
+            // its own neighbour. Triangles arrive in ascending order, so the
+            // repeat is always the entry just pushed.
+            if sharing.last() != Some(&(triangle as u32)) {
+                sharing.push(triangle as u32);
+            }
+        }
+    }
+
+    let mut neighbours = vec![Vec::new(); indices.len() / 3];
+    for sharing in users.values() {
+        for (at, &a) in sharing.iter().enumerate() {
+            for &b in &sharing[at + 1..] {
+                neighbours[a as usize].push(b);
+                neighbours[b as usize].push(a);
+            }
+        }
+    }
+    for list in &mut neighbours {
+        list.sort_unstable();
+        list.dedup();
+    }
+    neighbours
+}
+
+/// The triangles no cluster has taken, and which connected component each is
+/// in.
+///
+/// This is where a cluster is seeded from — when the build starts, when a
+/// cluster closes, and when a cluster's frontier runs dry with room to spare —
+/// and it is the lowest such triangle, which is the only thing left in the
+/// build that reads the index buffer's order at all. The scan does not restart
+/// at the front of the mesh for each seed: no triangle below
+/// [`unseeded`](Self::unseeded) is still untaken.
+struct Pending {
+    taken: Vec<bool>,
+    unseeded: usize,
+
+    /// Which connected component of the adjacency graph each triangle is in.
+    component: Vec<u32>,
+
+    /// How many triangles of each component no cluster has taken yet.
+    untaken: Vec<usize>,
+}
+
+impl Pending {
+    fn new(neighbours: &[Vec<u32>]) -> Self {
+        let mut component = vec![u32::MAX; neighbours.len()];
+        let mut untaken = Vec::new();
+        for start in 0..neighbours.len() {
+            if component[start] != u32::MAX {
+                continue;
+            }
+            let label = untaken.len() as u32;
+            let mut size = 0usize;
+            let mut reached = vec![start as u32];
+            component[start] = label;
+            while let Some(triangle) = reached.pop() {
+                size += 1;
+                for &neighbour in &neighbours[triangle as usize] {
+                    if component[neighbour as usize] == u32::MAX {
+                        component[neighbour as usize] = label;
+                        reached.push(neighbour);
+                    }
+                }
+            }
+            untaken.push(size);
+        }
+
+        Self {
+            taken: vec![false; neighbours.len()],
+            unseeded: 0,
+            component,
+            untaken,
+        }
+    }
+
+    /// The triangle to seed a cluster from, or `None` once every triangle is in
+    /// one.
+    fn seed(&mut self) -> Option<u32> {
+        while self.unseeded < self.taken.len() && self.taken[self.unseeded] {
+            self.unseeded += 1;
+        }
+        (self.unseeded < self.taken.len()).then_some(self.unseeded as u32)
+    }
+
+    /// Whether what is left of `triangle`'s connected component fits in
+    /// `capacity` more triangles.
+    ///
+    /// **A cluster jumps only when it can take everything it is jumping to.**
+    /// Reaching a seed at all means the cluster ran out of triangles adjacent
+    /// to what it holds, and the next one along the index buffer can be
+    /// anywhere — the other side of a gap, another object in the same mesh, the
+    /// far side of the region earlier clusters carved out — so a cluster that
+    /// took an arbitrary slice of it would get a bounding sphere spanning the
+    /// distance between the two and cull nothing. It closes instead, and the
+    /// next cluster starts there.
+    ///
+    /// Taking a whole component is the case that has to stay allowed, and it is
+    /// the common one: a mesh whose vertices are split per face, which is every
+    /// mesh with hard normals or a UV seam, is a heap of two-triangle
+    /// components, and one cluster per two triangles would be no clustering at
+    /// all.
+    fn component_fits(&self, triangle: u32, capacity: usize) -> bool {
+        self.untaken[self.component[triangle as usize] as usize] <= capacity
+    }
+
+    fn is_untaken(&self, triangle: u32) -> bool {
+        !self.taken[triangle as usize]
+    }
+
+    fn take(&mut self, triangle: u32) {
+        self.taken[triangle as usize] = true;
+        self.untaken[self.component[triangle as usize] as usize] -= 1;
+    }
+}
+
+/// The cluster being filled and the frontier it grows across.
+struct OpenCluster {
+    /// Original vertex indices in first-seen order: this cluster's vertex run.
+    vertices: Vec<u32>,
+
+    /// Its corners, three per triangle, indexing [`vertices`](Self::vertices).
+    corners: Vec<u8>,
+
+    /// Untaken triangles sharing an edge with one already in the cluster.
+    frontier: BTreeSet<u32>,
+
+    /// The centroid of the triangle this cluster was seeded on, which the
+    /// compactness term measures distance from.
+    ///
+    /// **The seed and not the cluster's own moving centre**, which is what
+    /// keeps a cluster round. Measured from a centre that moves with the
+    /// cluster, a cluster growing along a strip of triangles finds the
+    /// candidates at each end of the strip equidistant and takes them
+    /// alternately, so it grows into a strip as long as the mesh — which is
+    /// exactly what the residue between two rounds of clusters is made of.
+    /// Measured from a fixed point, growth is nearest-first and the cluster is
+    /// a disc around it however the geometry it is picking through is shaped.
+    seed: Vec3,
+}
+
+impl OpenCluster {
+    fn new() -> Self {
+        Self {
+            vertices: Vec::with_capacity(MAX_CLUSTER_VERTICES),
+            corners: Vec::with_capacity(MAX_CLUSTER_TRIANGLES * 3),
+            frontier: BTreeSet::new(),
+            seed: Vec3::ZERO,
+        }
+    }
+
+    /// Whether `face` would push this cluster past either bound.
+    ///
+    /// An empty cluster always takes the triangle: three vertices and one
+    /// triangle are inside both bounds, so the build cannot stall on a triangle
+    /// no cluster will accept.
+    fn closes(&self, face: &[u32]) -> bool {
+        if self.vertices.is_empty() {
+            return false;
+        }
+        if self.corners.len() / 3 >= MAX_CLUSTER_TRIANGLES {
+            return true;
+        }
+        self.vertices.len() + fresh_vertices(&self.vertices, face) > MAX_CLUSTER_VERTICES
+    }
+
+    /// The frontier triangle to take next, or `None` when the frontier is
+    /// empty and the cluster has to be seeded from the mesh instead.
+    ///
+    /// Most vertex reuse first, then nearest this cluster's box centre, then
+    /// the lowest triangle index. Reuse leads because the vertex bound is what
+    /// closes most clusters and a triangle that adds none is free against it —
+    /// and because a triangle sharing two edges with the cluster is filling a
+    /// notch in its outline, which is what keeps the outline round.
+    fn best(&self, positions: &[[f32; 3]], indices: &[u32]) -> Option<u32> {
+        let key = |triangle: u32| {
+            let face = face(indices, triangle);
+            (
+                fresh_vertices(&self.vertices, face),
+                centroid(positions, face).distance_squared(self.seed),
+            )
+        };
+        // `min_by` keeps the first of equal elements and a `BTreeSet` iterates
+        // ascending, so an exact tie falls to the lowest triangle index rather
+        // than to whichever the scan reached first.
+        self.frontier.iter().copied().min_by(|&a, &b| {
+            let (fresh_a, near_a) = key(a);
+            let (fresh_b, near_b) = key(b);
+            fresh_a.cmp(&fresh_b).then(near_a.total_cmp(&near_b))
+        })
+    }
+
+    /// Adds `triangle` to the cluster and its untaken neighbours to the
+    /// frontier.
+    fn take(
+        &mut self,
+        triangle: u32,
+        positions: &[[f32; 3]],
+        indices: &[u32],
+        neighbours: &[Vec<u32>],
+        pending: &mut Pending,
+    ) {
+        pending.take(triangle);
+        self.frontier.remove(&triangle);
+        if self.vertices.is_empty() {
+            self.seed = centroid(positions, face(indices, triangle));
+        }
+        for &index in face(indices, triangle) {
+            let local = self
+                .vertices
+                .iter()
+                .position(|&seen| seen == index)
+                .unwrap_or_else(|| {
+                    self.vertices.push(index);
+                    self.vertices.len() - 1
+                });
+            self.corners.push(local as u8);
+        }
+        for &neighbour in &neighbours[triangle as usize] {
+            if pending.is_untaken(neighbour) {
+                self.frontier.insert(neighbour);
+            }
+        }
+    }
 }
 
 /// The bounding sphere and normal cone over one cluster's own geometry.
@@ -405,6 +704,7 @@ fn triangle_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::simplify::tests::{dunes, height_field};
 
     /// Every cluster's corners decoded back to original vertex indices, in
     /// emission order, with each cluster's record checked against the bounds on
@@ -414,7 +714,14 @@ pub(crate) mod tests {
     /// catches an off-by-one in either offset: a wrong `vertex_offset` decodes
     /// to the wrong original indices, a wrong `triangle_offset` decodes the
     /// wrong corners, and either a dropped or a duplicated triangle changes
-    /// the sequence.
+    /// what comes out.
+    ///
+    /// **Compare it through [`sorted`]**, because the builder grows clusters
+    /// across shared edges and its emission order is therefore its own rather
+    /// than the index buffer's. What the invariant claims is that every input
+    /// triangle reaches exactly one cluster, and a comparison of two sorted
+    /// lists says exactly that — a dropped, duplicated or misdecoded triangle
+    /// still fails it, and only the ordering stops being asserted.
     ///
     /// `pub(crate)` because [`crate::lod`] applies the same invariant to every
     /// level of a chain, and a second copy of a decoder is a second thing to
@@ -423,6 +730,16 @@ pub(crate) mod tests {
         (0..build.clusters().len())
             .flat_map(|cluster| cluster_triangles(build, cluster))
             .collect()
+    }
+
+    /// Triangles in a canonical order, so comparing two lists asks whether they
+    /// hold the same triangles the same number of times.
+    ///
+    /// Each triple keeps its own winding — only the list is sorted — so a
+    /// triangle emitted the other way round is still a different triangle.
+    pub(crate) fn sorted(mut triangles: Vec<[u32; 3]>) -> Vec<[u32; 3]> {
+        triangles.sort_unstable();
+        triangles
     }
 
     /// [`MeshletBuild::cluster_indices`] as triangles, with the record's two
@@ -708,7 +1025,7 @@ pub(crate) mod tests {
             );
             assert_finite(&cluster.bounds);
         }
-        assert_eq!(decoded(&build), triangles_of(&indices));
+        assert_eq!(sorted(decoded(&build)), sorted(triangles_of(&indices)));
     }
 
     #[test]
@@ -810,7 +1127,7 @@ pub(crate) mod tests {
         );
         assert!(counts[0].1 < MAX_CLUSTER_TRIANGLES);
         assert!(counts[0].0 + 3 > MAX_CLUSTER_VERTICES);
-        assert_eq!(decoded(&build), triangles_of(&indices));
+        assert_eq!(sorted(decoded(&build)), sorted(triangles_of(&indices)));
     }
 
     #[test]
@@ -832,15 +1149,123 @@ pub(crate) mod tests {
         assert_eq!(
             counts,
             [
-                (17, MAX_CLUSTER_TRIANGLES),
-                (17, 160 - MAX_CLUSTER_TRIANGLES)
+                (15, MAX_CLUSTER_TRIANGLES),
+                (6, 160 - MAX_CLUSTER_TRIANGLES)
             ],
             "the triangle bound closed the first cluster: a hub and a 16-vertex \
              ring is far short of MAX_CLUSTER_VERTICES, and 10 laps of 16 is \
              160 triangles"
         );
         assert!(counts[0].0 < MAX_CLUSTER_VERTICES);
-        assert_eq!(decoded(&build), triangles_of(&indices));
+        // Neither cluster is the whole ring, because the ten copies of one
+        // spoke's triangle share every edge with each other and are taken
+        // together: the first cluster is 124 triangles over 14 of the ring's
+        // 16 vertices, and the second is what is left of the last two spokes.
+        assert!(counts[0].0 < 17 && counts[1].0 < 17);
+        assert_eq!(sorted(decoded(&build)), sorted(triangles_of(&indices)));
+    }
+
+    /// **The clusters of a dense mesh are compact**, which is the whole reason
+    /// the build grows across shared edges rather than along the index buffer.
+    ///
+    /// The mean cluster bounding-sphere radius over the dune fixture is the
+    /// number, and the mesh is 32 across: growing by index order gave every
+    /// cluster one full grid row, so the mean radius was 16.0 — half the mesh,
+    /// per cluster, on a fixture that has 23 of them. A per-cluster cull tests
+    /// that sphere and a per-cluster LOD selection descends by that region's
+    /// error, and neither means anything while the region is the whole mesh.
+    ///
+    /// Both halves are asserted because neither is enough on its own: a mean
+    /// says nothing about how many clusters are behind it, and a count says
+    /// nothing about how tight they are.
+    #[test]
+    fn a_dense_grid_clusters_into_compact_spheres() {
+        let (positions, indices) = height_field(32, dunes);
+
+        let build = build_meshlets(&positions, &indices).unwrap();
+
+        let radii: Vec<f32> = build
+            .clusters()
+            .iter()
+            .map(|cluster| cluster.bounds.radius)
+            .collect();
+        assert_eq!(radii.len(), 23, "the fixture's clusters");
+        let mean = radii.iter().sum::<f32>() / radii.len() as f32;
+        assert!(
+            mean < 8.0,
+            "the mean cluster radius is {mean} on a mesh 32 across, where index \
+             order gave 16.0 — so the clusters are no more local than the rows \
+             they used to be"
+        );
+        // And the mean is not being carried by a few tight clusters among
+        // sprawling ones. Two of these are the interstitial scraps the disc
+        // packing leaves, which this pins rather than hides — see the module
+        // docs.
+        let compact = radii.iter().filter(|&&radius| radius < 8.0).count();
+        assert_eq!(
+            compact, 21,
+            "clusters inside a quarter of the mesh: {radii:?}"
+        );
+        assert_eq!(sorted(decoded(&build)), sorted(triangles_of(&indices)));
+    }
+
+    /// **A cluster takes a second connected component whole or not at all.**
+    ///
+    /// Two grids a hundred units apart, each too large for one cluster. A
+    /// cluster that ran out of its own grid and mopped up part of the other
+    /// would get a bounding sphere spanning the gap — a sphere that fails every
+    /// cull and is nowhere near the geometry it claims to bound — and it is the
+    /// index buffer's order, not any distance, that would have led it there.
+    ///
+    /// The other half of the rule is
+    /// [`a_mesh_of_disjoint_triangles_closes_each_cluster_on_the_vertex_bound`]:
+    /// there every triangle is its own component and one cluster takes 21 of
+    /// them, because each fits whole.
+    #[test]
+    fn a_cluster_never_holds_part_of_a_second_component() {
+        let (grid, faces) = coplanar_grid(9);
+        let positions: Vec<[f32; 3]> = grid
+            .iter()
+            .copied()
+            .chain(grid.iter().map(|&[x, y, z]| [x + 100.0, y, z]))
+            .collect();
+        let offset = grid.len() as u32;
+        let indices: Vec<u32> = faces
+            .iter()
+            .copied()
+            .chain(faces.iter().map(|index| index + offset))
+            .collect();
+
+        let build = build_meshlets(&positions, &indices).unwrap();
+
+        assert!(
+            build.clusters().len() > 2,
+            "each grid has to be more than one cluster for a cluster to run out \
+             of one mid-way, got {} for the pair",
+            build.clusters().len()
+        );
+        for cluster in 0..build.clusters().len() {
+            let grids: BTreeSet<bool> = build
+                .cluster_indices(cluster)
+                .iter()
+                .map(|&index| index < offset)
+                .collect();
+            assert_eq!(
+                grids.len(),
+                1,
+                "cluster {cluster} holds triangles from both grids, a hundred \
+                 units apart, so its sphere spans the gap"
+            );
+        }
+        for cluster in build.clusters() {
+            assert!(
+                cluster.bounds.radius < 10.0,
+                "a cluster of a 9 x 9 grid has radius {}, so it reached the \
+                 other grid",
+                cluster.bounds.radius
+            );
+        }
+        assert_eq!(sorted(decoded(&build)), sorted(triangles_of(&indices)));
     }
 
     #[test]
@@ -873,7 +1298,7 @@ pub(crate) mod tests {
             backward.vertices(),
             "the same triangles in the opposite order land in different clusters"
         );
-        assert_eq!(decoded(&backward), triangles_of(&reversed));
+        assert_eq!(sorted(decoded(&backward)), sorted(triangles_of(&reversed)));
     }
 
     #[test]

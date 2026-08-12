@@ -255,6 +255,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`build_meshlets` grows clusters across shared edges instead of walking the
+  index buffer.** A cluster seeds on a triangle and repeatedly takes the
+  edge-adjacent triangle with the most vertex reuse, then nearest the seed's
+  centroid, then lowest index. On a 32x32 dune field the mean cluster bounding
+  sphere goes from **16.04 to 6.90** on a mesh 32 units across, with 21 of 23
+  clusters under radius 8 where **0 of 34** were before.
+
+  Adjacency rather than a space-filling curve, for two reasons: a curve sorts
+  space, so two surfaces a hair apart interleave into one cluster whose sphere
+  spans the gap; and the vertex bound — which closes most clusters — is about
+  vertex _sharing_, which adjacency measures directly and proximity only
+  predicts. Distance is measured from the **seed**, not the cluster's moving
+  centre, because a moving centre finds both ends of a strip equidistant and
+  grows into a strip as long as the mesh.
+
+  A cluster jumps to a disconnected component only if it can take the whole
+  thing. That keeps a seam-split mesh — a heap of two-triangle components —
+  clustering sensibly instead of one cluster per two triangles, and it is what
+  leaves the cooked cube, pyramid and open-box constants bit-identical, so no
+  golden moved.
+
+  It also removed a stall in the cluster DAG: levels went
+  `2048 → 1024 → 512 → 272 → 206 → 128` to a clean
+  `2048 → 1024 → 512 → 256 → 128`.
+
 - **`crcbl_scene::cluster_dag` — the crack-free cluster hierarchy topic 25
   specifies.** `build_cluster_dag` clusters the base mesh, groups neighbouring
   clusters by partitioning the **shared-edge** adjacency graph, locks each

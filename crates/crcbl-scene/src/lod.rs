@@ -44,10 +44,10 @@
 //! path and per instance elsewhere. A chain of independently clustered levels
 //! cannot do the per-cluster half, and this module does not pretend otherwise.
 //!
-//! Each level is clustered on its own: [`build_meshlets`] walks that level's
-//! own index buffer, so two levels' cluster boundaries have no relationship to
-//! each other, and the decimation between them moved and removed vertices
-//! wherever the collapses fell — including along whatever boundary the coarser
+//! Each level is clustered on its own: [`build_meshlets`] grows clusters over
+//! that level's own triangles, so two levels' cluster boundaries have no
+//! relationship to each other, and the decimation between them moved and
+//! removed vertices wherever the collapses fell — including along whatever boundary the coarser
 //! level ends up drawn on. Rendering one cluster from LOD1 beside its
 //! neighbour from LOD2 therefore puts two differently decimated versions of one
 //! shared edge next to each other, which is a crack.
@@ -283,7 +283,7 @@ fn target_triangles(base_triangles: usize, ratio: f32) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meshlet::tests::{decoded, triangles_of};
+    use crate::meshlet::tests::{decoded, sorted, triangles_of};
     use crate::simplify::tests::{height_field, spikes, torus};
 
     /// Every level's triangle count, LOD0 first.
@@ -462,8 +462,8 @@ mod tests {
             assert!(pair[1].error() >= pair[0].error());
         }
         assert_eq!(
-            decoded(chain[4].clusters()),
-            triangles_of(chain[4].indices())
+            sorted(decoded(chain[4].clusters())),
+            sorted(triangles_of(chain[4].indices()))
         );
     }
 
@@ -500,8 +500,8 @@ mod tests {
                 "LOD{level} was not clustered at all"
             );
             assert_eq!(
-                decoded(lod.clusters()),
-                triangles_of(lod.indices()),
+                sorted(decoded(lod.clusters())),
+                sorted(triangles_of(lod.indices())),
                 "LOD{level}'s clusters do not decode to its own triangles"
             );
         }
@@ -542,7 +542,10 @@ mod tests {
 
         assert_eq!(chain.len(), 1);
         assert_eq!(chain[0].indices(), indices);
-        assert_eq!(decoded(chain[0].clusters()), triangles_of(&indices));
+        assert_eq!(
+            sorted(decoded(chain[0].clusters())),
+            sorted(triangles_of(&indices))
+        );
     }
 
     #[test]

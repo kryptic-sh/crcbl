@@ -240,8 +240,10 @@ impl ClusterDag {
 /// Build a mesh's cluster DAG.
 ///
 /// `positions` and `indices` are a triangle list exactly as
-/// [`GltfPrimitive`](crate::GltfPrimitive) holds them, and become level 0
-/// verbatim. Levels are added until one of them fails to hold fewer clusters
+/// [`GltfPrimitive`](crate::GltfPrimitive) holds them, and become level 0 — its
+/// positions verbatim, and its triangles permuted into the order its clusters
+/// hold them, which is what [`DagLevel::indices`] means at every level.
+/// Levels are added until one of them fails to hold fewer clusters
 /// than the level below it, which is the point at which grouping has stopped
 /// buying anything; a mesh of a single cluster gets level 0 alone.
 ///
@@ -266,9 +268,9 @@ pub fn build_cluster_dag(
     let clusters = build_meshlets(positions, indices)?;
     let mut levels = vec![DagLevel {
         errors: vec![0.0; clusters.clusters().len()],
+        indices: clusters.all_indices(),
         clusters,
         positions: positions.to_vec(),
-        indices: indices.to_vec(),
         groups: Vec::new(),
     }];
 
@@ -342,8 +344,8 @@ fn coarsen(below: &DagLevel) -> Result<Option<(Vec<ClusterGroup>, DagLevel)>, Cl
         for parent in first..clusters.clusters().len() {
             errors.push(error);
             group.parents.push(parent as u32);
+            indices.extend(clusters.cluster_indices(parent));
         }
-        indices.extend_from_slice(faces);
     }
 
     if clusters.clusters().len() >= cluster_count {
@@ -511,7 +513,7 @@ fn cluster_adjacency(level: &DagLevel) -> Vec<BTreeMap<usize, usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::meshlet::tests::{cluster_triangles, decoded, triangles_of};
+    use crate::meshlet::tests::{cluster_triangles, decoded, sorted, triangles_of};
     use crate::simplify::tests::{dunes, height_field};
 
     /// How wide the dense fixture is. Big enough that level 0 clusters into
@@ -619,6 +621,59 @@ mod tests {
             .collect()
     }
 
+    /// Every cut reached by expanding one group at a time, deepest group first,
+    /// starting from the top level.
+    ///
+    /// A cut is *any* set of clusters covering the surface once, and swapping a
+    /// group's parents for its children turns one cut into another — which is
+    /// the definition [`cut`] applies a global error budget to. The budget is
+    /// the narrower thing, and on this fixture it never draws three levels at
+    /// once: the decimator orders collapses by cost across the whole level, so
+    /// a level's groups all report much the same error, the levels' error bands
+    /// do not overlap, and a rising threshold passes each band in turn.
+    ///
+    /// **They used to overlap for a bad reason.** While `build_meshlets` grew
+    /// clusters along the index buffer, every cluster spanned the mesh, groups
+    /// locked boundaries that ran end to end, and a group could stall — keep
+    /// every triangle it was given and carry its children's error up unchanged.
+    /// That one number then appeared in three levels' error lists at once, and
+    /// it was what a threshold cut three levels on. So the depth is not
+    /// something the budget lost; it is something a degenerate group was
+    /// providing. The DAG admits the deep cuts either way, and this reaches
+    /// them the way the definition does, by always expanding the deepest group
+    /// it can: a cut here draws level 0 in one place while most of the surface
+    /// is still at the top.
+    fn expanded_cuts(dag: &ClusterDag) -> Vec<Vec<(usize, usize)>> {
+        let top = dag.levels().len() - 1;
+        let mut drawn: BTreeSet<(usize, usize)> =
+            (0..dag.levels()[top].clusters().clusters().len())
+                .map(|cluster| (top, cluster))
+                .collect();
+        let mut cuts = vec![drawn.iter().copied().collect()];
+
+        while let Some((level, group)) = (0..top).find_map(|level| {
+            dag.levels()[level]
+                .groups()
+                .iter()
+                .find(|group| {
+                    group
+                        .parents()
+                        .iter()
+                        .all(|&parent| drawn.contains(&(level + 1, parent as usize)))
+                })
+                .map(|group| (level, group))
+        }) {
+            for &parent in group.parents() {
+                drawn.remove(&(level + 1, parent as usize));
+            }
+            for &child in group.children() {
+                drawn.insert((level, child as usize));
+            }
+            cuts.push(drawn.iter().copied().collect());
+        }
+        cuts
+    }
+
     /// Every edge of a cut's triangles, by position, and the levels of the
     /// clusters that carry it.
     fn cut_edges(dag: &ClusterDag, drawn: &[(usize, usize)]) -> BTreeMap<SharedEdge, Vec<usize>> {
@@ -699,13 +754,17 @@ mod tests {
             positions,
             "level 0 is verbatim"
         );
-        assert_eq!(dag.levels()[0].indices(), indices);
+        assert_eq!(
+            sorted(triangles_of(dag.levels()[0].indices())),
+            sorted(triangles_of(&indices)),
+            "level 0 is the base mesh's own triangles, in its clusters' order"
+        );
         assert_eq!(
             dag.levels()
                 .iter()
                 .map(|level| level.clusters().clusters().len())
                 .collect::<Vec<_>>(),
-            [34, 18, 10, 6, 5, 3],
+            [23, 17, 9, 5, 3],
             "tens of clusters at the leaves is what makes grouping possible"
         );
         assert_eq!(
@@ -713,7 +772,7 @@ mod tests {
                 .iter()
                 .map(|level| level.indices().len() / 3)
                 .collect::<Vec<_>>(),
-            [2048, 1024, 512, 272, 206, 128]
+            [2048, 1024, 512, 256, 128]
         );
         assert_levels_got_coarser(&dag);
         assert!(
@@ -738,9 +797,12 @@ mod tests {
 
         let mut mixed = 0;
         let mut deepest = 0;
-        for threshold in every_threshold(&dag) {
-            let drawn = cut(&dag, threshold);
-            let interfaces = assert_cut_is_a_crack_free_cover(&dag, &drawn, &border);
+        let budgeted: Vec<Vec<(usize, usize)>> = every_threshold(&dag)
+            .into_iter()
+            .map(|threshold| cut(&dag, threshold))
+            .collect();
+        for drawn in budgeted.iter().chain(&expanded_cuts(&dag)) {
+            let interfaces = assert_cut_is_a_crack_free_cover(&dag, drawn, &border);
             let levels: BTreeSet<usize> = drawn.iter().map(|&(level, _)| level).collect();
             if levels.len() > 1 {
                 mixed += 1;
@@ -755,13 +817,30 @@ mod tests {
 
         assert!(
             mixed > 5,
-            "only {mixed} of the thresholds gave a cut of more than one level, \
-             so this is mostly testing uniform cuts"
+            "only {mixed} of the cuts held more than one level, so this is \
+             mostly testing uniform cuts"
         );
         assert!(
             deepest >= 3,
-            "no threshold drew three levels at once, so the deepest interface \
-             this checked was one level to the next"
+            "no cut drew three levels at once, so the deepest interface this \
+             checked was one level to the next"
+        );
+        // The budgeted cuts are the ones selection will actually ask for, so
+        // they have to be more than the two ends of the DAG on their own.
+        assert!(
+            budgeted
+                .iter()
+                .filter(|drawn| {
+                    drawn
+                        .iter()
+                        .map(|&(level, _)| level)
+                        .collect::<BTreeSet<_>>()
+                        .len()
+                        > 1
+                })
+                .count()
+                > 5,
+            "an error budget almost never draws a mixed cut on this fixture"
         );
     }
 
@@ -777,7 +856,7 @@ mod tests {
         // Inside the spread of level 0's group errors, so some groups are still
         // drawn as their four leaf clusters and their neighbours are already
         // drawn as the two clusters that replaced them.
-        let threshold = 0.93;
+        let threshold = 0.66;
         let drawn = cut(&dag, threshold);
 
         let levels: BTreeSet<usize> = drawn.iter().map(|&(level, _)| level).collect();
@@ -986,13 +1065,13 @@ mod tests {
     /// grouping on shared edges cannot.
     #[test]
     fn clusters_that_only_nearly_touch_are_never_grouped() {
-        // A size at which the greedy clustering happens to close a cluster
-        // exactly where the first sheet ends. It does not in general — the walk
-        // follows index order and knows nothing about connected components, so
-        // at most sizes one cluster holds triangles from both sheets and the
-        // two are then genuinely edge-adjacent through it. That is a weakness
-        // of `build_meshlets`, which its own docs record, and the assertion
-        // below is what stops this test quietly becoming vacuous under it.
+        // No cluster holds triangles from both sheets, and at this size that is
+        // structural rather than lucky: `build_meshlets` grows a cluster across
+        // shared edges, and it takes a second connected component only when it
+        // can take the whole of it — a sheet this size is far too large. The
+        // assertion below is what holds that, because a cluster spanning both
+        // sheets would make them edge-adjacent through it and leave this test
+        // saying nothing.
         let (sheet, faces) = height_field(15, dunes);
         let positions: Vec<[f32; 3]> = sheet
             .iter()

@@ -5804,16 +5804,46 @@ The chain-versus-DAG question is decided — the user chose the DAG on 2026-08-1
   one global threshold and is valid _because_ it is global. On the GPU both
   sides of a decision must be evaluated against the **same** bounding sphere —
   the group's — or cracks come back. This is the trap in the next slice.
-- **The spatial pre-sort in `build_meshlets` is now a real prerequisite for
-  selection quality**, and it is measured rather than suspected. The greedy
-  index-order walk makes each leaf cluster roughly one full-width grid row, so
-  every group spans the whole mesh and contains domes and valleys in the same
-  proportion: level 1's group errors span only 0.79–0.96. Region-varying detail
-  is averaged away, so a threshold mostly cuts between two adjacent levels
-  rather than picking fine detail where the surface is curved. **The DAG is
-  structurally correct without the pre-sort and its selection is not worth much
-  with it missing** — so the pre-sort should land before, or with, the GPU
-  slice.
+- **Corrected: compact clusters are not what makes group errors vary by region,
+  and this entry previously said they were.** The pre-sort landed and the
+  level-1 group-error spread **narrowed** — 0.79–0.96 before, 0.63–0.68 after.
+  The cause is not clustering at all: `simplify_with_locked_edges` orders
+  collapses by cost across the whole level and stops at a **triangle count**, so
+  the error frontier is uniform by construction and every group's max lands near
+  the same value whatever shape its clusters are. Checked against the hypothesis
+  directly, on a fixture whose dune amplitude ramps across the mesh: the spread
+  came out narrower still. An error-**targeted** decimator is what would vary
+  it.
+
+  **But that matters less than it looks**, and the reason is worth stating
+  before someone builds error targeting to fix a non-problem: runtime selection
+  projects a group's error by **distance**, so on a large mesh receding from the
+  camera the near and far groups take different cut depths from the _same_
+  stored error. The host-side `cut` used in the DAG's tests has no distance term
+  — it is one global threshold, which is exactly why it looks flat. Error
+  targeting is a quality refinement (levels evenly spaced in error), not a
+  prerequisite for per-cluster selection to pay off.
+
+- **The pre-sort did fix something real, just not that.** Growing clusters
+  across shared edges took the dune fixture's mean cluster sphere from **16.04
+  to 6.90** on a mesh 32 units across, 21 of 23 clusters under radius 8 where 0
+  of 34 were before, and removed a stall: DAG levels went
+  `2048 → 1024 → 512 → 272 → 206 → 128` (two steps nowhere near halving, a group
+  where every edge was locked carrying its children's error up unchanged) to a
+  clean `2048 → 1024 → 512 → 256 → 128`.
+
+- **2 of 23 dune clusters are still interstitial scraps** spanning the mesh
+  (radii 11.1 and 14.7). Discs grown one at a time do not tile a plane; removing
+  them needs a partitioner that grows every cluster at once — METIS-class, or
+  Lloyd relaxation over seeds. Pinned by the `compact == 21` assertion so it
+  cannot silently worsen.
+
+- **Cluster adjacency is by shared index, not welded position.** A mesh split by
+  UV seams or hard normals is many components; growth cannot cross a seam, so
+  locality on seam-heavy real assets is worse than on these fixtures. Position
+  welding would fix it and **would** reorder the cooked cluster constants and
+  move the rendered frame.
+
 - **`group_clusters` optimises nothing globally.** It is a greedy
   most-shared-edges walk where a METIS-class partitioner would minimise the edge
   cut, so group boundaries are longer than they need to be — and a group
