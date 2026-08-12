@@ -45,6 +45,61 @@ Rules that keep the two from diverging into two renderers:
   are the other potential consumers; neither is MVP and neither may assume the
   structure exists.
 
+## Many lights: the list and how it is gathered (decided 2026-08-13)
+
+The table above names shadows for spot and point lights, and **the engine has
+exactly one light** — a single `DirectionalLight` (direction, colour) in the
+frame block. There was no light list, no light culling and no count budget
+specified anywhere, so the shadow rows above were not implementable as written.
+This section is that missing half.
+
+### Clustered forward
+
+Lights live in an SSBO of rows, exactly as instances and materials already do,
+and a **compute pass assigns them to a froxel grid** — screen tiles by depth
+slices — which the fragment stage indexes by its own position. This is the same
+discipline §3.3 already uses for instances: a compute pass produces compacted
+lists, the draw reads them, the CPU uploads deltas and nothing else.
+
+Chosen over the alternatives for reasons that are about this engine rather than
+taste:
+
+- **Tiled / Forward+** is simpler and degrades badly with depth range: a tile
+  spanning a near wall and a far skybox gathers every light in between. The
+  samples that motivate lighting (lumen, towers) are exactly that shape.
+- **Deferred** conflicts with two rules already locked here: "one material
+  model, one BRDF, one set of inputs" shared with the ray-traced twin, and the
+  post stack running identically after either path. It also fights MSAA and
+  transparency, and it would make the raster path structurally unlike the
+  ray-traced one, which is the divergence this topic exists to prevent.
+- **Clustered forward needs nothing of a device** — a compute pass and two
+  storage buffers — so it is the same code on all four backends, which is the
+  constraint every other path in this engine is held to.
+
+### What it costs and what is budgeted
+
+- **A light is a row**: position, radius, colour premultiplied by intensity,
+  type, and for a spot its direction and cone angles. A directional light is a
+  row too, flagged as affecting every cluster, so the sun stops being a special
+  case in the shader.
+- **A cluster holds a bounded number of light indices.** Overflow is **counted
+  and reported**, never silently dropped — topic 40's counters are where that
+  number surfaces, and a scene that overflows should be visible in the debug
+  panel rather than mysteriously dark.
+- **Shadowed lights are a subset, and a small one.** Shadow atlas space is the
+  scarce resource: the sun's cascades, then a stated number of spot maps and
+  point cube maps, chosen by a rule the frame can state (nearest, brightest,
+  largest screen influence — the rule is the next slice's decision and belongs
+  in this file when taken). An unshadowed light still lights; it just does not
+  occlude.
+
+### What this does not decide
+
+Shadow-atlas allocation across light types, the selection rule for which lights
+get maps, and whether point lights use a cube map or six atlas tiles. Each wants
+the light list to exist first, and each is a decision to record here when the
+slice that needs it arrives.
+
 ## Shadows (MVP — lands with P7)
 
 - **Sun: cascaded shadow maps** (CSM), 2–3 cascades, stable (texel-snapped)

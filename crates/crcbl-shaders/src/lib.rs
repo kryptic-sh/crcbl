@@ -179,6 +179,10 @@ pub mod draw_gen;
 /// shader declares.
 pub mod mesh;
 
+/// The light row and froxel grid `light_cluster.slang` fills and `mesh.slang`
+/// shades from, in the layouts those shaders declare.
+pub mod light;
+
 /// The cluster record `mesh_cluster.slang` indexes, in the layout that shader
 /// declares. `crcbl_scene::meshlet` is what builds them.
 pub mod meshlet;

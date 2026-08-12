@@ -44,6 +44,7 @@ mod draw_gen;
 mod frame_loop_sequences;
 mod harness;
 mod indirect;
+mod lights;
 mod menu;
 mod mesh;
 mod mesh_shader;

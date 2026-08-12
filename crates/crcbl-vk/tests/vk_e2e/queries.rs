@@ -20,8 +20,10 @@ use crcbl_hal::{CommandEncoderDesc, Features, PresentInfo, QueryKind, QuerySetDe
 /// takes to see all of them.
 ///
 /// Three compute passes per cull — one cull for the camera and one per shadow
-/// cascade — then the depth-only shadow pass, the colour pass and the tonemap.
-const TIMED_PASSES: u32 = 3 * (1 + crcbl_render::shadow::CASCADES as u32) + 3;
+/// cascade — plus topic 18's clustering dispatch, which the camera has and no
+/// cascade does, then the depth-only shadow pass, the colour pass and the
+/// tonemap.
+const TIMED_PASSES: u32 = 3 * (1 + crcbl_render::shadow::CASCADES as u32) + 4;
 
 /// Timestamp queries, if the device has them: the profiler HUD's foundation,
 /// and the seam says it degrades rather than breaks without them.
@@ -170,8 +172,13 @@ fn per_pass_gpu_timers_report_real_numbers() {
     // whose passes stopped being recorded is a failure here and not a shorter
     // HUD nobody counted.
     let mut expected: Vec<&str> = Vec::new();
-    for _ in 0..=crcbl_render::shadow::CASCADES {
+    for cascade in 0..=crcbl_render::shadow::CASCADES {
         expected.extend(["clear-counters", "cull", "draw-args"]);
+        if cascade == 0 {
+            // The camera's alone: a cascade shades nothing, so one froxel grid
+            // per camera is the whole of what the light list costs a frame.
+            expected.push("light-cluster");
+        }
     }
     expected.extend(["shadow", "forward", "tonemap"]);
     assert_eq!(

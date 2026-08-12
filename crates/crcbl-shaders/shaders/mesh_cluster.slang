@@ -138,20 +138,37 @@ struct FrameUniforms
 {
     float4x4 view_proj;
     float4 camera_position;
-    float4 light_direction;
-    float4 light_color;
     float4 ambient;
     float4x4 shadow_view_proj[SHADOW_CASCADES];
     float4 cascade_far;
     float4 shadow_params;
-    /// `docs/plan/25-lod.md`'s selection numbers: `x` pixels per unit at one
-    /// unit, `y` the budget a group starts expanding over, `z` the budget it is
-    /// held down to, `w` padding.
+    /// The froxel grid's extent: `x` across, `y` down, `z` depth slices, `w`
+    /// padding.
     ///
-    /// **Read by nothing here since hysteresis landed** — the projection moved
-    /// to `draw_gen.slang`, which owns the state it needs — and declared because
-    /// this block is `mesh.slang`'s and the two declarations are held identical.
-    float4 lod_params;
+    /// **Read by nothing here** — nothing in this file shades — and declared
+    /// because this block is `mesh.slang`'s and the two declarations are held
+    /// identical. The slot held `docs/plan/25-lod.md`'s selection numbers until
+    /// the light list arrived, by which time no stage read those either.
+    uint4 cluster_grid;
+};
+
+/// Matching `struct GpuLight` in `mesh.slang`.
+///
+/// Declared here and read by nothing, for `materials`' reason exactly: the
+/// layout this pipeline is built with carries the light bindings because
+/// `mesh.slang`'s fragment stage reads them, and Slang's Metal target numbers a
+/// stage's resources by *declaration order* in the source. A file that skipped
+/// them would put its own buffers at indices the backend binds something else
+/// at.
+struct GpuLight
+{
+    float4 position;
+    float4 color;
+    float4 direction;
+    uint kind;
+    float cos_inner;
+    uint pad0;
+    uint pad1;
 };
 
 /// Matching `struct GpuInstance` in `mesh.slang`.
@@ -486,6 +503,16 @@ RWStructuredBuffer<uint> cluster_selection;
 /// record names a group and this says what that group decided.
 [[vk::binding(19, 0)]]
 StructuredBuffer<uint> group_state;
+
+/// The frame's light list, on `materials`' terms exactly: the fragment stage
+/// reads it, this file does not, and the declaration is what keeps the Metal
+/// argument table aligned with the layout.
+[[vk::binding(20, 0)]]
+StructuredBuffer<GpuLight> lights;
+
+/// The froxel grid, for the same reason.
+[[vk::binding(21, 0)]]
+StructuredBuffer<uint> cluster_lights;
 
 /// What the mesh stage emits and `mesh.slang`'s `fragmentMain` consumes.
 ///

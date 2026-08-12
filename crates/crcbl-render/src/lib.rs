@@ -131,6 +131,8 @@ pub mod forward;
 pub mod graph;
 pub mod instance_pool;
 pub mod layers;
+pub mod light;
+pub mod light_grid;
 pub mod material_table;
 pub mod menu;
 pub mod mesh_pool;
@@ -176,6 +178,8 @@ pub use instance_pool::{
     Instance, InstanceHandle, InstancePool, InstancePoolDesc, InstancePoolError,
 };
 pub use layers::{Layer, LayerStack, Parallax};
+pub use light::{Light, PointLight, SpotLight, sun_row};
+pub use light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
 pub use material_table::{
     Material, MaterialHandle, MaterialTable, MaterialTableDesc, MaterialTableError,
 };

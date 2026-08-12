@@ -1240,7 +1240,11 @@ impl DrawGen {
 }
 
 /// A uniform-buffer layout entry for the compute stage.
-const fn uniform(binding: u32) -> BindGroupLayoutEntry {
+///
+/// Shared with [`crate::light_grid`], which builds a compute pass on exactly
+/// these terms: one uniform block of parameters and a handful of storage
+/// buffers, in the shader's declaration order.
+pub(crate) const fn uniform(binding: u32) -> BindGroupLayoutEntry {
     BindGroupLayoutEntry {
         binding,
         visibility: ShaderStages::COMPUTE,
@@ -1253,7 +1257,7 @@ const fn uniform(binding: u32) -> BindGroupLayoutEntry {
 /// A storage-buffer layout entry for the compute stage. `read_only` is the
 /// shader's own `StructuredBuffer` versus `RWStructuredBuffer`, so it is the
 /// truth rather than a hint.
-const fn storage(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
+pub(crate) const fn storage(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
     BindGroupLayoutEntry {
         binding,
         visibility: ShaderStages::COMPUTE,
@@ -1267,7 +1271,7 @@ const fn storage(binding: u32, read_only: bool) -> BindGroupLayoutEntry {
 }
 
 /// A whole-buffer bind group entry.
-const fn bound(binding: u32, buffer: BufferHandle) -> BindGroupEntry {
+pub(crate) const fn bound(binding: u32, buffer: BufferHandle) -> BindGroupEntry {
     BindGroupEntry {
         binding,
         array_index: 0,
@@ -1277,7 +1281,7 @@ const fn bound(binding: u32, buffer: BufferHandle) -> BindGroupEntry {
 
 /// Creates a compute pipeline from `shader`'s single compute entry point,
 /// destroying the module whether or not the pipeline was created.
-fn compute_pipeline(
+pub(crate) fn compute_pipeline(
     device: &dyn Device,
     label: &str,
     shader: &crcbl_shaders::Shader,

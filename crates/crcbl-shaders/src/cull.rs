@@ -26,18 +26,20 @@ pub const PLANE_COUNT: usize = 6;
 
 /// Words in the frame's culling-statistics buffer.
 ///
-/// **One buffer, two counters, and topic 03 §3.6's single permitted readback.**
-/// `cull.slang` adds surviving instances into
-/// [`INSTANCE_SURVIVOR_WORD`] and `mesh_cluster.slang`'s amplification stage
-/// adds surviving clusters into [`CLUSTER_SURVIVOR_WORD`]; a counter of its own
-/// for the second would be a second buffer to zero, to barrier and to copy back
-/// every frame.
+/// **One buffer, and topic 03 §3.6's single permitted readback.**
+/// `cull.slang` adds surviving instances into [`INSTANCE_SURVIVOR_WORD`],
+/// `mesh_cluster.slang`'s amplification stage adds surviving clusters into
+/// [`CLUSTER_SURVIVOR_WORD`], and `light_cluster.slang` adds the light
+/// assignments its budget refused into
+/// [`CLUSTER_OVERFLOW_WORD`](crate::light::CLUSTER_OVERFLOW_WORD). A counter of
+/// its own for any of them would be another buffer to zero, to barrier and to
+/// copy back every frame.
 ///
 /// `clear_counters.slang` is told this number rather than assuming it — see
 /// [`crate::clear_counters::Params::stats_words`] — because a clearing pass
-/// that zeroed a prefix would leave one of the two carrying the previous
-/// frame's total, which reads as a plausible count rather than as a failure.
-pub const STATS_WORDS: u32 = 2;
+/// that zeroed a prefix would leave one of them carrying the previous frame's
+/// total, which reads as a plausible count rather than as a failure.
+pub const STATS_WORDS: u32 = 3;
 
 /// Which word of the culling statistics counts surviving **instances** — the
 /// one `cull.slang` writes.
@@ -51,8 +53,9 @@ pub const INSTANCE_SURVIVOR_WORD: u32 = 0;
 /// else in the frame culls a cluster.
 pub const CLUSTER_SURVIVOR_WORD: u32 = 1;
 
-// Two words, and each counter owns one of them. A third counter would need
-// `STATS_WORDS` raised with it, and this is what says so at build time.
+// Each counter owns one word. A further counter would need `STATS_WORDS` raised
+// with it, and this is what says so at build time. The light grid's own word is
+// asserted the same way beside its declaration in [`crate::light`].
 const _: () = assert!(INSTANCE_SURVIVOR_WORD < STATS_WORDS);
 const _: () = assert!(CLUSTER_SURVIVOR_WORD < STATS_WORDS);
 const _: () = assert!(INSTANCE_SURVIVOR_WORD != CLUSTER_SURVIVOR_WORD);
@@ -206,6 +209,40 @@ mod tests {
                 "`struct {name}` was not found in mesh.slang, so this comparison checked nothing"
             );
             for (source, text) in others {
+                assert_eq!(
+                    declared,
+                    struct_fields(text, name),
+                    "`struct {name}` differs between mesh.slang and {source}; the two shaders \
+                     would read the same buffer with different layouts"
+                );
+            }
+        }
+
+        // `FrameUniforms` and `GpuLight` have a narrower spread: the frame block
+        // is the raster and mesh pipelines' shared uniform buffer, and the light
+        // row is read by the fragment stage and written by the clustering pass.
+        // A drift in either is the same silent class as the two above — one
+        // buffer, two layouts — so each pair is compared over the files that
+        // really declare it rather than over all of them.
+        for (name, files) in [
+            ("FrameUniforms", &[("mesh_cluster.slang", cluster)][..]),
+            (
+                "GpuLight",
+                &[
+                    ("mesh_cluster.slang", cluster),
+                    (
+                        "light_cluster.slang",
+                        include_str!("../shaders/light_cluster.slang"),
+                    ),
+                ][..],
+            ),
+        ] {
+            let declared = struct_fields(mesh, name);
+            assert!(
+                !declared.is_empty(),
+                "`struct {name}` was not found in mesh.slang, so this comparison checked nothing"
+            );
+            for (source, text) in files {
                 assert_eq!(
                     declared,
                     struct_fields(text, name),

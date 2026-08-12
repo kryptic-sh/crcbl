@@ -762,9 +762,23 @@ mod tests {
                 // `SamplerComparisonState` in the same `s#` space as a
                 // `SamplerState`, which is why it is one more `Sampler` here
                 // rather than a class of its own.
+                //
+                // The last two are topic 18's light list and froxel grid, at
+                // bindings 20 and 21 — another gap `mesh_cluster.slang` owns and
+                // D3D12 likewise does not see, so they are `t7` and `t8`. Both
+                // are `StructuredBuffer` rather than `RW`, because this file
+                // only reads what `light_cluster.slang` wrote.
                 &[
-                    Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler,
+                    Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler, Srv, Srv,
                 ],
+            ),
+            (
+                "light_cluster",
+                &crcbl_shaders::LIGHT_CLUSTER,
+                &["computeMain"],
+                // The parameters, the light list it reads, the grid it fills and
+                // the culling statistics it counts overflow into.
+                &[Cbv, Srv, Uav, Uav],
             ),
             (
                 "sprite",

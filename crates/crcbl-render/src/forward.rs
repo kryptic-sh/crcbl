@@ -154,6 +154,8 @@ use crate::cull::Frustum;
 use crate::draw_gen::{DrawGen, DrawGenDesc};
 use crate::graph::{BufferId, ImageId, ImportedBuffer, ImportedImage, RenderGraph};
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc};
+use crate::light::{Light, sun_row};
+use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
 use crate::shadow::{self, Cascades};
@@ -297,6 +299,29 @@ const SHADOW_ATLAS_BINDING: u32 = 15;
 
 /// The bind-group slot the shadow atlas's **comparison** sampler is bound to.
 const SHADOW_SAMPLER_BINDING: u32 = 16;
+
+/// The bind-group slot topic 18's light list is read through.
+///
+/// **20, and the gap below it is `mesh_cluster.slang`'s** on
+/// [`SHADOW_ATLAS_BINDING`]'s terms exactly: 17 to 19 are that file's, declared
+/// by the mesh and amplification stages of a pipeline this file's fragment stage
+/// completes, so the light bindings resume above them. Both files declare both
+/// numbers, because a binding is a property of the source and Metal numbers a
+/// stage's resources by declaration order.
+const LIGHT_LIST_BINDING: u32 = 20;
+
+/// The bind-group slot the froxel grid is read through.
+const LIGHT_GRID_BINDING: u32 = 21;
+
+/// Rows the light list holds — the sun and every [`Light`] a caller set.
+///
+/// Sized like the pools around it: reserved at start-up, never grown, and
+/// generous against a scene with far more lights than a froxel's budget will
+/// ever show at once. Overflowing *this* is refused rather than counted, because
+/// a light missing from the list is missing from every froxel and no counter in
+/// the frame would say so — see [`LightGrid::begin_frame`], which is where that
+/// distinction is argued.
+const POOL_LIGHT_CAPACITY: u32 = 1024;
 
 /// The cube's bucket, the pyramid's and the open box's. Named rather than
 /// written as numbers where the bucket table is filled in.
@@ -588,9 +613,9 @@ pub struct ForwardRenderer {
     /// [`LOD_HOLD_RATIO`] until
     /// [`ForwardRenderer::set_lod_hold_ratio`] says otherwise.
     lod_hold_ratio: f32,
-    /// What [`begin_frame`](ForwardRenderer::begin_frame) last wrote into
-    /// [`mesh::FrameUniforms::lod_params`], kept so a reader can compute the
-    /// same cut host-side without re-deriving it from the camera.
+    /// What [`begin_frame`](ForwardRenderer::begin_frame) last handed
+    /// [`DrawGen::begin_frame`], kept so a reader can compute the same cut
+    /// host-side without re-deriving it from the camera.
     ///
     /// Pixels per unit, the budget a group starts expanding over, and the budget
     /// it is held down to — `docs/plan/25-lod.md`'s hysteresis, and
@@ -604,6 +629,24 @@ pub struct ForwardRenderer {
     /// takes both pairs from here rather than re-deriving the bias, which would
     /// be comparing two copies of one arithmetic instead of two selections.
     shadow_lod_params: [f32; 3],
+
+    /// Topic 18's light list and froxel grid, and the compute pass between them.
+    lights: LightGrid,
+    /// The lights a caller set beside the sun, as
+    /// [`ForwardRenderer::set_lights`] was handed them.
+    ///
+    /// Kept rather than converted on the way in, because a row is the *frame's*
+    /// artefact: the sun arrives per frame at
+    /// [`begin_frame`](ForwardRenderer::begin_frame) and is row 0, so the list a
+    /// frame uploads cannot be assembled until then.
+    extra_lights: Vec<Light>,
+    /// This frame's froxel grid, as [`begin_frame`](ForwardRenderer::begin_frame)
+    /// decided it from the viewport and the camera.
+    ///
+    /// Held rather than recomputed at [`ForwardRenderer::add_passes`], because
+    /// the number of froxels the dispatch covers and the number the frame block
+    /// tells the fragment stage about have to be the same one.
+    grid: Grid,
 
     // Per-frame uniforms, one set per frame in flight.
     uniforms: Vec<BufferHandle>,
@@ -746,6 +789,10 @@ struct Rollback {
     /// The cluster buffers, which own three buffers and are built on the
     /// mesh-shader path alone.
     clusters: Option<ClusterPool>,
+    /// Topic 18's light list and froxel grid, which own a pipeline and a ring of
+    /// three buffers — and which clean themselves up on their own failure path,
+    /// so this only carries one that was built.
+    lights: Option<LightGrid>,
 }
 
 impl Rollback {
@@ -785,6 +832,9 @@ impl Rollback {
         for draws in self.shadow_draws {
             draws.destroy(device);
         }
+        if let Some(lights) = self.lights {
+            lights.destroy(device);
+        }
         if let Some(draws) = self.draws {
             draws.destroy(device);
         }
@@ -817,6 +867,16 @@ struct SharedBindings<'a> {
     clusters: Option<&'a ClusterPool>,
     culls_clusters: bool,
     shadow_sampler: SamplerHandle,
+    /// Bindings [`LIGHT_LIST_BINDING`] and [`LIGHT_GRID_BINDING`], this frame's
+    /// slots of the light ring.
+    ///
+    /// Shared rather than per-group, unlike the instance array beside them, and
+    /// that is the claim: **a cascade shades nothing**, so it reads the same
+    /// list and the same grid the colour pass does — the depth-only pipeline
+    /// simply never looks. Two buffers per pass would be two clustering
+    /// dispatches for one camera.
+    lights: BufferHandle,
+    light_grid: BufferHandle,
 }
 
 /// The half of a mesh-layout bind group that differs between the colour pass and
@@ -1021,6 +1081,18 @@ impl MeshGroup {
                 resource: BindingResource::whole_buffer(state),
             });
         }
+        // Topic 18's pair, on every path and in every group — see the layout,
+        // which has no configuration that omits them either.
+        entries.push(BindGroupEntry {
+            binding: LIGHT_LIST_BINDING,
+            array_index: 0,
+            resource: BindingResource::whole_buffer(shared.lights),
+        });
+        entries.push(BindGroupEntry {
+            binding: LIGHT_GRID_BINDING,
+            array_index: 0,
+            resource: BindingResource::whole_buffer(shared.light_grid),
+        });
         entries
     }
 }
@@ -1727,6 +1799,40 @@ impl ForwardRenderer {
             });
         }
 
+        // Topic 18's light list and froxel grid, last of all because
+        // `mesh_cluster.slang` reaches 19 and both files declare these two above
+        // it. Bound on **every** path and in every group, unlike the four
+        // conditional ranges above: `mesh.slang`'s fragment stage reads them
+        // whatever geometry produced the primitive, so there is no configuration
+        // in which the layout can omit them.
+        //
+        // `geometry` joins `FRAGMENT` in the visibility for binding 7's reason
+        // exactly: Slang's Metal backend materialises every global into every
+        // entry point, so the vertex and mesh stages take these buffers whether
+        // they read them or not.
+        mesh_entries.push(BindGroupLayoutEntry {
+            binding: LIGHT_LIST_BINDING,
+            visibility: geometry.union(ShaderStages::FRAGMENT),
+            kind: BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
+        mesh_entries.push(BindGroupLayoutEntry {
+            binding: LIGHT_GRID_BINDING,
+            visibility: geometry.union(ShaderStages::FRAGMENT),
+            kind: BindingKind::StorageBuffer {
+                // **Read-only here**, and written by the clustering pass through
+                // a layout of its own. The graph is what orders the two.
+                read_only: true,
+                dynamic: false,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
+
         let mesh_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("mesh frame"),
             entries: &mesh_entries,
@@ -1930,27 +2036,47 @@ impl ForwardRenderer {
             })
             .collect();
 
+        // Topic 18's light list and the froxel grid its compute pass fills.
+        //
+        // Built here rather than beside the cull because it needs the
+        // culling-statistics ring: its overflow counter is a word of that
+        // buffer, which is what keeps topic 03 §3.6's readback at one.
+        let lights = LightGrid::new(
+            device,
+            &LightGridDesc {
+                label: Some("lights"),
+                frames: instance_buffers.len(),
+                lights: POOL_LIGHT_CAPACITY,
+                froxels: FROXEL_CAPACITY,
+                stats: &cull_stats,
+            },
+        )?;
+        rollback.lights = Some(lights);
+        let lights = rollback.lights.as_ref().expect("just stored");
+
         let mut uniforms = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut mesh_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut shadow_uniforms = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut shadow_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut shadow_selection = Vec::with_capacity(FRAMES_IN_FLIGHT);
-        // Everything a group of this layout names that is the same in all of
-        // them. The per-group half is what `MeshGroup` below varies, and the two
-        // exist so the colour pass's group and the shadow pass's are one
-        // description rather than two that agree today.
-        let shared = SharedBindings {
-            vertices,
-            draw_constants,
-            mesh_table,
-            materials: material_buffer,
-            page: base_color_page.view,
-            page_sampler: base_color_sampler,
-            clusters: rollback.clusters.as_ref(),
-            culls_clusters,
-            shadow_sampler,
-        };
         for (frame, &slot_instances) in instance_buffers.iter().enumerate() {
+            // Everything a group of this layout names that is the same in all of
+            // this frame's. The per-group half is what `MeshGroup` below varies,
+            // and the two exist so the colour pass's group and the shadow pass's
+            // are one description rather than two that agree today.
+            let shared = SharedBindings {
+                vertices,
+                draw_constants,
+                mesh_table,
+                materials: material_buffer,
+                page: base_color_page.view,
+                page_sampler: base_color_sampler,
+                clusters: rollback.clusters.as_ref(),
+                culls_clusters,
+                shadow_sampler,
+                lights: lights.lights(frame),
+                light_grid: lights.grid(frame),
+            };
             let buffer = device.create_buffer(&BufferDesc {
                 label: Some("mesh frame uniforms"),
                 size: mesh::FRAME_UNIFORMS_SIZE as u64,
@@ -2355,6 +2481,17 @@ impl ForwardRenderer {
             // selects nothing at all, and there is no frame yet to select for.
             lod_params: [0.0, 0.0, 0.0],
             shadow_lod_params: [0.0, 0.0, 0.0],
+            lights: rollback.lights.take().expect("the light grid was built"),
+            extra_lights: Vec::new(),
+            // Overwritten by the first `begin_frame` on `lod_params`' terms: a
+            // one-froxel grid is the smallest legal one, and there is no
+            // viewport yet to size a real one against.
+            grid: Grid {
+                x: 1,
+                y: 1,
+                slices: 1,
+                tile_pixels: 1,
+            },
             mesh_groups,
             frame: 0,
             mesh_layout,
@@ -2786,21 +2923,46 @@ impl ForwardRenderer {
         for (matrix, cascade) in shadow_view_proj.iter_mut().zip(&cascades.view_proj) {
             *matrix = cascade.to_cols_array();
         }
+        // **Topic 18's light list, and the sun is row 0 of it.** Its direction
+        // and colour were two fields of the block below until the list existed;
+        // `sun_row` normalises exactly as this function did, so the row carries
+        // the same bits and `mesh.slang`'s loop over one directional light is
+        // the same arithmetic the single-light form performed. The goldens are
+        // what say so.
+        //
+        // Rebuilt every frame rather than kept: the sun arrives per frame, and a
+        // cached list would be a second place for it to be stale.
+        let mut rows = Vec::with_capacity(1 + self.extra_lights.len());
+        rows.push(sun_row(light));
+        rows.extend(self.extra_lights.iter().map(Light::row));
+
+        // The grid this frame's viewport and camera get. An orthographic camera
+        // has no view depth to slice by — its `clip.w` is 1 everywhere — so it
+        // runs with one slice, which `light_cluster.slang` builds a different
+        // way rather than pretending it is a perspective frustum.
+        let perspective = !camera.projection.is_orthographic();
+        self.grid = Grid::for_frame(extent, perspective, self.lights.froxel_capacity());
+        self.lights.begin_frame(
+            device,
+            self.frame,
+            &rows,
+            self.grid,
+            FrameView {
+                extent,
+                view_projection,
+                eye: camera.eye,
+                perspective,
+            },
+        )?;
+
         let uniforms = mesh::FrameUniforms {
             view_proj: view_projection.to_cols_array(),
             camera_position: camera.eye.extend(1.0).to_array(),
-            light_direction: direction.extend(0.0).to_array(),
-            light_color: light.color.extend(0.0).to_array(),
             ambient: light.ambient.extend(0.0).to_array(),
             shadow_view_proj,
             cascade_far: cascades.far,
             shadow_params: Cascades::params(),
-            lod_params: [
-                self.lod_params[0],
-                self.lod_params[1],
-                self.lod_params[2],
-                0.0,
-            ],
+            cluster_grid: self.grid.to_frame_block(),
         };
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
 
@@ -3060,6 +3222,71 @@ impl ForwardRenderer {
         true
     }
 
+    /// The lights in the frame **beside the sun**, which
+    /// [`begin_frame`](Self::begin_frame) still takes on its own.
+    ///
+    /// `docs/plan/18-render-features.md`'s light list, minus its first row: the
+    /// sun is row 0 of every frame's list and the ones set here follow it, in
+    /// the order given. That order is the one a froxel keeps a prefix of when it
+    /// runs out of budget — see [`ForwardRenderer::light_capacity`] and the
+    /// overflow counter beside it — so it is a caller's lever and not an
+    /// accident.
+    ///
+    /// The sun keeps a parameter of its own because it is the light that owns
+    /// the ambient term and the shadow cascades, neither of which a [`Light`]
+    /// has. What it stopped being is a special case in the *shader*, which is
+    /// what the list bought.
+    ///
+    /// Takes effect at the next [`begin_frame`](Self::begin_frame), which is
+    /// what uploads the rows.
+    ///
+    /// # Panics
+    ///
+    /// If there are more lights than [`ForwardRenderer::light_capacity`] leaves
+    /// room for once the sun has its row. Refused rather than truncated: a light
+    /// missing from the list is missing from every froxel, and **no counter in
+    /// the frame would report it** — the overflow counter counts what a froxel's
+    /// budget refused, which is a different number.
+    pub fn set_lights(&mut self, lights: &[Light]) {
+        assert!(
+            lights.len() < self.lights.capacity() as usize,
+            "{} lights beside the sun, in a list of {}",
+            lights.len(),
+            self.lights.capacity()
+        );
+        self.extra_lights.clear();
+        self.extra_lights.extend_from_slice(lights);
+    }
+
+    /// Rows the light list holds, the sun's included.
+    #[must_use]
+    pub const fn light_capacity(&self) -> u32 {
+        self.lights.capacity()
+    }
+
+    /// This frame's froxel grid, as [`begin_frame`](Self::begin_frame) sized it
+    /// from the viewport and the camera.
+    ///
+    /// Exposed for the reason [`lod_params`](Self::lod_params) is: a test that
+    /// wants to know which froxel a point was shaded out of has to use the grid
+    /// the frame really used, and re-deriving it would be a second copy of the
+    /// arithmetic rather than a reading of the first.
+    #[must_use]
+    pub const fn grid(&self) -> Grid {
+        self.grid
+    }
+
+    /// `frame`'s froxel grid buffer, for a test copying out what the clustering
+    /// pass decided.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    #[must_use]
+    pub fn light_grid_buffer(&self, frame: usize) -> BufferHandle {
+        self.lights.grid(frame)
+    }
+
     /// The pixel budget the descent compares a group's projected error against.
     ///
     /// One pixel until this is called — see the constant this crate keeps it
@@ -3267,6 +3494,17 @@ impl ForwardRenderer {
             })
             .collect();
 
+        // Topic 18's clustering, **after the pair above and before anything
+        // draws**. After, because the clearing dispatch is what zeroes the
+        // overflow counter this pass adds to, and the two are ordered by the
+        // graph out of the one id they both declare — which is why `stats` is
+        // the id the draw generator handed back rather than a second import of
+        // the same buffer. It has no other dependency on the cull: lights are
+        // assigned to froxels, and a froxel is a property of the camera.
+        let light_grid =
+            self.lights
+                .add_pass(graph, self.frame, generated.visible_count_id, self.grid);
+
         let imported = std::mem::replace(&mut self.shadow_imported, ResourceState::ShaderRead);
         let shadow_atlas = self.add_shadow_pass(graph, imported, &cascade_selection);
 
@@ -3313,6 +3551,12 @@ impl ForwardRenderer {
             // binding, and which every other backend reads as whatever the
             // depth writes left behind.
             .read_image(shadow_atlas)
+            // The froxel grid, on the shadow atlas's terms exactly: the
+            // clustering pass left it in `ShaderReadWrite` and the fragment
+            // stage has it bound, so declaring the read is what moves it — and
+            // without the declaration the fragment stage reads a buffer the
+            // compute pass may still be writing.
+            .read_buffer(light_grid)
             // The buffers the draws come out of. Declaring them is what makes
             // the graph transition them out of the compute pass's
             // `ShaderReadWrite` — the seam calls that the single most important
@@ -3862,6 +4106,10 @@ impl ForwardRenderer {
         if let Some(clusters) = self.clusters {
             clusters.destroy(device);
         }
+        // Before the draw generator, because its bind groups name that
+        // generator's statistics buffers: the overflow counter is a word of
+        // them.
+        self.lights.destroy(device);
         self.draws.destroy(device);
         self.materials.destroy(device);
         self.instances.destroy(device);
@@ -4424,9 +4672,11 @@ mod tests {
             }
             assert_eq!(
                 dispatches,
-                3 * (1 + shadow::CASCADES),
+                3 * (1 + shadow::CASCADES) + 1,
                 "the clearing pass, the cull pass and the draw-argument pass, in front of \
-                 the draws — once for the camera and once per shadow cascade"
+                 the draws — once for the camera and once per shadow cascade — plus topic \
+                 18's one clustering dispatch, which is the camera's alone because a \
+                 cascade shades nothing"
             );
             assert_eq!(
                 seen, expected,
@@ -5012,15 +5262,24 @@ mod tests {
             .iter()
             .map(|pass| pass.label().to_string())
             .collect();
-        // The camera's compute triple, then one per shadow cascade, then the
-        // depth-only pass they feed and the colour pass that samples it.
+        // The camera's compute triple and topic 18's clustering dispatch, then
+        // one triple per shadow cascade, then the depth-only pass they feed and
+        // the colour pass that samples it.
+        //
+        // **The clustering pass is after the camera's clearing dispatch**, and
+        // that is the ordering the overflow counter depends on: the clearing
+        // pass zeroes the statistics word this one adds to, and both declare
+        // the same buffer, so the graph is what puts the barrier between them.
         let mut expected: Vec<String> = Vec::new();
-        for _ in 0..=shadow::CASCADES {
+        for cascade in 0..=shadow::CASCADES {
             expected.extend(
                 ["clear-counters", "cull", "draw-args"]
                     .into_iter()
                     .map(str::to_string),
             );
+            if cascade == 0 {
+                expected.push("light-cluster".to_string());
+            }
         }
         expected.extend(
             ["shadow", "forward", "tonemap"]

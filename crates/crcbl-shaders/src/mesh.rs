@@ -48,12 +48,11 @@ pub const SHADOW_CASCADES: usize = 2;
 
 /// Bytes in the frame uniform block.
 ///
-/// One `float4x4` (64), four `float4` (16 each), [`SHADOW_CASCADES`] more
-/// `float4x4` and three closing `float4`. Checked against the `Offset`
-/// decorations `slangc` emits — 0, 64, 80, 96, 112, 128, 256, 272, 288 at two
-/// cascades — by this module's
-/// `the_uniform_block_matches_the_offsets_slangc_emits`.
-pub const FRAME_UNIFORMS_SIZE: usize = 128 + 64 * SHADOW_CASCADES + 48;
+/// One `float4x4` (64), two `float4` (16 each), [`SHADOW_CASCADES`] more
+/// `float4x4`, two closing `float4` and a `uint4`. Checked against the `Offset`
+/// decorations `slangc` emits — 0, 64, 80, 96, 224, 240, 256 at two cascades —
+/// by this module's `the_uniform_block_matches_the_offsets_slangc_emits`.
+pub const FRAME_UNIFORMS_SIZE: usize = 96 + 64 * SHADOW_CASCADES + 48;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -124,11 +123,14 @@ pub struct FrameUniforms {
     pub view_proj: [f32; 16],
     /// World-space eye position in `xyz`.
     pub camera_position: [f32; 4],
-    /// World-space direction *towards* the light in `xyz`, unit length.
-    pub light_direction: [f32; 4],
-    /// Light colour premultiplied by intensity in `rgb`.
-    pub light_color: [f32; 4],
     /// Flat ambient term in `rgb`.
+    ///
+    /// **Not a light and not a row.** It stands in for the bounces the direct
+    /// terms do not carry, so it has no position, no froxel and no shadow. The
+    /// sun sat beside it here as a direction and a colour until
+    /// `docs/plan/18-render-features.md`'s light list existed; it is
+    /// [`GpuLight`](crate::light::GpuLight) row now, and the shader has no
+    /// special case for it.
     pub ambient: [f32; 4],
     /// World → cascade `i`'s shadow clip, column-major, one per cascade.
     ///
@@ -146,27 +148,25 @@ pub struct FrameUniforms {
     /// the atlas is [`SHADOW_CASCADES`] square tiles side by side. `z`: the
     /// constant depth bias. `w`: the slope-scaled coefficient on top of it.
     pub shadow_params: [f32; 4],
-    /// `docs/plan/25-lod.md`'s two selection numbers, read by
-    /// `mesh_cluster.slang`'s amplification stage and by nothing else.
+    /// The froxel grid's extent: `x` froxels across the screen, `y` down it, `z`
+    /// depth slices, `w` unread padding `std140` aligns a vector to sixteen
+    /// bytes with.
     ///
-    /// `x`: how many pixels one unit of length subtends one unit from the eye —
-    /// `0.5 * viewport_height / tan(0.5 * fov_y)` for a perspective camera, which
-    /// is what carries the frame's size and field of view into a screen-space
-    /// error. `y`: the pixel budget a group's projected error is compared
-    /// against. `z`: the budget an already-expanded group is held down to,
-    /// `docs/plan/25-lod.md`'s hysteresis. `w` is padding, because `std140`
-    /// aligns a `float4` to sixteen bytes.
+    /// Everything else about the split — the tile size, the slice count for a
+    /// perspective camera, the depth range and the exponential distribution over
+    /// it — is a constant [`crate::light`] and the two shaders each declare, so
+    /// there is nothing here for them to disagree about. `z` is
+    /// [`CLUSTER_DEPTH_SLICES`](crate::light::CLUSTER_DEPTH_SLICES) for a
+    /// perspective camera and `1` for an orthographic one, which has no view
+    /// depth to slice by.
     ///
-    /// **Read by no shader since hysteresis landed**, and written all the same:
-    /// a group's expansion is decided once per (instance, group) in
-    /// `draw_gen.slang` — which reads its own copy of these three numbers out of
-    /// [`draw_gen::Params::lod_params`](crate::draw_gen::Params::lod_params) —
-    /// and `mesh_cluster.slang`'s amplification stage reads the answer rather
-    /// than the numbers. They stay in this block because a renderer writes one
-    /// camera's selection numbers in one place and both blocks take them from
-    /// it; a second source is how the two paths would come to select
-    /// differently.
-    pub lod_params: [f32; 4],
+    /// This slot held `docs/plan/25-lod.md`'s selection numbers until the light
+    /// list arrived, and **no shader had read them since hysteresis landed**:
+    /// the projection moved into `draw_gen.slang`, which owns the state it
+    /// needs, and `mesh_cluster.slang`'s amplification stage reads that pass's
+    /// answer rather than the numbers. A dead vector in a block every pipeline
+    /// binds is not somewhere to leave a value nothing reads.
+    pub cluster_grid: [u32; 4],
 }
 
 impl FrameUniforms {
@@ -183,15 +183,20 @@ impl FrameUniforms {
         };
         put(&self.view_proj);
         put(&self.camera_position);
-        put(&self.light_direction);
-        put(&self.light_color);
         put(&self.ambient);
         for matrix in &self.shadow_view_proj {
             put(matrix);
         }
         put(&self.cascade_far);
         put(&self.shadow_params);
-        put(&self.lod_params);
+        // The one integer member, and it is written through the same running
+        // cursor rather than at a computed offset: `std140` puts a `uint4`
+        // exactly where a `float4` would go, and a second writer here is a
+        // second place for the layout to drift.
+        for value in self.cluster_grid {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
     }
@@ -1131,7 +1136,7 @@ mod tests {
 
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
-        assert_eq!(FRAME_UNIFORMS_SIZE, 304, "at two cascades");
+        assert_eq!(FRAME_UNIFORMS_SIZE, 272, "at two cascades");
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …`, and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64`.
         let cascades = 64 * SHADOW_CASCADES;
@@ -1140,13 +1145,11 @@ mod tests {
             64,
             80,
             96,
-            112,
-            128,
+            96 + cascades,
+            112 + cascades,
             128 + cascades,
-            144 + cascades,
-            160 + cascades,
         ];
-        let sizes = [64usize, 16, 16, 16, 16, cascades, 16, 16, 16];
+        let sizes = [64usize, 16, 16, cascades, 16, 16, 16];
         for (index, (offset, size)) in offsets.iter().zip(&sizes).enumerate() {
             assert_eq!(
                 offset + size,
@@ -1169,33 +1172,40 @@ mod tests {
         let uniforms = FrameUniforms {
             view_proj: [1.0; 16],
             camera_position: [3.0; 4],
-            light_direction: [4.0; 4],
-            light_color: [5.0; 4],
             ambient: [6.0; 4],
             shadow_view_proj,
             cascade_far: [20.0; 4],
             shadow_params: [30.0; 4],
-            lod_params: [40.0; 4],
+            cluster_grid: [41, 42, 43, 44],
         };
         let bytes = uniforms.to_bytes();
         let at =
             |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
+        let word_at =
+            |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
         assert_eq!(at(0), 1.0, "view_proj at offset 0");
         assert_eq!(at(64), 3.0, "camera_position at offset 64");
-        assert_eq!(at(80), 4.0, "light_direction at offset 80");
-        assert_eq!(at(96), 5.0, "light_color at offset 96");
-        assert_eq!(at(112), 6.0, "ambient at offset 112");
+        assert_eq!(at(80), 6.0, "ambient at offset 80");
         for index in 0..SHADOW_CASCADES {
             assert_eq!(
-                at(128 + 64 * index),
+                at(96 + 64 * index),
                 7.0 + index as f32,
                 "shadow_view_proj[{index}] at offset {}",
-                128 + 64 * index
+                96 + 64 * index
             );
         }
-        assert_eq!(at(128 + cascades), 20.0, "cascade_far");
-        assert_eq!(at(144 + cascades), 30.0, "shadow_params");
-        assert_eq!(at(160 + cascades), 40.0, "lod_params");
+        assert_eq!(at(96 + cascades), 20.0, "cascade_far");
+        assert_eq!(at(112 + cascades), 30.0, "shadow_params");
+        // Every lane, not just the first: the grid's three numbers are all
+        // `uint`s of the same width and would permute silently — a fragment
+        // reading the slice count as the tile stride is a picture, not an error.
+        for (lane, expected) in [41u32, 42, 43, 44].into_iter().enumerate() {
+            assert_eq!(
+                word_at(128 + cascades + lane * 4),
+                expected,
+                "cluster_grid lane {lane}"
+            );
+        }
     }
 
     /// The offsets `slangc` actually emitted for `GpuInstance`, read out of the

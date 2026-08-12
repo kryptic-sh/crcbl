@@ -181,14 +181,12 @@ struct FrameUniforms
     float4x4 view_proj;
     /// World-space eye position in `xyz`; `w` unused.
     float4 camera_position;
-    /// World-space direction **towards** the light in `xyz`, normalized; `w`
-    /// unused. Towards rather than "the direction light travels" because that is
-    /// the vector both the Lambert and the Blinn half-vector terms want, and
-    /// negating it in the shader is a sign error waiting to happen.
-    float4 light_direction;
-    /// Light colour premultiplied by intensity in `rgb`; `w` unused.
-    float4 light_color;
     /// Flat ambient term in `rgb`; `w` unused. A real irradiance probe is P7.
+    ///
+    /// **Ambient is not a light and is not a row**: it stands in for every
+    /// bounce the direct terms do not carry, so it has no position, no cluster
+    /// and no shadow. The sun used to sit beside it here as a direction and a
+    /// colour, and it is a row in `lights` now — see that binding.
     float4 ambient;
     /// World → cascade `i`'s shadow clip, one matrix per cascade.
     ///
@@ -221,16 +219,25 @@ struct FrameUniforms
     /// `1 / tile`. Deriving one from the other is how the PCF kernel ends up
     /// sampling a rectangle.
     float4 shadow_params;
-    /// `docs/plan/25-lod.md`'s selection numbers. `x`: how many pixels one unit
-    /// of length subtends one unit from the eye. `y`: the pixel budget a group's
-    /// projected error is compared against. `z`, `w`: unread padding `std140`'s
-    /// sixteen-byte `float4` alignment requires.
+    /// The froxel grid's extent: `x` froxels across the screen, `y` down it, `z`
+    /// depth slices, `w` how many pixels wide and tall one tile is.
     ///
-    /// **Declared here and read by nothing**: no stage in this file selects a
-    /// level. It is here because this block and `mesh_cluster.slang`'s must be
-    /// the same bytes — that file's amplification stage is the one that reads it,
-    /// out of the same buffer this one's vertex stage reads `view_proj` from.
-    float4 lod_params;
+    /// The slice count is `CLUSTER_DEPTH_SLICES` for a perspective camera and
+    /// `1` for an orthographic one, which has no view depth to slice by. The
+    /// tile size is `crcbl_shaders::light::CLUSTER_TILE_PIXELS` at any viewport
+    /// the grid buffer can hold and is doubled where it cannot, which is what
+    /// keeps a very large frame coarser rather than out of bounds. The
+    /// distribution of the slices over depth is a constant this file and
+    /// `light_cluster.slang` each declare, so there is nothing there for the two
+    /// to disagree about.
+    ///
+    /// This slot held `docs/plan/25-lod.md`'s selection numbers until the light
+    /// list arrived, by which time no stage read them: the projection moved into
+    /// `draw_gen.slang`, which owns the hysteresis state it needs, and
+    /// `mesh_cluster.slang`'s amplification stage reads that pass's answer rather
+    /// than the numbers. A dead `float4` in a block every pipeline binds is not
+    /// somewhere to leave a value nothing reads.
+    uint4 cluster_grid;
 };
 
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
@@ -340,6 +347,61 @@ struct GpuMaterial
     uint pad1;
     uint pad2;
 };
+
+/// One light, matching `struct GpuLight` in `light_cluster.slang` and
+/// `crcbl_shaders::light::GpuLight`.
+struct GpuLight
+{
+    /// World-space position in `xyz`, influence radius in `w`.
+    float4 position;
+    /// Colour premultiplied by intensity in `rgb`; `w` unused.
+    float4 color;
+    /// Towards the light for a directional; the cone axis for a spot. `w` is the
+    /// cosine of a spot's outer half-angle.
+    float4 direction;
+    uint kind;
+    /// The cosine of a spot's inner half-angle.
+    float cos_inner;
+    uint pad0;
+    uint pad1;
+};
+
+/// `GpuLight::kind` for the sun: no position, no falloff, and in every froxel.
+static const uint KIND_DIRECTIONAL = 0;
+
+/// `GpuLight::kind` for a point light.
+static const uint KIND_POINT = 1;
+
+/// `GpuLight::kind` for a spot light.
+static const uint KIND_SPOT = 2;
+
+/// How many light indices one froxel's list holds, matching
+/// `crcbl_shaders::light::CLUSTER_LIGHT_CAPACITY`.
+static const uint CLUSTER_LIGHT_CAPACITY = 16;
+
+/// Words one froxel occupies in `cluster_lights`, matching
+/// `crcbl_shaders::light::CLUSTER_STRIDE`.
+static const uint CLUSTER_STRIDE = 17;
+
+/// The statistics word the clustering pass counts dropped assignments into,
+/// matching `crcbl_shaders::light::CLUSTER_OVERFLOW_WORD`.
+///
+/// Declared here and read by nothing: this file is the other half of the grid's
+/// contract, and the constant is one of the numbers `crcbl_shaders::light`
+/// checks both declarations of.
+static const uint CLUSTER_OVERFLOW_WORD = 2;
+
+/// Depth slices a perspective grid has, matching
+/// `crcbl_shaders::light::CLUSTER_DEPTH_SLICES`.
+static const uint CLUSTER_DEPTH_SLICES = 24;
+
+/// The view depth the first slice starts at, matching
+/// `crcbl_shaders::light::CLUSTER_NEAR`.
+static const float CLUSTER_NEAR = 0.1;
+
+/// The view depth the last slice's resolution ends at, matching
+/// `crcbl_shaders::light::CLUSTER_FAR`.
+static const float CLUSTER_FAR = 1000.0;
 
 /// Where this draw's run of visible instances starts and what geometry it
 /// draws, matching `crcbl_shaders::mesh::DrawConstants`.
@@ -483,6 +545,30 @@ DepthTexture2D shadow_atlas;
 /// carries the same warning.
 [[vk::binding(16, 0)]]
 SamplerComparisonState shadow_sampler;
+
+/// `docs/plan/18-render-features.md`'s light list: every light in the frame, one
+/// row each, **the sun included**.
+///
+/// The sun was `FrameUniforms::light_direction` and `light_color` until the list
+/// existed, and moving it here is the point rather than a side effect: a
+/// directional row is flagged as affecting every froxel, so the loop below has
+/// one shape and no "and also the sun" tail. What that buys is that a second
+/// directional light is data, and adding one changes nothing in this file.
+///
+/// Bindings 17 to 19 are `mesh_cluster.slang`'s, declared by the mesh and
+/// amplification stages of the pipeline this file's `fragmentMain` completes, so
+/// the numbering skips past them exactly as it skipped 9 to 14 above.
+[[vk::binding(20, 0)]]
+StructuredBuffer<GpuLight> lights;
+
+/// The froxel grid `light_cluster.slang` filled: `CLUSTER_STRIDE` words per
+/// froxel, the count first and then that many indices into `lights`.
+///
+/// Indexed by *this fragment's own position* — its pixel gives the tile, its
+/// view depth gives the slice — which is the whole of what clustered forward
+/// buys over looping the scene's lights.
+[[vk::binding(21, 0)]]
+StructuredBuffer<uint> cluster_lights;
 
 struct VertexOutput
 {
@@ -659,13 +745,83 @@ float sun_visibility(float3 world_position, float n_dot_l)
     return visibility / 9.0;
 }
 
+/// How bright a punctual light is at `distance`, reaching **exactly zero** at
+/// `radius`.
+///
+/// Inverse-square with Karis' quartic window on top. The window is not
+/// cosmetic: `light_cluster.slang` culls a light against this same radius, so a
+/// falloff still contributing there would leave a hard edge wherever a froxel
+/// stopped listing it — the seam that reads as a shading bug. Zero at the radius
+/// is what makes the cull and the shading the same statement.
+///
+/// The `1` in the denominator keeps the singularity at zero distance finite;
+/// it is the standard form, and it costs a light its physical units in exchange
+/// for never producing an infinity a tonemap has to survive.
+float punctual_falloff(float distance, float radius)
+{
+    float ratio = distance / max(radius, 1e-6);
+    float window = saturate(1.0 - ratio * ratio * ratio * ratio);
+    return window * window / (distance * distance + 1.0);
+}
+
+/// How much of a spot light this direction is inside its cone for: `1` within
+/// the inner angle, `0` outside the outer one, smooth between.
+///
+/// `to_light` points at the light and `axis` points along the cone, so the
+/// cosine wanted is of the angle between the axis and the direction *away* from
+/// the light — hence the negation, which is the sign error this whole engine
+/// spells out rather than leaves to be rediscovered.
+float spot_cone(float3 to_light, float3 axis, float cos_outer, float cos_inner)
+{
+    float cosine = dot(-to_light, normalize(axis));
+    // `max` rather than a guard: a caller writing the two cosines the wrong way
+    // round would otherwise divide by a negative and light the outside of the
+    // cone. `crcbl_render::SpotLight` refuses that pairing on the way in; this
+    // is the shader-side half of the same statement.
+    return saturate((cosine - cos_outer) / max(cos_inner - cos_outer, 1e-4));
+}
+
+/// Which froxel a fragment at `pixel` and view depth `depth` belongs to.
+///
+/// **The depth is `clip.w`, not the depth buffer.** Under reversed-Z the buffer
+/// runs 1.0 at the near plane to 0.0 at infinity, so an index taken from
+/// `SV_Position.z` would run backwards *and* be hyperbolically distributed — a
+/// numbering that looks plausible and puts every fragment in the wrong list.
+///
+/// The slice mapping is the inverse of `light_cluster.slang`'s exponential
+/// split, and both are written from the same four constants rather than from a
+/// scale and a bias passed between them; `crcbl_shaders::light`'s
+/// `the_slice_mapping_round_trips` is what says the pair really are inverses.
+uint froxel_of(float2 pixel, float depth)
+{
+    uint grid_x = max(frame.cluster_grid.x, 1u);
+    uint grid_y = max(frame.cluster_grid.y, 1u);
+    uint slices = max(frame.cluster_grid.z, 1u);
+    uint tile_pixels = max(frame.cluster_grid.w, 1u);
+
+    // Clamped as well as divided: the grid is `ceil(extent / tile)` wide, so the
+    // last column and row are part-empty and a pixel in the part that is not
+    // there would index the next row's froxel.
+    uint tile_x = min(uint(pixel.x) / tile_pixels, grid_x - 1);
+    uint tile_y = min(uint(pixel.y) / tile_pixels, grid_y - 1);
+
+    float scale = float(CLUSTER_DEPTH_SLICES) / log2(CLUSTER_FAR / CLUSTER_NEAR);
+    float bias = -scale * log2(CLUSTER_NEAR);
+    // Clamped *before* the logarithm as well as after: a fragment on the eye
+    // plane has zero depth, and `log2(0)` is an infinity whose conversion to an
+    // integer is undefined rather than merely wrong.
+    float slice = floor(log2(max(depth, CLUSTER_NEAR)) * scale + bias);
+    uint index = uint(clamp(slice, 0.0, float(slices - 1)));
+
+    return (index * grid_y + tile_y) * grid_x + tile_x;
+}
+
 [shader("fragment")]
 float4 fragmentMain(VertexOutput input) : SV_Target
 {
     // Interpolation denormalises, so both of these are renormalised per
     // fragment. Skipping it makes large triangles darken towards their centres.
     float3 normal = normalize(input.world_normal);
-    float3 to_light = normalize(frame.light_direction.xyz);
     float3 to_eye = normalize(frame.camera_position.xyz - input.world_position);
 
     // The material row, resolved here rather than at the corners. `material` is
@@ -683,28 +839,86 @@ float4 fragmentMain(VertexOutput input) : SV_Target
         base_color_sampler, float3(input.uv, float(material.base_color_texture)));
     float4 albedo = input.color * material.base_color * texel;
 
-    // Lambert.
-    float n_dot_l = dot(normal, to_light);
-    float diffuse = max(n_dot_l, 0.0);
+    // This fragment's own froxel, and the only lights it will look at. The view
+    // depth is recomputed from the frame's matrix rather than read off
+    // `input.position.w`: the four targets this file compiles to have twice
+    // disagreed about what a value the rasteriser hands the fragment stage
+    // means — see the header on `SV_VertexID` — and `SV_Position`'s `w` in a
+    // fragment is a reciprocal on some of them and not others. A matrix row is
+    // the same arithmetic everywhere.
+    float view_depth = mul(frame.view_proj, float4(input.world_position, 1.0)).w;
+    uint base = froxel_of(input.position.xy, view_depth) * CLUSTER_STRIDE;
+    // Clamped against the budget as well as read from the buffer: the count is
+    // written by a pass that already refuses to exceed it, and this is what
+    // stops a corrupt or never-written grid from walking into the next froxel's
+    // list.
+    uint count = min(cluster_lights[base], CLUSTER_LIGHT_CAPACITY);
 
-    // Blinn: the half-vector form, not Phong's reflection vector. Cheaper, and
-    // it is what every later specular model in this engine is a refinement of.
-    float3 half_vector = normalize(to_light + to_eye);
-    float specular = pow(max(dot(normal, half_vector), 0.0), SPECULAR_POWER);
-    // No light on the back of a surface, whatever the half-vector says.
-    specular *= step(0.0, diffuse) * diffuse;
+    // Accumulated rather than branched on, which is the whole of what making the
+    // sun a row bought: one loop shades a directional, a point and a spot, and
+    // topic 18's "one material model, one BRDF" holds by construction instead of
+    // by three copies of the same maths agreeing.
+    float3 direct = float3(0.0, 0.0, 0.0);
+    float3 gloss = float3(0.0, 0.0, 0.0);
+    for (uint slot = 0; slot < count; ++slot)
+    {
+        GpuLight light = lights[cluster_lights[base + 1 + slot]];
 
-    // The cascaded shadow map, and the *only* place it enters the shading.
-    // Topic 18's rule that both lighting paths share one BRDF is what makes it
-    // one multiplier on the sun's direct terms rather than a branch: ambient is
-    // not the sun and keeps its full value in shadow, which is what stops a
-    // shadowed surface from being black.
-    float visibility = sun_visibility(input.world_position, n_dot_l);
-    diffuse *= visibility;
-    specular *= visibility;
+        float3 to_light;
+        // What scales this light's direct terms: the shadow map for the sun, the
+        // distance falloff and cone for a punctual light. One name for both, so
+        // the two arrive at the same two multiplies below.
+        float reach;
+        if (light.kind == KIND_DIRECTIONAL)
+        {
+            to_light = normalize(light.direction.xyz);
+            reach = 1.0;
+        }
+        else
+        {
+            float3 offset = light.position.xyz - input.world_position;
+            float distance = length(offset);
+            to_light = offset / max(distance, 1e-6);
+            reach = punctual_falloff(distance, light.position.w);
+            if (light.kind == KIND_SPOT)
+            {
+                reach *= spot_cone(to_light, light.direction.xyz, light.direction.w, light.cos_inner);
+            }
+        }
 
-    float3 lit = albedo.rgb * (frame.ambient.rgb + frame.light_color.rgb * diffuse)
-               + frame.light_color.rgb * (specular * SPECULAR_STRENGTH);
+        // Lambert.
+        float n_dot_l = dot(normal, to_light);
+        float diffuse = max(n_dot_l, 0.0);
+
+        // Blinn: the half-vector form, not Phong's reflection vector. Cheaper,
+        // and it is what every later specular model in this engine is a
+        // refinement of.
+        float3 half_vector = normalize(to_light + to_eye);
+        float specular = pow(max(dot(normal, half_vector), 0.0), SPECULAR_POWER);
+        // No light on the back of a surface, whatever the half-vector says.
+        specular *= step(0.0, diffuse) * diffuse;
+
+        // The cascaded shadow map, and the *only* place it enters the shading.
+        // Still the sun's alone — `docs/plan/18-render-features.md` puts shadows
+        // for the other two kinds in a later slice, and an unshadowed light
+        // still lights, it just does not occlude.
+        if (light.kind == KIND_DIRECTIONAL)
+        {
+            reach = sun_visibility(input.world_position, n_dot_l);
+        }
+        diffuse *= reach;
+        specular *= reach;
+
+        direct += light.color.rgb * diffuse;
+        gloss += light.color.rgb * (specular * SPECULAR_STRENGTH);
+    }
+
+    // Ambient is not the sun and keeps its full value in shadow, which is what
+    // stops a shadowed surface from being black. The association here is the one
+    // the single-light form had — the sum starts at zero and `0 + x` is `x`
+    // exactly — so converting the sun from a field to a row is arithmetically a
+    // no-op and the goldens are what say so.
+    float3 lit = albedo.rgb * (frame.ambient.rgb + direct) + gloss;
 
     // Deliberately **not** clamped: the target is `Rgba16Float` and the tonemap
     // pass is what maps this into the swapchain. A `saturate` here would throw

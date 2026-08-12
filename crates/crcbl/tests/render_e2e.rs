@@ -102,6 +102,15 @@ const MIN_COLORS_DUNES: usize = 32;
 /// three batches trips it.
 const MIN_COLORS_SPRITE: usize = 16;
 
+/// The same, for [`Scene::Lights`].
+///
+/// Higher than [`MIN_COLORS_CUBE`] and that is the scene's whole claim: three
+/// coloured point lights falling off across the same geometry produce a
+/// gradient where a single directional light produced flat faces, so a frame
+/// that lost the light list would fail this floor before any golden was
+/// consulted.
+const MIN_COLORS_LIGHTS: usize = 64;
+
 /// The same, for [`Scene::Ui`]: `CRCBL_CROSS_MIN_COLORS_UI`.
 ///
 /// The UI frame is the least colourful of the three — the clear, the panel, the
@@ -186,6 +195,96 @@ fn the_cube_scene_drew_its_geometry_and_both_material_columns(image: &Image) {
 /// golden holds for both. `crcbl-vk`'s
 /// `the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is` is where
 /// that claim is made in numbers instead of in pixels.
+/// `docs/plan/18-render-features.md`'s light list, drawn.
+///
+/// The same geometry as the cube scene under three coloured point lights and a
+/// sun turned right down, so the two goldens differ in the light list alone.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_lights_scene_draws_its_point_lights_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::Lights,
+        "lights",
+        MIN_COLORS_LIGHTS,
+        each_point_light_pools_where_it_was_put_and_nowhere_else,
+    );
+}
+
+/// The three pools are where the three lights are, and the background is not
+/// one of them.
+///
+/// **Where**, not merely *whether*: a fragment stage that ignored the froxel
+/// grid and summed the whole list would light every pyramid in every colour,
+/// which reads as a plausible picture and passes any "is it brighter" check.
+/// Each quadrant is therefore asserted to lead in *its own* channel, which no
+/// single dominant light can satisfy for all three at once.
+///
+/// The brightest pixel of each quadrant rather than a fixed coordinate: which
+/// pixel a pyramid's lit face lands on is a rasteriser's business, and the
+/// brightest one in a band that holds a pyramid and the clear behind it is on
+/// the pyramid. The luminance floor is what says so — the clear is dark and
+/// blue-dominant, so "leads blue" alone would be satisfiable by the background
+/// and this is what refuses that.
+fn each_point_light_pools_where_it_was_put_and_nowhere_else(image: &Image) {
+    let clear = image.pixel(1, 1).expect("inside");
+    let clear_peak = u32::from(*clear.iter().take(3).max().expect("three channels"));
+
+    // `PYRAMID_BAND` is the left column; its mirror is the right one. The
+    // pyramids sit above and below the cube's row, so the halves split them.
+    let half = EXTENT.1 / 2;
+    let right = (EXTENT.0 - PYRAMID_BAND.end)..EXTENT.0;
+    // The order `scene_lights` places them: red over the plain pyramid, blue over
+    // the blue-tinted one, green over the textured one. Which colour goes where
+    // is the material's doing as much as the light's — see that function.
+    let quadrants = [
+        ("red", 0usize, PYRAMID_BAND, 0..half),
+        ("blue", 2, right, 0..half),
+        ("green", 1, PYRAMID_BAND, half..EXTENT.1),
+    ];
+    for (name, channel, columns, rows) in quadrants {
+        let mut brightest = clear;
+        let mut peak = 0u32;
+        for row in rows {
+            for column in columns.clone() {
+                let Some(pixel) = image.pixel(column, row) else {
+                    continue;
+                };
+                let luma: u32 = pixel.iter().take(3).map(|c| u32::from(*c)).sum();
+                if luma > peak {
+                    peak = luma;
+                    brightest = pixel;
+                }
+            }
+        }
+        eprintln!("crcbl render e2e: lights — {name} quadrant peaks at {brightest:?}");
+        assert!(
+            u32::from(brightest[channel]) > clear_peak * 2,
+            "the {name} quadrant's brightest pixel must be lit geometry rather than \
+             the clear behind it: {brightest:?} against a clear of {clear:?}"
+        );
+        for other in 0..3usize {
+            if other == channel {
+                continue;
+            }
+            assert!(
+                brightest[channel] > brightest[other],
+                "the {name} light must lead its own channel where it was put, got {brightest:?}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_lights_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::Lights,
+        "lights",
+        MIN_COLORS_LIGHTS,
+        each_point_light_pools_where_it_was_put_and_nowhere_else,
+    );
+}
+
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
 fn the_dunes_scene_draws_its_cluster_dag_and_matches_its_golden() {

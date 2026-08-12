@@ -5907,6 +5907,70 @@ harness has a precedent for a demo whose input is not a keypress.
   `clap` and delete it "when this file passes roughly two hundred lines of
   `match`" — a line it was well past before this added 285 more.
 
+## What the light list left owed
+
+The list, the froxel grid and the sun-as-a-row landed; the decision below it is
+recorded in `docs/plan/18-render-features.md`. What is left:
+
+- **Spot lights have no rendered-pixel coverage.** The row conversion is
+  unit-tested including the angles-reversed clamp, and `spot_cone` compiles on
+  all four targets, but nothing draws one. A real gap, not a stub.
+- **A spot is bounded by its sphere, not its cone**, so a narrow spot is listed
+  in far more froxels than it lights. Correct but wasteful; a cone test is the
+  refinement.
+- **No shadows for the new types**, no atlas allocation, and no rule for which
+  lights get maps. Those are the next slices and topic 18 says each wants the
+  list to exist first — which it now does.
+- **`mesh.png`, `mesh_ortho.png` and `mesh_second.png` differ from what this
+  machine's lavapipe produces** by exactly one channel level across 80–96 % of
+  pixels, comfortably inside tolerance. **Pre-existing** — identical before and
+  after the light work — so those three were presumably blessed on a slightly
+  different driver. `mesh_clusters.png` matches exactly.
+- **`mesh.png` is written by two different tests in one run**, so a bless is
+  last-writer-wins and the file is not a stable baseline. That is why the
+  bit-identical check above compared captured output rather than re-blessing.
+- **`MAX_TIMED_PASSES` is now 8 against 13 recorded passes** in the samples, up
+  from 12 before this slice, so their HUD silently times only the first eight.
+  Already recorded; the number moved again.
+
+## P7B could not start as written: the engine has one light
+
+Surveying P7B before delegating it found that `docs/plan/18-render-features.md`
+names "CSM for sun, single map for spot, cube for point" while **the engine has
+exactly one light** — a single `DirectionalLight` carrying a direction and a
+colour. No light list, no point or spot lights, no light culling, and **no
+specification anywhere** of how many lights there are or how they are gathered:
+grepping topic 18 and topic 3 for clustered, tiled, Forward+, light list or
+light culling returns nothing. So "spot and point shadows" would have meant
+shadowing lights that have no representation.
+
+**Decided and written into topic 18: clustered forward.** Lights are an SSBO of
+rows like instances and materials, and a compute pass assigns them to a froxel
+grid the fragment stage indexes. The reasoning is on the record there; the short
+form is that tiled/Forward+ degrades badly over depth range and the samples that
+motivate lighting are exactly that shape, deferred conflicts with two rules
+already locked in that topic (one BRDF shared with the ray-traced twin, one post
+stack after either path) and would make the raster path structurally unlike its
+twin, and clustered forward needs nothing of a device — a compute pass and two
+storage buffers — so it is the same code on all four backends, which is the
+constraint every other path here is held to.
+
+Two things that follow and are worth holding to:
+
+- **A directional light becomes a row too**, flagged as affecting every cluster,
+  so the sun stops being a special case in the shader.
+- **Cluster overflow is counted, not dropped silently** — it surfaces through
+  topic 40's counters, because a scene that overflows should be visible in the
+  panel rather than mysteriously dark.
+
+**Left undecided on purpose**, each wanting the list to exist first:
+shadow-atlas allocation across light types, the rule choosing which lights get
+maps (nearest, brightest, largest screen influence), and whether point lights
+use a cube map or six atlas tiles.
+
+**So the P7B order is: the light list first, then shadows for the types it
+introduces**, not the other way round.
+
 ## Three CI installs turned a download flake into a hard red in one hour
 
 All three hit on 2026-08-12 within an hour, on commits that could not have

@@ -70,13 +70,18 @@ pub struct Params {
     /// the two geometry paths select at different granularities and must never
     /// select from different cameras.
     pub camera_position: [f32; 3],
-    /// How many pixels one unit of length subtends one unit from the eye, and
-    /// the pixel budget a group's projected error is compared against — the two
-    /// numbers of
-    /// [`FrameUniforms::lod_params`](crate::mesh::FrameUniforms::lod_params),
-    /// for that field's reason — followed by the budget an already-expanded
-    /// group is held down to, which is `docs/plan/25-lod.md`'s hysteresis and
-    /// [`LodBudgets`](crate::cluster_select::LodBudgets)' two halves.
+    /// How many pixels one unit of length subtends one unit from the eye, the
+    /// pixel budget a group's projected error is compared against, and the
+    /// budget an already-expanded group is held down to — `docs/plan/25-lod.md`'s
+    /// hysteresis, and [`LodBudgets`](crate::cluster_select::LodBudgets)' two
+    /// halves.
+    ///
+    /// **This block is the only place they are uploaded.** They travelled in
+    /// [`FrameUniforms`](crate::mesh::FrameUniforms) as well until topic 18's
+    /// light list needed that slot; no shader had read them there since the
+    /// hysteresis landed, because a group's expansion is decided once per
+    /// (instance, group) here and `mesh_cluster.slang`'s amplification stage
+    /// reads the answer rather than the numbers.
     pub lod_params: [f32; 3],
 }
 

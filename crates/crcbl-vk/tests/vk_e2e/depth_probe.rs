@@ -58,6 +58,8 @@ struct DepthProbe {
     /// the engine, this one included.
     mesh_table: crcbl_hal::BufferHandle,
     materials: crcbl_hal::BufferHandle,
+    lights: crcbl_hal::BufferHandle,
+    light_grid: crcbl_hal::BufferHandle,
     /// A one-entry run of visible instances, holding the index 0.
     ///
     /// `mesh.slang` reads its instance out of a run rather than naming one,
@@ -337,6 +339,51 @@ impl DepthProbe {
             .write_buffer(visible_instances, 0, &0u32.to_le_bytes())
             .expect("write");
 
+        // Topic 18's light list and froxel grid, written by the host rather than
+        // by `light_cluster.slang`.
+        //
+        // This probe runs no compute pass at all — it is a question about depth,
+        // and it draws through a pipeline of its own — so the grid is filled here
+        // with the one answer the clustering pass would have produced for one
+        // directional light: **every froxel holds it**, which is what "affects
+        // every cluster" means. Bound read-only, so the device-local rule a
+        // shader-written grid is under does not apply.
+        let lights = device
+            .create_buffer(&BufferDesc {
+                label: Some("probe lights"),
+                size: crcbl_shaders::light::LIGHT_STRIDE as u64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a light list");
+        device
+            .write_buffer(lights, 0, &probe_sun().to_bytes())
+            .expect("write");
+
+        let grid = PROBE_GRID;
+        let mut grid_words =
+            vec![0u32; (grid.froxels() * crcbl_shaders::light::CLUSTER_STRIDE) as usize];
+        for froxel in 0..grid.froxels() {
+            let base = (froxel * crcbl_shaders::light::CLUSTER_STRIDE) as usize;
+            grid_words[base] = 1;
+            grid_words[base + 1] = 0;
+        }
+        let grid_bytes: Vec<u8> = grid_words
+            .iter()
+            .flat_map(|word| word.to_le_bytes())
+            .collect();
+        let light_grid = device
+            .create_buffer(&BufferDesc {
+                label: Some("probe light grid"),
+                size: grid_bytes.len() as u64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a froxel grid");
+        device
+            .write_buffer(light_grid, 0, &grid_bytes)
+            .expect("write");
+
         // §3.2's texture side, in its smallest honest form: one layer, one
         // texel, opaque white. `Rgba8UnormSrgb` for `crcbl_render::forward`'s
         // reason — the format is the sRGB decode, and `0xFF` decodes to exactly
@@ -522,6 +569,28 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl_hal::BindingFlags::empty(),
             },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 20,
+                visibility: crcbl_hal::ShaderStages::VERTEX
+                    .union(crcbl_hal::ShaderStages::FRAGMENT),
+                kind: crcbl_hal::BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 21,
+                visibility: crcbl_hal::ShaderStages::VERTEX
+                    .union(crcbl_hal::ShaderStages::FRAGMENT),
+                kind: crcbl_hal::BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
         ];
         let layout = device
             .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
@@ -585,6 +654,16 @@ impl DepthProbe {
                 array_index: 0,
                 resource: crcbl_hal::BindingResource::Sampler(shadow_sampler),
             },
+            crcbl_hal::BindGroupEntry {
+                binding: 20,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(lights),
+            },
+            crcbl_hal::BindGroupEntry {
+                binding: 21,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(light_grid),
+            },
         ];
         let group = device
             .create_bind_group(&crcbl_hal::BindGroupDesc {
@@ -640,6 +719,8 @@ impl DepthProbe {
         device.destroy_shader_module(module);
 
         Self {
+            lights,
+            light_grid,
             vertices,
             indices,
             uniforms,
@@ -675,12 +756,53 @@ impl DepthProbe {
         self.base_color_page.destroy(device);
         device.destroy_buffer(self.visible_instances);
         device.destroy_buffer(self.mesh_table);
+        device.destroy_buffer(self.light_grid);
+        device.destroy_buffer(self.lights);
         device.destroy_buffer(self.materials);
         device.destroy_buffer(self.draw_constants);
         device.destroy_buffer(self.instances);
         device.destroy_buffer(self.uniforms);
         device.destroy_buffer(self.indices);
         device.destroy_buffer(self.vertices);
+    }
+}
+
+/// The froxel grid this probe's own frame runs with.
+///
+/// One slice, because a slice index would need a view depth and this probe is a
+/// question about depth rather than a user of it — and one light in every froxel
+/// makes the slice count irrelevant to the picture either way. The tiles are the
+/// ordinary ones for this extent, so `mesh.slang`'s `froxel_of` divides its pixel
+/// down exactly as it does in a real frame.
+const PROBE_GRID: crcbl_render::Grid = crcbl_render::Grid {
+    x: 4,
+    y: 3,
+    slices: 1,
+    tile_pixels: 64,
+};
+
+const _: () = assert!(
+    PROBE_GRID.x * PROBE_GRID.tile_pixels >= MESH_EXTENT.0
+        && PROBE_GRID.y * PROBE_GRID.tile_pixels >= MESH_EXTENT.1,
+    "the grid must cover the probe's frame, or a fragment past it reads a froxel \
+     built for somewhere else"
+);
+
+/// The one light in this probe's list: straight at the quads, so both are lit
+/// identically and the only difference between them is their albedo.
+///
+/// The same direction and colour this probe carried in the frame block before
+/// `docs/plan/18-render-features.md`'s light list existed, so its depth answers
+/// are the answers it recorded then.
+fn probe_sun() -> crcbl_shaders::light::GpuLight {
+    crcbl_shaders::light::GpuLight {
+        position: [0.0; 4],
+        color: [0.8, 0.8, 0.8, 0.0],
+        direction: [0.0, 0.0, 1.0, 0.0],
+        kind: crcbl_shaders::light::KIND_DIRECTIONAL,
+        cos_inner: 0.0,
+        pad0: 0,
+        pad1: 0,
     }
 }
 
@@ -697,10 +819,6 @@ fn render_probe(
     let uniforms = crcbl_shaders::mesh::FrameUniforms {
         view_proj: view_proj.to_cols_array(),
         camera_position: [0.0, 0.0, PROBE_EYE, 1.0],
-        // Straight at the quads, so both are lit identically and the only
-        // difference between them is their albedo.
-        light_direction: [0.0, 0.0, 1.0, 0.0],
-        light_color: [0.8, 0.8, 0.8, 0.0],
         ambient: [0.2, 0.2, 0.2, 0.0],
         // This probe binds no shadow atlas and draws through a pipeline of its
         // own, so the cascades are never sampled. Identity matrices and a zero
@@ -711,11 +829,9 @@ fn render_probe(
             crcbl_shaders::mesh::SHADOW_CASCADES],
         cascade_far: [0.0; 4],
         shadow_params: [0.0; 4],
-        // This probe draws through `mesh.slang`'s vertex stage, which selects
-        // no level: there is no amplification stage in its pipeline and no
-        // cluster DAG behind its two quads. Zeroes rather than a real budget
-        // say that, and nothing in this frame reads them.
-        lod_params: [0.0; 4],
+        // The grid the host filled above, so the fragment stage looks itself up
+        // in the froxel that really holds the one light.
+        cluster_grid: PROBE_GRID.to_frame_block(),
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())

@@ -130,6 +130,15 @@ pub enum Scene {
     Dunes,
     /// Four sprites over three [`SpriteRenderer`] batches: `sprite.slang`.
     Sprite,
+    /// `docs/plan/18-render-features.md`'s light list: the cube scene's geometry
+    /// under three coloured **point** lights and a sun turned down far enough
+    /// that they are what is lighting it.
+    ///
+    /// The scene the clustered-forward slice exists for, and it is deliberately
+    /// the same geometry as [`Scene::Cube`]: the two goldens differ in the light
+    /// list and in nothing else, so a diff between them is the feature rather
+    /// than a new arrangement of objects.
+    Lights,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
@@ -199,6 +208,100 @@ const TINTED_PYRAMID_AT: glam::Vec3 = glam::Vec3::new(PYRAMID_COLUMN, PYRAMID_RO
 /// fourth pyramid would prove nothing new — a row differing in *both* columns
 /// is a picture neither pair could be told from.
 const TEXTURED_PYRAMID_AT: glam::Vec3 = glam::Vec3::new(-PYRAMID_COLUMN, -PYRAMID_ROW, 0.0);
+
+/// How far in front of the geometry [`Scene::Lights`] hangs its point lights.
+///
+/// The cube and the pyramids sit at `z = 0` and the camera is on `+Z`, so a
+/// light nearer than they are lights the faces the camera can see. Near enough
+/// that the falloff is steep across one object, which is what makes the three
+/// pools of colour separate rather than a wash.
+const LIGHT_Z: f32 = 1.1;
+
+/// How far apart two of these lights are, at their closest.
+///
+/// The two left-hand pyramids, which [`PYRAMID_ROW`] puts one above and one
+/// below the cube's row. [`LIGHT_RADIUS`] is held under this, which is what
+/// makes each pool one colour rather than three overlapping ones.
+const LIGHT_SPACING: f32 = 2.0 * PYRAMID_ROW;
+
+/// How far a [`Scene::Lights`] point light reaches, in world units.
+///
+/// **A hard bound**: `crcbl_render::PointLight::radius` is the radius the
+/// shading window reaches zero at and the radius the clustering pass culls
+/// against, so this is also how many froxels each light lands in.
+///
+/// Under [`LIGHT_SPACING`] and over the light's own distance to the faces below
+/// it, so each pyramid is lit by its own light and by no other — which is what
+/// makes the golden legible: a fragment stage that ignored the froxel grid and
+/// summed the whole list would put all three colours on all three pyramids, and
+/// that is a picture, not an error.
+const LIGHT_RADIUS: f32 = 1.05;
+
+/// How bright each [`Scene::Lights`] point light is, before its colour.
+///
+/// Above 1.0, like the sun's: the scene target is `Rgba16Float` and the tonemap
+/// pass is what brings it back, so a light that peaked at 1.0 would be one this
+/// pipeline could not tell from a darker one. Below the point where the
+/// specular lobe clips, so the pools carry a gradient rather than a flat white
+/// core.
+const LIGHT_INTENSITY: f32 = 2.0;
+
+/// The three [`Scene::Lights`] point lights: one over each pyramid, in a colour
+/// family none of the materials is.
+///
+/// Red, blue and green rather than three whites, so which light lit a pixel is
+/// legible in the golden — a wrong froxel assignment shows up as a pool in the
+/// wrong place rather than as a slightly different brightness.
+fn scene_lights() -> [crcbl_render::Light; 3] {
+    const {
+        assert!(
+            LIGHT_RADIUS < LIGHT_SPACING,
+            "a radius reaching the next pyramid puts two colours in one pool, and the \
+             golden stops saying which light lit what"
+        );
+    }
+    let at = |x: f32, y: f32, colour: glam::Vec3| {
+        crcbl_render::Light::Point(crcbl_render::PointLight {
+            position: glam::Vec3::new(x, y, LIGHT_Z),
+            radius: LIGHT_RADIUS,
+            color: colour * LIGHT_INTENSITY,
+        })
+    };
+    // **Each light's colour is chosen against the material under it**, because a
+    // fragment's colour is the product of the two: [`PYRAMID_TINT`] makes the
+    // top-right pyramid strongly blue, so a green light there would come out
+    // blue and say nothing about which light lit it. The blue light goes where
+    // the blue material is; the two neutral pyramids take the other two.
+    [
+        at(
+            -PYRAMID_COLUMN,
+            PYRAMID_ROW,
+            glam::Vec3::new(1.0, 0.15, 0.1),
+        ),
+        at(PYRAMID_COLUMN, PYRAMID_ROW, glam::Vec3::new(0.15, 0.3, 1.0)),
+        at(
+            -PYRAMID_COLUMN,
+            -PYRAMID_ROW,
+            glam::Vec3::new(0.1, 1.0, 0.2),
+        ),
+    ]
+}
+
+/// The sun [`Scene::Lights`] runs under: the default direction, turned right
+/// down.
+///
+/// Not removed altogether, and that is the point of the scene: the sun is a row
+/// of the same list the three point lights are rows of, so a frame in which it
+/// stopped contributing would be as wrong as one in which they did. Dim enough
+/// that the pools of colour are unmistakably the point lights' work.
+fn dim_sun() -> crcbl_render::DirectionalLight {
+    let bright = crcbl_render::DirectionalLight::default();
+    crcbl_render::DirectionalLight {
+        direction: bright.direction,
+        color: bright.color * 0.12,
+        ambient: bright.ambient * 0.35,
+    }
+}
 
 /// The colour [`Scene::Sprite`] and [`Scene::Ui`] composite onto, in **linear**
 /// light — which is what a clear value on an sRGB attachment means.
@@ -436,6 +539,24 @@ impl SceneState {
                         near: 0.01,
                     }),
                     light: DirectionalLight::default(),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::Lights => {
+                // The cube scene's geometry exactly, so the two goldens differ
+                // in their light lists and in nothing else.
+                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                renderer.set_pyramid(Some(glam::Mat4::from_translation(PYRAMID_AT)));
+                renderer.set_tinted_pyramid(Some(glam::Mat4::from_translation(TINTED_PYRAMID_AT)));
+                renderer
+                    .set_textured_pyramid(Some(glam::Mat4::from_translation(TEXTURED_PYRAMID_AT)));
+                renderer.set_lights(&scene_lights());
+                Self::Forward {
+                    camera: Camera::default().with_projection(Projection::Perspective {
+                        fov_y: std::f32::consts::FRAC_PI_3,
+                        near: 0.01,
+                    }),
+                    light: dim_sun(),
                     renderer: Box::new(renderer),
                 }
             }
@@ -1525,21 +1646,32 @@ mod tests {
         // silently stops matching when the count changes — which is the one
         // thing this assertion exists to notice, since a cascade whose cull
         // never ran draws an empty tile and an entirely lit frame.
+        //
+        // Topic 18's clustering dispatch joins the camera's triple and no
+        // cascade's, because a cascade shades nothing: one froxel grid per
+        // camera is the whole of what the light list costs a frame.
         let mut cube_passes: Vec<(&str, &str)> = Vec::new();
-        for _ in 0..=crcbl_render::shadow::CASCADES {
+        for cascade in 0..=crcbl_render::shadow::CASCADES {
             cube_passes.extend([
                 ("compute", "clear-counters"),
                 ("compute", "cull"),
                 ("compute", "draw-args"),
             ]);
+            if cascade == 0 {
+                cube_passes.push(("compute", "light-cluster"));
+            }
         }
         cube_passes.extend([
             ("render", "shadow"),
             ("render", "forward"),
             ("render", "tonemap"),
         ]);
-        let expected: [(Scene, &[(&str, &str)]); 4] = [
+        let expected: [(Scene, &[(&str, &str)]); 5] = [
             (Scene::Cube, &cube_passes),
+            // The same passes again: `Scene::Lights` is the cube scene with a
+            // longer light list, and the clustering dispatch is one per camera
+            // however many lights it assigns.
+            (Scene::Lights, &cube_passes),
             // The same passes: `Scene::Dunes` is the same renderer with
             // different content, and a scene that quietly stopped running the
             // cull pair would still draw a plausible frame.

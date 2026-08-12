@@ -64,13 +64,11 @@ struct FrameUniforms_std140_0
 {
     @align(16) view_proj_0 : _MatrixStorage_float4x4_ColMajorstd140_0,
     @align(16) camera_position_0 : vec4<f32>,
-    @align(16) light_direction_0 : vec4<f32>,
-    @align(16) light_color_0 : vec4<f32>,
     @align(16) ambient_0 : vec4<f32>,
     @align(16) shadow_view_proj_0 : _Array_std140_matrixx3Cfloatx2C4x2C4x3E2_0,
     @align(16) cascade_far_0 : vec4<f32>,
     @align(16) shadow_params_0 : vec4<f32>,
-    @align(16) lod_params_0 : vec4<f32>,
+    @align(16) cluster_grid_0 : vec4<u32>,
 };
 
 @binding(0) @group(0) var<uniform> frame_0 : FrameUniforms_std140_0;
@@ -89,16 +87,31 @@ struct GpuMaterial_std430_0
 
 @binding(8) @group(0) var base_color_sampler_0 : sampler;
 
+@binding(21) @group(0) var<storage, read> cluster_lights_0 : array<u32>;
+
+struct GpuLight_std430_0
+{
+    @align(16) position_1 : vec4<f32>,
+    @align(16) color_1 : vec4<f32>,
+    @align(16) direction_0 : vec4<f32>,
+    @align(16) kind_0 : u32,
+    @align(4) cos_inner_0 : f32,
+    @align(8) pad0_2 : u32,
+    @align(4) pad1_2 : u32,
+};
+
+@binding(20) @group(0) var<storage, read> lights_0 : array<GpuLight_std430_0>;
+
 @binding(15) @group(0) var shadow_atlas_0 : texture_depth_2d;
 
 @binding(16) @group(0) var shadow_sampler_0 : sampler_comparison;
 
 struct VertexOutput_0
 {
-    @builtin(position) position_1 : vec4<f32>,
+    @builtin(position) position_2 : vec4<f32>,
     @location(0) world_position_0 : vec3<f32>,
     @location(2) world_normal_0 : vec3<f32>,
-    @location(3) color_1 : vec4<f32>,
+    @location(3) color_2 : vec4<f32>,
     @interpolate(flat) @location(4) material_1 : u32,
     @location(1) uv_1 : vec2<f32>,
 };
@@ -111,13 +124,38 @@ fn vertexMain(@builtin(vertex_index) index_0 : u32, @builtin(instance_index) ins
     var _S1 : mat4x4<f32> = mat4x4<f32>(instance_0.transform_0.data_0[i32(0)][i32(0)], instance_0.transform_0.data_0[i32(1)][i32(0)], instance_0.transform_0.data_0[i32(2)][i32(0)], instance_0.transform_0.data_0[i32(3)][i32(0)], instance_0.transform_0.data_0[i32(0)][i32(1)], instance_0.transform_0.data_0[i32(1)][i32(1)], instance_0.transform_0.data_0[i32(2)][i32(1)], instance_0.transform_0.data_0[i32(3)][i32(1)], instance_0.transform_0.data_0[i32(0)][i32(2)], instance_0.transform_0.data_0[i32(1)][i32(2)], instance_0.transform_0.data_0[i32(2)][i32(2)], instance_0.transform_0.data_0[i32(3)][i32(2)], instance_0.transform_0.data_0[i32(0)][i32(3)], instance_0.transform_0.data_0[i32(1)][i32(3)], instance_0.transform_0.data_0[i32(2)][i32(3)], instance_0.transform_0.data_0[i32(3)][i32(3)]);
     var world_0 : vec4<f32> = (((vec4<f32>(vertex_0.position_0.xyz, 1.0f)) * (_S1)));
     var output_0 : VertexOutput_0;
-    output_0.position_1 = (((world_0) * (mat4x4<f32>(frame_0.view_proj_0.data_1[i32(0)][i32(0)], frame_0.view_proj_0.data_1[i32(1)][i32(0)], frame_0.view_proj_0.data_1[i32(2)][i32(0)], frame_0.view_proj_0.data_1[i32(3)][i32(0)], frame_0.view_proj_0.data_1[i32(0)][i32(1)], frame_0.view_proj_0.data_1[i32(1)][i32(1)], frame_0.view_proj_0.data_1[i32(2)][i32(1)], frame_0.view_proj_0.data_1[i32(3)][i32(1)], frame_0.view_proj_0.data_1[i32(0)][i32(2)], frame_0.view_proj_0.data_1[i32(1)][i32(2)], frame_0.view_proj_0.data_1[i32(2)][i32(2)], frame_0.view_proj_0.data_1[i32(3)][i32(2)], frame_0.view_proj_0.data_1[i32(0)][i32(3)], frame_0.view_proj_0.data_1[i32(1)][i32(3)], frame_0.view_proj_0.data_1[i32(2)][i32(3)], frame_0.view_proj_0.data_1[i32(3)][i32(3)]))));
+    output_0.position_2 = (((world_0) * (mat4x4<f32>(frame_0.view_proj_0.data_1[i32(0)][i32(0)], frame_0.view_proj_0.data_1[i32(1)][i32(0)], frame_0.view_proj_0.data_1[i32(2)][i32(0)], frame_0.view_proj_0.data_1[i32(3)][i32(0)], frame_0.view_proj_0.data_1[i32(0)][i32(1)], frame_0.view_proj_0.data_1[i32(1)][i32(1)], frame_0.view_proj_0.data_1[i32(2)][i32(1)], frame_0.view_proj_0.data_1[i32(3)][i32(1)], frame_0.view_proj_0.data_1[i32(0)][i32(2)], frame_0.view_proj_0.data_1[i32(1)][i32(2)], frame_0.view_proj_0.data_1[i32(2)][i32(2)], frame_0.view_proj_0.data_1[i32(3)][i32(2)], frame_0.view_proj_0.data_1[i32(0)][i32(3)], frame_0.view_proj_0.data_1[i32(1)][i32(3)], frame_0.view_proj_0.data_1[i32(2)][i32(3)], frame_0.view_proj_0.data_1[i32(3)][i32(3)]))));
     output_0.world_position_0 = world_0.xyz;
     output_0.world_normal_0 = (((vertex_0.normal_0.xyz) * (mat3x3<f32>(_S1[i32(0)].xyz, _S1[i32(1)].xyz, _S1[i32(2)].xyz))));
-    output_0.color_1 = vertex_0.color_0;
+    output_0.color_2 = vertex_0.color_0;
     output_0.material_1 = instance_0.material_0;
     output_0.uv_1 = vertex_0.uv_0.xy;
     return output_0;
+}
+
+fn froxel_of_0( pixel_0 : vec2<f32>,  depth_0 : f32) -> u32
+{
+    var _S2 : u32 = max(frame_0.cluster_grid_0.x, u32(1));
+    var _S3 : u32 = max(frame_0.cluster_grid_0.y, u32(1));
+    var _S4 : u32 = max(frame_0.cluster_grid_0.z, u32(1));
+    var _S5 : u32 = max(frame_0.cluster_grid_0.w, u32(1));
+    var _S6 : u32 = u32(pixel_0.x) / _S5;
+    var _S7 : u32 = min(_S6, _S2 - u32(1));
+    var _S8 : u32 = u32(pixel_0.y) / _S5;
+    var scale_0 : f32 = 24.0f / log2(10000.0f);
+    return (u32(clamp(floor(log2(max(depth_0, 0.10000000149011612f)) * scale_0 + - scale_0 * log2(0.10000000149011612f)), 0.0f, f32(_S4 - u32(1)))) * _S3 + min(_S8, _S3 - u32(1))) * _S2 + _S7;
+}
+
+fn punctual_falloff_0( distance_0 : f32,  radius_0 : f32) -> f32
+{
+    var ratio_0 : f32 = distance_0 / max(radius_0, 9.99999997475242708e-07f);
+    var window_0 : f32 = saturate(1.0f - ratio_0 * ratio_0 * ratio_0 * ratio_0);
+    return window_0 * window_0 / (distance_0 * distance_0 + 1.0f);
+}
+
+fn spot_cone_0( to_light_0 : vec3<f32>,  axis_0 : vec3<f32>,  cos_outer_0 : f32,  cos_inner_1 : f32) -> f32
+{
+    return saturate((dot((vec3<f32>(0) - to_light_0), normalize(axis_0)) - cos_outer_0) / max(cos_inner_1 - cos_outer_0, 0.00009999999747379f));
 }
 
 fn sun_visibility_0( world_position_1 : vec3<f32>,  n_dot_l_0 : f32) -> f32
@@ -127,7 +165,7 @@ fn sun_visibility_0( world_position_1 : vec3<f32>,  n_dot_l_0 : f32) -> f32
     {
         return 1.0f;
     }
-    var _S2 : f32 = length(world_position_1 - frame_0.camera_position_0.xyz);
+    var _S9 : f32 = length(world_position_1 - frame_0.camera_position_0.xyz);
     var index_1 : u32 = u32(0);
     for(;;)
     {
@@ -139,7 +177,7 @@ fn sun_visibility_0( world_position_1 : vec3<f32>,  n_dot_l_0 : f32) -> f32
             cascade_0 = u32(1);
             break;
         }
-        if(_S2 < (frame_0.cascade_far_0[index_1]))
+        if(_S9 < (frame_0.cascade_far_0[index_1]))
         {
             cascade_0 = index_1;
             break;
@@ -148,26 +186,26 @@ fn sun_visibility_0( world_position_1 : vec3<f32>,  n_dot_l_0 : f32) -> f32
     }
     var clip_0 : vec4<f32> = (((vec4<f32>(world_position_1, 1.0f)) * (mat4x4<f32>(frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(0)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(1)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(2)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(3)][i32(0)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(0)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(1)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(2)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(3)][i32(1)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(0)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(1)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(2)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(3)][i32(2)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(0)][i32(3)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(1)][i32(3)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(2)][i32(3)], frame_0.shadow_view_proj_0.data_2[cascade_0].data_1[i32(3)][i32(3)]))));
     var ndc_0 : vec3<f32> = clip_0.xyz / vec3<f32>(clip_0.w);
-    var _S3 : vec2<f32> = vec2<f32>(1.0f);
-    var _S4 : bool;
-    if((any(((abs(ndc_0.xy)) > _S3))))
+    var _S10 : vec2<f32> = vec2<f32>(1.0f);
+    var _S11 : bool;
+    if((any(((abs(ndc_0.xy)) > _S10))))
     {
-        _S4 = true;
+        _S11 = true;
     }
     else
     {
-        _S4 = (ndc_0.z) <= 0.0f;
+        _S11 = (ndc_0.z) <= 0.0f;
     }
-    if(_S4)
+    if(_S11)
     {
         return 1.0f;
     }
-    var _S5 : vec2<f32> = vec2<f32>(ndc_0.x * 0.5f + 0.5f, 0.5f - ndc_0.y * 0.5f);
+    var _S12 : vec2<f32> = vec2<f32>(ndc_0.x * 0.5f + 0.5f, 0.5f - ndc_0.y * 0.5f);
     var texel_0 : vec2<f32> = frame_0.shadow_params_0.xy;
     var cosine_0 : f32 = saturate(n_dot_l_0);
-    var _S6 : f32 = ndc_0.z + (frame_0.shadow_params_0.z + frame_0.shadow_params_0.w * min(sqrt(saturate(1.0f - cosine_0 * cosine_0)) / max(cosine_0, 0.00009999999747379f), 5.0f));
-    const _S7 : vec2<f32> = vec2<f32>(2.0f, 1.0f);
-    var _S8 : vec2<f32> = vec2<f32>(0.5f, 0.5f) * texel_0 * _S7;
+    var _S13 : f32 = ndc_0.z + (frame_0.shadow_params_0.z + frame_0.shadow_params_0.w * min(sqrt(saturate(1.0f - cosine_0 * cosine_0)) / max(cosine_0, 0.00009999999747379f), 5.0f));
+    const _S14 : vec2<f32> = vec2<f32>(2.0f, 1.0f);
+    var _S15 : vec2<f32> = vec2<f32>(0.5f, 0.5f) * texel_0 * _S14;
     var y_0 : i32 = i32(-1);
     var visibility_0 : f32 = 0.0f;
     for(;;)
@@ -189,8 +227,8 @@ fn sun_visibility_0( world_position_1 : vec3<f32>,  n_dot_l_0 : f32) -> f32
             {
                 break;
             }
-            var tap_0 : vec2<f32> = clamp(_S5 + vec2<f32>(f32(x_0), f32(y_0)) * texel_0 * _S7, _S8, _S3 - _S8);
-            var visibility_1 : f32 = visibility_0 + (textureSampleCompareLevel((shadow_atlas_0), (shadow_sampler_0), (vec2<f32>((f32(cascade_0) + tap_0.x) / 2.0f, tap_0.y)), (_S6)));
+            var tap_0 : vec2<f32> = clamp(_S12 + vec2<f32>(f32(x_0), f32(y_0)) * texel_0 * _S14, _S15, _S10 - _S15);
+            var visibility_1 : f32 = visibility_0 + (textureSampleCompareLevel((shadow_atlas_0), (shadow_sampler_0), (vec2<f32>((f32(cascade_0) + tap_0.x) / 2.0f, tap_0.y)), (_S13)));
             x_0 = x_0 + i32(1);
             visibility_0 = visibility_1;
         }
@@ -208,23 +246,80 @@ struct pixelInput_0
 {
     @location(0) world_position_2 : vec3<f32>,
     @location(2) world_normal_1 : vec3<f32>,
-    @location(3) color_2 : vec4<f32>,
+    @location(3) color_3 : vec4<f32>,
     @interpolate(flat) @location(4) material_2 : u32,
     @location(1) uv_2 : vec2<f32>,
 };
 
 @fragment
-fn fragmentMain( _S9 : pixelInput_0, @builtin(position) position_2 : vec4<f32>) -> pixelOutput_0
+fn fragmentMain( _S16 : pixelInput_0, @builtin(position) position_3 : vec4<f32>) -> pixelOutput_0
 {
-    var normal_1 : vec3<f32> = normalize(_S9.world_normal_1);
-    var to_light_0 : vec3<f32> = normalize(frame_0.light_direction_0.xyz);
-    var material_3 : GpuMaterial_std430_0 = materials_0[_S9.material_2];
-    var _S10 : vec3<f32> = vec3<f32>(_S9.uv_2, f32(material_3.base_color_texture_0));
-    var albedo_0 : vec4<f32> = _S9.color_2 * material_3.base_color_0 * (textureSample((base_color_textures_0), (base_color_sampler_0), ((_S10)).xy, i32(((_S10)).z)));
-    var n_dot_l_1 : f32 = dot(normal_1, to_light_0);
-    var _S11 : f32 = max(n_dot_l_1, 0.0f);
-    var visibility_2 : f32 = sun_visibility_0(_S9.world_position_2, n_dot_l_1);
-    var _S12 : pixelOutput_0 = pixelOutput_0( vec4<f32>(albedo_0.xyz * (frame_0.ambient_0.xyz + frame_0.light_color_0.xyz * vec3<f32>((_S11 * visibility_2))) + frame_0.light_color_0.xyz * vec3<f32>((pow(max(dot(normal_1, normalize(to_light_0 + normalize(frame_0.camera_position_0.xyz - _S9.world_position_2))), 0.0f), 32.0f) * (step(0.0f, _S11) * _S11) * visibility_2 * 0.34999999403953552f)), albedo_0.w) );
-    return _S12;
+    var _S17 : vec3<f32> = normalize(_S16.world_normal_1);
+    var _S18 : vec3<f32> = normalize(frame_0.camera_position_0.xyz - _S16.world_position_2);
+    var material_3 : GpuMaterial_std430_0 = materials_0[_S16.material_2];
+    var _S19 : vec3<f32> = vec3<f32>(_S16.uv_2, f32(material_3.base_color_texture_0));
+    var albedo_0 : vec4<f32> = _S16.color_3 * material_3.base_color_0 * (textureSample((base_color_textures_0), (base_color_sampler_0), ((_S19)).xy, i32(((_S19)).z)));
+    var _S20 : u32 = froxel_of_0(position_3.xy, (((vec4<f32>(_S16.world_position_2, 1.0f)) * (mat4x4<f32>(frame_0.view_proj_0.data_1[i32(0)][i32(0)], frame_0.view_proj_0.data_1[i32(1)][i32(0)], frame_0.view_proj_0.data_1[i32(2)][i32(0)], frame_0.view_proj_0.data_1[i32(3)][i32(0)], frame_0.view_proj_0.data_1[i32(0)][i32(1)], frame_0.view_proj_0.data_1[i32(1)][i32(1)], frame_0.view_proj_0.data_1[i32(2)][i32(1)], frame_0.view_proj_0.data_1[i32(3)][i32(1)], frame_0.view_proj_0.data_1[i32(0)][i32(2)], frame_0.view_proj_0.data_1[i32(1)][i32(2)], frame_0.view_proj_0.data_1[i32(2)][i32(2)], frame_0.view_proj_0.data_1[i32(3)][i32(2)], frame_0.view_proj_0.data_1[i32(0)][i32(3)], frame_0.view_proj_0.data_1[i32(1)][i32(3)], frame_0.view_proj_0.data_1[i32(2)][i32(3)], frame_0.view_proj_0.data_1[i32(3)][i32(3)])))).w);
+    var base_1 : u32 = _S20 * u32(17);
+    var _S21 : u32 = min(cluster_lights_0[base_1], u32(16));
+    const _S22 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
+    var slot_0 : u32 = u32(0);
+    var direct_0 : vec3<f32> = _S22;
+    var gloss_0 : vec3<f32> = _S22;
+    for(;;)
+    {
+        if(slot_0 < _S21)
+        {
+        }
+        else
+        {
+            break;
+        }
+        var light_0 : GpuLight_std430_0 = lights_0[cluster_lights_0[base_1 + u32(1) + slot_0]];
+        var _S23 : bool = (light_0.kind_0) == u32(0);
+        var to_light_1 : vec3<f32>;
+        var reach_0 : f32;
+        if(_S23)
+        {
+            to_light_1 = normalize(light_0.direction_0.xyz);
+            reach_0 = 1.0f;
+        }
+        else
+        {
+            var offset_0 : vec3<f32> = light_0.position_1.xyz - _S16.world_position_2;
+            var distance_1 : f32 = length(offset_0);
+            var to_light_2 : vec3<f32> = offset_0 / vec3<f32>(max(distance_1, 9.99999997475242708e-07f));
+            var reach_1 : f32 = punctual_falloff_0(distance_1, light_0.position_1.w);
+            if((light_0.kind_0) == u32(2))
+            {
+                reach_0 = reach_1 * spot_cone_0(to_light_2, light_0.direction_0.xyz, light_0.direction_0.w, light_0.cos_inner_0);
+            }
+            else
+            {
+                reach_0 = reach_1;
+            }
+            to_light_1 = to_light_2;
+        }
+        var n_dot_l_1 : f32 = dot(_S17, to_light_1);
+        var _S24 : f32 = max(n_dot_l_1, 0.0f);
+        var specular_0 : f32 = pow(max(dot(_S17, normalize(to_light_1 + _S18)), 0.0f), 32.0f) * (step(0.0f, _S24) * _S24);
+        var reach_2 : f32;
+        if(_S23)
+        {
+            reach_2 = sun_visibility_0(_S16.world_position_2, n_dot_l_1);
+        }
+        else
+        {
+            reach_2 = reach_0;
+        }
+        var _S25 : vec3<f32> = light_0.color_1.xyz;
+        var direct_1 : vec3<f32> = direct_0 + _S25 * vec3<f32>((_S24 * reach_2));
+        var gloss_1 : vec3<f32> = gloss_0 + _S25 * vec3<f32>((specular_0 * reach_2 * 0.34999999403953552f));
+        slot_0 = slot_0 + u32(1);
+        direct_0 = direct_1;
+        gloss_0 = gloss_1;
+    }
+    var _S26 : pixelOutput_0 = pixelOutput_0( vec4<f32>(albedo_0.xyz * (frame_0.ambient_0.xyz + direct_0) + gloss_0, albedo_0.w) );
+    return _S26;
 }
 

@@ -907,13 +907,32 @@ fn surviving_clusters(
     camera: &crcbl_render::Camera,
 ) -> u32 {
     let _ = render_mesh(headless, renderer, pool, camera);
+    read_stats_word(
+        headless,
+        renderer,
+        crcbl_shaders::cull::CLUSTER_SURVIVOR_WORD,
+    )
+}
 
+/// One word of the frame's culling statistics, copied back after the frame that
+/// wrote it.
+///
+/// Topic 03 §3.6's ring is one buffer with a counter per producer in it — the
+/// cull pass's survivors, the amplification stage's, and `light_cluster.slang`'s
+/// refused assignments — so reading any of them is the same copy with a
+/// different offset. One helper rather than one per counter, because the
+/// barriers around it are the part worth getting right once.
+pub(crate) fn read_stats_word(
+    headless: &Headless,
+    renderer: &crcbl_render::ForwardRenderer,
+    word_index: u32,
+) -> u32 {
     let device = headless.device.as_ref();
     let stats = renderer.draws().visible_count(renderer.frame());
-    let word = u64::from(crcbl_shaders::cull::CLUSTER_SURVIVOR_WORD) * 4;
+    let word = u64::from(word_index) * 4;
     let staging = device
         .create_buffer(&BufferDesc {
-            label: Some("cluster survivor readback"),
+            label: Some("culling statistics readback"),
             size: 4,
             usage: BufferUsage::TRANSFER_DST,
             memory: MemoryLocation::HostReadback,

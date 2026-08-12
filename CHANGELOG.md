@@ -16,6 +16,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`FrameUniforms` lost `light_direction`, `light_color` and `lod_params`.**
+  The sun is a row in the light list now rather than a field, and `lod_params`
+  was already dead — documented in-tree as "read by no shader since hysteresis
+  landed, and written all the same". The block gained `cluster_grid` and still
+  net-shrank from 304 to 272 bytes. Anything constructing `FrameUniforms` or
+  reading those fields has to change.
+
 - **`BindingKind::SampledImage` gained `sample_type` and `BindingKind::Sampler`
   became a struct variant with `comparison`.** Every construction has to name
   them — `SampleType::Float` and `comparison: false` reproduce the old behaviour
@@ -320,6 +327,39 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   silence. Failures are now tracked per submission and logged as errors.
 
 ### Added
+
+- **Many lights, gathered by a clustered-forward pass.** `crcbl_render::Light`
+  with `PointLight` and `SpotLight`, an SSBO of rows the way instances and
+  materials already are, and `light_cluster.slang` assigning them to a froxel
+  grid — screen tiles by depth slices — that the fragment stage indexes by its
+  own position. `Scene::Lights` is the new golden.
+
+  **The sun is a row too**, flagged as reaching every froxel, so it stops being
+  a special case in the shader — and the proof that the conversion is faithful
+  is that **every existing golden is bit-identical**, measured byte-for-byte
+  before and after rather than trusted to the comparator, which is
+  tolerance-and-SSIM based and would have absorbed real drift.
+
+  Depth slices are **exponential** (Olsson–Assarsson) because a uniform split
+  over 0.1–1000 m would give a first slice 41 m deep holding every light. The
+  slice index comes from **linear view depth**, not `SV_Position.z`: under this
+  engine's reversed-Z that value runs backwards _and_ hyperbolically, so a
+  uniform step in it would put one slice covering 2.4 m to infinity.
+  `1/SV_Position.w` was avoided too — a reciprocal on some targets and not
+  others, which is the class of cross-target disagreement `mesh.slang`'s header
+  records being burned by twice. An orthographic camera has no view depth at all
+  and runs on one slice through its own branch.
+
+  Assignment is conservative by construction: a froxel is the convex hull of its
+  eight corners so their AABB contains it exactly, the falloff window is exactly
+  zero at the light's radius so cull and shading are the same statement, and a
+  spot is bounded by its sphere rather than its cone — loose in the safe
+  direction.
+
+  **Cluster overflow is counted rather than dropped silently**, riding the
+  existing delayed-readback counter: 21 lights over 288 froxels against a budget
+  of 16 refuses 1440 assignments, and the zero case is asserted first so the
+  counter is not wired to a constant.
 
 - **`crcbl lod stats` and `crcbl lod gen`** — topic 25's tooling row, host-only.
   `stats` resolves every mesh the file draws and reports, per level, **where the
