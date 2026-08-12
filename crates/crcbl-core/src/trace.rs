@@ -38,7 +38,9 @@
 //! straight through to whatever the span wrapped.
 //!
 //! The gate starts **disabled**, so a process pays that and nothing else until
-//! something calls [`set_enabled`].
+//! something calls [`set_enabled`] — or until [`init_from_env`] reads
+//! `CRCBL_TRACE` at start-up, which is how a run turns the profiler on without a
+//! rebuild.
 //!
 //! There is no compile-time removal, and that is deliberate for now. The plan
 //! reserves one for shipping builds; nothing ships from this repo yet, so it has
@@ -227,6 +229,72 @@ pub fn is_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
+/// Environment variable that decides whether a run records anything.
+///
+/// `CRCBL_TRACE=1` to record, `CRCBL_TRACE=0` not to. See [`init_from_env`].
+pub const ENV_VAR: &str = "CRCBL_TRACE";
+
+/// The gate's state when [`ENV_VAR`] says nothing readable — the same default
+/// [`set_enabled`] has never been called from.
+pub const DEFAULT_ENABLED: bool = false;
+
+/// Sets the gate from [`ENV_VAR`], and reports what it left it at.
+///
+/// Call once at start-up, beside [`init_logging`](crate::log::init_logging) —
+/// it is the same kind of thing, and the reason it exists at all is that
+/// [`set_enabled`] is a code change and the plan's "always compiled, runtime
+/// gated" decision exists to avoid needing one.
+///
+/// `1`, `true`, `on` and `yes` turn it on; `0`, `false`, `off` and `no` turn it
+/// off. Case and surrounding space do not matter.
+///
+/// # An unreadable value is [`DEFAULT_ENABLED`], not an error
+///
+/// Exactly what [`Filter::parse`](crate::log::Filter::parse) does with a
+/// directive it cannot read, and for the reason stated there: a typo in an
+/// environment variable must not stop the engine from starting. `CRCBL_TRACE=yse`
+/// therefore leaves the trace off and says nothing, the same as not setting it.
+///
+/// # It never turns the trace on in a browser build
+///
+/// `wasm32-unknown-unknown` has no environment to read *and* a clock that panics
+/// on the first span — see the module docs. The early return below is what makes
+/// the first of those irrelevant: this cannot be the thing that enables a trace
+/// the browser cannot run.
+pub fn init_from_env() -> bool {
+    // Compiled on every target, taken on one: `cfg!` rather than `#[cfg]` so the
+    // code below is type-checked by every build rather than by the ones that
+    // happen to run it.
+    if cfg!(target_arch = "wasm32") {
+        return false;
+    }
+    let enabled = std::env::var(ENV_VAR)
+        .ok()
+        .and_then(|value| parse_enabled(&value))
+        .unwrap_or(DEFAULT_ENABLED);
+    set_enabled(enabled);
+    if enabled {
+        // A run that is paying for instrumentation should say so, the way one
+        // that is capped by a frame limit says what capped it. Silence about the
+        // *off* case is deliberate: that is every other run.
+        log::info!("trace: recording CPU spans ({ENV_VAR} is set)");
+    }
+    enabled
+}
+
+/// The pure half of [`init_from_env`], so the spellings are testable without an
+/// environment.
+///
+/// `None` for anything unreadable, including the empty string, which
+/// [`init_from_env`] resolves to [`DEFAULT_ENABLED`].
+fn parse_enabled(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "on" | "yes" => Some(true),
+        "0" | "false" | "off" | "no" => Some(false),
+        _ => None,
+    }
+}
+
 /// Nanoseconds since the trace epoch.
 fn now_nanos() -> u64 {
     let epoch = EPOCH.get_or_init(MonotonicTime::new);
@@ -263,6 +331,19 @@ impl ThreadTrack {
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0
+    }
+
+    /// A track with this number.
+    ///
+    /// [`get`](Self::get)'s inverse, and the piece a consumer needs to build a
+    /// [`Snapshot`] rather than record one — every other field of one is already
+    /// public. [`drain`] is the only thing that hands out the tracks a *recorded*
+    /// snapshot carries; this cannot mint one of those, because a number is not a
+    /// buffer.
+    #[inline]
+    #[must_use]
+    pub const fn new(number: u32) -> Self {
+        Self(number)
     }
 }
 
@@ -822,6 +903,79 @@ mod tests {
         assert!(!is_enabled());
         assert!(!set_enabled(true), "the previous value was `false`");
         assert!(is_enabled());
+    }
+
+    /// Every spelling the variable accepts, and the ones it refuses.
+    ///
+    /// The refusals are the half that matters: `CRCBL_TRACE=yse` must land on
+    /// [`DEFAULT_ENABLED`] rather than on "anything not falsey is true", which is
+    /// what [`crate::log::Filter::parse`] does with a directive it cannot read.
+    #[test]
+    fn the_variables_spellings_are_read_the_way_crcbl_log_reads_a_directive() {
+        for on in ["1", "true", "on", "yes", "TRUE", "  On  ", "YES"] {
+            assert_eq!(parse_enabled(on), Some(true), "{on:?}");
+        }
+        for off in ["0", "false", "off", "no", "OFF", " False "] {
+            assert_eq!(parse_enabled(off), Some(false), "{off:?}");
+        }
+        for nonsense in ["", "   ", "yse", "2", "enabled", "trace", "-1"] {
+            assert_eq!(parse_enabled(nonsense), None, "{nonsense:?}");
+        }
+    }
+
+    /// **`CRCBL_TRACE` actually turns the gate on**, rather than a parser that
+    /// would pass while `init_from_env` read a variable of a different name.
+    ///
+    /// # Why a child process
+    ///
+    /// An environment variable is process-global and
+    /// [`std::env::set_var`] is `unsafe` precisely because another thread
+    /// reading the environment at the same moment is undefined — and `cargo
+    /// test` runs this crate's tests as threads in one process. So the run with
+    /// the variable set is a *process* of its own: this test re-executes the test
+    /// binary against its own name with `CRCBL_TRACE=1` in the child's
+    /// environment. Nothing in this process is mutated, so no other test can see
+    /// an ordering.
+    ///
+    /// Both halves are asserted. The parent asserts the unset case in the
+    /// ambient environment; the child, which finds the variable set, asserts the
+    /// set one. A developer who happens to have `CRCBL_TRACE` exported runs the
+    /// child arm here and the test still means something.
+    #[test]
+    fn the_environment_variable_is_what_turns_the_gate_on() {
+        // The trace is process-wide, so this takes the same lock every other
+        // test here does — and then puts the gate back to where a fresh process
+        // starts, which is what this test is about.
+        let _test = trace_test();
+        set_enabled(false);
+
+        if std::env::var(ENV_VAR).is_ok() {
+            assert!(init_from_env(), "the child was launched with {ENV_VAR}=1");
+            assert!(is_enabled(), "and the gate is what it set");
+            return;
+        }
+
+        assert!(!init_from_env(), "{ENV_VAR} is not set in this environment");
+        assert!(!is_enabled(), "so the gate is left at DEFAULT_ENABLED");
+
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("a test binary knows its own path"),
+        )
+        .args([
+            "--exact",
+            "trace::tests::the_environment_variable_is_what_turns_the_gate_on",
+        ])
+        .env(ENV_VAR, "1")
+        .output()
+        .expect("re-running this test binary");
+        let report = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "the child failed:\n{report}");
+        // **`--exact` with a name that matches nothing exits zero**, so without
+        // this the whole test passes vacuously the moment it is renamed.
+        assert!(
+            report.contains("1 passed"),
+            "the child ran no test — has this one been renamed?\n{report}"
+        );
     }
 
     /// The gate flipping under a live guard must not leave a begin without an

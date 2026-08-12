@@ -334,6 +334,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The frame loop is instrumented, and the debug panel answers "am I
+  GPU-bound?"** Six spans across `Loop::frame` — `frame` around `input`, `pace`,
+  `tick`, `draw` and `present`, with `present-wait` nested inside the last — and
+  a `budget` section showing CPU and GPU frame time as p50/p95 over a rolling
+  120-frame window with which of the two is the budget. `CRCBL_TRACE` turns the
+  profiler on the way `CRCBL_LOG` turns on logging, so it needs no rebuild.
+
+  **CPU frame time is the frame span less the spans the loop spent blocked** —
+  `pace` and `present-wait`. Including them would make the row read as the
+  display's period on every machine under vsync, exceed the GPU total whatever
+  the GPU was doing, and answer "CPU-bound" to a question it never looked at.
+
+  The two halves are distributions over their own windows, not a pair: the GPU
+  report is frames latent by design and nothing here stalls to "fix" that, so
+  the row carries the frame number its newest GPU sample came from. Percentiles
+  are refused below 20 samples, because nearest-rank p95 is just the maximum
+  under that, and the section is absent until it has one — a run with the
+  profiler off gets no row of dashes.
+
 - **`crcbl_core::trace`: CPU spans and counters**, topic 40's span API. A scoped
   span with a static name, opened and closed by RAII and nesting freely; a
   counter is its sibling, a named `u64` sampled at the depth it was taken from.

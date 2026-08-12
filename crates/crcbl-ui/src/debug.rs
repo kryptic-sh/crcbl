@@ -50,6 +50,7 @@ use std::collections::VecDeque;
 
 use glam::Vec2;
 
+use crate::budget::BudgetStats;
 use crate::draw_list::DrawList;
 use crate::hud::Anchor;
 use crate::text::{FontAtlas, LINE_HEIGHT};
@@ -582,6 +583,13 @@ pub struct DebugOverlay {
     pub panel: DebugPanel,
     /// The rolling frame window, fed by [`DebugOverlay::record`].
     pub frame: FrameStats,
+    /// CPU against GPU frame time, fed by whatever holds both — the engine's
+    /// loop does, from the trace and the renderer's timers.
+    ///
+    /// Unlike [`DebugOverlay::frame`] this has a precondition, so
+    /// [`DebugOverlay::begin_frame`] adds it only once it has a sample; see
+    /// there.
+    pub budget: BudgetStats,
 }
 
 impl DebugOverlay {
@@ -623,10 +631,22 @@ impl DebugOverlay {
         self.frame.record(dt);
     }
 
-    /// Starts the frame and adds the frame-timing section.
+    /// Starts the frame and adds the frame-timing section, plus the budget
+    /// section if there is anything in it.
+    ///
+    /// **The budget row has a precondition and the frame row does not**, which
+    /// is the whole difference between the two. Every sample has a frame
+    /// interval; the CPU half of the budget row exists only in a run whose trace
+    /// is on and the GPU half only on a device with timestamp queries, so a
+    /// sample that has neither would get three rows of `none` forever. That is
+    /// the same rule the panel already applies to a network module: a section
+    /// appears because the system it reports on is there.
     pub fn begin_frame(&mut self) {
         self.panel.begin_frame();
         self.panel.add(&self.frame);
+        if self.budget.has_samples() {
+            self.panel.add(&self.budget);
+        }
     }
 
     /// Adds a system's section, after [`DebugOverlay::begin_frame`].
@@ -848,6 +868,63 @@ mod tests {
             "the panel draws its own background"
         );
         assert_eq!(overlay.panel.sections().len(), 1, "no network module");
+    }
+
+    /// **The budget row reaches the draw list, and only once it has a sample.**
+    ///
+    /// Keyed on the section *title* and then on the labels inside it rather than
+    /// by searching the whole list for a string: `DebugModule` labels share one
+    /// namespace across modules and nothing detects a collision, so a search for
+    /// `cpu` could pick up a row a future module adds. The title `budget` is this
+    /// module's, and the walk below starts from it.
+    #[test]
+    fn the_budget_section_appears_once_it_has_a_sample_and_carries_its_numbers() {
+        use crate::budget::MIN_PERCENTILE_SAMPLES;
+
+        let atlas = FontAtlas::built_in();
+        let mut overlay = DebugOverlay::with_visible(true);
+        overlay.record(ms(16));
+
+        // Nothing recorded: the frame section and nothing else.
+        overlay.begin_frame();
+        assert_eq!(
+            overlay
+                .panel
+                .sections()
+                .iter()
+                .map(DebugSection::title)
+                .collect::<Vec<_>>(),
+            ["frame"],
+            "a run with no trace and no GPU timers has no budget to report"
+        );
+
+        for frame in 0..MIN_PERCENTILE_SAMPLES as u64 {
+            overlay.budget.record_cpu(ms(4));
+            overlay.budget.record_gpu(frame, ms(11));
+        }
+        overlay.begin_frame();
+        let mut dl = DrawList::new();
+        overlay.render(&mut dl, screen(), &atlas);
+
+        let drawn = texts(&dl);
+        let start = drawn
+            .iter()
+            .position(|text| text == "budget")
+            .unwrap_or_else(|| panic!("no budget section: {drawn:?}"));
+        assert_eq!(
+            &drawn[start..],
+            [
+                "budget",
+                "cpu p50/p95",
+                "4.00 / 4.00 ms",
+                "gpu p50/p95",
+                "11.00 / 11.00 ms",
+                "bound",
+                "gpu",
+                "gpu frame",
+                "19",
+            ],
+        );
     }
 
     /// Two modules render as two sections, in the order they were added, with

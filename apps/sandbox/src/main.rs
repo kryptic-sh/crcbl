@@ -27,6 +27,11 @@ use crate::args::{Invocation, parse};
 fn main() -> ExitCode {
     // `CRCBL_LOG=debug` turns on the per-event lines; the default is warnings.
     crcbl::core::log::init_logging();
+    // And `CRCBL_TRACE=1` turns the CPU spans on. Spelled out here rather than
+    // inherited because this sample's front end is deliberately its own — see
+    // `crcbl::args::run_front_end`, which does the same two calls for every
+    // sample that does share one.
+    crcbl::core::trace::init_from_env();
 
     match parse(std::env::args().skip(1)) {
         Invocation::Run(options) => match app::run(&options) {

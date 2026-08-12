@@ -129,6 +129,11 @@ where
 {
     // `CRCBL_LOG=debug` turns on the per-event lines; the default is warnings.
     crate::core::log::init_logging();
+    // `CRCBL_TRACE=1` turns the CPU spans on and with them the debug panel's
+    // budget row. Beside the logger and after it, because turning the trace on
+    // logs a line saying so and a line logged before the sink exists goes
+    // nowhere. Off by default: see `crcbl_core::trace`.
+    crate::core::trace::init_from_env();
 
     match invocation {
         Invocation::Run(options) => match run(&options) {

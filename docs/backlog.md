@@ -6157,23 +6157,62 @@ trace export, no memory or pool-occupancy accounting, no `crcbl-jobs`
 instrumentation, and counters scattered across `SceneStats`, `visible_count` and
 each sample's own rows rather than one place.
 
-**`crcbl_core::trace` landed the mechanism; nothing is instrumented yet.** What
-that slice left owed:
+**`crcbl_core::trace` landed, and `Loop::frame` and the panel's budget row are
+its first callers.** Decisions taken there, so they are not re-argued:
 
-- **Nothing opens a span.** The frame loop, the ECS schedule, physics, upload
-  and record are the next slice, and the debug panel's CPU-vs-GPU row is what
-  makes it visible. Until then the module is exercised only by its own tests.
+- **CPU frame time is the frame span less `pace` and `present-wait`.** Under
+  vsync the loop blocks inside the present, so an unsubtracted frame span reads
+  as the display's period on every machine, always exceeds the GPU total, and
+  answers "CPU-bound" without having looked. Verified on a real horde run: the
+  loop's wall-clock line reported 1.053 ms at a 1000 fps cap while the row
+  reported 0.41 ms of work, the difference being the `pace` sleep.
+- **The plan's `schedule`, `physics`, `upload` and `record` phases do not
+  exist** in the loop — the first two live inside a game's `tick` closure and
+  there is no asset upload in the frame. `perf.rs` records that rather than
+  faking them. They arrive with whichever slice gives `tick` its own structure.
+- **`shell.wait_events` is outside the frame span**, deliberately: it is the
+  loop idling, and a frame span containing the compositor's idle timeout would
+  report it as CPU cost on every still frame.
+- **`drain` is called once per frame while the gate is on, and not at all while
+  it is off.** Calling it unconditionally is two mutex acquisitions per frame to
+  move nothing, which is the disabled-cost claim the module makes about itself.
+- **The two windows are distributions, not a pair.** The GPU report is frames
+  latent by design; over 120 frames a two-frame lag cannot move a percentile,
+  whereas a per-frame pairing would be wrong by exactly that offset. The row
+  carries the frame number its newest GPU sample came from rather than hiding
+  it.
+- **`MIN_PERCENTILE_SAMPLES` is 20 because it is derived, not picked**:
+  nearest-rank p95 is `ceil(0.95n)`, which is just the maximum for every `n`
+  under 20. Below it the row says `filling 7/20`.
+
+What is left:
+
+- **`apps/bare` drives `GpuContext` with its own loop and never drains**, so
+  with the trace on its `present-wait` spans fill the per-thread buffer and are
+  then refused and counted. Bounded and reported, never a leak — but a trace of
+  a bare-loop run is one buffer's worth and then a `dropped` count. It also
+  never calls `init_from_env`, so the gate has to be set by hand there.
+- **`CRCBL_TRACE` is silent on a malformed value**, matching `CRCBL_LOG`'s
+  precedent exactly. A typo therefore leaves the panel with no budget row and no
+  explanation. Diverging from `log` to warn is a one-line change and was not
+  taken.
+- **`trace::ThreadTrack::new` is public with only test callers today.** It is
+  `get`'s inverse and the thing an out-of-crate consumer needs to build a
+  `Snapshot`, which `crcbl::perf`'s tests are the first of — but it is the shape
+  that turns into dead public API if nothing else ever wants it.
+- **Nothing is instrumented outside the loop.** No spans in `crcbl-ecs`,
+  `crcbl-phys` or `crcbl-jobs`, no counters at all, and none of the panel's
+  other rows: the pass list, the CPU breakdown, memory, jobs, the freeze toggle.
 - **Enabling the trace in a browser build panics on the first span.**
   `std::time::Instant::now` compiles on `wasm32-unknown-unknown` and panics at
   runtime — `std`'s unsupported-platform stub. Left loud rather than papered
   over with a zero clock, and the gate starts off so a browser build that never
   enables it never reads the clock. A real browser clock is `performance.now()`
   through a dependency `crcbl-core` does not have, which is **a decision for the
-  user** when the browser wants a trace.
-- **No environment entry point.** There is `set_enabled` and nothing reads
-  `CRCBL_TRACE` the way `CRCBL_LOG` is read. Deliberate — an env reader with no
-  caller is speculative — and the slice that instruments the frame loop is where
-  it belongs.
+  user** when the browser wants a trace. `trace::init_from_env` returns `false`
+  on `wasm32` before touching the environment, so the only thing that can turn
+  the gate on cannot do so in a browser build; `set_enabled` deliberately still
+  can, and reversing that is the user's call.
 - **`crcbl-jobs` has not gained the `crcbl-core` edge.** Correct today: CI runs
   `cargo machete`, which fails on an unused dependency, so the edge arrives with
   the first span opened in a worker.

@@ -169,6 +169,8 @@ pub mod backend;
 
 pub mod engine;
 
+pub mod perf;
+
 pub mod session;
 
 // Deliberately **not** gated to `wasm32`, even though only a browser build calls

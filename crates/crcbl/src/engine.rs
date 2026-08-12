@@ -1255,31 +1255,46 @@ impl GpuContext {
             return Err(GpuError::Hal(HalError::Backend(message)));
         }
 
-        // Closed-loop pacing, before an image is taken and before any work is
-        // recorded: this is the point in a frame where the CPU can be held back
-        // without holding anything else up. A device without present feedback
-        // answers immediately, which is why there is no branch here on which
-        // backend is underneath.
-        if let Some(present_id) = Self::present_to_wait_for(self.submitted, self.effective_pacing) {
-            match self
-                .device
-                .wait_until_presented(self.swapchain, present_id, PRESENT_WAIT_TIMEOUT)
-            {
-                Ok(()) => {}
-                // The display did not get to it in time. Render anyway: a
-                // frame skipped because the *last* one was slow is two frames
-                // lost instead of one, and the next wait catches up.
-                Err(SurfaceError::Timeout) => {
-                    log::debug!("hal: present {present_id} was still not up after a whole timeout");
-                }
-                // Not reported here: the acquire below reports it too, through
-                // the arm that already reconfigures and skips the frame.
-                Err(SurfaceError::OutOfDate) => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
+        // The two blocking calls, and only those, under one span: this is where
+        // a frame waits for the display rather than for the CPU, and
+        // `crate::perf::frame_cpu_time` subtracts it. The reconfigure the match
+        // below can run is deliberately outside — it is work, not waiting.
+        let next = {
+            let _waiting = crcbl_core::trace::span(crate::perf::PRESENT_WAIT_SPAN);
 
-        let acquired = match self.device.acquire_next_frame(self.swapchain) {
+            // Closed-loop pacing, before an image is taken and before any work is
+            // recorded: this is the point in a frame where the CPU can be held back
+            // without holding anything else up. A device without present feedback
+            // answers immediately, which is why there is no branch here on which
+            // backend is underneath.
+            if let Some(present_id) =
+                Self::present_to_wait_for(self.submitted, self.effective_pacing)
+            {
+                match self.device.wait_until_presented(
+                    self.swapchain,
+                    present_id,
+                    PRESENT_WAIT_TIMEOUT,
+                ) {
+                    Ok(()) => {}
+                    // The display did not get to it in time. Render anyway: a
+                    // frame skipped because the *last* one was slow is two frames
+                    // lost instead of one, and the next wait catches up.
+                    Err(SurfaceError::Timeout) => {
+                        log::debug!(
+                            "hal: present {present_id} was still not up after a whole timeout"
+                        );
+                    }
+                    // Not reported here: the acquire below reports it too, through
+                    // the arm that already reconfigures and skips the frame.
+                    Err(SurfaceError::OutOfDate) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+
+            self.device.acquire_next_frame(self.swapchain)
+        };
+
+        let acquired = match next {
             Ok(frame) => frame,
             // Expected traffic after a resize, per the seam's docs: reconfigure
             // and let the next frame have the image.
@@ -3367,6 +3382,18 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     /// One frame: pump, route, tick the simulation to catch up with the clock,
     /// draw, present.
     ///
+    /// # The trace's frame boundary is here
+    ///
+    /// [`crcbl_core::trace::drain`] is called once per call to this, after the
+    /// body — which owns the outermost span — has returned and its guard has
+    /// dropped. A drain does not disturb a span that is open across
+    /// it, it *splits* it, so a drain inside the frame span would put every
+    /// frame's begin in one snapshot and its end in the next and leave
+    /// [`crate::perf::frame_cpu_time`] with no whole frame to read. Here is also
+    /// the one place both drivers pass through: the native [`drive`] and the
+    /// browser's `crcbl::web::App` both step this method and neither has to know
+    /// the trace exists.
+    ///
     /// # Errors
     ///
     /// [`LoopError`] if the shell or the GPU failed.
@@ -3375,9 +3402,24 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             return Ok(Flow::Stop(ExitReason::FrameBudget));
         }
 
+        // **Deliberately outside the frame span.** This is the loop idling with
+        // nothing to do, and a CPU frame time that counted the compositor's idle
+        // timeout would be the timeout on every still frame — larger than any
+        // GPU total, and "CPU-bound" as the answer to a question it never looked
+        // at. `crate::perf` says which spans are work and which are waiting.
         if self.windowed {
             self.shell.wait_events(Some(WINDOWED_IDLE));
         }
+
+        let flow = self.frame_body();
+        self.record_frame_cost();
+        flow
+    }
+
+    /// The frame proper, with the outermost span open across all of it.
+    fn frame_body(&mut self) -> Result<Flow, LoopError<G::Error>> {
+        let _frame = crcbl_core::trace::span(crate::perf::FRAME_SPAN);
+        let input = crcbl_core::trace::span(crate::perf::INPUT_SPAN);
 
         // **Carrying the pointer, not defaulting it.** A batch with no pointer
         // event in it has not moved the cursor, and a menu whose hover state
@@ -3457,8 +3499,14 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         if let Some(size) = pending.resized {
             self.gpu.resize((size.width, size.height))?;
         }
+        drop(input);
 
+        // The one call in the frame that sleeps, and the reason it has a span of
+        // its own: the limiter holds the loop back, and time spent held back is
+        // not time the CPU spent on the frame.
+        let pace = crcbl_core::trace::span(crate::perf::PACE_SPAN);
         let now = self.clock_source.advance();
+        drop(pace);
         self.frame_clock.update(now);
         // Recorded whether or not the panel is visible — a window that only
         // fills while you are looking at it shows two seconds of nothing every
@@ -3466,14 +3514,17 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         self.debug.record(self.frame_clock.render_dt());
         // A paused frame keeps the clock and throws the ticks away, which is
         // `run_ticks`'s whole job; its docs carry the argument for why.
+        let tick = crcbl_core::trace::span(crate::perf::TICK_SPAN);
         let tick_dt = self.frame_clock.tick_dt_secs();
         let game = &mut self.game;
         let gpu = &mut self.gpu;
         let ran = run_ticks(&mut self.frame_clock, self.paused, || {
             game.tick(gpu, tick_dt)
         });
+        drop(tick);
         self.ticks += ran;
 
+        let draw = crcbl_core::trace::span(crate::perf::DRAW_SPAN);
         // `alpha` is read after the tick loop, never before: before, the
         // accumulator may still hold whole ticks.
         let info = FrameInfo {
@@ -3487,9 +3538,44 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         self.draw_menu();
         self.draw_debug_overlay();
         self.gpu.take_draw_list(&mut self.draw_list);
+        drop(draw);
 
-        self.budget.record(self.gpu.frame()?)?;
+        let present = crcbl_core::trace::span(crate::perf::PRESENT_SPAN);
+        let outcome = self.gpu.frame()?;
+        drop(present);
+
+        self.budget.record(outcome)?;
         Ok(Flow::Continue)
+    }
+
+    /// Closes the trace's frame and feeds the debug panel's budget row.
+    ///
+    /// Both halves are recorded whether or not the panel is visible, for the
+    /// reason [`DebugOverlay::record`](crcbl_ui::DebugOverlay::record) is: a
+    /// window that only starts filling when you look at it shows nothing for the
+    /// first two seconds every time.
+    ///
+    /// The GPU half is *not* this frame's — the timers are frames latent by
+    /// design and `docs/plan/40-profiling.md` refuses to stall them — which is
+    /// why it goes in by frame number and why the row shows two distributions
+    /// rather than a pair. See [`crcbl_ui::budget`].
+    fn record_frame_cost(&mut self) {
+        // The whole cost of a run that never turned the trace on: one relaxed
+        // atomic load. `drain` takes locks, so it is not on the other side of
+        // this branch by accident.
+        if crcbl_core::trace::is_enabled() {
+            let snapshot = crcbl_core::trace::drain();
+            if let Some(cpu) = crate::perf::frame_cpu_time(&snapshot) {
+                self.debug.budget.record_cpu(cpu);
+            }
+        }
+        if let Some(timings) = self.gpu.timings()
+            && !timings.is_empty()
+        {
+            self.debug
+                .budget
+                .record_gpu(timings.frame, Duration::from_nanos(timings.total_nanos()));
+        }
     }
 
     /// What a fired menu button does.
@@ -3947,6 +4033,10 @@ mod tests {
         had_menu: bool,
         /// Frames recorded and presented.
         frames: u32,
+        /// What [`GameGpu::timings`] answers. `None` is a device with no
+        /// timestamp queries, which is what a fake is unless a test says
+        /// otherwise.
+        timings: Option<crcbl_render::FrameTimings>,
     }
 
     impl FakeGpu {
@@ -3957,6 +4047,7 @@ mod tests {
                 draw_list: crcbl_ui::draw_list::DrawList::new(),
                 had_menu: false,
                 frames: 0,
+                timings: None,
             }
         }
     }
@@ -4026,7 +4117,7 @@ mod tests {
         }
 
         fn timings(&self) -> Option<&crcbl_render::FrameTimings> {
-            None
+            self.timings.as_ref()
         }
 
         fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
@@ -7112,6 +7203,261 @@ mod tests {
             FakeGame::default(),
             hosted_config(frames),
         )
+    }
+
+    // -- the frame's spans ---------------------------------------------------
+
+    /// Runs `body` in a process of its own, with the trace on.
+    ///
+    /// **A mutex would not be enough here.** The gate, the per-thread buffers
+    /// and [`crcbl_core::trace::drain`] are all process-wide, `cargo test` runs
+    /// this binary's tests as threads, and [`Loop::frame`] now drains — so any
+    /// other test's frame, running concurrently while the gate is on, would take
+    /// this one's records with it. Serialising the tests that *turn the gate on*
+    /// does not fix that: the thief is a test that never asked about the trace at
+    /// all. A child process is the only isolation that actually holds, and it
+    /// turns the gate on the way a user does, through `CRCBL_TRACE`.
+    ///
+    /// `name` is this test's full path. It is checked rather than trusted — see
+    /// the assertion on the child's report.
+    fn in_a_traced_process(name: &str, body: impl FnOnce()) {
+        if std::env::var(crcbl_core::trace::ENV_VAR).is_ok() {
+            assert!(
+                crcbl_core::trace::init_from_env(),
+                "the child is launched with the trace on"
+            );
+            drop(crcbl_core::trace::drain());
+            body();
+            return;
+        }
+
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("a test binary knows its own path"),
+        )
+        .args(["--exact", name])
+        .env(crcbl_core::trace::ENV_VAR, "1")
+        .output()
+        .expect("re-running this test binary");
+        let report = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "the traced child failed:\n{report}"
+        );
+        // `--exact` with a name that matches nothing exits zero, so without this
+        // a rename would leave the whole test passing on nothing at all.
+        assert!(
+            report.contains("1 passed"),
+            "the child ran no test — is {name:?} still this test's path?\n{report}"
+        );
+    }
+
+    /// A record reduced to what these assertions are written against.
+    fn span_shapes(
+        snapshot: &crcbl_core::trace::Snapshot,
+    ) -> Vec<(&'static str, crcbl_core::trace::RecordKind, u16)> {
+        snapshot
+            .threads
+            .iter()
+            .flat_map(|thread| &thread.records)
+            .map(|record| (record.name, record.kind, record.depth))
+            .collect()
+    }
+
+    /// **The frame's phases, by name and by depth.**
+    ///
+    /// Against [`Loop::frame_body`] rather than [`Loop::frame`], because `frame`
+    /// drains what it recorded — which is the next test. The tree here is the one
+    /// `crate::perf`'s module docs draw, minus `present-wait`, which belongs to
+    /// [`GpuContext`] and has a test of its own: [`FakeGpu`] presents without a
+    /// swapchain to wait on.
+    #[test]
+    fn a_traced_frame_records_the_loops_phases_in_order_and_at_their_depths() {
+        in_a_traced_process(
+            "engine::tests::a_traced_frame_records_the_loops_phases_in_order_and_at_their_depths",
+            || {
+                use crcbl_core::trace::RecordKind::{SpanBegin, SpanEnd};
+
+                let mut engine = hosted(None);
+                assert_eq!(
+                    engine.frame_body().expect("the fake never fails"),
+                    Flow::Continue
+                );
+
+                let snapshot = crcbl_core::trace::drain();
+                assert_eq!(snapshot.dropped(), 0, "{}", snapshot.report());
+                assert_eq!(
+                    span_shapes(&snapshot),
+                    vec![
+                        (crate::perf::FRAME_SPAN, SpanBegin, 0),
+                        (crate::perf::INPUT_SPAN, SpanBegin, 1),
+                        (crate::perf::INPUT_SPAN, SpanEnd, 1),
+                        (crate::perf::PACE_SPAN, SpanBegin, 1),
+                        (crate::perf::PACE_SPAN, SpanEnd, 1),
+                        (crate::perf::TICK_SPAN, SpanBegin, 1),
+                        (crate::perf::TICK_SPAN, SpanEnd, 1),
+                        (crate::perf::DRAW_SPAN, SpanBegin, 1),
+                        (crate::perf::DRAW_SPAN, SpanEnd, 1),
+                        (crate::perf::PRESENT_SPAN, SpanBegin, 1),
+                        (crate::perf::PRESENT_SPAN, SpanEnd, 1),
+                        (crate::perf::FRAME_SPAN, SpanEnd, 0),
+                    ],
+                );
+            },
+        );
+    }
+
+    /// **Nothing is open across the frame's drain.**
+    ///
+    /// The failure this catches is a drain taken *inside* the frame span: the
+    /// span would be split, every snapshot would hold one frame's end and the
+    /// next one's begin, and `frame_cpu_time` would never find a whole frame. The
+    /// observable is a second drain finding anything at all — a stray `frame` end
+    /// is exactly what a split leaves behind.
+    #[test]
+    fn the_frames_drain_leaves_nothing_open_across_it() {
+        in_a_traced_process(
+            "engine::tests::the_frames_drain_leaves_nothing_open_across_it",
+            || {
+                let mut engine = hosted(None);
+                for _ in 0..3 {
+                    engine.frame().expect("the fake never fails");
+                }
+                let leftover = crcbl_core::trace::drain();
+                assert!(
+                    leftover.is_empty(),
+                    "the frame left records behind: {}\n{:?}",
+                    leftover.report(),
+                    span_shapes(&leftover),
+                );
+            },
+        );
+    }
+
+    /// **The swapchain wait is a span of its own**, so the CPU frame time can
+    /// have it taken back out. It is what a vsynced frame spends most of itself
+    /// in, and counting it as CPU work is how a row answers "CPU-bound" to every
+    /// frame on every machine.
+    #[test]
+    fn the_swapchain_wait_is_recorded_as_a_span_of_its_own() {
+        in_a_traced_process(
+            "engine::tests::the_swapchain_wait_is_recorded_as_a_span_of_its_own",
+            || {
+                use crcbl_core::trace::RecordKind::{SpanBegin, SpanEnd};
+
+                let (_shell, _window, _recorder, mut gpu) =
+                    null_context("present-wait span test", Pacing::Vsync);
+                // Two frames: the first has nothing submitted to wait on, the
+                // second does, and both go through the acquire.
+                null_frame(&mut gpu).expect("the null backend presents");
+                null_frame(&mut gpu).expect("the null backend presents");
+
+                let snapshot = crcbl_core::trace::drain();
+                assert_eq!(
+                    span_shapes(&snapshot),
+                    vec![
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
+                    ],
+                    "a hand-written loop opens no frame span, so these sit at depth zero",
+                );
+                gpu.destroy().expect("the null backend releases everything");
+            },
+        );
+    }
+
+    /// **A traced run fills the budget row's CPU window**, which is the whole
+    /// chain: the span opens, the drain finds it, `frame_cpu_time` reads it and
+    /// the row takes it.
+    #[test]
+    fn a_traced_run_fills_the_budget_rows_cpu_window() {
+        in_a_traced_process(
+            "engine::tests::a_traced_run_fills_the_budget_rows_cpu_window",
+            || {
+                let mut engine = hosted(None);
+                assert!(
+                    !engine.debug.budget.has_samples(),
+                    "nothing before the first frame"
+                );
+                for _ in 0..crcbl_ui::MIN_PERCENTILE_SAMPLES {
+                    engine.frame().expect("the fake never fails");
+                }
+                let (p50, p95) = engine
+                    .debug
+                    .budget
+                    .cpu()
+                    .expect("a window this full reports percentiles");
+                assert!(p50 > Duration::ZERO, "a frame that cost no CPU time at all");
+                assert!(p95 >= p50, "p95 {p95:?} is under p50 {p50:?}");
+                // No GPU timers on the fake, so the question stays open rather
+                // than being answered from one side.
+                assert_eq!(engine.debug.budget.bound(), crcbl_ui::Bound::Unknown);
+            },
+        );
+    }
+
+    /// The other side of the gate: with the trace off, the row has no CPU half
+    /// and the panel therefore has no budget section.
+    #[test]
+    fn an_untraced_run_records_no_cpu_samples_and_shows_no_budget_section() {
+        let mut engine = hosted(None);
+        assert!(!crcbl_core::trace::is_enabled(), "the gate starts off");
+        for _ in 0..4 {
+            engine.frame().expect("the fake never fails");
+        }
+        assert!(engine.debug.budget.cpu().is_none());
+        assert!(!engine.debug.budget.has_samples());
+
+        engine.debug.set_visible(true);
+        engine.debug.begin_frame();
+        assert!(
+            engine
+                .debug
+                .panel
+                .sections()
+                .iter()
+                .all(|section| section.title() != "budget"),
+            "a run with neither half has no budget row to show"
+        );
+    }
+
+    /// **The GPU half goes in by frame number**, so the timers' latency does not
+    /// fill the window with copies of one report.
+    ///
+    /// No trace here: the two halves are fed independently, and this is the one
+    /// that needs no gate.
+    #[test]
+    fn the_budget_rows_gpu_window_follows_the_timers_frame_number() {
+        let timings = |frame: u64, nanos: u64| crcbl_render::FrameTimings {
+            frame,
+            passes: vec![crcbl_render::PassTiming {
+                label: "forward".to_string(),
+                gpu_nanos: nanos,
+            }],
+        };
+
+        let mut engine = hosted(None);
+        engine.gpu.timings = Some(timings(1, 2_000_000));
+        engine.frame().expect("the fake never fails");
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            engine.debug.budget.gpu_frame(),
+            Some(1),
+            "the same latent report twice is still one frame"
+        );
+
+        engine.gpu.timings = Some(timings(2, 3_000_000));
+        engine.frame().expect("the fake never fails");
+        assert_eq!(engine.debug.budget.gpu_frame(), Some(2));
+
+        // And an empty report — a device with timers whose ring has not come
+        // round — is not a frame that cost nothing.
+        let mut pending = hosted(None);
+        pending.gpu.timings = Some(crcbl_render::FrameTimings::default());
+        pending.frame().expect("the fake never fails");
+        assert_eq!(pending.debug.budget.gpu_frame(), None);
+        assert!(!pending.debug.budget.has_samples());
     }
 
     /// **Every frame draws once, and draws after the ticks it reports.**
