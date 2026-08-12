@@ -102,7 +102,7 @@ struct GpuLight_std430_0
     @align(16) direction_0 : vec4<f32>,
     @align(16) kind_0 : u32,
     @align(4) cos_inner_0 : f32,
-    @align(8) shadow_slot_0 : u32,
+    @align(8) shadow_tile_0 : u32,
     @align(4) pad1_2 : u32,
 };
 
@@ -434,8 +434,8 @@ fn fragmentMain( _S18 : pixelInput_0, @builtin(position) position_3 : vec4<f32>)
         {
             if(_S26 == u32(1))
             {
-                var _S29 : u32 = _S25.shadow_slot_0;
-                if((_S25.shadow_slot_0) <= u32(0))
+                var _S29 : u32 = _S25.shadow_tile_0;
+                if((_S25.shadow_tile_0) <= u32(0))
                 {
                     var _S30 : f32 = point_visibility_0(&(_S25), _S29, _S18.world_position_5, to_light_4, n_dot_l_4);
                     reach_2 = reach_0 * _S30;
@@ -447,8 +447,8 @@ fn fragmentMain( _S18 : pixelInput_0, @builtin(position) position_3 : vec4<f32>)
             }
             else
             {
-                var _S31 : u32 = _S25.shadow_slot_0;
-                if((_S25.shadow_slot_0) < u32(6))
+                var _S31 : u32 = _S25.shadow_tile_0;
+                if((_S25.shadow_tile_0) < u32(6))
                 {
                     var _S32 : f32 = spot_visibility_0(&(_S25), _S31, _S18.world_position_5, to_light_4, n_dot_l_4);
                     reach_2 = reach_0 * _S32;

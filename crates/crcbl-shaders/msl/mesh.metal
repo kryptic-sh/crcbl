@@ -110,7 +110,7 @@ struct GpuLight_natural_0
     packed_float4 direction_0;
     uint kind_0;
     float cos_inner_0;
-    uint shadow_slot_0;
+    uint shadow_tile_0;
     uint pad1_2;
 };
 
@@ -779,10 +779,10 @@ struct pixelInput_0
             {
 
 #line 1211
-                uint _S37 = (&_S30)->shadow_slot_0;
+                uint _S37 = (&_S30)->shadow_tile_0;
 
 #line 1223
-                if(((&_S30)->shadow_slot_0) <= 0U)
+                if(((&_S30)->shadow_tile_0) <= 0U)
                 {
 
 #line 1223
@@ -808,10 +808,10 @@ struct pixelInput_0
             {
 
 #line 1211
-                uint _S39 = (&_S30)->shadow_slot_0;
+                uint _S39 = (&_S30)->shadow_tile_0;
 
 #line 1229
-                if(((&_S30)->shadow_slot_0) < 6U)
+                if(((&_S30)->shadow_tile_0) < 6U)
                 {
 
 #line 1229

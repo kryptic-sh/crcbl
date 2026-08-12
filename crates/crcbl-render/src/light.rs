@@ -98,8 +98,8 @@ impl Light {
     /// correctness cliff.
     #[must_use]
     pub fn row(&self, base_tile: Option<usize>) -> GpuLight {
-        let shadow_slot = base_tile.map_or(light::NO_SHADOW_SLOT, |base| {
-            u32::try_from(base).unwrap_or(light::NO_SHADOW_SLOT)
+        let shadow_tile = base_tile.map_or(light::NO_SHADOW_TILE, |base| {
+            u32::try_from(base).unwrap_or(light::NO_SHADOW_TILE)
         });
         match self {
             Self::Point(point) => GpuLight {
@@ -108,7 +108,7 @@ impl Light {
                 direction: [0.0; 4],
                 kind: light::KIND_POINT,
                 cos_inner: 0.0,
-                shadow_slot,
+                shadow_tile,
                 pad1: 0,
             },
             Self::Spot(spot) => {
@@ -128,7 +128,7 @@ impl Light {
                         .to_array(),
                     kind: light::KIND_SPOT,
                     cos_inner: spot.inner_angle.cos(),
-                    shadow_slot,
+                    shadow_tile,
                     pad1: 0,
                 }
             }
@@ -164,12 +164,12 @@ pub fn sun_row(sun: &DirectionalLight) -> GpuLight {
         direction: sun.direction.normalize_or_zero().extend(0.0).to_array(),
         kind: light::KIND_DIRECTIONAL,
         cos_inner: 0.0,
-        // **The sun occludes through the cascades, not through a light slot.**
-        // A directional row naming a slot would sample a spot's map with the
+        // **The sun occludes through the cascades, not through a light tile.**
+        // A directional row naming a tile would sample a spot's map with the
         // sun's geometry, so it names none — and `mesh.slang` reaches the
         // cascades by `kind` rather than by this field, which is why the two
         // cannot be confused.
-        shadow_slot: light::NO_SHADOW_SLOT,
+        shadow_tile: light::NO_SHADOW_TILE,
         pad1: 0,
     }
 }

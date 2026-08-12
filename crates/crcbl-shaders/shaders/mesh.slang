@@ -176,7 +176,7 @@ static const uint SHADOW_CASCADES = 2;
 /// this is a layout number and the same drift test that pins `SHADOW_CASCADES`
 /// pins it.
 ///
-/// **Not a count of lights**: `GpuLight::shadow_slot` is an index into this
+/// **Not a count of lights**: `GpuLight::shadow_tile` is an index into this
 /// region and a point light occupies six of it, so how many lights a frame can
 /// shadow is a host-side budget (`crcbl_render::shadow::LIGHT_SLOTS`) that no
 /// shader has any use for.
@@ -312,10 +312,10 @@ struct FrameUniforms
     /// the same `Greater` comparison sampler reads all three.
     ///
     /// **Indexed by tile rather than by light**, which is what lets one light own
-    /// six: `GpuLight::shadow_slot` names the first of a light's tiles and
+    /// six: `GpuLight::shadow_tile` names the first of a light's tiles and
     /// `point_visibility` adds the face it selected. A tile no light holds is
     /// read by nothing, because the rows that would name it carry
-    /// `NO_SHADOW_SLOT`. **Last in the block rather than beside the cascades**,
+    /// `NO_SHADOW_TILE`. **Last in the block rather than beside the cascades**,
     /// so adding it moved no existing member's offset — which is what let the
     /// cascade goldens stay byte-identical across the change that introduced it.
     float4x4 light_view_proj[SHADOW_LIGHT_TILES];
@@ -444,7 +444,7 @@ struct GpuLight
     /// The cosine of a spot's inner half-angle.
     float cos_inner;
     /// The **first** entry of `FrameUniforms::light_view_proj` this light
-    /// occludes through, or `NO_SHADOW_SLOT` if it was given none.
+    /// occludes through, or `NO_SHADOW_TILE` if it was given none.
     ///
     /// A spot occludes through that one tile; a point light through the
     /// `SHADOW_POINT_FACES` tiles from here, and `point_visibility` adds the face
@@ -452,18 +452,18 @@ struct GpuLight
     /// want more than they hold, so a row saying "no tile" is the ordinary case:
     /// `docs/plan/18-render-features.md`'s rule is that such a light still lights
     /// and simply does not occlude.
-    uint shadow_slot;
+    uint shadow_tile;
     uint pad1;
 };
 
-/// `GpuLight::shadow_slot` for a light with no shadow map of its own.
+/// `GpuLight::shadow_tile` for a light with no shadow map of its own.
 ///
 /// Deliberately not zero, which is a real tile. The shading loop compares
 /// against `SHADOW_LIGHT_TILES` rather than against this value, so a row carrying
 /// any other out-of-range tile is refused the same way — and a point light's
 /// whole run is checked, because this value plus a face index would otherwise
 /// wrap into the region.
-static const uint NO_SHADOW_SLOT = 0xffffffffu;
+static const uint NO_SHADOW_TILE = 0xffffffffu;
 
 /// `GpuLight::kind` for the sun: no position, no falloff, and in every froxel.
 static const uint KIND_DIRECTIONAL = 0;
@@ -960,7 +960,7 @@ float punctual_visibility(uint tile, float3 world_position, float3 to_light, flo
 
 /// The fraction of a shadowed spot this fragment can see.
 ///
-/// `tile` is the light's `shadow_slot` and the caller has already checked it
+/// `tile` is the light's `shadow_tile` and the caller has already checked it
 /// names a real light tile. The rest is `punctual_visibility`'s.
 float spot_visibility(GpuLight light, uint tile, float3 world_position, float3 to_light,
                       float n_dot_l)
@@ -1017,7 +1017,7 @@ uint point_face(float3 from_light)
 
 /// The fraction of a shadowed **point** light this fragment can see.
 ///
-/// `base` is the light's `shadow_slot`: the first of the `SHADOW_POINT_FACES`
+/// `base` is the light's `shadow_tile`: the first of the `SHADOW_POINT_FACES`
 /// light tiles it holds, and the face selected below is added to it. The caller
 /// has already checked that the whole run is inside the light region.
 float point_visibility(GpuLight light, uint base, float3 world_position, float3 to_light,
@@ -1211,24 +1211,24 @@ float4 fragmentMain(VertexOutput input) : SV_Target
         else if (light.kind == KIND_POINT)
         {
             // **The whole run has to be inside the region, not just its first
-            // tile**: a point light's faces are `shadow_slot .. + 6`, so a row
+            // tile**: a point light's faces are `shadow_tile .. + 6`, so a row
             // whose base sat in the last five tiles would read a matrix past the
             // end of the array. `Selection` never emits one; this is what makes
             // that a fact about the shader rather than a promise about the host.
             //
             // Written as a subtraction on the two constants rather than as
-            // `shadow_slot + SHADOW_POINT_FACES <= SHADOW_LIGHT_TILES`, because
-            // `NO_SHADOW_SLOT` is `0xffffffff` and that sum wraps — an unshadowed
+            // `shadow_tile + SHADOW_POINT_FACES <= SHADOW_LIGHT_TILES`, because
+            // `NO_SHADOW_TILE` is `0xffffffff` and that sum wraps — an unshadowed
             // point light would pass the test and sample tile 5.
-            if (light.shadow_slot <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
+            if (light.shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
             {
-                reach *= point_visibility(light, light.shadow_slot, input.world_position, to_light,
+                reach *= point_visibility(light, light.shadow_tile, input.world_position, to_light,
                                           n_dot_l);
             }
         }
-        else if (light.shadow_slot < SHADOW_LIGHT_TILES)
+        else if (light.shadow_tile < SHADOW_LIGHT_TILES)
         {
-            reach *= spot_visibility(light, light.shadow_slot, input.world_position, to_light,
+            reach *= spot_visibility(light, light.shadow_tile, input.world_position, to_light,
                                      n_dot_l);
         }
         diffuse *= reach;

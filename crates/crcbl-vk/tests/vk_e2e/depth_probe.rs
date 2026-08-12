@@ -801,7 +801,7 @@ fn probe_sun() -> crcbl_shaders::light::GpuLight {
         direction: [0.0, 0.0, 1.0, 0.0],
         kind: crcbl_shaders::light::KIND_DIRECTIONAL,
         cos_inner: 0.0,
-        shadow_slot: crcbl_shaders::light::NO_SHADOW_SLOT,
+        shadow_tile: crcbl_shaders::light::NO_SHADOW_TILE,
         pad1: 0,
     }
 }
@@ -833,7 +833,7 @@ fn render_probe(
         // in the froxel that really holds the one light.
         cluster_grid: PROBE_GRID.to_frame_block(),
         // No shadowed light either, and the row above says so: `probe_sun`
-        // carries `NO_SHADOW_SLOT`, so nothing in this frame reads these.
+        // carries `NO_SHADOW_TILE`, so nothing in this frame reads these.
         light_view_proj: [glam::Mat4::IDENTITY.to_cols_array();
             crcbl_shaders::mesh::SHADOW_LIGHT_TILES],
     };

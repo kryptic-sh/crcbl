@@ -3026,11 +3026,11 @@ impl ForwardRenderer {
         // Rebuilt every frame rather than kept: the sun arrives per frame, and a
         // cached list would be a second place for it to be stale.
         //
-        // **The tile budget is spent first**, because a row carries the slot it
+        // **The tile budget is spent first**, because a row carries the tile it
         // was given. Topic 18's rule — projected screen influence, ties by index,
         // an incumbent held until a challenger clearly beats it — lives in
         // `shadow::Selection`, and a light it refuses is a light whose row says
-        // `NO_SHADOW_SLOT`: it still lights, it just does not occlude.
+        // `NO_SHADOW_TILE`: it still lights, it just does not occlude.
         self.shadow_lights.update(&self.extra_lights, camera.eye);
         let mut rows = Vec::with_capacity(1 + self.extra_lights.len());
         rows.push(sun_row(light));
@@ -3046,7 +3046,7 @@ impl ForwardRenderer {
         // its base, in `shadow::face_axis`' order, which is the order
         // `mesh.slang`'s `point_face` selects between. The identity is not a
         // projection anything samples through — the rows that could name a free
-        // tile carry `NO_SHADOW_SLOT` — and it is written rather than left stale
+        // tile carry `NO_SHADOW_TILE` — and it is written rather than left stale
         // so a block dumped for debugging says plainly that the tile is empty.
         let mut light_view_proj = [Mat4::IDENTITY.to_cols_array(); shadow::LIGHT_TILES];
         for assignment in self.shadow_lights.slots().iter().flatten() {

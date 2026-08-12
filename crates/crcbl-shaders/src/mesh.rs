@@ -257,10 +257,10 @@ pub struct FrameUniforms {
     /// `crcbl_render::shadow::Selection` decides whose they are; a tile no light
     /// holds carries whatever was last written there and is read by nothing,
     /// because the rows that would name it carry
-    /// [`NO_SHADOW_SLOT`](crate::light::NO_SHADOW_SLOT).
+    /// [`NO_SHADOW_TILE`](crate::light::NO_SHADOW_TILE).
     ///
     /// **Indexed by tile rather than by light**, which is what lets one light own
-    /// six of them: [`GpuLight::shadow_slot`](crate::light::GpuLight::shadow_slot)
+    /// six of them: [`GpuLight::shadow_tile`](crate::light::GpuLight::shadow_tile)
     /// carries the *first* of a light's tiles and a point light's faces are the
     /// [`SHADOW_POINT_FACES`] entries from there.
     ///
@@ -1351,7 +1351,7 @@ mod tests {
                 "cluster_grid lane {lane}"
             );
         }
-        // And the light slots, which sit **after** the integer member — the one
+        // And the light tiles, which sit **after** the integer member — the one
         // place `to_bytes` writes through a second cursor, and so the one place
         // a member could land on the wrong side of it.
         for index in 0..SHADOW_LIGHT_TILES {

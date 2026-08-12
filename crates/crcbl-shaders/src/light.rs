@@ -221,7 +221,7 @@ pub struct GpuLight {
     /// — because the shader divides by the difference.
     pub cos_inner: f32,
     /// The **first** light tile this light occludes through, or
-    /// [`NO_SHADOW_SLOT`] if it was given none.
+    /// [`NO_SHADOW_TILE`] if it was given none.
     ///
     /// An index into [`FrameUniforms::light_view_proj`](crate::mesh::FrameUniforms::light_view_proj),
     /// and through `crcbl_render::shadow::light_tile` the atlas tile the map was
@@ -235,7 +235,7 @@ pub struct GpuLight {
     /// one per cube face, and the shader adds the face it selected to this
     /// number.
     ///
-    /// **[`NO_SHADOW_SLOT`] is the ordinary case, not an error.** The atlas has
+    /// **[`NO_SHADOW_TILE`] is the ordinary case, not an error.** The atlas has
     /// room for [`SHADOW_LIGHT_TILES`](crate::mesh::SHADOW_LIGHT_TILES) tiles and
     /// a scene may want more than they hold; a light that misses out still lights
     /// and simply does not occlude, which is what makes the budget a quality knob
@@ -245,21 +245,21 @@ pub struct GpuLight {
     ///
     /// This was the first of the row's two padding words. It is spent rather
     /// than added to the row because `std430` had already rounded the row up to
-    /// [`LIGHT_STRIDE`] to hold it, so the shadow slot costs no bytes at all.
-    pub shadow_slot: u32,
+    /// [`LIGHT_STRIDE`] to hold it, so the shadow tile costs no bytes at all.
+    pub shadow_tile: u32,
     /// Pads the row to [`LIGHT_STRIDE`], which is what `std430` rounds it to
     /// anyway.
     pub pad1: u32,
 }
 
-/// [`GpuLight::shadow_slot`] for a light with no shadow map of its own.
+/// [`GpuLight::shadow_tile`] for a light with no shadow map of its own.
 ///
-/// Deliberately not zero: zero is slot 0, which is a real tile, so a row that
-/// forgot to say would occlude through whichever light does hold that slot.
-/// `0xffff_ffff` is past every slot there will ever be, and the shader compares
-/// against the slot count rather than against this value — so a row carrying
+/// Deliberately not zero: zero is tile 0, which is a real tile, so a row that
+/// forgot to say would occlude through whichever light does hold that tile.
+/// `0xffff_ffff` is past every tile there will ever be, and the shader compares
+/// against the tile count rather than against this value — so a row carrying
 /// anything else out of range is refused the same way.
-pub const NO_SHADOW_SLOT: u32 = u32::MAX;
+pub const NO_SHADOW_TILE: u32 = u32::MAX;
 
 impl GpuLight {
     /// The bytes a light row holds, in `std430` order.
@@ -278,7 +278,7 @@ impl GpuLight {
         }
         put(self.kind.to_le_bytes());
         put(self.cos_inner.to_le_bytes());
-        put(self.shadow_slot.to_le_bytes());
+        put(self.shadow_tile.to_le_bytes());
         put(self.pad1.to_le_bytes());
         debug_assert_eq!(at, LIGHT_STRIDE);
         bytes
@@ -288,10 +288,10 @@ impl GpuLight {
 /// A row that lights nothing and occludes nothing.
 ///
 /// **Hand-written rather than derived**, and that is the whole point of it:
-/// `#[derive(Default)]` would zero [`shadow_slot`](GpuLight::shadow_slot), and
-/// zero is slot 0 — a real tile. A row defaulted that way would occlude through
-/// whichever light actually holds that slot, in a scene where nothing said it
-/// should cast at all. [`NO_SHADOW_SLOT`] is the only correct zero here.
+/// `#[derive(Default)]` would zero [`shadow_tile`](GpuLight::shadow_tile), and
+/// zero is tile 0 — a real tile. A row defaulted that way would occlude through
+/// whichever light actually holds that tile, in a scene where nothing said it
+/// should cast at all. [`NO_SHADOW_TILE`] is the only correct zero here.
 impl Default for GpuLight {
     fn default() -> Self {
         Self {
@@ -300,7 +300,7 @@ impl Default for GpuLight {
             direction: [0.0; 4],
             kind: KIND_DIRECTIONAL,
             cos_inner: 0.0,
-            shadow_slot: NO_SHADOW_SLOT,
+            shadow_tile: NO_SHADOW_TILE,
             pad1: 0,
         }
     }
@@ -522,7 +522,7 @@ mod tests {
             direction: [9.0, 10.0, 11.0, 12.0],
             kind: KIND_SPOT,
             cos_inner: 13.0,
-            shadow_slot: NO_SHADOW_SLOT,
+            shadow_tile: NO_SHADOW_TILE,
             pad1: 0,
         };
         let bytes = light.to_bytes();
@@ -551,7 +551,7 @@ mod tests {
         }
         assert_eq!(word_at(48), KIND_SPOT, "kind at offset 48");
         assert_eq!(float_at(52), 13.0, "cos_inner at offset 52");
-        assert_eq!(word_at(56), NO_SHADOW_SLOT, "shadow_slot at offset 56");
+        assert_eq!(word_at(56), NO_SHADOW_TILE, "shadow_tile at offset 56");
         assert_eq!(word_at(60), 0, "pad1 at offset 60");
     }
 

@@ -23,10 +23,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `light_view_proj`, and is 656 bytes. Anything constructing `FrameUniforms` or
   reading those fields has to change.
 
-- **`GpuLight::pad0` became `shadow_slot`, and `Light::row` takes it.** It names
+- **`GpuLight::pad0` became `shadow_tile`, and `Light::row` takes it.** It names
   the first atlas tile the light occludes through — one tile for a spot, the
   first of six for a point. A row's default is no longer all-zero:
-  `NO_SHADOW_SLOT` is `u32::MAX`, because zero is a real tile and a row that
+  `NO_SHADOW_TILE` is `u32::MAX`, because zero is a real tile and a row that
   forgot to say would occlude through whichever light holds it.
 
 - **`BindingKind::SampledImage` gained `sample_type` and `BindingKind::Sampler`
@@ -368,9 +368,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   **A light that gets no tile still lights and simply does not occlude.** A cone
   at or past 80° has no projection to build, so it is refused a tile by name and
   keeps lighting, as does every spot past the budget. `GpuLight` gained
-  `shadow_slot`, spent out of the first padding word, so the row costs no more
-  bytes than before; `NO_SHADOW_SLOT` is `u32::MAX` rather than zero, because
-  zero is a real slot, and `GpuLight::default()` is hand-written for that
+  `shadow_tile`, spent out of the first padding word, so the row costs no more
+  bytes than before; `NO_SHADOW_TILE` is `u32::MAX` rather than zero, because
+  zero is a real tile, and `GpuLight::default()` is hand-written for that
   reason.
 
   A spot's map is a **perspective** projection down the cone, reversed-Z like

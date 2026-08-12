@@ -35,7 +35,7 @@ struct GpuLight_natural_0
     packed_float4 direction_0;
     uint kind_0;
     float cos_inner_0;
-    uint shadow_slot_0;
+    uint shadow_tile_0;
     uint pad1_0;
 };
 

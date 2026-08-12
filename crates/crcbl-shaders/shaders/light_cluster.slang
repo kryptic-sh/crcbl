@@ -83,14 +83,14 @@ struct GpuLight
     uint kind;
     /// The cosine of a spot's inner half-angle.
     float cos_inner;
-    /// Which slot of `FrameUniforms::light_view_proj` this light occludes
-    /// through, or `NO_SHADOW_SLOT` if it was given none.
+    /// The **first** tile of `FrameUniforms::light_view_proj` this light
+    /// occludes through, or `NO_SHADOW_TILE` if it was given none.
     ///
     /// **Read by nothing here.** Which lights are in a froxel's list has nothing
     /// to do with which of them cast shadows — an unshadowed light lights
     /// exactly as far as a shadowed one — so this pass carries the field for the
     /// layout's sake and `mesh.slang`'s fragment stage is what reads it.
-    uint shadow_slot;
+    uint shadow_tile;
     uint pad1;
 };
 

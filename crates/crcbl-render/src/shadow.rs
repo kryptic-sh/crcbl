@@ -666,7 +666,7 @@ pub struct Assignment {
     pub light: usize,
     /// The first of the light's tiles, as an index into the atlas's light region
     /// — so [`light_tile`] of it is the atlas tile, and it is also the number
-    /// `Light::row` puts in `GpuLight::shadow_slot`.
+    /// `Light::row` puts in `GpuLight::shadow_tile`.
     pub base: usize,
 }
 
@@ -794,7 +794,7 @@ impl Selection {
 
     /// Where light `index`'s run of tiles starts, if it was given one.
     ///
-    /// The number a row carries: `Light::row` puts it in `GpuLight::shadow_slot`
+    /// The number a row carries: `Light::row` puts it in `GpuLight::shadow_tile`
     /// and the shader reads `light_view_proj` at it — plus the face, for a point
     /// light.
     #[must_use]

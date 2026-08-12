@@ -6009,10 +6009,6 @@ What is left:
 - **A shadowed spot idles five of the six light tiles.** The region is sized for
   a point light, so a scene of spots wastes 20 MiB of atlas. A packing policy is
   what would fix it and topic 18 puts packing post-MVP.
-- **`GpuLight::shadow_slot` now carries a tile _base_, not a slot**, while
-  `shadow::LIGHT_SLOTS` means cull space. Two meanings of "slot" one field name
-  apart. Renaming the wire field to `shadow_tile` is the obvious fix and was not
-  taken in the point-light slice.
 - **Nothing exercises two shadowed lights at once.** `Scene::SpotShadow` has one
   and `Scene::PointShadow` has one, so the second cull slot is covered only by
   the host-side `Selection` tests and by the vk_e2e assertion that a free tile

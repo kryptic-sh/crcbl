@@ -176,7 +176,7 @@ struct GpuLight
     float4 direction;
     uint kind;
     float cos_inner;
-    uint shadow_slot;
+    uint shadow_tile;
     uint pad1;
 };
 
