@@ -52,7 +52,10 @@
 //!   and every vertex on one is refused as either endpoint of a collapse. So an
 //!   open mesh keeps its boundary loop exactly — the plan's "optional border
 //!   locking (modular/tiling meshes keep exact edges)", except that it is not
-//!   optional here.
+//!   optional here. A caller with edges of its own to preserve —
+//!   [`crate::cluster_dag`]'s group boundaries, which are *interior* to the mesh
+//!   and so invisible to that rule — passes them to
+//!   [`simplify_with_locked_edges`].
 //! - **UV/normal seams are NOT constrained.** A seam is a discontinuity in an
 //!   attribute this function is never given, so it cannot see one. A mesh whose
 //!   UV seam is split into two coincident position vertices *does* get its seam
@@ -142,6 +145,8 @@ pub enum SimplifyError {
 pub struct Simplified {
     positions: Vec<[f32; 3]>,
     indices: Vec<u32>,
+    vertex_errors: Vec<f32>,
+    source_faces: Vec<u32>,
     max_error: f32,
 }
 
@@ -191,6 +196,43 @@ impl Simplified {
     pub fn max_error(&self) -> f32 {
         self.max_error
     }
+
+    /// Per surviving vertex, the worst collapse that fed into it, in the same
+    /// units as [`max_error`](Self::max_error) and parallel to
+    /// [`positions`](Self::positions).
+    ///
+    /// A collapse charges its cost to the vertex it merges into, and a vertex
+    /// keeps the worst charge of any collapse that reached it — its own, and
+    /// whatever the vertices merged into it had already accumulated. So a
+    /// vertex no collapse ever touched reads zero however much the rest of the
+    /// mesh moved, and [`max_error`](Self::max_error) is the largest entry that
+    /// any collapse produced.
+    ///
+    /// `pub(crate)` because [`crate::cluster_dag`] is what needs it: a cluster
+    /// covers part of a level and its error is the worst of its own vertices',
+    /// which is the per-cluster number `docs/plan/25-lod.md`'s per-cluster
+    /// selection asks for. A whole-mesh maximum would give every cluster of a
+    /// level the same error and make the DAG select uniformly, which is the
+    /// chain again.
+    #[inline]
+    pub(crate) fn vertex_errors(&self) -> &[f32] {
+        &self.vertex_errors
+    }
+
+    /// Per surviving triangle, the index of the input triangle it came from,
+    /// parallel to [`indices`](Self::indices) in triangles.
+    ///
+    /// A collapse deletes faces and rewrites the corners of others; it never
+    /// creates one. So every output triangle is an input triangle whose corners
+    /// may have moved, and this names which.
+    ///
+    /// `pub(crate)` because [`crate::cluster_dag`] is what needs it: it hands a
+    /// whole level to [`simplify_with_locked_edges`] in one call and has to
+    /// know which group each surviving triangle belongs to afterwards.
+    #[inline]
+    pub(crate) fn source_faces(&self) -> &[u32] {
+        &self.source_faces
+    }
 }
 
 /// Decimate a triangle list to at most `target_triangles` triangles.
@@ -203,6 +245,10 @@ impl Simplified {
 ///
 /// The result is deterministic: the same arrays and target produce
 /// byte-identical output, on any run and in any order relative to other work.
+///
+/// Vertices on a border are locked and nothing else is;
+/// [`simplify_with_locked_edges`] is the same decimation with edges of the
+/// caller's own choosing locked too.
 ///
 /// Simplification stops early — above the target — when no remaining collapse
 /// is allowed. A mesh whose every edge touches a border comes back unchanged
@@ -226,6 +272,45 @@ pub fn simplify(
     indices: &[u32],
     target_triangles: usize,
 ) -> Result<Simplified, SimplifyError> {
+    simplify_with_locked_edges(positions, indices, target_triangles, &[])
+}
+
+/// Decimate a triangle list, keeping `locked_edges` and their endpoints exactly.
+///
+/// [`simplify`] is this with an empty set, and an empty set changes nothing:
+/// every collapse it would have made is still available, so the two agree
+/// byte for byte on a caller that has no edges of its own to preserve. That is
+/// what `an_empty_locked_set_is_the_plain_simplification` pins.
+///
+/// **A locked edge locks both its endpoints**, which is the same rule the
+/// border already imposes: a locked vertex is refused as either endpoint of any
+/// collapse, so it never moves and never disappears. That is stronger than
+/// refusing to collapse the named edge itself, and it is deliberately so — it
+/// is what makes the polyline through those vertices survive the decimation
+/// *vertex for vertex*, which is what a caller locking a seam is asking for.
+/// The two faces on a locked edge survive with it: every edge of either face
+/// has a locked endpoint, so no collapse can remove them.
+///
+/// `docs/plan/25-lod.md` names this as the interface the cluster DAG needs:
+/// a group's outer boundary is interior to the mesh, so no rule over the two
+/// arrays can find it and it can only come from the caller. Locking edges that
+/// are already borders, that are not edges of the mesh at all, or that repeat
+/// is allowed and does nothing beyond locking the endpoints named.
+///
+/// # Errors
+///
+/// [`simplify`]'s two, and [`SimplifyError::IndexOutOfRange`] again for an
+/// endpoint of a locked edge that names a vertex `positions` does not have.
+///
+/// # Panics
+///
+/// It does not, on any input.
+pub fn simplify_with_locked_edges(
+    positions: &[[f32; 3]],
+    indices: &[u32],
+    target_triangles: usize,
+    locked_edges: &[[u32; 2]],
+) -> Result<Simplified, SimplifyError> {
     if !indices.len().is_multiple_of(3) {
         return Err(SimplifyError::PartialTriangle {
             count: indices.len(),
@@ -233,6 +318,7 @@ pub fn simplify(
     }
     if let Some(&index) = indices
         .iter()
+        .chain(locked_edges.iter().flatten())
         .find(|&&index| index as usize >= positions.len())
     {
         return Err(SimplifyError::IndexOutOfRange {
@@ -242,6 +328,9 @@ pub fn simplify(
     }
 
     let mut mesh = Decimator::new(positions, indices);
+    for &endpoint in locked_edges.iter().flatten() {
+        mesh.locked[endpoint as usize] = true;
+    }
     let mut heap = mesh.initial_candidates();
     let mut max_cost = 0.0f64;
 
@@ -253,7 +342,7 @@ pub fn simplify(
         if !mesh.is_current(&candidate) || !mesh.collapse_allowed(a, b, candidate.target) {
             continue;
         }
-        mesh.collapse(a, b, candidate.target, &mut heap);
+        mesh.collapse(a, b, candidate.target, candidate.cost, &mut heap);
         // A maximum because that is what the metric is defined as, even though
         // the costs come out of the heap non-decreasing — see
         // `the_costs_of_the_collapses_performed_never_decrease`.
@@ -403,8 +492,11 @@ struct Decimator {
     incident: Vec<Vec<usize>>,
     quadrics: Vec<Quadric>,
     alive: Vec<bool>,
-    /// On a border or a non-manifold edge, so never an endpoint of a collapse.
+    /// On a border or a non-manifold edge, or named by the caller, so never an
+    /// endpoint of a collapse.
     locked: Vec<bool>,
+    /// The worst collapse cost charged to each vertex so far, still squared.
+    vertex_error: Vec<f64>,
     /// Bumped when a vertex's quadric absorbs another's, to invalidate the
     /// candidates that were costed against the old one.
     version: Vec<u32>,
@@ -455,6 +547,7 @@ impl Decimator {
             live_faces: faces.len(),
             alive: vec![true; positions.len()],
             version: vec![0; positions.len()],
+            vertex_error: vec![0.0; positions.len()],
             positions,
             faces,
             incident,
@@ -622,11 +715,16 @@ impl Decimator {
     /// and leaves the neighbours' alone — so `a`'s version is the only one that
     /// needs bumping, and the candidates for edges that touch neither `a` nor
     /// `b` stay current.
+    ///
+    /// `cost` is what this collapse was costed at, and it is charged to the
+    /// survivor along with whatever `b` had already accumulated — see
+    /// [`Simplified::vertex_errors`].
     fn collapse(
         &mut self,
         a: u32,
         b: u32,
         target: DVec3,
+        cost: f64,
         heap: &mut BinaryHeap<Reverse<Candidate>>,
     ) {
         let (a, b) = (a as usize, b as usize);
@@ -637,6 +735,7 @@ impl Decimator {
 
         self.positions[a] = target;
         self.quadrics[a] = self.quadrics[a] + self.quadrics[b];
+        self.vertex_error[a] = self.vertex_error[a].max(self.vertex_error[b]).max(cost);
         self.alive[b] = false;
         self.version[a] += 1;
 
@@ -677,23 +776,32 @@ impl Decimator {
 
         let mut remap = vec![0u32; self.positions.len()];
         let mut positions = Vec::new();
+        let mut vertex_errors = Vec::new();
         for (index, position) in self.positions.iter().enumerate() {
             if used[index] {
                 remap[index] = positions.len() as u32;
                 positions.push([position.x as f32, position.y as f32, position.z as f32]);
+                vertex_errors.push(self.vertex_error[index].sqrt() as f32);
             }
         }
 
-        let indices = self
+        let mut indices = Vec::new();
+        let mut source_faces = Vec::new();
+        for (slot, face) in self
             .faces
             .iter()
-            .flatten()
-            .flat_map(|face| face.map(|corner| remap[corner as usize]))
-            .collect();
+            .enumerate()
+            .filter_map(|(slot, face)| Some((slot, (*face)?)))
+        {
+            indices.extend(face.map(|corner| remap[corner as usize]));
+            source_faces.push(slot as u32);
+        }
 
         Simplified {
             positions,
             indices,
+            vertex_errors,
+            source_faces,
             max_error,
         }
     }
@@ -701,7 +809,11 @@ impl Decimator {
 
 /// An edge as its two endpoints, lower index first, so the same edge reached
 /// from either of its faces is the same key.
-fn undirected(a: u32, b: u32) -> [u32; 2] {
+///
+/// `pub(crate)` because [`crate::cluster_dag`] keys its group boundaries and
+/// its cluster adjacency the same way, and two spellings of "the same edge"
+/// would be two things to keep in step.
+pub(crate) fn undirected(a: u32, b: u32) -> [u32; 2] {
     if a < b { [a, b] } else { [b, a] }
 }
 
@@ -806,6 +918,44 @@ pub(crate) mod tests {
             }
         }
         (positions, indices)
+    }
+
+    /// One period of a smooth bump: zero with zero slope at every integer, one
+    /// at every half-integer, and a quartic in between.
+    ///
+    /// `16 f²(1-f)²` for `f` the fractional part of `t`. Its derivative
+    /// `32 f (1-f) (1-2f)` vanishes at both ends of a period, so tiling it
+    /// leaves no crease at the joins — which a sine would also give, and this
+    /// gives without a sine. That matters: `sinf`/`cosf` are not
+    /// correctly-rounded and differ in the last place between glibc, Apple's
+    /// libm and MSVC, so a fixture built from them is a fixture whose vertex
+    /// positions differ per platform. Everything here is `+`, `-`, `*`, `/` and
+    /// [`f32::floor`], all of which IEEE 754 pins exactly.
+    fn bump(t: f32) -> f32 {
+        let f = t - t.floor();
+        let g = f * (1.0 - f);
+        16.0 * g * g
+    }
+
+    /// A field of rounded domes on a 9 × 7 lattice, four units tall.
+    ///
+    /// The dense fixture: [`height_field`] at a size that clusters into tens of
+    /// meshlets rather than a handful, which is what it takes to group clusters
+    /// into a DAG at all. Two properties beyond size earn it the job:
+    ///
+    /// - **Curvature that varies by region.** A dome's cap is curved and costs
+    ///   real error to decimate; the valleys between domes are quartic-flat and
+    ///   decimate for nearly nothing. So different parts of one surface
+    ///   genuinely want different detail, which is what makes a mixed cut
+    ///   through the DAG a natural thing to select rather than a contrived one.
+    /// - **Periods coprime with each other and with the grid**, so the domes do
+    ///   not line up with the clustering and no two regions are the same
+    ///   geometry twice.
+    ///
+    /// `pub(crate)` because [`crate::cluster_dag`] is what needs a mesh this
+    /// dense, and a second copy of it would be a second surface to keep exact.
+    pub(crate) fn dunes(x: f32, y: f32) -> f32 {
+        4.0 * bump(x / 9.0) * bump(y / 7.0)
     }
 
     /// Adversarial on purpose. Both wavelengths are close to two grid steps and
@@ -1111,7 +1261,7 @@ pub(crate) mod tests {
         };
         let [a, b] = collapsed.edge;
         assert!(mesh.collapse_allowed(a, b, collapsed.target));
-        mesh.collapse(a, b, collapsed.target, &mut heap);
+        mesh.collapse(a, b, collapsed.target, collapsed.cost, &mut heap);
 
         let touching = before
             .iter()
@@ -1169,7 +1319,7 @@ pub(crate) mod tests {
             if !mesh.is_current(&candidate) || !mesh.collapse_allowed(a, b, candidate.target) {
                 continue;
             }
-            mesh.collapse(a, b, candidate.target, &mut heap);
+            mesh.collapse(a, b, candidate.target, candidate.cost, &mut heap);
             costs.push(candidate.cost);
         }
 
@@ -1411,6 +1561,107 @@ pub(crate) mod tests {
                 vertices: 3,
             }),
             "refused whole, rather than simplified up to the bad index"
+        );
+    }
+
+    /// An empty locked set is the plain simplification, which is what makes
+    /// every other test in this module a test of [`simplify_with_locked_edges`]
+    /// too: they all go through it.
+    #[test]
+    fn an_empty_locked_set_is_the_plain_simplification() {
+        let (positions, indices) = torus(16, 10);
+        let target = indices.len() / 3 / 2;
+
+        let plain = simplify(&positions, &indices, target).unwrap();
+        let nothing_locked = simplify_with_locked_edges(&positions, &indices, target, &[]).unwrap();
+
+        assert_eq!(plain, nothing_locked);
+        assert_eq!(
+            plain.indices().len() / 3,
+            target,
+            "both have to have decimated, or this compares two mesh copies"
+        );
+    }
+
+    /// The parameter is not decoration: an interior edge of a closed mesh has
+    /// nothing to lock it — every vertex of a torus is off the border — and
+    /// naming it is the only thing that keeps its endpoints.
+    ///
+    /// The edge is `[1, 2]`, found by running the decimation without the lock
+    /// and taking an edge it collapsed away from both ends.
+    #[test]
+    fn a_locked_interior_edge_keeps_both_its_endpoints() {
+        let (positions, indices) = torus(16, 10);
+        let target = indices.len() / 3 / 2;
+        let edge = [1u32, 2];
+        assert!(
+            edge_uses(&indices).values().all(|&uses| uses == 2),
+            "a closed mesh, so nothing here is locked but what the caller locks"
+        );
+        let ends = edge.map(|vertex| positions[vertex as usize]);
+
+        let plain = simplify(&positions, &indices, target).unwrap();
+        let locked = simplify_with_locked_edges(&positions, &indices, target, &[edge]).unwrap();
+
+        for end in ends {
+            assert!(
+                !plain.positions().contains(&end),
+                "{end:?} survived the run that was told nothing, so locking it \
+                 cannot be what keeps it"
+            );
+            assert!(
+                locked.positions().contains(&end),
+                "{end:?} was locked and collapsed away anyway"
+            );
+        }
+        // And the edge itself is still an edge, with both its faces: every edge
+        // of either face has a locked endpoint, so no collapse could take them.
+        let kept: Vec<[u32; 2]> = edge_uses(locked.indices())
+            .into_iter()
+            .filter(|&(kept, _)| kept.map(|vertex| locked.positions()[vertex as usize]) == ends)
+            .map(|(kept, _)| kept)
+            .collect();
+        assert_eq!(kept.len(), 1, "the locked edge is gone from the mesh");
+        assert_eq!(edge_uses(locked.indices())[&kept[0]], 2);
+        assert_ne!(
+            plain.indices(),
+            locked.indices(),
+            "the lock has to change the outcome"
+        );
+    }
+
+    /// Locking is additive, so naming an edge the border rule already locks
+    /// asks for nothing new — the sanity check on "an empty set changes
+    /// nothing" being about the *set* rather than about locking being a no-op.
+    #[test]
+    fn locking_an_edge_that_is_already_a_border_changes_nothing() {
+        let (positions, indices) = height_field(10, dunes);
+        let target = indices.len() / 3 / 2;
+        let border: Vec<[u32; 2]> = edge_uses(&indices)
+            .into_iter()
+            .filter(|&(_, uses)| uses != 2)
+            .map(|(edge, _)| edge)
+            .collect();
+        assert!(!border.is_empty(), "an open patch has a border");
+
+        let plain = simplify(&positions, &indices, target).unwrap();
+        let locked = simplify_with_locked_edges(&positions, &indices, target, &border).unwrap();
+
+        assert_eq!(plain, locked);
+        assert_eq!(plain.indices().len() / 3, target, "and it decimated");
+    }
+
+    #[test]
+    fn a_locked_edge_naming_a_vertex_the_mesh_does_not_have_is_refused() {
+        let positions = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+
+        assert_eq!(
+            simplify_with_locked_edges(&positions, &[0, 1, 2], 1, &[[1, 9]]),
+            Err(SimplifyError::IndexOutOfRange {
+                index: 9,
+                vertices: 3,
+            }),
+            "refused whole, rather than simplified with a partial lock"
         );
     }
 }

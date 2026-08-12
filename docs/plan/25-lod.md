@@ -76,10 +76,14 @@ boundary was a **group boundary in the coarser level**, and step 3 preserved it
 exactly. So the two sides share their boundary vertices by construction. This is
 the whole reason for the grouping, and it is the property to test.
 
-**The invariant selection depends on**: a group's error must be at least its
-children's, so a cut is well-defined — no cluster may be drawn while an ancestor
-that also covers it is drawn. Error is monotonic up the DAG and must be asserted
-that way.
+**Error is carried per group, not per cluster** (refined 2026-08-12 by the
+implementation). A group simplifies as a unit, so every cluster it produced
+stands or falls together: a cut that drew one of a group's parents while
+descending into another would tear along a boundary that group never locked.
+Each group's error is the worst vertex charge over its parents, raised to the
+worst error of any cluster that went into it — monotone up the DAG by
+construction, which is what makes a cut well-defined. Detail still varies across
+a level, because different _groups_ differ; it does not vary within one.
 
 ### What the fallback paths do
 

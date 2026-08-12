@@ -144,6 +144,61 @@ impl MeshletBuild {
         &self.clusters
     }
 
+    /// One cluster's triangles as indices into the mesh, three per triangle —
+    /// its corner run decoded back through its own vertex run.
+    ///
+    /// `pub(crate)` because [`crate::cluster_dag`] works in clusters and has to
+    /// ask which triangles each one holds: to gather a group's geometry, and to
+    /// find which clusters share an edge.
+    pub(crate) fn cluster_indices(&self, cluster: usize) -> Vec<u32> {
+        let cluster = self.clusters[cluster];
+        let vertices =
+            &self.vertices[cluster.vertex_offset as usize..][..cluster.vertex_count as usize];
+        self.triangles[cluster.triangle_offset as usize..][..cluster.triangle_count as usize * 3]
+            .iter()
+            .map(|&corner| vertices[corner as usize])
+            .collect()
+    }
+
+    /// A build holding no clusters, to [`append`](Self::append) into.
+    pub(crate) fn empty() -> Self {
+        Self {
+            vertices: Vec::new(),
+            triangles: Vec::new(),
+            clusters: Vec::new(),
+        }
+    }
+
+    /// Appends another build's clusters, shifting its offsets onto the end of
+    /// this one's arrays.
+    ///
+    /// [`build_meshlets`] clusters one triangle list and its walk knows nothing
+    /// about where a cluster ought to stop. [`crate::cluster_dag`] needs each
+    /// group of a level clustered on its own — a cluster straddling two groups
+    /// would have two sets of parents and would not be a DAG node — so it calls
+    /// the builder per group and this is what puts those builds back together
+    /// as the one level's clusters.
+    ///
+    /// # Errors
+    ///
+    /// [`MeshletError::TooLarge`], for the same reason and at the same place
+    /// [`build_meshlets`] raises it: the shifted offsets are narrowed to the
+    /// `uint`s the record holds rather than cast.
+    pub(crate) fn append(&mut self, other: &Self) -> Result<(), MeshletError> {
+        for cluster in &other.clusters {
+            self.clusters.push(Meshlet::new(
+                self.vertices.len() + cluster.vertex_offset as usize,
+                cluster.vertex_count as usize,
+                self.triangles.len() + cluster.triangle_offset as usize,
+                cluster.triangle_count as usize,
+                cluster.bounds,
+            )?);
+        }
+        self.vertices.extend_from_slice(&other.vertices);
+        self.triangles.extend_from_slice(&other.triangles);
+        Ok(())
+    }
+
     /// Appends one cluster and its two runs, narrowing the host offsets to the
     /// `uint`s the record holds.
     ///
@@ -352,8 +407,8 @@ pub(crate) mod tests {
     use super::*;
 
     /// Every cluster's corners decoded back to original vertex indices, in
-    /// emission order, with each corner checked against its own cluster's
-    /// vertex run on the way through.
+    /// emission order, with each cluster's record checked against the bounds on
+    /// the way through.
     ///
     /// Comparing this against the input's triangles is the invariant that
     /// catches an off-by-one in either offset: a wrong `vertex_offset` decodes
@@ -365,34 +420,34 @@ pub(crate) mod tests {
     /// level of a chain, and a second copy of a decoder is a second thing to
     /// keep right.
     pub(crate) fn decoded(build: &MeshletBuild) -> Vec<[u32; 3]> {
-        let mut triangles = Vec::new();
-        for cluster in build.clusters() {
-            let vertex_count = cluster.vertex_count as usize;
-            let triangle_count = cluster.triangle_count as usize;
-            assert!(
-                vertex_count <= MAX_CLUSTER_VERTICES,
-                "cluster references {vertex_count} vertices"
-            );
-            assert!(
-                triangle_count <= MAX_CLUSTER_TRIANGLES,
-                "cluster holds {triangle_count} triangles"
-            );
-            let vertices = &build.vertices()[cluster.vertex_offset as usize..][..vertex_count];
-            let corners =
-                &build.triangles()[cluster.triangle_offset as usize..][..triangle_count * 3];
-            for triangle in corners.chunks_exact(3) {
-                triangles.push([0, 1, 2].map(|corner| {
-                    let local = usize::from(triangle[corner]);
-                    assert!(
-                        local < vertices.len(),
-                        "corner {local} is outside its cluster's {} vertices",
-                        vertices.len()
-                    );
-                    vertices[local]
-                }));
-            }
-        }
-        triangles
+        (0..build.clusters().len())
+            .flat_map(|cluster| cluster_triangles(build, cluster))
+            .collect()
+    }
+
+    /// [`MeshletBuild::cluster_indices`] as triangles, with the record's two
+    /// counts checked against the bounds first — a corner outside its own
+    /// cluster's vertex run is caught by the decode's own indexing.
+    ///
+    /// `pub(crate)` because [`crate::cluster_dag`] applies the same invariant to
+    /// every level of a DAG, whose clusters are built one group at a time.
+    pub(crate) fn cluster_triangles(build: &MeshletBuild, cluster: usize) -> Vec<[u32; 3]> {
+        let record = build.clusters()[cluster];
+        let vertex_count = record.vertex_count as usize;
+        let triangle_count = record.triangle_count as usize;
+        assert!(
+            vertex_count <= MAX_CLUSTER_VERTICES,
+            "cluster references {vertex_count} vertices"
+        );
+        assert!(
+            triangle_count <= MAX_CLUSTER_TRIANGLES,
+            "cluster holds {triangle_count} triangles"
+        );
+        build
+            .cluster_indices(cluster)
+            .chunks_exact(3)
+            .map(|triangle| [triangle[0], triangle[1], triangle[2]])
+            .collect()
     }
 
     /// The input's triangles, to compare [`decoded`] against.

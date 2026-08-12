@@ -255,6 +255,43 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_scene::cluster_dag` — the crack-free cluster hierarchy topic 25
+  specifies.** `build_cluster_dag` clusters the base mesh, groups neighbouring
+  clusters by partitioning the **shared-edge** adjacency graph, locks each
+  group's outer boundary while simplifying its interior, re-splits, and repeats
+  with different groupings — so an edge locked at one level becomes interior at
+  the next. Every cut through the result is crack-free by construction, which is
+  what a chain of independently-clustered levels cannot give.
+
+  `simplify_with_locked_edges` is the prerequisite: the simplifier infers
+  topological borders on its own, but a group's outer boundary is **interior**
+  to the mesh and can only come from the caller. `simplify` is now a one-line
+  delegation with an empty set, so every pre-existing test exercises the new
+  path and proves the old behaviour is unchanged.
+
+  **One `simplify` call per level, not one per group** — deliberately. Handing
+  each group over as its own mesh would put its boundary on a topological border
+  and lock it for free, leaving the new parameter decoration, and would split
+  the level's vertices per group so the next level's adjacency could not see
+  through them.
+
+  **Error is carried per group, not per cluster.** A group simplifies as a unit,
+  so its parents stand or fall together; a cut drawing one while descending into
+  another would tear along a boundary the group never locked.
+
+  The crack test keys every drawn edge by the **bit patterns** of its endpoint
+  positions and requires each to appear exactly twice except on the base border.
+  Two levels number their vertices independently, so a leaf's interface edge and
+  a parent's can only collide if the coarser level kept the finer one's vertices
+  bit-exactly. It sweeps every threshold at which the cut changes, and asserts
+  that several of those cuts genuinely mix levels — a uniform cut is the chain,
+  which was never the problem.
+
+  Its fixture is a 32x32 dune field, 2048 triangles, 34 leaf clusters and 6 DAG
+  levels. Its height function is quartic rather than trigonometric because a
+  fixture pinned by equality that uses `sinf` differs in the last place between
+  glibc, Apple libm and MSVC, and fails only on a CI runner.
+
 - **The sun casts shadows — topic 18's cascaded shadow maps, at two cascades.**
   `crcbl_render::shadow` computes practical-split distances, a stable
   sphere-around-the-eye fit and texel-snapped reversed-Z orthographic

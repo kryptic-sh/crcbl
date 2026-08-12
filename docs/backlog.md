@@ -5789,41 +5789,49 @@ a wasm regression in this code would not be observed by anything. The refusals
 that do not need an array layout — the flags gate, `count: 0`, the in-band
 layout error — run on every adapter, so that half is not skip-shaped.
 
-## Decision needed: the LOD chain cannot do per-cluster selection
+## Settled: the DAG, and what it left for the GPU slice
 
-`crcbl_scene::lod::build_lod_chain` implements what `docs/plan/25-lod.md`'s "LOD
-chains" section specifies — a chain of independently-clustered levels — and that
-shape **cannot** serve what `docs/plan/03-gpu-driven-rendering.md` §3.5 and
-topic 25's own "Runtime selection" section both promise: per-cluster granularity
-on the mesh-shader path, "which is what lets one mesh be several detail levels
-at once across its own surface".
+The chain-versus-DAG question is decided — the user chose the DAG on 2026-08-12,
+`docs/plan/25-lod.md` and `03-gpu-driven-rendering.md` §3.5 now specify it, and
+`crcbl_scene::cluster_dag` implements the host side. What is left:
 
-Why it cannot: each level is clustered by walking that level's own index buffer,
-so two levels' cluster boundaries have no relationship to each other, and the
-decimation between them moved and deleted vertices along whichever boundary the
-coarser level ended up with. Drawing LOD1's cluster next to LOD2's puts two
-differently decimated versions of one shared edge side by side — a crack.
-
-So the chain as built is **per-instance selection only**, which is exactly the
-`IndirectCount` / `IndirectPerBatch` granularity topic 25 already describes as
-the coarser, honest fallback. Nothing is wrong with it; it just does not reach
-the mesh-shader path's stated granularity.
-
-**The options, so the decision can be taken without redoing the research:**
-
-1. **Accept per-instance selection everywhere** and amend §3.5 and topic 25 to
-   drop the per-cluster claim. Cheapest, and it makes the mesh-shader path's
-   advantage purely culling rather than culling plus LOD.
-2. **Build the DAG** (Karis, SIGGRAPH 2021): group neighbouring clusters, lock
-   each group's _shared_ boundary while simplifying, re-split into fresh
-   clusters, repeat. Every cut through the resulting DAG is crack-free. This is
-   a different builder, not a parameter on `build_lod_chain`, and it needs the
-   simplifier to accept a locked-edge set it does not currently take.
-3. **Both**, with the chain as the fallback path's source and the DAG as the
-   mesh-shader path's. Two builders to keep agreeing about error metrics.
-
-Recorded because whichever slice next touches LOD will otherwise answer it by
-accident.
+- **Nothing calls it.** Selection is the GPU slice: projecting a group's error
+  to screen space against a pixel budget, the amplification-stage descent, the
+  uniform-cut restriction for `IndirectCount`/`IndirectPerBatch`, hysteresis,
+  shadow bias, pool upload of the clusters plus errors plus group links, and the
+  bake cache.
+- **A per-cluster distance term breaks monotonicity.** The host-side `cut` uses
+  one global threshold and is valid _because_ it is global. On the GPU both
+  sides of a decision must be evaluated against the **same** bounding sphere —
+  the group's — or cracks come back. This is the trap in the next slice.
+- **The spatial pre-sort in `build_meshlets` is now a real prerequisite for
+  selection quality**, and it is measured rather than suspected. The greedy
+  index-order walk makes each leaf cluster roughly one full-width grid row, so
+  every group spans the whole mesh and contains domes and valleys in the same
+  proportion: level 1's group errors span only 0.79–0.96. Region-varying detail
+  is averaged away, so a threshold mostly cuts between two adjacent levels
+  rather than picking fine detail where the surface is curved. **The DAG is
+  structurally correct without the pre-sort and its selection is not worth much
+  with it missing** — so the pre-sort should land before, or with, the GPU
+  slice.
+- **`group_clusters` optimises nothing globally.** It is a greedy
+  most-shared-edges walk where a METIS-class partitioner would minimise the edge
+  cut, so group boundaries are longer than they need to be — and a group
+  boundary is exactly what cannot be simplified at that level.
+- **`build_meshlets` will put two disconnected components in one cluster.**
+  Found while building the adjacency fixture. Harmless for the DAG's
+  correctness; another consequence of the missing pre-sort.
+- **`build_lod_chain` is untouched and now redundant in principle** — a uniform
+  cut through the DAG _is_ a chain level — but nothing has been moved onto the
+  DAG, so both exist. Collapsing them is for the slice that wires selection.
+- **Determinism is verified same-process only, and that is weaker than it
+  looks.** Swapping a `BTreeMap` for a `HashMap` in the grouping produced **no
+  test failure**: within one process the hash seed is fixed, so both builds in
+  the determinism test agree. Every ordered container on the path is a
+  `BTreeMap` or `BTreeSet` and the code is correct, but nothing in this crate
+  would catch a hash-order dependency. The same limitation applies to
+  `the_same_mesh_simplified_twice_is_identical` and the chain's equivalent. A
+  golden content hash in the topic 12 bake-cache slice is what would close it.
 
 ## What `crcbl_scene::simplify` owes, and one workspace-wide trap it found
 
