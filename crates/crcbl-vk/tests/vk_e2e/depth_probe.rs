@@ -834,7 +834,8 @@ fn render_probe(
         cluster_grid: PROBE_GRID.to_frame_block(),
         // No shadowed light either, and the row above says so: `probe_sun`
         // carries `NO_SHADOW_SLOT`, so nothing in this frame reads these.
-        light_view_proj: [glam::Mat4::IDENTITY.to_cols_array(); crcbl_shaders::mesh::SHADOW_LIGHTS],
+        light_view_proj: [glam::Mat4::IDENTITY.to_cols_array();
+            crcbl_shaders::mesh::SHADOW_LIGHT_TILES],
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())

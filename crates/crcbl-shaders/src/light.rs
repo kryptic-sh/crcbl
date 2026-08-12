@@ -220,7 +220,7 @@ pub struct GpuLight {
     /// [`direction`](Self::direction)'s `w` — a larger cosine is a narrower cone
     /// — because the shader divides by the difference.
     pub cos_inner: f32,
-    /// Which shadowed-light slot's map this light occludes through, or
+    /// The **first** light tile this light occludes through, or
     /// [`NO_SHADOW_SLOT`] if it was given none.
     ///
     /// An index into [`FrameUniforms::light_view_proj`](crate::mesh::FrameUniforms::light_view_proj),
@@ -229,10 +229,16 @@ pub struct GpuLight {
     /// `docs/plan/18-render-features.md`'s 2026-08-13 decision is the rule it
     /// applies.
     ///
+    /// **The first, because a light may own more than one.** A spot owns this
+    /// tile alone; a point light owns the
+    /// [`SHADOW_POINT_FACES`](crate::mesh::SHADOW_POINT_FACES) tiles from here,
+    /// one per cube face, and the shader adds the face it selected to this
+    /// number.
+    ///
     /// **[`NO_SHADOW_SLOT`] is the ordinary case, not an error.** The atlas has
-    /// room for [`SHADOW_LIGHTS`](crate::mesh::SHADOW_LIGHTS) maps and a scene
-    /// may hold more lights than that; one that misses out still lights and
-    /// simply does not occlude, which is what makes the budget a quality knob
+    /// room for [`SHADOW_LIGHT_TILES`](crate::mesh::SHADOW_LIGHT_TILES) tiles and
+    /// a scene may want more than they hold; a light that misses out still lights
+    /// and simply does not occlude, which is what makes the budget a quality knob
     /// rather than a correctness cliff. A directional row carries it too — the
     /// sun occludes through the cascades, which are a different array and a
     /// different code path.

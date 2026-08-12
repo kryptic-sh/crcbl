@@ -345,11 +345,11 @@ fn the_shadow_atlas_is_written_rather_than_left_at_its_clear_value() {
     // is the other half of the same claim: a free tile that got drawn into would
     // be a viewport landing where it does not belong, and a cascade's map
     // written over a light's is a picture no golden can see.
-    for slot in 0..crcbl_render::shadow::SHADOW_LIGHTS {
-        let tile = frame.tile(crcbl_render::shadow::light_tile(slot));
+    for light_tile in 0..crcbl_render::shadow::LIGHT_TILES {
+        let tile = frame.tile(crcbl_render::shadow::light_tile(light_tile));
         assert!(
             tile.iter().all(|depth| *depth == crcbl_hal::depth::CLEAR),
-            "slot {slot}'s tile holds depths in a frame with no shadowed light in it"
+            "light tile {light_tile} holds depths in a frame with no shadowed light in it"
         );
     }
     for cascade in 0..crcbl_render::shadow::CASCADES {
@@ -650,13 +650,15 @@ fn a_shadowed_spot_fills_the_tile_it_was_given_and_no_other() {
         "slot 0's tile holds a depth outside 0..1, so its reversed-Z range is not the one \
          the comparison sampler tests against"
     );
-    // And the slot nothing holds is untouched, which is what says the viewport
-    // went where `tile_origin` put it rather than one tile along.
-    for slot in 1..crcbl_render::shadow::SHADOW_LIGHTS {
-        let free = frame.tile(crcbl_render::shadow::light_tile(slot));
+    // And every other light tile is untouched, which is what says the viewport
+    // went where `tile_origin` put it rather than one tile along — and, since a
+    // spot is one tile of a region six wide, that a spot did not render the five
+    // faces it does not have.
+    for light_tile in 1..crcbl_render::shadow::LIGHT_TILES {
+        let free = frame.tile(crcbl_render::shadow::light_tile(light_tile));
         assert!(
             free.iter().all(|depth| *depth == crcbl_hal::depth::CLEAR),
-            "slot {slot} holds no light and its tile was written anyway"
+            "light tile {light_tile} holds no map and was written anyway"
         );
     }
 }
@@ -724,5 +726,254 @@ fn a_spots_shadow_follows_its_caster() {
         "and moving it to -X must darken the other band, but it measured {:.1} against {:.1}",
         minus.0,
         minus.1
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The shadowed point light
+// ---------------------------------------------------------------------------
+//
+// `docs/plan/18-render-features.md`'s six-tiles decision: one light, six atlas
+// tiles, and a face picked per fragment out of the direction to the light. The
+// scene is `crcbl::screenshot`'s `Scene::PointShadow` in every number that
+// matters, so a failure here and a moved golden there are the same failure seen
+// twice.
+//
+// What this module adds that the golden cannot is the **atlas**: which of the six
+// tiles were rendered into and which was not. A frame drawn through five correct
+// faces and one wrong one is a picture; a tile that holds depths where its face
+// looks at empty sky is not.
+
+/// How far above the floor the point light hangs, on `Scene::PointShadow`'s
+/// terms: low enough that the floor past `|x| = POINT_LIGHT_UP` is on the side
+/// faces rather than under the light on the `-Y` one.
+const POINT_LIGHT_UP: f32 = 0.5;
+
+/// How far its reach is, in world units.
+const POINT_REACH: f32 = 3.0;
+
+/// How far from the light's axis a caster stands.
+const POINT_CASTER_AT: f32 = 0.6;
+
+/// How much the pyramid is scaled by to get a caster.
+const POINT_CASTER_SCALE: f32 = 0.3;
+
+/// How far above the floor the camera stands, looking straight down.
+const POINT_CAMERA_UP: f32 = 2.2;
+
+/// How far out along a shadow's own axis the bands below are measured.
+///
+/// Past the caster's own image and past `POINT_LIGHT_UP`, which is what puts the
+/// band on a side face of the light's map — `crcbl`'s `POINT_SHADOW_AT` carries
+/// the full argument.
+const POINT_BAND_AT: f32 = 1.0;
+
+/// The half-extent of each band, in pixels.
+const POINT_BAND: u32 = 6;
+
+/// The point light this suite lights its floor with.
+fn point_light() -> crcbl_render::Light {
+    crcbl_render::Light::Point(crcbl_render::PointLight {
+        position: glam::Vec3::new(0.0, POINT_LIGHT_UP, 0.0),
+        radius: POINT_REACH,
+        color: glam::Vec3::new(1.0, 0.95, 0.85) * 5.0,
+    })
+}
+
+/// A camera straight down over the floor's centre.
+fn point_camera() -> crcbl_render::Camera {
+    crcbl_render::Camera {
+        eye: glam::Vec3::new(0.0, POINT_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        // `Y` is the view direction, so `up` cannot also be `Y`.
+        up: glam::Vec3::Z,
+        projection: crcbl_render::Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// A caster standing on the floor at `at`.
+///
+/// The pyramid's base is at `-0.4` in its own space, so lifting it by that much
+/// of the scale stands it on `y = 0`. A caster floating above the floor would
+/// hide a shadow detached from it, which is what too much bias looks like.
+fn point_caster(at: glam::Vec3) -> glam::Mat4 {
+    glam::Mat4::from_translation(at + glam::Vec3::new(0.0, 0.4 * POINT_CASTER_SCALE, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::splat(POINT_CASTER_SCALE))
+}
+
+/// Draws the floor under the point light with one caster at `caster`, and a
+/// second one at `second` — or with neither.
+fn render_point(caster: Option<glam::Vec3>, second: Option<glam::Vec3>) -> ShadowFrame {
+    render_scene(&ShadowScene {
+        prepare: &move |renderer| {
+            renderer.set_lights(&[point_light()]);
+            renderer.set_pyramid(caster.map(point_caster));
+            renderer.set_tinted_pyramid(second.map(point_caster));
+        },
+        camera: point_camera(),
+        // Dim, on `render_spot`'s terms: a bright sun would light the shadowed
+        // floor from a direction this light's map knows nothing about, and the
+        // ratios below would be measuring the sun.
+        sun: crcbl_render::DirectionalLight {
+            color: crcbl_render::DirectionalLight::default().color * 0.03,
+            ambient: crcbl_render::DirectionalLight::default().ambient * 0.09,
+            ..crcbl_render::DirectionalLight::default()
+        },
+        // The cube, scaled into a floor whose `+Y` face is the plane `y = 0`.
+        model: glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.5 * SPOT_FLOOR_SCALE, 0.0))
+            * glam::Mat4::from_scale(glam::Vec3::splat(SPOT_FLOOR_SCALE)),
+    })
+}
+
+/// The mean brightness of the band of floor at `(x, z)` in **world** units.
+///
+/// **World `+X` is the frame's left and `+Z` its top**, on `spot_band`'s terms
+/// exactly: the camera looks down `-Y` with `+Z` up, and a right-handed basis
+/// built from those two puts screen-right at `-X`.
+fn point_band(frame: &ShadowFrame, x: f32, z: f32) -> f32 {
+    // The frame's short half-axis covers `POINT_CAMERA_UP * tan(30°)` of floor.
+    let pixels_per_unit = (f64::from(MESH_EXTENT.1) / 2.0)
+        / (f64::from(POINT_CAMERA_UP) * (30.0f64).to_radians().tan());
+    let centre = |extent: u32, world: f32| {
+        let half = f64::from(extent) / 2.0;
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "every band this module measures is inside the frame"
+        )]
+        let pixel = (half - f64::from(world) * pixels_per_unit) as u32;
+        pixel
+    };
+    let column = centre(MESH_EXTENT.0, x);
+    let row = centre(MESH_EXTENT.1, z);
+    let mut total = 0.0f32;
+    let mut count = 0u32;
+    for y in row.saturating_sub(POINT_BAND)..(row + POINT_BAND).min(MESH_EXTENT.1) {
+        for x in column.saturating_sub(POINT_BAND)..(column + POINT_BAND).min(MESH_EXTENT.0) {
+            let pixel = frame.image.pixel(x, y).expect("inside the frame");
+            total += f32::from(pixel[0]) + f32::from(pixel[1]) + f32::from(pixel[2]);
+            count += 1;
+        }
+    }
+    assert!(count > 0, "an empty band measures nothing");
+    total / (count as f32 * 3.0)
+}
+
+/// **A point light's tiles are its six faces, in `shadow::face_axis`' order.**
+///
+/// The assertion that pins the face convention at the *atlas* rather than in the
+/// picture, and it is deliberately about which tile is **empty**: the light hangs
+/// over a floor with nothing above it, so the `+Y` face — index 2, and the only
+/// index this scene can name from outside — looks at empty sky and its tile has
+/// to come back at the clear. A renderer that rendered one face six times, or
+/// built the six in another order, writes depths there.
+///
+/// The two casters are what make the other half checkable without depending on
+/// which geometry path ran: on a device with an amplification stage the floor's
+/// own clusters are rejected before they reach this map — `cluster_survives`
+/// leaves a cluster's bounding radius unscaled and the floor is a scaled cube,
+/// which `a_shadowed_spot_fills_the_tile_it_was_given_and_no_other` records in
+/// full — so the only thing certain to be in *any* face is a caster. One stands
+/// out along `+X` and one out along `-Z`, so faces 0 and 5 hold geometry on every
+/// path.
+///
+/// The pass is one `LoadOp::Clear` over the whole atlas, so a tile nothing drew
+/// into is exactly `depth::CLEAR` — which makes "is it at the clear" a question
+/// with a crisp answer rather than a threshold.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_shadowed_point_lights_faces_are_the_six_the_host_built() {
+    let frame = render_point(
+        Some(glam::Vec3::new(POINT_CASTER_AT, 0.0, 0.0)),
+        Some(glam::Vec3::new(0.0, 0.0, -POINT_CASTER_AT)),
+    );
+    // The one light is the only candidate and the region is empty, so `Selection`
+    // gives it the whole of it from tile 0 — which is the base `mesh.slang` reads
+    // off the row and adds a face to.
+    let mut written = [0usize; crcbl_render::shadow::POINT_FACES];
+    for (face, count) in written.iter_mut().enumerate() {
+        let tile = frame.tile(crcbl_render::shadow::light_tile(face));
+        *count = tile.iter().filter(|depth| **depth > 0.0).count();
+        assert!(
+            tile.iter().all(|depth| (0.0..=1.0).contains(depth)),
+            "face {face} holds a depth outside 0..1, so its reversed-Z range is not the one the \
+             comparison sampler tests against"
+        );
+    }
+    eprintln!("vk e2e: point shadow — written texels per face {written:?}");
+
+    // `+Y`, which `shadow::face_axis` puts at index 2.
+    assert_eq!(
+        written[2], 0,
+        "face 2 looks straight up from a light with nothing above it and holds {} written \
+         texel(s), so the six matrices are not the six faces `shadow::face_axis` names",
+        written[2]
+    );
+    // `+X` and `-Z`, which each hold a caster. A real area rather than a stray
+    // texel: a caster covers a few per cent of a face's tile — the light is close
+    // to it and a face is a 90° frustum — and a mis-transformed sliver covers far
+    // less.
+    let texels = f64::from(crcbl_render::shadow::TILE).powi(2);
+    for face in [0, 5] {
+        assert!(
+            written[face] > 0,
+            "face {face} has a caster standing in it and is entirely at the reversed-Z clear, so \
+             its map was never rendered — a face that shadows nothing and a frame that looks \
+             correct"
+        );
+        let fraction = written[face] as f64 / texels;
+        assert!(
+            fraction > 0.01,
+            "face {face} wrote only {fraction:.4} of its texels, which is a sliver rather than a \
+             caster"
+        );
+    }
+}
+
+/// **The dark region follows the caster from one face of the map to another**,
+/// which is the claim six tiles exist for.
+///
+/// A caster out along `+X` darkens the floor `+X` of the light and leaves the
+/// floor `-Z` of it lit; move the same caster to `-Z` and the two swap. Neither
+/// frame can be told from a working one on its own — the first is exactly what a
+/// face lookup stuck on `+X` draws — and no lighting bug, no fixed patch and no
+/// single working face can produce both.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_point_lights_shadow_follows_its_caster_from_one_face_to_another() {
+    let along_x = render_point(Some(glam::Vec3::new(POINT_CASTER_AT, 0.0, 0.0)), None);
+    let along_z = render_point(Some(glam::Vec3::new(0.0, 0.0, -POINT_CASTER_AT)), None);
+
+    // `.0` is the band out along `+X`, `.1` the one out along `-Z`.
+    let with_x = (
+        point_band(&along_x, POINT_BAND_AT, 0.0),
+        point_band(&along_x, 0.0, -POINT_BAND_AT),
+    );
+    let with_z = (
+        point_band(&along_z, POINT_BAND_AT, 0.0),
+        point_band(&along_z, 0.0, -POINT_BAND_AT),
+    );
+    eprintln!(
+        "vk e2e: point shadow — caster in +X: +X band {:.1} -Z band {:.1}; caster in -Z: \
+         +X band {:.1} -Z band {:.1}",
+        with_x.0, with_x.1, with_z.0, with_z.1
+    );
+
+    assert!(
+        with_x.0 * SPOT_SHADOW_RATIO < with_x.1,
+        "a caster in +X must darken the +X band and leave the -Z one lit, but they measured \
+         {:.1} and {:.1}",
+        with_x.0,
+        with_x.1
+    );
+    assert!(
+        with_z.1 * SPOT_SHADOW_RATIO < with_z.0,
+        "and moving it to -Z must darken the -Z band instead, but they measured {:.1} and \
+         {:.1} — a face lookup stuck on one face draws the first frame and not this one",
+        with_z.1,
+        with_z.0
     );
 }

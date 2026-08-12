@@ -1,5 +1,5 @@
-//! Where each shadow map looks, and how far: the sun's cascades and a spot
-//! light's cone.
+//! Where each shadow map looks, and how far: the sun's cascades, a spot light's
+//! cone and a point light's six faces.
 //!
 //! `docs/plan/18-render-features.md`'s shadow section, arithmetic half. This
 //! module owns the matrices and the tile budget; [`crate::forward`] owns the
@@ -21,10 +21,32 @@
 //!
 //! The grid is [`ATLAS_COLUMNS`] by [`ATLAS_ROWS`] and the split of it is topic
 //! 18's 2026-08-13 decision: **the sun's cascades take the first [`CASCADES`]
-//! tiles and the rest are handed out one per shadowed spot**, with
-//! [`SHADOW_LIGHTS`] of them. A light that gets no tile still lights and simply
-//! does not occlude, which is what makes the budget a quality knob rather than a
-//! correctness cliff — see [`Selection`].
+//! tiles and the rest are handed out one per shadowed spot and [`POINT_FACES`]
+//! per shadowed point**, with [`LIGHT_TILES`] of them. A light that gets no tiles
+//! still lights and simply does not occlude, which is what makes the budget a
+//! quality knob rather than a correctness cliff — see [`Selection`].
+//!
+//! # Two budgets, because they buy different things
+//!
+//! [`LIGHT_TILES`] is atlas space and [`LIGHT_SLOTS`] is *cull* space, and the
+//! two stopped being one number the moment a light could own six tiles:
+//!
+//! * A tile is [`TILE`]² of `D32Float` — four mebibytes each, and the atlas is
+//!   allocated once for the renderer's life. [`LIGHT_TILES`] of them is what a
+//!   point light needs to be shadowable at all, since its six faces have to fit
+//!   in the region together.
+//! * A slot is one shadowed *light*, and what it costs is a
+//!   [`DrawGen`](crate::draw_gen::DrawGen) — roughly five megabytes, most of it
+//!   per-instance LOD hysteresis state that is device-local and permanent. Topic
+//!   18's fourth decision is that a point light gets **one** of these rather than
+//!   one per face: the six faces' union is the light's sphere, which is what the
+//!   cull tests against anyway, so one visible set feeds all six draws through
+//!   six matrices into six tiles. A face draws what is behind it and the
+//!   rasteriser discards it.
+//!
+//! So the light region holds one point light *or* [`LIGHT_SLOTS`] spots, and a
+//! frame with more shadow-worthy lights than either budget covers shadows the
+//! most influential ones it can fit and lights the rest without occluding.
 //!
 //! # Stability: a sphere around the eye, snapped to texels
 //!
@@ -52,7 +74,8 @@
 use glam::{Mat4, Vec3, Vec4Swizzles};
 
 use crate::camera::Camera;
-use crate::light::{Light, SpotLight};
+use crate::cull::Frustum;
+use crate::light::{Light, PointLight, SpotLight};
 
 /// How many cascades the sun's shadow map is split into.
 ///
@@ -61,12 +84,31 @@ use crate::light::{Light, SpotLight};
 /// uniform block's layout depends on it.
 pub const CASCADES: usize = crcbl_shaders::mesh::SHADOW_CASCADES;
 
-/// How many shadowed lights the atlas has room for beside the cascades.
+/// How many **tiles** the atlas has for shadowed lights beside the cascades.
 ///
 /// The shader's number for the same reason [`CASCADES`] is: the frame block
-/// carries one matrix per slot, so a block sized differently on the two sides
-/// puts every member after it at the wrong offset.
-pub const SHADOW_LIGHTS: usize = crcbl_shaders::mesh::SHADOW_LIGHTS;
+/// carries one matrix per light tile, so a block sized differently on the two
+/// sides puts every member after it at the wrong offset.
+pub const LIGHT_TILES: usize = crcbl_shaders::mesh::SHADOW_LIGHT_TILES;
+
+/// Tiles one point light's shadow map is: the six faces of a cube.
+///
+/// The shader's number as well, because it is how far apart two of a light's
+/// tiles are and `mesh.slang`'s `point_face` adds it to a row's base.
+pub const POINT_FACES: usize = crcbl_shaders::mesh::SHADOW_POINT_FACES;
+
+/// How many lights a frame can shadow at once.
+///
+/// **Not a shader number**, unlike [`LIGHT_TILES`], and the module docs say why:
+/// nothing in a shader counts lights, and what this bounds is the number of
+/// [`DrawGen`](crate::draw_gen::DrawGen)s the renderer holds — one cull per
+/// shadowed light, whether that light is one tile or six.
+///
+/// Two, which is what the light region can hold as spots: a point light takes
+/// the whole region and leaves the second slot with nothing to render into,
+/// which [`Selection`] discovers by running out of tiles rather than by a rule
+/// of its own.
+pub const LIGHT_SLOTS: usize = 2;
 
 /// The side of one tile in the shadow atlas, in texels.
 ///
@@ -75,24 +117,33 @@ pub const SHADOW_LIGHTS: usize = crcbl_shaders::mesh::SHADOW_LIGHTS;
 pub const TILE: u32 = 1024;
 
 /// Tiles across the atlas.
-pub const ATLAS_COLUMNS: u32 = 2;
+///
+/// At least [`CASCADES`], which is what keeps the cascades in the top row at the
+/// origins they were blessed at — see [`tile_origin`].
+pub const ATLAS_COLUMNS: u32 = crcbl_shaders::mesh::SHADOW_ATLAS_COLUMNS;
 
 /// Tiles down it.
 ///
-/// A grid rather than one row, and that is what the row above is for: a point
-/// light is six tiles of exactly this kind, so the next slice widens the grid
-/// rather than reshaping the atlas. The addressing below is already written in
-/// terms of both extents.
-pub const ATLAS_ROWS: u32 = 2;
+/// A grid rather than one row: a point light is [`POINT_FACES`] tiles of exactly
+/// this kind, and a single row holding them beside the cascades would be an image
+/// eight thousand texels wide. The addressing below is written in terms of both
+/// extents, and so is `mesh.slang`'s.
+pub const ATLAS_ROWS: u32 = crcbl_shaders::mesh::SHADOW_ATLAS_ROWS;
 
-/// Tiles in the whole atlas: [`CASCADES`] for the sun and [`SHADOW_LIGHTS`] for
+/// Tiles in the whole atlas: [`CASCADES`] for the sun and [`LIGHT_TILES`] for
 /// the lights that fit.
 pub const TILES: usize = (ATLAS_COLUMNS * ATLAS_ROWS) as usize;
 
 const _: () = assert!(
-    TILES == CASCADES + SHADOW_LIGHTS,
+    TILES == CASCADES + LIGHT_TILES,
     "every tile of the grid is either a cascade's or a light's; a grid with a \
      tile nothing owns is atlas nothing writes and nothing samples"
+);
+
+const _: () = assert!(
+    LIGHT_SLOTS <= LIGHT_TILES,
+    "a slot with no tile to render into is a cull dispatch whose result nothing \
+     can sample"
 );
 
 /// The widest half-angle a spot can have and still be given a tile, in radians.
@@ -108,14 +159,18 @@ const _: () = assert!(
 /// multiple of the tile it is rendered into.
 pub const MAX_SPOT_HALF_ANGLE: f32 = 80.0 * std::f32::consts::PI / 180.0;
 
-/// A spot's near plane, in world units.
+/// A punctual light's near plane, in world units.
 ///
 /// Everything nearer than this to the light is inside it and casts nothing. It
 /// is the only knob a perspective shadow map's depth distribution really has —
 /// under reversed-Z the precision piles up at the near plane, so this being
 /// small is what makes a caster far from the light cheap in depth resolution and
 /// not the other way round.
-const SPOT_NEAR: f32 = 0.05;
+///
+/// One number for a spot's cone and a point light's faces, because it is one
+/// piece of knowledge: how close to a light something has to be before it stops
+/// being a caster and starts being the light's own housing.
+const PUNCTUAL_NEAR: f32 = 0.05;
 
 /// How far from the eye the sun's shadows reach, in world units.
 ///
@@ -290,15 +345,29 @@ pub const fn tile_origin(index: usize) -> (u32, u32) {
     )
 }
 
-/// Which tile shadowed-light slot `slot` renders into.
+/// Which atlas tile light tile `tile` of the light region is.
 ///
 /// The one place the "cascades first, then the lights" split is written down.
 /// Both the viewport the shadow pass sets and the tile `mesh.slang` samples come
 /// through it — the shader's own `light_tile` is the same arithmetic, and
 /// `crcbl_shaders::mesh`'s drift test is what holds the two together.
 #[must_use]
-pub const fn light_tile(slot: usize) -> usize {
-    CASCADES + slot
+pub const fn light_tile(tile: usize) -> usize {
+    CASCADES + tile
+}
+
+/// How many light tiles `light` needs to be shadowed: [`POINT_FACES`] for a
+/// point light, one for a spot.
+///
+/// The whole of what makes the light region a run allocator rather than an array
+/// of slots, so it is one function both [`Selection`] and [`crate::forward`] ask
+/// rather than a `match` each.
+#[must_use]
+pub const fn tile_span(light: &Light) -> usize {
+    match light {
+        Light::Point(_) => POINT_FACES,
+        Light::Spot(_) => 1,
+    }
 }
 
 /// One cascade's world → shadow-clip matrix: an orthographic box around a
@@ -411,7 +480,7 @@ pub fn spot_matrix(spot: &SpotLight) -> Mat4 {
     // — so the same widening happens here, or the map would be narrower than the
     // cone it is sampled for.
     let outer = spot.outer_angle.max(spot.inner_angle);
-    let far = spot.radius.max(SPOT_NEAR * 2.0);
+    let far = spot.radius.max(PUNCTUAL_NEAR * 2.0);
 
     glam::camera::rh::proj::directx::perspective(
         2.0 * outer,
@@ -424,22 +493,127 @@ pub fn spot_matrix(spot: &SpotLight) -> Mat4 {
         // and then the near one puts 1.0 at the light. That is reversed-Z, and
         // it is what `CompareOp::Greater` everywhere else expects.
         far,
-        SPOT_NEAR,
+        PUNCTUAL_NEAR,
     ) * view
 }
 
-/// Whether a spot can be given a tile at all.
+/// The direction point-light face `face` looks along.
+///
+/// **The cube-map convention**: `+X, -X, +Y, -Y, +Z, -Z` as faces 0 to 5. It is a
+/// convention rather than a derivation, and the only thing that has to agree with
+/// it is `point_face` in `shaders/mesh.slang`, which picks a face out of the
+/// largest component of the direction from the light. A shader selecting face 3
+/// where the host built face 2's matrix samples a map of somewhere else, and
+/// draws a frame that has shadows in it —
+/// `every_face_of_a_point_light_covers_its_own_direction_and_no_other` is what
+/// refuses that here, and `crcbl`'s `Scene::PointShadow` is what refuses it
+/// through the shader.
+///
+/// # Panics
+///
+/// If `face` is not one of [`POINT_FACES`] faces.
+#[must_use]
+pub fn face_axis(face: usize) -> Vec3 {
+    match face {
+        0 => Vec3::X,
+        1 => Vec3::NEG_X,
+        2 => Vec3::Y,
+        3 => Vec3::NEG_Y,
+        4 => Vec3::Z,
+        5 => Vec3::NEG_Z,
+        _ => panic!("a point light has {POINT_FACES} faces, not a face {face}"),
+    }
+}
+
+/// A point light's world → shadow-clip matrix for face `face`: a **90°
+/// perspective** down that face's axis, reversed-Z.
+///
+/// The six of them tile the whole sphere exactly, which is what makes selecting
+/// one by the major axis of the direction from the light correct rather than
+/// approximate: at 90° with a square aspect the frustum's edge planes are the
+/// diagonals `|x| = |z|` and `|y| = |z|`, and those are precisely where the major
+/// axis changes.
+///
+/// # Why there is no texel snap here
+///
+/// [`spot_matrix`]'s reason exactly: nothing about the map depends on the camera,
+/// so a still light produces a byte-identical matrix frame after frame and there
+/// is nothing to quantise away.
+///
+/// # Panics
+///
+/// If the light's position is not finite, or if `face` is not one of
+/// [`POINT_FACES`] faces. A non-finite position produces a matrix of `NaN`s,
+/// which reaches the shader as a map that shadows nothing — the failure this
+/// whole slice can hide behind.
+#[must_use]
+pub fn point_matrix(point: &PointLight, face: usize) -> Mat4 {
+    assert!(
+        point.position.is_finite(),
+        "the point light's position is not finite: {:?}",
+        point.position
+    );
+    let axis = face_axis(face);
+    // A basis that is not parallel to the axis, on `cascade_matrix`'s terms. Two
+    // of the six faces look along `Y`, so the fallback is picked rather than
+    // asserted against — and *which* up vector a face takes only has to be
+    // consistent, because both the matrix that renders the tile and the matrix
+    // that samples it are this one. A cube map would have to match the API's own
+    // per-face orientation; an atlas of six ordinary maps has no such obligation.
+    let up = if axis.y == 0.0 { Vec3::Y } else { Vec3::Z };
+    let view = glam::camera::rh::view::look_at_mat4(point.position, point.position + axis, up);
+
+    let far = point.radius.max(PUNCTUAL_NEAR * 2.0);
+    glam::camera::rh::proj::directx::perspective(
+        // 90°, and it is the field of view that makes six faces a sphere: a
+        // narrower one leaves a gap at every face's edge, a wider one overlaps
+        // and wastes the tile.
+        std::f32::consts::FRAC_PI_2,
+        // Square: the tile is, and a cube face has no other aspect ratio.
+        1.0,
+        // **Swapped, and that is the whole reversal** — `spot_matrix`'s pair,
+        // for its reason.
+        far,
+        PUNCTUAL_NEAR,
+    ) * view
+}
+
+/// The frustum a point light's **one** cull runs against: the axis-aligned box
+/// around its sphere of influence.
+///
+/// Topic 18's fourth decision, in the only place it has arithmetic. A cascade and
+/// a spot cull against `Frustum::from_view_projection` of the matrix they render
+/// with, and a point light has six of those — so it culls against what all six
+/// share instead, which is the sphere the light reaches at all. Conservative
+/// against every face and against the sphere itself (a box is larger), which is
+/// the safe direction: a caster wrongly kept costs vertex work on one face, and
+/// one wrongly rejected is a missing shadow.
+#[must_use]
+pub fn point_frustum(point: &PointLight) -> Frustum {
+    let (centre, radius) = (point.position, point.radius);
+    // Inward normals, on `Frustum`'s convention: a point is inside a plane when
+    // `normal · p + w >= 0`.
+    Frustum {
+        planes: [
+            glam::Vec4::new(1.0, 0.0, 0.0, radius - centre.x),
+            glam::Vec4::new(-1.0, 0.0, 0.0, radius + centre.x),
+            glam::Vec4::new(0.0, 1.0, 0.0, radius - centre.y),
+            glam::Vec4::new(0.0, -1.0, 0.0, radius + centre.y),
+            glam::Vec4::new(0.0, 0.0, 1.0, radius - centre.z),
+            glam::Vec4::new(0.0, 0.0, -1.0, radius + centre.z),
+        ],
+    }
+}
+
+/// Whether a light can be given tiles at all.
 ///
 /// Split out so the reason a light was refused is one predicate rather than a
-/// condition buried in a fold: a zero radius has no frustum, and a cone at or
-/// past [`MAX_SPOT_HALF_ANGLE`] has no projection. Both light without occluding.
+/// condition buried in a fold: a zero radius has no frustum, a non-finite
+/// position has no view, and a cone at or past [`MAX_SPOT_HALF_ANGLE`] has no
+/// projection. All of them light without occluding.
 fn can_be_shadowed(light: &Light) -> bool {
     match light {
-        // Point lights are six tiles and a face selection, which is the next
-        // slice. Refused by name rather than by falling through a match, so a
-        // point light in the list is a light that lights and does not occlude
-        // rather than one that silently takes a tile it cannot fill.
-        Light::Point(_) => false,
+        Light::Point(point) => point.radius > 0.0 && point.position.is_finite(),
         Light::Spot(spot) => {
             spot.radius > 0.0
                 && spot.direction.normalize_or_zero().length_squared() > 0.0
@@ -473,21 +647,46 @@ fn influence(light: &Light, eye: Vec3) -> f32 {
 /// clearly drops.
 const HOLD_RATIO: f32 = 1.25;
 
+/// Whether `span` tiles from `base` are inside the light region and all free.
+///
+/// A function rather than a closure inside [`Selection::update`]'s loop, because
+/// the loop takes `used` mutably as soon as it has an answer.
+fn run_is_free(used: &[bool; LIGHT_TILES], base: usize, span: usize) -> bool {
+    base + span <= LIGHT_TILES && used[base..base + span].iter().all(|tile| !*tile)
+}
+
+/// One shadowed light: which light it is, and where its run of tiles starts.
+///
+/// The pair rather than a light index alone, because a slot no longer decides a
+/// tile: a spot owns one tile and a point owns [`POINT_FACES`], so where a
+/// light's map lives is an allocation and not an index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Assignment {
+    /// Which light, as an index into the list [`Selection::update`] was given.
+    pub light: usize,
+    /// The first of the light's tiles, as an index into the atlas's light region
+    /// — so [`light_tile`] of it is the atlas tile, and it is also the number
+    /// `Light::row` puts in `GpuLight::shadow_slot`.
+    pub base: usize,
+}
+
 /// Which lights hold the atlas's light tiles, and its memory of last frame.
 ///
-/// Topic 18's 2026-08-13 rule, whole: eligible lights are ranked by
-/// projected screen influence, ties break by index so a frame's answer does not
-/// depend on the
-/// order a caller happened to build the list in, the first [`SHADOW_LIGHTS`] of
-/// them get tiles, and an incumbent keeps its tile until a challenger clearly
-/// beats it.
+/// Topic 18's 2026-08-13 rule, whole: eligible lights are ranked by projected
+/// screen influence, ties break by index so a frame's answer does not depend on
+/// the order a caller happened to build the list in, they take slots and runs of
+/// tiles in that order until either budget runs out, and an incumbent keeps what
+/// it holds until a challenger clearly beats it.
 ///
-/// **A light that gets no tile still lights.** Nothing here removes a light from
-/// the frame; it decides which of them also occlude.
+/// **A light that gets no tiles still lights.** Nothing here removes a light from
+/// the frame; it decides which of them also occlude. A light can miss out two
+/// ways now — no free slot, or no free *run* long enough — and the second is what
+/// a scene with one point light and one spot in it hits: the point takes the
+/// whole region and the spot lights without occluding.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Selection {
-    /// Which light index holds slot `i`, or `None` if the slot is free.
-    slots: [Option<usize>; SHADOW_LIGHTS],
+    /// What holds slot `i`, or `None` if the slot is free.
+    slots: [Option<Assignment>; LIGHT_SLOTS],
 }
 
 impl Selection {
@@ -497,26 +696,35 @@ impl Selection {
     /// caller whose shader rows are offset from it — the sun is row 0 — maps
     /// them itself.
     pub fn update(&mut self, lights: &[Light], eye: Vec3) {
-        // An incumbent that has dropped off the end of the list, or stopped
-        // being eligible, holds nothing: the list is rebuilt every frame and an
-        // index is only meaningful against the list it was taken from.
-        for slot in &mut self.slots {
-            if !slot.is_some_and(|index| lights.get(index).is_some_and(can_be_shadowed)) {
-                *slot = None;
-            }
-        }
+        // Last frame's answer, kept whole: an incumbent's score is boosted and
+        // its run is preferred, and both need to be read after `self.slots` has
+        // been rebuilt.
+        let previous = self.slots;
+        let held_by = |index: usize| {
+            previous
+                .iter()
+                .flatten()
+                .find(|assignment| assignment.light == index)
+        };
 
         // Score every eligible light, with the incumbents' scores boosted. That
-        // ordering *is* the hysteresis: a challenger enters the top
-        // `SHADOW_LIGHTS` only by beating the incumbent it displaces by
-        // `HOLD_RATIO`, which is the statement this constant is written as.
+        // ordering *is* the hysteresis: a challenger takes a held tile only by
+        // beating the incumbent by `HOLD_RATIO`, which is the statement this
+        // constant is written as. An incumbent that has dropped off the end of
+        // the list, or stopped being eligible, is simply not in the ranking — the
+        // list is rebuilt every frame and an index is only meaningful against the
+        // list it was taken from.
         let mut ranked: Vec<(usize, f32)> = lights
             .iter()
             .enumerate()
             .filter(|(_, light)| can_be_shadowed(light))
             .map(|(index, light)| {
-                let held = self.slots.contains(&Some(index));
-                let score = influence(light, eye) * if held { HOLD_RATIO } else { 1.0 };
+                let score = influence(light, eye)
+                    * if held_by(index).is_some() {
+                        HOLD_RATIO
+                    } else {
+                        1.0
+                    };
                 (index, score)
             })
             .collect();
@@ -525,36 +733,77 @@ impl Selection {
         // inconsistent and the sort's output arbitrary, and this is a frame's
         // *stable* answer or it is nothing.
         ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
-        ranked.truncate(SHADOW_LIGHTS);
 
-        // Incumbents keep the slot they had, so a tile's contents do not jump
-        // between slots while both lights are still selected. Whatever is left
-        // fills the free slots in rank order.
-        for slot in &mut self.slots {
-            if !slot.is_some_and(|index| ranked.iter().any(|(ranked, _)| *ranked == index)) {
-                *slot = None;
+        // Hand out runs in rank order. **Not truncated to the slot count first**:
+        // a light that cannot fit — a point light with a spot already holding a
+        // tile in the middle of the region — must not take the budget down with
+        // it, so the walk continues and a smaller light behind it can still be
+        // shadowed.
+        let mut used = [false; LIGHT_TILES];
+        let mut chosen: Vec<Assignment> = Vec::with_capacity(LIGHT_SLOTS);
+        for (index, _) in ranked {
+            if chosen.len() == LIGHT_SLOTS {
+                break;
+            }
+            let span = tile_span(&lights[index]);
+            // The run it already had, if that run is still free — so a light's
+            // map does not move across the atlas while it goes on being
+            // selected. Otherwise the first run long enough.
+            let Some(base) = held_by(index)
+                .map(|assignment| assignment.base)
+                .filter(|base| run_is_free(&used, *base, span))
+                .or_else(|| (0..LIGHT_TILES).find(|base| run_is_free(&used, *base, span)))
+            else {
+                continue;
+            };
+            for tile in &mut used[base..base + span] {
+                *tile = true;
+            }
+            chosen.push(Assignment { light: index, base });
+        }
+
+        // Incumbents keep the slot they had, so a light's cull — and with it the
+        // per-instance LOD state that `DrawGen` holds for it — does not jump
+        // between slots while the light is still selected. Whatever is left fills
+        // the free slots in rank order.
+        let mut slots = [None; LIGHT_SLOTS];
+        for assignment in &chosen {
+            if let Some(slot) = previous
+                .iter()
+                .position(|held| held.is_some_and(|held| held.light == assignment.light))
+            {
+                slots[slot] = Some(*assignment);
             }
         }
-        for (index, _) in ranked {
-            if self.slots.contains(&Some(index)) {
+        for assignment in &chosen {
+            if slots.contains(&Some(*assignment)) {
                 continue;
             }
-            if let Some(free) = self.slots.iter_mut().find(|slot| slot.is_none()) {
-                *free = Some(index);
+            if let Some(free) = slots.iter_mut().find(|slot| slot.is_none()) {
+                *free = Some(*assignment);
             }
         }
+        self.slots = slots;
     }
 
-    /// Which light index holds each slot, in slot order.
+    /// What holds each slot, in slot order.
     #[must_use]
-    pub const fn slots(&self) -> &[Option<usize>; SHADOW_LIGHTS] {
+    pub const fn slots(&self) -> &[Option<Assignment>; LIGHT_SLOTS] {
         &self.slots
     }
 
-    /// Which slot light `index` holds, if any.
+    /// Where light `index`'s run of tiles starts, if it was given one.
+    ///
+    /// The number a row carries: `Light::row` puts it in `GpuLight::shadow_slot`
+    /// and the shader reads `light_view_proj` at it — plus the face, for a point
+    /// light.
     #[must_use]
-    pub fn slot_of(&self, index: usize) -> Option<usize> {
-        self.slots.iter().position(|slot| *slot == Some(index))
+    pub fn base_of(&self, index: usize) -> Option<usize> {
+        self.slots
+            .iter()
+            .flatten()
+            .find(|assignment| assignment.light == index)
+            .map(|assignment| assignment.base)
     }
 }
 
@@ -797,10 +1046,10 @@ mod tests {
         for cascade in 0..CASCADES {
             assert_eq!(tile_origin(cascade), (TILE * cascade as u32, 0));
         }
-        // And a light's slot is past every cascade's, which is the whole of the
+        // And every light tile is past every cascade's, which is the whole of the
         // split.
-        for slot in 0..SHADOW_LIGHTS {
-            assert!(light_tile(slot) >= CASCADES && light_tile(slot) < TILES);
+        for tile in 0..LIGHT_TILES {
+            assert!(light_tile(tile) >= CASCADES && light_tile(tile) < TILES);
         }
     }
 
@@ -843,9 +1092,9 @@ mod tests {
         // matrix whose range was 0.4..0.6, which is a map with almost no
         // precision in it.
         assert!(
-            (depth_at(SPOT_NEAR) - 1.0).abs() < 1e-4,
+            (depth_at(PUNCTUAL_NEAR) - 1.0).abs() < 1e-4,
             "the near plane must store 1.0, got {}",
-            depth_at(SPOT_NEAR)
+            depth_at(PUNCTUAL_NEAR)
         );
         assert!(
             depth_at(spot.radius).abs() < 1e-4,
@@ -854,7 +1103,8 @@ mod tests {
         );
         // Every depth in between is inside the range the comparison runs over.
         for step in 1..40u8 {
-            let depth = depth_at(SPOT_NEAR + (spot.radius - SPOT_NEAR) * f32::from(step) / 40.0);
+            let depth =
+                depth_at(PUNCTUAL_NEAR + (spot.radius - PUNCTUAL_NEAR) * f32::from(step) / 40.0);
             assert!(
                 (0.0..=1.0).contains(&depth),
                 "a caster inside the cone stored {depth}, outside 0..1"
@@ -932,6 +1182,220 @@ mod tests {
         assert_ne!(spot_matrix(&spot), spot_matrix(&moved));
     }
 
+    fn point_at(position: Vec3, radius: f32) -> PointLight {
+        PointLight {
+            position,
+            radius,
+            color: Vec3::ONE,
+        }
+    }
+
+    /// Whether `point` is inside the frustum `matrix` projects with, on the
+    /// shader's terms exactly: `mesh.slang`'s `punctual_visibility` refuses a
+    /// non-positive `w` first and then a point outside the unit box or outside
+    /// the depth range.
+    fn inside(matrix: Mat4, point: Vec3) -> bool {
+        let clip = matrix * point.extend(1.0);
+        if clip.w <= 0.0 {
+            return false;
+        }
+        let ndc = clip.xyz() / clip.w;
+        ndc.x.abs() <= 1.0 && ndc.y.abs() <= 1.0 && (0.0..=1.0).contains(&ndc.z)
+    }
+
+    /// **Each face covers one named direction and none of the other five**,
+    /// which is the assertion a face indexing mistake cannot survive.
+    ///
+    /// The six directions are written out here rather than taken from
+    /// [`face_axis`], and that is the whole point of the test: a table compared
+    /// against itself passes on any *permutation* of the six, and a permutation
+    /// is exactly what a wrong convention is. This list is `mesh.slang`'s
+    /// `point_face` transcribed — it picks a face out of the largest component of
+    /// the direction from the light, in this order — so a host that built its
+    /// matrices in another order fails here rather than in a frame where five of
+    /// the six faces sample somewhere else.
+    ///
+    /// It is also not "the six matrices differ" or "a caster projects somewhere
+    /// sensible", both of which pass on any order at all.
+    #[test]
+    fn every_face_of_a_point_light_covers_its_own_direction_and_no_other() {
+        let light = point_at(Vec3::new(0.5, -1.0, 2.0), 4.0);
+        let convention = [
+            (0, Vec3::X),
+            (1, Vec3::NEG_X),
+            (2, Vec3::Y),
+            (3, Vec3::NEG_Y),
+            (4, Vec3::Z),
+            (5, Vec3::NEG_Z),
+        ];
+        assert_eq!(
+            convention.len(),
+            POINT_FACES,
+            "the convention below has to name every face there is"
+        );
+        for (face, axis) in convention {
+            let towards = light.position + axis * 2.0;
+            for other in 0..POINT_FACES {
+                let matrix = point_matrix(&light, other);
+                assert_eq!(
+                    inside(matrix, towards),
+                    other == face,
+                    "a caster at {towards:?} is {axis:?} of the light, which is face {face}, \
+                     and face {other}'s matrix {} it",
+                    if other == face {
+                        "does not cover"
+                    } else {
+                        "covers"
+                    }
+                );
+            }
+        }
+    }
+
+    /// **The six faces leave no direction uncovered**, which is the other half:
+    /// a set of matrices that each covered only their own axis and nothing
+    /// between them would pass the test above and leave a shadow with holes in
+    /// it wherever the light shines diagonally.
+    ///
+    /// A spiral of directions rather than the six axes, because the axes are the
+    /// case that cannot fail — the corners between three faces are where a field
+    /// of view narrower than 90° stops reaching.
+    #[test]
+    fn the_six_faces_between_them_cover_every_direction() {
+        let light = point_at(Vec3::new(-2.0, 0.5, 1.0), 6.0);
+        let matrices: Vec<Mat4> = (0..POINT_FACES)
+            .map(|face| point_matrix(&light, face))
+            .collect();
+        for step in 0..512u32 {
+            // A Fibonacci spiral: `z` walks the range and the angle turns by the
+            // golden ratio, which spreads the samples over the sphere rather than
+            // clustering them at its poles the way a latitude/longitude grid
+            // does.
+            let fraction = (f64::from(step) + 0.5) / 512.0;
+            let z = 1.0 - 2.0 * fraction;
+            let radius = (1.0 - z * z).max(0.0).sqrt();
+            let angle = std::f64::consts::PI * (3.0 - 5.0f64.sqrt()) * f64::from(step);
+            #[expect(clippy::cast_possible_truncation, reason = "a direction is an f32")]
+            let direction = Vec3::new(
+                (radius * angle.cos()) as f32,
+                (radius * angle.sin()) as f32,
+                z as f32,
+            );
+            let caster = light.position + direction * 3.0;
+            let covered = matrices
+                .iter()
+                .filter(|matrix| inside(**matrix, caster))
+                .count();
+            assert!(
+                covered >= 1,
+                "no face covers a caster {direction:?} from the light, so a shadow cast that \
+                 way would be missing"
+            );
+        }
+    }
+
+    /// **Reversed-Z on a face**, stated as the only thing that distinguishes it,
+    /// and checked on every face rather than on one: a caster nearer the light
+    /// gets the larger depth, the near plane stores 1 and the radius stores 0.
+    ///
+    /// The same claim `a_caster_nearer_a_spot_gets_the_larger_depth` makes, and
+    /// it is made again rather than assumed to carry over: this is a different
+    /// field of view through a different constructor call, and a matrix built the
+    /// conventional way round lights exactly what it should darken.
+    #[test]
+    fn a_caster_nearer_a_point_lights_face_gets_the_larger_depth() {
+        let light = point_at(Vec3::new(0.0, 2.0, 0.0), 4.0);
+        for face in 0..POINT_FACES {
+            let matrix = point_matrix(&light, face);
+            let depth_at = |distance: f32| {
+                let clip = matrix * (light.position + face_axis(face) * distance).extend(1.0);
+                (clip.xyz() / clip.w).z
+            };
+            let near = depth_at(0.5);
+            let far = depth_at(3.0);
+            assert!(
+                near > far,
+                "reversed-Z on face {face}: a caster at 0.5 stores {near} and one at 3.0 \
+                 stores {far}"
+            );
+            assert!(
+                (depth_at(PUNCTUAL_NEAR) - 1.0).abs() < 1e-4,
+                "face {face}'s near plane must store 1.0, got {}",
+                depth_at(PUNCTUAL_NEAR)
+            );
+            assert!(
+                depth_at(light.radius).abs() < 1e-4,
+                "face {face}'s radius must store 0.0, got {}",
+                depth_at(light.radius)
+            );
+        }
+    }
+
+    /// A point light straight over the origin is the commonest one there is, and
+    /// two of its faces look along the axis the obvious up vector is.
+    #[test]
+    fn the_faces_that_look_along_y_still_produce_a_basis() {
+        let light = point_at(Vec3::new(0.0, 3.0, 0.0), 5.0);
+        for face in 0..POINT_FACES {
+            let matrix = point_matrix(&light, face);
+            assert!(
+                matrix.to_cols_array().iter().all(|value| value.is_finite()),
+                "face {face} produced {matrix:?}"
+            );
+        }
+        // And the `-Y` face really does look at the floor under it, which is the
+        // one a degenerate basis would leave empty.
+        assert!(inside(point_matrix(&light, 3), Vec3::ZERO));
+    }
+
+    /// **A still light produces a byte-identical matrix**, on `spot_matrix`'s
+    /// terms and for its reason: there is no texel snap here, so this is what
+    /// says none is needed.
+    #[test]
+    fn a_still_point_light_produces_the_same_matrices() {
+        let light = point_at(Vec3::new(0.5, 2.0, -1.5), 4.0);
+        for face in 0..POINT_FACES {
+            assert_eq!(point_matrix(&light, face), point_matrix(&light, face));
+        }
+        // And a light that *moved* does not, or the equality above would be
+        // passing because the matrix ignores the light.
+        let mut moved = light;
+        moved.position.x += 0.5;
+        assert_ne!(point_matrix(&light, 0), point_matrix(&moved, 0));
+    }
+
+    /// The one cull a point light gets must keep what is inside its reach and
+    /// reject what is outside it.
+    ///
+    /// The union of the six faces is the light's sphere — topic 18's fourth
+    /// decision — so this is the frustum all six draws share, and a box that
+    /// rejected a caster inside the light's radius would be a missing shadow on
+    /// whichever face it belonged to.
+    #[test]
+    fn a_point_lights_cull_keeps_what_is_inside_its_radius() {
+        let light = point_at(Vec3::new(1.0, 2.0, -3.0), 4.0);
+        let frustum = point_frustum(&light);
+        for face in 0..POINT_FACES {
+            let axis = face_axis(face);
+            let near = crate::cull::Aabb {
+                min: light.position + axis - Vec3::splat(0.1),
+                max: light.position + axis + Vec3::splat(0.1),
+            };
+            assert!(
+                frustum.intersects(&near),
+                "a caster a unit along face {face} is inside the light's reach"
+            );
+            let beyond = crate::cull::Aabb {
+                min: light.position + axis * 12.0 - Vec3::splat(0.1),
+                max: light.position + axis * 12.0 + Vec3::splat(0.1),
+            };
+            assert!(
+                !frustum.intersects(&beyond),
+                "a caster three radii along face {face} cannot shadow anything this light lights"
+            );
+        }
+    }
+
     fn spot_light_at(position: Vec3, radius: f32) -> Light {
         Light::Spot(SpotLight {
             position,
@@ -941,6 +1405,11 @@ mod tests {
             inner_angle: 0.2,
             outer_angle: 0.5,
         })
+    }
+
+    /// A slot holding light `light` from tile `base`, for the assertions below.
+    const fn held(light: usize, base: usize) -> Option<Assignment> {
+        Some(Assignment { light, base })
     }
 
     /// The budget goes to the lights with the largest projected influence, and a
@@ -965,13 +1434,13 @@ mod tests {
         selection.update(&lights, eye);
         assert_eq!(
             selection.slots(),
-            &[Some(1), Some(2)],
-            "the two largest influences take the tiles, in rank order"
+            &[held(1, 0), held(2, 1)],
+            "the two largest influences take the slots and the first tiles, in rank order"
         );
-        assert_eq!(selection.slot_of(1), Some(0));
-        assert_eq!(selection.slot_of(2), Some(1));
+        assert_eq!(selection.base_of(1), Some(0));
+        assert_eq!(selection.base_of(2), Some(1));
         assert_eq!(
-            selection.slot_of(0),
+            selection.base_of(0),
             None,
             "the light past the budget gets no tile — it still lights, it just \
              does not occlude"
@@ -989,7 +1458,7 @@ mod tests {
         ];
         let mut selection = Selection::default();
         selection.update(&lights, Vec3::ZERO);
-        assert_eq!(selection.slots(), &[Some(0), Some(1)]);
+        assert_eq!(selection.slots(), &[held(0, 0), held(1, 1)]);
     }
 
     /// **A light drifting across the cutoff must not flicker its shadow on and
@@ -1001,22 +1470,23 @@ mod tests {
     /// light would never get a map.
     #[test]
     fn an_incumbent_keeps_its_tile_until_a_challenger_clearly_beats_it() {
-        // One slot's worth of contention: two lights and `SHADOW_LIGHTS` tiles
+        // One slot's worth of contention: two lights and `LIGHT_SLOTS` slots
         // means nothing is contended, so the list is one longer than the budget.
         let contender = |influence: f32| spot_light_at(Vec3::new(0.0, 0.0, -1.0), influence);
         let mut lights = [contender(3.0), contender(2.0), contender(1.0)];
         let mut selection = Selection::default();
         selection.update(&lights, Vec3::ZERO);
-        assert_eq!(selection.slots(), &[Some(0), Some(1)]);
+        assert_eq!(selection.slots(), &[held(0, 0), held(1, 1)]);
 
         // The outsider edges past the incumbent by a few per cent. It does not
         // take the tile, and — this is the half that matters — the incumbent
-        // stays in the *same* slot rather than being reshuffled.
+        // stays in the *same* slot and on the *same* tile rather than being
+        // reshuffled.
         lights[2] = contender(2.1);
         selection.update(&lights, Vec3::ZERO);
         assert_eq!(
             selection.slots(),
-            &[Some(0), Some(1)],
+            &[held(0, 0), held(1, 1)],
             "a challenger 5% ahead must not take a held tile"
         );
 
@@ -1025,17 +1495,16 @@ mod tests {
         selection.update(&lights, Vec3::ZERO);
         assert_eq!(
             selection.slots(),
-            &[Some(0), Some(2)],
+            &[held(0, 0), held(2, 1)],
             "a challenger past the hold ratio must take the tile"
         );
     }
 
-    /// A light this slice cannot map is refused a tile rather than given one it
+    /// A light with no map at all is refused a tile rather than given one it
     /// cannot fill — and the tile goes to the next light instead.
     ///
-    /// Point lights are six tiles and a face selection, which is the next slice;
-    /// a cone at or past a right angle has no perspective projection at all. Both
-    /// still light.
+    /// A cone at or past a right angle has no perspective projection, and a light
+    /// with no radius has no frustum. Both still light.
     #[test]
     fn a_light_with_no_map_is_refused_a_tile_and_the_next_one_takes_it() {
         let mut wide = spot_light_at(Vec3::new(0.0, 0.0, -1.0), 10.0);
@@ -1043,11 +1512,10 @@ mod tests {
             spot.outer_angle = MAX_SPOT_HALF_ANGLE + 0.01;
         }
         let lights = [
-            Light::Point(crate::light::PointLight {
-                position: Vec3::new(0.0, 0.0, -1.0),
-                radius: 20.0,
-                color: Vec3::ONE,
-            }),
+            // A point light with no reach: influence is infinite by the metric
+            // and there is no frustum to render, which is why eligibility is a
+            // predicate of its own rather than a consequence of the ranking.
+            Light::Point(point_at(Vec3::new(0.0, 0.0, -1.0), 0.0)),
             wide,
             spot_light_at(Vec3::new(0.0, 0.0, -2.0), 1.0),
             spot_light_at(Vec3::new(0.0, 0.0, -3.0), 1.0),
@@ -1056,9 +1524,100 @@ mod tests {
         selection.update(&lights, Vec3::ZERO);
         assert_eq!(
             selection.slots(),
-            &[Some(2), Some(3)],
+            &[held(2, 0), held(3, 1)],
             "the two brightest are ineligible, so the tiles go to the two that are"
         );
+    }
+
+    /// **A point light takes the whole light region**, and the spot behind it
+    /// lights without occluding.
+    ///
+    /// The budget's shape, stated as the frame a caller actually gets: six tiles
+    /// is one point light's six faces exactly, so a second light has a free
+    /// *slot* and no run to put a map in. That is the honest degradation the plan
+    /// asks for, and it is a different refusal from "no slot left" — which is
+    /// why the walk below does not stop at the first light it cannot place.
+    #[test]
+    fn a_point_light_takes_the_whole_region_and_a_spot_behind_it_gets_nothing() {
+        let lights = [
+            Light::Point(point_at(Vec3::new(0.0, 0.0, -1.0), 4.0)),
+            spot_light_at(Vec3::new(0.0, 0.0, -2.0), 1.0),
+        ];
+        let mut selection = Selection::default();
+        selection.update(&lights, Vec3::ZERO);
+        assert_eq!(
+            selection.slots(),
+            &[held(0, 0), None],
+            "the point light's faces are the whole region, so nothing is left for the spot"
+        );
+        assert_eq!(selection.base_of(0), Some(0));
+        assert_eq!(selection.base_of(1), None);
+    }
+
+    /// A point light ranked behind a spot cannot fit, and **the spot keeps its
+    /// tile rather than the frame losing both maps**.
+    ///
+    /// The fragmentation case, and the reason the allocation walks the whole
+    /// ranking: the spot holds tile 0, so the six consecutive tiles a point needs
+    /// are not there. A walk that stopped at the first light it could not place
+    /// would be a frame where a distant point light silently switched off a
+    /// nearer spot's shadow.
+    #[test]
+    fn a_point_light_that_cannot_fit_leaves_the_lights_around_it_alone() {
+        let lights = [
+            spot_light_at(Vec3::new(0.0, 0.0, -1.0), 4.0),
+            Light::Point(point_at(Vec3::new(0.0, 0.0, -4.0), 2.0)),
+            spot_light_at(Vec3::new(0.0, 0.0, -2.0), 1.0),
+        ];
+        let mut selection = Selection::default();
+        selection.update(&lights, Vec3::ZERO);
+        assert_eq!(
+            selection.slots(),
+            &[held(0, 0), held(2, 1)],
+            "the spot ahead of the point keeps tile 0, the point does not fit in what is left, \
+             and the spot behind it is still shadowed"
+        );
+    }
+
+    /// Every run a selection hands out is inside the region and no two runs
+    /// overlap, whatever the list is.
+    ///
+    /// **Two lights sharing a tile is the failure this is here for**: both would
+    /// render into it, the second over the first, and both would sample it — a
+    /// picture, and a plausible one. Asserted over a list that changes kind under
+    /// a held index, which is the case the incumbents' preference for their own
+    /// run has to survive.
+    #[test]
+    fn no_two_lights_are_ever_given_the_same_tile() {
+        let spot = spot_light_at(Vec3::new(0.0, 0.0, -1.0), 4.0);
+        let other = spot_light_at(Vec3::new(0.0, 0.0, -2.0), 2.0);
+        let point = Light::Point(point_at(Vec3::new(0.0, 0.0, -1.0), 4.0));
+        let mut selection = Selection::default();
+        for lights in [
+            vec![spot, other],
+            // The light at index 0 is a point light now, and it wants six tiles
+            // where its incumbent run had one.
+            vec![point, other],
+            vec![other, point],
+            vec![point],
+            vec![spot, other, point],
+        ] {
+            selection.update(&lights, Vec3::ZERO);
+            let mut used = [false; LIGHT_TILES];
+            for assignment in selection.slots().iter().flatten() {
+                let span = tile_span(&lights[assignment.light]);
+                assert!(
+                    assignment.base + span <= LIGHT_TILES,
+                    "light {} runs off the end of the region from {}",
+                    assignment.light,
+                    assignment.base
+                );
+                for tile in &mut used[assignment.base..assignment.base + span] {
+                    assert!(!*tile, "two lights hold one tile: {:?}", selection.slots());
+                    *tile = true;
+                }
+            }
+        }
     }
 
     /// An incumbent that leaves the list — or stops being eligible — frees its
@@ -1075,12 +1634,12 @@ mod tests {
         ];
         let mut selection = Selection::default();
         selection.update(&lights, Vec3::ZERO);
-        assert_eq!(selection.slots(), &[Some(0), Some(1)]);
+        assert_eq!(selection.slots(), &[held(0, 0), held(1, 1)]);
 
         selection.update(&lights[..1], Vec3::ZERO);
-        assert_eq!(selection.slots(), &[Some(0), None]);
+        assert_eq!(selection.slots(), &[held(0, 0), None]);
 
         selection.update(&[], Vec3::ZERO);
-        assert_eq!(selection.slots(), &[None; SHADOW_LIGHTS]);
+        assert_eq!(selection.slots(), &[None; LIGHT_SLOTS]);
     }
 }

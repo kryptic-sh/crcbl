@@ -5923,7 +5923,7 @@ recorded in `docs/plan/18-render-features.md`. What is left:
   never in the code.
 - **Spot shadows landed; point-light shadows are what is left.** The atlas is a
   fixed grid and the rule for which lights get maps is `shadow::Selection`. See
-  "What spot-light shadows left owed" below.
+  "What punctual-light shadows left owed" below.
 - **`mesh.png`, `mesh_ortho.png` and `mesh_second.png` differ from what this
   machine's lavapipe produces** by exactly one channel level across 80–96 % of
   pixels, comfortably inside tolerance. **Pre-existing** — identical before and
@@ -5936,43 +5936,59 @@ recorded in `docs/plan/18-render-features.md`. What is left:
   from 12 before this slice, so their HUD silently times only the first eight.
   Already recorded; the number moved again.
 
-## What spot-light shadows left owed
+## What punctual-light shadows left owed
 
-The atlas became a fixed 2×2 tile grid, `shadow::Selection` decides who gets a
-tile, `shadow::spot_matrix` builds a reversed-Z perspective projection down the
-cone, and `mesh.slang`'s `spot_visibility` samples it through the same 3×3 PCF
-kernel the cascades use. Decisions taken, so they are not re-argued:
+The atlas is a fixed 4×2 tile grid, `shadow::Selection` decides who gets tiles,
+`shadow::spot_matrix` and `shadow::point_matrix` build reversed-Z perspective
+projections, and `mesh.slang`'s `spot_visibility` and `point_visibility` sample
+them through the same 3×3 PCF kernel the cascades use. Decisions taken, so they
+are not re-argued:
 
-- **`SHADOW_LIGHTS` is 2, and it is a memory number rather than a quality one.**
-  Each shadowed light needs its own `DrawGen`, and a `DrawGen` holds ~5.0 MiB
-  measured on the spot scene — 3.7 MiB of it per-instance LOD hysteresis state
-  that is device-local and permanent. Two light tiles plus the atlas growing
-  from 8 to 16 MiB is ~18 MiB allocated whether a scene has a shadowed light or
-  not. It is allocated up front deliberately: building a `DrawGen` inside
-  `begin_frame` means a frame that cannot allocate is a frame that cannot draw.
-  **Raising the budget is the memory conversation, not the atlas one.**
+- **Two budgets, because they buy different things.** `LIGHT_TILES` is atlas
+  space — six of them, the minimum a point light can exist in — and
+  `LIGHT_SLOTS` is cull space, two of them, because a slot costs a `DrawGen`. A
+  `DrawGen` is ~5.0 MiB measured on the spot scene, 3.7 MiB of it per-instance
+  LOD hysteresis state that is device-local and permanent; a tile is 4 MiB of
+  `D32Float`. So the atlas is 32 MiB and the four generators are ~20 MiB,
+  allocated whether a scene has a shadowed light or not. That is deliberate:
+  building a `DrawGen` inside `begin_frame` means a frame that cannot allocate
+  is a frame that cannot draw. **Raising either budget is the memory
+  conversation, not the atlas one.**
+- **The reachable states are one point light or two spots**, and nothing in
+  between. Six light tiles is the minimum a point light needs; two of them are
+  what a spot each takes. A frame with more shadow-worthy lights than fit ranks
+  them by projected influence and hands out runs first-fit, and a point light
+  that cannot fit six consecutive tiles is **skipped without taking the budget
+  down with it** —
+  `a_point_light_that_cannot_fit_leaves_the_lights_around_it_alone` is the
+  assertion.
 - **A cone at or past `MAX_SPOT_HALF_ANGLE` (80°) is refused a tile** rather
   than given a map narrower than the cone. `tan` runs to infinity at 90° and the
   matrix stops being one. Such a light lights without occluding, which is the
   same honest degradation as running out of tiles.
-- **The spot biases in world units before projecting**, denominated in tile
-  texels at the receiver, where the cascades bias in shadow-clip depth. A
+- **A punctual light biases in world units before projecting**, denominated in
+  tile texels at the receiver, where the cascades bias in shadow-clip depth. A
   perspective map's depth precision piles up at the near plane under reversed-Z,
   so the cascades' constants do not transfer. The shipped pair
-  (`SPOT_DEPTH_BIAS_TEXELS` 2.0, `SPOT_SLOPE_BIAS_TEXELS` 4.0) is double the
-  smallest that made the two geometry paths agree on lavapipe; the argument and
-  the measurements are at the constants in `shaders/mesh.slang`.
-- **No texel snap on a spot's matrix, and none is owed.** The cascades snap
-  because their box follows the camera; a spot's matrix is a pure function of
-  the light, so a still light already produces a byte-identical matrix.
-  `a_still_spot_produces_the_same_matrix` asserts it.
+  (`PUNCTUAL_DEPTH_BIAS_TEXELS` 2.0, `PUNCTUAL_SLOPE_BIAS_TEXELS` 4.0) is double
+  the smallest that made the two geometry paths agree on lavapipe. **A point
+  light's 90° face reuses them unchanged**, and that is not laziness: the
+  constant counts texels and the world footprint of a texel is computed per
+  receiver, so the same count means the same thing at any cone angle. Verified,
+  not assumed — the two geometry paths draw `Scene::PointShadow`
+  byte-identically.
+- **No texel snap on a spot's or a face's matrix, and none is owed.** The
+  cascades snap because their box follows the camera; a punctual light's matrix
+  is a pure function of the light, so a still light already produces a
+  byte-identical matrix. `a_still_spot_produces_the_same_matrix` asserts it.
+- **Face order is the cube-map convention**, `+X -X +Y -Y +Z -Z`, in
+  `shadow::face_axis` and `mesh.slang`'s `point_face`. The test that pins it
+  writes the six directions out **literally** rather than deriving them from
+  `face_axis` — the derived version passed cleanly with faces 4 and 5 swapped,
+  which is exactly the check-that-cannot-fail this project keeps finding.
 
 What is left:
 
-- **Point-light shadows are the next slice**: six tiles per light against two
-  spare, so the grid widens. `ATLAS_COLUMNS`, `ATLAS_ROWS` and the
-  `TILES == CASCADES + SHADOW_LIGHTS` static assert are the only two places that
-  change — but see the memory note above before widening it.
 - **`cluster_survives` does not scale a cluster's bounding radius by the
   instance transform** (`mesh_cluster.slang`, and its Rust oracle
   `cluster_survives_cull`). Correct for the rigid transform
@@ -5983,13 +5999,29 @@ What is left:
   correct bias produces anyway, and both paths agree pixel for pixel), but it is
   a hole waiting for a tighter frustum. Pre-existing; documented at the
   assertion in `vk_e2e/shadow.rs`.
-- **Hardware PCF filters across a tile seam.** The kernel clamps half a texel
-  inside the tile, which stops a tap reaching the neighbour, but the guarantee
-  is the clamp rather than per-tile padding. A wider kernel would need the
-  padding.
-- **Nothing exercises two shadowed lights at once.** `Scene::SpotShadow` has
-  one, so slot 1 is only covered by the host-side `Selection` tests and by the
-  vk_e2e assertion that a free tile stays at the clear.
+- **The cube's face seams are unpadded, and the plan's mitigation is not
+  built.** `tile_pcf` clamps taps half a texel inside the tile, so a receiver
+  within one texel of a face boundary re-samples its own edge texel instead of
+  the neighbour's: the shadow edge is **under-filtered** along the twelve cube
+  edges rather than wrong. One texel at distance `d` covers `2d/1024` world
+  units, so at a metre from the light that is about two millimetres. Topic 18
+  names a border of padding per tile as the fix; build it if a seam ever shows.
+- **A shadowed spot idles five of the six light tiles.** The region is sized for
+  a point light, so a scene of spots wastes 20 MiB of atlas. A packing policy is
+  what would fix it and topic 18 puts packing post-MVP.
+- **`GpuLight::shadow_slot` now carries a tile _base_, not a slot**, while
+  `shadow::LIGHT_SLOTS` means cull space. Two meanings of "slot" one field name
+  apart. Renaming the wire field to `shadow_tile` is the obvious fix and was not
+  taken in the point-light slice.
+- **Nothing exercises two shadowed lights at once.** `Scene::SpotShadow` has one
+  and `Scene::PointShadow` has one, so the second cull slot is covered only by
+  the host-side `Selection` tests and by the vk_e2e assertion that a free tile
+  stays at the clear.
+- **`Scene::Lights` changed shape without changing pixels.** Its three point
+  lights are now shadow-eligible, so the most influential takes the region and
+  the frame records one more cull triple. `lights.png` is byte-identical and
+  `every_scene_records_the_passes_it_names…` expects the extra triple — worth
+  knowing before reading that scene as unshadowed.
 
 ## P7B could not start as written: the engine has one light
 

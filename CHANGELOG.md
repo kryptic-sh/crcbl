@@ -20,13 +20,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   The sun is a row in the light list now rather than a field, and `lod_params`
   was already dead — documented in-tree as "read by no shader since hysteresis
   landed, and written all the same". It gained `cluster_grid` and then
-  `light_view_proj`, and is 400 bytes. Anything constructing `FrameUniforms` or
+  `light_view_proj`, and is 656 bytes. Anything constructing `FrameUniforms` or
   reading those fields has to change.
 
-- **`GpuLight::pad0` became `shadow_slot`, and `Light::row` takes the slot.** A
-  row's default is no longer all-zero: `NO_SHADOW_SLOT` is `u32::MAX`, because
-  zero is a real shadow slot and a row that forgot to say would occlude through
-  whichever light holds it.
+- **`GpuLight::pad0` became `shadow_slot`, and `Light::row` takes it.** It names
+  the first atlas tile the light occludes through — one tile for a spot, the
+  first of six for a point. A row's default is no longer all-zero:
+  `NO_SHADOW_SLOT` is `u32::MAX`, because zero is a real tile and a row that
+  forgot to say would occlude through whichever light holds it.
 
 - **`BindingKind::SampledImage` gained `sample_type` and `BindingKind::Sampler`
   became a struct variant with `comparison`.** Every construction has to name
@@ -333,7 +334,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **Spot lights cast shadows.** The shadow atlas became a fixed 2×2 grid of
+- **Point lights cast shadows too, through six atlas tiles rather than a cube
+  map.** The grid is 4×2 now: two cascades and a six-tile light region. Faces
+  are the cube-map order — `+X -X +Y -Y +Z -Z` — built by `shadow::face_axis` on
+  the host and picked by `mesh.slang`'s `point_face` from the largest component
+  of the offset to the light.
+
+  **One cull per point light, not one per face**, which is the decision recorded
+  in `docs/plan/18-render-features.md`: the six faces' union is the light's
+  sphere and that is what the cull tests anyway, so one visible set feeds all
+  six draws and a face discards what is behind it. The alternative would have
+  been thirty megabytes of `DrawGen` for one light.
+
+  That splits one number into three. `SHADOW_LIGHT_TILES` is atlas space,
+  `shadow::LIGHT_SLOTS` is cull space, and the view count is the product — so
+  the reachable states are **one point light or two spots**, and a light that
+  fits neither budget still lights and simply does not occlude. A point light
+  that cannot fit six consecutive tiles is skipped without taking the budget
+  down with it, so a smaller light ranked behind it is still shadowed.
+
+  `Scene::PointShadow` is the new golden: two casters standing on opposite sides
+  of the light, so a frame that shadows one direction and not the other — the
+  shape a face-indexing bug takes — fails rather than looking plausible.
+
+- **Spot lights cast shadows.** The shadow atlas became a fixed grid of
   1024-texel tiles: the sun's cascades keep the first ones and the rest are
   handed out one per shadowed spot, which is `docs/plan/18-render-features.md`'s
   recorded decision. `shadow::Selection` ranks eligible lights by projected
@@ -341,13 +365,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   breaks ties by index, and holds an incumbent's tile until a challenger beats
   it by a quarter, so a shadow does not blink in and out as the camera drifts.
 
-  **A light that gets no tile still lights and simply does not occlude.** The
-  atlas has room for two light maps; a point light, a cone at or past 80°, and
-  every spot past the budget are all refused a tile by name and keep lighting.
-  `GpuLight` gained `shadow_slot`, spent out of the first padding word, so the
-  row costs no more bytes than before; `NO_SHADOW_SLOT` is `u32::MAX` rather
-  than zero, because zero is a real slot, and `GpuLight::default()` is
-  hand-written for that reason.
+  **A light that gets no tile still lights and simply does not occlude.** A cone
+  at or past 80° has no projection to build, so it is refused a tile by name and
+  keeps lighting, as does every spot past the budget. `GpuLight` gained
+  `shadow_slot`, spent out of the first padding word, so the row costs no more
+  bytes than before; `NO_SHADOW_SLOT` is `u32::MAX` rather than zero, because
+  zero is a real slot, and `GpuLight::default()` is hand-written for that
+  reason.
 
   A spot's map is a **perspective** projection down the cone, reversed-Z like
   everything else here, its field of view twice the outer half-angle so the map

@@ -81,19 +81,25 @@ pub struct SpotLight {
 }
 
 impl Light {
-    /// This light as the row the shaders read, occluding through shadow slot
-    /// `shadow_slot`.
+    /// This light as the row the shaders read, occluding through the light tiles
+    /// starting at `base_tile`.
+    ///
+    /// **The first tile, not the only one**: a spot occludes through that tile
+    /// alone and a point light through the
+    /// [`POINT_FACES`](crate::shadow::POINT_FACES) tiles from there, one per cube
+    /// face, which the shader selects between. `shadow::Selection` is what hands
+    /// the run out.
     ///
     /// `None` is a light with no map of its own, which is the ordinary case: the
-    /// atlas holds [`shadow::SHADOW_LIGHTS`](crate::shadow::SHADOW_LIGHTS) light
-    /// maps and a scene may hold more lights than that. Such a light still
-    /// lights and simply does not occlude — `docs/plan/18-render-features.md`'s
-    /// honest degradation, and the reason the budget is a quality knob rather
-    /// than a correctness cliff.
+    /// atlas holds [`shadow::LIGHT_TILES`](crate::shadow::LIGHT_TILES) light
+    /// tiles and a scene may want more than they hold. Such a light still lights
+    /// and simply does not occlude — `docs/plan/18-render-features.md`'s honest
+    /// degradation, and the reason the budget is a quality knob rather than a
+    /// correctness cliff.
     #[must_use]
-    pub fn row(&self, shadow_slot: Option<usize>) -> GpuLight {
-        let shadow_slot = shadow_slot.map_or(light::NO_SHADOW_SLOT, |slot| {
-            u32::try_from(slot).unwrap_or(light::NO_SHADOW_SLOT)
+    pub fn row(&self, base_tile: Option<usize>) -> GpuLight {
+        let shadow_slot = base_tile.map_or(light::NO_SHADOW_SLOT, |base| {
+            u32::try_from(base).unwrap_or(light::NO_SHADOW_SLOT)
         });
         match self {
             Self::Point(point) => GpuLight {

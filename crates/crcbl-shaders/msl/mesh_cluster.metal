@@ -119,6 +119,13 @@ struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E2_0
 
 
 #line 142
+struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E6_0
+{
+    array<_MatrixStorage_float4x4_ColMajornatural_1, int(6)> data_3;
+};
+
+
+#line 142
 struct FrameUniforms_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_1 view_proj_0;
@@ -128,7 +135,7 @@ struct FrameUniforms_natural_0
     float4 cascade_far_0;
     float4 shadow_params_0;
     uint4 cluster_grid_0;
-    _Array_natural_matrixx3Cfloatx2C4x2C4x3E2_0 light_view_proj_0;
+    _Array_natural_matrixx3Cfloatx2C4x2C4x3E6_0 light_view_proj_0;
 };
 
 

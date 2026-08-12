@@ -126,10 +126,10 @@ struct MeshVertex
 /// was shorter is one whose later members it reads at the wrong offsets.
 static const uint SHADOW_CASCADES = 2;
 
-/// Matching `static const uint SHADOW_LIGHTS` in `mesh.slang`, for
+/// Matching `static const uint SHADOW_LIGHT_TILES` in `mesh.slang`, for
 /// `SHADOW_CASCADES`' reason exactly: `FrameUniforms` below sizes a second array
 /// with it.
-static const uint SHADOW_LIGHTS = 2;
+static const uint SHADOW_LIGHT_TILES = 6;
 
 /// Matching `struct FrameUniforms` in `mesh.slang`.
 ///
@@ -155,10 +155,10 @@ struct FrameUniforms
     /// identical. The slot held `docs/plan/25-lod.md`'s selection numbers until
     /// the light list arrived, by which time no stage read those either.
     uint4 cluster_grid;
-    /// World → shadowed-light slot `i`'s shadow clip. **Read by nothing here**,
-    /// on the cascades' terms exactly: this file does not shade, and a spot's
-    /// map is rendered through `view_proj` like every other pass.
-    float4x4 light_view_proj[SHADOW_LIGHTS];
+    /// World → light tile `i`'s shadow clip. **Read by nothing here**, on the
+    /// cascades' terms exactly: this file does not shade, and a spot's or a point
+    /// light's face's map is rendered through `view_proj` like every other pass.
+    float4x4 light_view_proj[SHADOW_LIGHT_TILES];
 };
 
 /// Matching `struct GpuLight` in `mesh.slang`.

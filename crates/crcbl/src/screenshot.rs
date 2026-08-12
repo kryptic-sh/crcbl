@@ -177,6 +177,24 @@ pub enum Scene {
     /// overhead the shadow hides under the object that casts it. See
     /// `spot_shadow_camera` and `SPOT_SHADOW_LIGHT_AT`.
     SpotShadow,
+    /// `docs/plan/18-render-features.md`'s **shadowed point light**: one light
+    /// low over a floor with a caster on either side of it, seen from above.
+    ///
+    /// **The only frame in the tree where one light occludes in more than one
+    /// direction**, and that is the whole of what it is for. A point light's map
+    /// is six atlas tiles and the fragment stage picks one of them from the
+    /// direction to the light, so five of the six can be wrong — sampled from the
+    /// neighbouring face, or from a fixed one — and the frame still has a shadow
+    /// in it. The two casters are on *different* faces, so a frame that got the
+    /// face selection wrong loses one of the two shadows while keeping the other,
+    /// which `tests/render_e2e.rs` asserts side by side rather than one at a
+    /// time.
+    ///
+    /// See this module's `POINT_LIGHT_UP` for why the light is low — a light
+    /// high over the floor puts every receiver on the `-Y` face and the scene
+    /// stops distinguishing anything — and `POINT_CASTER_AT` for where the
+    /// casters stand.
+    PointShadow,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
@@ -588,6 +606,96 @@ fn spot_shadow_light() -> crcbl_render::Light {
     })
 }
 
+/// How far above the floor [`Scene::PointShadow`] hangs its light.
+///
+/// **Low, and that is the scene.** A point light's six faces are picked by the
+/// largest component of the direction from the light, so a receiver at `(x, -h)`
+/// from a light `h` up is on the `-Y` face while `|x| < h` and on a side face
+/// past that. A light high over a floor therefore puts the whole visible floor —
+/// casters, shadows and all — on one face, and a frame drawn with every face
+/// selection wired to that one would be identical. From here the four side faces
+/// own everything past `|x| = h`, which is where both shadows fall.
+///
+/// Above the casters, or nothing casts anything; low enough that a caster a third
+/// of its height throws a shadow several times its own length, which is what
+/// makes the dark band wide enough to measure.
+const POINT_LIGHT_UP: f32 = 0.5;
+
+/// How far [`Scene::PointShadow`]'s light reaches, in world units.
+///
+/// Past the far end of both shadows, so the pool's edge is off the frame and
+/// every band the assertions measure is lit by the same falloff — the claim is a
+/// ratio between two bands equidistant from the light, and a radius cutting
+/// through one of them would decide it.
+const POINT_REACH: f32 = 3.0;
+
+/// How far from the light's axis each of [`Scene::PointShadow`]'s casters
+/// stands.
+///
+/// Past [`POINT_LIGHT_UP`], so a caster is already on the side face its shadow
+/// falls across and the two are one face's business rather than a shadow
+/// straddling a seam — the seam is real and untested here on purpose, and
+/// `docs/backlog.md` is where that belongs.
+const POINT_CASTER_AT: f32 = 0.6;
+
+/// How much [`Scene::PointShadow`] scales the pyramid by to get each caster.
+///
+/// Short next to [`POINT_LIGHT_UP`]: the shadow's tip is at
+/// `POINT_CASTER_AT * up / (up - height)`, which runs away to infinity as a
+/// caster approaches the light's own height. At this scale the tip lands
+/// comfortably inside the frame.
+const POINT_CASTER_SCALE: f32 = 0.3;
+
+/// How far above the floor [`Scene::PointShadow`]'s camera stands.
+///
+/// High enough that both shadows and both of their mirror bands are inside the
+/// frame: the far one reaches about `1.3` from the centre and the frame's short
+/// half-axis on the floor is `up * tan(30°)`.
+const POINT_CAMERA_UP: f32 = 2.2;
+
+/// The camera [`Scene::PointShadow`] is drawn with: straight down at the floor,
+/// on [`spot_camera`]'s terms exactly.
+fn point_shadow_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, POINT_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        // `Y` is the view direction, so `up` cannot also be `Y`; `+Z` puts the
+        // world's `+Z` axis at the top of the frame.
+        up: glam::Vec3::Z,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// [`Scene::PointShadow`]'s one light: a point light just above the floor's
+/// centre.
+///
+/// Near-white, on [`spot_light`]'s terms: the floor's albedo is the cube's green
+/// `+Y` face and a coloured light would tint the bands the assertions compare
+/// rather than leaving the comparison to the shadow.
+fn point_shadow_light() -> crcbl_render::Light {
+    crcbl_render::Light::Point(crcbl_render::PointLight {
+        position: glam::Vec3::new(0.0, POINT_LIGHT_UP, 0.0),
+        radius: POINT_REACH,
+        color: glam::Vec3::new(1.0, 0.95, 0.85) * SPOT_INTENSITY,
+    })
+}
+
+/// One of [`Scene::PointShadow`]'s casters: the pyramid, scaled and dropped so
+/// its base sits on the floor, at `offset` from the light's axis.
+///
+/// **On the floor rather than floating**, on `spot_shadow_caster`'s terms: a
+/// shadow detached from its caster is what too much depth bias looks like, and a
+/// floating caster hides that behind a gap that is meant to be there.
+fn point_shadow_caster(offset: glam::Vec3) -> glam::Mat4 {
+    // The pyramid's base is at `-0.4` in its own space, so lifting it by that
+    // much of the scale puts the base on `y = 0`.
+    glam::Mat4::from_translation(offset + glam::Vec3::new(0.0, 0.4 * POINT_CASTER_SCALE, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::splat(POINT_CASTER_SCALE))
+}
+
 /// The colour [`Scene::Sprite`] and [`Scene::Ui`] composite onto, in **linear**
 /// light — which is what a clear value on an sRGB attachment means.
 ///
@@ -878,6 +986,31 @@ impl SceneState {
                 renderer.set_lights(&[spot_shadow_light()]);
                 Self::Forward {
                     camera: spot_shadow_camera(),
+                    light: spot_sun(),
+                    model: spot_floor(),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::PointShadow => {
+                // The spot-shadow scene's floor, with **two** casters on
+                // different sides of the light: one out along `+X` and one out
+                // along `-Z`, so their shadows fall across two different faces
+                // of the light's map. One caster would prove a point light casts
+                // *a* shadow, which is what a single working face already does.
+                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                renderer.set_pyramid(Some(point_shadow_caster(glam::Vec3::new(
+                    POINT_CASTER_AT,
+                    0.0,
+                    0.0,
+                ))));
+                renderer.set_tinted_pyramid(Some(point_shadow_caster(glam::Vec3::new(
+                    0.0,
+                    0.0,
+                    -POINT_CASTER_AT,
+                ))));
+                renderer.set_lights(&[point_shadow_light()]);
+                Self::Forward {
+                    camera: point_shadow_camera(),
                     light: spot_sun(),
                     model: spot_floor(),
                     renderer: Box::new(renderer),
@@ -1999,12 +2132,18 @@ mod tests {
         // The spot scene's one light is a spot, it is the only candidate, and
         // there are tiles left after the cascades — so it holds one.
         let spot_shadow_passes = forward_passes(1);
-        let expected: [(Scene, &[(&str, &str)]); 6] = [
+        // **One triple, not three**, and that is the point-light budget visible
+        // in a frame's shape: `Scene::Lights` has three point lights, each of
+        // which is six tiles, and the light region holds six — so the most
+        // influential one is shadowed and the other two light without occluding.
+        let lights_passes = forward_passes(1);
+        let expected: [(Scene, &[(&str, &str)]); 7] = [
             (Scene::Cube, &cube_passes),
-            // The same passes again: `Scene::Lights` is the cube scene with a
-            // longer light list, and the clustering dispatch is one per camera
-            // however many lights it assigns.
-            (Scene::Lights, &cube_passes),
+            // Not the cube scene's passes: `Scene::Lights` is the cube scene
+            // with a longer light list, the clustering dispatch is one per
+            // camera however many lights it assigns — and one of those lights
+            // is shadowed, which costs the cull triple `lights_passes` carries.
+            (Scene::Lights, &lights_passes),
             // The same passes: `Scene::Dunes` is the same renderer with
             // different content, and a scene that quietly stopped running the
             // cull pair would still draw a plausible frame.
@@ -2018,6 +2157,12 @@ mod tests {
             // occlude" visible in the frame's shape rather than only in its
             // pixels.
             (Scene::SpotShadow, &spot_shadow_passes),
+            // **One triple, not six.** A point light's six faces are six
+            // viewports and six matrices over *one* cull — topic 18's fourth
+            // decision — so a shadowed point light costs a frame exactly what a
+            // shadowed spot does. A frame that culled per face would record five
+            // more triples here.
+            (Scene::PointShadow, &spot_shadow_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

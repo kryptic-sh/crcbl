@@ -166,19 +166,32 @@ struct MeshVertex
 /// where it ends.
 static const uint SHADOW_CASCADES = 2;
 
-/// How many shadowed lights the atlas has room for beside the cascades, matching
-/// `crcbl_shaders::mesh::SHADOW_LIGHTS`.
+/// How many **tiles** the atlas has for shadowed lights beside the cascades,
+/// matching `crcbl_shaders::mesh::SHADOW_LIGHT_TILES`.
 ///
 /// `docs/plan/18-render-features.md`'s 2026-08-13 decision: the atlas is a fixed
 /// tile grid, the cascades take the first tiles, the rest go one per shadowed
-/// spot, and a light that gets none still lights without occluding. Sizes
-/// `FrameUniforms::light_view_proj`, so this is a layout number and the same
-/// drift test that pins `SHADOW_CASCADES` pins it.
-static const uint SHADOW_LIGHTS = 2;
+/// spot and `SHADOW_POINT_FACES` per shadowed point, and a light that gets none
+/// still lights without occluding. Sizes `FrameUniforms::light_view_proj`, so
+/// this is a layout number and the same drift test that pins `SHADOW_CASCADES`
+/// pins it.
+///
+/// **Not a count of lights**: `GpuLight::shadow_slot` is an index into this
+/// region and a point light occupies six of it, so how many lights a frame can
+/// shadow is a host-side budget (`crcbl_render::shadow::LIGHT_SLOTS`) that no
+/// shader has any use for.
+static const uint SHADOW_LIGHT_TILES = 6;
+
+/// Tiles one point light's shadow map is, matching
+/// `crcbl_shaders::mesh::SHADOW_POINT_FACES`.
+///
+/// Six atlas tiles rather than a cube map — one image, one sampler, one barrier
+/// story — and `point_face` below is the convention that says which is which.
+static const uint SHADOW_POINT_FACES = 6;
 
 /// Tiles across the shadow atlas, matching
 /// `crcbl_shaders::mesh::SHADOW_ATLAS_COLUMNS`.
-static const uint SHADOW_ATLAS_COLUMNS = 2;
+static const uint SHADOW_ATLAS_COLUMNS = 4;
 
 /// Tiles down it, matching `crcbl_shaders::mesh::SHADOW_ATLAS_ROWS`.
 static const uint SHADOW_ATLAS_ROWS = 2;
@@ -190,14 +203,14 @@ static const uint SHADOW_ATLAS_ROWS = 2;
 /// converts through.
 static const float SHADOW_TILE = 1024.0;
 
-/// Which atlas tile shadowed-light slot `slot` was rendered into.
+/// Which atlas tile light tile `tile` of the light region was rendered into.
 ///
 /// The cascades take tiles `0 .. SHADOW_CASCADES` and the lights take the rest,
 /// which is the same arithmetic `crcbl_render::shadow::light_tile` performs on
 /// the writing side. One statement of the split, read from both ends.
-uint light_tile(uint slot)
+uint light_tile(uint tile)
 {
-    return SHADOW_CASCADES + slot;
+    return SHADOW_CASCADES + tile;
 }
 
 /// Where `tile_uv` — a point in tile `tile`, `0..1` on both axes — lands in the
@@ -290,19 +303,22 @@ struct FrameUniforms
     /// than the numbers. A dead `float4` in a block every pipeline binds is not
     /// somewhere to leave a value nothing reads.
     uint4 cluster_grid;
-    /// World → shadowed-light slot `i`'s shadow clip, one matrix per slot.
+    /// World → light tile `i`'s shadow clip, one matrix per tile of the atlas's
+    /// light region.
     ///
     /// **Perspective and reversed-Z**, unlike `shadow_view_proj` above: a spot
-    /// is a cone, a cone is a frustum, and the orthographic box the cascades use
-    /// has no cone in it. Reversed all the same, so the same `Greater`
-    /// comparison sampler reads both.
+    /// is a cone, a cone is a frustum, a point light's face is a 90° one, and the
+    /// orthographic box the cascades use is neither. Reversed all the same, so
+    /// the same `Greater` comparison sampler reads all three.
     ///
-    /// A slot no light holds is read by nothing: the rows that would name it
-    /// carry `NO_SHADOW_SLOT`. **Last in the block rather than beside the
-    /// cascades**, so adding it moved no existing member's offset — which is
-    /// what let the cascade goldens stay byte-identical across the change that
-    /// introduced it.
-    float4x4 light_view_proj[SHADOW_LIGHTS];
+    /// **Indexed by tile rather than by light**, which is what lets one light own
+    /// six: `GpuLight::shadow_slot` names the first of a light's tiles and
+    /// `point_visibility` adds the face it selected. A tile no light holds is
+    /// read by nothing, because the rows that would name it carry
+    /// `NO_SHADOW_SLOT`. **Last in the block rather than beside the cascades**,
+    /// so adding it moved no existing member's offset — which is what let the
+    /// cascade goldens stay byte-identical across the change that introduced it.
+    float4x4 light_view_proj[SHADOW_LIGHT_TILES];
 };
 
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
@@ -427,11 +443,13 @@ struct GpuLight
     uint kind;
     /// The cosine of a spot's inner half-angle.
     float cos_inner;
-    /// Which slot of `FrameUniforms::light_view_proj` this light occludes
-    /// through, or `NO_SHADOW_SLOT` if it was given none.
+    /// The **first** entry of `FrameUniforms::light_view_proj` this light
+    /// occludes through, or `NO_SHADOW_SLOT` if it was given none.
     ///
-    /// The atlas holds `SHADOW_LIGHTS` light maps and a scene may hold more
-    /// lights than that, so a row saying "no slot" is the ordinary case:
+    /// A spot occludes through that one tile; a point light through the
+    /// `SHADOW_POINT_FACES` tiles from here, and `point_visibility` adds the face
+    /// it selected. The atlas holds `SHADOW_LIGHT_TILES` of them and a scene may
+    /// want more than they hold, so a row saying "no tile" is the ordinary case:
     /// `docs/plan/18-render-features.md`'s rule is that such a light still lights
     /// and simply does not occlude.
     uint shadow_slot;
@@ -440,9 +458,11 @@ struct GpuLight
 
 /// `GpuLight::shadow_slot` for a light with no shadow map of its own.
 ///
-/// Deliberately not zero, which is a real slot. `spot_visibility` compares
-/// against `SHADOW_LIGHTS` rather than against this value, so a row carrying any
-/// other out-of-range slot is refused the same way.
+/// Deliberately not zero, which is a real tile. The shading loop compares
+/// against `SHADOW_LIGHT_TILES` rather than against this value, so a row carrying
+/// any other out-of-range tile is refused the same way — and a point light's
+/// whole run is checked, because this value plus a face index would otherwise
+/// wrap into the region.
 static const uint NO_SHADOW_SLOT = 0xffffffffu;
 
 /// `GpuLight::kind` for the sun: no position, no falloff, and in every froxel.
@@ -832,8 +852,8 @@ float sun_visibility(float3 world_position, float n_dot_l)
     return tile_pcf(cascade, tile_uv, reference);
 }
 
-/// How far a spot's shadow comparison is moved towards the light, in **tile
-/// texels** at the receiver.
+/// How far a punctual light's shadow comparison is moved towards the light, in
+/// **tile texels** at the receiver.
 ///
 /// # Why texels rather than depth
 ///
@@ -847,10 +867,18 @@ float sun_visibility(float3 world_position, float n_dot_l)
 /// So the offset is applied to the **world position, before projecting**, which
 /// makes it independent of the projection entirely, and it is denominated in the
 /// thing that actually causes acne: the world footprint of one shadow-map texel
-/// at the receiver, which for a cone of half-angle `θ` at axial depth `d` is
+/// at the receiver, which for a frustum of half-angle `θ` at axial depth `d` is
 /// `2 d tan θ / SHADOW_TILE`. A surface at slope `s` to the light climbs `s`
 /// times that across one texel, which is the depth error the map quantised away,
 /// which is the term below.
+///
+/// **That is also why one pair of numbers covers a point light's faces as well
+/// as a spot's cone**, whose fields of view are nothing like each other: a face
+/// is a 90° frustum, so its `tan θ` is 1 and one of its texels covers a much
+/// larger patch of world than a narrow spot's does — and the footprint is
+/// computed rather than assumed, so a constant in texels means the same thing in
+/// both. Each caller of `punctual_visibility` passes its own footprint; these
+/// two say how many of them to move.
 ///
 /// # Where the numbers came from, and what says they are right
 ///
@@ -875,22 +903,66 @@ float sun_visibility(float3 world_position, float n_dot_l)
 /// this has not run on. The other end is checked by the golden rather than by a
 /// number: too much bias detaches a shadow from its caster, and
 /// `Scene::SpotShadow` stands its pyramid **on** the floor so the contact point
-/// is in the frame.
-static const float SPOT_DEPTH_BIAS_TEXELS = 2.0;
+/// is in the frame. `Scene::PointShadow` stands both of its casters on the same
+/// floor for the same reason, and its two geometry paths agree at these numbers
+/// unchanged.
+static const float PUNCTUAL_DEPTH_BIAS_TEXELS = 2.0;
 
 /// The slope-scaled part, per unit of `tan(acos(N·L))`. See
-/// `SPOT_DEPTH_BIAS_TEXELS` for how it was chosen.
-static const float SPOT_SLOPE_BIAS_TEXELS = 4.0;
+/// `PUNCTUAL_DEPTH_BIAS_TEXELS` for how it was chosen.
+static const float PUNCTUAL_SLOPE_BIAS_TEXELS = 4.0;
 
-/// The fraction of a shadowed spot this fragment can see: `1.0` fully lit, `0.0`
-/// fully shadowed, the values between the PCF filter.
+/// The fraction of a punctual light's map this fragment can see: `1.0` fully
+/// lit, `0.0` fully shadowed, the values between the PCF filter.
 ///
-/// `slot` is the light's `shadow_slot` and the caller has already checked it
-/// names a real slot. `to_light` is the unit vector towards the light and
-/// `n_dot_l` the unclamped Lambert term, both already computed by the shading
-/// loop — passed in rather than recomputed, so this function and the term it
-/// scales cannot disagree about the geometry.
-float spot_visibility(GpuLight light, uint slot, float3 world_position, float3 to_light,
+/// The half a spot and a point light's face have in common, which is all of it
+/// but two numbers: `tile` is the light tile to sample and `texel_world` the
+/// world footprint of one of its texels at this receiver — see
+/// `PUNCTUAL_DEPTH_BIAS_TEXELS`, which is what that footprint is multiplied by.
+/// `to_light` is the unit vector towards the light and `n_dot_l` the unclamped
+/// Lambert term, both already computed by the shading loop.
+float punctual_visibility(uint tile, float3 world_position, float3 to_light, float n_dot_l,
+                          float texel_world)
+{
+    float cosine = saturate(n_dot_l);
+    float slope = sqrt(saturate(1.0 - cosine * cosine)) / max(cosine, 1e-4);
+    float offset = texel_world
+                 * (PUNCTUAL_DEPTH_BIAS_TEXELS
+                    + PUNCTUAL_SLOPE_BIAS_TEXELS * min(slope, SHADOW_SLOPE_BIAS_CLAMP));
+
+    float4 clip = mul(frame.light_view_proj[tile], float4(world_position + to_light * offset, 1.0));
+    // **`w` first, and this is the difference from the cascades.** An
+    // orthographic matrix has `w == 1` everywhere; a perspective one has `w`
+    // equal to the depth in front of the light, so a receiver *behind* the light
+    // gets a negative `w` and a divide that mirrors it into the frustum. Without
+    // this, a surface behind a spot samples the map as though it were in front
+    // of it.
+    if (clip.w <= 0.0)
+    {
+        return 1.0;
+    }
+    float3 ndc = clip.xyz / clip.w;
+    if (any(abs(ndc.xy) > 1.0) || ndc.z <= 0.0 || ndc.z > 1.0)
+    {
+        // Outside this map's own frustum, nearer than its near plane or past its
+        // far one. Lit, on `sun_visibility`'s terms: a map knows nothing about
+        // what it never rendered. A cone's falloff has already closed by the
+        // frustum's edge and a face's neighbour covers what it does not, so this
+        // path costs no picture.
+        return 1.0;
+    }
+
+    // Y-up NDC to top-left texture space, the flip `crcbl_render`'s projections
+    // push into the viewport rather than into the matrix.
+    float2 tile_uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+    return tile_pcf(light_tile(tile), tile_uv, ndc.z);
+}
+
+/// The fraction of a shadowed spot this fragment can see.
+///
+/// `tile` is the light's `shadow_slot` and the caller has already checked it
+/// names a real light tile. The rest is `punctual_visibility`'s.
+float spot_visibility(GpuLight light, uint tile, float3 world_position, float3 to_light,
                       float n_dot_l)
 {
     if (n_dot_l <= 0.0)
@@ -911,39 +983,59 @@ float spot_visibility(GpuLight light, uint slot, float3 world_position, float3 t
     // *before* the matrix, and a radial distance would be up to `1 / cos_outer`
     // too large at the rim.
     float axial = max(dot(world_position - light.position.xyz, normalize(light.direction.xyz)), 0.0);
-    float texel_world = 2.0 * tan_outer * axial / SHADOW_TILE;
+    return punctual_visibility(tile, world_position, to_light, n_dot_l,
+                               2.0 * tan_outer * axial / SHADOW_TILE);
+}
 
-    float cosine = saturate(n_dot_l);
-    float slope = sqrt(saturate(1.0 - cosine * cosine)) / max(cosine, 1e-4);
-    float offset = texel_world
-                 * (SPOT_DEPTH_BIAS_TEXELS
-                    + SPOT_SLOPE_BIAS_TEXELS * min(slope, SHADOW_SLOPE_BIAS_CLAMP));
+/// Which of a point light's six faces `from_light` — the direction from the
+/// light towards the surface — belongs to.
+///
+/// **The cube-map convention, and it is a convention rather than a derivation**:
+/// the largest component of the direction picks the axis and its sign picks the
+/// half, giving `+X, -X, +Y, -Y, +Z, -Z` as faces 0 to 5. The only thing that has
+/// to agree with it is `crcbl_render::shadow::face_axis`, which builds the six
+/// matrices in that same order — a shader picking face 3 for a direction the host
+/// built face 2's matrix for samples a map of somewhere else entirely, and draws
+/// a frame with shadows in it.
+///
+/// The ties — a direction exactly on a face diagonal — go to the earlier face,
+/// and either answer is right there: the two faces' frusta meet at that edge, so
+/// the point projects to the boundary of both.
+uint point_face(float3 from_light)
+{
+    float3 axis = abs(from_light);
+    if (axis.x >= axis.y && axis.x >= axis.z)
+    {
+        return from_light.x >= 0.0 ? 0u : 1u;
+    }
+    if (axis.y >= axis.z)
+    {
+        return from_light.y >= 0.0 ? 2u : 3u;
+    }
+    return from_light.z >= 0.0 ? 4u : 5u;
+}
 
-    float4 clip = mul(frame.light_view_proj[slot], float4(world_position + to_light * offset, 1.0));
-    // **`w` first, and this is the difference from the cascades.** An
-    // orthographic matrix has `w == 1` everywhere; a perspective one has `w`
-    // equal to the depth in front of the light, so a receiver *behind* the light
-    // gets a negative `w` and a divide that mirrors it into the frustum. Without
-    // this, a surface behind a spot samples the map as though it were in front
-    // of it.
-    if (clip.w <= 0.0)
+/// The fraction of a shadowed **point** light this fragment can see.
+///
+/// `base` is the light's `shadow_slot`: the first of the `SHADOW_POINT_FACES`
+/// light tiles it holds, and the face selected below is added to it. The caller
+/// has already checked that the whole run is inside the light region.
+float point_visibility(GpuLight light, uint base, float3 world_position, float3 to_light,
+                       float n_dot_l)
+{
+    if (n_dot_l <= 0.0)
     {
         return 1.0;
     }
-    float3 ndc = clip.xyz / clip.w;
-    if (any(abs(ndc.xy) > 1.0) || ndc.z <= 0.0 || ndc.z > 1.0)
-    {
-        // Outside the cone's own frustum, nearer than its near plane or past its
-        // far one. Lit, on `sun_visibility`'s terms: a map knows nothing about
-        // what it never rendered. The cone's falloff has already closed by the
-        // frustum's edge, so this path costs no picture.
-        return 1.0;
-    }
 
-    // Y-up NDC to top-left texture space, the flip `crcbl_render`'s projections
-    // push into the viewport rather than into the matrix.
-    float2 tile_uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
-    return tile_pcf(light_tile(slot), tile_uv, ndc.z);
+    float3 from_light = world_position - light.position.xyz;
+    // A face is a 90° frustum, so its half-angle's tangent is 1 and the axial
+    // depth is the largest component of the offset — which is the same
+    // `2 d tan θ / SHADOW_TILE` a spot computes, with both terms known rather
+    // than read off the row.
+    float axial = max(max(abs(from_light.x), abs(from_light.y)), abs(from_light.z));
+    return punctual_visibility(base + point_face(from_light), world_position, to_light, n_dot_l,
+                               2.0 * axial / SHADOW_TILE);
 }
 
 /// How bright a punctual light is at `distance`, reaching **exactly zero** at
@@ -1100,10 +1192,10 @@ float4 fragmentMain(VertexOutput input) : SV_Target
         specular *= step(0.0, diffuse) * diffuse;
 
         // The shadow maps, and the *only* place they enter the shading. The sun
-        // occludes through its cascades and a spot through the one tile
-        // `Selection` gave it; a light with no tile — every point light, and
-        // every spot past the budget — keeps the `reach` its falloff and cone
-        // already produced, which is
+        // occludes through its cascades, a spot through the one tile `Selection`
+        // gave it and a point light through whichever of its six the surface is
+        // on; a light with no tile — every light past the budget — keeps the
+        // `reach` its falloff and cone already produced, which is
         // `docs/plan/18-render-features.md`'s "still lights, just does not
         // occlude" holding by construction.
         //
@@ -1116,7 +1208,25 @@ float4 fragmentMain(VertexOutput input) : SV_Target
         {
             reach = sun_visibility(input.world_position, n_dot_l);
         }
-        else if (light.shadow_slot < SHADOW_LIGHTS)
+        else if (light.kind == KIND_POINT)
+        {
+            // **The whole run has to be inside the region, not just its first
+            // tile**: a point light's faces are `shadow_slot .. + 6`, so a row
+            // whose base sat in the last five tiles would read a matrix past the
+            // end of the array. `Selection` never emits one; this is what makes
+            // that a fact about the shader rather than a promise about the host.
+            //
+            // Written as a subtraction on the two constants rather than as
+            // `shadow_slot + SHADOW_POINT_FACES <= SHADOW_LIGHT_TILES`, because
+            // `NO_SHADOW_SLOT` is `0xffffffff` and that sum wraps — an unshadowed
+            // point light would pass the test and sample tile 5.
+            if (light.shadow_slot <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
+            {
+                reach *= point_visibility(light, light.shadow_slot, input.world_position, to_light,
+                                          n_dot_l);
+            }
+        }
+        else if (light.shadow_slot < SHADOW_LIGHT_TILES)
         {
             reach *= spot_visibility(light, light.shadow_slot, input.world_position, to_light,
                                      n_dot_l);

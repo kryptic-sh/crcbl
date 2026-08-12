@@ -46,18 +46,33 @@ pub const VERTEX_STRIDE: usize = 64;
 /// `float4`.
 pub const SHADOW_CASCADES: usize = 2;
 
-/// How many shadowed lights the atlas has room for beside the cascades.
+/// How many **tiles** the atlas has for shadowed lights, beside the cascades.
 ///
 /// `docs/plan/18-render-features.md`'s 2026-08-13 decision: the atlas is a fixed
 /// tile grid, the sun's cascades take the first tiles, and the rest are handed
-/// out one per shadowed spot. A light that gets no tile still lights and simply
-/// does not occlude.
+/// out one per shadowed spot and six per shadowed point. A light that gets no
+/// tiles still lights and simply does not occlude.
+///
+/// **A tile, not a light**: a point light owns [`SHADOW_POINT_FACES`] of these
+/// and a spot owns one, so this is not how many lights a frame can shadow —
+/// `crcbl_render::shadow::LIGHT_SLOTS` is that number, and it is a host-side
+/// budget because nothing in a shader counts lights.
 ///
 /// Here rather than in `crcbl_render::shadow` for [`SHADOW_CASCADES`]'s reason
 /// exactly: [`FrameUniforms::light_view_proj`] is an array of this length, so a
 /// block sized differently on the two sides puts every member after it at the
 /// wrong offset. The same drift test covers it.
-pub const SHADOW_LIGHTS: usize = 2;
+pub const SHADOW_LIGHT_TILES: usize = 6;
+
+/// Tiles one point light's shadow map is: the six faces of a cube.
+///
+/// `docs/plan/18-render-features.md`: six atlas tiles rather than a cube map, so
+/// one image, one sampler, one barrier story and one allocator serve the sun,
+/// the spots and the points alike. The face order is `+X, -X, +Y, -Y, +Z, -Z`
+/// — the cube-map convention — and `crcbl_render::shadow::face_axis` is the one
+/// place it is written down on the host, `point_face` in `shaders/mesh.slang`
+/// the one place on the device.
+pub const SHADOW_POINT_FACES: usize = 6;
 
 /// The side of one shadow-atlas tile, in texels.
 ///
@@ -67,29 +82,47 @@ pub const SHADOW_LIGHTS: usize = 2;
 pub const SHADOW_TILE: u32 = 1024;
 
 /// Tiles across the shadow atlas.
-pub const SHADOW_ATLAS_COLUMNS: u32 = 2;
+///
+/// At least [`SHADOW_CASCADES`], which is what keeps the cascades in the top row
+/// at the origins they have always had — see `crcbl_render::shadow::tile_origin`,
+/// and the cascade goldens, which are what say the arrangement survived a change
+/// to the grid's shape.
+pub const SHADOW_ATLAS_COLUMNS: u32 = 4;
 
 /// Tiles down it.
 ///
-/// A grid rather than one row, because a point light is six tiles of exactly
-/// this kind and the next slice widens the grid rather than reshaping the
-/// atlas. `mesh.slang` addresses a tile through both extents, so the shape is
-/// free to change without the sampling side changing with it.
+/// A grid rather than one row: a point light is [`SHADOW_POINT_FACES`] tiles of
+/// exactly this kind, and a row long enough to hold them beside the cascades
+/// would be an image wider than some devices' limit. `mesh.slang` addresses a
+/// tile through both extents, so the shape is free to change without the
+/// sampling side changing with it.
 pub const SHADOW_ATLAS_ROWS: u32 = 2;
 
 const _: () = assert!(
-    (SHADOW_ATLAS_COLUMNS * SHADOW_ATLAS_ROWS) as usize == SHADOW_CASCADES + SHADOW_LIGHTS,
+    (SHADOW_ATLAS_COLUMNS * SHADOW_ATLAS_ROWS) as usize == SHADOW_CASCADES + SHADOW_LIGHT_TILES,
     "every tile of the grid is either a cascade's or a light's"
+);
+
+const _: () = assert!(
+    SHADOW_ATLAS_COLUMNS as usize >= SHADOW_CASCADES,
+    "the cascades are the first tiles and are in the top row; a grid narrower \
+     than the cascade count wraps one of them onto the next row and moves the \
+     texels every cascade golden was blessed from"
+);
+
+const _: () = assert!(
+    SHADOW_LIGHT_TILES >= SHADOW_POINT_FACES,
+    "a point light's six faces have to fit in the light region at all, or the \
+     budget refuses every point light there can ever be"
 );
 
 /// Bytes in the frame uniform block.
 ///
 /// One `float4x4` (64), two `float4` (16 each), [`SHADOW_CASCADES`] more
-/// `float4x4`, two closing `float4`, a `uint4` and [`SHADOW_LIGHTS`] more
-/// `float4x4`. Checked against the `Offset` decorations `slangc` emits — 0, 64,
-/// 80, 96, 224, 240, 256, 272 at two cascades and two light slots — by this
+/// `float4x4`, two closing `float4`, a `uint4` and [`SHADOW_LIGHT_TILES`] more
+/// `float4x4`. Checked against the `Offset` decorations `slangc` emits by this
 /// module's `the_uniform_block_matches_the_offsets_slangc_emits`.
-pub const FRAME_UNIFORMS_SIZE: usize = 96 + 64 * SHADOW_CASCADES + 48 + 64 * SHADOW_LIGHTS;
+pub const FRAME_UNIFORMS_SIZE: usize = 96 + 64 * SHADOW_CASCADES + 48 + 64 * SHADOW_LIGHT_TILES;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -214,21 +247,27 @@ pub struct FrameUniforms {
     /// answer rather than the numbers. A dead vector in a block every pipeline
     /// binds is not somewhere to leave a value nothing reads.
     pub cluster_grid: [u32; 4],
-    /// World → shadowed-light slot `i`'s shadow clip, column-major, one per
-    /// slot.
+    /// World → **light tile** `i`'s shadow clip, column-major, one per tile of
+    /// the atlas's light region.
     ///
     /// Perspective and reversed-Z, unlike [`shadow_view_proj`](Self::shadow_view_proj)
-    /// above: a spot is a cone and a cone is a frustum.
-    /// `crcbl_render::shadow::spot_matrix` builds it and
-    /// `crcbl_render::shadow::Selection` decides whose it is; a slot no light
+    /// above: a spot is a cone and a cone is a frustum, and a point light's face
+    /// is a 90° one.
+    /// `crcbl_render::shadow::spot_matrix` and `point_matrix` build them and
+    /// `crcbl_render::shadow::Selection` decides whose they are; a tile no light
     /// holds carries whatever was last written there and is read by nothing,
     /// because the rows that would name it carry
     /// [`NO_SHADOW_SLOT`](crate::light::NO_SHADOW_SLOT).
     ///
+    /// **Indexed by tile rather than by light**, which is what lets one light own
+    /// six of them: [`GpuLight::shadow_slot`](crate::light::GpuLight::shadow_slot)
+    /// carries the *first* of a light's tiles and a point light's faces are the
+    /// [`SHADOW_POINT_FACES`] entries from there.
+    ///
     /// **Last in the block rather than beside the cascades**, so adding it moved
     /// no existing member's offset — which is what let the cascade goldens stay
-    /// byte-identical across this change.
-    pub light_view_proj: [[f32; 16]; SHADOW_LIGHTS],
+    /// byte-identical across the change that introduced it.
+    pub light_view_proj: [[f32; 16]; SHADOW_LIGHT_TILES],
 }
 
 impl FrameUniforms {
@@ -1188,7 +1227,7 @@ mod tests {
         // The two that size arrays in the block, so both files must agree.
         for declaration in [
             format!("static const uint SHADOW_CASCADES = {SHADOW_CASCADES};"),
-            format!("static const uint SHADOW_LIGHTS = {SHADOW_LIGHTS};"),
+            format!("static const uint SHADOW_LIGHT_TILES = {SHADOW_LIGHT_TILES};"),
         ] {
             for (name, source) in [("mesh.slang", mesh), ("mesh_cluster.slang", cluster)] {
                 assert!(
@@ -1206,6 +1245,11 @@ mod tests {
             format!("static const uint SHADOW_ATLAS_COLUMNS = {SHADOW_ATLAS_COLUMNS};"),
             format!("static const uint SHADOW_ATLAS_ROWS = {SHADOW_ATLAS_ROWS};"),
             format!("static const float SHADOW_TILE = {SHADOW_TILE}.0;"),
+            // The face count, which only the sampling side reads: it is how far
+            // apart two of a point light's tiles are, so a shader that thought a
+            // point light had five faces would sample another light's map for the
+            // sixth — a picture, and a plausible one.
+            format!("static const uint SHADOW_POINT_FACES = {SHADOW_POINT_FACES};"),
         ] {
             assert!(
                 mesh.contains(&declaration),
@@ -1224,14 +1268,14 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 400,
-            "at two cascades and two light slots"
+            FRAME_UNIFORMS_SIZE, 656,
+            "at two cascades and six light tiles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
         // 224, 240, 256, 272 — and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64`.
         let cascades = 64 * SHADOW_CASCADES;
-        let lights = 64 * SHADOW_LIGHTS;
+        let lights = 64 * SHADOW_LIGHT_TILES;
         let offsets = [
             0usize,
             64,
@@ -1265,7 +1309,7 @@ mod tests {
         // The same again for the light slots, and in a range nothing above uses:
         // a `to_bytes` that wrote the cascade array where the light array goes
         // would otherwise pass on values that happened to be equal.
-        let mut light_view_proj = [[0.0f32; 16]; SHADOW_LIGHTS];
+        let mut light_view_proj = [[0.0f32; 16]; SHADOW_LIGHT_TILES];
         for (index, matrix) in light_view_proj.iter_mut().enumerate() {
             *matrix = [50.0 + index as f32; 16];
         }
@@ -1310,7 +1354,7 @@ mod tests {
         // And the light slots, which sit **after** the integer member — the one
         // place `to_bytes` writes through a second cursor, and so the one place
         // a member could land on the wrong side of it.
-        for index in 0..SHADOW_LIGHTS {
+        for index in 0..SHADOW_LIGHT_TILES {
             assert_eq!(
                 at(144 + cascades + 64 * index),
                 50.0 + index as f32,

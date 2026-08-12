@@ -253,6 +253,73 @@ const SPOT_SHADOW_RATIO: f32 = 1.5;
 /// nothing at all.
 const SPOT_SHADOW_LIT_FLOOR: f32 = 10.0;
 
+/// The anti-vacuity floor for [`Scene::PointShadow`].
+///
+/// [`MIN_COLORS_SPOT_SHADOW`]'s number for its reason: a floor lit by one
+/// punctual light with two casters on it runs well past this, and what the floor
+/// separates is "the light contributed nothing" from a working frame. *Where* the
+/// two dark regions are is
+/// [`each_caster_darkens_its_own_side_of_the_point_light`]'s claim.
+///
+/// [`each_caster_darkens_its_own_side_of_the_point_light`]: fn@each_caster_darkens_its_own_side_of_the_point_light
+const MIN_COLORS_POINT_SHADOW: usize = 48;
+
+/// How many pixels of the frame one world unit of [`Scene::PointShadow`]'s floor
+/// is.
+///
+/// The camera looks straight down from `POINT_CAMERA_UP` with a 60° vertical
+/// field of view, so the frame's short half-axis covers `up * tan(30°)` of floor
+/// and a pixel is that over half the frame's height. Written as a constant
+/// because every band below is placed in world units and converted here — a band
+/// named in pixels alone is one nobody can check against the scene.
+const POINT_PIXELS_PER_UNIT: f32 = (EXTENT.1 as f32 / 2.0) / (2.2 * 0.577_350_3);
+
+/// Where a point on [`Scene::PointShadow`]'s floor lands in the frame.
+///
+/// **World `+X` is the frame's left and world `+Z` is its top.** The camera looks
+/// down `-Y` with `+Z` up, and a right-handed basis built from those two puts
+/// screen-right at `-X`: `cross((0,-1,0), (0,0,1))` is `(-1,0,0)`. Same flip, and
+/// the same reason, as `crcbl-vk`'s spot suite records.
+fn point_pixel(x: f32, z: f32) -> (u32, u32) {
+    let column = EXTENT.0 as f32 / 2.0 - x * POINT_PIXELS_PER_UNIT;
+    let row = EXTENT.1 as f32 / 2.0 - z * POINT_PIXELS_PER_UNIT;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "every band below is inside the frame, which the block reader asserts"
+    )]
+    (column as u32, row as u32)
+}
+
+/// How far out along its own axis each of [`Scene::PointShadow`]'s shadows is
+/// measured, in world units.
+///
+/// `screenshot`'s `POINT_CASTER_AT` is `0.6` and `POINT_LIGHT_UP` is `0.5`, so a
+/// caster of height `0.27` throws its shadow from about `0.5` out to about `1.3`.
+/// This sits in the middle of that and past the caster's own image, which the
+/// camera magnifies out to about `0.7`.
+///
+/// **It is also past `POINT_LIGHT_UP`**, which is what puts it on a *side* face
+/// of the light's map rather than on the `-Y` face under the light — the whole
+/// reason this scene can tell a face selection apart from a fixed face.
+const POINT_SHADOW_AT: f32 = 1.0;
+
+/// The half-extent of each band [`Scene::PointShadow`] is measured over, in
+/// pixels.
+///
+/// The shadow is about 30 pixels wide where it is sampled and its mirror is open
+/// floor, so a band this size stays inside both while averaging over PCF's
+/// several-texel gradient and a driver's dither.
+const POINT_SHADOW_BAND: (u32, u32) = (6, 6);
+
+/// How much brighter a lit band must be than the shadowed one it mirrors.
+///
+/// [`SPOT_SHADOW_RATIO`]'s number for its reason: what survives Lambert, the
+/// falloff and the tonemap is which side leads and by how much in proportion. The
+/// two bands are the same distance from the light, so every term but the shadow
+/// has the same value in both.
+const POINT_SHADOW_RATIO: f32 = 1.5;
+
 /// What channel order [`OffscreenSetup::draw_and_readback`]'s bytes are in.
 ///
 /// The same three lines as `crcbl-cli`'s `screenshot::channel_order` and
@@ -684,6 +751,99 @@ fn the_caster_darkens_the_floor_behind_it_and_not_beside_it(image: &Image) {
         "the lit half of the pool measures {lit:.1} against a clear of {clear:.1}, so there \
          is no lit floor here for a shadow to be a shadow against"
     );
+}
+
+/// `docs/plan/18-render-features.md`'s **shadowed point light**, drawn — one
+/// light occluding in two directions at once.
+///
+/// The golden is not the evidence and cannot be, on
+/// [`the_spot_shadow_scene_draws_its_shadow_and_matches_its_golden`]'s terms and
+/// one more: a point light's map is six tiles selected between per fragment, so a
+/// frame in which five of the six selections are wrong still has a shadow in it —
+/// the one under whichever face happens to be picked.
+/// [`each_caster_darkens_its_own_side_of_the_point_light`] is what tells those
+/// apart, because it asserts two shadows on two faces and the lit floor mirroring
+/// each.
+///
+/// [`the_spot_shadow_scene_draws_its_shadow_and_matches_its_golden`]: fn@the_spot_shadow_scene_draws_its_shadow_and_matches_its_golden
+/// [`each_caster_darkens_its_own_side_of_the_point_light`]: fn@each_caster_darkens_its_own_side_of_the_point_light
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_point_shadow_scene_draws_both_of_its_shadows_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::PointShadow,
+        "point_shadow",
+        MIN_COLORS_POINT_SHADOW,
+        each_caster_darkens_its_own_side_of_the_point_light,
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_point_shadow_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::PointShadow,
+        "point_shadow",
+        MIN_COLORS_POINT_SHADOW,
+        each_caster_darkens_its_own_side_of_the_point_light,
+    );
+}
+
+/// [`Scene::PointShadow`]'s claim: **each caster darkens the floor on its own
+/// side of the light, and the opposite side stays lit** — which is one light
+/// occluding through two different faces of its map.
+///
+/// Four bands of the same frame, all on the floor and all
+/// [`POINT_SHADOW_AT`] from the light's axis, so the falloff and Lambert have the
+/// same value in every one of them and the only thing that can separate them is
+/// the shadow:
+///
+/// * `+X`, behind the caster at `POINT_CASTER_AT` — dark, and it is the `+X` face
+///   of the light's map that says so.
+/// * `-X`, its mirror — lit, because nothing stands on that side.
+/// * `-Z`, behind the second caster — dark, through the `-Z` face.
+/// * `+Z`, its mirror — lit.
+///
+/// **The pairing across faces is what makes it evidence about face selection.** A
+/// lookup wired to one fixed face darkens one of the two shadow bands and lights
+/// the other, which no single-shadow scene can see: the `-Z` receiver projected
+/// through the `+X` face's matrix is behind that face's near plane, the shader
+/// takes its "outside the map" path, and the floor there comes back fully lit. A
+/// lookup that always returned "shadowed" darkens all four and fails both ratios;
+/// one that always returned "lit" leaves all four equal and fails them the other
+/// way.
+fn each_caster_darkens_its_own_side_of_the_point_light(image: &Image) {
+    let band = |x: f32, z: f32| block_brightness(image, point_pixel(x, z), POINT_SHADOW_BAND);
+    let along_x = band(POINT_SHADOW_AT, 0.0);
+    let mirrored_x = band(-POINT_SHADOW_AT, 0.0);
+    let along_z = band(0.0, -POINT_SHADOW_AT);
+    let mirrored_z = band(0.0, POINT_SHADOW_AT);
+    eprintln!(
+        "crcbl render e2e: point shadow — +X {along_x:.1} against -X {mirrored_x:.1}; \
+         -Z {along_z:.1} against +Z {mirrored_z:.1}"
+    );
+    assert!(
+        along_x * POINT_SHADOW_RATIO < mirrored_x,
+        "the floor behind the +X caster must be unmistakably darker than the same distance out \
+         on the other side: {along_x:.1} against {mirrored_x:.1}, which is not a shadow"
+    );
+    assert!(
+        along_z * POINT_SHADOW_RATIO < mirrored_z,
+        "and the floor behind the -Z caster must be darker than its own mirror: {along_z:.1} \
+         against {mirrored_z:.1} — a frame that has the first shadow and not this one is a \
+         frame whose face selection is stuck on one face"
+    );
+    // Both lit bands are lit *floor*, not a black frame the shadows are
+    // invisible against. Without this the two ratios are satisfiable by a scene
+    // that drew nothing at all.
+    let clear = block_brightness(image, (2, 2), (2, 2));
+    for (name, lit) in [("-X", mirrored_x), ("+Z", mirrored_z)] {
+        assert!(
+            lit > clear + SPOT_SHADOW_LIT_FLOOR,
+            "the {name} band measures {lit:.1} against a clear of {clear:.1}, so there is no lit \
+             floor here for a shadow to be a shadow against"
+        );
+    }
 }
 
 #[test]
