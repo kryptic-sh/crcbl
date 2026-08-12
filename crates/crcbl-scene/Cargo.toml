@@ -22,8 +22,15 @@ crcbl-shaders = { workspace = true }
 glam = { workspace = true }
 # `log::warn!` for the plan's "unsupported features log-and-skip loudly".
 log = { workspace = true }
-# glTF 2.0 parsing. See `[workspace.dependencies]` for the feature argument.
-gltf = { workspace = true }
+# glTF 2.0 parsing. See `[workspace.dependencies]` for the argument about the
+# features set there. `extensions` is added here because it is this crate's
+# alone to want: it is the gate on `gltf_json::extensions::scene::Node::others`,
+# the raw map every extension without a feature of its own arrives in, and
+# `MSFT_lod` — `docs/plan/25-lod.md`'s hand-authored precedence — is one of
+# those. It costs nothing but a `cfg`: both `gltf`'s and `gltf-json`'s
+# `extensions` feature list is empty, and the `serde_json` the map is made of is
+# already a non-optional dependency of both.
+gltf = { workspace = true, features = ["extensions"] }
 # `MeshletError`, which is not a `StorageError`: the meshlet builder reads no
 # bytes, so every storage variant but `Other` is unreachable from it and
 # `Other(String)` would erase which caller bug it hit.

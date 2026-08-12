@@ -255,6 +255,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Hand-authored LOD levels are imported and win over generated ones.**
+  `crcbl_scene::resolve_lod(scene, node)` resolves a mesh's chain and reports,
+  per level, **where it came from** — `LodOrigin::Hand { node, mesh, via }`
+  naming the glTF node and whether node naming, `MSFT_lod`, or both declared it,
+  or `Generated { dag_level }` naming the DAG depth. LOD0 is always the file's
+  own geometry. Gaps are filled by the generator and nothing else is; a fully
+  hand-authored chain never runs it at all, observable as an empty `dags()`.
+
+  **No silent substitution**, as the plan requires: a level two nodes claim, an
+  `MSFT_lod` id that draws nothing, a node named like a level that draws
+  nothing, and a gap the generator cannot reach are each a named error rather
+  than a quiet stand-in.
+
+  **Hand levels never enter the DAG**, structurally rather than by convention: a
+  hand level is a mesh index into the file and a generated one is a depth into
+  `dags()`, so there is no array where the distinction could be lost. A mesh
+  with both is therefore selected **per instance** — an artist supplies
+  whole-mesh geometry, not a crack-free cluster hierarchy, and a per-cluster cut
+  across the two would crack.
+
+  `MSFT_lod` needed `gltf`'s `extensions` feature, which costs nothing: both
+  that crate's and `gltf-json`'s feature lists are empty, the `serde_json`
+  behind the raw extension map is already non-optional in each, and `Cargo.lock`
+  is unchanged. `MSFT_lod` on _materials_ is deliberately not read.
+
 - **LOD hysteresis, so a camera drifting across a threshold stops flickering.**
   A group starts expanding above the budget and keeps expanding until its
   projected error falls to `LOD_HOLD_RATIO` of it. Measured on a

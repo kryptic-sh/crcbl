@@ -7,11 +7,18 @@
 //! byte layout spelled out below, so a diff that changes what is tested shows
 //! what changed.
 //!
-//! The one document is a single triangle: three vertices carrying positions,
+//! [`triangle_json`] is a single triangle: three vertices carrying positions,
 //! normals and `TEXCOORD_0`, three `u16` indices, one material, and two nodes
 //! so that transform composition has a parent to compose with. Malformed cases
 //! are that document with one thing altered, through [`replacing`], which
 //! refuses to alter nothing.
+//!
+//! [`lod_glb`] is the second shape, for [`crate::lod_resolve`]: a node and a
+//! mesh per entry, so a chain of levels is a list of meshes and the names,
+//! `MSFT_lod` ids and scene membership that tie them together. It builds its
+//! buffer from the arrays it is given rather than from constants, because what
+//! its tests assert is that a level's geometry came out the same as it went
+//! in.
 
 use std::path::Path;
 
@@ -150,6 +157,133 @@ pub(crate) fn glb(json: &str, bin: Option<&[u8]>) -> Vec<u8> {
         out.extend_from_slice(&chunk);
     }
     out
+}
+
+/// One node of a [`lod_glb`] document, and the mesh it draws.
+///
+/// Enough of a glTF to carry a LOD chain and nothing else: a name for the
+/// `name_LOD1` convention, a triangle list so a level's geometry is
+/// recognisable, and `MSFT_lod` ids for the extension half.
+pub(crate) struct LodNode<'a> {
+    /// The node's `name`.
+    pub(crate) name: &'a str,
+    /// Positions and indices of the mesh it draws, or `None` for a node that
+    /// draws nothing.
+    pub(crate) geometry: Option<(&'a [[f32; 3]], &'a [u32])>,
+    /// The node's `MSFT_lod` `ids`, written verbatim into the JSON so that a
+    /// malformed one can be a fixture too.
+    pub(crate) lod_ids: Option<&'a str>,
+}
+
+impl<'a> LodNode<'a> {
+    /// A node drawing `mesh`, with no `MSFT_lod`.
+    pub(crate) fn new(name: &'a str, mesh: &'a (Vec<[f32; 3]>, Vec<u32>)) -> Self {
+        Self {
+            name,
+            geometry: Some((&mesh.0, &mesh.1)),
+            lod_ids: None,
+        }
+    }
+
+    /// The same node with an `MSFT_lod` extension whose body is `ids`.
+    pub(crate) fn msft_lod(mut self, ids: &'a str) -> Self {
+        self.lod_ids = Some(ids);
+        self
+    }
+
+    /// A node with a name and no mesh.
+    pub(crate) fn empty(name: &'a str) -> Self {
+        Self {
+            name,
+            geometry: None,
+            lod_ids: None,
+        }
+    }
+}
+
+/// A `.glb` of one node per entry of `nodes`, each drawing its own mesh, with
+/// `scene` naming the ones the default scene contains.
+///
+/// `scene` is separate because `MSFT_lod`'s lower levels are deliberately kept
+/// out of every scene — a loader that drew them would draw the mesh several
+/// times over — so a fixture that put every node in the scene could not
+/// exercise the case the extension is actually written for.
+pub(crate) fn lod_glb(nodes: &[LodNode<'_>], scene: &[usize]) -> Vec<u8> {
+    let mut bin = Vec::new();
+    let mut meshes = Vec::new();
+    let mut accessors = Vec::new();
+    let mut views = Vec::new();
+    let mut node_json = Vec::new();
+
+    for node in nodes {
+        let mesh = node.geometry.map(|(positions, indices)| {
+            let mesh = meshes.len();
+            let position_view = views.len();
+            views.push(format!(
+                r#"{{ "buffer": 0, "byteOffset": {}, "byteLength": {} }}"#,
+                bin.len(),
+                positions.len() * 12
+            ));
+            for position in positions {
+                for component in position {
+                    bin.extend_from_slice(&component.to_le_bytes());
+                }
+            }
+            views.push(format!(
+                r#"{{ "buffer": 0, "byteOffset": {}, "byteLength": {} }}"#,
+                bin.len(),
+                indices.len() * 4
+            ));
+            for index in indices {
+                bin.extend_from_slice(&index.to_le_bytes());
+            }
+            accessors.push(format!(
+                r#"{{ "bufferView": {position_view}, "componentType": 5126, "count": {}, "type": "VEC3" }}"#,
+                positions.len()
+            ));
+            accessors.push(format!(
+                r#"{{ "bufferView": {}, "componentType": 5125, "count": {}, "type": "SCALAR" }}"#,
+                position_view + 1,
+                indices.len()
+            ));
+            meshes.push(format!(
+                r#"{{ "primitives": [{{ "attributes": {{ "POSITION": {} }}, "indices": {} }}] }}"#,
+                position_view,
+                position_view + 1
+            ));
+            mesh
+        });
+
+        let mut fields = vec![format!(r#""name": "{}""#, node.name)];
+        if let Some(mesh) = mesh {
+            fields.push(format!(r#""mesh": {mesh}"#));
+        }
+        if let Some(ids) = node.lod_ids {
+            fields.push(format!(r#""extensions": {{ "MSFT_lod": {ids} }}"#));
+        }
+        node_json.push(format!("{{ {} }}", fields.join(", ")));
+    }
+
+    let scene: Vec<String> = scene.iter().map(usize::to_string).collect();
+    let json = format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [{}] }}],
+  "nodes": [{}],
+  "meshes": [{}],
+  "accessors": [{}],
+  "bufferViews": [{}],
+  "buffers": [{{ "byteLength": {} }}]
+}}"#,
+        scene.join(", "),
+        node_json.join(", "),
+        meshes.join(", "),
+        accessors.join(", "),
+        views.join(", "),
+        bin.len(),
+    );
+    glb(&json, Some(&bin))
 }
 
 /// A directory of assets, read through the real [`DirSource`] rather than a

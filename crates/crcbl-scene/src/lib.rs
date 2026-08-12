@@ -33,9 +33,11 @@
 //! responsibility. [`mod@lod`] is the two of them composed into
 //! `docs/plan/25-lod.md`'s chain of levels, and [`mod@cluster_dag`] is the same
 //! two composed into its cluster DAG — the structure per-cluster selection
-//! needs, which a chain cannot provide. All of them are host-side builders
-//! alone; nothing consumes them yet, and each module's docs say what is still
-//! missing.
+//! needs, which a chain cannot provide. [`mod@lod_resolve`] is where that meets
+//! the importer: the plan's hand-authored precedence, deciding per level
+//! whether the file supplied it or the generator has to. All of them are
+//! host-side builders alone; nothing consumes them yet, and each module's docs
+//! say what is still missing.
 //!
 //! # No GPU work here
 //!
@@ -51,13 +53,15 @@ pub mod gltf_check;
 mod gltf_fixture;
 pub mod gltf_import;
 pub mod lod;
+pub mod lod_resolve;
 pub mod meshlet;
 pub mod simplify;
 
 pub use cluster_dag::{
     ClusterDag, ClusterDagError, ClusterGroup, DagLevel, GroupBounds, build_cluster_dag,
 };
-pub use gltf_import::{GltfInstance, GltfMesh, GltfPrimitive, GltfScene, import_gltf};
+pub use gltf_import::{GltfInstance, GltfMesh, GltfNode, GltfPrimitive, GltfScene, import_gltf};
 pub use lod::{DEFAULT_LOD_RATIOS, LodError, LodLevel, build_lod_chain};
+pub use lod_resolve::{HandLodLink, LodOrigin, LodResolveError, MeshLod, resolve_lod};
 pub use meshlet::{ClusterBounds, Meshlet, MeshletBuild, MeshletError, build_meshlets};
 pub use simplify::{Simplified, SimplifyError, simplify, simplify_with_locked_edges};

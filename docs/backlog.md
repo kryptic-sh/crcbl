@@ -5789,6 +5789,38 @@ a wasm regression in this code would not be observed by anything. The refusals
 that do not need an array layout — the flags gate, `count: 0`, the in-band
 layout error — run on every adapter, so that half is not skip-shaped.
 
+## Sidecar meta RON: three items now want it, and the workspace has no RON reader
+
+`docs/plan/06-assets-scenes.md` and topic 25 both assume a `crate.glb.meta.ron`
+sidecar, and **nothing in the workspace reads or writes RON**. There is no `ron`
+crate in `[workspace.dependencies]`; what exists is the plan's
+RON-for-entity-data rule and `crcbl-shell`'s `application/x-crcbl+ron` clipboard
+mime, which names the format and moves opaque bytes without parsing them. Adding
+the crate is a new dependency and therefore the user's call.
+
+Three things now want that one file, and they should land together rather than
+as competing conventions: the `AssetId` GUID this backlog already owes,
+per-asset LOD overrides, and whatever the importer's report should persist.
+
+**But the LOD half needs a decision first, not just a reader.** The chain era's
+"per-asset ratio override" no longer describes anything: the DAG halves
+structurally — each group simplified to about half its triangles and re-split —
+so a ratio is not a parameter of `build_cluster_dag`. Reinstating one is a
+change to the generator's signature. `docs/plan/25-lod.md` now says so; the
+delivery table's "sidecar overrides" line is still chain-era.
+
+Also recorded from the hand-authored import slice:
+
+- **`MSFT_lod` on materials is deliberately not read** — it declares a material
+  chain for a mesh that keeps its geometry, and nothing here shades at two
+  levels.
+- **Multi-primitive meshes resolve but are untested**: one DAG per primitive
+  with the chain depth taken as the shallowest, and no fixture exercises more
+  than one primitive.
+- **Nothing consumes `resolve_lod`.** The geometry it resolves never reaches a
+  GPU pool; wiring it to `crcbl-render` is the slice that would make hand LODs
+  visible.
+
 ## The host-visible-write rule has now cost two devices, and the seam could enforce it
 
 `crcbl-dx12` refuses a shader-written binding that names a host-visible buffer —

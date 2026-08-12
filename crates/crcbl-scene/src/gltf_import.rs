@@ -37,6 +37,16 @@
 //! page — so a material arrives with its factor and the page's white layer,
 //! which is exactly what an imported material shaded before the column existed.
 //!
+//! # The node table is the whole node array, not the scene graph
+//!
+//! [`GltfScene::instances`] is the *drawable* half — nodes reachable from the
+//! scene, with their transforms composed — and [`GltfScene::nodes`] is the
+//! document's `nodes` array in file order, whether a scene reaches them or not.
+//! Both are needed and neither subsumes the other: `MSFT_lod` names its lower
+//! levels by node index and those nodes are deliberately kept out of every
+//! scene, so a level that only the instances knew about would be a level that
+//! vanished. See [`GltfNode::lod_nodes`] and [`crate::lod_resolve`].
+//!
 //! # What is parsed and dropped
 //!
 //! Skins and animations are in the format and are not read: the plan has them
@@ -44,6 +54,12 @@
 //! fills is worse than no type. Textures are step 3's second half. Vertex
 //! colours, tangents, `TEXCOORD_1` and morph targets are read by nothing here
 //! and so are not extracted.
+//!
+//! `MSFT_lod` is the one extension read, and only where it sits on a **node**.
+//! The extension is also defined on materials — a material chain for a mesh
+//! that keeps its geometry — and nothing here shades at two levels of detail,
+//! so a material's copy is left alone rather than parsed into a field no
+//! caller could use.
 //!
 //! [`AssetSource`]: crcbl_assets::AssetSource
 //! [`AssetSource::read`]: crcbl_assets::AssetSource::read
@@ -69,6 +85,7 @@ use crate::gltf_check::{check_document, check_glb_header, malformed};
 pub struct GltfScene {
     meshes: Vec<GltfMesh>,
     materials: Vec<GpuMaterial>,
+    nodes: Vec<GltfNode>,
     instances: Vec<GltfInstance>,
 }
 
@@ -91,6 +108,17 @@ impl GltfScene {
         &self.materials
     }
 
+    /// The document's `nodes` array, in file order — every node, not only the
+    /// ones a scene reaches.
+    ///
+    /// [`GltfInstance::node`] indexes this. See the [module docs](self) for why
+    /// the unreachable ones are kept.
+    #[inline]
+    #[must_use]
+    pub fn nodes(&self) -> &[GltfNode] {
+        &self.nodes
+    }
+
     /// The node hierarchy, flattened: one entry per node that draws a mesh.
     ///
     /// Empty when the document has no scenes, which is legal glTF and means a
@@ -99,6 +127,56 @@ impl GltfScene {
     #[must_use]
     pub fn instances(&self) -> &[GltfInstance] {
         &self.instances
+    }
+}
+
+/// One entry of the document's `nodes` array: what it is called, what it draws,
+/// and the lower detail levels it declares.
+///
+/// The transform is deliberately absent. A node's own TRS is only half of where
+/// it ends up — the other half is every parent above it — and that composition
+/// is what [`GltfScene::instances`] is. A per-node local transform here would
+/// be a second, unconstructed answer to "where is this".
+#[derive(Clone, Debug, PartialEq)]
+pub struct GltfNode {
+    name: Option<String>,
+    mesh: Option<usize>,
+    lod_nodes: Vec<usize>,
+}
+
+impl GltfNode {
+    /// The name the document gave this node, if it gave one.
+    ///
+    /// The `name_LOD1` half of `docs/plan/25-lod.md`'s hand-authored precedence
+    /// reads exactly this; [`crate::lod_resolve`] is where the convention is
+    /// spelled out.
+    #[inline]
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// Which of [`GltfScene::meshes`] this node draws, if it draws one.
+    #[inline]
+    #[must_use]
+    pub const fn mesh(&self) -> Option<usize> {
+        self.mesh
+    }
+
+    /// The `MSFT_lod` extension's `ids`: nodes carrying this node's lower
+    /// detail levels, LOD1 first.
+    ///
+    /// Empty when the node declares no `MSFT_lod`, which is almost every node.
+    /// Every entry is a valid index into [`GltfScene::nodes`] — one that is not
+    /// makes the document malformed rather than making this array shorter.
+    ///
+    /// This is the declaration only. Whether those nodes *are* the mesh's
+    /// levels, and what happens where they disagree with the naming
+    /// convention, is [`crate::lod_resolve`]'s question.
+    #[inline]
+    #[must_use]
+    pub fn lod_nodes(&self) -> &[usize] {
+        &self.lod_nodes
     }
 }
 
@@ -200,11 +278,22 @@ impl GltfPrimitive {
 /// from the root.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GltfInstance {
+    node: usize,
     mesh: usize,
     transform: [f32; 16],
 }
 
 impl GltfInstance {
+    /// Which of [`GltfScene::nodes`] this instance came from.
+    ///
+    /// The way back from a drawn thing to what the document called it — and so
+    /// the argument [`crate::lod_resolve::resolve_lod`] takes.
+    #[inline]
+    #[must_use]
+    pub const fn node(&self) -> usize {
+        self.node
+    }
+
     /// Which of [`GltfScene::meshes`] this node draws.
     #[inline]
     #[must_use]
@@ -410,10 +499,66 @@ fn build(
     }
 
     Ok(GltfScene {
+        nodes: read_nodes(document.as_json(), key)?,
         instances: flatten(document, key)?,
         meshes,
         materials,
     })
+}
+
+/// The document's `nodes` array, name and mesh and `MSFT_lod` each.
+fn read_nodes(root: &gltf::json::Root, key: &Path) -> Result<Vec<GltfNode>, StorageError> {
+    root.nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            Ok(GltfNode {
+                name: node.name.clone(),
+                mesh: node.mesh.map(|mesh| mesh.value()),
+                lod_nodes: read_msft_lod(node, index, root.nodes.len(), key)?,
+            })
+        })
+        .collect()
+}
+
+/// One node's `MSFT_lod` `ids`, checked against the node array.
+///
+/// Read out of the raw extension JSON rather than a typed field: `gltf` models
+/// only the `KHR_*` extensions it has features for, and everything else arrives
+/// as the `serde_json` map the `extensions` feature exposes. Nothing is
+/// silently dropped — an `MSFT_lod` that is not an object, has no `ids` array,
+/// or names something other than an existing node makes the document malformed,
+/// because the alternative is a declared detail level that quietly is not one.
+fn read_msft_lod(
+    node: &gltf::json::Node,
+    index: usize,
+    nodes: usize,
+    key: &Path,
+) -> Result<Vec<usize>, StorageError> {
+    let Some(extension) = node
+        .extensions
+        .as_ref()
+        .and_then(|extensions| extensions.others.get("MSFT_lod"))
+    else {
+        return Ok(Vec::new());
+    };
+    let ids = extension
+        .get("ids")
+        .and_then(|ids| ids.as_array())
+        .ok_or_else(|| malformed(key, format!("node {index}'s MSFT_lod has no ids array")))?;
+    ids.iter()
+        .map(|id| {
+            id.as_u64()
+                .and_then(|id| usize::try_from(id).ok())
+                .filter(|&id| id < nodes)
+                .ok_or_else(|| {
+                    malformed(
+                        key,
+                        format!("node {index}'s MSFT_lod names {id}, and there are {nodes} nodes"),
+                    )
+                })
+        })
+        .collect()
 }
 
 fn read_primitive(
@@ -508,6 +653,7 @@ fn flatten(document: &gltf::Document, key: &Path) -> Result<Vec<GltfInstance>, S
         let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
         if let Some(mesh) = node.mesh() {
             instances.push(GltfInstance {
+                node: node.index(),
                 mesh: mesh.index(),
                 transform: world.to_cols_array(),
             });
@@ -594,6 +740,54 @@ mod tests {
             from_file,
             import_glb(&triangle_json(BIN_CHUNK_BUFFER)).unwrap()
         );
+    }
+
+    /// The node table is the document's array, so it holds the parent that
+    /// draws nothing as well as the child that draws the mesh — and an instance
+    /// says which entry it came from.
+    #[test]
+    fn every_node_is_in_the_table_with_its_name_and_what_it_draws() {
+        let scene = import_glb(&triangle_json(BIN_CHUNK_BUFFER)).unwrap();
+
+        assert_eq!(
+            scene.nodes(),
+            [
+                GltfNode {
+                    name: Some("root".to_owned()),
+                    mesh: None,
+                    lod_nodes: Vec::new(),
+                },
+                GltfNode {
+                    name: Some("leaf".to_owned()),
+                    mesh: Some(0),
+                    lod_nodes: Vec::new(),
+                },
+            ]
+        );
+        assert_eq!(
+            scene.instances()[0].node(),
+            1,
+            "the drawing node, not the root above it"
+        );
+    }
+
+    /// `MSFT_lod` has no feature of its own in `gltf`, so this is the raw
+    /// extension map being read — and the ids arriving as node indices is what
+    /// `crate::lod_resolve` rests on.
+    #[test]
+    fn a_nodes_msft_lod_ids_are_read_from_the_raw_extension() {
+        let json = replacing(
+            &triangle_json(BIN_CHUNK_BUFFER),
+            r#"{ "name": "leaf", "mesh": 0, "translation": [0.0, 5.0, 0.0] }"#,
+            r#"{ "name": "leaf", "mesh": 0, "extensions": { "MSFT_lod": { "ids": [0] } } }"#,
+        );
+        let scene = import_glb(&json).unwrap();
+
+        assert!(
+            scene.nodes()[0].lod_nodes().is_empty(),
+            "no extension, no ids"
+        );
+        assert_eq!(scene.nodes()[1].lod_nodes(), [0]);
     }
 
     /// The fixture's mesh hangs off a child node, so the instance transform is
