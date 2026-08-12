@@ -144,6 +144,12 @@ struct FrameUniforms
     float4x4 shadow_view_proj[SHADOW_CASCADES];
     float4 cascade_far;
     float4 shadow_params;
+    /// `docs/plan/25-lod.md`'s selection numbers, and the one member of this
+    /// block *this* file reads. `x`: how many pixels one unit of length subtends
+    /// one unit from the eye. `y`: the pixel budget a group's projected error is
+    /// compared against. `z`, `w`: unread padding `std140`'s `float4` alignment
+    /// requires.
+    float4 lod_params;
 };
 
 /// Matching `struct GpuInstance` in `mesh.slang`.
@@ -209,6 +215,54 @@ struct Meshlet
     float cone_axis_y;
     float cone_axis_z;
     float cone_cutoff;
+};
+
+/// [`ClusterSelect::flags`] bit meaning the producing group is real. The same
+/// number as `crcbl_shaders::cluster_select::ClusterSelect::HAS_PRODUCER`, held
+/// in step with it by that module's
+/// `the_shader_declares_the_same_selection_flags`.
+static const uint HAS_PRODUCER = 1;
+
+/// The same, for the containing group.
+static const uint HAS_CONTAINER = 2;
+
+/// One cluster's half of `docs/plan/25-lod.md`'s DAG descent, matching
+/// `crcbl_shaders::cluster_select::ClusterSelect`.
+///
+/// **Both spheres are a group's, never this cluster's own**, and that is the
+/// whole correctness argument: every cluster a group touches carries a
+/// bit-identical copy of that group's error and sphere, so every one of them
+/// evaluates the same test from the same bits and the group's parents are drawn
+/// all together or not at all. A per-cluster distance term gives two clusters of
+/// one group two answers to one question and tears the mesh along a boundary
+/// that group locked — invisible until a camera sits where the two answers
+/// differ. `crcbl_scene::cluster_dag`'s module docs carry the argument in full.
+///
+/// Scalars rather than `float3`s for `Meshlet`'s reason: under `std430` a
+/// `float3` is 16-byte aligned, so a struct of scalars is the only one whose
+/// stride is the sum of its members.
+struct ClusterSelect
+{
+    /// Which of the two groups this cluster has: `HAS_PRODUCER`, `HAS_CONTAINER`.
+    uint flags;
+    /// Added to `GpuMesh::base_vertex` when this cluster's vertex run is
+    /// resolved — which level of the DAG its geometry lives in. Zero for level 0
+    /// and for every mesh with no DAG.
+    uint vertex_base;
+    /// The group whose simplification produced this cluster: what it cost, and
+    /// the sphere that cost is projected from. Read only under `HAS_PRODUCER`.
+    float producer_error;
+    float producer_center_x;
+    float producer_center_y;
+    float producer_center_z;
+    float producer_radius;
+    /// The group this cluster is a child of — the one that would simplify it
+    /// away. Read only under `HAS_CONTAINER`.
+    float container_error;
+    float container_center_x;
+    float container_center_y;
+    float container_center_z;
+    float container_radius;
 };
 
 /// One indexed indirect draw's arguments, matching `draw_gen.slang`'s.
@@ -385,6 +439,35 @@ ConstantBuffer<CullParams> cull;
 [[vk::binding(14, 0)]]
 RWStructuredBuffer<Atomic<uint> > cull_stats;
 
+/// Every resident cluster's half of the DAG descent, parallel to `clusters`.
+///
+/// **Bound whenever `clusters` is**, because `vertex_base` is geometry rather
+/// than selection: a DAG's levels are separate vertex ranges and both mesh entry
+/// points have to resolve the right one. Bindings 15 and 16 are `mesh.slang`'s
+/// shadow atlas and its sampler — declared by the fragment stage of this very
+/// pipeline, so the numbers are taken and this is 17.
+[[vk::binding(17, 0)]]
+StructuredBuffer<ClusterSelect> cluster_select;
+
+/// The cut this frame chose, one word per resident cluster: `1` where the
+/// descent selected the cluster and `0` where it did not.
+///
+/// `docs/plan/25-lod.md`'s observable, and the only thing that can show
+/// per-cluster selection happening — a frame whose every cluster came from one
+/// level looks entirely plausible and matches any golden blessed from it. Read
+/// back by `crcbl-vk`'s
+/// `the_gpu_descends_the_dag_to_the_cut_the_host_rule_says` and by nothing in
+/// the frame.
+///
+/// **Instance slot zero writes it and no other slot does**, so several instances
+/// of one mesh do not race for one entry and no atomic is needed: what it holds
+/// is the cut chosen for a bucket's first surviving instance. A bucket whose
+/// instances were all culled launches no task group and leaves the entry at
+/// whatever the last frame that drew it wrote, which is why a reader compares
+/// two cameras rather than trusting one.
+[[vk::binding(18, 0)]]
+RWStructuredBuffer<uint> cluster_selection;
+
 /// What the mesh stage emits and `mesh.slang`'s `fragmentMain` consumes.
 ///
 /// **Member order is the interface**, not just the layout: locations are
@@ -500,6 +583,67 @@ uint cluster_survives(Meshlet cluster, float4x4 transform)
     return 1u;
 }
 
+/// Whether a group is **expanded** — its children drawn rather than its parents
+/// — from an eye at `eye`: `1` to descend into it, `0` to stop above it.
+///
+/// `docs/plan/25-lod.md`'s metric, and
+/// `crcbl_shaders::cluster_select::GroupCost::projected_error` in Slang: the
+/// group's error scaled by `lod_params.x` pixels per unit and divided by the
+/// distance to the nearest point of its sphere, compared against the budget in
+/// `lod_params.y`. The arithmetic is written out term by term rather than as
+/// `length()` so it is the same three operations in the same order as the host
+/// rule it is compared against.
+///
+/// **An eye inside the sphere expands**, because there is no distance to divide
+/// by and "as close as possible, so descend" is both the conservative answer and
+/// the monotone one: an eye inside a sphere is inside every sphere containing
+/// it, and containment is what carries monotone stored error up the DAG.
+uint group_is_expanded(float error, float3 center, float radius, float3 eye)
+{
+    float3 delta = eye - center;
+    float separation = sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+    float distance = separation - radius;
+    if (distance <= 0.0)
+    {
+        return 1u;
+    }
+    return error * frame.lod_params.x / distance > frame.lod_params.y ? 1u : 0u;
+}
+
+/// Whether this cluster is in the cut: `1` to draw it, `0` to leave it to a
+/// coarser or finer relative.
+///
+/// The descent, and the whole of it —
+/// `!E(the producer) && E(the container)`, with an absent producer reading as
+/// never expanded and an absent container as always expanded. One task group
+/// answers for one cluster out of that cluster's own record, with **no
+/// communication of any kind**; the reason that is sound, and the reason both
+/// halves name a group rather than this cluster, is on `struct ClusterSelect`
+/// above.
+///
+/// **In world space**, exactly as `cluster_survives` is: the sphere's centre goes
+/// through the instance's rigid transform, its radius does not, and the eye is
+/// `frame.camera_position` where it already is. That is the same statement as
+/// putting the camera through the inverse transform, and it needs no inverse.
+uint cluster_is_selected(ClusterSelect select, float4x4 transform)
+{
+    float3 eye = frame.camera_position.xyz;
+
+    float3 producer = mul(transform,
+        float4(select.producer_center_x, select.producer_center_y, select.producer_center_z, 1.0)).xyz;
+    uint producer_expanded = (select.flags & HAS_PRODUCER) == 0
+        ? 0u
+        : group_is_expanded(select.producer_error, producer, select.producer_radius, eye);
+
+    float3 container = mul(transform,
+        float4(select.container_center_x, select.container_center_y, select.container_center_z, 1.0)).xyz;
+    uint container_expanded = (select.flags & HAS_CONTAINER) == 0
+        ? 1u
+        : group_is_expanded(select.container_error, container, select.container_radius, eye);
+
+    return (1u - producer_expanded) * container_expanded;
+}
+
 /// One cluster of one instance, emitted — the body both mesh entry points are.
 ///
 /// `[ForceInline]`, and it is load-bearing on two of the three targets for the
@@ -544,10 +688,16 @@ void emit_cluster(
     GpuInstance instance = instances[visible_instances[draw.base + instance_slot]];
     GpuMesh mesh = meshes[instance.mesh];
 
+    // **The level's base, not only the mesh's.** A DAG's levels are decimated
+    // separately, so a coarser level's vertices are its own array and belong to
+    // no vertex of the level below — where the instance names one mesh and so
+    // one base. `vertex_base` is the difference, and it is zero for a mesh that
+    // is a single level.
+    uint level_base = cluster_select[cluster_index].vertex_base;
     for (uint v = lane; v < cluster.vertex_count; v += THREADS)
     {
         uint index = cluster_vertices[cluster.vertex_offset + v];
-        MeshVertex vertex = vertices[index + mesh.base_vertex];
+        MeshVertex vertex = vertices[index + mesh.base_vertex + level_base];
 
         float4 world = mul(instance.transform, float4(vertex.position.xyz, 1.0));
 
@@ -621,8 +771,25 @@ void taskMain(uint3 group: SV_GroupID)
     uint instance_index = visible_instances[draw.base + group.y * active] * active;
     GpuInstance instance = instances[instance_index];
 
-    uint keep = active * cluster_survives(cluster, instance.transform);
+    uint index = draw.cluster_base + group.x * active;
+    uint selected = cluster_is_selected(cluster_select[index], instance.transform);
+    uint keep = active * selected * cluster_survives(cluster, instance.transform);
     cull_stats[CLUSTER_SURVIVOR_WORD].add(keep);
+
+    // **The cut, not what survived it.** `selected` alone and not `keep`: this
+    // records which clusters the DAG descent chose, and a camera that leaves
+    // half the mesh outside its frustum still chose them — the cull is a second
+    // rejection on top, and folding it in here would make the record say a
+    // level was not selected when what happened is that it was not visible.
+    //
+    // Slot zero alone writes, so the entry has one writer however many instances
+    // of this mesh survived; `active` is the same bound the rest of this
+    // function carries, so a group past either extent records nothing rather
+    // than recording under the bucket's first cluster.
+    if (group.y == 0u && active == 1u)
+    {
+        cluster_selection[index] = selected;
+    }
 
     ClusterPayload payload;
     payload.cluster = group.x;

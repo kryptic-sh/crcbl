@@ -255,6 +255,42 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Per-cluster LOD selection on the GPU — topic 25's runtime half.** The
+  amplification stage descends the cluster DAG against projected screen-space
+  error, so one draw of one mesh renders at several detail levels across its own
+  surface. On a real GPU, the near third of the dunes patch draws
+  `{level 0: 13 clusters, level 1: 12}` while the far third draws
+  `{level 2: 14}` — identical on radv and lavapipe.
+
+  **The GPU's chosen cut is asserted equal to the host rule's**, cluster for
+  cluster across all 254, using the very `pixels_per_unit` and budget the
+  renderer wrote into the frame block. So the shader's implementation of
+  `projected_error` is held to the same metric as the two Rust ones rather than
+  trusted to agree.
+
+  **Both halves of the decision index a group, never a cluster.** Each
+  `ClusterSelect` record carries the producing and containing groups'
+  `(error, centre, radius)` copied into every cluster that group touches, so a
+  group's clusters evaluate bit-identical inputs and a cut cannot split one
+  across a boundary it never locked. There is no cluster centre in the descent
+  at all, and a DAG whose grouping misses a cluster is refused rather than
+  defaulted.
+
+  A parallel per-cluster buffer rather than a wider `Meshlet`: that record is
+  the wire format of the committed `dunes.dag`, its 48-byte stride is pinned
+  against the offsets slangc emits, and the fields are meaningless for the cube,
+  pyramid and open box.
+
+  `ClusterDag::check_cover` promotes the crack-free edge-cover check out of the
+  tests, so the host sweep and the GPU test run one implementation, and the
+  read-back cut is asserted crack-free **at the shipped configuration** rather
+  than by inference from a sweep that did not include it. Tearing that real cut
+  proves it bites: dropping one cluster reports a 45-edge hole, its own
+  boundary; drawing every cluster twice reports 5446 crowded edges.
+
+  `set_dunes` refuses without `Features::TASK_SHADER` — with no amplification
+  stage there is no descent, and a DAG mesh would draw all seven levels at once.
+
 - **A cooked cluster DAG reaches the renderer's crate, and a model built to
   exercise it.** `crcbl_shaders::dunes` is a 64x64 height-field patch — 4225
   vertices, 8192 triangles, 64 units across against a 4-unit amplitude — and

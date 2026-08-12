@@ -712,6 +712,11 @@ fn render_probe(
             crcbl_shaders::mesh::SHADOW_CASCADES],
         cascade_far: [0.0; 4],
         shadow_params: [0.0; 4],
+        // This probe draws through `mesh.slang`'s vertex stage, which selects
+        // no level: there is no amplification stage in its pipeline and no
+        // cluster DAG behind its two quads. Zeroes rather than a real budget
+        // say that, and nothing in this frame reads them.
+        lod_params: [0.0; 4],
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())

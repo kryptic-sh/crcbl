@@ -221,6 +221,16 @@ struct FrameUniforms
     /// `1 / tile`. Deriving one from the other is how the PCF kernel ends up
     /// sampling a rectangle.
     float4 shadow_params;
+    /// `docs/plan/25-lod.md`'s selection numbers. `x`: how many pixels one unit
+    /// of length subtends one unit from the eye. `y`: the pixel budget a group's
+    /// projected error is compared against. `z`, `w`: unread padding `std140`'s
+    /// sixteen-byte `float4` alignment requires.
+    ///
+    /// **Declared here and read by nothing**: no stage in this file selects a
+    /// level. It is here because this block and `mesh_cluster.slang`'s must be
+    /// the same bytes — that file's amplification stage is the one that reads it,
+    /// out of the same buffer this one's vertex stage reads `view_proj` from.
+    float4 lod_params;
 };
 
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.

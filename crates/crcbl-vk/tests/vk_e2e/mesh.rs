@@ -1356,9 +1356,17 @@ fn the_mesh_dispatch_extent_is_the_culled_instance_count() {
             );
         }
 
-        // The x extents are each bucket's own mesh's cluster count, and the box
-        // is the only resident whose is not one — so a table that handed every
-        // bucket the same number fails here.
+        // The x extents are each bucket's own mesh's cluster count, and two
+        // residents' are not one — so a table that handed every bucket the same
+        // number fails here. The dunes patch's is **every level of its DAG**,
+        // because one bucket covers the whole hierarchy and the amplification
+        // stage is what picks the cut out of it; that number is taken from the
+        // committed artifact rather than written down, so it follows a re-cook.
+        let dunes_clusters: u32 = crcbl_shaders::cluster_dag::dunes_dag()
+            .levels
+            .iter()
+            .map(|level| u32::try_from(level.clusters.clusters.len()).expect("small"))
+            .sum();
         let x: Vec<u32> = with
             .mesh_args
             .iter()
@@ -1366,15 +1374,24 @@ fn the_mesh_dispatch_extent_is_the_culled_instance_count() {
             .collect();
         assert_eq!(
             x,
-            vec![1, 1, faces],
-            "lap {lap}: the cube and the pyramid are one cluster each and the open box is \
-             one per face"
+            vec![1, 1, faces, dunes_clusters],
+            "lap {lap}: the cube and the pyramid are one cluster each, the open box is \
+             one per face, and the dunes patch is every cluster of every level"
         );
 
         // **The extent tracks the scene, per bucket.** The box's goes to zero
         // while the cube's stays one: a dispatch sized by the instance pool
         // would be the same number for both, in both rounds.
-        let box_bucket = with.mesh_args.len() - 1;
+        // The open box's bucket, which the renderer builds third — no longer the
+        // last one, now that the dunes patch is behind it. Named against its own
+        // cluster count rather than against a position in the list, so a bucket
+        // table reordered under this test fails here instead of measuring the
+        // wrong mesh.
+        let box_bucket = 2;
+        assert_eq!(
+            x[box_bucket], faces,
+            "lap {lap}: bucket {box_bucket} is not the open box's"
+        );
         assert_eq!(
             with.mesh_args[box_bucket].group_count_y, 1,
             "lap {lap}: the box is in the scene and in frame"
@@ -1696,4 +1713,386 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
     // The report is the assertion: a bind group destroyed while in flight, a
     // transient freed too early, or a stale view sampled would all land here.
     headless.finish();
+}
+
+/// Where the camera stands for the dunes patch: at its near edge, a little way
+/// up, looking along the surface as it recedes.
+///
+/// `docs/plan/25-lod.md`'s shape for per-cluster selection, and the arrangement
+/// `crcbl_shaders::cluster_dag`'s `a_receding_patch_draws_its_near_end_finer
+/// _than_its_far_end` reads its histograms from: the patch is centred on the
+/// origin in `x` and `z` with its height on `y`, so an eye at negative `z` and a
+/// small `y` is a viewer standing at one end of a ground plane whose far edge is
+/// tens of times further away than its near one. That ratio is the whole source
+/// of the variation — the distance term is what makes one cut span levels.
+fn dunes_camera() -> crcbl_render::Camera {
+    crcbl_render::Camera {
+        eye: glam::Vec3::new(0.0, 4.0, -crcbl_shaders::dunes::DUNES_EXTENT - 2.0),
+        target: glam::Vec3::new(0.0, 0.0, 0.0),
+        up: glam::Vec3::Y,
+        projection: crcbl_render::Projection::default(),
+    }
+}
+
+/// The pixel budget the mixing assertion is read at.
+///
+/// Inside the band where the near end's groups and the far end's fall on
+/// opposite sides of the descent's test from [`dunes_camera`]. Below it every
+/// group expands and the patch is level 0 whole; far above it none does and the
+/// patch is one coarse level. Both of those extremes are asserted below, which
+/// is what shows the mixing assertion can fail.
+const DUNES_MIXING_BUDGET: f32 = 32.0;
+
+/// Reads back the cut this frame's amplification stage chose, as one entry per
+/// cluster of the dunes DAG.
+///
+/// The buffer is `ForwardRenderer::cluster_selection`, which the stage writes
+/// from instance slot zero and nothing in the frame reads. The copy is its own
+/// submission after the frame's: the graph leaves the buffer in
+/// `ResourceState::ShaderReadWrite`, which is where the next frame on that slot
+/// expects it, so this moves it out and puts it straight back.
+fn selected_clusters(
+    headless: &Headless,
+    renderer: &crcbl_render::ForwardRenderer,
+) -> Vec<crcbl_shaders::cluster_dag::ClusterAt> {
+    let device = headless.device.as_ref();
+    let selection = renderer
+        .cluster_selection(renderer.frame())
+        .expect("an amplification stage records its cut");
+    let range = renderer
+        .dunes_clusters()
+        .expect("the mesh path has a cluster pool");
+    let bytes = u64::from(range.count) * 4;
+
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("cluster selection readback"),
+            size: bytes,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("cluster selection copy"),
+        queue: headless.queue,
+    });
+    let barrier = |from: ResourceState, to: ResourceState| {
+        [crcbl_hal::BufferBarrier {
+            buffer: selection,
+            from,
+            to,
+            queue_transfer: None,
+        }]
+    };
+    let out = barrier(ResourceState::ShaderReadWrite, ResourceState::TransferSrc);
+    let back = barrier(ResourceState::TransferSrc, ResourceState::ShaderReadWrite);
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &out,
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+        src: selection,
+        src_offset: u64::from(range.base) * 4,
+        dst: staging,
+        dst_offset: 0,
+        size: bytes,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &back,
+        ..Barriers::default()
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+
+    let mut words = vec![0u8; bytes as usize];
+    headless.readback(staging, bytes, &mut words);
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(staging);
+
+    // The pool holds the DAG's levels finest first and contiguously, so the
+    // run splits back into levels by their own cluster counts.
+    let dag = crcbl_shaders::cluster_dag::dunes_dag();
+    let mut drawn = Vec::new();
+    let mut at = 0usize;
+    for (level, here) in dag.levels.iter().enumerate() {
+        for cluster in 0..here.clusters.clusters.len() {
+            let word = u32::from_le_bytes(words[at * 4..at * 4 + 4].try_into().expect("4"));
+            assert!(
+                word <= 1,
+                "cluster {at} recorded {word}, which is not a flag"
+            );
+            if word == 1 {
+                drawn.push(crcbl_shaders::cluster_dag::ClusterAt { level, cluster });
+            }
+            at += 1;
+        }
+    }
+    assert_eq!(at * 4, words.len(), "the DAG and its pool run disagree");
+    drawn
+}
+
+/// A camera high above the patch, far enough out that **every** group's sphere
+/// is in front of the eye rather than around it.
+///
+/// The distinction matters and is not a detail: a group's sphere is grown to
+/// contain every sphere below it, so the top levels' spheres bound essentially
+/// the whole mesh — and an eye standing at the patch's own edge is *inside*
+/// them. `group_is_expanded` answers infinity there, which is the conservative
+/// and monotone answer, so from [`dunes_camera`] the deepest levels expand
+/// whatever the budget is and no budget can select the root. From up here they
+/// do not, which is what makes "draw the coarsest level" reachable at all.
+fn dunes_distant_camera() -> crcbl_render::Camera {
+    crcbl_render::Camera {
+        eye: glam::Vec3::new(0.0, 4.0 * crcbl_shaders::dunes::DUNES_EXTENT, 0.0),
+        target: glam::Vec3::ZERO,
+        // Looking straight down `-Y`, so `Y` cannot be the up axis.
+        up: glam::Vec3::Z,
+        projection: crcbl_render::Projection::default(),
+    }
+}
+
+/// Renders the dunes patch once and returns the cut the GPU chose, with the two
+/// numbers the frame selected under.
+fn dunes_cut(
+    headless: &Headless,
+    renderer: &mut crcbl_render::ForwardRenderer,
+    pool: &mut crcbl_render::TransientPool,
+    camera: &crcbl_render::Camera,
+    budget: f32,
+) -> (Vec<crcbl_shaders::cluster_dag::ClusterAt>, [f32; 2]) {
+    renderer.set_lod_error_budget(budget);
+    let _ = render_mesh(headless, renderer, pool, camera);
+    (selected_clusters(headless, renderer), renderer.lod_params())
+}
+
+/// **The GPU descends the DAG to the cut the host rule says**, and one cut of
+/// one mesh draws its near end finer than its far end.
+///
+/// `docs/plan/25-lod.md`'s runtime selection, and the check a golden cannot
+/// make: a frame whose every cluster came from one level is an entirely
+/// plausible picture and matches any golden blessed from it. So this reads back
+/// what the amplification stage actually chose and asserts three things about
+/// it.
+///
+/// * **It is the host rule's own answer**, cluster for cluster.
+///   `ClusterDag::cut` is the reference implementation the crack-free tests in
+///   `crcbl_shaders::cluster_dag` run over the committed artifact, and it is
+///   handed the very numbers the renderer put in the frame block rather than a
+///   second derivation of them. That is what holds the shader's
+///   `group_is_expanded` to `GroupCost::projected_error`: not a claim about
+///   floating point, but the decision itself compared over every group of the
+///   DAG.
+/// * **The near third and the far third report different levels.** This is the
+///   observable the whole slice exists to produce, and the one thing that
+///   distinguishes per-cluster selection from a whole-mesh LOD.
+/// * **And both extremes collapse it**, which is what shows the mixing
+///   assertion can fail: under a budget nothing satisfies the descent expands
+///   every group and draws level 0 alone, and under one everything satisfies it
+///   expands none and draws the top level alone. Neither is a mixed cut, and the
+///   histogram check below reds on both — so a shader whose descent ignored the
+///   distance term would be caught rather than passing by drawing a uniform cut
+///   nobody looked at.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_gpu_descends_the_dag_to_the_cut_the_host_rule_says() {
+    use std::collections::BTreeMap;
+
+    let headless = Headless::open_for_mesh_with(
+        Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,
+    );
+    if !headless.device.caps().supports(Features::TASK_SHADER) {
+        eprintln!(
+            "vk e2e: no TASK_SHADER on this device; the DAG descent cannot run. radv and \
+             lavapipe both report it, and `docs/backlog.md` is where a driver that does not belongs"
+        );
+        headless.finish();
+        return;
+    }
+
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds");
+    assert!(
+        renderer.culls_clusters(),
+        "the descent runs in the amplification stage, and this device reports none"
+    );
+    // **At the origin, with no rotation.** The shader puts each group's sphere
+    // through the instance transform and leaves the camera where it is, which is
+    // the same statement as putting the camera through the inverse — and at the
+    // identity the two are the same *bits*, which is what lets the comparison
+    // below be an equality rather than a tolerance.
+    assert!(
+        renderer.set_dunes(Some(glam::Mat4::IDENTITY)),
+        "a device with an amplification stage accepts the patch"
+    );
+
+    let eye = dunes_camera().eye.to_array();
+    let dag = crcbl_shaders::cluster_dag::dunes_dag();
+
+    // --- the cut, against the host rule ---
+    let (drawn, [pixels_per_unit, budget]) = dunes_cut(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &dunes_camera(),
+        DUNES_MIXING_BUDGET,
+    );
+    assert_eq!(budget, DUNES_MIXING_BUDGET, "the frame took the budget set");
+    assert!(
+        pixels_per_unit > 0.0,
+        "a viewport of no height selects nothing"
+    );
+    eprintln!(
+        "vk e2e: dunes cut — {} cluster(s) at {pixels_per_unit} px/unit, budget {budget}",
+        drawn.len()
+    );
+    assert_eq!(
+        drawn,
+        dag.cut(eye, pixels_per_unit, budget),
+        "the amplification stage chose a different cut from the host rule"
+    );
+
+    // --- the observable: near finer than far ---
+    let mut near: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut far: BTreeMap<usize, usize> = BTreeMap::new();
+    for &crcbl_shaders::cluster_dag::ClusterAt { level, cluster } in &drawn {
+        let depth = dag.levels[level].clusters.clusters[cluster].bounds.center[2];
+        if depth < -crcbl_shaders::dunes::DUNES_EXTENT / 3.0 {
+            *near.entry(level).or_default() += 1;
+        } else if depth > crcbl_shaders::dunes::DUNES_EXTENT / 3.0 {
+            *far.entry(level).or_default() += 1;
+        }
+    }
+    eprintln!("vk e2e: dunes near {near:?}, far {far:?}");
+    assert_mixes_levels(&near, &far);
+
+    // --- and the cut the GPU chose is a crack-free cover of the surface ---
+    //
+    // **Asserted on this cut, not inferred from two facts about it.** That the
+    // read-back cut equals the host rule's, and that the host rule's cuts are
+    // crack-free over a sweep, would together imply this — but the sweep runs at
+    // its own pixels-per-unit and does not contain the pair a real frame selects
+    // under, and crack-freedom is the property the whole DAG exists for. So it
+    // is checked here, at the camera and budget the engine actually shipped.
+    let interfaces = dag
+        .check_cover(&drawn)
+        .unwrap_or_else(|fault| panic!("the GPU's cut is not a cover of the surface: {fault}"));
+    eprintln!("vk e2e: dunes cut — {interfaces} interface edge(s)");
+    assert!(
+        interfaces > 20,
+        "only {interfaces} edge(s) have one level on one side and another on the other,          which is too few to be the seam between the two ends"
+    );
+
+    // The same check, shown to refuse — because one that passed whatever it was
+    // handed would be worse than the inference it replaces. Both tears start
+    // from the cut the GPU actually produced: drop one of its clusters and the
+    // surface has a hole where that cluster was, draw every one of them twice
+    // and each interior edge has four faces on it.
+    let mut holed = drawn.clone();
+    let dropped = holed.remove(drawn.len() / 2);
+    let fault = dag
+        .check_cover(&holed)
+        .expect_err("a GPU cut missing a cluster has a hole in it");
+    eprintln!("vk e2e: dunes cut without {dropped:?} — {fault}");
+    assert!(
+        fault.what.contains("hole"),
+        "dropping {dropped:?} from the GPU's cut was reported as {fault}"
+    );
+    let doubled: Vec<crcbl_shaders::cluster_dag::ClusterAt> =
+        drawn.iter().chain(&drawn).copied().collect();
+    let fault = dag
+        .check_cover(&doubled)
+        .expect_err("a GPU cut drawn twice covers the surface twice");
+    eprintln!("vk e2e: dunes cut drawn twice — {fault}");
+    assert!(
+        fault.what.contains("overlapping"),
+        "drawing the GPU's cut twice was reported as {fault}"
+    );
+
+    // --- and both extremes collapse it, so the assertion above can fail ---
+    //
+    // The leaves are forced by the budget alone and the root needs the distant
+    // camera as well, for the reason `dunes_distant_camera` carries.
+    for (camera, budget, name) in [
+        (
+            dunes_camera(),
+            f32::NEG_INFINITY,
+            "a budget every group exceeds",
+        ),
+        (
+            dunes_distant_camera(),
+            f32::INFINITY,
+            "a budget no group exceeds, from far enough out",
+        ),
+    ] {
+        let (collapsed, _) = dunes_cut(&headless, &mut renderer, &mut pool, &camera, budget);
+        let levels: std::collections::BTreeSet<usize> =
+            collapsed.iter().map(|at| at.level).collect();
+        let count = collapsed.len();
+        eprintln!("vk e2e: dunes under {name} — levels {levels:?}, {count} cluster(s)");
+        assert_eq!(
+            levels.len(),
+            1,
+            "{name} must draw one level and drew {levels:?}"
+        );
+        assert_ne!(
+            drawn, collapsed,
+            "{name} chose the same cut as the mixing budget, so the budget decides nothing"
+        );
+        // The same split the mixing assertion reads, which must now refuse —
+        // and it is run rather than reasoned about, because a check nobody has
+        // seen fail is a check nobody has tested.
+        let mut collapsed_near: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut collapsed_far: BTreeMap<usize, usize> = BTreeMap::new();
+        for &crcbl_shaders::cluster_dag::ClusterAt { level, cluster } in &collapsed {
+            let depth = dag.levels[level].clusters.clusters[cluster].bounds.center[2];
+            if depth < -crcbl_shaders::dunes::DUNES_EXTENT / 3.0 {
+                *collapsed_near.entry(level).or_default() += 1;
+            } else if depth > crcbl_shaders::dunes::DUNES_EXTENT / 3.0 {
+                *collapsed_far.entry(level).or_default() += 1;
+            }
+        }
+        // The default hook would print this deliberate failure as if something
+        // had gone wrong, in the middle of a passing run.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let refused =
+            std::panic::catch_unwind(|| assert_mixes_levels(&collapsed_near, &collapsed_far))
+                .is_err();
+        std::panic::set_hook(hook);
+        assert!(
+            refused,
+            "{name} draws one level, so the mixing assertion has to reject it — \
+             a check that cannot fail is not a check"
+        );
+    }
+
+    renderer.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// The near third of the patch is drawn at a finer level than the far third,
+/// and both ends drew something.
+///
+/// Its own function so the test above can run it in a `catch_unwind` and show
+/// that it refuses a cut that does not mix — which is the difference between an
+/// assertion and a decoration.
+fn assert_mixes_levels(
+    near: &std::collections::BTreeMap<usize, usize>,
+    far: &std::collections::BTreeMap<usize, usize>,
+) {
+    assert!(
+        !near.is_empty() && !far.is_empty(),
+        "one end of the patch drew nothing at all: near {near:?}, far {far:?}"
+    );
+    assert!(
+        near.keys().min() < far.keys().min(),
+        "the near end {near:?} is not drawn finer than the far end {far:?}"
+    );
 }

@@ -562,10 +562,10 @@ fn a_culled_bucket_generates_no_draw_and_says_so_in_the_count() {
 /// `SENTINEL` outright, because `draw_gen.slang` stores its `1` only for the
 /// invocation that took slot zero and no invocation would.
 ///
-/// **The empty bucket is the sharpest number here**, not a gap. The renderer's
-/// third resident — the open box — has no instance in this scene, so its
-/// arguments have nothing to add to `SENTINEL` and a clearing pass that never
-/// ran leaves them holding the poison undisguised.
+/// **The empty buckets are the sharpest numbers here**, not gaps. Two of the
+/// renderer's residents — the open box and the dunes patch — have no instance in
+/// this scene, so their arguments have nothing to add to `SENTINEL` and a
+/// clearing pass that never ran leaves them holding the poison undisguised.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn a_poisoned_counter_reaches_the_frame_at_zero() {
@@ -588,22 +588,23 @@ fn a_poisoned_counter_reaches_the_frame_at_zero() {
         "both instances survive, and the count is this frame's alone rather than \
          {SENTINEL:#010x} counted up from"
     );
-    // The cube's bucket, the pyramid's, and the open box's — which this scene
-    // puts nothing in. See the note above on why that zero is evidence.
+    // The cube's bucket, the pyramid's, then the open box's and the dunes
+    // patch's — which this scene puts nothing in. See the note above on why
+    // those zeroes are the evidence.
     assert_eq!(
         generated
             .args
             .iter()
             .map(|args| args.instance_count)
             .collect::<Vec<u32>>(),
-        vec![1, 1, 0],
+        vec![1, 1, 0, 0],
         "each bucket claims the instances this scene put in it, rather than \
          {SENTINEL:#010x} counted up from: {:?}",
         generated.args
     );
     assert_eq!(
         generated.counts,
-        vec![1, 1, 0],
+        vec![1, 1, 0, 0],
         "and each bucket's draw count is what the pass stored, not the poison it \
          was left holding"
     );

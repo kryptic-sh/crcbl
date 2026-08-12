@@ -149,10 +149,10 @@ use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, mesh};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::camera::{Camera, DirectionalLight};
-use crate::cluster_pool::ClusterPool;
+use crate::cluster_pool::{ClusterPool, ClusterRange, PooledMesh};
 use crate::cull::Frustum;
 use crate::draw_gen::{DrawGen, DrawGenDesc};
-use crate::graph::{ImageId, ImportedImage, RenderGraph};
+use crate::graph::{BufferId, ImageId, ImportedBuffer, ImportedImage, RenderGraph};
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc};
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
@@ -304,13 +304,46 @@ const SHADOW_SAMPLER_BINDING: u32 = 16;
 /// One per resident mesh, because an argument structure's index range is per
 /// draw and instances of different meshes cannot share one. See
 /// [`crate::draw_gen`] on what a bucket is and what a longer key would buy.
-const BUCKET_COUNT: u32 = 3;
+const BUCKET_COUNT: u32 = 4;
 
-/// The cube's bucket, the pyramid's, and the open box's. Named rather than
-/// written as `0`, `1` and `2` where the bucket table is filled in.
+/// The cube's bucket, the pyramid's, the open box's and the dunes patch's.
+/// Named rather than written as numbers where the bucket table is filled in.
 const CUBE_BUCKET: usize = 0;
 const PYRAMID_BUCKET: usize = 1;
 const OPEN_BOX_BUCKET: usize = 2;
+/// The dunes patch's bucket — **one bucket for its whole DAG**, not one per
+/// level.
+///
+/// A bucket is a mesh's run of clusters, and the point of `docs/plan/25-lod.md`'s
+/// per-cluster selection is that one draw covers several levels at once: the
+/// amplification stage picks the cut and the clusters it keeps come from
+/// wherever in the DAG they came from. So the run is every level's clusters end
+/// to end and the bucket's mesh id is level 0's, which is what the instance
+/// carries and what the cull pass reads a bounding box out of.
+const DUNES_BUCKET: usize = 3;
+
+/// The pixel budget `docs/plan/25-lod.md`'s descent compares a group's projected
+/// error against, unless a caller sets another with
+/// [`ForwardRenderer::set_lod_error_budget`].
+///
+/// One pixel, because that is what the metric is *for*: a level's error is how
+/// far its simplification may have moved the surface, so a budget of a pixel is
+/// the point at which a level change stops being something a viewer can see.
+/// The plan's "correct thresholds make pops sub-pixel by definition" is this
+/// number.
+const LOD_ERROR_BUDGET: f32 = 1.0;
+
+/// The budget an **orthographic** camera selects under: one no group satisfies,
+/// so every group expands and the base level is drawn whole.
+///
+/// The metric divides a projected error by the distance to the group's sphere,
+/// and an orthographic projection has no such falloff — see
+/// [`Projection::pixels_per_unit`], which is where the trade is written down.
+/// Drawing the finest level is the conservative answer and the honest one; a
+/// distance term invented for a projection that has none would be neither.
+///
+/// [`Projection::pixels_per_unit`]: crate::camera::Projection::pixels_per_unit
+const LOD_BUDGET_NONE: f32 = f32::NEG_INFINITY;
 
 /// Which indirect call the forward pass records per bucket.
 ///
@@ -393,12 +426,20 @@ pub struct ForwardRenderer {
     /// The open box's instance while a caller is asking for one, on the
     /// pyramid's terms exactly. See [`ForwardRenderer::set_open_box`].
     open_box_instance: Option<InstanceHandle>,
+    /// The dunes patch's instance, likewise. See
+    /// [`ForwardRenderer::set_dunes`], which is also where the one condition
+    /// this object has and the others do not is written down.
+    dunes_instance: Option<InstanceHandle>,
     /// The mesh ids those instances carry. Kept because every write of an
     /// instance writes the whole record, and an instance that lost its mesh id
     /// would resolve to entry 0 — which is a mesh, and the wrong one.
     cube_mesh: u32,
     pyramid_mesh: u32,
     open_box_mesh: u32,
+    /// Level 0 of the dunes DAG. The coarser levels are resident too and no
+    /// instance names one — a cluster reaches its own level's vertices through
+    /// [`crcbl_shaders::cluster_select::ClusterSelect::vertex_base`].
+    dunes_mesh: u32,
 
     /// §3.2's material table, and the two rows in it.
     ///
@@ -442,6 +483,22 @@ pub struct ForwardRenderer {
     /// front of it — see [`ForwardRenderer::culls_clusters`], which is where
     /// what it means is written down.
     culls_clusters: bool,
+    /// Where the dunes DAG's clusters are in [`ForwardRenderer::clusters`] —
+    /// every level of it, as one run. `None` off the mesh path, where there is
+    /// no cluster pool at all.
+    dunes_clusters: Option<ClusterRange>,
+    /// One buffer per frame in flight holding the cut the descent chose, or
+    /// empty where there is no amplification stage to choose one. See
+    /// [`ForwardRenderer::cluster_selection`].
+    cluster_selection: Vec<BufferHandle>,
+    /// The pixel budget `docs/plan/25-lod.md`'s descent compares a group's
+    /// projected error against. [`LOD_ERROR_BUDGET`] until
+    /// [`ForwardRenderer::set_lod_error_budget`] says otherwise.
+    lod_error_budget: f32,
+    /// What [`begin_frame`](ForwardRenderer::begin_frame) last wrote into
+    /// [`mesh::FrameUniforms::lod_params`], kept so a reader can compute the
+    /// same cut host-side without re-deriving it from the camera.
+    lod_params: [f32; 2],
 
     // Per-frame uniforms, one set per frame in flight.
     uniforms: Vec<BufferHandle>,
@@ -640,7 +697,7 @@ struct SharedBindings<'a> {
     page: ImageViewHandle,
     page_sampler: SamplerHandle,
     /// `Some` on [`GeometryPath::MeshShader`] and on no other path, which is
-    /// what decides whether bindings 9 to 12 exist at all.
+    /// what decides whether bindings 9 to 12 and 17 exist at all.
     clusters: Option<&'a ClusterPool>,
     culls_clusters: bool,
     shadow_sampler: SamplerHandle,
@@ -668,6 +725,16 @@ struct MeshGroup {
     cull_params: BufferHandle,
     /// Binding 14, likewise: what it counts survivors into.
     cull_stats: BufferHandle,
+    /// Binding 18, likewise: the cut the descent chose, one word per resident
+    /// cluster. `None` exactly where there is no amplification stage, which is
+    /// where the layout has no binding 18 either.
+    ///
+    /// **One buffer for the colour pass and every cascade**, which the graph
+    /// orders by the `ShaderReadWrite` all of them declare on it. What survives
+    /// a frame is therefore the last mesh pass recorded, and that is the colour
+    /// pass — so what a reader gets is the camera's cut rather than a
+    /// cascade's. See [`ForwardRenderer::cluster_selection`].
+    cluster_selection: Option<BufferHandle>,
     /// Binding [`SHADOW_ATLAS_BINDING`]. The atlas for the pass that reads it,
     /// and the placeholder for the pass that writes it — see
     /// [`ForwardRenderer::shadow_placeholder`], which is where that is argued.
@@ -803,8 +870,50 @@ impl MeshGroup {
             array_index: 0,
             resource: BindingResource::Sampler(shared.shadow_sampler),
         });
+        // **After the shadow pair, because 15 and 16 are taken.** Those two are
+        // `mesh.slang`'s, declared by the fragment stage of this very pipeline,
+        // so `mesh_cluster.slang`'s own additions start at 17 — and the list
+        // stays ascending, which is the order `crcbl-mtl` counts a Metal
+        // argument table in.
+        if let Some(clusters) = shared.clusters {
+            entries.push(BindGroupEntry {
+                binding: 17,
+                array_index: 0,
+                // Bound with the geometry rather than with the cull, because
+                // `vertex_base` *is* geometry: it is which level of a DAG a
+                // cluster's vertices live in, and both mesh entry points resolve
+                // a vertex through it.
+                resource: BindingResource::whole_buffer(clusters.selection()),
+            });
+        }
+        if let Some(selection) = self.cluster_selection {
+            entries.push(BindGroupEntry {
+                binding: 18,
+                array_index: 0,
+                resource: BindingResource::whole_buffer(selection),
+            });
+        }
         entries
     }
+}
+
+/// Every resident mesh's table id, and what a DAG needs on top of one.
+struct Residents {
+    cube: u32,
+    pyramid: u32,
+    open_box: u32,
+    /// Level 0 of the dunes patch — the id its instance carries, and the id its
+    /// bucket names. The coarser levels have table entries too, because each is
+    /// its own vertex range, but nothing names them: a cluster reaches its own
+    /// level through [`dunes_vertex_bases`](Self::dunes_vertex_bases).
+    dunes: u32,
+    /// Per level, how far that level's vertices start past level 0's.
+    ///
+    /// What [`crcbl_shaders::cluster_select::ClusterSelect::vertex_base`] holds,
+    /// and the whole of what makes a DAG drawable from one instance: the mesh
+    /// stage adds this to the instance's own `base_vertex`, so a cut spanning
+    /// three levels reads three different vertex ranges out of one pool.
+    dunes_vertex_bases: Vec<u32>,
 }
 
 /// One cascade's per-frame buffers, read out of its [`DrawGen`] before that
@@ -872,7 +981,16 @@ impl ForwardRenderer {
                 .features
                 .contains(crcbl_hal::Features::TASK_SHADER);
 
-        let (pool, cube_mesh, pyramid_mesh, open_box_mesh) = Self::build_geometry(device, queue)?;
+        let (
+            pool,
+            Residents {
+                cube: cube_mesh,
+                pyramid: pyramid_mesh,
+                open_box: open_box_mesh,
+                dunes: dunes_mesh,
+                dunes_vertex_bases,
+            },
+        ) = Self::build_geometry(device, queue)?;
         // The handles are `Copy`, so they can be read out before the pool
         // becomes the rollback's — which it must be before the first `?` below,
         // or a failed pipeline would leak two device-local buffers. The index
@@ -948,6 +1066,11 @@ impl ForwardRenderer {
         bucket_meshes[CUBE_BUCKET] = cube_mesh;
         bucket_meshes[PYRAMID_BUCKET] = pyramid_mesh;
         bucket_meshes[OPEN_BOX_BUCKET] = open_box_mesh;
+        // Level 0's id, which is the one the instance carries and the one the
+        // cull pass reads a bounding box out of. The coarser levels approximate
+        // the same surface inside the same box, so a cut of any depth is culled
+        // by that box correctly.
+        bucket_meshes[DUNES_BUCKET] = dunes_mesh;
 
         // §3.5's clusters, on the path that reads them and on no other. The
         // records are `crcbl-shaders`' — cooked, because the builder is
@@ -959,19 +1082,51 @@ impl ForwardRenderer {
         // per-bucket cluster counts are the x extent of each bucket's mesh
         // dispatch and that pass writes the argument structure carrying them.
         let mut bucket_clusters = [0u32; BUCKET_COUNT as usize];
+        let mut bucket_cluster_bases = [0u32; BUCKET_COUNT as usize];
+        let mut dunes_clusters: Option<ClusterRange> = None;
         if emit.is_mesh() {
-            let mut cooked: [crcbl_shaders::meshlet::MeshClusters; BUCKET_COUNT as usize] =
-                Default::default();
-            cooked[CUBE_BUCKET] = crcbl_shaders::meshlet::cube_clusters();
-            cooked[PYRAMID_BUCKET] = crcbl_shaders::meshlet::pyramid_clusters();
-            cooked[OPEN_BOX_BUCKET] = crcbl_shaders::meshlet::open_box_clusters();
-            let clusters = ClusterPool::new(device, "forward", &cooked)?;
-            for (bucket, count) in bucket_clusters.iter_mut().enumerate() {
-                *count = clusters
-                    .range(bucket)
-                    .unwrap_or_else(|| unreachable!("one cluster range per bucket, in order"))
-                    .count;
+            // Three flat meshes and one DAG. The flat ones are one pool entry
+            // each and their clusters carry `ClusterSelect::ALWAYS`, so the
+            // descent draws them from every camera; the DAG is **one entry per
+            // level**, laid end to end, and one bucket covers all of them.
+            let dag = crcbl_shaders::cluster_dag::dunes_dag();
+            let selection = dag.selection_records(&dunes_vertex_bases);
+            let mut cooked = vec![
+                PooledMesh::without_lod(crcbl_shaders::meshlet::cube_clusters()),
+                PooledMesh::without_lod(crcbl_shaders::meshlet::pyramid_clusters()),
+                PooledMesh::without_lod(crcbl_shaders::meshlet::open_box_clusters()),
+            ];
+            for (level, records) in dag.levels.iter().zip(selection) {
+                cooked.push(PooledMesh {
+                    clusters: level.clusters.clone(),
+                    selection: records,
+                });
             }
+
+            let clusters = ClusterPool::new(device, "forward", &cooked)?;
+            let range = |entry: usize| {
+                clusters
+                    .range(entry)
+                    .unwrap_or_else(|| unreachable!("one range per entry, in order"))
+            };
+            for bucket in [CUBE_BUCKET, PYRAMID_BUCKET, OPEN_BOX_BUCKET] {
+                bucket_clusters[bucket] = range(bucket).count;
+                bucket_cluster_bases[bucket] = range(bucket).base;
+            }
+            // **The DAG's levels are one run, not one per bucket.** `concatenate`
+            // lays the entries down in the order it was given them, so the
+            // levels are contiguous: the bucket starts where level 0 does and
+            // reaches to the end of the last level. That is what lets one
+            // dispatch cover a cut spanning several of them.
+            bucket_cluster_bases[DUNES_BUCKET] = range(DUNES_BUCKET).base;
+            bucket_clusters[DUNES_BUCKET] = (DUNES_BUCKET..cooked.len())
+                .map(|entry| range(entry).count)
+                .sum();
+            dunes_clusters = Some(ClusterRange {
+                base: bucket_cluster_bases[DUNES_BUCKET],
+                count: bucket_clusters[DUNES_BUCKET],
+            });
+
             rollback.clusters = Some(clusters);
         }
 
@@ -1002,6 +1157,35 @@ impl ForwardRenderer {
             .map(|frame| draws.visible_count(frame))
             .collect();
         rollback.draws = Some(draws);
+
+        // `docs/plan/25-lod.md`'s observable: one word per resident cluster,
+        // holding the cut the descent chose. Empty where there is no
+        // amplification stage, which is the same condition binding 18 exists
+        // under — and the two cannot disagree, because this vector is what
+        // decides whether the entry is written.
+        //
+        // **One buffer per frame in flight**, on `cull_stats`' terms exactly: a
+        // frame still in flight is a frame still writing, and one buffer shared
+        // across the ring would have the next frame's dispatch overwriting what
+        // this one recorded. `TRANSFER_SRC` because reading it is the point.
+        let mut cluster_selection: Vec<BufferHandle> = Vec::new();
+        if culls_clusters {
+            let count = rollback
+                .clusters
+                .as_ref()
+                .unwrap_or_else(|| unreachable!("an amplification stage implies a cluster pool"))
+                .count();
+            for frame in 0..instance_buffers.len() {
+                let buffer = device.create_buffer(&BufferDesc {
+                    label: Some(&format!("cluster selection {frame}")),
+                    size: u64::from(count) * 4,
+                    usage: BufferUsage::STORAGE.union(BufferUsage::TRANSFER_SRC),
+                    memory: MemoryLocation::DeviceLocal,
+                })?;
+                rollback.buffers.push(buffer);
+                cluster_selection.push(buffer);
+            }
+        }
 
         // --- the mesh pass ---
         //
@@ -1257,6 +1441,42 @@ impl ForwardRenderer {
             count: 1,
             flags: BindingFlags::empty(),
         });
+        // `docs/plan/25-lod.md`'s two, **after the shadow pair rather than
+        // beside their own kin**: 15 and 16 are taken by the fragment stage of
+        // this very pipeline, so `mesh_cluster.slang` resumes at 17. Ascending
+        // order matters here and not only for readability — `crcbl-mtl` gives a
+        // resource the next index in its Metal argument table by counting the
+        // same-table entries of this list.
+        if emit.is_mesh() {
+            mesh_entries.push(BindGroupLayoutEntry {
+                binding: 17,
+                visibility: geometry,
+                // Read-only and read by **both** mesh entry points, unlike the
+                // pair below: a cluster's `vertex_base` is which level of a DAG
+                // its geometry lives in, which an un-amplified stage needs just
+                // as much as an amplified one.
+                kind: BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            });
+        }
+        if culls_clusters {
+            mesh_entries.push(BindGroupLayoutEntry {
+                binding: 18,
+                visibility: geometry,
+                kind: BindingKind::StorageBuffer {
+                    // The second writable binding: the amplification stage
+                    // records the cut it chose, one word per resident cluster.
+                    read_only: false,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            });
+        }
 
         let mesh_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("mesh frame"),
@@ -1317,12 +1537,7 @@ impl ForwardRenderer {
             let block = if emit.is_mesh() {
                 crcbl_shaders::meshlet::ClusterDrawConstants {
                     base,
-                    cluster_base: rollback
-                        .clusters
-                        .as_ref()
-                        .and_then(|clusters| clusters.range(index))
-                        .unwrap_or_else(|| unreachable!("the mesh path built a cluster pool"))
-                        .base,
+                    cluster_base: bucket_cluster_bases[index],
                     cluster_count: bucket_clusters[index],
                     bucket,
                 }
@@ -1486,6 +1701,7 @@ impl ForwardRenderer {
                 args: args[frame],
                 cull_params: cull_params[frame],
                 cull_stats: cull_stats[frame],
+                cluster_selection: cluster_selection.get(frame).copied(),
                 // The colour pass reads the finished atlas. Its own pass writes
                 // nothing to it, so there is no conflict to avoid here.
                 shadow_map: shadow_atlas_view,
@@ -1526,6 +1742,13 @@ impl ForwardRenderer {
                     // and the wrong one to have asked with the camera's frustum.
                     cull_params: buffers.cull_params[frame],
                     cull_stats: buffers.cull_stats[frame],
+                    // **The same buffer the colour pass records into**, which
+                    // the graph orders by the `ShaderReadWrite` both declare on
+                    // it. A cascade's cut is overwritten by the colour pass's
+                    // because that pass is recorded last, which is what makes
+                    // `ForwardRenderer::cluster_selection` the camera's cut and
+                    // not the sun's.
+                    cluster_selection: cluster_selection.get(frame).copied(),
                     shadow_map: shadow_placeholder_view,
                 }
                 .entries(&shared);
@@ -1837,6 +2060,15 @@ impl ForwardRenderer {
             culls_clusters,
             uniforms,
             draw_constants,
+            dunes_instance: None,
+            dunes_mesh,
+            dunes_clusters,
+            cluster_selection,
+            lod_error_budget: LOD_ERROR_BUDGET,
+            // Overwritten by the first `begin_frame`, which is the only thing
+            // that can know the viewport. A zero scale with a budget of zero
+            // selects nothing at all, and there is no frame yet to select for.
+            lod_params: [0.0, 0.0],
             mesh_groups,
             frame: 0,
             mesh_layout,
@@ -1871,7 +2103,7 @@ impl ForwardRenderer {
     fn build_geometry(
         device: &dyn Device,
         queue: QueueHandle,
-    ) -> Result<(MeshPool, u32, u32, u32), HalError> {
+    ) -> Result<(MeshPool, Residents), HalError> {
         let mut pool = MeshPool::new(
             device,
             &MeshPoolDesc {
@@ -1882,10 +2114,10 @@ impl ForwardRenderer {
             },
         )?;
         match Self::residents(device, queue, &mut pool) {
-            Ok((cube, pyramid, open_box)) => Ok((pool, cube, pyramid, open_box)),
+            Ok(residents) => Ok((pool, residents)),
             Err(error) => {
                 pool.destroy(device);
-                Err(error.into())
+                Err(error)
             }
         }
     }
@@ -2049,11 +2281,20 @@ impl ForwardRenderer {
     /// the only one whose mesh-shader dispatch has a cluster at a non-zero
     /// `Meshlet::vertex_offset` *within* one mesh. See
     /// [`crcbl_shaders::meshlet::open_box_clusters`].
+    ///
+    /// The dunes patch is last, and it is **one upload per level of its DAG**.
+    /// Every level was decimated separately, so a coarser level's vertices are
+    /// wherever the collapses put them and belong to no vertex of the level
+    /// below — a DAG is several vertex ranges, and the pool suballocates in
+    /// vertices, so several ranges means several uploads. Level 0 goes first, so
+    /// every other level starts past it and the offsets a cluster carries are
+    /// non-negative; that is checked rather than assumed, because the pool's
+    /// free list makes no promise about where a mesh lands.
     fn residents(
         device: &dyn Device,
         queue: QueueHandle,
         pool: &mut MeshPool,
-    ) -> Result<(u32, u32, u32), MeshPoolError> {
+    ) -> Result<Residents, HalError> {
         let cube = pool.upload(
             device,
             queue,
@@ -2075,6 +2316,42 @@ impl ForwardRenderer {
             &mesh::open_box_vertex_bytes(),
             &mesh::open_box_indices(),
         )?;
+
+        // `docs/plan/25-lod.md`'s model, level by level. The geometry of a
+        // coarser level is positions and nothing else — the decimator carries no
+        // attributes — so `dunes::vertex_at` is what turns each into a vertex,
+        // by evaluating the surface rather than by interpolating an attribute
+        // nothing recorded.
+        let dag = crcbl_shaders::cluster_dag::dunes_dag();
+        let mut dunes_levels = Vec::with_capacity(dag.levels.len());
+        for (depth, level) in dag.levels.iter().enumerate() {
+            let vertices: Vec<u8> = level
+                .positions
+                .iter()
+                .flat_map(|&position| {
+                    let vertex = crcbl_shaders::dunes::vertex_at(position);
+                    let mut bytes = Vec::with_capacity(mesh::VERTEX_STRIDE);
+                    for value in vertex
+                        .position
+                        .iter()
+                        .chain(&vertex.normal)
+                        .chain(&vertex.color)
+                        .chain(&vertex.uv)
+                    {
+                        bytes.extend_from_slice(&value.to_le_bytes());
+                    }
+                    bytes
+                })
+                .collect();
+            dunes_levels.push(pool.upload(
+                device,
+                queue,
+                &format!("dunes level {depth}"),
+                &vertices,
+                &level.indices(),
+            )?);
+        }
+
         pool.flush(device)?;
         // The table index is the only number that leaves here — where the
         // geometry actually is reaches the GPU through the mesh table, and the
@@ -2086,7 +2363,34 @@ impl ForwardRenderer {
             (Some(_), Some(id)) => Ok(id),
             _ => Err(MeshPoolError::NotResident { handle }),
         };
-        Ok((resolve(cube)?, resolve(pyramid)?, resolve(open_box)?))
+        let base_vertex = |handle| match pool.mesh(handle) {
+            Some(range) => Ok(range.base_vertex),
+            None => Err(MeshPoolError::NotResident { handle }),
+        };
+
+        // **Relative to level 0's base**, because that is the base the instance
+        // resolves through its mesh id and the one the stage adds this on top
+        // of. A level that landed *below* level 0 would make the sum wrap, so it
+        // is refused here rather than drawn as another mesh's vertices.
+        let level_zero = base_vertex(dunes_levels[0])?;
+        let mut dunes_vertex_bases = Vec::with_capacity(dunes_levels.len());
+        for (depth, &handle) in dunes_levels.iter().enumerate() {
+            let base = base_vertex(handle)?;
+            dunes_vertex_bases.push(base.checked_sub(level_zero).ok_or_else(|| {
+                HalError::InvalidDescriptor(format!(
+                    "dunes level {depth} landed at vertex {base}, below level 0's \
+                     {level_zero}, so its clusters cannot name their own geometry"
+                ))
+            })?);
+        }
+
+        Ok(Residents {
+            cube: resolve(cube)?,
+            pyramid: resolve(pyramid)?,
+            open_box: resolve(open_box)?,
+            dunes: resolve(dunes_levels[0])?,
+            dunes_vertex_bases,
+        })
     }
 
     /// Rotates to the next frame's uniform buffer and instance buffer, writes
@@ -2157,6 +2461,18 @@ impl ForwardRenderer {
         // with — is invisible until something at the edge of the screen
         // disappears.
         let view_projection = camera.view_projection(aspect);
+        // `docs/plan/25-lod.md`'s two selection numbers, from this frame's
+        // viewport and this frame's camera. An orthographic projection has no
+        // distance falloff for the metric to divide by, so it selects under a
+        // budget nothing satisfies and draws the base level whole — see
+        // [`LOD_BUDGET_NONE`].
+        let lod_scale = camera.projection.pixels_per_unit(extent.1 as f32);
+        let lod_budget = if camera.projection.is_orthographic() {
+            LOD_BUDGET_NONE
+        } else {
+            self.lod_error_budget
+        };
+        self.lod_params = [lod_scale, lod_budget];
         // Topic 18's cascades. Built from the camera and the light alone, so a
         // frame that culls against them and a fragment that samples through them
         // cannot disagree about where they are.
@@ -2174,6 +2490,7 @@ impl ForwardRenderer {
             shadow_view_proj,
             cascade_far: cascades.far,
             shadow_params: Cascades::params(),
+            lod_params: [lod_scale, lod_budget, 0.0, 0.0],
         };
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
 
@@ -2357,6 +2674,104 @@ impl ForwardRenderer {
         );
     }
 
+    /// Puts the dunes patch in the scene at `model`, or takes it out.
+    ///
+    /// `docs/plan/25-lod.md`'s model, and the only resident with a **cluster
+    /// DAG**: a 64-unit height field whose far edge is many times further from
+    /// a viewer standing at its near edge, so one cut through that DAG draws its
+    /// two ends at different levels. That is the whole reason the mesh exists —
+    /// a cube subtends one distance and asks the same question of every cluster.
+    ///
+    /// # It needs an amplification stage, and says so rather than approximating
+    ///
+    /// **The descent runs in the amplification stage and nowhere else.** A
+    /// device without [`Features::TASK_SHADER`] draws through
+    /// `mesh_cluster.slang`'s un-amplified `meshMain`, which emits every cluster
+    /// of the bucket — and for a DAG that is every level at once, seven
+    /// overlapping copies of one surface. So this refuses on such a device
+    /// rather than drawing that: [`culls_clusters`](Self::culls_clusters) is the
+    /// question, and the return says which happened.
+    ///
+    /// Every other resident is a single level and is unaffected: their clusters
+    /// carry [`ClusterSelect::ALWAYS`], which draws from every camera.
+    ///
+    /// [`Features::TASK_SHADER`]: crcbl_hal::Features::TASK_SHADER
+    /// [`ClusterSelect::ALWAYS`]: crcbl_shaders::cluster_select::ClusterSelect::ALWAYS
+    pub fn set_dunes(&mut self, model: Option<Mat4>) -> bool {
+        if model.is_some() && !self.culls_clusters {
+            return false;
+        }
+        let instance = model.map(|model| mesh::GpuInstance {
+            transform: model.to_cols_array(),
+            mesh: self.dunes_mesh,
+            material: self.untinted_material,
+            ..mesh::GpuInstance::default()
+        });
+        place(
+            &mut self.instances,
+            &mut self.dunes_instance,
+            instance.as_ref(),
+            "the dunes patch",
+        );
+        true
+    }
+
+    /// The pixel budget the descent compares a group's projected error against.
+    ///
+    /// One pixel until this is called — see the constant this crate keeps it
+    /// in. Larger is coarser: a group
+    /// projecting *over* the budget is expanded and its children are drawn, so
+    /// raising it stops the descent higher up the DAG.
+    ///
+    /// Takes effect at the next [`begin_frame`](Self::begin_frame), which is
+    /// what writes it into the frame block.
+    pub const fn set_lod_error_budget(&mut self, budget: f32) {
+        self.lod_error_budget = budget;
+    }
+
+    /// What the last [`begin_frame`](Self::begin_frame) handed the descent:
+    /// pixels per unit at one unit from the eye, and the pixel budget.
+    ///
+    /// The pair `ClusterSelect::is_drawn` takes, so a caller reading
+    /// [`cluster_selection`](Self::cluster_selection) back can compute the same
+    /// cut host-side out of `ClusterDag::cut` rather than re-deriving the
+    /// numbers from the camera and hoping they agree. `[0.0, 0.0]` before the
+    /// first frame.
+    #[must_use]
+    pub const fn lod_params(&self) -> [f32; 2] {
+        self.lod_params
+    }
+
+    /// Where the dunes DAG's clusters are in the cluster pool — every level, as
+    /// one run — or `None` off the mesh path.
+    ///
+    /// The base a reader adds a `(level, cluster)` to in order to index
+    /// [`cluster_selection`](Self::cluster_selection): the levels are laid down
+    /// finest first and contiguously, so level `d` cluster `c` is at
+    /// `base + (clusters of levels below d) + c`.
+    #[must_use]
+    pub const fn dunes_clusters(&self) -> Option<ClusterRange> {
+        self.dunes_clusters
+    }
+
+    /// The buffer `frame`'s amplification stage recorded its chosen cut into:
+    /// one `u32` per resident cluster, `1` where the cluster was drawn.
+    ///
+    /// `None` where there is no amplification stage, which is every device that
+    /// reports no [`Features::TASK_SHADER`] and every non-mesh geometry path.
+    ///
+    /// **This is `docs/plan/25-lod.md`'s observable and nothing in the frame
+    /// reads it.** A frame whose every cluster came from one level is a
+    /// plausible picture and matches any golden blessed from it, so a golden
+    /// cannot show per-cluster selection happening at all; this can. It is
+    /// `TRANSFER_SRC`, and copying it out is the caller's to record.
+    ///
+    /// [`Features::TASK_SHADER`]: crcbl_hal::Features::TASK_SHADER
+    #[must_use]
+    pub fn cluster_selection(&self, frame: usize) -> Option<BufferHandle> {
+        self.cluster_selection.get(frame).copied()
+    }
+
     /// Adds the forward and tonemap passes to `graph`, rendering into `target`,
     /// and returns the HDR scene target they went through.
     ///
@@ -2382,8 +2797,24 @@ impl ForwardRenderer {
             .draws
             .add_passes(graph, self.frame, self.instances.slot_count());
 
+        // `docs/plan/25-lod.md`'s record of the cut, imported once and declared
+        // by every pass that writes it — the shadow cascades and the colour
+        // pass, in that order — so the graph orders them against each other and
+        // against the next frame's use of this slot. It arrives in the state
+        // the previous frame left it in, which is the one declared as final.
+        let selection = self.cluster_selection.get(self.frame).map(|&buffer| {
+            graph.import_buffer(
+                "cluster-selection",
+                ImportedBuffer {
+                    buffer,
+                    initial: ResourceState::ShaderReadWrite,
+                    final_state: ResourceState::ShaderReadWrite,
+                },
+            )
+        });
+
         let imported = std::mem::replace(&mut self.shadow_imported, ResourceState::ShaderRead);
-        let shadow_atlas = self.add_shadow_pass(graph, imported);
+        let shadow_atlas = self.add_shadow_pass(graph, imported, selection);
 
         let scene_color =
             graph.create_image("scene-color", TransientImageDesc::scene_color(extent));
@@ -2453,7 +2884,15 @@ impl ForwardRenderer {
                 // culling statistics, which the draw-argument pass read a
                 // moment ago — so this is a write-after-read the graph has to
                 // order, and declaring it is the whole of how it learns to.
-                pass.use_buffer(generated.visible_count_id, ResourceState::ShaderReadWrite)
+                let pass =
+                    pass.use_buffer(generated.visible_count_id, ResourceState::ShaderReadWrite);
+                match selection {
+                    // Declared last of the three, and by the last pass to write
+                    // it, which is what makes what survives the frame the
+                    // camera's cut rather than a cascade's.
+                    Some(selection) => pass.use_buffer(selection, ResourceState::ShaderReadWrite),
+                    None => pass,
+                }
             } else {
                 pass
             }
@@ -2621,7 +3060,12 @@ impl ForwardRenderer {
     /// [`shadow::CASCADES`] more barriers, and the graph would have to be told
     /// each of them only touches part of it — where one pass with a viewport per
     /// tile is what a shadow *atlas* is for in the first place.
-    fn add_shadow_pass(&self, graph: &mut RenderGraph<'_>, imported: ResourceState) -> ImageId {
+    fn add_shadow_pass(
+        &self,
+        graph: &mut RenderGraph<'_>,
+        imported: ResourceState,
+        selection: Option<BufferId>,
+    ) -> ImageId {
         let (atlas_width, atlas_height) = shadow::atlas_extent();
         let atlas = graph.import_image(
             "shadow-atlas",
@@ -2674,6 +3118,11 @@ impl ForwardRenderer {
             // every cascade's bind group, standing in for the atlas this pass is
             // writing. See `ForwardRenderer::shadow_placeholder`.
             .read_image(placeholder);
+        // The cascades' mesh passes write the cut too — same binding, same
+        // buffer — so the graph is told before the colour pass overwrites it.
+        if let Some(selection) = selection {
+            pass = pass.use_buffer(selection, ResourceState::ShaderReadWrite);
+        }
         for draws in &generated {
             pass = pass.read_buffer(draws.runs_id);
             pass = if self.emit.is_mesh() {
@@ -2936,6 +3385,9 @@ impl ForwardRenderer {
         self.base_color_page.destroy(device);
         device.destroy_sampler(self.base_color_sampler);
         for buffer in self.uniforms {
+            device.destroy_buffer(buffer);
+        }
+        for buffer in self.cluster_selection {
             device.destroy_buffer(buffer);
         }
         device.destroy_buffer(self.draw_constants);

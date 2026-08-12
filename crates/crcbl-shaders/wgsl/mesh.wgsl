@@ -70,6 +70,7 @@ struct FrameUniforms_std140_0
     @align(16) shadow_view_proj_0 : _Array_std140_matrixx3Cfloatx2C4x2C4x3E2_0,
     @align(16) cascade_far_0 : vec4<f32>,
     @align(16) shadow_params_0 : vec4<f32>,
+    @align(16) lod_params_0 : vec4<f32>,
 };
 
 @binding(0) @group(0) var<uniform> frame_0 : FrameUniforms_std140_0;

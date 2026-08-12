@@ -1,12 +1,16 @@
 //! The cluster buffers `mesh_cluster.slang` reads: §3.5's meshlets, resident on
 //! the GPU.
 //!
-//! Three storage buffers and a range per mesh. The **clusters** are
+//! Four storage buffers and a range per mesh. The **clusters** are
 //! [`crcbl_shaders::meshlet::Meshlet`] records back to back in mesh order; the
-//! **vertex** array is the original vertex indices, one run per cluster; and the
-//! **corner** array is `u8` corner indices packed four to a word. Every one of
-//! those shapes is decided by the record, not here — see that module, which is
-//! where both sides of the packing are written.
+//! **vertex** array is the original vertex indices, one run per cluster; the
+//! **corner** array is `u8` corner indices packed four to a word; and the
+//! **selection** array is one
+//! [`crcbl_shaders::cluster_select::ClusterSelect`] per cluster — the two groups
+//! `docs/plan/25-lod.md`'s descent tests, and which level of a DAG the cluster's
+//! vertices live in. Every one of those shapes is decided by the record, not
+//! here — see those modules, which are where both sides of the packing are
+//! written.
 //!
 //! # It receives clusters; it does not build them
 //!
@@ -28,6 +32,7 @@
 //! device's, and these are one path's.
 
 use crcbl_hal::{BufferDesc, BufferHandle, BufferUsage, Device, HalError, MemoryLocation};
+use crcbl_shaders::cluster_select::{self, ClusterSelect};
 use crcbl_shaders::meshlet::{self, MeshClusters};
 
 /// Where one mesh's clusters live in [`ClusterPool::clusters`].
@@ -58,6 +63,36 @@ struct Concatenated {
     vertices: Vec<u32>,
     corners: Vec<u8>,
     ranges: Vec<ClusterRange>,
+}
+
+/// One mesh's clusters and, if it has a DAG, what each of them needs to descend
+/// it.
+///
+/// A pair rather than a fourth array on [`MeshClusters`], because that type is
+/// the *geometry* — it is what `crcbl_scene::meshlet::build_meshlets` produces
+/// for a mesh with no hierarchy at all — and selection is
+/// `crcbl_shaders::cluster_dag`'s. [`without_lod`](Self::without_lod) is what a
+/// caller with only geometry passes, and it is not a special case downstream:
+/// [`ClusterSelect::ALWAYS`] draws from every camera, so the pool uploads one
+/// record per cluster either way.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PooledMesh {
+    /// The clusters, their vertex runs and their corners.
+    pub clusters: MeshClusters,
+    /// One [`ClusterSelect`] per cluster, parallel to
+    /// [`clusters.clusters`](MeshClusters::clusters).
+    pub selection: Vec<ClusterSelect>,
+}
+
+impl PooledMesh {
+    /// A mesh that is a single level: every cluster drawn whenever the mesh is.
+    #[must_use]
+    pub fn without_lod(clusters: MeshClusters) -> Self {
+        Self {
+            selection: vec![ClusterSelect::ALWAYS; clusters.clusters.len()],
+            clusters,
+        }
+    }
 }
 
 /// Lays `meshes`' three arrays end to end, moving each cluster's offsets by
@@ -105,13 +140,15 @@ fn concatenate(meshes: &[MeshClusters]) -> Result<Concatenated, HalError> {
     Ok(out)
 }
 
-/// The three cluster buffers, and where each mesh's clusters are in them.
+/// The four cluster buffers, and where each mesh's clusters are in them.
 #[derive(Debug)]
 pub struct ClusterPool {
     clusters: BufferHandle,
     vertices: BufferHandle,
     corners: BufferHandle,
+    selection: BufferHandle,
     ranges: Vec<ClusterRange>,
+    count: u32,
 }
 
 impl ClusterPool {
@@ -131,19 +168,31 @@ impl ClusterPool {
     /// [`HalError::InvalidDescriptor`] if `meshes` cluster into nothing — a
     /// pipeline whose cluster buffer is empty has a mesh stage that cannot
     /// safely read element zero, which is the read its out-of-range path makes.
-    pub fn new(
-        device: &dyn Device,
-        label: &str,
-        meshes: &[MeshClusters],
-    ) -> Result<Self, HalError> {
+    pub fn new(device: &dyn Device, label: &str, meshes: &[PooledMesh]) -> Result<Self, HalError> {
+        let geometry: Vec<MeshClusters> = meshes.iter().map(|mesh| mesh.clusters.clone()).collect();
         let Concatenated {
             clusters,
             vertices,
             corners,
             ranges,
-        } = concatenate(meshes)?;
+        } = concatenate(&geometry)?;
 
-        let mut created: Vec<BufferHandle> = Vec::with_capacity(3);
+        // Parallel to the clusters by construction, and refused rather than
+        // padded: a selection array short by one leaves a cluster reading its
+        // neighbour's groups, which is a level chosen wrong rather than a crash.
+        let mut selection = Vec::with_capacity(clusters.len());
+        for mesh in meshes {
+            if mesh.selection.len() != mesh.clusters.clusters.len() {
+                return Err(HalError::InvalidDescriptor(format!(
+                    "a mesh of {} clusters carries {} selection records",
+                    mesh.clusters.clusters.len(),
+                    mesh.selection.len()
+                )));
+            }
+            selection.extend_from_slice(&mesh.selection);
+        }
+
+        let mut created: Vec<BufferHandle> = Vec::with_capacity(4);
         let mut upload = |name: &str, bytes: &[u8]| -> Result<BufferHandle, HalError> {
             let buffer = device.create_buffer(&BufferDesc {
                 label: Some(&format!("{label} {name}")),
@@ -163,14 +212,27 @@ impl ClusterPool {
             let vertex_bytes: Vec<u8> = vertices.iter().flat_map(|v| v.to_le_bytes()).collect();
             let vertex_buffer = upload("cluster vertices", &vertex_bytes)?;
             let corner_buffer = upload("cluster corners", &meshlet::corner_bytes(&corners))?;
-            Ok::<_, HalError>((cluster_buffer, vertex_buffer, corner_buffer))
+            let selection_buffer = upload(
+                "cluster selection",
+                &cluster_select::selection_bytes(&selection),
+            )?;
+            Ok::<_, HalError>((
+                cluster_buffer,
+                vertex_buffer,
+                corner_buffer,
+                selection_buffer,
+            ))
         })();
+        let count = u32::try_from(clusters.len())
+            .unwrap_or_else(|_| unreachable!("`concatenate` refused a larger pool first"));
         match built {
-            Ok((clusters, vertices, corners)) => Ok(Self {
+            Ok((clusters, vertices, corners, selection)) => Ok(Self {
                 clusters,
                 vertices,
                 corners,
+                selection,
                 ranges,
+                count,
             }),
             Err(error) => {
                 for buffer in created {
@@ -199,6 +261,19 @@ impl ClusterPool {
         self.corners
     }
 
+    /// The per-cluster selection records, as binding 17.
+    #[must_use]
+    pub const fn selection(&self) -> BufferHandle {
+        self.selection
+    }
+
+    /// How many clusters the pool holds in total — the length of the buffer a
+    /// frame records its chosen cut into.
+    #[must_use]
+    pub const fn count(&self) -> u32 {
+        self.count
+    }
+
     /// Where mesh `index`'s clusters are, in the order [`ClusterPool::new`]
     /// received them.
     #[must_use]
@@ -206,9 +281,9 @@ impl ClusterPool {
         self.ranges.get(index).copied()
     }
 
-    /// Releases the three buffers. The device must be idle.
+    /// Releases the four buffers. The device must be idle.
     pub fn destroy(self, device: &dyn Device) {
-        for buffer in [self.clusters, self.vertices, self.corners] {
+        for buffer in [self.clusters, self.vertices, self.corners, self.selection] {
             device.destroy_buffer(buffer);
         }
     }
@@ -305,8 +380,15 @@ mod tests {
         let (recorder, device) = open();
         let cube = crcbl_shaders::meshlet::cube_clusters();
         let pyramid = crcbl_shaders::meshlet::pyramid_clusters();
-        let pool = ClusterPool::new(device.as_ref(), "test", &[cube.clone(), pyramid.clone()])
-            .expect("the null backend accepts every descriptor");
+        let pool = ClusterPool::new(
+            device.as_ref(),
+            "test",
+            &[
+                PooledMesh::without_lod(cube.clone()),
+                PooledMesh::without_lod(pyramid.clone()),
+            ],
+        )
+        .expect("the null backend accepts every descriptor");
 
         assert_eq!(pool.range(2), None, "there is no third mesh");
         let written = |buffer| {
@@ -336,6 +418,16 @@ mod tests {
             (cube.corners.len() + pyramid.corners.len()).div_ceil(4) * 4,
             "corners pack four to a word, tail included"
         );
+        assert_eq!(
+            written(pool.selection()),
+            (cube.clusters.len() + pyramid.clusters.len())
+                * crcbl_shaders::cluster_select::CLUSTER_SELECT_STRIDE,
+            "one selection record per cluster of every mesh"
+        );
+        assert_eq!(
+            pool.count(),
+            u32::try_from(cube.clusters.len() + pyramid.clusters.len()).expect("small")
+        );
 
         pool.destroy(device.as_ref());
         recorder.assert_valid();
@@ -364,7 +456,9 @@ mod tests {
         let pool = ClusterPool::new(
             device.as_ref(),
             "test",
-            &[crcbl_shaders::meshlet::cube_clusters()],
+            &[PooledMesh::without_lod(
+                crcbl_shaders::meshlet::cube_clusters(),
+            )],
         )
         .expect("built");
         assert!(recorder.total_live_objects() > before);

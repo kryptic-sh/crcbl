@@ -49,11 +49,11 @@ pub const SHADOW_CASCADES: usize = 2;
 /// Bytes in the frame uniform block.
 ///
 /// One `float4x4` (64), four `float4` (16 each), [`SHADOW_CASCADES`] more
-/// `float4x4` and two closing `float4`. Checked against the `Offset`
-/// decorations `slangc` emits — 0, 64, 80, 96, 112, 128, 256, 272 at two
+/// `float4x4` and three closing `float4`. Checked against the `Offset`
+/// decorations `slangc` emits — 0, 64, 80, 96, 112, 128, 256, 272, 288 at two
 /// cascades — by this module's
 /// `the_uniform_block_matches_the_offsets_slangc_emits`.
-pub const FRAME_UNIFORMS_SIZE: usize = 128 + 64 * SHADOW_CASCADES + 32;
+pub const FRAME_UNIFORMS_SIZE: usize = 128 + 64 * SHADOW_CASCADES + 48;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -146,6 +146,23 @@ pub struct FrameUniforms {
     /// the atlas is [`SHADOW_CASCADES`] square tiles side by side. `z`: the
     /// constant depth bias. `w`: the slope-scaled coefficient on top of it.
     pub shadow_params: [f32; 4],
+    /// `docs/plan/25-lod.md`'s two selection numbers, read by
+    /// `mesh_cluster.slang`'s amplification stage and by nothing else.
+    ///
+    /// `x`: how many pixels one unit of length subtends one unit from the eye —
+    /// `0.5 * viewport_height / tan(0.5 * fov_y)` for a perspective camera, which
+    /// is what carries the frame's size and field of view into a screen-space
+    /// error. `y`: the pixel budget a group's projected error is compared
+    /// against; a group over it is expanded and its children are drawn.
+    ///
+    /// `z` and `w` are **unread padding**, here because `std140` aligns a
+    /// `float4` to sixteen bytes and this block is written by both sides.
+    ///
+    /// A per-frame block rather than a per-bucket one because both numbers are
+    /// the camera's: the viewport can resize between frames, and this ring is
+    /// already one buffer per frame in flight where the draw constants are one
+    /// buffer shared by all of them.
+    pub lod_params: [f32; 4],
 }
 
 impl FrameUniforms {
@@ -170,6 +187,7 @@ impl FrameUniforms {
         }
         put(&self.cascade_far);
         put(&self.shadow_params);
+        put(&self.lod_params);
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
     }
@@ -1103,12 +1121,22 @@ mod tests {
 
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
-        assert_eq!(FRAME_UNIFORMS_SIZE, 288, "at two cascades");
+        assert_eq!(FRAME_UNIFORMS_SIZE, 304, "at two cascades");
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …`, and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64`.
         let cascades = 64 * SHADOW_CASCADES;
-        let offsets = [0usize, 64, 80, 96, 112, 128, 128 + cascades, 144 + cascades];
-        let sizes = [64usize, 16, 16, 16, 16, cascades, 16, 16];
+        let offsets = [
+            0usize,
+            64,
+            80,
+            96,
+            112,
+            128,
+            128 + cascades,
+            144 + cascades,
+            160 + cascades,
+        ];
+        let sizes = [64usize, 16, 16, 16, 16, cascades, 16, 16, 16];
         for (index, (offset, size)) in offsets.iter().zip(&sizes).enumerate() {
             assert_eq!(
                 offset + size,
@@ -1137,6 +1165,7 @@ mod tests {
             shadow_view_proj,
             cascade_far: [20.0; 4],
             shadow_params: [30.0; 4],
+            lod_params: [40.0; 4],
         };
         let bytes = uniforms.to_bytes();
         let at =
@@ -1156,6 +1185,7 @@ mod tests {
         }
         assert_eq!(at(128 + cascades), 20.0, "cascade_far");
         assert_eq!(at(144 + cascades), 30.0, "shadow_params");
+        assert_eq!(at(160 + cascades), 40.0, "lod_params");
     }
 
     /// The offsets `slangc` actually emitted for `GpuInstance`, read out of the

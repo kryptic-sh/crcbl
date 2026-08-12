@@ -39,13 +39,20 @@
 //! `the_cooked_dag_draws_a_crack_free_cut_from_every_camera` is it, run over the
 //! committed artifact.
 //!
-//! # This is the data, not the descent
+//! # This is the data and the rule, not the hysteresis
 //!
-//! Nothing in the engine selects on any of this yet. The amplification-stage
-//! descent, the hysteresis and the upload are the next slice; what is here is
-//! the DAG reaching a crate the renderer can see, and the metric its two
-//! per-group numbers exist to be fed to.
+//! [`ClusterDag::cut`](crate::cluster_dag::ClusterDag::cut) is that rule run
+//! over a whole DAG host-side, and
+//! [`ClusterDag::selection_records`](crate::cluster_dag::ClusterDag::selection_records)
+//! is the same two groups resolved per cluster
+//! for a GPU to run it one cluster at a time — see [`crate::cluster_select`],
+//! which is the record `mesh_cluster.slang`'s amplification stage reads. What is
+//! still absent is `docs/plan/25-lod.md`'s hysteresis, its shadow LOD bias and
+//! its bake cache; none of them exists anywhere yet.
 
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::cluster_select::{ClusterSelect, GroupCost};
 use crate::dunes;
 use crate::meshlet::{MESHLET_STRIDE, MeshClusters, Meshlet};
 
@@ -218,12 +225,285 @@ pub struct DagLevel {
     pub groups: Vec<ClusterGroup>,
 }
 
+impl DagLevel {
+    /// This level's triangles as a plain index list over its own
+    /// [`positions`](Self::positions), cluster by cluster.
+    ///
+    /// What a level costs to upload as ordinary geometry: [`positions`] and
+    /// [`clusters`] describe the surface for a mesh stage, and a vertex stage
+    /// pulling through an index buffer needs the same triangles spelled the
+    /// other way. Every geometry path draws a DAG level out of this — the mesh
+    /// path so its levels are resident in one vertex pool at all, and
+    /// `docs/plan/25-lod.md`'s uniform cut because a whole level *is* a chain
+    /// level.
+    ///
+    /// [`positions`]: Self::positions
+    /// [`clusters`]: Self::clusters
+    #[must_use]
+    pub fn indices(&self) -> Vec<u32> {
+        let mut indices = Vec::new();
+        for cluster in &self.clusters.clusters {
+            let run = &self.clusters.vertices[cluster.vertex_offset as usize..]
+                [..cluster.vertex_count as usize];
+            // A corner indexes its own cluster's run, not the array, which is
+            // the whole difference between a corner and an index.
+            for &corner in &self.clusters.corners[cluster.triangle_offset as usize..]
+                [..cluster.triangle_count as usize * 3]
+            {
+                indices.push(run[usize::from(corner)]);
+            }
+        }
+        indices
+    }
+}
+
 /// A mesh as a DAG of clusters: level 0 is the base, each level above it the
 /// simplified re-split of the one below.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClusterDag {
     /// The levels, finest first. Never empty.
     pub levels: Vec<DagLevel>,
+}
+
+/// Where one cluster of a cut is: which level, and which cluster of that level.
+///
+/// The two indices together, because neither names a cluster on its own — every
+/// level numbers its clusters from zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ClusterAt {
+    /// Index into [`ClusterDag::levels`].
+    pub level: usize,
+    /// Index into that level's [`clusters.clusters`](MeshClusters::clusters).
+    pub cluster: usize,
+}
+
+impl ClusterDag {
+    /// The clusters a camera at `eye` draws under a budget of `budget` pixels.
+    ///
+    /// **The selection rule, host-side**, and the oracle a GPU descent is held
+    /// to: `crcbl-vk`'s `the_gpu_descends_the_dag_to_the_cut_the_host_rule_says`
+    /// reads back what the amplification stage actually kept and compares it
+    /// against this, cluster for cluster.
+    ///
+    /// A cluster is drawn when the group that *produced* it is not expanded and
+    /// the group that *contains* it is, where a group is expanded exactly when
+    /// its [`projected_error`](ClusterGroup::projected_error) exceeds `budget` —
+    /// this module's docs carry the rule and why both halves name a group.
+    /// `eye` and the spheres are in one space, and `pixels_per_unit` is what
+    /// carries the viewport and the field of view into it.
+    ///
+    /// The result is ascending by level and then by cluster, so two cuts compare
+    /// without sorting.
+    #[must_use]
+    pub fn cut(&self, eye: [f32; 3], pixels_per_unit: f32, budget: f32) -> Vec<ClusterAt> {
+        self.descend(|group| group.projected_error(eye, pixels_per_unit) > budget)
+    }
+
+    /// The clusters an "is this group expanded?" answer draws.
+    ///
+    /// [`cut`](Self::cut) with the projection factored out, so a test can sweep
+    /// stored error directly instead of arranging a camera that produces each
+    /// threshold.
+    ///
+    /// A cluster no group contains defaults to **not** drawn, which is only
+    /// correct on the top level. That is deliberate: a level whose grouping
+    /// missed a cluster leaves a hole the cover check reports by name, where a
+    /// default of "drawn" would quietly produce an overlap instead.
+    /// [`selection_records`](Self::selection_records) refuses such a DAG rather
+    /// than encoding it, which is what keeps the two agreeing.
+    fn descend(&self, expanded: impl Fn(&ClusterGroup) -> bool) -> Vec<ClusterAt> {
+        let top = self.levels.len() - 1;
+        let mut drawn = Vec::new();
+        for (level, here) in self.levels.iter().enumerate() {
+            let count = here.clusters.clusters.len();
+            let mut container = vec![level == top; count];
+            for group in &here.groups {
+                let open = expanded(group);
+                for &child in &group.children {
+                    container[child as usize] = open;
+                }
+            }
+
+            let mut producer = vec![false; count];
+            if level > 0 {
+                for group in &self.levels[level - 1].groups {
+                    let open = expanded(group);
+                    for &parent in &group.parents {
+                        producer[parent as usize] = open;
+                    }
+                }
+            }
+
+            for cluster in 0..count {
+                if !producer[cluster] && container[cluster] {
+                    drawn.push(ClusterAt { level, cluster });
+                }
+            }
+        }
+        drawn
+    }
+
+    /// Whether `drawn` is a **crack-free cover of the surface**, and how many of
+    /// its edges have a different level on either side.
+    ///
+    /// The property the whole DAG exists for, and the one
+    /// `docs/plan/25-lod.md` calls "what its tests assert": a cut has to cover
+    /// the surface exactly once, with no hole where two levels meet. Public
+    /// because the host rule is no longer the only thing that produces a cut —
+    /// `crcbl-vk`'s `the_gpu_descends_the_dag_to_the_cut_the_host_rule_says`
+    /// runs this over what a GPU's amplification stage actually chose, at the
+    /// camera and budget the engine ships, rather than inferring the property
+    /// across two facts.
+    ///
+    /// # How one check does both halves
+    ///
+    /// Every edge of the drawn triangles, keyed by the **positions** of its
+    /// endpoints, must be used exactly twice — except the base mesh's own
+    /// border, used once. An edge used once anywhere else is a hole: two
+    /// clusters that should have met did not. An edge used three times or more
+    /// is an overlap. And the two sides of an interface edge only land on the
+    /// same key at all if the coarser level kept the finer level's vertices
+    /// exactly, so this tests the artifact and not only its index arithmetic.
+    ///
+    /// The returned count is the cut's **interface** edges: those with two
+    /// faces from two different levels. Zero from a cut that spans several
+    /// levels means the levels never meet, which is two meshes rather than one
+    /// cut, so a caller checking for a mixed cut checks this too.
+    ///
+    /// # Errors
+    ///
+    /// [`CutFault`] naming what is wrong and sampling a few of the edges that
+    /// are wrong that way.
+    ///
+    /// # Panics
+    ///
+    /// If a [`ClusterAt`] names a level or a cluster this DAG does not have.
+    /// That is a caller handing over indices from another mesh, not a property
+    /// of any cut.
+    pub fn check_cover(&self, drawn: &[ClusterAt]) -> Result<usize, CutFault> {
+        let border = base_border(&self.levels[0]);
+        let edges = cut_edges(self, drawn);
+        let single: BTreeSet<SharedEdge> = edges
+            .iter()
+            .filter(|&(_, levels)| levels.len() == 1)
+            .map(|(&edge, _)| edge)
+            .collect();
+
+        // **Overlap first, then holes.** A cut that draws a region twice makes
+        // its border edges two-faced as well, so testing coverage first would
+        // report an overlap as a missing border and name the wrong defect. The
+        // three are mutually exclusive on a sound cut, so the order only decides
+        // which one a broken cut is *called*.
+        let crowded = || {
+            edges
+                .iter()
+                .filter(|&(_, levels)| levels.len() > 2)
+                .map(|(&edge, _)| edge)
+        };
+        if crowded().next().is_some() {
+            return Err(CutFault {
+                what: "an edge has three faces on it, which is two clusters overlapping",
+                edges: crowded().count(),
+                sample: crowded().take(FAULT_SAMPLE).map(edge_positions).collect(),
+            });
+        }
+        let holes = || single.difference(&border).copied();
+        if holes().next().is_some() {
+            return Err(CutFault {
+                what: "an edge has one face where the mesh is closed, which is a hole",
+                edges: holes().count(),
+                sample: holes().take(FAULT_SAMPLE).map(edge_positions).collect(),
+            });
+        }
+        let missing = || border.difference(&single).copied();
+        if missing().next().is_some() {
+            return Err(CutFault {
+                what: "an edge of the mesh's own border has two faces or none, so the \
+                       cut does not cover the whole surface",
+                edges: missing().count(),
+                sample: missing().take(FAULT_SAMPLE).map(edge_positions).collect(),
+            });
+        }
+
+        Ok(edges
+            .values()
+            .filter(|levels| levels.len() == 2 && levels[0] != levels[1])
+            .count())
+    }
+
+    /// The DAG resolved into one [`ClusterSelect`] per cluster, level by level —
+    /// what a GPU reads to run [`cut`](Self::cut) with no communication.
+    ///
+    /// `level_vertex_bases[depth]` is where that level's vertices start relative
+    /// to the mesh the instance names, which is level 0's: a level is decimated
+    /// separately and its vertices belong to no vertex of the level below, so a
+    /// DAG is several vertex ranges and a cluster has to say which of them is
+    /// its own. See [`ClusterSelect::vertex_base`].
+    ///
+    /// # Panics
+    ///
+    /// If `level_vertex_bases` is not one entry per level, or if the DAG's
+    /// grouping does not cover it: every cluster below the top level must be in
+    /// exactly one group, and every cluster above level 0 must have been
+    /// produced by one. Those are what make the encoded rule the same rule
+    /// [`cut`](Self::cut) runs — an uncovered cluster is a hole this
+    /// encoding would silently *draw* — and a DAG that fails them is a bake
+    /// defect rather than a runtime condition.
+    #[must_use]
+    pub fn selection_records(&self, level_vertex_bases: &[u32]) -> Vec<Vec<ClusterSelect>> {
+        assert_eq!(
+            level_vertex_bases.len(),
+            self.levels.len(),
+            "a vertex base is needed for every level"
+        );
+        let top = self.levels.len() - 1;
+        let cost = |group: &ClusterGroup| GroupCost {
+            error: group.error,
+            bounds: group.bounds,
+        };
+
+        let mut out = Vec::with_capacity(self.levels.len());
+        for (depth, level) in self.levels.iter().enumerate() {
+            let mut records = vec![
+                ClusterSelect {
+                    vertex_base: level_vertex_bases[depth],
+                    ..ClusterSelect::ALWAYS
+                };
+                level.clusters.clusters.len()
+            ];
+            for group in &level.groups {
+                for &child in &group.children {
+                    let record = &mut records[child as usize];
+                    record.flags |= ClusterSelect::HAS_CONTAINER;
+                    record.container = cost(group);
+                }
+            }
+            if depth > 0 {
+                for group in &self.levels[depth - 1].groups {
+                    for &parent in &group.parents {
+                        let record = &mut records[parent as usize];
+                        record.flags |= ClusterSelect::HAS_PRODUCER;
+                        record.producer = cost(group);
+                    }
+                }
+            }
+
+            for (index, record) in records.iter().enumerate() {
+                assert!(
+                    depth == top || record.flags & ClusterSelect::HAS_CONTAINER != 0,
+                    "level {depth} cluster {index} is in no group, so the descent \
+                     would draw it beside the parents that cover it"
+                );
+                assert!(
+                    depth == 0 || record.flags & ClusterSelect::HAS_PRODUCER != 0,
+                    "level {depth} cluster {index} was produced by no group, so it \
+                     carries no error to be judged by"
+                );
+            }
+            out.push(records);
+        }
+        out
+    }
 }
 
 /// Why a committed DAG could not be decoded.
@@ -597,93 +877,121 @@ impl<'a> Reader<'a> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+/// An edge named by where its endpoints *are* rather than by which vertex they
+/// were, so it is the same edge on either side of a level change.
+///
+/// Two levels have unrelated vertex numbering and unrelated index buffers, so an
+/// index pair cannot say whether they meet. A bit pattern can, and exactly: a
+/// vertex the decimator never moved comes through the level change unchanged, so
+/// the coarser level's copy of a locked boundary vertex is bit-identical to the
+/// finer level's. Comparing bits rather than distances is what makes "they meet"
+/// mean *meet*, with no tolerance to tune.
+type SharedEdge = [[u32; 3]; 2];
 
-    use super::*;
-    use crate::meshlet::ClusterBounds;
+fn shared_edge(positions: &[[f32; 3]], a: u32, b: u32) -> SharedEdge {
+    let mut edge = [positions[a as usize], positions[b as usize]].map(|p| p.map(f32::to_bits));
+    edge.sort_unstable();
+    edge
+}
 
-    /// An edge named by where its endpoints *are* rather than by which vertex
-    /// they were, so it is the same edge on either side of a level change.
-    ///
-    /// Two levels have unrelated vertex numbering and unrelated index buffers,
-    /// so an index pair cannot say whether they meet. A bit pattern can, and
-    /// exactly: a vertex the decimator never moved comes through the level
-    /// change unchanged, so the coarser level's copy of a locked boundary vertex
-    /// is bit-identical to the finer level's. Comparing bits rather than
-    /// distances is what makes "they meet" mean *meet*, with no tolerance to
-    /// tune.
-    type SharedEdge = [[u32; 3]; 2];
+/// A [`SharedEdge`] back as the two positions it was keyed on, for a message a
+/// reader can locate on the mesh.
+fn edge_positions(edge: SharedEdge) -> [[f32; 3]; 2] {
+    edge.map(|point| point.map(f32::from_bits))
+}
 
-    fn shared_edge(positions: &[[f32; 3]], a: u32, b: u32) -> SharedEdge {
-        let mut edge = [positions[a as usize], positions[b as usize]].map(|p| p.map(f32::to_bits));
-        edge.sort_unstable();
-        edge
-    }
+/// One cluster's triangles, as indices into its level's positions.
+fn cluster_triangles(clusters: &MeshClusters, cluster: usize) -> Vec<[u32; 3]> {
+    let cluster = &clusters.clusters[cluster];
+    let run = &clusters.vertices[cluster.vertex_offset as usize..][..cluster.vertex_count as usize];
+    clusters.corners[cluster.triangle_offset as usize..][..cluster.triangle_count as usize * 3]
+        .chunks_exact(3)
+        .map(|face| [0, 1, 2].map(|corner| run[usize::from(face[corner])]))
+        .collect()
+}
 
-    /// One cluster's triangles, as indices into its level's positions.
-    fn cluster_triangles(clusters: &MeshClusters, cluster: usize) -> Vec<[u32; 3]> {
-        let cluster = &clusters.clusters[cluster];
-        let run =
-            &clusters.vertices[cluster.vertex_offset as usize..][..cluster.vertex_count as usize];
-        clusters.corners[cluster.triangle_offset as usize..][..cluster.triangle_count as usize * 3]
-            .chunks_exact(3)
-            .map(|face| [0, 1, 2].map(|corner| run[usize::from(face[corner])]))
-            .collect()
-    }
-
-    /// The clusters an "is this group expanded?" answer draws.
-    ///
-    /// `docs/plan/25-lod.md`'s descent, and the whole of it: a cluster is drawn
-    /// when the group that *produced* it is not expanded and the group that
-    /// *contains* it is. Both halves ask `expanded` about a **group**, which is
-    /// why one answer per group is all the rule needs and why every cluster a
-    /// group produced moves together.
-    ///
-    /// A cluster no group contains defaults to **not** drawn, which is only
-    /// correct on the top level. That is deliberate: a level whose grouping
-    /// missed a cluster leaves a hole the cover check reports by name, where a
-    /// default of "drawn" would quietly produce an overlap instead.
-    fn descend(dag: &ClusterDag, expanded: impl Fn(&ClusterGroup) -> bool) -> Vec<(usize, usize)> {
-        let top = dag.levels.len() - 1;
-        let mut drawn = Vec::new();
-        for (level, here) in dag.levels.iter().enumerate() {
-            let count = here.clusters.clusters.len();
-            let mut container = vec![level == top; count];
-            for group in &here.groups {
-                let open = expanded(group);
-                for &child in &group.children {
-                    container[child as usize] = open;
-                }
-            }
-
-            let mut producer = vec![false; count];
-            if level > 0 {
-                for group in &dag.levels[level - 1].groups {
-                    let open = expanded(group);
-                    for &parent in &group.parents {
-                        producer[parent as usize] = open;
-                    }
-                }
-            }
-
-            for cluster in 0..count {
-                if !producer[cluster] && container[cluster] {
-                    drawn.push((level, cluster));
-                }
+/// Every edge of a cut's triangles, by position, and the levels of the clusters
+/// that carry it.
+fn cut_edges(dag: &ClusterDag, drawn: &[ClusterAt]) -> BTreeMap<SharedEdge, Vec<usize>> {
+    let mut edges: BTreeMap<SharedEdge, Vec<usize>> = BTreeMap::new();
+    for &ClusterAt { level, cluster } in drawn {
+        let positions = &dag.levels[level].positions;
+        for face in cluster_triangles(&dag.levels[level].clusters, cluster) {
+            for corner in 0..3 {
+                let edge = shared_edge(positions, face[corner], face[(corner + 1) % 3]);
+                edges.entry(edge).or_default().push(level);
             }
         }
-        drawn
     }
+    edges
+}
 
-    /// The clusters a camera at `eye` draws — the rule an amplification stage
-    /// will run, evaluated host-side.
-    fn camera_cut(dag: &ClusterDag, eye: [f32; 3], budget: f32) -> Vec<(usize, usize)> {
-        descend(dag, |group| {
-            group.projected_error(eye, PIXELS_PER_UNIT) > budget
-        })
+/// The base mesh's own boundary loop, by position: the edges a cut is *supposed*
+/// to leave with one face. An open sheet has its outer ring here and a closed
+/// shape has nothing.
+///
+/// Taken off level 0 rather than from the caller's own arrays, because level 0
+/// *is* the base mesh — `every_level_decodes_to_triangles_over_its_own_positions`
+/// is what says so — and an edge count does not care that the clusters permuted
+/// the triangles.
+fn base_border(level: &DagLevel) -> BTreeSet<SharedEdge> {
+    let mut uses: BTreeMap<SharedEdge, usize> = BTreeMap::new();
+    for face in level.indices().chunks_exact(3) {
+        for corner in 0..3 {
+            *uses
+                .entry(shared_edge(
+                    &level.positions,
+                    face[corner],
+                    face[(corner + 1) % 3],
+                ))
+                .or_default() += 1;
+        }
     }
+    uses.into_iter()
+        .filter(|&(_, uses)| uses != 2)
+        .map(|(edge, _)| edge)
+        .collect()
+}
+
+/// Why a set of clusters is not a crack-free cover of the surface.
+///
+/// A hand-written `Display` rather than a `thiserror` derive, because this crate
+/// has no dependencies at all — the same decision [`DagDecodeError`] records.
+///
+/// `PartialEq` but not `Eq`: [`sample`](Self::sample) holds floats.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CutFault {
+    /// What is wrong with it, in one phrase.
+    pub what: &'static str,
+    /// How many of the cut's edges are wrong that way.
+    pub edges: usize,
+    /// A few of them, as the positions of their two endpoints.
+    ///
+    /// A sample rather than all of them: a patch's border is hundreds of edges
+    /// and printing every one buries the handful that actually differ.
+    pub sample: Vec<[[f32; 3]; 2]>,
+}
+
+impl std::fmt::Display for CutFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: {} edge(s), first {:?}",
+            self.what, self.edges, self.sample
+        )
+    }
+}
+
+impl std::error::Error for CutFault {}
+
+/// How many edges of a sound cut go unreported when [`ClusterDag::check_cover`]
+/// samples a fault.
+const FAULT_SAMPLE: usize = 3;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::meshlet::ClusterBounds;
 
     /// How many pixels one unit of length subtends one unit from the eye, for
     /// the frames this workspace's goldens are drawn at: a 192-pixel-high
@@ -711,87 +1019,6 @@ mod tests {
             .map(|pair| 0.5 * (pair[0] + pair[1]))
             .chain([last + 1.0])
             .collect()
-    }
-
-    /// Every edge of a cut's triangles, by position, and the levels of the
-    /// clusters that carry it.
-    fn cut_edges(dag: &ClusterDag, drawn: &[(usize, usize)]) -> BTreeMap<SharedEdge, Vec<usize>> {
-        let mut edges: BTreeMap<SharedEdge, Vec<usize>> = BTreeMap::new();
-        for &(level, cluster) in drawn {
-            let positions = &dag.levels[level].positions;
-            for face in cluster_triangles(&dag.levels[level].clusters, cluster) {
-                for corner in 0..3 {
-                    let edge = shared_edge(positions, face[corner], face[(corner + 1) % 3]);
-                    edges.entry(edge).or_default().push(level);
-                }
-            }
-        }
-        edges
-    }
-
-    /// The base mesh's own boundary loop, by position: the edges a cut is
-    /// *supposed* to leave with one face. The dunes patch is an open sheet, so
-    /// this is its outer ring.
-    fn base_border(positions: &[[f32; 3]], indices: &[u32]) -> BTreeSet<SharedEdge> {
-        let mut uses: BTreeMap<SharedEdge, usize> = BTreeMap::new();
-        for face in indices.chunks_exact(3) {
-            for corner in 0..3 {
-                *uses
-                    .entry(shared_edge(positions, face[corner], face[(corner + 1) % 3]))
-                    .or_default() += 1;
-            }
-        }
-        uses.into_iter()
-            .filter(|&(_, uses)| uses != 2)
-            .map(|(edge, _)| edge)
-            .collect()
-    }
-
-    /// Asserts a cut is a crack-free cover of the surface, and returns how many
-    /// of its edges have a different level on either side.
-    ///
-    /// One check does both halves, and it is the strongest form of either.
-    /// Every edge of the drawn triangles, keyed by the *positions* of its
-    /// endpoints, must be used exactly twice — except the base mesh's own
-    /// border, used once. An edge used once anywhere else is a hole: two
-    /// clusters that should have met did not. An edge used three times or more
-    /// is an overlap. And the two sides of an interface edge only land on the
-    /// same key at all if the coarser level kept the finer level's vertices
-    /// exactly, which is what makes this a test of the artifact and not only of
-    /// its index arithmetic.
-    fn assert_cut_is_a_crack_free_cover(
-        dag: &ClusterDag,
-        drawn: &[(usize, usize)],
-        border: &BTreeSet<SharedEdge>,
-    ) -> usize {
-        let edges = cut_edges(dag, drawn);
-        let single: BTreeSet<SharedEdge> = edges
-            .iter()
-            .filter(|&(_, levels)| levels.len() == 1)
-            .map(|(&edge, _)| edge)
-            .collect();
-        // Reported as a count and a sample rather than as two sets: the border
-        // of this patch is hundreds of edges and printing both sides of the
-        // comparison buries the handful that actually differ.
-        let holes: Vec<&SharedEdge> = single.difference(border).take(3).collect();
-        let missing: Vec<&SharedEdge> = border.difference(&single).take(3).collect();
-        assert!(
-            holes.is_empty() && missing.is_empty(),
-            "the cut's one-sided edges are not the base mesh's border, so it has a hole \
-             or does not cover the whole surface: {} edges have one face where the mesh \
-             is closed (first {holes:?}) and {} of the mesh's border edges have two or \
-             none (first {missing:?})",
-            single.difference(border).count(),
-            border.difference(&single).count()
-        );
-        assert!(
-            edges.values().all(|levels| levels.len() <= 2),
-            "an edge with three faces on it is two clusters overlapping"
-        );
-        edges
-            .values()
-            .filter(|levels| levels.len() == 2 && levels[0] != levels[1])
-            .count()
     }
 
     /// The committed artifact is exactly what this codec writes: decoding it and
@@ -995,7 +1222,6 @@ mod tests {
     #[test]
     fn every_error_budget_draws_a_crack_free_cut() {
         let dag = dunes_dag();
-        let border = base_border(&dunes::positions(), &dunes::indices());
         let thresholds = every_threshold(&dag);
         assert!(
             thresholds.len() > 3,
@@ -1004,9 +1230,11 @@ mod tests {
 
         let mut mixed = 0usize;
         for threshold in &thresholds {
-            let drawn = descend(&dag, |group| *threshold < group.error);
-            let interfaces = assert_cut_is_a_crack_free_cover(&dag, &drawn, &border);
-            let levels: BTreeSet<usize> = drawn.iter().map(|&(level, _)| level).collect();
+            let drawn = dag.descend(|group| *threshold < group.error);
+            let interfaces = dag
+                .check_cover(&drawn)
+                .unwrap_or_else(|fault| panic!("a budget of {threshold} draws a cut with {fault}"));
+            let levels: BTreeSet<usize> = drawn.iter().map(|at| at.level).collect();
             if levels.len() > 1 {
                 mixed += 1;
                 assert!(
@@ -1033,14 +1261,15 @@ mod tests {
     #[test]
     fn the_cooked_dag_draws_a_crack_free_cut_from_every_camera() {
         let dag = dunes_dag();
-        let border = base_border(&dunes::positions(), &dunes::indices());
 
         let (mut mixed, mut cuts) = (0usize, 0usize);
         for eye in EYES {
             for budget in BUDGETS {
-                let drawn = camera_cut(&dag, eye, budget);
-                let interfaces = assert_cut_is_a_crack_free_cover(&dag, &drawn, &border);
-                let levels: BTreeSet<usize> = drawn.iter().map(|&(level, _)| level).collect();
+                let drawn = dag.cut(eye, PIXELS_PER_UNIT, budget);
+                let interfaces = dag.check_cover(&drawn).unwrap_or_else(|fault| {
+                    panic!("an eye at {eye:?} under {budget} draws a cut with {fault}")
+                });
+                let levels: BTreeSet<usize> = drawn.iter().map(|at| at.level).collect();
                 if levels.len() > 1 {
                     mixed += 1;
                     assert!(
@@ -1080,11 +1309,11 @@ mod tests {
     fn a_receding_patch_draws_its_near_end_finer_than_its_far_end() {
         let dag = dunes_dag();
         let eye = EYES[0];
-        let drawn = camera_cut(&dag, eye, MIXING_BUDGET);
+        let drawn = dag.cut(eye, PIXELS_PER_UNIT, MIXING_BUDGET);
 
         let mut near: BTreeMap<usize, usize> = BTreeMap::new();
         let mut far: BTreeMap<usize, usize> = BTreeMap::new();
-        for &(level, cluster) in &drawn {
+        for &ClusterAt { level, cluster } in &drawn {
             let depth = dag.levels[level].clusters.clusters[cluster].bounds.center[2];
             if depth < NEAR_THIRD {
                 *near.entry(level).or_default() += 1;
@@ -1108,12 +1337,140 @@ mod tests {
         );
 
         // And the two ends are one cut of one mesh, not two pictures.
-        let border = base_border(&dunes::positions(), &dunes::indices());
-        let interfaces = assert_cut_is_a_crack_free_cover(&dag, &drawn, &border);
+        let interfaces = dag
+            .check_cover(&drawn)
+            .unwrap_or_else(|fault| panic!("the mixing budget draws a cut with {fault}"));
         assert!(
             interfaces > 20,
             "only {interfaces} edges have one level on one side and another on the other, \
              which is too few to be the seam between the two ends"
+        );
+    }
+
+    /// **The per-cluster encoding is the same rule as the descent**, over every
+    /// camera and budget the sweep visits.
+    ///
+    /// [`ClusterDag::descend`] walks the DAG level by level with both groups in
+    /// hand; [`ClusterSelect::is_drawn`] answers for one cluster with nothing
+    /// but that cluster's own 48 bytes, which is what a task group has. They are
+    /// the same statement only while the resolution in
+    /// [`ClusterDag::selection_records`] put the right group in each half, and
+    /// the failure that would produce — a container copied where a producer
+    /// belongs — inverts the descent rather than crashing.
+    #[test]
+    fn the_per_cluster_records_draw_the_cut_the_descent_does() {
+        let dag = dunes_dag();
+        let bases: Vec<u32> = (0..dag.levels.len() as u32).collect();
+        let records = dag.selection_records(&bases);
+        assert_eq!(records.len(), dag.levels.len());
+        for (depth, level) in dag.levels.iter().enumerate() {
+            assert_eq!(records[depth].len(), level.clusters.clusters.len());
+            assert!(
+                records[depth]
+                    .iter()
+                    .all(|record| record.vertex_base == bases[depth]),
+                "level {depth}'s records did not take the base they were given"
+            );
+        }
+
+        let mut compared = 0usize;
+        for eye in EYES {
+            for budget in BUDGETS {
+                let expected = dag.cut(eye, PIXELS_PER_UNIT, budget);
+                let mut drawn = Vec::new();
+                for (level, here) in records.iter().enumerate() {
+                    for (cluster, record) in here.iter().enumerate() {
+                        if record.is_drawn(eye, PIXELS_PER_UNIT, budget) {
+                            drawn.push(ClusterAt { level, cluster });
+                        }
+                    }
+                }
+                assert_eq!(
+                    drawn, expected,
+                    "the per-cluster records draw a different cut from {eye:?} \
+                     under {budget}"
+                );
+                assert!(!drawn.is_empty(), "an empty cut compares equal to nothing");
+                compared += 1;
+            }
+        }
+        assert_eq!(compared, EYES.len() * BUDGETS.len());
+    }
+
+    /// **The cover check refuses a torn cut**, on each of the two ways a cut
+    /// tears — because a checker that passes whatever it is handed is worse
+    /// than no checker at all, and every cut this module produces is sound by
+    /// construction, so nothing else here would ever make it fire.
+    ///
+    /// Both tears start from a real cut rather than from a fixture: drop one of
+    /// its clusters and the surface has a hole where that cluster was; draw
+    /// every cluster twice and every interior edge has four faces on it.
+    #[test]
+    fn the_cover_check_refuses_a_torn_cut() {
+        let dag = dunes_dag();
+        let sound = dag.cut(EYES[0], PIXELS_PER_UNIT, MIXING_BUDGET);
+        let interfaces = dag.check_cover(&sound).expect("the real cut is sound");
+        assert!(
+            interfaces > 0,
+            "a mixed cut whose levels never meet would make the tears below \
+             untestable"
+        );
+
+        let mut holed = sound.clone();
+        let dropped = holed.remove(sound.len() / 2);
+        let fault = dag
+            .check_cover(&holed)
+            .expect_err("a cut missing {dropped:?} covers the surface with a hole in it");
+        assert!(
+            fault.what.contains("hole"),
+            "dropping {dropped:?} was reported as {fault}"
+        );
+        assert!(
+            !fault.sample.is_empty(),
+            "a fault has to say where: {fault}"
+        );
+        assert_eq!(
+            fault.edges,
+            fault.edges.max(fault.sample.len()),
+            "the sample cannot be longer than the count it samples"
+        );
+
+        let doubled: Vec<ClusterAt> = sound.iter().chain(&sound).copied().collect();
+        let fault = dag
+            .check_cover(&doubled)
+            .expect_err("a cut drawn twice covers the surface twice");
+        assert!(
+            fault.what.contains("overlapping"),
+            "drawing the cut twice was reported as {fault}"
+        );
+
+        // And the sound cut still passes, so the two above are about the tears
+        // rather than about a checker that refuses everything.
+        assert_eq!(dag.check_cover(&sound), Ok(interfaces));
+    }
+
+    /// A DAG whose grouping leaves a cluster uncovered is **refused** rather
+    /// than encoded, because the encoding has no way to say "not drawn" and
+    /// would draw that cluster beside the parents covering it.
+    ///
+    /// The one place [`ClusterDag::descend`]'s default and
+    /// [`ClusterSelect`]'s flags could disagree, closed by the assertion rather
+    /// than by a comment saying it cannot happen.
+    #[test]
+    fn a_grouping_that_misses_a_cluster_is_refused() {
+        let mut dag = dunes_dag();
+        // Drop one child from one group of level 0, which leaves that cluster
+        // in no group at all while every other level stays well formed.
+        let orphan = dag.levels[0].groups[0].children.pop().expect("a child");
+        let bases = vec![0u32; dag.levels.len()];
+        let refusal = std::panic::catch_unwind(|| dag.selection_records(&bases))
+            .expect_err("an uncovered cluster has to be refused");
+        let message = refusal
+            .downcast_ref::<String>()
+            .map_or_else(String::new, Clone::clone);
+        assert!(
+            message.contains(&format!("level 0 cluster {orphan} is in no group")),
+            "the refusal must name the cluster, and said {message:?}"
         );
     }
 

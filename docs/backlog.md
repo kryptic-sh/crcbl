@@ -5789,79 +5789,51 @@ a wasm regression in this code would not be observed by anything. The refusals
 that do not need an array layout — the flags gate, `count: 0`, the in-band
 layout error — run on every adapter, so that half is not skip-shaped.
 
-## Settled: the DAG, and what it left for the GPU slice
+## What topic 25 still owes, now that the GPU selects
 
-The chain-versus-DAG question is decided — the user chose the DAG on 2026-08-12,
-`docs/plan/25-lod.md` and `03-gpu-driven-rendering.md` §3.5 now specify it, and
-`crcbl_scene::cluster_dag` implements the host side. What is left:
+Per-cluster selection works on the `MeshShader` path and is verified by
+readback. What is left:
 
-- **Nothing calls it.** Selection is the GPU slice: projecting a group's error
-  to screen space against a pixel budget, the amplification-stage descent, the
-  uniform-cut restriction for `IndirectCount`/`IndirectPerBatch`, hysteresis,
-  shadow bias, pool upload of the clusters plus errors plus group links, and the
-  bake cache.
-- **A per-cluster distance term breaks monotonicity.** The host-side `cut` uses
-  one global threshold and is valid _because_ it is global. On the GPU both
-  sides of a decision must be evaluated against the **same** bounding sphere —
-  the group's — or cracks come back. This is the trap in the next slice.
-- **Corrected: compact clusters are not what makes group errors vary by region,
-  and this entry previously said they were.** The pre-sort landed and the
-  level-1 group-error spread **narrowed** — 0.79–0.96 before, 0.63–0.68 after.
-  The cause is not clustering at all: `simplify_with_locked_edges` orders
-  collapses by cost across the whole level and stops at a **triangle count**, so
-  the error frontier is uniform by construction and every group's max lands near
-  the same value whatever shape its clusters are. Checked against the hypothesis
-  directly, on a fixture whose dune amplitude ramps across the mesh: the spread
-  came out narrower still. An error-**targeted** decimator is what would vary
-  it.
-
-  **But that matters less than it looks**, and the reason is worth stating
-  before someone builds error targeting to fix a non-problem: runtime selection
-  projects a group's error by **distance**, so on a large mesh receding from the
-  camera the near and far groups take different cut depths from the _same_
-  stored error. The host-side `cut` used in the DAG's tests has no distance term
-  — it is one global threshold, which is exactly why it looks flat. Error
-  targeting is a quality refinement (levels evenly spaced in error), not a
-  prerequisite for per-cluster selection to pay off.
-
-- **The pre-sort did fix something real, just not that.** Growing clusters
-  across shared edges took the dune fixture's mean cluster sphere from **16.04
-  to 6.90** on a mesh 32 units across, 21 of 23 clusters under radius 8 where 0
-  of 34 were before, and removed a stall: DAG levels went
-  `2048 → 1024 → 512 → 272 → 206 → 128` (two steps nowhere near halving, a group
-  where every edge was locked carrying its children's error up unchanged) to a
-  clean `2048 → 1024 → 512 → 256 → 128`.
-
-- **2 of 23 dune clusters are still interstitial scraps** spanning the mesh
-  (radii 11.1 and 14.7). Discs grown one at a time do not tile a plane; removing
-  them needs a partitioner that grows every cluster at once — METIS-class, or
-  Lloyd relaxation over seeds. Pinned by the `compact == 21` assertion so it
-  cannot silently worsen.
-
-- **Cluster adjacency is by shared index, not welded position.** A mesh split by
-  UV seams or hard normals is many components; growth cannot cross a seam, so
-  locality on seam-heavy real assets is worse than on these fixtures. Position
-  welding would fix it and **would** reorder the cooked cluster constants and
-  move the rendered frame.
-
-- **`group_clusters` optimises nothing globally.** It is a greedy
-  most-shared-edges walk where a METIS-class partitioner would minimise the edge
-  cut, so group boundaries are longer than they need to be — and a group
-  boundary is exactly what cannot be simplified at that level.
-- **`build_meshlets` will put two disconnected components in one cluster.**
-  Found while building the adjacency fixture. Harmless for the DAG's
-  correctness; another consequence of the missing pre-sort.
-- **`build_lod_chain` is untouched and now redundant in principle** — a uniform
-  cut through the DAG _is_ a chain level — but nothing has been moved onto the
-  DAG, so both exist. Collapsing them is for the slice that wires selection.
-- **Determinism is verified same-process only, and that is weaker than it
-  looks.** Swapping a `BTreeMap` for a `HashMap` in the grouping produced **no
-  test failure**: within one process the hash seed is fixed, so both builds in
-  the determinism test agree. Every ordered container on the path is a
-  `BTreeMap` or `BTreeSet` and the code is correct, but nothing in this crate
-  would catch a hash-order dependency. The same limitation applies to
-  `the_same_mesh_simplified_twice_is_identical` and the chain's equivalent. A
-  golden content hash in the topic 12 bake-cache slice is what would close it.
+- **The uniform cut for `IndirectCount` / `IndirectPerBatch` is not built.**
+  `DagLevel::indices` and per-level residency are in place; what is missing is
+  per-`(mesh, level)` bucket entries in `draw_gen` and the instance-level choice
+  of depth. Until then the fallback paths cannot draw a DAG mesh at all.
+- **Every `ForwardRenderer` uploads the dunes DAG whether or not `set_dunes` is
+  called** — seven meshes, 254 clusters, 16 664 triangles across the levels. A
+  build-time cost, not per-frame, but every app pays it for geometry most never
+  draw. Making it opt-in needs a second constructor, because the apps calling
+  `new` were off the implementing slice's paths.
+- **The shadow cascades select too, from the light's position**, because they
+  share the frame block. That is the same rule rather than the shadow LOD _bias_
+  topic 18 describes, and it was not designed — it fell out. Worth deciding
+  whether it is wanted before it is relied on. They also write the selection
+  buffer; the colour pass is recorded last, which is why the read-back cut is
+  the camera's.
+- **`FrameUniforms` grew `lod_params: float4`** (288 → 304 bytes), which is why
+  `mesh.slang` and all four of its artifacts moved. Per-bucket
+  `ClusterDrawConstants` was the alternative and is wrong: it is written once at
+  build and shared across frames in flight.
+- **`projected_error` now has three implementations** — `crcbl_scene`,
+  `crcbl_shaders`, and the shader. The first two are compared for bit equality
+  by the cooker; the third is held to the rule by comparing the _decision_ over
+  the whole DAG rather than the number. That is the right shape, but it means a
+  fourth would need its own tie.
+- **Hysteresis is not built**, so a camera drifting across a threshold will
+  switch level every frame at the boundary. Topic 25 names it as what kills that
+  flicker.
+- **Group radii compound faster than a model grows.** At side 64 the level-2
+  groups already reach a 49-unit radius against a 45-unit half-diagonal, so
+  levels 2–6 have little spatial discrimination between them and the near/far
+  split happens between levels 0–2. A tighter enclosing sphere — Ritter's or
+  Welzl's, which `enclosing` explicitly declines — is the lever, not a bigger
+  model.
+- **The DAG's top three levels all report the same error (83.508)**: decimation
+  stalls against locked boundaries and carries its children's error up
+  unchanged, so levels 4–6 are never separately selected by a budget.
+- **The cooked artifact has only been generated on x86-64 Linux.**
+  Byte-reproducibility elsewhere follows from the arithmetic being IEEE-pinned
+  with no libm calls, but no CI leg regenerates it on macOS or Windows —
+  matching how `compile-shaders.sh --check` is arranged.
 
 ## What `crcbl_scene::simplify` owes, and one workspace-wide trap it found
 

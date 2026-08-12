@@ -192,6 +192,10 @@ pub mod dunes;
 /// in. `crcbl_scene::cluster_dag` is what builds them.
 pub mod cluster_dag;
 
+/// The per-cluster record `mesh_cluster.slang`'s amplification stage descends
+/// [`cluster_dag`]'s DAG with, in the layout that shader declares.
+pub mod cluster_select;
+
 /// The geometry `triangle.slang` pulls, in the layout that shader declares.
 pub mod triangle;
 

@@ -156,6 +156,52 @@ impl Projection {
     pub const fn is_orthographic(self) -> bool {
         matches!(self, Self::Orthographic { .. })
     }
+
+    /// How many pixels one unit of length subtends one unit from the eye, in a
+    /// viewport `height` pixels tall.
+    ///
+    /// `docs/plan/25-lod.md`'s scale factor: the number that carries a frame's
+    /// size and field of view into a screen-space error, so a level's stored
+    /// error in world units becomes the pixels its simplification would cost.
+    /// [`ClusterSelect::is_drawn`] divides it by the distance to the group's
+    /// sphere, which is where the perspective falloff comes from.
+    ///
+    /// **An orthographic projection has no falloff at all**, so for that variant
+    /// this is the whole scale factor and dividing it by a distance is wrong.
+    /// The value returned is still the right one — half the viewport over half
+    /// the visible height — and [`ForwardRenderer`] is what deals with the rest:
+    /// it pairs an orthographic camera with a budget nothing satisfies, so the
+    /// descent expands every group and draws the base level. That is the honest
+    /// answer for a 2D mode rather than a distance term invented for it.
+    ///
+    /// # Panics
+    ///
+    /// On the same arguments [`matrix`](Self::matrix) refuses: a field of view
+    /// outside `(0, π)` or a non-positive half-height. `height` is not checked —
+    /// a zero-height viewport gives zero pixels per unit, which is a budget
+    /// nothing exceeds and a frame with no pixels in it.
+    ///
+    /// [`ClusterSelect::is_drawn`]: crcbl_shaders::cluster_select::ClusterSelect::is_drawn
+    /// [`ForwardRenderer`]: crate::forward::ForwardRenderer
+    #[must_use]
+    pub fn pixels_per_unit(self, height: f32) -> f32 {
+        match self {
+            Self::Perspective { fov_y, .. } => {
+                assert!(
+                    fov_y > 0.0 && fov_y < core::f32::consts::PI,
+                    "the field of view must be in (0, π), got {fov_y}"
+                );
+                0.5 * height / (0.5 * fov_y).tan()
+            }
+            Self::Orthographic { half_height, .. } => {
+                assert!(
+                    half_height > 0.0,
+                    "the orthographic half-height must be positive, got {half_height}"
+                );
+                0.5 * height / half_height
+            }
+        }
+    }
 }
 
 /// A camera: where it is, what it looks at, and how it projects.
