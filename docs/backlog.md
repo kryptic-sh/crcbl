@@ -5912,12 +5912,20 @@ harness has a precedent for a demo whose input is not a keypress.
 The list, the froxel grid and the sun-as-a-row landed; the decision below it is
 recorded in `docs/plan/18-render-features.md`. What is left:
 
-- **Spot lights have no rendered-pixel coverage.** The row conversion is
-  unit-tested including the angles-reversed clamp, and `spot_cone` compiles on
-  all four targets, but nothing draws one. A real gap, not a stub.
-- **A spot is bounded by its sphere, not its cone**, so a narrow spot is listed
-  in far more froxels than it lights. Correct but wasteful; a cone test is the
-  refinement.
+- **Both closed**: `Scene::Spot` draws a cone and asserts its shape by pixels,
+  and the froxel bound is a cone as well as a sphere (144 froxels to 91 on a
+  narrow spot, every golden unmoved).
+- **`Light::sphere()` in `crcbl-render/src/light.rs` has no callers.** Its doc
+  says it is "the clustering pass's test, on the host", but the assignment
+  happens entirely in `light_cluster.slang` and nothing on the host bounds a
+  light. Dead public API that reads as load-bearing — delete it or give it a
+  caller.
+- **The CLI's `--scene` knows only `cube`, `sprite` and `ui`**, so `Dunes`,
+  `Lights` and `Spot` are reachable only from the test suite, and
+  `run-cross-backend-e2e.sh` therefore does not cover them.
+- **`spot_cone` is a linear ramp in cosine space, not a smoothstep** — worth
+  knowing before someone "fixes" the falloff to match a description that was
+  never in the code.
 - **No shadows for the new types**, no atlas allocation, and no rule for which
   lights get maps. Those are the next slices and topic 18 says each wants the
   list to exist first — which it now does.

@@ -62,15 +62,15 @@ entry-points = computeMain:glcompute
 
 [light_cluster]
 source = shaders/light_cluster.slang
-source-sha256 = 260918f10be268d4621ecc40de948db24071df8f26449cb8107011deef3895f2
+source-sha256 = 035028e57ffc4c524c9a94f926818a331aedfd047b99089a5ff28d41781dbdc2
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/light_cluster.spv
-spirv-sha256 = 4506d3901fedef14ea573b5ffed9f591f81f2af008e1e48bceb4108f44fdfdc5
+spirv-sha256 = 9e8ed479e7105ae13f184b8bfe8447372abfbd3a3df4f220d1f81a0410746f0a
 wgsl = wgsl/light_cluster.wgsl
-wgsl-sha256 = d2ad89b23fee6be60e4f1a13c134b82a78b5c826f8f55e4c673c3253ff4e4b26
+wgsl-sha256 = b0afe9f85ae55068522ddde31124e59a26a4842687b3ffca1853859a40a21e9e
 msl = msl/light_cluster.metal
-msl-sha256 = e0e3f581c9ac0b32e5342014856e0e8d69331f332cc2144293782a721fd0e07a
-dxil = computeMain:dxil/light_cluster.computeMain.dxil:3cecaf37ae0daf74a5bbc90b34524a5ae0043f34b455ca39178ee9fa92baa29a
+msl-sha256 = bdedcb835722d01e05c9a85ad67c981c250b8c33daaf5942c4ca54c1d305a6a5
+dxil = computeMain:dxil/light_cluster.computeMain.dxil:06b2b68f683e6f02ea4a25a180bafece4f45eaf794c279cfa94039e5f56423cc
 entry-points = computeMain:glcompute
 
 [mesh]

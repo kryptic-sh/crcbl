@@ -328,6 +328,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Spot lights are drawn and their cone is asserted by pixels.** `Scene::Spot`
+  is a floor lit from directly overhead, so cone axis, surface normal and view
+  direction are all one axis and brightness is a function of distance from the
+  frame's centre alone. Four luminance profiles out from the centre assert a lit
+  floor, a core at least three times brighter, the axis as the maximum, and **at
+  least twelve samples strictly inside the penumbra band** — the check that
+  separates a ramp from a boolean.
+
+  That last one earns its place: swapping the inner and outer angles produces a
+  frame with the **same 697 at the axis and the same 106 at the edge** as a
+  correct one, and every other assertion passes on it. Only the penumbra count
+  moves, to zero.
+
+  The froxel bound for a spot is a cone as well as a sphere now, each rejection
+  slackened by the froxel's own bounding radius so it can only ever add froxels.
+  One narrow spot goes from **144 froxels to 91**, a 37 % drop, with every
+  golden bit-identical on radv, lavapipe and wgpu. Dropping the slack makes it
+  too tight, and the spot scene catches that as a tile-shaped bite out of the
+  pool — which is exactly the seam a too-tight cull produces and the reason the
+  scene exists.
+
 - **Many lights, gathered by a clustered-forward pass.** `crcbl_render::Light`
   with `PointLight` and `SpotLight`, an SSBO of rows the way instances and
   materials already are, and `light_cluster.slang` assigning them to a froxel

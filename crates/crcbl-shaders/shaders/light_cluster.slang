@@ -43,10 +43,14 @@
 //   real rather than a fade cut short: the falloff `mesh.slang` applies reaches
 //   exactly zero at that radius. A sphere-versus-box test is therefore a test of
 //   the whole of the light.
-// * A spot is bounded by its **sphere**, not its cone. Loose — a narrow spot is
-//   listed in froxels behind it — and loose in the safe direction, which is the
-//   only direction that matters here. A cone test is a refinement for the day a
-//   scene's spots cost something measurable.
+// * A spot is bounded by its cone **as well as** its sphere, and has to pass
+//   both. The sphere alone lists a narrow spot in every froxel behind it and
+//   beside it; the cone is tested against the *bounding sphere of the froxel's
+//   box*, which contains the box, so it too can only add froxels. See
+//   `cone_touches_sphere`, which is where the three rejections are argued one at
+//   a time — a cone test that is slightly too tight leaves a froxel that should
+//   list the light without it, and that draws a hard seam across a lit surface
+//   which reads as a shading bug rather than a culling one.
 // * The last slice's far side is unbounded (`FLT_MAX`), so a light past
 //   `CLUSTER_FAR` is still assigned to the froxels a fragment out there reads.
 //   The grid's range is where the *resolution* stops, not where the lighting
@@ -199,6 +203,45 @@ float3 unproject(float2 ndc, float depth)
     return world.xyz / world.w;
 }
 
+/// Whether a spot's cone reaches a sphere — the test that stops a narrow spot
+/// being listed in every froxel its *radius* covers.
+///
+/// **Conservative, and it has to be shown to be.** The three rejections are the
+/// three ways a sphere can miss a cone, and each is written with the sphere's
+/// own radius as slack, so a sphere that genuinely touches the cone passes all
+/// three:
+///
+/// * behind the apex, further back than the sphere reaches;
+/// * past the end of the cone's range, likewise;
+/// * outside the cone's opening. In the half-plane spanned by the axis and the
+///   sphere's centre, the cone's edge is the line through the apex at the outer
+///   half-angle, and `cos_outer * perpendicular - along * sin_outer` is the
+///   distance from the centre to it, signed positive on the outside. A sphere
+///   holding any point of the cone holds a point at distance zero or less, and
+///   its centre is then within `radius` of the line.
+///
+/// The caller passes the **bounding sphere of the froxel's box**, which contains
+/// the box, so a cone touching the box touches the sphere. That keeps the whole
+/// statement conservative rather than only this half of it. A cone test that is
+/// even slightly too tight leaves froxels that should list the light and do not,
+/// which draws a hard seam across a lit surface and reads as a shading bug.
+bool cone_touches_sphere(
+    float3 apex, float3 axis, float cos_outer, float range, float3 center, float radius)
+{
+    float3 offset = center - apex;
+    float along = dot(offset, axis);
+    if (along < -radius || along > range + radius)
+    {
+        return false;
+    }
+    // `saturate` before the root: the cosine arrives from a host that took it of
+    // an angle, and a value a hair over one would otherwise be a `sqrt` of a
+    // negative and a `NaN` that compares false against everything.
+    float sin_outer = sqrt(saturate(1.0 - cos_outer * cos_outer));
+    float perpendicular = sqrt(max(dot(offset, offset) - along * along, 0.0));
+    return cos_outer * perpendicular - along * sin_outer <= radius;
+}
+
 /// The view depth slice `index` starts at.
 ///
 /// `CLUSTER_DEPTH_SLICES` rather than `params.slices`, so this is literally the
@@ -348,6 +391,18 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
             float3 closest = clamp(center, box_lo, box_hi);
             float3 offset = center - closest;
             touches = dot(offset, offset) <= radius * radius;
+
+            // And, for a spot, its cone against the box's own bounding sphere.
+            // **Both rather than either**: each of the two is conservative on
+            // its own, so a light has to fail one of them to be rejected and
+            // neither can reject a froxel the other would have kept.
+            if (touches && light.kind == KIND_SPOT)
+            {
+                float3 box_center = (box_lo + box_hi) * 0.5;
+                float box_radius = length(box_hi - box_lo) * 0.5;
+                touches = cone_touches_sphere(
+                    center, light.direction.xyz, light.direction.w, radius, box_center, box_radius);
+            }
         }
 
         if (!touches)

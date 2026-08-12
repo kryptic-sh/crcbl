@@ -11,9 +11,12 @@
 //!   clusters and contributes nothing is the failure mode of every step in this
 //!   slice at once, and only pixels can see it.
 
-use crcbl_hal::Features;
-use crcbl_render::{Light, PointLight};
-use crcbl_shaders::light::{CLUSTER_LIGHT_CAPACITY, CLUSTER_OVERFLOW_WORD};
+use crcbl_hal::{
+    Barriers, BufferDesc, BufferUsage, CommandEncoderDesc, Features, MemoryLocation, ResourceState,
+    SubmitInfo,
+};
+use crcbl_render::{Light, PointLight, SpotLight};
+use crcbl_shaders::light::{CLUSTER_LIGHT_CAPACITY, CLUSTER_OVERFLOW_WORD, CLUSTER_STRIDE};
 use glam::Vec3;
 
 use crate::harness::Headless;
@@ -124,6 +127,200 @@ fn a_froxel_that_runs_out_of_budget_counts_what_it_refused() {
     eprintln!(
         "vk e2e: lights — {lights} lights over {} froxels refused {overflowed} assignment(s)",
         grid.froxels()
+    );
+
+    renderer.destroy(device);
+    pool.destroy(device);
+    headless.finish();
+}
+
+/// The half-angles of [`the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere`]'s
+/// spot, in radians.
+///
+/// Narrow, because that is the case the cone bound is *for*: a spot whose cone
+/// opens as wide as its sphere reaches is one the two bounds agree about, and
+/// the comparison below would be a tautology. At [`LIGHT_AT`]'s distance from
+/// the cube this outer angle still covers it, which is what makes the picture
+/// half of the claim available at all.
+///
+/// [`the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere`]: fn@the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere
+const SPOT_INNER: f32 = 0.10;
+const SPOT_OUTER: f32 = 0.22;
+
+/// How many light-to-froxel assignments the clustering pass made in the frame
+/// just drawn.
+///
+/// The sum of every froxel's count word, out of the grid the pass wrote — the
+/// **whole** grid rather than a sample of it, because the number this produces
+/// is a total and a total over some froxels is a different total.
+///
+/// The copy is its own submission after the frame's, on `read_stats_word`'s
+/// terms exactly: the graph leaves the grid in [`ResourceState::ShaderRead`],
+/// which is where the next frame on that slot expects it, so this moves it out
+/// and puts it straight back.
+fn assignments(headless: &Headless, renderer: &crcbl_render::ForwardRenderer) -> u32 {
+    let device = headless.device.as_ref();
+    let grid = renderer.light_grid_buffer(renderer.frame());
+    let words = renderer.grid().froxels() * CLUSTER_STRIDE;
+    let size = u64::from(words) * 4;
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("froxel grid readback"),
+            size,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("froxel grid copy"),
+        queue: headless.queue,
+    });
+    let barrier = |from: ResourceState, to: ResourceState| {
+        [crcbl_hal::BufferBarrier {
+            buffer: grid,
+            from,
+            to,
+            queue_transfer: None,
+        }]
+    };
+    let out = barrier(ResourceState::ShaderRead, ResourceState::TransferSrc);
+    let back = barrier(ResourceState::TransferSrc, ResourceState::ShaderRead);
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &out,
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+        src: grid,
+        src_offset: 0,
+        dst: staging,
+        dst_offset: 0,
+        size,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &back,
+        ..Barriers::default()
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+
+    let mut bytes = vec![0u8; size as usize];
+    headless.readback(staging, size, &mut bytes);
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(staging);
+
+    // The count is the first word of each froxel's record; the rest are the
+    // indices it kept.
+    bytes
+        .chunks_exact(CLUSTER_STRIDE as usize * 4)
+        .map(|froxel| u32::from_le_bytes(froxel[..4].try_into().expect("four bytes")))
+        .sum()
+}
+
+/// **A narrow spot is listed in fewer froxels than its sphere covers, and still
+/// lights what it points at.**
+///
+/// `light_cluster.slang` bounds a spot by its cone as well as by its radius, and
+/// the two halves of that are separate claims that need separate evidence:
+///
+/// * The cone is **tighter**, which is the point of having it — and it is
+///   measured against a point light at the same place with the same radius, in
+///   the same frame shape, so the difference between the two totals is the cone
+///   test and nothing else. A cone test that quietly accepted everything would
+///   land on the same number as the sphere and fail here.
+/// * The cone is still **conservative**, which is what a wrong one costs. A
+///   bound that is too tight leaves froxels that should list the light without
+///   it, and that is a hard seam across a lit surface — so the frame has to
+///   still light the cube the spot is aimed at. The `spot` golden in `crcbl`'s
+///   render suite is where that claim is made across a whole surface; this is
+///   the half of it that lives beside the number.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere() {
+    let headless = Headless::open_for_mesh_with(Features::GPU_DRIVEN);
+    let device = headless.device.as_ref();
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
+        .expect("a forward renderer");
+    let camera = camera();
+
+    let dark = render_mesh(&headless, &mut renderer, &mut pool, &camera).image;
+    let sun_only = assignments(&headless, &renderer);
+
+    renderer.set_lights(&[Light::Point(PointLight {
+        position: LIGHT_AT,
+        radius: LIGHT_REACH,
+        color: Vec3::new(4.0, 1.0, 1.0),
+    })]);
+    let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera);
+    let with_sphere = assignments(&headless, &renderer);
+
+    renderer.set_lights(&[Light::Spot(SpotLight {
+        position: LIGHT_AT,
+        radius: LIGHT_REACH,
+        color: Vec3::new(4.0, 1.0, 1.0),
+        // At the cube, which is at the origin — see `mesh_camera`.
+        direction: -LIGHT_AT,
+        inner_angle: SPOT_INNER,
+        outer_angle: SPOT_OUTER,
+    })]);
+    let lit = render_mesh(&headless, &mut renderer, &mut pool, &camera).image;
+    let with_cone = assignments(&headless, &renderer);
+
+    let froxels = renderer.grid().froxels();
+    eprintln!(
+        "vk e2e: lights — {froxels} froxels list {sun_only} assignment(s) for the sun alone, \
+         {with_sphere} with a point light beside it and {with_cone} with the same light as a \
+         narrow spot"
+    );
+
+    // The sun reaches every froxel by construction, so this is the baseline both
+    // totals below sit on — and it is asserted rather than assumed, because a
+    // grid that was never written reads as zeroes and every difference below
+    // would then be a difference between two nothings.
+    assert_eq!(
+        sun_only, froxels,
+        "the sun is in every froxel, so a frame with only the sun in its list has one \
+         assignment per froxel"
+    );
+    // Everything above that baseline is the second light's, so these two are the
+    // froxel counts the two bounds produce for one light at one place.
+    let by_sphere = with_sphere - sun_only;
+    let by_cone = with_cone - sun_only;
+    assert!(
+        by_sphere > 0,
+        "the point light reached no froxel at all, so there is nothing for the cone bound \
+         to be tighter than"
+    );
+    assert!(
+        by_cone > 0,
+        "the cone bound listed the spot in no froxel, which is not a tighter bound but a \
+         light switched off — and it is what a cone test with its sign the wrong way round \
+         produces"
+    );
+    // A fraction rather than a pinned count: the exact number is geometry, and a
+    // scene or a grid that legitimately moved would fail a pinned one with
+    // nothing to say about why. Measured at 91 froxels against the sphere's 144
+    // on radv and on lavapipe, so a bound that rejected nothing — the same 144 —
+    // fails this by a wide margin.
+    assert!(
+        by_cone * 4 <= by_sphere * 3,
+        "the cone bound listed the spot in {by_cone} of the {by_sphere} froxels its sphere \
+         reaches, which is not a tighter bound"
+    );
+
+    // And the picture: the cube's centre is what the spot is aimed at, so a
+    // bound that culled the froxels the cube is in leaves it as dark as the
+    // frame with no light in the list at all.
+    let (x, y) = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2);
+    let before = dark.pixel(x, y).expect("inside the frame");
+    let after = lit.pixel(x, y).expect("inside the frame");
+    eprintln!("vk e2e: lights — cube centre under the spot {before:?} → {after:?}");
+    assert!(
+        after[0] > before[0],
+        "the spot is aimed at the cube and must brighten it: {before:?} → {after:?}"
     );
 
     renderer.destroy(device);

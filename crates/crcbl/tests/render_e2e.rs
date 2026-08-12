@@ -111,6 +111,21 @@ const MIN_COLORS_SPRITE: usize = 16;
 /// consulted.
 const MIN_COLORS_LIGHTS: usize = 64;
 
+/// The same, for [`Scene::Spot`], and it is deliberately **not** set as high as
+/// this frame will go.
+///
+/// The frame is one flat floor with one cone on it, so a cone contributing
+/// nothing leaves a uniformly lit plane: measured at 37 distinct colours on
+/// lavapipe, against a correct frame that runs past every floor here. This one
+/// separates those two and stops there, because the *shape* of the cone is
+/// [`the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor`]'s claim and
+/// it says far more about a wrong one than a colour count can. A cone stepped
+/// rather than ramped measures 60 — over this floor, and refused a few lines
+/// later with a message that names what is actually wrong with it.
+///
+/// [`the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor`]: fn@the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor
+const MIN_COLORS_SPOT: usize = 48;
+
 /// The same, for [`Scene::Ui`]: `CRCBL_CROSS_MIN_COLORS_UI`.
 ///
 /// The UI frame is the least colourful of the three — the clear, the panel, the
@@ -128,6 +143,51 @@ const MIN_COLORS_UI: usize = 6;
 /// because the question it answers is "did anything draw here", not "is this the
 /// right colour" — the golden is what answers the second one.
 const PAINTED_DELTA: u8 = 8;
+
+/// How far out from the frame's centre a [`Scene::Spot`] profile runs, in
+/// pixels.
+///
+/// Half the frame's short axis, which is the furthest a straight line from the
+/// centre stays inside it — and `crcbl::screenshot`'s `SPOT_CAMERA_UP` is chosen
+/// so the cone has closed well before the end of it.
+const SPOT_PROFILE_LENGTH: u32 = EXTENT.1 / 2;
+
+/// How many samples of a [`Scene::Spot`] profile the floor outside the cone is
+/// averaged over.
+///
+/// The last of them, which is the furthest from the cone. Averaged rather than
+/// read off one pixel because it is the denominator of every claim below, and a
+/// single pixel of driver dither in it moves all of them.
+const SPOT_FLOOR_SAMPLES: usize = 16;
+
+/// How far a [`Scene::Spot`] profile may rise before it counts as rising rather
+/// than as two rasterisers disagreeing, in summed RGB.
+///
+/// Several times `crcbl_golden::Tolerance::RASTERISER`'s per-channel allowance,
+/// summed over three channels — the question here is whether the pool is
+/// brightest on its axis, not whether two drivers agree about a value.
+const SPOT_PROFILE_NOISE: u32 = 24;
+
+/// How many samples a [`Scene::Spot`] profile must have strictly inside the
+/// penumbra band before the cone counts as a ramp rather than a step.
+///
+/// **This is the number the whole scene exists to produce**, so it is worth
+/// saying what it is not: it is not "the pool has a gradient". A step-function
+/// cone draws a pool with a gradient too, because distance falloff and Lambert
+/// vary across it whatever the cone does. What a step cannot do is put pixels
+/// *between* the lit floor and the dark floor, and `SPOT_HEIGHT` is chosen so
+/// those other terms move the lit floor by only a few per cent — well inside the
+/// band's own edges. Measured at 20 or more per direction on lavapipe and on
+/// radv; this floor is under that and far above the nothing a step produces.
+const SPOT_PENUMBRA_MIN: usize = 12;
+
+/// How far the four directions' penumbra widths may differ, in samples.
+///
+/// The pool is a circle about the frame's centre — see `spot_camera` — so the
+/// four are measuring one number four ways, and they differ only in where the
+/// pixel grid falls across the ramp. A pool that is not round, or not centred,
+/// fails this rather than any single direction's own claims.
+const SPOT_ROUNDNESS: usize = 3;
 
 /// What channel order [`OffscreenSetup::draw_and_readback`]'s bytes are in.
 ///
@@ -282,6 +342,174 @@ fn the_lights_scene_draws_the_same_frame_on_every_geometry_path() {
         "lights",
         MIN_COLORS_LIGHTS,
         each_point_light_pools_where_it_was_put_and_nowhere_else,
+    );
+}
+
+/// `docs/plan/18-render-features.md`'s **spot** light, drawn — the one light
+/// kind in the list that had no rendered pixel anywhere in the tree.
+///
+/// `crcbl_render::Light::row`'s unit tests already pin the conversion, including
+/// the clamp that widens a caller's angles rather than inverting them, and
+/// `mesh.slang`'s `spot_cone` already compiled to all four targets. None of that
+/// is evidence about a cone: an inverted test, a swapped pair of angles and a
+/// step where the ramp should be each compile, each read plausibly, and each
+/// draws a picture. [`the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor`]
+/// is what tells them apart.
+///
+/// [`the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor`]: fn@the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_spot_scene_draws_its_cone_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::Spot,
+        "spot",
+        MIN_COLORS_SPOT,
+        the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor,
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_spot_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::Spot,
+        "spot",
+        MIN_COLORS_SPOT,
+        the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor,
+    );
+}
+
+/// The brightness of every pixel from the frame's centre outward along `step`,
+/// summed over RGB.
+///
+/// One sample per pixel out to [`SPOT_PROFILE_LENGTH`], which is the furthest a
+/// straight line from the centre of a `256x192` frame stays inside it — so the
+/// four axis directions all fit and all sample the same radii.
+fn spot_profile(image: &Image, step: (i32, i32)) -> Vec<u32> {
+    let centre = (
+        i32::try_from(EXTENT.0 / 2).expect("a frame edge fits in an i32"),
+        i32::try_from(EXTENT.1 / 2).expect("a frame edge fits in an i32"),
+    );
+    (0..i32::try_from(SPOT_PROFILE_LENGTH).expect("a frame edge fits in an i32"))
+        .map(|distance| {
+            let x = centre.0 + step.0 * distance;
+            let y = centre.1 + step.1 * distance;
+            let pixel = image
+                .pixel(
+                    u32::try_from(x).expect("the profile stays inside the frame"),
+                    u32::try_from(y).expect("the profile stays inside the frame"),
+                )
+                .expect("the profile stays inside the frame");
+            pixel
+                .iter()
+                .take(3)
+                .map(|channel| u32::from(*channel))
+                .sum()
+        })
+        .collect()
+}
+
+/// [`Scene::Spot`]'s claim, and it is three claims: the cone has a lit core, the
+/// floor outside it is dark, and **the band between them varies**.
+///
+/// The third is what the scene exists for, and the first two are what make it
+/// mean something. Take them in the order a wrong cone hits them:
+///
+/// * A cone test with its sign inverted lights everything *except* the cone, so
+///   the axis is dark and the far floor is bright: the core-against-floor ratio
+///   goes the wrong way and fails first.
+/// * A cone whose two angles arrive the wrong way round divides by a clamped
+///   epsilon and comes out a step at the inner angle. That draws a lit disc
+///   against a dark floor — the first two claims pass on it unchanged — and it
+///   is the penumbra count that refuses it.
+/// * So does a `spot_cone` written as a boolean in the first place, which is the
+///   same picture by a different route.
+///
+/// **The penumbra count is not "the pool has a gradient".** A step-function cone
+/// leaves a gradient across the pool too, because the distance falloff and
+/// Lambert vary over it whatever the cone does. What a step cannot do is put
+/// pixels *between* the lit floor and the dark floor, and `SPOT_HEIGHT` is
+/// chosen so those other two terms move the lit floor by a few per cent — far
+/// inside the band this counts, whose edges sit a fifth of the way in from each
+/// end. See [`SPOT_PENUMBRA_MIN`].
+///
+/// Four directions rather than one, because the pool is a circle about the
+/// frame's centre and four profiles of one circle are a claim about its
+/// *shape*: [`SPOT_ROUNDNESS`] is what a pool that is off-centre, elongated or
+/// aimed somewhere else fails, and no single profile can see any of those.
+fn the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor(image: &Image) {
+    let mut penumbras = Vec::new();
+    for (name, step) in [
+        ("right", (1i32, 0i32)),
+        ("left", (-1, 0)),
+        ("down", (0, 1)),
+        ("up", (0, -1)),
+    ] {
+        let profile = spot_profile(image, step);
+        let core = profile[0];
+        let tail = &profile[profile.len() - SPOT_FLOOR_SAMPLES..];
+        let floor = tail.iter().sum::<u32>() / SPOT_FLOOR_SAMPLES as u32;
+
+        // The floor outside the cone has to be *lit* floor rather than black, or
+        // "dark outside the cone" is a claim about an unpainted frame. The sun
+        // is turned right down and is what lights it — see `dim_sun`.
+        assert!(
+            floor > 0,
+            "the floor outside the cone is black, so the sun contributed nothing and \
+             the {name} profile is not a measurement of a cone against a lit surface"
+        );
+        assert!(
+            core >= floor * 3,
+            "the cone's core must be unmistakably brighter than the floor outside it: \
+             the {name} profile runs {core} at the axis against a floor of {floor}"
+        );
+        let peak = *profile.iter().max().expect("the profile is not empty");
+        assert!(
+            core + SPOT_PROFILE_NOISE >= peak,
+            "the pool must be brightest on the cone's axis: the {name} profile peaks at \
+             {peak} against {core} at the axis"
+        );
+
+        // The band, a fifth of the way in from each end so neither edge of it can
+        // be reached by the few per cent the other shading terms move across the
+        // pool. Its own edges are derived from this frame's two ends rather than
+        // written down, because the tonemap is what decides where a linear
+        // radiance lands and it is not this test's business to model.
+        let span = core - floor;
+        let low = floor + span / 5;
+        let high = floor + span * 4 / 5;
+        let penumbra = profile
+            .iter()
+            .filter(|value| **value > low && **value < high)
+            .count();
+        eprintln!(
+            "crcbl render e2e: spot — {name} runs {core} at the axis to {floor} at the edge, \
+             with {penumbra} sample(s) between {low} and {high}"
+        );
+        assert!(
+            penumbra >= SPOT_PENUMBRA_MIN,
+            "the cone's penumbra holds {penumbra} sample(s) between {low} and {high} along \
+             {name}, which is a step rather than a ramp — a boolean cone draws the same lit \
+             disc on the same dark floor and differs from a working one only here"
+        );
+        penumbras.push((name, penumbra));
+    }
+
+    let widest = penumbras
+        .iter()
+        .map(|(_, count)| *count)
+        .max()
+        .expect("four");
+    let narrowest = penumbras
+        .iter()
+        .map(|(_, count)| *count)
+        .min()
+        .expect("four");
+    assert!(
+        widest - narrowest <= SPOT_ROUNDNESS,
+        "the four directions' penumbras are {penumbras:?}, which is not one circle about the \
+         frame's centre — the cone is off-axis, elongated, or aimed somewhere this camera \
+         does not see square on"
     );
 }
 

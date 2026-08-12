@@ -139,6 +139,22 @@ pub enum Scene {
     /// list and in nothing else, so a diff between them is the feature rather
     /// than a new arrangement of objects.
     Lights,
+    /// `docs/plan/18-render-features.md`'s **spot** light: one cone of light on
+    /// a flat floor, seen from straight above.
+    ///
+    /// **The only frame in the tree that draws a cone.** [`Scene::Lights`] is
+    /// three point lights, so `mesh.slang`'s `spot_cone` compiled to all four
+    /// targets and lit no pixel anywhere — and a cone test with its sign
+    /// inverted, its two angles the wrong way round, or a step where its ramp
+    /// should be draws a plausible picture in each case and passes every other
+    /// golden here unchanged.
+    ///
+    /// The geometry is the cube alone, scaled into a floor, because what this
+    /// scene needs is a surface for the cone to land on and nothing else in the
+    /// frame to read the shape off instead. See this module's `spot_camera` for
+    /// why the camera looks straight down and `SPOT_HEIGHT` for what the light's
+    /// height buys the pixel assertions.
+    Spot,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
@@ -287,20 +303,163 @@ fn scene_lights() -> [crcbl_render::Light; 3] {
     ]
 }
 
-/// The sun [`Scene::Lights`] runs under: the default direction, turned right
-/// down.
+/// [`DirectionalLight::default`] at `key` of its brightness and `ambient` of its
+/// ambient, for a scene whose subject is the lights beside the sun.
 ///
-/// Not removed altogether, and that is the point of the scene: the sun is a row
-/// of the same list the three point lights are rows of, so a frame in which it
-/// stopped contributing would be as wrong as one in which they did. Dim enough
-/// that the pools of colour are unmistakably the point lights' work.
-fn dim_sun() -> crcbl_render::DirectionalLight {
+/// **Turned down rather than removed**, and that is a claim each of those scenes
+/// makes: the sun is a row of the same list the punctual lights are rows of, so
+/// a frame in which it stopped contributing would be as wrong as one in which
+/// they did.
+///
+/// Two factors rather than one because the ambient does a different job — it is
+/// what keeps a face turned away from every light dark rather than black — and a
+/// scene wants to dim the key light much further than the floor under it.
+fn dimmed_sun(key: f32, ambient: f32) -> crcbl_render::DirectionalLight {
     let bright = crcbl_render::DirectionalLight::default();
     crcbl_render::DirectionalLight {
         direction: bright.direction,
-        color: bright.color * 0.12,
-        ambient: bright.ambient * 0.35,
+        color: bright.color * key,
+        ambient: bright.ambient * ambient,
     }
+}
+
+/// The sun [`Scene::Lights`] runs under: dim enough that the pools of colour are
+/// unmistakably the three point lights' work.
+fn dim_sun() -> crcbl_render::DirectionalLight {
+    dimmed_sun(0.12, 0.35)
+}
+
+/// The sun [`Scene::Spot`] runs under, which is dimmer still.
+///
+/// That scene's claim is a **ratio** — the cone's core against the floor outside
+/// it — so a sun bright enough to be a large part of that floor is a sun that
+/// decides the ratio. Dim enough that the floor is unmistakably the dark side of
+/// the cone's edge, and not so dim that it is black: a black floor would make
+/// "dark outside the cone" a statement about an unpainted frame.
+///
+/// [`SPOT_INTENSITY`]'s doc says what the other end of the ratio is.
+fn spot_sun() -> crcbl_render::DirectionalLight {
+    dimmed_sun(0.03, 0.09)
+}
+
+/// How far above the floor [`Scene::Spot`] hangs its light.
+///
+/// **Large next to the cone's own footprint, and that ratio is what the pixel
+/// assertions rest on.** Distance falloff and Lambert fall off across the pool
+/// as well as the cone does, so on a low light a cone that was a hard cut rather
+/// than a ramp would still leave a gradient behind it and "the penumbra varies"
+/// would be satisfied by arithmetic that has nothing to do with the cone. From
+/// up here the far edge of the pool is barely further from the light, and barely
+/// more oblique to it, than the axis is — so what changes across the penumbra is
+/// the cone and very little else.
+const SPOT_HEIGHT: f32 = 1.6;
+
+/// The radius of the cone's bright core where it lands on [`Scene::Spot`]'s
+/// floor.
+///
+/// Written as a radius on the floor rather than as a half-angle in radians,
+/// which is also how [`spot_light`] passes it: the radius is what the frame
+/// shows and what the assertions talk about, and the angle is the arctangent of
+/// it over [`SPOT_HEIGHT`].
+const SPOT_CORE_RADIUS: f32 = 0.14;
+
+/// The radius at which the cone has closed, on the same terms.
+///
+/// The band between this and [`SPOT_CORE_RADIUS`] is the penumbra — the part of
+/// the picture that separates a working ramp from a boolean — so the two are set
+/// far enough apart that it is tens of pixels wide under the camera
+/// [`spot_camera`] puts over it, and `SPOT_PENUMBRA_MIN` in
+/// `tests/render_e2e.rs` is what holds that to a number.
+const SPOT_EDGE_RADIUS: f32 = 0.4;
+
+/// How far [`Scene::Spot`]'s light reaches, in world units.
+///
+/// Twice [`SPOT_HEIGHT`], so the quartic window that
+/// `crcbl_render::PointLight::radius` documents is nowhere near its zero where
+/// the cone lands: the pool's edge is then the cone's doing rather than the
+/// radius', which is the thing being drawn.
+const SPOT_REACH: f32 = 2.0 * SPOT_HEIGHT;
+
+/// How bright [`Scene::Spot`]'s light is, before its colour.
+///
+/// Well above [`LIGHT_INTENSITY`] because the falloff is an inverse square and
+/// [`SPOT_HEIGHT`] is the distance it runs over — the product is what matters,
+/// not either number. Chosen so the axis lands *under* the top of the swapchain
+/// once the tonemap has brought it back: a core that clipped would be a plateau
+/// with no shape in it, and the cone's own core is part of what this frame is
+/// meant to show.
+const SPOT_INTENSITY: f32 = 5.0;
+
+/// How far above the floor [`Scene::Spot`]'s camera stands.
+///
+/// Lower than [`SPOT_HEIGHT`], so the light is behind the eye and nothing in the
+/// frame is between the two. Far enough up that the frame's short half-axis on
+/// the floor is comfortably wider than [`SPOT_EDGE_RADIUS`] — the pool then sits
+/// well inside the frame with dark floor between it and every edge, which is
+/// what lets a profile out from the centre run past the cone and reach that
+/// floor.
+const SPOT_CAMERA_UP: f32 = 1.2;
+
+/// How much [`Scene::Spot`] scales the cube by to get its floor.
+///
+/// Uniform, so each face keeps the axis-aligned normal it was built with, and
+/// large enough that the `+Y` face runs past every edge of the frame — the scene
+/// is one flat lit surface and the cone on it, with no silhouette anywhere for a
+/// reader or an assertion to take the shape off instead.
+const SPOT_FLOOR_SCALE: f32 = 8.0;
+
+/// [`Scene::Spot`]'s floor: the cube scaled by [`SPOT_FLOOR_SCALE`] and dropped
+/// so its `+Y` face is the plane `y = 0`.
+///
+/// The cube spans half a unit either side of its origin, so the drop is half the
+/// scale.
+fn spot_floor() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.5 * SPOT_FLOOR_SCALE, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::splat(SPOT_FLOOR_SCALE))
+}
+
+/// The camera [`Scene::Spot`] is drawn with: straight down at the floor.
+///
+/// **Overhead rather than oblique, and the pixel assertions rest on that.** With
+/// the cone's axis, the floor's normal and the view direction all `Y`, every
+/// term in the shading — the cone, the distance falloff, Lambert and the
+/// specular lobe alike — is a function of the distance from the frame's centre
+/// alone, and each of them falls off with it. So the pool is a circle about a
+/// pixel the test can name, and a profile out from that pixel is the cone's own
+/// cross-section rather than a diagonal cut through an ellipse whose position a
+/// test would have to reconstruct the projection to find.
+///
+/// `Y` is the view direction, so `up` cannot also be `Y`; `+Z` puts the floor's
+/// `+Z` axis at the top of the frame.
+fn spot_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, SPOT_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        up: glam::Vec3::Z,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// [`Scene::Spot`]'s one light: a cone pointing straight down at the floor.
+///
+/// Near-white rather than a colour of its own, because the floor's albedo is the
+/// cube's green `+Y` face and a coloured light would tint the pool where the
+/// point of it is to show the pool's *shape*.
+fn spot_light() -> crcbl_render::Light {
+    crcbl_render::Light::Spot(crcbl_render::SpotLight {
+        position: glam::Vec3::new(0.0, SPOT_HEIGHT, 0.0),
+        radius: SPOT_REACH,
+        color: glam::Vec3::new(1.0, 0.95, 0.85) * SPOT_INTENSITY,
+        // Along the cone, away from the light — the opposite convention from the
+        // sun's, which `crcbl_render::SpotLight::direction` is where it is
+        // spelled out.
+        direction: glam::Vec3::NEG_Y,
+        inner_angle: (SPOT_CORE_RADIUS / SPOT_HEIGHT).atan(),
+        outer_angle: (SPOT_EDGE_RADIUS / SPOT_HEIGHT).atan(),
+    })
 }
 
 /// The colour [`Scene::Sprite`] and [`Scene::Ui`] composite onto, in **linear**
@@ -497,12 +656,18 @@ fn ui_draw_list(extent: (u32, u32)) -> DrawList {
 /// One variant per [`Scene`]; the frame's per-scene work is the two arms of
 /// [`OffscreenSetup::draw_and_readback`] and nothing else keys off it.
 enum SceneState {
-    /// [`Scene::Cube`] and [`Scene::Dunes`]: both are one [`ForwardRenderer`]
-    /// with a camera and a light, differing in what is put in the scene and
-    /// where the camera stands.
+    /// Every scene drawn through [`ForwardRenderer`]: one camera, one sun and
+    /// one set of residents, differing in what is put in the scene and where the
+    /// camera stands.
     Forward {
         camera: Camera,
         light: DirectionalLight,
+        /// The cube's model matrix, which
+        /// [`ForwardRenderer::begin_frame`](crate::render::ForwardRenderer::begin_frame)
+        /// takes as an argument rather than off a setter. Every scene but
+        /// [`Scene::Spot`] leaves it at `ForwardRenderer::spin(0.0)`, which is
+        /// the identity; that one scales it into a floor.
+        model: glam::Mat4,
         /// Boxed because it is much the largest of the three: it carries the
         /// geometry pools and the instance ring, and an unboxed variant would
         /// make every `SceneState` — including the two small ones — that size.
@@ -539,6 +704,7 @@ impl SceneState {
                         near: 0.01,
                     }),
                     light: DirectionalLight::default(),
+                    model: ForwardRenderer::spin(0.0),
                     renderer: Box::new(renderer),
                 }
             }
@@ -557,6 +723,21 @@ impl SceneState {
                         near: 0.01,
                     }),
                     light: dim_sun(),
+                    model: ForwardRenderer::spin(0.0),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::Spot => {
+                // **The cube alone, and it is the floor.** Every other resident
+                // stays off: a pyramid beside the pool would be a second lit
+                // shape in a frame whose whole content is meant to be one cone
+                // on one flat surface.
+                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                renderer.set_lights(&[spot_light()]);
+                Self::Forward {
+                    camera: spot_camera(),
+                    light: spot_sun(),
+                    model: spot_floor(),
                     renderer: Box::new(renderer),
                 }
             }
@@ -579,6 +760,7 @@ impl SceneState {
                 Self::Forward {
                     camera: dunes_camera(),
                     light: DirectionalLight::default(),
+                    model: ForwardRenderer::spin(0.0),
                     renderer: Box::new(renderer),
                 }
             }
@@ -1057,15 +1239,10 @@ impl OffscreenSetup {
                 SceneState::Forward {
                     camera,
                     light,
+                    model,
                     renderer,
                 } => {
-                    renderer.begin_frame(
-                        device,
-                        camera,
-                        light,
-                        ForwardRenderer::spin(0.0),
-                        extent,
-                    )?;
+                    renderer.begin_frame(device, camera, light, *model, extent)?;
                     let _hdr = renderer.add_passes(&mut graph, target, extent);
                 }
                 SceneState::Sprite { renderer, sheets } => {
