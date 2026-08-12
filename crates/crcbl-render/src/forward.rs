@@ -1284,6 +1284,7 @@ impl ForwardRenderer {
 
         let draws = DrawGen::new(
             device,
+            queue,
             &DrawGenDesc {
                 label: Some("forward"),
                 instances: &instance_buffers,
@@ -1815,6 +1816,7 @@ impl ForwardRenderer {
             // and the rollback is the only thing that knows about it.
             let draws = DrawGen::new(
                 device,
+                queue,
                 &DrawGenDesc {
                     label: Some("shadow cascade"),
                     instances: &instance_buffers,

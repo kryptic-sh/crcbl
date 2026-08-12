@@ -1714,3 +1714,107 @@ fn the_engine_passes_offer_every_shader_artifact_they_have() {
         );
     }
 }
+
+/// **No buffer the draw generation lets a shader write is host-visible.**
+///
+/// D3D12 has no unordered-access view of an upload-heap resource at all: the
+/// heap refuses `ALLOW_UNORDERED_ACCESS` at creation and pins the resource to
+/// `GENERIC_READ` for its lifetime, so a writable binding onto one is a
+/// descriptor `crcbl-dx12` refuses — and refusing it is the good outcome, since
+/// the alternative is a lost device. It has cost the WARP leg twice: the
+/// draw-generation counters, which were host-visible so the CPU could zero them
+/// before the frame, and then `docs/plan/25-lod.md`'s hysteresis state, which
+/// was host-visible so the CPU could zero it once at build.
+///
+/// Neither could fail anywhere else. Vulkan, Metal and wgpu all bind a
+/// host-visible storage buffer writably without complaint, and D3D12 does not
+/// build on the machine this is usually run on — so the whole class arrives as
+/// a red CI leg or not at all. This runs with no ICD in the room.
+///
+/// # What the assertion actually reads
+///
+/// The null backend materialises bytes for a mappable buffer and none for a
+/// device-local one, so a **non-empty** `buffer_bytes` is host visibility
+/// itself rather than a proxy for it. `Some` is asserted too: a handle the
+/// recorder never saw would otherwise pass by naming nothing.
+///
+/// The list is every buffer [`DrawGen`] hands out that a shader writes into,
+/// and it is written out one call at a time on purpose — a loop over an
+/// accessor that gained a buffer would silently not cover it, which is the
+/// failure that produced this test.
+#[test]
+fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
+    use crcbl_hal::{BufferDesc, BufferHandle, BufferUsage, MemoryLocation};
+    use crcbl_render::{DrawGen, DrawGenDesc};
+
+    let harness = Harness::open();
+    let device = harness.device.as_ref();
+    let input = |label: &str| {
+        device
+            .create_buffer(&BufferDesc {
+                label: Some(label),
+                size: 1024,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("the null backend always allocates")
+    };
+    // The pools a real renderer would hand over. Host-visible, and legitimately
+    // so — every one is read-only where a shader names it, which is the half of
+    // the rule this test must not be read as forbidding.
+    let instances = [input("instances 0"), input("instances 1")];
+    let mesh_table = input("mesh table");
+
+    let draws = DrawGen::new(
+        device,
+        harness.queue,
+        &DrawGenDesc {
+            label: Some("writable buffers"),
+            instances: &instances,
+            mesh_table,
+            bucket_meshes: &[0],
+            bucket_clusters: &[4],
+            // One mesh, no hierarchy: what the hysteresis state is *sized* by is
+            // not what this asserts about it, and a flat record keeps the
+            // fixture to the one thing under test.
+            mesh_levels: &[crcbl_shaders::level_select::MeshLevels::FLAT],
+            level_groups: &[],
+            level_meshes: &[0],
+            instance_capacity: 64,
+        },
+    )
+    .expect("the null backend accepts every descriptor");
+
+    let device_local = |label: &str, buffer: BufferHandle| {
+        let bytes = harness
+            .recorder
+            .buffer_bytes(buffer)
+            .unwrap_or_else(|| panic!("{label} names no buffer this recorder created"));
+        assert!(
+            bytes.is_empty(),
+            "{label} is host-visible ({} mappable bytes), and a shader writes it: D3D12 has no \
+             unordered-access view of an upload-heap resource, so this is a lost device on WARP",
+            bytes.len()
+        );
+    };
+    for frame in 0..instances.len() {
+        device_local(&format!("visible {frame}"), draws.visible(frame));
+        device_local(&format!("cull stats {frame}"), draws.visible_count(frame));
+        device_local(&format!("bucket runs {frame}"), draws.runs(frame));
+        device_local(&format!("draw args {frame}"), draws.args(frame));
+        device_local(&format!("draw counts {frame}"), draws.counts(frame));
+        device_local(
+            &format!("mesh dispatch args {frame}"),
+            draws.mesh_args(frame),
+        );
+    }
+    // Not per frame, and the one that took the device down: it carries a
+    // decision from one frame into the next, so there is one of it.
+    device_local("lod group state", draws.group_state());
+
+    draws.destroy(device);
+    for buffer in instances {
+        device.destroy_buffer(buffer);
+    }
+    device.destroy_buffer(mesh_table);
+}

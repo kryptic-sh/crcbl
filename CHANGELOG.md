@@ -286,6 +286,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The LOD hysteresis state was host-visible and shader-written, which removes
+  a D3D12 device.** Upload and readback heaps refuse `ALLOW_UNORDERED_ACCESS` at
+  creation, so there is no unordered access view of one, and `crcbl-dx12`
+  refused the binding by name. It is `DeviceLocal` now, zeroed by a start-up
+  staging copy rather than a host write — **once**, before frame zero, because
+  unlike the draw-generation counters this is history and zeroing it per frame
+  would delete the hysteresis silently.
+
+  `crcbl-render`'s
+  `nothing_the_draw_generation_lets_a_shader_write_is_host_visible` is the
+  guard: it builds a real `DrawGen` on the null backend and checks every buffer
+  a shader writes. It needs no ICD, so it covers the WARP leg from a Linux box —
+  which is where this class has now cost a device twice.
+
 - **The mesh path's cut collapsed to the top level, from a bind range that had
   not grown with its struct.** `ClusterDrawConstants` went 16 to 32 bytes while
   the bind group still named `DRAW_CONSTANTS_SIZE` for that dynamic uniform —

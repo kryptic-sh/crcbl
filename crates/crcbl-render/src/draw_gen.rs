@@ -66,12 +66,19 @@
 //! graph's, computed from what the two declare. Every backend that can run the
 //! two passes this zeroes for can run this one, which a fill is not true of.
 //!
-//! **Every per-frame buffer here is therefore
+//! **Every buffer here a shader writes is therefore
 //! [`MemoryLocation::DeviceLocal`]**, which is not a tidiness point: D3D12 has
 //! no unordered-access view of an upload-heap resource at all — the flag is
 //! rejected at creation and the heap pins the resource to `GENERIC_READ` for
 //! its lifetime — so the counters being host-visible and bound writable is what
-//! took its device down.
+//! took its device down. That rule is about the *binding*, not the frequency:
+//! `docs/plan/25-lod.md`'s hysteresis state is written once a frame by
+//! `draw_gen.slang` and is device-local for the same reason the counters are,
+//! even though nothing zeroes it per frame. What does zero it is a start-up
+//! copy, on [`crate::mesh_pool`]'s and [`crate::texture`]'s terms — see
+//! [`DrawGen::group_state`] for why zeroing it twice would be worse than not
+//! zeroing it at all. Read-only bindings are untouched by any of this, and the
+//! tables beside it stay host-visible.
 //!
 //! The ones the clearing pass owns carry [`BufferUsage::TRANSFER_DST`] as well
 //! as `TRANSFER_SRC`, and for the same reason: a buffer only ever written by a
@@ -89,11 +96,12 @@
 //! says so.
 
 use crcbl_hal::{
-    BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
-    BufferUsage, ComputePipelineDesc, ComputePipelineHandle, Device, HalError, MemoryLocation,
-    PipelineLayoutDesc, PipelineLayoutHandle, ResourceState, ShaderEntry, ShaderModuleDesc,
-    ShaderStages,
+    Barriers, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
+    BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource,
+    BufferBarrier, BufferCopy, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc,
+    ComputePipelineDesc, ComputePipelineHandle, Device, HalError, MemoryLocation,
+    PipelineLayoutDesc, PipelineLayoutHandle, QueueHandle, ResourceState, ShaderEntry,
+    ShaderModuleDesc, ShaderStages, SubmitInfo,
 };
 use crcbl_shaders::{
     CLEAR_COUNTERS, CULL, DRAW_GEN, Stage, clear_counters, cull as cull_shader, draw_gen,
@@ -243,7 +251,11 @@ pub struct DrawGen {
     /// ordered against each other by the graph instead, out of the
     /// `ShaderReadWrite` both the writing and the reading pass declare on it.
     ///
-    /// Zeroed at build, which is where the monotonicity induction starts.
+    /// Zeroed at build and never again, which is where the monotonicity
+    /// induction starts — by the start-up copy [`zero_at_start_up`] submits,
+    /// because a shader writes this and a buffer a shader writes cannot be
+    /// host-visible. A second zero anywhere would erase the history rather than
+    /// establish it, so there is deliberately no per-frame clear of it.
     group_state: BufferHandle,
     /// How many groups one instance's run of [`group_state`](Self::group_state)
     /// holds — every resident mesh's group count summed, and at least one so the
@@ -287,6 +299,10 @@ impl DrawGen {
     /// Builds both pipelines, both bind groups per frame, and every buffer
     /// between them.
     ///
+    /// `queue` carries the one start-up submit this makes: the copy that zeroes
+    /// the hysteresis state, described on
+    /// [`group_state`](Self::group_state) and blocked on before this returns.
+    ///
     /// # Errors
     ///
     /// [`HalError`] from any seam call. A failure part-way through releases
@@ -297,7 +313,11 @@ impl DrawGen {
     ///
     /// If `instances` is empty or `bucket_meshes` is: a ring with no buffers has
     /// nothing to bind, and a table with no buckets generates no draws at all.
-    pub fn new(device: &dyn Device, desc: &DrawGenDesc<'_>) -> Result<Self, HalError> {
+    pub fn new(
+        device: &dyn Device,
+        queue: QueueHandle,
+        desc: &DrawGenDesc<'_>,
+    ) -> Result<Self, HalError> {
         assert!(
             !desc.instances.is_empty(),
             "draw generation needs at least one instance buffer to cull"
@@ -313,7 +333,7 @@ impl DrawGen {
              reading a cluster count that belongs to another bucket, or to nothing"
         );
         let mut rollback = Rollback::default();
-        match Self::build(device, desc, &mut rollback) {
+        match Self::build(device, queue, desc, &mut rollback) {
             Ok(built) => Ok(built),
             Err(error) => {
                 rollback.run(device);
@@ -324,6 +344,7 @@ impl DrawGen {
 
     fn build(
         device: &dyn Device,
+        queue: QueueHandle,
         desc: &DrawGenDesc<'_>,
         rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
@@ -412,8 +433,15 @@ impl DrawGen {
         // input, and freshly allocated device memory holds whatever it holds. A
         // state that is not monotone up a DAG is a cut with a hole in it, so
         // this is the one write that keeps every later frame's induction
-        // standing. `HostUpload` for that reason and no other — nothing writes
-        // it from the host again.
+        // standing.
+        //
+        // Device-local like every other buffer a shader writes here, for the
+        // reason the module docs give: D3D12 has no unordered-access view of an
+        // upload-heap resource. So the zero arrives by a **start-up staging
+        // copy** rather than a `write_buffer` — and not by the clearing
+        // dispatch, which runs inside every frame. Running it twice would erase
+        // exactly the history this buffer exists to carry, and once is what a
+        // copy submitted before the first frame is.
         //
         // At least one word per instance even when nothing resident has a
         // hierarchy, because a zero-length buffer is not a descriptor any
@@ -421,16 +449,19 @@ impl DrawGen {
         let group_stride = u32::try_from(desc.level_groups.len())
             .map_err(|_| HalError::InvalidDescriptor("more groups than a u32".to_string()))?
             .max(1);
+        let group_state_bytes = u64::from(capacity) * u64::from(group_stride) * 4;
         let group_state = buffer(
             "lod group state",
-            u64::from(capacity) * u64::from(group_stride) * 4,
-            BufferUsage::STORAGE,
-            MemoryLocation::HostUpload,
+            group_state_bytes,
+            BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+            MemoryLocation::DeviceLocal,
         )?;
-        device.write_buffer(
+        zero_at_start_up(
+            device,
+            queue,
+            &format!("{stem} lod group state"),
             group_state,
-            0,
-            &vec![0u8; capacity as usize * group_stride as usize * 4],
+            group_state_bytes,
         )?;
 
         let clear_params = buffer(
@@ -1064,7 +1095,10 @@ impl DrawGen {
         // **Not indexed by `frame`**, and that is the point: this one buffer is
         // what carries a decision from the previous frame into this one. It
         // arrives in `ShaderReadWrite` because that is what the last frame left
-        // it in, and `ResourceState::needs_barrier` answers `true` for any
+        // it in — and on the very first frame because that is what
+        // `zero_at_start_up` left it in, which is why that copy ends with a
+        // barrier rather than in `TransferDst`. `ResourceState::needs_barrier`
+        // answers `true` for any
         // transition touching a write — so the first barrier of this frame
         // carries a source scope covering that frame's writes and the mesh
         // stage's reads of them, whether or not that frame is still in flight.
@@ -1284,6 +1318,99 @@ fn compute_pipeline(
     });
     device.destroy_shader_module(module);
     pipeline
+}
+
+/// Writes zeroes over `buffer` once, before any frame exists, and blocks until
+/// the copy has run.
+///
+/// A start-up staging copy on [`crate::mesh_pool`]'s and [`crate::texture`]'s
+/// terms, and it joins them on the crate docs' list of named exceptions to the
+/// no-manual-barriers rule. It is *not* a `write_buffer`, because the
+/// destination is device-local; not [`crcbl_hal::CommandEncoder::fill_buffer`],
+/// which `crcbl-dx12` refuses outright and the module docs argue about at
+/// length; and not the clearing dispatch, which runs inside every frame rather
+/// than once.
+///
+/// The buffer is left in [`ResourceState::ShaderReadWrite`], which is the state
+/// [`DrawGen::add_passes`] imports it in — so the graph's first barrier on it
+/// names a state the buffer is really in.
+fn zero_at_start_up(
+    device: &dyn Device,
+    queue: QueueHandle,
+    label: &str,
+    buffer: BufferHandle,
+    size: u64,
+) -> Result<(), HalError> {
+    let zeroes = vec![
+        0u8;
+        usize::try_from(size).map_err(|_| HalError::InvalidDescriptor(format!(
+            "{label} is {size} bytes, which does not fit this host's address space"
+        )))?
+    ];
+    let staging = device.create_buffer(&BufferDesc {
+        label: Some(&format!("{label} staging")),
+        size,
+        usage: BufferUsage::TRANSFER_SRC,
+        memory: MemoryLocation::HostUpload,
+    })?;
+    let zeroed = record_zero(device, queue, label, buffer, staging, &zeroes);
+    device.destroy_buffer(staging);
+    zeroed
+}
+
+/// The half of [`zero_at_start_up`] the staging buffer is live across, so the
+/// caller releases it on every path out.
+fn record_zero(
+    device: &dyn Device,
+    queue: QueueHandle,
+    label: &str,
+    buffer: BufferHandle,
+    staging: BufferHandle,
+    zeroes: &[u8],
+) -> Result<(), HalError> {
+    device.write_buffer(staging, 0, zeroes)?;
+
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some(&format!("{label} zero")),
+        queue,
+    });
+    // `Undefined` as the source, unlike [`crate::mesh_pool`]'s pools: this
+    // buffer was created a few statements ago and has never held anything, so
+    // there is no state to preserve and its contents are discarded rather than
+    // transitioned.
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[BufferBarrier::new(
+            buffer,
+            ResourceState::Undefined,
+            ResourceState::TransferDst,
+        )],
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&BufferCopy {
+        src: staging,
+        src_offset: 0,
+        dst: buffer,
+        dst_offset: 0,
+        size: zeroes.len() as u64,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &[BufferBarrier::new(
+            buffer,
+            ResourceState::TransferDst,
+            ResourceState::ShaderReadWrite,
+        )],
+        ..Barriers::default()
+    });
+    let commands = encoder.finish()?;
+
+    // Blocking is what makes this a start-up path: the staging buffer dies with
+    // the caller's next statement, and a frame that read the state before the
+    // copy landed would read whatever the allocation came with.
+    let submitted = device
+        .submit(queue, &SubmitInfo::new(&[commands]))
+        .and_then(|()| device.wait_idle());
+    device.destroy_command_buffer(commands);
+    submitted
 }
 
 /// What a partly-built [`DrawGen`] has to give back.

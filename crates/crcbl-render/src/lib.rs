@@ -23,11 +23,13 @@
 //! frame.
 //!
 //! The barriers outside it are the **startup uploads**: [`mesh_pool`]'s staging
-//! copy into the geometry pools, and [`texture`]'s for every image
-//! ([`ui_pass`]'s glyph atlas and [`sprite_pass`]'s sheets). Both run before any
-//! frame exists and have no graph to belong to; both are called out at the call
-//! site. There are no others, and a barrier recorded during a frame from
-//! anywhere but [`graph::CompiledGraph::execute`] is a bug.
+//! copy into the geometry pools, [`texture`]'s for every image ([`ui_pass`]'s
+//! glyph atlas and [`sprite_pass`]'s sheets), and [`draw_gen`]'s copy zeroing
+//! the LOD hysteresis state, which is device-local because a shader writes it
+//! and so cannot be zeroed by a host write. Each runs before any frame exists
+//! and has no graph to belong to; each is called out at the call site. There are
+//! no others, and a barrier recorded during a frame from anywhere but
+//! [`graph::CompiledGraph::execute`] is a bug.
 //!
 //! # Nothing here knows a backend
 //!

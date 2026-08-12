@@ -5789,6 +5789,39 @@ a wasm regression in this code would not be observed by anything. The refusals
 that do not need an array layout — the flags gate, `count: 0`, the in-band
 layout error — run on every adapter, so that half is not skip-shaped.
 
+## The host-visible-write rule has now cost two devices, and the seam could enforce it
+
+`crcbl-dx12` refuses a shader-written binding that names a host-visible buffer —
+D3D12's upload and readback heaps refuse `ALLOW_UNORDERED_ACCESS` at creation,
+so there is no UAV of one. The refusal is correct and its message is excellent.
+It has now caught the same mistake **twice**: the draw-generation counters, and
+the LOD hysteresis state.
+
+**The general fix belongs in `crcbl-hal`**: `NullDevice::create_bind_group`
+raising a validation error when a `read_only: false` entry names a mappable
+buffer would turn every existing null-backend test in the workspace into this
+check, on every machine, with no ICD. It was not written because it is a
+`crcbl-hal` change and the slice that hit the bug owned `crcbl-render`.
+
+**What blocks writing it from outside `crcbl-hal`:** the null backend does not
+record bind-group _contents_. `Detail::BindGroup` keeps the layout handle and an
+update-after-bind flag, and `Recorder` exposes no accessor for a group's entries
+or for a buffer's `MemoryLocation`. So a general "no shader-written binding
+names a host-visible buffer" assertion cannot be written by a consumer today.
+
+The narrow version that _can_ be, and now is:
+`nothing_the_draw_generation_lets_a_shader_write_is_host_visible` in
+`crcbl-render/tests/graph_compile.rs`, which builds a real `DrawGen` on the null
+backend and checks each buffer it hands out. Its observable is exact rather than
+a proxy — `NullDevice::create_buffer` materialises bytes only for a mappable
+buffer, so non-empty `Recorder::buffer_bytes` **is** host visibility. It runs
+with no ICD, so it covers the WARP leg from a Linux dev box.
+
+**Also worth an entry:** each shadow cascade now costs its own start-up submit
+and `wait_idle` — one per cascade plus the camera's — to zero its hysteresis
+state. Correct and blocking, and coarser than it needs to be, on the same terms
+`mesh_pool`'s timeline-less upload path already accepts.
+
 ## Topic 25's MVP is closed; what remains, and one coverage hole it found
 
 Per-cluster selection runs on `MeshShader` and the uniform cut on both indirect
