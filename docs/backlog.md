@@ -5971,7 +5971,7 @@ use a cube map or six atlas tiles.
 **So the P7B order is: the light list first, then shadows for the types it
 introduces**, not the other way round.
 
-## Three CI installs turned a download flake into a hard red in one hour
+## Decision needed: `taiki-e/install-action` is a single point of failure 17 times over
 
 All three hit on 2026-08-12 within an hour, on commits that could not have
 caused any of them, and **every one left its real step skipped**. None is a
@@ -5993,6 +5993,33 @@ defect in the tree; each cost a red build and a re-run.
   data) and the comparison was skipped. Nothing wrong with the artifacts;
   verified locally with the pinned compilers before re-running, and the re-run
   passed.
+
+**It happened a fourth time within the hour** — `vk e2e (lavapipe, windows)`
+again, `Run taiki-e/install-action@v2: failure`, every subsequent step skipped.
+Three of the four were that action.
+
+**`.github/workflows/ci.yml` uses it 17 times**, and each use is a step that can
+fail the whole job while testing nothing. The action already has an internal
+fallback chain (GitHub releases → QuickInstall → binstall → `cargo install`),
+and today every link failed for network reasons, so the fix is not "add another
+fallback" — it is to survive a transient outage or to stop downloading per run.
+The options, none of which I took because each is a real trade-off:
+
+1. **A step-level retry.** GitHub Actions cannot retry a `uses:` step natively,
+   so this means a third-party action such as `nick-fields/retry` — **a new
+   dependency, and therefore the user's call**. Cheapest to write, and it does
+   address the observed failure, which is transient rather than persistent.
+2. **Cache the installed binaries** with `actions/cache` keyed on tool and
+   version. They are already pinned, so the key is stable and a warm cache never
+   touches the network. The first run per key still downloads, so it narrows the
+   window rather than closing it.
+3. **Replace the action with `run:` steps that retry.** No new dependency, but
+   it discards the action's own fallback chain and means rewriting 17 sites —
+   the most work and the most to get wrong.
+
+**Recommendation: 2, then 1 if it still bites.** Caching removes most of the
+exposure without adding a dependency, and the pinning that makes CI reproducible
+is exactly what makes the cache key sound.
 
 **The shape worth naming**, because it recurs: a failed install leaves the real
 check **skipped**, and a skipped check is not a passed one. The Pages deploy did
