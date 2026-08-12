@@ -3043,6 +3043,72 @@ fn images_are_validated_per_type_and_sample_count() {
     assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
 }
 
+/// **An image is `DeviceLocal` and nothing else**, and a host-visible *buffer*
+/// is still the ordinary thing it always was.
+///
+/// The seam rule [`MemoryLocation`] states it: D3D12's upload and readback heaps
+/// take `D3D12_RESOURCE_DIMENSION_BUFFER` only, so a host-visible image is not a
+/// slow texture there but a resource that cannot be created.
+/// `crcbl_dx12::validate::check_image` has always refused it; nothing else did,
+/// so the same call worked on the three backends a developer runs locally and
+/// removed the device on the one that only CI sees. That is the shape that cost
+/// a device twice for the buffer half of this rule, one call later in the object
+/// lifetime.
+///
+/// The buffer at the end is the assertion that keeps the refusal honest. Every
+/// upload in the engine is a host-visible buffer, so a check that grew to cover
+/// them would take the engine down rather than the bug — the rule is about
+/// images, and this is where that is a test result rather than a sentence.
+#[test]
+fn a_host_visible_image_is_refused_and_a_host_visible_buffer_is_not() {
+    let instance = NullInstance::gpu_driven();
+    let device = open(&instance);
+    let base = ImageDesc {
+        label: Some("shadow atlas"),
+        image_type: ImageType::D2,
+        extent: crate::Extent3d::d2(64, 64),
+        format: Format::Rgba8Unorm,
+        mip_levels: 1,
+        samples: 1,
+        usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+        memory: MemoryLocation::DeviceLocal,
+    };
+
+    for memory in [MemoryLocation::HostUpload, MemoryLocation::HostReadback] {
+        let error = device
+            .create_image(&ImageDesc { memory, ..base })
+            .expect_err("a host-visible image is uncreatable on D3D12");
+        let text = error.to_string();
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+        // The label, so a caller with forty images knows which one; the
+        // location, so the fix is obvious; the heap rule, so the reason is not
+        // something they have to go and look up.
+        assert!(text.contains("shadow atlas"), "{memory:?}: {text}");
+        assert!(text.contains(&format!("{memory:?}")), "{memory:?}: {text}");
+        assert!(text.contains("DeviceLocal"), "{memory:?}: {text}");
+        assert!(
+            text.contains("D3D12_RESOURCE_DIMENSION_BUFFER"),
+            "{memory:?}: {text}"
+        );
+    }
+
+    // The same descriptor in the one legal location still creates, so the
+    // refusal reads `memory` and not something it happens to correlate with.
+    let image = device.create_image(&base).expect("a device-local image");
+    device.destroy_image(image);
+
+    // And the neighbouring class the rule must not reach.
+    let buffer = device
+        .create_buffer(&BufferDesc {
+            label: Some("staging ring"),
+            size: 64,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("every upload in the engine is this");
+    device.destroy_buffer(buffer);
+}
+
 /// Obligation 3 covers queues too. `submit`, `present` and
 /// `create_command_encoder` used to ignore the queue argument entirely, so
 /// another device's handle — synthesised from the kind index alone, and

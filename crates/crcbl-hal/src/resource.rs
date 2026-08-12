@@ -137,6 +137,40 @@ bitflags::bitflags! {
 /// shader writes are ever wanted they arrive as a
 /// [`Features`](crate::Features) flag with a documented fallback, not as a
 /// silent per-backend difference.
+///
+/// # An image is always [`DeviceLocal`](Self::DeviceLocal)
+///
+/// Not "almost always": every other value is refused by
+/// [`create_image`](crate::Device::create_image), so
+/// [`ImageDesc::memory`](crate::ImageDesc::memory) has one legal value. This is
+/// a stronger rule than the buffer one above, which forbids a *combination*.
+///
+/// It is D3D12's rule again, and this time it is the heap rather than a flag on
+/// it: `D3D12_HEAP_TYPE_UPLOAD` and `D3D12_HEAP_TYPE_READBACK` admit
+/// `D3D12_RESOURCE_DIMENSION_BUFFER` and nothing else, so a texture on one is
+/// not a slow texture but a resource `CreateCommittedResource` refuses. The
+/// route to texel data there is a copy from a host-visible buffer, which is
+/// what the seam's upload path already is on all four backends.
+///
+/// The other three give the value nothing to buy, which is why giving it up
+/// costs nothing:
+///
+/// * `crcbl-wgpu` never reads the field. `wgpu::TextureDescriptor` has no
+///   member for it, because WebGPU has no host-visible texture — so a
+///   host-visible image there is silently an ordinary device-local one.
+/// * `crcbl-vk` and `crcbl-mtl` do honour it, and the seam then offers no call
+///   that can observe the result. There is a
+///   [`write_buffer`](crate::Device::write_buffer) and no `write_image`, no
+///   image mapping and no subresource layout — and there could not be one for
+///   Vulkan, because `vkGetImageSubresourceLayout` is defined only for
+///   `VK_IMAGE_TILING_LINEAR` and this seam creates every image
+///   `VK_IMAGE_TILING_OPTIMAL`. Both backends therefore spend host-visible
+///   memory on an image whose bytes no caller can reach.
+///
+/// So the honest reading is that the host-visible locations were never an image
+/// feature this seam had: one backend cannot create it, one ignores the ask,
+/// and the two that comply produce something unreachable. What they do reliably
+/// is remove a D3D12 device on the run nobody watches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MemoryLocation {
     /// GPU-local, not CPU-mappable. Everything the GPU reads in a hot loop.
@@ -376,9 +410,17 @@ pub struct ImageDesc<'a> {
     pub samples: u32,
     /// Permitted uses.
     pub usage: ImageUsage,
-    /// Where the memory lives. Almost always
-    /// [`MemoryLocation::DeviceLocal`] — a host-visible image is a linear-tiled
-    /// image, which is slow everywhere.
+    /// Where the memory lives. **Always [`MemoryLocation::DeviceLocal`]** —
+    /// [`create_image`](crate::Device::create_image) refuses either
+    /// host-visible location, because D3D12's upload and readback heaps hold
+    /// buffers only and a texture on one is a resource that cannot be created.
+    /// [`MemoryLocation`] states the rule and what the other three backends do
+    /// with the ask; the short version is that none of them can be relied on
+    /// for it and the seam has no call that could read the result anyway.
+    ///
+    /// The field is still here rather than gone because removing it is an API
+    /// break across every image the engine allocates, not because a second
+    /// value is coming.
     pub memory: MemoryLocation,
 }
 

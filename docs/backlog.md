@@ -5978,13 +5978,16 @@ there was no third latent instance. Read-only bindings of host-visible buffers
 stay legal — removing that exemption fails 28 tests, which is the measure of how
 load-bearing it is.
 
-**The same divergence exists for images and is still uncovered.**
-`crcbl_dx12::validate::check_image` refuses _any_ non-`DeviceLocal` image at
-`create_image`, while `ImageDesc::memory`'s doc says only "almost always
-`DeviceLocal`" and the null backend accepts a host-visible image happily. It is
-the identical shape — a thing three backends permit and D3D12 refuses, invisible
-until CI — one call earlier in the object lifetime, and it is the obvious next
-instance of the decision just taken for buffers.
+**The image half is closed too**, and it turned out stronger than the buffer
+rule: `ImageDesc::memory` has exactly one legal value, because the seam has no
+way to touch an image's bytes from the CPU — no `write_image`, no mapping, no
+subresource layout — so the field buys nothing observable on any backend while
+removing a D3D12 device. **Recommendation on the record: delete the field.** A
+field with one legal value is one every caller must fill and can still fill
+wrongly, and `CLAUDE.md`'s own rule is to enforce a contract rather than
+document one — making the state unrepresentable beats refusing it. The cost is
+an API break across roughly 58 construction sites and four backends'
+`create_image`, which is mechanical and affordable pre-1.0.
 
 **What blocks writing it from outside `crcbl-hal`:** the null backend does not
 record bind-group _contents_. `Detail::BindGroup` keeps the layout handle and an

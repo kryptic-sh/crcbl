@@ -991,6 +991,24 @@ impl Device for NullDevice {
                 "an image with no usage flags can never be used".to_string(),
             ));
         }
+        // The seam's rule, stated on `MemoryLocation`: an image is
+        // `DeviceLocal` and nothing else. `crcbl-dx12` refuses it in
+        // `validate::check_image` because D3D12 genuinely cannot create the
+        // resource — but a violation only that backend catches is one nobody
+        // sees until CI runs WARP, which is how the buffer half of this rule
+        // cost a device twice. The null backend is the reference
+        // implementation, so it is refused here too, where every no-GPU test
+        // meets it.
+        if !matches!(desc.memory, MemoryLocation::DeviceLocal) {
+            return Err(HalError::InvalidDescriptor(format!(
+                "image {} asks for {:?} memory; an image must be \
+                 MemoryLocation::DeviceLocal, because D3D12's upload and readback heaps hold \
+                 D3D12_RESOURCE_DIMENSION_BUFFER only — a texture on one is not slow but \
+                 uncreatable. Reach texel data by copying from a host-visible buffer",
+                desc.label.unwrap_or("<unlabelled>"),
+                desc.memory
+            )));
+        }
         Ok(self.insert(ObjectKind::Image, desc.label, Detail::None))
     }
 

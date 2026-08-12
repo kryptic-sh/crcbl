@@ -197,6 +197,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **An image is always `DeviceLocal`, and the seam says so now.** `crcbl-dx12`
+  refused any other setting at `create_image` and the seam's doc said only
+  "almost always", so a caller could write code that worked on three backends
+  and removed the device on the fourth. The null backend refuses it now, with
+  the mechanism documented: D3D12's `UPLOAD`/`READBACK` heaps admit
+  `D3D12_RESOURCE_DIMENSION_BUFFER` only, so a host-visible texture is not slow
+  — it is uncreatable.
+
+  **This is stronger than the buffer rule, not the same shape.** That one
+  forbids a combination and leaves host-visible buffers legal elsewhere; this
+  forbids the _value_, leaving `ImageDesc::memory` one legal setting. What
+  decides it is that the seam has no way to touch an image's bytes from the CPU
+  at all — there is no `write_image`, no mapping, no subresource layout — so the
+  field buys a caller nothing observable on any backend while reliably removing
+  a D3D12 device.
+
+  Measured rather than assumed, on real hardware: Vulkan _accepts_ a
+  host-visible image on radv and lavapipe, but `crcbl-vk` hardcodes optimal
+  tiling, so what you get is an optimal-tiled image in host-visible memory —
+  allocated, legal and useless, since `vkGetImageSubresourceLayout` is defined
+  only for linear tiling. Metal honours the ask and is equally unreachable
+  through this seam. **wgpu does not read the field at all** —
+  `wgpu::TextureDescriptor` has no member for it — so it is the one backend that
+  would silently mis-honour rather than refuse.
+
+  The "almost always" hedge was covering nothing: of 58 `ImageDesc`
+  constructions in the tree, the only non-`DeviceLocal` one is the D3D12 test
+  asserting the refusal.
+
 - **A buffer a shader writes must be `DeviceLocal`, and the seam says so now.**
   D3D12's upload and readback heaps refuse `ALLOW_UNORDERED_ACCESS` at creation
   and pin the resource to a state a shader cannot write from, so there is no

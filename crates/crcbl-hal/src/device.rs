@@ -626,7 +626,11 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// # Errors
     ///
     /// [`HalError::OutOfDeviceMemory`], or [`HalError::InvalidDescriptor`] if
-    /// the extent, mip count or sample count exceeds [`Device::caps`].
+    /// the extent, mip count or sample count exceeds [`Device::caps`] — or if
+    /// [`ImageDesc::memory`](crate::ImageDesc::memory) is not
+    /// [`MemoryLocation::DeviceLocal`](crate::MemoryLocation::DeviceLocal),
+    /// which every backend refuses because D3D12 cannot create it at all. See
+    /// [`MemoryLocation`](crate::MemoryLocation).
     fn create_image(&self, desc: &ImageDesc<'_>) -> Result<ImageHandle, HalError>;
 
     /// Destroys an image. Every view of it must already be destroyed.
