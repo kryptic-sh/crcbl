@@ -1247,10 +1247,12 @@ impl DeviceInner {
     ///
     /// Used by [`Device::create_image`] and by the offscreen swapchain ring,
     /// which is the reason it exists as a helper at all.
+    ///
+    /// The allocation is always [`MemoryLocation::DeviceLocal`]: `ImageDesc`
+    /// has no memory field, and the swapchain ring's images are attachments.
     pub(crate) fn create_owned_image(
         &self,
         info: &vk::ImageCreateInfo<'_>,
-        location: MemoryLocation,
         label: Option<&str>,
     ) -> Result<(vk::Image, vk::DeviceMemory), HalError> {
         // SAFETY: `info` is a fully populated descriptor with no dangling
@@ -1259,7 +1261,7 @@ impl DeviceInner {
             .map_err(|error| conv::hal_error("vkCreateImage", error))?;
         // SAFETY: `image` was just created by this device.
         let requirements = unsafe { self.raw.get_image_memory_requirements(image) };
-        let memory = match self.allocate(requirements, location) {
+        let memory = match self.allocate(requirements, MemoryLocation::DeviceLocal) {
             Ok(memory) => memory,
             Err(error) => {
                 // SAFETY: `image` is live, unbound and unused.
@@ -1819,9 +1821,7 @@ impl Device for VkDevice {
             .usage(conv::image_usage(desc.usage))
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .initial_layout(vk::ImageLayout::UNDEFINED);
-        let (raw, memory) = self
-            .inner
-            .create_owned_image(&info, desc.memory, desc.label)?;
+        let (raw, memory) = self.inner.create_owned_image(&info, desc.label)?;
         Ok(self
             .inner
             .stamp(self.inner.state().images.insert(ImageEntry {
@@ -2970,11 +2970,7 @@ impl VkDevice {
         let mut memory = Vec::with_capacity(count as usize);
         for index in 0..count {
             let label = desc.label.map(|label| format!("{label} [{index}]"));
-            match self.inner.create_owned_image(
-                &info,
-                MemoryLocation::DeviceLocal,
-                label.as_deref(),
-            ) {
+            match self.inner.create_owned_image(&info, label.as_deref()) {
                 Ok((image, block)) => {
                     images.push(image);
                     memory.push(block);

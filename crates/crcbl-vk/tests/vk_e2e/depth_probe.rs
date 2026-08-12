@@ -373,7 +373,6 @@ impl DepthProbe {
                 samples: 1,
                 usage: crcbl_hal::ImageUsage::DEPTH_STENCIL_ATTACHMENT
                     .union(crcbl_hal::ImageUsage::SAMPLED),
-                memory: MemoryLocation::DeviceLocal,
             })
             .expect("a depth image");
         let shadow_atlas_view = device

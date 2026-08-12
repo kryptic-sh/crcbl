@@ -1397,8 +1397,12 @@ impl Device for MetalDevice {
         descriptor.setTextureType(conv::texture_type(desc.image_type, layers, desc.samples));
         descriptor.setPixelFormat(conv::pixel_format(desc.format));
         descriptor.setUsage(conv::texture_usage(desc.usage, desc.format));
-        descriptor.setStorageMode(conv::storage_mode(desc.memory));
-        descriptor.setCpuCacheMode(conv::cpu_cache_mode(desc.memory));
+        // An image is device-local — `MTLStorageMode::Private` — and
+        // `ImageDesc` has no field that could say otherwise; see
+        // `MemoryLocation`. Metal ignores a `Private` texture's cache mode, so
+        // the mapping's neutral value is the one to hand it.
+        descriptor.setStorageMode(conv::storage_mode(MemoryLocation::DeviceLocal));
+        descriptor.setCpuCacheMode(conv::cpu_cache_mode(MemoryLocation::DeviceLocal));
         // SAFETY: `objc2` marks these setters unsafe because Metal does not
         // bounds-check them and raises on an out-of-range value. Every argument
         // below was checked against this device's `Limits` above — the extent
@@ -2618,7 +2622,6 @@ pub(crate) mod tests {
                 mip_levels: 1,
                 samples: 1,
                 usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
-                memory: MemoryLocation::DeviceLocal,
             })
             .expect("a colour attachment");
         let view = device
@@ -4388,7 +4391,6 @@ using namespace metal;\n\
                 mip_levels: extent.full_mip_levels(ImageType::D2),
                 samples: 1,
                 usage: ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
-                memory: MemoryLocation::DeviceLocal,
             })
             .expect("a 2D colour image");
 
@@ -4466,7 +4468,6 @@ using namespace metal;\n\
                 mip_levels: 1,
                 samples: 1,
                 usage: ImageUsage::SAMPLED,
-                memory: MemoryLocation::DeviceLocal,
             })
             .expect("a linear image");
         let view = device
@@ -4497,7 +4498,6 @@ using namespace metal;\n\
                 mip_levels: 1,
                 samples: 1,
                 usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
-                memory: MemoryLocation::DeviceLocal,
             })
             .expect("a depth image");
         let error = device

@@ -1333,7 +1333,6 @@ mod tests {
                 mip_levels: 1,
                 samples: 1,
                 usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::PRESENT,
-                memory: MemoryLocation::DeviceLocal,
             })
             .expect("an image");
         let view = device

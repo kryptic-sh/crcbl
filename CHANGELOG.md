@@ -197,6 +197,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`ImageDesc::memory` is gone.** Images are device-local, and the type says so
+  by not having the field rather than by refusing the other values at run time —
+  `CLAUDE.md`'s own rule, that a contract is enforced rather than documented,
+  and a field every caller must fill and can still fill wrongly is the weaker
+  form of it. 36 construction sites lost a line; the only one that was not
+  `DeviceLocal` was the D3D12 test asserting the refusal, which went with it.
+
+  The refusal added a commit earlier is deleted along with its test, and so is
+  `crcbl-dx12`'s internal check — a guard against a state that can no longer be
+  constructed is noise. `crcbl-vk`'s `create_owned_image` lost its location
+  parameter entirely; Metal and D3D12 now name the one location at the call
+  rather than forwarding a field, keeping the mapping shared with buffers; wgpu
+  needed no edit because it never read it. `BufferDesc::memory` is untouched and
+  still uses all three locations.
+
 - **An image is always `DeviceLocal`, and the seam says so now.** `crcbl-dx12`
   refused any other setting at `create_image` and the seam's doc said only
   "almost always", so a caller could write code that worked on three backends

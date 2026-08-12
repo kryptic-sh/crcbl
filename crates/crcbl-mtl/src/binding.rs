@@ -1622,7 +1622,6 @@ mod tests {
                 mip_levels: 1,
                 samples: 1,
                 usage: ImageUsage::SAMPLED,
-                memory: MemoryLocation::DeviceLocal,
             })
             .expect("a sampled image");
         let view = device
@@ -1688,7 +1687,6 @@ mod tests {
                 mip_levels: 1,
                 samples: 1,
                 usage: ImageUsage::COLOR_ATTACHMENT,
-                memory: MemoryLocation::DeviceLocal,
             })
             .expect("a colour attachment");
         let view = device

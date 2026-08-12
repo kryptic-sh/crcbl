@@ -1828,7 +1828,6 @@ impl ForwardRenderer {
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT
                 .union(ImageUsage::SAMPLED)
                 .union(ImageUsage::TRANSFER_SRC),
-            memory: MemoryLocation::DeviceLocal,
         })?;
         rollback.images.push(shadow_atlas);
         let shadow_atlas_view = device.create_image_view(&ImageViewDesc {
@@ -1848,7 +1847,6 @@ impl ForwardRenderer {
             mip_levels: 1,
             samples: 1,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT.union(ImageUsage::SAMPLED),
-            memory: MemoryLocation::DeviceLocal,
         })?;
         rollback.images.push(shadow_placeholder);
         let shadow_placeholder_view = device.create_image_view(&ImageViewDesc {
@@ -5339,7 +5337,6 @@ mod tests {
                 mip_levels: 1,
                 samples: 1,
                 usage: crcbl_hal::ImageUsage::COLOR_ATTACHMENT | crcbl_hal::ImageUsage::PRESENT,
-                memory: MemoryLocation::DeviceLocal,
             })
             .expect("an image");
         let view = device

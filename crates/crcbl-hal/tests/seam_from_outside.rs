@@ -132,7 +132,6 @@ fn setup(instance: &dyn Instance) -> Frame {
             mip_levels: 1,
             samples: 1,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
-            memory: MemoryLocation::DeviceLocal,
         })
         .expect("hdr target");
     assert!(Format::Rgba16Float.is_hdr_capable());
@@ -156,7 +155,6 @@ fn setup(instance: &dyn Instance) -> Frame {
             mip_levels: 1,
             samples: 1,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
-            memory: MemoryLocation::DeviceLocal,
         })
         .expect("depth target");
     let depth_view: ImageViewHandle = device
@@ -521,7 +519,6 @@ fn a_full_setup_and_teardown_leaks_nothing() {
                 mip_levels: Extent3d::d2(16, 16).full_mip_levels(ImageType::D2),
                 samples: 1,
                 usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
-                memory: MemoryLocation::DeviceLocal,
             })
             .expect("image");
         assert_eq!(recorder.live_objects(ObjectKind::Buffer), 1);
@@ -590,7 +587,6 @@ fn the_screenshot_readback_path_polls_instead_of_blocking() {
             mip_levels: 1,
             samples: 1,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
-            memory: MemoryLocation::DeviceLocal,
         })
         .expect("source image");
 

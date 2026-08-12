@@ -1470,7 +1470,6 @@ impl Dx12Device {
                         | ImageUsage::TRANSFER_SRC
                         | ImageUsage::TRANSFER_DST
                         | ImageUsage::SAMPLED,
-                    memory: MemoryLocation::DeviceLocal,
                 })?;
                 images.push(image);
                 let view = self.create_image_view(&ImageViewDesc {
@@ -1958,7 +1957,10 @@ impl Device for Dx12Device {
             Layout: D3D12_TEXTURE_LAYOUT_UNKNOWN,
             Flags: conv::image_flags(desc.usage),
         };
-        let properties = heap_properties(desc.memory);
+        // An image is device-local — the default heap — and `ImageDesc` has no
+        // field that could say otherwise. D3D12 is the reason: its upload and
+        // readback heaps admit `D3D12_RESOURCE_DIMENSION_BUFFER` only.
+        let properties = heap_properties(MemoryLocation::DeviceLocal);
         let mut resource: Option<ID3D12Resource> = None;
         // SAFETY: as `create_buffer` — live descriptors borrowed for the call,
         // a live out-parameter, and the initial state D3D12 requires for the
@@ -1969,7 +1971,7 @@ impl Device for Dx12Device {
                 &properties,
                 D3D12_HEAP_FLAG_NONE,
                 &resource_desc,
-                conv::initial_state(desc.memory),
+                conv::initial_state(MemoryLocation::DeviceLocal),
                 None,
                 &mut resource,
             )
@@ -3546,7 +3548,6 @@ pub(crate) mod tests {
             mip_levels: 1,
             samples: 1,
             usage,
-            memory: MemoryLocation::DeviceLocal,
         }
     }
 
@@ -5832,13 +5833,6 @@ pub(crate) mod tests {
                 "no usage at all",
                 ImageDesc {
                     usage: ImageUsage::empty(),
-                    ..base
-                },
-            ),
-            (
-                "a host-visible image",
-                ImageDesc {
-                    memory: MemoryLocation::HostUpload,
                     ..base
                 },
             ),

@@ -79,7 +79,6 @@ impl Harness {
                 mip_levels: 1,
                 samples: 1,
                 usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::PRESENT,
-                memory: crcbl_hal::MemoryLocation::DeviceLocal,
             })
             .expect("an image");
         let view = self

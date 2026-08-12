@@ -5982,12 +5982,13 @@ load-bearing it is.
 rule: `ImageDesc::memory` has exactly one legal value, because the seam has no
 way to touch an image's bytes from the CPU — no `write_image`, no mapping, no
 subresource layout — so the field buys nothing observable on any backend while
-removing a D3D12 device. **Recommendation on the record: delete the field.** A
-field with one legal value is one every caller must fill and can still fill
-wrongly, and `CLAUDE.md`'s own rule is to enforce a contract rather than
-document one — making the state unrepresentable beats refusing it. The cost is
-an API break across roughly 58 construction sites and four backends'
-`create_image`, which is mechanical and affordable pre-1.0.
+removing a D3D12 device. **Done — the field is deleted.** Taken as a sane
+default under the standing instruction, on `CLAUDE.md`'s rule that a contract is
+enforced rather than documented: a field with one legal value is one every
+caller must fill and can still fill wrongly, and removing it makes the state
+unrepresentable instead of refused. 36 sites, 20 files, no golden moved, and the
+run-time refusal added one commit earlier is deleted with it — a guard against
+the unconstructable is noise.
 
 **What blocks writing it from outside `crcbl-hal`:** the null backend does not
 record bind-group _contents_. `Detail::BindGroup` keeps the layout handle and an

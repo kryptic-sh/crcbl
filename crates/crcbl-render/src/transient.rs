@@ -59,10 +59,10 @@ pub const RETIRE_AFTER_FRAMES: u32 = 3;
 
 /// What a graph-owned image should be.
 ///
-/// Deliberately smaller than [`ImageDesc`]: a transient is always
-/// [`MemoryLocation::DeviceLocal`], always a single-layer 2D image, and never
-/// has a caller-chosen label — the graph names it. Fewer fields is fewer ways
-/// for two "identical" transients to fail to alias.
+/// Deliberately smaller than [`ImageDesc`]: a transient is always a
+/// single-layer 2D image and never has a caller-chosen label — the graph names
+/// it. Fewer fields is fewer ways for two "identical" transients to fail to
+/// alias.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TransientImageDesc {
     /// Size in pixels.
@@ -211,7 +211,6 @@ impl TransientPool {
             mip_levels: desc.mip_levels,
             samples: desc.samples,
             usage: desc.usage,
-            memory: MemoryLocation::DeviceLocal,
         })?;
         let view = match device.create_image_view(&ImageViewDesc {
             label: Some("graph transient"),

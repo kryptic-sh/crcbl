@@ -352,7 +352,6 @@ fn upload_image(
         mip_levels: 1,
         samples: 1,
         usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
-        memory: MemoryLocation::DeviceLocal,
     })?;
 
     let view = match device.create_image_view(&ImageViewDesc {

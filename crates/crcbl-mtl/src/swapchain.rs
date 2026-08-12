@@ -136,8 +136,8 @@ use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     AcquiredFrame, AdapterId, CompositeAlpha, Device as _, DisplayTiming, Extent3d, Format,
     HalError, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewHandle, ImageViewType, MemoryLocation, PresentInfo, PresentMode, QueueHandle,
-    SurfaceCaps, SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle,
+    ImageViewHandle, ImageViewType, PresentInfo, PresentMode, QueueHandle, SurfaceCaps,
+    SurfaceError, SurfaceHandle, SwapchainDesc, SwapchainHandle,
 };
 use objc2::ClassType;
 use objc2::rc::Retained;
@@ -1101,7 +1101,6 @@ impl MetalDevice {
                     mip_levels: 1,
                     samples: 1,
                     image_type: ImageType::D2,
-                    memory: MemoryLocation::DeviceLocal,
                 })
                 .and_then(|image| {
                     images.push(image);
@@ -1232,8 +1231,8 @@ mod tests {
     use crcbl_hal::{
         Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
         CommandEncoderDesc, Features, ImageAspect, ImageBarrier, ImageSubresourceLayers, Instance,
-        LoadOp, Offset3d, QueueKind, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc,
-        ResourceState, StoreOp, SubmitInfo,
+        LoadOp, MemoryLocation, Offset3d, QueueKind, ReadbackDesc, ReadbackHandle, Rect2d,
+        RenderPassDesc, ResourceState, StoreOp, SubmitInfo,
     };
     use objc2_metal::MTLPixelFormat;
     use objc2_quartz_core::CALayer;

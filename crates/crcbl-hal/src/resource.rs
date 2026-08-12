@@ -138,12 +138,12 @@ bitflags::bitflags! {
 /// [`Features`](crate::Features) flag with a documented fallback, not as a
 /// silent per-backend difference.
 ///
-/// # An image is always [`DeviceLocal`](Self::DeviceLocal)
+/// # An image is [`DeviceLocal`](Self::DeviceLocal), and cannot say otherwise
 ///
-/// Not "almost always": every other value is refused by
-/// [`create_image`](crate::Device::create_image), so
-/// [`ImageDesc::memory`](crate::ImageDesc::memory) has one legal value. This is
-/// a stronger rule than the buffer one above, which forbids a *combination*.
+/// This location is not a field of [`ImageDesc`] at all. Every image the seam
+/// creates is device-local, so there is nothing for a caller to pass and
+/// nothing to get wrong — a stronger rule than the buffer one above, which
+/// forbids a *combination*.
 ///
 /// It is D3D12's rule again, and this time it is the heap rather than a flag on
 /// it: `D3D12_HEAP_TYPE_UPLOAD` and `D3D12_HEAP_TYPE_READBACK` admit
@@ -152,25 +152,19 @@ bitflags::bitflags! {
 /// route to texel data there is a copy from a host-visible buffer, which is
 /// what the seam's upload path already is on all four backends.
 ///
-/// The other three give the value nothing to buy, which is why giving it up
-/// costs nothing:
+/// The other three had nothing to offer for the ask either, which is why the
+/// field cost nothing to drop:
 ///
-/// * `crcbl-wgpu` never reads the field. `wgpu::TextureDescriptor` has no
-///   member for it, because WebGPU has no host-visible texture — so a
-///   host-visible image there is silently an ordinary device-local one.
-/// * `crcbl-vk` and `crcbl-mtl` do honour it, and the seam then offers no call
-///   that can observe the result. There is a
+/// * `crcbl-wgpu` never read it. `wgpu::TextureDescriptor` has no member for
+///   it, because WebGPU has no host-visible texture.
+/// * `crcbl-vk` and `crcbl-mtl` did honour it, and the seam offers no call that
+///   can observe the result. There is a
 ///   [`write_buffer`](crate::Device::write_buffer) and no `write_image`, no
 ///   image mapping and no subresource layout — and there could not be one for
 ///   Vulkan, because `vkGetImageSubresourceLayout` is defined only for
 ///   `VK_IMAGE_TILING_LINEAR` and this seam creates every image
-///   `VK_IMAGE_TILING_OPTIMAL`. Both backends therefore spend host-visible
-///   memory on an image whose bytes no caller can reach.
-///
-/// So the honest reading is that the host-visible locations were never an image
-/// feature this seam had: one backend cannot create it, one ignores the ask,
-/// and the two that comply produce something unreachable. What they do reliably
-/// is remove a D3D12 device on the run nobody watches.
+///   `VK_IMAGE_TILING_OPTIMAL`. Both spent host-visible memory on an image
+///   whose bytes no caller could reach.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MemoryLocation {
     /// GPU-local, not CPU-mappable. Everything the GPU reads in a hot loop.
@@ -394,6 +388,9 @@ pub struct ImageSubresourceLayers {
 }
 
 /// Creation parameters for an image.
+///
+/// There is no memory location here, unlike [`BufferDesc`]: an image is always
+/// [`MemoryLocation::DeviceLocal`], and [`MemoryLocation`] says why.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImageDesc<'a> {
     /// Debug name; see [`BufferDesc::label`].
@@ -410,18 +407,6 @@ pub struct ImageDesc<'a> {
     pub samples: u32,
     /// Permitted uses.
     pub usage: ImageUsage,
-    /// Where the memory lives. **Always [`MemoryLocation::DeviceLocal`]** —
-    /// [`create_image`](crate::Device::create_image) refuses either
-    /// host-visible location, because D3D12's upload and readback heaps hold
-    /// buffers only and a texture on one is a resource that cannot be created.
-    /// [`MemoryLocation`] states the rule and what the other three backends do
-    /// with the ask; the short version is that none of them can be relied on
-    /// for it and the seam has no call that could read the result anyway.
-    ///
-    /// The field is still here rather than gone because removing it is an API
-    /// break across every image the engine allocates, not because a second
-    /// value is coming.
-    pub memory: MemoryLocation,
 }
 
 /// How a view reinterprets its image's dimensionality.

@@ -1001,7 +1001,6 @@ fn an_msaa_pass_resolves_into_its_resolve_target() {
             mip_levels: 1,
             samples: 4,
             usage: ImageUsage::COLOR_ATTACHMENT,
-            memory: MemoryLocation::DeviceLocal,
         })
         .expect("a 4x target");
     let resolve = device
@@ -1013,7 +1012,6 @@ fn an_msaa_pass_resolves_into_its_resolve_target() {
             mip_levels: 1,
             samples: 1,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
-            memory: MemoryLocation::DeviceLocal,
         })
         .expect("a 1x resolve target");
     let msaa_view = device
@@ -1160,7 +1158,6 @@ fn a_stale_resolve_handle_is_refused_rather_than_dropped() {
             mip_levels: 1,
             samples: 4,
             usage: ImageUsage::COLOR_ATTACHMENT,
-            memory: MemoryLocation::DeviceLocal,
         })
         .expect("a 4x target");
     let msaa_view = device
@@ -1235,7 +1232,6 @@ fn a_padded_indirect_draw_stride_is_refused_at_finish() {
             mip_levels: 1,
             samples: 1,
             usage: ImageUsage::COLOR_ATTACHMENT,
-            memory: MemoryLocation::DeviceLocal,
         })
         .expect("a render target");
     let view = device
@@ -2092,7 +2088,6 @@ fn a_wgpu_indexed_draw_reads_the_index_buffer_it_was_bound() {
             mip_levels: 1,
             samples: 1,
             usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
-            memory: MemoryLocation::DeviceLocal,
         })
         .expect("a render target");
     let view = device
@@ -2765,7 +2760,6 @@ fn sampled_views(
                 mip_levels: 1,
                 samples: 1,
                 usage: ImageUsage::SAMPLED | ImageUsage::COLOR_ATTACHMENT,
-                memory: MemoryLocation::DeviceLocal,
             })
             .unwrap_or_else(|error| panic!("array element {index}: {error}"));
         let view = device

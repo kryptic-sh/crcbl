@@ -20,7 +20,6 @@
 
 use crcbl_hal::{
     DeviceCaps, Features, Format, HalError, ImageDesc, ImageType, ImageUsage, ImageViewDesc,
-    MemoryLocation,
 };
 use windows::Win32::Graphics::Direct3D12::{
     D3D12_DEPTH_STENCIL_VIEW_DESC, D3D12_RENDER_TARGET_VIEW_DESC, D3D12_SHADER_RESOURCE_VIEW_DESC,
@@ -47,18 +46,6 @@ pub(crate) fn check_image(caps: &DeviceCaps, desc: &ImageDesc<'_>) -> Result<(),
         return Err(HalError::InvalidDescriptor(
             "ImageDesc::usage is empty, so the image could never be used".to_string(),
         ));
-    }
-    // A texture cannot live on the upload or readback heap: D3D12 admits
-    // only buffers there. The route to a GPU texture is a copy from a
-    // host-visible buffer, which is the command slice, and the seam already
-    // says a host-visible image is the wrong shape everywhere.
-    if !matches!(desc.memory, MemoryLocation::DeviceLocal) {
-        return Err(HalError::InvalidDescriptor(format!(
-            "an image on {:?} is not creatable: D3D12's upload and readback heaps hold \
-             buffers only, so a texture is reached by copying from one (the DX12 command \
-             slice)",
-            desc.memory
-        )));
     }
     if !desc.samples.is_power_of_two() || desc.samples > limits.max_sample_count {
         return Err(HalError::InvalidDescriptor(format!(

@@ -57,7 +57,6 @@ fn a_read_only_depth_pass_uses_the_read_only_layout() {
             mip_levels: 1,
             samples: 1,
             usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
-            memory: MemoryLocation::DeviceLocal,
         })
         .expect("a depth target");
     let depth_view = device
