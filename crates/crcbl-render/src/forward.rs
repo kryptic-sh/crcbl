@@ -151,7 +151,7 @@ use glam::{Mat4, Quat, Vec3};
 use crate::camera::{Camera, DirectionalLight};
 use crate::cluster_pool::{ClusterPool, ClusterRange, PooledMesh};
 use crate::cull::Frustum;
-use crate::draw_gen::{DrawGen, DrawGenDesc};
+use crate::draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 use crate::graph::{BufferId, ImageId, ImportedBuffer, ImportedImage, RenderGraph};
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc};
 use crate::light::{Light, sun_row};
@@ -665,8 +665,9 @@ pub struct ForwardRenderer {
     mesh_pipeline_layout: PipelineLayoutHandle,
     mesh_pipeline: GraphicsPipelineHandle,
 
-    /// Topic 18's sun cascades: one `D32Float` image holding
-    /// [`shadow::CASCADES`] square tiles side by side.
+    /// Topic 18's shadow atlas: one `D32Float` image holding
+    /// [`shadow::TILES`] square tiles in a fixed grid — the sun's cascades
+    /// first, then one per shadowed light.
     ///
     /// Owned here rather than created by the graph per frame, because its
     /// extent is a **quality setting and not a window size** — nothing about it
@@ -697,35 +698,51 @@ pub struct ForwardRenderer {
     shadow_placeholder_view: ImageViewHandle,
     /// The **comparison** sampler the atlas is read through — hardware PCF.
     shadow_sampler: SamplerHandle,
-    /// The depth-only pipeline the cascades are rendered with: the same geometry
+    /// The depth-only pipeline every tile is rendered with: the same geometry
     /// stage as [`ForwardRenderer::mesh_pipeline`] and no fragment stage at all.
     shadow_pipeline: GraphicsPipelineHandle,
-    /// One cull and draw-argument pass **per cascade**, which is topic 18's
-    /// "one cull dispatch per cascade against the same instance/geometry pools".
+    /// One cull and draw-argument pass **per atlas tile**, which is topic 18's
+    /// "one cull dispatch per cascade against the same instance/geometry pools"
+    /// with a shadowed light's map counting as a tile like any other.
     ///
     /// A whole [`DrawGen`] rather than just its cull half: the shadow pass emits
     /// the same indirect call the colour pass does, so it needs the same
     /// arguments, and there is no "cull only" constructor to reach for. The cost
-    /// is that each cascade duplicates the clear and draw-argument pipelines.
-    shadow_draws: Vec<DrawGen>,
-    /// `[frame][cascade]`: a copy of the frame block whose `view_proj` **is**
-    /// that cascade's matrix, so the depth-only pipeline runs the unmodified
-    /// vertex and mesh stages rather than a second transform path.
-    shadow_uniforms: Vec<Vec<BufferHandle>>,
-    /// `[frame][cascade]`: the mesh layout again, reading that cascade's
-    /// survivors and that cascade's uniforms.
-    shadow_groups: Vec<Vec<BindGroupHandle>>,
-    /// `[frame][cascade]`: the cut that cascade's amplification stage chose,
-    /// one word per resident cluster — and empty where there is no such stage.
+    /// is that each tile duplicates the clear and draw-argument pipelines and
+    /// [`DrawGen`]'s own per-instance state — see
+    /// [`TileBuffers::group_state`], which is where that price is written down.
     ///
-    /// **A buffer per cascade rather than the camera's**, unlike every other
+    /// **Indexed by tile, not by cascade**: `0..shadow::CASCADES` are the sun's
+    /// and the rest are `shadow::light_tile`'s, so a slot's index into this
+    /// vector and its viewport in the atlas come from the same arithmetic.
+    shadow_draws: Vec<DrawGen>,
+    /// `[frame][tile]`: a copy of the frame block whose `view_proj` **is** that
+    /// tile's matrix, so the depth-only pipeline runs the unmodified vertex and
+    /// mesh stages rather than a second transform path.
+    shadow_uniforms: Vec<Vec<BufferHandle>>,
+    /// `[frame][tile]`: the mesh layout again, reading that tile's survivors and
+    /// that tile's uniforms.
+    shadow_groups: Vec<Vec<BindGroupHandle>>,
+    /// `[frame][tile]`: the cut that tile's amplification stage chose, one word
+    /// per resident cluster — and empty where there is no such stage.
+    ///
+    /// **A buffer per tile rather than the camera's**, unlike every other
     /// resource these passes share: the colour pass is recorded last and writes
-    /// [`ForwardRenderer::cluster_selection`] over whatever a cascade left in it,
-    /// so a cascade writing there leaves nothing behind to read. Without one of
+    /// [`ForwardRenderer::cluster_selection`] over whatever a tile left in it,
+    /// so a tile writing there leaves nothing behind to read. Without one of
     /// these the shadow pass's descent is unobservable — which is the state
     /// [`SHADOW_LOD_BIAS`] arrived in, and it is what a bias nothing can measure
     /// would have stayed in.
     shadow_selection: Vec<Vec<BufferHandle>>,
+    /// Which of [`ForwardRenderer::extra_lights`] holds each of the atlas's
+    /// light tiles, and the memory that keeps that answer from flickering.
+    ///
+    /// Re-run every [`ForwardRenderer::begin_frame`] and read by
+    /// [`ForwardRenderer::add_shadow_pass`], which records a cull and a viewport
+    /// for the occupied slots and nothing at all for the free ones — so a free
+    /// tile keeps the reversed-Z clear, which reads as "nothing stored, fully
+    /// lit" wherever anything did sample it.
+    shadow_lights: shadow::Selection,
     /// What the last frame left [`ForwardRenderer::shadow_atlas`] and its
     /// placeholder in.
     ///
@@ -782,9 +799,9 @@ struct Rollback {
     /// buffers each — and which clean themselves up on their own failure path,
     /// so this only carries one that was built.
     draws: Option<DrawGen>,
-    /// One more of the same per shadow cascade — a `Vec` rather than an
-    /// `Option`, because a failure part way through the cascades has to release
-    /// the ones already built.
+    /// One more of the same per shadow-atlas tile — a `Vec` rather than an
+    /// `Option`, because a failure part way through the tiles has to release the
+    /// ones already built.
     shadow_draws: Vec<DrawGen>,
     /// The cluster buffers, which own three buffers and are built on the
     /// mesh-shader path alone.
@@ -1120,26 +1137,32 @@ struct Residents {
     dunes_vertex_bases: Vec<u32>,
 }
 
-/// One cascade's per-frame buffers, read out of its [`DrawGen`] before that
+/// One shadow tile's per-frame buffers, read out of its [`DrawGen`] before that
 /// generator is handed to the rollback.
-struct CascadeBuffers {
+struct TileBuffers {
     runs: Vec<BufferHandle>,
     args: Vec<BufferHandle>,
     cull_params: Vec<BufferHandle>,
     cull_stats: Vec<BufferHandle>,
-    /// This cascade's own hysteresis state, and not the camera's.
+    /// This tile's own hysteresis state, and not the camera's.
     ///
-    /// A cascade selects from the camera's eye at the camera's scale, like the
+    /// A tile selects from the camera's eye at the camera's scale, like the
     /// colour pass, but under budgets [`SHADOW_LOD_BIAS`] times as large — so it
     /// reaches a different answer for the same group, and an answer carried
     /// between frames needs somewhere of its own to be carried. Sharing the
     /// camera's buffer would be two rules writing one history and each undoing
     /// the other's band every frame.
     ///
-    /// One per cascade rather than one for the shadow pass, even though every
-    /// cascade now selects identically: each cascade is its own [`DrawGen`], and
-    /// one buffer between them would be several dispatches writing one element
-    /// with nothing ordering them.
+    /// One per tile rather than one for the shadow pass, even though every tile
+    /// selects identically: each tile is its own [`DrawGen`], and one buffer
+    /// between them would be several dispatches writing one element with nothing
+    /// ordering them.
+    ///
+    /// **This is what a tile costs that is not a dispatch.** It is
+    /// `POOL_INSTANCE_CAPACITY` × the resident group count words of device-local
+    /// memory, held for the renderer's whole life whether the tile is drawn into
+    /// or not, and it is the reason [`shadow::SHADOW_LIGHTS`] is a budget rather
+    /// than "however many lights the scene has".
     group_state: BufferHandle,
 }
 
@@ -1464,10 +1487,10 @@ impl ForwardRenderer {
         // across the ring would have the next frame's dispatch overwriting what
         // this one recorded. `TRANSFER_SRC` because reading it is the point.
         let mut cluster_selection: Vec<BufferHandle> = Vec::new();
-        // And one ring per shadow cascade, indexed `[cascade][frame]` — see
-        // `ForwardRenderer::shadow_selection` for why a cascade cannot share the
+        // And one ring per shadow-atlas tile, indexed `[tile][frame]` — see
+        // `ForwardRenderer::shadow_selection` for why a tile cannot share the
         // buffer above.
-        let mut cascade_selection: Vec<Vec<BufferHandle>> = Vec::new();
+        let mut tile_selection: Vec<Vec<BufferHandle>> = Vec::new();
         if culls_clusters {
             let count = rollback
                 .clusters
@@ -1489,8 +1512,8 @@ impl ForwardRenderer {
                 Ok(buffers)
             };
             cluster_selection = ring("cluster selection")?;
-            for cascade in 0..shadow::CASCADES {
-                cascade_selection.push(ring(&format!("shadow selection {cascade}"))?);
+            for tile in 0..shadow::TILES {
+                tile_selection.push(ring(&format!("shadow selection {tile}"))?);
             }
         }
 
@@ -1988,20 +2011,33 @@ impl ForwardRenderer {
         })?;
         rollback.samplers.push(shadow_sampler);
 
-        // §3.3's cull, once per cascade. Each gets its own `DrawGen` and
+        // §3.3's cull, once per atlas tile. Each gets its own `DrawGen` and
         // therefore its own frustum, survivor list and indirect arguments —
         // which is what "one cull dispatch per cascade against the same
         // instance/geometry pools" means, and why the instance ring and the
         // mesh table below are the same handles the camera's cull was given.
-        for _ in 0..shadow::CASCADES {
+        //
+        // **Built for every tile, including the light tiles no light may ever
+        // hold.** A generator's buffers are sized by the instance capacity
+        // rather than by the scene, so building one on demand would mean
+        // allocating device memory inside `begin_frame` — and a frame that
+        // cannot allocate is a frame that cannot draw. The unused ones cost
+        // memory and no dispatch: `add_shadow_pass` records passes for the
+        // occupied tiles alone.
+        for tile in 0..shadow::TILES {
             // Into the rollback as each is built, on the same terms as the
-            // camera's: a failure two cascades in has to release the first one,
+            // camera's: a failure two tiles in has to release the first one,
             // and the rollback is the only thing that knows about it.
+            let label = if tile < shadow::CASCADES {
+                format!("shadow cascade {tile}")
+            } else {
+                format!("shadow light {}", tile - shadow::CASCADES)
+            };
             let draws = DrawGen::new(
                 device,
                 queue,
                 &DrawGenDesc {
-                    label: Some("shadow cascade"),
+                    label: Some(&label),
                     instances: &instance_buffers,
                     mesh_table,
                     bucket_meshes: &bucket_meshes,
@@ -2016,10 +2052,10 @@ impl ForwardRenderer {
         }
         // The handles are `Copy` and are read out here for the same reason the
         // camera's are above: the pool they came from is the rollback's now.
-        let cascade_buffers: Vec<CascadeBuffers> = rollback
+        let tile_buffers: Vec<TileBuffers> = rollback
             .shadow_draws
             .iter()
-            .map(|draws| CascadeBuffers {
+            .map(|draws| TileBuffers {
                 runs: (0..instance_buffers.len())
                     .map(|frame| draws.runs(frame))
                     .collect(),
@@ -2108,53 +2144,54 @@ impl ForwardRenderer {
             uniforms.push(buffer);
             mesh_groups.push(group);
 
-            // The same layout again, once per cascade, differing in exactly the
-            // things a cascade is: which matrix, which survivors, which frustum.
-            let mut frame_shadow_uniforms = Vec::with_capacity(shadow::CASCADES);
-            let mut frame_shadow_groups = Vec::with_capacity(shadow::CASCADES);
-            let mut frame_shadow_selection = Vec::with_capacity(shadow::CASCADES);
-            for (cascade, buffers) in cascade_buffers.iter().enumerate() {
-                let cascade_uniforms = device.create_buffer(&BufferDesc {
-                    label: Some("shadow cascade uniforms"),
+            // The same layout again, once per atlas tile, differing in exactly
+            // the things a tile is: which matrix, which survivors, which
+            // frustum.
+            let mut frame_shadow_uniforms = Vec::with_capacity(shadow::TILES);
+            let mut frame_shadow_groups = Vec::with_capacity(shadow::TILES);
+            let mut frame_shadow_selection = Vec::with_capacity(shadow::TILES);
+            for (tile, buffers) in tile_buffers.iter().enumerate() {
+                let tile_uniforms = device.create_buffer(&BufferDesc {
+                    label: Some("shadow tile uniforms"),
                     size: mesh::FRAME_UNIFORMS_SIZE as u64,
                     usage: BufferUsage::UNIFORM,
                     memory: MemoryLocation::HostUpload,
                 })?;
-                rollback.buffers.push(cascade_uniforms);
+                rollback.buffers.push(tile_uniforms);
                 let entries = MeshGroup {
-                    uniforms: cascade_uniforms,
+                    uniforms: tile_uniforms,
                     instances: slot_instances,
                     runs: buffers.runs[frame],
                     args: buffers.args[frame],
                     // The amplification stage culls clusters against whatever
                     // frustum is in this block, and against
-                    // `frame.camera_position` — which in a cascade's copy is the
+                    // `frame.camera_position` — which in a tile's copy is the
                     // *light*. So the per-cluster cull rejects what faces away
-                    // from the sun, which is the right question for a shadow map
-                    // and the wrong one to have asked with the camera's frustum.
+                    // from the light, which is the right question for a shadow
+                    // map and the wrong one to have asked with the camera's
+                    // frustum.
                     cull_params: buffers.cull_params[frame],
                     cull_stats: buffers.cull_stats[frame],
-                    // **This cascade's own**, and not the colour pass's: that
-                    // pass is recorded last and would write over it. See
+                    // **This tile's own**, and not the colour pass's: that pass
+                    // is recorded last and would write over it. See
                     // `ForwardRenderer::shadow_selection`.
-                    cluster_selection: cascade_selection.get(cascade).map(|ring| ring[frame]),
-                    // This cascade's own too — see `CascadeBuffers::group_state`,
+                    cluster_selection: tile_selection.get(tile).map(|ring| ring[frame]),
+                    // This tile's own too — see `TileBuffers::group_state`,
                     // which is where the two budgets are argued.
                     group_state: culls_clusters.then_some(buffers.group_state),
                     shadow_map: shadow_placeholder_view,
                 }
                 .entries(&shared);
                 let group = device.create_bind_group(&BindGroupDesc {
-                    label: Some("shadow cascade"),
+                    label: Some("shadow tile"),
                     layout: mesh_layout,
                     entries: &entries,
                     variable_count: None,
                 })?;
                 rollback.bind_groups.push(group);
-                frame_shadow_uniforms.push(cascade_uniforms);
+                frame_shadow_uniforms.push(tile_uniforms);
                 frame_shadow_groups.push(group);
-                frame_shadow_selection
-                    .extend(cascade_selection.get(cascade).map(|ring| ring[frame]));
+                frame_shadow_selection.extend(tile_selection.get(tile).map(|ring| ring[frame]));
             }
             shadow_uniforms.push(frame_shadow_uniforms);
             shadow_groups.push(frame_shadow_groups);
@@ -2507,6 +2544,7 @@ impl ForwardRenderer {
             shadow_uniforms,
             shadow_groups,
             shadow_selection,
+            shadow_lights: shadow::Selection::default(),
             // Nothing has written either image yet, so the first frame's graph
             // is what gives them a layout.
             shadow_imported: ResourceState::Undefined,
@@ -2932,9 +2970,35 @@ impl ForwardRenderer {
         //
         // Rebuilt every frame rather than kept: the sun arrives per frame, and a
         // cached list would be a second place for it to be stale.
+        //
+        // **The tile budget is spent first**, because a row carries the slot it
+        // was given. Topic 18's rule — projected screen influence, ties by index,
+        // an incumbent held until a challenger clearly beats it — lives in
+        // `shadow::Selection`, and a light it refuses is a light whose row says
+        // `NO_SHADOW_SLOT`: it still lights, it just does not occlude.
+        self.shadow_lights.update(&self.extra_lights, camera.eye);
         let mut rows = Vec::with_capacity(1 + self.extra_lights.len());
         rows.push(sun_row(light));
-        rows.extend(self.extra_lights.iter().map(Light::row));
+        rows.extend(
+            self.extra_lights
+                .iter()
+                .enumerate()
+                .map(|(index, extra)| extra.row(self.shadow_lights.slot_of(index))),
+        );
+
+        // One matrix per occupied slot, and the identity in a free one. The
+        // identity is not a projection anything samples through — the rows that
+        // could name that slot carry `NO_SHADOW_SLOT` — and it is written rather
+        // than left stale so a block dumped for debugging says plainly that the
+        // slot is empty.
+        let mut light_view_proj = [Mat4::IDENTITY.to_cols_array(); shadow::SHADOW_LIGHTS];
+        for (slot, held) in self.shadow_lights.slots().iter().enumerate() {
+            let Some(&Light::Spot(spot)) = held.and_then(|index| self.extra_lights.get(index))
+            else {
+                continue;
+            };
+            light_view_proj[slot] = shadow::spot_matrix(&spot).to_cols_array();
+        }
 
         // The grid this frame's viewport and camera get. An orthographic camera
         // has no view depth to slice by — its `clip.w` is 1 everywhere — so it
@@ -2963,6 +3027,7 @@ impl ForwardRenderer {
             cascade_far: cascades.far,
             shadow_params: Cascades::params(),
             cluster_grid: self.grid.to_frame_block(),
+            light_view_proj,
         };
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
 
@@ -2985,35 +3050,56 @@ impl ForwardRenderer {
             self.lod_params,
         )?;
 
-        // One cull per cascade, against that cascade's own frustum. The
+        // One cull per **occupied** tile, against that tile's own frustum. The
         // orthographic box gives `Frustum::from_view_projection` six real planes
         // — unlike the camera's infinite perspective, whose far plane is
-        // degenerate on purpose — so a caster outside the cascade is rejected
-        // before it costs a vertex.
-        for (cascade, draws) in self.shadow_draws.iter().enumerate() {
-            // The same block the fragment stage will sample through, with the
-            // cascade's matrix in `view_proj` and the *light* as the eye: the
-            // amplification stage rejects clusters facing away from whatever is
-            // at `camera_position`, and for a shadow map that must be the sun.
-            let cascade_uniforms = mesh::FrameUniforms {
-                view_proj: shadow_view_proj[cascade],
-                camera_position: (camera.eye + direction * cascades.far[cascade])
-                    .extend(1.0)
-                    .to_array(),
+        // degenerate on purpose — so a caster outside the tile is rejected
+        // before it costs a vertex. A spot's perspective box is finite too, and
+        // gives six real planes for the same reason.
+        //
+        // A free light tile takes neither a write nor a dispatch: nothing
+        // samples through it, and `add_shadow_pass` records no pass for it
+        // either, so it keeps the reversed-Z clear the pass wrote.
+        for (tile, draws) in self.shadow_draws.iter().enumerate() {
+            // Where the tile looks from and where it looks: a cascade's is the
+            // sun pushed out along its own direction, a light's is the light
+            // itself. Both go into `camera_position` because the amplification
+            // stage rejects clusters facing away from whatever is there, and for
+            // a shadow map that must be the light.
+            let (view_proj, eye) = if tile < shadow::CASCADES {
+                (
+                    cascades.view_proj[tile],
+                    camera.eye + direction * cascades.far[tile],
+                )
+            } else {
+                let slot = tile - shadow::CASCADES;
+                let held =
+                    self.shadow_lights.slots()[slot].and_then(|index| self.extra_lights.get(index));
+                // A free slot, or — once point lights arrive — one holding a
+                // light this loop has no single matrix for.
+                let Some(Light::Spot(spot)) = held else {
+                    continue;
+                };
+                (Mat4::from_cols_array(&light_view_proj[slot]), spot.position)
+            };
+
+            let tile_uniforms = mesh::FrameUniforms {
+                view_proj: view_proj.to_cols_array(),
+                camera_position: eye.extend(1.0).to_array(),
                 ..uniforms
             };
             device.write_buffer(
-                self.shadow_uniforms[self.frame][cascade],
+                self.shadow_uniforms[self.frame][tile],
                 0,
-                &cascade_uniforms.to_bytes(),
+                &tile_uniforms.to_bytes(),
             )?;
             // **The camera as the eye here, not the light**, and the two are
             // deliberately different questions asked of one pass.
             //
-            // The block above puts the sun at `camera_position` because the
+            // The block above puts the light at `camera_position` because the
             // amplification stage's *normal cone* test asks which way a cluster
             // faces relative to the viewer, and a shadow map's viewer is the
-            // sun. Detail is not that question. A directional sun has no
+            // light. Detail is not that question. A directional sun has no
             // position for a distance metric to measure from — the point above
             // is the camera's own eye pushed along the sun's direction, so a
             // "distance to the light" taken from it is a fact about the camera
@@ -3026,11 +3112,13 @@ impl ForwardRenderer {
             // budget is denominated in the camera's pixels, and the eye that
             // makes the metric mean that is the camera's. The bias above is then
             // a statement about shadows rather than a side effect of where a
-            // sun was placed.
+            // light was placed — and it is the same statement for a spot, whose
+            // map is looked at through the camera's pixels just as a cascade's
+            // is.
             draws.begin_frame(
                 device,
                 self.frame,
-                &Frustum::from_view_projection(cascades.view_proj[cascade]),
+                &Frustum::from_view_projection(view_proj),
                 instance_count,
                 [camera.eye.x, camera.eye.y, camera.eye.z],
                 self.shadow_lod_params,
@@ -3483,14 +3571,14 @@ impl ForwardRenderer {
             .cluster_selection
             .get(self.frame)
             .map(|&buffer| import_selection(graph, "cluster-selection", buffer));
-        let cascade_selection: Vec<BufferId> = self
+        let tile_selection: Vec<BufferId> = self
             .shadow_selection
             .get(self.frame)
             .into_iter()
             .flatten()
             .enumerate()
-            .map(|(cascade, &buffer)| {
-                import_selection(graph, &format!("shadow-selection-{cascade}"), buffer)
+            .map(|(tile, &buffer)| {
+                import_selection(graph, &format!("shadow-selection-{tile}"), buffer)
             })
             .collect();
 
@@ -3506,7 +3594,7 @@ impl ForwardRenderer {
                 .add_pass(graph, self.frame, generated.visible_count_id, self.grid);
 
         let imported = std::mem::replace(&mut self.shadow_imported, ResourceState::ShaderRead);
-        let shadow_atlas = self.add_shadow_pass(graph, imported, &cascade_selection);
+        let shadow_atlas = self.add_shadow_pass(graph, imported, &tile_selection);
 
         let scene_color =
             graph.create_image("scene-color", TransientImageDesc::scene_color(extent));
@@ -3760,11 +3848,18 @@ impl ForwardRenderer {
     /// Adds the cull dispatches and the depth-only pass that fill the shadow
     /// atlas, and returns the atlas as the graph knows it.
     ///
-    /// Every cascade is one viewport of one render pass. A pass per cascade
-    /// would be [`shadow::CASCADES`] clears of the same image and
-    /// [`shadow::CASCADES`] more barriers, and the graph would have to be told
-    /// each of them only touches part of it — where one pass with a viewport per
-    /// tile is what a shadow *atlas* is for in the first place.
+    /// Every tile is one viewport of one render pass. A pass per tile would be
+    /// one clear of the same image and one more barrier per tile, and the graph
+    /// would have to be told each of them only touches part of it — where one
+    /// pass with a viewport per tile is what a shadow *atlas* is for in the first
+    /// place.
+    ///
+    /// **Only the occupied tiles get a cull and a viewport.** The cascades
+    /// always are; a light tile is occupied when
+    /// [`shadow::Selection`] gave it to a light. A free one keeps the
+    /// reversed-Z clear the pass wrote, which is `0.0` — "nothing stored, as far
+    /// away as depth goes" — so anything that did sample it would come back
+    /// fully lit rather than fully shadowed.
     fn add_shadow_pass(
         &self,
         graph: &mut RenderGraph<'_>,
@@ -3797,11 +3892,30 @@ impl ForwardRenderer {
             },
         );
 
-        // One cull dispatch per cascade, before the pass that draws from them.
-        let generated: Vec<_> = self
-            .shadow_draws
-            .iter()
-            .map(|draws| draws.add_passes(graph, self.frame, self.instances.slot_count()))
+        // One cull dispatch per occupied tile, before the pass that draws from
+        // them. Paired with the tile it belongs to rather than positionally: the
+        // free slots are missing from this list, so a bare index into it would
+        // hand a light's draws to the wrong viewport the moment one slot is free
+        // and a later one is not.
+        let generated: Vec<(usize, GeneratedDraws)> = (0..shadow::CASCADES)
+            .chain(
+                self.shadow_lights
+                    .slots()
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, held)| held.is_some())
+                    .map(|(slot, _)| shadow::light_tile(slot)),
+            )
+            .map(|tile| {
+                (
+                    tile,
+                    self.shadow_draws[tile].add_passes(
+                        graph,
+                        self.frame,
+                        self.instances.slot_count(),
+                    ),
+                )
+            })
             .collect();
 
         let mut pass = graph
@@ -3823,13 +3937,18 @@ impl ForwardRenderer {
             // every cascade's bind group, standing in for the atlas this pass is
             // writing. See `ForwardRenderer::shadow_placeholder`.
             .read_image(placeholder);
-        // Each cascade's mesh pass records the cut it descended to, into a
-        // buffer of its own — see `ForwardRenderer::shadow_selection`. Empty
-        // where there is no amplification stage to descend anything.
+        // Each tile's mesh pass records the cut it descended to, into a buffer
+        // of its own — see `ForwardRenderer::shadow_selection`. Empty where
+        // there is no amplification stage to descend anything.
+        //
+        // Declared for every tile rather than for the occupied ones: the state
+        // is what the buffer is *in*, which does not depend on whether this
+        // frame happened to write it, and a free tile's buffer still has to
+        // arrive in the state the next frame's import claims.
         for &buffer in selection {
             pass = pass.use_buffer(buffer, ResourceState::ShaderReadWrite);
         }
-        for draws in &generated {
+        for (_, draws) in &generated {
             pass = pass.read_buffer(draws.runs_id);
             pass = if self.emit.is_mesh() {
                 let pass = pass
@@ -3876,12 +3995,13 @@ impl ForwardRenderer {
             if !emit.is_mesh() {
                 encoder.bind_index_buffer(indices, 0, IndexFormat::Uint32);
             }
-            for (cascade, (group, draws)) in groups.iter().zip(&generated).enumerate() {
-                // The tile this cascade owns. The graph set a viewport over the
+            for (tile, draws) in &generated {
+                let group = groups[*tile];
+                // The tile this map owns. The graph set a viewport over the
                 // whole atlas before this body ran, and this is what narrows it
-                // — the same clip-space matrix mapped into a different sixth of
+                // — the same clip-space matrix mapped into a different cell of
                 // the image.
-                let (origin_x, origin_y) = shadow::tile_origin(cascade);
+                let (origin_x, origin_y) = shadow::tile_origin(*tile);
                 let rect = Rect2d {
                     x: i32::try_from(origin_x).unwrap_or(i32::MAX),
                     y: i32::try_from(origin_y).unwrap_or(i32::MAX),
@@ -3897,7 +4017,7 @@ impl ForwardRenderer {
                 });
                 encoder.set_scissor(&rect);
                 for (constant_offset, args_offset, count_offset, mesh_args_offset) in &calls {
-                    encoder.bind_group(0, *group, &[*constant_offset], layout);
+                    encoder.bind_group(0, group, &[*constant_offset], layout);
                     match emit {
                         EmitTail::Mesh => {
                             encoder.draw_mesh_tasks_indirect(&DrawIndirect {

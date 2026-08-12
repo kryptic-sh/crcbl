@@ -19,9 +19,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`FrameUniforms` lost `light_direction`, `light_color` and `lod_params`.**
   The sun is a row in the light list now rather than a field, and `lod_params`
   was already dead — documented in-tree as "read by no shader since hysteresis
-  landed, and written all the same". The block gained `cluster_grid` and still
-  net-shrank from 304 to 272 bytes. Anything constructing `FrameUniforms` or
+  landed, and written all the same". It gained `cluster_grid` and then
+  `light_view_proj`, and is 400 bytes. Anything constructing `FrameUniforms` or
   reading those fields has to change.
+
+- **`GpuLight::pad0` became `shadow_slot`, and `Light::row` takes the slot.** A
+  row's default is no longer all-zero: `NO_SHADOW_SLOT` is `u32::MAX`, because
+  zero is a real shadow slot and a row that forgot to say would occlude through
+  whichever light holds it.
 
 - **`BindingKind::SampledImage` gained `sample_type` and `BindingKind::Sampler`
   became a struct variant with `comparison`.** Every construction has to name
@@ -327,6 +332,37 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   silence. Failures are now tracked per submission and logged as errors.
 
 ### Added
+
+- **Spot lights cast shadows.** The shadow atlas became a fixed 2×2 grid of
+  1024-texel tiles: the sun's cascades keep the first ones and the rest are
+  handed out one per shadowed spot, which is `docs/plan/18-render-features.md`'s
+  recorded decision. `shadow::Selection` ranks eligible lights by projected
+  screen influence — radius over distance, the metric family LOD already uses —
+  breaks ties by index, and holds an incumbent's tile until a challenger beats
+  it by a quarter, so a shadow does not blink in and out as the camera drifts.
+
+  **A light that gets no tile still lights and simply does not occlude.** The
+  atlas has room for two light maps; a point light, a cone at or past 80°, and
+  every spot past the budget are all refused a tile by name and keep lighting.
+  `GpuLight` gained `shadow_slot`, spent out of the first padding word, so the
+  row costs no more bytes than before; `NO_SHADOW_SLOT` is `u32::MAX` rather
+  than zero, because zero is a real slot, and `GpuLight::default()` is
+  hand-written for that reason.
+
+  A spot's map is a **perspective** projection down the cone, reversed-Z like
+  everything else here, its field of view twice the outer half-angle so the map
+  covers the cone exactly. It gets no texel snap and needs none: the cascades
+  snap because their box follows the camera, and a spot's matrix is a pure
+  function of the light. It biases in world units before projecting, in tile
+  texels at the receiver, because a perspective map's depth precision is
+  distributed nothing like a cascade's and the sun's constants do not transfer.
+
+  `FrameUniforms` gained `light_view_proj`, appended after `cluster_grid` so no
+  existing member moved and every cascade golden stayed byte-identical.
+  `Light::row` now takes the slot. `Scene::SpotShadow` is the new golden: a
+  pyramid between the light and the floor, asserting the floor is dark behind
+  the caster and lit across the pool from it, and that removing the caster
+  lights what it darkened.
 
 - **Spot lights are drawn and their cone is asserted by pixels.** `Scene::Spot`
   is a floor lit from directly overhead, so cone axis, surface normal and view

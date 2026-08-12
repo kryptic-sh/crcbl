@@ -46,13 +46,50 @@ pub const VERTEX_STRIDE: usize = 64;
 /// `float4`.
 pub const SHADOW_CASCADES: usize = 2;
 
+/// How many shadowed lights the atlas has room for beside the cascades.
+///
+/// `docs/plan/18-render-features.md`'s 2026-08-13 decision: the atlas is a fixed
+/// tile grid, the sun's cascades take the first tiles, and the rest are handed
+/// out one per shadowed spot. A light that gets no tile still lights and simply
+/// does not occlude.
+///
+/// Here rather than in `crcbl_render::shadow` for [`SHADOW_CASCADES`]'s reason
+/// exactly: [`FrameUniforms::light_view_proj`] is an array of this length, so a
+/// block sized differently on the two sides puts every member after it at the
+/// wrong offset. The same drift test covers it.
+pub const SHADOW_LIGHTS: usize = 2;
+
+/// The side of one shadow-atlas tile, in texels.
+///
+/// Read by the shader as well as by the host: the bias `mesh.slang` applies to a
+/// spot's comparison is denominated in *tile texels*, so it has to know how many
+/// of them the tile has. See `SPOT_DEPTH_BIAS_TEXELS` there.
+pub const SHADOW_TILE: u32 = 1024;
+
+/// Tiles across the shadow atlas.
+pub const SHADOW_ATLAS_COLUMNS: u32 = 2;
+
+/// Tiles down it.
+///
+/// A grid rather than one row, because a point light is six tiles of exactly
+/// this kind and the next slice widens the grid rather than reshaping the
+/// atlas. `mesh.slang` addresses a tile through both extents, so the shape is
+/// free to change without the sampling side changing with it.
+pub const SHADOW_ATLAS_ROWS: u32 = 2;
+
+const _: () = assert!(
+    (SHADOW_ATLAS_COLUMNS * SHADOW_ATLAS_ROWS) as usize == SHADOW_CASCADES + SHADOW_LIGHTS,
+    "every tile of the grid is either a cascade's or a light's"
+);
+
 /// Bytes in the frame uniform block.
 ///
 /// One `float4x4` (64), two `float4` (16 each), [`SHADOW_CASCADES`] more
-/// `float4x4`, two closing `float4` and a `uint4`. Checked against the `Offset`
-/// decorations `slangc` emits — 0, 64, 80, 96, 224, 240, 256 at two cascades —
-/// by this module's `the_uniform_block_matches_the_offsets_slangc_emits`.
-pub const FRAME_UNIFORMS_SIZE: usize = 96 + 64 * SHADOW_CASCADES + 48;
+/// `float4x4`, two closing `float4`, a `uint4` and [`SHADOW_LIGHTS`] more
+/// `float4x4`. Checked against the `Offset` decorations `slangc` emits — 0, 64,
+/// 80, 96, 224, 240, 256, 272 at two cascades and two light slots — by this
+/// module's `the_uniform_block_matches_the_offsets_slangc_emits`.
+pub const FRAME_UNIFORMS_SIZE: usize = 96 + 64 * SHADOW_CASCADES + 48 + 64 * SHADOW_LIGHTS;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -144,9 +181,19 @@ pub struct FrameUniforms {
     /// Component `i` is how far from the eye cascade `i` reaches, in world
     /// units. Components past [`SHADOW_CASCADES`] are unread.
     pub cascade_far: [f32; 4],
-    /// `x`, `y`: one shadow-atlas texel in `u` and in `v` — not equal, because
-    /// the atlas is [`SHADOW_CASCADES`] square tiles side by side. `z`: the
-    /// constant depth bias. `w`: the slope-scaled coefficient on top of it.
+    /// `x`, `y`: one shadow-atlas texel in `u` and in `v`. `z`: the constant
+    /// depth bias the **cascades** compare with. `w`: the slope-scaled
+    /// coefficient on top of it.
+    ///
+    /// Both texel sizes are carried even where the grid is square and they are
+    /// equal: the shader's kernel steps in tile space and scales back by
+    /// [`SHADOW_ATLAS_COLUMNS`] and [`SHADOW_ATLAS_ROWS`], and the grid stops
+    /// being square the moment a point light's six tiles arrive.
+    ///
+    /// The two biases are the sun's alone. A spot's map is a perspective
+    /// projection whose depth precision is distributed nothing like a cascade's,
+    /// so it biases in world units before projecting instead — see
+    /// `spot_visibility` in `shaders/mesh.slang`, which is where that is argued.
     pub shadow_params: [f32; 4],
     /// The froxel grid's extent: `x` froxels across the screen, `y` down it, `z`
     /// depth slices, `w` unread padding `std140` aligns a vector to sixteen
@@ -167,28 +214,49 @@ pub struct FrameUniforms {
     /// answer rather than the numbers. A dead vector in a block every pipeline
     /// binds is not somewhere to leave a value nothing reads.
     pub cluster_grid: [u32; 4],
+    /// World → shadowed-light slot `i`'s shadow clip, column-major, one per
+    /// slot.
+    ///
+    /// Perspective and reversed-Z, unlike [`shadow_view_proj`](Self::shadow_view_proj)
+    /// above: a spot is a cone and a cone is a frustum.
+    /// `crcbl_render::shadow::spot_matrix` builds it and
+    /// `crcbl_render::shadow::Selection` decides whose it is; a slot no light
+    /// holds carries whatever was last written there and is read by nothing,
+    /// because the rows that would name it carry
+    /// [`NO_SHADOW_SLOT`](crate::light::NO_SHADOW_SLOT).
+    ///
+    /// **Last in the block rather than beside the cascades**, so adding it moved
+    /// no existing member's offset — which is what let the cascade goldens stay
+    /// byte-identical across this change.
+    pub light_view_proj: [[f32; 16]; SHADOW_LIGHTS],
 }
 
 impl FrameUniforms {
     /// The bytes a uniform buffer holds, in `std140` order.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; FRAME_UNIFORMS_SIZE] {
+        // A function rather than a closure capturing the cursor, because the
+        // integer member below is written through the *same* cursor and a
+        // closure holding it would not let anything else touch it. One writer,
+        // one order, and a member that moved shows up as a `debug_assert` rather
+        // than as a silently shifted offset.
+        fn put(bytes: &mut [u8], at: &mut usize, values: &[f32]) {
+            for value in values {
+                bytes[*at..*at + 4].copy_from_slice(&value.to_le_bytes());
+                *at += 4;
+            }
+        }
+
         let mut bytes = [0u8; FRAME_UNIFORMS_SIZE];
         let mut at = 0usize;
-        let mut put = |values: &[f32]| {
-            for value in values {
-                bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
-                at += 4;
-            }
-        };
-        put(&self.view_proj);
-        put(&self.camera_position);
-        put(&self.ambient);
+        put(&mut bytes, &mut at, &self.view_proj);
+        put(&mut bytes, &mut at, &self.camera_position);
+        put(&mut bytes, &mut at, &self.ambient);
         for matrix in &self.shadow_view_proj {
-            put(matrix);
+            put(&mut bytes, &mut at, matrix);
         }
-        put(&self.cascade_far);
-        put(&self.shadow_params);
+        put(&mut bytes, &mut at, &self.cascade_far);
+        put(&mut bytes, &mut at, &self.shadow_params);
         // The one integer member, and it is written through the same running
         // cursor rather than at a computed offset: `std140` puts a `uint4`
         // exactly where a `float4` would go, and a second writer here is a
@@ -196,6 +264,9 @@ impl FrameUniforms {
         for value in self.cluster_grid {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
+        }
+        for matrix in &self.light_view_proj {
+            put(&mut bytes, &mut at, matrix);
         }
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
@@ -1112,17 +1183,33 @@ mod tests {
     /// unwritten. Both render a picture.
     #[test]
     fn the_cascade_count_matches_the_one_the_shaders_declare() {
-        let declaration = format!("static const uint SHADOW_CASCADES = {SHADOW_CASCADES};");
-        for (name, source) in [
-            ("mesh.slang", include_str!("../shaders/mesh.slang")),
-            (
-                "mesh_cluster.slang",
-                include_str!("../shaders/mesh_cluster.slang"),
-            ),
+        let mesh = include_str!("../shaders/mesh.slang");
+        let cluster = include_str!("../shaders/mesh_cluster.slang");
+        // The two that size arrays in the block, so both files must agree.
+        for declaration in [
+            format!("static const uint SHADOW_CASCADES = {SHADOW_CASCADES};"),
+            format!("static const uint SHADOW_LIGHTS = {SHADOW_LIGHTS};"),
+        ] {
+            for (name, source) in [("mesh.slang", mesh), ("mesh_cluster.slang", cluster)] {
+                assert!(
+                    source.contains(&declaration),
+                    "{name} does not declare `{declaration}`; a block sized differently on the \
+                     two sides puts every member after it at the wrong offset"
+                );
+            }
+        }
+        // The atlas's geometry, which only the sampling side reads. A grid the
+        // shader thought was a different shape would address every tile but the
+        // first at the wrong place in the atlas — a picture, and a plausible
+        // one, since tile 0 is cascade 0 either way.
+        for declaration in [
+            format!("static const uint SHADOW_ATLAS_COLUMNS = {SHADOW_ATLAS_COLUMNS};"),
+            format!("static const uint SHADOW_ATLAS_ROWS = {SHADOW_ATLAS_ROWS};"),
+            format!("static const float SHADOW_TILE = {SHADOW_TILE}.0;"),
         ] {
             assert!(
-                source.contains(&declaration),
-                "{name} does not declare `{declaration}`; SHADOW_CASCADES has drifted"
+                mesh.contains(&declaration),
+                "mesh.slang does not declare `{declaration}`; the atlas's geometry has drifted"
             );
         }
         const {
@@ -1136,10 +1223,15 @@ mod tests {
 
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
-        assert_eq!(FRAME_UNIFORMS_SIZE, 272, "at two cascades");
-        // `OpMemberDecorate %FrameUniforms_std140 n Offset …`, and
+        assert_eq!(
+            FRAME_UNIFORMS_SIZE, 400,
+            "at two cascades and two light slots"
+        );
+        // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
+        // 224, 240, 256, 272 — and
         // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64`.
         let cascades = 64 * SHADOW_CASCADES;
+        let lights = 64 * SHADOW_LIGHTS;
         let offsets = [
             0usize,
             64,
@@ -1148,8 +1240,9 @@ mod tests {
             96 + cascades,
             112 + cascades,
             128 + cascades,
+            144 + cascades,
         ];
-        let sizes = [64usize, 16, 16, cascades, 16, 16, 16];
+        let sizes = [64usize, 16, 16, cascades, 16, 16, 16, lights];
         for (index, (offset, size)) in offsets.iter().zip(&sizes).enumerate() {
             assert_eq!(
                 offset + size,
@@ -1169,6 +1262,13 @@ mod tests {
         for (index, matrix) in shadow_view_proj.iter_mut().enumerate() {
             *matrix = [7.0 + index as f32; 16];
         }
+        // The same again for the light slots, and in a range nothing above uses:
+        // a `to_bytes` that wrote the cascade array where the light array goes
+        // would otherwise pass on values that happened to be equal.
+        let mut light_view_proj = [[0.0f32; 16]; SHADOW_LIGHTS];
+        for (index, matrix) in light_view_proj.iter_mut().enumerate() {
+            *matrix = [50.0 + index as f32; 16];
+        }
         let uniforms = FrameUniforms {
             view_proj: [1.0; 16],
             camera_position: [3.0; 4],
@@ -1177,6 +1277,7 @@ mod tests {
             cascade_far: [20.0; 4],
             shadow_params: [30.0; 4],
             cluster_grid: [41, 42, 43, 44],
+            light_view_proj,
         };
         let bytes = uniforms.to_bytes();
         let at =
@@ -1204,6 +1305,17 @@ mod tests {
                 word_at(128 + cascades + lane * 4),
                 expected,
                 "cluster_grid lane {lane}"
+            );
+        }
+        // And the light slots, which sit **after** the integer member — the one
+        // place `to_bytes` writes through a second cursor, and so the one place
+        // a member could land on the wrong side of it.
+        for index in 0..SHADOW_LIGHTS {
+            assert_eq!(
+                at(144 + cascades + 64 * index),
+                50.0 + index as f32,
+                "light_view_proj[{index}] at offset {}",
+                144 + cascades + 64 * index
             );
         }
     }

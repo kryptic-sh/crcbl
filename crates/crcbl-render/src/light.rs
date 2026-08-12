@@ -81,9 +81,20 @@ pub struct SpotLight {
 }
 
 impl Light {
-    /// This light as the row the shaders read.
+    /// This light as the row the shaders read, occluding through shadow slot
+    /// `shadow_slot`.
+    ///
+    /// `None` is a light with no map of its own, which is the ordinary case: the
+    /// atlas holds [`shadow::SHADOW_LIGHTS`](crate::shadow::SHADOW_LIGHTS) light
+    /// maps and a scene may hold more lights than that. Such a light still
+    /// lights and simply does not occlude — `docs/plan/18-render-features.md`'s
+    /// honest degradation, and the reason the budget is a quality knob rather
+    /// than a correctness cliff.
     #[must_use]
-    pub fn row(&self) -> GpuLight {
+    pub fn row(&self, shadow_slot: Option<usize>) -> GpuLight {
+        let shadow_slot = shadow_slot.map_or(light::NO_SHADOW_SLOT, |slot| {
+            u32::try_from(slot).unwrap_or(light::NO_SHADOW_SLOT)
+        });
         match self {
             Self::Point(point) => GpuLight {
                 position: point.position.extend(point.radius).to_array(),
@@ -91,7 +102,7 @@ impl Light {
                 direction: [0.0; 4],
                 kind: light::KIND_POINT,
                 cos_inner: 0.0,
-                pad0: 0,
+                shadow_slot,
                 pad1: 0,
             },
             Self::Spot(spot) => {
@@ -111,7 +122,7 @@ impl Light {
                         .to_array(),
                     kind: light::KIND_SPOT,
                     cos_inner: spot.inner_angle.cos(),
-                    pad0: 0,
+                    shadow_slot,
                     pad1: 0,
                 }
             }
@@ -147,7 +158,12 @@ pub fn sun_row(sun: &DirectionalLight) -> GpuLight {
         direction: sun.direction.normalize_or_zero().extend(0.0).to_array(),
         kind: light::KIND_DIRECTIONAL,
         cos_inner: 0.0,
-        pad0: 0,
+        // **The sun occludes through the cascades, not through a light slot.**
+        // A directional row naming a slot would sample a spot's map with the
+        // sun's geometry, so it names none — and `mesh.slang` reaches the
+        // cascades by `kind` rather than by this field, which is why the two
+        // cannot be confused.
+        shadow_slot: light::NO_SHADOW_SLOT,
         pad1: 0,
     }
 }
@@ -187,7 +203,7 @@ mod tests {
             radius: 7.0,
             color: Vec3::new(0.25, 0.5, 0.75),
         })
-        .row();
+        .row(None);
         assert_eq!(row.kind, light::KIND_POINT);
         assert_eq!(row.position, [1.0, 2.0, 3.0, 7.0]);
         assert_eq!(row.color, [0.25, 0.5, 0.75, 0.0]);
@@ -205,7 +221,7 @@ mod tests {
             inner_angle: 0.6,
             outer_angle: 0.2,
         };
-        let row = Light::Spot(spot).row();
+        let row = Light::Spot(spot).row(None);
         assert_eq!(row.kind, light::KIND_SPOT);
         assert!(
             row.cos_inner >= row.direction[3],
@@ -232,7 +248,7 @@ mod tests {
             inner_angle: 0.2,
             outer_angle: 0.6,
         })
-        .row();
+        .row(None);
         assert!((row.cos_inner - 0.2_f32.cos()).abs() < 1e-6);
         assert!((row.direction[3] - 0.6_f32.cos()).abs() < 1e-6);
     }

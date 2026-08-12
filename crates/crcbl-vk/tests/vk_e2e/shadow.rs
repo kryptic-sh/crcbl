@@ -1,4 +1,5 @@
-//! Topic 18's sun cascades, against a real Vulkan implementation.
+//! Topic 18's shadow maps — the sun's cascades and a shadowed spot — against a
+//! real Vulkan implementation.
 //!
 //! # What this module exists to rule out
 //!
@@ -37,6 +38,10 @@
 //! wall, so the box casts nothing at all and the floor stayed uniformly lit.
 //! That is a real property of this shadow pass rather than a defect in the
 //! scene, and `docs/backlog.md` is where a two-sided caster belongs.
+//!
+//! The spot's scene is separate and its own section below says why: a light that
+//! is not the sun needs a caster the *light* can see past and the *camera*
+//! cannot, which the sun's overhead arrangement does not give.
 
 use crate::harness::Headless;
 use crate::mesh::MESH_EXTENT;
@@ -96,9 +101,24 @@ impl ShadowFrame {
     }
 }
 
-/// Opens a device, draws the open box under a sun at `to_light`, and reads back
-/// both the tonemapped frame and the shadow atlas.
-fn render_shadowed(to_light: glam::Vec3) -> ShadowFrame {
+/// What one frame of this module draws.
+///
+/// A struct rather than four arguments, because there are two scenes here now —
+/// the sun's wall and the spot's caster — and every line of the plumbing below
+/// is the same for both. What differs is exactly these four things.
+struct ShadowScene<'a> {
+    /// What goes in the frame besides the cube: the box for the sun's scene, the
+    /// pyramid for the spot's.
+    prepare: &'a dyn Fn(&mut crcbl_render::ForwardRenderer),
+    camera: crcbl_render::Camera,
+    sun: crcbl_render::DirectionalLight,
+    /// The cube's model matrix, which `begin_frame` takes as an argument.
+    model: glam::Mat4,
+}
+
+/// Opens a device, draws `scene`, and reads back both the tonemapped frame and
+/// the shadow atlas.
+fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
     // The mesh suite's own harness, so this frame is drawn at the extent and on
     // the device every other mesh assertion is made against.
     let headless = Headless::open_for_mesh_with(
@@ -109,7 +129,7 @@ fn render_shadowed(to_light: glam::Vec3) -> ShadowFrame {
     let mut pool = crcbl_render::TransientPool::new();
     let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
         .expect("the forward renderer builds");
-    renderer.set_open_box(Some(glam::Mat4::from_translation(BOX_AT)));
+    (scene.prepare)(&mut renderer);
 
     let acquired = device
         .acquire_next_frame(headless.swapchain)
@@ -134,16 +154,7 @@ fn render_shadowed(to_light: glam::Vec3) -> ShadowFrame {
     let atlas_staging = staging("shadow atlas readback", atlas_bytes);
 
     renderer
-        .begin_frame(
-            device,
-            &overhead_camera(),
-            &crcbl_render::DirectionalLight {
-                direction: to_light,
-                ..crcbl_render::DirectionalLight::default()
-            },
-            glam::Mat4::from_translation(CUBE_AT),
-            MESH_EXTENT,
-        )
+        .begin_frame(device, &scene.camera, &scene.sun, scene.model, MESH_EXTENT)
         .expect("the uniform buffer is writable");
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
@@ -254,6 +265,19 @@ fn render_shadowed(to_light: glam::Vec3) -> ShadowFrame {
     ShadowFrame { image, atlas }
 }
 
+/// The open box under a sun at `to_light`, with the cube hanging over it.
+fn render_shadowed(to_light: glam::Vec3) -> ShadowFrame {
+    render_scene(&ShadowScene {
+        prepare: &|renderer| renderer.set_open_box(Some(glam::Mat4::from_translation(BOX_AT))),
+        camera: overhead_camera(),
+        sun: crcbl_render::DirectionalLight {
+            direction: to_light,
+            ..crcbl_render::DirectionalLight::default()
+        },
+        model: glam::Mat4::from_translation(CUBE_AT),
+    })
+}
+
 /// A camera above the box, looking down into it.
 ///
 /// Nearly on the box's axis, so the floor is a square in the middle of the frame
@@ -314,9 +338,20 @@ fn the_shadow_atlas_is_written_rather_than_left_at_its_clear_value() {
     let side = crcbl_render::shadow::TILE as usize;
     assert_eq!(
         frame.atlas.len(),
-        side * side * crcbl_render::shadow::CASCADES,
+        side * side * crcbl_render::shadow::TILES,
         "the readback is the whole atlas"
     );
+    // **The light tiles are untouched in a scene with no shadowed light**, which
+    // is the other half of the same claim: a free tile that got drawn into would
+    // be a viewport landing where it does not belong, and a cascade's map
+    // written over a light's is a picture no golden can see.
+    for slot in 0..crcbl_render::shadow::SHADOW_LIGHTS {
+        let tile = frame.tile(crcbl_render::shadow::light_tile(slot));
+        assert!(
+            tile.iter().all(|depth| *depth == crcbl_hal::depth::CLEAR),
+            "slot {slot}'s tile holds depths in a frame with no shadowed light in it"
+        );
+    }
     for cascade in 0..crcbl_render::shadow::CASCADES {
         let tile = frame.tile(cascade);
         let written = tile.iter().filter(|depth| **depth > 0.0).count();
@@ -399,5 +434,295 @@ fn a_wall_darkens_the_floor_it_stands_on_and_the_sun_decides_which_half() {
         "and the sun in -X must darken the other half, but it measured {:.1} against {:.1}",
         minus.1,
         minus.0
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The shadowed spot
+// ---------------------------------------------------------------------------
+//
+// `docs/plan/18-render-features.md`'s 2026-08-13 slice: a light other than the
+// sun that occludes. The scene is `crcbl::screenshot`'s `Scene::SpotShadow` in
+// every number that matters — the same floor, the same light, the same camera —
+// so a failure here and a moved golden there are the same failure seen twice
+// rather than two scenes to keep in step.
+//
+// What this module adds that the golden cannot is **motion**: the golden is one
+// frame, and a shadow painted at a fixed place would match it for ever. Moving
+// the caster and watching the dark region follow is the only assertion that
+// separates a shadow map from a decal.
+
+/// How far above the floor the spot hangs, and how far towards `+Z`.
+///
+/// 45° from vertical. `crcbl::screenshot`'s `SPOT_SHADOW_LIGHT_AT` carries the
+/// argument for the angle: with the camera overhead and the light overhead too,
+/// a shadow falls under the object that casts it and the object's own image
+/// covers it.
+const SPOT_LIGHT_AT: glam::Vec3 = glam::Vec3::new(0.0, 1.2, 1.2);
+
+/// How far above the floor the camera stands, looking straight down.
+const SPOT_CAMERA_UP: f32 = 1.3;
+
+/// How much the pyramid is scaled by to get the caster, and how far its base is
+/// lifted so it stands on the floor.
+const SPOT_CASTER_SCALE: f32 = 0.5;
+
+/// How far the caster is moved off the frame's axis, in world units.
+///
+/// Far enough that its shadow lands wholly inside one of the two bands measured
+/// below, and inside the cone's pool at that distance from the axis — see
+/// `SPOT_BAND_COLUMNS`.
+const SPOT_CASTER_OFFSET: f32 = 0.30;
+
+/// How much the cube is scaled by to get the floor, and how far it is dropped so
+/// its `+Y` face is the plane `y = 0`.
+///
+/// `crcbl::screenshot`'s `SPOT_FLOOR_SCALE`, and large enough here for the same
+/// reason: the floor runs past every edge of the frame, so there is no
+/// silhouette anywhere for a band to measure instead of the floor.
+const SPOT_FLOOR_SCALE: f32 = 8.0;
+
+/// The rows the bands below are measured over: level with the shadow, a third of
+/// the way down from the frame's centre.
+///
+/// The light comes from `+Z` and `+Z` is the top of the frame, so the shadow
+/// falls *down* it. The caster's own image ends about 26 rows below centre and
+/// its shadow reaches about 92; this band sits between them.
+const SPOT_BAND_ROWS: std::ops::Range<u32> = (MESH_EXTENT.1 / 2 + 36)..(MESH_EXTENT.1 / 2 + 48);
+
+/// How far either side of the frame's axis each band sits, in columns.
+///
+/// The caster at `SPOT_CASTER_OFFSET` throws its shadow over roughly columns
+/// 153 to 191 in this band's rows, and the cone's pool reaches to about column
+/// 192 — so a band inside 162..174 is inside the shadow and inside the pool at
+/// once, and its mirror is lit floor at the same distance from the cone's axis.
+const SPOT_BAND_COLUMNS: (u32, u32) = (34, 46);
+
+/// The spot this suite lights its floor with, on `Scene::SpotShadow`'s terms.
+fn spot_light() -> crcbl_render::Light {
+    crcbl_render::Light::Spot(crcbl_render::SpotLight {
+        position: SPOT_LIGHT_AT,
+        radius: 3.4,
+        color: glam::Vec3::new(1.0, 0.95, 0.85) * 5.0,
+        // Along the cone, away from the light: from the light to the floor's
+        // centre.
+        direction: -SPOT_LIGHT_AT,
+        inner_angle: 0.18,
+        outer_angle: 0.28,
+    })
+}
+
+/// A camera straight down over the floor's centre.
+fn spot_camera() -> crcbl_render::Camera {
+    crcbl_render::Camera {
+        eye: glam::Vec3::new(0.0, SPOT_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        // `Y` is the view direction, so `up` cannot also be `Y`; `+Z` puts the
+        // direction the light comes from at the top of the frame.
+        up: glam::Vec3::Z,
+        projection: crcbl_render::Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// Draws the floor under the spot, with the caster at `caster` on the `x` axis —
+/// or with no caster at all.
+fn render_spot(caster: Option<f32>) -> ShadowFrame {
+    render_scene(&ShadowScene {
+        prepare: &move |renderer| {
+            renderer.set_lights(&[spot_light()]);
+            renderer.set_pyramid(caster.map(|x| {
+                // The pyramid's base is at `-0.4` in its own space, so lifting
+                // it by that much of the scale stands it on `y = 0`. A caster
+                // floating above the floor would hide a shadow detached from it,
+                // which is what too much bias looks like.
+                glam::Mat4::from_translation(glam::Vec3::new(x, 0.4 * SPOT_CASTER_SCALE, 0.0))
+                    * glam::Mat4::from_scale(glam::Vec3::splat(SPOT_CASTER_SCALE))
+            }));
+        },
+        camera: spot_camera(),
+        // Dim, so the pool and the shadow in it are the spot's work: a bright
+        // sun would light the shadowed floor from a direction the spot's map
+        // knows nothing about, and the ratio below would be measuring the sun.
+        sun: crcbl_render::DirectionalLight {
+            color: crcbl_render::DirectionalLight::default().color * 0.03,
+            ambient: crcbl_render::DirectionalLight::default().ambient * 0.09,
+            ..crcbl_render::DirectionalLight::default()
+        },
+        // The cube, scaled into a floor whose `+Y` face is the plane `y = 0`.
+        model: glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.5 * SPOT_FLOOR_SCALE, 0.0))
+            * glam::Mat4::from_scale(glam::Vec3::splat(SPOT_FLOOR_SCALE)),
+    })
+}
+
+/// The mean brightness of the band `SPOT_BAND_COLUMNS` from the frame's axis, on
+/// the **world** `+X` side when `sign` is positive.
+///
+/// **World `+X` is the frame's left.** The camera looks down `-Y` with `+Z` up,
+/// and a right-handed basis built from those two puts screen-right at `-X`:
+/// `cross((0,-1,0), (0,0,1))` is `(-1,0,0)`. So the flip is here rather than in
+/// every caller, and the callers can say "the band the caster is over" and mean
+/// it.
+fn spot_band(frame: &ShadowFrame, sign: i32) -> f32 {
+    let centre = i32::try_from(MESH_EXTENT.0 / 2).expect("a frame edge fits in an i32");
+    let near = i32::try_from(SPOT_BAND_COLUMNS.0).expect("a band offset fits in an i32");
+    let far = i32::try_from(SPOT_BAND_COLUMNS.1).expect("a band offset fits in an i32");
+    let columns = if sign >= 0 {
+        (centre - far)..(centre - near)
+    } else {
+        (centre + near)..(centre + far)
+    };
+    let columns = u32::try_from(columns.start).expect("inside the frame")
+        ..u32::try_from(columns.end).expect("inside the frame");
+    let mut total = 0.0f32;
+    let mut count = 0u32;
+    for y in SPOT_BAND_ROWS {
+        for x in columns.clone() {
+            let pixel = frame.image.pixel(x, y).expect("inside the frame");
+            total += f32::from(pixel[0]) + f32::from(pixel[1]) + f32::from(pixel[2]);
+            count += 1;
+        }
+    }
+    assert!(count > 0, "an empty band measures nothing");
+    total / (count as f32 * 3.0)
+}
+
+/// How much brighter the lit band must be than the shadowed one.
+///
+/// A ratio rather than a difference, on `a_wall_darkens_the_floor_it_stands_on`'s
+/// terms: what survives Lambert, the falloff, the cone and the tonemap is which
+/// side leads and by how much in proportion. The two bands are the same distance
+/// from the cone's axis, so every term but the shadow has the same value in
+/// both.
+const SPOT_SHADOW_RATIO: f32 = 1.5;
+
+/// **A spot's shadow map is written, and it is the map the slot says it is.**
+///
+/// The tile a shadowed light was given must hold real depths, and the *other*
+/// light tile must not: a viewport that ignored `shadow::tile_origin` would
+/// write the cascades' tiles or the free one, and every one of those renders a
+/// frame that looks entirely plausible.
+///
+/// The pass is one `LoadOp::Clear` over the whole atlas, so a tile nothing drew
+/// into is exactly `depth::CLEAR` — which is what makes "is it at the clear" a
+/// question with a crisp answer rather than a threshold.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_shadowed_spot_fills_the_tile_it_was_given_and_no_other() {
+    let frame = render_spot(Some(0.0));
+    let held = frame.tile(crcbl_render::shadow::light_tile(0));
+    let written = held.iter().filter(|depth| **depth > 0.0).count();
+    let fraction = written as f64 / held.len() as f64;
+    eprintln!(
+        "vk e2e: spot shadow — slot 0's tile holds {written} written texel(s) ({fraction:.4})"
+    );
+    assert!(
+        written > 0,
+        "the one shadowed light's tile is entirely at the reversed-Z clear, so its map was \
+         never rendered — which is a spot that shadows nothing and a frame that looks correct"
+    );
+    // **A real area, not a stray texel.** The caster alone covers about a sixth
+    // of this tile — the cone's frustum is barely wider than the pyramid at the
+    // depth it stands at — so a sliver is a mis-transformed caster and this
+    // floor is well under what a correct one writes.
+    //
+    // It is deliberately not "most of the tile", even though the floor runs past
+    // every edge of the cone and geometrically covers all of it. On a device
+    // with an amplification stage the floor's clusters are rejected before they
+    // are drawn, because `cluster_survives` transforms a cluster's bounding
+    // *centre* by the instance transform and leaves its **radius alone** — which
+    // is correct for the rigid transform `GpuInstance::transform` documents and
+    // eight times too small for a cube scaled into a floor. Nothing in the
+    // picture changes: a receiver missing from its own shadow map is a receiver
+    // that is not self-shadowed, which is what a correct bias produces anyway,
+    // and `crcbl`'s `the_spot_shadow_scene_draws_the_same_frame_on_every_geometry_path`
+    // is what says the two paths agree pixel for pixel. It is in
+    // `docs/backlog.md` rather than fixed here.
+    assert!(
+        fraction > 0.05,
+        "slot 0's tile wrote only {fraction:.4} of its texels, which is a sliver rather than \
+         a caster"
+    );
+    assert!(
+        held.iter().all(|depth| (0.0..=1.0).contains(depth)),
+        "slot 0's tile holds a depth outside 0..1, so its reversed-Z range is not the one \
+         the comparison sampler tests against"
+    );
+    // And the slot nothing holds is untouched, which is what says the viewport
+    // went where `tile_origin` put it rather than one tile along.
+    for slot in 1..crcbl_render::shadow::SHADOW_LIGHTS {
+        let free = frame.tile(crcbl_render::shadow::light_tile(slot));
+        assert!(
+            free.iter().all(|depth| *depth == crcbl_hal::depth::CLEAR),
+            "slot {slot} holds no light and its tile was written anyway"
+        );
+    }
+}
+
+/// **The caster darkens the floor, and removing it lights that floor back up.**
+///
+/// The half a golden cannot make: a frame with a dark patch in it is a frame
+/// with a dark patch in it, and a `spot_visibility` hard-wired to zero over the
+/// caster's own footprint would draw one. What separates a shadow from a decal is
+/// that it is *absent* when the caster is, and this is that comparison — the same
+/// pixels, the same light, the same floor, differing in one instance.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn removing_a_spots_caster_lights_the_floor_it_darkened() {
+    let with = render_spot(Some(SPOT_CASTER_OFFSET));
+    let without = render_spot(None);
+    let shadowed = spot_band(&with, 1);
+    let lit = spot_band(&without, 1);
+    eprintln!(
+        "vk e2e: spot shadow — the band measures {shadowed:.1} with the caster and {lit:.1} \
+         without it"
+    );
+    assert!(
+        shadowed * SPOT_SHADOW_RATIO < lit,
+        "the band under the caster's shadow measures {shadowed:.1}, and the same band with no \
+         caster at all measures {lit:.1} — a shadow is the difference between those two, and \
+         there is not one here"
+    );
+}
+
+/// **The dark region follows the caster**, which is the whole claim.
+///
+/// A shadow map read through a matrix that disagrees with the one it was
+/// rendered with puts a shadow somewhere — often somewhere plausible — and a
+/// single frame cannot tell that from a correct one. Two frames can: the caster
+/// moves from `-X` to `+X` and the dark band has to move with it, which no fixed
+/// patch and no lighting bug can do.
+///
+/// Both halves are asserted, and the second is what makes it evidence: a
+/// renderer that darkened one side of everything satisfies the first on its own.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_spots_shadow_follows_its_caster() {
+    let from_plus_x = render_spot(Some(SPOT_CASTER_OFFSET));
+    let from_minus_x = render_spot(Some(-SPOT_CASTER_OFFSET));
+
+    // `.0` is the band on the world `-X` side, `.1` the one on `+X`.
+    let plus = (spot_band(&from_plus_x, -1), spot_band(&from_plus_x, 1));
+    let minus = (spot_band(&from_minus_x, -1), spot_band(&from_minus_x, 1));
+    eprintln!(
+        "vk e2e: spot shadow — caster in +X: over it {:.1} across from it {:.1}; caster in -X: \
+         over +X {:.1} over -X {:.1}",
+        plus.1, plus.0, minus.1, minus.0
+    );
+
+    assert!(
+        plus.1 * SPOT_SHADOW_RATIO < plus.0,
+        "a caster in +X must darken the +X band, but it measured {:.1} against {:.1} on the \
+         other side",
+        plus.1,
+        plus.0
+    );
+    assert!(
+        minus.0 * SPOT_SHADOW_RATIO < minus.1,
+        "and moving it to -X must darken the other band, but it measured {:.1} against {:.1}",
+        minus.0,
+        minus.1
     );
 }

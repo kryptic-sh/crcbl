@@ -155,6 +155,28 @@ pub enum Scene {
     /// why the camera looks straight down and `SPOT_HEIGHT` for what the light's
     /// height buys the pixel assertions.
     Spot,
+    /// `docs/plan/18-render-features.md`'s **shadowed spot**: [`Scene::Spot`]'s
+    /// floor and cone with an object standing in the light.
+    ///
+    /// **The only frame in the tree where a light other than the sun occludes.**
+    /// A shadow map that is never written, never sampled, or sampled through a
+    /// matrix that disagrees with the one it was rendered with all produce a
+    /// plainly plausible picture here — an evenly lit pool — so the assertions
+    /// in `tests/render_e2e.rs` are about *where* the dark region is, and
+    /// `crcbl-vk`'s spot suite is what moves the caster and watches it follow.
+    ///
+    /// It is a scene of its own rather than an occluder added to [`Scene::Spot`]
+    /// for two reasons, and the first is the stronger: that scene's assertions
+    /// are a radial profile out from the frame's centre through the cone's
+    /// penumbra, and an object in the middle of it destroys exactly the
+    /// measurement it exists to make. The second is that its golden would have
+    /// had to be re-blessed for a feature it is not evidence about.
+    ///
+    /// The camera looks straight down and the light comes in at 45°, which is
+    /// the arrangement that separates the shadow from the caster: with both
+    /// overhead the shadow hides under the object that casts it. See
+    /// `spot_shadow_camera` and `SPOT_SHADOW_LIGHT_AT`.
+    SpotShadow,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
@@ -462,6 +484,110 @@ fn spot_light() -> crcbl_render::Light {
     })
 }
 
+/// Where [`Scene::SpotShadow`] puts its light.
+///
+/// **45° from vertical, and that angle is the whole scene.** The camera looks
+/// straight down, so a light straight down too would throw every shadow directly
+/// under the object that casts it, where the object's own image covers it — and
+/// a camera lower than the light magnifies the caster more than the light does,
+/// so the shadow can never grow out from under it. Tilting the light moves the
+/// shadow sideways by the caster's height, which at 45° is one for one.
+///
+/// Close enough in that the cone's pool still fits the frame at
+/// [`SPOT_SHADOW_OUTER_ANGLE`], and high enough that the tilt is a tilt rather
+/// than a grazing light whose pool runs off the bottom of the frame.
+const SPOT_SHADOW_LIGHT_AT: glam::Vec3 = glam::Vec3::new(0.0, 1.2, 1.2);
+
+/// How far [`Scene::SpotShadow`]'s light reaches, in world units.
+///
+/// Twice its distance to the floor's centre, on [`SPOT_REACH`]'s terms exactly:
+/// the pool's edge is then the cone's doing rather than the radius'.
+const SPOT_SHADOW_REACH: f32 = 3.4;
+
+/// The half-angle at which [`Scene::SpotShadow`]'s cone closes, in radians.
+///
+/// Written as an angle rather than as a radius on the floor — unlike
+/// [`SPOT_EDGE_RADIUS`] — because this cone lands on the floor at 45° and its
+/// pool is an ellipse, so there is no one radius to name it by. Wide enough that
+/// the pool covers the caster and the whole of the shadow it throws, narrow
+/// enough that dark floor is still visible in the frame's corners.
+const SPOT_SHADOW_OUTER_ANGLE: f32 = 0.28;
+
+/// The half-angle of its bright core.
+///
+/// Far enough inside [`SPOT_SHADOW_OUTER_ANGLE`] that the shadow and the
+/// penumbra are separate things in the frame: this scene's claim is about a dark
+/// region with a lit region beside it, and a cone that was all penumbra would put
+/// a gradient across both.
+const SPOT_SHADOW_INNER_ANGLE: f32 = 0.18;
+
+/// How much [`Scene::SpotShadow`] scales the pyramid by to get its caster.
+///
+/// The pyramid rather than a second cube, because the cube is already the floor
+/// and one resident cannot be two instances of different sizes here. Small
+/// enough that the pool has lit floor on both sides of the shadow, large enough
+/// that the shadow is tens of pixels across at the extent
+/// `tests/render_e2e.rs` renders.
+const SPOT_SHADOW_CASTER_SCALE: f32 = 0.5;
+
+/// How far above the floor [`Scene::SpotShadow`]'s camera stands.
+///
+/// Low enough that the pool fills a good part of the frame — the assertions
+/// measure bands of it, and a distant camera makes each band a handful of
+/// pixels. The light is at [`SPOT_SHADOW_LIGHT_AT`] and off the camera's axis
+/// entirely, so nothing here has to clear it.
+const SPOT_SHADOW_CAMERA_UP: f32 = 1.3;
+
+/// [`Scene::SpotShadow`]'s caster: the pyramid, scaled and dropped so its base
+/// sits exactly on the floor.
+///
+/// **On the floor rather than floating**, so the contact point of the shadow is
+/// in the frame: a shadow detached from its caster is what too much depth bias
+/// looks like, and a floating caster would hide that failure behind a gap that
+/// is meant to be there.
+fn spot_shadow_caster() -> glam::Mat4 {
+    // The pyramid's base is at `-PYRAMID_HALF_BASE` in its own space, so lifting
+    // it by that much of the scale puts the base on `y = 0`.
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.4 * SPOT_SHADOW_CASTER_SCALE, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::splat(SPOT_SHADOW_CASTER_SCALE))
+}
+
+/// The camera [`Scene::SpotShadow`] is drawn with: straight down at the floor,
+/// on [`spot_camera`]'s terms.
+///
+/// Overhead so the floor is a plane at a known scale and a pixel maps to a floor
+/// position by a division — which is what lets the assertions name the band the
+/// shadow falls in rather than searching for it.
+fn spot_shadow_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, SPOT_SHADOW_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        // `Y` is the view direction, so `up` cannot also be `Y`; `+Z` puts the
+        // floor's `+Z` axis at the top of the frame, which is the direction the
+        // light comes *from* and so the direction the shadow falls away from.
+        up: glam::Vec3::Z,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// [`Scene::SpotShadow`]'s one light: a cone aimed at the floor's centre from
+/// 45° up and behind it.
+fn spot_shadow_light() -> crcbl_render::Light {
+    crcbl_render::Light::Spot(crcbl_render::SpotLight {
+        position: SPOT_SHADOW_LIGHT_AT,
+        radius: SPOT_SHADOW_REACH,
+        color: glam::Vec3::new(1.0, 0.95, 0.85) * SPOT_INTENSITY,
+        // Along the cone, away from the light — so from the light to the floor's
+        // centre, which is what makes the pool's axis land on the frame's.
+        direction: -SPOT_SHADOW_LIGHT_AT,
+        inner_angle: SPOT_SHADOW_INNER_ANGLE,
+        outer_angle: SPOT_SHADOW_OUTER_ANGLE,
+    })
+}
+
 /// The colour [`Scene::Sprite`] and [`Scene::Ui`] composite onto, in **linear**
 /// light — which is what a clear value on an sRGB attachment means.
 ///
@@ -736,6 +862,22 @@ impl SceneState {
                 renderer.set_lights(&[spot_light()]);
                 Self::Forward {
                     camera: spot_camera(),
+                    light: spot_sun(),
+                    model: spot_floor(),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::SpotShadow => {
+                // The spot scene's floor exactly, with one thing added: the
+                // pyramid, standing in the light. Everything else that differs
+                // — the camera, the light's tilt — is what makes the shadow
+                // separable from its caster, and `Scene::SpotShadow` is where
+                // that is argued.
+                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                renderer.set_pyramid(Some(spot_shadow_caster()));
+                renderer.set_lights(&[spot_shadow_light()]);
+                Self::Forward {
+                    camera: spot_shadow_camera(),
                     light: spot_sun(),
                     model: spot_floor(),
                     renderer: Box::new(renderer),
@@ -1827,23 +1969,37 @@ mod tests {
         // Topic 18's clustering dispatch joins the camera's triple and no
         // cascade's, because a cascade shades nothing: one froxel grid per
         // camera is the whole of what the light list costs a frame.
-        let mut cube_passes: Vec<(&str, &str)> = Vec::new();
-        for cascade in 0..=crcbl_render::shadow::CASCADES {
-            cube_passes.extend([
-                ("compute", "clear-counters"),
-                ("compute", "cull"),
-                ("compute", "draw-args"),
-            ]);
-            if cascade == 0 {
-                cube_passes.push(("compute", "light-cluster"));
+        //
+        // **A shadowed light adds one more triple and nothing else**, which is
+        // the one thing the spot slice changed about a frame's shape: a light
+        // that was given an atlas tile gets a cull of its own, exactly as a
+        // cascade does, and a light that was not given one costs nothing at all.
+        // `forward_passes(0)` and `forward_passes(1)` differing by one triple is
+        // what says the free tiles really are free.
+        let forward_passes = |shadowed_lights: usize| {
+            let mut passes: Vec<(&str, &str)> = Vec::new();
+            for cull in 0..=(crcbl_render::shadow::CASCADES + shadowed_lights) {
+                passes.extend([
+                    ("compute", "clear-counters"),
+                    ("compute", "cull"),
+                    ("compute", "draw-args"),
+                ]);
+                if cull == 0 {
+                    passes.push(("compute", "light-cluster"));
+                }
             }
-        }
-        cube_passes.extend([
-            ("render", "shadow"),
-            ("render", "forward"),
-            ("render", "tonemap"),
-        ]);
-        let expected: [(Scene, &[(&str, &str)]); 5] = [
+            passes.extend([
+                ("render", "shadow"),
+                ("render", "forward"),
+                ("render", "tonemap"),
+            ]);
+            passes
+        };
+        let cube_passes = forward_passes(0);
+        // The spot scene's one light is a spot, it is the only candidate, and
+        // there are tiles left after the cascades — so it holds one.
+        let spot_shadow_passes = forward_passes(1);
+        let expected: [(Scene, &[(&str, &str)]); 6] = [
             (Scene::Cube, &cube_passes),
             // The same passes again: `Scene::Lights` is the cube scene with a
             // longer light list, and the clustering dispatch is one per camera
@@ -1853,6 +2009,15 @@ mod tests {
             // different content, and a scene that quietly stopped running the
             // cull pair would still draw a plausible frame.
             (Scene::Dunes, &cube_passes),
+            // **One triple more**, and it is the whole of what a shadowed light
+            // costs a frame: `crcbl_render::shadow::Selection` gave this scene's
+            // spot a tile, so the shadow pass runs a cull against the light's own
+            // frustum before drawing into it. A scene whose light was refused a
+            // tile records the cube scene's list unchanged — which is
+            // `docs/plan/18-render-features.md`'s "still lights, does not
+            // occlude" visible in the frame's shape rather than only in its
+            // pixels.
+            (Scene::SpotShadow, &spot_shadow_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

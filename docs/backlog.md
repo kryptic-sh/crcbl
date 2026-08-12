@@ -5915,20 +5915,15 @@ recorded in `docs/plan/18-render-features.md`. What is left:
 - **Both closed**: `Scene::Spot` draws a cone and asserts its shape by pixels,
   and the froxel bound is a cone as well as a sphere (144 froxels to 91 on a
   narrow spot, every golden unmoved).
-- **`Light::sphere()` in `crcbl-render/src/light.rs` has no callers.** Its doc
-  says it is "the clustering pass's test, on the host", but the assignment
-  happens entirely in `light_cluster.slang` and nothing on the host bounds a
-  light. Dead public API that reads as load-bearing — delete it or give it a
-  caller.
 - **The CLI's `--scene` knows only `cube`, `sprite` and `ui`**, so `Dunes`,
   `Lights` and `Spot` are reachable only from the test suite, and
   `run-cross-backend-e2e.sh` therefore does not cover them.
 - **`spot_cone` is a linear ramp in cosine space, not a smoothstep** — worth
   knowing before someone "fixes" the falloff to match a description that was
   never in the code.
-- **No shadows for the new types**, no atlas allocation, and no rule for which
-  lights get maps. Those are the next slices and topic 18 says each wants the
-  list to exist first — which it now does.
+- **Spot shadows landed; point-light shadows are what is left.** The atlas is a
+  fixed grid and the rule for which lights get maps is `shadow::Selection`. See
+  "What spot-light shadows left owed" below.
 - **`mesh.png`, `mesh_ortho.png` and `mesh_second.png` differ from what this
   machine's lavapipe produces** by exactly one channel level across 80–96 % of
   pixels, comfortably inside tolerance. **Pre-existing** — identical before and
@@ -5940,6 +5935,61 @@ recorded in `docs/plan/18-render-features.md`. What is left:
 - **`MAX_TIMED_PASSES` is now 8 against 13 recorded passes** in the samples, up
   from 12 before this slice, so their HUD silently times only the first eight.
   Already recorded; the number moved again.
+
+## What spot-light shadows left owed
+
+The atlas became a fixed 2×2 tile grid, `shadow::Selection` decides who gets a
+tile, `shadow::spot_matrix` builds a reversed-Z perspective projection down the
+cone, and `mesh.slang`'s `spot_visibility` samples it through the same 3×3 PCF
+kernel the cascades use. Decisions taken, so they are not re-argued:
+
+- **`SHADOW_LIGHTS` is 2, and it is a memory number rather than a quality one.**
+  Each shadowed light needs its own `DrawGen`, and a `DrawGen` holds ~5.0 MiB
+  measured on the spot scene — 3.7 MiB of it per-instance LOD hysteresis state
+  that is device-local and permanent. Two light tiles plus the atlas growing
+  from 8 to 16 MiB is ~18 MiB allocated whether a scene has a shadowed light or
+  not. It is allocated up front deliberately: building a `DrawGen` inside
+  `begin_frame` means a frame that cannot allocate is a frame that cannot draw.
+  **Raising the budget is the memory conversation, not the atlas one.**
+- **A cone at or past `MAX_SPOT_HALF_ANGLE` (80°) is refused a tile** rather
+  than given a map narrower than the cone. `tan` runs to infinity at 90° and the
+  matrix stops being one. Such a light lights without occluding, which is the
+  same honest degradation as running out of tiles.
+- **The spot biases in world units before projecting**, denominated in tile
+  texels at the receiver, where the cascades bias in shadow-clip depth. A
+  perspective map's depth precision piles up at the near plane under reversed-Z,
+  so the cascades' constants do not transfer. The shipped pair
+  (`SPOT_DEPTH_BIAS_TEXELS` 2.0, `SPOT_SLOPE_BIAS_TEXELS` 4.0) is double the
+  smallest that made the two geometry paths agree on lavapipe; the argument and
+  the measurements are at the constants in `shaders/mesh.slang`.
+- **No texel snap on a spot's matrix, and none is owed.** The cascades snap
+  because their box follows the camera; a spot's matrix is a pure function of
+  the light, so a still light already produces a byte-identical matrix.
+  `a_still_spot_produces_the_same_matrix` asserts it.
+
+What is left:
+
+- **Point-light shadows are the next slice**: six tiles per light against two
+  spare, so the grid widens. `ATLAS_COLUMNS`, `ATLAS_ROWS` and the
+  `TILES == CASCADES + SHADOW_LIGHTS` static assert are the only two places that
+  change — but see the memory note above before widening it.
+- **`cluster_survives` does not scale a cluster's bounding radius by the
+  instance transform** (`mesh_cluster.slang`, and its Rust oracle
+  `cluster_survives_cull`). Correct for the rigid transform
+  `GpuInstance::transform` documents, and 8× too small for the cube scaled into
+  a floor — so on a device with an amplification stage the floor's clusters are
+  rejected from the spot's tight frustum and the receiver is absent from its own
+  shadow map. Invisible today (a receiver that does not self-shadow is what a
+  correct bias produces anyway, and both paths agree pixel for pixel), but it is
+  a hole waiting for a tighter frustum. Pre-existing; documented at the
+  assertion in `vk_e2e/shadow.rs`.
+- **Hardware PCF filters across a tile seam.** The kernel clamps half a texel
+  inside the tile, which stops a tap reaching the neighbour, but the guarantee
+  is the clamp rather than per-tile padding. A wider kernel would need the
+  padding.
+- **Nothing exercises two shadowed lights at once.** `Scene::SpotShadow` has
+  one, so slot 1 is only covered by the host-side `Selection` tests and by the
+  vk_e2e assertion that a free tile stays at the clear.
 
 ## P7B could not start as written: the engine has one light
 

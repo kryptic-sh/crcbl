@@ -26,7 +26,7 @@ struct GpuLight_std430_0
     @align(16) direction_0 : vec4<f32>,
     @align(16) kind_0 : u32,
     @align(4) cos_inner_0 : f32,
-    @align(8) pad0_0 : u32,
+    @align(8) shadow_slot_0 : u32,
     @align(4) pad1_0 : u32,
 };
 

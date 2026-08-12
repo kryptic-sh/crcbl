@@ -189,6 +189,70 @@ const SPOT_PENUMBRA_MIN: usize = 12;
 /// fails this rather than any single direction's own claims.
 const SPOT_ROUNDNESS: usize = 3;
 
+/// The anti-vacuity floor for [`Scene::SpotShadow`].
+///
+/// A cone on a floor with a lit pyramid in it and a shadow behind it, so the
+/// count runs well past [`MIN_COLORS_SPOT`]'s frame — this floor is the same
+/// number for the same reason: it separates "the cone contributed nothing" from
+/// a working frame and stops there, because *where* the dark region is is
+/// [`the_caster_darkens_the_floor_behind_it_and_not_beside_it`]'s claim.
+///
+/// [`the_caster_darkens_the_floor_behind_it_and_not_beside_it`]: fn@the_caster_darkens_the_floor_behind_it_and_not_beside_it
+const MIN_COLORS_SPOT_SHADOW: usize = 48;
+
+/// The half-extent of each band [`Scene::SpotShadow`] is measured over, in
+/// pixels.
+///
+/// Small enough that the band stays inside the region it names — the shadow is
+/// about 19 pixels wide where it is sampled, and the lit floor beside it is
+/// bounded by the pool's own edge — and large enough that PCF's several-texel
+/// gradient and a driver's dither average out.
+const SPOT_SHADOW_BAND: (u32, u32) = (6, 6);
+
+/// Where [`Scene::SpotShadow`]'s shadow falls, in pixels.
+///
+/// `crcbl::screenshot`'s camera looks straight down from `SPOT_SHADOW_CAMERA_UP`
+/// with `+Z` at the top of the frame, and the light is at
+/// `SPOT_SHADOW_LIGHT_AT` — up and towards `+Z` — so the shadow falls towards
+/// `-Z`, which is *down* the frame. The caster's own image ends about 26 pixels
+/// below the centre and its shadow reaches about 92; this sits between the two,
+/// on the frame's vertical axis where the shadow is widest.
+const SPOT_SHADOW_DARK_AT: (u32, u32) = (EXTENT.0 / 2, EXTENT.1 / 2 + 42);
+
+/// Its mirror image across the cone's axis: the same distance from the frame's
+/// centre, on the side the light comes from.
+///
+/// **The same distance is the point.** Everything that varies over the pool —
+/// the falloff, the cone's own ramp, Lambert — is a function of distance from
+/// the cone's axis, so a band at the same distance has every one of those terms
+/// at the same value and differs from the dark band in exactly one thing.
+const SPOT_SHADOW_LIT_AT: (u32, u32) = (EXTENT.0 / 2, EXTENT.1 / 2 - 42);
+
+/// And beside the caster: level with the shadow, across the frame, still inside
+/// the pool.
+///
+/// What this refuses that the mirror does not is a frame that is simply darker
+/// towards the bottom — a vignette, a wrong normal on the floor, a cone aimed a
+/// little short. Each of those darkens a whole row and this band is in the same
+/// row as the shadow.
+const SPOT_SHADOW_SIDE_AT: (u32, u32) = (EXTENT.0 / 2 + 36, EXTENT.1 / 2 + 42);
+
+/// How much brighter the lit bands must be than the shadowed one.
+///
+/// A ratio rather than a difference, for the reason `crcbl-vk`'s shadow suite
+/// gives: what survives Lambert, the falloff, the cone and the tonemap is which
+/// side leads, and by how much in proportion. Well above the few per cent the
+/// other shading terms move across the pool and far below the several times a
+/// real shadow produces.
+const SPOT_SHADOW_RATIO: f32 = 1.5;
+
+/// How far above the clear the lit half of the pool must measure.
+///
+/// The anti-vacuity half of the two ratios above: a frame that drew nothing has
+/// every band equal to the clear, and two ratios between equal numbers say
+/// nothing at all.
+const SPOT_SHADOW_LIT_FLOOR: f32 = 10.0;
+
 /// What channel order [`OffscreenSetup::draw_and_readback`]'s bytes are in.
 ///
 /// The same three lines as `crcbl-cli`'s `screenshot::channel_order` and
@@ -510,6 +574,115 @@ fn the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor(image: &Image) 
         "the four directions' penumbras are {penumbras:?}, which is not one circle about the \
          frame's centre — the cone is off-axis, elongated, or aimed somewhere this camera \
          does not see square on"
+    );
+}
+
+/// `docs/plan/18-render-features.md`'s **shadowed spot**, drawn — the first
+/// light in this engine other than the sun that occludes.
+///
+/// The golden is not the evidence and cannot be: a spot whose shadow lookup
+/// always returned "lit" draws [`Scene::SpotShadow`] as an evenly lit pool with a
+/// pyramid in it, which is a perfectly ordinary picture, and one that always
+/// returned "shadowed" draws a pool that is uniformly dim. Both would be blessed
+/// without comment. [`the_caster_darkens_the_floor_behind_it_and_not_beside_it`]
+/// is what tells the three apart, and `crcbl-vk`'s
+/// `a_spots_shadow_follows_its_caster` is what says the dark region is this
+/// caster's rather than a fixed patch.
+///
+/// [`the_caster_darkens_the_floor_behind_it_and_not_beside_it`]: fn@the_caster_darkens_the_floor_behind_it_and_not_beside_it
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_spot_shadow_scene_draws_its_shadow_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::SpotShadow,
+        "spot_shadow",
+        MIN_COLORS_SPOT_SHADOW,
+        the_caster_darkens_the_floor_behind_it_and_not_beside_it,
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_spot_shadow_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::SpotShadow,
+        "spot_shadow",
+        MIN_COLORS_SPOT_SHADOW,
+        the_caster_darkens_the_floor_behind_it_and_not_beside_it,
+    );
+}
+
+/// The mean brightness of a `width` by `height` block of the frame centred on
+/// `(x, y)`, summed over RGB.
+///
+/// A block rather than a pixel, for the reason `crcbl-vk`'s shadow suite gives:
+/// PCF makes a shadow edge a gradient several texels wide, and a single sample
+/// lands wherever that gradient happens to fall.
+fn block_brightness(image: &Image, centre: (u32, u32), half: (u32, u32)) -> f32 {
+    let mut total = 0.0f32;
+    let mut count = 0u32;
+    for y in centre.1.saturating_sub(half.1)..(centre.1 + half.1).min(EXTENT.1) {
+        for x in centre.0.saturating_sub(half.0)..(centre.0 + half.0).min(EXTENT.0) {
+            let pixel = image.pixel(x, y).expect("inside the frame");
+            total += f32::from(pixel[0]) + f32::from(pixel[1]) + f32::from(pixel[2]);
+            count += 1;
+        }
+    }
+    assert!(count > 0, "an empty block measures nothing");
+    total / (count as f32 * 3.0)
+}
+
+/// [`Scene::SpotShadow`]'s claim: **the floor is dark where the caster blocks
+/// the light and lit where it does not**.
+///
+/// Three bands of the same frame, all inside the cone's pool and all on the
+/// floor, and the claim is the relation between them rather than any absolute
+/// colour — which is what survives Lambert, the falloff, the cone and the
+/// tonemap:
+///
+/// * `SPOT_SHADOW_DARK_AT` is the floor just behind the caster, where the light
+///   comes from `+Z` at 45° and the pyramid stands between. It must be the
+///   darkest of the three.
+/// * `SPOT_SHADOW_LIT_AT` is its mirror image on the far side, the same distance
+///   from the frame's centre and the same distance from the cone's axis. It must
+///   be unmistakably brighter.
+/// * `SPOT_SHADOW_SIDE_AT` is beside the caster, level with the shadow but
+///   across the frame, where nothing is between the light and the floor.
+///
+/// **The mirror is what makes it evidence.** A shadow lookup that always returned
+/// "shadowed" darkens all three equally and fails the ratio; one that always
+/// returned "lit" leaves all three equal and fails it the other way. A vignette,
+/// a wrong normal or a cone aimed slightly off darkens one *side* of the frame,
+/// which the third band refuses — it is level with the dark band and equally far
+/// from the cone's axis, so nothing that varies with position alone can separate
+/// the two.
+fn the_caster_darkens_the_floor_behind_it_and_not_beside_it(image: &Image) {
+    let dark = block_brightness(image, SPOT_SHADOW_DARK_AT, SPOT_SHADOW_BAND);
+    let lit = block_brightness(image, SPOT_SHADOW_LIT_AT, SPOT_SHADOW_BAND);
+    let side = block_brightness(image, SPOT_SHADOW_SIDE_AT, SPOT_SHADOW_BAND);
+    eprintln!(
+        "crcbl render e2e: spot shadow — behind the caster {dark:.1}, mirrored {lit:.1}, \
+         beside it {side:.1}"
+    );
+    assert!(
+        dark * SPOT_SHADOW_RATIO < lit,
+        "the floor behind the caster must be unmistakably darker than its mirror across the \
+         pool: {dark:.1} against {lit:.1}, which is not a shadow"
+    );
+    assert!(
+        dark * SPOT_SHADOW_RATIO < side,
+        "and darker than the floor beside it at the same distance from the cone's axis: \
+         {dark:.1} against {side:.1} — a frame that is merely dim on one side satisfies the \
+         first claim and not this one"
+    );
+    // The lit bands are lit *floor*, not a black frame the shadow is invisible
+    // against. Without this the two ratios above are satisfiable by a scene that
+    // drew nothing at all.
+    let clear = block_brightness(image, (2, 2), (2, 2));
+    assert!(
+        lit > clear + SPOT_SHADOW_LIT_FLOOR,
+        "the lit half of the pool measures {lit:.1} against a clear of {clear:.1}, so there \
+         is no lit floor here for a shadow to be a shadow against"
     );
 }
 

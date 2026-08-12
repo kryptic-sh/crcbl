@@ -93,12 +93,37 @@ taste:
   in this file when taken). An unshadowed light still lights; it just does not
   occlude.
 
-### What this does not decide
+### Shadowed lights: the three decisions (taken 2026-08-13)
 
-Shadow-atlas allocation across light types, the selection rule for which lights
-get maps, and whether point lights use a cube map or six atlas tiles. Each wants
-the light list to exist first, and each is a decision to record here when the
-slice that needs it arrives.
+The list exists now, so these are settled.
+
+- **Point lights use six atlas tiles, not a cube map.** The sun already renders
+  into a tile atlas, so six tiles reuse one allocator, one image, one sampler
+  and one barrier story; a cube map is a second image type, a second view type
+  the seam would have to carry, and a second sampling path. What that costs is
+  hardware filtering across a face seam, which a tile atlas cannot do —
+  mitigated by a border of padding per tile and by the fact that PCF already
+  samples within a face. **A cube map is the better answer only if seam
+  artefacts turn up in practice**, and then it is a contained change to the
+  sampling side.
+- **Shadowed lights are chosen by projected screen influence**, radius over
+  distance to the eye — the same metric family LOD selection already uses, so
+  there is one notion of "how much does this matter on screen" rather than two.
+  Ties break by light index so a frame's selection is stable rather than
+  order-dependent, and hysteresis on the selection is owed for the same reason
+  it was owed for LOD: a light drifting across the cutoff should not flicker its
+  shadow on and off.
+- **The atlas is a fixed tile grid.** The sun's cascades take the first tiles,
+  and the rest are handed out one per spot and six per point until they run out.
+  A light that gets no tile **still lights and simply does not occlude**, which
+  is the honest degradation and is what makes the budget a quality knob rather
+  than a correctness cliff.
+
+**Order of work: spot before point**, even though point is the MVP row and spot
+is polish. A spot is one tile and one matrix — the sun's machinery with a
+different projection — and a point light is six of exactly that plus face
+selection. Building the simpler one first de-risks the harder one and neither is
+wasted.
 
 ## Shadows (MVP — lands with P7)
 
