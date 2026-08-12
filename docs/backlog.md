@@ -5789,6 +5789,25 @@ a wasm regression in this code would not be observed by anything. The refusals
 that do not need an array layout — the flags gate, `count: 0`, the in-band
 layout error — run on every adapter, so that half is not skip-shaped.
 
+## What the shadow LOD bias left, and two stale docs
+
+- **`FrameUniforms::lod_params` is now dead in the uniform block on both
+  shaders.** `mesh.slang`'s doc says "that file's amplification stage is the one
+  that reads it" while `mesh_cluster.slang` says "read by nothing here since
+  hysteresis landed". Neither reads it. Removing it is a uniform-block change
+  and therefore an artifact regeneration; the docs should stop disagreeing
+  either way.
+- **The shadow atlas's contents were never compared for a DAG mesh.**
+  `the_shadow_atlas_is_written_rather_than_left_at_its_clear_value` uses the box
+  scene, which has no DAG, so the bias's effect on actual atlas depths is
+  inferred from the cut readback plus bit-identical colour frames rather than
+  measured on the atlas itself.
+- **`SHADOW_LOD_BIAS` is one constant for every cascade.** Topic 18 suggests
+  +1/+2 stepping by cascade, and a per-cascade factor would be sound — the
+  monotonicity argument only needs one constant per _pass_, and each cascade is
+  its own pass with its own `DrawGen` and its own history. Not done because
+  nothing yet shows the near cascade wants a different figure from the far one.
+
 ## Profiling and benchmarking: decisions taken 2026-08-13, before any code
 
 `docs/plan/40-profiling.md` is new and specifies the whole thing; it is a
@@ -5936,9 +5955,15 @@ Still open from earlier slices and unchanged by this one:
 
 - **Every `ForwardRenderer` uploads the dunes DAG** whether or not `set_dunes`
   is called — a build-time cost every app pays for geometry most never draw.
-- **The shadow cascades select too, from the light's position**, because they
-  share the frame block. Not designed; it fell out. Decide whether it is wanted
-  before relying on it.
+- **Settled: the cascades select from the camera's eye, not the light's.** What
+  looked like light-as-eye was `camera.eye + light_direction * cascade_far` —
+  the camera's own eye pushed along the sun's direction, stepping per cascade,
+  so two cascades asked two different detail questions about one caster.
+  Replaced by the camera's eye at the camera's pixels-per-unit with both budgets
+  scaled, because the artifact is a shadow edge displaced by the group's error
+  and that displacement is seen by the camera. The light is still the eye for
+  the amplification stage's cone test, where a shadow map's viewer genuinely is
+  the light.
 - **Group radii compound faster than a model grows**, so levels 2–6 have little
   spatial discrimination; a tighter enclosing sphere is the lever, not a bigger
   model.

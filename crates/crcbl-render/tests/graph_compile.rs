@@ -1818,3 +1818,89 @@ fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
     }
     device.destroy_buffer(mesh_table);
 }
+
+/// **Nor is any buffer the forward renderer's own mesh stages write**, which is
+/// the other half of the same rule and a different owner.
+///
+/// [`nothing_the_draw_generation_lets_a_shader_write_is_host_visible`] covers
+/// what [`DrawGen`](crcbl_render::DrawGen) hands out. The cut-recording buffers
+/// are `ForwardRenderer`'s, written by `mesh_cluster.slang`'s amplification
+/// stage rather than by a compute pass, and there is one per frame for the
+/// colour pass plus one per (cascade, frame) for
+/// `docs/plan/25-lod.md`'s shadow LOD bias — a set that grew with that slice and
+/// that the D3D12 refusal would meet as a lost device on WARP.
+///
+/// The renderer only creates them where it has an amplification stage, so this
+/// asks the null backend for one: `NullInstance::gpu_driven` reports no mesh
+/// stage at all, and on that preset there would be nothing here to check and the
+/// test would pass by finding nothing.
+#[test]
+fn nothing_the_forward_renderer_lets_a_mesh_stage_write_is_host_visible() {
+    use crcbl_hal::{AdapterId, Features};
+
+    let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
+    caps.features |= Features::MESH_SHADER | Features::TASK_SHADER;
+    let instance = NullInstance::new(caps);
+    let recorder = instance.recorder();
+    let device = instance
+        .create_device(&DeviceDesc {
+            label: Some("forward selection buffers"),
+            optional_features: caps.features,
+            ..DeviceDesc::for_adapter(AdapterId(0))
+        })
+        .expect("the null backend always opens");
+    let queue = device.queue(QueueKind::Graphics).expect("always present");
+    let renderer =
+        crcbl_render::ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
+            .expect("the null backend accepts every descriptor");
+    assert!(
+        renderer.culls_clusters(),
+        "this device reports no amplification stage, so there are no cut buffers here and \
+         this test checks nothing"
+    );
+
+    let mut checked = 0usize;
+    let mut device_local = |label: String, buffer: crcbl_hal::BufferHandle| {
+        let bytes = recorder
+            .buffer_bytes(buffer)
+            .unwrap_or_else(|| panic!("{label} names no buffer this recorder created"));
+        assert!(
+            bytes.is_empty(),
+            "{label} is host-visible ({} mappable bytes), and a mesh stage writes it: D3D12 \
+             has no unordered-access view of an upload-heap resource, so this is a lost \
+             device on WARP",
+            bytes.len()
+        );
+        checked += 1;
+    };
+    // The whole ring, walked until it ends rather than up to a length taken from
+    // somewhere else — and every cascade of every slot in it, because the
+    // cascades are where this slice added buffers.
+    let mut frames = 0usize;
+    while let Some(selection) = renderer.cluster_selection(frames) {
+        device_local(format!("cluster selection {frames}"), selection);
+        for cascade in 0..crcbl_render::shadow::CASCADES {
+            device_local(
+                format!("shadow selection {cascade} {frames}"),
+                renderer
+                    .shadow_selection(frames, cascade)
+                    .unwrap_or_else(|| {
+                        panic!("cascade {cascade} records no cut on frame {frames}")
+                    }),
+            );
+        }
+        frames += 1;
+    }
+    assert!(
+        frames > 1,
+        "the renderer handed out {frames} frame(s) of cut buffers, which is not a ring — \
+         and a ring of none would have made every assertion above vacuous"
+    );
+    assert_eq!(
+        checked,
+        frames * (1 + crcbl_render::shadow::CASCADES),
+        "one cut buffer per frame for the colour pass and one per cascade beside it"
+    );
+
+    renderer.destroy(device.as_ref());
+}

@@ -371,6 +371,52 @@ const DRAW_CONSTANTS_BLOCK: u64 =
 /// the setting that shows the band is what stops the flicker.
 const LOD_HOLD_RATIO: f32 = 0.8;
 
+/// How much larger than the camera's the pixel budget a shadow cascade selects
+/// under is — `docs/plan/25-lod.md`'s "**Shadow LOD bias**: shadow-pass culling
+/// selects +1/+2 coarser levels — casters are cheap where it never shows".
+///
+/// # A budget factor, because a level is not a parameter of the rule
+///
+/// The descent compares a group's projected error to a pixel budget; it never
+/// names a level. So "one or two levels coarser" is an *intent*, and the budget
+/// that produces it is the setting — and the two do not convert, because how far
+/// apart two levels' errors are is a property of the mesh. The committed dunes
+/// DAG is the demonstration: the step from one level's error to the next is
+/// several times larger in the middle of that hierarchy than at its base, and
+/// across its top levels there is no step at all — they report one error and are
+/// never separately selected by any budget. A bias expressed in levels would
+/// mean something different at each of those. `cook-clusters` prints the per
+/// level errors it built.
+///
+/// Four, then, is two doublings of the budget: enough that a caster is drawn
+/// coarser than the same object is in the colour pass, and small enough to stay
+/// inside what a shadow hides. What hides it is that a shadow edge is filtered —
+/// the atlas is read through a comparison sampler with linear filtering, so an
+/// edge arrives already spread over neighbouring texels — and that the atlas
+/// quantises every caster to [`shadow::TILE`] texels per cascade before anything
+/// samples it.
+///
+/// # Why one number, applied to the whole pass
+///
+/// **A cut is a cover only while expansion is monotone up the DAG**, and this
+/// scaling is what keeps it so. Multiplying both budgets by one positive
+/// constant leaves the rule in
+/// [`crcbl_shaders::cluster_select`]'s form with different constants in it, and
+/// that module's induction turns on the projected error being monotone up the
+/// DAG rather than on what the constants are — so the shadow pass's cut is a
+/// cover for exactly the reason the camera's is. A bias that varied by cluster,
+/// by group, by level or by cascade would not be: two groups on one branch would
+/// be judged against different budgets, and a child expanding under an
+/// unexpanded parent is a hole.
+///
+/// Being larger than one also makes the shadow pass's expanded set a **subset**
+/// of the colour pass's, since the two now select from one eye at one scale: a
+/// group over `k` times the budget is over the budget. So the shadow cut is
+/// never finer than the camera's anywhere, which is the property
+/// `crcbl-vk`'s `the_shadow_cascades_select_coarser_than_the_camera` reads back
+/// and asserts.
+pub const SHADOW_LOD_BIAS: f32 = 4.0;
+
 /// The budget an **orthographic** camera selects under: one no group satisfies,
 /// so every group expands and the base level is drawn whole.
 ///
@@ -550,6 +596,14 @@ pub struct ForwardRenderer {
     /// it is held down to — `docs/plan/25-lod.md`'s hysteresis, and
     /// [`LOD_HOLD_RATIO`] is what puts the third below the second.
     lod_params: [f32; 3],
+    /// The same three numbers the shadow cascades selected under, which is
+    /// [`ForwardRenderer::lod_params`] with both budgets scaled by
+    /// [`SHADOW_LOD_BIAS`] and the same pixels-per-unit.
+    ///
+    /// Kept beside the camera's for its reason: a reader comparing the two cuts
+    /// takes both pairs from here rather than re-deriving the bias, which would
+    /// be comparing two copies of one arithmetic instead of two selections.
+    shadow_lod_params: [f32; 3],
 
     // Per-frame uniforms, one set per frame in flight.
     uniforms: Vec<BufferHandle>,
@@ -618,6 +672,17 @@ pub struct ForwardRenderer {
     /// `[frame][cascade]`: the mesh layout again, reading that cascade's
     /// survivors and that cascade's uniforms.
     shadow_groups: Vec<Vec<BindGroupHandle>>,
+    /// `[frame][cascade]`: the cut that cascade's amplification stage chose,
+    /// one word per resident cluster — and empty where there is no such stage.
+    ///
+    /// **A buffer per cascade rather than the camera's**, unlike every other
+    /// resource these passes share: the colour pass is recorded last and writes
+    /// [`ForwardRenderer::cluster_selection`] over whatever a cascade left in it,
+    /// so a cascade writing there leaves nothing behind to read. Without one of
+    /// these the shadow pass's descent is unobservable — which is the state
+    /// [`SHADOW_LOD_BIAS`] arrived in, and it is what a bias nothing can measure
+    /// would have stayed in.
+    shadow_selection: Vec<Vec<BufferHandle>>,
     /// What the last frame left [`ForwardRenderer::shadow_atlas`] and its
     /// placeholder in.
     ///
@@ -780,19 +845,16 @@ struct MeshGroup {
     /// cluster. `None` exactly where there is no amplification stage, which is
     /// where the layout has no binding 18 either.
     ///
-    /// **One buffer for the colour pass and every cascade**, which the graph
-    /// orders by the `ShaderReadWrite` all of them declare on it. What survives
-    /// a frame is therefore the last mesh pass recorded, and that is the colour
-    /// pass — so what a reader gets is the camera's cut rather than a
-    /// cascade's. See [`ForwardRenderer::cluster_selection`].
+    /// **A buffer per pass**, not one shared: the colour pass is recorded last,
+    /// so a cascade writing the camera's would leave nothing of its own to read.
+    /// See [`ForwardRenderer::shadow_selection`].
     cluster_selection: Option<BufferHandle>,
     /// Binding 19, likewise: `docs/plan/25-lod.md`'s hysteresis state, which the
     /// draw-argument pass wrote this frame and this one only reads.
     ///
-    /// **One buffer for the colour pass and every cascade**, and not because
-    /// they happen to share one: they select from the same camera, so a cascade
-    /// that judged the groups again would be a second decision about one
-    /// instance — and a second *writer* of the state.
+    /// **A buffer per pass** as well, because the colour pass and a cascade
+    /// judge the same groups under different budgets — see
+    /// [`CascadeBuffers::group_state`].
     group_state: Option<BufferHandle>,
     /// Binding [`SHADOW_ATLAS_BINDING`]. The atlas for the pass that reads it,
     /// and the placeholder for the pass that writes it — see
@@ -995,12 +1057,17 @@ struct CascadeBuffers {
     cull_stats: Vec<BufferHandle>,
     /// This cascade's own hysteresis state, and not the camera's.
     ///
-    /// A cascade selects from the **light** — its `FrameUniforms` puts the sun
-    /// where the camera would be, which is what makes its per-cluster cull
-    /// reject what faces away from the sun — so its groups are judged against a
-    /// different eye and their history is a different history. Sharing the
-    /// camera's buffer would be two eyes writing one state and each undoing the
-    /// other's band every frame.
+    /// A cascade selects from the camera's eye at the camera's scale, like the
+    /// colour pass, but under budgets [`SHADOW_LOD_BIAS`] times as large — so it
+    /// reaches a different answer for the same group, and an answer carried
+    /// between frames needs somewhere of its own to be carried. Sharing the
+    /// camera's buffer would be two rules writing one history and each undoing
+    /// the other's band every frame.
+    ///
+    /// One per cascade rather than one for the shadow pass, even though every
+    /// cascade now selects identically: each cascade is its own [`DrawGen`], and
+    /// one buffer between them would be several dispatches writing one element
+    /// with nothing ordering them.
     group_state: BufferHandle,
 }
 
@@ -1325,21 +1392,33 @@ impl ForwardRenderer {
         // across the ring would have the next frame's dispatch overwriting what
         // this one recorded. `TRANSFER_SRC` because reading it is the point.
         let mut cluster_selection: Vec<BufferHandle> = Vec::new();
+        // And one ring per shadow cascade, indexed `[cascade][frame]` — see
+        // `ForwardRenderer::shadow_selection` for why a cascade cannot share the
+        // buffer above.
+        let mut cascade_selection: Vec<Vec<BufferHandle>> = Vec::new();
         if culls_clusters {
             let count = rollback
                 .clusters
                 .as_ref()
                 .unwrap_or_else(|| unreachable!("an amplification stage implies a cluster pool"))
                 .count();
-            for frame in 0..instance_buffers.len() {
-                let buffer = device.create_buffer(&BufferDesc {
-                    label: Some(&format!("cluster selection {frame}")),
-                    size: u64::from(count) * 4,
-                    usage: BufferUsage::STORAGE.union(BufferUsage::TRANSFER_SRC),
-                    memory: MemoryLocation::DeviceLocal,
-                })?;
-                rollback.buffers.push(buffer);
-                cluster_selection.push(buffer);
+            let mut ring = |label: &str| -> Result<Vec<BufferHandle>, HalError> {
+                let mut buffers = Vec::with_capacity(instance_buffers.len());
+                for frame in 0..instance_buffers.len() {
+                    let buffer = device.create_buffer(&BufferDesc {
+                        label: Some(&format!("{label} {frame}")),
+                        size: u64::from(count) * 4,
+                        usage: BufferUsage::STORAGE.union(BufferUsage::TRANSFER_SRC),
+                        memory: MemoryLocation::DeviceLocal,
+                    })?;
+                    rollback.buffers.push(buffer);
+                    buffers.push(buffer);
+                }
+                Ok(buffers)
+            };
+            cluster_selection = ring("cluster selection")?;
+            for cascade in 0..shadow::CASCADES {
+                cascade_selection.push(ring(&format!("shadow selection {cascade}"))?);
             }
         }
 
@@ -1857,6 +1936,7 @@ impl ForwardRenderer {
         let mut mesh_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut shadow_uniforms = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut shadow_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut shadow_selection = Vec::with_capacity(FRAMES_IN_FLIGHT);
         // Everything a group of this layout names that is the same in all of
         // them. The per-group half is what `MeshGroup` below varies, and the two
         // exist so the colour pass's group and the shadow pass's are one
@@ -1908,7 +1988,8 @@ impl ForwardRenderer {
             // things a cascade is: which matrix, which survivors, which frustum.
             let mut frame_shadow_uniforms = Vec::with_capacity(shadow::CASCADES);
             let mut frame_shadow_groups = Vec::with_capacity(shadow::CASCADES);
-            for buffers in &cascade_buffers {
+            let mut frame_shadow_selection = Vec::with_capacity(shadow::CASCADES);
+            for (cascade, buffers) in cascade_buffers.iter().enumerate() {
                 let cascade_uniforms = device.create_buffer(&BufferDesc {
                     label: Some("shadow cascade uniforms"),
                     size: mesh::FRAME_UNIFORMS_SIZE as u64,
@@ -1929,16 +2010,12 @@ impl ForwardRenderer {
                     // and the wrong one to have asked with the camera's frustum.
                     cull_params: buffers.cull_params[frame],
                     cull_stats: buffers.cull_stats[frame],
-                    // **The same buffer the colour pass records into**, which
-                    // the graph orders by the `ShaderReadWrite` both declare on
-                    // it. A cascade's cut is overwritten by the colour pass's
-                    // because that pass is recorded last, which is what makes
-                    // `ForwardRenderer::cluster_selection` the camera's cut and
-                    // not the sun's.
-                    cluster_selection: cluster_selection.get(frame).copied(),
-                    // **This cascade's own**, unlike the buffer above: see
-                    // `CascadeBuffers::group_state`, which is where the two eyes
-                    // are argued.
+                    // **This cascade's own**, and not the colour pass's: that
+                    // pass is recorded last and would write over it. See
+                    // `ForwardRenderer::shadow_selection`.
+                    cluster_selection: cascade_selection.get(cascade).map(|ring| ring[frame]),
+                    // This cascade's own too — see `CascadeBuffers::group_state`,
+                    // which is where the two budgets are argued.
                     group_state: culls_clusters.then_some(buffers.group_state),
                     shadow_map: shadow_placeholder_view,
                 }
@@ -1952,9 +2029,12 @@ impl ForwardRenderer {
                 rollback.bind_groups.push(group);
                 frame_shadow_uniforms.push(cascade_uniforms);
                 frame_shadow_groups.push(group);
+                frame_shadow_selection
+                    .extend(cascade_selection.get(cascade).map(|ring| ring[frame]));
             }
             shadow_uniforms.push(frame_shadow_uniforms);
             shadow_groups.push(frame_shadow_groups);
+            shadow_selection.push(frame_shadow_selection);
         }
 
         let mesh_set_layouts = [mesh_layout];
@@ -2276,6 +2356,7 @@ impl ForwardRenderer {
             // that can know the viewport. A zero scale with a budget of zero
             // selects nothing at all, and there is no frame yet to select for.
             lod_params: [0.0, 0.0, 0.0],
+            shadow_lod_params: [0.0, 0.0, 0.0],
             mesh_groups,
             frame: 0,
             mesh_layout,
@@ -2290,6 +2371,7 @@ impl ForwardRenderer {
             shadow_draws: std::mem::take(&mut rollback.shadow_draws),
             shadow_uniforms,
             shadow_groups,
+            shadow_selection,
             // Nothing has written either image yet, so the first frame's graph
             // is what gives them a layout.
             shadow_imported: ResourceState::Undefined,
@@ -2683,6 +2765,21 @@ impl ForwardRenderer {
             self.lod_error_budget
         };
         self.lod_params = [lod_scale, lod_budget, lod_budget * self.lod_hold_ratio];
+        // **The cascades select from this same camera at this same scale**, and
+        // differ from it in the budgets alone — `docs/plan/25-lod.md`'s shadow
+        // LOD bias, and see [`SHADOW_LOD_BIAS`] for why the bias is one factor
+        // over the whole pass rather than a level count.
+        //
+        // `LOD_BUDGET_NONE` survives the scaling, which is what an orthographic
+        // camera needs: negative infinity times a positive constant is still
+        // negative infinity, so a camera with no distance falloff still draws
+        // the base level into the shadow map rather than a level chosen by a
+        // budget the metric cannot reach.
+        self.shadow_lod_params = [
+            lod_scale,
+            self.lod_params[1] * SHADOW_LOD_BIAS,
+            self.lod_params[2] * SHADOW_LOD_BIAS,
+        ];
         // Topic 18's cascades. Built from the camera and the light alone, so a
         // frame that culls against them and a fragment that samples through them
         // cannot disagree about where they are.
@@ -2750,18 +2847,33 @@ impl ForwardRenderer {
                 0,
                 &cascade_uniforms.to_bytes(),
             )?;
-            // **The light as the eye here too**, matching the block above for
-            // the reason it gives: a cascade that selected detail from the
-            // camera while its amplification stage culled from the sun would be
-            // two passes disagreeing about where the viewer is.
-            let [eye_x, eye_y, eye_z, _] = cascade_uniforms.camera_position;
+            // **The camera as the eye here, not the light**, and the two are
+            // deliberately different questions asked of one pass.
+            //
+            // The block above puts the sun at `camera_position` because the
+            // amplification stage's *normal cone* test asks which way a cluster
+            // faces relative to the viewer, and a shadow map's viewer is the
+            // sun. Detail is not that question. A directional sun has no
+            // position for a distance metric to measure from — the point above
+            // is the camera's own eye pushed along the sun's direction, so a
+            // "distance to the light" taken from it is a fact about the camera
+            // wearing the light's name, and it steps discontinuously from one
+            // cascade to the next because `cascades.far` does.
+            //
+            // What a coarser caster actually costs is a shadow edge displaced by
+            // the group's error, and that displacement is **seen by the camera**,
+            // at the camera's pixels per unit and the camera's distance. So the
+            // budget is denominated in the camera's pixels, and the eye that
+            // makes the metric mean that is the camera's. The bias above is then
+            // a statement about shadows rather than a side effect of where a
+            // sun was placed.
             draws.begin_frame(
                 device,
                 self.frame,
                 &Frustum::from_view_projection(cascades.view_proj[cascade]),
                 instance_count,
-                [eye_x, eye_y, eye_z],
-                self.lod_params,
+                [camera.eye.x, camera.eye.y, camera.eye.z],
+                self.shadow_lod_params,
             )?;
         }
         Ok(())
@@ -3005,6 +3117,20 @@ impl ForwardRenderer {
         self.lod_params
     }
 
+    /// The same three numbers the **shadow cascades** selected under, which is
+    /// [`lod_params`](Self::lod_params) with both budgets multiplied by
+    /// [`SHADOW_LOD_BIAS`] — `docs/plan/25-lod.md`'s shadow LOD bias, as the
+    /// parameters it actually reaches the GPU as.
+    ///
+    /// The pixels-per-unit is the camera's, unchanged, because the cascades
+    /// select from the camera's eye at the camera's scale; see
+    /// [`begin_frame`](Self::begin_frame). `[0.0, 0.0, 0.0]` before the first
+    /// frame.
+    #[must_use]
+    pub const fn shadow_lod_params(&self) -> [f32; 3] {
+        self.shadow_lod_params
+    }
+
     /// Where the dunes DAG's clusters are in the cluster pool — every level, as
     /// one run — or `None` off the mesh path.
     ///
@@ -3033,6 +3159,26 @@ impl ForwardRenderer {
     #[must_use]
     pub fn cluster_selection(&self, frame: usize) -> Option<BufferHandle> {
         self.cluster_selection.get(frame).copied()
+    }
+
+    /// The same, for `cascade`'s shadow pass: the cut that cascade's
+    /// amplification stage chose this frame.
+    ///
+    /// **The shadow LOD bias' observable.** A budget the cascades merely *were
+    /// passed* is a parameter; the cut they reached under it is the behaviour,
+    /// and this is the only thing that carries it out of a frame — the colour
+    /// pass overwrites [`cluster_selection`](Self::cluster_selection) after the
+    /// cascades have run. Indexed and read exactly as that buffer is, through
+    /// [`dunes_clusters`](Self::dunes_clusters).
+    ///
+    /// `None` where there is no amplification stage, and where `cascade` is not
+    /// one of [`shadow::CASCADES`].
+    #[must_use]
+    pub fn shadow_selection(&self, frame: usize, cascade: usize) -> Option<BufferHandle> {
+        self.shadow_selection
+            .get(frame)
+            .and_then(|cascades| cascades.get(cascade))
+            .copied()
     }
 
     /// The buckets the dunes patch's DAG levels draw through, finest first —
@@ -3093,24 +3239,38 @@ impl ForwardRenderer {
             .draws
             .add_passes(graph, self.frame, self.instances.slot_count());
 
-        // `docs/plan/25-lod.md`'s record of the cut, imported once and declared
-        // by every pass that writes it — the shadow cascades and the colour
-        // pass, in that order — so the graph orders them against each other and
-        // against the next frame's use of this slot. It arrives in the state
-        // the previous frame left it in, which is the one declared as final.
-        let selection = self.cluster_selection.get(self.frame).map(|&buffer| {
+        // `docs/plan/25-lod.md`'s record of the cut — the colour pass's, and one
+        // per cascade beside it. Each is written by exactly one mesh pass, so
+        // what the graph orders here is this frame's write against the next
+        // frame's use of the same slot. Each arrives in the state the previous
+        // frame left it in, which is the one declared as final.
+        let import_selection = |graph: &mut RenderGraph<'_>, label: &str, buffer| {
             graph.import_buffer(
-                "cluster-selection",
+                label,
                 ImportedBuffer {
                     buffer,
                     initial: ResourceState::ShaderReadWrite,
                     final_state: ResourceState::ShaderReadWrite,
                 },
             )
-        });
+        };
+        let selection = self
+            .cluster_selection
+            .get(self.frame)
+            .map(|&buffer| import_selection(graph, "cluster-selection", buffer));
+        let cascade_selection: Vec<BufferId> = self
+            .shadow_selection
+            .get(self.frame)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(cascade, &buffer)| {
+                import_selection(graph, &format!("shadow-selection-{cascade}"), buffer)
+            })
+            .collect();
 
         let imported = std::mem::replace(&mut self.shadow_imported, ResourceState::ShaderRead);
-        let shadow_atlas = self.add_shadow_pass(graph, imported, selection);
+        let shadow_atlas = self.add_shadow_pass(graph, imported, &cascade_selection);
 
         let scene_color =
             graph.create_image("scene-color", TransientImageDesc::scene_color(extent));
@@ -3189,9 +3349,10 @@ impl ForwardRenderer {
                 // next frame's draw-argument pass expects to find it.
                 let pass = pass.read_buffer(generated.group_state_id);
                 match selection {
-                    // Declared last of the three, and by the last pass to write
-                    // it, which is what makes what survives the frame the
-                    // camera's cut rather than a cascade's.
+                    // The colour pass's own, which no cascade writes — the
+                    // cascades record into buffers of their own, so what
+                    // survives a frame here is the camera's cut and what
+                    // survives there is each cascade's.
                     Some(selection) => pass.use_buffer(selection, ResourceState::ShaderReadWrite),
                     None => pass,
                 }
@@ -3366,7 +3527,7 @@ impl ForwardRenderer {
         &self,
         graph: &mut RenderGraph<'_>,
         imported: ResourceState,
-        selection: Option<BufferId>,
+        selection: &[BufferId],
     ) -> ImageId {
         let (atlas_width, atlas_height) = shadow::atlas_extent();
         let atlas = graph.import_image(
@@ -3420,10 +3581,11 @@ impl ForwardRenderer {
             // every cascade's bind group, standing in for the atlas this pass is
             // writing. See `ForwardRenderer::shadow_placeholder`.
             .read_image(placeholder);
-        // The cascades' mesh passes write the cut too — same binding, same
-        // buffer — so the graph is told before the colour pass overwrites it.
-        if let Some(selection) = selection {
-            pass = pass.use_buffer(selection, ResourceState::ShaderReadWrite);
+        // Each cascade's mesh pass records the cut it descended to, into a
+        // buffer of its own — see `ForwardRenderer::shadow_selection`. Empty
+        // where there is no amplification stage to descend anything.
+        for &buffer in selection {
+            pass = pass.use_buffer(buffer, ResourceState::ShaderReadWrite);
         }
         for draws in &generated {
             pass = pass.read_buffer(draws.runs_id);
@@ -3666,6 +3828,11 @@ impl ForwardRenderer {
             }
         }
         for buffers in self.shadow_uniforms {
+            for buffer in buffers {
+                device.destroy_buffer(buffer);
+            }
+        }
+        for buffers in self.shadow_selection {
             for buffer in buffers {
                 device.destroy_buffer(buffer);
             }

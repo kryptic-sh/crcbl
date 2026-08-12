@@ -225,8 +225,33 @@ its tests rather than values recorded from its own output.
 - **Transitions**: instant swap MVP (correct thresholds make pops sub-pixel by
   definition — the error metric _is_ the pop size); dithered crossfade later if
   hero assets demand it (pairs with TAA era).
-- **Shadow LOD bias**: shadow-pass culling (topic 18, same shader) selects +1/+2
-  coarser levels — casters are cheap where it never shows.
+- **Shadow LOD bias**: the shadow pass selects coarser than the camera, because
+  a caster is cheap where the detail never shows. **It is a budget multiplier,
+  not "+N levels"** (settled 2026-08-13): the descent compares a projected error
+  to a budget and has no level parameter, and level-to-level error ratios are a
+  property of the mesh rather than a constant — on the committed dunes DAG level
+  0→1 steps about 2.4x, level 2→3 about 8.8x, and the top three levels report
+  the same error and are never separately selectable, so "+2 levels" would mean
+  three different things on one mesh.
+
+  **The cascades select from the camera's eye, not the light's.** A directional
+  sun has no position, and what a coarser caster costs is a shadow edge
+  displaced by the group's error — a displacement _seen by the camera, at the
+  camera's distance_. The budget is denominated in camera pixels, so the camera
+  is the eye that makes the metric mean anything. (The light remains the eye for
+  the amplification stage's normal-cone test, where a shadow map's viewer
+  genuinely is the light; those are two consumers that had been sharing one
+  value.)
+
+  Monotonicity survives because the scaling is **one positive constant over the
+  whole pass** — the same rule with different constants, and the induction turns
+  on the error being monotone up the DAG rather than on the constants' values. A
+  per-cluster, per-group or per-cascade fudge would break it: two groups on one
+  branch judged against different budgets is a child expanding under an
+  unexpanded parent, which is a hole. A bonus falls out: with a factor above one
+  and both histories starting empty, the shadow cut is a **subset** of the
+  camera's, so it is never finer anywhere.
+
 - Global **LOD bias** = a quality setting (topic 14 settings UI; also the Tier
   B/web lever — web demos ship a default bias).
 - **Graphics-only (LOCKED)**: LOD never touches simulation. Colliders are always

@@ -49,14 +49,14 @@ entry-points = computeMain:glcompute
 
 [draw_gen]
 source = shaders/draw_gen.slang
-source-sha256 = c239b0a11c8203560dca45366f4e68af34fc04275644c57d919849a9b7aa9e3d
+source-sha256 = 35a49df7c7a3375235ee706a22334665fbd6a66ed00750ea66658f0a7401c4cb
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/draw_gen.spv
 spirv-sha256 = 2a67faa1d45bc8f25ad56444054bd6b98fe797c873e3d9e0958b0f307a763511
 wgsl = wgsl/draw_gen.wgsl
 wgsl-sha256 = a68e7f13faa2cb48c004aecef452031ce6cb8ce59a27a9b803a5a9b44bc7ed59
 msl = msl/draw_gen.metal
-msl-sha256 = 109c51d35488d9b70479de2b46273ba93f3829d2128ff911ae18c041bc3c9942
+msl-sha256 = bfedaa5e3306d6993ee348e533b4e0d027931cf708d9f057168aafae07907ab9
 dxil = computeMain:dxil/draw_gen.computeMain.dxil:17312802ec054e9893091f2b1d2d75de1576c0565c891128e1e27ad35364d265
 entry-points = computeMain:glcompute
 

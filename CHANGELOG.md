@@ -255,6 +255,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Shadow LOD bias: the shadow pass selects coarser casters than the camera.**
+  `SHADOW_LOD_BIAS` multiplies both selection budgets for the whole pass. On the
+  dunes patch at the shipped camera that is 57 clusters at `[13, 26, 18, …]` for
+  the camera against 48 at `[5, 17, 24, 2, …]` for the shadow, with 7 of the 30
+  groups the camera expanded staying collapsed.
+
+  **The cascades were selecting from the wrong eye, and that is fixed.** They
+  used `camera.eye + light_direction * cascade_far` — which is not the light's
+  position, since a directional sun has none, but the camera's own eye pushed
+  along the sun's direction, and it stepped per cascade so two cascades asked
+  two different detail questions about one caster. They now select from the
+  camera's eye at the camera's pixels-per-unit, because what a coarser caster
+  costs is a shadow edge displaced by the group's error, and that displacement
+  is seen by the camera at the camera's distance. The light remains the eye for
+  the amplification stage's normal-cone test, where a shadow map's viewer
+  genuinely is the light — two consumers that had been sharing one value now
+  each get the one they need.
+
+  A budget multiplier rather than "+N levels", because the descent has no level
+  parameter and level-to-level error ratios are a property of the mesh: on this
+  DAG level 0→1 steps about 2.4x, level 2→3 about 8.8x, and the top three levels
+  share one error. Monotonicity survives because it is one positive constant
+  over the whole pass, and a subset property falls out — the shadow cut is never
+  finer than the camera's anywhere, which is what the test asserts.
+
+  Per-cascade selection rings are new, because the colour pass is recorded last
+  and overwrote the single selection buffer, so the shadow pass's descent had no
+  observable at all and the bias would have been unmeasurable.
+
 - **Hand-authored LOD levels are imported and win over generated ones.**
   `crcbl_scene::resolve_lod(scene, node)` resolves a mesh's chain and reports,
   per level, **where it came from** — `LodOrigin::Hand { node, mesh, via }`

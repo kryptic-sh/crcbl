@@ -280,10 +280,18 @@ struct DrawGenParams
     /// `ClusterDrawConstants::group_stride` carries, because that stage reads
     /// what this one writes.
     uint group_stride;
-    /// The eye this frame's uniform cut is selected from, in world space, in
-    /// `xyz`. The same name and the same three floats as `mesh.slang`'s
-    /// `FrameUniforms::camera_position`, and the renderer writes both from one
-    /// camera.
+    /// The eye this frame's selection is projected from, in world space, in
+    /// `xyz`. **The camera's**, on every pass this shader runs for, including the
+    /// shadow cascades.
+    ///
+    /// A cascade's copy of `mesh.slang`'s `FrameUniforms::camera_position` holds
+    /// the *sun* instead, and the two are answering different questions rather
+    /// than disagreeing: that one feeds the amplification stage's normal-cone
+    /// test, which asks which way a cluster faces relative to the viewer, and a
+    /// shadow map's viewer is the light. Detail is not that question — what a
+    /// coarser caster costs is a shadow edge displaced by the group's error, and
+    /// that displacement is seen by the camera at the camera's distance. A
+    /// directional sun has no position to measure a distance from at all.
     float4 camera_position;
     /// `docs/plan/25-lod.md`'s selection numbers: `x` is how many pixels one
     /// unit of length subtends one unit from the eye, `y` is the pixel budget an
@@ -291,10 +299,11 @@ struct DrawGenParams
     /// budget an already-expanded group is held down to before it collapses
     /// again — that plan's "switch-up and switch-down differ".
     ///
-    /// Named after `mesh.slang`'s `FrameUniforms::lod_params` because it is that
-    /// block's three numbers, written by the same frame from the same camera —
-    /// the two geometry paths select at different granularities and must never
-    /// select under different parameters.
+    /// The colour pass takes the camera's three; a shadow cascade takes the same
+    /// `x` and both budgets scaled by `crcbl_render::SHADOW_LOD_BIAS`, which is
+    /// that plan's shadow LOD bias. Scaling both by one positive constant is what
+    /// keeps the cut a cover: the rule below is unchanged and its monotonicity
+    /// turns on the projected error, not on the constants.
     float4 lod_params;
 };
 

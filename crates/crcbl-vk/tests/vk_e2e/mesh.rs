@@ -1755,10 +1755,36 @@ fn selected_clusters(
     headless: &Headless,
     renderer: &crcbl_render::ForwardRenderer,
 ) -> Vec<crcbl_shaders::cluster_dag::ClusterAt> {
-    let device = headless.device.as_ref();
     let selection = renderer
         .cluster_selection(renderer.frame())
         .expect("an amplification stage records its cut");
+    read_cut(headless, renderer, selection)
+}
+
+/// The same, for the cut `cascade`'s shadow pass chose — the shadow LOD bias'
+/// observable.
+///
+/// A buffer of its own rather than the camera's, because the colour pass is
+/// recorded last and writes over that one; see
+/// `ForwardRenderer::shadow_selection`.
+fn shadow_selected_clusters(
+    headless: &Headless,
+    renderer: &crcbl_render::ForwardRenderer,
+    cascade: usize,
+) -> Vec<crcbl_shaders::cluster_dag::ClusterAt> {
+    let selection = renderer
+        .shadow_selection(renderer.frame(), cascade)
+        .expect("an amplification stage records every cascade's cut");
+    read_cut(headless, renderer, selection)
+}
+
+/// Copies one selection buffer out and decodes the dunes DAG's run of it.
+fn read_cut(
+    headless: &Headless,
+    renderer: &crcbl_render::ForwardRenderer,
+    selection: crcbl_hal::BufferHandle,
+) -> Vec<crcbl_shaders::cluster_dag::ClusterAt> {
+    let device = headless.device.as_ref();
     let range = renderer
         .dunes_clusters()
         .expect("the mesh path has a cluster pool");
@@ -2156,6 +2182,239 @@ fn the_gpu_descends_the_dag_to_the_cut_the_host_rule_says() {
              a check that cannot fail is not a check"
         );
     }
+
+    renderer.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// **The shadow cascades descend to a coarser cut than the colour pass**, from
+/// one frame, read out of both passes' own buffers.
+///
+/// `docs/plan/25-lod.md`'s "**Shadow LOD bias**: shadow-pass culling (topic 18,
+/// same shader) selects +1/+2 coarser levels — casters are cheap where it never
+/// shows." The bias is `crcbl_render::SHADOW_LOD_BIAS`, applied to both budgets
+/// and to nothing else: the cascades select from the **camera's** eye at the
+/// camera's pixels per unit, so the only difference between the two cuts is the
+/// factor, and that is what makes "coarser by this much" a statement rather than
+/// "different".
+///
+/// Four things are asserted, and the fourth is what makes the first three mean
+/// anything:
+///
+/// * **The parameters are the camera's, scaled.** Bit-exact, because they are
+///   one multiplication apart and a tolerance would hide the eye changing too.
+/// * **Both passes' cuts are the host rule's own**, cluster for cluster, from
+///   histories walked frame by frame — the same comparison
+///   [`the_gpu_descends_the_dag_to_the_cut_the_host_rule_says`] makes for the
+///   camera, extended to a pass that had no observable at all before this.
+///
+///   **This is also what pins the eye**, and it is the only thing that can: the
+///   shadow parameters carry the two budgets and the scale but not the point
+///   they are projected from. The oracle is evaluated at the *camera's* eye, so
+///   a shadow pass still selecting from the sun — a point hundreds of units away
+///   along the light — would project every group differently and fail here. And
+///   every cascade is compared against the one oracle, which the old rule could
+///   not have satisfied either: it put the eye at `camera.eye + direction *
+///   cascade_far`, so two cascades asked two different questions of one caster.
+/// * **The shadow cut is a crack-free cover**, by `ClusterDag::check_cover` on
+///   the read-back cut. The bias is a uniform scaling of both budgets, so the
+///   monotonicity that makes a cut a cover survives it — and this is that
+///   argument run rather than asserted.
+/// * **And the shadow cut is strictly smaller and strictly coarser**, with the
+///   levels printed. Setting `crcbl_render::SHADOW_LOD_BIAS` to one makes the two
+///   passes one rule and reds both of those, which is how they were shown to be
+///   checks rather than decoration.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_shadow_cascades_select_coarser_than_the_camera() {
+    use crcbl_shaders::cluster_select::LodBudgets;
+
+    let headless = Headless::open_for_mesh_with(
+        Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,
+    );
+    if !headless.device.caps().supports(Features::TASK_SHADER) {
+        eprintln!(
+            "vk e2e: no TASK_SHADER on this device; the DAG descent cannot run, so neither \
+             pass selects anything to be biased"
+        );
+        headless.finish();
+        return;
+    }
+
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds");
+    assert!(
+        renderer.set_dunes(Some(glam::Mat4::IDENTITY)),
+        "a device with an amplification stage accepts the patch"
+    );
+    renderer.set_lod_error_budget(DUNES_MIXING_BUDGET);
+
+    let dag = crcbl_shaders::cluster_dag::dunes_dag();
+    // Two histories, because there are two: each pass carries its own hysteresis
+    // state, so each has to be walked frame for frame beside the device rather
+    // than evaluated from this frame's camera alone.
+    let mut camera_history = DunesHistory::new();
+    let mut shadow_history = DunesHistory::new();
+
+    let camera = dunes_camera();
+    let [pixels_per_unit, expand, hold] =
+        camera_history.step(&headless, &mut renderer, &mut pool, &camera);
+    let [shadow_scale, shadow_expand, shadow_hold] = renderer.shadow_lod_params();
+
+    // --- the parameters: the camera's numbers, both budgets scaled ---
+    assert_eq!(
+        shadow_scale.to_bits(),
+        pixels_per_unit.to_bits(),
+        "the cascades selected at {shadow_scale} pixels per unit and the camera at \
+         {pixels_per_unit}, so they are not projecting through one lens and the cuts \
+         below differ for a second reason"
+    );
+    assert_eq!(
+        shadow_expand.to_bits(),
+        (expand * crcbl_render::SHADOW_LOD_BIAS).to_bits(),
+        "the cascades' expand budget is {shadow_expand}, not the camera's {expand} times \
+         {}",
+        crcbl_render::SHADOW_LOD_BIAS
+    );
+    assert_eq!(
+        shadow_hold.to_bits(),
+        (hold * crcbl_render::SHADOW_LOD_BIAS).to_bits(),
+        "the cascades' hold budget is {shadow_hold}, not the camera's {hold} times {}",
+        crcbl_render::SHADOW_LOD_BIAS
+    );
+    // And the scaling actually raised them, at the budget this frame selected
+    // under. A bias of one satisfies every equality above and leaves the two
+    // passes as one rule, which is what the rest of this test would then be
+    // measuring.
+    assert!(
+        shadow_expand > expand && shadow_hold > hold,
+        "the cascades selected under {shadow_expand}/{shadow_hold} against the camera's \
+         {expand}/{hold}, so the bias of {} bought no headroom",
+        crcbl_render::SHADOW_LOD_BIAS
+    );
+    // The shadow history's own frame, under the budgets the renderer just
+    // reported rather than under this test's own multiplication.
+    shadow_history.expanded = dag.expand(
+        camera.eye.to_array(),
+        shadow_scale,
+        LodBudgets {
+            expand: shadow_expand,
+            hold: shadow_hold,
+        },
+        &shadow_history.expanded,
+    );
+
+    // --- both cuts, each out of its own pass's buffer ---
+    let drawn = selected_clusters(&headless, &renderer);
+    assert_eq!(
+        drawn,
+        camera_history.cut(),
+        "the colour pass chose a different cut from the host rule"
+    );
+    let want_shadow = shadow_history.cut();
+    for cascade in 0..crcbl_render::shadow::CASCADES {
+        let shadow = shadow_selected_clusters(&headless, &renderer, cascade);
+        assert_eq!(
+            shadow, want_shadow,
+            "cascade {cascade} chose a different cut from the host rule under the biased \
+             budgets"
+        );
+    }
+    let shadow = want_shadow;
+
+    // --- coarser, with the numbers ---
+    //
+    // **Not "the finest level moved"**, and that is the point of a per-cluster
+    // cut: both passes still reach level 0 at the patch's near edge, because a
+    // group four times over the budget is a group four times over it under
+    // either. What the bias moves is *how much* of the surface descends, and the
+    // three statements below are that, from the coarsest measure to the finest.
+    let histogram = |cut: &[crcbl_shaders::cluster_dag::ClusterAt]| {
+        let mut levels = vec![0usize; dag.levels.len()];
+        for at in cut {
+            levels[at.level] += 1;
+        }
+        levels
+    };
+    let (camera_levels, shadow_levels) = (histogram(&drawn), histogram(&shadow));
+    eprintln!(
+        "vk e2e: shadow bias — {pixels_per_unit} px/unit; camera budgets {expand}/{hold} \
+         drew {} cluster(s) per level {camera_levels:?}; shadow budgets \
+         {shadow_expand}/{shadow_hold} drew {} cluster(s) per level {shadow_levels:?}",
+        drawn.len(),
+        shadow.len(),
+    );
+
+    // **The exact statement: the shadow expands a subset of what the camera
+    // does.** One eye, one scale and budgets `k > 1` times as large, from
+    // histories that both started at all-zero — so a group over `k * expand` is
+    // over `expand`, a group held above `k * hold` was held above `hold`, and the
+    // induction carries frame to frame. That makes the shadow cut at or above
+    // the camera's *everywhere*, which is what "coarser" has to mean for a cut
+    // that spans levels. Asserted on the oracles, which the equalities above
+    // just pinned to the device's own two buffers.
+    let mut only_camera = 0usize;
+    for (group, (&shadow_expanded, &camera_expanded)) in shadow_history
+        .expanded
+        .iter()
+        .zip(&camera_history.expanded)
+        .enumerate()
+    {
+        assert!(
+            !shadow_expanded || camera_expanded,
+            "group {group} expanded for the shadow pass and not for the camera, so the \
+             biased cut descends somewhere the camera's does not"
+        );
+        only_camera += usize::from(camera_expanded && !shadow_expanded);
+    }
+    assert!(
+        only_camera > 0,
+        "every group the camera expanded the shadow pass expanded too, so the two cuts \
+         are one cut and the subset above is satisfied by equality"
+    );
+    eprintln!(
+        "vk e2e: shadow bias — {only_camera} of the {} group(s) the camera expanded stayed \
+         collapsed for the shadow pass",
+        camera_history.expanded.iter().filter(|at| **at).count()
+    );
+
+    // The same fact counted two more ways, because a subset of expansions is
+    // what produces both and neither is readable off the other.
+    assert!(
+        shadow.len() < drawn.len(),
+        "the shadow pass drew {} cluster(s) against the camera's {}, so a coarser cut is \
+         not a cheaper one",
+        shadow.len(),
+        drawn.len()
+    );
+    let mut camera_below = 0usize;
+    let mut shadow_below = 0usize;
+    for level in 0..dag.levels.len() {
+        camera_below += camera_levels[level];
+        shadow_below += shadow_levels[level];
+        assert!(
+            shadow_below <= camera_below,
+            "through level {level} the shadow pass drew {shadow_below} cluster(s) against \
+             the camera's {camera_below}, so its cut is finer somewhere rather than \
+             coarser everywhere"
+        );
+    }
+
+    // --- and it is still a cover ---
+    //
+    // The property the whole DAG exists for, at the budgets the shadow pass
+    // actually shipped rather than at a sweep's. A bias applied per group or per
+    // cascade would let a child expand under a parent that had not, and this is
+    // where that would land.
+    let interfaces = dag.check_cover(&shadow).unwrap_or_else(|fault| {
+        panic!("the shadow pass's cut is not a cover of the surface: {fault}")
+    });
+    eprintln!("vk e2e: shadow bias — shadow cut has {interfaces} interface edge(s)");
 
     renderer.destroy(headless.device.as_ref());
     headless.finish();
