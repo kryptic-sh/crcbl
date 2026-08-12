@@ -54,6 +54,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cluster_select::{ClusterSelect, GroupCost};
 use crate::dunes;
+use crate::level_select::LevelGroup;
 use crate::meshlet::{MESHLET_STRIDE, MeshClusters, Meshlet};
 
 /// The committed DAG of [`crate::dunes`], decoded.
@@ -297,6 +298,58 @@ impl ClusterDag {
     #[must_use]
     pub fn cut(&self, eye: [f32; 3], pixels_per_unit: f32, budget: f32) -> Vec<ClusterAt> {
         self.descend(|group| group.projected_error(eye, pixels_per_unit) > budget)
+    }
+
+    /// The one level a **uniform cut** draws from an eye at `eye` under a
+    /// budget of `budget` pixels.
+    ///
+    /// `docs/plan/25-lod.md`'s granularity for the two indirect tails: "every
+    /// cluster at one depth, which is exactly a whole-mesh level". The rule is
+    /// the finest level any group is expanded at, and the top level when none
+    /// is — [`crate::level_select`]'s module docs carry why that number is the
+    /// finest level [`cut`](Self::cut) draws anywhere, which is what makes the
+    /// coarser decision comparable to the finer one rather than merely similar.
+    ///
+    /// `eye`, `pixels_per_unit` and `budget` mean what they mean for
+    /// [`cut`](Self::cut) — this is the same metric over the same groups, asked
+    /// once for the mesh instead of once for each of its clusters.
+    #[must_use]
+    pub fn uniform_level(&self, eye: [f32; 3], pixels_per_unit: f32, budget: f32) -> usize {
+        let top = self.levels.len() - 1;
+        self.levels
+            .iter()
+            .position(|here| {
+                here.groups
+                    .iter()
+                    .any(|group| group.projected_error(eye, pixels_per_unit) > budget)
+            })
+            .unwrap_or(top)
+    }
+
+    /// Every group of the DAG, each carrying the level it grouped — the array
+    /// [`MeshLevels::uniform_level`] reads and a renderer uploads.
+    ///
+    /// Level order, and within a level the order [`DagLevel::groups`] holds
+    /// them, so the run is reproducible and a `--check` over a cooked copy of it
+    /// compares bytes rather than sets.
+    ///
+    /// [`MeshLevels::uniform_level`]: crate::level_select::MeshLevels#method.uniform_level
+    #[must_use]
+    pub fn level_groups(&self) -> Vec<LevelGroup> {
+        self.levels
+            .iter()
+            .enumerate()
+            .flat_map(|(level, here)| {
+                here.groups.iter().map(move |group| LevelGroup {
+                    level: u32::try_from(level)
+                        .unwrap_or_else(|_| unreachable!("a DAG of a few levels")),
+                    cost: GroupCost {
+                        error: group.error,
+                        bounds: group.bounds,
+                    },
+                })
+            })
+            .collect()
     }
 
     /// The clusters an "is this group expanded?" answer draws.
@@ -1291,6 +1344,78 @@ mod tests {
             "only {mixed} of {cuts} camera cuts held more than one level, so this is \
              mostly re-testing uniform cuts under a new name"
         );
+    }
+
+    /// **The uniform cut's level is the finest level the per-cluster cut
+    /// draws**, at every eye and every budget of the sweep.
+    ///
+    /// This is what makes `docs/plan/25-lod.md`'s two granularities one
+    /// hierarchy and one metric rather than two answers that happen to look
+    /// alike: the coarse decision is not an approximation of the fine one, it is
+    /// the fine one's own floor. [`crate::level_select`]'s module docs carry the
+    /// argument; this runs it over the committed artifact, and `crcbl-vk`'s
+    /// `the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is` runs it
+    /// across two real devices.
+    ///
+    /// The sweep is asserted to have produced several distinct levels, because
+    /// a comparison in which both sides always answered zero would pass with
+    /// neither of them working.
+    #[test]
+    fn the_uniform_level_is_the_finest_level_the_per_cluster_cut_draws() {
+        let dag = dunes_dag();
+        let mut seen = BTreeSet::new();
+        for eye in EYES {
+            for budget in BUDGETS {
+                let drawn = dag.cut(eye, PIXELS_PER_UNIT, budget);
+                let finest = drawn
+                    .iter()
+                    .map(|at| at.level)
+                    .min()
+                    .expect("a cut always draws something");
+                let uniform = dag.uniform_level(eye, PIXELS_PER_UNIT, budget);
+                assert_eq!(
+                    uniform, finest,
+                    "from {eye:?} under {budget} the uniform cut takes level {uniform} and \
+                     the per-cluster cut's finest is {finest}"
+                );
+                seen.insert(uniform);
+            }
+        }
+        assert!(
+            seen.len() > 2,
+            "the sweep chose {seen:?}, which is too few distinct levels for the equality \
+             to have been tested at more than one of them"
+        );
+    }
+
+    /// **Every uniform cut is a crack-free cover of the surface**, asserted
+    /// rather than argued from "it is one whole level".
+    ///
+    /// The argument is sound — a level's clusters partition the surface, so no
+    /// two detail levels meet anywhere — but it is an argument about a builder
+    /// this crate does not run, where [`ClusterDag::check_cover`] is a
+    /// measurement over the committed bytes. A level whose re-split dropped a
+    /// triangle passes the argument and fails this.
+    ///
+    /// The interface count is asserted to be zero for the same reason it is
+    /// asserted to be positive for a mixed cut: a uniform cut with an interface
+    /// edge would be one holding two levels, which is not what was drawn.
+    #[test]
+    fn every_uniform_cut_is_a_crack_free_cover() {
+        let dag = dunes_dag();
+        for (level, here) in dag.levels.iter().enumerate() {
+            let whole: Vec<ClusterAt> = (0..here.clusters.clusters.len())
+                .map(|cluster| ClusterAt { level, cluster })
+                .collect();
+            let interfaces = dag
+                .check_cover(&whole)
+                .unwrap_or_else(|fault| panic!("level {level} drawn whole has {fault}"));
+            assert_eq!(
+                interfaces, 0,
+                "level {level} drawn whole reports {interfaces} interface edge(s), so it \
+                 holds more than one level"
+            );
+        }
     }
 
     /// **The thing per-cluster selection is for**, in numbers: one draw of one

@@ -32,14 +32,18 @@ pub const WORKGROUP_SIZE: u32 = 64;
 
 /// Bytes of the uniform block.
 ///
-/// Three `uint` and the tail padding `std140` requires of a uniform block's
-/// size. Checked against the `Offset` decorations `slangc` emits by this
-/// module's `the_draw_gen_params_block_matches_the_offsets_slangc_emits`.
-pub const PARAMS_SIZE: usize = 16;
+/// Three `uint`, the padding `std140` puts in front of the `float4` that
+/// follows, and two `float4`. Checked against the `Offset` decorations `slangc`
+/// emits by this module's
+/// `the_draw_gen_params_block_matches_the_offsets_slangc_emits`.
+pub const PARAMS_SIZE: usize = 48;
 
 /// The uniform block, matching `struct DrawGenParams` in
 /// `shaders/draw_gen.slang`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq` since 2026-08: it holds the two floats
+/// `docs/plan/25-lod.md`'s uniform cut selects under.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Params {
     /// Buckets in the table, which is also how many argument structures the
     /// pass writes.
@@ -50,18 +54,32 @@ pub struct Params {
     /// Elements `cull.slang`'s visible list holds. Its counter can exceed this;
     /// the shader clamps before it indexes anything.
     pub visible_capacity: u32,
+    /// The eye the uniform cut is selected from, in world space.
+    ///
+    /// The same three floats a frame writes into
+    /// [`FrameUniforms::camera_position`](crate::mesh::FrameUniforms::camera_position):
+    /// the two geometry paths select at different granularities and must never
+    /// select from different cameras.
+    pub camera_position: [f32; 3],
+    /// How many pixels one unit of length subtends one unit from the eye, and
+    /// the pixel budget a group's projected error is compared against — the two
+    /// numbers of
+    /// [`FrameUniforms::lod_params`](crate::mesh::FrameUniforms::lod_params),
+    /// for that field's reason.
+    pub lod_params: [f32; 2],
 }
 
 impl Params {
     /// The block as the bytes a uniform buffer holds, in `std140` order.
     ///
-    /// The tail padding is written rather than left alone, for the reason
+    /// The padding is written rather than left alone, for the reason
     /// [`crate::compute_probe::Params::to_bytes`] gives: a buffer allocated for
     /// this block is [`PARAMS_SIZE`] bytes wide and a partial write leaves the
     /// rest undefined.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; PARAMS_SIZE] {
         let mut bytes = [0u8; PARAMS_SIZE];
+        let mut put = |at: usize, word: [u8; 4]| bytes[at..at + 4].copy_from_slice(&word);
         for (slot, value) in [
             self.bucket_count,
             self.bucket_capacity,
@@ -70,8 +88,14 @@ impl Params {
         .into_iter()
         .enumerate()
         {
-            let at = slot * 4;
-            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            put(slot * 4, value.to_le_bytes());
+        }
+        // Offset 12 is `pad0`, and 16 is where `std140` puts the first `float4`.
+        for (axis, value) in self.camera_position.into_iter().enumerate() {
+            put(16 + axis * 4, value.to_le_bytes());
+        }
+        for (slot, value) in self.lod_params.into_iter().enumerate() {
+            put(32 + slot * 4, value.to_le_bytes());
         }
         bytes
     }
@@ -252,8 +276,9 @@ mod tests {
     /// the disassembly.
     #[test]
     fn the_draw_gen_params_block_matches_the_offsets_slangc_emits() {
-        // `OpMemberDecorate %DrawGenParams_std140 n Offset …`: 0, 4, 8.
-        assert_eq!(PARAMS_SIZE, 16);
+        // `OpMemberDecorate %DrawGenParams_std140 n Offset …`: 0, 4, 8, 12, 16,
+        // 32.
+        assert_eq!(PARAMS_SIZE, 48);
         assert_eq!(
             PARAMS_SIZE % 16,
             0,
@@ -264,17 +289,27 @@ mod tests {
             bucket_count: 2,
             bucket_capacity: 5,
             visible_capacity: 9,
+            camera_position: [1.5, 2.5, 3.5],
+            lod_params: [4.5, 5.5],
         }
         .to_bytes();
         let uint_at =
             |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
+        let float_at =
+            |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
         assert_eq!(uint_at(0), 2, "bucket_count at offset 0");
         assert_eq!(uint_at(4), 5, "bucket_capacity at offset 4");
         assert_eq!(uint_at(8), 9, "visible_capacity at offset 8");
+        assert_eq!(uint_at(12), 0, "pad0 at offset 12, and it is written");
+        assert_eq!(float_at(16), 1.5, "camera_position at offset 16");
+        assert_eq!(float_at(24), 3.5, "and it is three floats wide");
+        assert_eq!(uint_at(28), 0, "the fourth component is padding, and zero");
+        assert_eq!(float_at(32), 4.5, "lod_params at offset 32");
+        assert_eq!(float_at(36), 5.5, "and its budget beside it");
         assert!(
-            bytes[12..].iter().all(|byte| *byte == 0),
+            bytes[40..].iter().all(|byte| *byte == 0),
             "the std140 tail padding is written, and it is zero: {:?}",
-            &bytes[12..]
+            &bytes[40..]
         );
     }
 

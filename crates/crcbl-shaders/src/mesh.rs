@@ -556,26 +556,31 @@ impl GpuMaterial {
     }
 }
 
-/// Where one draw call's run of visible instances starts, matching
-/// `struct DrawConstants` in `shaders/mesh.slang`.
+/// Where one draw call's run of visible instances starts and what geometry it
+/// draws, matching `struct DrawConstants` in `shaders/mesh.slang`.
 ///
-/// **This would be `draw_indexed`'s own base instance if the four targets
-/// agreed about what that does to `SV_InstanceID`, and they do not.** That
-/// shader's header measures the disagreement on all four; the consequence for a
-/// producer of these bytes is that every draw passes zero for its own bases, and
-/// the instance is looked up rather than named.
-///
-/// The base *vertex* used to sit beside it and does not any more: it is
-/// [`GpuMesh::base_vertex`], reached through the drawn instance's
-/// [`mesh`](GpuInstance::mesh). A per-draw block can say only one thing per
-/// draw, so a base vertex here made every instance in a draw share a mesh —
-/// which is exactly what §3.3's cull pass cannot promise.
+/// **[`base`](Self::base) would be `draw_indexed`'s own base instance if the
+/// four targets agreed about what that does to `SV_InstanceID`, and they do
+/// not.** That shader's header measures the disagreement on all four; the
+/// consequence for a producer of these bytes is that every draw passes zero for
+/// its own bases, and the instance is looked up rather than named.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DrawConstants {
     /// The draw's bucket's first slot in the list `draw_gen.slang` scatters
     /// surviving instances into. `SV_InstanceID` counts from zero within the
     /// draw and indexes the run from here.
     pub base: u32,
+    /// The bucket's mesh, as an index into the mesh table — where the vertex
+    /// stage takes [`GpuMesh::base_vertex`] from.
+    ///
+    /// **The bucket's, not the drawn instance's.** They name the same geometry
+    /// for every instance a bucket can hold, because an indexed draw has one
+    /// index range and `draw_gen.slang` takes it from this same entry. What the
+    /// distinction buys is `docs/plan/25-lod.md`'s uniform cut: a DAG's levels
+    /// are mesh table entries of their own and a bucket is one of them, while
+    /// the instance goes on naming level 0 — the entry the cull pass reads a
+    /// bounding box out of.
+    pub mesh: u32,
 }
 
 impl DrawConstants {
@@ -584,7 +589,8 @@ impl DrawConstants {
     pub fn to_bytes(&self) -> [u8; DRAW_CONSTANTS_SIZE] {
         let mut bytes = [0u8; DRAW_CONSTANTS_SIZE];
         bytes[0..4].copy_from_slice(&self.base.to_le_bytes());
-        // The three trailing `uint`s are padding and stay zero.
+        bytes[4..8].copy_from_slice(&self.mesh.to_le_bytes());
+        // The two trailing `uint`s are padding and stay zero.
         bytes
     }
 }
@@ -1448,11 +1454,12 @@ mod tests {
              block that is not one already is a block the shader and the CPU \
              disagree about the width of"
         );
-        let bytes = DrawConstants { base: 1 }.to_bytes();
+        let bytes = DrawConstants { base: 1, mesh: 2 }.to_bytes();
         let uint_at =
             |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
         assert_eq!(uint_at(0), 1, "base at offset 0");
-        for pad in [4, 8, 12] {
+        assert_eq!(uint_at(4), 2, "mesh at offset 4");
+        for pad in [8, 12] {
             assert_eq!(
                 uint_at(pad),
                 0,

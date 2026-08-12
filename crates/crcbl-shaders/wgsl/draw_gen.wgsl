@@ -4,6 +4,8 @@ struct DrawGenParams_std140_0
     @align(4) bucket_capacity_0 : u32,
     @align(8) visible_capacity_0 : u32,
     @align(4) pad0_0 : u32,
+    @align(16) camera_position_0 : vec4<f32>,
+    @align(16) lod_params_0 : vec4<f32>,
 };
 
 @binding(0) @group(0) var<uniform> gen_0 : DrawGenParams_std140_0;
@@ -50,9 +52,92 @@ struct GpuInstance_std430_0
 
 @binding(1) @group(0) var<storage, read> instances_0 : array<GpuInstance_std430_0>;
 
+struct MeshLevels_std430_0
+{
+    @align(4) first_group_0 : u32,
+    @align(4) group_count_0 : u32,
+    @align(4) first_level_0 : u32,
+    @align(4) top_level_0 : u32,
+};
+
+@binding(11) @group(0) var<storage, read> mesh_levels_0 : array<MeshLevels_std430_0>;
+
+struct LevelGroup_std430_0
+{
+    @align(4) level_0 : u32,
+    @align(4) error_0 : f32,
+    @align(4) center_x_0 : f32,
+    @align(4) center_y_0 : f32,
+    @align(4) center_z_0 : f32,
+    @align(4) radius_0 : f32,
+};
+
+@binding(12) @group(0) var<storage, read> level_groups_0 : array<LevelGroup_std430_0>;
+
+@binding(13) @group(0) var<storage, read> level_meshes_0 : array<u32>;
+
 @binding(6) @group(0) var<storage, read_write> visible_instances_0 : array<u32>;
 
 @binding(8) @group(0) var<storage, read_write> draw_counts_0 : array<u32>;
+
+fn group_is_expanded_0( error_1 : f32,  center_0 : vec3<f32>,  radius_1 : f32,  eye_0 : vec3<f32>) -> u32
+{
+    var delta_0 : vec3<f32> = eye_0 - center_0;
+    var _S1 : f32 = delta_0.x;
+    var _S2 : f32 = delta_0.y;
+    var _S3 : f32 = delta_0.z;
+    var distance_0 : f32 = sqrt(_S1 * _S1 + _S2 * _S2 + _S3 * _S3) - radius_1;
+    if(distance_0 <= 0.0f)
+    {
+        return u32(1);
+    }
+    var _S4 : u32;
+    if((error_1 * gen_0.lod_params_0.x / distance_0) > (gen_0.lod_params_0.y))
+    {
+        _S4 = u32(1);
+    }
+    else
+    {
+        _S4 = u32(0);
+    }
+    return _S4;
+}
+
+fn uniform_level_0( instance_0 : ptr<function, GpuInstance_std430_0>) -> u32
+{
+    var levels_0 : MeshLevels_std430_0 = mesh_levels_0[(*instance_0).mesh_0];
+    var _S5 : vec3<f32> = gen_0.camera_position_0.xyz;
+    var chosen_0 : u32 = levels_0.top_level_0;
+    var i_0 : u32 = u32(0);
+    for(;;)
+    {
+        if(i_0 < (levels_0.group_count_0))
+        {
+        }
+        else
+        {
+            break;
+        }
+        var group_0 : LevelGroup_std430_0 = level_groups_0[levels_0.first_group_0 + i_0];
+        if((group_0.level_0) >= chosen_0)
+        {
+            i_0 = i_0 + u32(1);
+            continue;
+        }
+        var chosen_1 : u32;
+        if((group_is_expanded_0(group_0.error_0, (((vec4<f32>(group_0.center_x_0, group_0.center_y_0, group_0.center_z_0, 1.0f)) * (mat4x4<f32>((*instance_0).transform_0.data_0[i32(0)][i32(0)], (*instance_0).transform_0.data_0[i32(1)][i32(0)], (*instance_0).transform_0.data_0[i32(2)][i32(0)], (*instance_0).transform_0.data_0[i32(3)][i32(0)], (*instance_0).transform_0.data_0[i32(0)][i32(1)], (*instance_0).transform_0.data_0[i32(1)][i32(1)], (*instance_0).transform_0.data_0[i32(2)][i32(1)], (*instance_0).transform_0.data_0[i32(3)][i32(1)], (*instance_0).transform_0.data_0[i32(0)][i32(2)], (*instance_0).transform_0.data_0[i32(1)][i32(2)], (*instance_0).transform_0.data_0[i32(2)][i32(2)], (*instance_0).transform_0.data_0[i32(3)][i32(2)], (*instance_0).transform_0.data_0[i32(0)][i32(3)], (*instance_0).transform_0.data_0[i32(1)][i32(3)], (*instance_0).transform_0.data_0[i32(2)][i32(3)], (*instance_0).transform_0.data_0[i32(3)][i32(3)])))).xyz, group_0.radius_0, _S5)) == u32(1))
+        {
+            chosen_1 = group_0.level_0;
+        }
+        else
+        {
+            chosen_1 = chosen_0;
+        }
+        chosen_0 = chosen_1;
+        i_0 = i_0 + u32(1);
+    }
+    return chosen_0;
+}
 
 @compute
 @workgroup_size(64, 1, 1)
@@ -76,7 +161,10 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
         return;
     }
     var instance_index_0 : u32 = visible_0[index_0];
-    var _S1 : GpuInstance_std430_0 = instances_0[instance_index_0];
+    var _S6 : GpuInstance_std430_0 = instances_0[instance_index_0];
+    var _S7 : MeshLevels_std430_0 = mesh_levels_0[_S6.mesh_0];
+    var _S8 : u32 = uniform_level_0(&(_S6));
+    var _S9 : u32 = level_meshes_0[_S7.first_level_0 + _S8];
     var bucket_0 : u32 = u32(0);
     for(;;)
     {
@@ -87,13 +175,13 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
         {
             break;
         }
-        if(bucket_meshes_0[bucket_0] != (_S1.mesh_0))
+        if(bucket_meshes_0[bucket_0] != _S9)
         {
             bucket_0 = bucket_0 + u32(1);
             continue;
         }
         var slot_0 : u32 = atomicAdd(&(args_0[bucket_0 * u32(5) + u32(1)]), u32(1));
-        var _S2 : u32 = atomicAdd(&(mesh_args_0[bucket_0 * u32(3) + u32(1)]), u32(1));
+        var _S10 : u32 = atomicAdd(&(mesh_args_0[bucket_0 * u32(3) + u32(1)]), u32(1));
         visible_instances_0[bucket_0 * gen_0.bucket_capacity_0 + slot_0] = instance_index_0;
         if(slot_0 == u32(0))
         {

@@ -341,28 +341,33 @@ struct GpuMaterial
     uint pad2;
 };
 
-/// Where this draw's run of visible instances starts, matching
-/// `crcbl_shaders::mesh::DrawConstants`.
+/// Where this draw's run of visible instances starts and what geometry it
+/// draws, matching `crcbl_shaders::mesh::DrawConstants`.
 ///
 /// One block per draw, reached through a dynamic offset — the same mechanism,
 /// for the same reason, as `sprite.slang`'s `SpriteConstants::base`. The header
-/// says why this number cannot be the draw's own base instance, and why the
-/// base vertex that used to sit beside it is in `meshes` instead.
+/// says why the first number cannot be the draw's own base instance.
 struct DrawConstants
 {
     /// This draw's bucket's first slot in `visible_instances`, added to
     /// `SV_InstanceID` — which counts from zero on every target, because every
     /// draw this pass records passes zero for its first instance.
     uint base;
+    /// Which mesh this draw's geometry is, as an index into `meshes`.
+    ///
+    /// **The bucket's mesh, not the instance's**, and the two are the same thing
+    /// for every instance a bucket can hold: an indexed draw has one index range
+    /// and `draw_gen.slang` takes it from this same entry, so a draw already
+    /// cannot cover two meshes' triangles. What the distinction buys is
+    /// `docs/plan/25-lod.md`'s uniform cut — the level a DAG is drawn at is a
+    /// mesh of its own, selected per instance on the GPU, and the instance goes
+    /// on naming level 0 because that is the entry the cull pass reads a
+    /// bounding box out of.
+    uint mesh;
     /// Pads the block to a multiple of 16 bytes, which `std140` requires of a
     /// uniform buffer's size and which naga enforces where a driver would not.
-    ///
-    /// Three scalars rather than a `uint3`: std140 aligns a three-component
-    /// vector to 16 bytes, so one declared here would land at offset 16 and
-    /// make the block 32 bytes rather than pad it to 16.
     uint pad0;
     uint pad1;
-    uint pad2;
 };
 
 [[vk::binding(0, 0)]]
@@ -520,10 +525,12 @@ struct VertexOutput
 VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID)
 {
     GpuInstance instance = instances[visible_instances[draw.base + instance_id]];
-    // The instance names its mesh and the mesh names its vertices: nothing on
-    // this path came from the draw call, which is what §3.3's cull pass needs
-    // in order to emit draws the CPU never looked at.
-    GpuMesh mesh = meshes[instance.mesh];
+    // The mesh names its vertices, and it is the bucket's mesh — the same entry
+    // `draw_gen.slang` took this draw's index range from, so the base vertex and
+    // the indices cannot come from two different meshes. Nothing on this path
+    // came from the draw call itself, which is what §3.3's cull pass needs in
+    // order to emit draws the CPU never looked at.
+    GpuMesh mesh = meshes[draw.mesh];
     MeshVertex vertex = vertices[index + mesh.base_vertex];
 
     float4 world = mul(instance.transform, float4(vertex.position.xyz, 1.0));

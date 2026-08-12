@@ -196,6 +196,10 @@ pub mod cluster_dag;
 /// [`cluster_dag`]'s DAG with, in the layout that shader declares.
 pub mod cluster_select;
 
+/// The per-instance records `draw_gen.slang` takes a **uniform cut** through
+/// [`cluster_dag`]'s DAG with, in the layout that shader declares.
+pub mod level_select;
+
 /// The geometry `triangle.slang` pulls, in the layout that shader declares.
 pub mod triangle;
 

@@ -1,9 +1,9 @@
 struct DrawConstants_std140_0
 {
     @align(16) base_0 : u32,
-    @align(4) pad0_0 : u32,
-    @align(8) pad1_0 : u32,
-    @align(4) pad2_0 : u32,
+    @align(4) mesh_0 : u32,
+    @align(8) pad0_0 : u32,
+    @align(4) pad1_0 : u32,
 };
 
 @binding(3) @group(0) var<uniform> draw_0 : DrawConstants_std140_0;
@@ -17,7 +17,7 @@ struct _MatrixStorage_float4x4_ColMajorstd430_0
 struct GpuInstance_std430_0
 {
     @align(16) transform_0 : _MatrixStorage_float4x4_ColMajorstd430_0,
-    @align(16) mesh_0 : u32,
+    @align(16) mesh_1 : u32,
     @align(4) material_0 : u32,
     @align(8) sector_0 : u32,
     @align(4) flags_0 : u32,
@@ -80,7 +80,7 @@ struct GpuMaterial_std430_0
     @align(16) base_color_texture_0 : u32,
     @align(4) pad0_1 : u32,
     @align(8) pad1_1 : u32,
-    @align(4) pad2_1 : u32,
+    @align(4) pad2_0 : u32,
 };
 
 @binding(6) @group(0) var<storage, read> materials_0 : array<GpuMaterial_std430_0>;
@@ -107,7 +107,7 @@ struct VertexOutput_0
 fn vertexMain(@builtin(vertex_index) index_0 : u32, @builtin(instance_index) instance_id_0 : u32) -> VertexOutput_0
 {
     var instance_0 : GpuInstance_std430_0 = instances_0[visible_instances_0[draw_0.base_0 + instance_id_0]];
-    var vertex_0 : MeshVertex_std430_0 = vertices_0[index_0 + meshes_0[instance_0.mesh_0].base_vertex_0];
+    var vertex_0 : MeshVertex_std430_0 = vertices_0[index_0 + meshes_0[draw_0.mesh_0].base_vertex_0];
     var _S1 : mat4x4<f32> = mat4x4<f32>(instance_0.transform_0.data_0[i32(0)][i32(0)], instance_0.transform_0.data_0[i32(1)][i32(0)], instance_0.transform_0.data_0[i32(2)][i32(0)], instance_0.transform_0.data_0[i32(3)][i32(0)], instance_0.transform_0.data_0[i32(0)][i32(1)], instance_0.transform_0.data_0[i32(1)][i32(1)], instance_0.transform_0.data_0[i32(2)][i32(1)], instance_0.transform_0.data_0[i32(3)][i32(1)], instance_0.transform_0.data_0[i32(0)][i32(2)], instance_0.transform_0.data_0[i32(1)][i32(2)], instance_0.transform_0.data_0[i32(2)][i32(2)], instance_0.transform_0.data_0[i32(3)][i32(2)], instance_0.transform_0.data_0[i32(0)][i32(3)], instance_0.transform_0.data_0[i32(1)][i32(3)], instance_0.transform_0.data_0[i32(2)][i32(3)], instance_0.transform_0.data_0[i32(3)][i32(3)]);
     var world_0 : vec4<f32> = (((vec4<f32>(vertex_0.position_0.xyz, 1.0f)) * (_S1)));
     var output_0 : VertexOutput_0;

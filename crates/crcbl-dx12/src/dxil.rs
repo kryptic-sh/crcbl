@@ -734,10 +734,14 @@ mod tests {
                 "draw_gen",
                 &crcbl_shaders::DRAW_GEN,
                 &["computeMain"],
-                // The tail is the mesh path's dispatch extents: the per-bucket
+                // The tail is the mesh path's dispatch extents — the per-bucket
                 // cluster counts the host uploaded (binding 9, read only) and
-                // the argument structures this pass writes them into (10).
-                &[Cbv, Srv, Srv, Srv, Srv, Srv, Uav, Uav, Uav, Srv, Uav],
+                // the argument structures this pass writes them into (10) —
+                // then `docs/plan/25-lod.md`'s three selection tables (11 to
+                // 13), all host-written and all read only.
+                &[
+                    Cbv, Srv, Srv, Srv, Srv, Srv, Uav, Uav, Uav, Srv, Uav, Srv, Srv, Srv,
+                ],
             ),
             (
                 "mesh",

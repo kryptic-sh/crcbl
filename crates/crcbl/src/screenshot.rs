@@ -114,6 +114,20 @@ pub enum Scene {
     /// One pair per column, so neither column's evidence is the other's.
     #[default]
     Cube,
+    /// `docs/plan/25-lod.md`'s dunes patch through [`ForwardRenderer`], seen
+    /// from its own near edge.
+    ///
+    /// **The scene that proves a device with no amplification stage can draw a
+    /// cluster DAG at all.** [`Scene::Cube`]'s three residents are flat meshes,
+    /// so a renderer whose level selection picked nothing — or picked a level it
+    /// then failed to draw — produces that frame unchanged. This one is the only
+    /// geometry in the tree with a hierarchy, so on the two indirect tails every
+    /// triangle of it arrives through a level `draw_gen.slang` chose.
+    ///
+    /// The camera is `DUNES_CAMERA_AT`: at the patch's near edge, low, looking
+    /// along it as it recedes — which is where the near end and the far end are
+    /// tens of times apart in distance and the metric has something to say.
+    Dunes,
     /// Four sprites over three [`SpriteRenderer`] batches: `sprite.slang`.
     Sprite,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
@@ -269,6 +283,40 @@ const SPRITE_RECTS: [[f32; 4]; 4] = [
 /// leaving its own slot at the clear colour.
 const SPRITE_ORDER: [usize; 4] = [0, 0, 1, 0];
 
+/// How far past the patch's near edge [`Scene::Dunes`]'s camera stands, and how
+/// far up.
+///
+/// The same arrangement `crcbl-vk`'s `dunes_camera` uses and
+/// `crcbl_shaders::cluster_dag`'s receding-patch test reads its histograms from:
+/// the patch is centred on the origin in `x` and `z` with its height on `y`, so
+/// an eye at negative `z` and a small `y` is a viewer standing at one end of a
+/// ground plane whose far edge is tens of times further away than its near one.
+const DUNES_CAMERA_BACK: f32 = 2.0;
+const DUNES_CAMERA_UP: f32 = 4.0;
+
+/// The camera [`Scene::Dunes`] is drawn with.
+///
+/// **Perspective**, and that is not decoration: the metric divides a projected
+/// error by the distance to a group's sphere, an orthographic projection has no
+/// such falloff, and `ForwardRenderer` answers that honestly by selecting the
+/// base level whole. A scene meant to show a level being *chosen* has to have a
+/// distance term to choose by.
+fn dunes_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(
+            0.0,
+            DUNES_CAMERA_UP,
+            -crcbl_shaders::dunes::DUNES_EXTENT - DUNES_CAMERA_BACK,
+        ),
+        target: glam::Vec3::ZERO,
+        up: glam::Vec3::Y,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
 /// The camera [`Scene::Sprite`] is drawn with: orthographic, looking down −Z at
 /// the plane the sprites live on.
 fn sprite_camera() -> Camera {
@@ -346,7 +394,10 @@ fn ui_draw_list(extent: (u32, u32)) -> DrawList {
 /// One variant per [`Scene`]; the frame's per-scene work is the two arms of
 /// [`OffscreenSetup::draw_and_readback`] and nothing else keys off it.
 enum SceneState {
-    Cube {
+    /// [`Scene::Cube`] and [`Scene::Dunes`]: both are one [`ForwardRenderer`]
+    /// with a camera and a light, differing in what is put in the scene and
+    /// where the camera stands.
+    Forward {
         camera: Camera,
         light: DirectionalLight,
         /// Boxed because it is much the largest of the three: it carries the
@@ -379,11 +430,33 @@ impl SceneState {
                 renderer.set_tinted_pyramid(Some(glam::Mat4::from_translation(TINTED_PYRAMID_AT)));
                 renderer
                     .set_textured_pyramid(Some(glam::Mat4::from_translation(TEXTURED_PYRAMID_AT)));
-                Self::Cube {
+                Self::Forward {
                     camera: Camera::default().with_projection(Projection::Perspective {
                         fov_y: std::f32::consts::FRAC_PI_3,
                         near: 0.01,
                     }),
+                    light: DirectionalLight::default(),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::Dunes => {
+                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                // **Refused rather than drawn empty.** `set_dunes` says no on a
+                // device that reports a mesh stage and no amplification stage,
+                // where the un-amplified path would emit every cluster of every
+                // level at once; every other device draws the patch, per cluster
+                // or through a uniform cut. Ignoring the answer is what made
+                // this scene a frame of clear colour that a golden would have
+                // been blessed from.
+                if !renderer.set_dunes(Some(glam::Mat4::IDENTITY)) {
+                    renderer.destroy(device);
+                    return Err(OffscreenError::Unusable(
+                        "this device reports a mesh stage and no amplification stage, so the \
+                         dunes patch's cluster DAG has nothing that can select a level in it",
+                    ));
+                }
+                Self::Forward {
+                    camera: dunes_camera(),
                     light: DirectionalLight::default(),
                     renderer: Box::new(renderer),
                 }
@@ -428,7 +501,7 @@ impl SceneState {
     /// Releases the scene's GPU resources. The device must be idle.
     fn destroy(self, device: &dyn Device) {
         match self {
-            Self::Cube { renderer, .. } => renderer.destroy(device),
+            Self::Forward { renderer, .. } => renderer.destroy(device),
             Self::Sprite { renderer, .. } => renderer.destroy(device),
             Self::Ui { renderer, .. } => renderer.destroy(device),
         }
@@ -589,6 +662,15 @@ impl OffscreenSetup {
     /// the same picture through a lesser tail.
     pub const OPTIONAL_FEATURES: Features = Features::GPU_DRIVEN
         .union(Features::MESH_SHADER)
+        // **Not implied by `MESH_SHADER`**, and asked for separately because
+        // `ForwardRenderer` builds §3.5's amplification stage only where the
+        // device has one — and without it `mesh_cluster.slang`'s un-amplified
+        // `meshMain` emits every cluster of every level, which
+        // [`Scene::Dunes`]' hierarchy cannot survive. A mesh adapter that has it
+        // and a setup that did not ask is the same defect this list already
+        // records for `MESH_SHADER`: the frame comes out of a lesser path and
+        // nothing says so.
+        .union(Features::TASK_SHADER)
         .union(Features::DEBUG_MARKERS);
 
     /// Opens the auto-selected GPU backend, creates an offscreen surface,
@@ -851,7 +933,7 @@ impl OffscreenSetup {
                 ForwardRenderer::present_target(acquired.image, acquired.view, self.format, extent),
             );
             match &mut self.scene {
-                SceneState::Cube {
+                SceneState::Forward {
                     camera,
                     light,
                     renderer,
@@ -1456,8 +1538,12 @@ mod tests {
             ("render", "forward"),
             ("render", "tonemap"),
         ]);
-        let expected: [(Scene, &[(&str, &str)]); 3] = [
+        let expected: [(Scene, &[(&str, &str)]); 4] = [
             (Scene::Cube, &cube_passes),
+            // The same passes: `Scene::Dunes` is the same renderer with
+            // different content, and a scene that quietly stopped running the
+            // cull pair would still draw a plausible frame.
+            (Scene::Dunes, &cube_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

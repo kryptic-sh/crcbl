@@ -5789,51 +5789,47 @@ a wasm regression in this code would not be observed by anything. The refusals
 that do not need an array layout — the flags gate, `count: 0`, the in-band
 layout error — run on every adapter, so that half is not skip-shaped.
 
-## What topic 25 still owes, now that the GPU selects
+## Topic 25's MVP is closed; what remains, and one coverage hole it found
 
-Per-cluster selection works on the `MeshShader` path and is verified by
-readback. What is left:
+Per-cluster selection runs on `MeshShader` and the uniform cut on both indirect
+tails, so the dunes patch draws on every geometry path and the two agree. What
+is left of topic 25:
 
-- **The uniform cut for `IndirectCount` / `IndirectPerBatch` is not built.**
-  `DagLevel::indices` and per-level residency are in place; what is missing is
-  per-`(mesh, level)` bucket entries in `draw_gen` and the instance-level choice
-  of depth. Until then the fallback paths cannot draw a DAG mesh at all.
-- **Every `ForwardRenderer` uploads the dunes DAG whether or not `set_dunes` is
-  called** — seven meshes, 254 clusters, 16 664 triangles across the levels. A
-  build-time cost, not per-frame, but every app pays it for geometry most never
-  draw. Making it opt-in needs a second constructor, because the apps calling
-  `new` were off the implementing slice's paths.
+- **Hysteresis.** A camera drifting across a threshold switches level every
+  frame at the boundary. It needs one persistent per-instance word on the
+  indirect paths and one per cluster on the mesh path; neither changes a data
+  layout that has landed, so it was deferrable and was deferred.
+- **Hand-authored LOD precedence and `MSFT_lod` import**, and QEM auto-gen for
+  arbitrary meshes — the only DAG in the tree is the cooked dunes artifact.
+- Shadow LOD bias, the bake cache, the debug tint overlay and shadow-map
+  inspector, `crcbl lod` CLI, HLOD, impostors, dithered crossfade.
+
+**The coverage hole worth knowing about:** `OffscreenSetup::OPTIONAL_FEATURES`
+never asked for `TASK_SHADER`, so every `render_e2e` run on a mesh-capable
+adapter had been drawing through the un-amplified `meshMain` while reporting
+`GeometryPath::MeshShader`. The goldens were real frames of a real path — just
+not the path the device advertised, and not the one carrying per-cluster
+culling. Fixed here. The knock-on is worth remembering: **Vulkan enables
+`meshShader` when `taskShader` is requested**, so a test that wants a lesser
+path must subtract both flags, and subtracting one leaves both arms on the same
+path with the self-comparison quietly passing.
+
+Still open from earlier slices and unchanged by this one:
+
+- **Every `ForwardRenderer` uploads the dunes DAG** whether or not `set_dunes`
+  is called — a build-time cost every app pays for geometry most never draw.
 - **The shadow cascades select too, from the light's position**, because they
-  share the frame block. That is the same rule rather than the shadow LOD _bias_
-  topic 18 describes, and it was not designed — it fell out. Worth deciding
-  whether it is wanted before it is relied on. They also write the selection
-  buffer; the colour pass is recorded last, which is why the read-back cut is
-  the camera's.
-- **`FrameUniforms` grew `lod_params: float4`** (288 → 304 bytes), which is why
-  `mesh.slang` and all four of its artifacts moved. Per-bucket
-  `ClusterDrawConstants` was the alternative and is wrong: it is written once at
-  build and shared across frames in flight.
-- **`projected_error` now has three implementations** — `crcbl_scene`,
-  `crcbl_shaders`, and the shader. The first two are compared for bit equality
-  by the cooker; the third is held to the rule by comparing the _decision_ over
-  the whole DAG rather than the number. That is the right shape, but it means a
-  fourth would need its own tie.
-- **Hysteresis is not built**, so a camera drifting across a threshold will
-  switch level every frame at the boundary. Topic 25 names it as what kills that
-  flicker.
-- **Group radii compound faster than a model grows.** At side 64 the level-2
-  groups already reach a 49-unit radius against a 45-unit half-diagonal, so
-  levels 2–6 have little spatial discrimination between them and the near/far
-  split happens between levels 0–2. A tighter enclosing sphere — Ritter's or
-  Welzl's, which `enclosing` explicitly declines — is the lever, not a bigger
+  share the frame block. Not designed; it fell out. Decide whether it is wanted
+  before relying on it.
+- **Group radii compound faster than a model grows**, so levels 2–6 have little
+  spatial discrimination; a tighter enclosing sphere is the lever, not a bigger
   model.
-- **The DAG's top three levels all report the same error (83.508)**: decimation
-  stalls against locked boundaries and carries its children's error up
-  unchanged, so levels 4–6 are never separately selected by a budget.
-- **The cooked artifact has only been generated on x86-64 Linux.**
-  Byte-reproducibility elsewhere follows from the arithmetic being IEEE-pinned
-  with no libm calls, but no CI leg regenerates it on macOS or Windows —
-  matching how `compile-shaders.sh --check` is arranged.
+- **The DAG's top three levels report the same error**, so they are never
+  separately selected by a budget.
+- **`projected_error` has three implementations** — two compared for bit
+  equality by the cooker, the third held to the rule by comparing the decision.
+- **The cooked artifact is only ever generated on x86-64 Linux**; no CI leg
+  regenerates it on macOS or Windows.
 
 ## What `crcbl_scene::simplify` owes, and one workspace-wide trap it found
 

@@ -562,10 +562,17 @@ fn a_culled_bucket_generates_no_draw_and_says_so_in_the_count() {
 /// `SENTINEL` outright, because `draw_gen.slang` stores its `1` only for the
 /// invocation that took slot zero and no invocation would.
 ///
-/// **The empty buckets are the sharpest numbers here**, not gaps. Two of the
-/// renderer's residents — the open box and the dunes patch — have no instance in
-/// this scene, so their arguments have nothing to add to `SENTINEL` and a
+/// **The empty buckets are the sharpest numbers here**, not gaps. Only the cube
+/// and the pyramid are in this scene, so every bucket after theirs — the open
+/// box's, and one per level of the dunes patch's DAG where the path takes
+/// `docs/plan/25-lod.md`'s uniform cut — has nothing to add to `SENTINEL`, and a
 /// clearing pass that never ran leaves them holding the poison undisguised.
+///
+/// How many of them there are is read off the arguments rather than written
+/// down, because the bucket count is a property of the geometry path: the mesh
+/// path gives the dunes patch one bucket and the indirect tails give it one per
+/// level. What is asserted is the shape — the first two full, every one after
+/// them empty, and at least one after them to be empty.
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn a_poisoned_counter_reaches_the_frame_at_zero() {
@@ -591,23 +598,31 @@ fn a_poisoned_counter_reaches_the_frame_at_zero() {
     // The cube's bucket, the pyramid's, then the open box's and the dunes
     // patch's — which this scene puts nothing in. See the note above on why
     // those zeroes are the evidence.
-    assert_eq!(
-        generated
-            .args
-            .iter()
-            .map(|args| args.instance_count)
-            .collect::<Vec<u32>>(),
-        vec![1, 1, 0, 0],
-        "each bucket claims the instances this scene put in it, rather than \
-         {SENTINEL:#010x} counted up from: {:?}",
-        generated.args
-    );
-    assert_eq!(
-        generated.counts,
-        vec![1, 1, 0, 0],
-        "and each bucket's draw count is what the pass stored, not the poison it \
-         was left holding"
-    );
+    let instances: Vec<u32> = generated
+        .args
+        .iter()
+        .map(|args| args.instance_count)
+        .collect();
+    for (what, counted) in [("instance", &instances), ("draw", &generated.counts)] {
+        assert!(
+            counted.len() > 2,
+            "this scene fills two buckets and the table has {} of them, so nothing \
+             here is left empty to hold the poison",
+            counted.len()
+        );
+        assert_eq!(
+            &counted[..2],
+            &[1, 1],
+            "the cube's and the pyramid's {what} counts are this frame's alone, rather \
+             than {SENTINEL:#010x} counted up from: {:?}",
+            generated.args
+        );
+        assert!(
+            counted[2..].iter().all(|&count| count == 0),
+            "a bucket this scene put nothing in reports a {what} count of {counted:?}, \
+             which is the poison the clearing pass did not remove"
+        );
+    }
 
     teardown(headless, renderer, pool);
 }

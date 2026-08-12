@@ -97,6 +97,7 @@ use crcbl_hal::{
 };
 use crcbl_shaders::{
     CLEAR_COUNTERS, CULL, DRAW_GEN, Stage, clear_counters, cull as cull_shader, draw_gen,
+    level_select,
 };
 
 use crate::cull::Frustum;
@@ -126,6 +127,23 @@ pub struct DrawGenDesc<'a> {
     /// per bucket whatever the path, exactly as it writes one draw argument
     /// per bucket.
     pub bucket_clusters: &'a [u32],
+    /// Where each mesh's cluster DAG is, **indexed by mesh id** — so this is
+    /// parallel to the mesh table and long enough for every id an instance can
+    /// name, not one entry per bucket.
+    ///
+    /// [`MeshLevels::FLAT`](crcbl_shaders::level_select::MeshLevels::FLAT) with
+    /// its `first_level` filled in is what an entry
+    /// for a mesh with no hierarchy holds, and it is also what a caller whose
+    /// geometry path selects per cluster hands over for every mesh — see
+    /// `crcbl_shaders::level_select`, which is where that arrangement is written
+    /// down.
+    pub mesh_levels: &'a [crcbl_shaders::level_select::MeshLevels],
+    /// Every mesh's DAG groups end to end, in the order `mesh_levels` points
+    /// into. Empty where nothing has a hierarchy.
+    pub level_groups: &'a [crcbl_shaders::level_select::LevelGroup],
+    /// Which mesh draws which level: element `first_level + d` of a mesh's run
+    /// is the mesh id of its level `d`.
+    pub level_meshes: &'a [u32],
     /// Instances the pool this culls can hold.
     ///
     /// Sizes the visible list *and* every bucket's run, which is what makes a
@@ -193,14 +211,24 @@ pub struct DrawGen {
     /// How many clusters each bucket's mesh has, written once for the same
     /// reason: a mesh's clusters are decided when it becomes resident.
     bucket_clusters: BufferHandle,
-    /// The block naming the bucket count and the two capacities. Shared by every
-    /// frame's group, because none of the three changes.
-    gen_params: BufferHandle,
-    /// The two buffer lengths the clearing dispatch zeroes. Shared for the same
-    /// reason: both are fixed when the bucket table is built.
+    /// `docs/plan/25-lod.md`'s three selection tables, written once: a mesh's
+    /// hierarchy is decided when it becomes resident, exactly as its clusters
+    /// are.
+    mesh_levels: BufferHandle,
+    level_groups: BufferHandle,
+    level_meshes: BufferHandle,
+    /// The two buffer lengths the clearing dispatch zeroes. Shared by every
+    /// frame's group, because both are fixed when the bucket table is built.
     clear_params: BufferHandle,
 
     // One per frame in flight, indexed by the caller's frame slot.
+    /// The block naming the bucket count, the two capacities and this frame's
+    /// selection camera.
+    ///
+    /// **Ringed since the uniform cut arrived**, where it used to be one shared
+    /// buffer: the camera and the pixel budget change every frame, and a frame
+    /// still in flight is a frame still reading them.
+    gen_params: Vec<BufferHandle>,
     cull_params: Vec<BufferHandle>,
     visible: Vec<BufferHandle>,
     visible_count: Vec<BufferHandle>,
@@ -310,21 +338,43 @@ impl DrawGen {
         }
         device.write_buffer(bucket_clusters, 0, &clusters)?;
 
-        let gen_params = buffer(
-            "params",
-            draw_gen::PARAMS_SIZE as u64,
-            BufferUsage::UNIFORM,
-            MemoryLocation::HostUpload,
+        // `docs/plan/25-lod.md`'s selection tables. **Never zero-length**: a
+        // buffer of no bytes is not a descriptor any backend will bind, and a
+        // renderer whose meshes have no hierarchy at all is the ordinary case
+        // rather than an error — so an empty table uploads one zeroed record
+        // that no `MeshLevels` ever names.
+        let mut table = |label: &str, bytes: Vec<u8>, stride: usize| -> Result<_, HalError> {
+            let bytes = if bytes.is_empty() {
+                vec![0u8; stride]
+            } else {
+                bytes
+            };
+            let handle = buffer(
+                label,
+                bytes.len() as u64,
+                BufferUsage::STORAGE,
+                MemoryLocation::HostUpload,
+            )?;
+            device.write_buffer(handle, 0, &bytes)?;
+            Ok(handle)
+        };
+        let mesh_levels = table(
+            "mesh levels",
+            level_select::mesh_levels_bytes(desc.mesh_levels),
+            level_select::MESH_LEVELS_STRIDE,
         )?;
-        device.write_buffer(
-            gen_params,
-            0,
-            &draw_gen::Params {
-                bucket_count,
-                bucket_capacity: capacity,
-                visible_capacity: capacity,
-            }
-            .to_bytes(),
+        let level_groups = table(
+            "level groups",
+            level_select::level_group_bytes(desc.level_groups),
+            level_select::LEVEL_GROUP_STRIDE,
+        )?;
+        let level_meshes = table(
+            "level meshes",
+            desc.level_meshes
+                .iter()
+                .flat_map(|mesh| mesh.to_le_bytes())
+                .collect(),
+            4,
         )?;
 
         let clear_params = buffer(
@@ -349,6 +399,7 @@ impl DrawGen {
         )?;
 
         let frames = desc.instances.len();
+        let mut gen_params = Vec::with_capacity(frames);
         let mut cull_params = Vec::with_capacity(frames);
         let mut visible = Vec::with_capacity(frames);
         let mut visible_count = Vec::with_capacity(frames);
@@ -357,6 +408,27 @@ impl DrawGen {
         let mut counts = Vec::with_capacity(frames);
         let mut mesh_args = Vec::with_capacity(frames);
         for frame in 0..frames {
+            // The static half is written here and the camera half in
+            // `begin_frame`, so a frame that never called it still names the
+            // right bucket count rather than reading a zeroed block.
+            let params = buffer(
+                &format!("params {frame}"),
+                draw_gen::PARAMS_SIZE as u64,
+                BufferUsage::UNIFORM,
+                MemoryLocation::HostUpload,
+            )?;
+            device.write_buffer(
+                params,
+                0,
+                &draw_gen::Params {
+                    bucket_count,
+                    bucket_capacity: capacity,
+                    visible_capacity: capacity,
+                    ..draw_gen::Params::default()
+                }
+                .to_bytes(),
+            )?;
+            gen_params.push(params);
             cull_params.push(buffer(
                 &format!("cull params {frame}"),
                 cull_shader::PARAMS_SIZE as u64,
@@ -510,6 +582,11 @@ impl DrawGen {
                 // x extent is the host's and this pass copies it through.
                 storage(9, true),
                 storage(10, false),
+                // `docs/plan/25-lod.md`'s selection tables, read only: what a
+                // mesh's hierarchy is was decided when it became resident.
+                storage(11, true),
+                storage(12, true),
+                storage(13, true),
             ],
         })?;
         rollback.bind_group_layouts.push(gen_layout);
@@ -569,7 +646,7 @@ impl DrawGen {
                 label: Some("draw args"),
                 layout: gen_layout,
                 entries: &[
-                    bound(0, gen_params),
+                    bound(0, gen_params[frame]),
                     bound(1, desc.instances[frame]),
                     bound(2, desc.mesh_table),
                     bound(3, visible[frame]),
@@ -580,6 +657,9 @@ impl DrawGen {
                     bound(8, counts[frame]),
                     bound(9, bucket_clusters),
                     bound(10, mesh_args[frame]),
+                    bound(11, mesh_levels),
+                    bound(12, level_groups),
+                    bound(13, level_meshes),
                 ],
                 variable_count: None,
             })?;
@@ -591,8 +671,11 @@ impl DrawGen {
         Ok(Self {
             bucket_meshes,
             bucket_clusters,
-            gen_params,
+            mesh_levels,
+            level_groups,
+            level_meshes,
             clear_params,
+            gen_params,
             cull_params,
             visible,
             visible_count,
@@ -761,8 +844,9 @@ impl DrawGen {
         self.mesh_args[frame]
     }
 
-    /// Writes `frame`'s cull parameters — this frame's frustum, and how much of
-    /// the instance array to test.
+    /// Writes `frame`'s cull parameters — this frame's frustum, how much of the
+    /// instance array to test, and the camera `docs/plan/25-lod.md`'s uniform
+    /// cut selects a level from.
     ///
     /// The three counters both dispatches add to are **not** zeroed here: that
     /// is the clearing pass [`DrawGen::add_passes`] schedules, and the module
@@ -786,13 +870,32 @@ impl DrawGen {
     /// # Panics
     ///
     /// If `frame` is not a slot this was built with.
+    /// `camera_position` and `lod_params` are the two the drawing pass writes
+    /// into [`FrameUniforms`](crcbl_shaders::mesh::FrameUniforms) — passed in
+    /// rather than re-derived here for the reason the frustum is: a pass that
+    /// selects detail against one camera while another draws is a difference
+    /// nothing in a frame can see.
     pub fn begin_frame(
         &self,
         device: &dyn Device,
         frame: usize,
         frustum: &Frustum,
         instance_count: u32,
+        camera_position: [f32; 3],
+        lod_params: [f32; 2],
     ) -> Result<(), HalError> {
+        device.write_buffer(
+            self.gen_params[frame],
+            0,
+            &draw_gen::Params {
+                bucket_count: self.bucket_count,
+                bucket_capacity: self.capacity,
+                visible_capacity: self.capacity,
+                camera_position,
+                lod_params,
+            }
+            .to_bytes(),
+        )?;
         device.write_buffer(
             self.cull_params[frame],
             0,
@@ -980,10 +1083,13 @@ impl DrawGen {
         for buffer in [
             self.bucket_meshes,
             self.bucket_clusters,
-            self.gen_params,
+            self.mesh_levels,
+            self.level_groups,
+            self.level_meshes,
             self.clear_params,
         ]
         .into_iter()
+        .chain(self.gen_params)
         .chain(self.cull_params)
         .chain(self.visible)
         .chain(self.visible_count)

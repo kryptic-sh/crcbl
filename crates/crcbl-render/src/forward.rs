@@ -145,7 +145,7 @@ use crcbl_hal::{
     QueueHandle, Rect2d, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
     ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, Viewport,
 };
-use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, mesh};
+use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, level_select, mesh};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::camera::{Camera, DirectionalLight};
@@ -298,28 +298,32 @@ const SHADOW_ATLAS_BINDING: u32 = 15;
 /// The bind-group slot the shadow atlas's **comparison** sampler is bound to.
 const SHADOW_SAMPLER_BINDING: u32 = 16;
 
-/// Buckets in the draw table, which is how many indirect calls the forward pass
-/// records — **whatever the scene holds**.
+/// The cube's bucket, the pyramid's and the open box's. Named rather than
+/// written as numbers where the bucket table is filled in.
 ///
-/// One per resident mesh, because an argument structure's index range is per
-/// draw and instances of different meshes cannot share one. See
-/// [`crate::draw_gen`] on what a bucket is and what a longer key would buy.
-const BUCKET_COUNT: u32 = 4;
-
-/// The cube's bucket, the pyramid's, the open box's and the dunes patch's.
-/// Named rather than written as numbers where the bucket table is filled in.
+/// One bucket per resident mesh, because an argument structure's index range is
+/// per draw and instances of different meshes cannot share one. See
+/// [`crate::draw_gen`] on what a bucket is and what a longer key would buy. How
+/// many the table holds altogether is [`ForwardRenderer::bucket_count`], and it
+/// is not the same number on every geometry path — see [`DUNES_BUCKET`].
 const CUBE_BUCKET: usize = 0;
 const PYRAMID_BUCKET: usize = 1;
 const OPEN_BOX_BUCKET: usize = 2;
-/// The dunes patch's bucket — **one bucket for its whole DAG**, not one per
-/// level.
+
+/// The dunes patch's first bucket, and **how many it has depends on the
+/// geometry path** — which is the one place in this renderer the two differ in
+/// shape rather than in the call they record.
 ///
-/// A bucket is a mesh's run of clusters, and the point of `docs/plan/25-lod.md`'s
-/// per-cluster selection is that one draw covers several levels at once: the
-/// amplification stage picks the cut and the clusters it keeps come from
-/// wherever in the DAG they came from. So the run is every level's clusters end
-/// to end and the bucket's mesh id is level 0's, which is what the instance
-/// carries and what the cull pass reads a bounding box out of.
+/// On [`EmitTail::Mesh`] it is a single bucket for the whole DAG: a bucket is a
+/// mesh's run of clusters, and the point of `docs/plan/25-lod.md`'s per-cluster
+/// selection is that one dispatch covers several levels at once, so the run is
+/// every level's clusters end to end and the bucket's mesh id is level 0's.
+///
+/// On the two indirect tails it is one bucket **per level**, because there the
+/// same plan takes a uniform cut and a level is drawn as an ordinary index
+/// range: a DAG's levels are separate mesh table entries, `draw_gen.slang`
+/// selects one per instance, and a bucket is what an indexed draw of one index
+/// range *is*. See [`ForwardRenderer::dunes_level_buckets`].
 const DUNES_BUCKET: usize = 3;
 
 /// The pixel budget `docs/plan/25-lod.md`'s descent compares a group's projected
@@ -398,12 +402,13 @@ pub struct ForwardRenderer {
     // draw below with a mesh the GPU has not received.
     pool: MeshPool,
     /// The dynamic offset of each bucket's [`mesh::DrawConstants`] block, in
-    /// the order [`CUBE_BUCKET`] and [`PYRAMID_BUCKET`] name.
+    /// the order [`CUBE_BUCKET`] and [`PYRAMID_BUCKET`] name. Its length is the
+    /// bucket count, which [`DUNES_BUCKET`] says is a property of the path.
     ///
     /// **The whole of what the CPU still says per draw.** Everything else a
     /// draw needs — how many instances, which indices, which vertices — is in
     /// the arguments the GPU wrote or in a table it resolves them through.
-    bucket_constants: [u32; BUCKET_COUNT as usize],
+    bucket_constants: Vec<u32>,
 
     // The instance array, and the objects' places in it. `begin_frame` rewrites
     // the cube's transform and the pool uploads only what changed.
@@ -487,6 +492,10 @@ pub struct ForwardRenderer {
     /// every level of it, as one run. `None` off the mesh path, where there is
     /// no cluster pool at all.
     dunes_clusters: Option<ClusterRange>,
+    /// The bucket each level of the dunes DAG draws through, finest first, and
+    /// empty on the mesh path. See
+    /// [`ForwardRenderer::dunes_level_buckets`].
+    dunes_level_buckets: Vec<u32>,
     /// One buffer per frame in flight holding the cut the descent chose, or
     /// empty where there is no amplification stage to choose one. See
     /// [`ForwardRenderer::cluster_selection`].
@@ -902,11 +911,15 @@ struct Residents {
     cube: u32,
     pyramid: u32,
     open_box: u32,
-    /// Level 0 of the dunes patch — the id its instance carries, and the id its
-    /// bucket names. The coarser levels have table entries too, because each is
-    /// its own vertex range, but nothing names them: a cluster reaches its own
-    /// level through [`dunes_vertex_bases`](Self::dunes_vertex_bases).
-    dunes: u32,
+    /// The dunes patch's DAG, level by level, as mesh table ids — finest first.
+    ///
+    /// Every level is its own vertex range and so its own table entry. Level 0's
+    /// id is the one the *instance* carries and the one the cull pass reads a
+    /// bounding box out of; the coarser ones are named by the bucket table on a
+    /// path that takes a uniform cut, and by nothing at all on the mesh path,
+    /// where a cluster reaches its own level through
+    /// [`dunes_vertex_bases`](Self::dunes_vertex_bases) instead.
+    dunes_levels: Vec<u32>,
     /// Per level, how far that level's vertices start past level 0's.
     ///
     /// What [`crcbl_shaders::cluster_select::ClusterSelect::vertex_base`] holds,
@@ -987,10 +1000,14 @@ impl ForwardRenderer {
                 cube: cube_mesh,
                 pyramid: pyramid_mesh,
                 open_box: open_box_mesh,
-                dunes: dunes_mesh,
+                dunes_levels,
                 dunes_vertex_bases,
             },
         ) = Self::build_geometry(device, queue)?;
+        // The id the dunes *instance* carries. Level 0 whatever the path,
+        // because it is the entry the cull pass reads a bounding box out of and
+        // the coarser levels approximate the same surface inside the same box.
+        let dunes_mesh = dunes_levels[0];
         // The handles are `Copy`, so they can be read out before the pool
         // becomes the rollback's — which it must be before the first `?` below,
         // or a failed pipeline would leak two device-local buffers. The index
@@ -1061,16 +1078,70 @@ impl ForwardRenderer {
         // here rather than beside the pipelines below because the mesh bind
         // group names one of its buffers, so it has to exist first.
         //
-        // The bucket table, and the one place its order is decided.
-        let mut bucket_meshes = [0u32; BUCKET_COUNT as usize];
+        // The bucket table, and the one place its order is decided. The dunes
+        // patch is one bucket where an amplification stage picks its cut per
+        // cluster and one per level where the cull pass picks a uniform one —
+        // see [`DUNES_BUCKET`], which is where that difference is written down.
+        let dunes_buckets = if emit.is_mesh() {
+            1
+        } else {
+            dunes_levels.len()
+        };
+        let mut bucket_meshes = vec![0u32; DUNES_BUCKET + dunes_buckets];
         bucket_meshes[CUBE_BUCKET] = cube_mesh;
         bucket_meshes[PYRAMID_BUCKET] = pyramid_mesh;
         bucket_meshes[OPEN_BOX_BUCKET] = open_box_mesh;
-        // Level 0's id, which is the one the instance carries and the one the
-        // cull pass reads a bounding box out of. The coarser levels approximate
-        // the same surface inside the same box, so a cut of any depth is culled
-        // by that box correctly.
-        bucket_meshes[DUNES_BUCKET] = dunes_mesh;
+        for (level, &mesh) in dunes_levels.iter().take(dunes_buckets).enumerate() {
+            bucket_meshes[DUNES_BUCKET + level] = mesh;
+        }
+        let bucket_count = u32::try_from(bucket_meshes.len())
+            .unwrap_or_else(|_| unreachable!("a table of a few buckets"));
+
+        // `docs/plan/25-lod.md`'s selection tables, and the one thing that
+        // decides whether `draw_gen.slang` takes a uniform cut at all.
+        //
+        // Every mesh id gets an entry, because the shader indexes this with
+        // `GpuInstance::mesh` and an instance can name any of them; the default
+        // is `MeshLevels::FLAT` pointing at a level run that is the mesh itself,
+        // so a mesh with no hierarchy resolves back to itself with no branch.
+        // **The dunes patch keeps that default on the mesh path**, which is how
+        // a device already descending the DAG per cluster avoids a second,
+        // coarser cut on top of it — the suppression is data rather than a
+        // branch in the shader.
+        let table_len = usize::try_from(
+            [cube_mesh, pyramid_mesh, open_box_mesh]
+                .into_iter()
+                .chain(dunes_levels.iter().copied())
+                .max()
+                .unwrap_or_else(|| unreachable!("at least the cube is resident"))
+                + 1,
+        )
+        .unwrap_or_else(|_| unreachable!("a table of a few meshes"));
+        let mut level_meshes: Vec<u32> = (0..table_len)
+            .map(|id| u32::try_from(id).unwrap_or_else(|_| unreachable!("bounded by table_len")))
+            .collect();
+        let mut mesh_levels: Vec<level_select::MeshLevels> = level_meshes
+            .iter()
+            .map(|&id| level_select::MeshLevels {
+                first_level: id,
+                ..level_select::MeshLevels::FLAT
+            })
+            .collect();
+        let mut level_groups: Vec<level_select::LevelGroup> = Vec::new();
+        if !emit.is_mesh() {
+            let dag = crcbl_shaders::cluster_dag::dunes_dag();
+            level_groups = dag.level_groups();
+            mesh_levels[dunes_mesh as usize] = level_select::MeshLevels {
+                first_group: 0,
+                group_count: u32::try_from(level_groups.len())
+                    .unwrap_or_else(|_| unreachable!("a DAG of a few dozen groups")),
+                first_level: u32::try_from(level_meshes.len())
+                    .unwrap_or_else(|_| unreachable!("a table of a few meshes")),
+                top_level: u32::try_from(dunes_levels.len() - 1)
+                    .unwrap_or_else(|_| unreachable!("a DAG of a few levels")),
+            };
+            level_meshes.extend_from_slice(&dunes_levels);
+        }
 
         // §3.5's clusters, on the path that reads them and on no other. The
         // records are `crcbl-shaders`' — cooked, because the builder is
@@ -1081,8 +1152,8 @@ impl ForwardRenderer {
         // Before the draw generation below rather than after it, because the
         // per-bucket cluster counts are the x extent of each bucket's mesh
         // dispatch and that pass writes the argument structure carrying them.
-        let mut bucket_clusters = [0u32; BUCKET_COUNT as usize];
-        let mut bucket_cluster_bases = [0u32; BUCKET_COUNT as usize];
+        let mut bucket_clusters = vec![0u32; bucket_meshes.len()];
+        let mut bucket_cluster_bases = vec![0u32; bucket_meshes.len()];
         let mut dunes_clusters: Option<ClusterRange> = None;
         if emit.is_mesh() {
             // Three flat meshes and one DAG. The flat ones are one pool entry
@@ -1138,6 +1209,9 @@ impl ForwardRenderer {
                 mesh_table,
                 bucket_meshes: &bucket_meshes,
                 bucket_clusters: &bucket_clusters,
+                mesh_levels: &mesh_levels,
+                level_groups: &level_groups,
+                level_meshes: &level_meshes,
                 instance_capacity: POOL_INSTANCE_CAPACITY,
             },
         )?;
@@ -1508,7 +1582,7 @@ impl ForwardRenderer {
         })?;
         let draw_constants = device.create_buffer(&BufferDesc {
             label: Some("mesh draw constants"),
-            size: u64::from(draw_stride) * u64::from(BUCKET_COUNT),
+            size: u64::from(draw_stride) * u64::from(bucket_count),
             usage: BufferUsage::UNIFORM,
             memory: MemoryLocation::HostUpload,
         })?;
@@ -1521,7 +1595,7 @@ impl ForwardRenderer {
             .draws
             .as_ref()
             .unwrap_or_else(|| unreachable!("draw generation was placed in the rollback above"));
-        let mut bucket_constants = [0u32; BUCKET_COUNT as usize];
+        let mut bucket_constants = vec![0u32; bucket_meshes.len()];
         for (bucket, offset) in bucket_constants.iter_mut().enumerate() {
             let index = bucket;
             let bucket =
@@ -1543,7 +1617,16 @@ impl ForwardRenderer {
                 }
                 .to_bytes()
             } else {
-                mesh::DrawConstants { base }.to_bytes()
+                // **The bucket's mesh, which is not always the drawn instance's.**
+                // A uniform cut selects one of a DAG's levels and each level is
+                // a mesh table entry of its own, so this is what says which
+                // geometry the draw's index range belongs to; the instance goes
+                // on naming level 0. See `mesh::DrawConstants::mesh`.
+                mesh::DrawConstants {
+                    base,
+                    mesh: bucket_meshes[index],
+                }
+                .to_bytes()
             };
             device.write_buffer(draw_constants, u64::from(*offset), &block)?;
         }
@@ -1641,6 +1724,9 @@ impl ForwardRenderer {
                     mesh_table,
                     bucket_meshes: &bucket_meshes,
                     bucket_clusters: &bucket_clusters,
+                    mesh_levels: &mesh_levels,
+                    level_groups: &level_groups,
+                    level_meshes: &level_meshes,
                     instance_capacity: POOL_INSTANCE_CAPACITY,
                 },
             )?;
@@ -2063,6 +2149,21 @@ impl ForwardRenderer {
             dunes_instance: None,
             dunes_mesh,
             dunes_clusters,
+            // One per level where the cull pass takes a uniform cut, and none
+            // where the amplification stage takes a per-cluster one — the same
+            // condition `dunes_buckets` was derived from, expressed off the
+            // table that was actually built rather than re-derived from the
+            // path.
+            dunes_level_buckets: if emit.is_mesh() {
+                Vec::new()
+            } else {
+                (DUNES_BUCKET..bucket_meshes.len())
+                    .map(|bucket| {
+                        u32::try_from(bucket)
+                            .unwrap_or_else(|_| unreachable!("a table of a few buckets"))
+                    })
+                    .collect()
+            },
             cluster_selection,
             lod_error_budget: LOD_ERROR_BUDGET,
             // Overwritten by the first `begin_frame`, which is the only thing
@@ -2388,7 +2489,10 @@ impl ForwardRenderer {
             cube: resolve(cube)?,
             pyramid: resolve(pyramid)?,
             open_box: resolve(open_box)?,
-            dunes: resolve(dunes_levels[0])?,
+            dunes_levels: dunes_levels
+                .iter()
+                .map(|&handle| resolve(handle))
+                .collect::<Result<_, _>>()?,
             dunes_vertex_bases,
         })
     }
@@ -2498,11 +2602,19 @@ impl ForwardRenderer {
         // removed instance leaves a hole and the live ones above it still have
         // to be tested. `InstancePool::slot_count` carries the difference.
         let instance_count = self.instances.slot_count();
+        // The camera and the two selection numbers go to the cull/draw-argument
+        // pair as well as into the block above, and they are handed over rather
+        // than re-derived: `docs/plan/25-lod.md`'s uniform cut runs there, the
+        // mesh path's per-cluster descent runs off the block, and a frame that
+        // selected detail against one camera while drawing with another is a
+        // difference nothing in the frame can see.
         self.draws.begin_frame(
             device,
             self.frame,
             &Frustum::from_view_projection(view_projection),
             instance_count,
+            [camera.eye.x, camera.eye.y, camera.eye.z],
+            self.lod_params,
         )?;
 
         // One cull per cascade, against that cascade's own frustum. The
@@ -2527,11 +2639,18 @@ impl ForwardRenderer {
                 0,
                 &cascade_uniforms.to_bytes(),
             )?;
+            // **The light as the eye here too**, matching the block above for
+            // the reason it gives: a cascade that selected detail from the
+            // camera while its amplification stage culled from the sun would be
+            // two passes disagreeing about where the viewer is.
+            let [eye_x, eye_y, eye_z, _] = cascade_uniforms.camera_position;
             draws.begin_frame(
                 device,
                 self.frame,
                 &Frustum::from_view_projection(cascades.view_proj[cascade]),
                 instance_count,
+                [eye_x, eye_y, eye_z],
+                self.lod_params,
             )?;
         }
         Ok(())
@@ -2682,23 +2801,27 @@ impl ForwardRenderer {
     /// two ends at different levels. That is the whole reason the mesh exists —
     /// a cube subtends one distance and asks the same question of every cluster.
     ///
-    /// # It needs an amplification stage, and says so rather than approximating
+    /// # One device cannot draw it, and says so rather than approximating
     ///
-    /// **The descent runs in the amplification stage and nowhere else.** A
-    /// device without [`Features::TASK_SHADER`] draws through
-    /// `mesh_cluster.slang`'s un-amplified `meshMain`, which emits every cluster
-    /// of the bucket — and for a DAG that is every level at once, seven
-    /// overlapping copies of one surface. So this refuses on such a device
-    /// rather than drawing that: [`culls_clusters`](Self::culls_clusters) is the
-    /// question, and the return says which happened.
+    /// A level gets chosen on every geometry path — per cluster in the
+    /// amplification stage, and per instance in the cull pass where there is no
+    /// such stage — **except** on a device that reports a mesh stage and no
+    /// [`Features::TASK_SHADER`]. That one draws through `mesh_cluster.slang`'s
+    /// un-amplified `meshMain`, which emits every cluster of the bucket, and for
+    /// a DAG that is every level at once: several overlapping copies of one
+    /// surface. So this refuses there rather than drawing that, and the return
+    /// says which happened. The two indirect tails have no such stage to be
+    /// missing a companion for — `draw_gen.slang` takes a uniform cut and the
+    /// bucket it selects is one level's index range.
     ///
     /// Every other resident is a single level and is unaffected: their clusters
-    /// carry [`ClusterSelect::ALWAYS`], which draws from every camera.
+    /// carry [`ClusterSelect::ALWAYS`] and their `MeshLevels` record resolves to
+    /// themselves, so both selections draw them from every camera.
     ///
     /// [`Features::TASK_SHADER`]: crcbl_hal::Features::TASK_SHADER
     /// [`ClusterSelect::ALWAYS`]: crcbl_shaders::cluster_select::ClusterSelect::ALWAYS
     pub fn set_dunes(&mut self, model: Option<Mat4>) -> bool {
-        if model.is_some() && !self.culls_clusters {
+        if model.is_some() && self.emit.is_mesh() && !self.culls_clusters {
             return false;
         }
         let instance = model.map(|model| mesh::GpuInstance {
@@ -2770,6 +2893,39 @@ impl ForwardRenderer {
     #[must_use]
     pub fn cluster_selection(&self, frame: usize) -> Option<BufferHandle> {
         self.cluster_selection.get(frame).copied()
+    }
+
+    /// The buckets the dunes patch's DAG levels draw through, finest first —
+    /// element `d` is level `d`'s bucket, and it is empty on the mesh path.
+    ///
+    /// **This is the uniform cut's observable**, and it is the indirect
+    /// arguments rather than a buffer of its own: `draw_gen.slang` scatters an
+    /// instance into the bucket for the level it selected, so exactly one of
+    /// these buckets comes out of a frame with a non-zero instance count and
+    /// which one it is *is* the chosen level. A reader takes
+    /// [`DrawGen::args_offset`](crate::draw_gen::DrawGen::args_offset) of each
+    /// and looks at
+    /// [`DrawIndexedArgs::instance_count`](crcbl_shaders::draw_gen::DrawIndexedArgs::instance_count).
+    ///
+    /// Empty on [`GeometryPath::MeshShader`], where the DAG is one bucket and
+    /// the level is chosen per cluster instead — see
+    /// [`cluster_selection`](Self::cluster_selection), which is that path's
+    /// observable.
+    #[must_use]
+    pub fn dunes_level_buckets(&self) -> &[u32] {
+        &self.dunes_level_buckets
+    }
+
+    /// `frame`'s indirect draw arguments, [`crcbl_shaders::draw_gen::DRAW_ARGS_SIZE`]
+    /// bytes per bucket — what a reader of
+    /// [`dunes_level_buckets`](Self::dunes_level_buckets) copies out.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this renderer was built with.
+    #[must_use]
+    pub fn draw_args(&self, frame: usize) -> BufferHandle {
+        self.draws.args(frame)
     }
 
     /// Adds the forward and tonemap passes to `graph`, rendering into `target`,
@@ -3909,12 +4065,12 @@ mod tests {
             let frame = frame(device.as_ref(), &mut renderer, queue);
 
             let stride = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE as u32;
-            let expected: Vec<(u32, u64, u64)> = (0..BUCKET_COUNT)
+            let expected: Vec<(u32, u64, u64)> = (0..renderer.bucket_constants.len())
                 .map(|bucket| {
                     (
-                        renderer.bucket_constants[bucket as usize],
-                        u64::from(bucket) * u64::from(stride),
-                        u64::from(bucket) * 4,
+                        renderer.bucket_constants[bucket],
+                        bucket as u64 * u64::from(stride),
+                        bucket as u64 * 4,
                     )
                 })
                 .collect();
@@ -4046,11 +4202,9 @@ mod tests {
                     _ => {}
                 }
             }
-            let (expected_counted, expected_per_batch) = if counted {
-                (BUCKET_COUNT, 0)
-            } else {
-                (0, BUCKET_COUNT)
-            };
+            let buckets = renderer.bucket_constants.len();
+            let (expected_counted, expected_per_batch) =
+                if counted { (buckets, 0) } else { (0, buckets) };
             assert_eq!(
                 (counted_calls, per_batch_calls),
                 (expected_counted, expected_per_batch),
@@ -4180,10 +4334,10 @@ mod tests {
     /// is a frame that draws one bucket's geometry three times.
     fn mesh_dispatch_calls(renderer: &ForwardRenderer) -> Vec<DrawIndirect> {
         let stride = crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32;
-        (0..BUCKET_COUNT)
+        (0..renderer.bucket_constants.len())
             .map(|bucket| DrawIndirect {
                 args: renderer.draws.mesh_args(renderer.frame),
-                offset: u64::from(bucket) * u64::from(stride),
+                offset: bucket as u64 * u64::from(stride),
                 draw_count: 1,
                 stride,
             })
@@ -4289,7 +4443,7 @@ mod tests {
         );
         assert_eq!(
             clusters.len(),
-            BUCKET_COUNT as usize,
+            renderer.bucket_constants.len(),
             "one x extent per bucket: {clusters:?}"
         );
         assert!(
@@ -4795,7 +4949,7 @@ mod tests {
     /// topic 18: the frame now records the same indirect call the colour pass
     /// records once per shadow cascade as well, out of that cascade's own
     /// arguments. A test filtering the whole stream for `DrawIndexedIndirect`
-    /// would see `(1 + shadow::CASCADES) × BUCKET_COUNT` of them and could not
+    /// would see one per cascade as well as the colour pass's, and could not
     /// say which pass any of them belonged to — so "the forward pass records one
     /// call per bucket" would become a claim about a total, which a shadow pass
     /// recording the wrong thing could satisfy.

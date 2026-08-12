@@ -2077,6 +2077,257 @@ fn the_gpu_descends_the_dag_to_the_cut_the_host_rule_says() {
     headless.finish();
 }
 
+/// Where the camera stands to make a uniform cut pick each of three levels.
+///
+/// **Distance along `-z` and nothing else**: the same eye height and the same
+/// target as [`dunes_camera`], so the only thing that changes between them is
+/// the term the metric divides by. Positions rather than levels, because which
+/// level each produces is what the test reads back — writing the levels here and
+/// the eyes there would be two halves of one claim with nothing holding them
+/// together.
+///
+/// The three are far apart on purpose: a group's sphere is grown to contain
+/// everything below it, so the levels are separated by hundreds of units rather
+/// than by tens, and an eye a little further back than another selects the same
+/// level. `crcbl_shaders::cluster_dag`'s
+/// `the_uniform_level_is_the_finest_level_the_per_cluster_cut_draws` sweeps the
+/// same rule host-side without needing a camera at all.
+const DUNES_RECEDING_CAMERAS: [f32; 3] = [2.0, 200.0, 1000.0];
+
+/// A camera `back` units past the dunes patch's near edge, looking at it.
+fn dunes_camera_back(back: f32) -> crcbl_render::Camera {
+    crcbl_render::Camera {
+        eye: glam::Vec3::new(0.0, 4.0, -crcbl_shaders::dunes::DUNES_EXTENT - back),
+        ..dunes_camera()
+    }
+}
+
+/// The dunes level this frame's uniform cut selected, read out of the bucket
+/// that actually drew.
+///
+/// **The indirect arguments are the observable**, and there is no second buffer
+/// recording an intention: `draw_gen.slang` scatters the instance into the
+/// bucket for the level it chose, so the bucket whose `instance_count` came out
+/// non-zero *is* the level. A selection that picked a level and then failed to
+/// route it would leave every bucket at zero and be reported here rather than
+/// drawn as an empty frame.
+fn selected_dunes_level(
+    headless: &Headless,
+    renderer: &crcbl_render::ForwardRenderer,
+) -> Option<usize> {
+    let device = headless.device.as_ref();
+    let buckets = renderer.dunes_level_buckets();
+    assert!(
+        !buckets.is_empty(),
+        "this device selects per cluster, so no bucket is a level"
+    );
+    let args = renderer.draw_args(renderer.frame());
+    let stride = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE as u64;
+    let bytes = stride * u64::from(buckets[buckets.len() - 1] + 1);
+
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("draw args readback"),
+            size: bytes,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a readback buffer");
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("draw args copy"),
+        queue: headless.queue,
+    });
+    // The graph leaves the argument buffer in `IndirectArgument`, which is where
+    // the next frame on this slot expects it — so this moves it out and puts it
+    // straight back, exactly as `selected_clusters` does for the cut buffer.
+    let barrier = |from: ResourceState, to: ResourceState| {
+        [crcbl_hal::BufferBarrier {
+            buffer: args,
+            from,
+            to,
+            queue_transfer: None,
+        }]
+    };
+    let out = barrier(ResourceState::IndirectArgument, ResourceState::TransferSrc);
+    let back = barrier(ResourceState::TransferSrc, ResourceState::IndirectArgument);
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &out,
+        ..Barriers::default()
+    });
+    encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+        src: args,
+        src_offset: 0,
+        dst: staging,
+        dst_offset: 0,
+        size: bytes,
+    });
+    encoder.pipeline_barrier(&Barriers {
+        buffers: &back,
+        ..Barriers::default()
+    });
+    let commands = encoder.finish().expect("recording succeeded");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[commands]))
+        .expect("submit");
+
+    let mut words = vec![0u8; bytes as usize];
+    headless.readback(staging, bytes, &mut words);
+    device.destroy_command_buffer(commands);
+    device.destroy_buffer(staging);
+
+    let mut drew: Vec<usize> = Vec::new();
+    for (level, &bucket) in buckets.iter().enumerate() {
+        let at = bucket as usize * crcbl_shaders::draw_gen::DRAW_ARGS_SIZE;
+        let args = crcbl_shaders::draw_gen::DrawIndexedArgs::from_bytes(
+            words[at..at + crcbl_shaders::draw_gen::DRAW_ARGS_SIZE]
+                .try_into()
+                .expect("one argument structure"),
+        );
+        if args.instance_count > 0 {
+            assert!(
+                args.index_count > 0,
+                "level {level}'s bucket drew {} instance(s) of no indices at all",
+                args.instance_count
+            );
+            drew.push(level);
+        }
+    }
+    assert!(
+        drew.len() <= 1,
+        "one instance was scattered into levels {drew:?}, which is not a uniform cut"
+    );
+    drew.first().copied()
+}
+
+/// **The uniform cut picks a coarser level the further away the patch is, and
+/// the level it picks is the finest level the per-cluster cut draws.**
+///
+/// `docs/plan/25-lod.md`'s "Runtime selection" gives the two indirect tails a
+/// uniform cut — "every cluster at one depth, which is exactly a whole-mesh
+/// level — drawn as ordinary index ranges. Same hierarchy, same error metric,
+/// one decision per instance instead of per cluster." Both halves of that
+/// sentence are asserted here, on two real devices:
+///
+/// * **The decision moves with distance.** Three cameras, strictly increasing
+///   levels. A uniform cut that always answered zero draws every frame correctly
+///   and proves nothing at all, which is why this is three positions and a
+///   strict comparison rather than "it drew".
+/// * **Each level is the host rule's own**, at the pixels-per-unit and budget
+///   the renderer actually wrote into its params block rather than a second
+///   derivation of them — the same discipline
+///   `the_gpu_descends_the_dag_to_the_cut_the_host_rule_says` applies to the
+///   per-cluster descent.
+/// * **And it is the same level the mesh path's cut bottoms out at.** The
+///   mesh-shader arm runs first, on a device opened with an amplification stage,
+///   and its read-back cut's finest level is compared against the uniform arm's
+///   choice camera for camera. That is the two granularities agreeing modulo
+///   detail, measured rather than argued: the coarse decision is the fine one's
+///   floor.
+///
+/// The two arms are two devices because a device reports what it reports —
+/// opening one *without* the mesh-stage features is the only way one machine
+/// reaches both paths, which is `Headless::open_for_mesh_with`'s whole purpose.
+/// They run one after the other rather than side by side so only one instance is
+/// live at a time.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is() {
+    let dag = crcbl_shaders::cluster_dag::dunes_dag();
+
+    // --- the mesh arm: the finest level its per-cluster cut reaches ---
+    let mut finest: Vec<Option<usize>> = Vec::new();
+    {
+        let headless = Headless::open_for_mesh_with(
+            Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,
+        );
+        if headless.device.caps().supports(Features::TASK_SHADER) {
+            let mut pool = crcbl_render::TransientPool::new();
+            let mut renderer = crcbl_render::ForwardRenderer::new(
+                headless.device.as_ref(),
+                headless.queue,
+                headless.format,
+            )
+            .expect("the forward renderer builds");
+            assert!(renderer.set_dunes(Some(glam::Mat4::IDENTITY)));
+            for back in DUNES_RECEDING_CAMERAS {
+                let camera = dunes_camera_back(back);
+                let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera);
+                let cut = selected_clusters(&headless, &renderer);
+                finest.push(cut.iter().map(|at| at.level).min());
+            }
+            renderer.destroy(headless.device.as_ref());
+            pool.destroy(headless.device.as_ref());
+        } else {
+            eprintln!(
+                "vk e2e: no TASK_SHADER on this device, so there is no per-cluster cut to \
+                 compare the uniform one against; the uniform arm below still runs"
+            );
+        }
+        headless.finish();
+    }
+
+    // --- the uniform arm: a device with no mesh stage at all ---
+    let headless = Headless::open_for_mesh_with(Features::GPU_DRIVEN);
+    assert_ne!(
+        headless.device.caps().geometry_path(),
+        crcbl_hal::GeometryPath::MeshShader,
+        "the mesh-stage features were withheld and this device selected the mesh path \
+         anyway, so both arms are the same arm"
+    );
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds");
+    assert!(
+        renderer.set_dunes(Some(glam::Mat4::IDENTITY)),
+        "a device with no mesh stage takes the patch through a uniform cut"
+    );
+
+    let mut chosen: Vec<usize> = Vec::new();
+    for (index, back) in DUNES_RECEDING_CAMERAS.into_iter().enumerate() {
+        let camera = dunes_camera_back(back);
+        let _ = render_mesh(&headless, &mut renderer, &mut pool, &camera);
+        let [pixels_per_unit, budget] = renderer.lod_params();
+        let level = selected_dunes_level(&headless, &renderer)
+            .unwrap_or_else(|| panic!("no bucket drew the patch from {back} units back"));
+        let eye = camera.eye.to_array();
+        let want = dag.uniform_level(eye, pixels_per_unit, budget);
+        eprintln!(
+            "vk e2e: dunes from {back} units back — level {level} at {pixels_per_unit} \
+             px/unit, budget {budget} (host rule says {want})"
+        );
+        assert_eq!(
+            level, want,
+            "from {back} units back the GPU took level {level} and the host rule takes \
+             {want}"
+        );
+        if let Some(Some(mesh_finest)) = finest.get(index) {
+            assert_eq!(
+                level, *mesh_finest,
+                "from {back} units back the uniform cut takes level {level} and the \
+                 per-cluster cut's finest level is {mesh_finest} — the two paths are \
+                 selecting against different metrics"
+            );
+        }
+        chosen.push(level);
+    }
+
+    // **Strictly increasing**, which is the whole claim: a selection wired to a
+    // constant draws every one of these frames correctly.
+    assert!(
+        chosen.windows(2).all(|pair| pair[0] < pair[1]),
+        "the levels selected at {DUNES_RECEDING_CAMERAS:?} units back are {chosen:?}, \
+         which does not get coarser with distance"
+    );
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
 /// The near third of the patch is drawn at a finer level than the far third,
 /// and both ends drew something.
 ///

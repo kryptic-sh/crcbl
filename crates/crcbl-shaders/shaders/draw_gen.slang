@@ -13,6 +13,26 @@
 // checked against a CPU oracle and consumed by more than this; nothing about a
 // bucket belongs in it.
 //
+// # Level of detail, for the paths with no amplification stage
+//
+// `docs/plan/25-lod.md`'s "Runtime selection" splits by geometry path: the mesh
+// path descends a mesh's cluster DAG per cluster in its amplification stage,
+// and "on `IndirectCount` and `IndirectPerBatch` it runs in the cull compute
+// pass and takes a **uniform cut** — every cluster at one depth, which is
+// exactly a whole-mesh level — drawn as ordinary index ranges."
+//
+// That decision lives *here*, in the half of the cull/draw-argument pair that
+// chooses an instance's bucket, because on this path a level **is** a bucket: a
+// DAG's levels are separate mesh table entries, so selecting one is selecting a
+// mesh, and the routing below already knows how to send an instance to the
+// bucket for a mesh. `uniform_level` is the rule and
+// `crcbl_shaders::level_select` is both its documentation and its host twin.
+//
+// A mesh with no hierarchy carries a record that resolves to itself, so nothing
+// here branches on whether a mesh has levels — and the mesh path hands over
+// exactly that record for every mesh, which is how a device that already
+// selects per cluster avoids a second, coarser cut on top of it.
+//
 // # Why the arguments are per bucket and not per visible instance
 //
 // A draw's instances have to be *addressable* by the vertex stage, and the only
@@ -171,6 +191,56 @@ static const uint MESH_ARG_GROUP_X = 0;
 static const uint MESH_ARG_GROUP_Y = 1;
 static const uint MESH_ARG_GROUP_Z = 2;
 
+/// One group of a mesh's cluster DAG, matching
+/// `crcbl_shaders::level_select::LevelGroup`.
+///
+/// Six scalars and not a `float3` in sight, for `GpuMesh`'s reason above: under
+/// `std430` a `float3` is 16-byte aligned and would put four bytes of padding in
+/// front of itself.
+struct LevelGroup
+{
+    /// The level whose clusters this group grouped. An expanded group is
+    /// therefore the deepest a uniform cut may go.
+    uint level;
+    /// How far this group's simplification may have moved the surface, in the
+    /// mesh's own units of length.
+    float error;
+    /// Centre of the sphere the error is projected from, in the mesh's own
+    /// space.
+    float center_x;
+    float center_y;
+    float center_z;
+    /// Distance from that centre to the furthest point the sphere contains.
+    float radius;
+};
+
+/// Where one mesh's DAG is, matching `crcbl_shaders::level_select::MeshLevels`.
+///
+/// Indexed by `GpuInstance::mesh`, so `mesh_levels` below is parallel to the
+/// mesh table and every entry an instance can name has to be filled. A mesh with
+/// no hierarchy carries zero groups and a top level of zero, which makes
+/// `uniform_level` answer zero without reading anything — and that is also how
+/// the mesh-shader path suppresses this selection, since a device descending the
+/// DAG per cluster must not have a coarser cut applied to the same instance
+/// first.
+struct MeshLevels
+{
+    /// This mesh's first entry in `level_groups`.
+    uint first_group;
+    /// How many it has. Zero for a mesh with no hierarchy.
+    uint group_count;
+    /// This mesh's first entry in `level_meshes`, whose element `d` is the mesh
+    /// id that draws level `d`.
+    uint first_level;
+    /// The coarsest level this mesh has, so its run of `level_meshes` is
+    /// `top_level + 1` long.
+    ///
+    /// The top *level* and not the level count: the search below starts here,
+    /// and a count would have to be decremented — which on a zero written by
+    /// mistake wraps to `0xffffffff` and indexes `level_meshes` with it.
+    uint top_level;
+};
+
 /// Everything an invocation needs that is not buffer contents, matching
 /// `crcbl_shaders::draw_gen::Params`.
 ///
@@ -191,13 +261,28 @@ struct DrawGenParams
     /// Pads the block to a multiple of 16 bytes, which `std140` requires of a
     /// uniform buffer's size.
     uint pad0;
+    /// The eye this frame's uniform cut is selected from, in world space, in
+    /// `xyz`. The same name and the same three floats as `mesh.slang`'s
+    /// `FrameUniforms::camera_position`, and the renderer writes both from one
+    /// camera.
+    float4 camera_position;
+    /// `docs/plan/25-lod.md`'s two selection numbers: `x` is how many pixels one
+    /// unit of length subtends one unit from the eye, `y` is the pixel budget a
+    /// group's projected error is compared against.
+    ///
+    /// Named after `mesh.slang`'s `FrameUniforms::lod_params` because it is that
+    /// block's two numbers, written by the same frame from the same camera —
+    /// the two geometry paths select at different granularities and must never
+    /// select under different parameters.
+    float4 lod_params;
 };
 
 [[vk::binding(0, 0)]]
 ConstantBuffer<DrawGenParams> gen;
 
-/// The instance array, read only for `GpuInstance::mesh`: which bucket an
-/// instance scatters into is the only thing this pass asks of it.
+/// The instance array, read for `GpuInstance::mesh` and `transform`: which
+/// bucket an instance scatters into, and — since `docs/plan/25-lod.md`'s uniform
+/// cut runs here — where its mesh's group spheres are in world space.
 [[vk::binding(1, 0)]]
 StructuredBuffer<GpuInstance> instances;
 
@@ -278,6 +363,90 @@ StructuredBuffer<uint> bucket_clusters;
 [[vk::binding(10, 0)]]
 RWStructuredBuffer<Atomic<uint> > mesh_args;
 
+/// Where each mesh's DAG is, indexed by `GpuInstance::mesh`. Host-written and
+/// not rewritten per frame: a mesh's hierarchy is decided when it becomes
+/// resident, exactly as its cluster count is.
+[[vk::binding(11, 0)]]
+StructuredBuffer<MeshLevels> mesh_levels;
+
+/// Every resident mesh's DAG groups, laid end to end in the order
+/// `MeshLevels::first_group` points into.
+[[vk::binding(12, 0)]]
+StructuredBuffer<LevelGroup> level_groups;
+
+/// Which mesh draws which level: element `MeshLevels::first_level + d` is the
+/// mesh id of level `d`.
+///
+/// A DAG is several mesh table entries because every level is decimated
+/// separately and its vertices belong to no vertex of the level below — so a
+/// uniform cut selects a *mesh*, and the bucket table then routes it exactly as
+/// it routes a mesh with no hierarchy at all.
+[[vk::binding(13, 0)]]
+StructuredBuffer<uint> level_meshes;
+
+/// Whether a group is **expanded** — its children drawn rather than its parents
+/// — from the eye this frame selects at.
+///
+/// `docs/plan/25-lod.md`'s metric, and
+/// `crcbl_shaders::cluster_select::GroupCost::projected_error` in Slang. This is
+/// character for character `mesh_cluster.slang`'s `group_is_expanded` with its
+/// `frame.lod_params` spelled `gen.lod_params`, and that is deliberate: the two
+/// geometry paths run the same three arithmetic operations in the same order on
+/// the same numbers, so a level chosen differently is a difference in
+/// *granularity* and never in the metric.
+///
+/// **An eye inside the sphere expands**, because there is no distance to divide
+/// by and "as close as possible, so descend" is both the conservative answer and
+/// the monotone one.
+uint group_is_expanded(float error, float3 center, float radius, float3 eye)
+{
+    float3 delta = eye - center;
+    float separation = sqrt(delta.x * delta.x + delta.y * delta.y + delta.z * delta.z);
+    float distance = separation - radius;
+    if (distance <= 0.0)
+    {
+        return 1u;
+    }
+    return error * gen.lod_params.x / distance > gen.lod_params.y ? 1u : 0u;
+}
+
+/// The level a uniform cut draws `instance` at: the finest level any of its
+/// mesh's groups is expanded at, and the top level when none is.
+///
+/// `crcbl_shaders::level_select::MeshLevels::uniform_level` is this loop in
+/// Rust, and that module's docs carry why this number is the finest level the
+/// per-cluster descent draws anywhere — which is what makes the coarse decision
+/// the fine one's own floor rather than an approximation of it.
+///
+/// **In world space**, exactly as `mesh_cluster.slang`'s descent is: the
+/// sphere's centre goes through the instance's rigid transform, its radius does
+/// not, and the eye stays where it is. That is the same statement as putting the
+/// camera through the inverse transform, and it needs no inverse.
+uint uniform_level(GpuInstance instance)
+{
+    MeshLevels levels = mesh_levels[instance.mesh];
+    float3 eye = gen.camera_position.xyz;
+    uint chosen = levels.top_level;
+    for (uint i = 0; i < levels.group_count; ++i)
+    {
+        LevelGroup group = level_groups[levels.first_group + i];
+        // A group at or above the answer so far cannot lower it, and the answer
+        // is a minimum — so this skips the projection and not only the
+        // comparison.
+        if (group.level >= chosen)
+        {
+            continue;
+        }
+        float3 center = mul(instance.transform,
+            float4(group.center_x, group.center_y, group.center_z, 1.0)).xyz;
+        if (group_is_expanded(group.error, center, group.radius, eye) == 1u)
+        {
+            chosen = group.level;
+        }
+    }
+    return chosen;
+}
+
 /// Invocations per workgroup, matching
 /// `crcbl_shaders::draw_gen::WORKGROUP_SIZE`.
 ///
@@ -325,7 +494,14 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
     }
 
     uint instance_index = visible[index];
-    uint mesh_id = instances[instance_index].mesh;
+    GpuInstance instance = instances[instance_index];
+    // **`docs/plan/25-lod.md`'s uniform cut, and the one decision this pass
+    // makes about detail.** The instance names level 0 of its mesh — that is
+    // what the cull pass read a bounding box out of — and the level selected
+    // here names the mesh that actually draws, which the bucket table then
+    // routes exactly as it routes a mesh with no hierarchy. A mesh with none
+    // resolves back to itself, so there is no branch for the ordinary case.
+    uint mesh_id = level_meshes[mesh_levels[instance.mesh].first_level + uniform_level(instance)];
     // A linear walk of the bucket table. The table is small and fixed — one
     // entry per resident mesh today — so this is a couple of comparisons; a
     // mesh → bucket map is what a table large enough to notice would want.

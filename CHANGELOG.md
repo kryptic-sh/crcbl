@@ -255,6 +255,39 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The uniform cut, so every geometry path draws a DAG mesh.** `draw_gen.slang`
+  picks one level per instance for `IndirectCount` and `IndirectPerBatch`, and
+  `Scene::Dunes` renders on all three paths. Until now per-cluster selection
+  existed only where there is an amplification stage, which excludes every
+  browser, WARP and the macOS runner.
+
+  **The level chosen is the finest at which any group is expanded**, each group
+  measured against its **own** sphere. That is provably the per-cluster cut's
+  own floor rather than an approximation of it: nothing below it is drawn per
+  cluster, and something at it is. Measuring against the root group or a
+  whole-mesh sphere instead over-selects without bound — a sphere containing
+  every group's is never further from the eye, so it reports a larger error, and
+  on a patch seen from its own edge it saturates at level 0 from everywhere.
+
+  The two paths are compared three ways, not by "both drew something": the host
+  rule equals `cut(...).map(level).min()` over a sweep; two real devices — one
+  opened with the mesh-stage features and one without — agree camera for camera;
+  and at a budget where both resolve to level 0 the frames are
+  **byte-identical**. Selected level goes 0 → 1 → 2 at 2, 200 and 1000 units
+  back.
+
+  `mesh::DrawConstants` gained `mesh`, because a DAG level is its own vertex
+  range and a draw of level 2's indices needs level 2's base vertex while the
+  instance still names level 0.
+
+- **`OffscreenSetup` now asks for `TASK_SHADER`, which it never had.** Every
+  `render_e2e` run on a mesh-shader adapter had been going through the
+  un-amplified `meshMain` — the golden frames were real, but not of the path the
+  device advertised. The suite's "lesser path" arm now subtracts **both**
+  mesh-stage flags, because Vulkan enables `meshShader` when `taskShader` is
+  requested, and without that both arms selected the same path and the
+  self-comparison guard fired.
+
 - **Per-cluster LOD selection on the GPU — topic 25's runtime half.** The
   amplification stage descends the cluster DAG against projected screen-space
   error, so one draw of one mesh renders at several detail levels across its own

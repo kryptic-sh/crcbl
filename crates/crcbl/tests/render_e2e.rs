@@ -81,6 +81,20 @@ const EXTENT: (u32, u32) = (256, 192);
 /// tonemap trips it.
 const MIN_COLORS_CUBE: usize = 16;
 
+/// The same, for [`Scene::Dunes`]: distinct RGBA colours that frame must hold.
+///
+/// A lit height field against a flat clear, so the count is dominated by shading
+/// rather than by how many objects drew, and it runs into the hundreds — the
+/// narrower strip
+/// [`the_dunes_patch_fills_the_lower_frame_and_leaves_the_sky_alone`] measures
+/// prints its own figure on every run. The floor sits far below that because
+/// what it has to separate is a lit surface from the clear alone and from one
+/// flat quad, both of which are a handful of colours; the golden is what holds
+/// the picture itself.
+///
+/// [`the_dunes_patch_fills_the_lower_frame_and_leaves_the_sky_alone`]: fn@the_dunes_patch_fills_the_lower_frame_and_leaves_the_sky_alone
+const MIN_COLORS_DUNES: usize = 32;
+
 /// The same, for [`Scene::Sprite`]: `CRCBL_CROSS_MIN_COLORS_SPRITE`.
 ///
 /// That harness measured 17-24 distinct colours for this scene on both ICDs at
@@ -152,6 +166,76 @@ fn the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden() {
 fn the_cube_scene_drew_its_geometry_and_both_material_columns(image: &Image) {
     the_cube_is_lit_against_an_unpainted_corner(image);
     the_textured_pyramid_is_quartered_and_the_plain_one_is_flat(image);
+}
+
+/// The dunes patch — `docs/plan/25-lod.md`'s cluster DAG — on the backend
+/// `CRCBL_GPU` names, against the reference in `tests/golden/`.
+///
+/// **This is the scene that says a device with no amplification stage can draw
+/// a DAG at all.** Every other resident is a flat mesh, so
+/// [`Scene::Cube`]'s frame is identical whether level selection works, picks
+/// nothing, or picks a level nothing then draws. Here every triangle arrives
+/// through a level `draw_gen.slang` chose per instance and a bucket the CPU
+/// recorded a draw for, so a selection that chose a bucket with no geometry in
+/// it is a black frame rather than a passing one.
+///
+/// On a device that reports both a mesh stage and an amplification stage the
+/// same frame comes out of the per-cluster descent instead, which is what makes
+/// this a comparison between the two granularities rather than a test of one:
+/// the levels differ across the surface and the silhouette does not, so the
+/// golden holds for both. `crcbl-vk`'s
+/// `the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is` is where
+/// that claim is made in numbers instead of in pixels.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_dunes_scene_draws_its_cluster_dag_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::Dunes,
+        "dunes",
+        MIN_COLORS_DUNES,
+        the_dunes_patch_fills_the_lower_frame_and_leaves_the_sky_alone,
+    );
+}
+
+/// [`Scene::Dunes`]'s anti-vacuity claim: lit ground below the horizon, clear
+/// sky above it, and shading that varies down the patch.
+///
+/// The three together are what a frame drawn from an empty bucket fails. A
+/// selection that resolved to a level with no geometry leaves the whole frame at
+/// the clear, which the first two catch; one that drew a single flat quad — or
+/// the patch collapsed to its coarsest level with the camera on top of it —
+/// passes those and fails the third, because the dunes are a height field and a
+/// lit height field is not one colour.
+fn the_dunes_patch_fills_the_lower_frame_and_leaves_the_sky_alone(image: &Image) {
+    // The camera looks along the patch from four units up, so the horizon sits
+    // near the middle of the frame: a row a fifth of the way down is sky and one
+    // four fifths down is ground, whichever level was selected.
+    let sky = image.pixel(EXTENT.0 / 2, EXTENT.1 / 5).expect("inside");
+    let ground = image.pixel(EXTENT.0 / 2, EXTENT.1 * 4 / 5).expect("inside");
+    let clear = image.pixel(1, 1).expect("inside");
+    assert!(
+        !differ(sky, clear),
+        "the sky at the top of the frame is {sky:?} against a clear of {clear:?} — the \
+         patch is not where this camera puts it"
+    );
+    assert!(
+        differ(ground, clear),
+        "the ground at the bottom of the frame is still the clear {clear:?} (got \
+         {ground:?}) — the selected level drew nothing"
+    );
+    // Down the middle of the patch, below the horizon. A height field lit by one
+    // directional light shades every slope differently; a flat quad does not.
+    let shades = distinct_colors_in(
+        image,
+        EXTENT.0 / 2 - 8..EXTENT.0 / 2 + 8,
+        EXTENT.1 * 3 / 5..EXTENT.1,
+    );
+    eprintln!("crcbl render e2e: dunes — {shades} shade(s) down the patch's middle");
+    assert!(
+        shades >= 8,
+        "the patch's middle holds {shades} distinct colour(s), which is a flat surface \
+         rather than a lit height field"
+    );
 }
 
 /// Four sprites over three batches and two sheets — `sprite.slang` — on the
@@ -370,6 +454,42 @@ fn the_cube_scene_draws_the_same_frame_on_every_geometry_path() {
     );
 }
 
+/// The dunes patch on both geometry paths — see
+/// [`draw_scene_on_every_geometry_path`].
+///
+/// **This is the two granularities of `docs/plan/25-lod.md` compared in
+/// pixels.** The mesh arm descends the cluster DAG per cluster in its
+/// amplification stage and the lesser arm takes a uniform cut per instance in
+/// the cull pass; both are asserted here to produce the *same frame*, byte for
+/// byte.
+///
+/// That is a real claim rather than a tautology, and it is one this scene's
+/// camera and budget make available: at a one-pixel budget from two units off
+/// the patch's near edge every group is expanded, so the per-cluster cut is the
+/// whole of level 0 and the uniform cut's level is 0 — the same triangles by two
+/// entirely different routes, one through an index pool and a vertex stage and
+/// one through cluster records and a mesh stage.
+///
+/// **It is also why this is a pixel comparison and not the comparison.** Move
+/// the camera back or raise the budget and the two paths diverge *by design*:
+/// the per-cluster cut mixes levels across the surface where the uniform one
+/// cannot, and the frames stop being equal. What stays true at every camera is
+/// that the uniform cut's level is the finest level the per-cluster cut draws,
+/// and that is asserted in numbers by `crcbl-shaders`'
+/// `the_uniform_level_is_the_finest_level_the_per_cluster_cut_draws` and on real
+/// devices by `crcbl-vk`'s
+/// `the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is`.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_dunes_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::Dunes,
+        "dunes",
+        MIN_COLORS_DUNES,
+        the_dunes_patch_fills_the_lower_frame_and_leaves_the_sky_alone,
+    );
+}
+
 /// The sprite scene on both geometry paths — see
 /// [`draw_scene_on_every_geometry_path`].
 ///
@@ -453,9 +573,16 @@ fn draw_scene_on_every_geometry_path(
     let mut frames: Vec<(GeometryPath, Image)> = Vec::new();
     let mut adapter_offers_mesh = None;
 
+    // **Both mesh-stage flags come out of the lesser arm, not just the one that
+    // names the path.** `Features::TASK_SHADER` is an amplification stage in
+    // front of a mesh stage, so a backend asked for it enables the mesh stage
+    // too — and a device that ended up on `MeshShader` after `MESH_SHADER` was
+    // subtracted is a self-comparison wearing a cross-path label, which is the
+    // failure the assertion below reports.
+    let mesh_stage = Features::MESH_SHADER.union(Features::TASK_SHADER);
     for optional in [
-        OffscreenSetup::OPTIONAL_FEATURES.union(Features::MESH_SHADER),
-        OffscreenSetup::OPTIONAL_FEATURES.difference(Features::MESH_SHADER),
+        OffscreenSetup::OPTIONAL_FEATURES.union(mesh_stage),
+        OffscreenSetup::OPTIONAL_FEATURES.difference(mesh_stage),
     ] {
         let mut setup = OffscreenSetup::open_with(EXTENT.0, EXTENT.1, scene, optional)
             .unwrap_or_else(|why| panic!("a GPU backend opens for the {name} scene: {why}"));
