@@ -5971,11 +5971,20 @@ so there is no UAV of one. The refusal is correct and its message is excellent.
 It has now caught the same mistake **twice**: the draw-generation counters, and
 the LOD hysteresis state.
 
-**The general fix belongs in `crcbl-hal`**: `NullDevice::create_bind_group`
-raising a validation error when a `read_only: false` entry names a mappable
-buffer would turn every existing null-backend test in the workspace into this
-check, on every machine, with no ICD. It was not written because it is a
-`crcbl-hal` change and the slice that hit the bug owned `crcbl-render`.
+**Done.** `NullDevice` refuses a `read_only: false` entry naming a mappable
+buffer at `create_bind_group` and `update_bind_group`, and `MemoryLocation`
+carries the rule with its D3D12 mechanism. Nothing in the tree violated it, so
+there was no third latent instance. Read-only bindings of host-visible buffers
+stay legal — removing that exemption fails 28 tests, which is the measure of how
+load-bearing it is.
+
+**The same divergence exists for images and is still uncovered.**
+`crcbl_dx12::validate::check_image` refuses _any_ non-`DeviceLocal` image at
+`create_image`, while `ImageDesc::memory`'s doc says only "almost always
+`DeviceLocal`" and the null backend accepts a host-visible image happily. It is
+the identical shape — a thing three backends permit and D3D12 refuses, invisible
+until CI — one call earlier in the object lifetime, and it is the obvious next
+instance of the decision just taken for buffers.
 
 **What blocks writing it from outside `crcbl-hal`:** the null backend does not
 record bind-group _contents_. `Detail::BindGroup` keeps the layout handle and an

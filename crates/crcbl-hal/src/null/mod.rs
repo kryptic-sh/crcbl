@@ -1809,8 +1809,61 @@ impl NullDevice {
             }
             check_resource_kind(declared.kind, &entry.resource, entry.binding)?;
             self.check_binding(&entry.resource)?;
+            self.check_shader_writable_memory(declared.kind, &entry.resource, entry.binding)?;
         }
         Ok(())
+    }
+
+    /// Refuses a host-visible buffer filling a binding a shader can write.
+    ///
+    /// The seam's rule, stated on
+    /// [`MemoryLocation`](crate::MemoryLocation): a buffer a shader writes is
+    /// [`MemoryLocation::DeviceLocal`] and nothing else, because D3D12's upload
+    /// and readback heaps admit no unordered access view. `crcbl-dx12` refuses
+    /// it too, at the binding it builds the view for — but a violation that only
+    /// that backend catches is one nobody sees until CI runs WARP, which has
+    /// twice cost a device. The null backend is the reference implementation, so
+    /// the class is refused here where every no-GPU test meets it.
+    ///
+    /// Read-only storage bindings are untouched: a host-visible buffer behind a
+    /// `StructuredBuffer` is the engine's staged-table shape and legal on all
+    /// four backends.
+    ///
+    /// The buffer's location is read from the record the seam already keeps,
+    /// not inferred from whether it materialised bytes — that is a proxy, and
+    /// the proxy is what the check would drift away from.
+    fn check_shader_writable_memory(
+        &self,
+        kind: crate::BindingKind,
+        resource: &crate::BindingResource,
+        binding: u32,
+    ) -> Result<(), HalError> {
+        let (
+            crate::BindingKind::StorageBuffer {
+                read_only: false, ..
+            },
+            crate::BindingResource::Buffer { buffer, .. },
+        ) = (kind, resource)
+        else {
+            return Ok(());
+        };
+        let state = self.recorder.lock();
+        let Some(object) = state.get(ObjectKind::Buffer, buffer.to_bits()) else {
+            return Err(HalError::invalid_handle("buffer", *buffer));
+        };
+        let Detail::Buffer { memory, .. } = &object.detail else {
+            unreachable!("a buffer handle always carries buffer detail");
+        };
+        if matches!(memory, MemoryLocation::DeviceLocal) {
+            return Ok(());
+        }
+        Err(HalError::InvalidDescriptor(format!(
+            "binding {binding} is a writable storage buffer and was given a {memory:?} buffer; a \
+             buffer a shader writes must be MemoryLocation::DeviceLocal, because D3D12's upload \
+             and readback heaps refuse D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS at creation and \
+             pin the resource to a state a shader cannot write from. Read-only storage bindings of \
+             a host-visible buffer are unaffected"
+        )))
     }
 
     fn check_binding(&self, resource: &crate::BindingResource) -> Result<(), HalError> {

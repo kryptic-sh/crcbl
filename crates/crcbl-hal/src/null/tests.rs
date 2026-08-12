@@ -2764,6 +2764,103 @@ fn a_bind_group_is_checked_against_its_layout() {
     assert!(error.to_string().contains('0'), "{error}");
 }
 
+/// **A host-visible buffer cannot fill a binding a shader writes**, and it can
+/// still fill every read-only one.
+///
+/// The seam rule [`MemoryLocation`] states: D3D12's upload and readback heaps
+/// admit no unordered access view, so the combination the other three backends
+/// permit is one that removes a D3D12 device. `crcbl-dx12` refuses it at the
+/// view it would have built; the null backend refuses the class, so a call site
+/// meets it in the no-GPU suite instead of on a WARP run.
+///
+/// The read-only half is the assertion that keeps the refusal honest. Every
+/// uniform block and every staged instance and material table in the engine is a
+/// host-visible buffer behind a read-only binding, so a check that refused those
+/// too would take the engine down rather than the bug.
+#[test]
+fn a_host_visible_buffer_cannot_fill_a_writable_storage_binding() {
+    let instance = NullInstance::gpu_driven();
+    let device = open(&instance);
+
+    let layout_of = |read_only| {
+        device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("staged instances"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    kind: BindingKind::StorageBuffer {
+                        read_only,
+                        dynamic: false,
+                    },
+                    count: 1,
+                    flags: crate::BindingFlags::empty(),
+                }],
+            })
+            .expect("a storage-buffer layout")
+    };
+    let writable = layout_of(false);
+    let readable = layout_of(true);
+
+    let buffer_in = |memory| {
+        device
+            .create_buffer(&BufferDesc {
+                label: Some("instances"),
+                size: 64,
+                usage: BufferUsage::STORAGE,
+                memory,
+            })
+            .expect("the null backend always allocates")
+    };
+    let group_of = |layout, buffer| {
+        device.create_bind_group(&BindGroupDesc {
+            label: None,
+            layout,
+            entries: &[BindGroupEntry {
+                binding: 3,
+                array_index: 0,
+                resource: crate::BindingResource::whole_buffer(buffer),
+            }],
+            variable_count: None,
+        })
+    };
+
+    // What the rule forbids, in both host-visible locations.
+    for memory in [MemoryLocation::HostUpload, MemoryLocation::HostReadback] {
+        let buffer = buffer_in(memory);
+        let error =
+            group_of(writable, buffer).expect_err("a host-visible buffer bound for writing");
+        let text = error.to_string();
+        assert!(matches!(error, HalError::InvalidDescriptor(_)), "{error:?}");
+        assert!(text.contains("binding 3"), "{memory:?}: {text}");
+        assert!(text.contains(&format!("{memory:?}")), "{memory:?}: {text}");
+        assert!(text.contains("DeviceLocal"), "{memory:?}: {text}");
+        assert!(
+            text.contains("ALLOW_UNORDERED_ACCESS"),
+            "{memory:?}: {text}"
+        );
+
+        // ...and the same buffer through a read-only binding is the engine's
+        // own staged-table shape, which must stay legal.
+        let group = group_of(readable, buffer).unwrap_or_else(|why| {
+            panic!("a read-only binding of a {memory:?} buffer is legal everywhere: {why}")
+        });
+        device.destroy_bind_group(group);
+        device.destroy_buffer(buffer);
+    }
+
+    // And the location the rule requires passes through both.
+    let device_local = buffer_in(MemoryLocation::DeviceLocal);
+    for layout in [writable, readable] {
+        let group = group_of(layout, device_local).expect("a device-local storage buffer");
+        device.destroy_bind_group(group);
+    }
+
+    device.destroy_buffer(device_local);
+    device.destroy_bind_group_layout(writable);
+    device.destroy_bind_group_layout(readable);
+}
+
 /// `update_bind_group` on a layout without `UPDATE_AFTER_BIND` is the error
 /// `Device::update_bind_group` promises, and `crcbl-vk` produces. The null
 /// backend used to accept it, which made the doc untestable.

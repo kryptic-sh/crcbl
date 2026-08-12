@@ -197,6 +197,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A buffer a shader writes must be `DeviceLocal`, and the seam says so now.**
+  D3D12's upload and readback heaps refuse `ALLOW_UNORDERED_ACCESS` at creation
+  and pin the resource to a state a shader cannot write from, so there is no
+  unordered access view of one — and that rule lived only in `crcbl-dx12`, where
+  a caller reading the seam could not find it. It has cost a D3D12 device twice.
+  `MemoryLocation` documents it with the mechanism, `BufferUsage::STORAGE` and
+  `BindingKind::StorageBuffer::read_only` point at it, and the **null backend
+  refuses it** at `create_bind_group` and `update_bind_group`.
+
+  **This is deliberately stricter than Vulkan and Metal**, which both permit it
+  and where it can be a real optimisation on unified memory. The seam exists so
+  that code working on one backend works on all four, and this particular
+  divergence does not degrade — it removes the device. If host-visible shader
+  writes are ever wanted they are a `Features` flag with a documented fallback,
+  not a silent per-backend difference.
+
+  **Read-only storage bindings of host-visible buffers are untouched**, which is
+  how every uniform and read-only table in the engine works — dropping that
+  exemption fails 28 tests across the sample crates, which is what says the
+  carve-out is load-bearing rather than decorative. Nothing in the tree violated
+  the new rule: the two devices it cost were already fixed.
+
 - **Per-cluster culling now skips work, not just output.** The mesh dispatch was
   CPU-bounded at `(cluster_count, slot_count, 1)`, so a rejected cluster still
   had its workgroup launched and returned early. `draw_gen.slang` writes a

@@ -108,6 +108,13 @@ pub enum BindingKind {
     StorageBuffer {
         /// Whether the shader only reads it. Read-only lets a backend place it
         /// more cheaply and lets the graph merge more barriers.
+        ///
+        /// `false` also constrains which buffers may fill the slot: every one
+        /// must be in
+        /// [`MemoryLocation::DeviceLocal`](crate::MemoryLocation::DeviceLocal),
+        /// because D3D12 has no unordered access view of a host-visible
+        /// resource. [`MemoryLocation`](crate::MemoryLocation) states the rule
+        /// and the mechanism; `create_bind_group` is where it is enforced.
         read_only: bool,
         /// Whether the binding takes a dynamic offset at bind time.
         dynamic: bool,

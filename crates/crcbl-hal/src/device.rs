@@ -702,7 +702,10 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// # Errors
     ///
     /// [`HalError::InvalidHandle`] for a stale layout or resource, or
-    /// [`HalError::InvalidDescriptor`] if an entry does not match the layout.
+    /// [`HalError::InvalidDescriptor`] if an entry does not match the layout —
+    /// including a host-visible buffer filling a writable storage binding,
+    /// which every backend refuses because D3D12 cannot express it. See
+    /// [`MemoryLocation`](crate::MemoryLocation).
     fn create_bind_group(&self, desc: &BindGroupDesc<'_>) -> Result<BindGroupHandle, HalError>;
 
     /// Updates entries of an existing bind group in place.

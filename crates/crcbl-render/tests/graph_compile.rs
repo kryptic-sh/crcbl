@@ -1726,10 +1726,21 @@ fn the_engine_passes_offer_every_shader_artifact_they_have() {
 /// before the frame, and then `docs/plan/25-lod.md`'s hysteresis state, which
 /// was host-visible so the CPU could zero it once at build.
 ///
-/// Neither could fail anywhere else. Vulkan, Metal and wgpu all bind a
-/// host-visible storage buffer writably without complaint, and D3D12 does not
-/// build on the machine this is usually run on — so the whole class arrives as
-/// a red CI leg or not at all. This runs with no ICD in the room.
+/// # What this still adds now the seam refuses the class
+///
+/// [`MemoryLocation`](crcbl_hal::MemoryLocation) states the rule and
+/// [`create_bind_group`](crcbl_hal::Device::create_bind_group) enforces it, so
+/// every buffer below would also fail `DrawGen::new` on any backend — the null
+/// one included. That covers the two devices this cost, and it covers them from
+/// a `read_only: false` in a **layout**.
+///
+/// This asserts the other end: that the *buffer* is device-local, whoever binds
+/// it and however the binding is declared. `read_only` is an assertion about
+/// what the shader does, not something anything checks against the shader, so a
+/// slot mislabelled `read_only: true` over a `RWStructuredBuffer` is a layout
+/// the seam believes and D3D12 still dies on. That is the gap this covers, and
+/// it is why the list below is the buffers a shader writes rather than the
+/// bindings a layout calls writable.
 ///
 /// # What the assertion actually reads
 ///

@@ -62,6 +62,10 @@ bitflags::bitflags! {
         /// Bound as a storage buffer. The engine's default: vertex pulling,
         /// instance arrays, material tables and the visible-instance list are
         /// all storage buffers.
+        ///
+        /// A storage buffer a **shader writes** must live in
+        /// [`MemoryLocation::DeviceLocal`] — see that type for why. The
+        /// read-only ones named above are free to be host-visible, and are.
         const STORAGE = 1 << 3;
         /// Bound with [`bind_index_buffer`](crate::CommandEncoder::bind_index_buffer).
         const INDEX = 1 << 4;
@@ -106,6 +110,33 @@ bitflags::bitflags! {
 /// `crcbl-vk` wraps `gpu-allocator` around (`docs/plan/02-vulkan-backend.md`
 /// §2.1), and they are the three that map onto Metal's `private`/`shared` and
 /// DX12's `DEFAULT`/`UPLOAD`/`READBACK` without invention.
+///
+/// # A buffer a shader writes must be [`DeviceLocal`](Self::DeviceLocal)
+///
+/// Filling a writable storage binding — a
+/// [`BindingKind::StorageBuffer`](crate::BindingKind::StorageBuffer) with
+/// `read_only: false` — with a buffer in either host-visible location is a seam
+/// violation, refused by
+/// [`create_bind_group`](crate::Device::create_bind_group). **Read-only
+/// bindings of a host-visible buffer are unaffected**, which is how every
+/// uniform block and every staged table in the engine is bound.
+///
+/// The rule is D3D12's. Its `UPLOAD` and `READBACK` heaps reject
+/// `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS` at resource creation, and they
+/// pin the resource to `GENERIC_READ` and `COPY_DEST` respectively for its whole
+/// lifetime — so there is neither a view a shader could write through nor a
+/// state it could write from. `CreateUnorderedAccessView` returns `void`: it
+/// writes no descriptor, reports nothing, and the device is removed at the next
+/// call.
+///
+/// Vulkan and Metal both permit the combination, and on unified memory it can be
+/// a genuine optimisation. The seam gives that up deliberately. A capability
+/// three backends have and one does not is exactly what the seam exists to keep
+/// out of call sites, and this one does not degrade on the fourth backend — it
+/// removes the device, somewhere only a WARP run ever looks. If host-visible
+/// shader writes are ever wanted they arrive as a
+/// [`Features`](crate::Features) flag with a documented fallback, not as a
+/// silent per-backend difference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MemoryLocation {
     /// GPU-local, not CPU-mappable. Everything the GPU reads in a hot loop.
