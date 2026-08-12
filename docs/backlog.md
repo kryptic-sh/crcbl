@@ -5808,6 +5808,76 @@ layout error — run on every adapter, so that half is not skip-shaped.
   its own pass with its own `DrawGen` and its own history. Not done because
   nothing yet shows the near cascade wants a different figure from the far one.
 
+## Mobile input for the demo games, and how much of it is already free
+
+The Pages site is the main way anyone sees this engine, and a phone visitor can
+currently do nothing at all. Requested for **breakout, horde and flappy** — the
+three whose controls survive a touchscreen.
+
+**The surprise from surveying it: single touch already reaches the engine.**
+`web/engine/shell.js` listens on
+`pointerdown`/`pointermove`/`pointerup`/`pointerenter`, and Pointer Events unify
+mouse, pen and touch — so a tap or drag on a phone already arrives as a
+`ShellEvent::Button` / `PointerMotion` today, with no seam change and no new
+backend. **What is missing is that no sample binds pointer input at all**: every
+one of them declares `Binding::Key(..)` and nothing else. So the cheap half of
+this is bindings and page ergonomics, not plumbing.
+
+### Per game, cheapest first
+
+- **flappy — nearly free.** One action, one tap. `Binding::MouseButton` on the
+  flap action and a phone works. This is the one to do first, and it is the
+  proof that the pointer path carries touch.
+- **breakout — needs one new binding kind.** The paddle wants an **absolute**
+  pointer position, and `Binding` has `MouseButton`, `MouseMotion` (a _delta_)
+  and `MouseScroll` — nothing that says "where the finger is". A drag composed
+  from deltas works but drifts and cannot be re-grabbed. Adding
+  `Binding::PointerPosition` (or an `Axis1` fed by it) is the honest fix and is
+  small; the alternative is a game-side hack in one sample, which is the wrong
+  place.
+- **horde — needs the real thing.** Movement is a stick, so this is topic 19's
+  post-MVP row: on-screen controls as `crcbl-ui` widgets emitting virtual-device
+  events, a bindable device like any other. Multi-touch matters here (move and
+  aim at once) and that is where single-pointer emulation genuinely stops being
+  enough.
+- **asteroids — deliberately not in scope**, and the reason should be recorded
+  rather than inferred: rotate, thrust and fire are three concurrent controls on
+  a screen with no room for them, and every phone layout for that shape is worse
+  than the keyboard one. If it is ever wanted, it wants a redesigned control
+  scheme rather than buttons bolted to the existing one.
+- **hud** — no game input by design; already recorded.
+
+### Page ergonomics, which nothing has
+
+- **`touch-action: none` on the canvas.** Without it the browser claims the
+  gesture for scrolling and zooming, and `pointermove` stops arriving mid-drag.
+  This is the single most likely reason a first attempt "does not work" despite
+  the events being wired.
+- `layout.html` sets `width=device-width, initial-scale=1` and nothing else; a
+  game canvas also wants zoom suppressed so a double-tap does not scale the
+  page.
+- **The "click the canvas to focus" affordance is meaningless on touch**, and
+  the `demo-window.html` keys partial tells a phone user to press keys they do
+  not have. Both need a touch-aware variant.
+
+### What the native seam still lacks
+
+`ShellEvent` has `PointerMotion`, `Button`, `PointerFocus` and `Wheel` and **no
+touch variant at all** — no contact id, no phase, no multi-touch. That is fine
+for the web demos, which is what was asked for, and it is the gap to close
+before claiming mobile support generally. Topic 19 already schedules on-screen
+controls post-MVP "with mobile-web interest" and its `ActionMap` sketch already
+has a `touch:` slot, so the design exists and only the implementation is
+missing.
+
+### Testing
+
+The browser gate dispatches key events (`web/tools/browser-e2e.mjs`'s
+`EXPECTATIONS` carries a `key` per demo). A touch path needs its own coverage —
+synthesised pointer events with `pointerType: 'touch'` — or it will be the one
+input path nothing exercises. Note `apps/hud` already sets `key: null`, so the
+harness has a precedent for a demo whose input is not a keypress.
+
 ## Profiling and benchmarking: decisions taken 2026-08-13, before any code
 
 `docs/plan/40-profiling.md` is new and specifies the whole thing; it is a
