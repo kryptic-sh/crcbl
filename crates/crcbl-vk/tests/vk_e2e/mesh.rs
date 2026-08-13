@@ -1130,6 +1130,128 @@ fn per_cluster_culling_rejects_the_clusters_a_camera_hides() {
     headless.finish();
 }
 
+/// `crcbl::screenshot`'s trough — the open box scaled into a long narrow room
+/// and lifted so its floor is the plane `y = 0` — slid `offset` units along its
+/// own run.
+///
+/// The engine's own **non-rigid** instance, and the arrangement that found the
+/// bug the test below guards. Its numbers are copied rather than referred to
+/// because `crcbl-vk` cannot depend on `crcbl`; a trough of some other size
+/// would not be evidence about the scene this came from.
+fn trough(offset: f32) -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(offset, 1.0, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::new(6.0, 2.0, 1.6))
+}
+
+/// The camera that scene is drawn with: straight down into the trough from just
+/// above its walls. `+Z` up, because the view direction is `Y`.
+fn trough_camera() -> crcbl_render::Camera {
+    crcbl_render::Camera {
+        eye: glam::Vec3::new(0.0, 2.2, 0.0),
+        target: glam::Vec3::ZERO,
+        up: glam::Vec3::Z,
+        projection: crcbl_render::Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// **A cluster's bounding sphere is scaled by its instance, and a scene-sized
+/// instance is where that stops being free.**
+///
+/// [`per_cluster_culling_rejects_the_clusters_a_camera_hides`] places the box by
+/// translation alone, so every count there is the same whether or not the cull
+/// scales a radius. This one is the trough: the same five clusters under a
+/// `6 x 2 x 1.6` scale, which multiplies each face's real extent by up to six
+/// while its mesh-space radius stays `0.71`.
+///
+/// | trough | clusters from the box | what a mesh-space radius reported |
+/// | --- | --- | --- |
+/// | centred under the camera | 5 | 3 — both long walls lost |
+/// | three units along its run | 5 | 1 — everything but one wall lost |
+/// | forty units along its run | 0 | 0 |
+///
+/// The middle row is the defect `docs/backlog.md` recorded as "a large open box
+/// offset laterally from the camera stops drawing entirely": the trough spans
+/// `x = 0..6` there and the near half of its floor fills a good part of the
+/// frame, while a sphere of radius `0.71` about a centre three units off-axis is
+/// entirely outside the left plane. The instance cull above it keeps the
+/// instance — [`crcbl_render::cull::visible_instances`] works on the mesh's
+/// *box*, which the transform scales correctly — so the frame comes back as
+/// clear colour with the counters reporting a draw, and this counter is the only
+/// thing in the frame that can say why.
+///
+/// The last row is what stops the first two being satisfied by a cull that
+/// rejects nothing: forty units out the trough is gone, radius and all. Which
+/// clusters go in each case is worked out in `crcbl_render::cull` —
+/// `a_scaled_trough_slid_across_the_camera_keeps_the_floor_it_still_shows` and
+/// `a_scaled_instances_cluster_sphere_still_contains_its_geometry` — where the
+/// answer is arithmetic and the geometry's own vertices say what is on screen.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_scaled_instance_keeps_the_clusters_its_own_size_puts_on_screen() {
+    let headless = Headless::open_for_mesh_with(
+        Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,
+    );
+    if !headless.device.caps().supports(Features::TASK_SHADER) {
+        eprintln!(
+            "vk e2e: no TASK_SHADER on this device; per-cluster culling cannot run. radv and \
+             lavapipe both report it, and `docs/backlog.md` is where a driver that does not belongs"
+        );
+        headless.finish();
+        return;
+    }
+
+    let mut pool = crcbl_render::TransientPool::new();
+    let mut renderer = crcbl_render::ForwardRenderer::new(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+    )
+    .expect("the forward renderer builds an amplification stage");
+    assert!(
+        renderer.culls_clusters(),
+        "the renderer must have *built* the amplification stage, or every count \
+         below is the un-amplified path's and says nothing about culling"
+    );
+
+    let camera = trough_camera();
+    let faces = crcbl_shaders::mesh::OPEN_BOX_FACES.len() as u32;
+    renderer.set_open_box(None);
+    let without = surviving_clusters(&headless, &mut renderer, &mut pool, &camera);
+    assert_eq!(
+        without, 1,
+        "the cube is one cluster and it is under this camera, which is what every \
+         count below is measured against"
+    );
+
+    for offset in [0.0f32, 3.0] {
+        renderer.set_open_box(Some(trough(offset)));
+        let with = surviving_clusters(&headless, &mut renderer, &mut pool, &camera);
+        eprintln!("vk e2e: clusters with the trough {offset} units along its run: {with}");
+        assert_eq!(
+            with,
+            without + faces,
+            "a trough this size keeps every cluster from straight above it; a cull \
+             carrying the mesh-space radius across reports fewer, and the missing \
+             ones are the floor and the walls the frame is made of"
+        );
+    }
+
+    renderer.set_open_box(Some(trough(40.0)));
+    let away = surviving_clusters(&headless, &mut renderer, &mut pool, &camera);
+    assert_eq!(
+        away, without,
+        "forty units out the whole trough is outside the frustum, radius and all — \
+         without this the counts above are satisfied by a cull that rejects nothing"
+    );
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
 /// What one frame's draw-argument pass produced, as far as the mesh path's
 /// dispatch is concerned.
 struct GeneratedDispatch {

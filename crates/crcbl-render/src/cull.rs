@@ -238,11 +238,16 @@ impl Frustum {
 /// [`Frustum::from_view_projection`] the instance cull is handed. `bounds` is
 /// in the mesh's own space, which is what makes the transform necessary at all.
 ///
-/// [`GpuInstance::transform`] must be rigid — its own documented obligation —
-/// so the sphere moves exactly: the centre through the whole matrix, the radius
-/// unchanged, and the cone axis through the 3×3 with its length intact. A
-/// scaled transform would need the radius scaled with it, and nothing in this
-/// engine produces one.
+/// **The sphere is moved by the whole transform, scale included.** The centre
+/// goes through the matrix, the radius is multiplied by the largest factor the
+/// 3×3 can stretch a length by, and the cone axis is the 3×3 applied to it and
+/// then made a unit vector again — which is the world-space form of the rule for
+/// any transform that preserves angles, and conservative for one that does not.
+/// This used to take the radius across unchanged and lean on
+/// [`GpuInstance::transform`] being rigid; the engine's own scenes are not —
+/// `crcbl::screenshot`'s trough is the open box scaled by `6 × 2 × 1.6` — and an
+/// instance-sized sphere standing in for a scene-sized one rejects clusters that
+/// fill half the frame.
 ///
 /// # The two halves
 ///
@@ -265,12 +270,18 @@ pub fn cluster_survives_cull(
     transform: Mat4,
     bounds: &ClusterBounds,
 ) -> bool {
+    let basis = Mat3::from_mat4(transform);
     let center = transform.transform_point3(Vec3::from_array(bounds.center));
-    let radius = bounds.radius;
+    let radius = bounds.radius * max_stretch(basis);
     if !frustum.intersects_sphere(center, radius) {
         return false;
     }
-    let axis = Mat3::from_mat4(transform) * Vec3::from_array(bounds.cone_axis);
+    // A unit axis, so the two sides of the cone inequality below are in the same
+    // units: the left is a length along the axis and the right is a length in
+    // world space. Left unnormalised, a transform that scales by `s` multiplies
+    // one side and not the other, which is a cone test that answers differently
+    // for the same shape at two sizes.
+    let axis = (basis * Vec3::from_array(bounds.cone_axis)).normalize_or_zero();
     let to_center = center - camera;
     let sine = (1.0 - bounds.cone_cutoff * bounds.cone_cutoff)
         .max(0.0)
@@ -278,6 +289,34 @@ pub fn cluster_survives_cull(
     let faces_away =
         bounds.cone_cutoff > 0.0 && axis.dot(to_center) > sine.mul_add(to_center.length(), radius);
     !faces_away
+}
+
+/// The largest factor by which `basis` can grow a vector's length, bounded from
+/// above — what a bounding *sphere*'s radius has to be multiplied by to still
+/// bound the transformed cluster.
+///
+/// That factor is `basis`' largest singular value, and this bounds it rather
+/// than computing it: `σ_max² = λ_max(BᵀB)`, and a symmetric matrix's spectral
+/// radius is at most any induced norm of it, so the largest absolute row sum of
+/// `BᵀB` is an upper bound on `σ_max²`. Bounding is the safe direction for a
+/// cull, and the bound is **exact** whenever `basis`' columns are orthogonal —
+/// every rotation-then-scale, which is every transform this engine builds —
+/// because `BᵀB` is then diagonal and its rows are the columns' squared lengths.
+///
+/// The alternative, `max` over the columns' lengths, is exact on the same
+/// matrices and *under*-estimates on a sheared one, which is the direction that
+/// drops geometry. This form needs no contract about what a caller may pass.
+///
+/// `1.0` for a rotation or a translation, so nothing that was already correct
+/// moves.
+fn max_stretch(basis: Mat3) -> f32 {
+    let gram = basis.transpose() * basis;
+    let row_sum = |row: usize| {
+        (0..3)
+            .map(|column| gram.col(column)[row].abs())
+            .sum::<f32>()
+    };
+    (0..3).map(row_sum).fold(0.0f32, f32::max).sqrt()
 }
 
 /// The instances `frustum` keeps, as indices into `instances`.
@@ -914,6 +953,179 @@ mod tests {
             point_form, 3,
             "the radius-free form drops the two walls whose planes this camera has \
              crossed, which is the difference the term exists to make"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // A cluster's sphere under a scaled instance
+    // -----------------------------------------------------------------------
+
+    /// `crcbl::screenshot`'s trough: the open box scaled into a long narrow room
+    /// and lifted so its floor is the plane `y = 0`.
+    ///
+    /// The engine's own non-rigid instance, copied here rather than referred to
+    /// because `crcbl-render` cannot depend on `crcbl` — and the numbers are what
+    /// the two tests below are about, so a trough of some other size would not be
+    /// evidence about the scene that found this.
+    fn trough(offset: Vec3) -> Mat4 {
+        Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0) + offset)
+            * Mat4::from_scale(Vec3::new(6.0, 2.0, 1.6))
+    }
+
+    /// The camera that scene is drawn with: straight down into the trough from
+    /// just above its walls, `+Z` up because the view direction is `Y`.
+    fn trough_camera() -> Camera {
+        Camera {
+            eye: Vec3::new(0.0, 2.2, 0.0),
+            target: Vec3::ZERO,
+            up: Vec3::Z,
+            projection: Projection::Perspective {
+                fov_y: core::f32::consts::FRAC_PI_3,
+                near: 0.01,
+            },
+        }
+    }
+
+    /// **A cluster's bounding sphere has to bound the cluster after the instance
+    /// transform, and a scaled instance is where that stops being free.**
+    ///
+    /// [`ClusterBounds::radius`] is a distance in the *mesh's* own space. The
+    /// cull needs one in world space, and the two are the same number only for a
+    /// transform that preserves length. This walks the open box's real vertices
+    /// through the trough's transform and measures how far each cluster's
+    /// furthest one actually gets from its transformed centre.
+    ///
+    /// Both halves are asserted, and the second is what makes the first mean
+    /// something:
+    ///
+    /// * the scaled radius **contains** every vertex, which is the property a
+    ///   bounding sphere is; and
+    /// * the unscaled radius **does not** — by more than a factor of four on the
+    ///   floor — so a test that passed with the scaling removed would be
+    ///   asserting nothing.
+    ///
+    /// A wrongly small sphere is not a slightly worse cull. It is a cluster that
+    /// covers half the frame reported as entirely outside a plane it straddles,
+    /// which is the frame `docs/backlog.md` recorded as coming back clear.
+    #[test]
+    fn a_scaled_instances_cluster_sphere_still_contains_its_geometry() {
+        let clusters = crcbl_shaders::meshlet::open_box_clusters();
+        let vertices = crcbl_shaders::mesh::open_box_vertices();
+        let transform = trough(Vec3::ZERO);
+        let stretch = max_stretch(Mat3::from_mat4(transform));
+        assert_eq!(
+            stretch, 6.0,
+            "the trough's longest axis is its run, and the bound is exact for an \
+             axis-aligned scale"
+        );
+
+        let mut escaped_the_local_radius = 0usize;
+        for cluster in &clusters.clusters {
+            let bounds = &cluster.bounds;
+            let center = transform.transform_point3(Vec3::from_array(bounds.center));
+            let run = cluster.vertex_offset as usize;
+            let furthest = clusters.vertices[run..run + cluster.vertex_count as usize]
+                .iter()
+                .map(|&vertex| {
+                    let position = vertices[vertex as usize].position;
+                    let world = transform.transform_point3(Vec3::new(
+                        position[0],
+                        position[1],
+                        position[2],
+                    ));
+                    (world - center).length()
+                })
+                .fold(0.0f32, f32::max);
+            assert!(
+                furthest <= bounds.radius * stretch,
+                "the scaled radius must bound the transformed cluster: {furthest} \
+                 reached against {}",
+                bounds.radius * stretch
+            );
+            if furthest > bounds.radius {
+                escaped_the_local_radius += 1;
+            }
+        }
+        assert_eq!(
+            escaped_the_local_radius,
+            clusters.clusters.len(),
+            "every cluster of a trough this size outgrows its mesh-space radius, so \
+             a cull carrying that radius across is testing a sphere that contains \
+             none of them"
+        );
+    }
+
+    /// **The trough slid along its own run keeps the floor that is still on
+    /// screen** — the defect `docs/backlog.md` recorded as "a large open box
+    /// offset laterally from the camera stops drawing entirely".
+    ///
+    /// Three units along `+X`, the trough spans `x = 0..6` and the camera looks
+    /// straight down at the origin, so the near half of its floor fills a good
+    /// part of the frame — which this states by projecting the floor cluster's
+    /// own vertices rather than by asserting it. The cull must therefore keep
+    /// that cluster, and with a mesh-space radius it does not: `0.71` against the
+    /// `3.10` the floor actually reaches, which puts its whole sphere outside the
+    /// left plane.
+    ///
+    /// The instance cull one layer up keeps this instance from every offset here
+    /// — [`visible_instances`] works on the mesh's *box*, which the transform
+    /// scales correctly — so nothing before the amplification stage notices, and
+    /// the frame comes back as clear colour with the counters reporting a draw.
+    #[test]
+    fn a_scaled_trough_slid_across_the_camera_keeps_the_floor_it_still_shows() {
+        let clusters = crcbl_shaders::meshlet::open_box_clusters();
+        let vertices = crcbl_shaders::mesh::open_box_vertices();
+        let camera = trough_camera();
+        let view_projection = camera.view_projection(256.0 / 192.0);
+        let frustum = Frustum::from_view_projection(view_projection);
+        let floor = &clusters.clusters[0];
+        assert_eq!(
+            crcbl_shaders::mesh::OPEN_BOX_FACES[0].name,
+            "floor",
+            "cluster zero is the face this test is about"
+        );
+
+        for offset in [2.6f32, 3.0, 4.0] {
+            let transform = trough(Vec3::X * offset);
+            // The floor is on screen, and this is the measurement that says so:
+            // at least one of its vertices lands inside the unit clip box in
+            // front of the eye.
+            let run = floor.vertex_offset as usize;
+            let on_screen = clusters.vertices[run..run + floor.vertex_count as usize]
+                .iter()
+                .filter(|&&vertex| {
+                    let position = vertices[vertex as usize].position;
+                    let clip = view_projection
+                        * (transform
+                            * Vec3::new(position[0], position[1], position[2]).extend(1.0));
+                    clip.w > 0.0
+                        && (clip.x / clip.w).abs() <= 1.0
+                        && (clip.y / clip.w).abs() <= 1.0
+                        && clip.z / clip.w >= 0.0
+                })
+                .count();
+            assert!(
+                on_screen > 0,
+                "the trough {offset} units along its run must still show floor, or \
+                 there is nothing here for a cull to wrongly reject"
+            );
+            assert!(
+                cluster_survives_cull(&frustum, camera.eye, transform, &floor.bounds),
+                "the floor puts {on_screen} of its vertices in the frame from {offset} \
+                 units out and the cull rejected it — that is the box that stops \
+                 drawing"
+            );
+        }
+
+        // And the cull still rejects: the same trough far enough out is gone, so
+        // the assertions above are not satisfied by a rule that keeps everything.
+        let away = trough(Vec3::X * 40.0);
+        assert!(
+            !clusters
+                .clusters
+                .iter()
+                .any(|cluster| cluster_survives_cull(&frustum, camera.eye, away, &cluster.bounds)),
+            "forty units out the whole trough is outside the frustum, radius and all"
         );
     }
 }

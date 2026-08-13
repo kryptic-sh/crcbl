@@ -744,6 +744,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A scaled instance's clusters were culled as if it were unscaled, so geometry
+  silently vanished.** `cluster_survives` carried a cluster's mesh-space
+  bounding radius into a world-space frustum test, documented as safe because
+  `GpuInstance::transform` "is rigid" — a claim already false in two shipped
+  scenes, where the true world radius is four to five times the local one. A
+  large scaled object offset from the camera therefore lost every cluster and
+  drew nothing, on devices with an amplification stage; the instance-level cull
+  kept it correctly, which is why nothing upstream noticed.
+
+  The radius is scaled by the square root of the largest absolute row sum of
+  `BᵀB` — an upper bound on the basis's largest singular value, exact for any
+  rotation-then-scale, and needing no contract about what callers may pass,
+  which is what the previous code needed and did not have. It is `1.0` for a
+  rigid transform, so nothing previously correct moved and no golden changed.
+  The transformed cone axis is normalised for the same reason: unnormalised, the
+  same shape at two sizes got two answers.
+
 - **A press made before a panel opened fired that panel's buttons.** `UiState`
   latches while the pointer is down, so a pointer already held when a menu
   appears latched whatever button appeared beneath it and fired it on release —

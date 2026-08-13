@@ -6073,6 +6073,41 @@ recorded in `docs/plan/18-render-features.md`. What is left:
   last-writer-wins and the file is not a stable baseline. That is why the
   bit-identical check above compared captured output rather than re-blessing.
 
+## `GpuInstance::transform` claims to be rigid and is not
+
+Its doc says "Rigid (rotation + translation), so its upper-left 3×3 transforms
+normals correctly without an inverse-transpose", declared
+character-for-character in four `.slang` files plus Rust and held there by an
+equality test. **It is false** for two shipped scenes: the `Scene::Ao` trough is
+`scale(6, 2, 1.6)` and `Scene::Spot`'s floor is a cube scaled `6 × 0.2 × 6`.
+
+The culling half of that lie is fixed (see the cluster-radius entry). The normal
+half is not, and it is a different failure: a non-uniformly scaled instance
+shades with a normal that is not perpendicular to its surface, which reads as
+lighting that is subtly wrong rather than geometry that vanishes.
+
+Two ways out, and it is a decision rather than a fix:
+
+- **Make the claim true** — forbid non-uniform scale in an instance transform
+  and push it into the mesh. Cheap to state, expensive for callers, and the two
+  scenes above would have to change.
+- **Make the code true** — carry an inverse-transpose, or renormalise after
+  transforming. Costs bytes in `GpuInstance` or work in the shader, and touches
+  all five declarations plus three shaders' artifacts.
+
+Nothing observable is known to be wrong today, which is why this is a decision
+and not an incident. But it is a documented contract nothing enforces, and the
+culling bug is what happens when one of those goes unexamined for long enough.
+
+## An audio test failed once and has not repeated
+
+`apps/asteroids`'
+`audio::tests::the_engine_is_one_looping_voice_that_outlives_its_buffer` failed
+once inside a full `cargo test` with "the engine's release block was cut", then
+passed five times in isolation and on three subsequent full-suite runs.
+Observed, not diagnosed; nothing near it had changed. Recorded so a second
+sighting is a pattern rather than a surprise.
+
 ## A timing test started its clock after the thread it was timing
 
 `crcbl-mtl`'s `a_wait_sleeps_until_the_presented_handler_reports` asserts the
@@ -6100,11 +6135,6 @@ than its size:
 `docs/plan/18-render-features.md`'s AO section holds the decisions and the
 reasons. What the first slice deferred or turned up:
 
-- **A large open box offset laterally from the camera stops drawing entirely** —
-  clear-colour frame, on _both_ geometry paths, while the instance passes a
-  host-side `Frustum` test. **Pre-existing**: it reproduces with the prepass
-  draws disabled, so it is not AO's. `Scene::Ao` is centred to stay clear of it.
-  This is the most alarming thing the slice found and nobody has chased it.
 - **The forward pass still clears and re-writes depth**, so the prepass buys AO
   its depth and nothing else — the overdraw win is deliberately deferred because
   it needs `GreaterOrEqual` and depth invariance across four rasterisers, which
@@ -6192,16 +6222,28 @@ are not re-argued:
 
 What is left:
 
-- **`cluster_survives` does not scale a cluster's bounding radius by the
-  instance transform** (`mesh_cluster.slang`, and its Rust oracle
-  `cluster_survives_cull`). Correct for the rigid transform
-  `GpuInstance::transform` documents, and 8× too small for the cube scaled into
-  a floor — so on a device with an amplification stage the floor's clusters are
-  rejected from the spot's tight frustum and the receiver is absent from its own
-  shadow map. Invisible today (a receiver that does not self-shadow is what a
-  correct bias produces anyway, and both paths agree pixel for pixel), but it is
-  a hole waiting for a tighter frustum. Pre-existing; documented at the
-  assertion in `vk_e2e/shadow.rs`.
+- **Fixed: `cluster_survives` carried a mesh-space radius into a world-space
+  test.** This and the "large open box stops drawing" entry were **one bug seen
+  from two ends** — a cluster's bounding radius was not scaled by the instance
+  transform, so a scaled instance's clusters were rejected while the instance
+  itself was correctly kept. Both files documented it as safe because
+  `GpuInstance::transform` "is rigid", and that claim was **already false in two
+  shipped scenes**: the open-box floor's true world radius is 3.10 against a
+  local 0.71, and `Scene::Spot`'s floor 4.24 against 0.87.
+
+  The radius is now multiplied by `max_stretch`, the square root of the largest
+  absolute row sum of `BᵀB` — an upper bound on the basis's largest singular
+  value that is **exact** for any rotation-then-scale and needs no contract
+  about what callers may pass, which is the point: the old code needed one and
+  did not have it. It is `1.0` for a rigid transform, so nothing previously
+  correct moved and no golden changed. The transformed cone axis is normalised
+  in the same function for the same reason — unnormalised, `dot(axis, d)` scaled
+  with the transform while the radius term did not, so the same shape at two
+  sizes got two answers.
+
+  **Only the amplification path was affected** — `IndirectCount` drew the box at
+  every offset — which is why the earlier note said "both paths" and was wrong.
+
 - **The cube's face seams are unpadded, and the plan's mitigation is not
   built.** `tile_pcf` clamps taps half a texel inside the tile, so a receiver
   within one texel of a face boundary re-samples its own edge texel instead of

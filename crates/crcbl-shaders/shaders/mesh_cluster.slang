@@ -571,15 +571,51 @@ uint group_is_live(uint3 group)
          * min(1u, max(draw.cluster_count, group.x) - group.x);
 }
 
+/// The largest factor by which `basis` can grow a vector's length, bounded from
+/// above — what a bounding *sphere*'s radius has to be multiplied by to still
+/// bound the transformed cluster.
+///
+/// That factor is `basis`' largest singular value, and this bounds it rather
+/// than computing it: `sigma_max^2 = lambda_max(B^T B)`, and a symmetric
+/// matrix's spectral radius is at most any induced norm of it, so the largest
+/// absolute row sum of `B^T B` is an upper bound on `sigma_max^2`. Bounding is
+/// the safe direction for a cull, and the bound is **exact** whenever `basis`'
+/// columns are orthogonal — every rotation-then-scale, which is every transform
+/// this engine builds — because `B^T B` is then diagonal and its rows are the
+/// columns' squared lengths.
+///
+/// The alternative, `max` over the columns' lengths, is exact on the same
+/// matrices and *under*-estimates on a sheared one, which is the direction that
+/// drops geometry. This form needs no contract about what a caller may pass.
+///
+/// `1.0` for a rotation or a translation, so nothing that was already correct
+/// moves. `crcbl_render::cull`'s `max_stretch` is this function in Rust and
+/// `cluster_survives_cull` is the oracle a test compares this whole rule to.
+float max_stretch(float3x3 basis)
+{
+    float3x3 gram = mul(transpose(basis), basis);
+    float bound = 0.0;
+    for (uint row = 0; row < 3; ++row)
+    {
+        bound = max(bound, abs(gram[row][0]) + abs(gram[row][1]) + abs(gram[row][2]));
+    }
+    return sqrt(bound);
+}
+
 /// Whether a cluster of an instance may contribute a pixel: `1` to draw it, `0`
 /// to reject it.
 ///
 /// **The cull is in world space**, which is where the frustum already is: the
 /// planes are `cull.slang`'s own for this frame, and `frame.camera_position` is
-/// world-space too. `GpuInstance::transform` is rigid — its own documented
-/// obligation, the same one the normal transform above rests on — so the
-/// bounding sphere moves exactly: the centre by the whole matrix, the radius
-/// not at all, and the cone axis by the 3x3 with its length intact.
+/// world-space too. The sphere is carried there by the **whole** transform: the
+/// centre by the matrix, the radius by `max_stretch` below, and the cone axis by
+/// the 3x3 and then made a unit vector again.
+///
+/// The radius used to be carried across unchanged, on the grounds that
+/// `GpuInstance::transform` is rigid. The engine's own scenes are not —
+/// `crcbl::screenshot`'s trough is the open box scaled by `6 x 2 x 1.6` — and an
+/// instance-sized sphere standing in for a scene-sized one rejects clusters that
+/// fill half the frame, which is geometry silently missing from the picture.
 ///
 /// # Frustum
 ///
@@ -613,8 +649,9 @@ uint group_is_live(uint3 group)
 /// normal for every possible view.
 uint cluster_survives(Meshlet cluster, float4x4 transform)
 {
+    float3x3 basis = (float3x3)transform;
     float3 center = mul(transform, float4(cluster.center_x, cluster.center_y, cluster.center_z, 1.0)).xyz;
-    float radius = cluster.radius;
+    float radius = cluster.radius * max_stretch(basis);
 
     for (uint plane = 0; plane < PLANE_COUNT; ++plane)
     {
@@ -625,8 +662,18 @@ uint cluster_survives(Meshlet cluster, float4x4 transform)
         }
     }
 
-    float3 axis = mul((float3x3)transform,
+    // A **unit** axis, so the two sides of the inequality below are in the same
+    // units: the left is a length along the axis and the right is a length in
+    // world space. Left as the raw product, a transform that scales by `s`
+    // multiplies one side and not the other, which is a cone test answering
+    // differently for the same shape at two sizes. `normalize` of a zero vector
+    // is a NaN, so the length is taken first and a degenerate basis — a zero
+    // scale, which draws nothing anyway — leaves the axis at zero and the
+    // cluster kept.
+    float3 axis = mul(basis,
                       float3(cluster.cone_axis_x, cluster.cone_axis_y, cluster.cone_axis_z));
+    float axis_length = length(axis);
+    axis = axis_length > 0.0 ? axis / axis_length : float3(0.0, 0.0, 0.0);
     float3 to_center = center - frame.camera_position.xyz;
     float sine = sqrt(max(0.0, 1.0 - cluster.cone_cutoff * cluster.cone_cutoff));
     if (cluster.cone_cutoff > 0.0
