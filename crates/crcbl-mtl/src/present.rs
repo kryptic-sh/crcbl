@@ -276,6 +276,13 @@ mod tests {
         assert!(ledger.record_present(7));
 
         let reported = Arc::new(AtomicBool::new(false));
+        // **Before the spawn, not after.** The handler's sleep starts the moment
+        // the thread runs, which is somewhere inside `spawn` — so a clock
+        // started afterwards is already behind it, and the lower bound below can
+        // miss by however long the spawn took. CI caught that at 39.932915ms
+        // against a 40ms delay: sixty-seven microseconds of slack, and a flake
+        // that says nothing about the mechanism under test.
+        let started = Instant::now();
         let handler = {
             let ledger = Arc::clone(&ledger);
             let reported = Arc::clone(&reported);
@@ -286,7 +293,6 @@ mod tests {
             })
         };
 
-        let started = Instant::now();
         let outcome = ledger
             .wait_until_shown(7, GENEROUS)
             .expect("the handler reports well inside the timeout");

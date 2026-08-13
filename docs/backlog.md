@@ -6073,6 +6073,28 @@ recorded in `docs/plan/18-render-features.md`. What is left:
   last-writer-wins and the file is not a stable baseline. That is why the
   bit-identical check above compared captured output rather than re-blessing.
 
+## A timing test started its clock after the thread it was timing
+
+`crcbl-mtl`'s `a_wait_sleeps_until_the_presented_handler_reports` asserts the
+wait blocked for at least `HANDLER_DELAY` (40 ms), and took `Instant::now()`
+**after** spawning the handler thread. The handler's sleep begins the moment the
+thread runs, which is somewhere inside `spawn`, so the clock was already behind
+it by however long the spawn took. CI caught it at **39.932915 ms** —
+sixty-seven microseconds short — after months of passing.
+
+Fixed by starting the clock before the spawn. Worth knowing for its shape rather
+than its size:
+
+- **It made the assertion sound, not tighter.** Moving the clock earlier can
+  only increase the measured elapsed, so the lower bound got easier to pass.
+  What it removed was the window in which a correct implementation could fail
+  it. The check still has teeth against what it exists for — a
+  `wait_until_shown` that returns immediately elapses in microseconds —
+  confirmed by mutating the wait to return at once and watching it go red.
+- **The local suite could not have found it.** It is a race whose window is a
+  thread spawn, and it fired once in CI and never in twenty consecutive local
+  runs of the same test.
+
 ## What screen-space AO left owed
 
 `docs/plan/18-render-features.md`'s AO section holds the decisions and the
