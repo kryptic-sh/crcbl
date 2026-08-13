@@ -638,6 +638,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **wgpu reported a bindless ceiling no layout could be built at.**
+  `max_bindless_descriptors` came straight from wgpu's
+  `max_binding_array_elements_per_shader_stage`, which is the count
+  `create_bind_group_layout` will not _reject_ — not one it will _accept_. wgpu
+  eagerly creates a descriptor pool for 64 sets when a layout is registered, so
+  radv's 8,388,606 asked the driver for roughly 537 million descriptors in one
+  call and got `OUT_OF_HOST_MEMORY`, out of the very call the `u32::MAX` count
+  sentinel resolves through. It is capped at the 500,000 wgpu commits to in
+  writing for any device with binding arrays, the same reasoning `crcbl-dx12`
+  gives for reporting the tier 2 heap constant on a tier 3 device: `Limits` is
+  documented as what the backend _guarantees_.
+
+  The portable bindless declaration therefore failed on every adapter generous
+  enough to report a large ceiling, and worked on the software one CI pins —
+  which is why the wgpu suite was green in CI and red on real hardware.
+
 - **The samples' profiler HUD was timing the first eight passes of a fourteen-
   pass frame.** Every sample picked its own `MAX_TIMED_PASSES` — a literal that
   has to track how many passes the renderer records, and that nothing made track

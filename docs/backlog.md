@@ -6231,16 +6231,18 @@ What is left:
   dev-dep, as `crcbl-vk` has, was not taken.
 - **Metal and D3D12 have never run the readback.** Cross-target type-checks
   only, as ever.
-- **One wgpu e2e test passes only on lavapipe.**
-  `a_wgpu_bind_group_layout_wgpu_rejects_arrives_as_an_error_from_the_call`
-  fails on radv with `Backend("wgpu create_bind_group_layout: Out of Memory")`
-  and passes under `CRCBL_WGPU_ICD=…/lvp_icd.json`, which is what CI pins — so
-  CI is green and a local run on real hardware reports a false failure.
-  **Pre-existing and unrelated to the readback work**, confirmed by running the
-  suite at `HEAD` in a clean worktree. The test asserts wgpu refuses a layout;
-  radv refuses it with a different error, so the assertion is really about which
-  driver is underneath. Worth either pinning the ICD in the script the way
-  `run-vk-e2e.sh` does, or asserting the refusal rather than its wording.
+- **`crcbl-wgpu` enumerates `Backends::all()`, which includes OpenGL — a
+  platform the matrix declined.** The right expression is
+  `wgpu::Backends::PRIMARY`, which is `VULKAN | METAL | DX12 | BROWSER_WEBGPU`
+  on every target with no `cfg`, and `SECONDARY` is GL alone; the browser would
+  lose only the WebGL2 fallback, also declined. **Not taken, because the trade
+  is real**: measured with `VK_LOADER_DRIVERS_DISABLE='*'`, a Vulkan-less Linux
+  box currently gets the GL adapter and passes all 28 wgpu e2e tests, honestly
+  declining `DESCRIPTOR_INDEXING` and `DRAW_INDIRECT_COUNT` rather than claiming
+  them. Narrowing to `PRIMARY` turns that into no adapter at all.
+  `create_native`'s own doc already claims Vulkan/Metal/DX12 while the code says
+  otherwise, so whichever way this goes, one of the two is wrong today.
+  **Decision wanted.**
 - **The whole counters section lags the frame by one, uniformly.** The panel is
   gathered in `draw_debug_overlay`, which runs before `GameGpu::frame` records
   anything. Stated in the module docs and asserted by

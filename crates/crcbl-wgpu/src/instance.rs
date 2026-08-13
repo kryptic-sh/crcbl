@@ -237,11 +237,36 @@ pub(crate) fn wgpu_features_for(wanted: Features, available: wgpu::Features) -> 
     out.intersection(available)
 }
 
+/// The largest bindless array this backend promises, whatever the adapter says.
+///
+/// wgpu's `max_binding_array_elements_per_shader_stage` is the count
+/// `create_bind_group_layout` will not *reject*, and an adapter answers it with
+/// its theoretical ceiling — radv reports over eight million. It is not a count
+/// a layout can be **built** at: wgpu's Vulkan backend creates a descriptor pool
+/// covering a fixed batch of sets the moment a layout carrying a binding array
+/// is registered, so a layout declared at that ceiling asks the driver for the
+/// ceiling times the batch in one allocation and the driver answers
+/// `VK_ERROR_OUT_OF_HOST_MEMORY`. It arrives as
+/// `Backend("wgpu create_bind_group_layout: Out of Memory")` out of the very
+/// call the [`u32::MAX`](crcbl_hal::BindGroupLayoutEntry::count) sentinel
+/// resolves through, so the portable bindless declaration failed on every
+/// adapter generous enough to report a large ceiling and worked on the software
+/// one CI pins.
+///
+/// [`Limits`] is documented as ceilings the backend *guarantees*, so this one is
+/// the figure wgpu commits to in writing — "if binding arrays are supported, all
+/// devices can support 500,000" — rather than the one the adapter hopes for.
+/// Same reasoning `crcbl-dx12` gives for reporting the tier 2 heap constant on a
+/// tier 3 device: the largest number the API states is the largest one this
+/// backend can stand behind.
+const MAX_BINDING_ARRAY_ELEMENTS: u32 = 500_000;
+
 /// wgpu limits → seam limits, kept consistent with the reported features.
 ///
 /// The two that used to disagree are the ones keyed off a feature here:
 /// reporting a 128-byte push-constant budget while `PUSH_CONSTANTS` is absent
-/// is a promise no call can keep.
+/// is a promise no call can keep. The bindless ceiling is bounded on top of
+/// that, for the reason [`MAX_BINDING_ARRAY_ELEMENTS`] gives.
 pub(crate) fn hal_limits_for(limits: &wgpu::Limits, features: wgpu::Features) -> Limits {
     let hal_features = hal_features_for(features);
     Limits {
@@ -252,7 +277,9 @@ pub(crate) fn hal_limits_for(limits: &wgpu::Limits, features: wgpu::Features) ->
         max_uniform_buffer_range: limits.max_uniform_buffer_binding_size,
         max_bind_groups: limits.max_bind_groups,
         max_bindless_descriptors: if hal_features.contains(Features::DESCRIPTOR_INDEXING) {
-            limits.max_binding_array_elements_per_shader_stage
+            limits
+                .max_binding_array_elements_per_shader_stage
+                .min(MAX_BINDING_ARRAY_ELEMENTS)
         } else {
             0
         },
@@ -649,6 +676,38 @@ mod tests {
             "without a count buffer, one indirect call emits its own draws only"
         );
         assert!(!hal_features_for(wgpu::Features::empty()).contains(Features::PUSH_CONSTANTS));
+    }
+
+    /// **The bindless ceiling is one a layout can be built at, not one wgpu
+    /// merely declines to reject.**
+    ///
+    /// An adapter's own answer is its theoretical maximum — radv says
+    /// 8 388 606 — and the `u32::MAX` sentinel resolves straight through this
+    /// field, so reporting it made the portable bindless declaration ask wgpu
+    /// for a descriptor pool no driver will allocate and come back with
+    /// "Out of Memory" from `create_bind_group_layout`. An adapter that reports
+    /// *less* than the bound still keeps its own answer: this is a ceiling on
+    /// the promise, not a floor under it.
+    #[test]
+    fn the_bindless_ceiling_is_bounded_by_what_a_layout_can_be_built_at() {
+        let bindless = wgpu::Features::all();
+        assert!(hal_features_for(bindless).contains(Features::DESCRIPTOR_INDEXING));
+
+        let mut generous = wgpu::Limits::defaults();
+        generous.max_binding_array_elements_per_shader_stage = u32::MAX;
+        assert_eq!(
+            hal_limits_for(&generous, bindless).max_bindless_descriptors,
+            MAX_BINDING_ARRAY_ELEMENTS,
+        );
+
+        let modest = MAX_BINDING_ARRAY_ELEMENTS / 2;
+        let mut small = wgpu::Limits::defaults();
+        small.max_binding_array_elements_per_shader_stage = modest;
+        assert_eq!(
+            hal_limits_for(&small, bindless).max_bindless_descriptors,
+            modest,
+            "a device with a smaller ceiling than the bound must report its own",
+        );
     }
 
     /// Push constants are never advertised, however capable the adapter is.
