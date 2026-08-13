@@ -1040,9 +1040,60 @@ fn ui_draw_list(extent: (u32, u32)) -> DrawList {
     list
 }
 
+/// A forward scene an **application** built for itself: what to draw, where it
+/// is seen from, and the sun it stands under.
+///
+/// The way in for a caller whose room is not one of the [`Scene`] variants —
+/// `apps/lumen` is the first, and the reason this exists. Everything below the
+/// renderer is the same offscreen path either way: the surface, the adapter
+/// pin, the ring, the barriers around the readback and the row unpadding are
+/// [`OffscreenSetup`]'s, and a sample rebuilding them for itself is
+/// `docs/plan/sample/00-samples-overview.md` rule 1's "reaching around the
+/// facade".
+///
+/// The renderer is the application's because
+/// [`ForwardRenderer::with_scene`](crate::render::ForwardRenderer::with_scene)
+/// is: the description, the material rows, the page and the instances are all
+/// the caller's, and there is no shape this module could take that would not be
+/// a second scene vocabulary beside `crcbl_render::scene`.
+///
+/// # The punctual lights are not here
+///
+/// They are already the renderer's, through
+/// [`ForwardRenderer::set_lights`](crate::render::ForwardRenderer::set_lights),
+/// and a field here would be a second place for them to be set — the sun is
+/// separate only because
+/// [`begin_frame`](crate::render::ForwardRenderer::begin_frame) takes it as an
+/// argument.
+#[allow(missing_debug_implementations)]
+pub struct ForwardScene {
+    /// Where the frame is seen from.
+    pub camera: Camera,
+    /// The sun it is lit by — the light that owns the ambient term and the
+    /// shadow cascades.
+    pub sun: DirectionalLight,
+    /// The renderer, built and filled by the caller.
+    ///
+    /// Boxed because it is much the largest thing here: it carries the geometry
+    /// pools and the instance ring, and moving one by value is a memcpy of all
+    /// of it.
+    pub renderer: Box<ForwardRenderer>,
+}
+
+impl From<ForwardScene> for SceneState {
+    fn from(scene: ForwardScene) -> Self {
+        Self::Forward {
+            camera: scene.camera,
+            light: scene.sun,
+            renderer: scene.renderer,
+        }
+    }
+}
+
 /// The renderer, and the content, for the scene being drawn.
 ///
-/// One variant per [`Scene`]; the frame's per-scene work is the two arms of
+/// One variant per [`Scene`], plus the [`ForwardScene`] an application supplies;
+/// the frame's per-scene work is the three arms of
 /// [`OffscreenSetup::draw_and_readback`] and nothing else keys off it.
 enum SceneState {
     /// Every scene drawn through [`ForwardRenderer`]: one camera, one sun and
@@ -1555,6 +1606,50 @@ impl OffscreenSetup {
         )
     }
 
+    /// [`Self::open`] drawing a [`ForwardScene`] the **caller** built, rather
+    /// than one of the [`Scene`] variants this module owns.
+    ///
+    /// `build` is handed the device, the graphics queue and the surface format
+    /// the ring was created with — everything
+    /// [`ForwardRenderer::with_scene`](crate::render::ForwardRenderer::with_scene)
+    /// needs — and hands back the renderer it filled, the camera and the sun.
+    /// The frame it draws is [`Self::draw_and_readback`]'s, unchanged: same
+    /// passes, same barriers, same tightly packed bytes in [`Self::format`]'s
+    /// channel order.
+    ///
+    /// The device asks for [`Self::OPTIONAL_FEATURES`], so the room is drawn on
+    /// the best path the adapter offers — [`Self::caps`] is what says which that
+    /// was.
+    ///
+    /// A `build` that fails hands its error back and **nothing is left behind**:
+    /// the swapchain, the surface and the device are released before this
+    /// returns, exactly as a failing [`Scene`] arm's are.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::open`], plus whatever `build` returns.
+    pub fn open_forward<F>(width: u32, height: u32, build: F) -> Result<Self, OffscreenError>
+    where
+        F: FnOnce(&dyn Device, QueueHandle, Format) -> Result<ForwardScene, OffscreenError>,
+    {
+        // The same two refusals `open_with` makes, and for the same reason: an
+        // absurd size costs a comparison rather than a device.
+        if width == 0 || height == 0 {
+            return Err(OffscreenError::Unusable("a frame must be at least 1x1"));
+        }
+        if width > MAX_DIMENSION || height > MAX_DIMENSION {
+            return Err(OffscreenError::TooLarge { width, height });
+        }
+
+        Self::open_built(
+            crate::backend::open()?,
+            width,
+            height,
+            Self::OPTIONAL_FEATURES,
+            |device, queue, format| build(device, queue, format).map(SceneState::from),
+        )
+    }
+
     /// [`Self::open`] on an instance that has already been opened.
     ///
     /// The split exists so the barrier test below can drive the whole of
@@ -1569,6 +1664,24 @@ impl OffscreenSetup {
         height: u32,
         scene: Scene,
         optional_features: Features,
+    ) -> Result<Self, OffscreenError> {
+        Self::open_built(instance, width, height, optional_features, |d, q, f| {
+            SceneState::open(scene, d, q, f)
+        })
+    }
+
+    /// Everything both entry points do once the scene is somebody's decision:
+    /// surface, adapter, device, ring — then whichever renderer `build` makes.
+    ///
+    /// One body rather than two, because a second copy is where the adapter pin,
+    /// the ring depth or the teardown-on-refusal below would come to differ
+    /// between the engine's own scenes and an application's.
+    fn open_built(
+        instance: Box<dyn Instance>,
+        width: u32,
+        height: u32,
+        optional_features: Features,
+        build: impl FnOnce(&dyn Device, QueueHandle, Format) -> Result<SceneState, OffscreenError>,
     ) -> Result<Self, OffscreenError> {
         let extent = (width, height);
 
@@ -1620,7 +1733,19 @@ impl OffscreenSetup {
             })
             .map_err(OffscreenError::Surface)?;
 
-        let scene = SceneState::open(scene, device.as_ref(), queue, format)?;
+        let scene = match build(device.as_ref(), queue, format) {
+            Ok(scene) => scene,
+            Err(error) => {
+                // Nothing has been submitted, so nothing is in flight — but the
+                // ring and the surface still have to go back, or a refused
+                // build leaks both. `Scene::Dunes`' "no amplification stage"
+                // refusal did exactly that: it destroyed its own renderer and
+                // left the swapchain and the surface behind.
+                device.destroy_swapchain(swapchain);
+                instance.destroy_surface(surface);
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             instance,

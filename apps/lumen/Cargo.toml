@@ -1,0 +1,55 @@
+[package]
+name = "lumen"
+description = "Lumen — the lighting acceptance fixture: one room, every effect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# **A library with a binary in front of it**, for one reason today and a second
+# one later. Today: `tests/golden.rs` is an integration test, and an integration
+# test can only reach the room it renders through a lib target — a bin crate has
+# no linkable artifact. Later: `docs/plan/sample/13-lumen.md`'s Scope asks for a
+# Pages web demo, which is `src/web.rs` beside `src/main.rs` on the shape
+# `apps/horde` already established.
+#
+# No `cdylib` yet, and that is the one place this differs from horde: the web
+# demo is deferred (see `docs/backlog.md`), and a dynamic library with no wasm
+# entry point in it is an artifact nothing links.
+#
+# The lib is not called `lumen`: a lib and a bin of the same name in one package
+# write the same file, which cargo calls an output filename collision.
+[lib]
+name = "crcbl_lumen"
+
+[[bin]]
+name = "lumen"
+path = "src/main.rs"
+
+# One engine dependency, like every other sample — with the `scene` feature on,
+# which is what this sample is the first consumer of. `crcbl::render::scene`'s
+# `Geometry::Flat` carries a `MeshClusters` and nothing above the seam can build
+# one: §3.5 makes the cluster build a bake step, so an application that
+# describes its own resident meshes needs `crcbl::scene::build_meshlets`. Every
+# other sample leaves the feature off and links no glTF parser.
+[dependencies]
+crcbl = { workspace = true, features = ["scene"] }
+
+# The golden suite's image I/O — comparison, diffs and PNG encoding. A
+# dev-dependency, which is the whole of `crcbl-golden`'s own manifest rule: it
+# reaches no shipped binary.
+[dev-dependencies]
+crcbl-golden = { workspace = true }
+
+[lints]
+workspace = true
+
+[features]
+# `tests/golden.rs` — the fixed camera's frame off a real device, against a
+# checked-in golden. Feature-gated *and* `#[ignore]`d, the same pair
+# `crcbl`'s `render-e2e` uses: a plain `cargo test --workspace --all-features`
+# on a machine with no GPU must stay green, and `tests/run-lumen-golden.sh` is
+# the only thing that turns it on — and it fails when the suite reports zero
+# tests run.
+golden-e2e = []

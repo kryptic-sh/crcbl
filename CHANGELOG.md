@@ -401,6 +401,41 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/lumen` — the lighting acceptance fixture, at milestone 1a.** One
+  indoor room, described by the sample rather than by the engine: nine meshes
+  baked from literals through `crcbl::scene::build_meshlets`, five material
+  rows, a two-layer base-colour page and its own `Capacities`. A window the sun
+  comes through, a mirror-grade panel, a rough metal block, a coloured wall and
+  a moving point light — plus a fixed camera the goldens are taken from, a
+  keyboard free-fly camera, and `--force-geometry` / `--force-binding` for
+  running the frame on a path below the one this device selects.
+
+  **The metal is near-black on purpose.** Ambient scales the diffuse albedo and
+  a conductor has none, so a fully metallic surface out of every light's
+  specular reach has nothing to shade with until screen-space reflections or
+  irradiance probes exist. The debug panel's `unbuilt` section says so on the
+  screen, and `docs/plan/sample/13-lumen.md` says what is still owed —
+  reflections, probes, ray tracing, the monitor camera, per-effect toggles and
+  the web demo.
+
+  `apps/lumen/tests/run-lumen-golden.sh` renders the fixed camera on a named
+  backend and checks five claims about **where** the frame is bright and dark
+  before comparing it against a golden. It is the first application scene in the
+  tree; every other frame draws `crcbl_render::scene::demo`.
+
+- **`crcbl::screenshot::OffscreenSetup::open_forward` and `ForwardScene`, so an
+  application can render its own scene offscreen.** `OffscreenSetup::open` takes
+  one of the engine's own `Scene` variants; this takes a closure handed the
+  device, the queue and the surface format, and returns the `ForwardRenderer`
+  the caller built along with its camera and sun. Everything below that — the
+  offscreen surface, the adapter pin, the swapchain ring, the barriers around
+  the readback and the row unpadding — is unchanged and shared, which is what
+  keeps a sample from rebuilding it.
+
+  Fixed alongside it: a scene that refused during `open` — `Scene::Dunes` on a
+  device with a mesh stage and no amplification stage — left its swapchain and
+  its surface behind.
+
 - **`crcbl::scene` — `crcbl-scene` behind the non-default `scene` feature, so an
   application can reach the bake its own meshes need.** A
   `render::scene::Geometry::Flat` carries a `MeshClusters` and a `Geometry::Dag`

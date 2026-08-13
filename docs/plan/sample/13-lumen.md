@@ -59,43 +59,67 @@ subject is 3D lighting and pixel art in front of it would be showing the wrong
 system. Rule 4's debug panel and rule 12's path reporting both apply, and a
 lighting fixture without them is not a fixture.
 
-## Status: not started, and it cannot start yet (2026-08-13)
+## Status: milestone 1a, and the blocker is gone (2026-08-14)
 
-**There is no `apps/lumen`, and building one today would not be this sample.**
-The blocker is not SSR or irradiance probes — those are merely unbuilt P7B rows.
-It is that **the engine has no way for an app to describe a scene**, so the room
-the Scope section asks for has no representation.
+**`apps/lumen` exists and renders the charter's room.** The blocker this section
+used to record — "the engine has no way for an app to describe a scene" — was
+answered by six slices in `crcbl-render`: the resident set is a `SceneDesc` an
+application writes, instances are `add_instance` / `set_instance` /
+`remove_instance`, `begin_frame` places nothing of its own, and `crcbl-scene`'s
+meshlet builder is reachable through `crcbl`'s non-default `scene` feature so an
+app can bake a mesh. `docs/backlog.md` carries what that left owed.
 
-What `crcbl::render::ForwardRenderer` offers an app is a **fixed resident set**,
-not a scene: `begin_frame` takes the cube's transform as an argument, and
-`set_pyramid`, `set_tinted_pyramid`, `set_textured_pyramid`, `set_open_box` and
-`set_dunes` place four more instances of meshes the renderer uploaded to itself
-in `new`. Each names one of three material rows the renderer also owns. There is
-no mesh-upload call, no instance call, and no material call above the pools —
-`MeshPool`, `InstancePool` and `MaterialTable` are public, but composing them
-means an app writing a second forward renderer, which sample rule 1 exists to
-forbid. `crcbl-scene`'s glTF importer is not reachable either: it is not a
-dependency of `crcbl`.
+### What milestone 1a delivers
 
-So, against the Scope section: the window, the mirror-grade surface, the rough
-metal surface and the coloured bounce wall each need geometry or a material this
-sample cannot author, and the per-effect toggles need switches `add_passes` does
-not have — it records the shadow, depth-prepass, light-grid, SSAO and SSAO-blur
-passes unconditionally. Only the moving light is buildable today (`set_lights`
-takes an arbitrary `&[Light]`), along with the free-fly camera, the debug panel
-and rule 12's path reporting.
+- **The room the Scope section names**, described by the sample rather than by
+  the engine: `crcbl_lumen::room` bakes nine meshes from literals through
+  `crcbl::scene::build_meshlets`, declares five material rows and a two-layer
+  page, and sizes its own `Capacities`. A window the sun comes through, a
+  mirror-grade panel, a rough metal block, a coloured wall, a moving point
+  light.
+- **Both cameras.** A fixed pose the goldens are taken from, and a keyboard
+  free-fly camera that starts at it; the pause menu's `CAMERA` row swaps them
+  and returns the free one to the golden pose.
+- **Rule 4's debug panel**, with three sections of the sample's own: the
+  selected paths, what is unbuilt, and where the camera is.
+- **Rule 12's path reporting**, in the panel and in the headless summary line,
+  with `--force-geometry` and `--force-binding` opening a device without the
+  features that select anything better. `IndirectPerBatch / ArrayPages` — the
+  browser's shape — runs on this desktop.
+- **A golden frame with five structural claims in front of it**
+  (`apps/lumen/tests/golden.rs`): the sun reaches the floor through the opening
+  and not beside it, the shaded floor is ambient rather than black, a conductor
+  has no ambient term, and the coloured wall's base-colour factor reached the
+  fragment stage. Each is a ratio between two blocks of pixels, and each is
+  re-run at twenty-five times the pixel count so it is a claim about the room
+  rather than about the sampling.
 
-**The roadmap already says this and the deliverable column contradicts it.**
-`docs/plan/ROADMAP.md`'s phase table orders S4B _after_ **P9** — "Assets +
-scenes: `AssetSource`, glTF import, RON scene format, hot reload; material
-templates + instances" — which is the phase that builds exactly what is missing.
-P7B's deliverable column nonetheless reads "lumen (13) renders the scene
-complete on `LightingPath::Rasterised`". Both cannot hold. The phase ordering is
-the one supported by the code: **lumen is a P9-dependent sample**, and P7B needs
-a different exit gate or a stated dependency on P9.
+### Two surfaces look broken and are not
 
-`docs/backlog.md` carries the engine work item, the option sizing, and the
-deferred web demo.
+**The mirror-grade panel and the rough metal block render near-black.** Ambient
+scales the _diffuse_ albedo and a conductor has none, so a fully metallic
+surface out of every light's specular reach has nothing left to shade with —
+[18-render-features.md](../18-render-features.md) is where the model is argued.
+What fills it in is a reflection, and both screen-space reflections and
+irradiance probes are unbuilt. Nothing here fakes it: the debug panel's
+`unbuilt` section says so on the screen where the black is, and
+`crcbl_lumen::room`'s module docs say it where a reader of the scene will find
+it.
+
+**The coloured wall does not bounce**, for the neighbouring reason. It is a
+coloured wall taking a low sun and a warm lamp; what a bounce would do to the
+room is milestone 3's picture. The fixed camera deliberately puts a floor in
+full sun beside a wall in shadow, which is the configuration global illumination
+would change most.
+
+### Still owed at this milestone, and where
+
+Recorded in `docs/backlog.md` rather than here: screen-space reflections,
+irradiance probes, ray tracing and the acceleration structures, the
+render-to-texture monitor camera, per-effect toggles for shadows and ambient
+occlusion (so there is no shadows-off or AO-off frame to compare against yet),
+the `[engine.video]` and programmatic-override layers of the toggle resolution
+order, the Pages web demo, and a CI leg that runs the golden suite.
 
 ## Milestones
 
