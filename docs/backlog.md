@@ -7626,13 +7626,15 @@ ten-minute job for somebody already in that file.
 `apps/lumen` could not be built because an application cannot describe a scene:
 `ForwardRenderer::begin_frame` takes the cube's transform as an argument, five
 `set_*` methods place instances of meshes the renderer holds the ids of, and
-there is no instance or material call on the type. The roadmap already put P9's
-scene work before S4B while P7B's deliverable named lumen. **Resolved by pulling
-the scene work forward**, rather than by moving lumen.
+there is no material call on the type. The roadmap already put P9's scene work
+before S4B while P7B's deliverable named lumen. **Resolved by pulling the scene
+work forward**, rather than by moving lumen.
 
 The resident set is a description now — `crcbl_render::scene` and
-`ForwardRenderer::with_scene`, with `new` as `with_scene(&scene::demo())`. What
-is left is everything below.
+`ForwardRenderer::with_scene`, with `new` as `with_scene(&scene::demo())` — and
+instances are a runtime API: `ForwardRenderer::add_instance` / `set_instance` /
+`remove_instance` over a `scene::InstanceDesc`, with the five `set_*` methods
+surviving as wrappers. What is left is everything below.
 
 ### The shape
 
@@ -7648,22 +7650,18 @@ already assign to P9.
 ### The slices left, in dependency order
 
 Each is independently committable and CI-green, and the six apps build at every
-boundary. **The first four must leave every golden byte-identical** — the demo
+boundary. **The first three must leave every golden byte-identical** — the demo
 scene is a caller of the new API rather than a special case inside the renderer,
 so a golden that moves in them is a bug in the move, not a re-bless.
 
-1. `add_instance`/`set_instance`/`remove_instance`, with the five `set_*`
-   methods surviving as wrappers so all 76 of their call sites are untouched.
-   This is also what retires `with_scene`'s positional reading of the
-   description — see the entry below.
-2. `begin_frame` loses its `model` argument; the cube becomes an ordinary
+1. `begin_frame` loses its `model` argument; the cube becomes an ordinary
    instance. Roughly a dozen call sites.
-3. App-supplied materials and page layers.
-4. App-supplied meshes, which is mostly making the failure paths honest.
-5. Reach the cook from an app: `crcbl-scene` behind a non-default `scene`
+2. App-supplied materials and page layers.
+3. App-supplied meshes, which is mostly making the failure paths honest.
+4. Reach the cook from an app: `crcbl-scene` behind a non-default `scene`
    feature so `gltf` does not reach a wasm binary, and the meshlet/DAG cook
    moved out of `crcbl-shaders/tools/cook-clusters.rs` into the crate.
-6. `apps/lumen` on top of it.
+5. `apps/lumen` on top of it.
 
 ### Flat meshes only, and why that is not negotiable yet
 
@@ -7725,12 +7723,12 @@ of the self-cleaning handover, or a rejected description leaks two device-local
 buffers.
 
 **Four of these are invisible to `cargo test`**: `crcbl-render`'s unit tests run
-on the null backend and cannot tell a right frame from a wrong one. Slices 2 and
-3 are verified by `run-render-e2e.sh` and `run-vk-e2e.sh` on a real device or
-they are not verified.
+on the null backend and cannot tell a right frame from a wrong one. Every
+remaining slice is verified by `run-render-e2e.sh` and `run-vk-e2e.sh` on a real
+device or it is not verified.
 
-What the landed slice did about each, so the next one does not re-derive it: row
-order is `SceneDesc::materials` order and `material_rows` inserts in it,
+What the landed slices did about each, so the next one does not re-derive it:
+row order is `SceneDesc::materials` order and `material_rows` inserts in it,
 asserted by `scene`'s
 `the_demo_scene_shades_by_omission_through_an_untinted_row`; ids are description
 order, asserted by `forward`'s
@@ -7740,23 +7738,21 @@ are built by walking the mesh list, so a duplicate is not refused but
 unspellable; and every description check runs from the top of
 `ForwardRenderer::check_scene`, before the first device object exists, which
 `a_refused_description_creates_nothing_at_all` reads off the recorder's live
-object count. The instance-index risk is untouched and belongs to the slice that
-adds a second instance.
+object count.
 
-### `with_scene` reads the description by position, and slice 1 above is what fixes it
-
-`ForwardRenderer` still has `cube_mesh`, `pyramid_mesh`, `open_box_mesh`,
-`dunes_mesh`, `untinted_material`, `tinted_material` and `textured_material`
-fields, because the five `set_*` methods and `begin_frame` are the only way to
-put an instance in the scene. So `with_scene` fills them from description
-positions — `DEMO_CUBE`…`DEMO_DUNES` and `DEMO_UNTINTED`…`DEMO_TEXTURED` in
-`crcbl-render/src/forward.rs` — and `check_scene` refuses a description with
-fewer meshes or rows than those name.
-
-That is honest but it is not the API: an application supplying four meshes of
-its own gets `set_pyramid` placing its second one. The positional constants and
-the refusal both go away with `add_instance`, which is why they are named for
-the demo rather than for a role.
+The instance-index risk is now **documented rather than removed**, on
+`ForwardRenderer::add_instance`: the index is the LOD hysteresis key and the
+pool reuses slots, so a slot freed by `remove_instance` hands the next object
+the previous occupant's expanded-group state. `group_state` is never cleared per
+instance — it is zeroed once at build by `DrawGen`'s start-up staging copy,
+which is where `draw_gen.slang`'s monotonicity induction starts. What the reuse
+costs is one frame selected against a history that is not this object's; every
+group is judged afresh, so it is never a wrong cut. **Not fixed, deliberately.**
+Fixing it is not a host write: the buffer is device-local because a shader
+writes it, so clearing one instance's `group_stride` words means work recorded
+inside a frame, and the existing per-frame clearing dispatch is explicitly the
+thing that must not touch this buffer. Unmeasured whether the pop is visible at
+all.
 
 ### Considered and declined in the description slice: a `SceneError`
 
@@ -7769,20 +7765,55 @@ slice, where `MeshPoolError::PoolExhausted` has to reach the caller un-flattened
 — that is a real distinction `HalError` cannot carry, and it is what would
 justify the type.
 
-### Coverage gap: a description that is not `scene::demo()`
+### `add_instance` cannot refuse a DAG the device cannot draw, and `set_dunes` can
 
-`with_scene` is generalised over any number of meshes, any number of DAGs and
-any page, but **nothing exercises more than one DAG or a mesh count other than
-the demo's four**. The concatenation that would break — `level_groups` laid end
-to end with each DAG's `first_group` offset handed to
-`ClusterDag::selection_records` — is written and type-checked and has never had
-a second DAG through it. Every golden and every e2e run uses `scene::demo()`.
+A mesh stage with no amplification stage — `Features::MESH_SHADER` without
+`Features::TASK_SHADER`, which is a real and supported device state — emits
+every cluster of a bucket, and for a DAG that is every level at once.
+`ForwardRenderer::set_dunes` refuses there and its `bool` says so;
+`add_instance` cannot, because its only error is `InstancePoolError` and "this
+device cannot choose a level" is not a full pool. **Documented instead**, on
+`add_instance`: a caller placing a `Geometry::Dag` mesh asks
+`ForwardRenderer::culls_clusters` first. Turning it into a refusal wants the
+error type the entry above declines, so the two decisions are the same one.
+Nothing checks that a caller obeys, and no test covers a `Geometry::Dag`
+instance placed on that device shape.
 
-Closing it means a second DAG in a test description and a null-backend assertion
-that the second one's `ClusterSelect` records name groups past the first's, plus
-a real-device frame that draws both. Cheap once instances are a runtime API;
-awkward before, because there is no `set_*` method to place an instance of a
-fifth mesh.
+### `place`'s swallowed pool-full failure, after the instance slice
+
+Unchanged, and deliberately so. `ForwardRenderer::place` — the body the five
+demo setters share — logs `InstancePoolError::PoolFull` and drops the object,
+because none of those five signatures says anything about a pool. What changed
+is that an application no longer goes through it: `add_instance` returns the
+error. So the swallowing is now confined to the demo wrappers, which the samples
+and the golden suite are the only callers of, and where a full pool means a
+caller filled a pool it also sized. The capacity slice decides whether that
+stays.
+
+### Coverage gap: a description that is not `scene::demo()` has never reached a device
+
+Half closed. `forward`'s
+`a_second_dag_reaches_its_own_groups_and_not_the_first_s` builds a five-mesh
+description with **two** DAGs on the null backend's mesh path, places an
+instance of each with `add_instance`, and asserts the three things a second DAG
+is the only thing that exercises: one mesh id per description mesh with the
+second DAG's level 0 a whole hierarchy past the first's, `DrawGen::group_stride`
+summing both DAGs' groups rather than taking the first's, and every
+`ClusterSelect` record of the second DAG naming a group in the second half of
+the concatenated `level_groups` — the `first_group` offset handed to
+`ClusterDag::selection_records`, which is zero for one DAG and so invisible with
+one. Both halves were shown red by dropping the offset and by suppressing the
+concatenation.
+
+**What is still not covered is a real device.** Every golden and every
+`run-render-e2e.sh` / `run-vk-e2e.sh` run is still `scene::demo()`, so no frame
+has ever been drawn from a description with two DAGs, a fifth mesh, or
+non-default `Capacities` — and the null backend cannot tell a right frame from a
+wrong one. Closing it means an end-to-end test that builds such a description
+and reads something back: the cluster-selection buffer through
+`ForwardRenderer::cluster_selection` is the observable that already exists, and
+asserting both DAGs' runs have clusters chosen in them needs no new golden
+image. Not done here to keep the slice to the API move.
 
 ### Open, and the one dependency call
 

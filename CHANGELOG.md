@@ -366,6 +366,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`ForwardRenderer::add_instance` / `set_instance` / `remove_instance`:
+  instances are a runtime API, so an application can put its own objects in the
+  scene.** `scene::InstanceDesc` is `{ mesh, material, transform }`, and both
+  indices are positions in the `SceneDesc` the renderer was built from — not
+  mesh table ids, which a DAG occupies one of per level and which a caller has
+  no way to know. `add_instance` returns an `InstanceHandle` or
+  `InstancePoolError::PoolFull`; a stale handle rewrites and removes nothing.
+
+  The five demo setters — `set_pyramid`, `set_tinted_pyramid`,
+  `set_textured_pyramid`, `set_open_box`, `set_dunes` — keep their exact
+  signatures and are wrappers over the new calls, so every caller is untouched,
+  `set_dunes` still reports whether the device can choose a level, and **no
+  golden moved**. `begin_frame`'s cube goes through `set_instance` too. The
+  renderer resolves any description's mesh and material indices now rather than
+  holding seven ids read out of `scene::demo`'s positions.
+
+  Two things a caller placing objects needs from the docs, both on
+  `add_instance`: an instance's **array index is the LOD hysteresis key**
+  (`draw_gen.slang` reads `instance_index * group_stride`), so a slot freed by
+  `remove_instance` hands the next object the previous occupant's expanded-group
+  history for one frame; and a `Geometry::Dag` mesh is not drawable on a device
+  with a mesh stage and no amplification stage, which is what
+  `ForwardRenderer::culls_clusters` answers.
+
 - **`crcbl_render::scene` and `ForwardRenderer::with_scene`: the resident set is
   a description now, not something the renderer uploads to itself.** `SceneDesc`
   — `meshes` + `materials` + `page` + `capacities` — is host-side data with no

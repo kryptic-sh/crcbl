@@ -48,6 +48,13 @@
 //!   one mesh would leave the second drawing nothing forever, which the bucket
 //!   table being derived from this list is what prevents.
 //!
+//! # Instances are the other half, and they are calls rather than data
+//!
+//! What is resident is fixed; *where the objects are* is not. So an
+//! [`InstanceDesc`] is handed to [`ForwardRenderer::add_instance`] at any point
+//! in a renderer's life, and it names its mesh and its material by **index into
+//! the description above** rather than by a table id only the renderer knows.
+//!
 //! # The engine's own scene is a caller of this
 //!
 //! [`demo`] is the cube, the pyramid, the open box and the dunes DAG — what the
@@ -57,6 +64,7 @@
 //! samples and the golden suite exercise the same path an application takes
 //! rather than a special case beside it.
 //!
+//! [`ForwardRenderer::add_instance`]: crate::forward::ForwardRenderer::add_instance
 //! [`ForwardRenderer::new`]: crate::forward::ForwardRenderer::new
 //! [`ForwardRenderer::with_scene`]: crate::forward::ForwardRenderer::with_scene
 
@@ -66,6 +74,7 @@ use crcbl_hal::HalError;
 use crcbl_shaders::cluster_dag::ClusterDag;
 use crcbl_shaders::mesh;
 use crcbl_shaders::meshlet::MeshClusters;
+use glam::Mat4;
 
 /// The second material's base colour, and the whole of what makes it visible.
 ///
@@ -420,6 +429,40 @@ pub struct SceneDesc<'a> {
     pub page: PageDesc<'a>,
     /// How much room each pool reserves.
     pub capacities: Capacities,
+}
+
+/// One object in the scene: which resident mesh it draws, which row it shades
+/// through, and where it is.
+///
+/// Handed to [`ForwardRenderer::add_instance`] and
+/// [`ForwardRenderer::set_instance`], at any point in a renderer's life — this
+/// is the half of the scene that is calls rather than data, for the reason the
+/// [module docs](self) open with.
+///
+/// # Both fields are description indices, not table ids
+///
+/// [`mesh`](Self::mesh) is an index into [`SceneDesc::meshes`] and
+/// [`material`](Self::material) one into [`SceneDesc::materials`] — the
+/// positions a caller wrote its own description in, which is the only numbering
+/// it has. Neither is the id the GPU reads: a DAG occupies one mesh table entry
+/// **per level**, so a description's fourth mesh is very often not table entry
+/// four, and an instance always names level 0's entry whatever level it ends up
+/// drawn at. The renderer holds that mapping and is what resolves it.
+///
+/// [`ForwardRenderer::add_instance`]: crate::forward::ForwardRenderer::add_instance
+/// [`ForwardRenderer::set_instance`]: crate::forward::ForwardRenderer::set_instance
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InstanceDesc {
+    /// Which [`SceneDesc::meshes`] entry this object draws.
+    pub mesh: usize,
+    /// Which [`SceneDesc::materials`] row it shades through.
+    ///
+    /// Row 0 is the one [`mesh::GpuInstance::default`] names, so it is what an
+    /// object shades through by omission — see [`SceneDesc::materials`].
+    pub material: usize,
+    /// Where it is: a **rigid** model matrix, on
+    /// [`mesh::GpuInstance::transform`]'s terms.
+    pub transform: Mat4,
 }
 
 /// The engine's own scene: the cube, the pyramid, the open box and the dunes
