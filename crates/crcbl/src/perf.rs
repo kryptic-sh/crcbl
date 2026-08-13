@@ -41,6 +41,13 @@
 //! else is subtracted, and the shell's idle wait is not in the frame span at all
 //! — [`Loop::frame`](crate::engine::Loop::frame) opens the span after it.
 //!
+//! # The frame's counters go on the same trace
+//!
+//! [`sample_counters`] is the other half of this module's vocabulary: the four
+//! names a frame's [`FrameCounters`] are sampled under, so a trace carries what
+//! the frame *drew* beside how long it took. The numbers themselves are
+//! [`crcbl_render::counters`]' — nothing here recounts them.
+//!
 //! **The subtraction is the whole point of the row it feeds.** Under vsync the
 //! present wait is most of a frame, so a "CPU frame time" that included it would
 //! read as the display's period on every machine and every frame, be larger than
@@ -50,6 +57,7 @@
 use std::time::Duration;
 
 use crcbl_core::trace::{RecordKind, Snapshot, ThreadTrace};
+use crcbl_render::FrameCounters;
 
 /// The frame itself: the outermost span, one per [`Loop::frame`](crate::engine::Loop::frame).
 pub const FRAME_SPAN: &str = "frame";
@@ -83,6 +91,49 @@ pub const PRESENT_WAIT_SPAN: &str = "present-wait";
 /// can check against the tree in the module docs rather than a condition spread
 /// across a subtraction.
 pub const IDLE_SPANS: [&str; 2] = [PACE_SPAN, PRESENT_WAIT_SPAN];
+
+/// Draw calls the frame recorded — [`FrameCounters::draws`].
+pub const DRAWS_COUNTER: &str = "draws";
+
+/// Instances the frame submitted to be drawn or culled —
+/// [`FrameCounters::instances`].
+pub const INSTANCES_COUNTER: &str = "instances";
+
+/// Instances the frame's draws actually covered — [`FrameCounters::drawn`].
+///
+/// **Absent from a frame that drew indirectly**, rather than sampled as zero;
+/// see [`sample_counters`].
+pub const DRAWN_COUNTER: &str = "instances-drawn";
+
+/// Triangles those draws covered — [`FrameCounters::triangles`]. Absent on the
+/// same terms as [`DRAWN_COUNTER`].
+pub const TRIANGLES_COUNTER: &str = "triangles";
+
+/// Puts this frame's counters on the trace, beside its spans.
+///
+/// `docs/plan/40-profiling.md`'s "counters are spans' siblings", and the caller
+/// is [`Loop::frame`](crate::engine::Loop::frame): sampled inside the frame
+/// span and before the drain that closes it, so a snapshot holds a frame's
+/// counters and that frame's spans together.
+///
+/// # A counter with no number is not sampled at all
+///
+/// [`FrameCounters::drawn`] and [`FrameCounters::triangles`] are [`None`] on a
+/// frame that drew indirectly — see [`crcbl_render::counters`] — and a `None`
+/// sampled as `0` would be indistinguishable in the trace from a frame that
+/// genuinely drew nothing. So it is left out, and a consumer that finds no
+/// [`DRAWN_COUNTER`] record for a frame is being told the truth rather than a
+/// number.
+pub fn sample_counters(counters: FrameCounters) {
+    crcbl_core::trace::counter(DRAWS_COUNTER, counters.draws);
+    crcbl_core::trace::counter(INSTANCES_COUNTER, counters.instances);
+    if let Some(drawn) = counters.drawn {
+        crcbl_core::trace::counter(DRAWN_COUNTER, drawn);
+    }
+    if let Some(triangles) = counters.triangles {
+        crcbl_core::trace::counter(TRIANGLES_COUNTER, triangles);
+    }
+}
 
 /// What the frame in `snapshot` cost on the CPU, or `None` if there is no whole
 /// frame in it.

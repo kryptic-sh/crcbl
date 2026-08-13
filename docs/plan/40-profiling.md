@@ -27,8 +27,7 @@ afterwards that it worked.
 - **Degrading rather than breaking**: a device without
   `Features::TIMESTAMP_QUERY` gets no timers and an empty report, which is what
   browsers actually do.
-- **`Features::DEBUG_MARKERS`** for capture tools, and the culling-stats
-  readback on a delayed ring — the one readback the frame loop is allowed.
+- **`Features::DEBUG_MARKERS`** for capture tools.
 - **`crcbl-cli`** with `new` and `screenshot`, `--json` output, and a report
   module.
 
@@ -55,6 +54,19 @@ The GPU side is genuinely good and the rest is not there at all:
 7. **Counters are piecemeal.** `SceneStats`, `visible_count` and each sample's
    own rows exist; there is no one place a frame's draw count, instance count,
    cluster count or triangle count is reported.
+8. **The culling stats never leave the GPU.** An earlier draft of this file
+   listed "the culling-stats readback on a delayed ring" under what already
+   exists. It does not: `DrawGen::visible_count` is a `DeviceLocal` buffer with
+   `TRANSFER_SRC`, and `crcbl-hal` has the poll-shaped
+   `request_readback`/`poll_readback` the frame loop is allowed to use — but
+   there is no staging buffer, no copy inside the frame graph, and no consumer.
+   Every read of it in the tree is a test copying it back by hand outside the
+   frame loop. **Until that ring is built, the culling win and the cluster
+   counts cannot be reported at all** — which is why the counters row says
+   `indirect` rather than a number wherever a `ForwardRenderer` is in the frame.
+   Building it is its own slice: a `HostReadback` buffer per frame in flight, a
+   copy the graph schedules rather than the hand-written barriers
+   `screenshot.rs` uses, and four-backend verification.
 
 ## Decisions (taken 2026-08-13, so they are not re-argued)
 

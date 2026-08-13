@@ -84,6 +84,7 @@ use crcbl_shaders::{SPRITE, Stage};
 use crcbl_sprite::SampleMode;
 use glam::Mat4;
 
+use crate::counters::FrameCounters;
 use crate::graph::{ImageId, RenderGraph};
 use crate::texture::{UploadedTexture, upload_texture};
 
@@ -420,6 +421,13 @@ const SHEET_SET: u32 = 1;
 /// Six, not four plus an index buffer — `sprite.slang`'s `CORNERS` records the
 /// trade.
 const QUAD_VERTICES: u32 = 6;
+
+/// Triangles one instance covers: [`QUAD_VERTICES`] of a triangle list.
+///
+/// A constant rather than a division at the one place it is used, because it is
+/// the fact [`SpriteRenderer::counters`] reports and the pipeline's
+/// `PrimitiveState::default()` — a triangle list — is what makes it true.
+const TRIANGLES_PER_QUAD: u64 = QUAD_VERTICES as u64 / 3;
 
 /// The size the instance ring grows to when `needed` bytes no longer fit.
 ///
@@ -774,6 +782,35 @@ impl SpriteRenderer {
     #[must_use]
     pub fn sheet_count(&self) -> usize {
         self.sheets.len()
+    }
+
+    /// What the last [`begin_frame`](Self::begin_frame) left this pass to draw.
+    ///
+    /// **Read off the batches themselves**, which is the same list
+    /// [`add_pass`](Self::add_pass) walks — so a draw this reports is a draw the
+    /// frame records, and a batching change moves both together. That is the
+    /// point of it existing: `docs/plan/40-profiling.md`'s complaint is that a
+    /// consumer keeping its own copy of a count is a copy that drifts, and this
+    /// is the pass's own answer.
+    ///
+    /// Every counter is known here. Nothing on this path draws indirectly and
+    /// nothing culls, so [`FrameCounters::drawn`] equals
+    /// [`FrameCounters::instances`] and the triangles are exact:
+    /// [`add_pass`](Self::add_pass) expands the same triangle-list quad per
+    /// instance, so the count is that quad's own and not an estimate.
+    ///
+    /// A frame with no sprites reports nothing recorded, because
+    /// [`add_pass`](Self::add_pass) adds no pass at all.
+    #[must_use]
+    pub fn counters(&self) -> FrameCounters {
+        let batches = &self.batches[self.frame];
+        let instances = u64::from(batches.iter().map(Batch::count).sum::<u32>());
+        FrameCounters {
+            draws: batches.len() as u64,
+            instances,
+            drawn: Some(instances),
+            triangles: Some(instances * TRIANGLES_PER_QUAD),
+        }
     }
 
     /// Uploads a sheet image and returns the id a [`Sprite`] names it by.
@@ -1837,6 +1874,75 @@ mod tests {
             3
         );
         assert_eq!(batch_count(&[]), 0);
+    }
+
+    /// **The counters are what the pass recorded**, checked against the recorded
+    /// stream rather than against a restatement of the batching rule.
+    ///
+    /// Two scenes whose answers differ in every field, so a counter wired to a
+    /// constant, to the sprite count, or to the sheet count fails on one of
+    /// them: `A A A` is one draw of three instances and `A A B A` is three draws
+    /// of four. And the numbers are compared with the `Draw` commands the null
+    /// backend actually saw, so a `counters` that stopped agreeing with
+    /// `add_pass` fails here rather than reading plausibly on a panel.
+    #[test]
+    fn the_counters_are_the_draws_the_pass_records() {
+        let recorder = Recorder::default();
+        let (device, queue) = open(&recorder);
+        let mut renderer =
+            SpriteRenderer::new(device.as_ref(), queue, TARGET).expect("the null backend builds");
+        let a = register(&mut renderer, device.as_ref(), "a");
+        let b = register(&mut renderer, device.as_ref(), "b");
+
+        // A scene of one run, and a scene the same rule splits into three.
+        for (sprites, expected) in [
+            (vec![sprite(a), sprite(a), sprite(a)], (1u64, 3u64)),
+            (
+                vec![sprite(a), sprite(a), sprite(b), sprite(a)],
+                (3u64, 4u64),
+            ),
+        ] {
+            recorder.clear();
+            renderer
+                .begin_frame(device.as_ref(), &sprites, Mat4::IDENTITY, EXTENT)
+                .expect("the null backend accepts the upload");
+            let counters = renderer.counters();
+            run_pass(device.as_ref(), queue, &renderer);
+
+            let recorded = draws(&recorder);
+            let (draw_count, instance_count) = expected;
+            assert_eq!(counters.draws, draw_count, "{} sprites", sprites.len());
+            assert_eq!(
+                counters.draws,
+                recorded.len() as u64,
+                "the counter and the recorded stream disagree",
+            );
+            assert_eq!(counters.instances, instance_count);
+            assert_eq!(
+                counters.instances,
+                recorded
+                    .iter()
+                    .map(|range| u64::from(range.end))
+                    .sum::<u64>(),
+                "every draw covers 0..count, so the ends sum to the instances",
+            );
+            // Nothing here culls and nothing here is indirect, so both of the
+            // `Option`s are answers rather than `indirect`.
+            assert_eq!(counters.drawn, Some(instance_count));
+            assert_eq!(counters.triangles, Some(instance_count * 2));
+        }
+
+        // A frame with no sprites adds no pass, so it recorded nothing — and
+        // says so as a zero it knows, not as an unknown.
+        recorder.clear();
+        renderer
+            .begin_frame(device.as_ref(), &[], Mat4::IDENTITY, EXTENT)
+            .expect("an empty frame is legal");
+        assert_eq!(renderer.counters(), FrameCounters::default());
+        run_pass(device.as_ref(), queue, &renderer);
+        assert!(draws(&recorder).is_empty());
+
+        renderer.destroy(device.as_ref());
     }
 
     /// **Batch `n` gets batch `n`'s first sprite, and every block gets the same

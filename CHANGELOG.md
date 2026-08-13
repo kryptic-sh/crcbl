@@ -334,6 +334,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **One place a frame's draws and instances are counted.**
+  `crcbl_render::FrameCounters`: each renderer answers with its own record and a
+  caller sums them, the same shape the timed-pass bound already uses. The debug
+  panel gains a `counters` section, and the numbers are sampled onto the trace
+  as `crcbl_core::trace` counters — which nothing had done until now.
+
+  **Two of the plan's counters are deliberately absent rather than
+  approximated.** Instances drawn and triangles read `indirect` wherever a
+  `ForwardRenderer` is in the frame, because the culling survivor count lives in
+  a device-local buffer that nothing copies back: the readback the plan listed
+  as already existing does not exist. A triangle count derived from a cluster
+  count and a nominal triangles-per-cluster would look authoritative and be
+  wrong. Clusters drawn and the level histogram are absent for the same reason,
+  plus one more — that word is written by the amplification stage, so it is
+  blank on three of the four ways the engine draws.
+
+  `GameGpu::counters` has no default implementation: a bundle that forgot it
+  would otherwise put `draws: 0` on the panel, which is "not counted" arriving
+  as "nothing drawn".
+
 - **The frame loop is instrumented, and the debug panel answers "am I
   GPU-bound?"** Six spans across `Loop::frame` — `frame` around `input`, `pace`,
   `tick`, `draw` and `present`, with `present-wait` nested inside the last — and

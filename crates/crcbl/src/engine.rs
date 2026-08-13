@@ -3068,6 +3068,24 @@ pub trait GameGpu: GpuSurface + Sized {
     /// queries.
     fn timings(&self) -> Option<&crcbl_render::FrameTimings>;
 
+    /// What the last [`frame`](Self::frame) recorded: draws, instances and
+    /// triangles, summed over this bundle's renderers.
+    ///
+    /// **No default**, deliberately. A default returning
+    /// [`FrameCounters::default`](crcbl_render::FrameCounters::default) would
+    /// put `draws: 0` on the panel for every bundle that forgot to implement it
+    /// — "not counted" arriving as "nothing was drawn", which is the one failure
+    /// `docs/plan/40-profiling.md` names for counters. Every renderer in
+    /// `crcbl-render` answers this, so an implementation is
+    /// [`plus`](crcbl_render::FrameCounters::plus)ing the ones this bundle
+    /// holds.
+    ///
+    /// The loop reads it *after* the frame, and shows it on the *next* one — the
+    /// panel is gathered before [`frame`](Self::frame) runs. So every row of that
+    /// section is one frame behind, uniformly; see
+    /// [`crcbl_render::counters`].
+    fn counters(&self) -> crcbl_render::FrameCounters;
+
     /// Records, submits and presents one frame.
     ///
     /// # Errors
@@ -3544,6 +3562,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         let outcome = self.gpu.frame()?;
         drop(present);
 
+        // After the frame, because that is when the renderers have recorded
+        // anything to count — and still inside the frame span, so the drain that
+        // closes the frame carries its counters and its spans in one snapshot.
+        crate::perf::sample_counters(self.gpu.counters());
+
         self.budget.record(outcome)?;
         Ok(Flow::Continue)
     }
@@ -3626,11 +3649,19 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     ///
     /// The GPU timings are a `Some` check because a device without timestamp
     /// queries has no timers at all.
+    ///
+    /// The counters section has no such condition — every bundle answers
+    /// [`GameGpu::counters`] — but it is the **previous** frame's, because this
+    /// runs before [`GameGpu::frame`] has recorded anything. Uniformly so: the
+    /// whole section lags by one frame rather than one row of it lagging beside
+    /// a live neighbour. See [`crcbl_render::counters`].
     fn draw_debug_overlay(&mut self) {
         self.debug.begin_frame();
         if let Some(timings) = self.gpu.timings() {
             self.debug.panel.add(timings);
         }
+        let counters = self.gpu.counters();
+        self.debug.panel.add(&counters);
         self.game.debug_sections(&mut self.debug.panel);
         let (width, height) = self.gpu.extent();
         #[allow(clippy::cast_precision_loss)]
@@ -4037,6 +4068,14 @@ mod tests {
         /// timestamp queries, which is what a fake is unless a test says
         /// otherwise.
         timings: Option<crcbl_render::FrameTimings>,
+        /// What the last [`GameGpu::frame`] recorded.
+        ///
+        /// Derived from the draw list that frame was handed rather than set by a
+        /// test, so it is a number that **moves when the frame's content moves**
+        /// — which is what an assertion about a counter has to be written
+        /// against. A fake whose counters were a constant would pass every test
+        /// a counter wired to a constant also passes.
+        counters: crcbl_render::FrameCounters,
     }
 
     impl FakeGpu {
@@ -4048,6 +4087,7 @@ mod tests {
                 had_menu: false,
                 frames: 0,
                 timings: None,
+                counters: crcbl_render::FrameCounters::default(),
             }
         }
     }
@@ -4120,8 +4160,23 @@ mod tests {
             self.timings.as_ref()
         }
 
+        fn counters(&self) -> crcbl_render::FrameCounters {
+            self.counters
+        }
+
         fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
             self.frames += 1;
+            // One draw for the whole list, one instance per command in it, and
+            // two triangles a command — a stand-in for the real renderers'
+            // arithmetic whose only job is to be a function of what the frame
+            // was actually handed.
+            let commands = self.draw_list.len() as u64;
+            self.counters = crcbl_render::FrameCounters {
+                draws: u64::from(!self.draw_list.is_empty()),
+                instances: commands,
+                drawn: Some(commands),
+                triangles: Some(commands * 2),
+            };
             Ok(FrameOutcome::Presented)
         }
 
@@ -7285,8 +7340,18 @@ mod tests {
 
                 let snapshot = crcbl_core::trace::drain();
                 assert_eq!(snapshot.dropped(), 0, "{}", snapshot.report());
+                // Spans only. The frame also samples its counters, whose values
+                // are the GPU bundle's rather than the loop's — where they sit
+                // and what they hold is
+                // `a_traced_frame_samples_the_counters_it_has_and_omits_the_ones_it_does_not`.
+                let spans: Vec<_> = span_shapes(&snapshot)
+                    .into_iter()
+                    .filter(|(_, kind, _)| {
+                        !matches!(kind, crcbl_core::trace::RecordKind::Counter(_))
+                    })
+                    .collect();
                 assert_eq!(
-                    span_shapes(&snapshot),
+                    spans,
                     vec![
                         (crate::perf::FRAME_SPAN, SpanBegin, 0),
                         (crate::perf::INPUT_SPAN, SpanBegin, 1),
@@ -7419,6 +7484,144 @@ mod tests {
                 .iter()
                 .all(|section| section.title() != "budget"),
             "a run with neither half has no budget row to show"
+        );
+    }
+
+    /// One row of one panel section, by title and label.
+    ///
+    /// Both, deliberately: `DebugModule` labels share one namespace and nothing
+    /// detects a collision, so a search of the whole panel for a label can read
+    /// another module's row and pass.
+    fn panel_row(
+        engine: &Loop<crcbl_shell::HeadlessShell, FakeGame>,
+        title: &str,
+        label: &str,
+    ) -> String {
+        let section = engine
+            .debug
+            .panel
+            .sections()
+            .iter()
+            .find(|section| section.title() == title)
+            .unwrap_or_else(|| panic!("no {title:?} section on the panel"));
+        section
+            .rows()
+            .iter()
+            .find(|row| row.label == label)
+            .unwrap_or_else(|| panic!("no {label:?} row in {:?}", section.rows()))
+            .value
+            .clone()
+    }
+
+    /// **The frame's counters move with what the frame drew, and the panel shows
+    /// them one frame later.**
+    ///
+    /// Two scenes with known answers: a frame with the panel hidden draws the
+    /// game's one HUD rect and nothing else, and a frame with the panel up draws
+    /// that plus the overlay's own geometry. A counter wired to a constant, or to
+    /// the frame number, agrees with neither.
+    ///
+    /// The last third is the **lag**, asserted rather than left to the docs: the
+    /// panel is gathered before [`GameGpu::frame`] records anything, so the row a
+    /// frame shows is the previous frame's — every row of it, which is why no row
+    /// here is live beside a latent one.
+    #[test]
+    fn the_counters_row_moves_with_the_frame_and_trails_it_by_one() {
+        let mut engine = hosted(None);
+
+        engine.frame().expect("the fake never fails");
+        let bare = engine.gpu.counters();
+        assert_eq!(bare.draws, 1, "one draw for the whole list");
+        assert!(bare.instances > 0, "the frame drew the game's own geometry");
+        assert_eq!(bare.drawn, Some(bare.instances));
+        assert_eq!(bare.triangles, Some(bare.instances * 2));
+
+        engine.debug.set_visible(true);
+        engine.frame().expect("the fake never fails");
+        let with_panel = engine.gpu.counters();
+        assert!(
+            with_panel.instances > bare.instances,
+            "the overlay's own geometry must move the counter: {with_panel:?} against {bare:?}",
+        );
+        assert_eq!(with_panel.drawn, Some(with_panel.instances));
+        assert_eq!(with_panel.triangles, Some(with_panel.instances * 2));
+
+        // The next frame's panel is the one that shows it.
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            panel_row(&engine, "counters", "instances submitted"),
+            with_panel.instances.to_string(),
+            "the row shows the frame before it, which is the whole section's lag",
+        );
+        assert_eq!(panel_row(&engine, "counters", "draws recorded"), "1");
+        assert_eq!(
+            panel_row(&engine, "counters", "instances drawn"),
+            with_panel.instances.to_string(),
+        );
+    }
+
+    /// **A traced frame carries its counters beside its spans**, and an unknown
+    /// counter is left out of the trace rather than sampled as a zero.
+    ///
+    /// The zero is the failure this is written against: a `None` sampled as `0`
+    /// is indistinguishable in a trace from a frame that genuinely drew nothing,
+    /// which is `docs/plan/40-profiling.md`'s "counters that lie by omission" in
+    /// the one place a consumer would never think to check.
+    #[test]
+    fn a_traced_frame_samples_the_counters_it_has_and_omits_the_ones_it_does_not() {
+        in_a_traced_process(
+            "engine::tests::a_traced_frame_samples_the_counters_it_has_and_omits_the_ones_it_does_not",
+            || {
+                use crcbl_core::trace::RecordKind::Counter;
+
+                let mut engine = hosted(None);
+                engine.frame_body().expect("the fake never fails");
+                let counters = engine.gpu.counters();
+                let sampled: Vec<(&'static str, crcbl_core::trace::RecordKind, u16)> =
+                    span_shapes(&crcbl_core::trace::drain())
+                        .into_iter()
+                        .filter(|(_, kind, _)| matches!(kind, Counter(_)))
+                        .collect();
+                assert_eq!(
+                    sampled,
+                    vec![
+                        (crate::perf::DRAWS_COUNTER, Counter(counters.draws), 1),
+                        (
+                            crate::perf::INSTANCES_COUNTER,
+                            Counter(counters.instances),
+                            1
+                        ),
+                        (
+                            crate::perf::DRAWN_COUNTER,
+                            Counter(counters.drawn.expect("nothing here draws indirectly")),
+                            1
+                        ),
+                        (
+                            crate::perf::TRIANGLES_COUNTER,
+                            Counter(counters.triangles.expect("nor is the index count hidden")),
+                            1
+                        ),
+                    ],
+                    "the frame's counters, inside the frame span, with their values",
+                );
+
+                // And the half a GPU-driven frame cannot answer: sampled as
+                // nothing at all, not as zero.
+                crate::perf::sample_counters(crcbl_render::FrameCounters {
+                    draws: 9,
+                    instances: 7,
+                    drawn: None,
+                    triangles: None,
+                });
+                assert_eq!(
+                    span_shapes(&crcbl_core::trace::drain()),
+                    vec![
+                        (crate::perf::DRAWS_COUNTER, Counter(9), 0),
+                        (crate::perf::INSTANCES_COUNTER, Counter(7), 0),
+                    ],
+                    "an unknown counter must leave no record, not a zero one",
+                );
+            },
         );
     }
 

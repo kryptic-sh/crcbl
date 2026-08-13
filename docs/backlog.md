@@ -6201,8 +6201,36 @@ What is left:
   `Snapshot`, which `crcbl::perf`'s tests are the first of — but it is the shape
   that turns into dead public API if nothing else ever wants it.
 - **Nothing is instrumented outside the loop.** No spans in `crcbl-ecs`,
-  `crcbl-phys` or `crcbl-jobs`, no counters at all, and none of the panel's
-  other rows: the pass list, the CPU breakdown, memory, jobs, the freeze toggle.
+  `crcbl-phys` or `crcbl-jobs`, and none of the panel's other rows: the pass
+  list, the CPU breakdown, memory, jobs, the freeze toggle.
+- **The culling stats never leave the GPU, so two counters read `indirect`.**
+  `DrawGen::visible_count` is `DeviceLocal` with `TRANSFER_SRC` and nothing
+  copies it back — the plan listed that readback under "what already exists" and
+  it never did; only tests read it, by hand, outside the frame loop. Until the
+  ring exists, instances-drawn and triangles are unknown wherever a
+  `ForwardRenderer` is in the frame, and clusters-drawn and its level histogram
+  cannot be reported at all. The slice is: a `HostReadback` buffer per frame in
+  flight, a copy the graph schedules rather than the hand-written barriers
+  `screenshot.rs` uses, and four-backend verification. **This is the single
+  thing most worth building next in topic 40** — it is what makes the culling
+  win visible, and the plan's counters row is half-blank without it.
+- **The cluster survivor word is written by the amplification stage**, so even
+  with the ring it is blank on both indirect tails and on `MESH_SHADER` without
+  `TASK_SHADER`. A cluster count that exists on one of four paths needs a story
+  before it becomes a row.
+- **The whole counters section lags the frame by one, uniformly.** The panel is
+  gathered in `draw_debug_overlay`, which runs before `GameGpu::frame` records
+  anything. Stated in the module docs and asserted by
+  `the_counters_row_moves_with_the_frame_and_trails_it_by_one`; `apps/horde`'s
+  `scene_stats` already had the same lag.
+- **`SceneStats::batches` re-runs the batching that
+  `SpriteRenderer::begin_frame` runs a moment later.** Sourcing it from
+  `SpriteRenderer::counters()` instead would need `Gpu` to fill it after
+  `begin_frame`, which breaks horde's two device-free batching tests. A horde
+  change rather than a counters one, and not taken.
+- **`ForwardRenderer`'s docs link `[ForwardRenderer::bucket_count]`, which does
+  not exist** — only `DrawGen::bucket_count` does. It sits on a private const so
+  rustdoc does not flag it, which is why it survived the doc gate.
 - **Enabling the trace in a browser build panics on the first span.**
   `std::time::Instant::now` compiles on `wasm32-unknown-unknown` and panics at
   runtime — `std`'s unsupported-platform stub. Left loud rather than papered

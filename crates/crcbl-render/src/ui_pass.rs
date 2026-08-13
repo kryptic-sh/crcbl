@@ -66,6 +66,7 @@ use crcbl_shaders::{Stage, UI};
 use crcbl_ui::draw_list::{DrawList, Vertex2d};
 use crcbl_ui::text::FontAtlas;
 
+use crate::counters::FrameCounters;
 use crate::graph::{ImageId, RenderGraph};
 use crate::texture::{UploadedTexture, upload_texture};
 
@@ -493,6 +494,29 @@ impl UiRenderer {
     /// none. What a caller sizing [`PassTimers`](crate::timing::PassTimers) adds
     /// up — see [`MAX_TIMED_PASSES`](crate::timing::MAX_TIMED_PASSES).
     pub const MAX_PASSES: u32 = 1;
+
+    /// What the last [`begin_frame`](Self::begin_frame) left this pass to draw.
+    ///
+    /// **Off the same two counts [`add_pass`](Self::add_pass) branches on**, so
+    /// a frame this reports as recording nothing is a frame that adds no pass,
+    /// and the two cannot disagree.
+    ///
+    /// One draw of one instance, covering the triangles of the index list this
+    /// pass wrote — `draw_list.to_triangles` produced it and the pipeline's
+    /// `PrimitiveState::default()` is a triangle list, so the count is a
+    /// division and not an estimate.
+    #[must_use]
+    pub fn counters(&self) -> FrameCounters {
+        if self.last_vertex_count[self.frame] == 0 || self.last_index_count[self.frame] == 0 {
+            return FrameCounters::default();
+        }
+        FrameCounters {
+            draws: 1,
+            instances: 1,
+            drawn: Some(1),
+            triangles: Some(self.last_index_count[self.frame] as u64 / 3),
+        }
+    }
 
     /// Adds the UI compositing pass to `graph`, drawing on top of `target`.
     ///
@@ -1028,6 +1052,73 @@ mod tests {
 
         renderer.destroy(device.as_ref());
         recorder.assert_valid();
+    }
+
+    /// **The counters are the one draw this pass records and the triangles it
+    /// wrote the indices for**, against two lists whose triangle counts differ.
+    ///
+    /// One rectangle is two triangles; a rectangle and a string are more, and
+    /// the number is the index list's own length rather than a per-glyph
+    /// estimate — so a counter that guessed, or that reported the vertex count,
+    /// fails on both. An empty list records no pass at all and the counters say
+    /// zero *and know it*, which is the value `indirect` is not.
+    #[test]
+    fn the_counters_are_the_one_draw_and_the_indices_it_covers() {
+        let (device, queue) = open();
+        let mut renderer =
+            UiRenderer::new(device.as_ref(), queue, Format::Bgra8UnormSrgb).expect("built");
+        let atlas = FontAtlas::built_in();
+
+        let mut one_rect = DrawList::new();
+        one_rect.rect(
+            glam::Vec2::ZERO,
+            glam::Vec2::new(10.0, 10.0),
+            [1.0, 1.0, 1.0, 1.0],
+        );
+        renderer
+            .begin_frame(device.as_ref(), &one_rect, &atlas, 1.0)
+            .expect("upload");
+        let counters = renderer.counters();
+        assert_eq!(counters.draws, 1, "one `draw_indexed` for the whole list");
+        assert_eq!(counters.instances, 1);
+        assert_eq!(counters.drawn, Some(1));
+        assert_eq!(counters.triangles, Some(2), "a quad is two triangles");
+
+        let mut with_text = one_rect.clone();
+        with_text.text(
+            glam::Vec2::new(4.0, 4.0),
+            "counters",
+            [1.0, 1.0, 1.0, 1.0],
+            14.0,
+        );
+        renderer
+            .begin_frame(device.as_ref(), &with_text, &atlas, 1.0)
+            .expect("upload");
+        let richer = renderer.counters();
+        assert_eq!(
+            richer.draws, 1,
+            "still one draw, however much is in the list"
+        );
+        // The index list the pass actually built, so this is the pass's own
+        // arithmetic and not a second count of the glyphs.
+        let (_, indices) = with_text.to_triangles(Some(&atlas), 1.0);
+        assert_eq!(richer.triangles, Some(indices.len() as u64 / 3));
+        assert!(
+            richer.triangles > counters.triangles,
+            "a longer list must move the counter: {:?} against {:?}",
+            richer.triangles,
+            counters.triangles,
+        );
+
+        renderer
+            .begin_frame(device.as_ref(), &DrawList::new(), &atlas, 1.0)
+            .expect("upload");
+        assert_eq!(
+            renderer.counters(),
+            crate::counters::FrameCounters::default()
+        );
+
+        renderer.destroy(device.as_ref());
     }
 
     /// The ring still grows when a frame genuinely needs more room, and the old

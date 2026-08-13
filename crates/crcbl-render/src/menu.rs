@@ -85,6 +85,7 @@ use glam::{Mat4, Vec3};
 
 use crate::button_skin::{ButtonSkin, screen_rect_to_target};
 use crate::camera::{Camera, Projection};
+use crate::counters::FrameCounters;
 use crate::nine_slice::NineSliceSource;
 use crate::sprite_pass::{SheetDesc, SheetId, Sprite, SpriteRenderer};
 
@@ -386,6 +387,16 @@ impl MenuRenderer {
     /// The sprite pass's own number, because the menu *is* a sprite pass: a
     /// frame with no menu on it declares nothing at all.
     pub const MAX_PASSES: u32 = crate::sprite_pass::SpriteRenderer::MAX_PASSES;
+
+    /// What the last [`begin_frame`](Self::begin_frame) left this pass to draw.
+    ///
+    /// The sprite pass's own answer, for [`MAX_PASSES`](Self::MAX_PASSES)'s
+    /// reason: the menu *is* a sprite pass, and counting its sprites here rather
+    /// than asking would be the second copy `crate::counters` exists to stop.
+    #[must_use]
+    pub fn counters(&self) -> FrameCounters {
+        self.sprites.counters()
+    }
 
     /// Adds the menu pass to `graph`, drawing on top of `target`.
     ///

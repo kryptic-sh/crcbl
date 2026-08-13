@@ -347,6 +347,19 @@ impl Gpu {
         self.timers.as_ref().map(PassTimers::latest)
     }
 
+    /// What the last [`Gpu::frame`] recorded: draws, instances and triangles,
+    /// summed over the three passes this bundle adds.
+    ///
+    /// Each renderer's own answer rather than a count kept here — see
+    /// [`crcbl::render::counters`], which is where that argument is made.
+    #[must_use]
+    pub fn counters(&self) -> crcbl::render::FrameCounters {
+        self.sprites
+            .counters()
+            .plus(self.menu.counters())
+            .plus(self.ui.counters())
+    }
+
     /// The glyph atlas the UI pass renders text from.
     ///
     /// The debug overlay measures its own panel with it, and must measure with
@@ -539,6 +552,10 @@ impl crcbl::engine::GameGpu for Gpu {
 
     fn timings(&self) -> Option<&crcbl::render::FrameTimings> {
         Self::timings(self)
+    }
+
+    fn counters(&self) -> crcbl::render::FrameCounters {
+        Self::counters(self)
     }
 
     fn frame(&mut self) -> Result<FrameOutcome, GpuError> {

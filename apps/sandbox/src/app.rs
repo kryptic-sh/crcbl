@@ -746,9 +746,9 @@ mod tests {
             .map(crcbl::ui::DebugSection::title)
             .collect();
         let expected: &[&str] = if engine.gpu().timings().is_some() {
-            &["frame", "gpu"]
+            &["frame", "gpu", "counters"]
         } else {
-            &["frame"]
+            &["frame", "counters"]
         };
         assert_eq!(titles, expected, "no module appears that no system offered");
 

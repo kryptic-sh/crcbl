@@ -150,6 +150,7 @@ use glam::{Mat4, Quat, Vec3};
 
 use crate::camera::{Camera, DirectionalLight};
 use crate::cluster_pool::{ClusterPool, ClusterRange, PooledMesh};
+use crate::counters::FrameCounters;
 use crate::cull::Frustum;
 use crate::draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 use crate::graph::{BufferId, ImageId, ImportedBuffer, ImportedImage, RenderGraph};
@@ -486,6 +487,13 @@ const fn shadow_cull(slot: usize) -> usize {
 /// derived — see [`ForwardRenderer::MAX_PASSES`].
 const RENDER_PASSES: u32 = 3;
 
+/// Draws the tonemap pass records: the full-screen triangle, drawn once.
+///
+/// Named rather than written into [`ForwardRenderer::counters`]'s arithmetic,
+/// because it is the one draw in this file whose instance and triangle counts
+/// the CPU knows exactly — everything else here goes through an indirect call.
+const TONEMAP_DRAWS: u64 = 1;
+
 /// The budget an **orthographic** camera selects under: one no group satisfies,
 /// so every group expands and the base level is drawn whole.
 ///
@@ -624,6 +632,14 @@ pub struct ForwardRenderer {
     /// The cull and draw-argument passes, and the indirect arguments they
     /// produce.
     draws: DrawGen,
+    /// Draw calls the last [`ForwardRenderer::add_passes`] recorded — see
+    /// [`ForwardRenderer::counters`], which is the only thing that reads it.
+    ///
+    /// Kept rather than recomputed because the shadow pass's share is the number
+    /// of **occupied** tiles, which [`ForwardRenderer::add_shadow_pass`] works
+    /// out from `docs/plan/18-lights.md`'s slot allocation and nothing outside
+    /// it can restate without becoming the second copy that drifts.
+    recorded_draws: u64,
     /// Which call the forward pass records — the device's [`GeometryPath`],
     /// resolved once.
     emit: EmitTail,
@@ -2550,6 +2566,9 @@ impl ForwardRenderer {
             draws: rollback.draws.take().unwrap_or_else(|| {
                 unreachable!("draw generation was placed in the rollback above")
             }),
+            // No frame has been recorded yet, and the counters say so rather
+            // than reporting the count a frame *would* have.
+            recorded_draws: 0,
             emit,
             clusters: rollback.clusters.take(),
             culls_clusters,
@@ -3706,7 +3725,7 @@ impl ForwardRenderer {
                 .add_pass(graph, self.frame, generated.visible_count_id, self.grid);
 
         let imported = std::mem::replace(&mut self.shadow_imported, ResourceState::ShaderRead);
-        let shadow_atlas = self.add_shadow_pass(graph, imported, &tile_selection);
+        let (shadow_atlas, shadow_draws) = self.add_shadow_pass(graph, imported, &tile_selection);
 
         let scene_color =
             graph.create_image("scene-color", TransientImageDesc::scene_color(extent));
@@ -3738,6 +3757,12 @@ impl ForwardRenderer {
                 )
             })
             .collect();
+
+        // Every draw this frame records: the shadow pass's, one per bucket in
+        // the forward pass, and the tonemap's full-screen triangle. Assigned
+        // before the passes below borrow the fields they need, so it is the
+        // count for the frame being built rather than the one before it.
+        self.recorded_draws = shadow_draws + calls.len() as u64 + TONEMAP_DRAWS;
 
         let pass = graph
             .add_render_pass("forward")
@@ -3977,7 +4002,7 @@ impl ForwardRenderer {
         graph: &mut RenderGraph<'_>,
         imported: ResourceState,
         selection: &[BufferId],
-    ) -> ImageId {
+    ) -> (ImageId, u64) {
         let (atlas_width, atlas_height) = shadow::atlas_extent();
         let atlas = graph.import_image(
             "shadow-atlas",
@@ -4130,6 +4155,12 @@ impl ForwardRenderer {
             })
             .collect();
 
+        // Counted off the two loops the body below runs, before it takes them:
+        // one call per bucket per occupied view. `ForwardRenderer::counters` is
+        // what reports it, and reading it back off the same `Vec`s is what makes
+        // it move when the tile allocation does.
+        let recorded = (views.len() * calls.len()) as u64;
+
         pass.execute(move |ctx| {
             let encoder = ctx.encoder();
             encoder.bind_graphics_pipeline(pipeline);
@@ -4192,7 +4223,7 @@ impl ForwardRenderer {
                 }
             }
         });
-        atlas
+        (atlas, recorded)
     }
 
     /// The shadow atlas, for a caller that wants to read it back.
@@ -4291,6 +4322,48 @@ impl ForwardRenderer {
     #[must_use]
     pub const fn frame(&self) -> usize {
         self.frame
+    }
+
+    /// What the last [`add_passes`](Self::add_passes) recorded, and what it
+    /// cannot know.
+    ///
+    /// Zero draws until a frame has been built: this reports what was recorded,
+    /// not what a frame would record.
+    ///
+    /// # Two of the four counters are [`None`] here, on every geometry path
+    ///
+    /// Every draw this renderer records except the tonemap's is **indirect**:
+    /// the instance count and the index range live in the argument buffer
+    /// `draw_gen.slang` wrote, so the CPU records the call and learns nothing
+    /// about what it covered. That is true of
+    /// [`GeometryPath::MeshShader`] and of
+    /// both indirect tails alike — the three differ in which call is recorded,
+    /// not in who decides the counts — so
+    /// [`FrameCounters::drawn`](crate::counters::FrameCounters::drawn) and
+    /// [`FrameCounters::triangles`](crate::counters::FrameCounters::triangles)
+    /// are [`None`] whatever the device supports.
+    ///
+    /// The survivor counts *are* on the GPU, in
+    /// [`DrawGen::visible_count`](crate::draw_gen::DrawGen::visible_count), and
+    /// topic 03 §3.6 allows exactly one readback to fetch them. Nothing copies
+    /// that buffer out yet; see [`crate::counters`], which is where the gap is
+    /// written down.
+    ///
+    /// [`FrameCounters::instances`](crate::counters::FrameCounters::instances)
+    /// is known and is the plan's "submitted" half: the live instances
+    /// [`add_passes`](Self::add_passes) hands the cull dispatches, plus the
+    /// tonemap's own full-screen triangle.
+    #[must_use]
+    pub fn counters(&self) -> FrameCounters {
+        if self.recorded_draws == 0 {
+            return FrameCounters::default();
+        }
+        FrameCounters {
+            draws: self.recorded_draws,
+            instances: self.instances.len() as u64 + TONEMAP_DRAWS,
+            drawn: None,
+            triangles: None,
+        }
     }
 
     /// Describes the imported swapchain image the frame ends in.
@@ -5038,6 +5111,133 @@ mod tests {
 
             frame.finish(device.as_ref(), renderer);
         }
+    }
+
+    /// Every draw the recorded stream holds, whichever call recorded it.
+    ///
+    /// Not scoped to a pass, unlike [`commands_in_pass`]: what
+    /// [`ForwardRenderer::counters`] claims is a count over the *whole* frame, so
+    /// the thing to compare it against is the whole frame.
+    fn recorded_draws(recorder: &Recorder) -> usize {
+        use crcbl_hal::null::Command;
+
+        recorder
+            .commands()
+            .into_iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    Command::Draw { .. }
+                        | Command::DrawIndexed { .. }
+                        | Command::DrawIndirect(_)
+                        | Command::DrawIndexedIndirect(_)
+                        | Command::DrawIndirectCount(_)
+                        | Command::DrawIndexedIndirectCount(_)
+                        | Command::DrawMeshTasks { .. }
+                        | Command::DrawMeshTasksIndirect(_)
+                )
+            })
+            .count()
+    }
+
+    /// **The draw count is what the frame recorded, and the two GPU-side
+    /// counters are `None` rather than a guess.**
+    ///
+    /// Both halves matter and both are checked here against something that
+    /// moves. The draws are compared with the recorded stream, so a count that
+    /// forgot the shadow pass's share or the tonemap's triangle fails. The
+    /// instances are read before and after a pyramid is put in the pool, so a
+    /// counter wired to a constant — or to the pool's *capacity*, which does not
+    /// move — fails too.
+    ///
+    /// `drawn` and `triangles` are asserted [`None`]. That is the assertion that
+    /// catches the tempting version of this method: an instance count taken from
+    /// the pool and reported as "drawn" would read as a culling win of exactly
+    /// zero on every frame, which is the number the whole cull exists to change.
+    #[test]
+    fn the_forward_counters_are_the_recorded_draws_and_admit_what_they_cannot_know() {
+        let (recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+
+        // Before any frame: nothing recorded, and said as a known zero.
+        assert_eq!(renderer.counters(), FrameCounters::default());
+
+        let first = frame(device.as_ref(), &mut renderer, queue);
+        let counters = renderer.counters();
+        assert_eq!(
+            counters.draws,
+            recorded_draws(&recorder) as u64,
+            "the counter and the frame's recorded draws disagree",
+        );
+        assert!(
+            counters.draws > TONEMAP_DRAWS,
+            "a frame that recorded only the tonemap drew no scene",
+        );
+        assert_eq!(
+            counters.instances,
+            renderer.instances.len() as u64 + TONEMAP_DRAWS,
+        );
+        assert_eq!(
+            counters.drawn, None,
+            "the survivor count is in a buffer this side never reads",
+        );
+        assert_eq!(counters.triangles, None);
+        first.release(device.as_ref());
+
+        // A second scene: one more instance in the pool, and the counter moves
+        // with it. The draws do not — one call per bucket whatever the scene
+        // holds is what §3.3 is about, and this is where that shows.
+        renderer.set_pyramid(Some(Mat4::IDENTITY));
+        recorder.clear();
+        let second = frame(device.as_ref(), &mut renderer, queue);
+        let richer = renderer.counters();
+        assert_eq!(
+            richer.instances,
+            counters.instances + 1,
+            "an instance added to the pool must move the counter",
+        );
+        assert_eq!(
+            richer.draws, counters.draws,
+            "the recorded call count is independent of what the scene holds",
+        );
+        assert_eq!(richer.draws, recorded_draws(&recorder) as u64);
+
+        second.finish(device.as_ref(), renderer);
+    }
+
+    /// **A light that takes a shadow tile moves the draw count**, because the
+    /// shadow pass records one call per bucket per occupied view.
+    ///
+    /// The observable a `recorded_draws` comparison alone would miss: a
+    /// `counters` that counted only the colour pass and the tonemap agrees with
+    /// nothing here, and one that hard-coded the cascades agrees with the first
+    /// frame and not the second.
+    #[test]
+    fn a_light_that_takes_a_shadow_tile_moves_the_draw_count() {
+        let (recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+
+        let dark = frame(device.as_ref(), &mut renderer, queue);
+        let without = renderer.counters().draws;
+        assert_eq!(without, recorded_draws(&recorder) as u64);
+        dark.release(device.as_ref());
+
+        renderer.set_lights(&[shadowable_spot(0.0)]);
+        recorder.clear();
+        let lit = frame(device.as_ref(), &mut renderer, queue);
+        let with = renderer.counters().draws;
+        assert!(
+            with > without,
+            "a shadow-casting light adds a view and therefore draws: {with} against {without}",
+        );
+        assert_eq!(
+            with,
+            recorded_draws(&recorder) as u64,
+            "and the counter still matches the stream",
+        );
+        lit.finish(device.as_ref(), renderer);
     }
 
     /// Opens a null device offering `optional` on top of the mesh path, and
@@ -5959,14 +6159,20 @@ mod tests {
     }
 
     impl Frame {
-        /// Releases the frame, the renderer and the image it drew into.
-        fn finish(self, device: &dyn Device, renderer: ForwardRenderer) {
+        /// Releases the frame and the image it drew into, leaving the renderer
+        /// alive for another one.
+        fn release(self, device: &dyn Device) {
             device.destroy_command_buffer(self.commands);
-            renderer.destroy(device);
             let mut pool = self.pool;
             pool.destroy(device);
             device.destroy_image_view(self.imported.view);
             device.destroy_image(self.imported.image);
+        }
+
+        /// Releases the frame, the renderer and the image it drew into.
+        fn finish(self, device: &dyn Device, renderer: ForwardRenderer) {
+            self.release(device);
+            renderer.destroy(device);
         }
     }
 

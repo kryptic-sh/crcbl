@@ -125,6 +125,7 @@
 pub mod button_skin;
 pub mod camera;
 pub mod cluster_pool;
+pub mod counters;
 pub mod cull;
 pub mod draw_gen;
 pub mod forward;
@@ -147,6 +148,7 @@ pub mod ui_pass;
 pub use button_skin::{ButtonSkin, screen_rect_to_target};
 pub use camera::{Camera, DirectionalLight, Projection};
 pub use cluster_pool::{ClusterPool, ClusterRange};
+pub use counters::{FrameCounters, INDIRECT};
 /// Re-exported because [`SheetDesc::sample`] is spelled in it: a crate whose
 /// public API names a foreign type and does not export it is one every caller
 /// has to add a dependency for.

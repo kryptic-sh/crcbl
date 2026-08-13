@@ -251,6 +251,20 @@ impl Gpu {
         self.timers.as_ref().map(PassTimers::latest)
     }
 
+    /// What the last [`Gpu::frame`] recorded: draws, instances and triangles,
+    /// summed over the three passes this bundle adds.
+    ///
+    /// Two of the four are `indirect` here and stay that way on every geometry
+    /// path — the forward renderer draws through arguments the GPU wrote. See
+    /// [`crcbl::render::ForwardRenderer::counters`].
+    #[must_use]
+    pub fn counters(&self) -> crcbl::render::FrameCounters {
+        self.renderer
+            .counters()
+            .plus(self.menu.counters())
+            .plus(self.ui.counters())
+    }
+
     /// Takes this frame's UI geometry, handing the previous frame's allocation
     /// back so the caller can refill it instead of building a new one.
     pub fn take_draw_list(&mut self, dl: &mut DrawList) {
@@ -498,6 +512,10 @@ impl crcbl::engine::GameGpu for Gpu {
 
     fn timings(&self) -> Option<&crcbl::render::FrameTimings> {
         Self::timings(self)
+    }
+
+    fn counters(&self) -> crcbl::render::FrameCounters {
+        Self::counters(self)
     }
 
     fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
