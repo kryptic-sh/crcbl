@@ -6073,6 +6073,50 @@ recorded in `docs/plan/18-render-features.md`. What is left:
   last-writer-wins and the file is not a stable baseline. That is why the
   bit-identical check above compared captured output rather than re-blessing.
 
+## What screen-space AO left owed
+
+`docs/plan/18-render-features.md`'s AO section holds the decisions and the
+reasons. What the first slice deferred or turned up:
+
+- **A large open box offset laterally from the camera stops drawing entirely** —
+  clear-colour frame, on _both_ geometry paths, while the instance passes a
+  host-side `Frustum` test. **Pre-existing**: it reproduces with the prepass
+  draws disabled, so it is not AO's. `Scene::Ao` is centred to stay clear of it.
+  This is the most alarming thing the slice found and nobody has chased it.
+- **The forward pass still clears and re-writes depth**, so the prepass buys AO
+  its depth and nothing else — the overdraw win is deliberately deferred because
+  it needs `GreaterOrEqual` and depth invariance across four rasterisers, which
+  only CI can settle. The engine now has per-pass GPU timers and frame counters,
+  so that change can be **measured** rather than assumed when it is made.
+- **The blur is a box, so AO bleeds across silhouettes as a halo.** A bilateral
+  blur is the fix; it is the thing a reviewer sees first and the natural slice
+  2, with half-resolution AO after it.
+- **`SSAO_RADIUS` is 0.5 and the kernel reaches ~⅞ of it laterally**, both tuned
+  against `Scene::Ao` alone. The first, normal-hugging kernel gave a ratio of
+  1.03 — visually nothing. Nothing has tuned these against a real scene, and
+  `lumen` (sample 13) is what would.
+- **`AO_RATIO` is 1.10 rather than a shadow-like 1.5**, and that is not
+  slackness: bands are read after the sRGB encode and AO scales ambient alone,
+  so a wall closing half a hemisphere cannot approach halving a pixel. Measured
+  1.162 with about ten LSB of separation, far past the one-level driver drift
+  the tolerance already absorbs.
+- **`crcbl_hal::SampleType::Depth`'s doc is now narrower than the type.** It
+  says the variant means "read through a comparison sampler" and that the paired
+  sampler must set `comparison: true`; the SSAO layout uses it with **no sampler
+  at all** and works on every backend.
+- **`prepass_stats` is a wrapping counter nobody clears.** Documented in code
+  and harmless, but a smell.
+- **Metal and D3D12 compiled the depth `Load` and never ran it.** SPIR-V and
+  WGSL both executed — `OpTypeImage Depth = 1` on radv and lavapipe,
+  `texture_depth_2d` on wgpu — so the `DepthTexture2D` vs `Texture2D<float>`
+  trap this engine hit once before did not recur, on the two targets that can
+  say so.
+- **Five goldens were re-blessed and one deliberately was not.** `cube`,
+  `lights`, `dunes`, `spot_shadow` and `point_shadow` moved; `ui`, `sprite` and
+  **`spot`** did not. `spot` staying bit-identical is the evidence the term is
+  contact AO rather than a global scale — it is the one 3D scene with nothing
+  near anything else.
+
 ## What punctual-light shadows left owed
 
 The atlas is a fixed 4×2 tile grid, `shadow::Selection` decides who gets tiles,

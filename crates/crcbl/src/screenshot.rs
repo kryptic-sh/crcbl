@@ -195,6 +195,32 @@ pub enum Scene {
     /// stops distinguishing anything — and `POINT_CASTER_AT` for where the
     /// casters stand.
     PointShadow,
+    /// `docs/plan/18-render-features.md`'s **screen-space ambient occlusion**:
+    /// the inside of a box, looked straight down into, lit almost entirely by
+    /// ambient.
+    ///
+    /// **The only frame in the tree whose subject is a term that darkens nothing
+    /// else.** AO multiplies `frame.ambient.rgb` alone, so a scene with a strong
+    /// key light shows it as a rounding error: this one turns the sun down to a
+    /// trace and leaves the ambient at full, which makes the floor's brightness
+    /// very nearly the occlusion value itself.
+    ///
+    /// It is a scene of its own rather than an occluder added to
+    /// [`Scene::Spot`], for [`Scene::SpotShadow`]'s two reasons and a third that
+    /// is stronger than either: **the sun points straight down**. A vertical
+    /// light casts no shadow from a vertical wall, so the two floor bands
+    /// `tests/render_e2e.rs` compares receive identical direct light, identical
+    /// ambient and identical Lambert — and the *only* thing left that can
+    /// separate them is the occlusion term. Under any other light the
+    /// measurement would be a shadow-map result wearing AO's name.
+    ///
+    /// The geometry is the open box alone — see
+    /// `crcbl_shaders::mesh::OPEN_BOX_FACES`, whose five faces point inward —
+    /// scaled by `ao_box` into a long narrow **trough**, so that its two long
+    /// walls are in frame and its two ends are not. See `ao_camera` for why the
+    /// view is straight down and `AO_RUN` for why the trough is not a square
+    /// room.
+    Ao,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
@@ -500,6 +526,118 @@ fn spot_light() -> crcbl_render::Light {
         inner_angle: (SPOT_CORE_RADIUS / SPOT_HEIGHT).atan(),
         outer_angle: (SPOT_EDGE_RADIUS / SPOT_HEIGHT).atan(),
     })
+}
+
+/// How far apart [`Scene::Ao`]'s two facing walls stand, in world units.
+///
+/// **This is the scene's whole subject**: a trough, narrow enough that its walls
+/// close over the floor between them and wide enough that the middle of that
+/// floor is well outside `crcbl_render::ForwardRenderer`'s occlusion radius. The
+/// bands `tests/render_e2e.rs` measures sit a tenth of a unit off each wall.
+const AO_TROUGH: f32 = 1.6;
+
+/// How far [`Scene::Ao`]'s trough runs, in world units.
+///
+/// **Several times [`AO_TROUGH`], and that asymmetry is what makes the scene
+/// measurable.** The two ends are then far enough out to be off frame *and* many
+/// occlusion radii from the middle — so a band out along the run is open floor
+/// while a band the same distance out across the trough is against a wall. Two
+/// bands at the same distance from the eye, on the same surface, under the same
+/// light, differing in occlusion alone: a square room has no such pair, because
+/// every point at a corner's distance from the centre is itself in a corner.
+const AO_RUN: f32 = 6.0;
+
+/// How tall [`Scene::Ao`]'s walls are, in world units.
+///
+/// Taller than the trough is wide, so each wall closes a good half of the
+/// hemisphere over the floor beside it rather than a sliver of it — occlusion is
+/// a solid angle, and a kerb would subtend almost none.
+const AO_WALL: f32 = 2.0;
+
+/// How far above the floor [`Scene::Ao`]'s camera stands, in world units.
+///
+/// Just above the wall tops, looking into the trough. It also sets the scale of
+/// the picture: with the 60° vertical field of view `ao_camera` uses, the frame's
+/// short half-axis on the floor is `AO_CAMERA_UP * tan(30°)` — so this is what
+/// puts both walls inside the frame and both ends of the run outside it, which is
+/// the framing every band below depends on.
+const AO_CAMERA_UP: f32 = 2.2;
+
+/// [`Scene::Ao`]'s trough: the open box scaled to
+/// [`AO_RUN`] × [`AO_WALL`] × [`AO_TROUGH`] and lifted so its floor is the plane
+/// `y = 0`.
+///
+/// **A non-uniform scale, and it is safe on this mesh alone.** Every face of
+/// `crcbl_shaders::mesh::OPEN_BOX_FACES` is axis aligned, so an axis-aligned
+/// scale leaves each normal on its own axis and `mesh.slang` renormalises what it
+/// is handed. A mesh with an oblique face would need the inverse transpose, which
+/// nothing in this engine builds.
+///
+/// **Centred on the camera's axis, and that is not decoration.** A box this large
+/// slid sideways from the eye stops drawing altogether — the frame comes back as
+/// clear colour, on every geometry path, with the instance passing a host-side
+/// frustum test. It reproduces without any of this slice's passes, so it is not
+/// theirs; the scene is arranged to stay clear of it rather than to chase it.
+fn ao_box() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5 * AO_WALL, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::new(AO_RUN, AO_WALL, AO_TROUGH))
+}
+
+/// Where [`Scene::Ao`] parks the cube.
+///
+/// [`ForwardRenderer::begin_frame`] always places the cube, and this scene has no
+/// use for it: a lit box in the middle of the trough is a second shape in a frame
+/// whose whole content is a floor and the two walls closing over it, and it would
+/// stand exactly where the unoccluded bands are measured. So it is put out along
+/// the run, past the frame and inside the trough — inside, so it cannot poke
+/// through a wall on a future change to the framing.
+fn ao_parked_cube() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(0.45 * AO_RUN, 0.5, 0.0))
+}
+
+/// The camera [`Scene::Ao`] is drawn with: straight down into the trough.
+///
+/// **Overhead, and the band placement rests on it.** With the view direction
+/// along `Y` and the floor's normal along `Y`, four points the same distance from
+/// the frame's centre on that floor are the same distance from the eye, carry the
+/// same normal and — the sun being directional — take the same direct light. Two
+/// of them are against a wall and two are on open floor, and the occlusion term is
+/// then the only thing that can tell the pairs apart.
+///
+/// `Y` is the view direction, so `up` cannot also be `Y`; `+Z` puts the trough's
+/// `+Z` wall at the top of the frame, exactly as `spot_camera` does.
+fn ao_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, AO_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        up: glam::Vec3::Z,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// The sun [`Scene::Ao`] runs under: **straight down**, and barely there.
+///
+/// Both halves are load-bearing and neither is a taste.
+///
+/// * **Straight down** — a vertical light throws no shadow from a vertical wall,
+///   so the floor is lit identically right up to where it meets one. Under the
+///   default sun's tilt a wall [`AO_WALL`] tall would lay a shadow across the
+///   floor beside it and the bands would be measuring the shadow map.
+///   `crcbl_render::shadow` picks a second up vector for exactly this direction,
+///   so the cascades are built rather than degenerate.
+/// * **Barely there** — occlusion scales the ambient term and nothing else, so a
+///   bright key light is something the measurement has to see through. Turned
+///   down rather than removed, for `dimmed_sun`'s reason: a sun that stopped
+///   contributing is a row of the light list that stopped working, and a scene
+///   without one would not notice.
+fn ao_sun() -> crcbl_render::DirectionalLight {
+    crcbl_render::DirectionalLight {
+        direction: glam::Vec3::Y,
+        ..dimmed_sun(0.01, 1.0)
+    }
 }
 
 /// Where [`Scene::SpotShadow`] puts its light.
@@ -1081,6 +1219,20 @@ impl SceneState {
                     }
                 };
                 Self::Sprite { renderer, sheets }
+            }
+            Scene::Ao => {
+                // The open box alone, and the cube parked out of frame — see
+                // `ao_parked_cube`. Every other resident stays off for
+                // `Scene::Spot`'s reason: what this frame is about is one
+                // concave corner and the flat floor beside it.
+                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                renderer.set_open_box(Some(ao_box()));
+                Self::Forward {
+                    camera: ao_camera(),
+                    light: ao_sun(),
+                    model: ao_parked_cube(),
+                    renderer: Box::new(renderer),
+                }
             }
             Scene::Ui => Self::Ui {
                 renderer: UiRenderer::new(device, queue, format)?,
@@ -2149,8 +2301,19 @@ mod tests {
                     passes.push(("compute", "light-cluster"));
                 }
             }
+            // `docs/plan/18-render-features.md`'s occlusion slice added the
+            // middle three, in this order and no other: the prepass has to write
+            // the depth `ssao` reads, `ssao-blur` has to have raw occlusion to
+            // blur, and `forward` has to have the blurred channel before it can
+            // scale its ambient by it. A frame that runs them in any other order
+            // still draws — each pass reads whatever the last frame left in the
+            // pooled transient — so the sequence is asserted here rather than
+            // trusted to the graph.
             passes.extend([
                 ("render", "shadow"),
+                ("render", "depth-prepass"),
+                ("render", "ssao"),
+                ("render", "ssao-blur"),
                 ("render", "forward"),
                 ("render", "tonemap"),
             ]);
@@ -2165,7 +2328,7 @@ mod tests {
         // which is six tiles, and the light region holds six — so the most
         // influential one is shadowed and the other two light without occluding.
         let lights_passes = forward_passes(1);
-        let expected: [(Scene, &[(&str, &str)]); 7] = [
+        let expected: [(Scene, &[(&str, &str)]); 8] = [
             (Scene::Cube, &cube_passes),
             // Not the cube scene's passes: `Scene::Lights` is the cube scene
             // with a longer light list, the clustering dispatch is one per
@@ -2191,6 +2354,12 @@ mod tests {
             // shadowed spot does. A frame that culled per face would record five
             // more triples here.
             (Scene::PointShadow, &spot_shadow_passes),
+            // The cube scene's passes again: `Scene::Ao` is a different room
+            // under a different sun, and neither of those is a pass. Its sun is
+            // directional and its light list is empty, so it holds no atlas tile
+            // — which is what makes this row `cube_passes` and not
+            // `spot_shadow_passes`.
+            (Scene::Ao, &cube_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

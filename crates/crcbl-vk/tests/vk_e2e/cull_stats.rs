@@ -36,10 +36,14 @@ use crate::mesh::{mesh_camera, read_stats_word, render_mesh};
 /// [`ForwardRenderer::counters`]: crcbl_render::ForwardRenderer::counters
 const RING_LATENCY: u64 = crcbl_render::forward::FRAMES_IN_FLIGHT as u64 + 1;
 
-/// The tonemap's full-screen triangle: one instance, submitted and drawn, and
-/// the one draw in a forward frame the CPU knows the count of. It is on both
-/// sides of the submitted/drawn pair, which is what makes them comparable.
-const TONEMAP_INSTANCE: u64 = 1;
+/// The full-screen triangles a forward frame draws: `ssao`'s, `ssao-blur`'s and
+/// the tonemap's.
+///
+/// One instance each, submitted and drawn, and the only draws in a forward frame
+/// the CPU knows the count of. They are on both sides of the submitted/drawn
+/// pair, which is what makes the two comparable — see
+/// `crcbl_render::ForwardRenderer::counters`.
+const FULLSCREEN_INSTANCES: u64 = 3;
 
 /// **The culling counters come back off the GPU, and they are the cull's own
 /// answer.**
@@ -104,13 +108,13 @@ fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
     let submitted = counters.instances;
     assert_eq!(
         submitted,
-        3 + TONEMAP_INSTANCE,
-        "the cube, two pyramids and the tonemap's triangle",
+        3 + FULLSCREEN_INSTANCES,
+        "the cube, two pyramids and one triangle per full-screen pass",
     );
     assert_eq!(
         counters.drawn,
-        Some(1 + TONEMAP_INSTANCE),
-        "one instance survives the frustum test, and the tonemap's own triangle is drawn \
+        Some(1 + FULLSCREEN_INSTANCES),
+        "one instance survives the frustum test, and the full-screen triangles are drawn \
          whatever the cull decided",
     );
     assert!(
@@ -127,7 +131,7 @@ fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
         crcbl_shaders::cull::INSTANCE_SURVIVOR_WORD,
     );
     assert_eq!(
-        u64::from(by_hand) + TONEMAP_INSTANCE,
+        u64::from(by_hand) + FULLSCREEN_INSTANCES,
         counters.drawn.expect("the ring came round"),
         "the ring's number must be the one in the counter buffer",
     );
@@ -231,7 +235,7 @@ fn the_ring_keeps_turning_and_the_count_follows_the_scene() {
     );
     assert_eq!(
         renderer.counters().drawn,
-        Some(2 + TONEMAP_INSTANCE),
+        Some(2 + FULLSCREEN_INSTANCES),
         "and the row follows it",
     );
 

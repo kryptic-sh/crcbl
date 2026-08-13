@@ -112,6 +112,8 @@ struct GpuLight_std430_0
 
 @binding(16) @group(0) var shadow_sampler_0 : sampler_comparison;
 
+@binding(22) @group(0) var ambient_occlusion_0 : texture_2d<f32>;
+
 struct VertexOutput_0
 {
     @builtin(position) position_2 : vec4<f32>,
@@ -380,41 +382,42 @@ fn fragmentMain( _S18 : pixelInput_0, @builtin(position) position_3 : vec4<f32>)
     var material_3 : GpuMaterial_std430_0 = materials_0[_S18.material_2];
     var _S21 : vec3<f32> = vec3<f32>(_S18.uv_2, f32(material_3.base_color_texture_0));
     var albedo_0 : vec4<f32> = _S18.color_3 * material_3.base_color_0 * (textureSample((base_color_textures_0), (base_color_sampler_0), ((_S21)).xy, i32(((_S21)).z)));
-    var _S22 : u32 = froxel_of_0(position_3.xy, (((vec4<f32>(_S18.world_position_5, 1.0f)) * (mat4x4<f32>(frame_0.view_proj_0.data_1[i32(0)][i32(0)], frame_0.view_proj_0.data_1[i32(1)][i32(0)], frame_0.view_proj_0.data_1[i32(2)][i32(0)], frame_0.view_proj_0.data_1[i32(3)][i32(0)], frame_0.view_proj_0.data_1[i32(0)][i32(1)], frame_0.view_proj_0.data_1[i32(1)][i32(1)], frame_0.view_proj_0.data_1[i32(2)][i32(1)], frame_0.view_proj_0.data_1[i32(3)][i32(1)], frame_0.view_proj_0.data_1[i32(0)][i32(2)], frame_0.view_proj_0.data_1[i32(1)][i32(2)], frame_0.view_proj_0.data_1[i32(2)][i32(2)], frame_0.view_proj_0.data_1[i32(3)][i32(2)], frame_0.view_proj_0.data_1[i32(0)][i32(3)], frame_0.view_proj_0.data_1[i32(1)][i32(3)], frame_0.view_proj_0.data_1[i32(2)][i32(3)], frame_0.view_proj_0.data_1[i32(3)][i32(3)])))).w);
-    var base_2 : u32 = _S22 * u32(17);
-    var _S23 : u32 = min(cluster_lights_0[base_2], u32(16));
-    const _S24 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
+    var _S22 : vec2<f32> = position_3.xy;
+    var _S23 : u32 = froxel_of_0(_S22, (((vec4<f32>(_S18.world_position_5, 1.0f)) * (mat4x4<f32>(frame_0.view_proj_0.data_1[i32(0)][i32(0)], frame_0.view_proj_0.data_1[i32(1)][i32(0)], frame_0.view_proj_0.data_1[i32(2)][i32(0)], frame_0.view_proj_0.data_1[i32(3)][i32(0)], frame_0.view_proj_0.data_1[i32(0)][i32(1)], frame_0.view_proj_0.data_1[i32(1)][i32(1)], frame_0.view_proj_0.data_1[i32(2)][i32(1)], frame_0.view_proj_0.data_1[i32(3)][i32(1)], frame_0.view_proj_0.data_1[i32(0)][i32(2)], frame_0.view_proj_0.data_1[i32(1)][i32(2)], frame_0.view_proj_0.data_1[i32(2)][i32(2)], frame_0.view_proj_0.data_1[i32(3)][i32(2)], frame_0.view_proj_0.data_1[i32(0)][i32(3)], frame_0.view_proj_0.data_1[i32(1)][i32(3)], frame_0.view_proj_0.data_1[i32(2)][i32(3)], frame_0.view_proj_0.data_1[i32(3)][i32(3)])))).w);
+    var base_2 : u32 = _S23 * u32(17);
+    var _S24 : u32 = min(cluster_lights_0[base_2], u32(16));
+    const _S25 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
     var slot_0 : u32 = u32(0);
-    var direct_0 : vec3<f32> = _S24;
-    var gloss_0 : vec3<f32> = _S24;
+    var direct_0 : vec3<f32> = _S25;
+    var gloss_0 : vec3<f32> = _S25;
     for(;;)
     {
-        if(slot_0 < _S23)
+        if(slot_0 < _S24)
         {
         }
         else
         {
             break;
         }
-        var _S25 : GpuLight_std430_0 = lights_0[cluster_lights_0[base_2 + u32(1) + slot_0]];
-        var _S26 : u32 = _S25.kind_0;
-        var _S27 : bool = (_S25.kind_0) == u32(0);
+        var _S26 : GpuLight_std430_0 = lights_0[cluster_lights_0[base_2 + u32(1) + slot_0]];
+        var _S27 : u32 = _S26.kind_0;
+        var _S28 : bool = (_S26.kind_0) == u32(0);
         var to_light_4 : vec3<f32>;
         var reach_0 : f32;
-        if(_S27)
+        if(_S28)
         {
-            to_light_4 = normalize(_S25.direction_0.xyz);
+            to_light_4 = normalize(_S26.direction_0.xyz);
             reach_0 = 1.0f;
         }
         else
         {
-            var offset_0 : vec3<f32> = _S25.position_1.xyz - _S18.world_position_5;
+            var offset_0 : vec3<f32> = _S26.position_1.xyz - _S18.world_position_5;
             var distance_1 : f32 = length(offset_0);
             var to_light_5 : vec3<f32> = offset_0 / vec3<f32>(max(distance_1, 9.99999997475242708e-07f));
-            var reach_1 : f32 = punctual_falloff_0(distance_1, _S25.position_1.w);
-            if(_S26 == u32(2))
+            var reach_1 : f32 = punctual_falloff_0(distance_1, _S26.position_1.w);
+            if(_S27 == u32(2))
             {
-                reach_0 = reach_1 * spot_cone_0(to_light_5, _S25.direction_0.xyz, _S25.direction_0.w, _S25.cos_inner_0);
+                reach_0 = reach_1 * spot_cone_0(to_light_5, _S26.direction_0.xyz, _S26.direction_0.w, _S26.cos_inner_0);
             }
             else
             {
@@ -423,22 +426,22 @@ fn fragmentMain( _S18 : pixelInput_0, @builtin(position) position_3 : vec4<f32>)
             to_light_4 = to_light_5;
         }
         var n_dot_l_4 : f32 = dot(_S19, to_light_4);
-        var _S28 : f32 = max(n_dot_l_4, 0.0f);
-        var specular_0 : f32 = pow(max(dot(_S19, normalize(to_light_4 + _S20)), 0.0f), 32.0f) * (step(0.0f, _S28) * _S28);
+        var _S29 : f32 = max(n_dot_l_4, 0.0f);
+        var specular_0 : f32 = pow(max(dot(_S19, normalize(to_light_4 + _S20)), 0.0f), 32.0f) * (step(0.0f, _S29) * _S29);
         var reach_2 : f32;
-        if(_S27)
+        if(_S28)
         {
             reach_2 = sun_visibility_0(_S18.world_position_5, n_dot_l_4);
         }
         else
         {
-            if(_S26 == u32(1))
+            if(_S27 == u32(1))
             {
-                var _S29 : u32 = _S25.shadow_tile_0;
-                if((_S25.shadow_tile_0) <= u32(0))
+                var _S30 : u32 = _S26.shadow_tile_0;
+                if((_S26.shadow_tile_0) <= u32(0))
                 {
-                    var _S30 : f32 = point_visibility_0(&(_S25), _S29, _S18.world_position_5, to_light_4, n_dot_l_4);
-                    reach_2 = reach_0 * _S30;
+                    var _S31 : f32 = point_visibility_0(&(_S26), _S30, _S18.world_position_5, to_light_4, n_dot_l_4);
+                    reach_2 = reach_0 * _S31;
                 }
                 else
                 {
@@ -447,11 +450,11 @@ fn fragmentMain( _S18 : pixelInput_0, @builtin(position) position_3 : vec4<f32>)
             }
             else
             {
-                var _S31 : u32 = _S25.shadow_tile_0;
-                if((_S25.shadow_tile_0) < u32(6))
+                var _S32 : u32 = _S26.shadow_tile_0;
+                if((_S26.shadow_tile_0) < u32(6))
                 {
-                    var _S32 : f32 = spot_visibility_0(&(_S25), _S31, _S18.world_position_5, to_light_4, n_dot_l_4);
-                    reach_2 = reach_0 * _S32;
+                    var _S33 : f32 = spot_visibility_0(&(_S26), _S32, _S18.world_position_5, to_light_4, n_dot_l_4);
+                    reach_2 = reach_0 * _S33;
                 }
                 else
                 {
@@ -459,14 +462,15 @@ fn fragmentMain( _S18 : pixelInput_0, @builtin(position) position_3 : vec4<f32>)
                 }
             }
         }
-        var _S33 : vec3<f32> = _S25.color_1.xyz;
-        var direct_1 : vec3<f32> = direct_0 + _S33 * vec3<f32>((_S28 * reach_2));
-        var gloss_1 : vec3<f32> = gloss_0 + _S33 * vec3<f32>((specular_0 * reach_2 * 0.34999999403953552f));
+        var _S34 : vec3<f32> = _S26.color_1.xyz;
+        var direct_1 : vec3<f32> = direct_0 + _S34 * vec3<f32>((_S29 * reach_2));
+        var gloss_1 : vec3<f32> = gloss_0 + _S34 * vec3<f32>((specular_0 * reach_2 * 0.34999999403953552f));
         slot_0 = slot_0 + u32(1);
         direct_0 = direct_1;
         gloss_0 = gloss_1;
     }
-    var _S34 : pixelOutput_0 = pixelOutput_0( vec4<f32>(albedo_0.xyz * (frame_0.ambient_0.xyz + direct_0) + gloss_0, albedo_0.w) );
-    return _S34;
+    var _S35 : vec3<i32> = vec3<i32>(vec2<i32>(_S22), i32(0));
+    var _S36 : pixelOutput_0 = pixelOutput_0( vec4<f32>(albedo_0.xyz * (frame_0.ambient_0.xyz * vec3<f32>((textureLoad((ambient_occlusion_0), ((_S35)).xy, ((_S35)).z).x)) + direct_0) + gloss_0, albedo_0.w) );
+    return _S36;
 }
 

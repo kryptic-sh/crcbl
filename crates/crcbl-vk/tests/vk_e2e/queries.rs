@@ -165,8 +165,9 @@ fn per_pass_gpu_timers_report_real_numbers() {
 
     let timings = timers.latest();
     eprintln!("vk e2e: {}", timings.report());
-    // The camera's cull triple, then one per shadow cascade, then the depth-only
-    // pass they feed and the two that follow it. Built from
+    // The camera's cull triple, then one per shadow cascade, then the shadow
+    // atlas's depth-only pass, `docs/plan/18-render-features.md`'s depth prepass
+    // and occlusion pair, and the two colour passes that follow them. Built from
     // `crcbl_render::shadow::CASCADES` rather than written out, so a cascade
     // whose passes stopped being recorded is a failure here and not a shorter
     // HUD nobody counted.
@@ -183,7 +184,15 @@ fn per_pass_gpu_timers_report_real_numbers() {
     // pass and the timers therefore bracket like any other pass — a copy is a
     // cost in the frame, and one that never appeared in the report would be a
     // cost nothing could see.
-    expected.extend(["shadow", "forward", "tonemap", "cull-stats-readback"]);
+    expected.extend([
+        "shadow",
+        "depth-prepass",
+        "ssao",
+        "ssao-blur",
+        "forward",
+        "tonemap",
+        "cull-stats-readback",
+    ]);
     assert_eq!(
         timings
             .passes

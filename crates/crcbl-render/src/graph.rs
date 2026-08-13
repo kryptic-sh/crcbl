@@ -2395,13 +2395,41 @@ impl TransientImageDesc {
         }
     }
 
-    /// The depth buffer: `D32Float`, reversed-Z, never sampled.
+    /// The depth buffer: `D32Float`, reversed-Z, written by the depth prepass
+    /// and **sampled** by the screen-space occlusion pass.
+    ///
+    /// `SAMPLED` since `docs/plan/18-render-features.md`'s AO slice, which is the
+    /// prepass that made this image something downstream reads. It costs nothing
+    /// on a frame that adds no such pass: a usage flag is a promise about what
+    /// the image may be bound as, not a copy or a layout.
     #[must_use]
     pub const fn scene_depth(extent: (u32, u32)) -> Self {
         Self {
             extent,
             format: Format::D32Float,
-            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT,
+            usage: ImageUsage::DEPTH_STENCIL_ATTACHMENT.union(ImageUsage::SAMPLED),
+            samples: 1,
+            mip_levels: 1,
+        }
+    }
+
+    /// A screen-space occlusion channel: `R8Unorm`, rendered into and then
+    /// fetched.
+    ///
+    /// `docs/plan/18-render-features.md`'s AO pair — `ssao.slang` writes one of
+    /// these and `ssao_blur.slang` reads it and writes another, which is why this
+    /// is one description rather than two that agree today.
+    ///
+    /// One channel and eight bits: the value is a fraction of a hemisphere that a
+    /// 4×4 box blur has just averaged sixteen samples into, so the quantisation
+    /// is far below what the blur already smoothed away — and it is a quarter of
+    /// the bandwidth of the smallest four-channel format.
+    #[must_use]
+    pub const fn ambient_occlusion(extent: (u32, u32)) -> Self {
+        Self {
+            extent,
+            format: Format::R8Unorm,
+            usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::SAMPLED),
             samples: 1,
             mip_levels: 1,
         }

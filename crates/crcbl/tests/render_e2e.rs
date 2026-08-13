@@ -846,6 +846,171 @@ fn each_caster_darkens_its_own_side_of_the_point_light(image: &Image) {
     }
 }
 
+/// The anti-vacuity floor for [`Scene::Ao`].
+///
+/// Lower than the shadow scenes', and deliberately: this frame is one flat floor
+/// under one ambient term, so most of its colours are the occlusion gradient
+/// itself and a count high enough to be interesting would be a count that fails
+/// when the gradient gets smoother. What it separates is "the box drew nothing"
+/// — a frame of clear colour, or of one flat unlit floor — from a working one,
+/// and the *shape* of the darkening is
+/// [`the_corner_is_occluded_and_the_open_floor_is_not`]'s claim.
+///
+/// [`the_corner_is_occluded_and_the_open_floor_is_not`]: fn@the_corner_is_occluded_and_the_open_floor_is_not
+const MIN_COLORS_AO: usize = 16;
+
+/// How many pixels of the frame one world unit of [`Scene::Ao`]'s floor is.
+///
+/// [`POINT_PIXELS_PER_UNIT`]'s arithmetic with that scene's camera height
+/// swapped for `screenshot`'s `AO_CAMERA_UP`: the frame's short half-axis covers
+/// `up * tan(30°)` of floor and a pixel is that over half the frame's height.
+const AO_PIXELS_PER_UNIT: f32 = (EXTENT.1 as f32 / 2.0) / (2.2 * 0.577_350_3);
+
+/// Where a point on [`Scene::Ao`]'s floor lands in the frame.
+///
+/// [`point_pixel`]'s flip for [`point_pixel`]'s reason: the camera looks down
+/// `-Y` with `+Z` up, so world `+X` is the frame's left and world `+Z` is its
+/// top.
+fn ao_pixel(x: f32, z: f32) -> (u32, u32) {
+    let column = EXTENT.0 as f32 / 2.0 - x * AO_PIXELS_PER_UNIT;
+    let row = EXTENT.1 as f32 / 2.0 - z * AO_PIXELS_PER_UNIT;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "every band below is inside the frame, which the block reader asserts"
+    )]
+    (column as u32, row as u32)
+}
+
+/// The half-extent of each band [`Scene::Ao`] is measured over, in pixels.
+///
+/// `screenshot`'s `AO_TROUGH` puts each wall `0.8` from the frame's centre, so at
+/// [`AO_PIXELS_PER_UNIT`] a wall's base is about 60 pixels out and the band below
+/// sits about 11 pixels inside it. Five is what fits between the two with the
+/// whole band still on floor, and it is wide enough that the 4×4 box blur
+/// `ssao_blur.slang` applies has averaged over every pixel of it.
+const AO_BAND: (u32, u32) = (5, 5);
+
+/// How far from the frame's centre every band sits, in world units.
+///
+/// **One number for all four, and that is what the claim rests on.** The camera
+/// looks straight down, so four points the same distance from the axis on the same
+/// flat floor are the same distance from the eye, carry the same normal, and — the
+/// sun being directional — receive exactly the same direct light. Two of the four
+/// are against a wall and two are on open floor; occlusion is the only term left
+/// that can separate them.
+///
+/// A tenth of a unit short of `screenshot`'s `AO_TROUGH` half-width, so the two
+/// across-bands are pressed into the corner where floor meets wall and the two
+/// along-bands are most of `AO_RUN` from either end.
+const AO_BAND_AT: f32 = 0.7;
+
+/// How much brighter the open floor must be than the floor against a wall.
+///
+/// A ratio rather than a difference, on [`SPOT_SHADOW_RATIO`]'s terms — and a much
+/// smaller number than that one, for a reason worth writing down rather than
+/// tuning around. **These bands are read after the sRGB encode**, which is very
+/// nearly a `0.42` power: a term that halves in linear light moves by about a
+/// quarter here. Occlusion also scales the ambient alone, so even a wall that
+/// closes half the hemisphere over a pixel cannot halve what that pixel shows.
+///
+/// The frame this was set against measures the wall bands about a sixth below the
+/// open ones, so this is a floor with margin over that and far over the
+/// single-digit drift `crcbl_golden::Tolerance::RASTERISER` was measured for. What
+/// it separates is real: a pass that wrote a constant, or one whose result never
+/// reached the shading line, leaves every band equal and lands at exactly `1.00`.
+const AO_RATIO: f32 = 1.10;
+
+/// How far above the clear the open bands must measure.
+///
+/// [`SPOT_SHADOW_LIT_FLOOR`]'s job: a frame that drew nothing has every band equal
+/// to the clear, and a ratio between equal numbers says nothing.
+const AO_LIT_FLOOR: f32 = 10.0;
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_ao_scene_occludes_its_corner_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::Ao,
+        "ao",
+        MIN_COLORS_AO,
+        the_corner_is_occluded_and_the_open_floor_is_not,
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_ao_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::Ao,
+        "ao",
+        MIN_COLORS_AO,
+        the_corner_is_occluded_and_the_open_floor_is_not,
+    );
+}
+
+/// [`Scene::Ao`]'s claim: **the floor is darker where a wall closes over it and
+/// not where the same floor is open.**
+///
+/// **The golden cannot make this claim and no golden ever could.** An occlusion
+/// pass that wrote a constant `1.0` draws a perfectly plausible frame — a flat
+/// floor under a flat ambient, which is what a trough lit this way looks like —
+/// and it would be blessed without comment. So would one whose reconstructed
+/// normal points into the surface, which occludes every pixel and produces the
+/// same frame a step darker. Both of those are a *uniform* change, and every
+/// assertion here is a ratio between bands of the same frame, which no uniform
+/// change can move.
+///
+/// Four bands, all [`AO_BAND_AT`] from the frame's centre on the same flat floor:
+///
+/// * `+Z` and `-Z`, each a tenth of a unit off one of the trough's two walls.
+/// * `+X` and `-X`, the same distance out along the trough's run, where the
+///   nearest wall is most of `screenshot`'s `AO_RUN` away.
+///
+/// **The four share a distance from the eye, and that is what a vignette cannot
+/// survive.** Anything that darkens with distance from the frame's centre — a
+/// vignette, a falloff, an occlusion pass whose radius is being read in screen
+/// space — moves all four together and satisfies none of the ratios. Anything
+/// that darkens one side of the frame — a flipped `SV_Position.y` in
+/// `ssao.slang`, a light pointing where it should not — moves one band of a pair
+/// and is caught by the other. Only occlusion separates the axes.
+fn the_corner_is_occluded_and_the_open_floor_is_not(image: &Image) {
+    let band = |x: f32, z: f32| block_brightness(image, ao_pixel(x, z), AO_BAND);
+    let near_wall = [
+        ("+Z", band(0.0, AO_BAND_AT)),
+        ("-Z", band(0.0, -AO_BAND_AT)),
+    ];
+    let open = [
+        ("+X", band(AO_BAND_AT, 0.0)),
+        ("-X", band(-AO_BAND_AT, 0.0)),
+    ];
+    eprintln!(
+        "crcbl render e2e: ao — against the walls {:.1} and {:.1}, open floor {:.1} and {:.1}",
+        near_wall[0].1, near_wall[1].1, open[0].1, open[1].1,
+    );
+    for (wall, dark) in near_wall {
+        for (axis, lit) in open {
+            assert!(
+                dark * AO_RATIO < lit,
+                "the floor against the {wall} wall must be unmistakably darker than the floor \
+                 the same distance out along {axis}, which is open: {dark:.1} against {lit:.1} \
+                 — that is not occlusion"
+            );
+        }
+    }
+    // The open bands are lit *floor*, not a black frame the corner is invisible
+    // against. Without this the ratios above are satisfiable by a scene that drew
+    // nothing at all.
+    let clear = block_brightness(image, (2, 2), (2, 2));
+    for (axis, lit) in open {
+        assert!(
+            lit > clear + AO_LIT_FLOOR,
+            "the {axis} band measures {lit:.1} against a clear of {clear:.1}, so there is no lit \
+             floor here for occlusion to be occlusion against"
+        );
+    }
+}
+
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
 fn the_dunes_scene_draws_its_cluster_dag_and_matches_its_golden() {

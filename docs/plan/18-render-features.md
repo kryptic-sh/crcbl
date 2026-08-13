@@ -255,14 +255,22 @@ first.
 
 ### Risks this carries
 
-- **Depth invariance.** `GreaterOrEqual` in the forward pass needs its
-  `SV_Position.z` bit-identical to the prepass's. Same module, same entry point,
-  same matrix, but two pipelines can be compiled differently and a marginally
-  farther fragment is rejected, which looks like holes. Nothing in the shaders
-  carries an invariance decoration. The four CI rasterisers are the measurement;
-  the zero-risk fallback is to keep the forward pass writing depth and forgo the
-  overdraw win, and **that fallback is taken by saying so in the code, never by
-  re-blessing a golden around it**.
+- **The forward pass keeps clearing and writing depth**, and the first slice
+  took that deliberately. `LoadOp::Load` with `Greater` — which an earlier draft
+  of this section implied — **cannot work**: the prepass has already written the
+  identical depth and `Greater` rejects equality, so every fragment dies and the
+  frame is black. `GreaterOrEqual` works and is the version that buys the
+  overdraw win, but it reintroduces the invariance risk below. Clearing is the
+  only zero-risk form, and it is why `spot.png` moved by exactly zero pixels
+  when AO landed.
+- **Depth invariance**, which is what the overdraw win costs. `GreaterOrEqual`
+  in the forward pass needs its `SV_Position.z` bit-identical to the prepass's.
+  Same module, same entry point, same matrix, but two pipelines can be compiled
+  differently and a marginally farther fragment is rejected, which looks like
+  holes. Nothing in the shaders carries an invariance decoration. The four CI
+  rasterisers are the measurement; the zero-risk fallback is to keep the forward
+  pass writing depth and forgo the overdraw win, and **that fallback is taken by
+  saying so in the code, never by re-blessing a golden around it**.
 - **A `Load` on a depth texture with no sampler** is the corner this engine has
   already been bitten in once, over `DepthTexture2D` versus `Texture2D<float>`.
 - **The box blur bleeds AO across silhouettes** as a halo. A bilateral blur is

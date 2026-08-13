@@ -763,13 +763,17 @@ mod tests {
                 // `SamplerState`, which is why it is one more `Sampler` here
                 // rather than a class of its own.
                 //
-                // The last two are topic 18's light list and froxel grid, at
-                // bindings 20 and 21 — another gap `mesh_cluster.slang` owns and
-                // D3D12 likewise does not see, so they are `t7` and `t8`. Both
-                // are `StructuredBuffer` rather than `RW`, because this file
-                // only reads what `light_cluster.slang` wrote.
+                // Then topic 18's light list and froxel grid, at bindings 20 and
+                // 21 — another gap `mesh_cluster.slang` owns and D3D12 likewise
+                // does not see, so they are `t7` and `t8`. Both are
+                // `StructuredBuffer` rather than `RW`, because this file only
+                // reads what `light_cluster.slang` wrote.
+                //
+                // Last is that file's screen-space occlusion channel at binding
+                // 22, and therefore `t9`: an ordinary `Texture2D<float>` read by
+                // `Load`, so it takes no sampler beside it.
                 &[
-                    Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler, Srv, Srv,
+                    Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler, Srv, Srv, Srv,
                 ],
             ),
             (

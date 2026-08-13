@@ -141,6 +141,7 @@ pub mod mesh_pool;
 pub mod nine_slice;
 pub mod shadow;
 pub mod sprite_pass;
+mod ssao;
 pub mod texture;
 pub mod timing;
 pub mod transient;

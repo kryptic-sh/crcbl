@@ -145,7 +145,7 @@ use crcbl_hal::{
     QueueHandle, Rect2d, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
     ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, Viewport,
 };
-use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, level_select, mesh};
+use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, level_select, mesh, ssao};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::camera::{Camera, DirectionalLight};
@@ -154,14 +154,15 @@ use crate::counters::FrameCounters;
 use crate::cull::Frustum;
 use crate::cull_stats::CullStatsRing;
 use crate::draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
-use crate::graph::{BufferId, ImageId, ImportedBuffer, ImportedImage, RenderGraph};
+use crate::graph::{BufferId, ImageId, ImportedBuffer, ImportedImage, PassBuilder, RenderGraph};
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc};
 use crate::light::{Light, sun_row};
 use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
 use crate::shadow::{self, Cascades};
-use crate::texture::{UploadedTexture, upload_texture_layers};
+use crate::ssao::{Ssao, cached_group};
+use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
 use crate::transient::TransientImageDesc;
 
 /// The clear behind the mesh, in **linear** light.
@@ -314,6 +315,56 @@ const LIGHT_LIST_BINDING: u32 = 20;
 
 /// The bind-group slot the froxel grid is read through.
 const LIGHT_GRID_BINDING: u32 = 21;
+
+/// The bind-group slot `docs/plan/18-render-features.md`'s screen-space
+/// occlusion is fetched through.
+///
+/// **Last of the set, and that is what keeps `crcbl-mtl` honest.** That backend
+/// gives a resource the next index in its Metal argument table by counting the
+/// same-table entries of the layout list, and Slang numbers a stage's arguments
+/// by declaration order — so the two agree only while both lists ascend. 22 is
+/// past everything `mesh_cluster.slang` declares as well, which is why that file
+/// needs no mirror of this one: no index it already owns moves.
+const AMBIENT_OCCLUSION_BINDING: u32 = 22;
+
+/// The radius `ssao.slang` gathers occlusion within, in **world units**.
+///
+/// A world-space radius rather than a screen-space one, because occlusion is a
+/// fact about a room and not about a zoom level: a corner that darkens when the
+/// camera walks towards it is the artefact a screen-space radius produces.
+///
+/// Half the width of the engine's unit cube — about half a metre at the scale
+/// every mesh in the tree is modelled at, which is the reach conventional
+/// screen-space occlusion is tuned for. A surface meeting a wall then darkens
+/// over a band a reader can see at the golden suite's 256×192, while two separate
+/// objects a unit apart still do not shade each other at all.
+const SSAO_RADIUS: f32 = 0.5;
+
+/// The depth bias `ssao.slang` needs before a surface may occlude, in view-space
+/// units.
+///
+/// A flat surface samples its own plane, and reconstructing that plane from a
+/// quantised depth buffer puts about half the samples marginally in front of it —
+/// which is uniform grey haze over every flat wall in the frame rather than
+/// occlusion. Small against [`SSAO_RADIUS`], so a real contact shadow survives
+/// it.
+const SSAO_BIAS: f32 = 0.02;
+
+/// The `R8Unorm` texel that occludes nothing: `1.0`, which is `0xFF`.
+///
+/// What [`ForwardRenderer::ambient_occlusion_placeholder`] holds, and therefore
+/// what `mesh.slang` multiplies `frame.ambient.rgb` by on every group built
+/// before the graph has a real occlusion image. Any other value would be a
+/// silent global ambient scale.
+const AMBIENT_OCCLUSION_NONE: u8 = 0xFF;
+
+/// The reversed-Z far plane, in the two places that have to agree about it.
+///
+/// `ssao.slang` leaves early at exactly this depth because the unprojection there
+/// divides by a `clip.w` an infinite reversed-Z projection takes to zero. The
+/// shader cannot include the seam and `crcbl-shaders` does not depend on it, so
+/// the mirror is checked here — which is the only place both names are in scope.
+const _: () = assert!(crcbl_hal::depth::CLEAR == crcbl_shaders::ssao::DEPTH_FAR);
 
 /// Rows the light list holds — the sun and every [`Light`] a caller set.
 ///
@@ -481,22 +532,31 @@ const fn shadow_cull(slot: usize) -> usize {
 }
 
 /// The passes [`ForwardRenderer::add_passes`] records itself: the shadow
-/// atlas's, the forward pass, the tonemap and the culling-statistics copy.
+/// atlas's, the depth prepass, the forward pass, the tonemap and the
+/// culling-statistics copy — plus [`Ssao::PASSES`] beside them.
 ///
 /// Every other pass in the frame belongs to a [`DrawGen`] or to the
 /// [`LightGrid`], which is why this is the only count written here rather than
 /// derived — see [`ForwardRenderer::MAX_PASSES`]. The copy is counted even
-/// though a device that refused the readback records three rather than four:
-/// this is a ceiling, and one that came up short would silently stop timing the
-/// last pass of every frame.
-const RENDER_PASSES: u32 = 4;
+/// though a device that refused the readback records one fewer: this is a
+/// ceiling, and one that came up short would silently stop timing the last pass
+/// of every frame.
+const RENDER_PASSES: u32 = 5 + Ssao::PASSES;
 
-/// Draws the tonemap pass records: the full-screen triangle, drawn once.
+/// Draws a full-screen pass records: the over-sized triangle, drawn once.
 ///
 /// Named rather than written into [`ForwardRenderer::counters`]'s arithmetic,
-/// because it is the one draw in this file whose instance and triangle counts
-/// the CPU knows exactly — everything else here goes through an indirect call.
-const TONEMAP_DRAWS: u64 = 1;
+/// because these are the only draws in this file whose instance and triangle
+/// counts the CPU knows exactly — everything else here goes through an indirect
+/// call.
+const FULLSCREEN_DRAWS: u64 = 1;
+
+/// Full-screen passes the frame records: `ssao`, `ssao-blur` and the tonemap.
+///
+/// It was the tonemap alone until `docs/plan/18-render-features.md`'s occlusion
+/// slice, which is why [`FULLSCREEN_DRAWS`] is a count *per pass* rather than the
+/// total: the two are different numbers now and were the same one before.
+const FULLSCREEN_PASSES: u64 = 3;
 
 /// The budget an **orthographic** camera selects under: one no group satisfies,
 /// so every group expands and the base level is drawn whole.
@@ -843,6 +903,67 @@ pub struct ForwardRenderer {
     /// The format the tonemap pipeline was built for. A swapchain format change
     /// needs a new pipeline, which is why it is remembered rather than assumed.
     target_format: Format,
+
+    /// A 1×1 `R8Unorm` image holding [`AMBIENT_OCCLUSION_NONE`], so a group of
+    /// the mesh layout can fill [`AMBIENT_OCCLUSION_BINDING`] without naming an
+    /// occlusion image that does not exist yet.
+    ///
+    /// [`ForwardRenderer::shadow_placeholder`]'s argument, one binding along, and
+    /// with one addition: this one's *contents* matter. The shadow placeholder is
+    /// never sampled — the depth-only pipeline has no fragment stage — where this
+    /// one is what `mesh.slang` multiplies the ambient term by on any frame whose
+    /// occlusion passes were not added. White is the value that occludes nothing,
+    /// which is the honest reading of "AO was not computed".
+    ///
+    /// It is uploaded rather than cleared, so it is in
+    /// [`ResourceState::ShaderRead`] from the moment it exists and no pass has to
+    /// declare it to give it a layout.
+    ambient_occlusion_placeholder: UploadedTexture,
+    /// `[frame]`: the entries [`ForwardRenderer::mesh_groups`] was built from.
+    ///
+    /// Kept because the occlusion image is a graph transient: its view is known
+    /// only at execute time, so the camera's group has to be rebuilt inside the
+    /// forward pass, and re-deriving twenty bindings there would mean carrying
+    /// half of `build`'s locals into the frame. Exactly one entry —
+    /// [`AMBIENT_OCCLUSION_BINDING`]'s — differs between the stored list and what
+    /// the rebuild writes.
+    mesh_group_entries: Vec<Vec<BindGroupEntry>>,
+    /// `[frame]`: the camera's group rebuilt against the blurred occlusion view,
+    /// cached against that view.
+    ///
+    /// [`ForwardRenderer::tonemap_group`]'s shape, one per frame in flight
+    /// because the group it replaces is per frame in flight. Rebuilt only when
+    /// the view changes, which is only on a resize.
+    ///
+    /// [`ForwardRenderer::mesh_groups`] is the fallback and is *not* dead weight:
+    /// it is what the depth prepass binds, because that pass runs before there is
+    /// any occlusion to name.
+    ambient_occlusion_groups: Vec<Option<(ImageViewHandle, BindGroupHandle)>>,
+    /// `[frame]`: the depth prepass's group — the camera's, with the occlusion
+    /// placeholder and **a culling-statistics buffer of its own**.
+    ///
+    /// The second half is the whole reason this is a group rather than
+    /// [`ForwardRenderer::mesh_groups`] reused. On the mesh-shader path the
+    /// prepass runs the same amplification stage the forward pass does, and that
+    /// stage counts every surviving cluster into the buffer bound at binding 14 —
+    /// so sharing the camera's would make
+    /// [`CullStats::clusters`](crate::cull_stats::CullStats::clusters) report
+    /// every cluster of the frame twice, which is a plausible number and a wrong
+    /// one.
+    ///
+    /// **Nothing reads what this counts and nothing clears it.** It is a sink: a
+    /// wrapping `u32` whose value is never looked at, which is the honest price
+    /// of a prepass that shares a pipeline with the pass it precedes.
+    prepass_groups: Vec<BindGroupHandle>,
+    /// `[frame]`: the sink [`ForwardRenderer::prepass_groups`] counts into.
+    ///
+    /// Held so the prepass can declare it and the graph can barrier it. A ring
+    /// rather than one buffer for every other per-frame resource's reason: the
+    /// previous frame's submission may still be writing last frame's.
+    prepass_stats: Vec<BufferHandle>,
+
+    /// `docs/plan/18-render-features.md`'s occlusion pair — see [`crate::ssao`].
+    ssao: Ssao,
 }
 
 /// What a partly-built [`ForwardRenderer`] has to give back.
@@ -889,6 +1010,9 @@ struct Rollback {
     /// three buffers — and which clean themselves up on their own failure path,
     /// so this only carries one that was built.
     lights: Option<LightGrid>,
+    /// `docs/plan/18-render-features.md`'s occlusion pair, which owns two
+    /// pipelines, two layouts and a ring of blocks.
+    ssao: Option<Ssao>,
 }
 
 impl Rollback {
@@ -930,6 +1054,9 @@ impl Rollback {
         }
         if let Some(lights) = self.lights {
             lights.destroy(device);
+        }
+        if let Some(ssao) = self.ssao {
+            ssao.destroy(device);
         }
         if let Some(draws) = self.draws {
             draws.destroy(device);
@@ -1016,6 +1143,17 @@ struct MeshGroup {
     /// and the placeholder for the pass that writes it — see
     /// [`ForwardRenderer::shadow_placeholder`], which is where that is argued.
     shadow_map: ImageViewHandle,
+    /// Binding [`AMBIENT_OCCLUSION_BINDING`]. The blurred occlusion channel for
+    /// the forward pass, and the white placeholder for every group built before
+    /// the graph has realised one — see
+    /// [`ForwardRenderer::ambient_occlusion_placeholder`].
+    ///
+    /// **Every group built at `build` names the placeholder**, including the
+    /// camera's: the occlusion image is a graph transient whose view exists only
+    /// at execute time, so the camera's group is rebuilt against it inside the
+    /// forward pass and cached — the shape
+    /// [`ForwardRenderer::tonemap_group`] already has.
+    ambient_occlusion: ImageViewHandle,
 }
 
 impl MeshGroup {
@@ -1189,7 +1327,184 @@ impl MeshGroup {
             array_index: 0,
             resource: BindingResource::whole_buffer(shared.light_grid),
         });
+        // Last, on [`AMBIENT_OCCLUSION_BINDING`]'s terms: the list has to ascend
+        // or `crcbl-mtl`'s argument table and Slang's stop agreeing.
+        entries.push(BindGroupEntry {
+            binding: AMBIENT_OCCLUSION_BINDING,
+            array_index: 0,
+            resource: BindingResource::ImageView(self.ambient_occlusion),
+        });
         entries
+    }
+}
+
+/// Everything a geometry pass needs to record one indirect call per bucket.
+///
+/// **One description for the three passes that record them**: the depth prepass,
+/// the forward pass and each shadow view. They differ in the pipeline and in
+/// which bind group and which cull's arguments they draw from, and in nothing
+/// else — so the emit tail, the index-buffer bind and the per-bucket loop are one
+/// piece of code rather than three that agree today. The shadow pass gained a
+/// viewport per tile around this; the prepass gained nothing at all, which is the
+/// point of it being the colour pass's twin.
+#[derive(Clone)]
+struct BucketDraws {
+    pipeline: GraphicsPipelineHandle,
+    layout: PipelineLayoutHandle,
+    /// The whole index pool, bound at offset zero — see [`BucketDraws::record`].
+    indices: BufferHandle,
+    emit: EmitTail,
+    /// Per bucket: the dynamic offset of its constant block, and the offsets of
+    /// its argument structure, its count word and its dispatch extents.
+    calls: Vec<(u32, u64, u64, u64)>,
+}
+
+impl BucketDraws {
+    /// Binds the pipeline and, unless this is a mesh pipeline, the index pool.
+    ///
+    /// Recorded once per pass; [`BucketDraws::record`] is once per bind group.
+    fn open(&self, encoder: &mut dyn crcbl_hal::CommandEncoder) {
+        encoder.bind_graphics_pipeline(self.pipeline);
+        if !self.emit.is_mesh() {
+            // The index pool is bound whole, at offset zero, for every mesh in
+            // it: the mesh's place is the draw's first index and its table entry,
+            // not a buffer offset. That is what makes one bind enough for the
+            // scene P7 puts in here.
+            //
+            // A mesh pipeline has no index buffer at all — the corner triples
+            // come out of the cluster records — so binding one would be a bind no
+            // stage could read.
+            encoder.bind_index_buffer(self.indices, 0, IndexFormat::Uint32);
+        }
+    }
+
+    /// Records one call per bucket, drawing `group`'s view of `draws`.
+    ///
+    /// One call per bucket **always** — the number the CPU records does not depend
+    /// on what is in the scene, which is the whole of what topic 03 §3.3 asks for.
+    /// An empty bucket's arguments carry an instance count of zero.
+    fn record(
+        &self,
+        encoder: &mut dyn crcbl_hal::CommandEncoder,
+        group: BindGroupHandle,
+        draws: &GeneratedDraws,
+    ) {
+        let stride = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE as u32;
+        let mesh_stride = crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32;
+        for (constant_offset, args_offset, count_offset, mesh_args_offset) in &self.calls {
+            // The block written at build for this bucket: where its run of
+            // surviving instances starts. `SV_InstanceID` walks the run from
+            // there, each entry names an instance, the instance names its mesh,
+            // and the mesh table says where that mesh's vertices start — none of
+            // which the draw call carries. The mesh path's block says the same and
+            // three things more; see `meshlet::ClusterDrawConstants`.
+            encoder.bind_group(0, group, &[*constant_offset], self.layout);
+            match self.emit {
+                EmitTail::Mesh => {
+                    // One workgroup per (cluster, **surviving** instance), and
+                    // neither extent is the CPU's: they are the three words the
+                    // draw-argument pass wrote for this bucket.
+                    //
+                    // That is the whole difference between culling that skips
+                    // output and culling that skips work. A dispatch sized here
+                    // would have to cover every slot the instance pool ever handed
+                    // out — a removed instance leaves a hole and the live ones
+                    // above it stay in the array — and launch a workgroup for
+                    // each, which then reads the survivor count and returns.
+                    //
+                    // Recorded unconditionally, unlike a CPU-sized dispatch: an
+                    // extent of zero is a legal indirect dispatch of no
+                    // workgroups, so an empty scene needs no branch here and the
+                    // recorded stream stays the same whatever the scene holds.
+                    encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                        args: draws.mesh_args,
+                        offset: *mesh_args_offset,
+                        draw_count: 1,
+                        stride: mesh_stride,
+                    });
+                }
+                EmitTail::Count => {
+                    encoder.draw_indexed_indirect_count(&DrawIndirectCount {
+                        args: draws.args,
+                        args_offset: *args_offset,
+                        count_buffer: draws.counts,
+                        count_offset: *count_offset,
+                        // One argument structure per bucket, so this is the
+                        // ceiling rather than a guess: the count in the buffer is
+                        // zero or one and the GPU decides which.
+                        max_draw_count: 1,
+                        stride,
+                    });
+                }
+                EmitTail::PerBatch => {
+                    encoder.draw_indexed_indirect(&DrawIndirect {
+                        args: draws.args,
+                        offset: *args_offset,
+                        // Read the bucket's one structure unconditionally — a
+                        // device without a GPU-side count cannot ask whether there
+                        // is anything in it, and an instance count of zero draws
+                        // nothing anyway. That is why the two paths are the same
+                        // picture and not an approximation of each other.
+                        draw_count: 1,
+                        stride,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Declares the buffers a geometry pass reads to find its draws.
+///
+/// The other half of [`BucketDraws`]: what the *graph* has to be told, where that
+/// struct is what the encoder is told. Three passes declare exactly this set, and
+/// the seam calls the barrier it produces the single most important one in a
+/// GPU-driven frame — its absence produces "sometimes nothing draws".
+///
+/// A caller with a cluster-selection buffer of its own appends it; that is the
+/// one declaration that differs between the colour pass, a cascade and the depth
+/// prepass.
+fn read_draw_sources<'g, 'a>(
+    pass: PassBuilder<'g, 'a>,
+    draws: &GeneratedDraws,
+    emit: EmitTail,
+    culls_clusters: bool,
+) -> PassBuilder<'g, 'a> {
+    // The buffers the draws come out of. Declaring them is what makes the graph
+    // transition them out of the compute pass's `ShaderReadWrite`.
+    let pass = pass.read_buffer(draws.runs_id);
+    if emit.is_mesh() {
+        // **The same arguments, read as data rather than executed**, which is
+        // what the stages use to bound the run of surviving instances they index.
+        // The per-bucket draw *counts* are not read at all, because nothing here
+        // is a draw whose count could come from memory.
+        //
+        // The dispatch *extents* are a second buffer and a real indirect read —
+        // one structure per bucket, written by the same pass. Two buffers rather
+        // than one because a resource is in exactly one state per pass and these
+        // two are in different ones.
+        let pass = pass
+            .read_buffer(draws.args_id)
+            .use_buffer(draws.mesh_args_id, ResourceState::IndirectArgument);
+        if culls_clusters {
+            // The amplification stage counts its survivors into the culling
+            // statistics, which the draw-argument pass read a moment ago — so this
+            // is a write-after-read the graph has to order, and declaring it is
+            // the whole of how it learns to.
+            //
+            // `docs/plan/25-lod.md`'s hysteresis state is read here and written by
+            // the draw-argument pass a moment ago. Declaring it is what orders the
+            // two — and what puts it back into `ShaderReadWrite` at the end of the
+            // graph, which is where the next frame's draw-argument pass expects to
+            // find it.
+            pass.use_buffer(draws.visible_count_id, ResourceState::ShaderReadWrite)
+                .read_buffer(draws.group_state_id)
+        } else {
+            pass
+        }
+    } else {
+        pass.use_buffer(draws.args_id, ResourceState::IndirectArgument)
+            .use_buffer(draws.counts_id, ResourceState::IndirectArgument)
     }
 }
 
@@ -1935,6 +2250,27 @@ impl ForwardRenderer {
             count: 1,
             flags: BindingFlags::empty(),
         });
+        // `docs/plan/18-render-features.md`'s occlusion channel, last of the set
+        // — see [`AMBIENT_OCCLUSION_BINDING`] on why last is structural rather
+        // than tidy.
+        //
+        // `geometry` beside `FRAGMENT` for binding 7's reason exactly, and
+        // `msl/mesh.metal` is the proof rather than the theory: its `vertexMain`
+        // takes `ambient_occlusion [[texture(2)]]` whether it reads it or not.
+        mesh_entries.push(BindGroupLayoutEntry {
+            binding: AMBIENT_OCCLUSION_BINDING,
+            visibility: geometry.union(ShaderStages::FRAGMENT),
+            kind: BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+                // **`Float`, unlike the shadow atlas above.** This one is an
+                // ordinary `R8Unorm` colour image and the WGSL artifact declares
+                // `texture_2d<f32>` for it; `Depth` here would be a layout
+                // claiming a depth format the view does not have.
+                sample_type: SampleType::Float,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
 
         let mesh_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("mesh frame"),
@@ -2067,6 +2403,27 @@ impl ForwardRenderer {
         })?;
         rollback.image_views.push(shadow_placeholder_view);
 
+        // The occlusion placeholder, beside the shadow one and for the same
+        // reason: every group of this layout has to fill
+        // [`AMBIENT_OCCLUSION_BINDING`], and most of them are built before the
+        // graph has an occlusion image to name.
+        //
+        // **Uploaded rather than cleared**, unlike the depth placeholder above,
+        // and the byte is the whole point: `0xFF` is `1.0` through `R8Unorm`, so
+        // a fragment that reads this one is a fragment nothing occludes. Left
+        // undefined it would be a random ambient scale on any frame that fell
+        // back to it.
+        let ambient_occlusion_placeholder = upload_texture(
+            device,
+            queue,
+            "ssao placeholder",
+            Format::R8Unorm,
+            1,
+            1,
+            &[AMBIENT_OCCLUSION_NONE],
+        )?;
+        rollback.textures.push(ambient_occlusion_placeholder);
+
         // **A comparison sampler, and that is the PCF.** Each
         // `SampleCmpLevelZero` returns the filtered fraction of four texels that
         // passed the test, so the shader's 3×3 kernel is nine hardware-bilinear
@@ -2177,6 +2534,9 @@ impl ForwardRenderer {
 
         let mut uniforms = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut mesh_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut mesh_group_entries = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut prepass_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut prepass_stats = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut shadow_uniforms = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut shadow_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut shadow_selection = Vec::with_capacity(FRAMES_IN_FLIGHT);
@@ -2217,6 +2577,12 @@ impl ForwardRenderer {
                 // The colour pass reads the finished atlas. Its own pass writes
                 // nothing to it, so there is no conflict to avoid here.
                 shadow_map: shadow_atlas_view,
+                // The placeholder even for the camera's group: the occlusion
+                // image is a graph transient and its view does not exist until
+                // execute time. `add_passes` rebuilds this group against the real
+                // one and caches it, and *this* group is what the depth prepass
+                // binds — which runs before there is any occlusion to name.
+                ambient_occlusion: ambient_occlusion_placeholder.view,
             }
             .entries(&shared);
             let group = device.create_bind_group(&BindGroupDesc {
@@ -2228,6 +2594,51 @@ impl ForwardRenderer {
             rollback.bind_groups.push(group);
             uniforms.push(buffer);
             mesh_groups.push(group);
+            // Kept so the forward pass can rebuild this group against the
+            // occlusion image the graph realised, without re-deriving twenty
+            // bindings out of fields that no longer exist by then. Exactly one
+            // entry differs — see [`ForwardRenderer::ambient_occlusion_groups`].
+            mesh_group_entries.push(entries);
+
+            // The depth prepass's group: this one again, counting its clusters
+            // somewhere the camera's counter cannot see. See
+            // [`ForwardRenderer::prepass_groups`] for why that matters, and note
+            // that binding 14 exists at all only where there is an amplification
+            // stage — so on every other path this buffer is bound nowhere and the
+            // group is the camera's under another handle.
+            //
+            // `DeviceLocal`, because a shader writes it: D3D12 has no unordered
+            // access view of a host-visible resource, and `create_bind_group`
+            // enforces it.
+            let stats = device.create_buffer(&BufferDesc {
+                label: Some("depth prepass cluster survivors"),
+                size: u64::from(crcbl_shaders::cull::STATS_WORDS) * 4,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::DeviceLocal,
+            })?;
+            rollback.buffers.push(stats);
+            let entries = MeshGroup {
+                uniforms: buffer,
+                instances: slot_instances,
+                runs: runs[frame],
+                args: args[frame],
+                cull_params: cull_params[frame],
+                cull_stats: stats,
+                cluster_selection: cluster_selection.get(frame).copied(),
+                group_state: culls_clusters.then(|| draws.group_state()),
+                shadow_map: shadow_atlas_view,
+                ambient_occlusion: ambient_occlusion_placeholder.view,
+            }
+            .entries(&shared);
+            let group = device.create_bind_group(&BindGroupDesc {
+                label: Some("depth prepass"),
+                layout: mesh_layout,
+                entries: &entries,
+                variable_count: None,
+            })?;
+            rollback.bind_groups.push(group);
+            prepass_groups.push(group);
+            prepass_stats.push(stats);
 
             // The same layout again, once per shadow view, differing in exactly
             // the things a view is: which matrix, and which cull's survivors.
@@ -2276,6 +2687,10 @@ impl ForwardRenderer {
                     // where that budget is argued.
                     group_state: culls_clusters.then_some(buffers.group_state),
                     shadow_map: shadow_placeholder_view,
+                    // A cascade shades nothing — the pipeline has no fragment
+                    // stage — so this slot exists only because Metal
+                    // materialises every global into every entry point.
+                    ambient_occlusion: ambient_occlusion_placeholder.view,
                 }
                 .entries(&shared);
                 let group = device.create_bind_group(&BindGroupDesc {
@@ -2553,6 +2968,17 @@ impl ForwardRenderer {
         })?;
         rollback.samplers.push(sampler);
 
+        // --- the screen-space occlusion pair ---
+        //
+        // Stored in the rollback whole, like the light grid: it owns two
+        // pipelines and a ring of buffers, and `Ssao::destroy` is the one place
+        // their release order lives.
+        rollback.ssao = Some(Ssao::new(
+            device,
+            instance_buffers.len(),
+            Self::build_fullscreen,
+        )?);
+
         Ok(Self {
             pool: rollback
                 .pool
@@ -2659,7 +3085,69 @@ impl ForwardRenderer {
             sampler,
             tonemap_group: None,
             target_format,
+            ambient_occlusion_placeholder,
+            mesh_group_entries,
+            ambient_occlusion_groups: vec![None; instance_buffers.len()],
+            prepass_groups,
+            prepass_stats,
+            ssao: rollback
+                .ssao
+                .take()
+                .unwrap_or_else(|| unreachable!("the pair was placed in the rollback above")),
         })
+    }
+
+    /// Builds a full-screen-triangle pipeline out of `shader`'s vertex and
+    /// fragment entry points.
+    ///
+    /// One helper because there are now three of these — the tonemap's, `ssao`'s
+    /// and `ssao-blur`'s — differing in the module, the layout and the target
+    /// format alone. The tonemap's stays written out where it is: it is the one
+    /// that carries the *why* of the shape, and this is the shape repeated.
+    ///
+    /// The module is destroyed before the pipeline result is unwrapped, so a
+    /// failing creation leaks nothing.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the manifest lookup, the module or the pipeline.
+    fn build_fullscreen(
+        device: &dyn Device,
+        label: &str,
+        shader: &crcbl_shaders::Shader,
+        layout: PipelineLayoutHandle,
+        color_targets: &[ColorTargetState],
+    ) -> Result<GraphicsPipelineHandle, HalError> {
+        let vertex = entry(shader, Stage::Vertex)?;
+        let fragment = entry(shader, Stage::Fragment)?;
+        let module = device.create_shader_module(&ShaderModuleDesc {
+            label: Some(shader.source()),
+            spirv: shader.spirv(),
+            wgsl: shader.wgsl(),
+            msl: shader.msl(),
+            // A container per entry point, for the reason the mesh module gives.
+            dxil: &shader.dxil_containers(),
+        })?;
+        let pipeline = device.create_graphics_pipeline(&GraphicsPipelineDesc {
+            label: Some(label),
+            layout,
+            vertex: ShaderEntry {
+                module,
+                entry_point: vertex,
+            },
+            fragment: Some(ShaderEntry {
+                module,
+                entry_point: fragment,
+            }),
+            // The triangle is deliberately oversized, so two of its vertices are
+            // outside the viewport and its winding is not worth reasoning about.
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            color_targets,
+        });
+        device.destroy_shader_module(module);
+        pipeline
     }
 
     /// Creates the geometry pool and makes every resident mesh resident in it.
@@ -3153,6 +3641,29 @@ impl ForwardRenderer {
             light_view_proj,
         };
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
+
+        // `docs/plan/18-render-features.md`'s occlusion block. **The projection
+        // alone, not the view-projection**: the occlusion integral asks what is
+        // near a surface, and view space is where "near" is isotropic and the eye
+        // is at the origin — a world-space reconstruction would put the camera
+        // somewhere else every frame and the hemisphere would have to be rotated
+        // into it for no gain.
+        //
+        // `inverse` here rather than a hand-derived unprojection: an infinite
+        // reversed-Z perspective and a reversed orthographic box do not share a
+        // closed form, and the two matrices this pass needs are then provably
+        // each other's inverse rather than two derivations that agree today.
+        let projection = camera.projection.matrix(aspect);
+        self.ssao.begin_frame(
+            device,
+            self.frame,
+            ssao::SsaoParams {
+                inv_proj: projection.inverse().to_cols_array(),
+                proj: projection.to_cols_array(),
+                radius: SSAO_RADIUS,
+                bias: SSAO_BIAS,
+            },
+        )?;
 
         // Every element the pool has ever handed out, not its live count: a
         // removed instance leaves a hole and the live ones above it still have
@@ -3756,50 +4267,166 @@ impl ForwardRenderer {
             self.lights
                 .add_pass(graph, self.frame, generated.visible_count_id, self.grid);
 
+        // The occlusion placeholder, imported once and read by the two passes
+        // whose bind groups name it: the shadow pass's views and the depth
+        // prepass's copy of the camera's group. It was uploaded at build, so it
+        // is already in `ShaderRead` and the graph has nothing to transition —
+        // declaring it is what keeps that true if a later pass wants it in some
+        // other state.
+        let occlusion_placeholder = graph.import_image(
+            "ssao-placeholder",
+            ImportedImage {
+                image: self.ambient_occlusion_placeholder.image,
+                view: self.ambient_occlusion_placeholder.view,
+                format: Format::R8Unorm,
+                extent: (1, 1),
+                initial: ResourceState::ShaderRead,
+                final_state: ResourceState::ShaderRead,
+            },
+        );
+
         let imported = std::mem::replace(&mut self.shadow_imported, ResourceState::ShaderRead);
-        let (shadow_atlas, shadow_draws) = self.add_shadow_pass(graph, imported, &tile_selection);
+        let (shadow_atlas, shadow_draws) =
+            self.add_shadow_pass(graph, imported, &tile_selection, occlusion_placeholder);
 
         let scene_color =
             graph.create_image("scene-color", TransientImageDesc::scene_color(extent));
         let scene_depth =
             graph.create_image("scene-depth", TransientImageDesc::scene_depth(extent));
+        let occlusion = graph.create_image("ssao", TransientImageDesc::ambient_occlusion(extent));
+        let occlusion_blurred = graph.create_image(
+            "ssao-blurred",
+            TransientImageDesc::ambient_occlusion(extent),
+        );
 
         let group = self.mesh_groups[self.frame];
-        let pipeline = self.mesh_pipeline;
-        let layout = self.mesh_pipeline_layout;
-        let indices = self.pool.index_buffer();
         let emit = self.emit;
-        let stride = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE as u32;
-        let mesh_stride = crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32;
-        // One call per bucket, always — the number the CPU records does not
-        // depend on what is in the scene, which is the whole of what §3.3 asks
-        // for. An empty bucket's arguments carry an instance count of zero.
-        let calls: Vec<(u32, u64, u64, u64)> = self
-            .bucket_constants
-            .iter()
-            .enumerate()
-            .map(|(bucket, constant_offset)| {
-                let bucket = u32::try_from(bucket)
-                    .unwrap_or_else(|_| unreachable!("a fixed table of a few buckets"));
-                (
-                    *constant_offset,
-                    self.draws.args_offset(bucket),
-                    self.draws.count_offset(bucket),
-                    self.draws.mesh_args_offset(bucket),
-                )
-            })
-            .collect();
+        let bucket_draws = BucketDraws {
+            pipeline: self.mesh_pipeline,
+            layout: self.mesh_pipeline_layout,
+            indices: self.pool.index_buffer(),
+            emit,
+            calls: self
+                .bucket_constants
+                .iter()
+                .enumerate()
+                .map(|(bucket, constant_offset)| {
+                    let bucket = u32::try_from(bucket)
+                        .unwrap_or_else(|_| unreachable!("a fixed table of a few buckets"));
+                    (
+                        *constant_offset,
+                        self.draws.args_offset(bucket),
+                        self.draws.count_offset(bucket),
+                        self.draws.mesh_args_offset(bucket),
+                    )
+                })
+                .collect(),
+        };
 
         // Every draw this frame records: the shadow pass's, one per bucket in
-        // the forward pass, and the tonemap's full-screen triangle. Assigned
-        // before the passes below borrow the fields they need, so it is the
-        // count for the frame being built rather than the one before it.
-        self.recorded_draws = shadow_draws + calls.len() as u64 + TONEMAP_DRAWS;
+        // **each** of the depth prepass and the forward pass, and one full-screen
+        // triangle per full-screen pass. Assigned before the passes below borrow
+        // the fields they need, so it is the count for the frame being built
+        // rather than the one before it.
+        self.recorded_draws = shadow_draws
+            + 2 * bucket_draws.calls.len() as u64
+            + FULLSCREEN_PASSES * FULLSCREEN_DRAWS;
+
+        // --- the depth prepass ---
+        //
+        // `docs/plan/18-render-features.md`'s prepass, and it is unusually cheap:
+        // `shadow_pipeline` is already the depth-only twin of the colour pipeline,
+        // built from the same modules and the same layout, so driven with the
+        // camera's draws and a copy of the camera's bind group it *is* a scene
+        // depth prepass — no new pipeline, no new shader, no new entry point.
+        //
+        // **Stored, unlike the depth the forward pass writes.** This is what the
+        // occlusion pass samples, and it is the only reason
+        // `TransientImageDesc::scene_depth` carries `SAMPLED`.
+        //
+        // # The overdraw win is deliberately not taken
+        //
+        // With depth already in the buffer the forward pass could test
+        // `GreaterOrEqual` and stop writing — `PassBuilder::depth_read` and
+        // `DepthStencilState::equal_depth_read_only` both exist for it — and every
+        // hidden fragment of the clustered-forward shading would go away. It is
+        // not done here, and the reason is `SV_Position.z` invariance: the two
+        // pipelines are compiled separately from the same source, nothing in the
+        // shaders carries an invariance decoration, and a fragment the forward
+        // pass places a bit farther than the prepass did is *rejected* — which
+        // arrives as holes in the frame rather than as an error. Only CI's four
+        // rasterisers can settle whether that happens, and the engine now has
+        // per-pass GPU timers and frame counters, so it is a change that can be
+        // **measured** when it is made rather than assumed.
+        //
+        // So the forward pass below clears and writes depth exactly as it did
+        // before this pass existed. Note that it must *clear*: loading this
+        // prepass's depth under the default `Greater` test rejects every fragment
+        // of the same geometry, and the frame goes black.
+        let depth_group = self.prepass_groups[self.frame];
+        let prepass_draws = BucketDraws {
+            pipeline: self.shadow_pipeline,
+            ..bucket_draws.clone()
+        };
+        // The prepass's own cluster counter — see
+        // [`ForwardRenderer::prepass_stats`]. Imported in the state the last frame
+        // on this slot left it in, on `cluster-selection`'s terms exactly: a
+        // barrier naming `Undefined` as its source carries no source scope, so it
+        // would order this frame's write against nothing.
+        let prepass_stats =
+            import_selection(graph, "prepass-stats", self.prepass_stats[self.frame]);
+        let prepass = graph
+            .add_render_pass("depth-prepass")
+            .depth(
+                scene_depth,
+                LoadOp::Clear,
+                StoreOp::Store,
+                crcbl_hal::ClearValue {
+                    depth: crcbl_hal::depth::CLEAR,
+                    ..crcbl_hal::ClearValue::default()
+                },
+            )
+            // Both are in this pass's bind group. Nothing samples either — the
+            // depth-only pipeline has no fragment stage — but a bound descriptor
+            // whose image is in the wrong layout is what
+            // `VUID-vkCmdDrawIndexedIndirectCount-imageLayout-00344` names, and
+            // the other backends read whatever the last writer left behind.
+            .read_image(shadow_atlas)
+            .read_image(occlusion_placeholder);
+        // `read_draw_sources` declares the *camera's* statistics buffer, because
+        // that is the one the arguments came out of; the prepass writes its own
+        // instead, so both are declared and the graph barriers both.
+        let prepass = read_draw_sources(prepass, &generated, emit, self.culls_clusters)
+            .use_buffer(prepass_stats, ResourceState::ShaderReadWrite);
+        // The camera's own cut, written here and again by the forward pass with
+        // the same camera and the same budget. Shared rather than a buffer of its
+        // own — unlike a cascade's, which a *later* pass would overwrite before
+        // anything could read it — because the second write is the one that stands
+        // and it writes the same words.
+        let prepass = match selection {
+            Some(selection) if emit.is_mesh() && self.culls_clusters => {
+                prepass.use_buffer(selection, ResourceState::ShaderReadWrite)
+            }
+            _ => prepass,
+        };
+        prepass.execute(move |ctx| {
+            let encoder = ctx.encoder();
+            prepass_draws.open(encoder);
+            prepass_draws.record(encoder, depth_group, &generated);
+        });
+
+        let frame = self.frame;
+        self.ssao
+            .add_passes(graph, frame, scene_depth, occlusion, occlusion_blurred);
 
         let pass = graph
             .add_render_pass("forward")
             .clear_color(scene_color, SCENE_CLEAR)
             .clear_depth(scene_depth)
+            // The occlusion channel this frame's ambient term is scaled by. The
+            // blur pass wrote it as a colour attachment a moment ago, so this
+            // declaration is the barrier into a shader-readable layout.
+            .read_image(occlusion_blurred)
             // **The barrier out of the shadow pass's depth attachment.** The
             // atlas is in this pass's bind group at `SHADOW_ATLAS_BINDING`, and
             // without this declaration the graph leaves it in
@@ -3813,134 +4440,47 @@ impl ForwardRenderer {
             // stage has it bound, so declaring the read is what moves it — and
             // without the declaration the fragment stage reads a buffer the
             // compute pass may still be writing.
-            .read_buffer(light_grid)
-            // The buffers the draws come out of. Declaring them is what makes
-            // the graph transition them out of the compute pass's
-            // `ShaderReadWrite` — the seam calls that the single most important
-            // barrier in a GPU-driven frame, and its absence produces
-            // "sometimes nothing draws".
-            .read_buffer(generated.runs_id);
-        let pass = if emit.is_mesh() {
-            // **The same arguments, read as data rather than executed**, which
-            // is what the stages use to bound the run of surviving instances
-            // they index. The per-bucket draw *counts* are not read at all,
-            // because nothing here is a draw whose count could come from
-            // memory.
-            //
-            // The dispatch *extents* are a second buffer and a real indirect
-            // read — one structure per bucket, written by the same pass. Two
-            // buffers rather than one because a resource is in exactly one
-            // state per pass and these two are in different ones.
-            let pass = pass
-                .read_buffer(generated.args_id)
-                .use_buffer(generated.mesh_args_id, ResourceState::IndirectArgument);
-            if self.culls_clusters {
-                // The amplification stage counts its survivors into the
-                // culling statistics, which the draw-argument pass read a
-                // moment ago — so this is a write-after-read the graph has to
-                // order, and declaring it is the whole of how it learns to.
-                let pass =
-                    pass.use_buffer(generated.visible_count_id, ResourceState::ShaderReadWrite);
-                // `docs/plan/25-lod.md`'s hysteresis state, read here and
-                // written by the draw-argument pass a moment ago. Declaring it
-                // is what orders the two — and what puts it back into
-                // `ShaderReadWrite` at the end of the graph, which is where the
-                // next frame's draw-argument pass expects to find it.
-                let pass = pass.read_buffer(generated.group_state_id);
-                match selection {
-                    // The colour pass's own, which no cascade writes — the
-                    // cascades record into buffers of their own, so what
-                    // survives a frame here is the camera's cut and what
-                    // survives there is each cascade's.
-                    Some(selection) => pass.use_buffer(selection, ResourceState::ShaderReadWrite),
-                    None => pass,
-                }
-            } else {
-                pass
+            .read_buffer(light_grid);
+        let pass = read_draw_sources(pass, &generated, emit, self.culls_clusters);
+        let pass = match selection {
+            // The colour pass's own, which no cascade writes — the cascades
+            // record into buffers of their own, so what survives a frame here is
+            // the camera's cut and what survives there is each cascade's. The
+            // depth prepass above writes this one too, with the same camera and
+            // the same budget, and is ordered before this pass by the graph.
+            Some(selection) if emit.is_mesh() && self.culls_clusters => {
+                pass.use_buffer(selection, ResourceState::ShaderReadWrite)
             }
-        } else {
-            pass.use_buffer(generated.args_id, ResourceState::IndirectArgument)
-                .use_buffer(generated.counts_id, ResourceState::IndirectArgument)
+            _ => pass,
         };
+
+        // The camera's group rebuilt against the occlusion image the graph just
+        // realised, cached against its view — the shape the tonemap group below
+        // has, and for the same reason: a graph transient's view is not known
+        // until execute time. One entry of the stored list differs; see
+        // `ForwardRenderer::mesh_group_entries`.
+        let entries = self.mesh_group_entries[self.frame].clone();
+        let mesh_layout = self.mesh_layout;
+        let cached_mesh = &mut self.ambient_occlusion_groups[self.frame];
         pass.execute(move |ctx| {
+            let view = ctx.image_view(occlusion_blurred);
+            let device = ctx.device();
+            let group = cached_group(
+                cached_mesh,
+                device,
+                view,
+                "mesh frame",
+                mesh_layout,
+                entries,
+                AMBIENT_OCCLUSION_BINDING,
+            )
+            // Falling back to the group built at `build` rather than dropping
+            // the frame: it names the white placeholder, so the picture loses
+            // its occlusion and keeps everything else.
+            .unwrap_or(group);
             let encoder = ctx.encoder();
-            encoder.bind_graphics_pipeline(pipeline);
-            if !emit.is_mesh() {
-                // The index pool is bound whole, at offset zero, for every mesh
-                // in it: the mesh's place is the draw's first index and its
-                // table entry, not a buffer offset. That is what makes one bind
-                // enough for the scene P7 puts in here.
-                //
-                // A mesh pipeline has no index buffer at all — the corner
-                // triples come out of the cluster records — so binding one
-                // would be a bind no stage could read.
-                encoder.bind_index_buffer(indices, 0, IndexFormat::Uint32);
-            }
-            for (constant_offset, args_offset, count_offset, mesh_args_offset) in calls {
-                // The block written at build for this bucket: where its run
-                // of surviving instances starts. `SV_InstanceID` walks the
-                // run from there, each entry names an instance, the
-                // instance names its mesh, and the mesh table says where
-                // that mesh's vertices start — none of which the draw call
-                // carries. The mesh path's block says the same and three
-                // things more; see `meshlet::ClusterDrawConstants`.
-                encoder.bind_group(0, group, &[constant_offset], layout);
-                match emit {
-                    EmitTail::Mesh => {
-                        // One workgroup per (cluster, **surviving** instance),
-                        // and neither extent is the CPU's: they are the three
-                        // words the draw-argument pass wrote for this bucket.
-                        //
-                        // That is the whole difference between culling that
-                        // skips output and culling that skips work. A dispatch
-                        // sized here would have to cover every slot the
-                        // instance pool ever handed out — a removed instance
-                        // leaves a hole and the live ones above it stay in the
-                        // array — and launch a workgroup for each, which then
-                        // reads the survivor count and returns.
-                        //
-                        // Recorded unconditionally, unlike a CPU-sized
-                        // dispatch: an extent of zero is a legal indirect
-                        // dispatch of no workgroups, so an empty scene needs no
-                        // branch here and the recorded stream stays the same
-                        // whatever the scene holds.
-                        encoder.draw_mesh_tasks_indirect(&DrawIndirect {
-                            args: generated.mesh_args,
-                            offset: mesh_args_offset,
-                            draw_count: 1,
-                            stride: mesh_stride,
-                        });
-                    }
-                    EmitTail::Count => {
-                        encoder.draw_indexed_indirect_count(&DrawIndirectCount {
-                            args: generated.args,
-                            args_offset,
-                            count_buffer: generated.counts,
-                            count_offset,
-                            // One argument structure per bucket, so this is
-                            // the ceiling rather than a guess: the count in
-                            // the buffer is zero or one and the GPU decides
-                            // which.
-                            max_draw_count: 1,
-                            stride,
-                        });
-                    }
-                    EmitTail::PerBatch => {
-                        encoder.draw_indexed_indirect(&DrawIndirect {
-                            args: generated.args,
-                            offset: args_offset,
-                            // Read the bucket's one structure unconditionally
-                            // — a device without a GPU-side count cannot ask
-                            // whether there is anything in it, and an
-                            // instance count of zero draws nothing anyway.
-                            // That is why the two paths are the same picture
-                            // and not an approximation of each other.
-                            draw_count: 1,
-                            stride,
-                        });
-                    }
-                }
-            }
+            bucket_draws.open(encoder);
+            bucket_draws.record(encoder, group, &generated);
         });
 
         // The tonemap group names a *graph-owned* view, so it can only be built
@@ -3966,43 +4506,22 @@ impl ForwardRenderer {
             .execute(move |ctx| {
                 let view = ctx.image_view(scene_color);
                 let device = ctx.device();
-                let group = match cached {
-                    Some((cached_view, group)) if *cached_view == view => *group,
-                    other => {
-                        if let Some((_, stale)) = other.take() {
-                            device.destroy_bind_group(stale);
-                        }
-                        let entries = [
-                            BindGroupEntry {
-                                binding: 0,
-                                array_index: 0,
-                                resource: BindingResource::ImageView(view),
-                            },
-                            BindGroupEntry {
-                                binding: 1,
-                                array_index: 0,
-                                resource: BindingResource::Sampler(sampler),
-                            },
-                        ];
-                        match device.create_bind_group(&BindGroupDesc {
-                            label: Some("tonemap scene"),
-                            layout,
-                            entries: &entries,
-                            variable_count: None,
-                        }) {
-                            Ok(group) => {
-                                *other = Some((view, group));
-                                group
-                            }
-                            Err(error) => {
-                                // Recording a pass that draws nothing is better
-                                // than aborting a frame: the window goes black,
-                                // the log says why, and the next frame retries.
-                                log::error!("graph: tonemap bind group failed: {error}");
-                                return;
-                            }
-                        }
-                    }
+                let entries = vec![
+                    BindGroupEntry {
+                        binding: 0,
+                        array_index: 0,
+                        resource: BindingResource::ImageView(view),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        array_index: 0,
+                        resource: BindingResource::Sampler(sampler),
+                    },
+                ];
+                let Some(group) =
+                    cached_group(cached, device, view, "tonemap scene", layout, entries, 0)
+                else {
+                    return;
                 };
                 let encoder = ctx.encoder();
                 encoder.bind_graphics_pipeline(tonemap_pipeline);
@@ -4045,6 +4564,7 @@ impl ForwardRenderer {
         graph: &mut RenderGraph<'_>,
         imported: ResourceState,
         selection: &[BufferId],
+        occlusion_placeholder: ImageId,
     ) -> (ImageId, u64) {
         let (atlas_width, atlas_height) = shadow::atlas_extent();
         let atlas = graph.import_image(
@@ -4145,7 +4665,11 @@ impl ForwardRenderer {
             // Declared so the graph gives it a shader-read layout: it is in
             // every cascade's bind group, standing in for the atlas this pass is
             // writing. See `ForwardRenderer::shadow_placeholder`.
-            .read_image(placeholder);
+            .read_image(placeholder)
+            // Likewise, and it is in every one of those groups too — see
+            // `ForwardRenderer::ambient_occlusion_placeholder`. Nothing samples
+            // it here either: the depth-only pipeline has no fragment stage.
+            .read_image(occlusion_placeholder);
         // Each tile's mesh pass records the cut it descended to, into a buffer
         // of its own — see `ForwardRenderer::shadow_selection`. Empty where
         // there is no amplification stage to descend anything.
@@ -4158,61 +4682,42 @@ impl ForwardRenderer {
             pass = pass.use_buffer(buffer, ResourceState::ShaderReadWrite);
         }
         for (_, draws) in &generated {
-            pass = pass.read_buffer(draws.runs_id);
-            pass = if self.emit.is_mesh() {
-                let pass = pass
-                    .read_buffer(draws.args_id)
-                    .use_buffer(draws.mesh_args_id, ResourceState::IndirectArgument);
-                if self.culls_clusters {
-                    pass.use_buffer(draws.visible_count_id, ResourceState::ShaderReadWrite)
-                        .read_buffer(draws.group_state_id)
-                } else {
-                    pass
-                }
-            } else {
-                pass.use_buffer(draws.args_id, ResourceState::IndirectArgument)
-                    .use_buffer(draws.counts_id, ResourceState::IndirectArgument)
-            };
+            pass = read_draw_sources(pass, draws, self.emit, self.culls_clusters);
         }
 
         let groups = self.shadow_groups[self.frame].clone();
-        let pipeline = self.shadow_pipeline;
-        let layout = self.mesh_pipeline_layout;
-        let indices = self.pool.index_buffer();
-        let emit = self.emit;
-        let stride = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE as u32;
-        let mesh_stride = crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32;
-        let calls: Vec<(u32, u64, u64, u64)> = self
-            .bucket_constants
-            .iter()
-            .enumerate()
-            .map(|(bucket, constant_offset)| {
-                let bucket = u32::try_from(bucket)
-                    .unwrap_or_else(|_| unreachable!("a fixed table of a few buckets"));
-                (
-                    *constant_offset,
-                    self.draws.args_offset(bucket),
-                    self.draws.count_offset(bucket),
-                    self.draws.mesh_args_offset(bucket),
-                )
-            })
-            .collect();
+        let bucket_draws = BucketDraws {
+            pipeline: self.shadow_pipeline,
+            layout: self.mesh_pipeline_layout,
+            indices: self.pool.index_buffer(),
+            emit: self.emit,
+            calls: self
+                .bucket_constants
+                .iter()
+                .enumerate()
+                .map(|(bucket, constant_offset)| {
+                    let bucket = u32::try_from(bucket)
+                        .unwrap_or_else(|_| unreachable!("a fixed table of a few buckets"));
+                    (
+                        *constant_offset,
+                        self.draws.args_offset(bucket),
+                        self.draws.count_offset(bucket),
+                        self.draws.mesh_args_offset(bucket),
+                    )
+                })
+                .collect(),
+        };
 
         // Counted off the two loops the body below runs, before it takes them:
         // one call per bucket per occupied view. `ForwardRenderer::counters` is
         // what reports it, and reading it back off the same `Vec`s is what makes
         // it move when the tile allocation does.
-        let recorded = (views.len() * calls.len()) as u64;
+        let recorded = (views.len() * bucket_draws.calls.len()) as u64;
 
         pass.execute(move |ctx| {
             let encoder = ctx.encoder();
-            encoder.bind_graphics_pipeline(pipeline);
-            if !emit.is_mesh() {
-                encoder.bind_index_buffer(indices, 0, IndexFormat::Uint32);
-            }
+            bucket_draws.open(encoder);
             for (view, tile, cull) in &views {
-                let group = groups[*view];
-                let draws = &generated[*cull].1;
                 // The tile this view draws into. The graph set a viewport over
                 // the whole atlas before this body ran, and this is what narrows
                 // it — the same clip-space matrix mapped into a different cell
@@ -4233,37 +4738,7 @@ impl ForwardRenderer {
                     ..Viewport::from_size(rect.width, rect.height)
                 });
                 encoder.set_scissor(&rect);
-                for (constant_offset, args_offset, count_offset, mesh_args_offset) in &calls {
-                    encoder.bind_group(0, group, &[*constant_offset], layout);
-                    match emit {
-                        EmitTail::Mesh => {
-                            encoder.draw_mesh_tasks_indirect(&DrawIndirect {
-                                args: draws.mesh_args,
-                                offset: *mesh_args_offset,
-                                draw_count: 1,
-                                stride: mesh_stride,
-                            });
-                        }
-                        EmitTail::Count => {
-                            encoder.draw_indexed_indirect_count(&DrawIndirectCount {
-                                args: draws.args,
-                                args_offset: *args_offset,
-                                count_buffer: draws.counts,
-                                count_offset: *count_offset,
-                                max_draw_count: 1,
-                                stride,
-                            });
-                        }
-                        EmitTail::PerBatch => {
-                            encoder.draw_indexed_indirect(&DrawIndirect {
-                                args: draws.args,
-                                offset: *args_offset,
-                                draw_count: 1,
-                                stride,
-                            });
-                        }
-                    }
-                }
+                bucket_draws.record(encoder, groups[*view], &generated[*cull].1);
             }
         });
         (atlas, recorded)
@@ -4419,11 +4894,12 @@ impl ForwardRenderer {
         let stats = self.cull_stats();
         FrameCounters {
             draws: self.recorded_draws,
-            instances: self.instances.len() as u64 + TONEMAP_DRAWS,
-            // The tonemap's triangle is submitted and drawn, and it is not in
-            // the cull's count — it is a direct draw of one instance, added on
-            // both sides so the two halves of the row measure the same thing.
-            drawn: stats.map(|stats| stats.instances + TONEMAP_DRAWS),
+            instances: self.instances.len() as u64 + FULLSCREEN_PASSES * FULLSCREEN_DRAWS,
+            // Each full-screen triangle is submitted and drawn, and none of them
+            // is in the cull's count — they are direct draws of one instance,
+            // added on both sides so the two halves of the row measure the same
+            // thing.
+            drawn: stats.map(|stats| stats.instances + FULLSCREEN_PASSES * FULLSCREEN_DRAWS),
             triangles: None,
             clusters: stats.and_then(|stats| stats.clusters),
             cull_frame: stats.map(|stats| stats.frame),
@@ -4503,10 +4979,26 @@ impl ForwardRenderer {
         device.destroy_image_view(self.shadow_placeholder_view);
         device.destroy_image(self.shadow_placeholder);
 
+        self.ssao.destroy(device);
+        self.ambient_occlusion_placeholder.destroy(device);
+
         device.destroy_graphics_pipeline(self.mesh_pipeline);
         device.destroy_pipeline_layout(self.mesh_pipeline_layout);
-        for group in self.mesh_groups {
+        for group in self
+            .mesh_groups
+            .into_iter()
+            .chain(self.prepass_groups)
+            .chain(
+                self.ambient_occlusion_groups
+                    .into_iter()
+                    .flatten()
+                    .map(|(_, group)| group),
+            )
+        {
             device.destroy_bind_group(group);
+        }
+        for buffer in self.prepass_stats {
+            device.destroy_buffer(buffer);
         }
         device.destroy_bind_group_layout(self.mesh_layout);
         self.base_color_page.destroy(device);
@@ -5254,12 +5746,12 @@ mod tests {
             "the counter and the frame's recorded draws disagree",
         );
         assert!(
-            counters.draws > TONEMAP_DRAWS,
-            "a frame that recorded only the tonemap drew no scene",
+            counters.draws > FULLSCREEN_PASSES * FULLSCREEN_DRAWS,
+            "a frame that recorded only its full-screen passes drew no scene",
         );
         assert_eq!(
             counters.instances,
-            renderer.instances.len() as u64 + TONEMAP_DRAWS,
+            renderer.instances.len() as u64 + FULLSCREEN_PASSES * FULLSCREEN_DRAWS,
         );
         assert_eq!(
             counters.drawn, None,
@@ -5296,7 +5788,7 @@ mod tests {
     /// The other half of the test above: `indirect` while the readback is in
     /// flight, a count afterwards, and a `cull_frame` naming a frame several
     /// behind the one just recorded. The null backend executes no copy, so the
-    /// *value* here is the tonemap's own draw and nothing else — what the cull
+    /// *value* here is the full-screen passes' own draws and nothing else — what the cull
     /// really kept is asserted against a real GPU, in `crcbl-vk`'s and
     /// `crcbl-wgpu`'s end-to-end suites, where a scene is culled on purpose.
     ///
@@ -5325,9 +5817,9 @@ mod tests {
         let counters = renderer.counters();
         assert_eq!(
             counters.drawn,
-            Some(TONEMAP_DRAWS),
-            "the survivor count the null backend produced is zero, plus the tonemap's own \
-             instance — which is on both sides of the row",
+            Some(FULLSCREEN_PASSES * FULLSCREEN_DRAWS),
+            "the survivor count the null backend produced is zero, plus one instance per \
+             full-screen pass — which is on both sides of the row",
         );
         assert_eq!(
             counters.cull_frame,
@@ -5889,21 +6381,34 @@ mod tests {
         // to the buffer it reads — the cull dispatch, the clustering pass and
         // the amplification stage inside the colour pass.
         expected.extend(
-            ["shadow", "forward", "tonemap", "cull-stats-readback"]
-                .into_iter()
-                .map(str::to_string),
+            [
+                "shadow",
+                "depth-prepass",
+                "ssao",
+                "ssao-blur",
+                "forward",
+                "tonemap",
+                "cull-stats-readback",
+            ]
+            .into_iter()
+            .map(str::to_string),
         );
         assert_eq!(
             passes, expected,
             "each cull's three compute passes come first, and in that order"
         );
 
-        let forward = compiled
+        // **The depth prepass, not the colour pass**, and that is what says the
+        // prepass really is the first thing to draw from the camera's cull: it is
+        // where the draw buffers leave the compute pass's writes. The colour pass
+        // below then needs none of these, because they are already in the state it
+        // wants — which is the assertion after it.
+        let prepass = compiled
             .passes()
             .iter()
-            .find(|pass| pass.label() == "forward")
+            .find(|pass| pass.label() == "depth-prepass")
             .expect("the pass list above");
-        let into_indirect = forward
+        let into_indirect = prepass
             .barriers()
             .buffers
             .iter()
@@ -5914,14 +6419,41 @@ mod tests {
             2,
             "the arguments and the count, out of the compute pass's writes and into \
              the state a draw reads them in: {:?}",
+            prepass.barriers().buffers
+        );
+        assert!(
+            prepass.barriers().buffers.iter().any(|barrier| {
+                barrier.from == ResourceState::ShaderReadWrite
+                    && barrier.to == ResourceState::ShaderRead
+            }),
+            "and the runs, which the vertex stage reads: {:?}",
+            prepass.barriers().buffers
+        );
+
+        let forward = compiled
+            .passes()
+            .iter()
+            .find(|pass| pass.label() == "forward")
+            .expect("the pass list above");
+        assert!(
+            forward
+                .barriers()
+                .buffers
+                .iter()
+                .all(|barrier| barrier.to != ResourceState::IndirectArgument),
+            "the prepass draws from the same arguments, so the colour pass finds them \
+             already in the state it wants — a barrier here would mean something between \
+             the two put them back: {:?}",
             forward.barriers().buffers
         );
+        // What the colour pass *does* still have to be given: the froxel grid,
+        // which no earlier pass reads.
         assert!(
             forward.barriers().buffers.iter().any(|barrier| {
                 barrier.from == ResourceState::ShaderReadWrite
                     && barrier.to == ResourceState::ShaderRead
             }),
-            "and the runs, which the vertex stage reads: {:?}",
+            "and the froxel grid, which its fragment stage reads: {:?}",
             forward.barriers().buffers
         );
 

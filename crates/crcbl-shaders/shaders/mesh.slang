@@ -669,6 +669,33 @@ StructuredBuffer<GpuLight> lights;
 [[vk::binding(21, 0)]]
 StructuredBuffer<uint> cluster_lights;
 
+/// `docs/plan/18-render-features.md`'s screen-space ambient occlusion, as
+/// `ssao_blur.slang` left it: one `R8Unorm` channel the size of the frame, `1.0`
+/// where nothing occludes.
+///
+/// # Fetched by pixel, not sampled
+///
+/// A `Load` at `SV_Position.xy` — the same value `froxel_of` above is indexed by,
+/// and for the same reason. This image is exactly the size of the frame being
+/// drawn, so there is a texel per fragment and no interpolation to want: a `Load`
+/// needs no sampler, no UV and no texel-centre arithmetic, which is one less
+/// thing for four backends to disagree about.
+///
+/// # It is bound on every path, and is `1.0` when the passes are not there
+///
+/// `crcbl_render::forward` binds a 1×1 white image when it adds no AO pass, on
+/// the terms `shadow_atlas`' placeholder is bound: the slot has to be filled
+/// because Slang's Metal backend materialises every global into every entry
+/// point, and the honest filler for "no occlusion was computed" is the value that
+/// occludes nothing. So this file has no branch for the feature being off.
+///
+/// **Last of the set, and that is structural.** `mesh_cluster.slang` declares up
+/// to 19 and mirrors 20 and 21; 22 is past all of them, so it needs no mirror
+/// there and no Metal argument-table index moves. See `SHADOW_ATLAS_BINDING`'s
+/// note in `crcbl_render::forward` on why the list stays ascending.
+[[vk::binding(22, 0)]]
+Texture2D<float> ambient_occlusion;
+
 struct VertexOutput
 {
     float4 position : SV_Position;
@@ -1238,12 +1265,24 @@ float4 fragmentMain(VertexOutput input) : SV_Target
         gloss += light.color.rgb * (specular * SPECULAR_STRENGTH);
     }
 
+    // **Screen-space occlusion scales the ambient term and nothing else**, and
+    // the refusal is as load-bearing as the multiply. Ambient stands in for every
+    // bounce the direct terms do not carry, so how much of the surrounding room a
+    // surface can see is exactly what modulates it. Applying the same factor to
+    // `direct` would darken light that has a *measured* path to the surface —
+    // already occluded by the shadow maps above — and applying it to `gloss`
+    // would dim a highlight, which is a mirror image of the light rather than of
+    // the room. Multiplying the tonemap pass's input instead is the same mistake
+    // one pass later and is refused in `docs/plan/18-render-features.md` in
+    // writing, because the one-line feature row invites it.
+    float occluded = ambient_occlusion.Load(int3(int2(input.position.xy), 0));
+
     // Ambient is not the sun and keeps its full value in shadow, which is what
     // stops a shadowed surface from being black. The association here is the one
     // the single-light form had — the sum starts at zero and `0 + x` is `x`
     // exactly — so converting the sun from a field to a row is arithmetically a
     // no-op and the goldens are what say so.
-    float3 lit = albedo.rgb * (frame.ambient.rgb + direct) + gloss;
+    float3 lit = albedo.rgb * (frame.ambient.rgb * occluded + direct) + gloss;
 
     // Deliberately **not** clamped: the target is `Rgba16Float` and the tonemap
     // pass is what maps this into the swapchain. A `saturate` here would throw

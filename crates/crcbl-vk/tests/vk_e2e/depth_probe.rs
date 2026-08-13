@@ -75,6 +75,8 @@ struct DepthProbe {
     /// quads the colours this test asserts, because the material row names
     /// layer 0 and the shader multiplies by what it finds there.
     base_color_page: crcbl_render::UploadedTexture,
+    /// `mesh.slang`'s occlusion channel, one white texel — see the bind group.
+    occlusion: crcbl_render::UploadedTexture,
     base_color_sampler: crcbl_hal::SamplerHandle,
     /// A 1×1 `D32Float` image standing in for topic 18's shadow atlas, and its
     /// **comparison** sampler.
@@ -441,6 +443,20 @@ impl DepthProbe {
             })
             .expect("a comparison sampler");
 
+        // `mesh.slang`'s occlusion channel, bound white so the probe's ambient
+        // term is unscaled — `crcbl_render::forward`'s placeholder, by hand,
+        // because this file builds its own layout out of the same shader.
+        let occlusion = crcbl_render::upload_texture(
+            device,
+            headless.queue,
+            "probe ssao placeholder",
+            Format::R8Unorm,
+            1,
+            1,
+            &[0xFF],
+        )
+        .expect("a one-texel white image");
+
         let entries = [
             crcbl_hal::BindGroupLayoutEntry {
                 binding: 0,
@@ -591,6 +607,17 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl_hal::BindingFlags::empty(),
             },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 22,
+                visibility: crcbl_hal::ShaderStages::VERTEX
+                    .union(crcbl_hal::ShaderStages::FRAGMENT),
+                kind: crcbl_hal::BindingKind::SampledImage {
+                    view_type: crcbl_hal::ImageViewType::D2,
+                    sample_type: crcbl_hal::SampleType::Float,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
         ];
         let layout = device
             .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
@@ -664,6 +691,11 @@ impl DepthProbe {
                 array_index: 0,
                 resource: crcbl_hal::BindingResource::whole_buffer(light_grid),
             },
+            crcbl_hal::BindGroupEntry {
+                binding: 22,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::ImageView(occlusion.view),
+            },
         ];
         let group = device
             .create_bind_group(&crcbl_hal::BindGroupDesc {
@@ -730,6 +762,7 @@ impl DepthProbe {
             materials,
             visible_instances,
             base_color_page,
+            occlusion,
             base_color_sampler,
             shadow_atlas,
             shadow_atlas_view,
@@ -754,6 +787,7 @@ impl DepthProbe {
         device.destroy_image(self.shadow_atlas);
         device.destroy_sampler(self.base_color_sampler);
         self.base_color_page.destroy(device);
+        self.occlusion.destroy(device);
         device.destroy_buffer(self.visible_instances);
         device.destroy_buffer(self.mesh_table);
         device.destroy_buffer(self.light_grid);

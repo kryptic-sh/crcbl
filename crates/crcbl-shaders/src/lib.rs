@@ -210,6 +210,10 @@ pub mod triangle;
 /// The triangle `mesh_shader.slang` pulls, in the layout that shader declares.
 pub mod mesh_shader;
 
+/// The uniform block and the far-plane constant `ssao.slang` reads, in the
+/// layouts that shader declares.
+pub mod ssao;
+
 use std::sync::OnceLock;
 
 /// Little-endian `f32`s in iteration order — what `std430` means for a struct

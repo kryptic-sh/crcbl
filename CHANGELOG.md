@@ -334,6 +334,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Screen-space ambient occlusion**, the rasterised twin's AO row. A depth
+  prepass — driven by the existing depth-only pipeline with the camera's own
+  bind group and draws, so no new pipeline or shader — feeds an `ssao` pass that
+  reconstructs normals from depth and takes eight hemisphere samples, a `4x4`
+  box blur, and a texel fetch in the forward shader that multiplies
+  `frame.ambient.rgb` **alone**. Darkening the tonemap's input instead would
+  have darkened direct light and highlights, which is what the plan's one-line
+  row invited and what it now refuses in writing.
+
+  **The rotation comes from a sixteen-entry constant table indexed by
+  `pixel.xy & 3`, never a float hash, and the blur is not optional.** Each AO
+  sample is a binary depth comparison, so one landing on the threshold resolves
+  differently on two drivers and swings that pixel by an eighth — far past the
+  golden tolerance. Noise functions amplify float differences by construction;
+  an integer index into a constant array is bit-identical by inspection, and the
+  blur's footprint is exactly the noise tile.
+
+  **The check is a structural ratio, not the golden**: a band inside a concave
+  corner against a band on the same surface at the same camera distance, because
+  an AO pass writing a constant 1.0 draws a perfectly plausible frame. AO is
+  always on, and its off-switch is a 1×1 white texture rather than a shader
+  permutation. `cube`, `lights`, `dunes`, `spot_shadow` and `point_shadow` were
+  re-blessed; `spot` is unchanged to the pixel, which is what says the term is
+  contact occlusion rather than a global scale.
+
 - **Flappy and breakout can be paused with a finger, and a second finger can
   work a menu while the first holds a control.** Pause is the loop's rather than
   a game action and its menu is the only tappable route to fullscreen and the
