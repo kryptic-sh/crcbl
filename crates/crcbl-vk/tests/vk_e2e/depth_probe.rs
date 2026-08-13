@@ -848,6 +848,26 @@ fn probe_sun() -> crcbl_shaders::light::GpuLight {
 }
 
 /// Renders the probe with `view_proj` and reads the frame back.
+/// How many pixels of `frame` differ from the pixel at its top-left corner.
+///
+/// The corner stands in for "what this frame looks like where nothing drew":
+/// neither quad reaches it, so it is the pass's clear whenever the pass ran at
+/// all. Comparing against it rather than against an encoded [`PROBE_CLEAR`]
+/// keeps this honest about the target's format — the clear is authored in
+/// floats and read back through whichever transfer function the swapchain
+/// carries, and a diagnostic that guessed at that encoding could report a fully
+/// cleared frame as fully drawn.
+fn pixels_unlike_the_corner(frame: &crcbl_golden::Image) -> usize {
+    let Some(corner) = frame.pixel(0, 0) else {
+        return 0;
+    };
+    frame
+        .pixels()
+        .chunks_exact(4)
+        .filter(|pixel| *pixel != corner)
+        .count()
+}
+
 fn render_probe(
     headless: &Headless,
     probe: &mut DepthProbe,
@@ -1057,6 +1077,14 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
 
     let reversed_frame = render_probe(&headless, &mut probe, &mut pool, reversed);
     let pixel = reversed_frame.pixel(centre.0, centre.1).expect("inside");
+    // **What the rest of the frame holds, because one pixel cannot say.** A
+    // centre holding the clear is either "no fragment survived anywhere" or
+    // "fragments landed, but not here", and those want looking at in different
+    // places — the first at the depth clear and the depth state, the second at
+    // the projection and the vertex data. The corner is the reference because
+    // neither quad reaches it: the near one spans 34 pixels from the centre and
+    // the far one 60.
+    let drawn = pixels_unlike_the_corner(&reversed_frame);
     // **Neither quad drawing is its own diagnosis, and it must not read as the
     // projection one.** The two want looking at in completely different places.
     // This message said only "if it is blue…" once, and a black centre on a
@@ -1074,7 +1102,12 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
          this pixel alone does not separate the two.\n\
          \x20 * If any channel is {poison:#04x} it is the readback \
          destination's own fill, untouched: no copy reached it and the bytes \
-         are this harness's, not a frame's.",
+         are this harness's, not a frame's.\n\
+         \x20 * {drawn} pixel(s) of this frame differ from its corner. Zero \
+         means no fragment survived anywhere, so look at the depth clear and \
+         the depth state rather than at where the geometry went; a non-zero \
+         count means fragments landed and missed the centre, which is the \
+         projection and the vertex data.",
         poison = POISON,
     );
     assert!(
