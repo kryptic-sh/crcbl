@@ -18,6 +18,19 @@
 //! That also makes the queue correct when a frame issues two submissions or
 //! none, which a frame counter is not.
 //!
+//! # A timeline value is not the whole answer
+//!
+//! The seam lets a caller record a command buffer, destroy an object it uses,
+//! and submit later — so between `finish` and `submit` an object is referenced
+//! by work that **no** timeline value describes, because the submission that
+//! would signal one has not been issued. Waiting for a key that only covers the
+//! submissions already made frees it under that recording. So [`retire`] takes
+//! a `held` predicate beside the timeline value, and `crate::device`'s
+//! `poll_retire` answers it from the command buffers that are recorded and not
+//! yet submitted.
+//!
+//! [`retire`]: RetireQueue::retire
+//!
 //! # What the queue cannot cover
 //!
 //! Swapchains. A present is queue work that no timeline semaphore signals, so
@@ -105,7 +118,8 @@ impl<T> RetireQueue<T> {
         self.entries.len()
     }
 
-    /// Hands `destroy` every payload whose `retire_at` the timeline has reached.
+    /// Hands `destroy` every payload whose `retire_at` the timeline has reached
+    /// and that `held` does not claim.
     ///
     /// `completed` is the timeline's current value. The whole queue is scanned
     /// rather than stopping at the first entry that is not ready, because
@@ -113,10 +127,22 @@ impl<T> RetireQueue<T> {
     /// of an earlier one — a ready entry behind an extended one must still free
     /// promptly. Each entry is freed exactly when its own submission count is
     /// passed, never earlier.
-    pub fn retire(&mut self, completed: u64, mut destroy: impl FnMut(T)) {
+    ///
+    /// `held` is the second half of "safe to free", and the timeline cannot
+    /// answer it: a payload something still *references* but that no submission
+    /// has ever been issued for has no key that means anything, because no
+    /// submission will ever signal one on its behalf. A held payload is skipped
+    /// and stays parked at its own key, so it frees on the next pass after the
+    /// hold is released.
+    pub fn retire(
+        &mut self,
+        completed: u64,
+        mut held: impl FnMut(&T) -> bool,
+        mut destroy: impl FnMut(T),
+    ) {
         let mut index = 0;
         while index < self.entries.len() {
-            if self.entries[index].0 <= completed {
+            if self.entries[index].0 <= completed && !held(&self.entries[index].1) {
                 let (_, payload) = self
                     .entries
                     .remove(index)
@@ -144,9 +170,11 @@ impl<T> RetireQueue<T> {
 mod tests {
     use super::*;
 
+    /// Retires with nothing held, which is the steady state: every command
+    /// buffer that referenced these payloads has been submitted.
     fn drained(queue: &mut RetireQueue<u32>, completed: u64) -> Vec<u32> {
         let mut out = Vec::new();
-        queue.retire(completed, |payload| out.push(payload));
+        queue.retire(completed, |_| false, |payload| out.push(payload));
         out
     }
 
@@ -248,6 +276,37 @@ mod tests {
         );
         assert_eq!(queue.pending(), 1);
         assert_eq!(drained(&mut queue, 9), vec![30]);
+        assert_eq!(queue.pending(), 0);
+    }
+
+    /// A held payload stays parked however far past its key the timeline has
+    /// run — the recorded-but-not-yet-submitted command buffer, which
+    /// references the payload while no submission exists to signal a value on
+    /// its behalf. Its neighbours are unaffected, and releasing the hold frees
+    /// it on the next pass without needing a new key or a new submission.
+    #[test]
+    fn a_held_payload_stays_parked_past_its_key() {
+        let mut queue = RetireQueue::new();
+        queue.push(1, 30_u32);
+        queue.push(1, 50);
+        let mut freed = Vec::new();
+        queue.retire(
+            9,
+            |payload| *payload == 30_u32,
+            |payload| freed.push(payload),
+        );
+        assert_eq!(freed, vec![50], "a payload nothing holds frees on its key");
+        assert_eq!(
+            queue.pending(),
+            1,
+            "the held payload is still parked at a key the timeline passed"
+        );
+
+        assert_eq!(
+            drained(&mut queue, 9),
+            vec![30],
+            "and frees as soon as the hold is released"
+        );
         assert_eq!(queue.pending(), 0);
     }
 

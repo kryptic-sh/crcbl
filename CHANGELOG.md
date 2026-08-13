@@ -792,6 +792,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-vk` freed a destroyed resource while a command buffer that was
+  recorded and not yet submitted still referenced it — a use-after-free the
+  driver reads through.** The seam permits record → destroy → submit, and the
+  deletion queue kept a destroyed object parked until every submission _naming_
+  it completed. A command buffer recorded against the same object and not yet
+  submitted was invisible to that: no submission had extended its objects'
+  retirement, so an earlier submission completing freed them under it. The
+  validation layer reports it at the next submit as
+  `VUID-vkQueueSubmit2-commandBuffer-03874` ("recorded but now has become
+  invalid"), and lavapipe then reads the freed allocation and segfaults.
+
+  `poll_retire` now refuses to free anything a recorded-but-unsubmitted command
+  buffer names, and `submit` marks its command buffers submitted once the driver
+  has accepted them. Nothing above the seam changes: an object still frees as
+  soon as every recording that names it has been submitted or destroyed and the
+  timeline has passed it. `crcbl-dx12` and `crcbl-mtl` never had this — their
+  recordings take a COM/ARC reference to what they name.
+
 - **A scaled instance's clusters were culled as if it were unscaled, so geometry
   silently vanished.** `cluster_survives` carried a cluster's mesh-space
   bounding radius into a world-space frustum test, documented as safe because

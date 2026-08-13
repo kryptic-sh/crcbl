@@ -1,21 +1,23 @@
-//! The deletion queue, at the three moments its retirement key can be wrong.
+//! The deletion queue, at the four moments its retirement key can be wrong.
 //!
 //! Destroy after recording and before submitting; destroy while a submission
-//! that used the object is still in flight; and destroy an object that two
-//! queued submissions both reference. The first and the last are regressions
-//! against keys that were off by one submission — `submissions()` and
-//! `submissions() + 1` respectively — and all three fail the same way when they
-//! fail: the validation layer's "destroyed while in use", or, with no layer, a
-//! silent use-after-free inside the driver.
+//! that used the object is still in flight; destroy an object that two queued
+//! submissions both reference; and destroy an object that one submission has
+//! finished with while a second command buffer still only *holds* it, recorded
+//! and not yet submitted. The first and the third are regressions against keys
+//! that were off by one submission — `submissions()` and `submissions() + 1`
+//! respectively — and all four fail the same way when they fail: the validation
+//! layer's "destroyed while in use", or, with no layer, a silent use-after-free
+//! inside the driver.
 //!
 //! That failure mode is why these live in the e2e binary rather than in
 //! `crcbl-vk`'s `src/` tests: the observable is a layer message about memory
-//! the driver was still reading. The last test says as much about itself —
-//! whether the first submission has completed when the second's poll runs is
-//! timing-dependent, so it is the integration smoke test and `RetireQueue`'s
-//! own unit tests are the deterministic proof.
+//! the driver was still reading. Only one of them leaves the outcome to timing —
+//! [`two_submissions_referencing_one_destroyed_buffer_keep_it_alive`] is the
+//! integration smoke test, and it says so; the other three settle the question
+//! on every run.
 
-use crate::harness::Headless;
+use crate::harness::{Headless, poisoned};
 use crcbl_hal::{BufferDesc, BufferUsage, CommandEncoderDesc, MemoryLocation, SubmitInfo};
 
 /// Destroy a resource **after recording but before submitting**, then submit.
@@ -213,6 +215,98 @@ fn two_submissions_referencing_one_destroyed_buffer_keep_it_alive() {
         .expect("submit B");
 
     device.wait_idle().expect("idle");
+    device.destroy_command_buffer(a);
+    device.destroy_command_buffer(b);
+    device.destroy_buffer(dst_a);
+    device.destroy_buffer(dst_b);
+    headless.finish();
+}
+
+/// A command buffer that is **recorded and not yet submitted** keeps the
+/// objects it names alive, even once every submission that used them has
+/// completed.
+///
+/// The same shape as the test above with the timing taken out of it: record A
+/// and B against one buffer, destroy the buffer, submit A, **wait for A to
+/// complete**, and only then submit B. The wait is what makes the outcome the
+/// same on every run and every driver — the retire timeline has reached A's
+/// value before submit(B) is reached, so a queue that frees on the timeline
+/// alone has already run `vkDestroyBuffer` under a command buffer that names
+/// it. The layer answers `VUID-vkQueueSubmit2-commandBuffer-03874` ("recorded
+/// but now has become invalid"), and lavapipe then reads the freed allocation.
+///
+/// The readback is the second half of the claim: B's copy has to land the bytes
+/// the source held, which is only true if the source was still there when B
+/// ran.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_recorded_but_unsubmitted_command_buffer_keeps_its_buffer_alive() {
+    const SIZE: u64 = 4096;
+    const FILL: u8 = 0x5C;
+
+    let headless = Headless::open();
+    let device = &headless.device;
+
+    let source = device
+        .create_buffer(&BufferDesc {
+            label: Some("destroyed, still recorded against"),
+            size: SIZE,
+            usage: BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::HostUpload,
+        })
+        .expect("a source buffer");
+    device
+        .write_buffer(source, 0, &[FILL; SIZE as usize])
+        .expect("write");
+    let destination = |label| {
+        device
+            .create_buffer(&BufferDesc {
+                label: Some(label),
+                size: SIZE,
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a destination buffer")
+    };
+    let record_copy = |label, dst| {
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some(label),
+            queue: headless.queue,
+        });
+        encoder.copy_buffer_to_buffer(&crcbl_hal::BufferCopy {
+            src: source,
+            src_offset: 0,
+            dst,
+            dst_offset: 0,
+            size: SIZE,
+        });
+        encoder.finish().expect("recording succeeded")
+    };
+    let dst_a = destination("completed submission (dst)");
+    let dst_b = destination("still-recorded submission (dst)");
+    let a = record_copy("copy to A", dst_a);
+    let b = record_copy("copy to B", dst_b);
+
+    device.destroy_buffer(source);
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[a]))
+        .expect("submit A");
+    // The whole point: A has *completed*, so the timeline has passed the value
+    // the source was parked at. Only B's recording still holds it.
+    device.wait_idle().expect("idle");
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[b]))
+        .expect("submit B");
+    device.wait_idle().expect("idle");
+
+    let mut copied = poisoned(SIZE as usize);
+    headless.readback(dst_b, SIZE, &mut copied);
+    assert!(
+        copied.iter().all(|byte| *byte == FILL),
+        "B copied from a source that was freed under it: {:?}…",
+        &copied[..8]
+    );
+
     device.destroy_command_buffer(a);
     device.destroy_command_buffer(b);
     device.destroy_buffer(dst_a);

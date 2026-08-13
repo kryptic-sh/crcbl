@@ -167,6 +167,14 @@ pub(crate) struct CommandBufferEntry {
     /// parked, so an object destroyed after recording stays alive until the last
     /// submission referencing it completes.
     pub(crate) references: Vec<u64>,
+    /// Whether this command buffer has ever been handed to a queue.
+    ///
+    /// Until it has, its [`references`](Self::references) are referenced by work
+    /// no timeline value covers, so [`DeviceInner::poll_retire`] treats them as
+    /// held and refuses to free them however far the timeline has run. `submit`
+    /// sets this once the driver has taken the submission, which is the moment
+    /// the retire timeline starts describing this recording instead.
+    pub(crate) submitted: bool,
 }
 
 /// An in-flight readback request.
@@ -1070,16 +1078,36 @@ impl DeviceInner {
                 return;
             }
         };
+        // What the timeline cannot say: a command buffer that is recorded and
+        // not yet submitted references everything it names, and no submission
+        // has been issued that would extend those objects' keys — `submit`
+        // extends for the buffers in *that* submit. So an earlier submission
+        // completing is not proof the object is unreferenced, and freeing on the
+        // timeline alone runs `vkDestroy*` under a recording, which the layer
+        // reports as `VUID-vkQueueSubmit2-commandBuffer-03874` at the submit
+        // that follows. Collected by value so the borrow of the command-buffer
+        // table ends before the queue is mutated.
+        let held: Vec<u64> = state
+            .command_buffers
+            .iter()
+            .filter(|(_, entry)| !entry.submitted)
+            .flat_map(|(_, entry)| entry.references.iter().copied())
+            .collect();
         let raw = &self.raw;
         let swapchain_ext = &self.swapchain_ext;
         let instance = &self.instance;
-        state.trash.retire(completed, |item| {
-            // SAFETY: every object in the queue was created by this device and
-            // is destroyed exactly once. The timeline reaching its key is the
-            // proof that no submission still references it — which is the whole
-            // contract of this module.
-            unsafe { destroy_trash(raw, swapchain_ext, instance, item) };
-        });
+        state.trash.retire(
+            completed,
+            |item| held.contains(&trash_raw(item)),
+            |item| {
+                // SAFETY: every object in the queue was created by this device
+                // and is destroyed exactly once. The timeline reaching its key
+                // and no live recording naming it are together the proof that
+                // nothing still references it — which is the whole contract of
+                // this module.
+                unsafe { destroy_trash(raw, swapchain_ext, instance, item) };
+            },
+        );
     }
 
     /// Parks a driver object until it is safe to free.
@@ -2359,6 +2387,22 @@ impl Device for VkDevice {
         // Committed only now: the submission is in flight, so the retire
         // timeline *will* reach `value`.
         self.inner.submissions.store(value, Ordering::Release);
+
+        // And only now do these recordings stop holding what they reference in
+        // the deletion queue: the extend above pinned their objects to `value`,
+        // which the timeline will reach. Marked after the driver call for the
+        // same reason the counter is committed after it — a submission that was
+        // refused never runs, so its command buffers go on holding.
+        for handle in submit.command_buffers {
+            let entry = lookup_mut(
+                &mut state.command_buffers,
+                "command buffer",
+                *handle,
+                &self.inner,
+            )
+            .unwrap_or_else(|_| unreachable!("resolved twice above under this lock"));
+            entry.submitted = true;
+        }
 
         self.inner.poll_retire(&mut state);
         Ok(())

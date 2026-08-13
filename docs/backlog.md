@@ -6207,10 +6207,10 @@ read out of the two jobs' logs. Inside that:
   and serialises that suite too. Left alone deliberately: it is a different
   suite on a different job, and turning its parallelism on wants its own
   several-runs-per-driver check, which is exactly what turned up the
-  deletion-queue bug below. `run-cli-e2e.sh`, `run-wayland-e2e.sh`,
-  `run-x11-e2e.sh` and `run-win32-e2e.ps1` pass `--test-threads 1` _without_
-  `--no-capture`, so theirs is effective and deliberate — `run-win32-e2e.ps1`'s
-  header says why.
+  use-after-free in `crcbl-vk`'s deletion queue. `run-cli-e2e.sh`,
+  `run-wayland-e2e.sh`, `run-x11-e2e.sh` and `run-win32-e2e.ps1` pass
+  `--test-threads 1` _without_ `--no-capture`, so theirs is effective and
+  deliberate — `run-win32-e2e.ps1`'s header says why.
 
 ### The suspicion that is still unmeasured: synchronisation validation
 
@@ -6252,50 +6252,29 @@ The measurement, to be run as a one-off and then reverted:
      procedure measures by flipping `CRCBL_VK_VALIDATION` instead. That one is a
      bigger coverage loss and would only ever be a diagnostic run.
 
-## `crcbl-vk`'s deletion queue frees a buffer a recorded command buffer still references
+## A recording that names a swapchain view is still not protected
 
-**A real use-after-free, reproduced, not fixed here.** Found because the vk e2e
-suite started running in parallel; it is not caused by that change and
-reproduces on a pristine worktree of `e875e44`, the commit this work sits on.
+`crcbl_vk::device`'s `retire_swapchain` deliberately does not go through the
+deletion queue: a present is queue work no timeline semaphore signals, so it
+drains pending acquires, idles the device, and destroys the swapchain's views,
+images and sync objects on the spot. The hold `poll_retire` now honours for
+command buffers that are recorded and not yet submitted therefore does not reach
+them, because nothing about them is ever parked.
 
-`retire::two_submissions_referencing_one_destroyed_buffer_keep_it_alive` records
-two command buffers against one source buffer, destroys the buffer, then submits
-both. Under parallel load on lavapipe, roughly one run in three:
+So a caller that acquires a frame, records against `AcquiredFrame::view`, and
+then calls `reconfigure_swapchain` (a resize) or `destroy_swapchain` before
+submitting is left holding a command buffer that names a destroyed
+`VkImageView`; submitting it is the same
+`VUID-vkQueueSubmit2-commandBuffer-03874` the deletion-queue bug produced.
 
-```text
-VUID-vkQueueSubmit2-commandBuffer-03874: VkCommandBuffer [copy to B] which was
-recorded but now has become invalid to use because the following objects bound
-to the command buffer were invalidated
- VkBuffer [destroyed, still referenced] was destroyed
-```
-
-followed by a SIGSEGV inside lavapipe.
-
-The mechanism, from `crcbl_vk::device`'s `submit`: a destroyed object is parked
-by `park` at `submissions() + 1`; `submit` calls `trash.extend_matching` for the
-objects referenced by the command buffers **in that submit** and then calls
-`poll_retire` at the end of it. A command buffer that was recorded against the
-same object and has not been submitted yet is invisible to both. So submit(A)'s
-trailing `poll_retire` frees the buffer the moment A completes, while B — still
-only recorded — references it. Serially, A has not finished microseconds after
-`vkQueueSubmit2`, which is the only reason this has ever passed; the test's own
-doc already says the timing is what decides it.
-
-What a fix looks like: `poll_retire` must not free an item any live command
-buffer still references. `CommandBufferEntry::references` already holds the raw
-handles, so the check is available; the question is whether it belongs as a
-predicate in `RetireQueue::retire` or as a re-park at `submissions() + 1`. Both
-want a deterministic unit test beside `extend_matching`'s, since the e2e test is
-a smoke test by construction.
-
-Until then the test is quarantined in `.config/nextest.toml` with
-`threads-required = "num-cpus"` so it runs alone, which restores the timing it
-has always relied on. **That override is hiding this bug and goes when this
-entry does.** Evidence, on an RX 7900 XTX workstation against
-`/usr/share/vulkan/icd.d/lvp_icd.json`: 30 consecutive runs of the test alone
-are green; the whole suite in parallel failed 2 of 3 runs before the override
-and 1 of 4 on a **pristine worktree of `e875e44`**, which is the commit this
-work sits on — so the parallelism exposes it and did not introduce it.
+**Reasoned from the code, not reproduced, and not fixed.** No test records
+against an acquired view without submitting, and `crcbl-render`'s frame loop
+acquires, records and submits within one frame, so it is not known to be
+reachable in practice. A fix would mean `retire_swapchain` consulting the same
+recorded-but-unsubmitted set `poll_retire` builds — and then deciding what to do
+when one is found, since it cannot park what it is destroying: either wait, or
+refuse, or invalidate the recording loudly. That decision is the reason this is
+an entry rather than a change.
 
 ## `CARGO_NET_OFFLINE` on the vk e2e steps: looked at, not applied
 

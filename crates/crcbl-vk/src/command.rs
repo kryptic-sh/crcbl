@@ -1336,6 +1336,10 @@ impl CommandEncoder for VkCommandEncoder {
                         raw,
                         pool,
                         references,
+                        // Recorded, not submitted: until `submit` says
+                        // otherwise, this recording holds everything it
+                        // references in the deletion queue.
+                        submitted: false,
                     }),
             ))
     }
