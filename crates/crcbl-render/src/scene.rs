@@ -465,6 +465,46 @@ pub struct InstanceDesc {
     pub transform: Mat4,
 }
 
+/// Where [`demo`]'s cube is in [`SceneDesc::meshes`], and therefore what an
+/// [`InstanceDesc::mesh`] naming it carries.
+///
+/// **Public because placing an object is the caller's job.** [`demo`] says what
+/// is resident and [`ForwardRenderer::add_instance`] is what puts one of those
+/// meshes in the frame, so a caller of the demo scene needs a name for the entry
+/// it is placing. A literal `0` would mean whatever the first entry happens to
+/// be, and that list's order is load-bearing in the four ways the
+/// [module docs](self) open with.
+///
+/// [`ForwardRenderer::add_instance`]: crate::forward::ForwardRenderer::add_instance
+pub const DEMO_CUBE: usize = 0;
+/// Where [`demo`]'s pyramid is, on [`DEMO_CUBE`]'s terms.
+pub const DEMO_PYRAMID: usize = 1;
+/// Where [`demo`]'s open box is, on [`DEMO_CUBE`]'s terms.
+pub const DEMO_OPEN_BOX: usize = 2;
+/// Where [`demo`]'s dunes patch is, on [`DEMO_CUBE`]'s terms.
+///
+/// The description's only [`Geometry::Dag`], so a caller placing it asks
+/// [`ForwardRenderer::culls_clusters`] first — see
+/// [`ForwardRenderer::add_instance`], which is where that condition is written
+/// down.
+///
+/// [`ForwardRenderer::add_instance`]: crate::forward::ForwardRenderer::add_instance
+/// [`ForwardRenderer::culls_clusters`]: crate::forward::ForwardRenderer::culls_clusters
+pub const DEMO_DUNES: usize = 3;
+
+/// [`demo`]'s neutral material row, and what an [`InstanceDesc::material`]
+/// naming it carries.
+///
+/// **Row 0 is not a convention this module may pick**: it is the row
+/// [`mesh::GpuInstance::default`] names, so it is what an instance written by
+/// omission shades through. See [`SceneDesc::materials`].
+pub const DEMO_UNTINTED: usize = 0;
+/// [`demo`]'s tinted row — [`PYRAMID_TINT`] and [`PYRAMID_ROUGHNESS`], on
+/// [`DEMO_UNTINTED`]'s terms.
+pub const DEMO_TINTED: usize = 1;
+/// [`demo`]'s textured row — [`CHECKER_LAYER`], on [`DEMO_UNTINTED`]'s terms.
+pub const DEMO_TEXTURED: usize = 2;
+
 /// The engine's own scene: the cube, the pyramid, the open box and the dunes
 /// DAG, with the three material rows and the two page layers the golden suite
 /// reads.
@@ -620,6 +660,11 @@ mod tests {
     fn the_demo_scene_shades_by_omission_through_an_untinted_row() {
         let scene = demo();
         assert_eq!(
+            usize::try_from(mesh::GpuInstance::default().material).expect("a table of three rows"),
+            DEMO_UNTINTED,
+            "the row a caller names by omission and the one it names by index are the same row"
+        );
+        assert_eq!(
             scene.materials[mesh::GpuInstance::default().material as usize],
             mesh::GpuMaterial {
                 base_color_texture: PageDesc::UNTEXTURED_LAYER,
@@ -736,6 +781,13 @@ mod tests {
             .map(|mesh| mesh.label.as_ref())
             .collect();
         assert_eq!(labels, ["cube", "pyramid", "open box", "dunes"]);
+        // And each index a caller places one of them by names that entry. A
+        // constant off by one puts an application's cube wherever the pyramid
+        // is — a frame that draws, of the wrong mesh.
+        assert_eq!(
+            [DEMO_CUBE, DEMO_PYRAMID, DEMO_OPEN_BOX, DEMO_DUNES].map(|mesh| labels[mesh]),
+            ["cube", "pyramid", "open box", "dunes"]
+        );
         assert_eq!(
             scene.meshes[..3]
                 .iter()

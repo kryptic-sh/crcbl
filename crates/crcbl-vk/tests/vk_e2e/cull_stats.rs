@@ -24,7 +24,7 @@
 //! `crcbl`'s `render_e2e`, both are actually reached.
 
 use crate::harness::Headless;
-use crate::mesh::{mesh_camera, read_stats_word, render_mesh};
+use crate::mesh::{mesh_camera, place_cube, read_stats_word, render_mesh};
 
 /// How many frames behind [`ForwardRenderer::counters`]' culling half is.
 ///
@@ -75,9 +75,10 @@ fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
         headless.format,
     )
     .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     let camera = mesh_camera(crcbl_render::Projection::default());
 
-    // The cube is always in the pool. These two are put where the camera cannot
+    // The cube is in the pool, placed above. These two are put where the camera cannot
     // see them: 500 units along +Z, which is behind an eye at z = 2.2 looking at
     // the origin. Two rather than one so a survivor count that reported the
     // *culled* half instead would read 2 and not 1.
@@ -193,6 +194,7 @@ fn the_ring_keeps_turning_and_the_count_follows_the_scene() {
         headless.format,
     )
     .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     let camera = mesh_camera(crcbl_render::Projection::default());
     renderer.set_pyramid(Some(glam::Mat4::from_translation(glam::Vec3::new(
         0.0, 0.0, 500.0,

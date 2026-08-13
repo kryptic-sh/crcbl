@@ -112,7 +112,8 @@ struct ShadowScene<'a> {
     prepare: &'a dyn Fn(&mut crcbl_render::ForwardRenderer),
     camera: crcbl_render::Camera,
     sun: crcbl_render::DirectionalLight,
-    /// The cube's model matrix, which `begin_frame` takes as an argument.
+    /// Where the caller puts the cube — the wall's hanging caster in the sun's
+    /// scene, the floor in the spot's.
     model: glam::Mat4,
 }
 
@@ -129,6 +130,9 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
     let mut pool = crcbl_render::TransientPool::new();
     let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
         .expect("the forward renderer builds");
+    // The cube first and whatever else the scene wants above it, which is the
+    // order the pool has always been filled in.
+    crate::mesh::place_cube_at(&mut renderer, scene.model);
     (scene.prepare)(&mut renderer);
 
     let acquired = device
@@ -154,7 +158,7 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
     let atlas_staging = staging("shadow atlas readback", atlas_bytes);
 
     renderer
-        .begin_frame(device, &scene.camera, &scene.sun, scene.model, MESH_EXTENT)
+        .begin_frame(device, &scene.camera, &scene.sun, MESH_EXTENT)
         .expect("the uniform buffer is writable");
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {

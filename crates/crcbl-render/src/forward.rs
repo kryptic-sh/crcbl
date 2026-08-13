@@ -161,7 +161,10 @@ use crate::light::{Light, sun_row};
 use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
-use crate::scene::{self, Geometry, InstanceDesc, SceneDesc};
+use crate::scene::{
+    self, DEMO_DUNES, DEMO_OPEN_BOX, DEMO_PYRAMID, DEMO_TEXTURED, DEMO_TINTED, DEMO_UNTINTED,
+    Geometry, InstanceDesc, SceneDesc,
+};
 use crate::shadow::{self, Cascades};
 use crate::ssao::{Ssao, cached_group};
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
@@ -254,36 +257,19 @@ const AMBIENT_OCCLUSION_NONE: u8 = 0xFF;
 /// the mirror is checked here — which is the only place both names are in scope.
 const _: () = assert!(crcbl_hal::depth::CLEAR == crcbl_shaders::ssao::DEPTH_FAR);
 
-/// Which [`SceneDesc::meshes`] entry each of the five `set_*` methods places,
-/// and which one [`ForwardRenderer::begin_frame`] transforms.
+/// How many description meshes and material rows the five `set_*` methods name
+/// by position, so a description that cannot satisfy them is refused rather than
+/// indexed past.
 ///
-/// **These belong to the demo methods, not to [`ForwardRenderer::with_scene`].**
-/// The renderer resolves an [`InstanceDesc::mesh`] index through
-/// [`ForwardRenderer::mesh_ids`] for any description at all; what is positional
-/// is that `set_pyramid` means [`scene::demo`]'s second mesh, because that is
-/// what a method named for the pyramid can mean. An application places its own
-/// objects with [`ForwardRenderer::add_instance`] and never reaches these.
-///
-/// [`ForwardRenderer::with_scene`] still refuses a description shorter than
-/// this, because those methods and `begin_frame`'s cube are on the type whatever
-/// description built it — see [`REQUIRED_MESHES`].
-const DEMO_CUBE: usize = 0;
-const DEMO_PYRAMID: usize = 1;
-const DEMO_OPEN_BOX: usize = 2;
-const DEMO_DUNES: usize = 3;
-
-/// Which [`SceneDesc::materials`] row each of those instances shades through,
-/// on [`DEMO_CUBE`]'s terms exactly.
-///
-/// Row 0 is not a convention this file may pick: it is what
-/// [`mesh::GpuInstance::default`] names, so it is the row every instance written
-/// by omission carries.
-const DEMO_UNTINTED: usize = 0;
-const DEMO_TINTED: usize = 1;
-const DEMO_TEXTURED: usize = 2;
-
-/// How many description meshes and material rows the constants above name, so a
-/// description that cannot satisfy them is refused rather than indexed past.
+/// **This is the demo methods' requirement, not
+/// [`ForwardRenderer::with_scene`]'s.** The renderer resolves an
+/// [`InstanceDesc::mesh`] index through [`ForwardRenderer::mesh_ids`] for any
+/// description at all; what is positional is that `set_pyramid` means
+/// [`scene::demo`]'s second mesh, because that is what a method named for the
+/// pyramid can mean. An application places its own objects with
+/// [`ForwardRenderer::add_instance`] and never calls them — but they are on the
+/// type whatever description built it, so a description too short to satisfy
+/// them is refused rather than indexed past.
 const REQUIRED_MESHES: usize = DEMO_DUNES + 1;
 const REQUIRED_MATERIALS: usize = DEMO_TEXTURED + 1;
 
@@ -533,10 +519,10 @@ pub struct ForwardRenderer {
     /// the arguments the GPU wrote or in a table it resolves them through.
     bucket_constants: Vec<u32>,
 
-    // The instance array, and the objects' places in it. `begin_frame` rewrites
-    // the cube's transform and the pool uploads only what changed.
+    // The instance array, and the objects' places in it. Nothing here is
+    // rewritten per frame: the pool uploads what a caller changed and nothing
+    // else, so a scene nobody moved costs no transfer at all.
     instances: InstancePool,
-    cube_instance: InstanceHandle,
     /// The pyramid's instance while a caller is asking for one.
     ///
     /// `None` is how it is *hidden*: an instance that is in the pool is in the
@@ -1729,11 +1715,17 @@ impl ForwardRenderer {
         let material_buffer = materials.buffer();
         rollback.materials = Some(materials);
 
-        let (instances, cube_instance) = Self::build_instances(
+        // **Empty.** Every object in the scene arrives through
+        // [`ForwardRenderer::add_instance`], including the demo scene's cube: a
+        // renderer that inserted one of its description's meshes here would put
+        // an object in a caller's frame that the caller never asked for.
+        let instances = InstancePool::new(
             device,
-            scene.capacities.instances,
-            mesh_ids[DEMO_CUBE],
-            material_ids[DEMO_UNTINTED],
+            &InstancePoolDesc {
+                label: Some("forward instances"),
+                capacity: scene.capacities.instances,
+                frames_in_flight: FRAMES_IN_FLIGHT,
+            },
         )?;
         // Same handle-then-hand-over dance as the geometry pool above: the
         // buffers are `Copy` and are read out before the pool becomes the
@@ -3066,7 +3058,6 @@ impl ForwardRenderer {
                 .instances
                 .take()
                 .unwrap_or_else(|| unreachable!("the pool was placed in the rollback above")),
-            cube_instance,
             pyramid_instance: None,
             tinted_pyramid_instance: None,
             textured_pyramid_instance: None,
@@ -3305,62 +3296,6 @@ impl ForwardRenderer {
         Ok(ids)
     }
 
-    /// Creates the instance pool and puts the cube in it.
-    ///
-    /// Self-cleaning for the same reason [`ForwardRenderer::build_geometry`] is:
-    /// the pool is not the rollback's until this has returned.
-    ///
-    /// **The cube only.** An instance in the pool is an object in the scene now
-    /// that the cull pass decides what draws, so the pyramid arrives when a
-    /// caller asks for it with [`ForwardRenderer::set_pyramid`] and not before —
-    /// which is what keeps the frame every sample draws the cube alone.
-    ///
-    /// The transform is left at [`Mat4::IDENTITY`], and **the instance carries
-    /// its own mesh id from here on**: that is what the vertex stage resolves
-    /// its geometry through, so an instance written without one would draw the
-    /// mesh at table entry 0. [`ForwardRenderer::begin_frame`] rewrites the
-    /// transform before the first draw and writes the id back with it.
-    ///
-    /// It carries its **material** id for the same reason it carries its mesh
-    /// id: a row nobody wrote shades black, so an instance that named one by
-    /// omission would be an invisible object rather than an untinted one.
-    ///
-    /// The sector id stays zero because nothing reads it yet — see
-    /// [`crcbl_shaders::mesh::GpuInstance`], which is the field that is still
-    /// reserved.
-    ///
-    /// The instance's index is not asserted to be anything in particular. It
-    /// used to be — the cube had to land at 0, because a draw could address no
-    /// other one — and nothing on the CPU names an instance index at all now
-    /// that the cull pass writes the list a draw walks.
-    fn build_instances(
-        device: &dyn Device,
-        capacity: u32,
-        cube_mesh: u32,
-        material: u32,
-    ) -> Result<(InstancePool, InstanceHandle), HalError> {
-        let mut instances = InstancePool::new(
-            device,
-            &InstancePoolDesc {
-                label: Some("forward instances"),
-                capacity,
-                frames_in_flight: FRAMES_IN_FLIGHT,
-            },
-        )?;
-        match instances.insert(&mesh::GpuInstance {
-            transform: Mat4::IDENTITY.to_cols_array(),
-            mesh: cube_mesh,
-            material,
-            ..mesh::GpuInstance::default()
-        }) {
-            Ok(cube) => Ok((instances, cube)),
-            Err(error) => {
-                instances.destroy(device);
-                Err(error.into())
-            }
-        }
-    }
-
     /// Uploads every mesh of `scene` and returns their mesh ids — **only** once
     /// the transfers have completed.
     ///
@@ -3475,13 +3410,12 @@ impl ForwardRenderer {
     /// passes are recorded on the GPU timeline: fusing them would hide the ring
     /// rotation inside a function whose name says nothing about it.
     ///
-    /// `model` is the cube's transform, and it is written into the instance
-    /// pool rather than into the uniform block. A frame that passes the same
-    /// matrix as the last one still marks the instance dirty — see
-    /// [`InstancePool::set`], which explains why it does not compare — so the
-    /// sandbox's spinning cube uploads 80 bytes a frame and a still one uploads
-    /// 80 bytes a frame too. What delta upload buys is that a *second* instance
-    /// that did not move costs nothing, which is the property §3.2 is about.
+    /// **It moves nothing.** Every object's transform is the caller's, written
+    /// through [`ForwardRenderer::set_instance`] whenever it changes, so the
+    /// transfer this records is [`InstancePool::begin_frame`]'s delta and a
+    /// frame in which nothing moved uploads no instance bytes at all. The
+    /// sandbox's spinning cube is one 80-byte write a frame because the sandbox
+    /// spins it; a still scene is free.
     ///
     /// It also writes this frame's **cull parameters** — the camera's frustum,
     /// extracted from the very same view-projection the uniform block carries,
@@ -3499,22 +3433,8 @@ impl ForwardRenderer {
         device: &dyn Device,
         camera: &Camera,
         light: &DirectionalLight,
-        model: Mat4,
         extent: (u32, u32),
     ) -> Result<(), HalError> {
-        // Through the runtime API like any other object, which is what makes the
-        // cube an ordinary instance the moment this argument goes away. A `set`
-        // writes the whole record, so the mesh and material ids go with the
-        // transform or the cube resolves to entry 0 of each by accident — one of
-        // which is a mesh and the other a colour.
-        self.set_instance(
-            self.cube_instance,
-            &InstanceDesc {
-                mesh: DEMO_CUBE,
-                material: DEMO_UNTINTED,
-                transform: model,
-            },
-        );
         // The instance pool owns the ring, so its slot is the frame index the
         // uniform buffer and the bind group below are picked with.
         self.frame = self.instances.begin_frame(device)?;
@@ -5228,6 +5148,7 @@ fn named_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::DEMO_CUBE;
     use crcbl_hal::null::{NullInstance, Recorder};
     use crcbl_hal::{DeviceDesc, Features, Instance, QueueKind};
 
@@ -5240,6 +5161,21 @@ mod tests {
             .expect("the null backend always opens");
         let queue = device.queue(QueueKind::Graphics).expect("always present");
         (recorder, device, queue)
+    }
+
+    /// Puts [`scene::demo`]'s cube in the frame the way a caller does, and
+    /// **first**, so it takes the pool slot it has always had.
+    ///
+    /// `begin_frame` used to write this object for every caller; the tests below
+    /// that are about a frame with something in it place it themselves now.
+    fn place_cube(renderer: &mut ForwardRenderer, transform: Mat4) -> InstanceHandle {
+        renderer
+            .add_instance(&InstanceDesc {
+                mesh: DEMO_CUBE,
+                material: DEMO_UNTINTED,
+                transform,
+            })
+            .expect("an empty pool of thousands has room for one cube")
     }
 
     /// The whole renderer builds and tears down against a backend with no
@@ -5272,15 +5208,9 @@ mod tests {
         let light = DirectionalLight::default();
 
         let mut seen = Vec::new();
-        for frame in 0..FRAMES_IN_FLIGHT * 2 {
+        for _ in 0..FRAMES_IN_FLIGHT * 2 {
             renderer
-                .begin_frame(
-                    device.as_ref(),
-                    &camera,
-                    &light,
-                    ForwardRenderer::spin(frame as f32),
-                    (64, 48),
-                )
+                .begin_frame(device.as_ref(), &camera, &light, (64, 48))
                 .expect("write");
             seen.push(renderer.uniforms[renderer.frame]);
         }
@@ -5292,70 +5222,94 @@ mod tests {
         renderer.destroy(device.as_ref());
     }
 
-    /// The cube really is an instance. `begin_frame` puts the model matrix in
-    /// the instance pool instead of the uniform block, and in the steady state
-    /// it reaches the device as one instance-sized write per frame — the
-    /// pyramid, which is in the array and did not move, costs nothing.
+    /// **A frame uploads the instances a caller moved, and a frame nobody moved
+    /// anything in uploads nothing at all.**
+    ///
+    /// The second half is the stronger claim and it is the one that needed the
+    /// cube to become an ordinary instance: `begin_frame` used to take the
+    /// cube's transform as an argument and write it into the pool every frame,
+    /// so that slot was dirty in every ring slot forever and a motionless scene
+    /// paid a spinning one's transfer. The bytes were identical, so no golden
+    /// image could ever have shown it — the recorder's write log is the only
+    /// place the difference is visible.
+    ///
+    /// The pyramid is here so that "only the one that moved" is a claim about a
+    /// choice: with one instance in the array, uploading it and uploading
+    /// everything are the same event.
     #[test]
     fn only_the_instance_that_moved_is_uploaded() {
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
         let instance_buffers = renderer.instances.buffers().to_vec();
+        let cube = place_cube(&mut renderer, Mat4::IDENTITY);
+        renderer.set_pyramid(Some(Mat4::from_translation(Vec3::X)));
 
-        // Both instances are inserted at build and are dirty in *every* slot, so
+        // Both instances are dirty in *every* slot when they are inserted, so
         // the first frames upload both however well delta upload works. The ring
         // has to be walked right through before an upload is evidence about the
         // delta rather than about initialisation.
-        let frame = |renderer: &mut ForwardRenderer, model| {
+        let frame = |renderer: &mut ForwardRenderer| {
             renderer
                 .begin_frame(
                     device.as_ref(),
                     &Camera::default(),
                     &DirectionalLight::default(),
-                    model,
                     (64, 48),
                 )
                 .expect("write");
         };
         for _ in 0..FRAMES_IN_FLIGHT {
-            frame(&mut renderer, Mat4::IDENTITY);
+            frame(&mut renderer);
         }
+        let instance_writes = |from: usize| -> Vec<(u64, usize)> {
+            recorder
+                .events()
+                .into_iter()
+                .skip(from)
+                .filter_map(|event| match event {
+                    crcbl_hal::null::Event::BufferWritten {
+                        buffer,
+                        offset,
+                        len,
+                    } if instance_buffers.contains(&buffer) => Some((offset, len)),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let before = recorder.events().len();
+        frame(&mut renderer);
+        assert_eq!(
+            instance_writes(before),
+            [],
+            "a frame in which nothing moved must upload no instance bytes at all"
+        );
 
         let before = recorder.events().len();
         let model = ForwardRenderer::spin(1.25);
-        frame(&mut renderer, model);
+        renderer.set_instance(
+            cube,
+            &InstanceDesc {
+                mesh: DEMO_CUBE,
+                material: DEMO_UNTINTED,
+                transform: model,
+            },
+        );
+        frame(&mut renderer);
         assert_eq!(
             renderer
                 .instances
-                .get(renderer.cube_instance)
+                .get(cube)
                 .expect("the cube is live")
                 .transform,
             model.to_cols_array(),
             "the model matrix must land in the instance, not the uniform block"
         );
-
-        let instance_writes: Vec<(u64, usize)> = recorder
-            .events()
-            .into_iter()
-            .skip(before)
-            .filter_map(|event| match event {
-                crcbl_hal::null::Event::BufferWritten {
-                    buffer,
-                    offset,
-                    len,
-                } if instance_buffers.contains(&buffer) => Some((offset, len)),
-                _ => None,
-            })
-            .collect();
-        let cube_at = u64::from(
-            renderer
-                .instances
-                .index(renderer.cube_instance)
-                .expect("the cube is live"),
-        ) * crcbl_shaders::mesh::INSTANCE_STRIDE as u64;
+        let cube_at = u64::from(renderer.instances.index(cube).expect("the cube is live"))
+            * crcbl_shaders::mesh::INSTANCE_STRIDE as u64;
         assert_eq!(
-            instance_writes,
+            instance_writes(before),
             [(cube_at, crcbl_shaders::mesh::INSTANCE_STRIDE)],
             "a steady-state frame must upload exactly the one instance that changed"
         );
@@ -5425,7 +5379,8 @@ mod tests {
             let (recorder, device, queue) = open();
             let mut renderer = ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
                 .expect("built");
-            // The cube, which `build_instances` inserts and nothing here moves.
+            // Whatever the pool holds before the setter is called, which is
+            // nothing: a renderer places no object of its own any more.
             let resident = renderer.instances.len();
             assert_eq!(
                 slot(&renderer),
@@ -6109,6 +6064,13 @@ mod tests {
             let (recorder, device, queue) = open();
             let mut renderer = ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
                 .expect("built");
+            // The cube in both scenes, so the difference between them is the
+            // pyramid alone. It also keeps both frames non-empty, and an empty
+            // one would be a weaker comparison than this claims: `cull`'s
+            // dispatch covers no workgroups when the pool is empty, and the pass
+            // records nothing rather than a dispatch of zero — see
+            // [`DrawGen::add_passes`].
+            place_cube(&mut renderer, Mat4::IDENTITY);
             renderer.set_pyramid(pyramid);
             let frame = frame(device.as_ref(), &mut renderer, queue);
 
@@ -6721,6 +6683,9 @@ mod tests {
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        // The cube first and the pyramid above it, because the second half of
+        // this test frees the lower slot and asks what the walk still covers.
+        let cube = place_cube(&mut renderer, Mat4::IDENTITY);
         renderer.set_pyramid(Some(Mat4::from_translation(Vec3::X)));
 
         let camera = Camera {
@@ -6733,7 +6698,6 @@ mod tests {
                 device.as_ref(),
                 &camera,
                 &DirectionalLight::default(),
-                Mat4::IDENTITY,
                 extent,
             )
             .expect("write");
@@ -6757,14 +6721,12 @@ mod tests {
 
         // And the high-water mark is what is written, not the live count: remove
         // the cube and the pyramid above it still has to be tested.
-        let cube = renderer.cube_instance;
-        renderer.instances.remove(cube);
+        renderer.remove_instance(cube);
         renderer
             .begin_frame(
                 device.as_ref(),
                 &camera,
                 &DirectionalLight::default(),
-                Mat4::IDENTITY,
                 extent,
             )
             .expect("write");
@@ -6821,7 +6783,6 @@ mod tests {
                     device.as_ref(),
                     &Camera::default(),
                     &DirectionalLight::default(),
-                    Mat4::IDENTITY,
                     (64, 48),
                 )
                 .expect("write");
@@ -6922,7 +6883,6 @@ mod tests {
                 device.as_ref(),
                 &Camera::default(),
                 &DirectionalLight::default(),
-                Mat4::IDENTITY,
                 (64, 48),
             )
             .expect("write");
@@ -7117,7 +7077,6 @@ mod tests {
                     device,
                     &Camera::default(),
                     &DirectionalLight::default(),
-                    Mat4::IDENTITY,
                     (64, 48),
                 )
                 .expect("write");
@@ -7214,7 +7173,6 @@ mod tests {
                 device,
                 &Camera::default(),
                 &DirectionalLight::default(),
-                Mat4::IDENTITY,
                 (64, 48),
             )
             .expect("write");
@@ -7335,7 +7293,6 @@ mod tests {
                     device,
                     &Camera::default(),
                     &DirectionalLight::default(),
-                    Mat4::IDENTITY,
                     (64, 48),
                 )
                 .expect("write");
@@ -7474,7 +7431,6 @@ mod tests {
                 device,
                 &Camera::default(),
                 &DirectionalLight::default(),
-                Mat4::IDENTITY,
                 (64, 48),
             )
             .expect("write");

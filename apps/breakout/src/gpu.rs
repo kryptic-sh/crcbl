@@ -11,7 +11,7 @@
 //! # There is no forward pass
 //!
 //! There was one, and it drew the paddle as a lit cube, because
-//! [`ForwardRenderer::begin_frame`] takes a single `model: Mat4` and one
+//! [`ForwardRenderer::begin_frame`] then took a single `model: Mat4` and one
 //! instance was all breakout could get out of it — which is why the ball and the
 //! forty bricks went through the UI pass as screen-space quads instead. The
 //! paddle is a sprite now, so the forward renderer had nothing left to draw, and

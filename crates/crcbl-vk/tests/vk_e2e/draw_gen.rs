@@ -108,8 +108,17 @@ fn local_bounds(vertices: &[u8]) -> Aabb {
     Aabb::from_points(positions).expect("neither mesh is empty")
 }
 
-/// The instance array as the renderer builds it: the cube at element 0 from
-/// `new`, the pyramid at element 1 from the first `set_pyramid`.
+/// Where every test here puts the cube.
+///
+/// `setup` places it and nothing moves it again, so a frame's cube is at this
+/// transform whichever test drew it — which is what the CPU reference below
+/// models it at.
+fn cube_model() -> Mat4 {
+    ForwardRenderer::spin(0.35)
+}
+
+/// The instance array as the tests here fill it: the cube at element 0, placed
+/// by [`setup`], and the pyramid at element 1 from the first `set_pyramid`.
 fn scene(model: Mat4, pyramid: Vec3) -> Vec<GpuInstance> {
     let at = |transform: Mat4, mesh| GpuInstance {
         transform: transform.to_cols_array(),
@@ -161,9 +170,8 @@ fn generate(
     renderer: &mut ForwardRenderer,
     pool: &mut TransientPool,
     camera: &crcbl_render::Camera,
-    model: Mat4,
 ) -> Generated {
-    generate_with(headless, renderer, pool, camera, model, None)
+    generate_with(headless, renderer, pool, camera, None)
 }
 
 /// The same frame, with the three counters the frame's clearing pass owns filled
@@ -184,7 +192,6 @@ fn generate_with(
     renderer: &mut ForwardRenderer,
     pool: &mut TransientPool,
     camera: &crcbl_render::Camera,
-    model: Mat4,
     poison: Option<u32>,
 ) -> Generated {
     let device = headless.device.as_ref();
@@ -197,7 +204,6 @@ fn generate_with(
             device,
             camera,
             &crcbl_render::DirectionalLight::default(),
-            model,
             MESH_EXTENT,
         )
         .expect("the uniform buffers are writable");
@@ -398,8 +404,10 @@ fn generate_with(
 /// Opens the pieces every test here needs.
 fn setup() -> (Headless, ForwardRenderer, TransientPool) {
     let headless = Headless::open_for_mesh();
-    let renderer = ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
-        .expect("the forward renderer builds");
+    let mut renderer =
+        ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+            .expect("the forward renderer builds");
+    crate::mesh::place_cube_at(&mut renderer, cube_model());
     (headless, renderer, TransientPool::new())
 }
 
@@ -429,8 +437,8 @@ fn the_generated_arguments_are_the_draws_the_cpu_would_have_recorded() {
     renderer.set_pyramid(Some(Mat4::from_translation(PYRAMID_AT)));
 
     let camera = mesh_camera(Projection::default());
-    let model = ForwardRenderer::spin(0.35);
-    let generated = generate(&headless, &mut renderer, &mut pool, &camera, model);
+    let model = cube_model();
+    let generated = generate(&headless, &mut renderer, &mut pool, &camera);
 
     let meshes = mesh_table();
     let instances = scene(model, PYRAMID_AT);
@@ -501,8 +509,8 @@ fn a_culled_bucket_generates_no_draw_and_says_so_in_the_count() {
     renderer.set_pyramid(Some(Mat4::from_translation(PYRAMID_AWAY)));
 
     let camera = mesh_camera(Projection::default());
-    let model = ForwardRenderer::spin(0.35);
-    let generated = generate(&headless, &mut renderer, &mut pool, &camera, model);
+    let model = cube_model();
+    let generated = generate(&headless, &mut renderer, &mut pool, &camera);
 
     let meshes = mesh_table();
     let instances = scene(model, PYRAMID_AWAY);
@@ -580,15 +588,7 @@ fn a_poisoned_counter_reaches_the_frame_at_zero() {
     renderer.set_pyramid(Some(Mat4::from_translation(PYRAMID_AT)));
 
     let camera = mesh_camera(Projection::default());
-    let model = ForwardRenderer::spin(0.35);
-    let generated = generate_with(
-        &headless,
-        &mut renderer,
-        &mut pool,
-        &camera,
-        model,
-        Some(SENTINEL),
-    );
+    let generated = generate_with(&headless, &mut renderer, &mut pool, &camera, Some(SENTINEL));
 
     assert_eq!(
         generated.visible_count, 2,
@@ -640,13 +640,12 @@ fn a_poisoned_counter_reaches_the_frame_at_zero() {
 fn a_bucket_fills_and_empties_as_its_instance_comes_and_goes() {
     let (headless, mut renderer, mut pool) = setup();
     let camera = mesh_camera(Projection::default());
-    let model = ForwardRenderer::spin(0.35);
 
     // Four frames, so the ring wraps and every slot is used twice: the second
     // pass over a slot is the one that would carry a stale counter.
     for round in 0..2 {
         renderer.set_pyramid(None);
-        let without = generate(&headless, &mut renderer, &mut pool, &camera, model);
+        let without = generate(&headless, &mut renderer, &mut pool, &camera);
         assert_eq!(
             (
                 without.visible_count,
@@ -660,7 +659,7 @@ fn a_bucket_fills_and_empties_as_its_instance_comes_and_goes() {
         );
 
         renderer.set_pyramid(Some(Mat4::from_translation(PYRAMID_AT)));
-        let with = generate(&headless, &mut renderer, &mut pool, &camera, model);
+        let with = generate(&headless, &mut renderer, &mut pool, &camera);
         assert_eq!(
             (
                 with.visible_count,
@@ -726,6 +725,7 @@ fn every_geometry_path_draws_the_same_frame() {
         let mut renderer =
             ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
                 .expect("the forward renderer builds");
+        crate::mesh::place_cube(&mut renderer);
         assert_eq!(
             renderer.geometry_path(),
             expected,

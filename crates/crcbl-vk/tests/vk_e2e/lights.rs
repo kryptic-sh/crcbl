@@ -20,7 +20,7 @@ use crcbl_shaders::light::{CLUSTER_LIGHT_CAPACITY, CLUSTER_OVERFLOW_WORD, CLUSTE
 use glam::Vec3;
 
 use crate::harness::{Headless, poisoned};
-use crate::mesh::{MESH_EXTENT, mesh_camera, read_stats_word, render_mesh};
+use crate::mesh::{MESH_EXTENT, mesh_camera, place_cube, read_stats_word, render_mesh};
 
 /// Where the cube is, and where a light has to be to reach it.
 ///
@@ -83,6 +83,7 @@ fn a_froxel_that_runs_out_of_budget_counts_what_it_refused() {
     let mut pool = crcbl_render::TransientPool::new();
     let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
         .expect("a forward renderer");
+    place_cube(&mut renderer);
     let camera = camera();
 
     // A frame no froxel could overflow: the sun and two lights, well inside the
@@ -244,6 +245,7 @@ fn the_cone_bound_lists_a_spot_in_fewer_froxels_than_its_sphere() {
     let mut pool = crcbl_render::TransientPool::new();
     let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
         .expect("a forward renderer");
+    place_cube(&mut renderer);
     let camera = camera();
 
     let dark = render_mesh(&headless, &mut renderer, &mut pool, &camera).image;
@@ -345,6 +347,7 @@ fn a_point_light_brightens_the_face_it_is_beside_and_not_the_frame() {
     let mut pool = crcbl_render::TransientPool::new();
     let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
         .expect("a forward renderer");
+    place_cube(&mut renderer);
     let camera = camera();
 
     let dark = render_mesh(&headless, &mut renderer, &mut pool, &camera).image;

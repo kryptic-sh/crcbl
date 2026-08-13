@@ -24,8 +24,8 @@
 //! # There is no forward pass
 //!
 //! There was one, and it drew the bird as a lit cube, because
-//! `ForwardRenderer::begin_frame` takes a single `model: Mat4` and one instance
-//! was all flappy could get out of it. The bird is a sprite now, so the forward
+//! `ForwardRenderer::begin_frame` then took a single `model: Mat4` and one
+//! instance was all flappy could get out of it. The bird is a sprite now, so the forward
 //! renderer had nothing left to draw — and it was carrying an HDR scene target,
 //! a depth buffer, a tonemap pass and a cube mesh to draw it. All of that is
 //! gone; what the pass also did, and what had to be replaced, is **clear the

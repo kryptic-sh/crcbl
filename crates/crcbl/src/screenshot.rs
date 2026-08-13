@@ -76,9 +76,11 @@ use crate::hal::{
     QueueHandle, QueueKind, ReadbackDesc, ReadbackState, ResourceState, SubmitInfo, SurfaceError,
     SurfaceHandle, SurfaceTarget, SwapchainDesc, SwapchainHandle,
 };
+use crate::render::scene::{DEMO_CUBE, DEMO_UNTINTED};
 use crate::render::{
-    Camera, DirectionalLight, FontAtlas, ForwardRenderer, FrameCounters, GraphError, Projection,
-    RenderGraph, SampleMode, SheetDesc, SheetId, Sprite, SpriteRenderer, TransientPool, UiRenderer,
+    Camera, DirectionalLight, FontAtlas, ForwardRenderer, FrameCounters, GraphError, InstanceDesc,
+    Projection, RenderGraph, SampleMode, SheetDesc, SheetId, Sprite, SpriteRenderer, TransientPool,
+    UiRenderer,
 };
 use crate::ui::draw_list::DrawList;
 
@@ -598,7 +600,7 @@ fn ao_box() -> glam::Mat4 {
 
 /// Where [`Scene::Ao`] parks the cube.
 ///
-/// [`ForwardRenderer::begin_frame`] always places the cube, and this scene has no
+/// Every scene here places the cube — see [`place_cube`] — and this one has no
 /// use for it: a lit box in the middle of the trough is a second shape in a frame
 /// whose whole content is a floor and the two walls closing over it, and it would
 /// stand exactly where the unoccluded bands are measured. So it is put out along
@@ -1047,12 +1049,6 @@ enum SceneState {
     Forward {
         camera: Camera,
         light: DirectionalLight,
-        /// The cube's model matrix, which
-        /// [`ForwardRenderer::begin_frame`](crate::render::ForwardRenderer::begin_frame)
-        /// takes as an argument rather than off a setter. Every scene but
-        /// [`Scene::Spot`] leaves it at `ForwardRenderer::spin(0.0)`, which is
-        /// the identity; that one scales it into a floor.
-        model: glam::Mat4,
         /// Boxed because it is much the largest of the three: it carries the
         /// geometry pools and the instance ring, and an unboxed variant would
         /// make every `SceneState` — including the two small ones — that size.
@@ -1066,6 +1062,27 @@ enum SceneState {
         renderer: UiRenderer,
         atlas: FontAtlas,
     },
+}
+
+/// Puts the demo scene's cube in the frame at `model`, **before anything else**.
+///
+/// Every forward scene here draws it — as the subject in [`Scene::Cube`], as the
+/// floor in [`Scene::Spot`] and its two shadow siblings, and parked out of frame
+/// in [`Scene::Ao`]. The renderer used to insert it at build and rewrite it from
+/// every `begin_frame`; it is an ordinary instance now, so the caller places it,
+/// and placing it first is what keeps it in the pool slot it has always had.
+///
+/// The insert cannot fail here: the pool is
+/// [`Capacities::instances`](crate::render::Capacities::instances) wide and this
+/// is the first object in it.
+fn place_cube(renderer: &mut ForwardRenderer, model: glam::Mat4) {
+    renderer
+        .add_instance(&InstanceDesc {
+            mesh: DEMO_CUBE,
+            material: DEMO_UNTINTED,
+            transform: model,
+        })
+        .expect("an empty instance pool has room for the cube");
 }
 
 impl SceneState {
@@ -1092,6 +1109,7 @@ impl SceneState {
         Ok(match scene {
             Scene::Cube => {
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                place_cube(&mut renderer, ForwardRenderer::spin(0.0));
                 renderer.set_pyramid(Some(glam::Mat4::from_translation(PYRAMID_AT)));
                 renderer.set_tinted_pyramid(Some(glam::Mat4::from_translation(TINTED_PYRAMID_AT)));
                 renderer
@@ -1102,7 +1120,6 @@ impl SceneState {
                         near: 0.01,
                     }),
                     light: DirectionalLight::default(),
-                    model: ForwardRenderer::spin(0.0),
                     renderer: Box::new(renderer),
                 }
             }
@@ -1110,6 +1127,7 @@ impl SceneState {
                 // The cube scene's geometry exactly, so the two goldens differ
                 // in their light lists and in nothing else.
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                place_cube(&mut renderer, ForwardRenderer::spin(0.0));
                 renderer.set_pyramid(Some(glam::Mat4::from_translation(PYRAMID_AT)));
                 renderer.set_tinted_pyramid(Some(glam::Mat4::from_translation(TINTED_PYRAMID_AT)));
                 renderer
@@ -1121,7 +1139,6 @@ impl SceneState {
                         near: 0.01,
                     }),
                     light: dim_sun(),
-                    model: ForwardRenderer::spin(0.0),
                     renderer: Box::new(renderer),
                 }
             }
@@ -1131,11 +1148,11 @@ impl SceneState {
                 // shape in a frame whose whole content is meant to be one cone
                 // on one flat surface.
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                place_cube(&mut renderer, spot_floor());
                 renderer.set_lights(&[spot_light()]);
                 Self::Forward {
                     camera: spot_camera(),
                     light: spot_sun(),
-                    model: spot_floor(),
                     renderer: Box::new(renderer),
                 }
             }
@@ -1146,12 +1163,12 @@ impl SceneState {
                 // separable from its caster, and `Scene::SpotShadow` is where
                 // that is argued.
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                place_cube(&mut renderer, spot_floor());
                 renderer.set_pyramid(Some(spot_shadow_caster()));
                 renderer.set_lights(&[spot_shadow_light()]);
                 Self::Forward {
                     camera: spot_shadow_camera(),
                     light: spot_sun(),
-                    model: spot_floor(),
                     renderer: Box::new(renderer),
                 }
             }
@@ -1162,6 +1179,7 @@ impl SceneState {
                 // of the light's map. One caster would prove a point light casts
                 // *a* shadow, which is what a single working face already does.
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                place_cube(&mut renderer, spot_floor());
                 renderer.set_pyramid(Some(point_shadow_caster(glam::Vec3::new(
                     POINT_CASTER_AT,
                     0.0,
@@ -1176,12 +1194,12 @@ impl SceneState {
                 Self::Forward {
                     camera: point_shadow_camera(),
                     light: spot_sun(),
-                    model: spot_floor(),
                     renderer: Box::new(renderer),
                 }
             }
             Scene::Dunes => {
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                place_cube(&mut renderer, ForwardRenderer::spin(0.0));
                 // **Refused rather than drawn empty.** `set_dunes` says no on a
                 // device that reports a mesh stage and no amplification stage,
                 // where the un-amplified path would emit every cluster of every
@@ -1199,7 +1217,6 @@ impl SceneState {
                 Self::Forward {
                     camera: dunes_camera(),
                     light: DirectionalLight::default(),
-                    model: ForwardRenderer::spin(0.0),
                     renderer: Box::new(renderer),
                 }
             }
@@ -1239,11 +1256,11 @@ impl SceneState {
                 // `Scene::Spot`'s reason: what this frame is about is one
                 // concave corner and the flat floor beside it.
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                place_cube(&mut renderer, ao_parked_cube());
                 renderer.set_open_box(Some(ao_box()));
                 Self::Forward {
                     camera: ao_camera(),
                     light: ao_sun(),
-                    model: ao_parked_cube(),
                     renderer: Box::new(renderer),
                 }
             }
@@ -1707,10 +1724,9 @@ impl OffscreenSetup {
                 SceneState::Forward {
                     camera,
                     light,
-                    model,
                     renderer,
                 } => {
-                    renderer.begin_frame(device, camera, light, *model, extent)?;
+                    renderer.begin_frame(device, camera, light, extent)?;
                     let _hdr = renderer.add_passes(&mut graph, target, extent);
                 }
                 SceneState::Sprite { renderer, sheets } => {

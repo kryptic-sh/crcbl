@@ -7631,10 +7631,13 @@ before S4B while P7B's deliverable named lumen. **Resolved by pulling the scene
 work forward**, rather than by moving lumen.
 
 The resident set is a description now — `crcbl_render::scene` and
-`ForwardRenderer::with_scene`, with `new` as `with_scene(&scene::demo())` — and
+`ForwardRenderer::with_scene`, with `new` as `with_scene(&scene::demo())`;
 instances are a runtime API: `ForwardRenderer::add_instance` / `set_instance` /
 `remove_instance` over a `scene::InstanceDesc`, with the five `set_*` methods
-surviving as wrappers. What is left is everything below.
+surviving as wrappers; and `begin_frame` no longer takes the cube's transform —
+the cube is an ordinary instance every caller places for itself, by
+`scene::DEMO_CUBE` and the other public demo indices. What is left is everything
+below.
 
 ### The shape
 
@@ -7650,18 +7653,16 @@ already assign to P9.
 ### The slices left, in dependency order
 
 Each is independently committable and CI-green, and the six apps build at every
-boundary. **The first three must leave every golden byte-identical** — the demo
+boundary. **The first two must leave every golden byte-identical** — the demo
 scene is a caller of the new API rather than a special case inside the renderer,
 so a golden that moves in them is a bug in the move, not a re-bless.
 
-1. `begin_frame` loses its `model` argument; the cube becomes an ordinary
-   instance. Roughly a dozen call sites.
-2. App-supplied materials and page layers.
-3. App-supplied meshes, which is mostly making the failure paths honest.
-4. Reach the cook from an app: `crcbl-scene` behind a non-default `scene`
+1. App-supplied materials and page layers.
+2. App-supplied meshes, which is mostly making the failure paths honest.
+3. Reach the cook from an app: `crcbl-scene` behind a non-default `scene`
    feature so `gltf` does not reach a wasm binary, and the meshlet/DAG cook
    moved out of `crcbl-shaders/tools/cook-clusters.rs` into the crate.
-5. `apps/lumen` on top of it.
+4. `apps/lumen` on top of it.
 
 ### Flat meshes only, and why that is not negotiable yet
 
@@ -7753,6 +7754,37 @@ writes it, so clearing one instance's `group_stride` words means work recorded
 inside a frame, and the existing per-frame clearing dispatch is explicitly the
 thing that must not touch this buffer. Unmeasured whether the pop is visible at
 all.
+
+### Instance order is the caller's now, and it is what keeps a golden still
+
+`ForwardRenderer::new` used to insert the cube itself, so it was always instance
+0 and every `set_*` object landed above it. Nothing is inserted at build any
+more, so the pool's slot order is the order a caller places objects in — and the
+eleven goldens stayed byte-identical across the `begin_frame` slice because
+every caller places the cube **first**: `screenshot.rs`'s `place_cube`,
+`vk_e2e`'s `mesh::place_cube` / `place_cube_at`, and `forward`'s own test
+helper, each of which says so at the call site.
+
+Whether a different order would actually move a frame is **not measured**. The
+visible list is filled by an atomic, so the draw order is not the pool's order
+to begin with; but the instance index is `docs/plan/25-lod.md`'s hysteresis key
+(see the entry above), and a slice whose whole obligation was that no golden
+moves was not the place to find out.
+
+### A renderer nobody placed anything in records fewer dispatches
+
+Not a defect, and newly reachable. With an empty instance pool the cull dispatch
+covers no workgroups, and `DrawGen::add_passes` records **no dispatch at all**
+rather than one of zero — Metal rejects the empty dispatch, and the comment
+there says so. Before the cube became a caller's instance the pool was never
+empty, so this could not be reached from `ForwardRenderer` at all.
+
+`forward`'s
+`the_frame_records_one_indirect_call_per_bucket_whatever_the_scene_holds` is
+what found it: its no-pyramid half recorded 7 dispatches against the other
+half's 10. It places the cube in both halves now, so the two differ in the
+pyramid alone, which is what the test was always about. Nothing else in the tree
+draws a frame with an empty pool.
 
 ### Considered and declined in the description slice: a `SceneError`
 

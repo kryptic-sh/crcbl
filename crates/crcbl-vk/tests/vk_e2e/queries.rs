@@ -13,7 +13,7 @@
 //! run says which one it took.
 
 use crate::harness::Headless;
-use crate::mesh::{MESH_EXTENT, MESH_SECONDS, mesh_camera};
+use crate::mesh::{MESH_EXTENT, mesh_camera, place_cube};
 use crcbl_hal::{CommandEncoderDesc, Features, PresentInfo, QueryKind, QuerySetDesc, SubmitInfo};
 
 /// How many timers it takes to see every pass a forward frame records.
@@ -98,6 +98,7 @@ fn per_pass_gpu_timers_report_real_numbers() {
     let mut pool = crcbl_render::TransientPool::new();
     let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
         .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     let mut timers =
         // Room for every pass the forward frame records: the camera's cull
         // triple, one per shadow cascade, and the three render passes. A
@@ -117,7 +118,6 @@ fn per_pass_gpu_timers_report_real_numbers() {
                 device,
                 &camera,
                 &crcbl_render::DirectionalLight::default(),
-                crcbl_render::ForwardRenderer::spin(MESH_SECONDS),
                 MESH_EXTENT,
             )
             .expect("uniforms");

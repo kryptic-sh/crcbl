@@ -60,6 +60,28 @@ pub(crate) fn mesh_camera(projection: crcbl_render::Projection) -> crcbl_render:
 /// matrix or a mirrored axis to hide behind.
 pub(crate) const MESH_SECONDS: f32 = 0.35;
 
+/// Puts the demo scene's cube in the frame at `transform`, and **first**, so it
+/// takes the pool slot it has always had.
+///
+/// The renderer used to insert this object itself and to take its transform as a
+/// `begin_frame` argument. It is an ordinary instance now, so every renderer in
+/// this suite places it the way an application does — and the scene the goldens
+/// were blessed on is the same scene.
+pub(crate) fn place_cube_at(renderer: &mut crcbl_render::ForwardRenderer, transform: glam::Mat4) {
+    renderer
+        .add_instance(&crcbl_render::InstanceDesc {
+            mesh: crcbl_render::scene::DEMO_CUBE,
+            material: crcbl_render::scene::DEMO_UNTINTED,
+            transform,
+        })
+        .expect("an empty instance pool has room for the cube");
+}
+
+/// The same, at the spin every frame in this suite is drawn at.
+pub(crate) fn place_cube(renderer: &mut crcbl_render::ForwardRenderer) {
+    place_cube_at(renderer, crcbl_render::ForwardRenderer::spin(MESH_SECONDS));
+}
+
 impl Headless {
     /// Opens a ring at a pinned format for the mesh suite. See
     /// [`Headless::open_for_triangle`] on why the format is pinned rather than
@@ -197,7 +219,7 @@ pub(crate) fn render_mesh(
     pool: &mut crcbl_render::TransientPool,
     camera: &crcbl_render::Camera,
 ) -> MeshFrame {
-    use crcbl_render::{ForwardRenderer, RenderGraph};
+    use crcbl_render::RenderGraph;
 
     let device = headless.device.as_ref();
     let (width, height) = MESH_EXTENT;
@@ -227,7 +249,6 @@ pub(crate) fn render_mesh(
             device,
             camera,
             &crcbl_render::DirectionalLight::default(),
-            ForwardRenderer::spin(MESH_SECONDS),
             MESH_EXTENT,
         )
         .expect("the uniform buffer is writable");
@@ -356,6 +377,7 @@ fn a_lit_mesh_through_the_graph_matches_its_golden_image() {
         headless.format,
     )
     .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     let frame = render_mesh(
         &headless,
         &mut renderer,
@@ -436,6 +458,7 @@ fn the_mesh_shader_path_matches_the_indirect_path_s_golden() {
         headless.format,
     )
     .expect("the forward renderer builds a mesh pipeline");
+    place_cube(&mut renderer);
     assert_eq!(
         renderer.geometry_path(),
         crcbl_hal::GeometryPath::MeshShader,
@@ -494,6 +517,7 @@ fn the_orthographic_camera_is_a_projection_swap_and_matches_its_golden() {
         headless.format,
     )
     .expect("the forward renderer builds");
+    place_cube(&mut renderer);
 
     let ortho = crcbl_render::Projection::Orthographic {
         half_height: 0.9,
@@ -589,6 +613,7 @@ fn a_mesh_at_a_non_zero_base_vertex_draws_its_own_geometry() {
         headless.format,
     )
     .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     renderer.set_pyramid(Some(glam::Mat4::from_translation(PYRAMID_AT)));
 
     let frame = render_mesh(&headless, &mut renderer, &mut pool, &two_mesh_camera());
@@ -673,6 +698,7 @@ fn render_open_box(optional: Features) -> OpenBoxFrame {
         headless.format,
     )
     .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     let path = renderer.geometry_path();
     let culls_clusters = renderer.culls_clusters();
     renderer.set_open_box(Some(glam::Mat4::from_translation(OPEN_BOX_AT)));
@@ -1028,6 +1054,7 @@ fn per_cluster_culling_rejects_the_clusters_a_camera_hides() {
         headless.format,
     )
     .expect("the forward renderer builds an amplification stage");
+    place_cube(&mut renderer);
     assert!(
         renderer.culls_clusters(),
         "the renderer must have *built* the amplification stage, or every count \
@@ -1210,6 +1237,7 @@ fn a_scaled_instance_keeps_the_clusters_its_own_size_puts_on_screen() {
         headless.format,
     )
     .expect("the forward renderer builds an amplification stage");
+    place_cube(&mut renderer);
     assert!(
         renderer.culls_clusters(),
         "the renderer must have *built* the amplification stage, or every count \
@@ -1446,6 +1474,7 @@ fn the_mesh_dispatch_extent_is_the_culled_instance_count() {
         headless.format,
     )
     .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     if renderer.geometry_path() != crcbl_hal::GeometryPath::MeshShader {
         eprintln!(
             "vk e2e: this device does not select the mesh path, so it records no indirect \
@@ -1575,6 +1604,7 @@ fn the_directional_light_actually_shades_the_mesh() {
         headless.format,
     )
     .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     let frame = render_mesh(
         &headless,
         &mut renderer,
@@ -1637,6 +1667,7 @@ fn the_hdr_target_carries_values_an_eight_bit_target_could_not() {
         headless.format,
     )
     .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     let frame = render_mesh(
         &headless,
         &mut renderer,
@@ -1708,6 +1739,7 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
     let mut pool = crcbl_render::TransientPool::new();
     let mut renderer = crcbl_render::ForwardRenderer::new(device, headless.queue, headless.format)
         .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     let camera = mesh_camera(crcbl_render::Projection::default());
 
     // Sizes chosen to be genuinely different rather than a nudge — including one
@@ -1750,7 +1782,6 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
                     device,
                     &camera,
                     &crcbl_render::DirectionalLight::default(),
-                    crcbl_render::ForwardRenderer::spin(MESH_SECONDS),
                     extent,
                 )
                 .expect("uniforms");
@@ -2152,6 +2183,7 @@ fn the_gpu_descends_the_dag_to_the_cut_the_host_rule_says() {
         headless.format,
     )
     .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     assert!(
         renderer.culls_clusters(),
         "the descent runs in the amplification stage, and this device reports none"
@@ -2389,6 +2421,7 @@ fn the_shadow_cascades_select_coarser_than_the_camera() {
         headless.format,
     )
     .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     assert!(
         renderer.set_dunes(Some(glam::Mat4::IDENTITY)),
         "a device with an amplification stage accepts the patch"
@@ -2730,6 +2763,7 @@ fn the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is() {
                 headless.format,
             )
             .expect("the forward renderer builds");
+            place_cube(&mut renderer);
             assert!(renderer.set_dunes(Some(glam::Mat4::IDENTITY)));
             // Its own history, because the state is this renderer's buffer and
             // the uniform arm below opens a second device with a second one.
@@ -2771,6 +2805,7 @@ fn the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is() {
         headless.format,
     )
     .expect("the forward renderer builds");
+    place_cube(&mut renderer);
     assert!(
         renderer.set_dunes(Some(glam::Mat4::IDENTITY)),
         "a device with no mesh stage takes the patch through a uniform cut"
@@ -2884,6 +2919,7 @@ fn a_camera_drifting_across_a_level_boundary_stops_flickering() {
             headless.format,
         )
         .expect("the forward renderer builds");
+        place_cube(&mut renderer);
         assert!(renderer.set_dunes(Some(glam::Mat4::IDENTITY)));
         let _ = render_mesh(
             &headless,
@@ -2949,6 +2985,7 @@ fn a_camera_drifting_across_a_level_boundary_stops_flickering() {
             headless.format,
         )
         .expect("the forward renderer builds");
+        place_cube(&mut renderer);
         assert!(renderer.set_dunes(Some(glam::Mat4::IDENTITY)));
         renderer.set_lod_hold_ratio(hold_ratio);
         let mut history = DunesHistory::new();

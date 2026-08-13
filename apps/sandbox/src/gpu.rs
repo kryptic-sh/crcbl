@@ -109,9 +109,10 @@ use std::time::{Duration, Instant};
 use crcbl::engine::{GpuContext, GpuContextDesc, GpuOptions, Pacing};
 use crcbl::hal::CommandEncoderDesc;
 use crcbl::prelude::*;
+use crcbl::render::scene::{DEMO_CUBE, DEMO_UNTINTED};
 use crcbl::render::{
-    Camera, DirectionalLight, ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers,
-    RenderGraph, TransientPool, UiRenderer,
+    Camera, DirectionalLight, ForwardRenderer, InstanceDesc, InstanceHandle, MAX_TIMED_PASSES,
+    MenuRenderer, PassTimers, RenderGraph, TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -125,6 +126,10 @@ const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 pub struct Gpu {
     ctx: GpuContext,
     renderer: ForwardRenderer,
+    /// The cube the sandbox spins — an object it placed, not one the renderer
+    /// came with. [`Gpu::frame`] rewrites its transform per frame, which is the
+    /// whole of the sandbox's animation.
+    cube: InstanceHandle,
     pool: TransientPool,
     /// `None` on a device without timestamp queries — the report degrades, the
     /// frame does not.
@@ -188,7 +193,16 @@ impl Gpu {
 
         // Milestones 3–5. Built after the swapchain because the tonemap
         // pipeline has to name the colour format the pass will render to.
-        let renderer = ForwardRenderer::new(ctx.device(), ctx.queue(), ctx.format())?;
+        let mut renderer = ForwardRenderer::new(ctx.device(), ctx.queue(), ctx.format())?;
+        // Milestone 3's subject, placed by the application like any other
+        // object. The pool is empty and thousands wide, so this cannot fail.
+        let cube = renderer
+            .add_instance(&InstanceDesc {
+                mesh: DEMO_CUBE,
+                material: DEMO_UNTINTED,
+                transform: ForwardRenderer::spin(0.0),
+            })
+            .expect("an empty instance pool has room for the cube");
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
         if timers.is_none() {
             crcbl::log::info!("hal: no timestamp queries on this device; per-pass timing is off");
@@ -214,6 +228,7 @@ impl Gpu {
         Ok(Self {
             ctx,
             renderer,
+            cube,
             pool: TransientPool::new(),
             timers,
             camera: Camera::default().with_projection(projection),
@@ -343,13 +358,18 @@ impl Gpu {
         };
         let extent = acquired.extent;
 
-        self.renderer.begin_frame(
-            self.ctx.device(),
-            &self.camera,
-            &self.light,
-            ForwardRenderer::spin(self.elapsed),
-            extent,
-        )?;
+        // The animation, and the only object this sample moves: a rewrite of
+        // one instance, which the pool uploads and nothing else.
+        self.renderer.set_instance(
+            self.cube,
+            &InstanceDesc {
+                mesh: DEMO_CUBE,
+                material: DEMO_UNTINTED,
+                transform: ForwardRenderer::spin(self.elapsed),
+            },
+        );
+        self.renderer
+            .begin_frame(self.ctx.device(), &self.camera, &self.light, extent)?;
         self.menu
             .begin_frame(self.ctx.device(), extent)
             .map_err(GpuError::Hal)?;
