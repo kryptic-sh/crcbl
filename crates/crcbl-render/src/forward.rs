@@ -35,8 +35,8 @@
 //! two of them exist to be seen: [`ForwardRenderer::set_tinted_pyramid`]'s
 //! differs from the default row in its factor and its roughness, and
 //! [`ForwardRenderer::set_textured_pyramid`]'s in its base-colour page layer
-//! alone. See this module's `material_rows` for why the shading factor rides on
-//! that row rather than on a fourth.
+//! alone. Which rows those are is [`crate::scene::demo`]'s to say, and so is why
+//! the shading factor rides on that row rather than on a fourth.
 //!
 //! The page is the texture side, and it is one `D2Array` image rather than an
 //! array of descriptors — `BindingModel::ArrayPages` rather than `Bindless`.
@@ -45,8 +45,8 @@
 //! array needs `Features::DESCRIPTOR_INDEXING`, which `crcbl-mtl` withdraws. So
 //! there is one lookup, one layout and one artifact rather than a permutation,
 //! and a device that reports the feature runs the same declaration. What
-//! bindless buys later is capacity, not a second path — see `PAGE_EXTENT` and
-//! the layout entry for binding 7.
+//! bindless buys later is capacity, not a second path — see [`crate::scene::PageDesc`]
+//! and the layout entry for binding 7.
 //!
 //! What *was* on that list until 2026-08 is GPU culling and the indirect draw
 //! count, and both are here now: [`crate::draw_gen`] runs `cull.slang` and
@@ -161,6 +161,7 @@ use crate::light::{Light, sun_row};
 use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
+use crate::scene::{self, Geometry, SceneDesc};
 use crate::shadow::{self, Cascades};
 use crate::ssao::{Ssao, cached_group};
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
@@ -177,137 +178,6 @@ pub const SCENE_CLEAR: [f32; 4] = [0.012, 0.016, 0.030, 1.0];
 /// How many frames of uniform buffers to keep. Matches the frame loop's
 /// frames-in-flight.
 pub const FRAMES_IN_FLIGHT: usize = 2;
-
-/// Vertices the geometry pool holds.
-///
-/// A handful of meshes are resident today, and the pool exists so that stops
-/// being the interesting number. It is device-local memory reserved at start-up
-/// and never grown — [`crate::mesh_pool`] says why — so it is sized for the
-/// scene P7 puts in it rather than for the meshes P1 draws.
-const POOL_VERTEX_CAPACITY: u32 = 64 * 1024;
-
-/// Indices the geometry pool holds. Four per vertex is the usual ratio for
-/// indexed triangle soup, rounded up.
-const POOL_INDEX_CAPACITY: u32 = 256 * 1024;
-
-/// Meshes the geometry pool can hold at once, which is the length of its mesh
-/// table.
-///
-/// Distinct meshes, not instances of them: §3.2's instance array is what a
-/// scene's object count sizes, and a mesh id names one entry here however many
-/// instances carry it. Sized on the same terms as the pools it indexes —
-/// reserved at start-up, never grown — against a scene with far more objects
-/// than distinct geometry.
-const POOL_MESH_CAPACITY: u32 = 1024;
-
-/// Instances the instance pool holds, per frame in flight.
-///
-/// A handful are resident, for the same reason the geometry pools hold a
-/// handful of meshes. Sized against topic 03's exit criterion — "sandbox scene:
-/// 10k+ instanced meshes" — rather than against them, because the buffers are
-/// reserved at start-up and never grown.
-const POOL_INSTANCE_CAPACITY: u32 = 16 * 1024;
-
-/// Materials the material table holds.
-///
-/// A handful are resident, on the same terms as the meshes: the buffer is
-/// reserved at start-up and never grown, so it is sized against a scene rather
-/// than against what P1 draws. Distinct materials, not instances of them — a
-/// material id names one row however many instances carry it, which is the
-/// property that makes the table worth having.
-const POOL_MATERIAL_CAPACITY: u32 = 1024;
-
-/// The second material's base colour, and the whole of what makes it visible.
-///
-/// A factor per channel with no two alike, so multiplying by it moves every
-/// colour it touches: a tint that left a channel at `1.0` would leave the
-/// pyramid's white base looking like a lighting difference, and one that left
-/// them equal would be a brightness change a shading bug could also produce.
-/// See [`ForwardRenderer::set_tinted_pyramid`], which is the pair this exists
-/// for.
-const PYRAMID_TINT: [f32; 4] = [0.15, 0.45, 1.0, 1.0];
-
-/// The second material's roughness, and the whole of what makes the **shading**
-/// half of the row visible.
-///
-/// Well under [`mesh::GpuMaterial::UNTINTED`]'s, so the same lobe under the same
-/// sun draws a tight bright highlight here where the neutral row draws a broad
-/// faint one. Not lower still: a roughness near zero puts the whole lobe inside
-/// a handful of pixels, and a highlight a rasteriser can miss is not something
-/// a frame comparison can measure.
-///
-/// **This is the only place in the engine where two materials differ in a
-/// shading factor**, which is what makes
-/// `crcbl`'s `the_smooth_pyramid_holds_a_tighter_highlight_than_the_rough_one`
-/// possible at all — see this module's `material_rows` for why the frame can
-/// attribute the difference to this number and not to where the two pyramids
-/// stand.
-const PYRAMID_ROUGHNESS: f32 = 0.25;
-
-/// The base-colour page's extent, in texels — square, and **two**.
-///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.2's
-/// [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) page is one image with a
-/// layer per material texture, and two texels a side is the smallest extent in
-/// which a layer can be something other than a flat colour. Small on purpose,
-/// and not only because this is demo content:
-///
-/// * A flat layer would make the golden below pass with **no UV at all**. Four
-///   texels is what makes the texture coordinate observable, because a mesh
-///   whose UVs never varied would shade each face in one texel's colour.
-/// * Every texel boundary is a hard edge — the sampler has no mips and filters
-///   nearest, see [`ForwardRenderer::build`] — and a hard edge is where two
-///   rasterisers can land on opposite sides of an interpolated UV. Four texels
-///   put **one** boundary across a face in each axis, at `0.5`, which is as far
-///   from a vertex as an edge can be. A denser checker would put a row of
-///   disagreeable pixels through every face for no more evidence.
-const PAGE_EXTENT: u32 = 2;
-
-/// Bytes in one layer of the page: `PAGE_EXTENT²` RGBA texels.
-const PAGE_LAYER_BYTES: usize = (PAGE_EXTENT * PAGE_EXTENT) as usize * 4;
-
-/// The page layer a material naming no texture samples, which
-/// [`mesh::GpuMaterial::UNTINTED`] is written against.
-///
-/// **Layer 0 is white**, which is the convention that type's docs state and
-/// [`UNTEXTURED_TEXELS`] keeps: an `Rgba8UnormSrgb` texel of `0xFF` decodes to
-/// exactly `1.0`, so a material that names this layer is shaded by the same
-/// product it was before there was a page at all.
-const UNTEXTURED_LAYER: u32 = 0;
-
-/// The layer [`ForwardRenderer::set_textured_pyramid`] shades with.
-const CHECKER_LAYER: u32 = 1;
-
-/// Layer [`UNTEXTURED_LAYER`]: opaque white, in every texel.
-///
-/// sRGB-encoded like the layer beside it — the image is `Rgba8UnormSrgb` — and
-/// `0xFF` is the one value the encoding leaves alone, so the sampler returns
-/// exactly `1.0`.
-const UNTEXTURED_TEXELS: [u8; PAGE_LAYER_BYTES] = [0xFF; PAGE_LAYER_BYTES];
-
-/// Layer [`CHECKER_LAYER`]: four **distinct** greys, one per texel.
-///
-/// Distinct rather than a two-value checker, for the reason `crcbl-vk`'s sprite
-/// suite records about its sheets: a two-value checker is symmetric under both a
-/// flipped U and a flipped V, so either mistake would produce the same picture.
-/// No two of these are equal, so any flip is a different frame.
-///
-/// Grey rather than coloured because the colour axis is already spoken for:
-/// [`PYRAMID_TINT`] is what proves the *factor* column, and a texture that also
-/// changed hue would make the two columns' evidence look alike.
-const CHECKER_TEXELS: [u8; PAGE_LAYER_BYTES] = [
-    0xFF, 0xFF, 0xFF, 0xFF, // (0, 0)
-    0xB0, 0xB0, 0xB0, 0xFF, // (1, 0)
-    0x70, 0x70, 0x70, 0xFF, // (0, 1)
-    0x30, 0x30, 0x30, 0xFF, // (1, 1)
-];
-
-/// The page, layer by layer: element `n` is layer `n`.
-///
-/// The one place the page's length lives, so [`UNTEXTURED_LAYER`] and
-/// [`CHECKER_LAYER`] can be checked against it rather than against a number
-/// written twice.
-const PAGE_LAYERS: [&[u8; PAGE_LAYER_BYTES]; 2] = [&UNTEXTURED_TEXELS, &CHECKER_TEXELS];
 
 /// The bind-group slot the sun's shadow atlas is read through.
 ///
@@ -384,43 +254,54 @@ const AMBIENT_OCCLUSION_NONE: u8 = 0xFF;
 /// the mirror is checked here — which is the only place both names are in scope.
 const _: () = assert!(crcbl_hal::depth::CLEAR == crcbl_shaders::ssao::DEPTH_FAR);
 
-/// Rows the light list holds — the sun and every [`Light`] a caller set.
+/// Which [`SceneDesc::meshes`] entry each of the five `set_*` methods places,
+/// and which one [`ForwardRenderer::begin_frame`] transforms.
 ///
-/// Sized like the pools around it: reserved at start-up, never grown, and
-/// generous against a scene with far more lights than a froxel's budget will
-/// ever show at once. Overflowing *this* is refused rather than counted, because
-/// a light missing from the list is missing from every froxel and no counter in
-/// the frame would say so — see [`LightGrid::begin_frame`], which is where that
-/// distinction is argued.
-const POOL_LIGHT_CAPACITY: u32 = 1024;
+/// **Positional, until instances become a runtime API.** Those methods name a
+/// mesh the renderer holds the id of, so until a caller can insert an instance
+/// of a mesh *it* chose, "which mesh" has to be a number written down somewhere
+/// — and a description read by position is the honest place for it, rather than
+/// a renderer that still uploads its own geometry.
+/// [`ForwardRenderer::with_scene`] refuses a description shorter than this,
+/// because a `set_pyramid` on a description with one mesh has no mesh to name.
+const DEMO_CUBE: usize = 0;
+const DEMO_PYRAMID: usize = 1;
+const DEMO_OPEN_BOX: usize = 2;
+const DEMO_DUNES: usize = 3;
 
-/// The cube's bucket, the pyramid's and the open box's. Named rather than
-/// written as numbers where the bucket table is filled in.
+/// Which [`SceneDesc::materials`] row each of those instances shades through,
+/// on [`DEMO_CUBE`]'s terms exactly.
 ///
-/// One bucket per resident mesh, because an argument structure's index range is
-/// per draw and instances of different meshes cannot share one. See
-/// [`crate::draw_gen`] on what a bucket is and what a longer key would buy. How
-/// many the table holds altogether is [`ForwardRenderer::bucket_count`], and it
-/// is not the same number on every geometry path — see [`DUNES_BUCKET`].
-const CUBE_BUCKET: usize = 0;
-const PYRAMID_BUCKET: usize = 1;
-const OPEN_BOX_BUCKET: usize = 2;
+/// Row 0 is not a convention this file may pick: it is what
+/// [`mesh::GpuInstance::default`] names, so it is the row every instance written
+/// by omission carries.
+const DEMO_UNTINTED: usize = 0;
+const DEMO_TINTED: usize = 1;
+const DEMO_TEXTURED: usize = 2;
 
-/// The dunes patch's first bucket, and **how many it has depends on the
-/// geometry path** — which is the one place in this renderer the two differ in
-/// shape rather than in the call they record.
+/// How many description meshes and material rows the constants above name, so a
+/// description that cannot satisfy them is refused rather than indexed past.
+const REQUIRED_MESHES: usize = DEMO_DUNES + 1;
+const REQUIRED_MATERIALS: usize = DEMO_TEXTURED + 1;
+
+/// How many buckets a resident mesh occupies, which is **not the same on every
+/// geometry path** — the one place in this renderer the two differ in shape
+/// rather than in the call they record.
 ///
-/// On [`EmitTail::Mesh`] it is a single bucket for the whole DAG: a bucket is a
-/// mesh's run of clusters, and the point of `docs/plan/25-lod.md`'s per-cluster
-/// selection is that one dispatch covers several levels at once, so the run is
-/// every level's clusters end to end and the bucket's mesh id is level 0's.
+/// A flat mesh is one bucket either way. A DAG is one bucket on
+/// [`EmitTail::Mesh`]: a bucket is a mesh's run of clusters, and the point of
+/// `docs/plan/25-lod.md`'s per-cluster selection is that one dispatch covers
+/// several levels at once, so the run is every level's clusters end to end and
+/// the bucket's mesh id is level 0's.
 ///
-/// On the two indirect tails it is one bucket **per level**, because there the
-/// same plan takes a uniform cut and a level is drawn as an ordinary index
+/// On the two indirect tails a DAG is one bucket **per level**, because there
+/// the same plan takes a uniform cut and a level is drawn as an ordinary index
 /// range: a DAG's levels are separate mesh table entries, `draw_gen.slang`
 /// selects one per instance, and a bucket is what an indexed draw of one index
 /// range *is*. See [`ForwardRenderer::dunes_level_buckets`].
-const DUNES_BUCKET: usize = 3;
+const fn buckets_for(levels: usize, emit: EmitTail) -> usize {
+    if emit.is_mesh() { 1 } else { levels }
+}
 
 /// The pixel budget `docs/plan/25-lod.md`'s descent compares a group's projected
 /// error against, unless a caller sets another with
@@ -641,8 +522,8 @@ pub struct ForwardRenderer {
     // draw below with a mesh the GPU has not received.
     pool: MeshPool,
     /// The dynamic offset of each bucket's [`mesh::DrawConstants`] block, in
-    /// the order [`CUBE_BUCKET`] and [`PYRAMID_BUCKET`] name. Its length is the
-    /// bucket count, which [`DUNES_BUCKET`] says is a property of the path.
+    /// [`SceneDesc::meshes`] order. Its length is the bucket count, which
+    /// [`buckets_for`] says is a property of the path as well as of the scene.
     ///
     /// **The whole of what the CPU still says per draw.** Everything else a
     /// draw needs — how many instances, which indices, which vertices — is in
@@ -696,12 +577,13 @@ pub struct ForwardRenderer {
     /// would name row 0 by accident — which is a material, and only *happens*
     /// to be this one.
     untinted_material: u32,
-    /// The row [`PYRAMID_TINT`] and [`PYRAMID_ROUGHNESS`] went into.
+    /// The row [`scene::PYRAMID_TINT`] and [`scene::PYRAMID_ROUGHNESS`] went
+    /// into — description row [`DEMO_TINTED`].
     tinted_material: u32,
     /// The row that is [`mesh::GpuMaterial::UNTINTED`] with
-    /// [`CHECKER_LAYER`] in place of [`UNTEXTURED_LAYER`] — the same factor as
-    /// [`ForwardRenderer::untinted_material`] and a different texture, which is
-    /// what makes the texture column observable on its own.
+    /// [`scene::CHECKER_LAYER`] in place of [`scene::PageDesc::UNTEXTURED_LAYER`] — the
+    /// same factor as [`ForwardRenderer::untinted_material`] and a different
+    /// texture, which is what makes the texture column observable on its own.
     textured_material: u32,
     /// §3.2's texture side: one `D2Array` image whose layers the material rows
     /// index. One page, bound once, for every material — see the module docs on
@@ -1526,27 +1408,40 @@ fn read_draw_sources<'g, 'a>(
     }
 }
 
-/// Every resident mesh's table id, and what a DAG needs on top of one.
-struct Residents {
-    cube: u32,
-    pyramid: u32,
-    open_box: u32,
-    /// The dunes patch's DAG, level by level, as mesh table ids — finest first.
+/// What one [`MeshDesc`](crate::scene::MeshDesc) became once it was resident.
+///
+/// One of these per description mesh, in description order — so a mesh's index
+/// here is its index there, which is what lets the bucket table, the level
+/// tables and the cluster pool all be filled in by walking one list.
+struct ResidentMesh {
+    /// This mesh's table ids, finest first: one entry for a flat mesh, one per
+    /// level for a DAG. Never empty.
     ///
     /// Every level is its own vertex range and so its own table entry. Level 0's
     /// id is the one the *instance* carries and the one the cull pass reads a
     /// bounding box out of; the coarser ones are named by the bucket table on a
     /// path that takes a uniform cut, and by nothing at all on the mesh path,
     /// where a cluster reaches its own level through
-    /// [`dunes_vertex_bases`](Self::dunes_vertex_bases) instead.
-    dunes_levels: Vec<u32>,
-    /// Per level, how far that level's vertices start past level 0's.
+    /// [`vertex_bases`](Self::vertex_bases) instead.
+    levels: Vec<u32>,
+    /// Per level, how far that level's vertices start past level 0's — so a flat
+    /// mesh's single entry is zero.
     ///
     /// What [`crcbl_shaders::cluster_select::ClusterSelect::vertex_base`] holds,
     /// and the whole of what makes a DAG drawable from one instance: the mesh
     /// stage adds this to the instance's own `base_vertex`, so a cut spanning
     /// three levels reads three different vertex ranges out of one pool.
-    dunes_vertex_bases: Vec<u32>,
+    vertex_bases: Vec<u32>,
+}
+
+impl ResidentMesh {
+    /// The table id an instance of this mesh carries: **level 0's**, whatever
+    /// the geometry path, because it is the entry `cull.slang` reads a bounding
+    /// box out of and the coarser levels approximate the same surface inside the
+    /// same box.
+    fn id(&self) -> u32 {
+        self.levels[0]
+    }
 }
 
 /// One shadow cull's per-frame buffers, read out of its [`DrawGen`] before that
@@ -1571,7 +1466,8 @@ struct TileBuffers {
     /// ordering them.
     ///
     /// **This is what a cull costs that is not a dispatch.** It is
-    /// `POOL_INSTANCE_CAPACITY` × the resident group count words of device-local
+    /// [`Capacities::instances`](crate::scene::Capacities::instances) × the
+    /// resident group count words of device-local
     /// memory, held for the renderer's whole life whether anything is drawn
     /// through it or not, and it is the reason [`shadow::LIGHT_SLOTS`] is a
     /// budget rather than "however many lights the scene has" — and the reason a
@@ -1580,7 +1476,11 @@ struct TileBuffers {
 }
 
 impl ForwardRenderer {
-    /// Builds both pipelines and uploads the cube.
+    /// Builds both pipelines and makes [`scene::demo`] resident.
+    ///
+    /// [`ForwardRenderer::with_scene`] with the engine's own description, and
+    /// nothing else — so the frame this draws is the one the golden suite has
+    /// always compared, and every existing caller is untouched.
     ///
     /// `target_format` must be the format the tonemap pass will render into —
     /// dynamic rendering checks pipeline and attachment formats against each
@@ -1588,17 +1488,58 @@ impl ForwardRenderer {
     ///
     /// # Errors
     ///
-    /// [`HalError`] from any seam call. A backend that cannot build a pipeline
-    /// says so here rather than drawing nothing later — and a failure part-way
-    /// through releases everything already created, so a caller that retries or
-    /// exits leaves nothing behind.
+    /// [`HalError`], on [`ForwardRenderer::with_scene`]'s terms.
     pub fn new(
         device: &dyn Device,
         queue: QueueHandle,
         target_format: Format,
     ) -> Result<Self, HalError> {
+        Self::with_scene(device, queue, target_format, &scene::demo())
+    }
+
+    /// Builds both pipelines and makes `scene` resident.
+    ///
+    /// Everything in the description is created here and never grows: the
+    /// geometry pools, the cluster pool, the material table, the page, the
+    /// instance array and the bucket table are all sized and filled once. See
+    /// [`crate::scene`] for why that split is where the seam is, and for the
+    /// four places a description's *order* decides what the frame looks like.
+    ///
+    /// `target_format` must be the format the tonemap pass will render into —
+    /// dynamic rendering checks pipeline and attachment formats against each
+    /// other at pass-begin time, not at creation.
+    ///
+    /// # The description is read by position, for now
+    ///
+    /// Instances are not a runtime API yet, so the five `set_*` methods and
+    /// [`ForwardRenderer::begin_frame`] place objects of description meshes
+    /// named by **position**: the cube, the pyramid, the open box and the dunes
+    /// patch of [`scene::demo`], in that order, shaded through the first three
+    /// material rows. A description shorter than that is refused rather than
+    /// accepted into a renderer whose `set_pyramid` has no mesh to name.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`] if the description cannot be made
+    /// resident as written: fewer meshes or material rows than the paragraph
+    /// above names, a page layer that is not the extent's worth of RGBA8, a page
+    /// whose layer 0 is not opaque white, a material row naming a layer the page
+    /// has not got, or a DAG carrying a vertex array for anything but each of
+    /// its levels. Every one of those is settled **before the first device
+    /// object exists**, so a refusal leaks nothing.
+    ///
+    /// [`HalError`] otherwise, from any seam call. A backend that cannot build a pipeline
+    /// says so here rather than drawing nothing later, and a failure part-way
+    /// through releases everything already created, so a caller that retries or
+    /// exits leaves nothing behind.
+    pub fn with_scene(
+        device: &dyn Device,
+        queue: QueueHandle,
+        target_format: Format,
+        scene: &SceneDesc<'_>,
+    ) -> Result<Self, HalError> {
         let mut rollback = Rollback::default();
-        match Self::build(device, queue, target_format, &mut rollback) {
+        match Self::build(device, queue, target_format, scene, &mut rollback) {
             Ok(renderer) => Ok(renderer),
             Err(error) => {
                 rollback.run(device);
@@ -1607,14 +1548,93 @@ impl ForwardRenderer {
         }
     }
 
-    /// The body of [`ForwardRenderer::new`], recording what it has created into
-    /// `rollback` as it goes.
+    /// Everything `build` needs to be true of a description, checked **before
+    /// the first device object exists**.
+    ///
+    /// That placement is the whole design of this function. `build` hands the
+    /// geometry pool and the material table to the rollback and creates a dozen
+    /// objects with `?` between them; a check that ran part way down that list
+    /// would be a new early exit on the wrong side of a handover, and a rejected
+    /// description would leak two device-local buffers. Run from the top of
+    /// `build`, a refusal costs nothing to unwind because nothing was made.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`] naming the entry that is wrong and what
+    /// is wrong with it.
+    fn check_scene(scene: &SceneDesc<'_>) -> Result<(), HalError> {
+        let refuse = |what: String| Err(HalError::InvalidDescriptor(what));
+        if scene.meshes.len() < REQUIRED_MESHES || scene.materials.len() < REQUIRED_MATERIALS {
+            return refuse(format!(
+                "a scene of {} mesh(es) and {} material row(s); the renderer's set_* methods \
+                 name {REQUIRED_MESHES} meshes and {REQUIRED_MATERIALS} rows by position",
+                scene.meshes.len(),
+                scene.materials.len()
+            ));
+        }
+
+        // Every layer's length, and **layer 0's whiteness** — the invariant
+        // whose failure is a global albedo scale on every untextured surface.
+        // Checked by the type that owns the page rather than here, because that
+        // is where a page can be built wrong and where the check can be made to
+        // fail; see `PageDesc::check`.
+        scene.page.check()?;
+        // A row naming a layer the page does not have is an out-of-range sample,
+        // which nothing below the seam reports.
+        let layers = scene.page.layers().len();
+        for (row, material) in scene.materials.iter().enumerate() {
+            if material.base_color_texture as usize >= layers {
+                return refuse(format!(
+                    "material row {row} samples page layer {}, and the page has {layers}",
+                    material.base_color_texture
+                ));
+            }
+        }
+
+        for (index, desc) in scene.meshes.iter().enumerate() {
+            let Geometry::Dag { levels, dag } = &desc.geometry else {
+                continue;
+            };
+            // Zipped together at upload and again at
+            // `ClusterDag::selection_records`, so a short list would silently
+            // leave a level's clusters reading the level below's vertices.
+            if levels.len() != dag.levels.len() {
+                return refuse(format!(
+                    "mesh {index} ({}) carries {} vertex array(s) for a DAG of {} level(s)",
+                    desc.label,
+                    levels.len(),
+                    dag.levels.len()
+                ));
+            }
+            for (depth, (bytes, level)) in levels.iter().zip(&dag.levels).enumerate() {
+                let want = level.positions.len() * mesh::VERTEX_STRIDE;
+                if bytes.len() != want {
+                    return refuse(format!(
+                        "mesh {index} ({}) level {depth} carries {} vertex byte(s) for {} \
+                         position(s), which is {want}",
+                        desc.label,
+                        bytes.len(),
+                        level.positions.len()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The body of [`ForwardRenderer::with_scene`], recording what it has
+    /// created into `rollback` as it goes.
     fn build(
         device: &dyn Device,
         queue: QueueHandle,
         target_format: Format,
+        scene: &SceneDesc<'_>,
         rollback: &mut Rollback,
     ) -> Result<Self, HalError> {
+        // Before anything exists, so a refused description leaks nothing — see
+        // `check_scene`, which is where that placement is argued.
+        Self::check_scene(scene)?;
+
         // Resolved before anything is created, because it decides the *shape*
         // of what is created — the bind group layout, which pipeline kind the
         // pass builds, and what a bucket's constant block says. A device on the
@@ -1635,20 +1655,16 @@ impl ForwardRenderer {
                 .features
                 .contains(crcbl_hal::Features::TASK_SHADER);
 
-        let (
-            pool,
-            Residents {
-                cube: cube_mesh,
-                pyramid: pyramid_mesh,
-                open_box: open_box_mesh,
-                dunes_levels,
-                dunes_vertex_bases,
-            },
-        ) = Self::build_geometry(device, queue)?;
-        // The id the dunes *instance* carries. Level 0 whatever the path,
-        // because it is the entry the cull pass reads a bounding box out of and
-        // the coarser levels approximate the same surface inside the same box.
-        let dunes_mesh = dunes_levels[0];
+        let (pool, residents) = Self::build_geometry(device, queue, scene)?;
+        // The ids the five `set_*` methods and `begin_frame` name, read out of
+        // the description by position — see [`DEMO_CUBE`]. Each is the id of
+        // that mesh's **level 0**, whatever the path, because it is the entry
+        // the cull pass reads a bounding box out of and a DAG's coarser levels
+        // approximate the same surface inside the same box.
+        let cube_mesh = residents[DEMO_CUBE].id();
+        let pyramid_mesh = residents[DEMO_PYRAMID].id();
+        let open_box_mesh = residents[DEMO_OPEN_BOX].id();
+        let dunes_mesh = residents[DEMO_DUNES].id();
         // The handles are `Copy`, so they can be read out before the pool
         // becomes the rollback's — which it must be before the first `?` below,
         // or a failed pipeline would leak two device-local buffers. The index
@@ -1662,8 +1678,8 @@ impl ForwardRenderer {
         // §3.2's texture side, before the table that indexes it: a material row
         // is written with a layer number, so the layer has to exist to be named.
         //
-        // **`Rgba8UnormSrgb`, and that is the colour-space decision.** The
-        // texels above are sRGB-encoded, which is what glTF defines a
+        // **`Rgba8UnormSrgb`, and that is the colour-space decision.** A
+        // description's texels are sRGB-encoded, which is what glTF defines a
         // base-colour texture to be, so the format is what makes the sampler
         // decode them — and `mesh.slang` then multiplies a linear texel by a
         // linear `base_color` and lights in linear, exactly as it did before
@@ -1671,14 +1687,22 @@ impl ForwardRenderer {
         // multiplying an encoded value by a linear one, which is
         // `crate::sprite_pass`'s "darkens every half-transparent edge" defect
         // in a different place.
-        let page_layers = PAGE_LAYERS.map(|texels| texels.as_slice());
+        //
+        // Layer 0's whiteness and every layer's length were settled by
+        // `check_scene` above, before this device object existed.
+        let page_layers: Vec<&[u8]> = scene
+            .page
+            .layers()
+            .iter()
+            .map(|texels| texels.as_ref())
+            .collect();
         let base_color_page = upload_texture_layers(
             device,
             queue,
             "material base colour",
             Format::Rgba8UnormSrgb,
-            PAGE_EXTENT,
-            PAGE_EXTENT,
+            scene.page.extent(),
+            scene.page.extent(),
             &page_layers,
         )?;
         rollback.textures.push(base_color_page);
@@ -1701,13 +1725,21 @@ impl ForwardRenderer {
 
         // The material table, before the instances: an instance is written with
         // the material id it carries, so the row has to exist to be named.
-        let (materials, untinted_material, tinted_material, textured_material) =
-            Self::build_materials(device)?;
+        let (materials, material_ids) = Self::build_materials(device, scene)?;
+        // The rows the five `set_*` methods shade through, by position — see
+        // [`DEMO_UNTINTED`], and `check_scene` for why there are at least three.
+        let untinted_material = material_ids[DEMO_UNTINTED];
+        let tinted_material = material_ids[DEMO_TINTED];
+        let textured_material = material_ids[DEMO_TEXTURED];
         let material_buffer = materials.buffer();
         rollback.materials = Some(materials);
 
-        let (instances, cube_instance) =
-            Self::build_instances(device, cube_mesh, untinted_material)?;
+        let (instances, cube_instance) = Self::build_instances(
+            device,
+            scene.capacities.instances,
+            cube_mesh,
+            untinted_material,
+        )?;
         // Same handle-then-hand-over dance as the geometry pool above: the
         // buffers are `Copy` and are read out before the pool becomes the
         // rollback's, which it must be before the first `?` below — after which
@@ -1719,21 +1751,27 @@ impl ForwardRenderer {
         // here rather than beside the pipelines below because the mesh bind
         // group names one of its buffers, so it has to exist first.
         //
-        // The bucket table, and the one place its order is decided. The dunes
-        // patch is one bucket where an amplification stage picks its cut per
-        // cluster and one per level where the cull pass picks a uniform one —
-        // see [`DUNES_BUCKET`], which is where that difference is written down.
-        let dunes_buckets = if emit.is_mesh() {
-            1
-        } else {
-            dunes_levels.len()
-        };
-        let mut bucket_meshes = vec![0u32; DUNES_BUCKET + dunes_buckets];
-        bucket_meshes[CUBE_BUCKET] = cube_mesh;
-        bucket_meshes[PYRAMID_BUCKET] = pyramid_mesh;
-        bucket_meshes[OPEN_BOX_BUCKET] = open_box_mesh;
-        for (level, &mesh) in dunes_levels.iter().take(dunes_buckets).enumerate() {
-            bucket_meshes[DUNES_BUCKET + level] = mesh;
+        // The bucket table, and the one place its order is decided.
+        //
+        // **Built by walking the description**, which is what makes a duplicate
+        // structurally impossible rather than refused: every bucket's mesh id is
+        // the id of the description mesh it came from, and two description
+        // meshes are two uploads with two table entries however alike their
+        // geometry is. That matters because `draw_gen.slang`'s scatter takes the
+        // *first* bucket whose mesh id matches, so a second bucket naming one
+        // mesh would never draw anything at all.
+        //
+        // One bucket per mesh, except that a DAG is one bucket where an
+        // amplification stage picks its cut per cluster and one per level where
+        // the cull pass picks a uniform one — see [`buckets_for`].
+        let mut bucket_meshes: Vec<u32> = Vec::with_capacity(residents.len());
+        // Where each description mesh's buckets start, so the tables below can
+        // be filled in mesh by mesh rather than by re-deriving the arithmetic.
+        let mut bucket_bases: Vec<usize> = Vec::with_capacity(residents.len());
+        for resident in &residents {
+            bucket_bases.push(bucket_meshes.len());
+            bucket_meshes
+                .extend_from_slice(&resident.levels[..buckets_for(resident.levels.len(), emit)]);
         }
         let bucket_count = u32::try_from(bucket_meshes.len())
             .unwrap_or_else(|_| unreachable!("a table of a few buckets"));
@@ -1745,16 +1783,15 @@ impl ForwardRenderer {
         // `GpuInstance::mesh` and an instance can name any of them; the default
         // is `MeshLevels::FLAT` pointing at a level run that is the mesh itself,
         // so a mesh with no hierarchy resolves back to itself with no branch.
-        // **The dunes patch keeps that default on the mesh path**, which is how
-        // a device already descending the DAG per cluster avoids a second,
-        // coarser cut on top of it — the suppression is data rather than a
-        // branch in the shader.
+        // **A DAG keeps that default on the mesh path**, which is how a device
+        // already descending it per cluster avoids a second, coarser cut on top
+        // of it — the suppression is data rather than a branch in the shader.
         let table_len = usize::try_from(
-            [cube_mesh, pyramid_mesh, open_box_mesh]
-                .into_iter()
-                .chain(dunes_levels.iter().copied())
+            residents
+                .iter()
+                .flat_map(|resident| resident.levels.iter().copied())
                 .max()
-                .unwrap_or_else(|| unreachable!("at least the cube is resident"))
+                .unwrap_or_else(|| unreachable!("check_scene refused an empty description"))
                 + 1,
         )
         .unwrap_or_else(|_| unreachable!("a table of a few meshes"));
@@ -1768,36 +1805,52 @@ impl ForwardRenderer {
                 ..level_select::MeshLevels::FLAT
             })
             .collect();
-        let dag = crcbl_shaders::cluster_dag::dunes_dag();
-        let level_groups: Vec<level_select::LevelGroup> = dag.level_groups();
-        let dunes_first_group = 0u32;
-        mesh_levels[dunes_mesh as usize] = level_select::MeshLevels {
-            first_group: dunes_first_group,
-            group_count: u32::try_from(level_groups.len())
-                .unwrap_or_else(|_| unreachable!("a DAG of a few dozen groups")),
-            // **The mesh path suppresses the uniform cut with a top level of
-            // zero, not with a group count of zero**, and the difference is the
-            // hysteresis state: `draw_gen.slang` judges every group it is given
-            // whatever level it answers, and the amplification stage reads those
-            // answers. A record naming no groups would leave the state
-            // untouched and every cluster of the patch collapsed. A top level of
-            // zero makes the level loop's minimum unreachable, so the instance
-            // routes to the mesh it already names — which is level 0.
-            first_level: if emit.is_mesh() {
-                dunes_mesh
-            } else {
-                u32::try_from(level_meshes.len())
-                    .unwrap_or_else(|_| unreachable!("a table of a few meshes"))
-            },
-            top_level: if emit.is_mesh() {
-                0
-            } else {
-                u32::try_from(dunes_levels.len() - 1)
-                    .unwrap_or_else(|_| unreachable!("a DAG of a few levels"))
-            },
-        };
-        if !emit.is_mesh() {
-            level_meshes.extend_from_slice(&dunes_levels);
+        // Every DAG's groups end to end, in description order, and where each
+        // one's run starts. `ClusterSelect` records name a group by its index in
+        // *this* array — see `ClusterDag::selection_records`' `first_group` — so
+        // several DAGs concatenate without `crcbl-shaders` knowing they did.
+        let mut level_groups: Vec<level_select::LevelGroup> = Vec::new();
+        let mut first_groups: Vec<u32> = Vec::with_capacity(residents.len());
+        for (index, desc) in scene.meshes.iter().enumerate() {
+            first_groups.push(
+                u32::try_from(level_groups.len())
+                    .unwrap_or_else(|_| unreachable!("a few dozen groups per DAG")),
+            );
+            let Geometry::Dag { dag, .. } = &desc.geometry else {
+                continue;
+            };
+            let groups = dag.level_groups();
+            let id = residents[index].id();
+            mesh_levels[id as usize] = level_select::MeshLevels {
+                first_group: first_groups[index],
+                group_count: u32::try_from(groups.len())
+                    .unwrap_or_else(|_| unreachable!("a DAG of a few dozen groups")),
+                // **The mesh path suppresses the uniform cut with a top level of
+                // zero, not with a group count of zero**, and the difference is
+                // the hysteresis state: `draw_gen.slang` judges every group it is
+                // given whatever level it answers, and the amplification stage
+                // reads those answers. A record naming no groups would leave the
+                // state untouched and every cluster of the patch collapsed. A
+                // top level of zero makes the level loop's minimum unreachable,
+                // so the instance routes to the mesh it already names — which is
+                // level 0.
+                first_level: if emit.is_mesh() {
+                    id
+                } else {
+                    u32::try_from(level_meshes.len())
+                        .unwrap_or_else(|_| unreachable!("a table of a few meshes"))
+                },
+                top_level: if emit.is_mesh() {
+                    0
+                } else {
+                    u32::try_from(residents[index].levels.len() - 1)
+                        .unwrap_or_else(|_| unreachable!("a DAG of a few levels"))
+                },
+            };
+            level_groups.extend(groups);
+            if !emit.is_mesh() {
+                level_meshes.extend_from_slice(&residents[index].levels);
+            }
         }
 
         // §3.5's clusters, on the path that reads them and on no other. The
@@ -1813,21 +1866,31 @@ impl ForwardRenderer {
         let mut bucket_cluster_bases = vec![0u32; bucket_meshes.len()];
         let mut dunes_clusters: Option<ClusterRange> = None;
         if emit.is_mesh() {
-            // Three flat meshes and one DAG. The flat ones are one pool entry
-            // each and their clusters carry `ClusterSelect::ALWAYS`, so the
-            // descent draws them from every camera; the DAG is **one entry per
-            // level**, laid end to end, and one bucket covers all of them.
-            let selection = dag.selection_records(&dunes_vertex_bases, dunes_first_group);
-            let mut cooked = vec![
-                PooledMesh::without_lod(crcbl_shaders::meshlet::cube_clusters()),
-                PooledMesh::without_lod(crcbl_shaders::meshlet::pyramid_clusters()),
-                PooledMesh::without_lod(crcbl_shaders::meshlet::open_box_clusters()),
-            ];
-            for (level, records) in dag.levels.iter().zip(selection) {
-                cooked.push(PooledMesh {
-                    clusters: level.clusters.clone(),
-                    selection: records,
-                });
+            // A flat mesh is one pool entry and its clusters carry
+            // `ClusterSelect::ALWAYS`, so the descent draws them from every
+            // camera; a DAG is **one entry per level**, laid end to end.
+            let mut cooked: Vec<PooledMesh> = Vec::with_capacity(residents.len());
+            // Where each description mesh's entries start, on `bucket_bases`'
+            // terms — the two differ exactly where a DAG's levels are one bucket
+            // and several entries.
+            let mut entry_bases: Vec<usize> = Vec::with_capacity(residents.len());
+            for (index, desc) in scene.meshes.iter().enumerate() {
+                entry_bases.push(cooked.len());
+                match &desc.geometry {
+                    Geometry::Flat { clusters, .. } => {
+                        cooked.push(PooledMesh::without_lod(clusters.clone()));
+                    }
+                    Geometry::Dag { dag, .. } => {
+                        let selection = dag
+                            .selection_records(&residents[index].vertex_bases, first_groups[index]);
+                        for (level, records) in dag.levels.iter().zip(selection) {
+                            cooked.push(PooledMesh {
+                                clusters: level.clusters.clone(),
+                                selection: records,
+                            });
+                        }
+                    }
+                }
             }
 
             let clusters = ClusterPool::new(device, "forward", &cooked)?;
@@ -1836,22 +1899,23 @@ impl ForwardRenderer {
                     .range(entry)
                     .unwrap_or_else(|| unreachable!("one range per entry, in order"))
             };
-            for bucket in [CUBE_BUCKET, PYRAMID_BUCKET, OPEN_BOX_BUCKET] {
-                bucket_clusters[bucket] = range(bucket).count;
-                bucket_cluster_bases[bucket] = range(bucket).base;
-            }
-            // **The DAG's levels are one run, not one per bucket.** `concatenate`
+            // **A DAG's levels are one run, not one per bucket.** `concatenate`
             // lays the entries down in the order it was given them, so the
             // levels are contiguous: the bucket starts where level 0 does and
             // reaches to the end of the last level. That is what lets one
-            // dispatch cover a cut spanning several of them.
-            bucket_cluster_bases[DUNES_BUCKET] = range(DUNES_BUCKET).base;
-            bucket_clusters[DUNES_BUCKET] = (DUNES_BUCKET..cooked.len())
-                .map(|entry| range(entry).count)
-                .sum();
+            // dispatch cover a cut spanning several of them — and it is why a
+            // flat mesh, whose one entry is the whole sum, needs no second case.
+            for (index, resident) in residents.iter().enumerate() {
+                let entry = entry_bases[index];
+                let bucket = bucket_bases[index];
+                bucket_cluster_bases[bucket] = range(entry).base;
+                bucket_clusters[bucket] = (entry..entry + resident.levels.len())
+                    .map(|entry| range(entry).count)
+                    .sum();
+            }
             dunes_clusters = Some(ClusterRange {
-                base: bucket_cluster_bases[DUNES_BUCKET],
-                count: bucket_clusters[DUNES_BUCKET],
+                base: bucket_cluster_bases[bucket_bases[DEMO_DUNES]],
+                count: bucket_clusters[bucket_bases[DEMO_DUNES]],
             });
 
             rollback.clusters = Some(clusters);
@@ -1869,7 +1933,7 @@ impl ForwardRenderer {
                 mesh_levels: &mesh_levels,
                 level_groups: &level_groups,
                 level_meshes: &level_meshes,
-                instance_capacity: POOL_INSTANCE_CAPACITY,
+                instance_capacity: scene.capacities.instances,
             },
         )?;
         let runs: Vec<BufferHandle> = (0..instance_buffers.len())
@@ -2505,7 +2569,7 @@ impl ForwardRenderer {
                     mesh_levels: &mesh_levels,
                     level_groups: &level_groups,
                     level_meshes: &level_meshes,
-                    instance_capacity: POOL_INSTANCE_CAPACITY,
+                    instance_capacity: scene.capacities.instances,
                 },
             )?;
             rollback.shadow_draws.push(draws);
@@ -2542,7 +2606,7 @@ impl ForwardRenderer {
             &LightGridDesc {
                 label: Some("lights"),
                 frames: instance_buffers.len(),
-                lights: POOL_LIGHT_CAPACITY,
+                lights: scene.capacities.lights,
                 froxels: FROXEL_CAPACITY,
                 stats: &cull_stats,
             },
@@ -3039,14 +3103,14 @@ impl ForwardRenderer {
             dunes_mesh,
             dunes_clusters,
             // One per level where the cull pass takes a uniform cut, and none
-            // where the amplification stage takes a per-cluster one — the same
-            // condition `dunes_buckets` was derived from, expressed off the
-            // table that was actually built rather than re-derived from the
-            // path.
+            // where the amplification stage takes a per-cluster one — read off
+            // the bucket table that was actually built rather than re-derived
+            // from the path.
             dunes_level_buckets: if emit.is_mesh() {
                 Vec::new()
             } else {
-                (DUNES_BUCKET..bucket_meshes.len())
+                let base = bucket_bases[DEMO_DUNES];
+                (base..base + residents[DEMO_DUNES].levels.len())
                     .map(|bucket| {
                         u32::try_from(bucket)
                             .unwrap_or_else(|_| unreachable!("a table of a few buckets"))
@@ -3168,25 +3232,26 @@ impl ForwardRenderer {
         pipeline
     }
 
-    /// Creates the geometry pool and makes every resident mesh resident in it.
+    /// Creates the geometry pool and makes every mesh of `scene` resident in it.
     ///
     /// Separate from [`ForwardRenderer::build`] because it is **self-cleaning**:
     /// the pool is not the rollback's until this has returned, so a failure
-    /// between creating it and flushing the cube releases it here.
+    /// between creating it and flushing the last upload releases it here.
     fn build_geometry(
         device: &dyn Device,
         queue: QueueHandle,
-    ) -> Result<(MeshPool, Residents), HalError> {
+        scene: &SceneDesc<'_>,
+    ) -> Result<(MeshPool, Vec<ResidentMesh>), HalError> {
         let mut pool = MeshPool::new(
             device,
             &MeshPoolDesc {
                 label: Some("forward geometry"),
-                vertex_capacity: POOL_VERTEX_CAPACITY,
-                index_capacity: POOL_INDEX_CAPACITY,
-                mesh_capacity: POOL_MESH_CAPACITY,
+                vertex_capacity: scene.capacities.vertices,
+                index_capacity: scene.capacities.indices,
+                mesh_capacity: scene.capacities.meshes,
             },
         )?;
-        match Self::residents(device, queue, &mut pool) {
+        match Self::residents(device, queue, &mut pool, scene) {
             Ok(residents) => Ok((pool, residents)),
             Err(error) => {
                 pool.destroy(device);
@@ -3195,28 +3260,24 @@ impl ForwardRenderer {
         }
     }
 
-    /// Creates the material table and fills its two rows, returning it and the
-    /// ids of both.
+    /// Creates the material table and fills it with `scene`'s rows, returning it
+    /// and the id of each.
     ///
     /// Self-cleaning for the same reason [`ForwardRenderer::build_geometry`] is:
     /// the table is not the rollback's until this has returned.
-    ///
-    /// The untinted row is created **first**, so it is row 0 — which is what
-    /// [`mesh::GpuInstance::default`] names, and therefore what an instance
-    /// written without a material id would shade with. Nothing here relies on
-    /// that: every instance below is written with an id read out of this table.
-    /// It is a defence in depth, not the contract, because a caller assembling
-    /// a `GpuInstance` by hand is one who has not read either.
-    fn build_materials(device: &dyn Device) -> Result<(MaterialTable, u32, u32, u32), HalError> {
+    fn build_materials(
+        device: &dyn Device,
+        scene: &SceneDesc<'_>,
+    ) -> Result<(MaterialTable, Vec<u32>), HalError> {
         let mut materials = MaterialTable::new(
             device,
             &MaterialTableDesc {
                 label: Some("forward"),
-                capacity: POOL_MATERIAL_CAPACITY,
+                capacity: scene.capacities.materials,
             },
         )?;
-        match Self::material_rows(device, &mut materials) {
-            Ok((untinted, tinted, textured)) => Ok((materials, untinted, tinted, textured)),
+        match Self::material_rows(device, &mut materials, &scene.materials) {
+            Ok(ids) => Ok((materials, ids)),
             Err(error) => {
                 materials.destroy(device);
                 Err(error)
@@ -3224,74 +3285,34 @@ impl ForwardRenderer {
         }
     }
 
-    /// Fills the three rows and returns the ids an instance carries.
+    /// Inserts `rows` **in order** and returns the id of each.
     ///
     /// Split out of [`ForwardRenderer::build_materials`] only so the table can
     /// be released on a failure without the borrow that filling it takes, which
     /// is the same shape [`ForwardRenderer::residents`] has.
     ///
-    /// **The three rows are one row and two edits of it, and no edit can be
-    /// mistaken for another** — which is what makes each column's evidence its
-    /// own. The textured row differs from the untinted one in its page layer
-    /// and nothing else. The tinted row differs in its base-colour factor and
-    /// in [`PYRAMID_ROUGHNESS`], which is two columns rather than one, and the
-    /// reason that is still separable is that the two do disjoint things to a
-    /// frame: a factor cannot narrow a highlight and a roughness cannot tint a
-    /// surface, so the colour assertions read one and the highlight assertion
-    /// reads the other.
-    ///
-    /// The roughness had to go on *this* row rather than on either of the
-    /// others, and it is the geometry that decides it. `Scene::Cube` puts this
-    /// pyramid at `+X` and the default sun comes from `+X`, so its front face is
-    /// the one place in that frame where a surface sits at the mirror direction
-    /// — and a specular lobe's width is only legible where its peak actually
-    /// lands. On the two left-hand pyramids the same pair of roughnesses draws
-    /// very nearly the same face, which is exactly why the frame comparison uses
-    /// them as its control.
+    /// **In order, because row 0 is not this function's to choose**: it is what
+    /// [`mesh::GpuInstance::default`] names, so it is what an instance written
+    /// without a material id shades with. Inserting a description's rows in any
+    /// other order would move that row under every caller — see
+    /// [`SceneDesc::materials`], which is where it is a caller's decision.
     fn material_rows(
         device: &dyn Device,
         materials: &mut MaterialTable,
-    ) -> Result<(u32, u32, u32), HalError> {
-        // The layer is named rather than left to `UNTINTED`'s own zero: this
-        // module owns the page, so it is the one that has to say which layer is
-        // the white one, and the two agreeing is a fact worth being able to see
-        // at the call site.
-        let untinted = materials.insert(
-            device,
-            &mesh::GpuMaterial {
-                base_color_texture: UNTEXTURED_LAYER,
-                ..mesh::GpuMaterial::UNTINTED
-            },
-        )?;
-        let tinted = materials.insert(
-            device,
-            &mesh::GpuMaterial {
-                base_color: PYRAMID_TINT,
-                roughness: PYRAMID_ROUGHNESS,
-                ..mesh::GpuMaterial::UNTINTED
-            },
-        )?;
-        let textured = materials.insert(
-            device,
-            &mesh::GpuMaterial {
-                base_color_texture: CHECKER_LAYER,
-                ..mesh::GpuMaterial::UNTINTED
-            },
-        )?;
-        // A table this size cannot have refused any of the handles, so all
-        // three resolve — but the ids are asked for rather than assumed,
-        // because the number an instance carries is this one and nothing else
-        // knows it.
-        match (
-            materials.index(untinted),
-            materials.index(tinted),
-            materials.index(textured),
-        ) {
-            (Some(untinted), Some(tinted), Some(textured)) => Ok((untinted, tinted, textured)),
-            _ => Err(HalError::Backend(
-                "a material inserted into an empty table did not resolve".to_string(),
-            )),
+        rows: &[mesh::GpuMaterial],
+    ) -> Result<Vec<u32>, HalError> {
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            let handle = materials.insert(device, row)?;
+            // The id is asked for rather than assumed, because the number an
+            // instance carries is this one and nothing else knows it.
+            ids.push(materials.index(handle).ok_or_else(|| {
+                HalError::Backend(
+                    "a material inserted into an empty table did not resolve".to_string(),
+                )
+            })?);
         }
+        Ok(ids)
     }
 
     /// Creates the instance pool and puts the cube in it.
@@ -3324,6 +3345,7 @@ impl ForwardRenderer {
     /// that the cull pass writes the list a draw walks.
     fn build_instances(
         device: &dyn Device,
+        capacity: u32,
         cube_mesh: u32,
         material: u32,
     ) -> Result<(InstancePool, InstanceHandle), HalError> {
@@ -3331,7 +3353,7 @@ impl ForwardRenderer {
             device,
             &InstancePoolDesc {
                 label: Some("forward instances"),
-                capacity: POOL_INSTANCE_CAPACITY,
+                capacity,
                 frames_in_flight: FRAMES_IN_FLIGHT,
             },
         )?;
@@ -3349,7 +3371,7 @@ impl ForwardRenderer {
         }
     }
 
-    /// Uploads every resident mesh and returns their mesh ids — **only** once
+    /// Uploads every mesh of `scene` and returns their mesh ids — **only** once
     /// the transfers have completed.
     ///
     /// The calls are §3.1's upload path in order: the copies are recorded and
@@ -3357,85 +3379,55 @@ impl ForwardRenderer {
     /// values pass, and [`MeshPool::mesh`] is what refuses to hand out a range
     /// before they have.
     ///
-    /// The pyramid is uploaded second, so it is the pool's first resident at a
-    /// non-zero base vertex — which is the whole reason it is here, and what the
-    /// module docs call the one thing that can tell a working base vertex from a
-    /// cancelled one.
+    /// **In description order**, which is what makes a mesh's table id a
+    /// property of the description rather than of this loop — the second mesh
+    /// uploaded is the pool's first resident at a non-zero base vertex, which is
+    /// what the module docs call the one thing that can tell a working base
+    /// vertex from a cancelled one.
     ///
-    /// The open box is third and is here for the same shape of reason one layer
-    /// down: it is the only resident that is **more than one cluster**, so it is
-    /// the only one whose mesh-shader dispatch has a cluster at a non-zero
-    /// `Meshlet::vertex_offset` *within* one mesh. See
-    /// [`crcbl_shaders::meshlet::open_box_clusters`].
-    ///
-    /// The dunes patch is last, and it is **one upload per level of its DAG**.
-    /// Every level was decimated separately, so a coarser level's vertices are
-    /// wherever the collapses put them and belong to no vertex of the level
-    /// below — a DAG is several vertex ranges, and the pool suballocates in
-    /// vertices, so several ranges means several uploads. Level 0 goes first, so
-    /// every other level starts past it and the offsets a cluster carries are
-    /// non-negative; that is checked rather than assumed, because the pool's
-    /// free list makes no promise about where a mesh lands.
+    /// A DAG is **one upload per level**. Every level was decimated separately,
+    /// so a coarser level's vertices are wherever the collapses put them and
+    /// belong to no vertex of the level below — a DAG is several vertex ranges,
+    /// and the pool suballocates in vertices, so several ranges means several
+    /// uploads. Level 0 goes first, so every other level starts past it and the
+    /// offsets a cluster carries are non-negative; that is checked rather than
+    /// assumed, because the pool's free list makes no promise about where a mesh
+    /// lands.
     fn residents(
         device: &dyn Device,
         queue: QueueHandle,
         pool: &mut MeshPool,
-    ) -> Result<Residents, HalError> {
-        let cube = pool.upload(
-            device,
-            queue,
-            "cube",
-            &mesh::cube_vertex_bytes(),
-            &mesh::cube_indices(),
-        )?;
-        let pyramid = pool.upload(
-            device,
-            queue,
-            "pyramid",
-            &mesh::pyramid_vertex_bytes(),
-            &mesh::pyramid_indices(),
-        )?;
-        let open_box = pool.upload(
-            device,
-            queue,
-            "open box",
-            &mesh::open_box_vertex_bytes(),
-            &mesh::open_box_indices(),
-        )?;
-
-        // `docs/plan/25-lod.md`'s model, level by level. The geometry of a
-        // coarser level is positions and nothing else — the decimator carries no
-        // attributes — so `dunes::vertex_at` is what turns each into a vertex,
-        // by evaluating the surface rather than by interpolating an attribute
-        // nothing recorded.
-        let dag = crcbl_shaders::cluster_dag::dunes_dag();
-        let mut dunes_levels = Vec::with_capacity(dag.levels.len());
-        for (depth, level) in dag.levels.iter().enumerate() {
-            let vertices: Vec<u8> = level
-                .positions
-                .iter()
-                .flat_map(|&position| {
-                    let vertex = crcbl_shaders::dunes::vertex_at(position);
-                    let mut bytes = Vec::with_capacity(mesh::VERTEX_STRIDE);
-                    for value in vertex
-                        .position
-                        .iter()
-                        .chain(&vertex.normal)
-                        .chain(&vertex.color)
-                        .chain(&vertex.uv)
-                    {
-                        bytes.extend_from_slice(&value.to_le_bytes());
+        scene: &SceneDesc<'_>,
+    ) -> Result<Vec<ResidentMesh>, HalError> {
+        let mut uploaded: Vec<Vec<crate::mesh_pool::MeshHandle>> =
+            Vec::with_capacity(scene.meshes.len());
+        for desc in &scene.meshes {
+            match &desc.geometry {
+                Geometry::Flat {
+                    vertices, indices, ..
+                } => {
+                    uploaded.push(vec![pool.upload(
+                        device,
+                        queue,
+                        &desc.label,
+                        vertices,
+                        indices,
+                    )?]);
+                }
+                Geometry::Dag { levels, dag } => {
+                    let mut handles = Vec::with_capacity(levels.len());
+                    for (depth, (vertices, level)) in levels.iter().zip(&dag.levels).enumerate() {
+                        handles.push(pool.upload(
+                            device,
+                            queue,
+                            &format!("{} level {depth}", desc.label),
+                            vertices,
+                            &level.indices(),
+                        )?);
                     }
-                    bytes
-                })
-                .collect();
-            dunes_levels.push(pool.upload(
-                device,
-                queue,
-                &format!("dunes level {depth}"),
-                &vertices,
-                &level.indices(),
-            )?);
+                    uploaded.push(handles);
+                }
+            }
         }
 
         pool.flush(device)?;
@@ -3454,32 +3446,34 @@ impl ForwardRenderer {
             None => Err(MeshPoolError::NotResident { handle }),
         };
 
-        // **Relative to level 0's base**, because that is the base the instance
-        // resolves through its mesh id and the one the stage adds this on top
-        // of. A level that landed *below* level 0 would make the sum wrap, so it
-        // is refused here rather than drawn as another mesh's vertices.
-        let level_zero = base_vertex(dunes_levels[0])?;
-        let mut dunes_vertex_bases = Vec::with_capacity(dunes_levels.len());
-        for (depth, &handle) in dunes_levels.iter().enumerate() {
-            let base = base_vertex(handle)?;
-            dunes_vertex_bases.push(base.checked_sub(level_zero).ok_or_else(|| {
-                HalError::InvalidDescriptor(format!(
-                    "dunes level {depth} landed at vertex {base}, below level 0's \
-                     {level_zero}, so its clusters cannot name their own geometry"
-                ))
-            })?);
+        let mut residents = Vec::with_capacity(uploaded.len());
+        for (desc, handles) in scene.meshes.iter().zip(&uploaded) {
+            // **Relative to level 0's base**, because that is the base the
+            // instance resolves through its mesh id and the one the stage adds
+            // this on top of. A level that landed *below* level 0 would make the
+            // sum wrap, so it is refused here rather than drawn as another
+            // mesh's vertices. A flat mesh is one level and reads zero.
+            let level_zero = base_vertex(handles[0])?;
+            let mut vertex_bases = Vec::with_capacity(handles.len());
+            for (depth, &handle) in handles.iter().enumerate() {
+                let base = base_vertex(handle)?;
+                vertex_bases.push(base.checked_sub(level_zero).ok_or_else(|| {
+                    HalError::InvalidDescriptor(format!(
+                        "{} level {depth} landed at vertex {base}, below level 0's \
+                         {level_zero}, so its clusters cannot name their own geometry",
+                        desc.label
+                    ))
+                })?);
+            }
+            residents.push(ResidentMesh {
+                levels: handles
+                    .iter()
+                    .map(|&handle| resolve(handle))
+                    .collect::<Result<_, _>>()?,
+                vertex_bases,
+            });
         }
-
-        Ok(Residents {
-            cube: resolve(cube)?,
-            pyramid: resolve(pyramid)?,
-            open_box: resolve(open_box)?,
-            dunes_levels: dunes_levels
-                .iter()
-                .map(|&handle| resolve(handle))
-                .collect::<Result<_, _>>()?,
-            dunes_vertex_bases,
-        })
+        Ok(residents)
     }
 
     /// Rotates to the next frame's uniform buffer and instance buffer, writes
@@ -5283,6 +5277,152 @@ mod tests {
         recorder.assert_valid();
     }
 
+    /// **The description resolves to the ids the renderer used to hand itself**:
+    /// one table entry per description mesh, in description order, with the DAG
+    /// occupying one per level after them — and every level's vertex base
+    /// measured from level 0's, which is zero.
+    ///
+    /// Upload order is what decides a mesh id, and `cull.slang` reads a bounding
+    /// box out of the entry the *instance* names. So a description walked in
+    /// another order, or a DAG whose levels landed among the flat meshes, would
+    /// leave every instance naming a mesh that is not its own: the cube culled
+    /// against the pyramid's box, the dunes patch drawn as an open box. Every
+    /// one of those is a frame that still looks like a frame.
+    ///
+    /// The bases are asserted against the table bytes rather than against
+    /// `ResidentMesh`, because the table is what the GPU reads.
+    #[test]
+    fn the_description_resolves_to_the_ids_it_was_written_in() {
+        let (recorder, device, queue) = open();
+        let renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+
+        assert_eq!(
+            [
+                renderer.cube_mesh,
+                renderer.pyramid_mesh,
+                renderer.open_box_mesh,
+                renderer.dunes_mesh
+            ],
+            [0, 1, 2, 3],
+            "the four description meshes take the first four table entries, in order"
+        );
+
+        // The DAG's coarser levels follow level 0, so a cut that spans them
+        // reads entries the flat meshes never occupied.
+        let scene = scene::demo();
+        let Geometry::Dag { dag, .. } = &scene.meshes[DEMO_DUNES].geometry else {
+            panic!("the demo description's fourth mesh is the DAG");
+        };
+        let level_ids: Vec<u32> = (0..dag.levels.len())
+            .map(|level| renderer.dunes_mesh + level as u32)
+            .collect();
+        assert!(
+            level_ids.iter().all(|&id| id > renderer.open_box_mesh),
+            "every dunes level is past the flat residents: {level_ids:?}"
+        );
+
+        // **Level 0 is at the pool's own first vertex**, which is what makes
+        // every `ClusterSelect::vertex_base` a non-negative offset from it — the
+        // sum the mesh stage forms with the instance's own base.
+        let entries: Vec<crcbl_shaders::mesh::GpuMesh> = level_ids
+            .iter()
+            .map(|&id| mesh_entry(&recorder, &renderer, id))
+            .collect();
+        let level_zero = entries[0].base_vertex;
+        assert_eq!(
+            level_zero,
+            mesh_entry(&recorder, &renderer, renderer.open_box_mesh).base_vertex
+                + crcbl_shaders::mesh::OPEN_BOX_VERTEX_COUNT as u32,
+            "the DAG starts where the last flat resident ends"
+        );
+        let bases: Vec<u32> = entries
+            .iter()
+            .map(|entry| {
+                entry
+                    .base_vertex
+                    .checked_sub(level_zero)
+                    .expect("a level below level 0 would wrap the offset a cluster carries")
+            })
+            .collect();
+        assert_eq!(
+            bases[0], 0,
+            "level 0 is the base every other is measured from"
+        );
+        assert!(
+            bases.windows(2).all(|pair| pair[0] < pair[1]),
+            "each level starts past the one below it: {bases:?}"
+        );
+
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **A description the renderer cannot make resident is refused before the
+    /// first device object exists**, so a rejection leaks nothing.
+    ///
+    /// `build` hands the geometry pool and the material table to the rollback
+    /// and then creates a dozen objects with `?` between them. A check that ran
+    /// part way down that list would be a new early exit on the wrong side of a
+    /// handover, and the pool would go with it — which is exactly the leak
+    /// `Rollback` exists to prevent and which
+    /// `the_forward_renderer_builds_and_leaks_nothing` cannot see, because it
+    /// only walks the happy path.
+    ///
+    /// Each arm below is a *different* refusal, so a check that stopped running
+    /// would show up as one arm leaking rather than as all of them.
+    #[test]
+    fn a_refused_description_creates_nothing_at_all() {
+        /// One way of writing a description the renderer cannot build.
+        type Break = fn(&mut SceneDesc<'static>);
+
+        let cases: [(&str, Break); 5] = [
+            ("too few meshes", |scene| {
+                scene.meshes.truncate(REQUIRED_MESHES - 1);
+            }),
+            ("too few material rows", |scene| {
+                scene.materials.truncate(REQUIRED_MATERIALS - 1);
+            }),
+            ("a row naming a layer the page has not got", |scene| {
+                scene.materials[DEMO_TEXTURED].base_color_texture = 7;
+            }),
+            // The one page refusal a caller can actually spell: `push_layer`
+            // takes bytes it cannot measure against the extent.
+            ("a page layer of the wrong length", |scene| {
+                scene.page = scene::PageDesc::opaque_white(scene::PAGE_EXTENT);
+                scene.page.push_layer(vec![0x00; 4]);
+                scene.materials[DEMO_TEXTURED].base_color_texture = scene::CHECKER_LAYER;
+            }),
+            ("a DAG level with no vertices", |scene| {
+                let Geometry::Dag { levels, .. } = &mut scene.meshes[DEMO_DUNES].geometry else {
+                    panic!("the demo description's fourth mesh is the DAG");
+                };
+                levels.pop();
+            }),
+        ];
+
+        for (what, break_it) in cases {
+            let (recorder, device, queue) = open();
+            let before = recorder.total_live_objects();
+            let mut scene = scene::demo();
+            break_it(&mut scene);
+            let error =
+                ForwardRenderer::with_scene(device.as_ref(), queue, Format::Rgba8UnormSrgb, &scene)
+                    .expect_err(&format!("{what} must be refused"));
+            assert!(
+                matches!(error, HalError::InvalidDescriptor(_)),
+                "{what} must be refused as an invalid descriptor, not as {error:?}"
+            );
+            assert_eq!(
+                recorder.total_live_objects(),
+                before,
+                "{what} was refused after something had been created, and the rollback \
+                 is the only thing that could have released it"
+            );
+            recorder.assert_valid();
+        }
+    }
+
     /// The property the whole arrangement exists for: the pool's second
     /// resident is **not** at base vertex zero, so a frame containing it is a
     /// frame that fails if the base is lost between the pool and the shader.
@@ -5318,7 +5458,7 @@ mod tests {
         // And the two buckets read different constant blocks, or both would walk
         // the same run of instances.
         assert_ne!(
-            renderer.bucket_constants[CUBE_BUCKET], renderer.bucket_constants[PYRAMID_BUCKET],
+            renderer.bucket_constants[DEMO_CUBE], renderer.bucket_constants[DEMO_PYRAMID],
             "each bucket needs a block of its own"
         );
         renderer.destroy(device.as_ref());
@@ -5350,8 +5490,8 @@ mod tests {
             u32::from_le_bytes(blocks[at..at + 4].try_into().expect("four bytes"))
         };
 
-        let cube = base_at(renderer.bucket_constants[CUBE_BUCKET]);
-        let pyramid = base_at(renderer.bucket_constants[PYRAMID_BUCKET]);
+        let cube = base_at(renderer.bucket_constants[DEMO_CUBE]);
+        let pyramid = base_at(renderer.bucket_constants[DEMO_PYRAMID]);
         assert_eq!(cube, 0, "the first bucket's run starts at the beginning");
         assert_eq!(
             pyramid,
@@ -5426,8 +5566,8 @@ mod tests {
         assert_eq!(
             row(tinted.material),
             mesh::GpuMaterial {
-                base_color: PYRAMID_TINT,
-                roughness: PYRAMID_ROUGHNESS,
+                base_color: scene::PYRAMID_TINT,
+                roughness: scene::PYRAMID_ROUGHNESS,
                 ..mesh::GpuMaterial::UNTINTED
             },
             "the tinted pyramid's row must be the tint and the tighter lobe"
@@ -5527,8 +5667,14 @@ mod tests {
             row(textured.material).base_color,
             "the texture pair must share a factor, or the pair is evidence about both columns"
         );
-        assert_eq!(row(plain.material).base_color_texture, UNTEXTURED_LAYER);
-        assert_eq!(row(textured.material).base_color_texture, CHECKER_LAYER);
+        assert_eq!(
+            row(plain.material).base_color_texture,
+            scene::PageDesc::UNTEXTURED_LAYER
+        );
+        assert_eq!(
+            row(textured.material).base_color_texture,
+            scene::CHECKER_LAYER
+        );
         assert_ne!(
             row(plain.material),
             row(textured.material),
@@ -5537,12 +5683,16 @@ mod tests {
         // The layers those numbers name are layers the page has, and they hold
         // different texels — a page whose two layers were the same image would
         // pass every assertion above and draw one picture.
-        assert_ne!(UNTEXTURED_TEXELS, CHECKER_TEXELS);
-        for layer in [UNTEXTURED_LAYER, CHECKER_LAYER] {
+        let page = scene::demo().page;
+        assert_ne!(
+            page.layers()[scene::PageDesc::UNTEXTURED_LAYER as usize],
+            page.layers()[scene::CHECKER_LAYER as usize]
+        );
+        for layer in [scene::PageDesc::UNTEXTURED_LAYER, scene::CHECKER_LAYER] {
             assert!(
-                (layer as usize) < PAGE_LAYERS.len(),
+                (layer as usize) < page.layers().len(),
                 "layer {layer} is past the end of a {}-layer page, which is an out-of-range                  sample nothing below the seam would report",
-                PAGE_LAYERS.len()
+                page.layers().len()
             );
         }
 
@@ -6161,7 +6311,7 @@ mod tests {
         // single-cluster meshes would let a table hard-coded to one cluster
         // pass; the open box is five, one per face.
         assert_eq!(
-            clusters[OPEN_BOX_BUCKET] as usize,
+            clusters[DEMO_OPEN_BOX] as usize,
             crcbl_shaders::mesh::OPEN_BOX_FACES.len(),
             "the open box dispatches one workgroup per face, and that is the only \
              resident whose cluster count is not one: {clusters:?}"
@@ -6214,7 +6364,7 @@ mod tests {
             &crcbl_shaders::cull::Params {
                 planes: expected.planes.map(|plane| plane.to_array()),
                 instance_count: 2,
-                capacity: POOL_INSTANCE_CAPACITY,
+                capacity: scene::Capacities::default().instances,
             }
             .to_bytes()[..],
             "the cull block must carry this frame's own frustum, the pool's whole \

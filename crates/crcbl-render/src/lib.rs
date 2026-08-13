@@ -139,6 +139,7 @@ pub mod material_table;
 pub mod menu;
 pub mod mesh_pool;
 pub mod nine_slice;
+pub mod scene;
 pub mod shadow;
 pub mod sprite_pass;
 mod ssao;
@@ -193,6 +194,7 @@ pub use mesh_pool::{
     Mesh, MeshHandle, MeshPool, MeshPoolDesc, MeshPoolError, MeshRange, UPLOAD_TIMEOUT,
 };
 pub use nine_slice::{NineQuads, NineSliceSource, SliceQuad};
+pub use scene::{Capacities, Geometry, MeshDesc, PageDesc, SceneDesc};
 pub use shadow::Cascades;
 pub use sprite_pass::{
     CONSTANTS_SIZE, INSTANCE_STRIDE, SAMPLE_PIXEL, SAMPLE_SMOOTH, SheetDesc, SheetId, Sprite,

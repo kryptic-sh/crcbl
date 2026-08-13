@@ -7625,10 +7625,14 @@ ten-minute job for somebody already in that file.
 
 `apps/lumen` could not be built because an application cannot describe a scene:
 `ForwardRenderer::begin_frame` takes the cube's transform as an argument, five
-`set_*` methods place instances of meshes the renderer uploaded to itself, and
-there is no mesh, instance or material call on the type. The roadmap already put
-P9's scene work before S4B while P7B's deliverable named lumen. **Resolved by
-pulling the scene work forward**, rather than by moving lumen.
+`set_*` methods place instances of meshes the renderer holds the ids of, and
+there is no instance or material call on the type. The roadmap already put P9's
+scene work before S4B while P7B's deliverable named lumen. **Resolved by pulling
+the scene work forward**, rather than by moving lumen.
+
+The resident set is a description now — `crcbl_render::scene` and
+`ForwardRenderer::with_scene`, with `new` as `with_scene(&scene::demo())`. What
+is left is everything below.
 
 ### The shape
 
@@ -7641,31 +7645,25 @@ per-frame paths. A runtime `add_mesh` would mean recreating the camera's
 mid-life, which is the streaming path `crcbl-render`'s own `mesh_pool` docs
 already assign to P9.
 
-`SceneDesc` = meshes + materials + page + capacities, consumed by a `with_scene`
-constructor; `ForwardRenderer::new` becomes `with_scene(&scene::demo())` so
-every existing caller is untouched.
-
-### The slices, in dependency order
+### The slices left, in dependency order
 
 Each is independently committable and CI-green, and the six apps build at every
-boundary. **The first five must leave every golden byte-identical** — the demo
-scene becomes a caller of the new API rather than a special case inside the
-renderer, so a golden that moves in them is a bug in the move, not a re-bless.
+boundary. **The first four must leave every golden byte-identical** — the demo
+scene is a caller of the new API rather than a special case inside the renderer,
+so a golden that moves in them is a bug in the move, not a re-bless.
 
-1. Move the resident set into a description. `SceneDesc`/`MeshDesc`/`Geometry`/
-   `PageDesc`/`Capacities` as host-side types with no device in them, plus
-   `scene::demo()` reproducing today's residents exactly. The bucket table
-   generalises from four named constants to one bucket per description mesh.
-2. `add_instance`/`set_instance`/`remove_instance`, with the five `set_*`
+1. `add_instance`/`set_instance`/`remove_instance`, with the five `set_*`
    methods surviving as wrappers so all 76 of their call sites are untouched.
-3. `begin_frame` loses its `model` argument; the cube becomes an ordinary
+   This is also what retires `with_scene`'s positional reading of the
+   description — see the entry below.
+2. `begin_frame` loses its `model` argument; the cube becomes an ordinary
    instance. Roughly a dozen call sites.
-4. App-supplied materials and page layers.
-5. App-supplied meshes, which is mostly making the failure paths honest.
-6. Reach the cook from an app: `crcbl-scene` behind a non-default `scene`
+3. App-supplied materials and page layers.
+4. App-supplied meshes, which is mostly making the failure paths honest.
+5. Reach the cook from an app: `crcbl-scene` behind a non-default `scene`
    feature so `gltf` does not reach a wasm binary, and the meshlet/DAG cook
    moved out of `crcbl-shaders/tools/cook-clusters.rs` into the crate.
-7. `apps/lumen` on top of it.
+6. `apps/lumen` on top of it.
 
 ### Flat meshes only, and why that is not negotiable yet
 
@@ -7676,18 +7674,19 @@ its own module docs: a coarse level has no normals and no UVs. The engine's one
 DAG works because the dunes patch is analytic — `residents` synthesises each
 coarse vertex through `crcbl_shaders::dunes::vertex_at`. An app-supplied DAG
 needs attribute-aware simplification or nearest-source attribute transfer, which
-is unbuilt topic 25 work listed in that plan's own risks. `Geometry::Dag` exists
-in the API and carries that constraint in its documentation, so the limitation
-is stated at the type rather than discovered.
+is unbuilt topic 25 work listed in that plan's own risks. `Geometry::Dag`
+carries that constraint in its own documentation, so the limitation is stated at
+the type rather than discovered.
 
 ### Capacity: a documented cap the caller chooses, never growth
 
-The `POOL_*` constants become fields of `Capacities`, whose `Default` is today's
-numbers. Growth is out for the reason `mesh_pool` already argues — every bind
-group names those buffers. `MeshPoolError::PoolExhausted` must reach the caller
-rather than being flattened, because it distinguishes fragmentation from a full
-pool. Worth knowing while sizing: raising the instance cap is not linear, since
-the LOD hysteresis buffer is per instance per `DrawGen` and there are five.
+The `POOL_*` constants are fields of `Capacities` now, whose `Default` is the
+numbers the engine shipped. Growth is out for the reason `mesh_pool` already
+argues — every bind group names those buffers. `MeshPoolError::PoolExhausted`
+must reach the caller rather than being flattened, because it distinguishes
+fragmentation from a full pool. Worth knowing while sizing: raising the instance
+cap is not linear, since the LOD hysteresis buffer is per instance per `DrawGen`
+and there are five.
 
 ### Effect toggles are NOT part of this
 
@@ -7726,14 +7725,69 @@ of the self-cleaning handover, or a rejected description leaks two device-local
 buffers.
 
 **Four of these are invisible to `cargo test`**: `crcbl-render`'s unit tests run
-on the null backend and cannot tell a right frame from a wrong one. Slices 1, 3
-and 4 are verified by `run-render-e2e.sh` and `run-vk-e2e.sh` on a real device
-or they are not verified.
+on the null backend and cannot tell a right frame from a wrong one. Slices 2 and
+3 are verified by `run-render-e2e.sh` and `run-vk-e2e.sh` on a real device or
+they are not verified.
+
+What the landed slice did about each, so the next one does not re-derive it: row
+order is `SceneDesc::materials` order and `material_rows` inserts in it,
+asserted by `scene`'s
+`the_demo_scene_shades_by_omission_through_an_untinted_row`; ids are description
+order, asserted by `forward`'s
+`the_description_resolves_to_the_ids_it_was_written_in`; layer 0 is
+`PageDesc::opaque_white`'s to write and `PageDesc::check`'s to verify; buckets
+are built by walking the mesh list, so a duplicate is not refused but
+unspellable; and every description check runs from the top of
+`ForwardRenderer::check_scene`, before the first device object exists, which
+`a_refused_description_creates_nothing_at_all` reads off the recorder's live
+object count. The instance-index risk is untouched and belongs to the slice that
+adds a second instance.
+
+### `with_scene` reads the description by position, and slice 1 above is what fixes it
+
+`ForwardRenderer` still has `cube_mesh`, `pyramid_mesh`, `open_box_mesh`,
+`dunes_mesh`, `untinted_material`, `tinted_material` and `textured_material`
+fields, because the five `set_*` methods and `begin_frame` are the only way to
+put an instance in the scene. So `with_scene` fills them from description
+positions — `DEMO_CUBE`…`DEMO_DUNES` and `DEMO_UNTINTED`…`DEMO_TEXTURED` in
+`crcbl-render/src/forward.rs` — and `check_scene` refuses a description with
+fewer meshes or rows than those name.
+
+That is honest but it is not the API: an application supplying four meshes of
+its own gets `set_pyramid` placing its second one. The positional constants and
+the refusal both go away with `add_instance`, which is why they are named for
+the demo rather than for a role.
+
+### Considered and declined in the description slice: a `SceneError`
+
+The plan sanctioned adding one. Not added: every refusal `check_scene` makes is
+already `HalError::InvalidDescriptor` with a message naming the entry, which is
+the shape `MeshPool`, `ClusterPool` and `MaterialTable` already refuse in, and a
+new error type that converted straight into `HalError` at its only call site
+would be indirection with one implementation. Revisit at the app-supplied-mesh
+slice, where `MeshPoolError::PoolExhausted` has to reach the caller un-flattened
+— that is a real distinction `HalError` cannot carry, and it is what would
+justify the type.
+
+### Coverage gap: a description that is not `scene::demo()`
+
+`with_scene` is generalised over any number of meshes, any number of DAGs and
+any page, but **nothing exercises more than one DAG or a mesh count other than
+the demo's four**. The concatenation that would break — `level_groups` laid end
+to end with each DAG's `first_group` offset handed to
+`ClusterDag::selection_records` — is written and type-checked and has never had
+a second DAG through it. Every golden and every e2e run uses `scene::demo()`.
+
+Closing it means a second DAG in a test description and a null-backend assertion
+that the second one's `ClusterSelect` records name groups past the first's, plus
+a real-device frame that draws both. Cheap once instances are a runtime API;
+awkward before, because there is no `set_*` method to place an instance of a
+fifth mesh.
 
 ### Open, and the one dependency call
 
 Whether `crcbl` should take `crcbl-scene` at all, versus splitting the meshlet
 and DAG builders out of it into a crate that does not carry `gltf`. The
-feature-gate is the smaller move and is what slice 6 does; the split is cleaner
-and is its own change. Also unmeasured: the cook's load-time cost — time the
-`cook-clusters` example rather than quoting a guess.
+feature-gate is the smaller move and is what the cook slice does; the split is
+cleaner and is its own change. Also unmeasured: the cook's load-time cost — time
+the `cook-clusters` example rather than quoting a guess.

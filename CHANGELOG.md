@@ -366,6 +366,39 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_render::scene` and `ForwardRenderer::with_scene`: the resident set is
+  a description now, not something the renderer uploads to itself.** `SceneDesc`
+  — `meshes` + `materials` + `page` + `capacities` — is host-side data with no
+  device in it, so it can be built and compared with no GPU in the room.
+  `MeshDesc::geometry` is `Geometry::Flat` (vertex bytes, indices, cooked
+  clusters) or `Geometry::Dag` (a `ClusterDag` plus a vertex array per level);
+  `PageDesc` owns layer 0 so the white texel a material naming no texture
+  samples cannot be got wrong; `Capacities` is what the `POOL_*` constants were,
+  with `Default` at the numbers the engine shipped.
+
+  `ForwardRenderer::new` keeps its exact signature and is
+  `with_scene(&scene::demo())`, so **every existing caller is untouched and no
+  golden moved** — the demo scene is a caller of the API rather than a special
+  case inside the renderer. `scene::demo` is the cube, the pyramid, the open box
+  and the dunes DAG with the three material rows and two page layers the golden
+  suite reads.
+
+  A description's **order is load-bearing**, and the module docs say so at the
+  four places it decides a frame: material row 0 is what an instance written
+  without a material id shades through, mesh table ids come from upload order,
+  page layer 0 has to decode to `1.0`, and the bucket table is one bucket per
+  description mesh — built by walking that list, so `draw_gen.slang`'s
+  first-match scatter cannot be given two buckets naming one mesh. A description
+  that cannot be made resident is refused as `HalError::InvalidDescriptor`
+  **before the first device object exists**, so a rejection leaks nothing.
+
+  Instances are not a runtime API yet: the five `set_*` methods and
+  `begin_frame` still name description meshes and rows by position, and
+  `with_scene` refuses a description shorter than they need. That, and
+  `Geometry::Dag`'s documented limitation that `crcbl_scene::simplify` is
+  position-only so a coarse level's attributes are the caller's to supply, are
+  in `docs/backlog.md`.
+
 - **`crcbl screenshot --scene` reaches every scene the engine draws.**
   `crcbl::screenshot::Scene` has had nine variants for a while and the CLI
   parsed three of them, so `dunes`, `lights`, `spot`, `spot_shadow`,
