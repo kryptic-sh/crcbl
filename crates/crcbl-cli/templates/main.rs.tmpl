@@ -50,7 +50,8 @@ use crcbl::hal::{CommandEncoderDesc, Features};
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
 use crcbl::render::{
-    FrameTimings, MAX_TIMED_PASSES, MenuRenderer, PassTimers, TransientPool, UiRenderer,
+    FrameCounters, FrameTimings, MAX_TIMED_PASSES, MenuRenderer, PassTimers, TransientPool,
+    UiRenderer,
 };
 use crcbl::shell::{LogicalSize, open, open_backend};
 use crcbl::ui::WidgetId;
@@ -447,6 +448,15 @@ impl GameGpu for Gpu {
 
     fn timings(&self) -> Option<&FrameTimings> {
         self.timers.as_ref().map(PassTimers::latest)
+    }
+
+    /// What this frame drew, summed across every renderer the bundle owns.
+    ///
+    /// Each renderer answers for itself and `plus` adds them up, so a renderer
+    /// added here has to be added to this sum too — a total that quietly omits
+    /// one reads as a smaller frame rather than as a missing row.
+    fn counters(&self) -> FrameCounters {
+        self.menu.counters().plus(self.ui.counters())
     }
 
     fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
