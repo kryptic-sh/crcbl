@@ -59,6 +59,44 @@ subject is 3D lighting and pixel art in front of it would be showing the wrong
 system. Rule 4's debug panel and rule 12's path reporting both apply, and a
 lighting fixture without them is not a fixture.
 
+## Status: not started, and it cannot start yet (2026-08-13)
+
+**There is no `apps/lumen`, and building one today would not be this sample.**
+The blocker is not SSR or irradiance probes — those are merely unbuilt P7B rows.
+It is that **the engine has no way for an app to describe a scene**, so the room
+the Scope section asks for has no representation.
+
+What `crcbl::render::ForwardRenderer` offers an app is a **fixed resident set**,
+not a scene: `begin_frame` takes the cube's transform as an argument, and
+`set_pyramid`, `set_tinted_pyramid`, `set_textured_pyramid`, `set_open_box` and
+`set_dunes` place four more instances of meshes the renderer uploaded to itself
+in `new`. Each names one of three material rows the renderer also owns. There is
+no mesh-upload call, no instance call, and no material call above the pools —
+`MeshPool`, `InstancePool` and `MaterialTable` are public, but composing them
+means an app writing a second forward renderer, which sample rule 1 exists to
+forbid. `crcbl-scene`'s glTF importer is not reachable either: it is not a
+dependency of `crcbl`.
+
+So, against the Scope section: the window, the mirror-grade surface, the rough
+metal surface and the coloured bounce wall each need geometry or a material this
+sample cannot author, and the per-effect toggles need switches `add_passes` does
+not have — it records the shadow, depth-prepass, light-grid, SSAO and SSAO-blur
+passes unconditionally. Only the moving light is buildable today (`set_lights`
+takes an arbitrary `&[Light]`), along with the free-fly camera, the debug panel
+and rule 12's path reporting.
+
+**The roadmap already says this and the deliverable column contradicts it.**
+`docs/plan/ROADMAP.md`'s phase table orders S4B _after_ **P9** — "Assets +
+scenes: `AssetSource`, glTF import, RON scene format, hot reload; material
+templates + instances" — which is the phase that builds exactly what is missing.
+P7B's deliverable column nonetheless reads "lumen (13) renders the scene
+complete on `LightingPath::Rasterised`". Both cannot hold. The phase ordering is
+the one supported by the code: **lumen is a P9-dependent sample**, and P7B needs
+a different exit gate or a stated dependency on P9.
+
+`docs/backlog.md` carries the engine work item, the option sizing, and the
+deferred web demo.
+
 ## Milestones
 
 1. Scene + raster path complete: shadows for every light type, SSAO, SSR,

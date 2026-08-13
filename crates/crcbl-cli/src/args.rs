@@ -142,9 +142,20 @@ Renders one frame using the auto-selected GPU backend through an offscreen
 swapchain, reads the pixels back, and writes a PNG.
 
 OPTIONS:
-        --scene <SCENE>  What to draw: `cube` (the default) is the lit cube
-                         through the forward renderer, `sprite` is four sprites
-                         over three batches, `ui` is text, a rect and an outline.
+        --scene <SCENE>  What to draw. Each name is the file stem of the golden
+                         the render e2e blesses for it, so a frame taken here
+                         and the one CI compares are the same scene under the
+                         same name:
+                           cube (the default)  lit cube, three pyramids
+                           dunes               the cluster-DAG height field
+                           lights              the cube scene under three
+                                               coloured point lights
+                           spot                one spot cone on a floor
+                           spot_shadow         that cone with a caster in it
+                           point_shadow        one point light, two casters
+                           ao                  the inside of a box, ambient only
+                           sprite              four sprites over three batches
+                           ui                  text, a rect and an outline
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
                          be between 1 and 16384.
     -o, --output <FILE>  Write the PNG here. Default: screenshot.png.
@@ -646,6 +657,73 @@ fn parse_build(mut args: impl Iterator<Item = OsString>) -> Invocation {
     Invocation::Command(Command::Build(parsed))
 }
 
+/// What `--scene` accepts, and what each name draws.
+///
+/// The name is the **golden's file stem** rather than a spelling of its own:
+/// `crates/crcbl/tests/render_e2e.rs` blesses one PNG per scene under exactly
+/// these stems, so a frame taken by hand and the one CI compares are reachable
+/// by the same word. A second vocabulary would be a translation step, and the
+/// place a typo turns into "the cube twice, and every shader agrees".
+///
+/// **A [`Scene`](crcbl::screenshot::Scene) variant absent from this table is
+/// unreachable from the command line.** Nothing here can notice that on its own;
+/// what points at it is [`scene_name`], whose match is exhaustive, so a new
+/// variant stops this crate compiling until somebody comes to this file.
+const SCENES: &[crcbl::screenshot::Scene] = {
+    use crcbl::screenshot::Scene;
+    &[
+        Scene::Cube,
+        Scene::Dunes,
+        Scene::Lights,
+        Scene::Spot,
+        Scene::SpotShadow,
+        Scene::PointShadow,
+        Scene::Ao,
+        Scene::Sprite,
+        Scene::Ui,
+    ]
+};
+
+/// The `--scene` name for a scene.
+///
+/// Exhaustive on purpose — no wildcard arm — so adding a
+/// [`Scene`](crcbl::screenshot::Scene) variant is a compile error here rather
+/// than a scene the CLI silently cannot draw. See [`SCENES`].
+const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
+    use crcbl::screenshot::Scene;
+    match scene {
+        Scene::Cube => "cube",
+        Scene::Dunes => "dunes",
+        Scene::Lights => "lights",
+        Scene::Spot => "spot",
+        Scene::SpotShadow => "spot_shadow",
+        Scene::PointShadow => "point_shadow",
+        Scene::Ao => "ao",
+        Scene::Sprite => "sprite",
+        Scene::Ui => "ui",
+    }
+}
+
+/// The scene `name` selects, or `None` if no scene answers to it.
+fn scene_from_name(name: &str) -> Option<crcbl::screenshot::Scene> {
+    SCENES
+        .iter()
+        .copied()
+        .find(|&scene| scene_name(scene) == name)
+}
+
+/// Every name `--scene` takes, for the rejection message.
+///
+/// Built from [`SCENES`] rather than written out, so the list a user is shown
+/// after a typo cannot name a scene the parser does not accept.
+fn scene_names() -> String {
+    SCENES
+        .iter()
+        .map(|&scene| scene_name(scene))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn parse_screenshot(mut args: impl Iterator<Item = OsString>) -> Invocation {
     let mut parsed = ScreenshotArgs {
         width: 1920,
@@ -663,14 +741,13 @@ fn parse_screenshot(mut args: impl Iterator<Item = OsString>) -> Invocation {
                 let Some(value) = args.next() else {
                     return bad("--scene needs a value");
                 };
-                match value.to_str() {
-                    Some("cube") => parsed.scene = crcbl::screenshot::Scene::Cube,
-                    Some("sprite") => parsed.scene = crcbl::screenshot::Scene::Sprite,
-                    Some("ui") => parsed.scene = crcbl::screenshot::Scene::Ui,
-                    _ => {
+                match value.to_str().and_then(scene_from_name) {
+                    Some(scene) => parsed.scene = scene,
+                    None => {
                         return Invocation::BadUsage(format!(
-                            "unknown scene `{}` (known: cube, sprite, ui)",
-                            value.to_string_lossy()
+                            "unknown scene `{}` (known: {})",
+                            value.to_string_lossy(),
+                            scene_names()
                         ));
                     }
                 }
@@ -1384,25 +1461,37 @@ mod tests {
     /// The scene selector, including the default: `crcbl screenshot` with no
     /// `--scene` has to keep drawing what it drew before there was one, because
     /// the golden-image suites that call it were written against that frame.
+    ///
+    /// Every scene in [`SCENES`] is driven through the real parser rather than
+    /// through [`scene_from_name`], because the failure this guards is a name
+    /// the *parser* cannot reach — a table entry the `--scene` arm never
+    /// consults would pass a direct call and fail here.
     #[test]
-    fn the_scene_defaults_to_the_cube_and_names_the_other_two() {
+    fn every_scene_in_the_table_is_reachable_and_the_default_is_still_the_cube() {
         use crcbl::screenshot::Scene;
 
-        for (flag, expected) in [
-            (None, Scene::Cube),
-            (Some("cube"), Scene::Cube),
-            (Some("sprite"), Scene::Sprite),
-            (Some("ui"), Scene::Ui),
-        ] {
-            let mut argv = vec!["screenshot"];
-            if let Some(flag) = flag {
-                argv.extend(["--scene", flag]);
-            }
+        let Command::Screenshot(args) = command(&["screenshot"]) else {
+            panic!("expected screenshot");
+        };
+        assert_eq!(args.scene, Scene::Cube, "the default frame moved");
+
+        for &scene in SCENES {
+            let name = scene_name(scene);
+            let argv = vec!["screenshot", "--scene", name];
             let Command::Screenshot(args) = command(&argv) else {
                 panic!("expected screenshot");
             };
-            assert_eq!(args.scene, expected, "{argv:?}");
+            assert_eq!(args.scene, scene, "--scene {name}");
         }
+
+        // Distinct names, because [`scene_from_name`] takes the first match: two
+        // scenes sharing one word would make the second unreachable while every
+        // assertion above still passed.
+        let mut names: Vec<&str> = SCENES.iter().map(|&scene| scene_name(scene)).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "two scenes answer to one --scene name");
 
         // A scene the CLI does not know is exit 2, not a silent fall back to the
         // default — a typo in a harness would otherwise compare the cube twice
@@ -1414,6 +1503,24 @@ mod tests {
             assert!(
                 matches!(parse_args(&argv), Invocation::BadUsage(_)),
                 "{argv:?} should be a bad invocation"
+            );
+        }
+    }
+
+    /// `--help` lists what `--scene` takes, and the two are the same list.
+    ///
+    /// The usage text is a literal — `concat!` takes literals and a `&'static
+    /// str` const is not one — so this is what stops it drifting from
+    /// [`SCENES`], exactly as `the_screenshot_help_names_the_real_size_cap`
+    /// stops it drifting from the size cap.
+    #[test]
+    fn the_screenshot_help_names_every_scene_it_will_draw() {
+        for &scene in SCENES {
+            let name = scene_name(scene);
+            assert!(
+                SCREENSHOT_USAGE.contains(name),
+                "`screenshot --help` does not name the scene `{name}`:\n\
+                 {SCREENSHOT_USAGE}"
             );
         }
     }

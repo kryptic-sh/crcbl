@@ -366,6 +366,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl screenshot --scene` reaches every scene the engine draws.**
+  `crcbl::screenshot::Scene` has had nine variants for a while and the CLI
+  parsed three of them, so `dunes`, `lights`, `spot`, `spot_shadow`,
+  `point_shadow` and `ao` — every 3D lighting scene the render e2e blesses a
+  golden for — could not be rendered by hand at all. Each name is now the
+  **golden's file stem**, so a frame taken at any size and the 256×192 one CI
+  compares are reachable by the same word. An unknown name is still exit 2
+  rather than a silent fall back to the cube, and `--help` now lists them; a
+  test asserts the help text names every scene the parser accepts, and
+  `scene_name`'s match is exhaustive so a new variant stops the crate compiling
+  until it is named.
+
 - **Screen-space ambient occlusion**, the rasterised twin's AO row. A depth
   prepass — driven by the existing depth-only pipeline with the camera's own
   bind group and draws, so no new pipeline or shader — feeds an `ssao` pass that

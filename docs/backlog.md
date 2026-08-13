@@ -7424,3 +7424,199 @@ other leg would build the stale artifact and pass. The manifest hash catches a
 source edited without regenerating; it cannot catch a manifest regenerated
 against a source that was then not committed, which is what the recompile step
 exists for and which only that job always runs.
+
+## `lumen` cannot be built: the engine has no scene (2026-08-13)
+
+Surveying S4B before delegating it found the same shape P7B had. The brief was
+`apps/lumen` milestone 1a — the charter's room, minus SSR and irradiance probes
+because those are unbuilt. The room is what cannot be built.
+
+**`ForwardRenderer` is a fixed resident set, not a renderer an app feeds.**
+`begin_frame` takes the cube's transform as a positional argument;
+`set_pyramid`, `set_tinted_pyramid`, `set_textured_pyramid`, `set_open_box` and
+`set_dunes` place four more instances of meshes it uploaded to itself in `new`,
+each naming one of three material rows it also owns. There is no mesh-upload
+call, no instance call and no material call on it. So a sample cannot author a
+metal, a coloured wall, or a wall with a hole in it.
+
+The pools underneath are public — `MeshPool::upload`, `InstancePool::insert`,
+`MaterialTable::insert`, `ClusterPool`, `DrawGen` — but composing them into a
+frame means writing a second forward renderer inside a sample, which is exactly
+what sample rule 1 forbids. `crcbl_scene::import_gltf` is not an escape either:
+`crcbl-scene` is not a dependency of `crcbl`, so nothing in `apps/` can name it,
+and it produces host arrays with no pool-upload path above them.
+
+**Per-effect toggles do not exist either.** `ForwardRenderer::add_passes`
+records the shadow, depth-prepass, light-grid, SSAO, SSAO-blur, forward and
+tonemap passes unconditionally. Topic 18 already sanctions the AO switch in
+writing — "a renderer-owned 1×1 `R8Unorm` cleared to 1.0, bound when the AO
+passes are not added" — and the placeholder it names is already built and
+already imported every frame as `ssao-placeholder`, so that one is small.
+Nothing sanctions a shadow switch.
+
+**What is buildable today**, so it is not re-derived: `set_lights` takes an
+arbitrary `&[Light]`, so the moving light and the light types are real; the
+free-fly and fixed cameras are plain `Camera` writes; the debug panel is
+`HostedGame::debug_sections`; and rule 12's path reporting is three accessors on
+`DeviceCaps` away. That is roughly two of the charter's five scope bullets.
+
+**The roadmap already ordered this correctly and its deliverable column does
+not.** `docs/plan/ROADMAP.md`'s phase table puts S4B after **P9** — "Assets +
+scenes: `AssetSource`, glTF import, RON scene format, hot reload; material
+templates + instances + render↔surface link" — which builds precisely what is
+missing. P7B's deliverable column meanwhile reads "lumen (13) renders the scene
+complete on `LightingPath::Rasterised`". **Decision needed: which one moves.**
+The options, none taken here:
+
+1. **Give P7B a different exit gate** and leave lumen at S4B behind P9. Cheapest
+   and matches the code. P7B then exits on the render-e2e scenes plus a
+   human-reviewed set of frames, which is what it actually has.
+2. **Build the scene API early**, as its own slice, and keep lumen at P7B. It is
+   two separable pieces and only the first is small:
+   - _Materials and instances of the existing meshes._
+     `add_material(&Material) -> MaterialHandle` and
+     `add_instance(mesh, material, Mat4) -> InstanceHandle` on
+     `ForwardRenderer`, replacing the five hard-coded slots and the `place`
+     helper. Every golden depends on the current slot ordering, so it is a
+     re-bless as well as an API change. A room of scaled cubes with authored
+     metals is reachable at the end of it.
+   - _App-supplied meshes._ Much deeper: `build_geometry` uploads the mesh pool,
+     cluster pool, cluster DAG, mesh table and LOD levels once inside `new`, so
+     a runtime upload means growing all of them mid-life, and the cluster
+     builders live in `crcbl-scene` which the facade does not re-export. This is
+     P9's own work and should not be smuggled in.
+3. **Build a reduced `apps/lumen` now** on the fixed residents — the open box as
+   the room, the cube as a ceiling slab with a slot for a window, the three
+   pyramids as props — with a free-fly camera and the debug panel. Considered
+   and **not taken**: its scene would be `Scene::Ao` plus `Scene::Cube` with a
+   camera on it, it would deliver none of the four surfaces the charter names,
+   it would make P7B's exit gate look satisfied, and P9 would rewrite it.
+   Recorded because it is the obvious next suggestion.
+
+### What milestone 1 still owes beyond the scene API
+
+Each of these is independently unbuilt, so none of them is what blocks the
+sample; they are what it would still be missing after the blocker cleared.
+
+- **Screen-space reflections.** Topic 18's `Rasterised` reflection row. Nothing
+  in the tree. It is also what makes the charter's mirror-grade surface anything
+  other than black — see the metal note below.
+- **Irradiance probes.** Topic 18's `Rasterised` GI row. Nothing in the tree.
+  The other half of what a metal reflects.
+- **The render-to-texture monitor camera**, and with it the per-camera layer of
+  the toggle resolution order. There is one camera per frame today.
+- **`[engine.video]` and the programmatic override layers.** The charter wants
+  each toggle exercised from all three layers; the first layer has no toggles to
+  resolve yet.
+- **A forced-path flag.** Rule 12 asks every sample for one and no sample has
+  one — `crcbl::args::Common` has no such field. lumen is where it would land.
+
+### A metal is black, and that is the model
+
+Worth stating here because it will read as a bug in the first lumen frame that
+has one. Ambient scales diffuse albedo, a conductor's diffuse albedo is zero, so
+a fully metallic surface out of every light's reach renders near-black until SSR
+or a probe gives it something to reflect. `docs/plan/18-render-features.md`
+argues it. When lumen is built, its debug panel or its doc must say so at the
+surface, or every reviewer files the same non-bug.
+
+## The AO tuning constants, measured against a real frame (2026-08-13)
+
+Two entries above — under "What screen-space AO left owed" and "What the
+depth-weighted blur left owed" — say `SSAO_RADIUS`, the kernel's lateral reach
+and `DEPTH_TOLERANCE_RADII` were tuned against `Scene::Ao` alone and that
+`lumen` is what would tune them. lumen cannot be built (above), so this is what
+could be measured without it. **Nothing was retuned**; the numbers are here so
+the retune has a starting point.
+
+Measured on this box — AMD RX 7900 XTX, radv, Mesa 26.1.6,
+`MeshShader / Bindless / Rasterised` — from
+`crcbl screenshot --scene ao --size 1280x960`, and from the render-e2e suite's
+own printed numbers at its 256×192.
+
+- **The trough is already room-scale in one axis, which the entries do not
+  say.** `AO_RUN` is 6.0 and `AO_WALL` is 2.0 world units: a six-metre run
+  between two-metre walls. What `Scene::Ao` is missing is not scale, it is a
+  camera at eye height inside the box, a corner where three surfaces meet, and
+  anything to cast a silhouette. The straight-down camera is load-bearing for
+  the measurement it exists for and should not be changed to get those.
+- **The occlusion reaches 0.38–0.40 world units from the wall**, against a
+  kernel whose stated lateral reach is `7/8 × SSAO_RADIUS` = 0.4375. Floor luma
+  down the middle of the run, averaged over a 3-unit-wide strip: 74.66 on open
+  floor, falling to 63.31 at 0.10 from the wall, back within one percent of open
+  floor by 0.38. So the term is **bounded by the kernel and not by the
+  geometry** — `SSAO_RADIUS` is doing exactly what it says, and the trough is
+  wide enough not to clip it.
+- **So it reads as a broad ambient wash, not as contact occlusion.** A 0.4-unit
+  gradient against a 2-unit wall is a fifth of the wall's height. Contact
+  occlusion in a room wants a tighter band; 0.5 is at the top of the usual
+  range. **This is the finding a retune would act on**, and it is a judgement
+  about looks, so it wants goldens and a human, which is what the deferral said.
+- **The gradient terraces.** 63.31 → 74.66 is about eleven sRGB levels spread
+  over roughly 150 pixels at 1280×960, so a band every fourteen pixels or so.
+  Invisible at the goldens' 256×192, where the whole gradient is ten pixels
+  wide, and visible in a contrast-stretched crop of the full-resolution frame.
+  In a room lit mostly by ambient — which is what a lighting fixture is — that
+  banding is what a reviewer would notice first, ahead of the radius.
+- **The bilateral blur holds at a silhouette, with about a fortieth left.** The
+  render-e2e's own reading on this GPU:
+  `cube — the pyramid's underside measures 67.3 along its silhouette and 66.0 two rows in, against a clear of 37.0`
+  — a residual halo of 2.0%, matching what the blur entry claimed. Against a
+  _real_ silhouette rather than a pyramid's underside, nothing has been
+  measured, because no scene in the tree has one.
+- **`DEPTH_TOLERANCE_RADII` remains unmeasured and that is not fixable here.**
+  It weights the blur by view-space depth difference, so what exercises it is
+  two surfaces at different depths sharing a kernel footprint. `Scene::Ao` has
+  one flat floor and two walls at the same depth as it, and `Scene::Cube` has
+  one silhouette against the clear. Neither separates the tolerance from the
+  far-plane test beside it. A room with furniture is still what would.
+- **Where these came from**, so they can be reproduced: `SSAO_RADIUS` is a
+  private `const` in `crates/crcbl-render/src/forward.rs`, the lateral reach is
+  the sample table in `crates/crcbl-shaders/shaders/ssao.slang`, and
+  `DEPTH_TOLERANCE_RADII` is a `static const` in `ssao_blur.slang`. None is
+  reachable from an app, which is its own small finding: a retune is an engine
+  edit and a re-bless, not a sample knob.
+
+## The lumen web demo is deferred, and what naming a new demo costs
+
+Native first, deliberately: the sample's job is to make the lighting visible and
+tunable, and a wasm build multiplies the surface before anyone has looked at the
+picture. Recorded so the next slice does not re-derive the checklist —
+`web/README.md`'s "Adding a demo" is the authority and lists six things, not the
+five that get remembered:
+
+1. a row in `web/build.sh`'s `DEMOS` and a line in `web/build-pages.py`'s
+   `DEMOS`;
+2. `web/pages/lumen.html` — metadata, the sample's own prose, and the three
+   `<!--include …-->` directives every demo page carries;
+3. `web/demos/lumen/main.js` binding this sample's `__crcbl_lumen_*` exports;
+4. `web/demos/lumen/assets/manifest.json`, even with empty `keys`;
+5. an entry in `web/tools/browser-e2e.mjs`'s `EXPECTATIONS` — the two assertions
+   that are about the sample rather than the browser, which the gate refuses to
+   run without;
+6. a step in `.github/workflows/pages.yml`, because the gate reads one canvas
+   and therefore runs once per demo.
+
+Plus the sample's own `src/web.rs`, which `apps/horde/src/web.rs`'s header
+already flags as the fourth verbatim copy of one file and asks to be shared
+before a fifth is written. lumen would be the fifth.
+
+Note the shape it would be a demo _of_: the browser runs
+`LightingPath:: Rasterised` by construction, which is the whole reason the
+charter wants the page. That argument is unaffected by the deferral and stays.
+
+## `crcbl::screenshot`'s `ao_box` warns about a bug that is fixed
+
+`crates/crcbl/src/screenshot.rs`'s `ao_box` doc says a box that large "slid
+sideways from the eye stops drawing altogether — the frame comes back as clear
+colour, on every geometry path, with the instance passing a host-side frustum
+test", and arranges the scene to stay clear of it.
+
+That is the bug `e8d3dab` fixed: a cluster's bounding radius was not scaled by
+its instance transform, so a scaled instance's clusters were rejected while the
+instance was kept. The entry above under punctual-light shadows records the fix
+and says only the amplification path was affected. The comment is now a warning
+about something that no longer happens, and it constrains where a future scene
+may put a large box for no reason. Not touched here because re-verifying it
+means deliberately sliding the AO box off-axis and re-blessing nothing — a
+ten-minute job for somebody already in that file.
