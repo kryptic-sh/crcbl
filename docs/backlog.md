@@ -6090,34 +6090,73 @@ Nothing observable is known to be wrong today, which is why this is a decision
 and not an incident. But it is a documented contract nothing enforces, and the
 culling bug is what happens when one of those goes unexamined for long enough.
 
-## An audio test failed once and has not repeated
+## An audio test fails intermittently under a loaded full-suite run
 
 `apps/asteroids`'
-`audio::tests::the_engine_is_one_looping_voice_that_outlives_its_buffer` failed
-once inside a full `cargo test` with "the engine's release block was cut", then
-passed five times in isolation and on three subsequent full-suite runs.
-Observed, not diagnosed; nothing near it had changed. Recorded so a second
-sighting is a pattern rather than a surprise.
+`audio::tests::the_engine_is_one_looping_voice_that_outlives_its_buffer` fails
+inside a full `cargo test` with "the engine's release block was cut", and passes
+in isolation and on most full-suite runs. This entry previously said it had
+happened once and asked for a second sighting to make it a pattern. **The second
+sighting has arrived**: it fired again during a `cargo test --all-features`
+sweep, with the same assertion, and the very next run of the same command was
+green (`3402 passed`). Nothing near it had changed either time.
 
-## The Windows lavapipe job produces an empty frame intermittently
+Both sightings were under a **full workspace** run rather than a targeted one,
+which is the only correlation there is so far. That points at a timing
+assumption rather than at the audio maths: the assertion is about a release
+block surviving, and a suite that is loading every core is where a voice that
+depends on wall-clock progress would get cut. Nobody has read the test with that
+hypothesis in hand, and it is a cheap thing to do — the alternative is that it
+keeps costing a random CI run.
+
+Not diagnosed, and deliberately not "fixed" by rerunning: this is now the second
+intermittent failure in the tree whose entry says "recorded so a second sighting
+is a pattern", and both have since repeated.
+
+## One primitive shades black on Windows lavapipe, intermittently
 
 `depth_probe::reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not`
 fails on `vk e2e (lavapipe, windows)` with `[0, 0, 0, 255]` at the centre pixel,
-while the same test passes on Linux lavapipe and radv, and the same job is green
-on the commits either side of it.
+while the same test passes on Linux lavapipe and radv.
 
-**It has now happened twice**, on `e8d3dab` and on `0b10832`, with unrelated
-changes under it both times and a re-run green both times. That is a flake, not
-a sighting.
+**Five occurrences**: `e8d3dab`, `0b10832`, `e875e44`, `c22f7d5`, and `bfc270c`
+**twice in a row** — the first time a re-run has not cleared it on the first
+retry. A third attempt on that commit was green, and the change under it cannot
+reach this test (`depth_probe` never constructs a `ForwardRenderer` and its only
+mentions of the scene API are comments), so it is still the flake and not a
+regression. But it now costs multiple CI runs per push, where it used to cost
+one.
 
-**What that pixel says, and what it does not.** `[0, 0, 0, 255]` is
-`depth_probe::PROBE_CLEAR` encoded — the pass's own clear colour, alpha
-included. So the copy landed and carried a _cleared_ pixel: either the draw
-produced no fragment at the centre, or the pass never executed. "Nothing drew"
-is narrower than that and was never established; the assertion said it for one
-commit and now says what is known instead.
+**The diagnostics have narrowed it to one primitive, and the arithmetic is
+exact.** On both `bfc270c` attempts the frame-wide count read **9776 pixels
+differ from the corner**. The far quad reaches 60 pixels from the centre and the
+near one 34, so their footprints are 14400 and 4624 — and 14400 − 4624 is 9776
+exactly. A correct frame measures 14400, confirmed locally by forcing the
+assertion.
 
-Which of the two it is, the next occurrence answers from the job log alone:
+So the failing picture is the far quad drawn normally with a hole punched in it
+exactly the near quad's size. **The near quad wins the depth test** — which is
+why the blue does not show through — **and then shades to the clear colour.**
+That is a shading failure on one primitive. It is not a lost submission, not a
+mis-projection, not a readback race, and not an empty frame, which is what this
+entry claimed for its first four occurrences.
+
+What the earlier diagnostics ruled out, each from the job log alone:
+
+- **No `0xa5` anywhere**, so the copy landed and the bytes are a real frame's.
+- **`wait_idle: Ok`**, so the device was never lost.
+- **`validation: enabled=true, 0 error(s), 0 warning(s)`** — and that silence is
+  evidence rather than an absent channel, because the same log carries a VUID
+  from `validation_gate`'s deliberate violation.
+
+**What would settle it**, and none of it has been done: read the depth
+attachment back to confirm the near quad wrote depth (it needs `TRANSFER_SRC` on
+the shared `scene_depth` descriptor, which is a production change for a test's
+benefit — see the assertion's own note); or dump the near quad's fragment
+inputs; or bisect lavapipe's version on that runner. The Linux legs have never
+reproduced it, so this is a Windows-lavapipe-only investigation.
+
+The rest of this entry records how the diagnosis got here, and stands:
 
 - every readback destination is filled with `harness::POISON` before it is
   polled, so a copy that never landed reads back as `0xa5` instead of as the
