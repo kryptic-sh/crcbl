@@ -11,6 +11,7 @@
 //! crcbl::shell   → crcbl-shell   the windowing seam and its backends
 //! crcbl::hal     → crcbl-hal     the GPU seam, plus the recording null backend
 //! crcbl::render  → crcbl-render  the render graph, cameras, the forward frame
+//! crcbl::scene   → crcbl-scene   glTF import and the mesh bakes (feature `scene`)
 //! crcbl::shaders → crcbl-shaders the engine's shaders, as SPIR-V
 //! crcbl::ui      → crcbl-ui      draw lists, the glyph atlas, HUD widgets
 //! crcbl::ecs     → crcbl-ecs     the world, components, systems, the schedule
@@ -114,6 +115,28 @@ pub use crcbl_phys as phys;
 /// `docs/plan/02-vulkan-backend.md` §2.4's rule is "no manual barriers outside
 /// the graph, ever", and this is the crate that makes it keepable.
 pub use crcbl_render as render;
+/// [`crcbl-scene`](crcbl_scene): glTF import, meshlet clustering, mesh
+/// simplification and the cluster DAG.
+///
+/// **The bake side of [`render::scene`], and the only way
+/// to reach it.** A [`Geometry::Flat`](crcbl_render::scene::Geometry::Flat)
+/// carries a [`MeshClusters`](crcbl_shaders::meshlet::MeshClusters) and a
+/// [`Geometry::Dag`](crcbl_render::scene::Geometry::Dag) a
+/// [`ClusterDag`](crcbl_shaders::cluster_dag::ClusterDag); `crcbl-render` cannot
+/// build either, because §3.5 makes the cluster build a bake step and the
+/// renderer must not depend on this crate. So an application that describes its
+/// own resident meshes calls
+/// [`build_meshlets`](crcbl_scene::build_meshlets) and
+/// [`MeshletBuild::into_clusters`](crcbl_scene::MeshletBuild::into_clusters), or
+/// [`build_cluster_dag`](crcbl_scene::build_cluster_dag) and
+/// [`ClusterDag::cook`](crcbl_scene::ClusterDag::cook), and hands the result to
+/// [`ForwardRenderer::with_scene`](crcbl_render::ForwardRenderer::with_scene).
+///
+/// Behind the non-default `scene` feature, because this crate depends on `gltf`
+/// and a game that ships cooked meshes links no parser for the source format —
+/// the same split, for the same reason, as [`sprite`]'s `load` and `bake`.
+#[cfg(feature = "scene")]
+pub use crcbl_scene as scene;
 /// [`crcbl-server`](crcbl_server): the authoritative simulation, its fixed
 /// timestep and the state hash the determinism harness compares.
 pub use crcbl_server as server;
@@ -317,5 +340,79 @@ mod tests {
         let surface = unsafe { instance.create_surface(&target) }
             .expect("the null backend accepts every target");
         instance.destroy_surface(surface);
+    }
+
+    /// **An application reaches the cluster bake and makes its own mesh
+    /// resident, naming this crate and nothing else.**
+    ///
+    /// The whole of what the `scene` feature is for, as one path. A
+    /// [`Geometry::Flat`](crcbl_render::scene::Geometry::Flat) carries
+    /// `MeshClusters`, and until `crcbl-scene` was reachable from here there was
+    /// no way for an application to produce one: `crcbl-render` may not depend on
+    /// the builder, and the clusters of every mesh the engine draws are either
+    /// hardcoded in `crcbl-shaders` or cooked into `clusters/dunes.dag`. So this
+    /// bakes its own — `build_meshlets` over positions and indices, through
+    /// [`MeshletBuild::into_clusters`](crcbl_scene::MeshletBuild::into_clusters)
+    /// — and hands it to the renderer.
+    ///
+    /// A **one-mesh, one-row** description on purpose: it is also what says the
+    /// floor is gone. `with_scene` used to refuse anything shorter than the demo
+    /// scene, because the five `set_*` wrappers named its meshes and its rows by
+    /// position, so this description was unbuildable whatever the bake produced.
+    #[cfg(feature = "scene")]
+    #[test]
+    fn an_application_bakes_its_own_mesh_and_the_renderer_makes_it_resident() {
+        use crcbl_hal::{DeviceDesc, Format, QueueKind};
+        use crcbl_render::scene::{Capacities, Geometry, MeshDesc, PageDesc, SceneDesc};
+        use crcbl_shaders::mesh;
+        use std::borrow::Cow;
+
+        // An ordinary triangle list, the shape a glTF primitive arrives in.
+        let vertices = mesh::pyramid_vertices();
+        let indices = mesh::pyramid_indices();
+        let positions: Vec<[f32; 3]> = vertices
+            .iter()
+            .map(|vertex| [vertex.position[0], vertex.position[1], vertex.position[2]])
+            .collect();
+
+        let build = crate::scene::build_meshlets(&positions, &indices)
+            .expect("a whole number of triangles, every index inside the mesh");
+        let cluster_count = build.clusters().len();
+        assert!(
+            cluster_count > 0,
+            "a mesh of triangles must bake into at least one cluster, or the description \
+             below would make a mesh nothing can draw resident"
+        );
+        let clusters = build.into_clusters();
+        assert_eq!(
+            clusters.clusters.len(),
+            cluster_count,
+            "into_clusters is a rename, so it must hand over every cluster the build grew"
+        );
+
+        let scene = SceneDesc {
+            meshes: vec![MeshDesc {
+                label: Cow::Borrowed("an application's own mesh"),
+                geometry: Geometry::Flat {
+                    vertices: Cow::Owned(mesh::pyramid_vertex_bytes()),
+                    indices: Cow::Owned(indices),
+                    clusters,
+                },
+            }],
+            materials: vec![mesh::GpuMaterial::UNTINTED],
+            page: PageDesc::opaque_white(1),
+            capacities: Capacities::default(),
+        };
+
+        let instance = NullInstance::gpu_driven();
+        let adapter = instance.adapters().remove(0);
+        let device = instance
+            .create_device(&DeviceDesc::for_adapter(adapter.id))
+            .expect("the null backend always opens");
+        let queue = device.queue(QueueKind::Graphics).expect("always present");
+        let renderer =
+            ForwardRenderer::with_scene(device.as_ref(), queue, Format::Rgba8UnormSrgb, &scene)
+                .expect("a description of one baked mesh and one row is one the renderer can hold");
+        renderer.destroy(device.as_ref());
     }
 }

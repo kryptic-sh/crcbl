@@ -28,9 +28,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use crcbl_scene::cluster_dag::{ClusterDag as BuiltDag, build_cluster_dag};
-use crcbl_shaders::cluster_dag::{ClusterDag, ClusterGroup, DagLevel, GroupBounds};
+use crcbl_shaders::cluster_dag::ClusterDag;
 use crcbl_shaders::dunes;
-use crcbl_shaders::meshlet::MeshClusters;
 
 /// Where the committed artifact lives, relative to this crate.
 ///
@@ -95,7 +94,7 @@ fn main() -> ExitCode {
          cannot leave its positions out"
     );
 
-    let cooked = cook(&built);
+    let cooked = built.cook();
     assert_metrics_agree(&built, &cooked);
 
     let bytes = cooked.to_bytes();
@@ -162,47 +161,6 @@ fn difference(committed: &[u8], fresh: &[u8]) -> String {
     {
         Some(at) => format!("they first differ at byte {at}"),
         None => "one is a prefix of the other".to_string(),
-    }
-}
-
-/// The builder's DAG in the cooked crate's own types.
-///
-/// A transcription and nothing else: every number below is read straight off the
-/// built DAG, because a generator that computed anything of its own would be a
-/// second implementation of the builder with no test between them.
-fn cook(built: &BuiltDag) -> ClusterDag {
-    ClusterDag {
-        levels: built
-            .levels()
-            .iter()
-            .map(|level| DagLevel {
-                positions: level.positions().to_vec(),
-                clusters: MeshClusters {
-                    clusters: level.clusters().clusters().to_vec(),
-                    vertices: level.clusters().vertices().to_vec(),
-                    corners: level.clusters().triangles().to_vec(),
-                },
-                errors: level.errors().to_vec(),
-                bounds: level.bounds().iter().map(sphere).collect(),
-                groups: level
-                    .groups()
-                    .iter()
-                    .map(|group| ClusterGroup {
-                        children: group.children().to_vec(),
-                        parents: group.parents().to_vec(),
-                        error: group.error(),
-                        bounds: sphere(&group.bounds()),
-                    })
-                    .collect(),
-            })
-            .collect(),
-    }
-}
-
-fn sphere(bounds: &crcbl_scene::cluster_dag::GroupBounds) -> GroupBounds {
-    GroupBounds {
-        center: bounds.center(),
-        radius: bounds.radius(),
     }
 }
 

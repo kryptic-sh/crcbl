@@ -7660,16 +7660,10 @@ already assign to P9.
 
 ### The slices left, in dependency order
 
-Each is independently committable and CI-green, and the six apps build at every
-boundary. **The first must leave every golden byte-identical** — the demo scene
-is a caller of the new API rather than a special case inside the renderer, so a
-golden that moves in it is a bug in the move, not a re-bless.
-
-1. Reach the cook from an app: the `crcbl` facade, `crcbl-scene` behind a
-   non-default `scene` feature so `gltf` does not reach a wasm binary, the
-   meshlet/DAG cook moved out of `crcbl-shaders/tools/cook-clusters.rs` into the
-   crate, and the five demo setters dropped.
-2. `apps/lumen` on top of it.
+One: **`apps/lumen` on top of the API**. Everything the engine owed it has
+landed — the description, the instance API, a `begin_frame` that places nothing,
+the app-description evidence, the capacity refusals, and now the cook and the
+retirement of the demo setters.
 
 ### Flat meshes only, and why that is not negotiable yet
 
@@ -7813,10 +7807,17 @@ all.
 `ForwardRenderer::new` used to insert the cube itself, so it was always instance
 0 and every `set_*` object landed above it. Nothing is inserted at build any
 more, so the pool's slot order is the order a caller places objects in — and the
-eleven goldens stayed byte-identical across the `begin_frame` slice because
-every caller places the cube **first**: `screenshot.rs`'s `place_cube`,
-`vk_e2e`'s `mesh::place_cube` / `place_cube_at`, and `forward`'s own test
-helper, each of which says so at the call site.
+eleven goldens stayed byte-identical across the `begin_frame` slice and again
+across the setters' retirement because every caller places the cube **first**:
+`screenshot.rs`'s `place_cube`, `vk_e2e`'s `mesh::place_cube` / `place_cube_at`,
+and `forward`'s own test helper, each of which says so at the call site.
+
+Retiring the setters made this the whole risk of that slice, and it is why every
+converted call site is a straight `add_instance` in the setters' own order, why
+the toggling ones hold a handle and `remove_instance` before placing again
+rather than inserting twice, and why the three helpers that grew out of it —
+`screenshot.rs`'s `place`, `vk_e2e::mesh::place` and `forward`'s `place_demo` —
+each say the order is load-bearing where a reader will find it.
 
 Whether a different order would actually move a frame is **not measured**. The
 visible list is filled by an atomic, so the draw order is not the pool's order
@@ -7865,34 +7866,51 @@ renderer's life — P9's streaming `add_mesh`, deliberately deferred — and tha
 the slice where the type earns itself. Not before: today it would still be one
 implementation, and it would be carrying a distinction that cannot arise.
 
-### `add_instance` cannot refuse a DAG the device cannot draw, and `set_dunes` can
+### `add_instance` still cannot refuse a DAG the device cannot draw
 
 A mesh stage with no amplification stage — `Features::MESH_SHADER` without
 `Features::TASK_SHADER`, which is a real and supported device state — emits
 every cluster of a bucket, and for a DAG that is every level at once.
-`ForwardRenderer::set_dunes` refuses there and its `bool` says so;
-`add_instance` cannot, because its only error is `InstancePoolError` and "this
-device cannot choose a level" is not a full pool. **Documented instead**, on
-`add_instance`: a caller placing a `Geometry::Dag` mesh asks
-`ForwardRenderer::culls_clusters` first. Turning it into a refusal wants an
-error type on `add_instance` that says something other than "full pool", which
-is the type the entry above has now declined twice — so this stays documented
-until that one arrives. Nothing checks that a caller obeys, and no test covers a
-`Geometry::Dag` instance placed on that device shape.
+`add_instance` cannot refuse there, because its only error is
+`InstancePoolError` and "this device cannot choose a level" is not a full pool.
 
-### `place`'s swallowed pool-full failure: the capacity slice kept it
+What the cook slice changed is where a caller reads the condition. `set_dunes`'s
+`bool` was the only place it was spelled out, and deleting that method would
+have left the two-term device test
+(`geometry_path() == MeshShader && !culls_clusters()`) to be re-derived at each
+of the seven call sites that ask it. It is `ForwardRenderer::selects_levels` now
+— one predicate, documented at the type, asked by `screenshot.rs`'s
+`Scene::Dunes` and by `vk_e2e::mesh::place_dunes`' callers before either places
+the patch.
 
-`ForwardRenderer::place` — the body the five demo setters share — logs
-`InstancePoolError::PoolFull` and drops the object, because none of those five
-signatures says anything about a pool. The capacity slice's job was to decide
-whether that stays, and it does: an application does not go through `place` at
-all, and `forward`'s
-`a_full_instance_pool_reaches_the_application_that_sized_it` is what says so — a
-scene built with `capacities.instances` of 2 refuses the third `add_instance`
-with `PoolFull { capacity: 2, in_use: 2 }`, un-flattened, carrying the number
-the caller itself chose. The swallowing is confined to the five wrappers the
-cook slice deletes outright, whose only callers are the samples and the golden
-suite. Nothing further to do; it goes when they go.
+**Still not a refusal**, and nothing checks that a caller obeys: turning it into
+one wants an error type on `add_instance` that says something other than "full
+pool", which is the type the entry above has now declined twice. No test covers
+a `Geometry::Dag` instance placed on that device shape.
+
+### The demo setters are gone, and what indexed the description besides them
+
+`set_pyramid`, `set_tinted_pyramid`, `set_textured_pyramid`, `set_open_box` and
+`set_dunes` are deleted, with `ForwardRenderer::place` — the body they shared,
+whose swallowed `InstancePoolError::PoolFull` this backlog kept as "it goes when
+they go" — and the five `Option<InstanceHandle>` fields, and the
+`REQUIRED_MESHES` / `REQUIRED_MATERIALS` floor `check_scene` enforced.
+
+**The floor was not held up by the setters alone**, which is what the plan for
+this slice assumed. `ForwardRenderer::build` also indexed the description at
+`DEMO_DUNES` in two places — the cluster range it published as `dunes_clusters`
+and the per-level bucket list it published as `dunes_level_buckets` — so with
+the check simply deleted, a one-mesh description **panicked** out of `build`
+rather than being refused. Both are per-description-mesh now: the fields are
+`mesh_clusters` / `mesh_level_buckets` and the accessors are
+`ForwardRenderer::cluster_range(mesh)` and
+`ForwardRenderer::level_buckets(mesh)`, whose only callers are
+`vk_e2e/mesh.rs`'s `read_cut` and `selected_dunes_level`. `forward`'s
+`a_description_smaller_than_the_demo_is_a_scene` is the test, and it was shown
+red both ways — against a restored floor, and against the positional indexing,
+where it fails with `index out of bounds: the len is 1 but the index is 3`.
+
+Nothing in `crcbl-render`'s non-test code names a `DEMO_*` constant any more.
 
 ### Where the capacity slice drew the line, and what it left to the pool
 
@@ -7955,10 +7973,45 @@ and reads something back: the cluster-selection buffer through
 asserting both DAGs' runs have clusters chosen in them needs no new golden
 image. Not done here to keep the slice to the API move.
 
-### Open, and the one dependency call
+The cook slice added one description that is not `scene::demo()` and does reach
+a device object: `crcbl`'s
+`an_application_bakes_its_own_mesh_and_the_renderer_makes_it_resident` bakes a
+mesh's clusters through `crcbl::scene` and builds a one-mesh, one-row renderer —
+but on the **null** backend, and behind the `scene` feature, so a plain
+`cargo test` does not run it at all and only `--all-features` does. Nothing
+about the above is closed by it.
 
-Whether `crcbl` should take `crcbl-scene` at all, versus splitting the meshlet
-and DAG builders out of it into a crate that does not carry `gltf`. The
-feature-gate is the smaller move and is what the cook slice does; the split is
-cleaner and is its own change. Also unmeasured: the cook's load-time cost — time
-the `cook-clusters` example rather than quoting a guess.
+### The dependency call was made, and the split it declined
+
+`crcbl` takes `crcbl-scene` behind the non-default `scene` feature, and
+`crcbl::scene` is the re-export. `cargo tree -p crcbl -e normal` finds no `gltf`
+and no `crcbl-scene` by default and finds both with `--features scene`, and
+`crcbl` builds for `wasm32-unknown-unknown` both ways.
+
+**Declined, and still open as its own change:** splitting the meshlet and DAG
+builders out of `crcbl-scene` into a crate that does not carry `gltf`. That is
+the cleaner shape — a game linking the bakes would then not link a parser at
+all, feature or no feature — and it is a crate move rather than a manifest line.
+The feature gate is what the cook slice did because it is reversible and touches
+nothing else.
+
+Also unmeasured: the cook's load-time cost — time the `cook-clusters` example
+rather than quoting a guess.
+
+### What the cook slice actually had to move, and what was already there
+
+`ClusterDag::cook` was **already** in `crcbl-scene` (landed with
+`crcbl lod gen`), so the `cook`/`sphere` pair in
+`crates/crcbl-shaders/tools/cook-clusters.rs` was a second copy of the same
+transcription with nothing between them. The example calls `built.cook()` now
+and its own copy is gone;
+`cargo run -p crcbl-shaders --example cook-clusters -- --check` is what says the
+move changed no byte, and it was shown red by perturbing one cooked vertex index
+(`they first differ at byte 4972`).
+
+New is `MeshletBuild::into_clusters`, which is the flat-mesh half an application
+needs and had no spelling at all: `build_meshlets` produces three private `Vec`s
+and `crcbl_render::scene::Geometry::Flat` takes a
+`crcbl_shaders::meshlet::MeshClusters`. `ClusterDag::cook` goes through it now
+too (`level.clusters.clone().into_clusters()`, the same three allocations the
+three `to_vec`s cost), so the mapping lives in one place.

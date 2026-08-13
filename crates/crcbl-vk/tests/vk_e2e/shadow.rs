@@ -272,7 +272,14 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
 /// The open box under a sun at `to_light`, with the cube hanging over it.
 fn render_shadowed(to_light: glam::Vec3) -> ShadowFrame {
     render_scene(&ShadowScene {
-        prepare: &|renderer| renderer.set_open_box(Some(glam::Mat4::from_translation(BOX_AT))),
+        prepare: &|renderer| {
+            crate::mesh::place(
+                renderer,
+                crcbl_render::scene::DEMO_OPEN_BOX,
+                crcbl_render::scene::DEMO_UNTINTED,
+                glam::Mat4::from_translation(BOX_AT),
+            );
+        },
         camera: overhead_camera(),
         sun: crcbl_render::DirectionalLight {
             direction: to_light,
@@ -537,14 +544,19 @@ fn render_spot(caster: Option<f32>) -> ShadowFrame {
     render_scene(&ShadowScene {
         prepare: &move |renderer| {
             renderer.set_lights(&[spot_light()]);
-            renderer.set_pyramid(caster.map(|x| {
+            if let Some(x) = caster {
                 // The pyramid's base is at `-0.4` in its own space, so lifting
                 // it by that much of the scale stands it on `y = 0`. A caster
                 // floating above the floor would hide a shadow detached from it,
                 // which is what too much bias looks like.
-                glam::Mat4::from_translation(glam::Vec3::new(x, 0.4 * SPOT_CASTER_SCALE, 0.0))
-                    * glam::Mat4::from_scale(glam::Vec3::splat(SPOT_CASTER_SCALE))
-            }));
+                crate::mesh::place(
+                    renderer,
+                    crcbl_render::scene::DEMO_PYRAMID,
+                    crcbl_render::scene::DEMO_UNTINTED,
+                    glam::Mat4::from_translation(glam::Vec3::new(x, 0.4 * SPOT_CASTER_SCALE, 0.0))
+                        * glam::Mat4::from_scale(glam::Vec3::splat(SPOT_CASTER_SCALE)),
+                );
+            }
         },
         camera: spot_camera(),
         // Dim, so the pool and the shadow in it are the spot's work: a bright
@@ -814,8 +826,22 @@ fn render_point(caster: Option<glam::Vec3>, second: Option<glam::Vec3>) -> Shado
     render_scene(&ShadowScene {
         prepare: &move |renderer| {
             renderer.set_lights(&[point_light()]);
-            renderer.set_pyramid(caster.map(point_caster));
-            renderer.set_tinted_pyramid(second.map(point_caster));
+            // Two rows rather than one, so the pair is two objects in the frame
+            // rather than one drawn twice — the untinted row first, on the order
+            // the pool has always been filled in.
+            for (at, material) in [
+                (caster, crcbl_render::scene::DEMO_UNTINTED),
+                (second, crcbl_render::scene::DEMO_TINTED),
+            ] {
+                if let Some(at) = at {
+                    crate::mesh::place(
+                        renderer,
+                        crcbl_render::scene::DEMO_PYRAMID,
+                        material,
+                        point_caster(at),
+                    );
+                }
+            }
         },
         camera: point_camera(),
         // Dim, on `render_spot`'s terms: a bright sun would light the shadowed

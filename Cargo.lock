@@ -275,6 +275,7 @@ dependencies = [
  "crcbl-net",
  "crcbl-phys",
  "crcbl-render",
+ "crcbl-scene",
  "crcbl-server",
  "crcbl-shaders",
  "crcbl-shell",

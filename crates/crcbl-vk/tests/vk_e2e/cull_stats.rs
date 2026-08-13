@@ -82,13 +82,20 @@ fn the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer() {
     // see them: 500 units along +Z, which is behind an eye at z = 2.2 looking at
     // the origin. Two rather than one so a survivor count that reported the
     // *culled* half instead would read 2 and not 1.
-    let far_behind = |offset: f32| {
-        Some(glam::Mat4::from_translation(glam::Vec3::new(
-            offset, 0.0, 500.0,
-        )))
-    };
-    renderer.set_pyramid(far_behind(0.0));
-    renderer.set_tinted_pyramid(far_behind(2.0));
+    let far_behind =
+        |offset: f32| glam::Mat4::from_translation(glam::Vec3::new(offset, 0.0, 500.0));
+    crate::mesh::place(
+        &mut renderer,
+        crcbl_render::scene::DEMO_PYRAMID,
+        crcbl_render::scene::DEMO_UNTINTED,
+        far_behind(0.0),
+    );
+    crate::mesh::place(
+        &mut renderer,
+        crcbl_render::scene::DEMO_PYRAMID,
+        crcbl_render::scene::DEMO_TINTED,
+        far_behind(2.0),
+    );
 
     // Frame 1, and every frame up to the ring's length: the copy is in the
     // graph, the readback is in flight, and there is nothing to report.
@@ -196,9 +203,17 @@ fn the_ring_keeps_turning_and_the_count_follows_the_scene() {
     .expect("the forward renderer builds");
     place_cube(&mut renderer);
     let camera = mesh_camera(crcbl_render::Projection::default());
-    renderer.set_pyramid(Some(glam::Mat4::from_translation(glam::Vec3::new(
-        0.0, 0.0, 500.0,
-    ))));
+    // One slot for the pyramid, moved rather than re-inserted below: a second
+    // insert would leave the culled copy live and the survivor count would never
+    // come back down.
+    let pyramid_at = |at: glam::Vec3| crcbl_render::InstanceDesc {
+        mesh: crcbl_render::scene::DEMO_PYRAMID,
+        material: crcbl_render::scene::DEMO_UNTINTED,
+        transform: glam::Mat4::from_translation(at),
+    };
+    let pyramid = renderer
+        .add_instance(&pyramid_at(glam::Vec3::new(0.0, 0.0, 500.0)))
+        .expect("an instance pool of thousands has room for the pyramid");
 
     // Long enough for the ring to come round on the culled scene.
     for _ in 0..=RING_LATENCY {
@@ -213,9 +228,7 @@ fn the_ring_keeps_turning_and_the_count_follows_the_scene() {
     // Now bring it back where the camera can see it. The count must not change
     // on the very next frame — the ring is still carrying the old frames — and
     // must have changed once the ring has turned over.
-    renderer.set_pyramid(Some(glam::Mat4::from_translation(glam::Vec3::new(
-        0.9, 0.0, 0.0,
-    ))));
+    renderer.set_instance(pyramid, &pyramid_at(glam::Vec3::new(0.9, 0.0, 0.0)));
     render_mesh(&headless, &mut renderer, &mut pool, &camera);
     let straight_after = renderer.cull_stats().expect("still reporting");
     assert_eq!(

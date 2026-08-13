@@ -16,6 +16,41 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **The five demo setters are gone: `ForwardRenderer::set_pyramid`,
+  `set_tinted_pyramid`, `set_textured_pyramid`, `set_open_box` and
+  `set_dunes`.** Every one of them named a `scene::demo()` mesh and material row
+  by _position_, which is why `with_scene` refused any description shorter than
+  the demo's four meshes and three rows. Place the object instead —
+  `add_instance(&InstanceDesc { mesh: scene::DEMO_PYRAMID, material: scene::DEMO_TINTED, transform })`
+  — and hold the handle if you mean to move or remove it later: the setters kept
+  one internally, and a caller that inserts twice gets two live objects rather
+  than one that moved.
+
+  **Instance insertion order is entirely the caller's now**, and it is the LOD
+  hysteresis key: place objects in the order the setters did — the cube first
+  wherever there is one — or a `Geometry::Dag` object inherits another's
+  expanded-group state for a frame.
+
+  With them go the description floor (a **one-mesh, one-row** `SceneDesc` is a
+  scene) and `ForwardRenderer::place`'s swallowed `InstancePoolError::PoolFull`,
+  which logged and dropped an object because none of those five signatures could
+  report it.
+
+- **`ForwardRenderer::dunes_clusters()` and `dunes_level_buckets()` are
+  `cluster_range(mesh)` and `level_buckets(mesh)`.** Both used to publish the
+  demo scene's fourth mesh by index, and `build` computed them by indexing the
+  description at `DEMO_DUNES` — so a description with fewer meshes did not
+  merely get a wrong answer, it panicked. They take a `SceneDesc::meshes` index
+  now and answer for any resident mesh. `cluster_range` is still `None` off the
+  mesh path and `level_buckets` still empty on it.
+
+- **`set_dunes`' `bool` is `ForwardRenderer::selects_levels()`.** It answers
+  whether this renderer can choose _which level_ of a `Geometry::Dag` mesh an
+  object is drawn at — `false` only on a device with a mesh stage and no
+  amplification stage, which would emit every level of the DAG at once. A caller
+  placing a DAG asks it first; `add_instance` cannot refuse for that reason,
+  because its only error is a full pool.
+
 - **`crcbl_shaders::mesh::GpuMaterial` gained `metallic: f32` and
   `roughness: f32`, and `mesh.slang` shades with one GGX lobe driven by them.**
   Anything building a `GpuMaterial` literally has to name the two fields
@@ -235,7 +270,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   probe is the only one — has to bind a run and pass a base. The byte layout is
   unchanged.
 
-- **`ForwardRenderer::set_pyramid(None)` removes the instance** rather than
+- **Taking an object out of the scene removes its instance** rather than
   skipping a draw. An instance in the pool is an object in the scene now that
   culling decides what draws, so hiding an object and culling it off screen take
   the same path out of the frame.
@@ -366,6 +401,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::scene` — `crcbl-scene` behind the non-default `scene` feature, so an
+  application can reach the bake its own meshes need.** A
+  `render::scene::Geometry::Flat` carries a `MeshClusters` and a `Geometry::Dag`
+  a cooked `ClusterDag`, and `crcbl-render` can build neither: §3.5 makes the
+  cluster build a bake step precisely so the renderer never depends on `gltf`.
+  With the feature on, an application calls `build_meshlets` and the new
+  `MeshletBuild::into_clusters()`, or `build_cluster_dag` and
+  `ClusterDag::cook`, and hands the result to `ForwardRenderer::with_scene`.
+
+  **Off by default**, on `crcbl-sprite`'s `load`/`bake` terms: a game shipping
+  cooked meshes links no glTF parser, and neither does a browser build —
+  `cargo tree -p crcbl -e normal` finds no `gltf` until `--features scene`.
+
+- **`MeshletBuild::into_clusters()` → `crcbl_shaders::meshlet::MeshClusters`.**
+  A rename of the three arrays the builder already produces, and the only way an
+  application had of turning `build_meshlets` output into what a resident mesh
+  takes. `ClusterDag::cook` goes through it too, so there is one spelling of the
+  mapping, and `crcbl-shaders`' `cook-clusters` example calls `ClusterDag::cook`
+  rather than keeping a second copy of it.
+
 - **`ForwardRenderer::add_instance` / `set_instance` / `remove_instance`:
   instances are a runtime API, so an application can put its own objects in the
   scene.** `scene::InstanceDesc` is `{ mesh, material, transform }`, and both
@@ -374,13 +429,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   no way to know. `add_instance` returns an `InstanceHandle` or
   `InstancePoolError::PoolFull`; a stale handle rewrites and removes nothing.
 
-  The five demo setters — `set_pyramid`, `set_tinted_pyramid`,
-  `set_textured_pyramid`, `set_open_box`, `set_dunes` — keep their exact
-  signatures and are wrappers over the new calls, so every caller is untouched,
-  `set_dunes` still reports whether the device can choose a level, and **no
-  golden moved**. `begin_frame`'s cube goes through `set_instance` too. The
-  renderer resolves any description's mesh and material indices now rather than
-  holding seven ids read out of `scene::demo`'s positions.
+  The renderer resolves any description's mesh and material indices now rather
+  than holding seven ids read out of `scene::demo`'s positions. The five demo
+  setters survived one slice as wrappers over these calls and are gone — see
+  Breaking, above.
 
   Two things a caller placing objects needs from the docs, both on
   `add_instance`: an instance's **array index is the LOD hysteresis key**
@@ -388,7 +440,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `remove_instance` hands the next object the previous occupant's expanded-group
   history for one frame; and a `Geometry::Dag` mesh is not drawable on a device
   with a mesh stage and no amplification stage, which is what
-  `ForwardRenderer::culls_clusters` answers.
+  `ForwardRenderer::selects_levels` answers.
 
 - **`crcbl_render::scene` and `ForwardRenderer::with_scene`: the resident set is
   a description now, not something the renderer uploads to itself.** `SceneDesc`
@@ -422,10 +474,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   exception, because objects are placed while the renderer runs: filling it is
   `InstancePoolError::PoolFull` from `add_instance`.
 
-  The five `set_*` methods still name description meshes and rows by position,
-  and `with_scene` refuses a description shorter than they need. That, and
-  `Geometry::Dag`'s documented limitation that `crcbl_scene::simplify` is
-  position-only so a coarse level's attributes are the caller's to supply, are
+  `Geometry::Dag`'s documented limitation — `crcbl_scene::simplify` is
+  position-only, so a coarse level's attributes are the caller's to supply — is
   in `docs/backlog.md`.
 
 - **`crcbl screenshot --scene` reaches every scene the engine draws.**

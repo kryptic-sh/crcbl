@@ -82,8 +82,8 @@ use glam::Mat4;
 /// colour it touches: a tint that left a channel at `1.0` would leave the
 /// pyramid's white base looking like a lighting difference, and one that left
 /// them equal would be a brightness change a shading bug could also produce.
-/// See [`set_tinted_pyramid`](crate::forward::ForwardRenderer::set_tinted_pyramid),
-/// which is the pair this exists for.
+/// Carried by [`DEMO_TINTED`], which is the row a second instance of the pyramid
+/// mesh is placed through — the pair this exists for.
 pub const PYRAMID_TINT: [f32; 4] = [0.15, 0.45, 1.0, 1.0];
 
 /// The second material's roughness, and the whole of what makes the **shading**
@@ -124,8 +124,7 @@ pub const PAGE_EXTENT: u32 = 2;
 /// Bytes in one layer of [`demo`]'s page: [`PAGE_EXTENT`]² RGBA texels.
 const PAGE_LAYER_BYTES: usize = (PAGE_EXTENT * PAGE_EXTENT) as usize * 4;
 
-/// The layer [`set_textured_pyramid`](crate::forward::ForwardRenderer::set_textured_pyramid)
-/// shades with — the one [`demo`] appends past
+/// The layer [`DEMO_TEXTURED`] shades with — the one [`demo`] appends past
 /// [`PageDesc::UNTEXTURED_LAYER`].
 pub const CHECKER_LAYER: u32 = 1;
 

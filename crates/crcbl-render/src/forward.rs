@@ -32,11 +32,11 @@
 //! What *is* here since 2026-08 is [`crate::material_table`]: §3.2's material
 //! table, holding **both** halves of "texture indices + factors", with
 //! [`mesh::GpuInstance::material`] selecting a row. Three rows are resident and
-//! two of them exist to be seen: [`ForwardRenderer::set_tinted_pyramid`]'s
-//! differs from the default row in its factor and its roughness, and
-//! [`ForwardRenderer::set_textured_pyramid`]'s in its base-colour page layer
-//! alone. Which rows those are is [`crate::scene::demo`]'s to say, and so is why
-//! the shading factor rides on that row rather than on a fourth.
+//! two of them exist to be seen: [`scene::DEMO_TINTED`] differs from the default
+//! row in its factor and its roughness, and [`scene::DEMO_TEXTURED`] in its
+//! base-colour page layer alone. Which rows those are is [`crate::scene::demo`]'s
+//! to say, and so is why the shading factor rides on that row rather than on a
+//! fourth.
 //!
 //! The page is the texture side, and it is one `D2Array` image rather than an
 //! array of descriptors — `BindingModel::ArrayPages` rather than `Bindless`.
@@ -105,7 +105,7 @@
 //! [`mesh::pyramid_vertices`], draw its own geometry rather than the cube's.
 //!
 //! The pyramid is in the pools from `new` but has no *instance* until a caller
-//! asks for one with [`ForwardRenderer::set_pyramid`] — an instance in the pool
+//! places one with [`ForwardRenderer::add_instance`] — an instance in the pool
 //! is an object in the scene now that culling decides what draws. The frame the
 //! samples draw is still the cube alone, which is why their golden images did
 //! not move either.
@@ -121,9 +121,8 @@
 //! [`crate::mesh_pool`], and it is what §3.5's per-cluster culling will need
 //! before a surviving-cluster count can mean anything.
 //!
-//! It arrives on [`ForwardRenderer::set_open_box`]' terms exactly: resident from
-//! `new`, in the scene only when a caller asks, so no golden moved for it
-//! either.
+//! It arrives on the pyramid's terms exactly: resident from `new`, in the scene
+//! only when a caller places it, so no golden moved for it either.
 //!
 //! # Uniforms are a ring, and they have to be
 //!
@@ -161,10 +160,7 @@ use crate::light::{Light, sun_row};
 use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
-use crate::scene::{
-    self, DEMO_DUNES, DEMO_OPEN_BOX, DEMO_PYRAMID, DEMO_TEXTURED, DEMO_TINTED, DEMO_UNTINTED,
-    Geometry, InstanceDesc, SceneDesc,
-};
+use crate::scene::{self, Geometry, InstanceDesc, SceneDesc};
 use crate::shadow::{self, Cascades};
 use crate::ssao::{Ssao, cached_group};
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
@@ -257,22 +253,6 @@ const AMBIENT_OCCLUSION_NONE: u8 = 0xFF;
 /// the mirror is checked here — which is the only place both names are in scope.
 const _: () = assert!(crcbl_hal::depth::CLEAR == crcbl_shaders::ssao::DEPTH_FAR);
 
-/// How many description meshes and material rows the five `set_*` methods name
-/// by position, so a description that cannot satisfy them is refused rather than
-/// indexed past.
-///
-/// **This is the demo methods' requirement, not
-/// [`ForwardRenderer::with_scene`]'s.** The renderer resolves an
-/// [`InstanceDesc::mesh`] index through [`ForwardRenderer::mesh_ids`] for any
-/// description at all; what is positional is that `set_pyramid` means
-/// [`scene::demo`]'s second mesh, because that is what a method named for the
-/// pyramid can mean. An application places its own objects with
-/// [`ForwardRenderer::add_instance`] and never calls them — but they are on the
-/// type whatever description built it, so a description too short to satisfy
-/// them is refused rather than indexed past.
-const REQUIRED_MESHES: usize = DEMO_DUNES + 1;
-const REQUIRED_MATERIALS: usize = DEMO_TEXTURED + 1;
-
 /// How many buckets a resident mesh occupies, which is **not the same on every
 /// geometry path** — the one place in this renderer the two differ in shape
 /// rather than in the call they record.
@@ -287,7 +267,7 @@ const REQUIRED_MATERIALS: usize = DEMO_TEXTURED + 1;
 /// the same plan takes a uniform cut and a level is drawn as an ordinary index
 /// range: a DAG's levels are separate mesh table entries, `draw_gen.slang`
 /// selects one per instance, and a bucket is what an indexed draw of one index
-/// range *is*. See [`ForwardRenderer::dunes_level_buckets`].
+/// range *is*. See [`ForwardRenderer::level_buckets`].
 const fn buckets_for(levels: usize, emit: EmitTail) -> usize {
     if emit.is_mesh() { 1 } else { levels }
 }
@@ -523,27 +503,6 @@ pub struct ForwardRenderer {
     // rewritten per frame: the pool uploads what a caller changed and nothing
     // else, so a scene nobody moved costs no transfer at all.
     instances: InstancePool,
-    /// The pyramid's instance while a caller is asking for one.
-    ///
-    /// `None` is how it is *hidden*: an instance that is in the pool is in the
-    /// scene, because the frame no longer records a draw per object and the
-    /// cull pass is what decides what is drawn. See
-    /// [`ForwardRenderer::set_pyramid`].
-    pyramid_instance: Option<InstanceHandle>,
-    /// A second instance of the pyramid mesh, shaded through the table's other
-    /// row. See [`ForwardRenderer::set_tinted_pyramid`], which is what puts it
-    /// in the scene and what it is for.
-    tinted_pyramid_instance: Option<InstanceHandle>,
-    /// A third, shaded through a row that differs from the first's in nothing
-    /// but its page layer. See [`ForwardRenderer::set_textured_pyramid`].
-    textured_pyramid_instance: Option<InstanceHandle>,
-    /// The open box's instance while a caller is asking for one, on the
-    /// pyramid's terms exactly. See [`ForwardRenderer::set_open_box`].
-    open_box_instance: Option<InstanceHandle>,
-    /// The dunes patch's instance, likewise. See
-    /// [`ForwardRenderer::set_dunes`], which is also where the one condition
-    /// this object has and the others do not is written down.
-    dunes_instance: Option<InstanceHandle>,
     /// The mesh table id of each description mesh's **level 0**, in
     /// [`SceneDesc::meshes`] order — what an [`InstanceDesc::mesh`] index
     /// resolves through.
@@ -606,14 +565,15 @@ pub struct ForwardRenderer {
     /// front of it — see [`ForwardRenderer::culls_clusters`], which is where
     /// what it means is written down.
     culls_clusters: bool,
-    /// Where the dunes DAG's clusters are in [`ForwardRenderer::clusters`] —
-    /// every level of it, as one run. `None` off the mesh path, where there is
-    /// no cluster pool at all.
-    dunes_clusters: Option<ClusterRange>,
-    /// The bucket each level of the dunes DAG draws through, finest first, and
-    /// empty on the mesh path. See
-    /// [`ForwardRenderer::dunes_level_buckets`].
-    dunes_level_buckets: Vec<u32>,
+    /// Where each description mesh's clusters are in
+    /// [`ForwardRenderer::clusters`] — every level of it, as one run, in
+    /// [`SceneDesc::meshes`] order. Empty off the mesh path, where there is no
+    /// cluster pool at all. See [`ForwardRenderer::cluster_range`].
+    mesh_clusters: Vec<ClusterRange>,
+    /// The bucket each level of each description mesh draws through, finest
+    /// first, in [`SceneDesc::meshes`] order — and empty on the mesh path. See
+    /// [`ForwardRenderer::level_buckets`].
+    mesh_level_buckets: Vec<Vec<u32>>,
     /// One buffer per frame in flight holding the cut the descent chose, or
     /// empty where there is no amplification stage to choose one. See
     /// [`ForwardRenderer::cluster_selection`].
@@ -1498,21 +1458,18 @@ impl ForwardRenderer {
     /// dynamic rendering checks pipeline and attachment formats against each
     /// other at pass-begin time, not at creation.
     ///
-    /// # The demo setters still read the description by position
+    /// # No description is too small
     ///
-    /// Instances are a runtime API — [`ForwardRenderer::add_instance`], which
-    /// names its mesh and its row by description index — but the five `set_*`
-    /// wrappers beside it name description meshes by **position**: the cube, the
-    /// pyramid, the open box and the dunes patch of [`scene::demo`], in that
-    /// order, shaded through the first three material rows. A description
-    /// shorter than that is refused rather than accepted into a renderer whose
-    /// `set_pyramid` has no mesh to name.
+    /// One mesh and one material row is a scene, and so is
+    /// [`scene::demo`]'s four and three. Nothing on this type names a
+    /// description entry by position any more — the five `set_*` demo wrappers
+    /// that did are gone, and [`ForwardRenderer::add_instance`] takes the mesh
+    /// and the row a caller wrote its **own** description in.
     ///
     /// # Errors
     ///
     /// [`HalError::InvalidDescriptor`] if the description cannot be made
-    /// resident as written: fewer meshes or material rows than the paragraph
-    /// above names, a page layer that is not the extent's worth of RGBA8, a page
+    /// resident as written: a page layer that is not the extent's worth of RGBA8, a page
     /// whose layer 0 is not opaque white, a material row naming a layer the page
     /// has not got, a DAG carrying a vertex array for anything but each of its
     /// levels, or more vertices, indices, mesh table entries or material rows
@@ -1559,15 +1516,6 @@ impl ForwardRenderer {
     /// is wrong with it.
     fn check_scene(scene: &SceneDesc<'_>) -> Result<(), HalError> {
         let refuse = |what: String| Err(HalError::InvalidDescriptor(what));
-        if scene.meshes.len() < REQUIRED_MESHES || scene.materials.len() < REQUIRED_MATERIALS {
-            return refuse(format!(
-                "a scene of {} mesh(es) and {} material row(s); the renderer's set_* methods \
-                 name {REQUIRED_MESHES} meshes and {REQUIRED_MATERIALS} rows by position",
-                scene.meshes.len(),
-                scene.materials.len()
-            ));
-        }
-
         // Every layer's length, and **layer 0's whiteness** — the invariant
         // whose failure is a global albedo scale on every untextured surface.
         // Checked by the type that owns the page rather than here, because that
@@ -1915,7 +1863,7 @@ impl ForwardRenderer {
         // dispatch and that pass writes the argument structure carrying them.
         let mut bucket_clusters = vec![0u32; bucket_meshes.len()];
         let mut bucket_cluster_bases = vec![0u32; bucket_meshes.len()];
-        let mut dunes_clusters: Option<ClusterRange> = None;
+        let mut mesh_clusters: Vec<ClusterRange> = Vec::new();
         if emit.is_mesh() {
             // A flat mesh is one pool entry and its clusters carry
             // `ClusterSelect::ALWAYS`, so the descent draws them from every
@@ -1956,6 +1904,7 @@ impl ForwardRenderer {
             // reaches to the end of the last level. That is what lets one
             // dispatch cover a cut spanning several of them — and it is why a
             // flat mesh, whose one entry is the whole sum, needs no second case.
+            mesh_clusters.reserve(residents.len());
             for (index, resident) in residents.iter().enumerate() {
                 let entry = entry_bases[index];
                 let bucket = bucket_bases[index];
@@ -1963,11 +1912,11 @@ impl ForwardRenderer {
                 bucket_clusters[bucket] = (entry..entry + resident.levels.len())
                     .map(|entry| range(entry).count)
                     .sum();
+                mesh_clusters.push(ClusterRange {
+                    base: bucket_cluster_bases[bucket],
+                    count: bucket_clusters[bucket],
+                });
             }
-            dunes_clusters = Some(ClusterRange {
-                base: bucket_cluster_bases[bucket_bases[DEMO_DUNES]],
-                count: bucket_clusters[bucket_bases[DEMO_DUNES]],
-            });
 
             rollback.clusters = Some(clusters);
         }
@@ -3122,10 +3071,6 @@ impl ForwardRenderer {
                 .instances
                 .take()
                 .unwrap_or_else(|| unreachable!("the pool was placed in the rollback above")),
-            pyramid_instance: None,
-            tinted_pyramid_instance: None,
-            textured_pyramid_instance: None,
-            open_box_instance: None,
             mesh_ids,
             materials: rollback
                 .materials
@@ -3145,20 +3090,26 @@ impl ForwardRenderer {
             culls_clusters,
             uniforms,
             draw_constants,
-            dunes_instance: None,
-            dunes_clusters,
-            // One per level where the cull pass takes a uniform cut, and none
-            // where the amplification stage takes a per-cluster one — read off
-            // the bucket table that was actually built rather than re-derived
-            // from the path.
-            dunes_level_buckets: if emit.is_mesh() {
+            mesh_clusters,
+            // One entry per description mesh, each holding one bucket per level,
+            // where the cull pass takes a uniform cut — and nothing at all where
+            // the amplification stage takes a per-cluster one. Read off the
+            // bucket table that was actually built rather than re-derived from
+            // the path.
+            mesh_level_buckets: if emit.is_mesh() {
                 Vec::new()
             } else {
-                let base = bucket_bases[DEMO_DUNES];
-                (base..base + residents[DEMO_DUNES].levels.len())
-                    .map(|bucket| {
-                        u32::try_from(bucket)
-                            .unwrap_or_else(|_| unreachable!("a table of a few buckets"))
+                residents
+                    .iter()
+                    .enumerate()
+                    .map(|(index, resident)| {
+                        let base = bucket_bases[index];
+                        (base..base + resident.levels.len())
+                            .map(|bucket| {
+                                u32::try_from(bucket)
+                                    .unwrap_or_else(|_| unreachable!("a table of a few buckets"))
+                            })
+                            .collect()
                     })
                     .collect()
             },
@@ -3819,9 +3770,8 @@ impl ForwardRenderer {
     /// bucket, which for a DAG is every level at once — several overlapping
     /// copies of one surface. This does not refuse it, because it has no
     /// vocabulary for that refusal; a caller placing a DAG asks
-    /// [`ForwardRenderer::culls_clusters`] first, which is what
-    /// [`ForwardRenderer::set_dunes`] does for the demo's own DAG and what its
-    /// `bool` reports. A flat mesh is unaffected on every path.
+    /// [`ForwardRenderer::selects_levels`] first, and places it only where that
+    /// says yes. A flat mesh is unaffected on every path.
     ///
     /// # Errors
     ///
@@ -3891,217 +3841,6 @@ impl ForwardRenderer {
             material: self.material_ids[desc.material],
             ..mesh::GpuInstance::default()
         }
-    }
-
-    /// Puts `desc` in `slot`, or takes whatever is there back out when it is
-    /// `None`, and answers with what `slot` now holds.
-    ///
-    /// The body the five `set_*` methods below share: each holds an optional
-    /// handle and each means the same three things by it — [`add_instance`] when
-    /// there is nothing there, [`set_instance`] when there is, and
-    /// [`remove_instance`] on `None`. **That laziness is load-bearing**: a
-    /// setter called twice with a transform must cost one insert and one rewrite,
-    /// not two inserts, or every one of these leaks a pool slot per call.
-    ///
-    /// The handle goes in and comes back out rather than being borrowed, because
-    /// the slot is a field of the same renderer these methods take `&mut` of.
-    ///
-    /// `what` names the object in the one message this can produce. A pool with
-    /// room for thousands is full only if a caller filled it, and the failure is
-    /// logged rather than propagated: none of the five signatures says anything
-    /// about a pool, and a frame that draws one fewer object is better than a
-    /// frame loop that stops. [`add_instance`] is where an application gets that
-    /// failure instead of this line.
-    ///
-    /// [`add_instance`]: ForwardRenderer::add_instance
-    /// [`set_instance`]: ForwardRenderer::set_instance
-    /// [`remove_instance`]: ForwardRenderer::remove_instance
-    fn place(
-        &mut self,
-        slot: Option<InstanceHandle>,
-        desc: Option<&InstanceDesc>,
-        what: &str,
-    ) -> Option<InstanceHandle> {
-        let Some(desc) = desc else {
-            if let Some(handle) = slot {
-                self.remove_instance(handle);
-            }
-            return None;
-        };
-        match slot {
-            Some(handle) => {
-                self.set_instance(handle, desc);
-                Some(handle)
-            }
-            None => match self.add_instance(desc) {
-                Ok(handle) => Some(handle),
-                Err(error) => {
-                    log::error!("forward: {what} has no instance slot: {error}");
-                    None
-                }
-            },
-        }
-    }
-
-    /// Puts the pool's second mesh in the frame at `model`, or takes it back out
-    /// with `None`.
-    ///
-    /// **This is what makes a non-zero `MeshRange::base_vertex` observable**, and
-    /// it is why it is here at all: the pyramid is uploaded after the cube, so
-    /// it is the pool's first resident that is not at base 0, and a frame
-    /// containing it is a frame that fails if the base is lost on the way to the
-    /// shader. See the module docs for the disagreement that made losing it the
-    /// default.
-    ///
-    /// Off by default, so the frame every sample draws is the cube alone.
-    ///
-    /// **`None` removes the instance rather than skipping a draw**, because the
-    /// frame no longer records a draw per object: the pass draws whatever the
-    /// cull pass kept, and an instance left in the pool at the origin would be
-    /// kept. [`InstancePool::remove`] clears the record's live bit, which is
-    /// what `cull.slang` asks before it reads anything else — so hiding the
-    /// pyramid and culling it off screen take the same path out of the frame.
-    ///
-    /// Takes effect at the next [`ForwardRenderer::begin_frame`], which is what
-    /// uploads the change.
-    pub fn set_pyramid(&mut self, model: Option<Mat4>) {
-        // [`DEMO_PYRAMID`] and not the description's first mesh: without it the
-        // instance names table entry 0, which is the cube — and it would draw a
-        // second cube here rather than nothing, which is the failure the whole
-        // second resident exists to make visible.
-        let desc = model.map(|transform| InstanceDesc {
-            mesh: DEMO_PYRAMID,
-            material: DEMO_UNTINTED,
-            transform,
-        });
-        self.pyramid_instance = self.place(self.pyramid_instance, desc.as_ref(), "the pyramid");
-    }
-
-    /// Puts a **second instance of the pyramid mesh** in the frame at `model`,
-    /// shaded through a material of its own, or takes it back out with `None`.
-    ///
-    /// **This is what makes `GpuInstance::material` observable**, and it is why
-    /// it is here at all. The two pyramids carry the same mesh id, the same
-    /// orientation and the same size; the *only* field they differ in is the
-    /// material, so a frame in which they are the same colour is a frame where
-    /// the id indexed nothing. That is a claim no single-material scene can
-    /// make — a tint applied to the one pyramid would pass just as well if the
-    /// shader keyed the colour off the mesh id.
-    ///
-    /// [`ForwardRenderer::set_pyramid`]'s sibling in every other respect: off
-    /// by default, `None` removes the instance rather than skipping a draw, and
-    /// the change takes effect at the next [`ForwardRenderer::begin_frame`].
-    /// See that method for why each of those is what it is.
-    pub fn set_tinted_pyramid(&mut self, model: Option<Mat4>) {
-        let desc = model.map(|transform| InstanceDesc {
-            mesh: DEMO_PYRAMID,
-            material: DEMO_TINTED,
-            transform,
-        });
-        self.tinted_pyramid_instance = self.place(
-            self.tinted_pyramid_instance,
-            desc.as_ref(),
-            "the tinted pyramid",
-        );
-    }
-
-    /// Puts a **third instance of the pyramid mesh** in the frame at `model`,
-    /// shaded through a material whose only difference from
-    /// [`ForwardRenderer::set_pyramid`]'s is its base-colour page layer, or
-    /// takes it back out with `None`.
-    ///
-    /// **This is what makes `GpuMaterial::base_color_texture` observable**, and
-    /// it is why it is here at all. It is [`ForwardRenderer::set_tinted_pyramid`]'s
-    /// argument moved one column along: that pair's two rows differ in their
-    /// factor and this pair's differ in their texture, so each column has a pair
-    /// of its own and neither can be mistaken for the other. A frame in which
-    /// this pyramid and the plain one are the same picture is a frame where the
-    /// layer index indexed nothing — and because the layer is four unequal
-    /// texels rather than a flat colour, it is also a frame that fails if the
-    /// texture coordinate never reached the fragment stage.
-    ///
-    /// [`ForwardRenderer::set_pyramid`]'s sibling in every other respect: off
-    /// by default, `None` removes the instance rather than skipping a draw, and
-    /// the change takes effect at the next [`ForwardRenderer::begin_frame`].
-    pub fn set_textured_pyramid(&mut self, model: Option<Mat4>) {
-        let desc = model.map(|transform| InstanceDesc {
-            mesh: DEMO_PYRAMID,
-            material: DEMO_TEXTURED,
-            transform,
-        });
-        self.textured_pyramid_instance = self.place(
-            self.textured_pyramid_instance,
-            desc.as_ref(),
-            "the textured pyramid",
-        );
-    }
-
-    /// Puts the pool's third mesh — the open box — in the frame at `model`, or
-    /// takes it back out with `None`.
-    ///
-    /// **This is what makes a cluster at a non-zero `vertex_offset` observable
-    /// in a rendered frame**, and it is why the mesh is here at all. The cube
-    /// and the pyramid are one cluster each, so on
-    /// [`GeometryPath::MeshShader`] every workgroup they draw reads cluster
-    /// zero of its mesh and a run that starts at zero; the open box is five
-    /// clusters, one per face, and four of them are not. A mesh stage that
-    /// dropped the offset draws the first face five times over — the same
-    /// triangle count, the same buffer sizes, a different picture.
-    ///
-    /// It is also the mesh §3.5's per-cluster culling needs: with one cluster
-    /// per mesh, rejecting a cluster and rejecting the whole mesh are the same
-    /// act and no count can tell them apart.
-    ///
-    /// [`ForwardRenderer::set_pyramid`]'s sibling in every other respect: off
-    /// by default, `None` removes the instance rather than skipping a draw, and
-    /// the change takes effect at the next [`ForwardRenderer::begin_frame`].
-    pub fn set_open_box(&mut self, model: Option<Mat4>) {
-        let desc = model.map(|transform| InstanceDesc {
-            mesh: DEMO_OPEN_BOX,
-            material: DEMO_UNTINTED,
-            transform,
-        });
-        self.open_box_instance = self.place(self.open_box_instance, desc.as_ref(), "the open box");
-    }
-
-    /// Puts the dunes patch in the scene at `model`, or takes it out.
-    ///
-    /// `docs/plan/25-lod.md`'s model, and the only resident with a **cluster
-    /// DAG**: a 64-unit height field whose far edge is many times further from
-    /// a viewer standing at its near edge, so one cut through that DAG draws its
-    /// two ends at different levels. That is the whole reason the mesh exists —
-    /// a cube subtends one distance and asks the same question of every cluster.
-    ///
-    /// # One device cannot draw it, and says so rather than approximating
-    ///
-    /// A level gets chosen on every geometry path — per cluster in the
-    /// amplification stage, and per instance in the cull pass where there is no
-    /// such stage — **except** on a device that reports a mesh stage and no
-    /// [`Features::TASK_SHADER`]. That one draws through `mesh_cluster.slang`'s
-    /// un-amplified `meshMain`, which emits every cluster of the bucket, and for
-    /// a DAG that is every level at once: several overlapping copies of one
-    /// surface. So this refuses there rather than drawing that, and the return
-    /// says which happened. The two indirect tails have no such stage to be
-    /// missing a companion for — `draw_gen.slang` takes a uniform cut and the
-    /// bucket it selects is one level's index range.
-    ///
-    /// Every other resident is a single level and is unaffected: their clusters
-    /// carry [`ClusterSelect::ALWAYS`] and their `MeshLevels` record resolves to
-    /// themselves, so both selections draw them from every camera.
-    ///
-    /// [`Features::TASK_SHADER`]: crcbl_hal::Features::TASK_SHADER
-    /// [`ClusterSelect::ALWAYS`]: crcbl_shaders::cluster_select::ClusterSelect::ALWAYS
-    pub fn set_dunes(&mut self, model: Option<Mat4>) -> bool {
-        if model.is_some() && self.emit.is_mesh() && !self.culls_clusters {
-            return false;
-        }
-        let desc = model.map(|transform| InstanceDesc {
-            mesh: DEMO_DUNES,
-            material: DEMO_UNTINTED,
-            transform,
-        });
-        self.dunes_instance = self.place(self.dunes_instance, desc.as_ref(), "the dunes patch");
-        true
     }
 
     /// The lights in the frame **beside the sun**, which
@@ -4238,16 +3977,23 @@ impl ForwardRenderer {
         self.shadow_lod_params
     }
 
-    /// Where the dunes DAG's clusters are in the cluster pool — every level, as
-    /// one run — or `None` off the mesh path.
+    /// Where description mesh `mesh`'s clusters are in the cluster pool — every
+    /// level of it, as one run — or `None` off the mesh path, where there is no
+    /// cluster pool at all.
     ///
     /// The base a reader adds a `(level, cluster)` to in order to index
     /// [`cluster_selection`](Self::cluster_selection): the levels are laid down
     /// finest first and contiguously, so level `d` cluster `c` is at
-    /// `base + (clusters of levels below d) + c`.
+    /// `base + (clusters of levels below d) + c`. A flat mesh is one level, so
+    /// its run is its clusters and `c` indexes it directly.
+    ///
+    /// # Panics
+    ///
+    /// If `mesh` is past the end of the description this renderer was built
+    /// from, on [`add_instance`](Self::add_instance)'s terms.
     #[must_use]
-    pub const fn dunes_clusters(&self) -> Option<ClusterRange> {
-        self.dunes_clusters
+    pub fn cluster_range(&self, mesh: usize) -> Option<ClusterRange> {
+        (!self.mesh_clusters.is_empty()).then(|| self.mesh_clusters[mesh])
     }
 
     /// The buffer `frame`'s amplification stage recorded its chosen cut into:
@@ -4276,7 +4022,7 @@ impl ForwardRenderer {
     /// and this is the only thing that carries it out of a frame — the colour
     /// pass overwrites [`cluster_selection`](Self::cluster_selection) after the
     /// cascades have run. Indexed and read exactly as that buffer is, through
-    /// [`dunes_clusters`](Self::dunes_clusters).
+    /// [`cluster_range`](Self::cluster_range).
     ///
     /// `None` where there is no amplification stage, and where `cascade` is not
     /// one of [`shadow::CASCADES`].
@@ -4288,7 +4034,7 @@ impl ForwardRenderer {
             .copied()
     }
 
-    /// The buckets the dunes patch's DAG levels draw through, finest first —
+    /// The buckets description mesh `mesh`'s levels draw through, finest first —
     /// element `d` is level `d`'s bucket, and it is empty on the mesh path.
     ///
     /// **This is the uniform cut's observable**, and it is the indirect
@@ -4300,18 +4046,26 @@ impl ForwardRenderer {
     /// and looks at
     /// [`DrawIndexedArgs::instance_count`](crcbl_shaders::draw_gen::DrawIndexedArgs::instance_count).
     ///
-    /// Empty on [`GeometryPath::MeshShader`], where the DAG is one bucket and
-    /// the level is chosen per cluster instead — see
+    /// Empty on [`GeometryPath::MeshShader`], where a mesh is one bucket and the
+    /// level is chosen per cluster instead — see
     /// [`cluster_selection`](Self::cluster_selection), which is that path's
     /// observable.
+    ///
+    /// # Panics
+    ///
+    /// If `mesh` is past the end of the description this renderer was built
+    /// from, on [`add_instance`](Self::add_instance)'s terms.
     #[must_use]
-    pub fn dunes_level_buckets(&self) -> &[u32] {
-        &self.dunes_level_buckets
+    pub fn level_buckets(&self, mesh: usize) -> &[u32] {
+        if self.mesh_level_buckets.is_empty() {
+            return &[];
+        }
+        &self.mesh_level_buckets[mesh]
     }
 
     /// `frame`'s indirect draw arguments, [`crcbl_shaders::draw_gen::DRAW_ARGS_SIZE`]
     /// bytes per bucket — what a reader of
-    /// [`dunes_level_buckets`](Self::dunes_level_buckets) copies out.
+    /// [`level_buckets`](Self::level_buckets) copies out.
     ///
     /// # Panics
     ///
@@ -4977,6 +4731,34 @@ impl ForwardRenderer {
         self.culls_clusters
     }
 
+    /// Whether this renderer can choose **which level** of a
+    /// [`Geometry::Dag`] mesh an object is drawn at, and therefore whether
+    /// [`ForwardRenderer::add_instance`] may be given one at all.
+    ///
+    /// `docs/plan/25-lod.md`'s selection happens in the amplification stage where
+    /// there is one, and in the cull pass where the tail is indirect and a level
+    /// is an ordinary index range. **One device shape has neither**: a mesh stage
+    /// with [`Features::MESH_SHADER`](crcbl_hal::Features::MESH_SHADER) and no
+    /// [`Features::TASK_SHADER`](crcbl_hal::Features::TASK_SHADER) draws through
+    /// `mesh_cluster.slang`'s un-amplified `meshMain`, which emits every cluster
+    /// of the bucket — and a DAG's bucket is every level end to end, so the frame
+    /// is several overlapping copies of one surface. That is a real and supported
+    /// device state rather than a degradation, so this reports it instead of
+    /// refusing to build.
+    ///
+    /// A [`Geometry::Flat`] mesh is one level and is unaffected: its clusters
+    /// carry [`ClusterSelect::ALWAYS`] and every path draws it from every camera,
+    /// which is why this is asked only before placing a DAG.
+    ///
+    /// Asked of the renderer rather than of the device for
+    /// [`ForwardRenderer::culls_clusters`]' reason: it reports what was built.
+    ///
+    /// [`ClusterSelect::ALWAYS`]: crcbl_shaders::cluster_select::ClusterSelect::ALWAYS
+    #[must_use]
+    pub const fn selects_levels(&self) -> bool {
+        !self.emit.is_mesh() || self.culls_clusters
+    }
+
     /// Which frame-in-flight slot the last [`ForwardRenderer::begin_frame`]
     /// rotated to, which is the slot every per-frame buffer is indexed by.
     #[must_use]
@@ -5212,7 +4994,10 @@ fn named_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::DEMO_CUBE;
+    use crate::scene::{
+        DEMO_CUBE, DEMO_DUNES, DEMO_OPEN_BOX, DEMO_PYRAMID, DEMO_TEXTURED, DEMO_TINTED,
+        DEMO_UNTINTED,
+    };
     use crcbl_hal::null::{NullInstance, Recorder};
     use crcbl_hal::{DeviceDesc, Features, Instance, QueueKind};
 
@@ -5227,19 +5012,34 @@ mod tests {
         (recorder, device, queue)
     }
 
-    /// Puts [`scene::demo`]'s cube in the frame the way a caller does, and
-    /// **first**, so it takes the pool slot it has always had.
+    /// Puts one of [`scene::demo`]'s meshes in the frame the way a caller does.
+    ///
+    /// **Insertion order is what the caller decides**, and it is load-bearing:
+    /// the slot an object lands in is `docs/plan/25-lod.md`'s hysteresis key. So
+    /// every test below places its objects in the order the frame used to hold
+    /// them — the cube first, wherever there is one.
+    fn place_demo(
+        renderer: &mut ForwardRenderer,
+        mesh: usize,
+        material: usize,
+        transform: Mat4,
+    ) -> InstanceHandle {
+        renderer
+            .add_instance(&InstanceDesc {
+                mesh,
+                material,
+                transform,
+            })
+            .expect("a pool of thousands has room for a handful of objects")
+    }
+
+    /// [`scene::demo`]'s cube, placed **first** so it takes the pool slot it has
+    /// always had.
     ///
     /// `begin_frame` used to write this object for every caller; the tests below
     /// that are about a frame with something in it place it themselves now.
     fn place_cube(renderer: &mut ForwardRenderer, transform: Mat4) -> InstanceHandle {
-        renderer
-            .add_instance(&InstanceDesc {
-                mesh: DEMO_CUBE,
-                material: DEMO_UNTINTED,
-                transform,
-            })
-            .expect("an empty pool of thousands has room for one cube")
+        place_demo(renderer, DEMO_CUBE, DEMO_UNTINTED, transform)
     }
 
     /// The whole renderer builds and tears down against a backend with no
@@ -5307,7 +5107,12 @@ mod tests {
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
         let instance_buffers = renderer.instances.buffers().to_vec();
         let cube = place_cube(&mut renderer, Mat4::IDENTITY);
-        renderer.set_pyramid(Some(Mat4::from_translation(Vec3::X)));
+        place_demo(
+            &mut renderer,
+            DEMO_PYRAMID,
+            DEMO_UNTINTED,
+            Mat4::from_translation(Vec3::X),
+        );
 
         // Both instances are dirty in *every* slot when they are inserted, so
         // the first frames upload both however well delta upload works. The ring
@@ -5382,14 +5187,14 @@ mod tests {
         recorder.assert_valid();
     }
 
-    /// **Each demo setter owns one pool slot, however many times it is called.**
+    /// **An object takes one pool slot, a rewrite keeps it, and a removal gives
+    /// it back for the next object to reuse.**
     ///
-    /// All five are wrappers over [`ForwardRenderer::add_instance`] and hold an
-    /// `Option<InstanceHandle>` of their own, so what decides between an insert
-    /// and a rewrite is whether that option is already filled. A wrapper that
-    /// inserted every time would take a fresh slot per call — the pool exhausted
-    /// in a few thousand frames of a caller that sets a transform per frame,
-    /// which is what every sample does — and every slot it abandoned would stay
+    /// The three-call bookkeeping every caller of the instance API depends on,
+    /// checked on the pool rather than on the recorder. A `set_instance` that
+    /// inserted instead would take a fresh slot per call — the pool exhausted in
+    /// a few thousand frames of a caller that writes a transform per frame, which
+    /// is what every sample does — and every slot it abandoned would stay
     /// **live**, so the frame would draw a copy of the object at each transform
     /// it had ever been given. Neither is something a golden image would show
     /// until the pool ran out.
@@ -5397,113 +5202,81 @@ mod tests {
     /// `only_the_instance_that_moved_is_uploaded` is the delta half of this and
     /// reads the recorder; this is the bookkeeping half and reads the pool, which
     /// is where an abandoned slot would still be counted.
+    ///
+    /// Run over every mesh of [`scene::demo`], because the DAG is the one whose
+    /// slot carries `docs/plan/25-lod.md`'s hysteresis state — the reuse below is
+    /// exactly what [`ForwardRenderer::add_instance`] documents as inheriting a
+    /// previous occupant's expanded groups.
     #[test]
-    fn a_demo_setter_takes_one_slot_however_often_it_is_called() {
-        /// One of the five, as a call and as the field it keeps its handle in.
-        type Setter = (
-            &'static str,
-            fn(&mut ForwardRenderer, Option<Mat4>),
-            fn(&ForwardRenderer) -> Option<InstanceHandle>,
-        );
-
-        let setters: [Setter; 5] = [
-            ("set_pyramid", ForwardRenderer::set_pyramid, |renderer| {
-                renderer.pyramid_instance
-            }),
-            (
-                "set_tinted_pyramid",
-                ForwardRenderer::set_tinted_pyramid,
-                |renderer| renderer.tinted_pyramid_instance,
-            ),
-            (
-                "set_textured_pyramid",
-                ForwardRenderer::set_textured_pyramid,
-                |renderer| renderer.textured_pyramid_instance,
-            ),
-            ("set_open_box", ForwardRenderer::set_open_box, |renderer| {
-                renderer.open_box_instance
-            }),
-            // The `bool` is dropped rather than the method skipped: the null
-            // backend takes an indirect tail, so this is the arm that places an
-            // instance. A device with a mesh stage and no amplification one is
-            // the arm that refuses, and it refuses before the pool is touched.
-            (
-                "set_dunes",
-                |renderer, model| {
-                    assert!(
-                        renderer.set_dunes(model),
-                        "an indirect tail draws the dunes patch"
-                    );
-                },
-                |renderer| renderer.dunes_instance,
-            ),
-        ];
-
-        for (name, set, slot) in setters {
+    fn an_object_takes_one_slot_and_a_removal_gives_it_back() {
+        for mesh in [DEMO_CUBE, DEMO_PYRAMID, DEMO_OPEN_BOX, DEMO_DUNES] {
             let (recorder, device, queue) = open();
             let mut renderer = ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
                 .expect("built");
-            // Whatever the pool holds before the setter is called, which is
-            // nothing: a renderer places no object of its own any more.
-            let resident = renderer.instances.len();
-            assert_eq!(
-                slot(&renderer),
-                None,
-                "{name} places nothing until it is called"
+            // The null backend takes an indirect tail, so the DAG is placeable
+            // here; the arm that cannot select a level refuses before an
+            // application ever calls this.
+            assert!(
+                renderer.selects_levels(),
+                "an indirect tail chooses a level for every mesh, DAG included"
             );
+            // What the pool holds before anything is placed, which is nothing: a
+            // renderer places no object of its own any more.
+            let resident = renderer.instances.len();
+            assert_eq!(resident, 0, "a fresh renderer holds no objects");
 
             let first = Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0));
-            set(&mut renderer, Some(first));
-            let handle = slot(&renderer).unwrap_or_else(|| panic!("{name} inserted an instance"));
+            let handle = place_demo(&mut renderer, mesh, DEMO_UNTINTED, first);
             assert_eq!(
                 renderer.instances.len(),
                 resident + 1,
-                "{name} takes one slot on the first call"
+                "mesh {mesh}: add_instance takes one slot"
             );
 
-            // The second call is the whole test: the same handle, the same slot
+            // The rewrite is the whole test: the same handle, the same slot
             // count, and the new transform in it.
             let second = Mat4::from_translation(Vec3::new(-4.0, 5.0, -6.0));
-            set(&mut renderer, Some(second));
-            assert_eq!(
-                slot(&renderer),
-                Some(handle),
-                "{name} called twice must keep the instance it already has"
+            renderer.set_instance(
+                handle,
+                &InstanceDesc {
+                    mesh,
+                    material: DEMO_UNTINTED,
+                    transform: second,
+                },
             );
             assert_eq!(
                 renderer.instances.len(),
                 resident + 1,
-                "{name} called twice must rewrite its instance, not insert a second"
+                "mesh {mesh}: set_instance must rewrite its instance, not insert a second"
             );
             assert_eq!(
                 renderer.instances.slot_count(),
                 u32::try_from(resident + 1).expect("a handful of instances"),
-                "{name} called twice must not have reached past the slot it holds"
+                "mesh {mesh}: set_instance must not have reached past the slot it holds"
             );
             assert_eq!(
                 renderer
                     .instances
                     .get(handle)
-                    .unwrap_or_else(|| panic!("{name}'s instance is live"))
+                    .unwrap_or_else(|| panic!("mesh {mesh}: the instance is live"))
                     .transform,
                 second.to_cols_array(),
-                "{name} called twice must have written the second transform"
+                "mesh {mesh}: set_instance must have written the second transform"
             );
 
-            // And `None` gives the slot back, so a caller toggling an object is
-            // not a leak either.
-            set(&mut renderer, None);
-            assert_eq!(slot(&renderer), None, "{name}(None) drops its handle");
+            // And a removal gives the slot back, so a caller toggling an object
+            // is not a leak either.
+            renderer.remove_instance(handle);
             assert_eq!(
                 renderer.instances.len(),
                 resident,
-                "{name}(None) must free the slot rather than hide the object"
+                "mesh {mesh}: remove_instance must free the slot rather than hide the object"
             );
-            set(&mut renderer, Some(first));
+            place_demo(&mut renderer, mesh, DEMO_UNTINTED, first);
             assert_eq!(
                 renderer.instances.slot_count(),
                 u32::try_from(resident + 1).expect("a handful of instances"),
-                "{name} after a removal must reuse the freed slot"
+                "mesh {mesh}: the object after a removal must reuse the freed slot"
             );
 
             renderer.destroy(device.as_ref());
@@ -5782,21 +5555,7 @@ mod tests {
         /// words that say it was this refusal rather than another.
         type Break = (&'static str, fn(&mut SceneDesc<'static>), &'static str);
 
-        let cases: [Break; 9] = [
-            (
-                "too few meshes",
-                |scene| {
-                    scene.meshes.truncate(REQUIRED_MESHES - 1);
-                },
-                "a scene of 3 mesh(es)",
-            ),
-            (
-                "too few material rows",
-                |scene| {
-                    scene.materials.truncate(REQUIRED_MATERIALS - 1);
-                },
-                "and 2 material row(s)",
-            ),
+        let cases: [Break; 7] = [
             (
                 "a row naming a layer the page has not got",
                 |scene| {
@@ -5978,6 +5737,79 @@ mod tests {
         recorder.assert_valid();
     }
 
+    /// **One mesh and one material row is a scene, and it draws.**
+    ///
+    /// The floor is gone. `with_scene` used to refuse anything shorter than
+    /// [`scene::demo`] — four meshes and three rows — because the five `set_*`
+    /// demo wrappers named those entries by position, and the renderer's own
+    /// `dunes_clusters` and `dunes_level_buckets` indexed the description at
+    /// `DEMO_DUNES` besides. So an application's own description was not merely
+    /// refused: with the check removed it would have panicked out of `build`.
+    ///
+    /// A frame is recorded rather than only a build, because that is where the
+    /// positional indexing was: the bucket table, the cluster ranges and the
+    /// draw-argument blocks are all one-per-description-mesh, and a renderer that
+    /// still assumed four would come apart here rather than at `with_scene`.
+    #[test]
+    fn a_description_smaller_than_the_demo_is_a_scene() {
+        use std::borrow::Cow;
+
+        let scene = SceneDesc {
+            meshes: vec![scene::MeshDesc {
+                label: Cow::Borrowed("the only mesh"),
+                geometry: Geometry::Flat {
+                    vertices: Cow::Owned(crcbl_shaders::mesh::cube_vertex_bytes()),
+                    indices: Cow::Owned(crcbl_shaders::mesh::cube_indices()),
+                    clusters: crcbl_shaders::meshlet::cube_clusters(),
+                },
+            }],
+            materials: vec![mesh::GpuMaterial::UNTINTED],
+            page: scene::PageDesc::opaque_white(1),
+            capacities: scene::Capacities::default(),
+        };
+        assert!(
+            scene.meshes.len() < scene::demo().meshes.len()
+                && scene.materials.len() < scene::demo().materials.len(),
+            "this description must be smaller than the demo's in both, or it says nothing \
+             about the floor"
+        );
+
+        let (recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::with_scene(device.as_ref(), queue, Format::Rgba8UnormSrgb, &scene)
+                .expect("one mesh and one row is a description the renderer can hold");
+        assert_eq!(
+            renderer.mesh_ids,
+            [0],
+            "the one description mesh takes the one table entry"
+        );
+        assert_eq!(
+            renderer.bucket_constants.len(),
+            1,
+            "one bucket per description mesh, and there is one"
+        );
+        renderer
+            .add_instance(&InstanceDesc {
+                mesh: 0,
+                material: 0,
+                transform: Mat4::IDENTITY,
+            })
+            .expect("an empty pool has room for the only object");
+        let recorded = frame(device.as_ref(), &mut renderer, queue);
+        assert_eq!(
+            commands_in_pass(&recorder, "forward")
+                .into_iter()
+                .filter(|command| matches!(
+                    command,
+                    crcbl_hal::null::Command::DrawIndexedIndirectCount(_)
+                ))
+                .count(),
+            1,
+            "a one-mesh scene records the one bucket's indirect call"
+        );
+        recorded.finish(device.as_ref(), renderer);
+    }
+
     /// **A description that exactly fills what it reserved is built, not
     /// refused.**
     ///
@@ -6109,17 +5941,17 @@ mod tests {
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
         let at = Mat4::from_translation(Vec3::new(-1.0, 0.0, 0.0));
-        renderer.set_pyramid(Some(at));
-        renderer.set_tinted_pyramid(Some(at));
+        let plain_handle = place_demo(&mut renderer, DEMO_PYRAMID, DEMO_UNTINTED, at);
+        let tinted_handle = place_demo(&mut renderer, DEMO_PYRAMID, DEMO_TINTED, at);
 
-        let instance = |handle: Option<InstanceHandle>| {
+        let instance = |handle: InstanceHandle| {
             renderer
                 .instances
-                .get(handle.expect("the instance was inserted"))
-                .expect("and it is live")
+                .get(handle)
+                .expect("the instance was inserted and is live")
         };
-        let plain = instance(renderer.pyramid_instance);
-        let tinted = instance(renderer.tinted_pyramid_instance);
+        let plain = instance(plain_handle);
+        let tinted = instance(tinted_handle);
         assert_ne!(
             plain.material, tinted.material,
             "the two pyramids must not share a material row"
@@ -6184,9 +6016,9 @@ mod tests {
 
         // And the second pyramid leaves the frame the way the first does: the
         // instance is removed, not a draw skipped.
-        renderer.set_tinted_pyramid(None);
+        renderer.remove_instance(tinted_handle);
         assert!(
-            renderer.tinted_pyramid_instance.is_none(),
+            renderer.instances.get(tinted_handle).is_none(),
             "the instance must be given back, or an object nobody asked for stays in the scene"
         );
 
@@ -6213,17 +6045,17 @@ mod tests {
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
         let at = Mat4::from_translation(Vec3::new(-1.0, 0.0, 0.0));
-        renderer.set_pyramid(Some(at));
-        renderer.set_textured_pyramid(Some(at));
+        let plain_handle = place_demo(&mut renderer, DEMO_PYRAMID, DEMO_UNTINTED, at);
+        let textured_handle = place_demo(&mut renderer, DEMO_PYRAMID, DEMO_TEXTURED, at);
 
-        let instance = |handle: Option<InstanceHandle>| {
+        let instance = |handle: InstanceHandle| {
             renderer
                 .instances
-                .get(handle.expect("the instance was inserted"))
-                .expect("and it is live")
+                .get(handle)
+                .expect("the instance was inserted and is live")
         };
-        let plain = instance(renderer.pyramid_instance);
-        let textured = instance(renderer.textured_pyramid_instance);
+        let plain = instance(plain_handle);
+        let textured = instance(textured_handle);
         assert_ne!(
             plain.material, textured.material,
             "the two pyramids must not share a material row"
@@ -6282,9 +6114,9 @@ mod tests {
             );
         }
 
-        renderer.set_textured_pyramid(None);
+        renderer.remove_instance(textured_handle);
         assert!(
-            renderer.textured_pyramid_instance.is_none(),
+            renderer.instances.get(textured_handle).is_none(),
             "the instance must be given back, or an object nobody asked for stays in the scene"
         );
 
@@ -6459,7 +6291,9 @@ mod tests {
             // records nothing rather than a dispatch of zero — see
             // [`DrawGen::add_passes`].
             place_cube(&mut renderer, Mat4::IDENTITY);
-            renderer.set_pyramid(pyramid);
+            if let Some(at) = pyramid {
+                place_demo(&mut renderer, DEMO_PYRAMID, DEMO_UNTINTED, at);
+            }
             let frame = frame(device.as_ref(), &mut renderer, queue);
 
             let stride = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE as u32;
@@ -6695,7 +6529,7 @@ mod tests {
         // A second scene: one more instance in the pool, and the counter moves
         // with it. The draws do not — one call per bucket whatever the scene
         // holds is what §3.3 is about, and this is where that shows.
-        renderer.set_pyramid(Some(Mat4::IDENTITY));
+        place_demo(&mut renderer, DEMO_PYRAMID, DEMO_UNTINTED, Mat4::IDENTITY);
         recorder.clear();
         let second = frame(device.as_ref(), &mut renderer, queue);
         let richer = renderer.counters();
@@ -7074,7 +6908,12 @@ mod tests {
         // The cube first and the pyramid above it, because the second half of
         // this test frees the lower slot and asks what the walk still covers.
         let cube = place_cube(&mut renderer, Mat4::IDENTITY);
-        renderer.set_pyramid(Some(Mat4::from_translation(Vec3::X)));
+        place_demo(
+            &mut renderer,
+            DEMO_PYRAMID,
+            DEMO_UNTINTED,
+            Mat4::from_translation(Vec3::X),
+        );
 
         let camera = Camera {
             eye: Vec3::new(1.6, 1.2, 2.2),

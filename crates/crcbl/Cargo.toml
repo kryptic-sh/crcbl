@@ -39,6 +39,13 @@ crcbl-net = { workspace = true }
 crcbl-phys = { workspace = true }
 crcbl-server = { workspace = true }
 crcbl-store = { workspace = true }
+# The bake half: glTF import, the meshlet builder and the cluster DAG, which is
+# where the `MeshClusters` a `render::scene::Geometry::Flat` carries and the
+# `ClusterDag` a `Geometry::Dag` carries actually come from. **Optional**, on
+# `crcbl-sprite`'s terms below: it depends on `gltf`, and a browser build that
+# describes no scene of its own should not link a glTF parser. See the `scene`
+# feature and `src/lib.rs`'s `scene` re-export.
+crcbl-scene = { workspace = true, optional = true }
 # `load`, not `bake`: this is the half a shipped game links, and it reads the
 # baked pair rather than producing it. A build script wanting the encoder names
 # `crcbl-sprite` itself — see `src/lib.rs`'s `sprite` re-export.
@@ -112,3 +119,13 @@ workspace = true
 # on Vulkan and wgpu": until this existed, no Metal test had ever constructed a
 # `ForwardRenderer`.
 render-e2e = []
+
+# `crcbl::scene` — `crcbl-scene`, the bake side: glTF import, `build_meshlets`
+# and `build_cluster_dag`. **Off by default**, and the reason is the same one
+# `crcbl-sprite` is linked as `load` and not `bake`: the crate depends on `gltf`,
+# a parser a shipped game reads no bytes through and a browser build has no use
+# for at all. An application that describes its own resident meshes turns it on
+# and gets the builders whose output `render::scene::Geometry` is spelled in;
+# every existing sample leaves it off and links no glTF parser, which
+# `cargo tree -p crcbl -e normal` is what says.
+scene = ["dep:crcbl-scene"]

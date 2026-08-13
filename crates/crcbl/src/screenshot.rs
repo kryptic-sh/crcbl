@@ -76,7 +76,9 @@ use crate::hal::{
     QueueHandle, QueueKind, ReadbackDesc, ReadbackState, ResourceState, SubmitInfo, SurfaceError,
     SurfaceHandle, SurfaceTarget, SwapchainDesc, SwapchainHandle,
 };
-use crate::render::scene::{DEMO_CUBE, DEMO_UNTINTED};
+use crate::render::scene::{
+    DEMO_CUBE, DEMO_DUNES, DEMO_OPEN_BOX, DEMO_PYRAMID, DEMO_TEXTURED, DEMO_TINTED, DEMO_UNTINTED,
+};
 use crate::render::{
     Camera, DirectionalLight, FontAtlas, ForwardRenderer, FrameCounters, GraphError, InstanceDesc,
     Projection, RenderGraph, SampleMode, SheetDesc, SheetId, Sprite, SpriteRenderer, TransientPool,
@@ -1064,25 +1066,63 @@ enum SceneState {
     },
 }
 
-/// Puts the demo scene's cube in the frame at `model`, **before anything else**.
+/// Puts one of the demo scene's meshes in the frame at `model`.
+///
+/// **Insertion order is the caller's and it is load-bearing**, so every scene
+/// below places its objects in the order the frame has always held them — the
+/// cube first, then whatever stands on it. The slot an object lands in is
+/// `docs/plan/25-lod.md`'s hysteresis key, and it is what kept the goldens still
+/// when the five demo setters that used to do this were retired.
+///
+/// The insert cannot fail here: the pool is
+/// [`Capacities::instances`](crate::render::Capacities::instances) wide and no
+/// scene here places more than three objects.
+fn place(renderer: &mut ForwardRenderer, mesh: usize, material: usize, model: glam::Mat4) {
+    renderer
+        .add_instance(&InstanceDesc {
+            mesh,
+            material,
+            transform: model,
+        })
+        .expect("an instance pool of thousands has room for a screenshot scene");
+}
+
+/// The demo scene's cube, placed **before anything else**.
 ///
 /// Every forward scene here draws it — as the subject in [`Scene::Cube`], as the
 /// floor in [`Scene::Spot`] and its two shadow siblings, and parked out of frame
 /// in [`Scene::Ao`]. The renderer used to insert it at build and rewrite it from
 /// every `begin_frame`; it is an ordinary instance now, so the caller places it,
 /// and placing it first is what keeps it in the pool slot it has always had.
-///
-/// The insert cannot fail here: the pool is
-/// [`Capacities::instances`](crate::render::Capacities::instances) wide and this
-/// is the first object in it.
 fn place_cube(renderer: &mut ForwardRenderer, model: glam::Mat4) {
-    renderer
-        .add_instance(&InstanceDesc {
-            mesh: DEMO_CUBE,
-            material: DEMO_UNTINTED,
-            transform: model,
-        })
-        .expect("an empty instance pool has room for the cube");
+    place(renderer, DEMO_CUBE, DEMO_UNTINTED, model);
+}
+
+/// The three pyramids [`Scene::Cube`] and [`Scene::Lights`] both stand on the
+/// cube, in the order and the rows they have always carried.
+///
+/// One helper because the two scenes are the same geometry on purpose — their
+/// goldens differ in the light list and in nothing else — so a transform or a
+/// row that moved in one and not the other would make that pair prove nothing.
+fn place_pyramids(renderer: &mut ForwardRenderer) {
+    place(
+        renderer,
+        DEMO_PYRAMID,
+        DEMO_UNTINTED,
+        glam::Mat4::from_translation(PYRAMID_AT),
+    );
+    place(
+        renderer,
+        DEMO_PYRAMID,
+        DEMO_TINTED,
+        glam::Mat4::from_translation(TINTED_PYRAMID_AT),
+    );
+    place(
+        renderer,
+        DEMO_PYRAMID,
+        DEMO_TEXTURED,
+        glam::Mat4::from_translation(TEXTURED_PYRAMID_AT),
+    );
 }
 
 impl SceneState {
@@ -1110,10 +1150,7 @@ impl SceneState {
             Scene::Cube => {
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
                 place_cube(&mut renderer, ForwardRenderer::spin(0.0));
-                renderer.set_pyramid(Some(glam::Mat4::from_translation(PYRAMID_AT)));
-                renderer.set_tinted_pyramid(Some(glam::Mat4::from_translation(TINTED_PYRAMID_AT)));
-                renderer
-                    .set_textured_pyramid(Some(glam::Mat4::from_translation(TEXTURED_PYRAMID_AT)));
+                place_pyramids(&mut renderer);
                 Self::Forward {
                     camera: Camera::default().with_projection(Projection::Perspective {
                         fov_y: std::f32::consts::FRAC_PI_3,
@@ -1128,10 +1165,7 @@ impl SceneState {
                 // in their light lists and in nothing else.
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
                 place_cube(&mut renderer, ForwardRenderer::spin(0.0));
-                renderer.set_pyramid(Some(glam::Mat4::from_translation(PYRAMID_AT)));
-                renderer.set_tinted_pyramid(Some(glam::Mat4::from_translation(TINTED_PYRAMID_AT)));
-                renderer
-                    .set_textured_pyramid(Some(glam::Mat4::from_translation(TEXTURED_PYRAMID_AT)));
+                place_pyramids(&mut renderer);
                 renderer.set_lights(&scene_lights());
                 Self::Forward {
                     camera: Camera::default().with_projection(Projection::Perspective {
@@ -1164,7 +1198,12 @@ impl SceneState {
                 // that is argued.
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
                 place_cube(&mut renderer, spot_floor());
-                renderer.set_pyramid(Some(spot_shadow_caster()));
+                place(
+                    &mut renderer,
+                    DEMO_PYRAMID,
+                    DEMO_UNTINTED,
+                    spot_shadow_caster(),
+                );
                 renderer.set_lights(&[spot_shadow_light()]);
                 Self::Forward {
                     camera: spot_shadow_camera(),
@@ -1180,16 +1219,18 @@ impl SceneState {
                 // *a* shadow, which is what a single working face already does.
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
                 place_cube(&mut renderer, spot_floor());
-                renderer.set_pyramid(Some(point_shadow_caster(glam::Vec3::new(
-                    POINT_CASTER_AT,
-                    0.0,
-                    0.0,
-                ))));
-                renderer.set_tinted_pyramid(Some(point_shadow_caster(glam::Vec3::new(
-                    0.0,
-                    0.0,
-                    -POINT_CASTER_AT,
-                ))));
+                place(
+                    &mut renderer,
+                    DEMO_PYRAMID,
+                    DEMO_UNTINTED,
+                    point_shadow_caster(glam::Vec3::new(POINT_CASTER_AT, 0.0, 0.0)),
+                );
+                place(
+                    &mut renderer,
+                    DEMO_PYRAMID,
+                    DEMO_TINTED,
+                    point_shadow_caster(glam::Vec3::new(0.0, 0.0, -POINT_CASTER_AT)),
+                );
                 renderer.set_lights(&[point_shadow_light()]);
                 Self::Forward {
                     camera: point_shadow_camera(),
@@ -1200,20 +1241,28 @@ impl SceneState {
             Scene::Dunes => {
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
                 place_cube(&mut renderer, ForwardRenderer::spin(0.0));
-                // **Refused rather than drawn empty.** `set_dunes` says no on a
-                // device that reports a mesh stage and no amplification stage,
-                // where the un-amplified path would emit every cluster of every
-                // level at once; every other device draws the patch, per cluster
-                // or through a uniform cut. Ignoring the answer is what made
-                // this scene a frame of clear colour that a golden would have
-                // been blessed from.
-                if !renderer.set_dunes(Some(glam::Mat4::IDENTITY)) {
+                // **Refused rather than drawn empty.** `selects_levels` says no
+                // on a device that reports a mesh stage and no amplification
+                // stage, where the un-amplified path would emit every cluster of
+                // every level at once; every other device draws the patch, per
+                // cluster or through a uniform cut. Asking before placing the
+                // patch is the caller's job — `add_instance` has no vocabulary
+                // for that refusal — and not asking is what made this scene a
+                // frame of clear colour that a golden would have been blessed
+                // from.
+                if !renderer.selects_levels() {
                     renderer.destroy(device);
                     return Err(OffscreenError::Unusable(
                         "this device reports a mesh stage and no amplification stage, so the \
                          dunes patch's cluster DAG has nothing that can select a level in it",
                     ));
                 }
+                place(
+                    &mut renderer,
+                    DEMO_DUNES,
+                    DEMO_UNTINTED,
+                    glam::Mat4::IDENTITY,
+                );
                 Self::Forward {
                     camera: dunes_camera(),
                     light: DirectionalLight::default(),
@@ -1257,7 +1306,7 @@ impl SceneState {
                 // concave corner and the flat floor beside it.
                 let mut renderer = ForwardRenderer::new(device, queue, format)?;
                 place_cube(&mut renderer, ao_parked_cube());
-                renderer.set_open_box(Some(ao_box()));
+                place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, ao_box());
                 Self::Forward {
                     camera: ao_camera(),
                     light: ao_sun(),

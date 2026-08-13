@@ -60,6 +60,29 @@ pub(crate) fn mesh_camera(projection: crcbl_render::Projection) -> crcbl_render:
 /// matrix or a mirrored axis to hide behind.
 pub(crate) const MESH_SECONDS: f32 = 0.35;
 
+/// Puts one of the demo scene's meshes in the frame at `transform`, and answers
+/// with the handle that names it.
+///
+/// **Insertion order is the caller's and it is load-bearing** — the slot an
+/// object lands in is `docs/plan/25-lod.md`'s hysteresis key — so every scene in
+/// this suite places its objects in the order the frame has always held them:
+/// the cube first, then whatever stands beside it. That is what kept the goldens
+/// still when the five demo setters that used to do this were retired.
+pub(crate) fn place(
+    renderer: &mut crcbl_render::ForwardRenderer,
+    mesh: usize,
+    material: usize,
+    transform: glam::Mat4,
+) -> crcbl_render::InstanceHandle {
+    renderer
+        .add_instance(&crcbl_render::InstanceDesc {
+            mesh,
+            material,
+            transform,
+        })
+        .expect("an instance pool of thousands has room for a test scene")
+}
+
 /// Puts the demo scene's cube in the frame at `transform`, and **first**, so it
 /// takes the pool slot it has always had.
 ///
@@ -68,18 +91,40 @@ pub(crate) const MESH_SECONDS: f32 = 0.35;
 /// this suite places it the way an application does — and the scene the goldens
 /// were blessed on is the same scene.
 pub(crate) fn place_cube_at(renderer: &mut crcbl_render::ForwardRenderer, transform: glam::Mat4) {
-    renderer
-        .add_instance(&crcbl_render::InstanceDesc {
-            mesh: crcbl_render::scene::DEMO_CUBE,
-            material: crcbl_render::scene::DEMO_UNTINTED,
-            transform,
-        })
-        .expect("an empty instance pool has room for the cube");
+    place(
+        renderer,
+        crcbl_render::scene::DEMO_CUBE,
+        crcbl_render::scene::DEMO_UNTINTED,
+        transform,
+    );
 }
 
 /// The same, at the spin every frame in this suite is drawn at.
 pub(crate) fn place_cube(renderer: &mut crcbl_render::ForwardRenderer) {
     place_cube_at(renderer, crcbl_render::ForwardRenderer::spin(MESH_SECONDS));
+}
+
+/// The demo scene's dunes patch, **at the origin and with no rotation**.
+///
+/// The identity is load-bearing rather than a default: the amplification stage
+/// puts each group's sphere through the instance transform and leaves the camera
+/// where it is, which is the same statement as putting the camera through the
+/// inverse — and at the identity the two are the same *bits*, which is what lets
+/// the host-versus-GPU comparisons in this suite be equalities rather than
+/// tolerances.
+///
+/// Every caller asks [`ForwardRenderer::selects_levels`] first. A device with a
+/// mesh stage and no amplification stage cannot choose a level of a DAG at all,
+/// and `add_instance` has no vocabulary for refusing one.
+///
+/// [`ForwardRenderer::selects_levels`]: crcbl_render::ForwardRenderer::selects_levels
+pub(crate) fn place_dunes(renderer: &mut crcbl_render::ForwardRenderer) {
+    place(
+        renderer,
+        crcbl_render::scene::DEMO_DUNES,
+        crcbl_render::scene::DEMO_UNTINTED,
+        glam::Mat4::IDENTITY,
+    );
 }
 
 impl Headless {
@@ -614,7 +659,12 @@ fn a_mesh_at_a_non_zero_base_vertex_draws_its_own_geometry() {
     )
     .expect("the forward renderer builds");
     place_cube(&mut renderer);
-    renderer.set_pyramid(Some(glam::Mat4::from_translation(PYRAMID_AT)));
+    place(
+        &mut renderer,
+        crcbl_render::scene::DEMO_PYRAMID,
+        crcbl_render::scene::DEMO_UNTINTED,
+        glam::Mat4::from_translation(PYRAMID_AT),
+    );
 
     let frame = render_mesh(&headless, &mut renderer, &mut pool, &two_mesh_camera());
 
@@ -701,7 +751,12 @@ fn render_open_box(optional: Features) -> OpenBoxFrame {
     place_cube(&mut renderer);
     let path = renderer.geometry_path();
     let culls_clusters = renderer.culls_clusters();
-    renderer.set_open_box(Some(glam::Mat4::from_translation(OPEN_BOX_AT)));
+    place(
+        &mut renderer,
+        crcbl_render::scene::DEMO_OPEN_BOX,
+        crcbl_render::scene::DEMO_UNTINTED,
+        glam::Mat4::from_translation(OPEN_BOX_AT),
+    );
 
     let frame = render_mesh(&headless, &mut renderer, &mut pool, &two_mesh_camera());
 
@@ -1068,6 +1123,10 @@ fn per_cluster_culling_rejects_the_clusters_a_camera_hides() {
     // count with it in. The first is what the cube contributes and is measured
     // rather than assumed.
     let mut counts = Vec::new();
+    // The box goes in and out of the scene per camera, so its handle is held
+    // rather than a setter's field. Removing before placing again is what keeps
+    // it in one slot: a second insert would leave the first copy live and drawn.
+    let mut open_box: Option<crcbl_render::InstanceHandle> = None;
     for (label, camera) in [
         ("above and inside the walls", inside_the_open_box_camera()),
         ("the golden's", two_mesh_camera()),
@@ -1077,9 +1136,16 @@ fn per_cluster_culling_rejects_the_clusters_a_camera_hides() {
             across_the_open_box_wall_camera(),
         ),
     ] {
-        renderer.set_open_box(None);
+        if let Some(handle) = open_box.take() {
+            renderer.remove_instance(handle);
+        }
         let without = surviving_clusters(&headless, &mut renderer, &mut pool, &camera);
-        renderer.set_open_box(Some(at));
+        open_box = Some(place(
+            &mut renderer,
+            crcbl_render::scene::DEMO_OPEN_BOX,
+            crcbl_render::scene::DEMO_UNTINTED,
+            at,
+        ));
         let with = surviving_clusters(&headless, &mut renderer, &mut pool, &camera);
         eprintln!("vk e2e: clusters from {label}: {without} without the box, {with} with it");
         counts.push((without, with));
@@ -1246,7 +1312,7 @@ fn a_scaled_instance_keeps_the_clusters_its_own_size_puts_on_screen() {
 
     let camera = trough_camera();
     let faces = crcbl_shaders::mesh::OPEN_BOX_FACES.len() as u32;
-    renderer.set_open_box(None);
+    // The cube alone: nothing else has been placed yet.
     let without = surviving_clusters(&headless, &mut renderer, &mut pool, &camera);
     assert_eq!(
         without, 1,
@@ -1254,8 +1320,19 @@ fn a_scaled_instance_keeps_the_clusters_its_own_size_puts_on_screen() {
          count below is measured against"
     );
 
+    // One slot for the trough, **moved** between measurements rather than
+    // inserted again: a second insert would leave the first copy live and drawn,
+    // and every count below would be of two troughs.
+    let trough_at = |offset: f32| crcbl_render::InstanceDesc {
+        mesh: crcbl_render::scene::DEMO_OPEN_BOX,
+        material: crcbl_render::scene::DEMO_UNTINTED,
+        transform: trough(offset),
+    };
+    let open_box = renderer
+        .add_instance(&trough_at(0.0))
+        .expect("an instance pool of thousands has room for the trough");
     for offset in [0.0f32, 3.0] {
-        renderer.set_open_box(Some(trough(offset)));
+        renderer.set_instance(open_box, &trough_at(offset));
         let with = surviving_clusters(&headless, &mut renderer, &mut pool, &camera);
         eprintln!("vk e2e: clusters with the trough {offset} units along its run: {with}");
         assert_eq!(
@@ -1267,7 +1344,7 @@ fn a_scaled_instance_keeps_the_clusters_its_own_size_puts_on_screen() {
         );
     }
 
-    renderer.set_open_box(Some(trough(40.0)));
+    renderer.set_instance(open_box, &trough_at(40.0));
     let away = surviving_clusters(&headless, &mut renderer, &mut pool, &camera);
     assert_eq!(
         away, without,
@@ -1492,9 +1569,17 @@ fn the_mesh_dispatch_extent_is_the_culled_instance_count() {
     let faces = crcbl_shaders::mesh::OPEN_BOX_FACES.len() as u32;
 
     for lap in 0..2 {
-        renderer.set_open_box(Some(at));
+        // In and out of the scene per lap, through the slot the box has held
+        // since the first one: `InstancePool::slot_count` never shrinks, so the
+        // removal frees the slot and the next insert takes it back.
+        let open_box = place(
+            &mut renderer,
+            crcbl_render::scene::DEMO_OPEN_BOX,
+            crcbl_render::scene::DEMO_UNTINTED,
+            at,
+        );
         let with = generated_dispatch(&headless, &mut renderer, &mut pool, &camera);
-        renderer.set_open_box(None);
+        renderer.remove_instance(open_box);
         let without = generated_dispatch(&headless, &mut renderer, &mut pool, &camera);
 
         for (label, produced) in [("with the box", &with), ("without it", &without)] {
@@ -1958,7 +2043,7 @@ fn read_cut(
 ) -> Vec<crcbl_shaders::cluster_dag::ClusterAt> {
     let device = headless.device.as_ref();
     let range = renderer
-        .dunes_clusters()
+        .cluster_range(crcbl_render::scene::DEMO_DUNES)
         .expect("the mesh path has a cluster pool");
     let bytes = u64::from(range.count) * 4;
 
@@ -2194,9 +2279,10 @@ fn the_gpu_descends_the_dag_to_the_cut_the_host_rule_says() {
     // identity the two are the same *bits*, which is what lets the comparison
     // below be an equality rather than a tolerance.
     assert!(
-        renderer.set_dunes(Some(glam::Mat4::IDENTITY)),
-        "a device with an amplification stage accepts the patch"
+        renderer.selects_levels(),
+        "a device with an amplification stage can choose a level of the patch"
     );
+    place_dunes(&mut renderer);
 
     let dag = crcbl_shaders::cluster_dag::dunes_dag();
     let mut history = DunesHistory::new();
@@ -2423,9 +2509,10 @@ fn the_shadow_cascades_select_coarser_than_the_camera() {
     .expect("the forward renderer builds");
     place_cube(&mut renderer);
     assert!(
-        renderer.set_dunes(Some(glam::Mat4::IDENTITY)),
-        "a device with an amplification stage accepts the patch"
+        renderer.selects_levels(),
+        "a device with an amplification stage can choose a level of the patch"
     );
+    place_dunes(&mut renderer);
     renderer.set_lod_error_budget(DUNES_MIXING_BUDGET);
 
     let dag = crcbl_shaders::cluster_dag::dunes_dag();
@@ -2633,7 +2720,7 @@ fn selected_dunes_level(
     renderer: &crcbl_render::ForwardRenderer,
 ) -> Option<usize> {
     let device = headless.device.as_ref();
-    let buckets = renderer.dunes_level_buckets();
+    let buckets = renderer.level_buckets(crcbl_render::scene::DEMO_DUNES);
     assert!(
         !buckets.is_empty(),
         "this device selects per cluster, so no bucket is a level"
@@ -2764,7 +2851,8 @@ fn the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is() {
             )
             .expect("the forward renderer builds");
             place_cube(&mut renderer);
-            assert!(renderer.set_dunes(Some(glam::Mat4::IDENTITY)));
+            assert!(renderer.selects_levels());
+            place_dunes(&mut renderer);
             // Its own history, because the state is this renderer's buffer and
             // the uniform arm below opens a second device with a second one.
             let mut history = DunesHistory::new();
@@ -2807,9 +2895,10 @@ fn the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is() {
     .expect("the forward renderer builds");
     place_cube(&mut renderer);
     assert!(
-        renderer.set_dunes(Some(glam::Mat4::IDENTITY)),
+        renderer.selects_levels(),
         "a device with no mesh stage takes the patch through a uniform cut"
     );
+    place_dunes(&mut renderer);
 
     let mut history = DunesHistory::new();
     let mut chosen: Vec<usize> = Vec::new();
@@ -2920,7 +3009,8 @@ fn a_camera_drifting_across_a_level_boundary_stops_flickering() {
         )
         .expect("the forward renderer builds");
         place_cube(&mut renderer);
-        assert!(renderer.set_dunes(Some(glam::Mat4::IDENTITY)));
+        assert!(renderer.selects_levels());
+        place_dunes(&mut renderer);
         let _ = render_mesh(
             &headless,
             &mut renderer,
@@ -2986,7 +3076,8 @@ fn a_camera_drifting_across_a_level_boundary_stops_flickering() {
         )
         .expect("the forward renderer builds");
         place_cube(&mut renderer);
-        assert!(renderer.set_dunes(Some(glam::Mat4::IDENTITY)));
+        assert!(renderer.selects_levels());
+        place_dunes(&mut renderer);
         renderer.set_lod_hold_ratio(hold_ratio);
         let mut history = DunesHistory::new();
         let mut levels = Vec::with_capacity(path.len());

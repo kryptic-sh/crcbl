@@ -85,6 +85,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crcbl_shaders::meshlet::MeshClusters;
 use glam::Vec3;
 
 use crate::simplify::undirected;
@@ -182,6 +183,28 @@ impl MeshletBuild {
     #[must_use]
     pub fn clusters(&self) -> &[Meshlet] {
         &self.clusters
+    }
+
+    /// The same three arrays as [`MeshClusters`], which is the spelling
+    /// `crcbl_render::scene::Geometry::Flat` takes.
+    ///
+    /// **The whole path from a triangle list to a resident mesh's clusters**, and
+    /// the reason it exists is that the renderer cannot call [`build_meshlets`]
+    /// itself: `crcbl-render` must not depend on this crate — that would pull
+    /// `gltf` into the renderer — so §3.5 makes the cluster build a bake step and
+    /// this is what a bake hands over. [`crate::cluster_dag::ClusterDag::cook`] is
+    /// the same conversion for a DAG's levels, and it goes through here.
+    ///
+    /// A rename and nothing else: the three arrays move out unchanged, and
+    /// [`MeshClusters::corners`] is [`triangles`](Self::triangles) under the name
+    /// the shader's own record gives it.
+    #[must_use]
+    pub fn into_clusters(self) -> MeshClusters {
+        MeshClusters {
+            clusters: self.clusters,
+            vertices: self.vertices,
+            corners: self.triangles,
+        }
     }
 
     /// One cluster's triangles as indices into the mesh, three per triangle —

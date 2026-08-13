@@ -118,7 +118,7 @@ fn cube_model() -> Mat4 {
 }
 
 /// The instance array as the tests here fill it: the cube at element 0, placed
-/// by [`setup`], and the pyramid at element 1 from the first `set_pyramid`.
+/// by [`setup`], and the pyramid at element 1 from the first [`place_pyramid`].
 fn scene(model: Mat4, pyramid: Vec3) -> Vec<GpuInstance> {
     let at = |transform: Mat4, mesh| GpuInstance {
         transform: transform.to_cols_array(),
@@ -411,6 +411,18 @@ fn setup() -> (Headless, ForwardRenderer, TransientPool) {
     (headless, renderer, TransientPool::new())
 }
 
+/// Puts the demo pyramid in the frame at `at`, **after the cube [`setup`]
+/// placed**, so it is element 1 of the instance array — which is where
+/// [`scene`]'s CPU reference models it.
+fn place_pyramid(renderer: &mut ForwardRenderer, at: Vec3) -> crcbl_render::InstanceHandle {
+    crate::mesh::place(
+        renderer,
+        crcbl_render::scene::DEMO_PYRAMID,
+        crcbl_render::scene::DEMO_UNTINTED,
+        Mat4::from_translation(at),
+    )
+}
+
 /// Releases everything in dependency order.
 fn teardown(headless: Headless, renderer: ForwardRenderer, mut pool: TransientPool) {
     let device = headless.device.as_ref();
@@ -434,7 +446,7 @@ fn teardown(headless: Headless, renderer: ForwardRenderer, mut pool: TransientPo
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn the_generated_arguments_are_the_draws_the_cpu_would_have_recorded() {
     let (headless, mut renderer, mut pool) = setup();
-    renderer.set_pyramid(Some(Mat4::from_translation(PYRAMID_AT)));
+    place_pyramid(&mut renderer, PYRAMID_AT);
 
     let camera = mesh_camera(Projection::default());
     let model = cube_model();
@@ -506,7 +518,7 @@ fn the_generated_arguments_are_the_draws_the_cpu_would_have_recorded() {
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn a_culled_bucket_generates_no_draw_and_says_so_in_the_count() {
     let (headless, mut renderer, mut pool) = setup();
-    renderer.set_pyramid(Some(Mat4::from_translation(PYRAMID_AWAY)));
+    place_pyramid(&mut renderer, PYRAMID_AWAY);
 
     let camera = mesh_camera(Projection::default());
     let model = cube_model();
@@ -585,7 +597,7 @@ fn a_culled_bucket_generates_no_draw_and_says_so_in_the_count() {
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn a_poisoned_counter_reaches_the_frame_at_zero() {
     let (headless, mut renderer, mut pool) = setup();
-    renderer.set_pyramid(Some(Mat4::from_translation(PYRAMID_AT)));
+    place_pyramid(&mut renderer, PYRAMID_AT);
 
     let camera = mesh_camera(Projection::default());
     let generated = generate_with(&headless, &mut renderer, &mut pool, &camera, Some(SENTINEL));
@@ -643,8 +655,14 @@ fn a_bucket_fills_and_empties_as_its_instance_comes_and_goes() {
 
     // Four frames, so the ring wraps and every slot is used twice: the second
     // pass over a slot is the one that would carry a stale counter.
+    // The pyramid's slot, held across rounds: removing it frees element 1 and
+    // the next placement takes it back, which is what keeps the CPU reference
+    // in `scene` describing the array both halves of a round see.
+    let mut pyramid: Option<crcbl_render::InstanceHandle> = None;
     for round in 0..2 {
-        renderer.set_pyramid(None);
+        if let Some(handle) = pyramid.take() {
+            renderer.remove_instance(handle);
+        }
         let without = generate(&headless, &mut renderer, &mut pool, &camera);
         assert_eq!(
             (
@@ -658,7 +676,7 @@ fn a_bucket_fills_and_empties_as_its_instance_comes_and_goes() {
              its bucket draws"
         );
 
-        renderer.set_pyramid(Some(Mat4::from_translation(PYRAMID_AT)));
+        pyramid = Some(place_pyramid(&mut renderer, PYRAMID_AT));
         let with = generate(&headless, &mut renderer, &mut pool, &camera);
         assert_eq!(
             (
@@ -733,7 +751,7 @@ fn every_geometry_path_draws_the_same_frame() {
              degraded to an indirect tail would draw an identical frame and make this \
              comparison vacuous"
         );
-        renderer.set_pyramid(Some(Mat4::from_translation(PYRAMID_AT)));
+        place_pyramid(&mut renderer, PYRAMID_AT);
         let frame = crate::mesh::render_mesh(
             &headless,
             &mut renderer,

@@ -503,11 +503,13 @@ impl ClusterDag {
                 .iter()
                 .map(|level| crcbl_shaders::cluster_dag::DagLevel {
                     positions: level.positions.clone(),
-                    clusters: crcbl_shaders::meshlet::MeshClusters {
-                        clusters: level.clusters.clusters().to_vec(),
-                        vertices: level.clusters.vertices().to_vec(),
-                        corners: level.clusters.triangles().to_vec(),
-                    },
+                    // Cloned and then moved out of rather than copied array by
+                    // array, so the mapping from a build's three arrays to the
+                    // shader record's lives in one place — see
+                    // [`MeshletBuild::into_clusters`], which is also the call an
+                    // application's own flat mesh goes through. The clone costs
+                    // the same three allocations the copies did.
+                    clusters: level.clusters.clone().into_clusters(),
                     errors: level.errors.clone(),
                     bounds: level.bounds.iter().map(cook_sphere).collect(),
                     groups: level
