@@ -5,17 +5,17 @@
 //! Horde binds six things: **movement**, the start/restart edge, and three
 //! level-up choices. Five of the six already survive a screen without a widget —
 //! `PLAY`, `TRY AGAIN` and the three upgrades are *menu buttons*, and a menu is
-//! hit-tested against the emulated pointer that every platform builds from the
-//! primary contact, so a finger has always been able to press them. Movement is
-//! the one that does not: it is a direction held continuously while the game is
-//! being played, there is no menu up, and there is nothing to tap.
+//! hit-tested against positions the loop knows about, so a finger has always
+//! been able to press them. Movement is the one that does not: it is a direction
+//! held continuously while the game is being played, there is no menu up, and
+//! there is nothing to tap.
 //!
 //! So the movement stick is the control this game was missing, and it is the one
-//! this module exists for. The other control here is the **pause button**, and
-//! it is not a game action at all: [`crcbl::engine::PAUSE_KEY`] is the loop's
-//! and never reaches a game, so a phone could start a run and then never stop
-//! it, and the pause menu — the only place fullscreen and the debug panel are
-//! tappable — could not be opened. One button reaches all three.
+//! this module exists for. The other control here is the **pause button**, which
+//! is not a game action at all and therefore not this game's:
+//! [`crcbl::engine::PauseControl`] is the engine's, every sample a finger can
+//! play has the same one, and all this module does is give it its contacts and
+//! its place in the draw.
 //!
 //! **Deliberately not here:** a fire button (the gun aims and fires itself —
 //! that is the genre), an on-screen restart (the two menus that offer one are
@@ -23,25 +23,24 @@
 //! stray thumb), and on-screen level-up choices (the panel's own three buttons
 //! are it).
 //!
-//! # A held control takes the pointer away, which is why the button is a contact
+//! # A held control takes the pointer away, which is why both read contacts
 //!
 //! Only the **primary** contact is reported as an emulated pointer. A thumb
 //! resting on the stick is that primary contact for as long as it is down, so
-//! every other finger raises no pointer event at all: while the stick is held, a
-//! menu button cannot be pressed by anyone. A second control that went through
-//! the pointer would therefore be unusable at exactly the moment it is wanted —
-//! which is why both controls here read **contacts**, and why this is the first
-//! sample where two fingers can do two things at once.
+//! every other finger raises no pointer event at all. A second control that went
+//! through the pointer would therefore be unusable at exactly the moment it is
+//! wanted — which is why both controls here read **contacts**, and why this is
+//! the first sample where two fingers can do two things at once. (The engine's
+//! menus read contacts for the same reason, so the pause menu this button opens
+//! can be tapped shut without lifting the stick.)
 //!
 //! # Where each control lives
 //!
 //! The stick **floats**: it appears where the thumb lands. Held two-handed, a
 //! phone puts the thumb wherever the grip does, and every fixed position is
 //! wrong for some grip — see [`crcbl::ui::TouchStick`], which carries the whole
-//! argument. The pause button is **fixed**, in the top-right corner: it means
-//! one specific thing, so it has to be somewhere a player can aim at
-//! deliberately, and the top-right is the one corner neither the HUD nor a
-//! two-handed grip is already using.
+//! argument. The pause button is **fixed**, in the top-right corner, and
+//! [`crcbl::engine::PauseControl`] carries that argument.
 //!
 //! # When they are on screen
 //!
@@ -55,12 +54,16 @@
 //! A panel on screen takes the controls away for the frames it is up: the menu's
 //! buttons are the whole interaction there, and a stick that stayed live behind
 //! the level-up screen would be walking the wizard the moment the panel closed.
+//! **The thumb takes the stick back on its next move** once the panel goes,
+//! rather than having to be lifted and put down again — see [`Controls::touch`].
 
-use crcbl::engine::TouchUpdate;
+use crcbl::core::input::TouchPhase;
+use crcbl::engine::{PauseControl, TouchUpdate};
 use crcbl::math::Vec2;
+use crcbl::ui::TouchStick;
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::text::FontAtlas;
-use crcbl::ui::{Button, ButtonState, Style, TouchButton, TouchStick};
+use crcbl::ui::touch::CONTROL_STYLE;
 
 /// The stick's throw, as a fraction of the surface's shorter side.
 ///
@@ -74,38 +77,12 @@ const STICK_RADIUS_FRACTION: f32 = 0.11;
 /// `game::eight_way` splits it into.
 const STICK_RADIUS_MIN: f32 = 40.0;
 
-/// The pause button's size in pixels: a deliberate target for a thumb, which is
-/// wider than a label needs.
-const PAUSE_SIZE: Vec2 = Vec2::new(112.0, 56.0);
-
-/// How far the pause button sits from the surface's top-right corner.
-const PAUSE_MARGIN: f32 = 12.0;
-
-/// The palette both controls are drawn in.
-///
-/// Dark and translucent, because they are drawn **over the arena** and a control
-/// a player cannot see past is a control hiding the thing that is about to kill
-/// them.
-const CONTROL_STYLE: Style = Style {
-    text: [0.9, 0.9, 1.0, 0.9],
-    bg: [0.08, 0.08, 0.12, 0.45],
-    bg_hover: [0.15, 0.15, 0.22, 0.55],
-    bg_active: [0.55, 0.55, 0.75, 0.7],
-    border: [0.7, 0.7, 0.85, 0.55],
-};
-
 /// Horde's on-screen controls, and the bookkeeping that decides whether they are
 /// there at all.
 #[derive(Debug)]
 pub struct Controls {
     stick: TouchStick,
-    pause: TouchButton,
-    /// Whether any contact has ever reached this run.
-    ///
-    /// The gate on the pause button being drawn — see the module header. The
-    /// stick needs no such gate: a floating stick is drawn only while a finger
-    /// is on it, which is the same claim made structurally.
-    touched: bool,
+    pause: PauseControl,
     /// Whether a menu was on screen the last time the loop asked which one to
     /// show.
     ///
@@ -114,12 +91,12 @@ pub struct Controls {
     /// frame's menu, the panel the player put a thumb through is the one that
     /// was on screen when they did it. What is *drawn* asks a fresher question —
     /// see [`render`](Self::render).
+    ///
+    /// The button keeps its own copy of this, because it is the engine's control
+    /// and answers for itself; this one is the stick's.
     panel_up: bool,
     /// The surface, in pixels, as of the last frame drawn.
     extent: (u32, u32),
-    /// Where the pause button was drawn last frame, and so where a contact this
-    /// frame is hit-tested against.
-    pause_rect: (Vec2, Vec2),
 }
 
 impl Controls {
@@ -128,11 +105,9 @@ impl Controls {
     pub fn new(extent: (u32, u32)) -> Self {
         Self {
             stick: TouchStick::new(stick_radius(extent)),
-            pause: TouchButton::new(),
-            touched: false,
+            pause: PauseControl::new(),
             panel_up: false,
             extent,
-            pause_rect: (Vec2::ZERO, Vec2::ZERO),
         }
     }
 
@@ -149,24 +124,37 @@ impl Controls {
     /// rectangle, so it can say the contact is not its business; the stick has
     /// none and claims whatever is left, which is what makes the whole field a
     /// place to put a thumb. A contact one control has taken is never offered to
-    /// the other — that is what the `bool` each `offer` returns is for.
+    /// the other — that is what the `bool` the button's `touch` returns is for.
     ///
     /// A contact that arrives while a panel is up reaches neither: the menu owns
-    /// the screen, and its buttons are pressed through the emulated pointer the
-    /// loop already routes.
+    /// the screen, and its buttons are pressed through the contacts the loop
+    /// routes to it.
+    ///
+    /// # A move takes the stick back
+    ///
+    /// A **`Moved` offered to a free stick grabs it**, as a `Began` would. Two
+    /// things need that. A panel that opened over a held stick released it (see
+    /// [`set_panel_up`](Self::set_panel_up)) and the thumb never lifted, so
+    /// without this the player has to lift and land again to walk after every
+    /// level-up. And a finger that was refused because another one held the
+    /// stick should get it once that one lets go, rather than being dead for the
+    /// rest of the gesture. The stick floats, so it re-centres wherever the
+    /// thumb has got to — which is exactly where a player pushing from would
+    /// expect it.
     pub fn touch(&mut self, touch: TouchUpdate) {
-        self.touched = true;
+        if self.pause.touch(touch) {
+            return;
+        }
         if self.panel_up {
             return;
         }
         let at = touch.pixels(self.extent);
-        if self
-            .pause
-            .offer(self.pause_rect, touch.contact, touch.phase, at)
-        {
-            return;
-        }
-        self.stick.offer(touch.contact, touch.phase, at);
+        let phase = if self.stick.is_held() || !matches!(touch.phase, TouchPhase::Moved) {
+            touch.phase
+        } else {
+            TouchPhase::Began
+        };
+        self.stick.offer(touch.contact, phase, at);
     }
 
     /// Tells the controls which menu the frame that just drew is showing, and
@@ -179,9 +167,9 @@ impl Controls {
     /// the control away. Same for a half-pressed pause button: it does not fire.
     pub const fn set_panel_up(&mut self, panel_up: bool) {
         self.panel_up = panel_up;
+        self.pause.set_panel_up(panel_up);
         if panel_up {
             self.stick.release();
-            self.pause.release();
         }
     }
 
@@ -201,7 +189,7 @@ impl Controls {
     pub fn layout(&mut self, extent: (u32, u32), atlas: &FontAtlas) {
         self.extent = extent;
         self.stick.set_radius(stick_radius(extent));
-        self.pause_rect = pause_button().rect(pause_pos(extent), atlas);
+        self.pause.layout(extent, atlas);
     }
 
     /// Draws whatever is on screen this frame — which is nothing at all until a
@@ -215,16 +203,11 @@ impl Controls {
     /// goes missing for a frame after one closes. Where a *contact* is concerned
     /// the stale answer is the right one, and that is the field's job.
     pub fn render(&self, dl: &mut DrawList, atlas: &FontAtlas, panel_up: bool) {
-        if !self.touched || panel_up {
+        if panel_up {
             return;
         }
         self.stick.render(dl, &CONTROL_STYLE);
-        let state = if self.pause.is_held() {
-            ButtonState::Pressed
-        } else {
-            ButtonState::Idle
-        };
-        pause_button().render(dl, pause_pos(self.extent), atlas, &CONTROL_STYLE, state);
+        self.pause.render(dl, atlas, panel_up);
     }
 }
 
@@ -232,24 +215,6 @@ impl Controls {
 fn stick_radius(extent: (u32, u32)) -> f32 {
     let shorter = extent.0.min(extent.1) as f32;
     (shorter * STICK_RADIUS_FRACTION).max(STICK_RADIUS_MIN)
-}
-
-/// The pause button, as a widget: the art and the hit rectangle come from one
-/// place, so a tap cannot land somewhere the label is not.
-fn pause_button() -> Button {
-    Button::new("PAUSE").with_fixed_size(PAUSE_SIZE)
-}
-
-/// The middle of the pause button, for the tests that have to put a finger on
-/// it without knowing which corner it is laid out from.
-#[cfg(test)]
-pub fn pause_centre(extent: (u32, u32)) -> Vec2 {
-    pause_pos(extent) + PAUSE_SIZE * 0.5
-}
-
-/// Its top-left corner, inset from the surface's top-right.
-fn pause_pos(extent: (u32, u32)) -> Vec2 {
-    Vec2::new(extent.0 as f32 - PAUSE_MARGIN - PAUSE_SIZE.x, PAUSE_MARGIN)
 }
 
 // ---- tests ------------------------------------------------------------------
@@ -344,7 +309,7 @@ mod tests {
         );
 
         // The second finger, on the button, while the first has not moved.
-        let button = pause_pos(EXTENT) + PAUSE_SIZE * 0.5;
+        let button = PauseControl::centre(EXTENT);
         controls.touch(at_pixels(SECOND, TouchPhase::Began, button.x, button.y));
         assert!(!controls.take_pause(), "a press is not a tap");
         assert_eq!(
@@ -372,7 +337,7 @@ mod tests {
     #[test]
     fn the_button_takes_the_contact_that_lands_on_it() {
         let mut controls = playing();
-        let button = pause_pos(EXTENT) + PAUSE_SIZE * 0.5;
+        let button = PauseControl::centre(EXTENT);
         controls.touch(at_pixels(FIRST, TouchPhase::Began, button.x, button.y));
         // A finger that slid a long way while pressing the button: the stick
         // would report a full deflection if it had taken this contact.
@@ -405,7 +370,7 @@ mod tests {
             "a cancelled gesture left the wizard walking north",
         );
 
-        let button = pause_pos(EXTENT) + PAUSE_SIZE * 0.5;
+        let button = PauseControl::centre(EXTENT);
         controls.touch(at_pixels(SECOND, TouchPhase::Began, button.x, button.y));
         controls.touch(at_pixels(SECOND, TouchPhase::Cancelled, button.x, button.y));
         assert!(
@@ -434,7 +399,7 @@ mod tests {
         // already down.
         controls.touch(at_pixels(FIRST, TouchPhase::Moved, 300.0 + radius, 500.0));
         assert_eq!(controls.stick(), Vec2::ZERO);
-        let button = pause_pos(EXTENT) + PAUSE_SIZE * 0.5;
+        let button = PauseControl::centre(EXTENT);
         controls.touch(at_pixels(SECOND, TouchPhase::Began, button.x, button.y));
         controls.touch(at_pixels(SECOND, TouchPhase::Ended, button.x, button.y));
         assert!(!controls.take_pause(), "a panel's screen fired the button");
@@ -456,7 +421,7 @@ mod tests {
 
         // The first contact is what puts the button on screen — and the stick
         // is on screen only while it is held.
-        let button = pause_pos(EXTENT) + PAUSE_SIZE * 0.5;
+        let button = PauseControl::centre(EXTENT);
         controls.touch(at_pixels(FIRST, TouchPhase::Began, button.x, button.y));
         controls.render(&mut dl, &atlas, false);
         let with_button = dl.len();
@@ -492,23 +457,74 @@ mod tests {
         );
     }
 
-    /// The button stays inside the surface, and clear of the HUD panel.
+    /// **The pause button clears this game's HUD panel**, which is the one
+    /// thing about the engine's button only this sample can check. Where it
+    /// sits in the corner is [`PauseControl`]'s own test.
     #[test]
-    fn the_pause_button_sits_in_the_corner_it_claims() {
-        let (min, max) = pause_button().rect(pause_pos(EXTENT), &FontAtlas::built_in());
-        assert!(min.x > 0.0 && min.y > 0.0, "off the top-left at {min}");
-        assert!(
-            (max.x - (EXTENT.0 as f32 - PAUSE_MARGIN)).abs() < 1e-3,
-            "not inset from the right edge: {max}",
-        );
-        assert!(
-            max.y < EXTENT.1 as f32,
-            "hanging off the bottom of the surface",
-        );
+    fn the_pause_button_sits_clear_of_the_hud_panel() {
+        let (min, _) = playing().pause.rect();
         assert!(
             min.x >= crate::app::HUD_PANEL_RIGHT,
-            "the button overlaps the HUD panel, which ends at {}",
+            "the button overlaps the HUD panel, which ends at {}: {min}",
             crate::app::HUD_PANEL_RIGHT,
         );
+    }
+
+    /// **A thumb the panel took the stick from takes it back on its next
+    /// move**, rather than having to be lifted and landed again.
+    ///
+    /// The level-up case: the panel opens under a thumb that is pushing, the
+    /// player takes an upgrade with the other hand, and the thumb — which never
+    /// left the glass — has to be able to walk again. The stick floats, so it
+    /// re-centres where the thumb has got to and the first frame back reads
+    /// zero, which is why the check pushes from there rather than expecting the
+    /// old deflection to return.
+    #[test]
+    fn a_thumb_that_never_lifted_takes_the_stick_back_after_a_panel() {
+        let mut controls = playing();
+        let radius = stick_radius(EXTENT);
+        controls.touch(at_pixels(FIRST, TouchPhase::Began, 300.0, 500.0));
+        controls.touch(at_pixels(FIRST, TouchPhase::Moved, 300.0 + radius, 500.0));
+        assert_eq!(controls.stick(), Vec2::new(1.0, 0.0));
+
+        controls.set_panel_up(true);
+        assert_eq!(controls.stick(), Vec2::ZERO, "the panel kept him walking");
+        controls.set_panel_up(false);
+
+        // The thumb is still down and still where the panel left it; the next
+        // move is what it takes.
+        controls.touch(at_pixels(FIRST, TouchPhase::Moved, 300.0 + radius, 500.0));
+        assert_eq!(
+            controls.stick(),
+            Vec2::ZERO,
+            "the stick came back with a deflection nobody asked for",
+        );
+        controls.touch(at_pixels(
+            FIRST,
+            TouchPhase::Moved,
+            300.0 + radius * 2.0,
+            500.0,
+        ));
+        let value = controls.stick();
+        assert!(
+            (value - Vec2::new(1.0, 0.0)).length() < 1e-3,
+            "the thumb had to be lifted and landed again to walk: {value}",
+        );
+    }
+
+    /// …and a second finger still cannot take a stick another one is holding,
+    /// which is the rule the re-grab above must not have traded away.
+    #[test]
+    fn a_moving_second_finger_does_not_steal_a_held_stick() {
+        let mut controls = playing();
+        let radius = stick_radius(EXTENT);
+        controls.touch(at_pixels(FIRST, TouchPhase::Began, 300.0, 500.0));
+        controls.touch(at_pixels(FIRST, TouchPhase::Moved, 300.0, 500.0 - radius));
+        let held = controls.stick();
+        assert_eq!(held, Vec2::new(0.0, 1.0));
+
+        controls.touch(at_pixels(SECOND, TouchPhase::Began, 700.0, 200.0));
+        controls.touch(at_pixels(SECOND, TouchPhase::Moved, 700.0, 600.0));
+        assert_eq!(controls.stick(), held, "the second finger took the stick");
     }
 }

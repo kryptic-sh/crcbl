@@ -334,6 +334,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Flappy and breakout can be paused with a finger, and a second finger can
+  work a menu while the first holds a control.** Pause is the loop's rather than
+  a game action and its menu is the only tappable route to fullscreen and the
+  debug panel, so a phone could previously start a run and never stop it.
+  `crcbl::engine::PauseControl` is shared across the three demos with touch —
+  size, corner, palette, appear-condition and hit-test are one piece of
+  knowledge, and it owns the extent so a sample needs no pixel conversion.
+
+  The lockout fix landed in the menu's hit-testing: contacts are a second device
+  driving the same widgets, the way the activate key already is. The contact
+  carrying the emulated pointer is skipped, without which a one-finger tap fires
+  twice. Contacts are now delivered before the pointer, because a sample cannot
+  say "that pointer press belonged to my control" until it has heard about the
+  finger — and the finger pressing pause _is_ the emulated pointer, so without
+  that it flapped in flappy and served in breakout on the way to pausing.
+
+  A control the panel took away also re-grabs on its next move now, instead of
+  needing the thumb lifted and landed again.
+
 - **Horde plays on a phone: a floating stick and a PAUSE button.**
   `crcbl_ui::touch`'s `TouchStick` and `TouchButton` are widgets acting as a
   virtual device, and `Binding::Virtual` is how `ActionMap` binds them — the

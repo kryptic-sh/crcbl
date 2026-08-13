@@ -5910,11 +5910,22 @@ All were real, all are fixed, and all three are invisible to a mouse:
   logged value moves with the paddle; the check counts blue pixels in the bottom
   band instead, measured 1:1 against the touch x. Worth knowing before someone
   looks for a HUD line that does not exist.
-- **Horde has a PAUSE button; the other four demos still do not.** Pause is the
-  only route to fullscreen and the debug panel, so on those four a phone can
-  start a run and never stop it. `web/templates/demo-loop-keys.html` now says
-  "keys — unless a control for them is listed above" and only horde's page lists
-  one.
+- **Every demo with touch controls has a PAUSE button**; asteroids and hud stay
+  out on purpose. It is `crcbl::engine::PauseControl`, shared rather than three
+  copies: size, margin, corner, palette, the appear-condition, the hit-test and
+  the tap-take are one piece of knowledge, and moving the corner would otherwise
+  be three edits. It lives in `crcbl` rather than `crcbl-ui` because it needs
+  `TouchUpdate`/`PointerUpdate` and owns the extent, so a sample needs no extent
+  field and no pixel conversion of its own.
+- **The finger pressing the pause button is also the emulated pointer**, so
+  without a guard it flapped in flappy and served in breakout on the way to
+  pausing. `PauseControl::takes_pointer` answers that, and it forced the loop to
+  deliver **contacts before the pointer** — a sample cannot say "that pointer
+  press was my control's" until it has heard about the finger, and the first tap
+  of a run always arrived pointer-first.
+- **A mouse click on the drawn pause button is swallowed but does not pause.**
+  The keyboard has Escape, so this is cosmetic rather than a lockout, but it is
+  an inconsistency someone will notice.
 - **The seam carries contacts now.**
   `ShellEvent::Touch { contact, phase, position }` with `ContactId` and
   `TouchPhase`, routed to `HostedGame::touch_event`. Decisions taken:
@@ -5984,13 +5995,20 @@ All were real, all are fixed, and all three are invisible to a mouse:
     needed `HostedGame::take_pending_pause`, modelled on
     `take_pending_frame_limit`.
 
-- **A held control blocks every menu tap.** Only the primary contact drives the
-  emulated pointer, so while a thumb holds the stick nothing else can press a
-  menu button — which is why the pause button reads contacts directly. It also
-  means a player who pauses must lift the stick before RESUME can be tapped.
-  Worth fixing; not fixed.
-- **A control refused while a panel is up does not re-grab when the panel
-  closes.** A finger already down has to lift and land again.
+- **Both fixed: a second finger can work a menu while the first holds a control,
+  and a refused control re-grabs.** The lockout fix landed in the _menu's_
+  hit-testing, driven from the loop's contact routing — contacts are a second
+  device driving the same widgets, exactly as `MENU_ACTIVATE_KEY` is. Not in the
+  shim, which would fix one platform and contradict the browser's own "a second
+  finger does not move the mouse"; and not in the pointer routing, which is
+  `7ce0f2b`'s decision and stayed untouched. A contact is the menu's only if its
+  `Began` latched a button, one at a time, and the contact carrying the emulated
+  pointer is skipped — without that skip a one-finger tap fires twice.
+- **That primacy is re-derived in the loop rather than carried by the seam**:
+  the contact down while no other is, which is the Pointer Events rule the shim
+  already documents. **The durable alternative is a `primary` flag on
+  `ShellEvent::Touch`**, which touches `crcbl-shell` and `shell.js`. Worth a
+  decision.
 - **Horde's in-frame HUD still says "WASD to move" on a phone.**
 - **`web/engine/shell.js` is the one web file prettier would rewrite**, and it
   was already so before this work: 350 lines of drift at `HEAD`, against

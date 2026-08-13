@@ -1047,7 +1047,7 @@ mod tests {
         assert!(!engine.is_paused());
 
         // The second finger, on the button, while the first has not moved.
-        let button = crate::controls::pause_centre(engine.gpu().extent());
+        let button = crcbl::engine::PauseControl::centre(engine.gpu().extent());
         finger(&mut engine, ContactId(2), TouchPhase::Began, button);
         assert!(!engine.is_paused(), "a press paused it before the lift");
         finger(&mut engine, ContactId(2), TouchPhase::Ended, button);
@@ -1105,7 +1105,7 @@ mod tests {
 
         // And a contact at its centre really is on it — the same point the
         // browser gate taps, checked here where a failure names the rectangle.
-        let centre = crate::controls::pause_centre(CANVAS);
+        let centre = crcbl::engine::PauseControl::centre(CANVAS);
         finger(&mut engine, ContactId(2), TouchPhase::Began, centre);
         finger(&mut engine, ContactId(2), TouchPhase::Ended, centre);
         assert!(engine.is_paused(), "a tap on the button did not pause");

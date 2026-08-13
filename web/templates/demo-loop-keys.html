@@ -10,11 +10,14 @@
   printing <kbd>F11</kbd> at someone with no F11.
 
   The touch row no longer says "keyboard only" flatly, because that stopped
-  being true of every demo: on-screen controls are `crcbl-ui` widgets a *game*
-  draws, and horde draws a pause button — which opens the pause menu, whose
-  fullscreen and debug-panel buttons a finger can then press. A demo with such a
-  control lists it in its own rows above this include, so the row points there
-  rather than naming a demo this shared file has no business knowing about.
+  being true of every demo: `crcbl::engine::PauseControl` is an on-screen button
+  a game draws once a finger has arrived, and it opens the pause menu, whose
+  fullscreen and debug-panel buttons a finger can then press. Every demo a
+  finger can play draws it — breakout, flappy and horde — and each lists it in
+  its own rows above this include, so this row points there rather than naming
+  demos this shared file has no business knowing about. Asteroids and hud do not
+  have it: asteroids has no touch controls at all (three concurrent controls
+  have no good phone layout) and hud takes no game input.
 -->
 <li class="key-row pointer-only">
   <span>Pause and resume</span>

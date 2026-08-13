@@ -30,7 +30,8 @@
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Booted, Clock, ExitReason, FrameInfo, HostedGame, PointerUpdate, RunSummary, wait_for_configure,
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, PauseControl, PointerUpdate, RunSummary,
+    TouchUpdate, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
@@ -109,6 +110,13 @@ pub struct Flappy {
     /// [`Game::course_stats`] needs the game mutably — the entity count is the
     /// server's world. Horde's `scene` field is the same arrangement.
     course: game::CourseStats,
+    /// The on-screen pause button, which is the engine's rather than this
+    /// game's: [`crcbl::engine::PAUSE_KEY`] never reaches a game, so without it
+    /// a phone can start a run and never stop it — and the pause menu is the
+    /// only place fullscreen and the debug panel are tappable. It draws nothing
+    /// until a finger arrives, so a keyboard-and-mouse run is unchanged and no
+    /// golden frame moves.
+    pause: PauseControl,
 }
 
 /// The loop flappy runs in.
@@ -208,6 +216,7 @@ fn assemble<S: Shell + ?Sized>(
             render_state: RenderState::default(),
             hud: HudStrings::default(),
             course: game::CourseStats::default(),
+            pause: PauseControl::new(),
         },
         options.common.loop_config(),
     ))
@@ -249,12 +258,33 @@ impl HostedGame for Flappy {
         self.game.key_event(key, pressed);
     }
 
+    /// One finger, offered to the pause button and to nothing else.
+    ///
+    /// Flappy's own input is a tap, and a tap is already the emulated pointer —
+    /// see [`pointer_event`](Self::pointer_event). The contact stream is here
+    /// for the one control the pointer cannot carry.
+    fn touch_event(&mut self, touch: TouchUpdate) {
+        self.pause.touch(touch);
+    }
+
+    fn take_pending_pause(&mut self) -> bool {
+        self.pause.take_fired()
+    }
+
     /// **A tap is a flap, and the position is nobody's business here.**
     ///
     /// This game has one action and no aim: where the finger landed says
     /// nothing, so [`PointerUpdate::at`] is dropped and only the edges are
     /// forwarded. Breakout is the sample that needs the other half.
+    ///
+    /// **Unless the pause button has it.** The finger pressing that button is
+    /// also the emulated pointer, so without the first line a player asking for
+    /// the pause would flap on the way there — and on this game's clock that is
+    /// a run.
     fn pointer_event(&mut self, pointer: PointerUpdate) {
+        if self.pause.takes_pointer(pointer) {
+            return;
+        }
         if pointer.pressed {
             self.game.pointer_button(true);
         }
@@ -287,7 +317,13 @@ impl HostedGame for Flappy {
         _menus: &mut crcbl::ui::menu::MenuSet<MenuKind>,
         paused: bool,
     ) -> MenuKind {
-        MenuKind::of(paused, &self.render_state)
+        let kind = MenuKind::of(paused, &self.render_state);
+        // A panel takes the button away and a half-press with it, and the
+        // contacts that arrive before the next call are hit-tested against this
+        // answer — the same "last frame's menu" rule the loop applies to its own
+        // pointer.
+        self.pause.set_panel_up(kind != MenuKind::None);
+        kind
     }
 
     fn draw(
@@ -305,6 +341,15 @@ impl HostedGame for Flappy {
         self.course = self.game.course_stats();
         self.hud.refresh(&self.render_state, frame.paused);
         draw_hud(draw_list, &self.hud);
+        // After the HUD and before the menu, which the loop appends to this same
+        // list. **This frame's menu, not the one `menu_kind` last reported**:
+        // the loop asks for the draw before it asks which menu the frame shows,
+        // and `MenuKind::of` is a pure function of what this method has already
+        // refreshed, so the button goes away on the same frame the panel arrives
+        // rather than a frame late.
+        let panel_up = MenuKind::of(frame.paused, &self.render_state) != MenuKind::None;
+        self.pause.layout(gpu.extent(), gpu.atlas());
+        self.pause.render(draw_list, gpu.atlas(), panel_up);
     }
 
     /// **Flappy's two modules, and no third.**
@@ -1328,6 +1373,128 @@ mod tests {
             "the second tap raised no edge, so the first one's release never \
              arrived: {before} to {}",
             engine.game().game().bird_velocity.y,
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A finger on the pause button pauses the run, and does not flap.**
+    ///
+    /// Both halves matter. The pause is the point — a phone had no way to reach
+    /// it, and the pause menu is the only route to fullscreen and the debug
+    /// panel. And "does not flap": the finger pressing that button *is* the
+    /// emulated pointer this game binds its flap to, so a control that only took
+    /// the contact would throw the bird up on the way to pausing, which on this
+    /// game's clock is a run.
+    ///
+    /// The tap is one pump, press and release together, which is what a tap on a
+    /// phone is.
+    #[test]
+    fn a_finger_on_the_pause_button_pauses_the_run_without_flapping() {
+        use crcbl::core::input::{ContactId, PointerButton, TouchPhase};
+        use crcbl::shell::{ButtonState as PointerState, PhysicalPoint};
+
+        let mut engine = scripted(&headless(120));
+        let window = engine.window();
+        // Started with the keyboard, so the panel is down and the only pointer
+        // input in this run is the tap below.
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::Space)
+            .expect("the window is live");
+        run_frames(&mut engine, 20);
+        assert_eq!(engine.game().game().state, GameState::Playing);
+        assert!(
+            !ui_text(&engine).iter().any(|text| text == "PAUSE"),
+            "a run nobody has touched drew an on-screen control",
+        );
+        // Gravity is the only other thing that touches this velocity and it
+        // only ever lowers it, so a value that did not rise is a tap that did
+        // not flap.
+        let before = engine.game().game().bird_velocity.y;
+
+        let centre = crcbl::engine::PauseControl::centre(engine.gpu().extent());
+        let at = PhysicalPoint {
+            x: f64::from(centre.x),
+            y: f64::from(centre.y),
+        };
+        for (phase, state) in [
+            (TouchPhase::Began, PointerState::Pressed),
+            (TouchPhase::Ended, PointerState::Released),
+        ] {
+            engine
+                .shell_mut()
+                .touch(window, ContactId(1), phase, at)
+                .expect("the headless shell reports TOUCH");
+            // The emulated pointer the platform owes for the primary contact:
+            // without it this would be testing a phone that does not exist.
+            engine
+                .shell_mut()
+                .button(window, PointerButton::Left, state, Some(at))
+                .expect("the window is live");
+        }
+        run_frames(&mut engine, 1);
+
+        assert!(engine.is_paused(), "the tap never reached the pause");
+
+        // **Un-paused with the key before the bird is looked at**, because a
+        // paused frame runs no ticks: a flap the tap queued would be sitting in
+        // the action map unapplied, and reading the velocity here would call
+        // that a tap that did not flap. The key, not a button, so nothing in
+        // this half is the pointer's.
+        for state in [PointerState::Pressed, PointerState::Released] {
+            engine
+                .shell_mut()
+                .key(window, PAUSE_KEY, state)
+                .expect("the window is live");
+        }
+        run_frames(&mut engine, 3);
+        assert!(!engine.is_paused(), "the key did not resume");
+        assert!(
+            engine.game().game().bird_velocity.y <= before,
+            "the pause tap flapped: the bird went from {before} to {}",
+            engine.game().game().bird_velocity.y,
+        );
+
+        // And out through the panel the button opens — a finger on `RESUME`,
+        // which is the only way back on a device with no keyboard — with the
+        // button on the frame once the panel has gone.
+        for state in [PointerState::Pressed, PointerState::Released] {
+            engine
+                .shell_mut()
+                .key(window, PAUSE_KEY, state)
+                .expect("the window is live");
+        }
+        run_frames(&mut engine, 1);
+        assert!(engine.is_paused(), "the key did not pause");
+        let resume = engine.menu_layout().expect("the pause menu").items()[0];
+        let resume = (resume.min + resume.max) * 0.5;
+        let resume = PhysicalPoint {
+            x: f64::from(resume.x),
+            y: f64::from(resume.y),
+        };
+        for (phase, state) in [
+            (TouchPhase::Began, PointerState::Pressed),
+            (TouchPhase::Ended, PointerState::Released),
+        ] {
+            engine
+                .shell_mut()
+                .touch(window, ContactId(2), phase, resume)
+                .expect("the headless shell reports TOUCH");
+            engine
+                .shell_mut()
+                .button(window, PointerButton::Left, state, Some(resume))
+                .expect("the window is live");
+        }
+        run_frames(&mut engine, 2);
+        assert!(!engine.is_paused(), "the panel could not be tapped shut");
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "PAUSE"),
+            "the button never reached the frame: {:?}",
+            ui_text(&engine),
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

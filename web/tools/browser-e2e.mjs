@@ -135,12 +135,15 @@ const EXPECTATIONS = {
     // pointer at all, and group F makes only the page-level claims for it.
     //
     // `paddle` says this game binds the pointer's *position*, so a drag has a
-    // visible result and [`SAMPLE_PADDLE`] can read it. `lives` is how the gate
-    // knows the start menu has gone: `menu::MenuKind::of` shows it while the run
-    // is untouched, a menu on screen owns the button, and a lost life is what
-    // returns the game to WAITING with nothing over it — the state a tap serves
-    // from, and the reason the tap binding exists at all.
-    touch: { paddle: true, lives: /Lives: (\d+)/ },
+    // visible result and [`SAMPLE_PADDLE`] can read it. `pause` says the demo
+    // draws `crcbl::engine::PauseControl`, which is the only route to the pause
+    // menu — and so to fullscreen and the debug panel — on a device with no
+    // keyboard. `lives` is how the gate knows the start menu has gone:
+    // `menu::MenuKind::of` shows it while the run is untouched, a menu on
+    // screen owns the button, and a lost life is what returns the game to
+    // WAITING with nothing over it — the state a tap serves from, and the
+    // reason the tap binding exists at all.
+    touch: { paddle: true, lives: /Lives: (\d+)/, pause: true },
   },
   flappy: {
     key: 'Space',
@@ -156,7 +159,7 @@ const EXPECTATIONS = {
     // other thing that touches the bird's `y`, and it can only ever lower it, so
     // a value above the one from before the taps is a flap and cannot be
     // anything else. `\by:` and not `y:`, or the line's own `vy:` matches first.
-    touch: { height: /\by: (-?[\d.]+)/ },
+    touch: { height: /\by: (-?[\d.]+)/, pause: true },
   },
   // `rock x` and not the ship's: this game's ship is stationary until the
   // player thrusts, and Space only fires. The rocks drift on their own from the
@@ -194,8 +197,8 @@ const EXPECTATIONS = {
     // claim below: `walk` is where the wizard is standing, and nothing but the
     // player's own movement input ever changes it — enemies do not push him and
     // the arena does not drift. `pause` says this game draws a second control
-    // beside the stick, which is what lets one finger walk while another does
-    // something else entirely.
+    // beside the stick — the pause button every touch demo draws — which is
+    // what lets one finger walk while another does something else entirely.
     touch: { walk: /\bx: (-?[\d.]+)/, pause: true },
   },
   // **The demo with no input.** `apps/hud` is the UI system's fixture rather
@@ -438,11 +441,11 @@ const WALK_MS = 25_000;
  * How far inside the canvas's top-right corner the pause button is tapped, in
  * the canvas's own device pixels.
  *
- * A deliberate coupling to `apps/horde/src/controls.rs`, which insets a
- * 112 × 56 button by 12: any point at least this far in from the corner and no
- * further than the button's own size lands on it. Written as one number rather
- * than as the rectangle so that a button that is resized but stays in its corner
- * does not move this file.
+ * A deliberate coupling to `crcbl::engine::pause`, which insets a 112 × 56
+ * button by 12 — the same button in every demo that draws one: any point at
+ * least this far in from the corner and no further than the button's own size
+ * lands on it. Written as one number rather than as the rectangle so that a
+ * button that is resized but stays in its corner does not move this file.
  */
 const PAUSE_INSET = 40;
 
@@ -2343,6 +2346,67 @@ try {
                 `x ${stoppedAt} -> ${stillStopped} while paused`
         );
 
+        // **The panel is tapped shut with the thumb still on the stick**, which
+        // is the lockout this whole contact route exists for: only the primary
+        // contact drives the emulated pointer, so while this thumb is down no
+        // other finger raises one, and `RESUME` could not be pressed by anybody
+        // until the stick was let go. The third contact is a finger that never
+        // touches the pointer at all.
+        const lockedMark = consoleLines.length;
+        await touch('touchStart', [
+          contact(pushed, 1),
+          contact(spot(0.5, 0.5), 3),
+        ]);
+        await touch('touchEnd', [contact(spot(0.5, 0.5), 3)]);
+        const unlocked = await until(async () => {
+          const status = await evaluate(page, `crcbl.status()`);
+          return status === STATUS_RUNNING ? status : null;
+        }, WALK_MS);
+        check(
+          'F',
+          'a second finger taps the pause menu shut while the first holds the stick',
+          unlocked === STATUS_RUNNING,
+          unlocked === STATUS_RUNNING
+            ? `resumed with contact 1 still down (${consoleLines.length - lockedMark} lines)`
+            : `status ${await evaluate(page, `crcbl.status()`)} — the menu ` +
+                'could not be reached while a control was held'
+        );
+
+        // **And the thumb that never lifted takes the stick back**, on its next
+        // move rather than after being lifted and landed again. The panel
+        // released the stick when it opened — deliberately, so the wizard does
+        // not walk behind it — and a floating stick re-centres wherever the
+        // thumb has got to, which is why this moves twice: once to take it, once
+        // to push it.
+        const regrabbed = wizardX();
+        await touch('touchMove', [contact(spot(0.68, STICK_BAND), 1)]);
+        await touch('touchMove', [contact(spot(0.95, STICK_BAND), 1)]);
+        const walkedAgain = await until(async () => {
+          const at = wizardX();
+          return at > regrabbed + WALK_MARGIN ? at : null;
+        }, WALK_MS);
+        check(
+          'F',
+          'the thumb that never lifted walks again once the panel has gone',
+          walkedAgain !== null,
+          walkedAgain === null
+            ? `x stayed at ${regrabbed} for ${WALK_MS} ms with a thumb that ` +
+                'never left the glass pushing right'
+            : `x ${regrabbed} -> ${walkedAgain} without lifting`
+        );
+
+        // Back into the pause menu for the stray-lift check below, with the
+        // thumb still down — which is the state that makes that check about
+        // anything at all — and back where it started, because where it *lifts*
+        // is what that check is about.
+        await touch('touchMove', [contact(pushed, 1)]);
+        await touch('touchStart', [contact(pushed, 1), contact(pauseSpot, 2)]);
+        await touch('touchEnd', [contact(pauseSpot, 2)]);
+        await until(async () => {
+          const status = await evaluate(page, `crcbl.status()`);
+          return status === STATUS_PAUSED ? status : null;
+        }, WALK_MS);
+
         // **The thumb that was already down lifts, over a panel it never
         // pressed.** It is the primary contact, so its lift is also a
         // `pointerup`, and it lands wherever the panel happened to open — which
@@ -2384,6 +2448,59 @@ try {
           `status ${resumed ?? (await evaluate(page, `crcbl.status()`))}`
         );
       }
+    }
+
+    if (EXPECTED.touch.pause) {
+      // **One finger, the whole round trip**, for every demo that draws the
+      // button rather than only for the one with two controls: tap the corner,
+      // the loop stops; tap the panel, it starts again. On breakout and flappy
+      // that finger is also the emulated pointer the game binds its paddle and
+      // its flap to, so this is the check that the button is not merely
+      // *present* — a run that served or flapped on the way to pausing would
+      // pause here too, and `crcbl.status()` alone would call that a pass. The
+      // sample tests carry that half, where the paddle and the bird can be read
+      // directly.
+      //
+      // Each attempt taps the middle first, which starts or restarts a run
+      // whenever a panel is up: flappy's bird dies on its own clock, and a
+      // corner tap under a death screen presses nothing at all.
+      const box = await evaluate(
+        page,
+        `(() => { const c = document.getElementById('canvas');
+                  return { w: c.width, h: c.height }; })()`
+      );
+      const corner = spot(1 - PAUSE_INSET / box.w, PAUSE_INSET / box.h);
+      const pausedByButton = await until(async () => {
+        await tap(spot(0.5, 0.5));
+        await pause(TAP_INTERVAL_MS);
+        await tap(corner);
+        await pause(TAP_INTERVAL_MS);
+        const status = await evaluate(page, `crcbl.status()`);
+        return status === STATUS_PAUSED ? status : null;
+      }, LIFE_MS);
+      check(
+        'F',
+        'a tap on the pause button stops the run',
+        pausedByButton === STATUS_PAUSED,
+        pausedByButton === STATUS_PAUSED
+          ? `status ${pausedByButton} after a tap ${PAUSE_INSET} px inside the corner`
+          : `status ${await evaluate(page, `crcbl.status()`)} — the corner ` +
+              `was tapped for ${LIFE_MS} ms and the loop never stopped`
+      );
+
+      // …and out again, which leaves the demo running as every other group here
+      // leaves it.
+      await tap(spot(0.5, 0.5));
+      const runningAgain = await until(async () => {
+        const status = await evaluate(page, `crcbl.status()`);
+        return status === STATUS_RUNNING ? status : null;
+      });
+      check(
+        'F',
+        'the panel that button opened can be tapped shut',
+        runningAgain === STATUS_RUNNING,
+        `status ${runningAgain ?? (await evaluate(page, `crcbl.status()`))}`
+      );
     }
   }
 

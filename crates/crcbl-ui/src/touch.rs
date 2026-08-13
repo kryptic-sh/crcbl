@@ -48,6 +48,21 @@ use crate::widget::Style;
 use crcbl_core::input::{ContactId, TouchPhase};
 use glam::Vec2;
 
+/// The palette an on-screen control is drawn in.
+///
+/// Dark and translucent, because a control is drawn **over the game's field**
+/// and one a player cannot see past is a control hiding the thing that is about
+/// to kill them. Here rather than in each game so that a stick and a button on
+/// the same screen — and the same button in two different samples — cannot drift
+/// into two different palettes.
+pub const CONTROL_STYLE: Style = Style {
+    text: [0.9, 0.9, 1.0, 0.9],
+    bg: [0.08, 0.08, 0.12, 0.45],
+    bg_hover: [0.15, 0.15, 0.22, 0.55],
+    bg_active: [0.55, 0.55, 0.75, 0.7],
+    border: [0.7, 0.7, 0.85, 0.55],
+};
+
 /// How much of the pad's radius the knob is drawn as.
 ///
 /// The knob is what the player's thumb is under, so it is drawn large enough to

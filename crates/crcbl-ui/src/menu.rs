@@ -914,6 +914,35 @@ impl<K: Copy + Eq> MenuSet<K> {
         self.current_mut().and_then(Menu::activate)
     }
 
+    /// Whether a press is latched onto one of this set's buttons.
+    ///
+    /// The question a caller driving the menu from **something other than the
+    /// pointer** has to ask: a contact is offered to [`point`](Self::point) once
+    /// and then has to be remembered or forgotten, and this is what says which —
+    /// a press that latched a button is one whose later events matter, and a
+    /// press that landed on the panel's background is not the menu's at all.
+    #[must_use]
+    pub fn press_captured(&self) -> bool {
+        self.ui.active().is_some()
+    }
+
+    /// Drops a press in progress **without firing it**.
+    ///
+    /// The [`Cancelled`](crcbl_core::input::TouchPhase::Cancelled) path, and the
+    /// distinction is the same one [`crate::touch::TouchButton`] draws: a lift
+    /// commits, a gesture the system took away does not. Without it a cancelled
+    /// contact would leave [`UiState`]'s capture latched onto a button nobody is
+    /// touching, and the next press could latch nothing at all.
+    ///
+    /// A press the pointer made is dropped by this too — there is one capture,
+    /// and a caller that cancels one cancels the press that is live.
+    pub fn cancel_press(&mut self) {
+        self.ui.clear();
+        if let Some(menu) = self.current_mut() {
+            menu.clear_input();
+        }
+    }
+
     /// Runs one frame of pointer input against the menu on screen.
     ///
     /// The layout is recomputed here rather than kept, because it depends on
@@ -1583,6 +1612,63 @@ mod tests {
         let corner = Vec2::new(3.0, 3.0);
         assert_eq!(menus.point(extent, &atlas(), press_at(corner)), None);
         assert_eq!(menus.point(extent, &atlas(), release_at(corner)), None);
+    }
+
+    /// **A cancelled press fires nothing and leaves nothing latched**, which is
+    /// what lets the next press latch at all.
+    ///
+    /// The second half is the one that matters: a capture left behind by a
+    /// gesture the system took away is not visible — the panel looks idle — and
+    /// the symptom is every later press doing nothing, on touch only.
+    #[test]
+    fn a_cancelled_press_fires_nothing_and_frees_the_capture() {
+        let extent = (960, 720);
+        let mut menus = menus();
+        menus.show(Kind::Paused);
+        let target = over(&menus, extent, 1);
+
+        assert!(!menus.press_captured(), "nothing is pressed yet");
+        menus.point(extent, &atlas(), press_at(target));
+        assert!(menus.press_captured(), "the press latched nothing");
+
+        menus.cancel_press();
+        assert!(
+            !menus.press_captured(),
+            "the cancel left the capture behind"
+        );
+        assert_eq!(
+            menus.current().expect("a menu").state(1),
+            ButtonState::Idle,
+            "the button stayed pressed under a finger that is gone",
+        );
+        assert_eq!(
+            menus.point(extent, &atlas(), release_at(target)),
+            None,
+            "the cancelled press fired on the lift anyway",
+        );
+
+        // And the button still works afterwards, which is what a capture left
+        // latched would have made impossible.
+        menus.point(extent, &atlas(), press_at(target));
+        assert_eq!(menus.point(extent, &atlas(), release_at(target)), Some(2));
+    }
+
+    /// **A press on the panel's background captures nothing**, so a caller
+    /// driving the menu with contacts can tell the press it must remember from
+    /// the one it must let go of.
+    #[test]
+    fn a_press_that_lands_on_no_button_captures_nothing() {
+        let extent = (960, 720);
+        let mut menus = menus();
+        menus.show(Kind::Paused);
+
+        menus.point(extent, &atlas(), press_at(Vec2::new(3.0, 3.0)));
+        assert!(
+            !menus.press_captured(),
+            "a press in the corner of the screen latched a button",
+        );
+        menus.point(extent, &atlas(), press_at(over(&menus, extent, 0)));
+        assert!(menus.press_captured());
     }
 
     /// **Switching menus drops the press capture**, so a click that started on

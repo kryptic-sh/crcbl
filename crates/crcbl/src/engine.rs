@@ -115,6 +115,10 @@ use crcbl_shell::{CloseReply, DisplayMode, PhysicalSize, Shell, ShellError, Shel
 
 use crate::backend::GpuBackend;
 
+pub mod pause;
+
+pub use pause::PauseControl;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -2630,14 +2634,24 @@ impl TouchUpdate {
     /// [`DrawList`]: crcbl_ui::draw_list::DrawList
     #[must_use]
     pub fn pixels(&self, extent: (u32, u32)) -> glam::Vec2 {
-        let width = extent.0.max(1) as f32;
-        let height = extent.1.max(1) as f32;
-        glam::Vec2::new(
-            (self.at.x + 1.0) * 0.5 * width,
-            // The Y flip `normalised` applied, undone.
-            (1.0 - self.at.y) * 0.5 * height,
-        )
+        surface_pixels(self.at, extent)
     }
+}
+
+/// The −1…1 a game binds against back to framebuffer pixels, Y down from the
+/// top-left — [`normalised`] undone.
+///
+/// Shared by [`TouchUpdate::pixels`] and by [`pause`], which hit-tests the
+/// *pointer* against a rectangle laid out in the same pixels a
+/// [`DrawList`](crcbl_ui::draw_list::DrawList) uses.
+fn surface_pixels(at: glam::Vec2, extent: (u32, u32)) -> glam::Vec2 {
+    let width = extent.0.max(1) as f32;
+    let height = extent.1.max(1) as f32;
+    glam::Vec2::new(
+        (at.x + 1.0) * 0.5 * width,
+        // The Y flip `normalised` applied, undone.
+        (1.0 - at.y) * 0.5 * height,
+    )
 }
 
 /// Framebuffer pixels to the −1…1 the game binds against, +Y up.
@@ -3609,6 +3623,34 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// not a release, because the player did not lift the finger — see
     /// [`TouchUpdate::phase`].
     live_contacts: Vec<(crcbl_core::input::ContactId, glam::Vec2)>,
+    /// Which contact the platform is **also** reporting as the emulated
+    /// pointer, while it is down.
+    ///
+    /// The seam carries no flag for it, so it is re-derived from the rule every
+    /// backend that sets [`ShellCaps::TOUCH`](crcbl_shell::ShellCaps::TOUCH)
+    /// owes — the browser's, which the others must match: the emulated pointer
+    /// is the **first contact of a gesture**, the one down while no other is,
+    /// and no later finger inherits it when that one lifts.
+    ///
+    /// It is not a pointer the engine synthesizes and nothing reads a position
+    /// off it: it exists so [`Self::menu_contact`] can skip the one finger the
+    /// menu already hears about through the pointer. Without it a one-finger tap
+    /// on a button would arrive twice and fire twice — which for `FULLSCREEN` is
+    /// a toggle that does nothing at all.
+    pointer_contact: Option<crcbl_core::input::ContactId>,
+    /// The contact holding a press **on the panel on screen**, if any.
+    ///
+    /// [`Self::menu_owns_press`] for fingers, and it is what makes a menu
+    /// reachable while another contact holds an on-screen control: only the
+    /// primary contact drives the pointer, so a thumb on a stick leaves every
+    /// other finger with no way to press a button at all. A contact is the
+    /// menu's only if it *landed on a button* while a panel was up — a finger
+    /// that came down on the field before the panel did stays the game's, and
+    /// one that lands on the panel's background is nobody's.
+    ///
+    /// One at a time, like the pointer's single capture: first come, first
+    /// served, which is the rule every other control here follows.
+    menu_contact: Option<crcbl_core::input::ContactId>,
     mode: ModeRequest,
     budget: FrameBudget,
     ticks: u64,
@@ -3660,6 +3702,8 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             pointer_in_game: false,
             menu_owns_press: false,
             live_contacts: Vec::new(),
+            pointer_contact: None,
+            menu_contact: None,
             mode: ModeRequest::new(),
             budget: FrameBudget::new(config.frames),
             ticks: 0,
@@ -3778,7 +3822,53 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             }
         }
 
-        // What is left of the pointer once the menu has had it. `showing` is
+        // **Contacts before the pointer**, which is the order they exist in:
+        // the finger is the event, and the emulated pointer is derived from it
+        // by the platform. A game whose on-screen control took the contact has
+        // to be able to say that the pointer press the *same* finger raised is
+        // that control's and not a flap — see
+        // [`PauseControl::takes_pointer`](pause::PauseControl::takes_pointer) —
+        // and it can only say so once it has heard about the finger.
+        //
+        // One call per event and none merged, because a tap is a `Began` and an
+        // `Ended` in one batch and a game that only heard the last of them
+        // would never see a finger land.
+        for touch in std::mem::take(&mut pending.touches) {
+            let at = normalised(touch.at, self.gpu.extent());
+            // Before the bookkeeping below moves it: the first contact of a
+            // gesture is the one down while `live_contacts` is empty, which is
+            // exactly the rule the platform used to pick the finger it emulates
+            // the pointer with. See `Self::pointer_contact`.
+            if matches!(touch.phase, crcbl_core::input::TouchPhase::Began)
+                && self.live_contacts.is_empty()
+            {
+                self.pointer_contact = Some(touch.contact);
+            }
+            self.live_contacts.retain(|(id, _)| *id != touch.contact);
+            if touch.phase.ends_contact() {
+                if self.pointer_contact == Some(touch.contact) {
+                    self.pointer_contact = None;
+                }
+            } else {
+                self.live_contacts.push((touch.contact, at));
+            }
+            // The menu's turn at this finger, before the game's — the same
+            // order the pointer's half above takes, and for the same reason: a
+            // button fires on the batch the player pressed it in.
+            if let Some(id) = self.route_contact_to_menu(&touch)
+                && let Some(action) = MenuAction::from_id(id, G::menu_action)
+            {
+                self.apply(action)?;
+            }
+            self.game.touch_event(TouchUpdate {
+                contact: touch.contact,
+                phase: touch.phase,
+                at,
+            });
+        }
+
+        // What is left of the pointer once the menu and the game's own controls
+        // have had it. `showing` is
         // last frame's menu for the same reason the keyboard's claim is: the
         // panel the player tapped is the one that was on screen when they did.
         let pressed = pending.pointer_pressed && !showing;
@@ -3798,26 +3888,6 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                 at,
                 pressed,
                 released,
-            });
-        }
-
-        // Contacts, after the menu has had the pointer: a phone's tap on a
-        // panel is both a widget press and a contact, and the game hears about
-        // them in the order they happened to the player.
-        //
-        // One call per event and none merged, because a tap is a `Began` and an
-        // `Ended` in one batch and a game that only heard the last of them
-        // would never see a finger land.
-        for touch in std::mem::take(&mut pending.touches) {
-            let at = normalised(touch.at, self.gpu.extent());
-            self.live_contacts.retain(|(id, _)| *id != touch.contact);
-            if !touch.phase.ends_contact() {
-                self.live_contacts.push((touch.contact, at));
-            }
-            self.game.touch_event(TouchUpdate {
-                contact: touch.contact,
-                phase: touch.phase,
-                at,
             });
         }
 
@@ -3849,6 +3919,13 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                     pressed: false,
                     released: true,
                 });
+            }
+            // A finger that was pressing a panel is holding a press nobody will
+            // finish, and the menu's is the same obligation: dropped rather than
+            // fired, because the window going away is not a tap.
+            self.pointer_contact = None;
+            if self.menu_contact.take().is_some() {
+                self.menus.cancel_press();
             }
             // And the same for every finger that was down. **Cancelled, not
             // ended**: the player did not lift it, so a stick centres and a
@@ -3972,6 +4049,117 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         }
     }
 
+    /// Offers one contact to the menu on screen, and reports a button it fired.
+    ///
+    /// # Why a menu hears fingers at all
+    ///
+    /// Because the pointer cannot carry them. Only the **primary** contact is
+    /// reported as the emulated pointer, so a game whose on-screen control is
+    /// held — a thumb on horde's stick — owns that pointer for as long as the
+    /// thumb is down, and every other finger raises no pointer event anywhere.
+    /// The menu was therefore unreachable at exactly the moment a player most
+    /// wants it: pause with one thumb still down and `RESUME` could not be
+    /// tapped by the other hand until the first was lifted.
+    ///
+    /// Contacts are a **second device** driving the same widgets, the way
+    /// [`MENU_ACTIVATE_KEY`] is. Nothing here synthesizes a pointer: the
+    /// position comes from the contact, no [`PointerCapture`] state is touched,
+    /// and a game bound to [`Binding::MouseButton`](crcbl_input::Binding) sees
+    /// exactly what it saw before.
+    ///
+    /// # Which fingers are the menu's
+    ///
+    /// * **Not the one the pointer already carries** — see
+    ///   [`Self::pointer_contact`]. A one-finger tap arrives on both streams,
+    ///   and a button that fired on each would fire twice.
+    /// * **Only one at a time**, and only one whose landing **latched a
+    ///   button**. That is the whole of the rule — a press the menu is not
+    ///   holding is never followed, so a finger that came down on the field
+    ///   before the panel existed cannot fire what appears under it (the menu
+    ///   was not on screen for its `Began`, so nothing latched), and a finger
+    ///   resting on the panel's background cannot occupy the slot the other hand
+    ///   needs. [`Self::menu_owns_press`] is the same rule for the pointer,
+    ///   which needs a flag of its own because its press is a *level* the loop
+    ///   re-reads every frame rather than an event that arrives once.
+    /// * A contact the system **cancelled** drops the press without firing,
+    ///   which is the whole reason [`TouchPhase::Cancelled`] is not
+    ///   [`TouchPhase::Ended`].
+    ///
+    /// [`TouchPhase::Cancelled`]: crcbl_core::input::TouchPhase::Cancelled
+    /// [`TouchPhase::Ended`]: crcbl_core::input::TouchPhase::Ended
+    fn route_contact_to_menu(&mut self, touch: &TouchContact) -> Option<crcbl_ui::WidgetId> {
+        use crcbl_core::input::TouchPhase;
+
+        if self.pointer_contact == Some(touch.contact) {
+            return None;
+        }
+        match touch.phase {
+            TouchPhase::Began => {
+                // `press_captured` as well as `menu_contact`: the press already
+                // latched may be the pointer's, and a second finger arriving on
+                // top of one is not the menu's either. First come, first served,
+                // which is the rule every control here follows.
+                if self.menu_contact.is_some() || self.menus.press_captured() {
+                    return None;
+                }
+                let fired = self.point_contact(touch.at, true, false);
+                // A press latches a button or it lands on nothing. Only the
+                // first is a press the menu is holding, and only that one is
+                // worth remembering — the rest of this finger's gesture is the
+                // game's business.
+                if self.menus.press_captured() {
+                    self.menu_contact = Some(touch.contact);
+                }
+                fired
+            }
+            TouchPhase::Moved => {
+                if self.menu_contact != Some(touch.contact) {
+                    return None;
+                }
+                self.point_contact(touch.at, true, false)
+            }
+            TouchPhase::Ended => {
+                if self.menu_contact != Some(touch.contact) {
+                    return None;
+                }
+                self.menu_contact = None;
+                self.point_contact(touch.at, false, true)
+            }
+            TouchPhase::Cancelled => {
+                if self.menu_contact != Some(touch.contact) {
+                    return None;
+                }
+                self.menu_contact = None;
+                self.menus.cancel_press();
+                None
+            }
+        }
+    }
+
+    /// One contact's worth of input against this frame's menu, in the pixels it
+    /// is laid out in.
+    ///
+    /// The layout is the menu's own, recomputed per call for the reason
+    /// [`MenuSet::point`](crcbl_ui::menu::MenuSet::point) recomputes it: it
+    /// depends on the framebuffer's size, and a hit test against last frame's
+    /// rectangles misses on the frame a rotation lands.
+    fn point_contact(
+        &mut self,
+        at: glam::Vec2,
+        down: bool,
+        released: bool,
+    ) -> Option<crcbl_ui::WidgetId> {
+        self.menus.point(
+            self.gpu.extent(),
+            self.gpu.atlas(),
+            crcbl_ui::PointerInput {
+                pos: at,
+                down,
+                released,
+            },
+        )
+    }
+
     /// What a fired menu button does.
     ///
     /// The one place a button becomes an effect. Both input devices arrive
@@ -4009,6 +4197,10 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // whether the pointer reaches the panel at all.
         if kind != self.menus.kind() {
             self.menu_owns_press = false;
+            // The finger's half of the same rule: the button it was holding is
+            // not on screen any more, so its lift belongs to nothing. `show`
+            // below drops the capture it was latched onto.
+            self.menu_contact = None;
         }
         self.menus.show(kind);
         let layout = self
@@ -8555,6 +8747,343 @@ mod tests {
             engine.game().touches,
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    // -- a finger on a menu ---------------------------------------------------
+
+    /// Posts one contact and runs a frame.
+    fn finger(
+        engine: &mut Loop<crcbl_shell::HeadlessShell, FakeGame>,
+        contact: u32,
+        phase: crcbl_core::input::TouchPhase,
+        at: glam::Vec2,
+    ) {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .touch(
+                window,
+                crcbl_core::input::ContactId(contact),
+                phase,
+                crcbl_shell::PhysicalPoint {
+                    x: f64::from(at.x),
+                    y: f64::from(at.y),
+                },
+            )
+            .expect("the headless shell reports TOUCH");
+        engine.frame().expect("the fake never fails");
+    }
+
+    /// Posts one contact **and the emulated pointer the platform owes for it**,
+    /// then runs a frame.
+    ///
+    /// The obligation on any backend that sets `ShellCaps::TOUCH`: every contact
+    /// on the touch stream, and the primary one *also* as a pointer. A test that
+    /// scripted only the contacts would be modelling a platform that does not
+    /// exist, and would never see the double-fire this file guards against.
+    fn primary_finger(
+        engine: &mut Loop<crcbl_shell::HeadlessShell, FakeGame>,
+        contact: u32,
+        phase: crcbl_core::input::TouchPhase,
+        at: glam::Vec2,
+    ) {
+        use crcbl_core::input::TouchPhase;
+        let window = engine.window();
+        let point = crcbl_shell::PhysicalPoint {
+            x: f64::from(at.x),
+            y: f64::from(at.y),
+        };
+        let shell = engine.shell_mut();
+        shell
+            .touch(window, crcbl_core::input::ContactId(contact), phase, point)
+            .expect("the headless shell reports TOUCH");
+        match phase {
+            TouchPhase::Began | TouchPhase::Ended | TouchPhase::Cancelled => {
+                let state = if matches!(phase, TouchPhase::Began) {
+                    crcbl_shell::ButtonState::Pressed
+                } else {
+                    crcbl_shell::ButtonState::Released
+                };
+                shell
+                    .button(
+                        window,
+                        crcbl_core::input::PointerButton::Left,
+                        state,
+                        Some(point),
+                    )
+                    .expect("the window is live");
+            }
+            TouchPhase::Moved => shell
+                .move_pointer(window, point, (0.0, 0.0))
+                .expect("the window is live"),
+        }
+        engine.frame().expect("the fake never fails");
+    }
+
+    /// A whole tap of the primary finger **inside one pump**, which is what a
+    /// tap on a phone is: the press and the release of a real one arrive in the
+    /// same batch, and a check that spread them over two frames is checking a
+    /// gesture nobody makes.
+    fn primary_tap(
+        engine: &mut Loop<crcbl_shell::HeadlessShell, FakeGame>,
+        contact: u32,
+        at: glam::Vec2,
+    ) {
+        use crcbl_core::input::TouchPhase;
+        let window = engine.window();
+        let point = crcbl_shell::PhysicalPoint {
+            x: f64::from(at.x),
+            y: f64::from(at.y),
+        };
+        let shell = engine.shell_mut();
+        for (phase, state) in [
+            (TouchPhase::Began, crcbl_shell::ButtonState::Pressed),
+            (TouchPhase::Ended, crcbl_shell::ButtonState::Released),
+        ] {
+            shell
+                .touch(window, crcbl_core::input::ContactId(contact), phase, point)
+                .expect("the headless shell reports TOUCH");
+            shell
+                .button(
+                    window,
+                    crcbl_core::input::PointerButton::Left,
+                    state,
+                    Some(point),
+                )
+                .expect("the window is live");
+        }
+        engine.frame().expect("the fake never fails");
+    }
+
+    /// The centre of the button the menu on screen is showing, in framebuffer
+    /// pixels.
+    fn menu_button(engine: &Loop<crcbl_shell::HeadlessShell, FakeGame>) -> glam::Vec2 {
+        let layout = engine.menu_layout().expect("a menu is on screen");
+        let item = layout.items()[0];
+        (item.min + item.max) * 0.5
+    }
+
+    /// A loop whose swapchain has settled and whose start menu is up.
+    fn with_a_menu() -> Loop<crcbl_shell::HeadlessShell, FakeGame> {
+        let mut engine = hosted(None);
+        // The fixture's swapchain settles at its final extent a frame or two
+        // in, and a menu laid out before that is laid out for a surface about
+        // to change size.
+        for _ in 0..3 {
+            engine.frame().expect("the fake never fails");
+        }
+        assert_eq!(engine.menu_kind(), FakeMenu::Start, "no menu to press");
+        engine
+    }
+
+    /// Pauses through the key, which is the loop's own route to the panel.
+    fn pause_key(engine: &mut Loop<crcbl_shell::HeadlessShell, FakeGame>) {
+        let window = engine.window();
+        for state in [
+            crcbl_shell::ButtonState::Pressed,
+            crcbl_shell::ButtonState::Released,
+        ] {
+            engine
+                .shell_mut()
+                .key(window, PAUSE_KEY, state)
+                .expect("the window is live");
+        }
+        engine.frame().expect("the fake never fails");
+    }
+
+    /// **A second finger presses a menu button while the first holds a
+    /// control.**
+    ///
+    /// The lockout this routing exists for. Only the primary contact drives the
+    /// emulated pointer, so while a thumb is down on an on-screen stick the menu
+    /// hears nothing from any other finger — and a player who paused had to lift
+    /// the stick before `RESUME` could be tapped at all.
+    ///
+    /// Both halves are asserted. The panel goes away, which is the second finger
+    /// having fired the button; and the first contact is **not disturbed** —
+    /// nothing is delivered for it, so the control it is holding keeps whatever
+    /// value it had, and it is still live afterwards.
+    #[test]
+    fn a_second_contact_presses_a_menu_while_the_first_holds_a_control() {
+        use crcbl_core::input::{ContactId, TouchPhase};
+        let mut engine = with_a_menu();
+
+        // The thumb, on the field and down for the rest of this test. It is the
+        // first contact of the gesture, so it is the one the platform emulates
+        // the pointer with.
+        primary_finger(
+            &mut engine,
+            1,
+            TouchPhase::Began,
+            glam::Vec2::new(40.0, 400.0),
+        );
+        pause_key(&mut engine);
+        assert!(engine.is_paused(), "the panel never opened");
+        assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+        let resume = menu_button(&engine);
+        let held = engine.game().touches.len();
+
+        // The other hand, on RESUME, with the thumb still down. No pointer
+        // event anywhere: a second contact raises none, which is exactly why
+        // this could not be done before.
+        finger(&mut engine, 2, TouchPhase::Began, resume);
+        assert!(engine.is_paused(), "a press is not a tap");
+        finger(&mut engine, 2, TouchPhase::Ended, resume);
+        assert!(
+            !engine.is_paused(),
+            "the second finger could not reach the panel: the run is still paused",
+        );
+
+        // The thumb was left alone: every contact delivered while the other
+        // hand was pressing belongs to the second finger.
+        assert!(
+            engine.game().touches[held..]
+                .iter()
+                .all(|touch| touch.contact == ContactId(2)),
+            "the menu tap disturbed the contact holding the control: {:?}",
+            &engine.game().touches[held..],
+        );
+        // …and it is still the loop's live, primary contact, so its next move
+        // reaches the game and nothing else has inherited the pointer.
+        let moved = engine.game().touches.len();
+        primary_finger(
+            &mut engine,
+            1,
+            TouchPhase::Moved,
+            glam::Vec2::new(60.0, 400.0),
+        );
+        assert_eq!(
+            engine.game().touches[moved..]
+                .iter()
+                .map(|touch| (touch.contact, touch.phase))
+                .collect::<Vec<_>>(),
+            vec![(ContactId(1), TouchPhase::Moved)],
+            "the thumb stopped being heard from",
+        );
+    }
+
+    /// **One finger, one press.**
+    ///
+    /// A tap arrives on both streams — the contact and the pointer the platform
+    /// emulates for it — and the button it lands on must fire *once*. The
+    /// observable is the game's own key log rather than a state that saturates:
+    /// `Serve::Launch` presses `SERVE_KEY` and releases it, so a button that
+    /// fired twice logs four events instead of two, and for a toggle like
+    /// `FULLSCREEN` the second fire would silently undo the first.
+    ///
+    /// **The tap is one pump**, which is what makes this able to fail: with the
+    /// press and the release in separate batches the pointer's fire clears the
+    /// menu's capture before the contact reaches it, and the double fire hides.
+    #[test]
+    fn a_one_finger_tap_on_a_menu_button_fires_it_once() {
+        let mut engine = with_a_menu();
+        let play = menu_button(&engine);
+        assert!(engine.game().keys.is_empty(), "nothing has been pressed");
+
+        primary_tap(&mut engine, 1, play);
+        assert!(engine.game().served, "the tap never fired the button");
+        assert_eq!(
+            engine.game().keys,
+            vec![(SERVE_KEY, true), (SERVE_KEY, false)],
+            "the button fired more than once for one finger",
+        );
+    }
+
+    /// **A contact that landed before the panel presses nothing**, which is the
+    /// pointer's rule and has to be the finger's too.
+    ///
+    /// The finger here is deliberately **not** the primary one — an anchor
+    /// contact is down first — so this is about the contact route rather than
+    /// about the pointer's `menu_owns_press`, which a primary contact would
+    /// have hidden behind.
+    #[test]
+    fn a_contact_that_landed_before_the_panel_fires_nothing() {
+        use crcbl_core::input::TouchPhase;
+        let mut engine = with_a_menu();
+        // Anchor, so the finger under test is never the emulated pointer.
+        primary_finger(&mut engine, 1, TouchPhase::Began, glam::Vec2::new(8.0, 8.0));
+        pause_key(&mut engine);
+        let resume = menu_button(&engine);
+        pause_key(&mut engine);
+        assert!(!engine.is_paused(), "the fixture would not un-pause");
+
+        // Down on the field, where the panel is about to open, and lifted after
+        // it has.
+        finger(&mut engine, 2, TouchPhase::Began, resume);
+        pause_key(&mut engine);
+        assert!(engine.is_paused(), "the panel never opened");
+        finger(&mut engine, 2, TouchPhase::Moved, resume);
+        finger(&mut engine, 2, TouchPhase::Ended, resume);
+        assert!(
+            engine.is_paused(),
+            "a finger that was down before the panel opened fired the button \
+             that appeared under it",
+        );
+
+        // The control: a finger that lands *on* the panel still fires it, so
+        // this is not a menu that stopped answering contacts.
+        finger(&mut engine, 2, TouchPhase::Began, resume);
+        finger(&mut engine, 2, TouchPhase::Ended, resume);
+        assert!(
+            !engine.is_paused(),
+            "a tap made on the panel stopped working"
+        );
+    }
+
+    /// **A gesture the system took away fires nothing, and frees the panel for
+    /// the next finger.**
+    ///
+    /// The second half is the one that hides: a cancelled press that left the
+    /// menu's capture latched is invisible — the panel looks idle — and every
+    /// later tap does nothing.
+    #[test]
+    fn a_cancelled_contact_fires_nothing_and_leaves_the_menu_pressable() {
+        use crcbl_core::input::TouchPhase;
+        let mut engine = with_a_menu();
+        primary_finger(&mut engine, 1, TouchPhase::Began, glam::Vec2::new(8.0, 8.0));
+        pause_key(&mut engine);
+        let resume = menu_button(&engine);
+
+        finger(&mut engine, 2, TouchPhase::Began, resume);
+        finger(&mut engine, 2, TouchPhase::Cancelled, resume);
+        assert!(
+            engine.is_paused(),
+            "the system took the gesture away and the button fired anyway",
+        );
+
+        finger(&mut engine, 3, TouchPhase::Began, resume);
+        finger(&mut engine, 3, TouchPhase::Ended, resume);
+        assert!(
+            !engine.is_paused(),
+            "the cancelled press left the panel holding a capture nobody could \
+             take, so the next tap did nothing",
+        );
+    }
+
+    /// **A finger resting on the panel's background does not lock the other
+    /// hand out**, which is the failure a "the first contact while a panel is
+    /// up is the menu's" rule would have introduced in place of the one it fixed.
+    #[test]
+    fn a_contact_on_the_panels_background_leaves_the_buttons_pressable() {
+        use crcbl_core::input::TouchPhase;
+        let mut engine = with_a_menu();
+        primary_finger(&mut engine, 1, TouchPhase::Began, glam::Vec2::new(8.0, 8.0));
+        pause_key(&mut engine);
+        let resume = menu_button(&engine);
+
+        // A corner of the screen: on the panel's frame at most, on no button.
+        finger(
+            &mut engine,
+            2,
+            TouchPhase::Began,
+            glam::Vec2::new(4.0, 470.0),
+        );
+        finger(&mut engine, 3, TouchPhase::Began, resume);
+        finger(&mut engine, 3, TouchPhase::Ended, resume);
+        assert!(
+            !engine.is_paused(),
+            "a finger resting off the buttons held the panel's press slot",
+        );
     }
 
     /// **A menu button of the game's reaches the game as its own action.**
