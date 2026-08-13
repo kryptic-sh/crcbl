@@ -171,14 +171,16 @@ impl crcbl::ui::DebugModule for Paths {
 /// **The row that stops a reviewer filing a bug.** The mirror panel and the
 /// metal block render near-black because ambient scales the diffuse albedo and
 /// a conductor has none — see [`crate::room`] — so this says it on the screen
-/// where the black is, rather than only in a document nobody has open.
+/// where the black is, rather than only in a document nobody has open. Since
+/// screen-space reflections landed the panel's *foot* is lit and the rest of it
+/// is not, which is a picture that needs the row more rather than less.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Unbuilt;
 
 impl crcbl::ui::DebugModule for Unbuilt {
     fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
         section.set_title("unbuilt");
-        section.row_str("metal", "black: no SSR, no probes");
+        section.row_str("metal", "black: SSR misses, no probes");
         section.row_str("bounce wall", "no GI: it does not bounce");
         section.row_str("toggles", "shadows/AO always on");
     }

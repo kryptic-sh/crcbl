@@ -30,9 +30,17 @@
 //! the diffuse albedo *down* — a conductor has no diffuse lobe — and the ambient
 //! term multiplies that same diffuse albedo, so a fully metallic surface out of
 //! every light's specular reach has nothing left to shade with. What fills it in
-//! is a reflection, and `docs/plan/18-render-features.md`'s screen-space
-//! reflections and irradiance probes are both unbuilt. The debug panel says so
-//! on a row of its own, and `docs/backlog.md` carries it as owed work.
+//! is a reflection.
+//!
+//! Some of that has landed. `docs/plan/18-render-features.md`'s screen-space
+//! reflections now light **the foot of the mirror panel**, and only the foot: the
+//! panel faces the camera, so a ray leaving it goes back past the eye and only
+//! the lowest part of the face sends one that reaches the floor while still on
+//! screen — see [`MIRROR_FOOT`]. The rough metal block is untouched, because its
+//! roughness is above the cutoff a single ray is honest at
+//! ([`crcbl::shaders::ssr::ROUGHNESS_CUTOFF`]); the blur that lowers it and the
+//! irradiance probes that would fill in a miss are both unbuilt. The debug panel
+//! says so on a row of its own, and `docs/backlog.md` carries it as owed work.
 //!
 //! **The coloured wall does not bounce**, for the neighbouring reason: bounced
 //! light is global illumination, and there is none. It is a coloured wall that
@@ -131,6 +139,36 @@ const MIRROR_MAX: Vec3 = Vec3::new(-0.55, 2.25, -2.83);
 /// test spelling the number for itself would be a second copy of the panel's
 /// own corner.
 pub const MIRROR_FACE_Z: f32 = MIRROR_MAX.z;
+
+/// The middle of the mirror panel's `+Z` face, left to right.
+const MIRROR_MID_X: f32 = 0.5 * (MIRROR_MIN.x + MIRROR_MAX.x);
+
+/// The middle of the panel's **bottom edge**, where the golden suite reads the
+/// reflection.
+///
+/// **The panel is close to screen-space reflection's worst case, and this is the
+/// only part of it that is not.** The face looks straight at the camera, so a ray
+/// leaving it goes back past the eye: from a point above eye height the ray rises
+/// and finds the ceiling behind the camera, and from a point below it the ray
+/// falls towards the floor — but only from the lowest part of the face does it
+/// reach the floor while still *inside the frame*, which is the only place a
+/// screen-space march can find anything at all.
+///
+/// So this is the bottom edge itself, and
+/// `apps/lumen/tests/golden.rs` hangs its block directly above it rather than
+/// centring one here. `the_mirror_panel_reflects_at_its_foot_and_not_at_its_head`
+/// is what says the band is real, with no GPU: it computes the height at which a
+/// reflected ray stops landing in frame and checks this point is below it and
+/// [`MIRROR_MISSES`] above it.
+pub const MIRROR_FOOT: Vec3 = Vec3::new(MIRROR_MID_X, MIRROR_MIN.y, MIRROR_FACE_Z);
+
+/// A point on the **same face** whose reflected ray finds nothing.
+///
+/// Same material row, same normal, same `F0`, same roughness, same absence of
+/// direct light as [`MIRROR_FOOT`] — the two differ in one thing only, which is
+/// whether the ray they send finds the floor while it is still on screen. That is
+/// what makes the pair a claim about the reflection rather than about the panel.
+pub const MIRROR_MISSES: Vec3 = Vec3::new(MIRROR_MID_X, 1.5, MIRROR_FACE_Z);
 
 /// A floor point **inside** the shaft of sunlight the window throws.
 ///
@@ -1189,6 +1227,104 @@ mod tests {
             !(WINDOW_SILL..=WINDOW_HEAD).contains(&dark_height) || dark_run.abs() > WINDOW_HALF,
             "the ray back from {SHADED_FLOOR:?} meets the wall at ({dark_height:.2}, \
              {dark_run:.2}), which is inside the opening — both samples are lit"
+        );
+    }
+
+    /// [`MIRROR_FOOT`] and [`MIRROR_MISSES`] are on one face of one material and
+    /// differ in **one** thing: whether the ray each sends finds the floor while
+    /// it is still inside the frame.
+    ///
+    /// Worked out here rather than eyeballed off a picture, on
+    /// [`the_two_floor_samples_differ_in_the_sun_and_in_nothing_else`]'s terms.
+    /// The face's normal is `+Z`, so reflecting the view ray about it flips the
+    /// `z` component and leaves `x` and `y` alone; the reflected ray falls
+    /// towards the floor for any point below eye height and meets it at a
+    /// position this test projects through [`fixed_camera`]. The transition — the
+    /// height above which that position leaves the frame — is bisected rather
+    /// than written down, so the two constants are checked against the camera
+    /// they are read under rather than against a number somebody wrote once.
+    ///
+    /// [`the_two_floor_samples_differ_in_the_sun_and_in_nothing_else`]: fn@the_two_floor_samples_differ_in_the_sun_and_in_nothing_else
+    #[test]
+    fn the_mirror_panel_reflects_at_its_foot_and_not_at_its_head() {
+        let camera = fixed_camera();
+        // The golden suite's own aspect: both extents it draws at are 4:3.
+        let view_projection = camera.view_projection(4.0 / 3.0);
+        // Where the ray reflected off the `+Z` face at `height` meets the floor,
+        // and whether that point is inside the frame. `None` at or above eye
+        // height, where the ray rises instead of falling.
+        let lands_in_frame = |height: f32| {
+            if height >= camera.eye.y {
+                return false;
+            }
+            let steps = height / (camera.eye.y - height);
+            let hit = Vec3::new(
+                MIRROR_MID_X + (MIRROR_MID_X - camera.eye.x) * steps,
+                0.0,
+                MIRROR_FACE_Z + (camera.eye.z - MIRROR_FACE_Z) * steps,
+            );
+            let clip = view_projection * hit.extend(1.0);
+            clip.w > 0.0 && (clip.x / clip.w).abs() < 1.0 && (clip.y / clip.w).abs() < 1.0
+        };
+
+        for point in [MIRROR_FOOT, MIRROR_MISSES] {
+            assert_eq!(
+                point.z, MIRROR_FACE_Z,
+                "{point:?} is not on the panel's front face"
+            );
+            assert!(
+                point.x > MIRROR_MIN.x
+                    && point.x < MIRROR_MAX.x
+                    && point.y >= MIRROR_MIN.y
+                    && point.y <= MIRROR_MAX.y,
+                "{point:?} is off the panel's front face, so it is not the mirror material"
+            );
+            let Light::Point(light) = lamp(0.0) else {
+                panic!("the lamp is a point light");
+            };
+            assert!(
+                point.distance(light.position) > light.radius,
+                "{point:?} is inside the lamp's radius, so the two samples do not differ in \
+                 the reflection alone"
+            );
+        }
+        assert_eq!(
+            (MIRROR_FOOT.x, MIRROR_MISSES.x),
+            (MIRROR_MID_X, MIRROR_MID_X),
+            "the two samples must be in the same column of the face, or they differ in the \
+             direction their rays leave in as well as in the height"
+        );
+
+        // The transition, bisected between the panel's foot and its head.
+        let (mut reflects, mut misses) = (MIRROR_FOOT.y, MIRROR_MAX.y);
+        assert!(
+            lands_in_frame(reflects) && !lands_in_frame(misses),
+            "the panel's foot must reflect into the frame and its head must not, or there is \
+             no transition between them to find"
+        );
+        for _ in 0..40 {
+            let middle = 0.5 * (reflects + misses);
+            if lands_in_frame(middle) {
+                reflects = middle;
+            } else {
+                misses = middle;
+            }
+        }
+        // The block the golden hangs above `MIRROR_FOOT` is as tall as the
+        // caller's own, so the band has to be a real share of the face rather
+        // than a line: an eighth of the panel's height is what the frame this was
+        // set against measures, and a band that had shrunk to nothing would leave
+        // the golden's claim resting on a couple of rows.
+        let band = reflects - MIRROR_FOOT.y;
+        assert!(
+            band > 0.1,
+            "only {band:.3} of the panel's height reflects into the frame, which is too thin \
+             a band for a block to sit in — the camera or the panel has moved"
+        );
+        assert!(
+            MIRROR_MISSES.y > misses,
+            "{MIRROR_MISSES:?} is at or below the height where reflections stop landing in \
+             frame ({misses:.3}), so it is not a control"
         );
     }
 

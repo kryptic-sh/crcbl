@@ -2454,6 +2454,11 @@ impl TransientImageDesc {
     /// forward pass writes the bound material row" a test result rather than a
     /// claim about a buffer nothing looks at.
     ///
+    /// `SAMPLED` since the reflection slice, and not before it: the attachment
+    /// landed one slice ahead of the pass that reads it, and a usage flag naming
+    /// a binding nothing binds is a claim about a resource rather than a fact
+    /// about one. `crcbl_render::ssr` is that reader.
+    ///
     /// [`ambient_occlusion`]: TransientImageDesc::ambient_occlusion
     /// [`scene_color`]: TransientImageDesc::scene_color
     #[must_use]
@@ -2461,7 +2466,9 @@ impl TransientImageDesc {
         Self {
             extent,
             format: Format::Rgba8Unorm,
-            usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::TRANSFER_SRC),
+            usage: ImageUsage::COLOR_ATTACHMENT
+                .union(ImageUsage::TRANSFER_SRC)
+                .union(ImageUsage::SAMPLED),
             samples: 1,
             mip_levels: 1,
         }

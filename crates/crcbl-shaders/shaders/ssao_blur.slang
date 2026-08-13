@@ -66,6 +66,10 @@
 /// whose edits nothing downstream notices — `cull.slang` carries the same
 /// paragraph. `crcbl_shaders::ssao::SsaoParams` is the Rust mirror both agree
 /// with, and `crcbl_render::ssao` is what binds the one buffer to both passes.
+///
+/// **Bound as `camera`** for the reason `ssao.slang` gives at the same
+/// declaration: `depth_at` is copied into `ssr.slang` as well, and the guard
+/// that holds the copies together compares their bodies as text.
 struct SsaoParams
 {
     /// Clip → view. Reversed-Z and possibly infinite, so `w` is what carries the
@@ -82,7 +86,7 @@ struct SsaoParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<SsaoParams> ssao;
+ConstantBuffer<SsaoParams> camera;
 
 /// The raw occlusion `ssao.slang` wrote, fetched by integer pixel.
 ///
@@ -183,7 +187,7 @@ float view_z(int2 pixel, float depth, float2 extent)
     float2 ndc = float2(
         (float(pixel.x) + 0.5) / extent.x * 2.0 - 1.0,
         1.0 - (float(pixel.y) + 0.5) / extent.y * 2.0);
-    float4 view = mul(ssao.inv_proj, float4(ndc, depth, 1.0));
+    float4 view = mul(camera.inv_proj, float4(ndc, depth, 1.0));
     return view.z / view.w;
 }
 
@@ -216,7 +220,7 @@ float fragmentMain(FullscreenOutput input) : SV_Target
         return 1.0;
     }
     float centre_z = view_z(pixel, centre_depth, size);
-    float tolerance = ssao.params.x * DEPTH_TOLERANCE_RADII;
+    float tolerance = camera.params.x * DEPTH_TOLERANCE_RADII;
 
     float total = 0.0;
     float weight = 0.0;

@@ -417,13 +417,43 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Screen-space reflections.** `shaders/ssr.slang` marches the depth prepass in
+  screen space, reads `F0` and roughness out of the reflectivity attachment, and
+  adds what it finds to the scene colour — one full-screen pass between the
+  forward pass and the tonemap, added to every frame
+  `ForwardRenderer::add_passes` builds. Mirror-sharp only for now: the weight
+  ramps linearly to nothing at `crcbl_shaders::ssr::ROUGHNESS_CUTOFF` (0.5),
+  which is `GpuMaterial::UNTINTED`'s own roughness, so every surface nobody gave
+  a material to weighs exactly zero and every existing golden but one is
+  bit-identical. A ray that finds nothing adds nothing.
+
+  `ForwardRenderer::add_passes` now returns **the composited frame** rather than
+  the target the forward pass wrote. Both are `Rgba16Float` transients of the
+  same description, so a caller reading the return value back gets the scene
+  _with_ its reflections; a caller that had stored the old id is reading the
+  frame the tonemap did not resolve.
+
+  Two things this needed and did not have: `TransientImageDesc::reflectivity`
+  gained `SAMPLED`, and the forward pass now **stores** its depth instead of
+  discarding it. The second was a real bug rather than a tidy-up — a discarded
+  attachment is undefined, not "what was written", so the same build drew
+  reflections on Vulkan and none at all on wgpu with nothing reporting an error.
+
+- **`crcbl::screenshot::Scene::Ssr`** — a smooth floor with the plain pyramid
+  standing on it, seen from just above the floor, and
+  `crcbl screenshot --scene ssr` draws it. The one frame in the tree whose
+  subject is the march.
+
+- **`crcbl_shaders::ssr`** — `SsrParams` (the two projection matrices
+  `ssr.slang` reads) and `ROUGHNESS_CUTOFF`, so an application can say which of
+  its own materials the pass can see.
+
 - **`crcbl_render::TransientImageDesc::reflectivity`** — the `Rgba8Unorm`
   transient the forward pass writes `F0` and roughness into, beside
-  `scene_color`, `scene_depth` and `ambient_occlusion`. `COLOR_ATTACHMENT` and
-  `TRANSFER_SRC`, the second so a headless probe can read it back; it gains
-  `SAMPLED` when a pass samples it. The forward pass clears it to zero, so a
-  pixel no geometry covered says "nothing reflects here" rather than holding
-  whatever was in the memory.
+  `scene_color`, `scene_depth` and `ambient_occlusion`. `COLOR_ATTACHMENT`,
+  `TRANSFER_SRC` and — since the reflection pass — `SAMPLED`. The forward pass
+  clears it to zero, so a pixel no geometry covered says "nothing reflects here"
+  rather than holding whatever was in the memory.
 
 - **`apps/lumen` — the lighting acceptance fixture, at milestone 1a.** One
   indoor room, described by the sample rather than by the engine: nine meshes

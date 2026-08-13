@@ -143,6 +143,7 @@ pub mod scene;
 pub mod shadow;
 pub mod sprite_pass;
 mod ssao;
+mod ssr;
 pub mod texture;
 pub mod timing;
 pub mod transient;

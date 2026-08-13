@@ -154,6 +154,8 @@ OPTIONS:
                            spot_shadow         that cone with a caster in it
                            point_shadow        one point light, two casters
                            ao                  the inside of a box, ambient only
+                           ssr                 a pyramid reflected in a smooth
+                                               floor
                            sprite              four sprites over three batches
                            ui                  text, a rect and an outline
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
@@ -679,6 +681,7 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::SpotShadow,
         Scene::PointShadow,
         Scene::Ao,
+        Scene::Ssr,
         Scene::Sprite,
         Scene::Ui,
     ]
@@ -699,6 +702,7 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::SpotShadow => "spot_shadow",
         Scene::PointShadow => "point_shadow",
         Scene::Ao => "ao",
+        Scene::Ssr => "ssr",
         Scene::Sprite => "sprite",
         Scene::Ui => "ui",
     }

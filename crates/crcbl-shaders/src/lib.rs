@@ -214,6 +214,11 @@ pub mod mesh_shader;
 /// layouts that shader declares.
 pub mod ssao;
 
+/// The uniform block and the roughness cutoff `ssr.slang` reads, in the layouts
+/// that shader declares — and the guard over the helpers it shares with
+/// `ssao.slang`.
+pub mod ssr;
+
 use std::sync::OnceLock;
 
 /// Little-endian `f32`s in iteration order — what `std430` means for a struct

@@ -1,0 +1,311 @@
+//! `docs/plan/18-render-features.md`'s screen-space reflections: the one
+//! full-screen pass between the forward pass and the tonemap.
+//!
+//! ```text
+//! forward ──▶ scene-color ─────┐
+//!         └─▶ reflectivity ────┼──▶ ssr ──▶ scene-reflected ──▶ tonemap
+//! prepass ──▶ scene-depth ─────┘         (Rgba16Float)
+//! ```
+//!
+//! A module of its own rather than more of [`crate::forward`], on
+//! [`crate::ssao`]'s terms exactly: what lives here is one pipeline, one cache
+//! and one pass, and none of it is reachable from the geometry passes except
+//! through [`Ssr::add_pass`].
+//!
+//! **The pass is the composite.** It reads the scene colour and writes the sum
+//! of it and the reflection into a second `Rgba16Float` transient, which
+//! [`ForwardRenderer::add_passes`] returns in place of the first — one pass, no
+//! blend state, and no image that is both read and written. That is also the
+//! off-switch: a frame that does not add this pass hands the old id on and is
+//! bit-identical, needing no placeholder because nothing upstream reads the
+//! result.
+//!
+//! There is no device fact to gate on. Every backend has a full-screen draw, a
+//! sampled `D32Float` and a sampled `Rgba8Unorm`, and the reflectivity
+//! attachment is written whether or not this pass exists.
+//!
+//! [`ForwardRenderer::add_passes`]: crate::forward::ForwardRenderer::add_passes
+
+use crcbl_hal::{
+    BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
+    BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource, BufferDesc, BufferHandle,
+    BufferUsage, ClearValue, ColorTargetState, Device, Format, GraphicsPipelineHandle, HalError,
+    ImageViewHandle, ImageViewType, LoadOp, MemoryLocation, PipelineLayoutDesc,
+    PipelineLayoutHandle, SampleType, ShaderStages, StoreOp,
+};
+use crcbl_shaders::{SSR, ssr};
+
+use crate::graph::{ImageId, RenderGraph};
+use crate::ssao::cached_group;
+
+/// Vertices in the over-sized full-screen triangle `ssr.slang` generates from
+/// `SV_VertexID`. No geometry is bound anywhere.
+const FULLSCREEN_VERTICES: u32 = 3;
+
+/// Everything the reflection pass owns.
+///
+/// Built once by [`Ssr::new`] and released by [`Ssr::destroy`], which is the
+/// shape every other resource group in this crate has — see [`crate::ssao`].
+#[derive(Debug)]
+pub(crate) struct Ssr {
+    /// `[frame]`: `ssr.slang`'s uniform block. One per frame in flight for the
+    /// frame uniforms' reason exactly — the previous frame may still be reading
+    /// last frame's while this one is written.
+    ///
+    /// **A block of its own rather than the occlusion pair's**, which carries
+    /// the same two matrices and a radius and a bias besides. Sharing the buffer
+    /// would make a pass that is meant to stand alone depend on that pair having
+    /// been built, for 128 bytes per frame in flight.
+    uniforms: Vec<BufferHandle>,
+    layout: BindGroupLayoutHandle,
+    pipeline_layout: PipelineLayoutHandle,
+    pipeline: GraphicsPipelineHandle,
+    /// `[frame]`: the group, cached against all three views together.
+    ///
+    /// **One per frame in flight**, because this group names [`Ssr::uniforms`]
+    /// as well as three graph transients — and that is a ring. A single cache
+    /// keyed on the views alone would hand the even frames' block to the odd
+    /// frames.
+    groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
+}
+
+impl Ssr {
+    /// Passes [`Ssr::add_pass`] adds to a frame.
+    pub(crate) const PASSES: u32 = 1;
+
+    /// Builds the pipeline and the uniform ring.
+    ///
+    /// `build_fullscreen` is handed in rather than duplicated, on
+    /// [`Ssao::new`](crate::ssao::Ssao::new)'s terms: it is [`crate::forward`]'s,
+    /// because the shape it carries — a triangle out of `SV_VertexID`, no depth
+    /// state, one colour target — is documented there.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from any seam call. **Nothing is released on the failing
+    /// path**, for the reason every other builder in this crate gives: the
+    /// caller holds a rollback, and this is stored in it whole.
+    pub(crate) fn new(
+        device: &dyn Device,
+        frames: usize,
+        build_fullscreen: impl Fn(
+            &dyn Device,
+            &str,
+            &crcbl_shaders::Shader,
+            PipelineLayoutHandle,
+            &[ColorTargetState],
+        ) -> Result<GraphicsPipelineHandle, HalError>,
+    ) -> Result<Self, HalError> {
+        // **No sampler**, which is the whole of what reading by `Load` buys —
+        // and it buys more here than in the occlusion pass, because what a tap
+        // fetches is a colour rather than a fraction a blur will average. See
+        // the binding comments in `shaders/ssr.slang`.
+        let entries = [
+            BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::UniformBuffer { dynamic: false },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                    // **`Depth`, and it is the seam's half of `DepthTexture2D`.**
+                    // WebGPU will only bind a `D32Float` view through a depth
+                    // sample type, and the WGSL artifact agrees — it declares
+                    // `texture_depth_2d`, which `textureLoad` takes. The
+                    // paragraph on `crate::ssao`'s own depth binding is this
+                    // one's too: it is the same image, read the same way.
+                    sample_type: SampleType::Depth,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                    // The `Rgba16Float` scene target: an ordinary colour image,
+                    // and the WGSL artifact declares `texture_2d<f32>` for it.
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                    // The `Rgba8Unorm` reflectivity attachment, on the scene
+                    // colour's terms: `SAMPLED` is on
+                    // `TransientImageDesc::reflectivity` because *this* pass is
+                    // the thing that reads it.
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
+        ];
+        let layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+            label: Some("ssr"),
+            entries: &entries,
+        })?;
+        let set_layouts = [layout];
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
+            label: Some("ssr"),
+            bind_group_layouts: &set_layouts,
+            push_constants: None,
+        })?;
+
+        // The same format the forward pass wrote, because this pass's output is
+        // that image plus a term: a narrower target here would tonemap a
+        // truncated scene and the reflection would be blamed for it.
+        let targets = [ColorTargetState::opaque(Format::Rgba16Float)];
+        let pipeline = build_fullscreen(device, "ssr", &SSR, pipeline_layout, &targets)?;
+
+        let mut uniforms = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            uniforms.push(device.create_buffer(&BufferDesc {
+                label: Some("ssr params"),
+                size: ssr::PARAMS_SIZE as u64,
+                usage: BufferUsage::UNIFORM,
+                memory: MemoryLocation::HostUpload,
+            })?);
+        }
+
+        Ok(Self {
+            uniforms,
+            layout,
+            pipeline_layout,
+            pipeline,
+            groups: vec![None; frames],
+        })
+    }
+
+    /// Writes `frame`'s uniform block.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError`] from the mapped write.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    pub(crate) fn begin_frame(
+        &self,
+        device: &dyn Device,
+        frame: usize,
+        params: ssr::SsrParams,
+    ) -> Result<(), HalError> {
+        device.write_buffer(self.uniforms[frame], 0, &params.to_bytes())
+    }
+
+    /// Adds the `ssr` pass, reading `color`, `depth` and `reflectivity` and
+    /// writing `composited`.
+    ///
+    /// `composited` is what the caller must go on to tonemap and hand back: the
+    /// reflection is *in* it, and the scene colour it was added to is not the
+    /// finished picture any more.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    pub(crate) fn add_pass<'a>(
+        &'a mut self,
+        graph: &mut RenderGraph<'a>,
+        frame: usize,
+        depth: ImageId,
+        color: ImageId,
+        reflectivity: ImageId,
+        composited: ImageId,
+    ) {
+        let pipeline = self.pipeline;
+        let pipeline_layout = self.pipeline_layout;
+        let layout = self.layout;
+        let uniforms = self.uniforms[frame];
+        let cached = &mut self.groups[frame];
+
+        graph
+            .add_render_pass("ssr")
+            // `DontCare`, not `Clear`: the full-screen triangle writes every
+            // pixel of the target — the scene colour passes through it — so
+            // loading or clearing it is pure bandwidth.
+            .color(
+                composited,
+                LoadOp::DontCare,
+                StoreOp::Store,
+                ClearValue::default(),
+            )
+            // The forward pass left both of these in `ColorAttachment` and the
+            // prepass left the depth in `DepthStencilWrite`. Declaring the reads
+            // is what moves each into a shader-readable layout, and without them
+            // every backend reads whatever the last writer left behind.
+            .read_image(color)
+            .read_image(depth)
+            .read_image(reflectivity)
+            .execute(move |ctx| {
+                let color_view = ctx.image_view(color);
+                let depth_view = ctx.image_view(depth);
+                let material_view = ctx.image_view(reflectivity);
+                let device = ctx.device();
+                let entries = vec![
+                    BindGroupEntry {
+                        binding: 0,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(uniforms),
+                    },
+                    // The three below are overwritten by `cached_group` with the
+                    // realised views; written here so the list is a complete
+                    // description of the layout rather than a list with holes in
+                    // it.
+                    BindGroupEntry {
+                        binding: 1,
+                        array_index: 0,
+                        resource: BindingResource::ImageView(depth_view),
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        array_index: 0,
+                        resource: BindingResource::ImageView(color_view),
+                    },
+                    BindGroupEntry {
+                        binding: 3,
+                        array_index: 0,
+                        resource: BindingResource::ImageView(material_view),
+                    },
+                ];
+                let Some(group) = cached_group(
+                    cached,
+                    device,
+                    &[(1, depth_view), (2, color_view), (3, material_view)],
+                    "ssr",
+                    layout,
+                    entries,
+                ) else {
+                    return;
+                };
+                let encoder = ctx.encoder();
+                encoder.bind_graphics_pipeline(pipeline);
+                encoder.bind_group(0, group, &[], pipeline_layout);
+                encoder.draw(0..FULLSCREEN_VERTICES, 0..1);
+            });
+    }
+
+    /// Releases everything, in dependency order. The device must be idle.
+    pub(crate) fn destroy(self, device: &dyn Device) {
+        for cached in self.groups.into_iter().flatten() {
+            device.destroy_bind_group(cached.1);
+        }
+        device.destroy_graphics_pipeline(self.pipeline);
+        device.destroy_pipeline_layout(self.pipeline_layout);
+        device.destroy_bind_group_layout(self.layout);
+        for buffer in self.uniforms {
+            device.destroy_buffer(buffer);
+        }
+    }
+}

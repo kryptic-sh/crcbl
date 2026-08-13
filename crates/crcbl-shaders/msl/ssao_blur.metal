@@ -24,61 +24,61 @@ struct KernelContext_0
 {
     texture2d<float, access::sample> occlusion_0;
     depth2d<float, access::sample> scene_depth_0;
-    SsaoParams_natural_0 constant* ssao_0;
+    SsaoParams_natural_0 constant* camera_0;
 };
 
 
-#line 167 "shaders/ssao_blur.slang"
+#line 171 "shaders/ssao_blur.slang"
 float depth_at_0(int2 pixel_0, int2 extent_0, KernelContext_0 thread* kernelContext_0)
 {
 
     int3 _S1 = int3(clamp(pixel_0, int2(int(0), int(0)), extent_0 - int2(int(1), int(1))), int(0));
 
-#line 170
+#line 174
     return ((kernelContext_0->scene_depth_0).read(vec<uint,2>(((_S1)).xy), uint(((_S1)).z)));
 }
 
 
-#line 181
+#line 185
 float view_z_0(int2 pixel_1, float depth_0, float2 extent_1, KernelContext_0 thread* kernelContext_1)
 {
 
 
 
-    float4 view_0 = (((float4(float2((float(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (float(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (matrix<float,int(4),int(4)> (kernelContext_1->ssao_0->inv_proj_0.data_0[int(0)][int(0)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(1)][int(0)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(2)][int(0)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(3)][int(0)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(0)][int(1)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(1)][int(1)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(2)][int(1)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(3)][int(1)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(0)][int(2)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(1)][int(2)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(2)][int(2)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(3)][int(2)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(0)][int(3)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(1)][int(3)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(2)][int(3)], kernelContext_1->ssao_0->inv_proj_0.data_0[int(3)][int(3)]))));
+    float4 view_0 = (((float4(float2((float(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (float(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (matrix<float,int(4),int(4)> (kernelContext_1->camera_0->inv_proj_0.data_0[int(0)][int(0)], kernelContext_1->camera_0->inv_proj_0.data_0[int(1)][int(0)], kernelContext_1->camera_0->inv_proj_0.data_0[int(2)][int(0)], kernelContext_1->camera_0->inv_proj_0.data_0[int(3)][int(0)], kernelContext_1->camera_0->inv_proj_0.data_0[int(0)][int(1)], kernelContext_1->camera_0->inv_proj_0.data_0[int(1)][int(1)], kernelContext_1->camera_0->inv_proj_0.data_0[int(2)][int(1)], kernelContext_1->camera_0->inv_proj_0.data_0[int(3)][int(1)], kernelContext_1->camera_0->inv_proj_0.data_0[int(0)][int(2)], kernelContext_1->camera_0->inv_proj_0.data_0[int(1)][int(2)], kernelContext_1->camera_0->inv_proj_0.data_0[int(2)][int(2)], kernelContext_1->camera_0->inv_proj_0.data_0[int(3)][int(2)], kernelContext_1->camera_0->inv_proj_0.data_0[int(0)][int(3)], kernelContext_1->camera_0->inv_proj_0.data_0[int(1)][int(3)], kernelContext_1->camera_0->inv_proj_0.data_0[int(2)][int(3)], kernelContext_1->camera_0->inv_proj_0.data_0[int(3)][int(3)]))));
     return view_0.z / view_0.w;
 }
 
 
-#line 187
+#line 191
 struct pixelOutput_0
 {
     float output_0 [[color(0)]];
 };
 
 
-#line 187
+#line 191
 struct pixelInput_0
 {
     float2 uv_0 [[user(TEXCOORD)]];
 };
 
 
-#line 201
-[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S2 [[stage_in]], float4 position_0 [[position]], texture2d<float, access::sample> occlusion_1 [[texture(0)]], depth2d<float, access::sample> scene_depth_1 [[texture(1)]], SsaoParams_natural_0 constant* ssao_1 [[buffer(0)]])
+#line 205
+[[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S2 [[stage_in]], float4 position_0 [[position]], texture2d<float, access::sample> occlusion_1 [[texture(0)]], depth2d<float, access::sample> scene_depth_1 [[texture(1)]], SsaoParams_natural_0 constant* camera_1 [[buffer(0)]])
 {
 
-#line 201
+#line 205
     thread KernelContext_0 kernelContext_2;
 
-#line 201
+#line 205
     (&kernelContext_2)->occlusion_0 = occlusion_1;
 
-#line 201
+#line 205
     (&kernelContext_2)->scene_depth_0 = scene_depth_1;
 
-#line 201
-    (&kernelContext_2)->ssao_0 = ssao_1;
+#line 205
+    (&kernelContext_2)->camera_0 = camera_1;
 
     thread uint width_0;
     thread uint height_0;
@@ -87,32 +87,32 @@ struct pixelInput_0
     float2 size_0 = float2(float(width_0), float(height_0));
     int2 _S3 = int2(position_0.xy);
 
-#line 208
+#line 212
     float _S4 = depth_at_0(_S3, extent_2, &kernelContext_2);
 
-#line 214
+#line 218
     if(_S4 <= 0.0f)
     {
 
-#line 214
+#line 218
         pixelOutput_0 _S5 = { 1.0f };
 
         return _S5;
     }
 
-#line 216
+#line 220
     float _S6 = view_z_0(_S3, _S4, size_0, &kernelContext_2);
 
 
-    float _S7 = (&kernelContext_2)->ssao_0->params_0.x * 2.0f;
+    float _S7 = (&kernelContext_2)->camera_0->params_0.x * 2.0f;
 
-#line 219
+#line 223
     int y_0 = int(-1);
 
-#line 219
+#line 223
     float total_0 = 0.0f;
 
-#line 219
+#line 223
     float weight_0 = 0.0f;
 
 
@@ -120,69 +120,69 @@ struct pixelInput_0
     for(;;)
     {
 
-#line 223
+#line 227
         if(y_0 < int(3))
         {
         }
         else
         {
 
-#line 223
+#line 227
             break;
         }
 
-#line 223
+#line 227
         int x_0 = int(-1);
 
         for(;;)
         {
 
-#line 225
+#line 229
             if(x_0 < int(3))
             {
             }
             else
             {
 
-#line 225
+#line 229
                 break;
             }
 
-#line 233
+#line 237
             int2 tap_0 = clamp(_S3 + int2(x_0, y_0), int2(int(0), int(0)), extent_2 - int2(int(1), int(1)));
 
-#line 233
+#line 237
             bool _S8;
 
-#line 240
+#line 244
             if(x_0 != int(0))
             {
 
-#line 240
+#line 244
                 _S8 = true;
 
-#line 240
+#line 244
             }
             else
             {
 
-#line 240
+#line 244
                 _S8 = y_0 != int(0);
 
-#line 240
+#line 244
             }
 
-#line 240
+#line 244
             float share_0;
 
-#line 240
+#line 244
             if(_S8)
             {
 
-#line 240
+#line 244
                 float _S9 = depth_at_0(tap_0, extent_2, &kernelContext_2);
 
-#line 240
+#line 244
                 float _S10 = view_z_0(tap_0, _S9, size_0, &kernelContext_2);
 
 
@@ -193,65 +193,65 @@ struct pixelInput_0
                 if(_S9 <= 0.0f)
                 {
 
-#line 247
+#line 251
                     share_0 = 0.0f;
 
-#line 247
+#line 251
                 }
                 else
                 {
 
-#line 247
+#line 251
                     share_0 = saturate(1.0f - away_0 / _S7);
 
-#line 247
+#line 251
                 }
 
-#line 240
+#line 244
             }
             else
             {
 
-#line 240
+#line 244
                 share_0 = 1.0f;
 
-#line 240
+#line 244
             }
 
-#line 249
+#line 253
             int3 _S11 = int3(tap_0, int(0));
 
-#line 249
+#line 253
             float total_1 = total_0 + (((&kernelContext_2)->occlusion_0).read(vec<uint,2>(((_S11)).xy), uint(((_S11)).z)).x) * share_0;
             float weight_1 = weight_0 + share_0;
 
-#line 225
+#line 229
             x_0 = x_0 + int(1);
 
-#line 225
+#line 229
             total_0 = total_1;
 
-#line 225
+#line 229
             weight_0 = weight_1;
 
-#line 225
+#line 229
         }
 
-#line 223
+#line 227
         y_0 = y_0 + int(1);
 
-#line 223
+#line 227
     }
 
-#line 223
+#line 227
     pixelOutput_0 _S12 = { total_0 / weight_0 };
 
-#line 254
+#line 258
     return _S12;
 }
 
 
-#line 254
+#line 258
 struct vertexMain_Result_0
 {
     float4 position_1 [[position]];
@@ -259,7 +259,7 @@ struct vertexMain_Result_0
 };
 
 
-#line 155
+#line 159
 struct FullscreenOutput_0
 {
     float4 position_2;
@@ -267,41 +267,41 @@ struct FullscreenOutput_0
 };
 
 
-#line 155
-[[vertex]] vertexMain_Result_0 vertexMain(uint index_0 [[vertex_id]], texture2d<float, access::sample> occlusion_2 [[texture(0)]], depth2d<float, access::sample> scene_depth_2 [[texture(1)]], SsaoParams_natural_0 constant* ssao_2 [[buffer(0)]])
+#line 159
+[[vertex]] vertexMain_Result_0 vertexMain(uint index_0 [[vertex_id]], texture2d<float, access::sample> occlusion_2 [[texture(0)]], depth2d<float, access::sample> scene_depth_2 [[texture(1)]], SsaoParams_natural_0 constant* camera_2 [[buffer(0)]])
 {
 
-#line 155
+#line 159
     thread KernelContext_0 kernelContext_3;
 
-#line 155
+#line 159
     (&kernelContext_3)->occlusion_0 = occlusion_2;
 
-#line 155
+#line 159
     (&kernelContext_3)->scene_depth_0 = scene_depth_2;
 
-#line 155
-    (&kernelContext_3)->ssao_0 = ssao_2;
+#line 159
+    (&kernelContext_3)->camera_0 = camera_2;
 
-#line 193
+#line 197
     thread FullscreenOutput_0 output_1;
 
     float2 _S13 = float2(float((index_0 << 1U) & 2U), float(index_0 & 2U));
 
-#line 195
+#line 199
     (&output_1)->uv_2 = _S13;
     (&output_1)->position_2 = float4(_S13 * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
 
-#line 196
+#line 200
     thread vertexMain_Result_0 _S14;
 
-#line 196
+#line 200
     (&_S14)->position_1 = output_1.position_2;
 
-#line 196
+#line 200
     (&_S14)->uv_1 = output_1.uv_2;
 
-#line 196
+#line 200
     return _S14;
 }
 

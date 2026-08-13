@@ -8117,29 +8117,50 @@ three `to_vec`s cost), so the mapping lives in one place.
 The design and its refusals are in `docs/plan/18-render-features.md`'s SSR
 section. This is the slice order and what each one's observable is.
 
-**The attachment slice has landed**, so three remain, in dependency order. Each
-is committable and CI-green alone.
+**The attachment slice and the march have landed**, so two remain, in dependency
+order. Each is committable and CI-green alone.
 
-What the first one left for the second: `TransientImageDesc::reflectivity` is
-`COLOR_ATTACHMENT | TRANSFER_SRC` and **not `SAMPLED`**, because nothing samples
-it yet and the transfer flag is what the probe reads it back through. The SSR
-pass adds `SAMPLED` when it is the thing that reads it — a one-line change to
-that description, and the honest state until then.
+What the march found on the way, and what a reader of the design should know
+before writing the next slice:
 
-1. **The march, mirror-sharp, composited.** `ssr.slang` plus an `ssr.rs` in the
-   AO pass's shape. Roughness cutoff at 0.5. **Observable:** a new `Scene::Ssr`
-   — a smooth floor with the plain pyramid standing on it, which is the case SSR
-   is good at and satisfies the low-frequency requirement the determinism
-   section asks of a golden. The floor block directly below the pyramid must be
-   measurably brighter than one at the same depth, same lights, same normal,
-   same material, off to the side. That fails a no-op, a constant, and an
-   inverted ray direction, and it is a ratio between two blocks of one frame.
-2. **The rough end.** The blur, weighted on view-space depth **and** roughness;
+- **The reach had to become a share of the frame.** The design said a fixed
+  pixel stride and a fixed loop bound, which a first cut read as a fixed pixel
+  _reach_ — and a reflection that shrinks as the window grows is the same defect
+  the design refuses one level down. `ssr.slang`'s `REACH_FRACTION` is the fix
+  and `docs/plan/18-render-features.md` carries the amendment.
+- **The forward pass stores its depth now.** `PassBuilder::clear_depth` is
+  `StoreOp::Discard`, and a discarded attachment is undefined rather than
+  "whatever was written": radv and llvmpipe handed the values back and wgpu
+  handed back the clear, so the same build reflected on one backend and not the
+  other with no error anywhere. Anything else that wants to read the depth
+  _after_ the forward pass inherits this.
+- **`Scene::PointShadow` earned a geometry-path budget.** Its caster carries the
+  tinted row, the only demo material under the cutoff, so it is the first scene
+  whose pixels come from a march rather than from shading the fragment the
+  rasteriser handed over — which makes the depth buffer's last bits visible in
+  the picture. One channel, off by one, on llvmpipe alone, stable across runs.
+  See `path_lsb_channels` in `crates/crcbl/tests/render_e2e.rs`.
+- **The cross-driver evidence, which the design asked for and had none of.**
+  `ssr.png` blessed on llvmpipe compares on radv and on wgpu at **max channel
+  delta 1, zero pixels over `Tolerance::RASTERISER`** — a _less_ divergent frame
+  than `cube.png`, which has no reflection in it and differs on 60% of its
+  pixels at the same delta. The structural ratio reads 92.8 against 64.0 on all
+  three, to the decimal. `lumen`'s room is where the exposure is visible: of the
+  nine pixels over tolerance between llvmpipe and radv, five are in the panel's
+  reflecting band and two of those are gross (deltas 66 and 33). That is one
+  fixture's worth of evidence, not a general argument, and the design's recorded
+  resolution — flatten the reflected content or drop the golden and keep the
+  ratio — has not had to be used.
+- **The stepping is visible and is slice 2's to remove.** At a 1.5-pixel stride
+  the reflection in `Scene::Ssr` alternates by a few levels row to row. The
+  block averages it away and a reader can see it in the review PNG.
+
+1. **The rough end.** The blur, weighted on view-space depth **and** roughness;
    cutoff raised so lumen's rough metal reflects. **Observable:** a falloff
    comparison in the shape of the GGX slice's highlight test — the brass block's
    reflection varies less across its face than the mirror panel's does across an
    equal span, both above a floor so two black surfaces cannot satisfy it.
-3. **What a miss returns.** `frame.ambient.rgb` scaled by the same weight
+2. **What a miss returns.** `frame.ambient.rgb` scaled by the same weight
    instead of zero — the same approximation the diffuse term already makes,
    applied consistently, and **the exact expression the irradiance-probe row
    replaces**, which is what makes that row additive instead of a rewrite.
@@ -8148,26 +8169,28 @@ that description, and the honest state until then.
 
 ### lumen's mirror panel is close to SSR's worst case
 
-Worked out by hand from the room's plane and camera constants, **not measured**:
-the panel faces `+Z` at the camera, so its rays point back past the viewer, and
-its centre reflects a point on the front wall behind the camera — off screen, a
-miss. Only where the panel point is below eye height do rays go downward, so
-roughly the bottom two thirds reflect towards the floor and only the lowest part
-finds it while still on screen.
+Worked out by hand before the slice and **measured** by it since. The panel
+faces `+Z` at the camera, so its rays point back past the viewer and its centre
+reflects a point on the front wall behind the camera — off screen, a miss. Only
+where the panel point is below eye height do rays go downward, and the band that
+reaches the floor _while still inside the frame_ is narrower than the hand
+estimate: `y = 0.45` up to about `0.607`, an eighth of the face rather than two
+thirds, because the vertical frustum edge binds before the geometry does.
+`room.rs`'s `the_mirror_panel_reflects_at_its_foot_and_not_at_its_head` bisects
+for that height rather than writing it down.
 
-That is still a good observable and arguably a better one than a full mirror:
-**a block near the panel's bottom must be measurably brighter than one near its
-top** — same material row, same face, same normal, same `F0`, same roughness,
-same absence of direct light, differing only in whether the ray finds the floor
-on screen. The transition height is derivable on the CPU, so both blocks are
-computed rather than eyeballed.
+So the observable is a block hung on the panel's **bottom edge** against one
+further up the same face — same material row, same normal, same `F0`, same
+roughness, same absence of direct light, differing only in whether the ray finds
+anything. It reads about 22/255 against exactly 0 at 256×192 and 18 against 0 at
+1280×960.
 
-**`METAL_DARKNESS` must be replaced by that gradient, not deleted and not
-weakened.** lumen's golden currently asserts the panel is three times darker
-than the plaster behind it, and its doc calls that the sample's central honest
-claim. The claim was true of the model; the model changes, so the claim changes
-— and its replacement has to be stronger. Lowering the number to keep it green
-would be making the test pass the code.
+**`METAL_DARKNESS` was replaced by that gradient rather than deleted**, and the
+constant itself was kept: it is read at `MIRROR_MISSES` now, which is above
+everything that reflects, so the claim it makes about a conductor's absent
+ambient is still exactly true and its number has not moved. `MIRROR_GRADIENT` is
+the new central claim beside it, and `reflecting > LIT_FLOOR` is the floor that
+stops a ratio against zero from being a check that cannot fail.
 
 **Considered, and for the sample's owner rather than the SSR slice:** if lumen
 wants a mirror showing the room, the panel wants angling or moving to a side
@@ -8178,7 +8201,13 @@ past.
 
 `ssr.slang` re-declares `depth_at`, `view_position` and `normal_at` verbatim,
 because this repo has no include mechanism by design — the manifest hashes one
-source per artifact. That makes **three** copies of `normal_at`. A test
-asserting the three bodies are textually identical goes in with the march slice;
-two copies is already the bug, and three without a guard is a drift with a
-schedule.
+source per artifact. `crcbl_shaders::ssr`'s
+`the_shared_screen_space_helpers_have_not_drifted` compares the bodies as text
+and holds all of them: three copies of `depth_at`, two each of `view_position`
+and `normal_at`. (The plan said three copies of `normal_at`; `ssao_blur.slang`
+carries `depth_at` and a `view_z` cut down from `view_position`, not a normal.)
+
+Making that an equality rather than a substitution cost one rename: all three
+files bind the projection block as `camera` rather than as `ssao`, because
+`view_position`'s body names it. No compiled instruction moved and no golden
+did.

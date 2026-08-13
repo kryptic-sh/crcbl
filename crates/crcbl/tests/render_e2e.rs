@@ -702,6 +702,27 @@ fn block_brightness(image: &Image, centre: (u32, u32), half: (u32, u32)) -> f32 
     total / (count as f32 * 3.0)
 }
 
+/// The mean of one channel over the same block [`block_brightness`] averages.
+///
+/// **For a claim about a hue rather than about a level.** A reflection adds the
+/// reflected surface's colour to the reflector's own, so where the two are
+/// different colours the change is much larger in the channel one of them has
+/// least of than it is in the mean of three — see
+/// [`the_floor_reflects_the_pyramid_and_only_under_it`], which is the one caller.
+fn block_channel(image: &Image, centre: (u32, u32), half: (u32, u32), index: usize) -> f32 {
+    let mut total = 0.0f32;
+    let mut count = 0u32;
+    for y in centre.1.saturating_sub(half.1)..(centre.1 + half.1).min(EXTENT.1) {
+        for x in centre.0.saturating_sub(half.0)..(centre.0 + half.0).min(EXTENT.0) {
+            let pixel = image.pixel(x, y).expect("inside the frame");
+            total += f32::from(pixel[index]);
+            count += 1;
+        }
+    }
+    assert!(count > 0, "an empty block measures nothing");
+    total / count as f32
+}
+
 /// [`Scene::SpotShadow`]'s claim: **the floor is dark where the caster blocks
 /// the light and lit where it does not**.
 ///
@@ -1010,6 +1031,159 @@ fn the_corner_is_occluded_and_the_open_floor_is_not(image: &Image) {
             lit > clear + AO_LIT_FLOOR,
             "the {axis} band measures {lit:.1} against a clear of {clear:.1}, so there is no lit \
              floor here for occlusion to be occlusion against"
+        );
+    }
+}
+
+/// The anti-vacuity floor for [`Scene::Ssr`].
+///
+/// The frame is one flat floor, one flat-faced pyramid and the clear behind
+/// them, so most of its colours are the two shading gradients — comfortably past
+/// this, and far enough past that a smoother gradient will not walk into it. What
+/// it separates is a frame in which nothing drew.
+const MIN_COLORS_SSR: usize = 32;
+
+/// The half-extent of each band [`Scene::Ssr`] is measured over, in pixels.
+///
+/// [`AO_BAND`]'s size, and it has to fit inside the reflection: the reflected
+/// pyramid is foreshortened to a wedge about forty-five pixels wide where
+/// [`SSR_BAND_ROW`] cuts it, so a ten-pixel block centred on the frame's axis has
+/// most of twenty pixels of margin on each side.
+const SSR_BAND: (u32, u32) = (5, 5);
+
+/// The row every band of [`Scene::Ssr`] sits on.
+///
+/// **One row for all three, and that is what the claim rests on.** The camera
+/// looks along the plane `x = 0` at a floor whose normal is `+Y`, so three points
+/// on one row of that floor are at the same view depth, carry the same normal,
+/// and — `screenshot`'s `ssr_sun` having no X component — take exactly the same
+/// direct light, the same ambient and the same specular sheen. The reflection is
+/// the only term left that can separate the middle of the row from its ends.
+///
+/// A few rows below the pyramid's base, which lands near row 121: far enough that
+/// the block is clear of the contact edge and of the occlusion pass's own
+/// darkening, near enough that the reflection is still most of its own width.
+const SSR_BAND_ROW: u32 = 128;
+
+/// How far to each side of the frame's axis the two control bands sit, in pixels.
+///
+/// Past the reflection's own edge at [`SSR_BAND_ROW`] — which is about
+/// twenty-three pixels out — by more than the band's own half-width, so no pixel
+/// of a control band is a pixel of the reflection.
+const SSR_ASIDE: u32 = 40;
+
+/// Which channel [`Scene::Ssr`]'s bands are read on: **red**.
+///
+/// The floor is the cube's green `+Y` face through the tinted material row, whose
+/// factor is `[0.15, 0.45, 1.0]` — so the floor has very little red — and the
+/// pyramid it reflects is bright in every channel. Reading red is therefore
+/// reading how much of the pyramid is in the floor, where the mean of three
+/// channels reads that diluted by two the floor already owns.
+///
+/// It is the same claim either way and this is the sharper instrument: the frame
+/// this was set against measures the mean a fourteenth up under the pyramid and
+/// the red channel a third up.
+const SSR_CHANNEL: usize = 0;
+
+/// How much redder the floor under the pyramid must be than the floor beside it.
+///
+/// [`AO_RATIO`]'s shape, and a larger number because the effect is larger: a
+/// reflection replaces a share of what a surface shows with the colour of
+/// something else, where occlusion scales one term of it. The frame this was set
+/// against measures about `1.34`, so this is a floor with margin over it and far
+/// over the single-digit drift `crcbl_golden::Tolerance::RASTERISER` was measured
+/// for.
+///
+/// What it separates is real, and it is the list the design asks a fixture to
+/// fail: a pass that wrote nothing, one that wrote a constant, and one whose ray
+/// direction is inverted all leave the three bands equal — the last because a ray
+/// turned into the surface crosses it at the first tap and reflects every floor
+/// pixel into itself, which brightens the whole floor and moves no ratio.
+const SSR_RATIO: f32 = 1.15;
+
+/// How far above the clear the control bands must measure, on the red channel.
+///
+/// [`AO_LIT_FLOOR`]'s job in [`SSR_CHANNEL`]'s units: a frame that drew nothing
+/// has every band equal to the clear, and a ratio between equal numbers says
+/// nothing. Smaller than that constant because the floor is deliberately poor in
+/// red — it measures about `64` against a clear of `29`.
+const SSR_LIT_FLOOR: f32 = 10.0;
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_ssr_scene_reflects_its_pyramid_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::Ssr,
+        "ssr",
+        MIN_COLORS_SSR,
+        the_floor_reflects_the_pyramid_and_only_under_it,
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_ssr_scene_draws_the_same_frame_on_every_geometry_path() {
+    draw_scene_on_every_geometry_path(
+        Scene::Ssr,
+        "ssr",
+        MIN_COLORS_SSR,
+        the_floor_reflects_the_pyramid_and_only_under_it,
+    );
+}
+
+/// [`Scene::Ssr`]'s claim: **the floor carries the pyramid's colour directly
+/// below the pyramid, and not on either side of it.**
+///
+/// **The golden cannot make this claim and no golden ever could**, and the
+/// design says so in as many words: a march has no denominator, so a golden here
+/// is a review aid and the real check is a structural ratio between blocks of one
+/// frame. A reflection pass that returned zero everywhere draws a perfectly
+/// plausible frame — a polished floor is a plausible matt floor — and would be
+/// blessed without comment. So would one that added a constant, which is a floor
+/// a shade brighter.
+///
+/// Three bands on [`SSR_BAND_ROW`], all on the same flat floor:
+///
+/// * the frame's own axis, where the reflected pyramid is;
+/// * [`SSR_ASIDE`] pixels to each side of it, where the same ray finds nothing
+///   and the reflection is correctly zero.
+///
+/// **The two controls are on opposite sides, and that is not symmetry for its own
+/// sake.** A ray inverted in the plane of the surface reflects what is on the far
+/// side of the pixel from the real answer, so a one-sided claim could be
+/// satisfied by a frame whose bright band is in the wrong place. Asserting the
+/// dark side as well as the bright one leaves no arrangement that passes but the
+/// intended one — and the two controls are exactly equal in the frame this was
+/// set against, which is the symmetry `ssr_sun` was given no X component for.
+fn the_floor_reflects_the_pyramid_and_only_under_it(image: &Image) {
+    let band = |column: u32| block_channel(image, (column, SSR_BAND_ROW), SSR_BAND, SSR_CHANNEL);
+    let axis = EXTENT.0 / 2;
+    let under = band(axis);
+    let aside = [
+        ("-X", band(axis - SSR_ASIDE)),
+        ("+X", band(axis + SSR_ASIDE)),
+    ];
+    eprintln!(
+        "crcbl render e2e: ssr — under the pyramid {under:.1}, floor beside it {:.1} and {:.1}",
+        aside[0].1, aside[1].1
+    );
+    for (side, plain) in aside {
+        assert!(
+            plain * SSR_RATIO < under,
+            "the floor under the pyramid must carry unmistakably more of its colour than the \
+             floor {side} of it at the same depth, same normal, same material and same light: \
+             {under:.1} against {plain:.1} — that is not a reflection"
+        );
+    }
+    // The controls are lit *floor*, not an unpainted frame the reflection is
+    // bright against. Without this the ratios above are satisfiable by a scene
+    // that drew nothing at all.
+    let clear = block_channel(image, (2, 2), (2, 2), SSR_CHANNEL);
+    for (side, plain) in aside {
+        assert!(
+            plain > clear + SSR_LIT_FLOOR,
+            "the {side} band measures {plain:.1} against a clear of {clear:.1}, so there is no \
+             lit floor here for a reflection to be a reflection on"
         );
     }
 }
@@ -1517,12 +1691,27 @@ fn draw_scene_on_every_geometry_path(
 /// a pixel, where a broad one absorbed it. Measured at **one** channel, off by
 /// one, out of the frame's 196608, on llvmpipe alone.
 ///
-/// The budget is two orders of magnitude under anything a level that failed to
+/// `PointShadow` is the second exception, and it arrived with
+/// `docs/plan/18-render-features.md`'s reflection march. That scene's caster
+/// carries the tinted material row, whose roughness is the only one in the demo
+/// scene under `ssr.slang`'s cutoff — so it is the one object in the suite whose
+/// pixels are decided by a *march over the depth buffer* rather than by shading
+/// the fragment the rasteriser handed over. **That makes the depth buffer's last
+/// bits visible in the picture for the first time**: a ray whose origin differs
+/// in the last place taps a neighbouring pixel at the crossing, which the design
+/// says in as many words is the exposure a march has and a blurred term does not.
+/// Measured at **one** channel, off by one, out of the frame's 196608, on
+/// llvmpipe alone — radv and wgpu answer zero — and stable across repeated runs.
+///
+/// Both budgets are two orders of magnitude under anything a level that failed to
 /// draw would produce — the failure this exists for moves whole clusters, not
-/// one channel.
+/// one channel. `worst <= 1` is the other half and is not budgeted at all: a
+/// reflection that landed on the wrong surface moves a channel by far more than
+/// one, so it fails here whatever the count.
 const fn path_lsb_channels(scene: Scene) -> usize {
     match scene {
         Scene::Dunes => 16,
+        Scene::PointShadow => 16,
         _ => 0,
     }
 }

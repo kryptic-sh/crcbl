@@ -145,7 +145,7 @@ use crcbl_hal::{
     QueueHandle, Rect2d, ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle,
     ShaderEntry, ShaderModuleDesc, ShaderStages, StoreOp, Viewport,
 };
-use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, level_select, mesh, ssao};
+use crcbl_shaders::{MESH, MESH_CLUSTER, Stage, TONEMAP, level_select, mesh, ssao, ssr};
 use glam::{Mat4, Quat, Vec3};
 
 use crate::camera::{Camera, DirectionalLight};
@@ -163,6 +163,7 @@ use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
 use crate::scene::{self, Geometry, InstanceDesc, SceneDesc};
 use crate::shadow::{self, Cascades};
 use crate::ssao::{Ssao, cached_group};
+use crate::ssr::Ssr;
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
 use crate::transient::TransientImageDesc;
 
@@ -401,7 +402,8 @@ const fn shadow_cull(slot: usize) -> usize {
 
 /// The passes [`ForwardRenderer::add_passes`] records itself: the shadow
 /// atlas's, the depth prepass, the forward pass, the tonemap and the
-/// culling-statistics copy — plus [`Ssao::PASSES`] beside them.
+/// culling-statistics copy — plus [`Ssao::PASSES`] and [`Ssr::PASSES`] beside
+/// them.
 ///
 /// Every other pass in the frame belongs to a [`DrawGen`] or to the
 /// [`LightGrid`], which is why this is the only count written here rather than
@@ -409,7 +411,7 @@ const fn shadow_cull(slot: usize) -> usize {
 /// though a device that refused the readback records one fewer: this is a
 /// ceiling, and one that came up short would silently stop timing the last pass
 /// of every frame.
-const RENDER_PASSES: u32 = 5 + Ssao::PASSES;
+const RENDER_PASSES: u32 = 5 + Ssao::PASSES + Ssr::PASSES;
 
 /// Draws a full-screen pass records: the over-sized triangle, drawn once.
 ///
@@ -419,12 +421,13 @@ const RENDER_PASSES: u32 = 5 + Ssao::PASSES;
 /// call.
 const FULLSCREEN_DRAWS: u64 = 1;
 
-/// Full-screen passes the frame records: `ssao`, `ssao-blur` and the tonemap.
+/// Full-screen passes the frame records: `ssao`, `ssao-blur`, `ssr` and the
+/// tonemap.
 ///
 /// It was the tonemap alone until `docs/plan/18-render-features.md`'s occlusion
 /// slice, which is why [`FULLSCREEN_DRAWS`] is a count *per pass* rather than the
 /// total: the two are different numbers now and were the same one before.
-const FULLSCREEN_PASSES: u64 = 3;
+const FULLSCREEN_PASSES: u64 = 4;
 
 /// The budget an **orthographic** camera selects under: one no group satisfies,
 /// so every group expands and the base level is drawn whole.
@@ -813,6 +816,9 @@ pub struct ForwardRenderer {
 
     /// `docs/plan/18-render-features.md`'s occlusion pair — see [`crate::ssao`].
     ssao: Ssao,
+    /// `docs/plan/18-render-features.md`'s reflection march — see
+    /// [`crate::ssr`].
+    ssr: Ssr,
 }
 
 /// What a partly-built [`ForwardRenderer`] has to give back.
@@ -862,6 +868,9 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s occlusion pair, which owns two
     /// pipelines, two layouts and a ring of blocks.
     ssao: Option<Ssao>,
+    /// `docs/plan/18-render-features.md`'s reflection march, which owns one
+    /// pipeline, one layout and a ring of blocks.
+    ssr: Option<Ssr>,
 }
 
 impl Rollback {
@@ -903,6 +912,9 @@ impl Rollback {
         }
         if let Some(lights) = self.lights {
             lights.destroy(device);
+        }
+        if let Some(ssr) = self.ssr {
+            ssr.destroy(device);
         }
         if let Some(ssao) = self.ssao {
             ssao.destroy(device);
@@ -3072,6 +3084,16 @@ impl ForwardRenderer {
             Self::build_fullscreen,
         )?);
 
+        // --- the screen-space reflection march ---
+        //
+        // Stored whole for the pair above's reason, and after them because
+        // `Rollback::run` releases in the reverse order of construction.
+        rollback.ssr = Some(Ssr::new(
+            device,
+            instance_buffers.len(),
+            Self::build_fullscreen,
+        )?);
+
         Ok(Self {
             pool: rollback
                 .pool
@@ -3183,14 +3205,18 @@ impl ForwardRenderer {
                 .ssao
                 .take()
                 .unwrap_or_else(|| unreachable!("the pair was placed in the rollback above")),
+            ssr: rollback
+                .ssr
+                .take()
+                .unwrap_or_else(|| unreachable!("the march was placed in the rollback above")),
         })
     }
 
     /// Builds a full-screen-triangle pipeline out of `shader`'s vertex and
     /// fragment entry points.
     ///
-    /// One helper because there are now three of these — the tonemap's, `ssao`'s
-    /// and `ssao-blur`'s — differing in the module, the layout and the target
+    /// One helper because there are now four of these — the tonemap's, `ssao`'s,
+    /// `ssao-blur`'s and `ssr`'s — differing in the module, the layout and the target
     /// format alone. The tonemap's stays written out where it is: it is the one
     /// that carries the *why* of the shape, and this is the shape repeated.
     ///
@@ -3616,14 +3642,27 @@ impl ForwardRenderer {
         // closed form, and the two matrices this pass needs are then provably
         // each other's inverse rather than two derivations that agree today.
         let projection = camera.projection.matrix(aspect);
+        let inv_projection = projection.inverse();
         self.ssao.begin_frame(
             device,
             self.frame,
             ssao::SsaoParams {
-                inv_proj: projection.inverse().to_cols_array(),
+                inv_proj: inv_projection.to_cols_array(),
                 proj: projection.to_cols_array(),
                 radius: SSAO_RADIUS,
                 bias: SSAO_BIAS,
+            },
+        )?;
+        // The reflection march's block: the same two matrices and nothing else.
+        // Its own buffer rather than the pair's — see [`crate::ssr::Ssr`] — and
+        // the same pair of `glam` values, so a march and an occlusion sample can
+        // never be looking at two different cameras.
+        self.ssr.begin_frame(
+            device,
+            self.frame,
+            ssr::SsrParams {
+                inv_proj: inv_projection.to_cols_array(),
+                proj: projection.to_cols_array(),
             },
         )?;
 
@@ -4111,10 +4150,17 @@ impl ForwardRenderer {
     /// HDR scene colour, the depth buffer, and every barrier between them — is
     /// the graph's.
     ///
-    /// The returned [`ImageId`] is the `Rgba16Float` scene colour. A caller that
-    /// wants to add a pass of its own after the tonemap — a debug overlay, or a
-    /// readback proving the HDR range is real — declares a read of it and the
-    /// graph works out the transition, exactly as it does for the tonemap.
+    /// The returned [`ImageId`] is the `Rgba16Float` frame the tonemap read:
+    /// the scene colour **with the screen-space reflections already added**, not
+    /// the target the forward pass wrote. A caller that wants to add a pass of
+    /// its own after the tonemap — a debug overlay, or a readback proving the
+    /// HDR range is real — declares a read of it and the graph works out the
+    /// transition, exactly as it does for the tonemap.
+    ///
+    /// The two are the same description and different images, which is the
+    /// design's off-switch as data rather than as a branch: a frame that did not
+    /// add the reflection pass would return the forward pass's own id and be
+    /// bit-identical.
     pub fn add_passes<'a>(
         &'a mut self,
         graph: &mut RenderGraph<'a>,
@@ -4203,6 +4249,13 @@ impl ForwardRenderer {
         );
         let reflectivity =
             graph.create_image("reflectivity", TransientImageDesc::reflectivity(extent));
+        // The reflection pass's output, and it is the scene target's description
+        // exactly: what that pass writes is the scene colour plus a term, so a
+        // narrower image here would tonemap a truncated frame. Two live requests
+        // for one description are two physical images — see
+        // `TransientPool::image`.
+        let composited =
+            graph.create_image("scene-reflected", TransientImageDesc::scene_color(extent));
 
         let group = self.mesh_groups[self.frame];
         let emit = self.emit;
@@ -4335,7 +4388,29 @@ impl ForwardRenderer {
             // one. Zero in every channel is that value: an `F0` of zero
             // reflects nothing whatever the roughness beside it says.
             .clear_color(reflectivity, [0.0; 4])
-            .clear_depth(scene_depth)
+            // **Cleared and then *stored*, where every frame before the
+            // reflection slice discarded it.** `PassBuilder::clear_depth` is
+            // `LoadOp::Clear` with `StoreOp::Discard`, which is right for a pass
+            // nothing downstream reads the depth of — and the reflection march
+            // is downstream and reads exactly that. A discarded attachment is
+            // *undefined* afterwards, not "whatever was in it": a desktop driver
+            // hands back the values it just wrote and wgpu hands back the clear,
+            // so the same build drew reflections on one backend and none at all
+            // on the other, with nothing anywhere reporting an error.
+            //
+            // The prepass wrote the same depth into the same image, so this is a
+            // writeback of values already there and not a second depth buffer.
+            // The forward pass's own writes are what is kept, which is also the
+            // honest choice: the march is about the surfaces this frame *shaded*.
+            .depth(
+                scene_depth,
+                LoadOp::Clear,
+                StoreOp::Store,
+                crcbl_hal::ClearValue {
+                    depth: crcbl_hal::depth::CLEAR,
+                    ..crcbl_hal::ClearValue::default()
+                },
+            )
             // The occlusion channel this frame's ambient term is scaled by. The
             // blur pass wrote it as a colour attachment a moment ago, so this
             // declaration is the barrier into a shader-readable layout.
@@ -4395,6 +4470,20 @@ impl ForwardRenderer {
             bucket_draws.record(encoder, group, &generated);
         });
 
+        // `docs/plan/18-render-features.md`'s reflection march, and **it is the
+        // composite**: it reads the scene colour, the depth prepass and the
+        // reflectivity attachment and writes their sum, so everything below this
+        // line works on `composited` rather than on `scene_color`. A frame that
+        // did not add it would hand `scene_color` on and be bit-identical.
+        self.ssr.add_pass(
+            graph,
+            frame,
+            scene_depth,
+            scene_color,
+            reflectivity,
+            composited,
+        );
+
         // The tonemap group names a *graph-owned* view, so it can only be built
         // once the graph has realised one. It is cached against the view handle
         // and therefore rebuilt only on a resize.
@@ -4414,9 +4503,13 @@ impl ForwardRenderer {
                 StoreOp::Store,
                 crcbl_hal::ClearValue::default(),
             )
-            .read_image(scene_color)
+            // **The reflection pass's output, not the forward pass's.** The two
+            // are the same description and different images, and tonemapping the
+            // first one would compile, draw a picture, and silently be the frame
+            // without reflections in it.
+            .read_image(composited)
             .execute(move |ctx| {
-                let view = ctx.image_view(scene_color);
+                let view = ctx.image_view(composited);
                 let device = ctx.device();
                 let entries = vec![
                     BindGroupEntry {
@@ -4458,7 +4551,7 @@ impl ForwardRenderer {
             stats.add_copy_pass(graph, generated.visible_count_id);
         }
 
-        scene_color
+        composited
     }
 
     /// Adds the cull dispatches and the depth-only pass that fill the shadow
@@ -4924,6 +5017,7 @@ impl ForwardRenderer {
         device.destroy_image_view(self.shadow_placeholder_view);
         device.destroy_image(self.shadow_placeholder);
 
+        self.ssr.destroy(device);
         self.ssao.destroy(device);
         self.ambient_occlusion_placeholder.destroy(device);
 
@@ -7176,6 +7270,7 @@ mod tests {
                 "ssao",
                 "ssao-blur",
                 "forward",
+                "ssr",
                 "tonemap",
                 "cull-stats-readback",
             ]

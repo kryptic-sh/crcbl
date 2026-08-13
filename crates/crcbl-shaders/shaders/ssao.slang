@@ -49,6 +49,14 @@
 /// sample goes view → clip again, and there is no cheaper spelling that survives
 /// an orthographic camera. `crcbl_shaders::ssao::SsaoParams` is the Rust mirror
 /// and `crcbl_render::forward` is what writes it.
+///
+/// **Bound as `camera` rather than as `ssao`**, and that is the one thing here
+/// that is about a *different* file: `ssr.slang` copies `view_position` and
+/// `normal_at` out of this one verbatim, and
+/// `crcbl_shaders::ssr`'s `the_shared_screen_space_helpers_have_not_drifted`
+/// compares the bodies as text. Three passes reaching the same two matrices
+/// through the same name is what lets that guard be an equality rather than a
+/// substitution nobody would trust.
 struct SsaoParams
 {
     /// Clip → view. Reversed-Z and possibly infinite, so `w` is what carries the
@@ -63,7 +71,7 @@ struct SsaoParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<SsaoParams> ssao;
+ConstantBuffer<SsaoParams> camera;
 
 /// The depth prepass's output, fetched by integer pixel and never filtered.
 ///
@@ -181,7 +189,7 @@ float3 view_position(int2 pixel, float depth, float2 extent)
     float2 ndc = float2(
         (float(pixel.x) + 0.5) / extent.x * 2.0 - 1.0,
         1.0 - (float(pixel.y) + 0.5) / extent.y * 2.0);
-    float4 view = mul(ssao.inv_proj, float4(ndc, depth, 1.0));
+    float4 view = mul(camera.inv_proj, float4(ndc, depth, 1.0));
     return view.xyz / view.w;
 }
 
@@ -226,8 +234,8 @@ float3 normal_at(int2 pixel, float3 centre, int2 extent, float2 size)
 /// **Replace this function, and only this function, to upgrade the technique.**
 float occlusion_at(int2 pixel, float3 centre, float3 normal, int2 extent, float2 size)
 {
-    float radius = ssao.params.x;
-    float bias = ssao.params.y;
+    float radius = camera.params.x;
+    float bias = camera.params.y;
 
     // The tile's rotation, turned into a tangent frame. Gram-Schmidt against the
     // normal rather than an arbitrary basis, so the frame spins about the normal
@@ -249,7 +257,7 @@ float occlusion_at(int2 pixel, float3 centre, float3 normal, int2 extent, float2
         float3 offset = KERNEL[index];
         float3 at = centre + (across * offset.x + along * offset.y + normal * offset.z) * radius;
 
-        float4 clip = mul(ssao.proj, float4(at, 1.0));
+        float4 clip = mul(camera.proj, float4(at, 1.0));
         // Behind the eye: there is no pixel to ask about.
         if (clip.w <= 0.0)
         {

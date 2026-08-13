@@ -474,6 +474,20 @@ refinement pass.
   it makes the loop bound a property of the screen rather than of the scene's
   scale — which matters because CI's rasterisers are software and the loop bound
   is the whole cost.
+- **Amended when it was built (2026-08-14): the _reach_ is a share of the frame,
+  not a fixed pixel count.** The paragraph above is right about the step and
+  about the loop bound, and a first cut took it literally — sixty-four taps two
+  pixels apart, so a reflection could reach 128 pixels whatever the resolution.
+  That has the mirror image of the defect the paragraph refuses, one level up:
+  the same scene at five times the resolution grows five times as many pixels
+  between a surface and what it reflects, so the reflection got _shorter_ as the
+  window got bigger. `lumen`'s panel is where it showed — the reflection its
+  golden asserts at 256×192 was simply absent from the 1280×960 review frame of
+  the same room. `ssr.slang` therefore derives its stride from
+  `REACH_FRACTION * min(width, height) / MAX_STEPS`: the stride is still a fixed
+  number of pixels along one ray, the loop bound is still a constant, the cost
+  is still the same at every resolution, and a reflection is now the same share
+  of the frame at every resolution rather than the same number of pixels.
 - **The segment is clipped to the viewport before the walk**, so every tap is
   in-bounds by construction and a ray leaving the screen stops being a branch.
   It ends at the clipped endpoint with a **border ramp** on its weight; a hard

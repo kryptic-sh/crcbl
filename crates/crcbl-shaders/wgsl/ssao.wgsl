@@ -12,7 +12,7 @@ struct SsaoParams_std140_0
     @align(16) params_0 : vec4<f32>,
 };
 
-@binding(0) @group(0) var<uniform> ssao_0 : SsaoParams_std140_0;
+@binding(0) @group(0) var<uniform> camera_0 : SsaoParams_std140_0;
 var<private> KERNEL_0 : array<vec3<f32>, i32(8)> = array<vec3<f32>, i32(8)>( vec3<f32>(0.875f, 0.0f, 0.25f), vec3<f32>(-0.75f, 0.0f, 0.375f), vec3<f32>(0.0f, 0.75f, 0.25f), vec3<f32>(0.0f, -0.625f, 0.5f), vec3<f32>(0.5f, 0.5f, 0.375f), vec3<f32>(-0.5f, 0.5f, 0.625f), vec3<f32>(0.375f, -0.375f, 0.75f), vec3<f32>(-0.25f, -0.25f, 0.875f) );
 var<private> ROTATIONS_0 : array<vec2<f32>, i32(16)> = array<vec2<f32>, i32(16)>( vec2<f32>(2.0f, 0.0f), vec2<f32>(-2.0f, 0.0f), vec2<f32>(1.0f, 1.0f), vec2<f32>(-1.0f, -1.0f), vec2<f32>(0.0f, -2.0f), vec2<f32>(0.0f, 2.0f), vec2<f32>(1.0f, -1.0f), vec2<f32>(-1.0f, 1.0f), vec2<f32>(1.0f, 2.0f), vec2<f32>(-1.0f, -2.0f), vec2<f32>(2.0f, 1.0f), vec2<f32>(-2.0f, -1.0f), vec2<f32>(2.0f, -1.0f), vec2<f32>(-2.0f, 1.0f), vec2<f32>(1.0f, -2.0f), vec2<f32>(-1.0f, 2.0f) );
 struct FullscreenOutput_0
@@ -39,7 +39,7 @@ fn depth_at_0( pixel_0 : vec2<i32>,  extent_0 : vec2<i32>) -> f32
 
 fn view_position_0( pixel_1 : vec2<i32>,  depth_0 : f32,  extent_1 : vec2<f32>) -> vec3<f32>
 {
-    var view_0 : vec4<f32> = (((vec4<f32>(vec2<f32>((f32(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (mat4x4<f32>(ssao_0.inv_proj_0.data_0[i32(0)][i32(0)], ssao_0.inv_proj_0.data_0[i32(1)][i32(0)], ssao_0.inv_proj_0.data_0[i32(2)][i32(0)], ssao_0.inv_proj_0.data_0[i32(3)][i32(0)], ssao_0.inv_proj_0.data_0[i32(0)][i32(1)], ssao_0.inv_proj_0.data_0[i32(1)][i32(1)], ssao_0.inv_proj_0.data_0[i32(2)][i32(1)], ssao_0.inv_proj_0.data_0[i32(3)][i32(1)], ssao_0.inv_proj_0.data_0[i32(0)][i32(2)], ssao_0.inv_proj_0.data_0[i32(1)][i32(2)], ssao_0.inv_proj_0.data_0[i32(2)][i32(2)], ssao_0.inv_proj_0.data_0[i32(3)][i32(2)], ssao_0.inv_proj_0.data_0[i32(0)][i32(3)], ssao_0.inv_proj_0.data_0[i32(1)][i32(3)], ssao_0.inv_proj_0.data_0[i32(2)][i32(3)], ssao_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
+    var view_0 : vec4<f32> = (((vec4<f32>(vec2<f32>((f32(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(0)], camera_0.inv_proj_0.data_0[i32(2)][i32(0)], camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(0)][i32(1)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)], camera_0.inv_proj_0.data_0[i32(2)][i32(1)], camera_0.inv_proj_0.data_0[i32(3)][i32(1)], camera_0.inv_proj_0.data_0[i32(0)][i32(2)], camera_0.inv_proj_0.data_0[i32(1)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(2)], camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(0)][i32(3)], camera_0.inv_proj_0.data_0[i32(1)][i32(3)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)], camera_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
     return view_0.xyz / vec3<f32>(view_0.w);
 }
 
@@ -77,8 +77,8 @@ fn normal_at_0( pixel_2 : vec2<i32>,  centre_0 : vec3<f32>,  extent_2 : vec2<i32
 
 fn occlusion_at_0( pixel_3 : vec2<i32>,  centre_1 : vec3<f32>,  normal_0 : vec3<f32>,  extent_3 : vec2<i32>,  size_1 : vec2<f32>) -> f32
 {
-    var _S8 : f32 = ssao_0.params_0.x;
-    var _S9 : f32 = ssao_0.params_0.y;
+    var _S8 : f32 = camera_0.params_0.x;
+    var _S9 : f32 = camera_0.params_0.y;
     var seed_0 : vec3<f32> = vec3<f32>(ROTATIONS_0[((u32(pixel_3.y) & (u32(3)))) * u32(4) + ((u32(pixel_3.x) & (u32(3))))], 0.0f);
     var tangent_0 : vec3<f32> = seed_0 - normal_0 * vec3<f32>(dot(seed_0, normal_0));
     var across_0 : vec3<f32>;
@@ -103,7 +103,7 @@ fn occlusion_at_0( pixel_3 : vec2<i32>,  centre_1 : vec3<f32>,  normal_0 : vec3<
             break;
         }
         var at_0 : vec3<f32> = centre_1 + (across_0 * vec3<f32>(KERNEL_0[index_1].x) + _S10 * vec3<f32>(KERNEL_0[index_1].y) + normal_0 * vec3<f32>(KERNEL_0[index_1].z)) * vec3<f32>(_S8);
-        var clip_0 : vec4<f32> = (((vec4<f32>(at_0, 1.0f)) * (mat4x4<f32>(ssao_0.proj_0.data_0[i32(0)][i32(0)], ssao_0.proj_0.data_0[i32(1)][i32(0)], ssao_0.proj_0.data_0[i32(2)][i32(0)], ssao_0.proj_0.data_0[i32(3)][i32(0)], ssao_0.proj_0.data_0[i32(0)][i32(1)], ssao_0.proj_0.data_0[i32(1)][i32(1)], ssao_0.proj_0.data_0[i32(2)][i32(1)], ssao_0.proj_0.data_0[i32(3)][i32(1)], ssao_0.proj_0.data_0[i32(0)][i32(2)], ssao_0.proj_0.data_0[i32(1)][i32(2)], ssao_0.proj_0.data_0[i32(2)][i32(2)], ssao_0.proj_0.data_0[i32(3)][i32(2)], ssao_0.proj_0.data_0[i32(0)][i32(3)], ssao_0.proj_0.data_0[i32(1)][i32(3)], ssao_0.proj_0.data_0[i32(2)][i32(3)], ssao_0.proj_0.data_0[i32(3)][i32(3)]))));
+        var clip_0 : vec4<f32> = (((vec4<f32>(at_0, 1.0f)) * (mat4x4<f32>(camera_0.proj_0.data_0[i32(0)][i32(0)], camera_0.proj_0.data_0[i32(1)][i32(0)], camera_0.proj_0.data_0[i32(2)][i32(0)], camera_0.proj_0.data_0[i32(3)][i32(0)], camera_0.proj_0.data_0[i32(0)][i32(1)], camera_0.proj_0.data_0[i32(1)][i32(1)], camera_0.proj_0.data_0[i32(2)][i32(1)], camera_0.proj_0.data_0[i32(3)][i32(1)], camera_0.proj_0.data_0[i32(0)][i32(2)], camera_0.proj_0.data_0[i32(1)][i32(2)], camera_0.proj_0.data_0[i32(2)][i32(2)], camera_0.proj_0.data_0[i32(3)][i32(2)], camera_0.proj_0.data_0[i32(0)][i32(3)], camera_0.proj_0.data_0[i32(1)][i32(3)], camera_0.proj_0.data_0[i32(2)][i32(3)], camera_0.proj_0.data_0[i32(3)][i32(3)]))));
         var _S11 : f32 = clip_0.w;
         if(_S11 <= 0.0f)
         {

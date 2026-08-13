@@ -225,6 +225,33 @@ pub enum Scene {
     /// view is straight down and `AO_RUN` for why the trough is not a square
     /// room.
     Ao,
+    /// `docs/plan/18-render-features.md`'s **screen-space reflections**: a
+    /// smooth floor with the plain pyramid standing on it, seen from just above
+    /// the floor.
+    ///
+    /// **The case the technique is good at, and the one its determinism section
+    /// asks a fixture for**: the reflected content is one large, flat, brightly
+    /// lit object, so a driver picking the neighbouring tap at the crossing
+    /// fetches very nearly the same colour. A fixture reflecting fine detail
+    /// would make the golden a function of which pixel each rasteriser landed
+    /// on.
+    ///
+    /// The floor is the cube through the **tinted** material row, which is the
+    /// only row in the demo scene under the pass's roughness cutoff — see
+    /// `crcbl_render::scene::PYRAMID_ROUGHNESS`. Everything else in this frame,
+    /// the pyramid included, is the untinted row at exactly the cutoff and
+    /// therefore weighs zero, so the reflection is the floor's and nothing
+    /// else's.
+    ///
+    /// It is a scene of its own rather than a camera change to [`Scene::Spot`]
+    /// for that reason alone: this needs a *smooth* floor, and that scene's is
+    /// the neutral row whose whole job is to be what an instance shades through
+    /// by omission.
+    ///
+    /// See `SSR_CAMERA_UP` for why the eye is low — a Fresnel term head-on is a
+    /// twenty-fifth — and `ssr_sun` for why the sun has no X component, which is
+    /// what makes the two bands beside the reflection its controls.
+    Ssr,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
@@ -491,11 +518,18 @@ const SPOT_CAMERA_UP: f32 = 1.2;
 /// reader or an assertion to take the shape off instead.
 const SPOT_FLOOR_SCALE: f32 = 8.0;
 
-/// [`Scene::Spot`]'s floor: the cube scaled by [`SPOT_FLOOR_SCALE`] and dropped
-/// so its `+Y` face is the plane `y = 0`.
+/// The floor [`Scene::Spot`], its two shadow siblings and [`Scene::Ssr`] all
+/// stand on: the cube scaled by [`SPOT_FLOOR_SCALE`] and dropped so its `+Y`
+/// face is the plane `y = 0`.
 ///
 /// The cube spans half a unit either side of its origin, so the drop is half the
 /// scale.
+///
+/// One helper rather than one per scene, on [`place_pyramids`]' terms: four
+/// frames stand on the same plane at the same scale, and a floor that moved in
+/// one of them would be a difference nobody asked for in a golden that is about
+/// something else. What [`Scene::Ssr`] varies is the material row it places this
+/// transform through, not the transform.
 fn spot_floor() -> glam::Mat4 {
     glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.5 * SPOT_FLOOR_SCALE, 0.0))
         * glam::Mat4::from_scale(glam::Vec3::splat(SPOT_FLOOR_SCALE))
@@ -654,6 +688,107 @@ fn ao_sun() -> crcbl_render::DirectionalLight {
     crcbl_render::DirectionalLight {
         direction: glam::Vec3::Y,
         ..dimmed_sun(0.01, 1.0)
+    }
+}
+
+/// How much [`Scene::Ssr`] scales the pyramid by.
+///
+/// Large enough that its reflection is tens of pixels across at the golden
+/// suite's 256×192 — the reflected image is foreshortened to a fraction of the
+/// object's own height, so a pyramid the size the cube scene draws would leave a
+/// smear a band could not be centred in. Small enough that the whole of it, and
+/// the floor in front of it that carries the reflection, are both in frame.
+const SSR_PYRAMID_SCALE: f32 = 1.2;
+
+/// How far above the floor [`Scene::Ssr`]'s camera stands, in world units.
+///
+/// **Low, and that is the scene.** The reflectance of a dielectric is a Fresnel
+/// term: about a twenty-fifth head-on and rising steeply towards grazing, so a
+/// floor seen from overhead reflects almost nothing whatever the march does. From
+/// here the floor in front of the pyramid is seen at about fifteen degrees, where
+/// the term is several times its head-on value and the reflection is a thing a
+/// band can measure.
+///
+/// It is also what puts the reflection *in frame*: a reflected ray leaves the
+/// floor at the same angle it arrived, so a low eye is a shallow ray that runs a
+/// long way up the frame before it reaches the object — and a march that runs off
+/// the top of the screen finds nothing.
+const SSR_CAMERA_UP: f32 = 0.8;
+
+/// How far back along `+Z` [`Scene::Ssr`]'s camera stands.
+///
+/// Far enough that the pyramid at the origin is comfortably inside the frame with
+/// floor visible on both sides of it — the bands this scene compares are floor,
+/// and two of the three are beside the reflection rather than in it.
+const SSR_CAMERA_BACK: f32 = 3.2;
+
+/// How high [`Scene::Ssr`]'s camera looks.
+///
+/// Below [`SSR_CAMERA_UP`], so the view tilts down and the floor fills the lower
+/// half of the frame; above the floor, so the pyramid is not pinned to the top
+/// edge. The reflection lands between the pyramid's base and the bottom of the
+/// frame, which is the band the assertions read.
+const SSR_CAMERA_LOOK: f32 = 0.35;
+
+/// [`Scene::Ssr`]'s pyramid: scaled and dropped so its base sits exactly on the
+/// floor.
+///
+/// **On the floor rather than floating**, on `spot_shadow_caster`'s terms: the
+/// reflection of an object standing on a mirror meets the object at the contact
+/// line, and a gap there is the first thing wrong with a march that has its
+/// start point or its normal offset wrong.
+fn ssr_pyramid() -> glam::Mat4 {
+    // The pyramid's base is at `-0.4` in its own space, so lifting it by that
+    // much of the scale puts the base on `y = 0`.
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.4 * SSR_PYRAMID_SCALE, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::splat(SSR_PYRAMID_SCALE))
+}
+
+/// The camera [`Scene::Ssr`] is drawn with: low, on the `+Z` axis, looking
+/// slightly down at the pyramid.
+///
+/// **On the axis, and every band rests on that.** With the eye at `x = 0` and the
+/// look direction in the plane `x = 0`, the frame is symmetric about its own
+/// centre column: two floor points at `±x` on one row are the same distance from
+/// the eye, carry the same normal, take the same directional light and lie in the
+/// same shadow. So the only thing that can separate the middle of that row from
+/// its two ends is the reflection, which is what [`ssr_sun`] finishes the
+/// argument for.
+fn ssr_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, SSR_CAMERA_UP, SSR_CAMERA_BACK),
+        target: glam::Vec3::new(0.0, SSR_CAMERA_LOOK, 0.0),
+        up: glam::Vec3::Y,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// The sun [`Scene::Ssr`] runs under: the default one with its **X component
+/// removed**.
+///
+/// Both halves are load-bearing.
+///
+/// * **No X**, so the whole frame is symmetric about the plane `x = 0`: the
+///   Lambert term, the specular lobe and the shadow the pyramid throws are all
+///   the same at `+x` and `-x`. The default sun comes over the viewer's right
+///   shoulder, which would make the two side bands different by the lighting and
+///   leave the assertion measuring that instead.
+/// * **Still from behind the eye and above**, so the pyramid's shadow falls
+///   *away* from the camera and the reflection — which is on the floor between
+///   the pyramid and the eye — lands on lit floor. A sun in front would lay the
+///   shadow across exactly the band this scene measures.
+///
+/// The colour and the ambient are the default's, unlike every other scene here:
+/// this one's claim is a ratio between three bands of lit floor, so there is
+/// nothing to turn down.
+fn ssr_sun() -> crcbl_render::DirectionalLight {
+    let bright = crcbl_render::DirectionalLight::default();
+    crcbl_render::DirectionalLight {
+        direction: glam::Vec3::new(0.0, bright.direction.y, bright.direction.z).normalize(),
+        ..bright
     }
 }
 
@@ -1361,6 +1496,26 @@ impl SceneState {
                 Self::Forward {
                     camera: ao_camera(),
                     light: ao_sun(),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::Ssr => {
+                // The cube as the floor and the pyramid standing on it, and
+                // nothing else — `Scene::Spot`'s reason: what this frame is
+                // about is one flat reflective surface and one thing for it to
+                // reflect.
+                //
+                // **The cube is placed through `DEMO_TINTED` rather than
+                // through `place_cube`.** It is still the first insertion, so it
+                // still holds the pool slot every other scene gives it; what
+                // differs is the row, and that row's roughness is the only one
+                // in the demo scene the reflection pass can see.
+                let mut renderer = ForwardRenderer::new(device, queue, format)?;
+                place(&mut renderer, DEMO_CUBE, DEMO_TINTED, spot_floor());
+                place(&mut renderer, DEMO_PYRAMID, DEMO_UNTINTED, ssr_pyramid());
+                Self::Forward {
+                    camera: ssr_camera(),
+                    light: ssr_sun(),
                     renderer: Box::new(renderer),
                 }
             }
@@ -2512,12 +2667,20 @@ mod tests {
             // still draws — each pass reads whatever the last frame left in the
             // pooled transient — so the sequence is asserted here rather than
             // trusted to the graph.
+            //
+            // **`ssr` is after `forward` and before `tonemap`, and both halves
+            // matter.** It marches the depth prepass for a colour out of the
+            // scene target, so it cannot run before the pass that wrote that
+            // target; and it *is* the composite, so a tonemap scheduled first
+            // would resolve the frame without the reflections in it. Neither
+            // mistake is visible as anything but a picture.
             passes.extend([
                 ("render", "shadow"),
                 ("render", "depth-prepass"),
                 ("render", "ssao"),
                 ("render", "ssao-blur"),
                 ("render", "forward"),
+                ("render", "ssr"),
                 ("render", "tonemap"),
             ]);
             passes
@@ -2531,7 +2694,7 @@ mod tests {
         // which is six tiles, and the light region holds six — so the most
         // influential one is shadowed and the other two light without occluding.
         let lights_passes = forward_passes(1);
-        let expected: [(Scene, &[(&str, &str)]); 8] = [
+        let expected: [(Scene, &[(&str, &str)]); 9] = [
             (Scene::Cube, &cube_passes),
             // Not the cube scene's passes: `Scene::Lights` is the cube scene
             // with a longer light list, the clustering dispatch is one per
@@ -2563,6 +2726,11 @@ mod tests {
             // — which is what makes this row `cube_passes` and not
             // `spot_shadow_passes`.
             (Scene::Ao, &cube_passes),
+            // And again for `Scene::Ssr`, which is the cube scene's list for the
+            // same two reasons: a directional sun and an empty light list, so no
+            // atlas tile and no cull of its own. The `ssr` pass itself is in
+            // every row here — it is not a scene's to opt into.
+            (Scene::Ssr, &cube_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

@@ -14,7 +14,7 @@ struct SsaoParams_std140_0
     @align(16) params_0 : vec4<f32>,
 };
 
-@binding(0) @group(0) var<uniform> ssao_0 : SsaoParams_std140_0;
+@binding(0) @group(0) var<uniform> camera_0 : SsaoParams_std140_0;
 struct FullscreenOutput_0
 {
     @builtin(position) position_0 : vec4<f32>,
@@ -39,7 +39,7 @@ fn depth_at_0( pixel_0 : vec2<i32>,  extent_0 : vec2<i32>) -> f32
 
 fn view_z_0( pixel_1 : vec2<i32>,  depth_0 : f32,  extent_1 : vec2<f32>) -> f32
 {
-    var view_0 : vec4<f32> = (((vec4<f32>(vec2<f32>((f32(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (mat4x4<f32>(ssao_0.inv_proj_0.data_0[i32(0)][i32(0)], ssao_0.inv_proj_0.data_0[i32(1)][i32(0)], ssao_0.inv_proj_0.data_0[i32(2)][i32(0)], ssao_0.inv_proj_0.data_0[i32(3)][i32(0)], ssao_0.inv_proj_0.data_0[i32(0)][i32(1)], ssao_0.inv_proj_0.data_0[i32(1)][i32(1)], ssao_0.inv_proj_0.data_0[i32(2)][i32(1)], ssao_0.inv_proj_0.data_0[i32(3)][i32(1)], ssao_0.inv_proj_0.data_0[i32(0)][i32(2)], ssao_0.inv_proj_0.data_0[i32(1)][i32(2)], ssao_0.inv_proj_0.data_0[i32(2)][i32(2)], ssao_0.inv_proj_0.data_0[i32(3)][i32(2)], ssao_0.inv_proj_0.data_0[i32(0)][i32(3)], ssao_0.inv_proj_0.data_0[i32(1)][i32(3)], ssao_0.inv_proj_0.data_0[i32(2)][i32(3)], ssao_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
+    var view_0 : vec4<f32> = (((vec4<f32>(vec2<f32>((f32(pixel_1.x) + 0.5f) / extent_1.x * 2.0f - 1.0f, 1.0f - (f32(pixel_1.y) + 0.5f) / extent_1.y * 2.0f), depth_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_proj_0.data_0[i32(0)][i32(0)], camera_0.inv_proj_0.data_0[i32(1)][i32(0)], camera_0.inv_proj_0.data_0[i32(2)][i32(0)], camera_0.inv_proj_0.data_0[i32(3)][i32(0)], camera_0.inv_proj_0.data_0[i32(0)][i32(1)], camera_0.inv_proj_0.data_0[i32(1)][i32(1)], camera_0.inv_proj_0.data_0[i32(2)][i32(1)], camera_0.inv_proj_0.data_0[i32(3)][i32(1)], camera_0.inv_proj_0.data_0[i32(0)][i32(2)], camera_0.inv_proj_0.data_0[i32(1)][i32(2)], camera_0.inv_proj_0.data_0[i32(2)][i32(2)], camera_0.inv_proj_0.data_0[i32(3)][i32(2)], camera_0.inv_proj_0.data_0[i32(0)][i32(3)], camera_0.inv_proj_0.data_0[i32(1)][i32(3)], camera_0.inv_proj_0.data_0[i32(2)][i32(3)], camera_0.inv_proj_0.data_0[i32(3)][i32(3)]))));
     return view_0.z / view_0.w;
 }
 
@@ -69,7 +69,7 @@ fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
         return _S5;
     }
     var _S6 : f32 = view_z_0(_S4, centre_depth_0, size_0);
-    var _S7 : f32 = ssao_0.params_0.x * 2.0f;
+    var _S7 : f32 = camera_0.params_0.x * 2.0f;
     var y_0 : i32 = i32(-1);
     var total_0 : f32 = 0.0f;
     var weight_0 : f32 = 0.0f;

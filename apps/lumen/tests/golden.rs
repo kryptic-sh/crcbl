@@ -95,14 +95,39 @@ const SHAFT_RATIO: f32 = 2.0;
 
 /// How much darker the mirror-grade panel is than the plaster behind it.
 ///
-/// **The sample's central honest claim, as a number.** Both points face `+Z`,
-/// both are out of the lamp's reach and both are out of the sun's, so the
-/// direct term is zero on each and the only thing left is the ambient — which
-/// scales the *diffuse* albedo, and a conductor has none. That is the model
-/// `docs/plan/18-render-features.md` documents, and this is what says the frame
-/// still shows it: a build in which metals had picked up an ambient term would
-/// fail here rather than quietly getting prettier.
+/// **What was the sample's central honest claim, and is now half of it.** Both
+/// points face `+Z`, both are out of the lamp's reach and both are out of the
+/// sun's, so the direct term is zero on each and the only thing left is the
+/// ambient — which scales the *diffuse* albedo, and a conductor has none. That
+/// is the model `docs/plan/18-render-features.md` documents, and this is what
+/// says the frame still shows it: a build in which metals had picked up an
+/// ambient term would fail here rather than quietly getting prettier.
+///
+/// The model has since gained the other half — a conductor with no ambient
+/// **reflects** instead — so this number is read at [`MIRROR_AT`], which is above
+/// the band of the panel that reflects anything, and [`MIRROR_GRADIENT`] is the
+/// claim about the band. The number itself has not moved: lowering it to keep it
+/// green would be making the test pass the code.
 const METAL_DARKNESS: f32 = 3.0;
+
+/// How much brighter the foot of the mirror panel is than its face further up.
+///
+/// **The sample's central honest claim now.** The panel looks straight at the
+/// camera, which is close to screen-space reflection's worst case: a ray leaving
+/// it goes back past the eye, so only the lowest part of the face sends one that
+/// reaches the floor while still inside the frame —
+/// `crcbl_lumen::room::MIRROR_FOOT` carries the geometry and
+/// `the_mirror_panel_reflects_at_its_foot_and_not_at_its_head` derives the band
+/// with no GPU. The two blocks are one material row, one face, one normal, one
+/// `F0`, one roughness and no direct light on either; the only thing that differs
+/// is whether the ray finds anything.
+///
+/// Three, and it is the ratio [`METAL_DARKNESS`] used to make about the whole
+/// panel — because the control here is a *conductor with no reflection*, which
+/// this model says is black, and the frame this was set against measures it at
+/// exactly zero against a foot near twenty. A build that reflected everywhere,
+/// or one that reflected nothing, closes that gap from one end or the other.
+const MIRROR_GRADIENT: f32 = 3.0;
 
 /// The floor a lit block's mean brightness has to clear, out of 255.
 ///
@@ -127,8 +152,10 @@ const BOUNCE_REDNESS: f32 = 0.55;
 /// configuration global illumination would change.
 const BOUNCE_AT: Vec3 = Vec3::new(room::HALF_WIDTH, 1.4, -2.0);
 
-/// A point on the mirror-grade panel's `+Z` face.
-const MIRROR_AT: Vec3 = Vec3::new(-1.2, 1.5, room::MIRROR_FACE_Z);
+/// A point on the mirror-grade panel's `+Z` face, above everything of it that
+/// reflects — see `crcbl_lumen::room::MIRROR_MISSES`, which is this point and
+/// carries the proof.
+const MIRROR_AT: Vec3 = room::MIRROR_MISSES;
 
 /// A point on the plaster back wall, clear of the panel and of the plinth.
 const PLASTER_AT: Vec3 = Vec3::new(-2.6, 1.5, -room::HALF_DEPTH);
@@ -373,7 +400,29 @@ fn inspect(image: &Image, extent: (u32, u32), block: (u32, u32)) {
          says metals picked one up"
     );
 
-    // ---- 4. the material table's colour factor reached the device -----------
+    // ---- 4. what a conductor owes the room instead is a reflection ----------
+    //
+    // The block hangs directly **above** the panel's bottom edge rather than
+    // being centred on a point: the band that reflects is the lowest eighth of
+    // the face, so a block centred in it would have to be a different size from
+    // every other claim's, and one centred on the edge would take in the plinth
+    // below. Sitting it on the edge keeps the caller's own block and puts every
+    // reflecting row of the face inside it.
+    let foot = project(&camera, extent, room::MIRROR_FOOT);
+    let reflecting = brightness(image, (foot.0, foot.1 - block.1), block);
+    assert!(
+        reflecting > LIT_FLOOR,
+        "the foot of the mirror panel is at {reflecting:.1}/255 — a conductor with no \
+         ambient and no reflection is black, and this one still is"
+    );
+    assert!(
+        reflecting > mirror * MIRROR_GRADIENT,
+        "the mirror panel reads {reflecting:.1} at its foot and {mirror:.1} further up the \
+         same face — same row, same normal, same F0, same roughness and no direct light on \
+         either, so this says the reflection is not following the geometry"
+    );
+
+    // ---- 5. the material table's colour factor reached the device -----------
     let at = project(&camera, extent, BOUNCE_AT);
     let red = channel(image, at, block, 0);
     let green = channel(image, at, block, 1);
