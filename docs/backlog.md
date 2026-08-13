@@ -6111,12 +6111,27 @@ passed five times in isolation and on three subsequent full-suite runs.
 Observed, not diagnosed; nothing near it had changed. Recorded so a second
 sighting is a pattern rather than a surprise.
 
-## The Windows lavapipe job produced an empty frame once
+## The Windows lavapipe job produces an empty frame intermittently
 
 `depth_probe::reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not`
-failed on `vk e2e (lavapipe, windows)` with a **black** centre pixel — neither
-quad drew — while the same test passed on Linux lavapipe and radv, and the same
-job was green on the three commits before it.
+fails on `vk e2e (lavapipe, windows)` with a **black** centre pixel — neither
+quad drew — while the same test passes on Linux lavapipe and radv, and the same
+job is green on the commits either side of it.
+
+**It has now happened twice**, on `e8d3dab` and on `0b10832`, with unrelated
+changes under it both times and a re-run green both times. That is a flake, not
+a sighting: the second occurrence is what this entry was recorded to wait for,
+and it has arrived. What it is _not_ is a mystery about which failure it is —
+the improved assertion below fired on the second one and said "Nothing drew" in
+its own words, so the frame is empty rather than mis-projected and the place to
+look is the device and the submission.
+
+Nobody has looked there yet. What would settle it: the job draws through
+`crcbl-vk`'s offscreen ring, so the question is whether the readback's wait can
+return before the render has landed on a runner this slow, or whether the device
+is lost and the failure is being reported as a black frame instead. Both are
+answerable from that job's own log without reproducing it locally, which is just
+as well — see below on why the local suite cannot.
 
 **Not a regression from the cluster-radius fix**, and that is checkable rather
 than assumed: `depth_probe` draws through `mesh.slang`'s vertex and fragment
@@ -6124,10 +6139,9 @@ stages with no amplification stage, so `mesh_cluster.slang`'s `cluster_survives`
 is not compiled into the path at all. Every instance it draws is at identity, so
 the radius scaling is `1.0` besides.
 
-That job takes **143 seconds** where the Linux one takes 8, which is the shape
-of a software rasteriser under a slow runner, and an empty frame is what a
-readback that outran the render looks like. Re-run to confirm; recorded so a
-second sighting is a pattern.
+That job takes over two minutes where the Linux one takes single-digit seconds,
+which is the shape of a software rasteriser under a slow runner, and an empty
+frame is what a readback that outran the render looks like.
 
 **The assertion's message has been improved** because it made this harder than
 it needed to be: it said only "if it is blue, the projection matrix is not
