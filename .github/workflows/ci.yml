@@ -898,6 +898,23 @@ jobs:
           CRCBL_GPU: vk
           CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
         run: crates/crcbl/tests/run-render-e2e.sh
+      # The only frame in the tree drawn from an **application's** `SceneDesc`
+      # rather than from `crcbl_render::scene::demo`, which is what makes it
+      # worth its own step: the step above proves the engine's own residents
+      # reach the device, and this one proves the description path a game
+      # actually uses does. A description that arrived short by a mesh, a
+      # material row or a page layer draws a perfectly plausible room, so the
+      # suite asserts where the frame is bright and dark before it compares the
+      # golden at all.
+      #
+      # Added because the golden existed and nothing ran it — it passed on three
+      # configurations on the author's machine and on none in CI, which is a
+      # check that cannot fail where it matters.
+      - name: Draw lumen's room on lavapipe
+        env:
+          CRCBL_GPU: vk
+          CRCBL_VK_ICD: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: apps/lumen/tests/run-lumen-golden.sh
       # The first playable sample, against a real driver. `run-vk-e2e.sh` drives
       # `--package sandbox` and every other harness script does too, so until
       # this step existed nothing outside breakout's own unit tests ever ran the
