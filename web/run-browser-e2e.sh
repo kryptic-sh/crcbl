@@ -24,6 +24,14 @@
 #   trusting a status code — a black canvas satisfies every other check in the
 #   repository.
 #
+#   It is also the only gate on **touch**. `Input.dispatchMouseEvent` is a mouse:
+#   `pointerType` is "mouse", `isPrimary` is never false, no `pointercancel` is
+#   ever raised, and the browser does not consult `touch-action` on the way. So
+#   the shim's touch handling and the CSS that decides whether the browser hands
+#   a gesture to the page at all are invisible to every check outside group F,
+#   which turns touch emulation on and dispatches real contacts. The named guard
+#   below insists that group ran.
+#
 #   It is also the only gate on **cross-origin isolation**. `web/tools/serve.mjs`
 #   sends COOP and COEP, `web/build.sh --serve` runs that same server, and the
 #   driver asserts `crossOriginIsolated === true` inside the loaded document —
@@ -286,6 +294,18 @@ ISOLATION="$(grep -F 'the document is cross-origin isolated' "${OUTPUT}.plain" |
 if [ -z "$ISOLATION" ]; then
     echo "crcbl web e2e: the driver never asked whether the origin is cross-origin isolated;" >&2
     echo "               the COOP/COEP headers in web/tools/serve.mjs are ungated" >&2
+    exit 1
+fi
+
+# The same argument for touch, and by name for the same reason. Every check
+# outside group F passes on a page whose canvas has no `touch-action` at all and
+# whose shim drops every contact — a mouse is not a finger and nothing else here
+# sends one. This one drag is the check every demo makes, so its absence means
+# the touch group did not run rather than that this demo has no bindings.
+TOUCH="$(grep -F 'the canvas keeps a drag the browser would otherwise take' "${OUTPUT}.plain" || true)"
+if [ -z "$TOUCH" ]; then
+    echo "crcbl web e2e: the driver never dragged a finger across the canvas;" >&2
+    echo "               'touch-action: none' in web/style.css is ungated" >&2
     exit 1
 fi
 

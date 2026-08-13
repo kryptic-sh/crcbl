@@ -130,6 +130,17 @@ const EXPECTATIONS = {
     startedFailure: 'the state never left WAITING',
     moving: /Ball x: (-?[\d.]+)/,
     movingLabel: 'the ball moves after the launch',
+    // **What a finger can do here**, read by group F the way the rest of this
+    // table is read. A row with no `touch` key is a demo whose bindings take no
+    // pointer at all, and group F makes only the page-level claims for it.
+    //
+    // `paddle` says this game binds the pointer's *position*, so a drag has a
+    // visible result and [`SAMPLE_PADDLE`] can read it. `lives` is how the gate
+    // knows the start menu has gone: `menu::MenuKind::of` shows it while the run
+    // is untouched, a menu on screen owns the button, and a lost life is what
+    // returns the game to WAITING with nothing over it — the state a tap serves
+    // from, and the reason the tap binding exists at all.
+    touch: { paddle: true, lives: /Lives: (\d+)/ },
   },
   flappy: {
     key: 'Space',
@@ -139,6 +150,13 @@ const EXPECTATIONS = {
     startedFailure: 'the state never left WaitingToStart',
     moving: /\bx: (-?[\d.]+)/,
     movingLabel: 'the bird advances after the flap',
+    // No pointer *position* binding in this game — a tap is a flap and where it
+    // landed says nothing — so a drag has nothing to show and there is no
+    // `paddle`. `height` is the tap's observable instead: gravity is the only
+    // other thing that touches the bird's `y`, and it can only ever lower it, so
+    // a value above the one from before the taps is a flap and cannot be
+    // anything else. `\by:` and not `y:`, or the line's own `vy:` matches first.
+    touch: { height: /\by: (-?[\d.]+)/ },
   },
   // `rock x` and not the ship's: this game's ship is stationary until the
   // player thrusts, and Space only fires. The rocks drift on their own from the
@@ -251,6 +269,99 @@ const TICK_WINDOW_MS = 4_000;
  * reached the corner fails a fast Rust test rather than this slow one.
  */
 const FOCUS_CLICK_INSET = 8;
+
+/**
+ * How many contacts the emulated touchscreen reports.
+ *
+ * The checks need two — one to hold and one to fumble with, which is what the
+ * shim's `isPrimary` filter is about — and a phone reports about this many.
+ */
+const MAX_TOUCH_POINTS = 5;
+
+/**
+ * How many `touchMove`s a drag is dispatched as.
+ *
+ * Enough that "the moves stopped arriving part way" is a different number from
+ * "every move arrived", which is the whole of the `touch-action` check: a
+ * browser that claims the gesture delivers the first one or two and then a
+ * `pointercancel`.
+ */
+const DRAG_STEPS = 8;
+
+/**
+ * The band of the canvas [`SAMPLE_PADDLE`] looks in, as a fraction of its
+ * height, and how near the finger the paddle has to land, as a fraction of its
+ * width.
+ *
+ * The paddle sits at the bottom of breakout's field and nothing else blue is
+ * down there — the ball rests well above the band, the walls are grey, and a
+ * menu is laid out centred.
+ */
+const PADDLE_BAND = 0.85;
+const PADDLE_TOLERANCE = 0.015;
+
+/**
+ * How long the paddle is given to arrive where a finger put it.
+ *
+ * A deadline on a poll rather than a sleep, everywhere but one: it is also the
+ * window "a second contact moves nothing" watches nothing happen for, and a
+ * negative claim has no observable to poll. The control inside that check — the
+ * first contact moving, inside this same window — is what stops a window too
+ * short to show a move from making it pass for free.
+ */
+const PADDLE_SETTLE_MS = 1_500;
+
+/**
+ * Where the drags in group F put the paddle, as fractions of the canvas width.
+ *
+ * The second drag starts somewhere else and moves a *short* way, which is what
+ * tells an absolute placement from a delta-composed one: composed on top of the
+ * first drag it would land near 0.36 instead, which is nowhere near the
+ * tolerance above. Both targets stay inside the walls, because
+ * `game::clamp_paddle` stops the paddle short of them and a target beyond one
+ * would be asserting on the clamp rather than on the drag.
+ */
+const FIRST_DRAG = { from: 0.5, to: 0.3 };
+const SECOND_DRAG = { from: 0.6, to: 0.66 };
+
+/**
+ * Where every later touch in breakout lands, as a fraction of the canvas width.
+ *
+ * A contact states a *place*, so a tap is also a move: served from the middle of
+ * the canvas, each tap would park the paddle under the ball it just launched and
+ * the rally would go on until the run's timeout. The far edge is the one place a
+ * tap cannot catch the ball, which is what makes "wait for the life to be lost"
+ * a wait of seconds rather than of minutes.
+ */
+const PARK_X = 0.02;
+
+/**
+ * How long group F waits for the ball to come down, and how long it taps a
+ * flappy bird for while waiting to see it climb.
+ *
+ * Neither is a guess about how fast the demo runs: both are deadlines on a poll
+ * for an observable, sized so a check that is *going* to fail says so in a
+ * reasonable time rather than sitting on the run's whole timeout.
+ */
+const LIFE_MS = 25_000;
+const CLIMB_MS = 10_000;
+
+/** How long between the taps that keep a bird in the air. */
+const TAP_INTERVAL_MS = 120;
+
+/**
+ * How far above its starting height a flappy bird has to climb before the taps
+ * are the only thing that can have put it there, in the units its HUD prints.
+ *
+ * A run *starts* with a flap: the start menu's button is bound to the same
+ * action a tap is, so the bird is above where it began for the third of a second
+ * that one flap's arc lasts, whether or not another tap ever lands.
+ * `game::FLAP_SPEED` documents that arc as a little under half a pipe gap, and
+ * `game::WORLD_CEILING` is where a bird tapped several times a second is pinned
+ * within a second. This sits between them, nearer the ceiling, so that a sample
+ * taken part way up the climb still counts.
+ */
+const CLIMB_ABOVE = 4;
 
 /** The control page's clear colour, and what it must read back as. */
 const CONTROL_RGB = [0, 51, 204];
@@ -775,6 +886,47 @@ const describe = (sample) =>
       ({ rgb, share }) => `rgb(${rgb.join(',')}) ${(share * 100).toFixed(1)}%`
     )
     .join(', ');
+
+/**
+ * Where breakout's paddle is, as a fraction of the canvas's width.
+ *
+ * **The frame is the observable**, because the HUD line is not: it carries the
+ * *ball's* x and the ball is pinned at its start position while the paddle is
+ * being dragged, so nothing the game logs moves when the finger does. What the
+ * drag is supposed to produce is a paddle somewhere else on screen, and that is
+ * what this reads.
+ *
+ * The classifier is "strongly blue in the bottom band": the paddle is the only
+ * thing down there that is, with the background near-black, the walls grey and
+ * the ball white — all three of which fail `blue − red`. `count` comes back with
+ * the answer so a check can insist the paddle was actually found rather than
+ * pass on an empty band.
+ */
+const SAMPLE_PADDLE = (selector) => `(async () => {
+  const canvas = document.querySelector(${JSON.stringify(selector)});
+  if (!canvas || !canvas.width || !canvas.height) return null;
+  const image = new Image();
+  image.src = canvas.toDataURL();
+  await image.decode();
+  const scratch = document.createElement('canvas');
+  scratch.width = canvas.width;
+  scratch.height = canvas.height;
+  const context = scratch.getContext('2d', { willReadFrequently: true });
+  context.drawImage(image, 0, 0);
+  const top = Math.floor(scratch.height * ${PADDLE_BAND});
+  const pixels = context
+    .getImageData(0, top, scratch.width, scratch.height - top)
+    .data;
+  let sum = 0;
+  let count = 0;
+  for (let i = 0; i < pixels.length; i += 4) {
+    if (pixels[i + 2] - pixels[i] >= 50 && pixels[i + 1] - pixels[i] >= 30) {
+      sum += (i / 4) % scratch.width;
+      count += 1;
+    }
+  }
+  return { count, at: count ? sum / count / scratch.width : null };
+})()`;
 
 // ---------------------------------------------------------------------------
 // The pre-flight: can this browser render *and* report pixels?
@@ -1460,6 +1612,431 @@ try {
     afterResume > 0,
     `${afterResume} HUD line(s) in ${TICK_WINDOW_MS} ms`
   );
+
+  group('F — a finger');
+
+  // **Nothing above this line has ever sent a touch.**
+  // `Input.dispatchMouseEvent` is a mouse all the way down: it arrives as a
+  // `pointerdown` whose `pointerType` is "mouse", `isPrimary` is never false, no
+  // `pointercancel` is ever raised, and the browser does not consult
+  // `touch-action` on the way. So the shim's touch handling, and the CSS that
+  // decides whether the browser hands a gesture to the page at all, were shipped
+  // with a green gate that could not see them.
+  //
+  // `Emulation.setTouchEmulationEnabled` is what makes the browser build touch
+  // pointers for `Input.dispatchTouchEvent`, and it also flips `(hover: none)`
+  // and `(pointer: coarse)` — the pair the demo pages swap their copy on — so
+  // one call sets up both halves of this group.
+
+  /** Both counts, so a check cannot pass on a selector that matches nothing. */
+  const copyState = () =>
+    evaluate(
+      page,
+      `(() => {
+         const count = (selector) => {
+           const all = [...document.querySelectorAll(selector)];
+           return {
+             total: all.length,
+             shown: all.filter((el) => getComputedStyle(el).display !== 'none')
+               .length,
+           };
+         };
+         return {
+           touch: count('.touch-only'),
+           pointer: count('.pointer-only'),
+           coarse: matchMedia('(hover: none) and (pointer: coarse)').matches,
+           contacts: navigator.maxTouchPoints,
+         };
+       })()`
+    );
+
+  const withMouse = await copyState();
+  check(
+    'F',
+    'a mouse gets the keyboard copy and none of the touch copy',
+    withMouse.touch.total > 0 &&
+      withMouse.touch.shown === 0 &&
+      withMouse.pointer.total > 0 &&
+      withMouse.pointer.shown === withMouse.pointer.total,
+    `${withMouse.touch.shown}/${withMouse.touch.total} touch-only and ` +
+      `${withMouse.pointer.shown}/${withMouse.pointer.total} pointer-only elements showing`
+  );
+
+  await page.send('Emulation.setTouchEmulationEnabled', {
+    enabled: true,
+    maxTouchPoints: MAX_TOUCH_POINTS,
+  });
+
+  const withFinger = await copyState();
+  // The precondition for everything below, asserted rather than assumed: an
+  // emulation call that silently did nothing would leave every touch check
+  // dispatching events no browser would ever build, and they would fail as if
+  // the engine had.
+  check(
+    'F',
+    'touch emulation reports a coarse pointer with contacts',
+    withFinger.coarse && withFinger.contacts > 0,
+    `(hover: none) and (pointer: coarse) is ${withFinger.coarse}, ` +
+      `maxTouchPoints ${withFinger.contacts}`
+  );
+  check(
+    'F',
+    'a coarse pointer swaps the keyboard copy for the touch copy',
+    withFinger.touch.total > 0 &&
+      withFinger.touch.shown === withFinger.touch.total &&
+      withFinger.pointer.shown === 0,
+    `${withFinger.touch.shown}/${withFinger.touch.total} touch-only and ` +
+      `${withFinger.pointer.shown}/${withFinger.pointer.total} pointer-only elements showing`
+  );
+
+  // **A fresh page, booted with touch already on.** What follows is a phone's
+  // visit, and by this point groups C to E have launched the ball, spent lives,
+  // paused the demo and left whichever menu that ended on. Navigating to the
+  // same URL is the whole reset: the shim's `pagehide` teardown runs and the
+  // next document starts from the top.
+  const beforeReload = hud().length;
+  await page.send('Page.navigate', { url });
+  await until(async () => evaluate(page, `document.readyState === 'complete'`));
+  const rebooted = await until(async () => {
+    const status = await evaluate(page, `crcbl.status()`);
+    return status === 3 ? status : null;
+  });
+  /** The demo's HUD lines since the reload, so nothing reads the old run's. */
+  const fresh = () => hud().slice(beforeReload);
+  await until(async () => fresh().length > 0);
+  check(
+    'F',
+    'the demo boots again with touch emulation on',
+    rebooted === 3 && fresh().length > 0,
+    fresh().at(0)?.trim() ??
+      `status ${rebooted ?? 'never settled'}, no HUD line`
+  );
+
+  const canvas = await evaluate(
+    page,
+    `(() => { const c = document.getElementById('canvas');
+              c.scrollIntoView({ block: 'center', behavior: 'instant' });
+              const r = c.getBoundingClientRect();
+              return { x: r.x, y: r.y, width: r.width, height: r.height }; })()`
+  );
+  /** A point on the canvas, as fractions of its box. */
+  const spot = (fx, fy) => ({
+    x: Math.round(canvas.x + fx * canvas.width),
+    y: Math.round(canvas.y + fy * canvas.height),
+  });
+  const contact = (point, id = 0) => ({ x: point.x, y: point.y, id });
+  const touch = (type, touchPoints = []) =>
+    page.send('Input.dispatchTouchEvent', { type, touchPoints });
+
+  /**
+   * A tap, with the press and the release in **one** pump.
+   *
+   * Both messages go out before either is awaited. A finger is on the glass for
+   * a fraction of a frame, so a real tap's press and release reach the engine in
+   * the same batch — and a loop that only forwards a release it already believed
+   * in drops that one, leaves the game holding the button and eats the *next*
+   * tap. Awaiting the press first would let a frame run in between and hide
+   * exactly the case a phone always takes.
+   */
+  const tap = async (point) =>
+    Promise.all([touch('touchStart', [contact(point)]), touch('touchEnd')]);
+
+  // What the browser delivered, counted in the page. This is about the browser
+  // rather than the engine — whether a gesture was handed to the canvas at all —
+  // and there is nowhere else to see it. The listeners are passive, so they
+  // cannot change what the shim's own listeners then do with the same events.
+  await evaluate(
+    page,
+    `(() => {
+       const seen = { moves: 0, cancels: 0, secondary: 0 };
+       globalThis.__crcblGateTouch = seen;
+       const canvas = document.getElementById('canvas');
+       const on = (type, handler) =>
+         canvas.addEventListener(type, handler, { passive: true });
+       on('pointermove', () => { seen.moves += 1; });
+       on('pointercancel', () => { seen.cancels += 1; });
+       on('pointerdown', (e) => { if (!e.isPrimary) seen.secondary += 1; });
+       return true;
+     })()`
+  );
+  const delivered = () =>
+    evaluate(page, `({ ...globalThis.__crcblGateTouch, scroll: scrollY })`);
+
+  /** A drag as a real one arrives: down, a run of moves, up. */
+  const drag = async (from, to, steps = DRAG_STEPS) => {
+    await touch('touchStart', [contact(spot(from.x, from.y))]);
+    for (let i = 1; i <= steps; i += 1) {
+      const at = spot(
+        from.x + ((to.x - from.x) * i) / steps,
+        from.y + ((to.y - from.y) * i) / steps
+      );
+      await touch('touchMove', [contact(at)]);
+    }
+    await touch('touchEnd');
+  };
+
+  // **`touch-action: none`, asserted on the browser's behaviour and not on the
+  // stylesheet.** Reading the rule back out of `getComputedStyle` would pass on
+  // a declaration the browser ignores, which is the half that matters: the
+  // property's whole job is to stop the *browser* claiming the gesture for
+  // scrolling. A drag with a large vertical component is the one that gets
+  // claimed — the demo page scrolls — so this drags up and across, and then
+  // asks the three questions a stolen gesture answers differently. Measured with
+  // the declaration overridden to `auto`: the moves stop after the first, a
+  // `pointercancel` arrives, and the page scrolls instead.
+  //
+  // It starts low on the canvas and finishes above the middle, so the press that
+  // begins it lands below any centred menu and cannot fire a widget on the way.
+  const beforeDrag = await delivered();
+  await drag({ x: 0.5, y: 0.85 }, { x: 0.35, y: 0.35 });
+  const afterDrag = await delivered();
+  check(
+    'F',
+    'the canvas keeps a drag the browser would otherwise take for scrolling',
+    afterDrag.moves - beforeDrag.moves === DRAG_STEPS &&
+      afterDrag.cancels === beforeDrag.cancels &&
+      afterDrag.scroll === beforeDrag.scroll,
+    `${afterDrag.moves - beforeDrag.moves}/${DRAG_STEPS} moves delivered, ` +
+      `${afterDrag.cancels - beforeDrag.cancels} cancel(s), ` +
+      `scrollY ${beforeDrag.scroll} -> ${afterDrag.scroll}`
+  );
+
+  // Everything past here is about what the *game* does with a finger, so a demo
+  // that binds no pointer input stops at the page-level claims above rather than
+  // dispatching taps and asserting they did something. `EXPECTATIONS` says
+  // which, the same way `key: null` says a demo takes no keyboard.
+  if (EXPECTED.touch) {
+    const paddleAt = async () => evaluate(page, SAMPLE_PADDLE('#canvas'));
+
+    /**
+     * Polls the frame until the paddle is where the finger asked for it.
+     *
+     * A drag ends when the last `touchMove` is acknowledged, which is before the
+     * engine has pumped it and long before the frame carrying the result has
+     * been composited — so a single read after the drag is a race, and the
+     * reading it loses with is the paddle's *previous* position. Returns the
+     * last sample either way, so a failure can say where the paddle actually
+     * was.
+     */
+    const paddleReaches = async (target) => {
+      let last = null;
+      const reached = await until(async () => {
+        last = await paddleAt();
+        return last?.count > 0 && Math.abs(last.at - target) <= PADDLE_TOLERANCE
+          ? last
+          : null;
+      }, PADDLE_SETTLE_MS);
+      return { reached: Boolean(reached), last };
+    };
+
+    if (EXPECTED.touch.paddle) {
+      await drag(
+        { x: FIRST_DRAG.from, y: PADDLE_BAND },
+        { x: FIRST_DRAG.to, y: PADDLE_BAND }
+      );
+      const firstDrag = await paddleReaches(FIRST_DRAG.to);
+      check(
+        'F',
+        'a drag puts the paddle under the finger',
+        firstDrag.reached,
+        firstDrag.last?.count
+          ? `asked for ${FIRST_DRAG.to}, paddle at ${firstDrag.last.at.toFixed(3)}`
+          : 'no paddle in the bottom band of the frame'
+      );
+
+      // **The re-grab.** A finger that lifts and lands somewhere else is the
+      // case a delta-composed drag cannot do: composed on the last position it
+      // would move by the length of this drag instead of to its end, and land
+      // nowhere near.
+      await drag(
+        { x: SECOND_DRAG.from, y: PADDLE_BAND },
+        { x: SECOND_DRAG.to, y: PADDLE_BAND }
+      );
+      const secondDrag = await paddleReaches(SECOND_DRAG.to);
+      check(
+        'F',
+        'a second drag from somewhere else moves it again',
+        secondDrag.reached,
+        secondDrag.last?.count
+          ? `asked for ${SECOND_DRAG.to}, paddle at ${secondDrag.last.at.toFixed(3)}`
+          : 'no paddle in the bottom band of the frame'
+      );
+
+      // **The `isPrimary` filter.** The engine's pointer seam has no contact id,
+      // so a second finger is not a second pointer to it — it is the same one
+      // teleporting. One contact holds the paddle while another lands elsewhere
+      // and moves; the paddle must stay with the first.
+      //
+      // Two things keep the negative claim honest. The page's count of
+      // non-primary presses says the browser really did deliver a second
+      // contact, so this cannot pass on a fumble that never happened. And the
+      // first contact then moves, inside the same window, to somewhere the
+      // second one never was: a window too short to show a move would fail
+      // there rather than making "nothing moved" true for free.
+      const held = spot(FIRST_DRAG.to, PADDLE_BAND);
+      const second = spot(SECOND_DRAG.from, PADDLE_BAND);
+      const moved = spot(SECOND_DRAG.to, PADDLE_BAND);
+      await touch('touchStart', [contact(held, 1)]);
+      const anchored = await paddleReaches(FIRST_DRAG.to);
+      await touch('touchStart', [contact(held, 1), contact(second, 2)]);
+      await touch('touchMove', [contact(held, 1), contact(moved, 2)]);
+      await pause(PADDLE_SETTLE_MS);
+      const fumbled = await paddleAt();
+      await touch('touchMove', [
+        contact(spot(FIRST_DRAG.from, PADDLE_BAND), 1),
+        contact(moved, 2),
+      ]);
+      const followed = await paddleReaches(FIRST_DRAG.from);
+      await touch('touchEnd');
+      const secondary = (await delivered()).secondary;
+      check(
+        'F',
+        'a second contact moves nothing',
+        secondary > 0 &&
+          anchored.reached &&
+          fumbled?.count > 0 &&
+          Math.abs(fumbled.at - anchored.last.at) <= PADDLE_TOLERANCE &&
+          followed.reached,
+        secondary > 0
+          ? `paddle at ${anchored.last?.at?.toFixed(3)} on one contact, ` +
+              `${fumbled?.at?.toFixed(3)} while a second moved to ${SECOND_DRAG.to}, ` +
+              `${followed.last?.at?.toFixed(3)} when the first moved to ${FIRST_DRAG.from}`
+          : 'the browser delivered no non-primary press, so nothing was filtered'
+      );
+    }
+
+    // **A tap on the menu.** Every demo here opens on a start panel, and a menu
+    // on screen owns the button — so this is the first thing a phone visitor
+    // touches, and until it works nothing else in the game can be reached by
+    // finger at all. The centre of the canvas is where the panel's first item
+    // is laid out, which is why every other check in this file deliberately
+    // clicks a corner.
+    const startMark = fresh().length;
+    await tap(spot(0.5, 0.5));
+    const startedByTap = await until(
+      async () => fresh().slice(startMark).find(EXPECTED.started),
+      LIFE_MS
+    );
+    check(
+      'F',
+      'a tap on the start menu starts the run',
+      Boolean(startedByTap),
+      (startedByTap ?? EXPECTED.startedFailure).trim()
+    );
+
+    if (EXPECTED.touch.lives) {
+      const lives = (line) =>
+        Number(line?.match(EXPECTED.touch.lives)?.[1] ?? NaN);
+      const startingLives = lives(fresh().at(0));
+
+      // Park the paddle at one edge so the ball, which starts in the middle, is
+      // not caught by it. Waiting for a life to be lost is not a detour: the
+      // start menu stays up until the run is under way, and the state a tap can
+      // serve from is the one a lost life comes back to.
+      await drag({ x: 0.4, y: PADDLE_BAND }, { x: PARK_X, y: PADDLE_BAND });
+
+      // **A gesture the browser took away.** `pointercancel` fires *instead of*
+      // `pointerup`, so a shim that does not translate it leaves the engine
+      // holding the button — and a held button raises no press edge, so the
+      // symptom is not a stuck control but a tap that silently stops working.
+      // Two frames between the press and the cancel keep this about the cancel
+      // rather than about a press and release landing in one pump, which is the
+      // check below.
+      await touch('touchStart', [contact(spot(PARK_X, PADDLE_BAND))]);
+      await evaluate(
+        page,
+        `new Promise((ok) => requestAnimationFrame(() => requestAnimationFrame(ok)))`
+      );
+      await touch('touchCancel');
+
+      const lostOne = await until(
+        async () =>
+          fresh().find(
+            (line) => EXPECTED.waiting(line) && lives(line) < startingLives
+          ),
+        LIFE_MS
+      );
+      const afterCancel = fresh().length;
+      await tap(spot(PARK_X, PADDLE_BAND));
+      const servedAfterCancel = await until(
+        async () => fresh().slice(afterCancel).find(EXPECTED.started),
+        LIFE_MS
+      );
+      check(
+        'F',
+        'a tap after a cancelled gesture still serves',
+        Boolean(lostOne) && Boolean(servedAfterCancel),
+        lostOne
+          ? (servedAfterCancel ?? 'the tap raised no edge').trim()
+          : `no life was lost inside ${LIFE_MS} ms, so there was never a tap to make`
+      );
+
+      // **Two taps in a row.** The second is the one that matters: a tap is one
+      // pump's press *and* release, and a loop that drops the release keeps the
+      // button down, so the first tap works and the second does nothing. A
+      // single tap and an assertion cannot tell those apart.
+      const lostTwo = await until(
+        async () =>
+          fresh()
+            .slice(afterCancel)
+            .find(
+              (line) =>
+                EXPECTED.waiting(line) && lives(line) < startingLives - 1
+            ),
+        LIFE_MS
+      );
+      const afterSecond = fresh().length;
+      await tap(spot(PARK_X, PADDLE_BAND));
+      const servedAgain = await until(
+        async () => fresh().slice(afterSecond).find(EXPECTED.started),
+        LIFE_MS
+      );
+      check(
+        'F',
+        'a second tap in a row serves it again',
+        Boolean(lostTwo) && Boolean(servedAgain),
+        lostTwo
+          ? (servedAgain ?? 'the second tap raised no edge').trim()
+          : `no second life was lost inside ${LIFE_MS} ms`
+      );
+    }
+
+    if (EXPECTED.touch.height) {
+      // **A tap is a flap**, and the bird's height is the observable: gravity is
+      // the only other thing that touches it and gravity only ever lowers it.
+      //
+      // **`CLIMB_ABOVE` and not "higher than it was"**, which is the version
+      // this check shipped as for an afternoon and which passed with the game's
+      // tap binding cut out of the build. The run's *own start* is a flap — the
+      // menu button is bound to the same action — so the arc it throws the bird
+      // through is above the starting height for a third of a second, and the
+      // HUD's every-sixtieth-tick line lands in that arc often enough to look
+      // like a tap that worked. A height one flap cannot reach is what tells the
+      // two apart.
+      const height = (line) =>
+        Number(line?.match(EXPECTED.touch.height)?.[1] ?? NaN);
+      const bar = height(fresh().at(-1)) + CLIMB_ABOVE;
+      const climbMark = fresh().length;
+      const climbed = await until(async () => {
+        await tap(spot(0.5, 0.5));
+        await pause(TAP_INTERVAL_MS);
+        const above = fresh()
+          .slice(climbMark)
+          .map(height)
+          .find((y) => y > bar);
+        return above === undefined ? null : { above };
+      }, CLIMB_MS);
+      check(
+        'F',
+        'a tap lifts the bird',
+        Boolean(climbed),
+        climbed
+          ? `y reached ${climbed.above}, over the ${bar} one flap could manage`
+          : `y never passed ${bar} in ${CLIMB_MS} ms of tapping, which is ` +
+              'what the flap the run started with does on its own'
+      );
+    }
+  }
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and
   // the first thing a human will ask for. The canvas itself rather than a

@@ -241,14 +241,26 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     exports.__crcbl_web_pointer_motion(canvasId, event.timeStamp, x, y);
   }
 
+  /**
+   * The button the primary pointer last went down with.
+   *
+   * `pointercancel` reports `button: -1` — no button changed state, says the
+   * spec — and the engine's seam has to be told which one came up. The gesture
+   * being cancelled is the one that pressed this.
+   */
+  let heldButton = 0;
+
   /** @param {PointerEvent} event */
   function onPointerButton(event) {
     if (!isPrimary(event)) return;
     const [x, y] = position(event);
     const down = event.type === 'pointerdown';
-    // Clicking the canvas is how a player expects to give it the keyboard, and
-    // is also the user gesture an `AudioContext` needs before it will start.
-    if (down) canvas.focus();
+    if (down) {
+      heldButton = event.button;
+      // Clicking the canvas is how a player expects to give it the keyboard,
+      // and is also the user gesture an `AudioContext` needs before it starts.
+      canvas.focus();
+    }
     exports.__crcbl_web_pointer_button(
       canvasId,
       event.timeStamp,
@@ -269,6 +281,10 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
    * silently stops working, on touch only, and only after something else on the
    * phone interrupted it.
    *
+   * `heldButton` and not `event.button`, which this event reports as `-1`: the
+   * engine reads that as a button it has never heard of, drops the release, and
+   * the handler is inert in exactly the way it was written to prevent.
+   *
    * @param {PointerEvent} event
    */
   function onPointerCancel(event) {
@@ -279,7 +295,7 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
       event.timeStamp,
       x,
       y,
-      event.button,
+      heldButton,
       modifiers(event),
     );
   }
@@ -302,9 +318,22 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     event.preventDefault();
   }
 
-  /** @param {PointerEvent} event */
+  /**
+   * A pointer crossing the canvas's edge — for a **cursor**, not a contact.
+   *
+   * A touch pointer is created at `pointerdown` and destroyed once the gesture
+   * ends, and the browser fires `pointerenter` and `pointerleave` around it: the
+   * enter arrives with the press, and the leave arrives immediately after the
+   * release, in the same batch the engine pumps. The leave says "the pointer is
+   * nowhere", so the position the engine hit-tests that release against is gone
+   * by the time it looks — and a tap on a menu button fires nothing, while the
+   * identical tap with a mouse works. A finger between contacts is not hovering
+   * anywhere, so there is no state here for touch to report.
+   *
+   * @param {PointerEvent} event
+   */
   function onPointerFocus(event) {
-    if (!isPrimary(event)) return;
+    if (!isPrimary(event) || event.pointerType === 'touch') return;
     const [x, y] = position(event);
     exports.__crcbl_web_pointer_focus(
       canvasId,

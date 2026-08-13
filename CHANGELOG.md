@@ -660,6 +660,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A tap on a menu button did nothing, so no demo could actually be started on
+  a phone.** For a touch pointer the browser fires `pointerleave` in the same
+  pump as `pointerup`; the web shim reported that as a focus loss, so the
+  position the release is hit-tested against was already gone by the time the
+  engine looked. The identical click with a mouse worked, which is why it
+  shipped. A finger between contacts is not hovering anywhere, so touch no
+  longer reports enter and leave at all.
+
+  Two more found with it: `pointercancel` handling was **inert**, because the
+  spec gives it `button: -1` and that became a `PointerButton::Other` the engine
+  ignores — the release was dropped and the game stayed holding the button,
+  exactly the failure the handler existed to prevent. And the coarse-pointer
+  copy swap did nothing, because `.key-row { display: flex }` ties on
+  specificity with `.touch-only`/`.pointer-only` and won on source order, so
+  every desktop saw the keyboard row and every phone saw `Esc`, `F11` and `F3`.
+
+  All three were shipped green and all three were found by teaching the browser
+  gate to dispatch touch. It drove `Input.dispatchMouseEvent` only, so the mouse
+  path of shared plumbing was covered and nothing touch-specific ever ran.
+
 - **wgpu reported a bindless ceiling no layout could be built at.**
   `max_bindless_descriptors` came straight from wgpu's
   `max_binding_array_elements_per_shader_stage`, which is the count

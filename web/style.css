@@ -516,18 +516,25 @@ a.feat:hover {
    and (pointer: coarse)` is the pair that means a finger — coarse alone also
    matches a TV remote, and hover alone matches a stylus. */
 
-.touch-only {
-  display: none;
+/* Both blocks hide; neither shows. An element that belongs on this device is
+   left with no rule from here at all, so it keeps whatever display its own
+   layout gives it — `flex` for a `.key-row`, `block` for a `.note`. Naming a
+   value to bring one back cannot do that: `display: revert` drops the whole
+   author origin, so a key row would return as a bare list item.
+
+   The class is doubled to raise the specificity. `.key-row` below also sets
+   `display`, ties with a single class and wins on source order — which put the
+   touch row on screen for every desktop visitor and left all three keyboard
+   rows on screen for every phone. */
+
+@media not all and (hover: none) and (pointer: coarse) {
+  .touch-only.touch-only {
+    display: none;
+  }
 }
 
 @media (hover: none) and (pointer: coarse) {
-  .touch-only {
-    /* `revert`, not `block`: these are `<li>` as often as `<div>`, and a list
-       item forced to `block` loses its row layout. */
-    display: revert;
-  }
-
-  .pointer-only {
+  .pointer-only.pointer-only {
     display: none;
   }
 }

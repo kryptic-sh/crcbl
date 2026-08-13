@@ -5871,14 +5871,45 @@ All were real, all are fixed, and all three are invisible to a mouse:
 
 ### What is left
 
-- **Nothing has run on a phone**, and the browser gate cannot substitute:
-  `web/tools/browser-e2e.mjs` dispatches `Input.dispatchMouseEvent` only, so
-  `touch-action: none`, the `isPrimary` filter, `pointercancel` and the
-  `(hover: none) and (pointer: coarse)` copy have never executed in any browser
-  — only the mouse path of the same plumbing has. The fix is a group using
-  `Input.dispatchTouchEvent` (a tap, then a drag, asserting the paddle's HUD
-  value moves) plus `Emulation.setTouchEmulationEnabled` for the media query.
-  **This is the gap worth closing first.**
+- **The gate now drives touch, and closing that gap found the feature did not
+  work.** Group F in `web/tools/browser-e2e.mjs` uses `Input.dispatchTouchEvent`
+  and `Emulation.setTouchEmulationEnabled`. It caught three defects that shipped
+  green, and the first two are worth remembering as a class:
+  - **A tap on a menu button did nothing, so no demo could be started at all on
+    a phone.** For a touch pointer the browser fires `pointerleave` in the same
+    pump as `pointerup`; the shim reported it as a focus loss,
+    `Pending::pointer` became `None`, and `PointerCapture::resolve` hit-tested
+    the release against a position that was already gone. The identical click
+    with a mouse worked.
+  - **`pointercancel` handling was inert.** The spec gives it `button: -1`,
+    which became a `PointerButton::Other` the engine ignores, so the release was
+    dropped and the game stayed holding the button — exactly the failure the
+    handler existed to prevent. The shim remembers the button that went down.
+  - **The coarse-pointer copy swap did nothing**: `.key-row { display: flex }`
+    ties on specificity with `.touch-only`/`.pointer-only` and won on source
+    order, so every desktop saw the keyboard row and every phone saw `Esc`,
+    `F11` and `F3`. Both blocks only hide now, with the class doubled.
+
+- **Both pointer defects were fixed in the web shim, and both are really the
+  engine's seam.** A release that arrives with a leave, and a cancel that names
+  no button, are what any touch platform does — an Android or iOS backend would
+  hit the same two. The durable fix is in `PointerCapture::resolve` and
+  `Pending::observe`, not in `shell.js`. **Decision wanted** before a native
+  mobile backend is attempted.
+- **`touch-action` coverage is Chromium-under-emulation, not a phone.** The
+  check is behavioural rather than a stylesheet read — with the declaration
+  overridden to `auto` the same drag delivers 1 move of 8, raises a
+  `pointercancel` and scrolls the page 233px, and all three are asserted. But it
+  proves Chromium's gesture recogniser honours the rule, not a real phone's.
+  **Nothing here has run on a phone.**
+- **`web/tools/browser-e2e.mjs` is 2107 lines.** Group F is self-contained apart
+  from `check`/`evaluate`/`until`/`hud`, so the seam is obvious; splitting it
+  means handing a driver's closures to a module. Worth doing, not done.
+- **The paddle is read out of the rendered frame, not the HUD.** Breakout's HUD
+  carries `Ball x` and `reset_ball` pins the ball while it is unlaunched, so no
+  logged value moves with the paddle; the check counts blue pixels in the bottom
+  band instead, measured 1:1 against the touch x. Worth knowing before someone
+  looks for a HUD line that does not exist.
 - **Pause, fullscreen and the debug overlay are keyboard-only on a phone.** The
   demo pages now say so rather than printing `F11` at someone with no keyboard;
   making them reachable is on-screen-controls work.
