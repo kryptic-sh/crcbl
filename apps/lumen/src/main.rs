@@ -1,7 +1,8 @@
 //! Lumen — the native front end.
 //!
 //! ```text
-//! lumen [--camera fixed|free] [--force-geometry P] [--force-binding B] [--headless]
+//! lumen [--camera fixed|free] [--force-geometry P] [--force-binding B]
+//!       [--no-shadows] [--no-ao] [--no-reflections] [--headless]
 //! ```
 //!
 //! Argv in, exit code out, and nothing else: the fixture itself is the
@@ -22,7 +23,7 @@ fn main() -> ExitCode {
         |summary| {
             format!(
                 "lumen: {} frames, {} ticks on the {} shell at {}x{}, {} \
-                 (camera {}, {:?} / {:?} / {:?}, {:?})",
+                 (camera {}, {:?} / {:?} / {:?}, effects {}, {:?})",
                 summary.frames,
                 summary.ticks,
                 summary.backend,
@@ -37,6 +38,8 @@ fn main() -> ExitCode {
                 summary.paths.geometry,
                 summary.paths.binding,
                 summary.paths.lighting,
+                // And which of topic 18's effects were in them, resolved.
+                summary.paths.effects_row(),
                 summary.exit,
             )
         },

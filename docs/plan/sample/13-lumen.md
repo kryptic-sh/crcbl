@@ -86,6 +86,18 @@ app can bake a mesh. `docs/backlog.md` carries what that left owed.
   with `--force-geometry` and `--force-binding` opening a device without the
   features that select anything better. `IndirectPerBatch / ArrayPages` — the
   browser's shape — runs on this desktop.
+- **Every effect toggles independently, and there are frames to prove it**
+  (2026-08-14). `--no-shadows`, `--no-ao` and `--no-reflections` drive the
+  programmatic layer of topic 39's resolution order; the panel's `paths` section
+  and the headless summary both name the **resolved** set, not the requested
+  one. `every_effect_toggles_and_the_frame_says_so` renders four states at
+  1280×960 and makes each claim as a pair of blocks over a pair of frames — a
+  block the effect works on and a control block it does not touch, so a frame
+  that merely got brighter fails. Measured on radv: the shadowed floor goes 49.0
+  → 140.3 with the atlas off while the sunlit floor does not move, the plinth's
+  contact corner goes 47.1 → 53.8 with occlusion off while open floor does not
+  move, and the mirror panel's foot goes 18.7 → 1.2 with the march off while the
+  part of the same face that reflected nothing stays at 0.0.
 - **A golden frame with five structural claims in front of it**
   (`apps/lumen/tests/golden.rs`): the sun reaches the floor through the opening
   and not beside it, the shaded floor is ambient rather than black, a conductor
@@ -100,11 +112,13 @@ app can bake a mesh. `docs/backlog.md` carries what that left owed.
 scales the _diffuse_ albedo and a conductor has none, so a fully metallic
 surface out of every light's specular reach has nothing left to shade with —
 [18-render-features.md](../18-render-features.md) is where the model is argued.
-What fills it in is a reflection, and both screen-space reflections and
-irradiance probes are unbuilt. Nothing here fakes it: the debug panel's
-`unbuilt` section says so on the screen where the black is, and
-`crcbl_lumen::room`'s module docs say it where a reader of the scene will find
-it.
+What fills it in is a reflection. Screen-space reflections have since landed and
+light the panel's **foot**, where a reflected ray still finds the floor on
+screen; the rest of the face sends rays back past the eye and finds nothing, and
+irradiance probes — which is what would answer that — are unbuilt. Nothing here
+fakes it: the debug panel's `unbuilt` section says so on the screen where the
+black is, and `crcbl_lumen::room`'s module docs say it where a reader of the
+scene will find it.
 
 **The coloured wall does not bounce**, for the neighbouring reason. It is a
 coloured wall taking a low sun and a warm lamp; what a bounce would do to the
@@ -114,12 +128,11 @@ would change most.
 
 ### Still owed at this milestone, and where
 
-Recorded in `docs/backlog.md` rather than here: screen-space reflections,
-irradiance probes, ray tracing and the acceleration structures, the
-render-to-texture monitor camera, per-effect toggles for shadows and ambient
-occlusion (so there is no shadows-off or AO-off frame to compare against yet),
-the `[engine.video]` and programmatic-override layers of the toggle resolution
-order, the Pages web demo, and a CI leg that runs the golden suite.
+Recorded in `docs/backlog.md` rather than here: irradiance probes, ray tracing
+and the acceleration structures, the render-to-texture monitor camera, the
+camera-stack and `[engine.video]` layers of the toggle resolution order (the
+programmatic one is built and is what the `--no-*` flags drive), a UI for the
+toggles, the Pages web demo, and a CI leg that runs the golden suite.
 
 ## Milestones
 

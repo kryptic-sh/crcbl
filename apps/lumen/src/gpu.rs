@@ -26,8 +26,8 @@ use crcbl::hal::{
 };
 use crcbl::prelude::*;
 use crcbl::render::{
-    ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers, RenderGraph, TransientPool,
-    UiRenderer,
+    EffectOverride, EffectRequest, ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers,
+    RenderEffects, RenderGraph, TransientPool, UiRenderer,
 };
 use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
@@ -107,17 +107,45 @@ pub struct Paths {
     pub lighting: LightingPath,
     /// What the run asked to be held down.
     pub forced: Forced,
+    /// Which of topic 18's effects the frame draws, **resolved** — what came out
+    /// of the four layers rather than what the command line asked for.
+    ///
+    /// Read back off the renderer for that reason: the charter's toggle matrix
+    /// is only checkable if the panel and the summary report what the frame did,
+    /// and a request the device clamped would otherwise report as granted.
+    pub effects: RenderEffects,
 }
 
 impl Paths {
     /// What the device opened as, beside what the run asked for.
     #[must_use]
-    pub const fn of(caps: &DeviceCaps, forced: Forced) -> Self {
+    pub const fn of(caps: &DeviceCaps, forced: Forced, effects: RenderEffects) -> Self {
         Self {
             geometry: caps.geometry_path(),
             binding: caps.binding_model(),
             lighting: caps.lighting_path(),
             forced,
+            effects,
+        }
+    }
+
+    /// The effect set as the panel and the summary spell it: `shadows ao ssr`,
+    /// with a switched-off one dropped, and `none` where they all are.
+    #[must_use]
+    pub fn effects_row(&self) -> String {
+        let on: Vec<&str> = [
+            (RenderEffects::SHADOWS, "shadows"),
+            (RenderEffects::AMBIENT_OCCLUSION, "ao"),
+            (RenderEffects::REFLECTIONS, "ssr"),
+        ]
+        .into_iter()
+        .filter(|(feature, _)| self.effects.contains(*feature))
+        .map(|(_, name)| name)
+        .collect();
+        if on.is_empty() {
+            "none".to_string()
+        } else {
+            on.join(" ")
         }
     }
 
@@ -163,6 +191,7 @@ impl crcbl::ui::DebugModule for Paths {
         );
         section.row_str("lighting", &format!("{:?}", self.lighting));
         section.row_str("ray tracing", Self::ray_tracing_note());
+        section.row_str("effects", &self.effects_row());
     }
 }
 
@@ -182,7 +211,10 @@ impl crcbl::ui::DebugModule for Unbuilt {
         section.set_title("unbuilt");
         section.row_str("metal", "black: SSR misses, no probes");
         section.row_str("bounce wall", "no GI: it does not bounce");
-        section.row_str("toggles", "shadows/AO always on");
+        // The per-effect toggles used to be a row here. They are built — the
+        // `paths` section's `effects` row is what this frame drew — so what is
+        // still owed is the two request layers with no source in the tree.
+        section.row_str("toggle layers", "no camera RON, no [engine.video]");
     }
 }
 
@@ -220,6 +252,10 @@ impl Gpu {
     /// `extent` must come from the window system — call this only after the
     /// first configure.
     ///
+    /// `effects` is which of topic 18's effects this run **asks** for; what the
+    /// frame actually draws is [`Paths::effects`], read back off the renderer
+    /// once the four layers have resolved.
+    ///
     /// # Errors
     ///
     /// [`GpuError`] if no backend opened, if the backend exposes no adapter, no
@@ -231,6 +267,7 @@ impl Gpu {
         extent: (u32, u32),
         gpu: GpuOptions,
         forced: Forced,
+        effects: RenderEffects,
     ) -> Result<Self, GpuError> {
         let optional_features = forced.optional_features();
         let ctx = GpuContext::open(
@@ -245,7 +282,6 @@ impl Gpu {
         )?;
 
         let caps = ctx.device().caps();
-        let paths = Paths::of(&caps, forced);
         // Topic 39's "every downgrade is logged once, at device creation,
         // naming the feature and the path it selected" — including the ones
         // `--force-*` asked for, which are downgrades this run made on purpose
@@ -256,13 +292,6 @@ impl Gpu {
         } else {
             crcbl::log::info!("lumen: {report}");
         }
-        crcbl::log::info!(
-            "lumen: {:?} / {:?} / {:?}",
-            paths.geometry,
-            paths.binding,
-            paths.lighting,
-        );
-
         let mut renderer =
             ForwardRenderer::with_scene(ctx.device(), ctx.queue(), ctx.format(), &room::room())?;
         // Every object of the room, in one fixed order — see `room::place`.
@@ -276,6 +305,28 @@ impl Gpu {
             }
         };
         crcbl::log::info!("lumen: {placed} object(s) placed in the room");
+
+        // The **programmatic** layer of topic 39's resolution order, which is
+        // the one a command line has any business driving: the camera stack and
+        // `[engine.video]` are a view's and a player's answers, and this run is
+        // neither of them. Forcing off rather than clamping the camera layer for
+        // the same reason — `--no-shadows` is an instruction, not a preference,
+        // and the override is the layer that can say so either way.
+        renderer.set_effect_request(EffectRequest {
+            programmatic: EffectOverride::none()
+                .force(RenderEffects::all().difference(effects), Some(false)),
+            ..EffectRequest::default()
+        });
+        // Resolved rather than requested: the device clamps last, so what the
+        // panel and the summary report has to come back off the renderer.
+        let paths = Paths::of(&caps, forced, renderer.resolved_effects());
+        crcbl::log::info!(
+            "lumen: {:?} / {:?} / {:?}, effects {}",
+            paths.geometry,
+            paths.binding,
+            paths.lighting,
+            paths.effects_row(),
+        );
 
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
         if timers.is_none() {
@@ -643,6 +694,7 @@ mod tests {
             binding: BindingModel::ArrayPages,
             lighting: LightingPath::Rasterised,
             forced: Forced::default(),
+            effects: RenderEffects::all(),
         };
         let run_chose = Paths {
             forced: Forced {

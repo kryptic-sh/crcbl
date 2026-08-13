@@ -7,6 +7,7 @@
 
 use crcbl::args::{Common, Consumed};
 use crcbl::hal::{BindingModel, GeometryPath};
+use crcbl::render::RenderEffects;
 
 use crate::gpu::Forced;
 use crate::menu::CameraMode;
@@ -24,6 +25,14 @@ pub struct Options {
     pub camera: CameraMode,
     /// Which selectors the run asks to be held below the device's own.
     pub forced: Forced,
+    /// Which of topic 18's effects the run draws.
+    ///
+    /// The charter's "every effect toggles independently", reached from the
+    /// command line: each `--no-*` flag clears one bit and the run drives the
+    /// **programmatic** layer of the resolution order with what is left. The
+    /// other two request layers have no source in this tree — see
+    /// `crcbl::render::effects`.
+    pub effects: RenderEffects,
 }
 
 impl Default for Options {
@@ -32,6 +41,7 @@ impl Default for Options {
             common: Common::new(DEFAULT_TICK_HZ),
             camera: CameraMode::default(),
             forced: Forced::default(),
+            effects: RenderEffects::all(),
         }
     }
 }
@@ -86,6 +96,13 @@ OPTIONS:
     --force-binding <B>  Hold the binding model at 'bindless' or 'array-pages',
                          on --force-geometry's terms. 'array-pages' is what
                          every browser and every Apple device runs.
+    --no-shadows         Draw with no shadow atlas: no cascade cull, no light
+                         tile, and every comparison against the cleared atlas
+                         reads as fully lit.
+    --no-ao              Draw with no ambient occlusion. The ambient term is
+                         scaled by the renderer's 1x1 white instead.
+    --no-reflections     Draw with no screen-space reflections. The frame is the
+                         forward pass's own scene colour, bit for bit.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'
@@ -134,6 +151,9 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 }
                 None => return Invocation::BadUsage("--force-binding needs a value".into()),
             },
+            "--no-shadows" => options.effects.remove(RenderEffects::SHADOWS),
+            "--no-ao" => options.effects.remove(RenderEffects::AMBIENT_OCCLUSION),
+            "--no-reflections" => options.effects.remove(RenderEffects::REFLECTIONS),
             _ => return Invocation::BadUsage(format!("unknown argument: {arg}")),
         }
     }
@@ -184,6 +204,42 @@ mod tests {
         assert_eq!(options.camera, CameraMode::Fixed);
         assert_eq!(options.forced, Forced::default());
         assert_eq!(options.common.tick_hz, DEFAULT_TICK_HZ);
+        assert_eq!(
+            options.effects,
+            RenderEffects::all(),
+            "a bare run is the every-effect frame the golden is blessed from"
+        );
+    }
+
+    /// **Each `--no-*` flag clears one effect and leaves the others alone**, and
+    /// they compose.
+    ///
+    /// One arm per flag rather than one assertion over all three, because the
+    /// failure worth catching is a flag wired to the wrong bit — which a test
+    /// passing every flag at once cannot see, since the answer is empty either
+    /// way.
+    #[test]
+    fn every_effect_flag_clears_its_own_effect_and_no_other() {
+        for (flag, cleared) in [
+            ("--no-shadows", RenderEffects::SHADOWS),
+            ("--no-ao", RenderEffects::AMBIENT_OCCLUSION),
+            ("--no-reflections", RenderEffects::REFLECTIONS),
+        ] {
+            let Invocation::Run(options) = run(&[flag]) else {
+                panic!("{flag} is a run");
+            };
+            assert_eq!(
+                options.effects,
+                RenderEffects::all().difference(cleared),
+                "{flag}"
+            );
+            assert!(USAGE.contains(flag), "the usage text does not offer {flag}");
+        }
+
+        let Invocation::Run(options) = run(&["--no-shadows", "--no-ao"]) else {
+            panic!("two flags is a run");
+        };
+        assert_eq!(options.effects, RenderEffects::REFLECTIONS);
     }
 
     /// Every flag this sample adds parses, and reaches the field it names.

@@ -27,7 +27,7 @@
 
 use crcbl::hal::Format;
 use crcbl::math::Vec3;
-use crcbl::render::{Camera, ForwardRenderer};
+use crcbl::render::{Camera, EffectOverride, EffectRequest, ForwardRenderer, RenderEffects};
 use crcbl::screenshot::{ForwardScene, OffscreenSetup};
 use crcbl_golden::{ChannelOrder, Golden, Image};
 use crcbl_lumen::room;
@@ -160,6 +160,41 @@ const MIRROR_AT: Vec3 = room::MIRROR_MISSES;
 /// A point on the plaster back wall, clear of the panel and of the plinth.
 const PLASTER_AT: Vec3 = Vec3::new(-2.6, 1.5, -room::HALF_DEPTH);
 
+/// Floor in the plinth's contact corner, where ambient occlusion is strongest.
+///
+/// The plinth's `+Z` face stands at `z = -2.4` and its run in `x` covers this
+/// point, so this is floor a few centimetres out from a wall of it — inside the
+/// occlusion radius on one whole side. Out of the sun (the shaft is at `+x`) and
+/// out of the lamp's reach at `t = 0`, exactly as [`SHADED`] is, so the two are a
+/// pair that differs in occlusion and in nothing else.
+const AO_CORNER: Vec3 = Vec3::new(-1.2, 0.0, -2.32);
+
+/// How much brighter the shadowed floor must get when the atlas is switched off.
+///
+/// A ratio rather than a difference, and against the *shadowed* reading, because
+/// what that block gains is the sun's whole direct contribution — the same
+/// quantity [`SHAFT_RATIO`] measures from the other side. Set below the measured
+/// lift so a driver that resolves the shaft's edge differently does not flip it;
+/// well above one, because a frame in which the two are close is a frame whose
+/// shadow switch did nothing.
+const SHADOW_LIFT: f32 = 1.6;
+
+/// How much brighter the contact corner must get when occlusion is switched off.
+///
+/// Smaller than [`SHADOW_LIFT`] and for a real reason: occlusion scales the
+/// *ambient* term alone, so what this block can gain is bounded by the share of
+/// it that is ambient — `docs/backlog.md` measures a quarter at a single wall.
+/// This is a claim about that term, not about the pixel.
+const AO_LIFT: f32 = 1.08;
+
+/// How far a control block is allowed to move, as a share of its own reading.
+///
+/// Every claim above is paired with a block the same switch must **not** move,
+/// which is what separates "this effect stopped darkening its own corner" from
+/// "the whole frame got brighter". Not zero: the two frames are separate runs of
+/// a rasteriser, and a block on a lit floor carries the texture's check.
+const UNCHANGED: f32 = 0.02;
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -172,7 +207,7 @@ const PLASTER_AT: Vec3 = Vec3::new(-2.6, 1.5, -room::HALF_DEPTH);
 /// [`OffscreenSetup::open_forward`](crcbl::screenshot::OffscreenSetup::open_forward).
 /// A sample rebuilding that for itself is exactly what
 /// `docs/plan/sample/00-samples-overview.md` rule 1 forbids.
-fn draw(extent: (u32, u32)) -> (Image, String) {
+fn draw(extent: (u32, u32), effects: RenderEffects) -> (Image, String) {
     // A logger before anything opens: without one, every line a backend emits on
     // the way to a device goes nowhere, and a failure inside `open` names the
     // call that noticed rather than the one that caused it.
@@ -182,7 +217,7 @@ fn draw(extent: (u32, u32)) -> (Image, String) {
         Ok(ForwardScene {
             camera: room::fixed_camera(),
             sun: room::sun(),
-            renderer: Box::new(build(device, queue, format)?),
+            renderer: Box::new(build(device, queue, format, effects)?),
         })
     })
     .unwrap_or_else(|why| panic!("a GPU backend opens for lumen's room: {why}"));
@@ -240,13 +275,22 @@ fn draw(extent: (u32, u32)) -> (Image, String) {
     (image, paths)
 }
 
-/// The room, made resident and placed, on a device the caller opened.
+/// The room, made resident and placed, on a device the caller opened, drawing
+/// `effects`.
 fn build(
     device: &dyn crcbl::hal::Device,
     queue: crcbl::hal::QueueHandle,
     format: Format,
+    effects: RenderEffects,
 ) -> Result<ForwardRenderer, crcbl::screenshot::OffscreenError> {
     let mut renderer = ForwardRenderer::with_scene(device, queue, format, &room::room())?;
+    // The **programmatic** layer of topic 39's resolution order, which is the
+    // one a test has any business driving — see `crcbl::render::effects`.
+    renderer.set_effect_request(EffectRequest {
+        programmatic: EffectOverride::none()
+            .force(RenderEffects::all().difference(effects), Some(false)),
+        ..EffectRequest::default()
+    });
     if let Err(error) = room::place(&mut renderer) {
         renderer.destroy(device);
         return Err(crcbl::screenshot::OffscreenError::Hal(
@@ -448,7 +492,7 @@ fn inspect(image: &Image, extent: (u32, u32), block: (u32, u32)) {
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-lumen-golden.sh"]
 fn the_fixed_camera_draws_the_room_and_matches_its_golden() {
-    let (image, paths) = draw(EXTENT);
+    let (image, paths) = draw(EXTENT, RenderEffects::all());
     inspect(&image, EXTENT, BLOCK);
 
     let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/room.png");
@@ -478,24 +522,160 @@ fn the_fixed_camera_draws_the_room_and_matches_its_golden() {
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-lumen-golden.sh"]
 fn the_room_reads_the_same_at_presentation_size() {
-    let (image, _) = draw(REVIEW_EXTENT);
+    let image = review(RenderEffects::all(), "fixed-camera");
 
-    // **Written before the claims are checked**, on `Golden::check`'s terms: a
-    // run that is about to fail is exactly the run somebody wants the picture
-    // from, and a save after the assertions is a save a failure skips.
+    // The blocks grow with the frame, so each covers the same patch of the room
+    // rather than a twenty-fifth of it.
+    inspect(&image, REVIEW_EXTENT, review_block());
+}
+
+/// **Switching an effect off changes the frame where that effect darkens it, and
+/// leaves the rest of the room alone.**
+///
+/// The charter's "every effect toggles independently", as the one thing a
+/// picture can actually say about it. `crcbl-render`'s own tests already show the
+/// toggle reaches the recorded pass list; what they cannot show is that the
+/// passes it removed were the ones doing the darkening — a switch wired to the
+/// wrong effect, or an occlusion placeholder that is not white, produces a frame
+/// with the right passes in it and the wrong picture.
+///
+/// Each claim is therefore **a pair of blocks over a pair of frames**: one block
+/// where the effect works and one where it does not, so a frame that simply got
+/// brighter — a lost tonemap, a different exposure — fails the control half.
+///
+/// Nothing here is blessed. One frame per state is written for a reviewer, at
+/// the size a shadow's edge can be judged at.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-lumen-golden.sh"]
+fn every_effect_toggles_and_the_frame_says_so() {
+    let block = review_block();
+    let camera = room::fixed_camera();
+    let at = |point: Vec3| project(&camera, REVIEW_EXTENT, point);
+
+    let all_on = review(RenderEffects::all(), "all-effects");
+    let no_shadows = review(
+        RenderEffects::all().difference(RenderEffects::SHADOWS),
+        "no-shadows",
+    );
+    let no_ao = review(
+        RenderEffects::all().difference(RenderEffects::AMBIENT_OCCLUSION),
+        "no-ao",
+    );
+    let no_reflections = review(
+        RenderEffects::all().difference(RenderEffects::REFLECTIONS),
+        "no-reflections",
+    );
+
+    // ---- shadows -----------------------------------------------------------
+    //
+    // `SHADED_FLOOR` is floor in the window wall's own shadow and `SUNLIT_FLOOR`
+    // is floor inside the shaft: with no shadow atlas the first one takes the
+    // sun it was being denied and the second one, already lit, does not move.
+    let shaded_on = brightness(&all_on, at(SHADED), block);
+    let shaded_off = brightness(&no_shadows, at(SHADED), block);
+    let sunlit_on = brightness(&all_on, at(SUNLIT), block);
+    let sunlit_off = brightness(&no_shadows, at(SUNLIT), block);
+    eprintln!(
+        "lumen toggles: shadowed floor {shaded_on:.1} -> {shaded_off:.1}, \
+         sunlit floor {sunlit_on:.1} -> {sunlit_off:.1}"
+    );
+    assert!(
+        shaded_off > shaded_on * SHADOW_LIFT,
+        "the shadowed floor reads {shaded_on:.1} with shadows and {shaded_off:.1} without — \
+         switching the atlas off did not stop the wall occluding the sun"
+    );
+    assert!(
+        (sunlit_off - sunlit_on).abs() < sunlit_on * UNCHANGED,
+        "the sunlit floor moved from {sunlit_on:.1} to {sunlit_off:.1} — a floor already in \
+         full sun has no shadow to lose, so this is the whole frame changing rather than the \
+         shadows"
+    );
+
+    // ---- ambient occlusion -------------------------------------------------
+    //
+    // Two blocks of the same floor, same material, same normal, both out of the
+    // sun and out of the lamp's reach: one in the plinth's contact corner and
+    // one out in the open. Occlusion is the only term that separates them, so
+    // switching it off has to lift the first and leave the second where it is.
+    let corner_on = brightness(&all_on, at(AO_CORNER), block);
+    let corner_off = brightness(&no_ao, at(AO_CORNER), block);
+    let open_on = brightness(&all_on, at(SHADED), block);
+    let open_off = brightness(&no_ao, at(SHADED), block);
+    eprintln!(
+        "lumen toggles: contact corner {corner_on:.1} -> {corner_off:.1}, \
+         open floor {open_on:.1} -> {open_off:.1}"
+    );
+    assert!(
+        corner_off > corner_on * AO_LIFT,
+        "the plinth's contact corner reads {corner_on:.1} with occlusion and {corner_off:.1} \
+         without — the occlusion pass is not darkening the corner, or the placeholder bound in \
+         its place is not white"
+    );
+    assert!(
+        (open_off - open_on).abs() < open_on * UNCHANGED,
+        "open floor moved from {open_on:.1} to {open_off:.1} — a surface with nothing within \
+         the occlusion radius has no occlusion to lose"
+    );
+
+    // ---- reflections -------------------------------------------------------
+    //
+    // The two blocks the [`MIRROR_GRADIENT`] claim already reads: the foot of the
+    // panel, whose reflected ray finds the floor while still on screen, and a
+    // point further up the same face whose ray finds nothing. With the march off
+    // the first one has to lose what it was gaining and the second one, which was
+    // gaining nothing, cannot move at all.
+    //
+    // The control is the strong half here. A conductor with no ambient is near
+    // black, so "the foot got darker" is satisfied by a frame that went dark
+    // everywhere; a face that reflected nothing either way and stayed exactly put
+    // is what says the pass came out and nothing else did.
+    let foot = at(room::MIRROR_FOOT);
+    let foot_block = (foot.0, foot.1 - block.1);
+    let foot_on = brightness(&all_on, foot_block, block);
+    let foot_off = brightness(&no_reflections, foot_block, block);
+    let missing_on = brightness(&all_on, at(MIRROR_AT), block);
+    let missing_off = brightness(&no_reflections, at(MIRROR_AT), block);
+    eprintln!(
+        "lumen toggles: mirror foot {foot_on:.1} -> {foot_off:.1}, \
+         mirror face {missing_on:.1} -> {missing_off:.1}"
+    );
+    assert!(
+        foot_off * MIRROR_GRADIENT < foot_on,
+        "the mirror panel's foot reads {foot_on:.1} with the march and {foot_off:.1} without — \
+         a conductor with no ambient and no reflection is black, and this one is not"
+    );
+    assert!(
+        (missing_off - missing_on).abs() <= 1.0,
+        "the part of the same face that reflects nothing moved from {missing_on:.1} to \
+         {missing_off:.1} — removing the march changed a pixel it never wrote"
+    );
+}
+
+/// One frame at [`REVIEW_EXTENT`], written where a reviewer can open it.
+///
+/// **Written before any claim is checked**, on `Golden::check`'s terms: a run
+/// that is about to fail is exactly the run somebody wants the picture from, and
+/// a save after the assertions is a save a failure skips.
+fn review(effects: RenderEffects, name: &str) -> Image {
+    let (image, paths) = draw(REVIEW_EXTENT, effects);
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(REVIEW_DIR);
     std::fs::create_dir_all(&dir).expect("target/ is writable");
     let path = dir.join(format!(
-        "fixed-camera-{}x{}.png",
+        "{name}-{}x{}.png",
         REVIEW_EXTENT.0, REVIEW_EXTENT.1
     ));
     image.save_png(&path).expect("the review frame is writable");
-    eprintln!("lumen golden: review frame at {}", path.display());
+    eprintln!("lumen golden: {paths} review frame at {}", path.display());
+    image
+}
 
-    // The blocks grow with the frame, so each covers the same patch of the room
-    // rather than a twenty-fifth of it.
+/// The block every claim at [`REVIEW_EXTENT`] averages over.
+///
+/// [`BLOCK`] scaled by the extent ratio, so a block covers the same patch of the
+/// room rather than a twenty-fifth of it.
+fn review_block() -> (u32, u32) {
     let scale = REVIEW_EXTENT.0 / EXTENT.0;
-    inspect(&image, REVIEW_EXTENT, (BLOCK.0 * scale, BLOCK.1 * scale));
+    (BLOCK.0 * scale, BLOCK.1 * scale)
 }

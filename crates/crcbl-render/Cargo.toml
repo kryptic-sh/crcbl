@@ -34,6 +34,12 @@ crcbl-shaders = { workspace = true }
 # samples already enable, so nothing new reaches a binary that did not have it.
 crcbl-sprite = { workspace = true, features = ["load"] }
 crcbl-ui = { workspace = true }
+# [`features`]'s per-effect toggles, which are `crcbl_hal::Features`' shape one
+# level up: a set of independent switches with union, intersection and
+# difference over them, which is what topic 39's resolution order is written in.
+# Already the workspace's, and already what `crcbl-hal` spells its capability
+# flags with, so this crate learns no new pattern.
+bitflags = { workspace = true }
 bytemuck = { workspace = true }
 thiserror = { workspace = true }
 

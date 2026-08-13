@@ -131,6 +131,24 @@ quality logic can drive it directly.
 the device lacks is what `required` is for; it is not something a toggle can
 force.
 
+**Built 2026-08-14 for topic 18's three raster effects**, in
+`crcbl_render::effects`: `RenderEffects` is the effect set, `EffectRequest`
+carries the three requested layers, and `EffectRequest::resolve` is the one
+place the order is applied. `ForwardRenderer` holds one request and resolves it
+once per `begin_frame`.
+
+Two of the four layers are shaped and have no source in the tree — the camera
+stack (there is no render-stack RON, and nothing in the workspace reads RON) and
+`[engine.video]` (`crcbl_store::settings` reads the namespace; nothing builds a
+stack at startup). They are fields nothing but a test writes, and they are
+present because the _order_ is the thing being built: a resolution point missing
+two of its inputs cannot be shown to apply them in the right order.
+
+The device layer is wired to `DeviceCaps` and currently **removes nothing**, and
+that is a statement about the three effects rather than a stub — see topic 18's
+"Where the toggles live", which argues it per effect. The first rule that fires
+arrives with the ray-traced variants, which `LightingPath` already selects.
+
 ## Feature matrix
 
 Two different questions, deliberately separated — a plan that conflates them

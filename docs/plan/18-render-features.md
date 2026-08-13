@@ -305,6 +305,29 @@ first.
   `shadow_placeholder` pattern already in the tree, and it makes a later quality
   knob a two-line change rather than a shader permutation.
 
+  **Corrected when the switch was built (2026-08-14): the placeholder cannot be
+  1×1, and the reason is the read rather than the write.** `mesh.slang` fetches
+  this channel with `ambient_occlusion.Load(int3(int2(input.position.xy), 0))` —
+  a `Load` at the fragment's own pixel, chosen in that file for having no
+  sampler, no UV and no texel-centre arithmetic for four backends to disagree
+  about. A `Load` outside a texture's extent yields **zero**, not its one texel,
+  so a 1×1 image bound to a frame-sized read occludes everything: the first
+  AO-off frame drawn this way was black wherever ambient was the whole of the
+  light, on real hardware, with nothing reporting an error.
+
+  What ships instead is the same idea at the extent the read needs: the
+  occlusion transient is created whatever the toggle says, and a frame with AO
+  off records an `ssao-none` pass that **clears it to 1.0** in place of the
+  pair. Every property the placeholder was chosen for survives — no shader
+  permutation, no uniform branch, one pipeline, a value that occludes nothing —
+  and the cost is one clear of an `R8Unorm` image and no draw. The 1×1
+  placeholder keeps its other job, filling the binding for the shadow pass and
+  the depth prepass, neither of which has a fragment stage to sample it with.
+
+  A `min` against `GetDimensions` in `mesh.slang` would let the 1×1 form work as
+  this paragraph originally described, and is the cheaper answer; it needs the
+  pinned shader compiler, so `docs/backlog.md` carries it.
+
 ### Risks this carries
 
 - **The forward pass keeps clearing and writing depth**, and the first slice
@@ -678,6 +701,29 @@ The per-camera layer is the one this topic owns, and it is genuinely per view: a
 render-to-texture camera driving a security monitor, a planar reflection, or a
 weapon-scope PiP (topic 29) does not want reflections or GI of its own, and that
 is a property of the camera rather than of the player's hardware.
+
+**Built 2026-08-14, and two of the four layers have no source in the tree.**
+`crcbl_render::effects` is the resolution point: `RenderEffects` is the effect
+set, `EffectRequest` carries the three requested layers, and
+`EffectRequest::resolve` applies the whole order in one place.
+`ForwardRenderer::begin_frame` resolves once per frame and freezes the answer,
+so the half of a frame that parametrises the shadow culls and the half that
+dispatches them cannot disagree.
+
+- **Programmatic** is wired: `ForwardRenderer::set_effect_request`, and
+  `apps/lumen`'s `--no-shadows` / `--no-ao` / `--no-reflections` drive it.
+- **Device** is wired to `DeviceCaps` and **removes nothing**, which is a fact
+  about these three effects rather than an unfinished clamp — the AO section
+  above says it of the occlusion pair in as many words, the reflection pair's
+  module says it of itself, and a device too small for the shadow atlas fails to
+  build the renderer rather than degrading past it. The first real rule arrives
+  with the ray-traced variants, which `LightingPath` selects.
+- **Camera stack** is a field nothing writes: there is no render-stack RON, and
+  nothing in the workspace reads or writes RON at all.
+- **`[engine.video]`** is a field nothing writes either, and it is closer than
+  the row above: `crcbl_store::settings::SettingsStack` reads that namespace
+  today. What is missing is a schema and a startup that builds a stack — nothing
+  in `crates/` or `apps/` constructs one. See `docs/backlog.md`.
 
 ## Interactions (kept honest)
 

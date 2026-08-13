@@ -154,6 +154,7 @@ use crate::counters::FrameCounters;
 use crate::cull::Frustum;
 use crate::cull_stats::CullStatsRing;
 use crate::draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
+use crate::effects::{EffectRequest, RenderEffects};
 use crate::graph::{BufferId, ImageId, ImportedBuffer, ImportedImage, PassBuilder, RenderGraph};
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc, InstancePoolError};
 use crate::light::{Light, sun_row};
@@ -240,10 +241,11 @@ const SSAO_BIAS: f32 = 0.02;
 
 /// The `R8Unorm` texel that occludes nothing: `1.0`, which is `0xFF`.
 ///
-/// What [`ForwardRenderer::ambient_occlusion_placeholder`] holds, and therefore
-/// what `mesh.slang` multiplies `frame.ambient.rgb` by on every group built
-/// before the graph has a real occlusion image. Any other value would be a
-/// silent global ambient scale.
+/// What [`ForwardRenderer::ambient_occlusion_placeholder`] holds, and what the
+/// `ssao-none` pass clears the occlusion channel to on a frame drawing without
+/// [`RenderEffects::AMBIENT_OCCLUSION`] — so `mesh.slang` multiplies
+/// `frame.ambient.rgb` by it and the ambient term is untouched. Any other value
+/// would be a silent global ambient scale.
 const AMBIENT_OCCLUSION_NONE: u8 = 0xFF;
 
 /// The reversed-Z far plane, in the two places that have to agree about it.
@@ -410,7 +412,9 @@ const fn shadow_cull(slot: usize) -> usize {
 /// derived — see [`ForwardRenderer::MAX_PASSES`]. The copy is counted even
 /// though a device that refused the readback records one fewer: this is a
 /// ceiling, and one that came up short would silently stop timing the last pass
-/// of every frame.
+/// of every frame. It is the **all-effects-on** count for the same reason: a
+/// frame that switched one off records fewer, and a bound that tracked the
+/// toggles would have to be re-sized whenever they moved.
 const RENDER_PASSES: u32 = 5 + Ssao::PASSES + Ssr::PASSES;
 
 /// Draws a full-screen pass records: the over-sized triangle, drawn once.
@@ -421,13 +425,24 @@ const RENDER_PASSES: u32 = 5 + Ssao::PASSES + Ssr::PASSES;
 /// call.
 const FULLSCREEN_DRAWS: u64 = 1;
 
-/// Full-screen passes the frame records: `ssao`, `ssao-blur`, `ssr`, `ssr-blur`
-/// and the tonemap.
+/// How many full-screen passes a frame drawing `effects` records: the tonemap,
+/// always, and each switched-on effect's pair beside it.
 ///
-/// It was the tonemap alone until `docs/plan/18-render-features.md`'s occlusion
-/// slice, which is why [`FULLSCREEN_DRAWS`] is a count *per pass* rather than the
-/// total: the two are different numbers now and were the same one before.
-const FULLSCREEN_PASSES: u64 = 5;
+/// **A function of the frame rather than a constant**, since
+/// `docs/plan/18-render-features.md`'s toggles: it was the tonemap alone, then
+/// five, and either written down is a number that stops matching the frame. The
+/// tonemap is the one that is not conditional — a frame has to reach the
+/// swapchain.
+const fn fullscreen_passes(effects: RenderEffects) -> u64 {
+    let mut passes = 1;
+    if effects.contains(RenderEffects::AMBIENT_OCCLUSION) {
+        passes += Ssao::PASSES as u64;
+    }
+    if effects.contains(RenderEffects::REFLECTIONS) {
+        passes += Ssr::PASSES as u64;
+    }
+    passes
+}
 
 /// The budget an **orthographic** camera selects under: one no group satisfies,
 /// so every group expands and the base level is drawn whole.
@@ -761,11 +776,19 @@ pub struct ForwardRenderer {
     /// occlusion image that does not exist yet.
     ///
     /// [`ForwardRenderer::shadow_placeholder`]'s argument, one binding along, and
-    /// with one addition: this one's *contents* matter. The shadow placeholder is
-    /// never sampled — the depth-only pipeline has no fragment stage — where this
-    /// one is what `mesh.slang` multiplies the ambient term by on any frame whose
-    /// occlusion passes were not added. White is the value that occludes nothing,
-    /// which is the honest reading of "AO was not computed".
+    /// **nothing samples this one either**: the two passes whose groups name it
+    /// are the shadow pass and the depth prepass, and a depth-only pipeline has
+    /// no fragment stage. The forward pass always binds a frame-sized occlusion
+    /// channel instead — the occlusion pair's output, or the `ssao-none` clear
+    /// where the pair was not added.
+    ///
+    /// **It is white all the same**, and that is not decoration: it is the value
+    /// that occludes nothing, so a group that reached the fragment stage by
+    /// mistake would lose the occlusion rather than the whole ambient term. What
+    /// stops that being the *sanctioned* off-switch is that `mesh.slang` reads
+    /// the binding with a `Load`, and a `Load` past a 1×1 image's one texel is
+    /// zero on every backend — see the `ssao-none` pass in
+    /// [`add_passes`](ForwardRenderer::add_passes).
     ///
     /// It is uploaded rather than cleared, so it is in
     /// [`ResourceState::ShaderRead`] from the moment it exists and no pass has to
@@ -819,6 +842,43 @@ pub struct ForwardRenderer {
     /// `docs/plan/18-render-features.md`'s reflection march — see
     /// [`crate::ssr`].
     ssr: Ssr,
+
+    /// The three layers a caller supplies — see [`crate::effects`].
+    effect_request: EffectRequest,
+    /// The fourth layer: what this device can draw, which clamps last and
+    /// absolutely.
+    ///
+    /// **Every effect, and that is a fact about the effects rather than an
+    /// unfinished clamp.** Topic 18 says so of the occlusion pair in as many
+    /// words — "there is no device fact to gate on … inventing a capability that
+    /// is really a performance opinion is what topic 39 exists to prevent" — and
+    /// the reflection pair's module says it of itself. The shadow atlas is a
+    /// `D32Float` image and a depth-only pass, which is not something a device
+    /// that got this far can be missing either: one too small for the atlas
+    /// fails to *build* this renderer rather than degrading past it.
+    ///
+    /// So the clamp is real and its rule set is empty. The first rule arrives
+    /// with the ray-traced variants of these same three effects, which
+    /// [`LightingPath`](crcbl_hal::LightingPath) selects and which nothing
+    /// builds yet.
+    device_effects: RenderEffects,
+    /// What the frame [`begin_frame`](ForwardRenderer::begin_frame) opened
+    /// draws, resolved once there.
+    ///
+    /// **Frozen for the frame on purpose.** `begin_frame` skips a shadow cull's
+    /// parameter write when shadows are off and
+    /// [`add_passes`](ForwardRenderer::add_passes) skips its dispatch; a request
+    /// changed between the two would dispatch a cull whose counters nothing
+    /// zeroed, which is a plausible frame drawn off last frame's numbers.
+    frame_effects: RenderEffects,
+    /// Full-screen passes the last [`add_passes`](ForwardRenderer::add_passes)
+    /// recorded, which is what [`counters`](ForwardRenderer::counters) reports
+    /// as submitted beside the pool's instances.
+    ///
+    /// Stored rather than re-derived from [`ForwardRenderer::frame_effects`]:
+    /// `counters` describes the frame that *was* recorded, and a request set
+    /// after it would otherwise change the count of a frame already submitted.
+    recorded_fullscreen: u64,
 }
 
 /// What a partly-built [`ForwardRenderer`] has to give back.
@@ -3209,6 +3269,14 @@ impl ForwardRenderer {
                 .ssr
                 .take()
                 .unwrap_or_else(|| unreachable!("the march was placed in the rollback above")),
+            // Every effect the view wants, no quality clamp and no override,
+            // which resolves to every effect this device permits — the frame
+            // every caller of this type drew before there were toggles.
+            effect_request: EffectRequest::default(),
+            device_effects: RenderEffects::all(),
+            frame_effects: RenderEffects::all(),
+            // No frame has been recorded yet, on `recorded_draws`' terms.
+            recorded_fullscreen: 0,
         })
     }
 
@@ -3491,6 +3559,13 @@ impl ForwardRenderer {
         // uniform buffer and the bind group below are picked with.
         self.frame = self.instances.begin_frame(device)?;
 
+        // `docs/plan/39-capabilities.md`'s four layers, applied here and nowhere
+        // else. Frozen for the frame because this call and `add_passes` have to
+        // agree: the loops below skip a shadow cull's parameter write when
+        // shadows are off, and a request changed between the two would dispatch
+        // that cull against numbers nothing zeroed.
+        self.frame_effects = self.resolved_effects();
+
         // Requests the readback the *last* frame's copy earned and resolves the
         // slot that has come round, which is why it is here rather than beside
         // the copy: a readback covers work already submitted, and last frame's
@@ -3702,6 +3777,12 @@ impl ForwardRenderer {
         // through its tiles, and `add_shadow_pass` records no pass for it
         // either, so they keep the reversed-Z clear the pass wrote.
         //
+        // **A frame with [`RenderEffects::SHADOWS`] off is every slot free**,
+        // and the whole block below is skipped for the same reason — the atlas
+        // is cleared and nothing draws into it, so there is no cull to parametrise
+        // and no view to write a matrix for. That is what makes the switch cost
+        // nothing rather than costing the culls and throwing them away.
+        //
         // **The camera as the eye handed to `begin_frame`, not the light**, and
         // the two are deliberately different questions asked of one pass.
         //
@@ -3723,6 +3804,9 @@ impl ForwardRenderer {
         // shadows rather than a side effect of where a light was placed — and it
         // is the same statement for a spot or a point light, whose maps are
         // looked at through the camera's pixels just as a cascade's is.
+        if !self.frame_effects.contains(RenderEffects::SHADOWS) {
+            return Ok(());
+        }
         let eye = [camera.eye.x, camera.eye.y, camera.eye.z];
         let write_view = |view: usize, view_proj: Mat4, from: Vec3| -> Result<(), HalError> {
             let block = mesh::FrameUniforms {
@@ -4158,9 +4242,21 @@ impl ForwardRenderer {
     /// transition, exactly as it does for the tonemap.
     ///
     /// The two are the same description and different images, which is the
-    /// design's off-switch as data rather than as a branch: a frame that did not
-    /// add the reflection pass would return the forward pass's own id and be
-    /// bit-identical.
+    /// design's off-switch as data rather than as a branch: a frame with
+    /// [`RenderEffects::REFLECTIONS`] off adds neither pass, returns the forward
+    /// pass's own id, and is bit-identical.
+    ///
+    /// # Which passes this adds is [`effects`](Self::effects)
+    ///
+    /// Resolved by the [`begin_frame`](Self::begin_frame) that opened this frame
+    /// and read here — see [`crate::effects`] for the four layers and for what
+    /// each toggle removes. Every effect is on by default, which is the frame
+    /// every caller drew before the toggles existed.
+    ///
+    /// A switched-off effect is **fewer passes and one different bound
+    /// descriptor**, never a shader permutation: the shadow atlas keeps its
+    /// reversed-Z clear and reads as fully lit, the occlusion binding falls back
+    /// to the renderer's white 1×1, and the reflection pair simply is not there.
     pub fn add_passes<'a>(
         &'a mut self,
         graph: &mut RenderGraph<'a>,
@@ -4234,6 +4330,11 @@ impl ForwardRenderer {
             },
         );
 
+        // What this frame draws, resolved by the `begin_frame` that opened it —
+        // see [`crate::effects`]. Read once here so every conditional below is
+        // about one value rather than about four reads of a field.
+        let effects = self.frame_effects;
+
         let imported = std::mem::replace(&mut self.shadow_imported, ResourceState::ShaderRead);
         let (shadow_atlas, shadow_draws) =
             self.add_shadow_pass(graph, imported, &tile_selection, occlusion_placeholder);
@@ -4242,11 +4343,22 @@ impl ForwardRenderer {
             graph.create_image("scene-color", TransientImageDesc::scene_color(extent));
         let scene_depth =
             graph.create_image("scene-depth", TransientImageDesc::scene_depth(extent));
-        let occlusion = graph.create_image("ssao", TransientImageDesc::ambient_occlusion(extent));
+        // The occlusion channel the forward pass reads, **created whatever the
+        // occlusion pass is doing** — see the pass that fills it below. Only the
+        // pair's intermediate is conditional: a transient nothing reads or writes
+        // is a physical image taken out of the pool for a pass that does not
+        // exist.
         let occlusion_blurred = graph.create_image(
             "ssao-blurred",
             TransientImageDesc::ambient_occlusion(extent),
         );
+        let occlusion_raw = effects
+            .contains(RenderEffects::AMBIENT_OCCLUSION)
+            .then(|| graph.create_image("ssao", TransientImageDesc::ambient_occlusion(extent)));
+        // **Created whatever the reflections are doing**, unlike the pair above.
+        // It is the forward pass's second colour attachment, which is in that
+        // pipeline whether or not anything reads what it wrote — see the
+        // `clear_color` on it below.
         let reflectivity =
             graph.create_image("reflectivity", TransientImageDesc::reflectivity(extent));
         // The march's output and the blur's, and both are the scene target's
@@ -4256,9 +4368,12 @@ impl ForwardRenderer {
         // here would clip the frame's bright end before the tonemap saw it.
         // Three live requests for one description are three physical images —
         // see `TransientPool::image`.
-        let reflection = graph.create_image("reflection", TransientImageDesc::scene_color(extent));
-        let composited =
-            graph.create_image("scene-reflected", TransientImageDesc::scene_color(extent));
+        let reflected = effects.contains(RenderEffects::REFLECTIONS).then(|| {
+            (
+                graph.create_image("reflection", TransientImageDesc::scene_color(extent)),
+                graph.create_image("scene-reflected", TransientImageDesc::scene_color(extent)),
+            )
+        });
 
         let group = self.mesh_groups[self.frame];
         let emit = self.emit;
@@ -4288,10 +4403,13 @@ impl ForwardRenderer {
         // **each** of the depth prepass and the forward pass, and one full-screen
         // triangle per full-screen pass. Assigned before the passes below borrow
         // the fields they need, so it is the count for the frame being built
-        // rather than the one before it.
+        // rather than the one before it — and off this frame's resolved effects
+        // rather than off a constant, so a switched-off effect's triangle is not
+        // counted as submitted.
+        self.recorded_fullscreen = fullscreen_passes(effects);
         self.recorded_draws = shadow_draws
             + 2 * bucket_draws.calls.len() as u64
-            + FULLSCREEN_PASSES * FULLSCREEN_DRAWS;
+            + self.recorded_fullscreen * FULLSCREEN_DRAWS;
 
         // --- the depth prepass ---
         //
@@ -4377,8 +4495,45 @@ impl ForwardRenderer {
         });
 
         let frame = self.frame;
-        self.ssao
-            .add_passes(graph, frame, scene_depth, occlusion, occlusion_blurred);
+        // `docs/plan/18-render-features.md`'s occlusion pair, or the value that
+        // stands for "no occlusion was computed" where it is switched off.
+        //
+        // # Why the switched-off arm is a clear and not the 1×1 placeholder
+        //
+        // Topic 18 sanctions the placeholder — "a renderer-owned 1×1 `R8Unorm`
+        // cleared to 1.0, bound when the AO passes are not added" — and **that
+        // does not work, for a reason the paragraph could not have known**:
+        // `mesh.slang` reads this channel with a `Load` at `SV_Position.xy`,
+        // and a `Load` outside a texture's extent yields zero rather than its
+        // one texel. A 1×1 image bound to a 1280×960 frame therefore occludes
+        // *everything* — the frame that found it is black wherever ambient is
+        // the whole of the light.
+        //
+        // A frame-sized channel cleared to [`AMBIENT_OCCLUSION_NONE`] is the
+        // same idea at the extent the read needs, and it keeps every property
+        // the placeholder was chosen for: no shader permutation, no uniform
+        // branch, one pipeline, and a value that occludes nothing. It costs a
+        // clear of an `R8Unorm` image and records no draw.
+        //
+        // The 1×1 placeholder keeps its other job, which is filling the binding
+        // for the two depth-only passes — neither has a fragment stage, so
+        // neither ever samples it. `docs/backlog.md` carries what a shader-side
+        // clamp would buy, since editing `mesh.slang` needs the pinned compiler.
+        match occlusion_raw {
+            Some(raw) => {
+                self.ssao
+                    .add_passes(graph, frame, scene_depth, raw, occlusion_blurred);
+            }
+            None => {
+                graph
+                    .add_render_pass("ssao-none")
+                    .clear_color(
+                        occlusion_blurred,
+                        [f32::from(AMBIENT_OCCLUSION_NONE) / 255.0; 4],
+                    )
+                    .execute(|_| {});
+            }
+        }
 
         let pass = graph
             .add_render_pass("forward")
@@ -4415,8 +4570,9 @@ impl ForwardRenderer {
                 },
             )
             // The occlusion channel this frame's ambient term is scaled by. The
-            // blur pass wrote it as a colour attachment a moment ago, so this
-            // declaration is the barrier into a shader-readable layout.
+            // blur pass — or the clear that stands in for the pair — wrote it as
+            // a colour attachment a moment ago, so this declaration is the
+            // barrier into a shader-readable layout.
             .read_image(occlusion_blurred)
             // **The barrier out of the shadow pass's depth attachment.** The
             // atlas is in this pass's bind group at `SHADOW_ATLAS_BINDING`, and
@@ -4450,6 +4606,11 @@ impl ForwardRenderer {
         // has, and for the same reason: a graph transient's view is not known
         // until execute time. One entry of the stored list differs; see
         // `ForwardRenderer::mesh_group_entries`.
+        //
+        //
+        // The occlusion image is a frame-sized transient whether the pair ran or
+        // a clear stood in for it, so this rebuild is unconditional and there is
+        // one shape of forward pass rather than two.
         let entries = self.mesh_group_entries[self.frame].clone();
         let mesh_layout = self.mesh_layout;
         let cached_mesh = &mut self.ambient_occlusion_groups[self.frame];
@@ -4465,8 +4626,12 @@ impl ForwardRenderer {
                 entries,
             )
             // Falling back to the group built at `build` rather than dropping
-            // the frame: it names the white placeholder, so the picture loses
-            // its occlusion and keeps everything else.
+            // the frame. **That group names the 1×1 placeholder, and
+            // `mesh.slang` reads this binding with a `Load`** — so the fallback
+            // frame has no ambient term at all rather than an unoccluded one.
+            // It is still the better of the two outcomes on a descriptor
+            // failure, and `docs/backlog.md` carries the shader-side clamp that
+            // would make it the harmless one.
             .unwrap_or(group);
             let encoder = ctx.encoder();
             bucket_draws.open(encoder);
@@ -4477,20 +4642,27 @@ impl ForwardRenderer {
         // **the second of them is the composite**: the march reads the scene
         // colour, the depth prepass and the reflectivity attachment and writes
         // the reflection alone, and the blur filters that and adds it to the
-        // scene colour — so everything below this line works on `composited`
-        // rather than on `scene_color`. A frame that did not add the pair would
-        // hand `scene_color` on and be bit-identical.
-        self.ssr.add_passes(
-            graph,
-            frame,
-            SsrImages {
-                depth: scene_depth,
-                color: scene_color,
-                reflectivity,
-                reflection,
-                composited,
-            },
-        );
+        // scene colour — so everything below this line works on `tonemapped`
+        // rather than on `scene_color`. A frame that does not add the pair hands
+        // `scene_color` on and is bit-identical, which is this effect's whole
+        // off-switch.
+        let tonemapped = match reflected {
+            Some((reflection, composited)) => {
+                self.ssr.add_passes(
+                    graph,
+                    frame,
+                    SsrImages {
+                        depth: scene_depth,
+                        color: scene_color,
+                        reflectivity,
+                        reflection,
+                        composited,
+                    },
+                );
+                composited
+            }
+            None => scene_color,
+        };
 
         // The tonemap group names a *graph-owned* view, so it can only be built
         // once the graph has realised one. It is cached against the view handle
@@ -4511,13 +4683,14 @@ impl ForwardRenderer {
                 StoreOp::Store,
                 crcbl_hal::ClearValue::default(),
             )
-            // **The reflection pass's output, not the forward pass's.** The two
-            // are the same description and different images, and tonemapping the
-            // first one would compile, draw a picture, and silently be the frame
+            // **The reflection pass's output where there is one, and the forward
+            // pass's where there is not.** The two are the same description and
+            // different images, and tonemapping the first one on a frame that
+            // reflected would compile, draw a picture, and silently be the frame
             // without reflections in it.
-            .read_image(composited)
+            .read_image(tonemapped)
             .execute(move |ctx| {
-                let view = ctx.image_view(composited);
+                let view = ctx.image_view(tonemapped);
                 let device = ctx.device();
                 let entries = vec![
                     BindGroupEntry {
@@ -4559,7 +4732,7 @@ impl ForwardRenderer {
             stats.add_copy_pass(graph, generated.visible_count_id);
         }
 
-        composited
+        tonemapped
     }
 
     /// Adds the cull dispatches and the depth-only pass that fill the shadow
@@ -4577,6 +4750,16 @@ impl ForwardRenderer {
     /// reversed-Z clear the pass wrote, which is `0.0` — "nothing stored, as far
     /// away as depth goes" — so anything that did sample it would come back
     /// fully lit rather than fully shadowed.
+    ///
+    /// # With [`RenderEffects::SHADOWS`] off, every tile is a free one
+    ///
+    /// That is the whole switch, and it is the same mechanism a free tile
+    /// already had rather than a second one: no cull is dispatched and no
+    /// viewport is drawn, the pass records its clear and nothing else, and every
+    /// comparison against the atlas comes back fully lit. The pass itself stays —
+    /// it is what *writes* that clear, and skipping it would leave the atlas
+    /// holding the last frame that did draw into it, or undefined memory on the
+    /// first frame of all.
     fn add_shadow_pass(
         &self,
         graph: &mut RenderGraph<'_>,
@@ -4584,6 +4767,7 @@ impl ForwardRenderer {
         selection: &[BufferId],
         occlusion_placeholder: ImageId,
     ) -> (ImageId, u64) {
+        let shadows = self.frame_effects.contains(RenderEffects::SHADOWS);
         let (atlas_width, atlas_height) = shadow::atlas_extent();
         let atlas = graph.import_image(
             "shadow-atlas",
@@ -4619,6 +4803,7 @@ impl ForwardRenderer {
             .slots()
             .iter()
             .enumerate()
+            .filter(|_| shadows)
             .filter_map(|(slot, held)| {
                 let held = (*held)?;
                 Some((slot, held, self.extra_lights.get(held.light)?))
@@ -4628,7 +4813,8 @@ impl ForwardRenderer {
         // One cull dispatch per cascade and per occupied slot, before the pass
         // that draws from them — **not one per tile**, which is topic 18's
         // fourth decision: a point light's six faces draw one visible set.
-        let generated: Vec<(usize, GeneratedDraws)> = (0..shadow::CASCADES)
+        let cascades = if shadows { shadow::CASCADES } else { 0 };
+        let generated: Vec<(usize, GeneratedDraws)> = (0..cascades)
             .chain(occupied.iter().map(|(slot, _, _)| shadow_cull(*slot)))
             .map(|cull| {
                 (
@@ -4648,7 +4834,7 @@ impl ForwardRenderer {
         // missing from every one of these lists and a bare index into one would
         // hand a light's draws to the wrong viewport the moment one slot is free
         // and a later one is not.
-        let mut views: Vec<(usize, usize, usize)> = (0..shadow::CASCADES)
+        let mut views: Vec<(usize, usize, usize)> = (0..cascades)
             .map(|cascade| (cascade, cascade, cascade))
             .collect();
         for (index, (slot, held, light)) in occupied.iter().enumerate() {
@@ -4660,7 +4846,7 @@ impl ForwardRenderer {
                 views.push((
                     shadow_view(*slot, face),
                     shadow::light_tile(held.base + face),
-                    shadow::CASCADES + index,
+                    cascades + index,
                 ));
             }
         }
@@ -4809,6 +4995,66 @@ impl ForwardRenderer {
         &self.draws
     }
 
+    /// The three layers a caller supplies to the toggle resolution order — see
+    /// [`crate::effects`].
+    ///
+    /// Read back rather than only written, so a caller changing one layer does
+    /// not have to remember the other two: take this, edit the field it owns,
+    /// hand it back to [`set_effect_request`](Self::set_effect_request).
+    #[must_use]
+    pub const fn effect_request(&self) -> EffectRequest {
+        self.effect_request
+    }
+
+    /// Replaces all three requested layers, and resolves them at the next
+    /// [`begin_frame`](Self::begin_frame).
+    ///
+    /// **The frame in flight does not move.** `begin_frame` freezes what it
+    /// resolved and [`add_passes`](Self::add_passes) records that, because the
+    /// two halves of a frame have to agree about which culls were parametrised:
+    /// `begin_frame` skips a shadow cull's parameter write when shadows are off
+    /// and `add_passes` skips its dispatch, and a request landing between the two
+    /// would dispatch a cull against numbers nothing zeroed.
+    pub const fn set_effect_request(&mut self, request: EffectRequest) {
+        self.effect_request = request;
+    }
+
+    /// What the frame the last [`begin_frame`](Self::begin_frame) opened draws.
+    ///
+    /// The resolved set, not a layer: every effect in it has survived the
+    /// camera's stack, the player's quality clamp, any programmatic override and
+    /// the device — which is the one question a test asking "did this frame have
+    /// shadows in it" wants answered.
+    ///
+    /// [`RenderEffects::all`] before the first frame, which is what a renderer
+    /// nobody has changed would draw.
+    #[must_use]
+    pub const fn effects(&self) -> RenderEffects {
+        self.frame_effects
+    }
+
+    /// What a frame begun **now** would draw: the whole order applied to the
+    /// current request.
+    ///
+    /// [`effects`](Self::effects)' question one frame earlier, and the one a
+    /// caller reporting its own configuration wants — a debug panel built at
+    /// startup has no frame behind it yet, and printing what the last one drew
+    /// would print a default.
+    #[must_use]
+    pub fn resolved_effects(&self) -> RenderEffects {
+        self.effect_request.resolve(self.device_effects)
+    }
+
+    /// Which effects this **device** permits, which is the fourth layer and
+    /// clamps last.
+    ///
+    /// Every one of them today — see [`ForwardRenderer::device_effects`], which
+    /// is where that is argued per effect rather than asserted.
+    #[must_use]
+    pub const fn device_effects(&self) -> RenderEffects {
+        self.device_effects
+    }
+
     /// Which [`GeometryPath`] this renderer was **built for** — not what the
     /// device reports, but what it actually built.
     ///
@@ -4938,14 +5184,17 @@ impl ForwardRenderer {
             return FrameCounters::default();
         }
         let stats = self.cull_stats();
+        let fullscreen = self.recorded_fullscreen * FULLSCREEN_DRAWS;
         FrameCounters {
             draws: self.recorded_draws,
-            instances: self.instances.len() as u64 + FULLSCREEN_PASSES * FULLSCREEN_DRAWS,
+            instances: self.instances.len() as u64 + fullscreen,
             // Each full-screen triangle is submitted and drawn, and none of them
             // is in the cull's count — they are direct draws of one instance,
             // added on both sides so the two halves of the row measure the same
-            // thing.
-            drawn: stats.map(|stats| stats.instances + FULLSCREEN_PASSES * FULLSCREEN_DRAWS),
+            // thing. Off the frame that *was* recorded rather than off a
+            // constant, so a frame with an effect switched off does not count a
+            // triangle it never submitted.
+            drawn: stats.map(|stats| stats.instances + fullscreen),
             triangles: None,
             clusters: stats.and_then(|stats| stats.clusters),
             cull_frame: stats.map(|stats| stats.frame),
@@ -5117,6 +5366,7 @@ fn named_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effects::EffectOverride;
     use crate::scene::{
         DEMO_CUBE, DEMO_DUNES, DEMO_OPEN_BOX, DEMO_PYRAMID, DEMO_TEXTURED, DEMO_TINTED,
         DEMO_UNTINTED,
@@ -6633,13 +6883,17 @@ mod tests {
             recorded_draws(&recorder) as u64,
             "the counter and the frame's recorded draws disagree",
         );
+        // Derived from what the frame resolved rather than from a constant, so
+        // this is still the every-effect frame's count and would follow a frame
+        // that switched one off.
+        let fullscreen = fullscreen_passes(renderer.effects()) * FULLSCREEN_DRAWS;
         assert!(
-            counters.draws > FULLSCREEN_PASSES * FULLSCREEN_DRAWS,
+            counters.draws > fullscreen,
             "a frame that recorded only its full-screen passes drew no scene",
         );
         assert_eq!(
             counters.instances,
-            renderer.instances.len() as u64 + FULLSCREEN_PASSES * FULLSCREEN_DRAWS,
+            renderer.instances.len() as u64 + fullscreen,
         );
         assert_eq!(
             counters.drawn, None,
@@ -6705,7 +6959,7 @@ mod tests {
         let counters = renderer.counters();
         assert_eq!(
             counters.drawn,
-            Some(FULLSCREEN_PASSES * FULLSCREEN_DRAWS),
+            Some(fullscreen_passes(renderer.effects()) * FULLSCREEN_DRAWS),
             "the survivor count the null backend produced is zero, plus one instance per \
              full-screen pass — which is on both sides of the row",
         );
@@ -7509,17 +7763,20 @@ mod tests {
         recorder.assert_valid();
     }
 
-    /// Compiles one frame and says how many passes it turned out to be.
+    /// Compiles one frame and names the passes it turned out to be, in order.
     ///
     /// Compiled and not executed: what a pass costs is not the question here,
-    /// only how many of them the frame declared.
+    /// only which of them the frame declared. Names rather than a count since
+    /// the toggles landed — a count says a frame lost two passes and a list says
+    /// *which* two, which is the difference between "the switch did something"
+    /// and "the switch did the thing it is for".
     fn passes_in_a_frame(
         device: &dyn Device,
         queue: QueueHandle,
         renderer: &mut ForwardRenderer,
         imported: ImportedImage,
         pool: &crate::TransientPool,
-    ) -> usize {
+    ) -> Vec<String> {
         renderer
             .begin_frame(
                 device,
@@ -7531,7 +7788,13 @@ mod tests {
         let mut graph = crate::RenderGraph::new(queue);
         let target = graph.import_image("target", imported);
         renderer.add_passes(&mut graph, target, (64, 48));
-        graph.compile(pool).expect("a legal frame").passes().len()
+        graph
+            .compile(pool)
+            .expect("a legal frame")
+            .passes()
+            .iter()
+            .map(|pass| pass.label().to_string())
+            .collect()
     }
 
     /// A spot at `x` that [`shadow::Selection`] will give a tile: finite, a
@@ -7565,7 +7828,7 @@ mod tests {
         let imported = swapchain_image(device);
         let mut pool = crate::TransientPool::new();
 
-        let bare = passes_in_a_frame(device, queue, &mut renderer, imported, &pool);
+        let bare = passes_in_a_frame(device, queue, &mut renderer, imported, &pool).len();
         assert!(
             bare < ForwardRenderer::MAX_PASSES as usize,
             "a frame with no shadowed light runs {bare} passes, which is already the \
@@ -7574,7 +7837,7 @@ mod tests {
         );
 
         renderer.set_lights(&[shadowable_spot(-1.0), shadowable_spot(1.0)]);
-        let widest = passes_in_a_frame(device, queue, &mut renderer, imported, &pool);
+        let widest = passes_in_a_frame(device, queue, &mut renderer, imported, &pool).len();
         assert_eq!(
             renderer.shadow_lights.slots().iter().flatten().count(),
             shadow::LIGHT_SLOTS,
@@ -7597,6 +7860,253 @@ mod tests {
         device.destroy_image_view(imported.view);
         device.destroy_image(imported.image);
         recorder.assert_valid();
+    }
+
+    /// **A toggle reaches the recorded frame, and takes exactly its own passes
+    /// with it.**
+    ///
+    /// The observable is the compiled pass list, because the thing that could
+    /// otherwise be true is that the switch is stored and read by nothing: a
+    /// renderer holding `SHADOWS` clear and recording every shadow cull anyway
+    /// draws a frame that looks right, reports the right effect set, and has not
+    /// switched anything off.
+    ///
+    /// So each arm compares the whole list rather than its length. Two passes
+    /// fewer is satisfied by removing the wrong two, and it is satisfied by a
+    /// frame that lost its tonemap.
+    ///
+    /// The shadow arm is the one that cannot be written by name — a cascade's
+    /// cull passes are labelled exactly as the camera's are — so it is written as
+    /// its two halves instead: the count moves by a cull's worth per cascade and
+    /// per filled light slot, and everything from the `shadow` pass onwards is
+    /// unchanged. The `shadow` pass itself **stays**, because it is what writes
+    /// the clear that reads as "fully lit".
+    #[test]
+    fn each_effect_toggle_removes_exactly_the_passes_it_owns() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        // One shadowed light beside the cascades, so the shadow arm below covers
+        // a light slot's cull as well as a cascade's.
+        renderer.set_lights(&[shadowable_spot(-1.0)]);
+        let imported = swapchain_image(device);
+        let mut pool = crate::TransientPool::new();
+
+        let without = |renderer: &mut ForwardRenderer, off: RenderEffects| {
+            renderer.set_effect_request(EffectRequest {
+                programmatic: EffectOverride::none().force(off, Some(false)),
+                ..EffectRequest::default()
+            });
+            passes_in_a_frame(device, queue, renderer, imported, &pool)
+        };
+
+        let all_on = without(&mut renderer, RenderEffects::empty());
+        assert_eq!(
+            renderer.effects(),
+            RenderEffects::all(),
+            "the control frame has to be the every-effect one"
+        );
+        assert_eq!(
+            renderer.shadow_lights.slots().iter().flatten().count(),
+            1,
+            "the spot must actually hold a slot, or the shadow arm below is only about cascades"
+        );
+
+        // The occlusion pair leaves a clear behind it — the frame-sized white
+        // channel `mesh.slang`'s `Load` needs, which the 1×1 placeholder cannot
+        // be. The reflection pair leaves nothing, because nothing reads what it
+        // would have written.
+        for (off, gone, instead) in [
+            (
+                RenderEffects::AMBIENT_OCCLUSION,
+                ["ssao", "ssao-blur"].as_slice(),
+                Some("ssao-none"),
+            ),
+            (
+                RenderEffects::REFLECTIONS,
+                ["ssr", "ssr-blur"].as_slice(),
+                None,
+            ),
+        ] {
+            let labels = without(&mut renderer, off);
+            assert_eq!(
+                renderer.effects(),
+                RenderEffects::all().difference(off),
+                "{off:?}: the frame must have resolved to the set the request asked for"
+            );
+            let mut expected: Vec<String> = Vec::with_capacity(all_on.len());
+            for label in &all_on {
+                if !gone.contains(&label.as_str()) {
+                    expected.push(label.clone());
+                    continue;
+                }
+                // In the first one's place, so the stand-in is asserted to be
+                // where the pair was and not merely somewhere in the frame.
+                if label == gone[0]
+                    && let Some(instead) = instead
+                {
+                    expected.push(instead.to_string());
+                }
+            }
+            assert_eq!(
+                labels, expected,
+                "{off:?}: the frame must lose {gone:?}, gain {instead:?} in their place, and \
+                 keep every other pass"
+            );
+        }
+
+        let no_shadows = without(&mut renderer, RenderEffects::SHADOWS);
+        assert_eq!(
+            renderer.effects(),
+            RenderEffects::all().difference(RenderEffects::SHADOWS),
+        );
+        assert_eq!(
+            all_on.len() - no_shadows.len(),
+            DrawGen::MAX_PASSES as usize * (shadow::CASCADES + 1),
+            "shadows off must drop a cull's passes per cascade and per filled slot"
+        );
+        let from_the_atlas = |labels: &[String]| {
+            let at = labels
+                .iter()
+                .position(|label| label == "shadow")
+                .expect("the atlas pass is recorded whether or not anything draws into it");
+            labels[at..].to_vec()
+        };
+        assert_eq!(
+            from_the_atlas(&no_shadows),
+            from_the_atlas(&all_on),
+            "only the culls go: the atlas pass and everything after it are unchanged"
+        );
+
+        renderer.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
+    }
+
+    /// One frame on a device of its own, under an override switching `off`.
+    ///
+    /// **A device of its own per arm**, because a [`Recorder`] accumulates for a
+    /// device's whole life: asking "did the atlas pass draw" of a recorder that
+    /// has seen two frames answers about both of them, and the arm that matters
+    /// most here is the one whose answer must be zero.
+    ///
+    /// Returns what the frame reported and what its atlas pass actually drew.
+    fn frame_switching_off(off: RenderEffects) -> (FrameCounters, u64, usize) {
+        use crcbl_hal::null::Command;
+
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let adapter = instance.adapters().remove(0);
+        let opened = instance
+            .create_device(&DeviceDesc::for_adapter(adapter.id))
+            .expect("the null backend always opens");
+        let device = opened.as_ref();
+        let queue = opened.queue(QueueKind::Graphics).expect("always present");
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        // A shadowed light beside the cascades, so the atlas pass has draws to
+        // lose rather than being empty either way.
+        renderer.set_lights(&[shadowable_spot(-1.0)]);
+        renderer.set_effect_request(EffectRequest {
+            programmatic: EffectOverride::none().force(off, Some(false)),
+            ..EffectRequest::default()
+        });
+
+        let recorded = frame(device, &mut renderer, queue);
+        assert_eq!(
+            renderer.effects(),
+            RenderEffects::all().difference(off),
+            "the frame must have resolved to the set the request asked for"
+        );
+        let counters = renderer.counters();
+        let instances = renderer.instances.len() as u64;
+        let atlas_draws = commands_in_pass(&recorder, "shadow")
+            .into_iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    Command::DrawIndexedIndirect(_)
+                        | Command::DrawIndexedIndirectCount(_)
+                        | Command::DrawMeshTasksIndirect(_)
+                )
+            })
+            .count();
+        assert_eq!(
+            counters.draws,
+            recorded_draws(&recorder) as u64,
+            "the counter and the frame's own recorded stream must agree, whatever is switched off"
+        );
+        recorded.finish(device, renderer);
+        recorder.assert_valid();
+        (counters, instances, atlas_draws)
+    }
+
+    /// **A switched-off effect is work the frame did not record**, and a frame
+    /// that still executes with the placeholder bound in place of what it lost.
+    ///
+    /// The other half of the pass-list test above, and the half a pass list
+    /// cannot make: the `shadow` pass is still *there* with shadows off, so the
+    /// question is whether it drew. That answer comes off the recorded command
+    /// stream, which is a different instrument from `recorded_draws` — the number
+    /// under test.
+    ///
+    /// Executed rather than only compiled, because the occlusion switch changes
+    /// which image the forward pass has bound. A frame that declared a read of a
+    /// transient it never created, or bound a view the graph never realised,
+    /// fails here and compiles perfectly.
+    #[test]
+    fn a_switched_off_effect_is_work_the_frame_did_not_record() {
+        let (control, instances, atlas_draws) = frame_switching_off(RenderEffects::empty());
+        assert!(
+            atlas_draws > 0,
+            "with shadows on the atlas pass has to draw something, or turning it off means \
+             nothing"
+        );
+        assert_eq!(
+            control.instances,
+            instances + fullscreen_passes(RenderEffects::all()) * FULLSCREEN_DRAWS,
+            "the control frame submits one triangle per full-screen pass"
+        );
+
+        // Each pair is one full-screen triangle per pass, and the atlas is
+        // untouched by either.
+        for (off, fewer) in [
+            (RenderEffects::AMBIENT_OCCLUSION, u64::from(Ssao::PASSES)),
+            (RenderEffects::REFLECTIONS, u64::from(Ssr::PASSES)),
+        ] {
+            let (counters, instances, atlas) = frame_switching_off(off);
+            assert_eq!(
+                counters.draws,
+                control.draws - fewer * FULLSCREEN_DRAWS,
+                "{off:?}: the frame must record one draw fewer per pass it did not add"
+            );
+            assert_eq!(
+                counters.instances,
+                instances
+                    + fullscreen_passes(RenderEffects::all().difference(off)) * FULLSCREEN_DRAWS,
+                "{off:?}: and must not report as submitted a triangle it never submitted"
+            );
+            assert_eq!(
+                atlas, atlas_draws,
+                "{off:?}: a screen-space effect must not touch the shadow atlas"
+            );
+        }
+
+        // Shadows: the atlas pass survives and draws nothing at all, which is
+        // the mechanism — a cleared reversed-Z atlas reads as fully lit.
+        let (counters, _, atlas) = frame_switching_off(RenderEffects::SHADOWS);
+        assert_eq!(
+            atlas, 0,
+            "with shadows off the atlas pass must record its clear and no draw"
+        );
+        assert_eq!(
+            counters.draws,
+            control.draws - atlas_draws as u64,
+            "and the frame must record exactly the atlas pass's draws fewer"
+        );
     }
 
     /// **Every pass the frame records gets a row in the report.**

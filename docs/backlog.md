@@ -7481,30 +7481,22 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
 
 ### Owed, in the order a slice would take them
 
-- **Per-effect toggles for shadows and ambient occlusion.** `add_passes` records
-  the shadow, prepass, light-grid, SSAO and SSAO-blur passes unconditionally, so
-  **there is no shadows-off or AO-off frame to compare the fixture against** —
-  the one thing a reviewer asks for first. Topic 18 sanctions the AO switch in
-  writing ("a renderer-owned 1×1 `R8Unorm` cleared to 1.0, bound when the AO
-  passes are not added") and the placeholder it names is already built and
-  already imported every frame as `ssao-placeholder`, so that half is small.
-  Nothing sanctions a shadow switch, and turning shadows off moves `MAX_PASSES`,
-  `PassTimers` sizing and `FrameCounters`. **Deliberately not done here**: topic
-  18 specifies a four-layer resolution order (camera stack, `[engine.video]`,
-  programmatic override, device capability) and a `bool` on `add_passes` is not
-  it and would be replaced by it.
-- **Screen-space reflections**, then **irradiance probes**. Topic 18's two
-  `Rasterised` rows, both unbuilt, and between them the only thing that will
-  make lumen's mirror panel and metal block anything other than black.
+- **Irradiance probes.** Topic 18's last `Rasterised` row, and the only thing
+  that will make lumen's mirror panel and metal block anything other than black
+  above the band screen-space reflections reach.
 - **Ray tracing** — acceleration structures, `LightingPath::RayTraced`, and the
   side-by-side and A/B-flip modes the charter's milestones 2 and 3 want. The
   selector already exists and every device in the tree resolves to `Rasterised`
   because nothing builds a structure; lumen's panel says so on a row rather than
   implying a choice was made.
-- **The render-to-texture monitor camera**, and with it the per-camera layer of
-  the toggle resolution order. One camera per frame today.
-- **The `[engine.video]` and programmatic-override layers.** The first layer has
-  no toggles to resolve yet, so all three are blocked on the row above.
+- **The render-to-texture monitor camera**, and with it a consumer for the
+  camera-stack layer of the toggle resolution order. One camera per frame today.
+- **A UI for the toggles.** The charter's milestone 4 wants the effect matrix
+  reachable from the pause menu as well as from the command line; `--no-shadows`
+  / `--no-ao` / `--no-reflections` are what exist, and the panel's `paths`
+  section reports the resolved set. `ForwardRenderer::set_effect_request` takes
+  a whole `EffectRequest`, so a menu row is read-modify-write on
+  `effect_request()` and needs no new engine API.
 - **A CI leg.** `apps/lumen/tests/run-lumen-golden.sh` exists and passes on
   radv, lavapipe and wgpu locally; nothing in `.github/workflows` runs it, so
   the golden can rot exactly the way `run-render-e2e.sh`'s existed to stop
@@ -7703,6 +7695,99 @@ Note the shape it would be a demo _of_: the browser runs
 `LightingPath:: Rasterised` by construction, which is the whole reason the
 charter wants the page. That argument is unaffected by the deferral and stays.
 
+## The effect toggles landed, and three things about them are owed (2026-08-14)
+
+`crcbl_render::effects` is topic 39's resolution point: `RenderEffects` is the
+effect set, `EffectRequest` carries the three requested layers,
+`EffectRequest::resolve` applies the order, and `ForwardRenderer::begin_frame`
+resolves once per frame and freezes the answer. What follows is what that left.
+
+### `mesh.slang` reads the occlusion channel with an unclamped `Load`
+
+**The finding that changed the design, and it was found on hardware rather than
+reasoned about.** Topic 18 sanctions a 1×1 white `R8Unorm` as the AO off-switch;
+`mesh.slang`'s `ambient_occlusion.Load(int3(int2(input.position.xy), 0))`
+fetches by absolute pixel, and a `Load` outside a texture's extent yields
+**zero**. The first AO-off frame drawn that way was black wherever ambient was
+the whole of the light, on radv, with nothing reporting an error. What ships
+instead is an `ssao-none` render pass clearing a frame-sized occlusion transient
+to `AMBIENT_OCCLUSION_NONE`.
+
+Owed: `min` the load coordinate against `ambient_occlusion.GetDimensions()`. It
+would
+
+- let the `ssao-none` pass go away and make the AO-off frame strictly cheaper,
+- make `mesh.slang`'s binding-22 doc comment true again — it still says a 1×1
+  white image is bound when the passes are not added, which is now wrong,
+- and make `ForwardRenderer::add_passes`' bind-group-failure fallback harmless
+  instead of a frame with no ambient term (that group names the 1×1
+  placeholder).
+
+**It was not done because it needs the pinned shader compiler.**
+`crates/crcbl-shaders/build.rs` verifies each `.slang` by SHA-256 against
+`spirv/manifest.txt`, so _any_ edit to the source — including a comment — fails
+the build until the artifacts are regenerated, and neither `slangc` nor
+`CRCBL_DXC` is installed on the development machine. Whoever has the toolchain
+should take it; the change is one `min` and a comment.
+
+### Two of the four toggle layers have no source in the tree
+
+`EffectRequest::camera` and `EffectRequest::video` are fields nothing but a
+test writes. They are present because the _order_ is what was built — a
+resolution point missing two of its inputs cannot be shown to apply them in the
+right order — and `crcbl_render::effects`' module docs carry a table saying
+which are wired.
+
+- **Camera stack.** There is no render-stack RON. Nothing in the workspace reads
+  or writes RON at all, there is no `ron` dependency and no `.ron` file, and
+  `crcbl-render` has one camera per frame. The consumer topic 18 names is the
+  render-to-texture monitor camera, which is on lumen's owed list.
+- **`[engine.video]`.** Closer, and the gap is smaller than it looks.
+  `crcbl_store::settings::SettingsStack` implements the whole four-layer TOML
+  resolution and `get_section::<T>("engine.video")` is one call. What is missing
+  is a _schema_ (no `VideoSettings` type exists; the namespace appears only in
+  doc comments and unit-test strings) and a _startup_ — nothing in `crates/` or
+  `apps/` constructs a `SettingsStack`, opens a `StorageSource` or names a
+  `settings.toml`. Wiring it is a decision about where the file lives and which
+  binaries load one, which is topic 14's P10 settings-screen slice rather than a
+  renderer change. Deliberately left rather than invented for one sample.
+
+### The device-capability clamp is real and its rule set is empty
+
+`ForwardRenderer::device_effects` is `RenderEffects::all()`, and that is a
+statement about these three effects rather than an unfinished clamp:
+
+- AO has no device fact to gate on, which topic 18 says in as many words —
+  "inventing a capability that is really a performance opinion is what topic 39
+  exists to prevent".
+- The reflection pair says the same of itself in `crcbl_render::ssr`'s module
+  docs: every backend has a full-screen draw, a sampled `D32Float` and a sampled
+  `Rgba8Unorm`.
+- Shadows are a `D32Float` image and a depth-only pass. **Considered and
+  declined:** a rule requiring `max_image_2d >= shadow::atlas_extent()`. It is
+  true and it is unreachable — a device that fails it cannot create the atlas at
+  `build`, so the renderer never exists to be clamped, and writing the rule
+  would imply a degradation path that is actually a build failure.
+
+The clamp _step_ is exercised:
+`the_layers_resolve_in_the_order_topic_39_specifies` passes a reduced device set
+to `EffectRequest::resolve` and checks it wins over an override forcing an
+effect on. The first rule that fires arrives with the ray-traced variants, which
+`LightingPath` already selects.
+
+### Coverage gaps this slice leaves
+
+- **No CI job runs the toggle frames.** They are asserted by
+  `every_effect_toggles_and_the_frame_says_so` in `apps/lumen/tests/golden.rs`,
+  which is `#[ignore]`d and feature-gated; the missing CI leg is the entry in
+  the lumen section above and this is a second consumer of it.
+- **The `[engine.video]` and camera layers are untested against a real source**,
+  because they have none. What is tested is the order, with values a test wrote.
+- **`EffectOverride::force(.., None)` — releasing an override — has no caller
+  outside its unit test.** It is there because a settings row returning to
+  "auto" is the obvious consumer and leaving the tri-state out would have made
+  that a breaking change; nothing exercises it end to end.
+
 ## `crcbl::screenshot`'s `ao_box` warns about a bug that is fixed
 
 `crates/crcbl/src/screenshot.rs`'s `ao_box` doc says a box that large "slid
@@ -7788,17 +7873,6 @@ since the LOD hysteresis buffer is per instance per `DrawGen` and there are
 five. `Capacities::instances` is the one number no description can be measured
 against — objects are placed while the renderer runs — so filling it is
 `InstancePoolError::PoolFull` from `add_instance` and nothing earlier.
-
-### Effect toggles are NOT part of this
-
-`add_passes` records shadows, prepass, light grid, SSAO and the blur
-unconditionally, and lumen's charter wants per-effect switches. That is a
-separate topic 18 slice: that document already specifies a four-layer resolution
-order — camera stack, `[engine.video]`, programmatic override, device capability
-— and a `bool` on `add_passes` is not it and would be replaced by it. Only the
-AO switch is sanctioned today, and its mechanism already exists as the 1x1 white
-placeholder. Turning shadows off also moves `MAX_PASSES`, `PassTimers` sizing
-and `FrameCounters`, which is a golden-moving change on purpose.
 
 ### Deliberately left at P9-proper
 

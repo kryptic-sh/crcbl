@@ -206,6 +206,7 @@ pub fn with_shell<S: Shell + ?Sized>(
         extent,
         options.common.gpu(),
         options.forced,
+        options.effects,
     )?;
     let paths = gpu.paths();
 
@@ -473,6 +474,46 @@ mod tests {
         );
         assert_eq!(summary.paths.binding, crcbl::hal::BindingModel::ArrayPages);
         assert_eq!(summary.paths.forced, options.forced);
+    }
+
+    /// **An effect flag reaches the renderer's resolved set and the summary.**
+    ///
+    /// The charter's "every effect toggles independently" as far as a headless
+    /// run can see it: what a real device does to the picture is
+    /// `tests/golden.rs`, and what this catches is the flag that stopped at
+    /// [`Options`] — which would leave every frame drawing everything while the
+    /// summary line claimed otherwise.
+    ///
+    /// One arm per effect, because a run that switched all three off reports the
+    /// empty set whichever bit each flag was wired to.
+    #[test]
+    fn an_effect_flag_reaches_the_frame_and_the_summary() {
+        use crcbl::render::RenderEffects;
+
+        assert_eq!(
+            run(&headless(4))
+                .expect("headless runs everywhere")
+                .paths
+                .effects,
+            RenderEffects::all(),
+            "a run that asked for nothing must draw every effect",
+        );
+
+        for (off, row) in [
+            (RenderEffects::SHADOWS, "ao ssr"),
+            (RenderEffects::AMBIENT_OCCLUSION, "shadows ssr"),
+            (RenderEffects::REFLECTIONS, "shadows ao"),
+        ] {
+            let mut options = headless(4);
+            options.effects.remove(off);
+            let summary = run(&options).expect("a frame with an effect off still runs");
+            assert_eq!(
+                summary.paths.effects,
+                RenderEffects::all().difference(off),
+                "{off:?} did not reach the renderer",
+            );
+            assert_eq!(summary.paths.effects_row(), row, "{off:?}");
+        }
     }
 
     /// **F3 turns the panel on, and the sections it shows are lumen's own.**

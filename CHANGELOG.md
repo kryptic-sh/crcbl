@@ -417,6 +417,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Per-effect toggles, resolved through topic 39's four layers.**
+  `crcbl_render::effects` is the resolution point: `RenderEffects` is the effect
+  set (`SHADOWS`, `AMBIENT_OCCLUSION`, `REFLECTIONS`), `EffectRequest` carries
+  the three layers a caller supplies, and `EffectRequest::resolve` applies
+  camera stack → `[engine.video]` → programmatic override → device clamp in one
+  place. `ForwardRenderer::set_effect_request` is the setter,
+  `ForwardRenderer::effects` is what the frame in flight actually draws, and
+  `begin_frame` resolves once and freezes the answer for that frame.
+
+  **Nothing changes for a caller that does not ask.** The default request is
+  every effect, so every existing frame is the one it always was and no golden
+  moved on any rasteriser.
+
+  A switched-off effect is fewer recorded passes and one different bound
+  descriptor, never a shader permutation: shadows off records no cull and no
+  draw into the atlas, which keeps its reversed-Z clear and reads as fully lit;
+  reflections off tonemaps the forward pass's own scene colour, bit for bit;
+  ambient occlusion off replaces the pass pair with a clear of the occlusion
+  channel to 1.0. `apps/lumen` reaches all three from the command line with
+  `--no-shadows`, `--no-ao` and `--no-reflections`, and its debug panel and
+  headless summary both name the **resolved** set.
+
+  Two of the four layers are present and have no source in the tree — there is
+  no render-stack RON, and nothing builds a settings stack at startup — and the
+  device clamp currently removes nothing, which is a fact about these three
+  effects rather than an unfinished clamp. `docs/backlog.md` carries all three
+  statements and what each would take.
+
 - **Screen-space reflections.** `shaders/ssr.slang` marches the depth prepass in
   screen space, reads `F0` and roughness out of the reflectivity attachment, and
   writes the reflection it finds; `shaders/ssr_blur.slang` filters that with
