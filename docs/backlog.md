@@ -7620,3 +7620,120 @@ about something that no longer happens, and it constrains where a future scene
 may put a large box for no reason. Not touched here because re-verifying it
 means deliberately sliding the AO box off-axis and re-blessing nothing — a
 ten-minute job for somebody already in that file.
+
+## The scene API: the slice plan (decided 2026-08-13)
+
+`apps/lumen` could not be built because an application cannot describe a scene:
+`ForwardRenderer::begin_frame` takes the cube's transform as an argument, five
+`set_*` methods place instances of meshes the renderer uploaded to itself, and
+there is no mesh, instance or material call on the type. The roadmap already put
+P9's scene work before S4B while P7B's deliverable named lumen. **Resolved by
+pulling the scene work forward**, rather than by moving lumen.
+
+### The shape
+
+The resident set becomes a description the app hands to `new`; instances become
+a runtime API. That split is where the seam already is: pools, the cluster pool,
+the bucket table and the page are fixed at build and never grow, while
+`MaterialTable::insert` and `InstancePool::insert`/`set`/`remove` are already
+per-frame paths. A runtime `add_mesh` would mean recreating the camera's
+`DrawGen` and the four shadow ones plus every bind group naming their buffers
+mid-life, which is the streaming path `crcbl-render`'s own `mesh_pool` docs
+already assign to P9.
+
+`SceneDesc` = meshes + materials + page + capacities, consumed by a `with_scene`
+constructor; `ForwardRenderer::new` becomes `with_scene(&scene::demo())` so
+every existing caller is untouched.
+
+### The slices, in dependency order
+
+Each is independently committable and CI-green, and the six apps build at every
+boundary. **The first five must leave every golden byte-identical** — the demo
+scene becomes a caller of the new API rather than a special case inside the
+renderer, so a golden that moves in them is a bug in the move, not a re-bless.
+
+1. Move the resident set into a description. `SceneDesc`/`MeshDesc`/`Geometry`/
+   `PageDesc`/`Capacities` as host-side types with no device in them, plus
+   `scene::demo()` reproducing today's residents exactly. The bucket table
+   generalises from four named constants to one bucket per description mesh.
+2. `add_instance`/`set_instance`/`remove_instance`, with the five `set_*`
+   methods surviving as wrappers so all 76 of their call sites are untouched.
+3. `begin_frame` loses its `model` argument; the cube becomes an ordinary
+   instance. Roughly a dozen call sites.
+4. App-supplied materials and page layers.
+5. App-supplied meshes, which is mostly making the failure paths honest.
+6. Reach the cook from an app: `crcbl-scene` behind a non-default `scene`
+   feature so `gltf` does not reach a wasm binary, and the meshlet/DAG cook
+   moved out of `crcbl-shaders/tools/cook-clusters.rs` into the crate.
+7. `apps/lumen` on top of it.
+
+### Flat meshes only, and why that is not negotiable yet
+
+`build_meshlets` needs positions alone and emits vertex runs indexing the
+original array, so attributes survive exactly — a flat app mesh is fine. **A
+cluster DAG is not.** `crcbl_scene::simplify` is position-only and says so in
+its own module docs: a coarse level has no normals and no UVs. The engine's one
+DAG works because the dunes patch is analytic — `residents` synthesises each
+coarse vertex through `crcbl_shaders::dunes::vertex_at`. An app-supplied DAG
+needs attribute-aware simplification or nearest-source attribute transfer, which
+is unbuilt topic 25 work listed in that plan's own risks. `Geometry::Dag` exists
+in the API and carries that constraint in its documentation, so the limitation
+is stated at the type rather than discovered.
+
+### Capacity: a documented cap the caller chooses, never growth
+
+The `POOL_*` constants become fields of `Capacities`, whose `Default` is today's
+numbers. Growth is out for the reason `mesh_pool` already argues — every bind
+group names those buffers. `MeshPoolError::PoolExhausted` must reach the caller
+rather than being flattened, because it distinguishes fragmentation from a full
+pool. Worth knowing while sizing: raising the instance cap is not linear, since
+the LOD hysteresis buffer is per instance per `DrawGen` and there are five.
+
+### Effect toggles are NOT part of this
+
+`add_passes` records shadows, prepass, light grid, SSAO and the blur
+unconditionally, and lumen's charter wants per-effect switches. That is a
+separate topic 18 slice: that document already specifies a four-layer resolution
+order — camera stack, `[engine.video]`, programmatic override, device capability
+— and a `bool` on `add_passes` is not it and would be replaced by it. Only the
+AO switch is sanctioned today, and its mechanism already exists as the 1x1 white
+placeholder. Turning shadows off also moves `MAX_PASSES`, `PassTimers` sizing
+and `FrameCounters`, which is a golden-moving change on purpose.
+
+### Deliberately left at P9-proper
+
+`AssetSource`/`AssetRegistry` and refcounting (nothing depends on it, and
+`SceneDesc` borrows byte slices so the registry wires into the same seam later);
+glTF import into the pools (the importer exists, but glTF instances carry
+non-rigid transforms which `GpuInstance::transform` forbids, and that is a
+decision rather than a wiring job); RON scene files and the deterministic
+writer; hot reload; material templates; the glTF corpus; runtime `add_mesh`;
+texture slots beyond the page.
+
+### Where the refactor could silently change a frame
+
+Ordered by how quietly each would fail. Row 0 of the material table is what
+`GpuInstance::default` names, so a reordered description swaps the pyramids'
+materials. Mesh table ids come from upload order and the cull pass reads a
+bounding box out of the entry the instance names, which for a DAG is level 0's.
+Page layer 0 must stay opaque white or every untextured material is scaled by a
+texel that is not 1.0 — a global albedo change that reads as a lighting
+difference. `draw_gen`'s scatter takes the first bucket whose mesh id matches,
+so two buckets naming one mesh means the second never draws. Instance index is
+the LOD hysteresis key, inert with one DAG instance and not inert with two. And
+the rollback path gains new early-failure points that must sit on the same side
+of the self-cleaning handover, or a rejected description leaks two device-local
+buffers.
+
+**Four of these are invisible to `cargo test`**: `crcbl-render`'s unit tests run
+on the null backend and cannot tell a right frame from a wrong one. Slices 1, 3
+and 4 are verified by `run-render-e2e.sh` and `run-vk-e2e.sh` on a real device
+or they are not verified.
+
+### Open, and the one dependency call
+
+Whether `crcbl` should take `crcbl-scene` at all, versus splitting the meshlet
+and DAG builders out of it into a crate that does not carry `gltf`. The
+feature-gate is the smaller move and is what slice 6 does; the split is cleaner
+and is its own change. Also unmeasured: the cook's load-time cost — time the
+`cook-clusters` example rather than quoting a guess.
