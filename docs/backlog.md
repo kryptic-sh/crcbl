@@ -5910,9 +5910,11 @@ All were real, all are fixed, and all three are invisible to a mouse:
   logged value moves with the paddle; the check counts blue pixels in the bottom
   band instead, measured 1:1 against the touch x. Worth knowing before someone
   looks for a HUD line that does not exist.
-- **Pause, fullscreen and the debug overlay are keyboard-only on a phone.** The
-  demo pages now say so rather than printing `F11` at someone with no keyboard;
-  making them reachable is on-screen-controls work.
+- **Horde has a PAUSE button; the other four demos still do not.** Pause is the
+  only route to fullscreen and the debug panel, so on those four a phone can
+  start a run and never stop it. `web/templates/demo-loop-keys.html` now says
+  "keys — unless a control for them is listed above" and only horde's page lists
+  one.
 - **The seam carries contacts now.**
   `ShellEvent::Touch { contact, phase, position }` with `ContactId` and
   `TouchPhase`, routed to `HostedGame::touch_event`. Decisions taken:
@@ -5955,12 +5957,41 @@ All were real, all are fixed, and all three are invisible to a mouse:
   contact surfaces. That is a deliberate coupling to `ShellEvent`'s `Debug`
   shape: it will fail loudly if the variant is reshaped, which is the intended
   behaviour, but it is not a contract anyone declared.
-- **Horde still has no on-screen controls.** The seam is the prerequisite and it
-  is done; the widgets are topic 19's `Virtual("stick_move")` — an on-screen
-  control id emitted by a `crcbl-ui` widget acting as a virtual device, **not**
-  a binding on a raw contact. `crcbl-input` was deliberately not touched: raw
-  contacts feed the widgets, the widgets feed `ActionMap`, and a contact binding
-  now would be the speculative half.
+- **Horde's on-screen controls landed**: `crcbl_ui::touch`'s `TouchStick` and
+  `TouchButton` are widgets acting as a virtual device, and `Binding::Virtual`
+  is what `ActionMap` binds them through — topic 19's design, built. Decisions:
+  - **The stick floats**, appearing where the thumb lands. Held two-handed every
+    fixed position is wrong for some grip, and a floating origin reads exactly
+    `(0, 0)` on the frame the finger lands, so the widget needs no dead zone.
+  - **A stick's deflection lands in the same accumulator `Wasd` uses**, so a key
+    and a stick sum inside the unit disc rather than to twice the speed.
+    `Binding::Virtual` on an `Axis1` is inert and a test pins that: a stick has
+    no way to choose one axis.
+  - **First come, first served, and a second finger on a held control is
+    refused** and passed to the next control. The button is offered first
+    because it has a rectangle and can decline; the stick claims whatever is
+    left, so the whole field is somewhere to put a thumb.
+  - **Controls appear once a contact has arrived**, not on `ShellCaps::TOUCH` —
+    a desktop with a touchscreen sets that too. A desktop player sees nothing
+    change, and no golden can move because a headless golden never touches
+    glass.
+  - **`Cancelled` and `Ended` agree for a stick** and the code says so in one
+    arm: a stick has nothing latched, its value _is_ the command, and it is zero
+    the moment the contact goes. The distinction is real for the button, which
+    is where the code branches.
+  - **Horde got a PAUSE button as well as a stick**, because pause is the loop's
+    and not a game action, so a phone could start a run and never stop it. It
+    needed `HostedGame::take_pending_pause`, modelled on
+    `take_pending_frame_limit`.
+
+- **A held control blocks every menu tap.** Only the primary contact drives the
+  emulated pointer, so while a thumb holds the stick nothing else can press a
+  menu button — which is why the pause button reads contacts directly. It also
+  means a player who pauses must lift the stick before RESUME can be tapped.
+  Worth fixing; not fixed.
+- **A control refused while a panel is up does not re-grab when the panel
+  closes.** A finger already down has to lift and land again.
+- **Horde's in-frame HUD still says "WASD to move" on a phone.**
 - **`web/engine/shell.js` is the one web file prettier would rewrite**, and it
   was already so before this work: 350 lines of drift at `HEAD`, against
   `demo.js`, `style.css` and the templates which all pass. Reformatting it is a

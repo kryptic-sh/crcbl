@@ -59,7 +59,7 @@
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Booted, Clock, ExitReason, FrameInfo, HostedGame, RunSummary, wait_for_configure,
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, RunSummary, TouchUpdate, wait_for_configure,
 };
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
@@ -69,6 +69,7 @@ use crcbl::shell::{
 use crcbl::ui::draw_list::DrawList;
 
 use crate::art::SceneStats;
+use crate::controls::Controls;
 use crate::game::{self, Game, GameState, RenderState, UPGRADE_CHOICES, Upgrade};
 use crate::gpu::Gpu;
 use crate::menu::{self, HordeAction, LevelUpOffer, MenuKind, Menus};
@@ -166,6 +167,11 @@ pub struct Horde {
     /// Recorded rather than asked for at teardown, because the scene is rebuilt
     /// every frame and the run's last one is what the report is about.
     scene: SceneStats,
+    /// The movement stick and the pause button a finger plays this game with.
+    ///
+    /// Invisible, and inert, until a contact actually arrives — see
+    /// [`crate::controls`]. Nothing about a keyboard-and-mouse run changes.
+    controls: Controls,
 }
 
 /// The loop horde runs in.
@@ -278,6 +284,10 @@ fn assemble<S: Shell + ?Sized>(
         game.key_event(RESTART_KEY, false);
         crcbl::log::info!("prefill: started the run without waiting for the title screen");
     }
+    // The extent the swapchain actually opened at, so the controls have a real
+    // surface to lay out on before the first frame is drawn — a contact can
+    // arrive in the same pump as the first configure.
+    let controls = Controls::new(booted.gpu.extent());
     Ok(Loop::new(
         booted,
         Horde {
@@ -288,6 +298,7 @@ fn assemble<S: Shell + ?Sized>(
             choose: options.choose,
             choose_taken: None,
             scene: SceneStats::default(),
+            controls,
         },
         options.common.loop_config(),
     ))
@@ -332,6 +343,28 @@ impl HostedGame for Horde {
         // Forwarded to the game, which replays it at the start of the next
         // tick. A frame that runs no ticks loses nothing.
         self.game.key_event(key, pressed);
+    }
+
+    /// One finger, offered to the on-screen controls and then reported as a
+    /// **device**.
+    ///
+    /// The stick's deflection is pushed after every contact event rather than
+    /// once a frame, so a thumb that moves reaches the tick that runs in the
+    /// same frame: the pump is before the ticks and the draw is after them, and
+    /// a value handed over in the draw would be a frame of lag on every step the
+    /// player takes.
+    ///
+    /// Pushed even when the value has not changed, which costs one `f32` pair
+    /// and removes a class of bug: a lift and a cancel both centre the stick,
+    /// and both go out through this same line.
+    fn touch_event(&mut self, touch: TouchUpdate) {
+        self.controls.touch(touch);
+        let stick = self.controls.stick();
+        self.game.stick_moved(stick.x, stick.y);
+    }
+
+    fn take_pending_pause(&mut self) -> bool {
+        self.controls.take_pause()
     }
 
     fn menu_action(id: crcbl::ui::WidgetId) -> Option<HordeAction> {
@@ -384,6 +417,12 @@ impl HostedGame for Horde {
                 self.choose_taken = Some(identity);
             }
         }
+        // **After the auto-choose, and with the kind this frame settled on.**
+        // A panel takes the on-screen controls away and centres a held stick —
+        // see [`Controls::set_panel_up`] — and the contacts that arrive before
+        // the next call are hit-tested against this answer, which is the same
+        // "last frame's menu" rule the loop applies to its own pointer.
+        self.controls.set_panel_up(kind != MenuKind::None);
         kind
     }
 
@@ -393,6 +432,18 @@ impl HostedGame for Horde {
         self.scene = gpu.scene_stats();
         self.hud.refresh(&self.render_state, frame.paused);
         draw_hud(draw_list, &self.hud);
+        // After the HUD and before the menu, which is appended to this same list
+        // by the loop: a control belongs over the field it is steering something
+        // across, and under the panel that has taken it away.
+        //
+        // **This frame's menu, not the one `menu_kind` last reported.** The loop
+        // asks for the draw before it asks which menu the frame shows, and
+        // `MenuKind::of` is a pure function of the two things this method has
+        // already refreshed — so the controls go away on the same frame the
+        // panel arrives rather than a frame late.
+        let panel_up = MenuKind::of(frame.paused, &self.render_state) != MenuKind::None;
+        self.controls.layout(gpu.extent(), gpu.atlas());
+        self.controls.render(draw_list, gpu.atlas(), panel_up);
     }
 
     /// **This sample's own module, and the only one any sample adds.**
@@ -653,7 +704,11 @@ fn draw_hud(dl: &mut DrawList, hud: &HudStrings) {
 /// The HUD backdrop's top-left corner, in framebuffer pixels.
 const HUD_ORIGIN: Vec2 = Vec2::new(4.0, 4.0);
 /// Where the backdrop ends. See [`HUD_STAT_SIZE`].
-const HUD_PANEL_RIGHT: f32 = 820.0;
+///
+/// `pub(crate)` for one reason: `crate::controls` puts the pause button in the
+/// top-right corner and asserts it clears this, so the two layouts are held
+/// apart by the number itself rather than by two people eyeballing a screenshot.
+pub(crate) const HUD_PANEL_RIGHT: f32 = 820.0;
 /// Where both lines of text start.
 const HUD_TEXT_X: f32 = 10.0;
 /// The stat line's font size, and the reason the panel is as wide as it is.
@@ -680,7 +735,7 @@ mod tests {
     use crcbl::engine::{DEBUG_OVERLAY_KEY, Flow, PAUSE_KEY};
 
     use super::*;
-    use crcbl::core::input::PointerButton;
+    use crcbl::core::input::{ContactId, PointerButton, TouchPhase};
     use crcbl::math::DVec3;
     use crcbl::shell::{ButtonState as PointerState, HeadlessShell, PhysicalPoint, ShellBackend};
     use crcbl::ui::draw_list::DrawCommand;
@@ -823,6 +878,237 @@ mod tests {
                 .expect("the window is live");
             engine.frame().expect("a frame");
         }
+    }
+
+    /// Posts one contact event, in framebuffer pixels, and runs the frame that
+    /// folds it.
+    fn finger(engine: &mut Loop<HeadlessShell>, contact: ContactId, phase: TouchPhase, at: Vec2) {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .touch(
+                window,
+                contact,
+                phase,
+                PhysicalPoint {
+                    x: f64::from(at.x),
+                    y: f64::from(at.y),
+                },
+            )
+            .expect("the headless shell reports TOUCH");
+        engine.frame().expect("a frame");
+    }
+
+    /// A loop with the run under way and no panel on screen, which is the state
+    /// the on-screen controls are live in.
+    fn playing(frames: u64) -> Loop<HeadlessShell> {
+        let mut engine = scripted(&headless(frames));
+        run_frames(&mut engine, 4);
+        assert_eq!(
+            engine.game().game().state,
+            GameState::Playing,
+            "the fixture never left the title screen, so no control is live",
+        );
+        engine
+    }
+
+    /// **A finger on the field walks the wizard, and letting go stops him.**
+    ///
+    /// The whole chain in one test: a contact the shell posted, through the
+    /// loop's normalisation, into a `crcbl-ui` stick, out as a
+    /// `Binding::Virtual` on the same `move` action `WASD` drives, and into the
+    /// simulation's velocity. The *direction* is asserted rather than "it
+    /// moved": a stick whose axes were swapped or whose sign was flipped moves
+    /// the wizard just as far.
+    #[test]
+    fn a_finger_on_the_field_walks_the_wizard() {
+        let mut engine = playing(240);
+        let start = engine.game().game().player;
+
+        // Deflected right, well past the dead zone: the pad is a fraction of
+        // the surface, and 200 px is past the throw at this extent.
+        let grab = Vec2::new(300.0, 500.0);
+        finger(&mut engine, ContactId(1), TouchPhase::Began, grab);
+        finger(
+            &mut engine,
+            ContactId(1),
+            TouchPhase::Moved,
+            grab + Vec2::new(200.0, 0.0),
+        );
+        run_frames(&mut engine, 30);
+
+        let walked = engine.game().game().player;
+        assert!(
+            walked.x > start.x + 1.0,
+            "a thumb pushed right walked the wizard from {start} to {walked}",
+        );
+        assert!(
+            (walked.y - start.y).abs() < 0.5,
+            "pushing due right also moved him up or down: {start} to {walked}",
+        );
+
+        // Straight up the screen is +Y in the world, which is the flip that
+        // would send him south if it were missing.
+        finger(
+            &mut engine,
+            ContactId(1),
+            TouchPhase::Moved,
+            grab - Vec2::new(0.0, 200.0),
+        );
+        run_frames(&mut engine, 30);
+        let north = engine.game().game().player;
+        assert!(
+            north.y > walked.y + 1.0,
+            "a thumb pushed up the screen walked him {} instead",
+            north.y - walked.y,
+        );
+
+        // And the lift stops him: the stick centres, so the next frames move
+        // him nowhere at all.
+        finger(
+            &mut engine,
+            ContactId(1),
+            TouchPhase::Ended,
+            grab - Vec2::new(0.0, 200.0),
+        );
+        run_frames(&mut engine, 2);
+        let released = engine.game().game().player;
+        run_frames(&mut engine, 30);
+        assert_eq!(
+            engine.game().game().player,
+            released,
+            "a lifted finger left the wizard walking",
+        );
+    }
+
+    /// **A cancelled gesture stops him too, and does not commit the direction
+    /// he was last pushed in.**
+    ///
+    /// `TouchPhase::Cancelled` is "undo rather than commit", and for a stick
+    /// that means the value goes to zero rather than latching the direction the
+    /// thumb happened to be pushing. No finger is lifted anywhere in this test:
+    /// the system takes the gesture, which is what an edge swipe or a palm
+    /// rejection does.
+    #[test]
+    fn a_cancelled_gesture_stops_the_wizard() {
+        let mut engine = playing(240);
+        let grab = Vec2::new(300.0, 500.0);
+        let pushed = grab + Vec2::new(200.0, 0.0);
+        finger(&mut engine, ContactId(1), TouchPhase::Began, grab);
+        finger(&mut engine, ContactId(1), TouchPhase::Moved, pushed);
+        run_frames(&mut engine, 10);
+
+        // The control: he really is walking, so "he stopped" below is a change
+        // and not the state he was already in.
+        let walking = engine.game().game().player;
+        run_frames(&mut engine, 10);
+        assert!(
+            engine.game().game().player.x > walking.x,
+            "the fixture was not actually walking, so this proves nothing",
+        );
+
+        finger(&mut engine, ContactId(1), TouchPhase::Cancelled, pushed);
+        run_frames(&mut engine, 2);
+        let cancelled = engine.game().game().player;
+        run_frames(&mut engine, 30);
+        assert_eq!(
+            engine.game().game().player,
+            cancelled,
+            "the wizard kept walking after the system took the gesture away",
+        );
+    }
+
+    /// **Two fingers, two controls, at the same time.**
+    ///
+    /// The claim this slice exists to make, and the one no earlier sample could
+    /// make: the thumb on the stick is the *primary* contact, so the second
+    /// finger raises no pointer event at all and pauses the game anyway. Both
+    /// halves are asserted — the wizard was walking from the first contact when
+    /// the second one landed, and the pause came from the second.
+    #[test]
+    fn a_second_finger_pauses_while_the_first_is_walking() {
+        let mut engine = playing(240);
+        let grab = Vec2::new(300.0, 500.0);
+        finger(&mut engine, ContactId(1), TouchPhase::Began, grab);
+        finger(
+            &mut engine,
+            ContactId(1),
+            TouchPhase::Moved,
+            grab + Vec2::new(200.0, 0.0),
+        );
+        run_frames(&mut engine, 20);
+        let before = engine.game().game().player;
+        run_frames(&mut engine, 10);
+        assert!(
+            engine.game().game().player.x > before.x,
+            "the first finger is not walking him, so the pause below proves \
+             nothing about two fingers",
+        );
+        assert!(!engine.is_paused());
+
+        // The second finger, on the button, while the first has not moved.
+        let button = crate::controls::pause_centre(engine.gpu().extent());
+        finger(&mut engine, ContactId(2), TouchPhase::Began, button);
+        assert!(!engine.is_paused(), "a press paused it before the lift");
+        finger(&mut engine, ContactId(2), TouchPhase::Ended, button);
+        assert!(
+            engine.is_paused(),
+            "the second finger did not pause the run"
+        );
+
+        let paused_at = engine.game().game().player;
+        run_frames(&mut engine, 20);
+        assert_eq!(
+            engine.game().game().player,
+            paused_at,
+            "a paused game kept walking",
+        );
+    }
+
+    /// **The pause button is on the frame once a finger has arrived**, laid out
+    /// where `crate::controls` says, and not there before.
+    ///
+    /// At the extent a browser canvas actually opens at rather than at the
+    /// window's default: the button is placed from the *surface's* corner, and a
+    /// short wide canvas is where a corner-relative layout goes wrong.
+    #[test]
+    fn the_pause_button_reaches_the_frame_once_a_finger_has_landed() {
+        const CANVAS: (u32, u32) = (959, 463);
+        let mut options = headless(240);
+        options.common.size = Some(crcbl::shell::PhysicalSize {
+            width: CANVAS.0,
+            height: CANVAS.1,
+        });
+        let mut engine = at_the_title_screen(&options);
+        start_the_run(engine.game_mut().game_mut());
+        run_frames(&mut engine, 4);
+        assert_eq!(engine.gpu().extent(), CANVAS);
+        assert_eq!(engine.game().game().state, GameState::Playing);
+
+        assert!(
+            !ui_text(&engine).iter().any(|text| text == "PAUSE"),
+            "a run nobody has touched drew an on-screen control",
+        );
+
+        finger(
+            &mut engine,
+            ContactId(1),
+            TouchPhase::Began,
+            Vec2::new(300.0, 300.0),
+        );
+        run_frames(&mut engine, 2);
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "PAUSE"),
+            "the button never reached the frame: {:?}",
+            ui_text(&engine),
+        );
+
+        // And a contact at its centre really is on it — the same point the
+        // browser gate taps, checked here where a failure names the rectangle.
+        let centre = crate::controls::pause_centre(CANVAS);
+        finger(&mut engine, ContactId(2), TouchPhase::Began, centre);
+        finger(&mut engine, ContactId(2), TouchPhase::Ended, centre);
+        assert!(engine.is_paused(), "a tap on the button did not pause");
     }
 
     /// `--size` reaches the window: the headless offscreen ring opens at the

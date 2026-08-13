@@ -2614,6 +2614,32 @@ pub struct TouchUpdate {
     pub at: glam::Vec2,
 }
 
+impl TouchUpdate {
+    /// Where this contact is in **framebuffer pixels**, Y down from the
+    /// top-left.
+    ///
+    /// The one thing a normalised position cannot do is hit-test a widget: an
+    /// on-screen control is laid out in the same pixels the [`DrawList`] it
+    /// draws into uses, and a circle in normalised coordinates is an ellipse on
+    /// a surface that is not square. So the conversion back lives here, beside
+    /// the one that got us here, rather than in each game that grows a control —
+    /// two halves of one convention, and
+    /// `a_contact_survives_the_round_trip_through_the_surface` holds them
+    /// together.
+    ///
+    /// [`DrawList`]: crcbl_ui::draw_list::DrawList
+    #[must_use]
+    pub fn pixels(&self, extent: (u32, u32)) -> glam::Vec2 {
+        let width = extent.0.max(1) as f32;
+        let height = extent.1.max(1) as f32;
+        glam::Vec2::new(
+            (self.at.x + 1.0) * 0.5 * width,
+            // The Y flip `normalised` applied, undone.
+            (1.0 - self.at.y) * 0.5 * height,
+        )
+    }
+}
+
 /// Framebuffer pixels to the −1…1 the game binds against, +Y up.
 fn normalised(point: glam::Vec2, extent: (u32, u32)) -> glam::Vec2 {
     let width = extent.0.max(1) as f32;
@@ -3463,6 +3489,29 @@ pub trait HostedGame: Sized {
         None
     }
 
+    /// Whether an on-screen control asked the loop to toggle the pause since it
+    /// last looked.
+    ///
+    /// [`PAUSE_KEY`] is the loop's and never reaches the game, which leaves the
+    /// pause unreachable on a device with no keyboard: a phone can start a run
+    /// and then cannot stop it, and the pause menu — the only place fullscreen
+    /// and the debug panel are tappable — cannot be opened at all. This is the
+    /// way back, and it is a *request* rather than a state so that the loop
+    /// stays the only thing that knows whether the simulation is running.
+    ///
+    /// Taken like [`take_pending_frame_limit`](Self::take_pending_frame_limit),
+    /// and for the same reason: a control that re-reports its state every frame
+    /// would toggle the pause every frame. A frame carrying both this and the
+    /// key is **one** toggle, not two — the player asked for the pause once.
+    ///
+    /// The `false` default is the honest answer for a game with no on-screen
+    /// controls, and it is not an opt-in hook reporting success by doing
+    /// nothing: a game that never overrides it is a game whose pause is the key,
+    /// which is every game that came before touch.
+    fn take_pending_pause(&mut self) -> bool {
+        false
+    }
+
     /// Adds this game's own fields to the run's shared ones.
     fn summary(&self, run: RunSummary) -> Self::Summary;
 
@@ -3542,6 +3591,16 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// next tap, so the bug is not a stuck paddle — it is a button that stops
     /// working.
     pointer_in_game: bool,
+    /// Whether the press the pointer is holding was made **on a panel**, and so
+    /// whether a menu may act on it.
+    ///
+    /// [`Self::pointer_in_game`]'s opposite number, and the two are exclusive by
+    /// construction: a press goes to the game or to the menu depending on
+    /// whether one was on screen when it landed, and it stays there until it is
+    /// released. Without this a menu opened under a held pointer — which on a
+    /// phone is any menu opened while a finger holds an on-screen control —
+    /// fires the button that happens to appear beneath it.
+    menu_owns_press: bool,
     /// Contacts the game was told began and not yet told ended, with where each
     /// was last seen.
     ///
@@ -3599,6 +3658,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             paused: false,
             held_keys: Vec::new(),
             pointer_in_game: false,
+            menu_owns_press: false,
             live_contacts: Vec::new(),
             mode: ModeRequest::new(),
             budget: FrameBudget::new(config.frames),
@@ -3684,9 +3744,34 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // cursor as the player asking for something every frame.
         let pointer_moved = pending.pointer != self.pointer.at();
         let pointer_input = self.pointer.resolve(&pending);
-        let from_pointer = self
-            .menus
-            .point(self.gpu.extent(), self.gpu.atlas(), pointer_input);
+        // **A press that began before the panel did is not the panel's.**
+        //
+        // `UiState` latches a button while the pointer is *down* over it, so a
+        // pointer that was already held when a menu opened latches whatever
+        // button appeared underneath and fires it on release — a click the
+        // player never made on a panel that was not there when they pressed.
+        // Rare with a mouse, and the ordinary case on a phone: the thumb
+        // holding an on-screen stick **is** the emulated pointer, so every menu
+        // opened with the other hand opens under a held press.
+        //
+        // The rule is the mirror of the one three lines down, where a press
+        // over a panel does not reach the game: whoever the press was made on
+        // keeps it until it is released.
+        if pending.pointer_pressed && showing {
+            self.menu_owns_press = true;
+        }
+        let from_pointer = self.menus.point(
+            self.gpu.extent(),
+            self.gpu.atlas(),
+            crcbl_ui::PointerInput {
+                down: pointer_input.down && self.menu_owns_press,
+                released: pointer_input.released && self.menu_owns_press,
+                ..pointer_input
+            },
+        );
+        if pending.pointer_released {
+            self.menu_owns_press = false;
+        }
         for id in [from_keyboard, from_pointer].into_iter().flatten() {
             if let Some(action) = MenuAction::from_id(id, G::menu_action) {
                 self.apply(action)?;
@@ -3777,7 +3862,12 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                 });
             }
         }
-        if pending.toggle_pause {
+        // Taken every frame rather than only when the key did not fire, so a
+        // press left pending behind an Escape is not still waiting on the next
+        // frame to toggle the pause a second time. Both in one frame is one
+        // toggle: the player asked once, with two fingers or with two hands.
+        let pause_control = self.game.take_pending_pause();
+        if pending.toggle_pause || pause_control {
             self.paused = !self.paused;
             log::info!("game {}", if self.paused { "paused" } else { "resumed" });
         }
@@ -3911,6 +4001,15 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     /// UI pass through the draw list.
     fn draw_menu(&mut self) {
         let kind = self.game.menu_kind(&mut self.menus, self.paused);
+        // A panel that has been replaced takes the press with it, the same way
+        // [`MenuSet::show`] drops the capture: the button the press landed on is
+        // not on screen any more, and the next panel's button in the same place
+        // is not the one anybody pressed. Cleared here rather than left to
+        // `show`, because the *loop's* half of the ownership is what decides
+        // whether the pointer reaches the panel at all.
+        if kind != self.menus.kind() {
+            self.menu_owns_press = false;
+        }
         self.menus.show(kind);
         let layout = self
             .menus
@@ -7492,6 +7591,8 @@ mod tests {
         served: bool,
         /// A frame limit a settings screen asked for, taken by the loop.
         pending_limit: Option<FrameLimit>,
+        /// A pause an on-screen control asked for, taken by the loop.
+        pending_pause: bool,
     }
 
     /// This game's own summary: the shared half, plus a count only it kept.
@@ -7597,6 +7698,10 @@ mod tests {
 
         fn take_pending_frame_limit(&mut self) -> Option<FrameLimit> {
             self.pending_limit.take()
+        }
+
+        fn take_pending_pause(&mut self) -> bool {
+            std::mem::take(&mut self.pending_pause)
         }
 
         fn summary(&self, run: RunSummary) -> FakeSummary {
@@ -8140,6 +8245,173 @@ mod tests {
             "a paused frame stopped presenting",
         );
         assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+    }
+
+    /// **A press made before a panel opened does not fire that panel's
+    /// buttons.**
+    ///
+    /// The pointer is held down over the field, a menu opens under it, and the
+    /// release lands on a button the player never pressed. With a mouse it takes
+    /// a deliberate press-and-hold; on a phone it is the ordinary case, because
+    /// the thumb holding an on-screen stick *is* the emulated pointer and every
+    /// menu opened with the other hand opens under a held press. Found exactly
+    /// that way — `web/tools/browser-e2e.mjs` watched horde ask for fullscreen
+    /// when a thumb lifted off a pause menu it had never touched.
+    ///
+    /// The second half is the control: a press made *while* the panel is up
+    /// still fires it, so this is not a menu that stopped answering the pointer.
+    #[test]
+    fn a_press_made_before_a_panel_opened_does_not_fire_its_buttons() {
+        let mut engine = hosted(None);
+        // Frames first: the fixture's swapchain settles at its final extent a
+        // frame or two in, and a menu laid out before that is laid out for a
+        // surface that is about to change size.
+        for _ in 0..3 {
+            engine.frame().expect("the fake never fails");
+        }
+        let pause = |engine: &mut Loop<crcbl_shell::HeadlessShell, FakeGame>| {
+            let window = engine.window();
+            for state in [
+                crcbl_shell::ButtonState::Pressed,
+                crcbl_shell::ButtonState::Released,
+            ] {
+                engine
+                    .shell_mut()
+                    .key(window, PAUSE_KEY, state)
+                    .expect("the window is live");
+            }
+            engine.frame().expect("the fake never fails");
+        };
+        let button = |engine: &mut Loop<crcbl_shell::HeadlessShell, FakeGame>, at, state| {
+            let window = engine.window();
+            engine
+                .shell_mut()
+                .button(
+                    window,
+                    crcbl_core::input::PointerButton::Left,
+                    state,
+                    Some(at),
+                )
+                .expect("the window is live");
+            engine.frame().expect("the fake never fails");
+        };
+
+        // Where RESUME will be, read off the panel itself and then put away
+        // again: the press below has to land on a button that is not there yet.
+        pause(&mut engine);
+        let layout = engine.menu_layout().expect("the pause menu");
+        let item = layout.items()[0];
+        let centre = (item.min + item.max) * 0.5;
+        let over = crcbl_shell::PhysicalPoint {
+            x: f64::from(centre.x),
+            y: f64::from(centre.y),
+        };
+        pause(&mut engine);
+        assert!(!engine.is_paused(), "the fixture would not un-pause");
+
+        // Press on the field, open the panel under the held press, hold it
+        // there for a few frames, lift. **The held frames are the bug**: the
+        // press itself lands before the panel exists, and it is the frames
+        // after it — pointer still down, button now underneath — that latch it.
+        button(&mut engine, over, crcbl_shell::ButtonState::Pressed);
+        pause(&mut engine);
+        assert!(engine.is_paused(), "the panel never opened");
+        for _ in 0..2 {
+            engine.frame().expect("the fake never fails");
+        }
+        button(&mut engine, over, crcbl_shell::ButtonState::Released);
+        assert!(
+            engine.is_paused(),
+            "a press that predates the panel fired the button under it",
+        );
+
+        // The control: pressed *on* the panel, the same button still fires.
+        button(&mut engine, over, crcbl_shell::ButtonState::Pressed);
+        button(&mut engine, over, crcbl_shell::ButtonState::Released);
+        assert!(
+            !engine.is_paused(),
+            "a press made on the panel stopped working",
+        );
+    }
+
+    /// **A contact survives the round trip through the surface**, so a widget
+    /// hit-testing pixels and the loop normalising them agree.
+    ///
+    /// The pair is one convention with two halves, and the failure it guards is
+    /// silent: a `pixels` that dropped the Y flip would put every on-screen
+    /// control's hit rect in the mirror image of where it was drawn, and every
+    /// existing test would still pass.
+    #[test]
+    fn a_contact_survives_the_round_trip_through_the_surface() {
+        use crcbl_core::input::{ContactId, TouchPhase};
+        const EXTENT: (u32, u32) = (960, 720);
+
+        // Named corners, so a mirrored conversion fails on the value rather
+        // than on a tolerance.
+        for (pixels, want) in [
+            (glam::Vec2::new(0.0, 0.0), glam::Vec2::new(-1.0, 1.0)),
+            (glam::Vec2::new(960.0, 720.0), glam::Vec2::new(1.0, -1.0)),
+            (glam::Vec2::new(480.0, 360.0), glam::Vec2::ZERO),
+            (glam::Vec2::new(240.0, 540.0), glam::Vec2::new(-0.5, -0.5)),
+        ] {
+            let at = normalised(pixels, EXTENT);
+            assert_eq!(at, want, "{pixels} normalised wrong");
+            let back = TouchUpdate {
+                contact: ContactId(1),
+                phase: TouchPhase::Moved,
+                at,
+            }
+            .pixels(EXTENT);
+            assert_eq!(back, pixels, "{at} did not come back as {pixels}");
+        }
+    }
+
+    /// **An on-screen control pauses the loop, and un-pauses it again.**
+    ///
+    /// The half of the pause a phone can reach: no key is pressed anywhere in
+    /// this test, and the simulation stops and starts anyway. The tick counts on
+    /// either side are what says so — `is_paused` alone would pass on a flag the
+    /// loop set and then ignored.
+    #[test]
+    fn an_on_screen_control_can_pause_and_resume_the_loop() {
+        let mut engine = hosted(None);
+        // The first frame only establishes the clock's baseline, so it covers no
+        // time and runs no ticks — the control below has to be told from *that*,
+        // which is why the fixture is made to tick first.
+        for _ in 0..3 {
+            engine.frame().expect("the fake never fails");
+        }
+        assert!(
+            engine.game().ticks > 0,
+            "the fixture ticks when it is not paused",
+        );
+
+        engine.game_mut().pending_pause = true;
+        engine.frame().expect("the fake never fails");
+        engine.frame().expect("the fake never fails");
+        assert!(engine.is_paused(), "the control's request was dropped");
+        let ticks_paused = engine.game().ticks;
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            engine.game().ticks,
+            ticks_paused,
+            "a paused frame ran the simulation",
+        );
+        assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+
+        // …and the request is *taken*, so holding the control down does not
+        // toggle the pause once a frame.
+        engine.frame().expect("the fake never fails");
+        assert!(engine.is_paused(), "the pause toggled itself back off");
+
+        engine.game_mut().pending_pause = true;
+        engine.frame().expect("the fake never fails");
+        assert!(!engine.is_paused(), "a second press did not resume");
+        engine.frame().expect("the fake never fails");
+        assert!(
+            engine.game().ticks > ticks_paused,
+            "the simulation did not start again",
+        );
     }
 
     /// **The game is handed every contact, normalised, in order.**

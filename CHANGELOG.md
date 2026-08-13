@@ -334,6 +334,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Horde plays on a phone: a floating stick and a PAUSE button.**
+  `crcbl_ui::touch`'s `TouchStick` and `TouchButton` are widgets acting as a
+  virtual device, and `Binding::Virtual` is how `ActionMap` binds them — the
+  same table row a key sits in, so horde's `move` action is one `Axis2` bound to
+  WASD, the arrows and `Virtual("stick_move")` together. A stick's deflection
+  lands in the same accumulator the `Wasd` composite uses, so a key and a thumb
+  sum inside the unit disc rather than to twice the speed.
+
+  The stick appears where the thumb lands rather than at a fixed corner, because
+  every fixed position is wrong for some grip and a floating origin reads
+  exactly zero on the frame the finger arrives. A second finger on a held
+  control is refused and offered to the next one. Controls appear once a contact
+  has arrived — not on `ShellCaps::TOUCH`, which a desktop touchscreen also sets
+  — so a desktop player sees nothing change.
+
+  Pause came with it because pause is the loop's rather than a game action, so a
+  phone could otherwise start a run and never stop it, and the pause menu is the
+  only tappable route to fullscreen and the debug panel. `HostedGame` gained
+  `take_pending_pause`.
+
 - **The seam carries multiple contacts.**
   `ShellEvent::Touch { contact, phase, position }` with `ContactId` and
   `TouchPhase`, routed to a new `HostedGame::touch_event`. The web shell stops
@@ -679,6 +699,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   have two eyes undoing each other's band every frame.
 
 ### Fixed
+
+- **A press made before a panel opened fired that panel's buttons.** `UiState`
+  latches while the pointer is down, so a pointer already held when a menu
+  appears latched whatever button appeared beneath it and fired it on release —
+  rare with a mouse, and the ordinary case on a phone, where the thumb on the
+  movement stick _is_ the emulated pointer. Horde asked for fullscreen when that
+  thumb came off a pause menu it never touched. A press now belongs to whoever
+  was on screen when it landed, and a panel switch drops it.
 
 - **A tap on a menu button did nothing, so no demo could actually be started on
   a phone.** For a touch pointer the browser fires `pointerleave` in the same

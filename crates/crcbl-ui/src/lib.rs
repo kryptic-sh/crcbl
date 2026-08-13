@@ -9,6 +9,8 @@
 //! ```text
 //! Debug overlay ([`debug`])     ←  the modular profiler panel
 //!      │
+//! On-screen controls ([`touch`]) ←  the widgets a finger drives
+//!      │
 //! Widgets (Label, Button, …)   ←  this slice (P4-b)
 //!      │
 //!      ▼
@@ -35,6 +37,7 @@ pub mod draw_list;
 pub mod hud;
 pub mod menu;
 pub mod text;
+pub mod touch;
 pub mod widget;
 
 pub use budget::{Bound, BudgetStats, MIN_PERCENTILE_SAMPLES};
@@ -52,6 +55,7 @@ pub use text::{
     ASCENDER, ASCII_GLYPH_COUNT, FIRST_CHAR, FontAtlas, GLYPH_ADVANCE, GLYPH_COUNT, GLYPH_HEIGHT,
     GLYPH_WIDTH, GlyphMetrics, LAST_CHAR, LINE_HEIGHT, NOTDEF_INDEX, glyph_index,
 };
+pub use touch::{TouchButton, TouchStick};
 pub use widget::{
     Button, ButtonState, Label, NATURAL_FONT_SIZE, PointerInput, SkinInsets, Style, UiState,
     WidgetId,

@@ -62,6 +62,7 @@ mod args;
 mod art;
 mod audio;
 mod best;
+mod controls;
 mod game;
 mod gpu;
 mod menu;

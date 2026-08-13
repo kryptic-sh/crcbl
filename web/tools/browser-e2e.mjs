@@ -190,6 +190,13 @@ const EXPECTATIONS = {
     startedFailure: 'the state never left WaitingToStart',
     moving: /time: ([\d.]+)/,
     movingLabel: 'the clock advances under its own steam',
+    // **The demo with on-screen controls**, and the only one that can make the
+    // claim below: `walk` is where the wizard is standing, and nothing but the
+    // player's own movement input ever changes it — enemies do not push him and
+    // the arena does not drift. `pause` says this game draws a second control
+    // beside the stick, which is what lets one finger walk while another does
+    // something else entirely.
+    touch: { walk: /\bx: (-?[\d.]+)/, pause: true },
   },
   // **The demo with no input.** `apps/hud` is the UI system's fixture rather
   // than a game: its `HostedGame::key_event` is empty by design and its page is
@@ -395,6 +402,64 @@ const CLIMB_MS = 10_000;
 
 /** How long between the taps that keep a bird in the air. */
 const TAP_INTERVAL_MS = 120;
+
+/**
+ * Where the on-screen stick check puts its thumb, as fractions of the canvas
+ * box.
+ *
+ * Low enough to clear a centred menu and the HUD strip along the top, and a long
+ * way across: the throw is a fraction of the surface's shorter side, so a drag
+ * of a quarter of the width is full deflection at any size this runs at.
+ */
+const STICK_BAND = 0.62;
+const STICK_FROM = 0.35;
+const STICK_TO = 0.62;
+
+/**
+ * How far the wizard has to walk before the thumb is the only thing that can
+ * have moved him, in the world units his HUD line prints.
+ *
+ * `apps/horde` walks him at `PLAYER_SPEED` and nothing else in the game touches
+ * his position — no knockback, no drift — so anything above zero is already the
+ * claim. This is a margin over the two decimal places the line is printed to.
+ */
+const WALK_MARGIN = 1.0;
+
+/**
+ * How long the wizard is given to walk, and to stop again.
+ *
+ * A deadline on a poll, not a sleep. It is generous because the observable is
+ * the every-sixtieth-tick HUD line and a SwiftShader frame is slow enough that a
+ * simulated second is several wall ones.
+ */
+const WALK_MS = 25_000;
+
+/**
+ * How far inside the canvas's top-right corner the pause button is tapped, in
+ * the canvas's own device pixels.
+ *
+ * A deliberate coupling to `apps/horde/src/controls.rs`, which insets a
+ * 112 × 56 button by 12: any point at least this far in from the corner and no
+ * further than the button's own size lands on it. Written as one number rather
+ * than as the rectangle so that a button that is resized but stays in its corner
+ * does not move this file.
+ */
+const PAUSE_INSET = 40;
+
+/**
+ * A menu action the engine logs, for the checks that assert **no** button was
+ * fired.
+ *
+ * Resume, fullscreen and the debug panel are the three the loop owns, and two of
+ * them say so in the log. A deliberate coupling to `crcbl::engine`'s own lines,
+ * like `TOUCH_LINE`: a rename fails this loudly rather than quietly asserting
+ * nothing.
+ */
+const STRAY_MENU_ACTION = /game resumed|asked for borderless/;
+
+/** The engine's status while a demo is running, and while it is paused. */
+const STATUS_RUNNING = 3;
+const STATUS_PAUSED = 6;
 
 /**
  * How far above its starting height a flappy bird has to climb before the taps
@@ -2183,6 +2248,142 @@ try {
           : `y never passed ${bar} in ${CLIMB_MS} ms of tapping, which is ` +
               'what the flap the run started with does on its own'
       );
+    }
+
+    if (EXPECTED.touch.walk) {
+      // **The on-screen stick**, and the first thing in this file that is not
+      // the emulated pointer: a `crcbl-ui` widget takes the raw contacts, and
+      // reports through `Binding::Virtual` into the same `move` action `WASD`
+      // drives. The pointer cannot express this — a stick is a direction held
+      // continuously, and `Binding::PointerPosition` is a place.
+      const walkAt = (line) =>
+        Number(line?.match(EXPECTED.touch.walk)?.[1] ?? NaN);
+      /** The most recent position the HUD printed, or `NaN` if it never has. */
+      const wizardX = () => {
+        const seen = fresh().map(walkAt).filter(Number.isFinite);
+        return seen.at(-1) ?? NaN;
+      };
+      // Boxed, because `until` polls for something *truthy* and the wizard
+      // starts the run standing at exactly zero.
+      const found = await until(
+        async () => (Number.isFinite(wizardX()) ? { at: wizardX() } : null),
+        WALK_MS
+      );
+      const start = found?.at ?? NaN;
+
+      const grab = spot(STICK_FROM, STICK_BAND);
+      const pushed = spot(STICK_TO, STICK_BAND);
+      await touch('touchStart', [contact(grab, 1)]);
+      await touch('touchMove', [contact(pushed, 1)]);
+      // **The thumb stays down for the rest of this block.** A stick is a level
+      // and not an edge: the finger reports nothing while it rests, so a game
+      // that centred the stick between events would stop the wizard here.
+      const walked = await until(async () => {
+        const at = wizardX();
+        return at > start + WALK_MARGIN ? at : null;
+      }, WALK_MS);
+      check(
+        'F',
+        'a thumb on the field walks the wizard',
+        walked !== null,
+        walked === null
+          ? `x stayed at ${start} for ${WALK_MS} ms with a thumb pushing right`
+          : `x ${start} -> ${walked}, pushed right`
+      );
+
+      if (EXPECTED.touch.pause) {
+        // **Two fingers doing two things at once**, which no earlier demo could
+        // be asked to do: the thumb above is the *primary* contact, so the
+        // second finger raises no pointer event at all and its control is
+        // reached through the contact stream or not at all.
+        const box = await evaluate(
+          page,
+          `(() => { const c = document.getElementById('canvas');
+                    return { w: c.width, h: c.height }; })()`
+        );
+        const pauseSpot = spot(1 - PAUSE_INSET / box.w, PAUSE_INSET / box.h);
+        const running = await evaluate(page, `crcbl.status()`);
+        const beforeSecond = wizardX();
+        await touch('touchStart', [contact(pushed, 1), contact(pauseSpot, 2)]);
+        // The control on the negative claim below: with *both* fingers down,
+        // the wizard is still walking — so the second contact neither stole the
+        // stick nor centred it, and a pause that follows cannot be the first
+        // finger having been dropped.
+        const bothDown = await until(async () => {
+          const at = wizardX();
+          return at > beforeSecond + WALK_MARGIN ? at : null;
+        }, WALK_MS);
+        // **Only the second finger lifts**, which is what makes the pause the
+        // *second* one's doing. `Input.dispatchTouchEvent`'s `touchEnd` takes
+        // the points being **released** — an empty list is the "release
+        // everything" every other gesture in this file uses, and naming one
+        // point lifts that one and leaves the rest of the hand where it is.
+        await touch('touchEnd', [contact(pauseSpot, 2)]);
+        const paused = await until(async () => {
+          const status = await evaluate(page, `crcbl.status()`);
+          return status === STATUS_PAUSED ? status : null;
+        }, WALK_MS);
+        const stoppedAt = wizardX();
+        await pause(TICK_WINDOW_MS);
+        const stillStopped = wizardX();
+        check(
+          'F',
+          'a second finger pauses the run while the first keeps walking',
+          running === STATUS_RUNNING &&
+            bothDown !== null &&
+            paused === STATUS_PAUSED &&
+            stoppedAt === stillStopped,
+          running !== STATUS_RUNNING
+            ? `the demo was not running going in (status ${running})`
+            : bothDown === null
+              ? 'the second finger stopped the first one walking, so the ' +
+                'pause below says nothing about two fingers'
+              : `x reached ${bothDown} with two fingers down, status ` +
+                `${paused ?? (await evaluate(page, `crcbl.status()`))}, ` +
+                `x ${stoppedAt} -> ${stillStopped} while paused`
+        );
+
+        // **The thumb that was already down lifts, over a panel it never
+        // pressed.** It is the primary contact, so its lift is also a
+        // `pointerup`, and it lands wherever the panel happened to open — which
+        // for a centred menu is on a button. Nothing may fire: the press was
+        // made on the field, before this panel existed.
+        //
+        // Found here rather than reasoned about: this run asked for fullscreen
+        // when that thumb came off, and `crcbl::engine`'s
+        // `a_press_made_before_a_panel_opened_does_not_fire_its_buttons` is the
+        // fast test that came out of it.
+        const strayMark = consoleLines.length;
+        await touch('touchEnd');
+        await pause(TICK_WINDOW_MS);
+        const strayLines = consoleLines
+          .slice(strayMark)
+          .filter((line) => STRAY_MENU_ACTION.test(line));
+        const stillPaused = await evaluate(page, `crcbl.status()`);
+        check(
+          'F',
+          'a thumb that was down before the panel opened presses nothing',
+          strayLines.length === 0 && stillPaused === STATUS_PAUSED,
+          strayLines.length
+            ? `the lift fired ${strayLines.length} menu action(s): ${strayLines[0]}`
+            : `status ${stillPaused} after the stray lift`
+        );
+
+        // …and out through the pause menu's own button, which is what a phone
+        // can reach now that something can open the panel. The demo is left
+        // running, as every other group here leaves it.
+        await tap(spot(0.5, 0.5));
+        const resumed = await until(async () => {
+          const status = await evaluate(page, `crcbl.status()`);
+          return status === STATUS_RUNNING ? status : null;
+        });
+        check(
+          'F',
+          'the pause menu the button opened can be tapped shut again',
+          resumed === STATUS_RUNNING,
+          `status ${resumed ?? (await evaluate(page, `crcbl.status()`))}`
+        );
+      }
     }
   }
 

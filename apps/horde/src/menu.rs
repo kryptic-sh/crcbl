@@ -45,8 +45,8 @@
 //!
 //! Up, Down and Enter, and only while a menu is on screen. Two of the three are
 //! free — `game.rs` binds the arrows, WASD, Space, R and the digits — and
-//! **ArrowUp is not**: it is the second binding of the "up" movement action,
-//! beside `KeyW`.
+//! **ArrowUp is not**: it is the north key of the arrow composite bound to the
+//! `move` action, beside the WASD one.
 //!
 //! So while a panel is up, ArrowUp moves the selection instead of walking north.
 //! That is the same trade flappy and asteroids made and for the same two

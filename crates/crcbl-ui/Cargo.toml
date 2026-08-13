@@ -9,6 +9,10 @@ repository.workspace = true
 [dependencies]
 glam = { workspace = true }
 bytemuck = { workspace = true }
+# `ContactId` and `TouchPhase`, for the on-screen controls in `touch`. The
+# vocabulary a finger arrives in belongs to the shell's seam, and a widget that
+# invented its own copy would be a second answer to "which finger is this".
+crcbl-core = { workspace = true }
 
 [lints]
 workspace = true

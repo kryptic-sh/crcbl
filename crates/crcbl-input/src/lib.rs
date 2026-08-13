@@ -119,10 +119,12 @@ pub enum PointerAxis {
 
 /// A binding source: what raw input triggers this action.
 ///
-/// For P2 only keyboard and mouse are supported; gamepad lands at P10 and
-/// multi-touch post-MVP. A single touch contact needs nothing extra — the
-/// platforms deliver it as an ordinary pointer, so [`Binding::MouseButton`] and
-/// [`Binding::PointerPosition`] are what a phone plays a game through.
+/// Keyboard, mouse and on-screen controls today; gamepad lands at P10. A game
+/// played with **one** finger needs nothing touch-specific — the platforms
+/// deliver the primary contact as an ordinary pointer, so
+/// [`Binding::MouseButton`] and [`Binding::PointerPosition`] are what a phone
+/// plays it through. [`Binding::Virtual`] is what a game needs when one finger
+/// is not enough.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Binding {
     /// A single key.
@@ -179,6 +181,34 @@ pub enum Binding {
         /// Key for the +1.0 direction.
         positive: KeyCode,
     },
+    /// An **on-screen control**, by the id the widget drawing it was given.
+    ///
+    /// The touch row of a binding table, and the one binding whose device is a
+    /// piece of the game's own UI: a `crcbl-ui` control hit-tests the raw
+    /// contacts, decides what its geometry makes of them, and reports the
+    /// result here through [`ActionMap::virtual_button`] or
+    /// [`ActionMap::virtual_stick`]. From this side it is a device like any
+    /// other — the same action can carry a key, a mouse button and one of
+    /// these, and nothing downstream can tell which of them spoke.
+    ///
+    /// That split is deliberate and it is why there is no binding on a raw
+    /// contact. A finger reports a *place on the glass*; what it means is a
+    /// question only the thing drawn under it can answer, and an [`ActionMap`]
+    /// that hit-tested widgets would have to be told where every control was
+    /// drawn this frame.
+    ///
+    /// **A control is a button or a stick, and an action reads whichever
+    /// matches its own kind**: an [`ActionKind::Button`] is down while the
+    /// named control is held, an [`ActionKind::Axis2`] takes the named
+    /// control's deflection, and an [`ActionKind::Axis1`] takes **nothing** —
+    /// reducing a stick to one axis is a choice the control would have to make
+    /// and none of them makes it. A binding whose kind does not match is inert,
+    /// the way [`Binding::MouseMotion`] is on a button.
+    ///
+    /// The vector arrives already inside the unit disc, and is clamped to it
+    /// again here: a control with a longer throw than its own radius is a
+    /// broken control, not a player asking to run faster.
+    Virtual(String),
     /// WASD composite: four keys mapped to a 2-D axis.
     ///
     /// The composite is normalized, so a diagonal is a unit vector rather than
@@ -330,6 +360,15 @@ pub struct ActionMap {
     // Raw input state -------------------------------------------------------
     held_keys: HashSet<KeyCode>,
     held_buttons: HashSet<PointerButton>,
+    /// On-screen controls currently held — see [`Binding::Virtual`].
+    held_controls: HashSet<String>,
+    /// Where each on-screen stick is deflected to, inside the unit disc.
+    ///
+    /// A *level*, like [`ActionMap::pointer`] and unlike the two deltas below:
+    /// a finger resting on a stick reports nothing on the frames it does not
+    /// move, so a value cleared by [`ActionMap::begin_tick`] would centre the
+    /// stick under a finger that never let go.
+    control_sticks: HashMap<String, (f32, f32)>,
     mouse_delta: (f32, f32),
     scroll_delta: (f32, f32),
     /// Where the pointer is, normalised to the surface, or `None` until one has
@@ -359,6 +398,8 @@ impl ActionMap {
             name_to_idx: HashMap::new(),
             held_keys: HashSet::new(),
             held_buttons: HashSet::new(),
+            held_controls: HashSet::new(),
+            control_sticks: HashMap::new(),
             mouse_delta: (0.0, 0.0),
             scroll_delta: (0.0, 0.0),
             pointer: None,
@@ -468,7 +509,8 @@ impl ActionMap {
             Binding::MouseButton(_)
             | Binding::MouseMotion
             | Binding::MouseScroll
-            | Binding::PointerPosition { .. } => false,
+            | Binding::PointerPosition { .. }
+            | Binding::Virtual(_) => false,
         });
     }
 
@@ -550,6 +592,49 @@ impl ActionMap {
                 axis.pointer_moved = true;
             }
         }
+    }
+
+    /// Feed an on-screen **button**: the control named by `control` is held, or
+    /// it is not.
+    ///
+    /// The widget decides what "held" means for its own geometry — which
+    /// contact owns it, and whether a lift over it commits or cancels. What
+    /// arrives here is the answer, and it drives every
+    /// [`Binding::Virtual`] with this id on an [`ActionKind::Button`] exactly as
+    /// a key event drives a [`Binding::Key`], edges included.
+    pub fn virtual_button(&mut self, control: &str, pressed: bool) {
+        if pressed {
+            // `contains` first so a control that is already held costs no
+            // allocation: this runs once per frame per held control.
+            if !self.held_controls.contains(control) {
+                self.held_controls.insert(control.to_owned());
+            }
+        } else {
+            self.held_controls.remove(control);
+        }
+        self.resolve_matching(|b| matches!(b, Binding::Virtual(id) if id == control));
+    }
+
+    /// Feed an on-screen **stick**: where the control named by `control` is
+    /// deflected to, with +X right and +Y up.
+    ///
+    /// A *level*, not a delta — a stick held still reports the same value every
+    /// frame, and a stick nobody is touching reports `(0.0, 0.0)`. The magnitude
+    /// belongs to the widget's own radius, so a control at its edge reports 1.0
+    /// and the value is clamped to the unit disc when it is resolved.
+    ///
+    /// Non-finite coordinates are dropped like [`ActionMap::mouse_motion`]'s
+    /// deltas: a `NaN` would poison every comparison downstream of the axis.
+    pub fn virtual_stick(&mut self, control: &str, x: f32, y: f32) {
+        if !x.is_finite() || !y.is_finite() {
+            return;
+        }
+        if let Some(held) = self.control_sticks.get_mut(control) {
+            *held = (x, y);
+        } else {
+            self.control_sticks.insert(control.to_owned(), (x, y));
+        }
+        self.resolve_matching(|b| matches!(b, Binding::Virtual(id) if id == control));
     }
 
     /// Called at the start of each server tick.
@@ -702,6 +787,8 @@ impl ActionMap {
     fn resolve_one(&mut self, idx: usize) {
         let held_keys = &self.held_keys;
         let held_buttons = &self.held_buttons;
+        let held_controls = &self.held_controls;
+        let control_sticks = &self.control_sticks;
         let mouse_delta = self.mouse_delta;
         let scroll_delta = self.scroll_delta;
         let pointer = self.pointer;
@@ -716,6 +803,7 @@ impl ActionMap {
                 let down = bindings.iter().any(|b| match b {
                     Binding::Key(k) => held_keys.contains(k),
                     Binding::MouseButton(b) => held_buttons.contains(b),
+                    Binding::Virtual(id) => held_controls.contains(id.as_str()),
                     Binding::MouseMotion
                     | Binding::MouseScroll
                     | Binding::PointerPosition { .. } => false,
@@ -814,12 +902,14 @@ impl ActionMap {
                 action.value = value;
             }
             ActionKind::Axis2 => {
-                // The key composite and the pointer delta are accumulated
-                // separately: the composite is normalized so a diagonal is a
-                // unit vector rather than 1.414 long, while a pointer delta is
-                // a pixel count and normalizing it would throw away the speed.
-                let mut key_x: f32 = 0.0;
-                let mut key_y: f32 = 0.0;
+                // The *direction* sources and the pointer delta are accumulated
+                // separately: a direction is bounded by the unit disc, so a
+                // diagonal is a unit vector rather than 1.414 long and a stick
+                // pushed past its own radius is still all the way over. A
+                // pointer delta is a pixel count, and normalizing it would
+                // throw away the speed.
+                let mut dir_x: f32 = 0.0;
+                let mut dir_y: f32 = 0.0;
                 let mut x: f32 = 0.0;
                 let mut y: f32 = 0.0;
 
@@ -832,16 +922,25 @@ impl ActionMap {
                             right,
                         } => {
                             if held_keys.contains(up) {
-                                key_y += 1.0;
+                                dir_y += 1.0;
                             }
                             if held_keys.contains(w_down) {
-                                key_y -= 1.0;
+                                dir_y -= 1.0;
                             }
                             if held_keys.contains(left) {
-                                key_x -= 1.0;
+                                dir_x -= 1.0;
                             }
                             if held_keys.contains(right) {
-                                key_x += 1.0;
+                                dir_x += 1.0;
+                            }
+                        }
+                        // Into the same accumulator as the keys, so a player
+                        // pushing a stick *and* holding a key asks for one
+                        // direction rather than for twice the speed.
+                        Binding::Virtual(id) => {
+                            if let Some((sx, sy)) = control_sticks.get(id.as_str()) {
+                                dir_x += sx;
+                                dir_y += sy;
                             }
                         }
                         Binding::MouseMotion => {
@@ -852,13 +951,13 @@ impl ActionMap {
                     }
                 }
 
-                let len = (key_x * key_x + key_y * key_y).sqrt();
+                let len = (dir_x * dir_x + dir_y * dir_y).sqrt();
                 if len > 1.0 {
-                    key_x /= len;
-                    key_y /= len;
+                    dir_x /= len;
+                    dir_y /= len;
                 }
-                x += key_x;
-                y += key_y;
+                x += dir_x;
+                y += dir_y;
 
                 let action = match &mut slot.value {
                     ActionValue::Axis2(a) => a,
@@ -886,6 +985,8 @@ impl std::fmt::Debug for ActionMap {
             )
             .field("held_keys", &self.held_keys.len())
             .field("held_buttons", &self.held_buttons.len())
+            .field("held_controls", &self.held_controls)
+            .field("control_sticks", &self.control_sticks)
             .field("pointer", &self.pointer)
             .field("elapsed", &self.elapsed)
             .finish_non_exhaustive()
@@ -2286,6 +2387,162 @@ mod tests {
         map.declare(decl_axis2_mouse("look"));
         map.mouse_motion(30.0, 40.0);
         assert_eq_axis2(map.action("look").unwrap(), 30.0, 40.0);
+    }
+
+    // -- on-screen controls --------------------------------------------------
+
+    /// An on-screen stick and the keyboard drive the **same** action, and the
+    /// action cannot tell which of them spoke.
+    ///
+    /// The whole claim of [`Binding::Virtual`]: one `move`, two devices, and a
+    /// game that reads `axis2` and never asks where the value came from.
+    #[test]
+    fn a_stick_and_a_keyboard_drive_one_action() {
+        let mut map = ActionMap::new();
+        map.declare(ActionDecl {
+            name: "move".to_owned(),
+            kind: ActionKind::Axis2,
+            bindings: vec![
+                Binding::Wasd {
+                    up: KeyCode::KeyW,
+                    down: KeyCode::KeyS,
+                    left: KeyCode::KeyA,
+                    right: KeyCode::KeyD,
+                },
+                Binding::Virtual("stick_move".to_owned()),
+            ],
+        });
+
+        assert_eq!(map.axis2("move"), (0.0, 0.0), "nothing is touching it yet");
+
+        map.virtual_stick("stick_move", -0.5, 0.25);
+        assert_eq_axis2(map.action("move").unwrap(), -0.5, 0.25);
+
+        // A partial deflection is a partial value, which is the thing four
+        // buttons could not say — and it survives the tick boundary, because a
+        // finger resting on the glass reports nothing.
+        map.begin_tick(TICK);
+        assert_eq_axis2(map.action("move").unwrap(), -0.5, 0.25);
+
+        // A key *and* a stick is one direction, not twice the speed: the two
+        // sum to (-1.5, 0.25) and the sum is scaled back onto the disc, so the
+        // heading survives and the magnitude does not exceed one.
+        map.key_event(KeyCode::KeyA, true);
+        let (x, y) = map.axis2("move");
+        let len = x.hypot(y);
+        assert!((len - 1.0).abs() < 0.001, "magnitude {len} left the disc");
+        assert!(
+            (y / x - 0.25 / -1.5).abs() < 0.001,
+            "the summed heading was not kept, got ({x}, {y})",
+        );
+
+        map.virtual_stick("stick_move", 0.0, 0.0);
+        map.key_event(KeyCode::KeyA, false);
+        assert_eq!(map.axis2("move"), (0.0, 0.0), "both let go");
+    }
+
+    /// A stick reported past its own radius is still only all the way over,
+    /// **and keeps its direction**.
+    #[test]
+    fn a_stick_past_its_radius_is_clamped_to_the_disc() {
+        let mut map = ActionMap::new();
+        map.declare(ActionDecl {
+            name: "move".to_owned(),
+            kind: ActionKind::Axis2,
+            bindings: vec![Binding::Virtual("stick_move".to_owned())],
+        });
+
+        // 3-4-5: a length of 5, so the clamped value is the exact (0.6, 0.8)
+        // rather than a number that only looks about right.
+        map.virtual_stick("stick_move", 3.0, 4.0);
+        assert_eq_axis2(map.action("move").unwrap(), 0.6, 0.8);
+        let len = axis2_len(map.action("move").unwrap());
+        assert!((len - 1.0).abs() < 0.001, "got {len}");
+    }
+
+    /// A control drives a button action with the same edges a key does.
+    #[test]
+    fn a_virtual_button_has_the_edges_a_key_has() {
+        let mut map = ActionMap::new();
+        map.declare(decl_button(
+            "pause",
+            Binding::Virtual("btn_pause".to_owned()),
+        ));
+
+        map.begin_tick(TICK);
+        map.virtual_button("btn_pause", true);
+        assert!(map.just_pressed("pause"));
+        assert!(map.button_held("pause"));
+
+        map.begin_tick(TICK);
+        assert!(
+            !map.just_pressed("pause"),
+            "holding the control does not press it again",
+        );
+        assert!(map.button_held("pause"));
+
+        map.virtual_button("btn_pause", false);
+        assert!(map.just_released("pause"));
+        assert!(!map.button_held("pause"));
+    }
+
+    /// Ids name different controls: a second control does not drive the first
+    /// one's action.
+    #[test]
+    fn a_control_drives_only_the_action_that_names_it() {
+        let mut map = ActionMap::new();
+        map.declare(decl_button("pause", Binding::Virtual("btn_pause".into())));
+        map.declare(ActionDecl {
+            name: "move".to_owned(),
+            kind: ActionKind::Axis2,
+            bindings: vec![Binding::Virtual("stick_move".to_owned())],
+        });
+
+        map.virtual_button("btn_other", true);
+        map.virtual_stick("stick_other", 1.0, 0.0);
+        assert!(!map.button_held("pause"), "another control's press");
+        assert_eq!(map.axis2("move"), (0.0, 0.0), "another control's stick");
+
+        map.virtual_button("btn_pause", true);
+        map.virtual_stick("stick_move", 1.0, 0.0);
+        assert!(map.button_held("pause"));
+        assert_eq!(map.axis2("move"), (1.0, 0.0));
+    }
+
+    /// A stick fed to a 1-D axis reads nothing, and the docs say so: reducing a
+    /// vector to one axis is a choice no control makes.
+    ///
+    /// The inert case pinned deliberately — a `Virtual` that silently drove
+    /// `Axis1` off its `x` would be a value nobody chose.
+    #[test]
+    fn a_stick_on_a_one_dimensional_axis_reads_nothing() {
+        let mut map = ActionMap::new();
+        map.declare(ActionDecl {
+            name: "throttle".to_owned(),
+            kind: ActionKind::Axis1,
+            bindings: vec![Binding::Virtual("stick_move".to_owned())],
+        });
+
+        map.virtual_stick("stick_move", 1.0, 1.0);
+        assert_eq!(map.axis1("throttle"), 0.0);
+    }
+
+    /// A non-finite deflection is dropped rather than stored, like a `NaN`
+    /// mouse delta: one would poison every comparison downstream of the axis.
+    #[test]
+    fn a_non_finite_deflection_is_dropped() {
+        let mut map = ActionMap::new();
+        map.declare(ActionDecl {
+            name: "move".to_owned(),
+            kind: ActionKind::Axis2,
+            bindings: vec![Binding::Virtual("stick_move".to_owned())],
+        });
+
+        map.virtual_stick("stick_move", 0.5, 0.5);
+        map.virtual_stick("stick_move", f32::NAN, 0.0);
+        assert_eq_axis2(map.action("move").unwrap(), 0.5, 0.5);
+        map.virtual_stick("stick_move", 0.0, f32::INFINITY);
+        assert_eq_axis2(map.action("move").unwrap(), 0.5, 0.5);
     }
 
     // -- assert helpers -----------------------------------------------------

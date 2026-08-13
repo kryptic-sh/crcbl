@@ -6,11 +6,15 @@
   Goes inside a page's `<ul class="keys">`, after that game's own rows.
 
   The rows are `pointer-only` and the last one is `touch-only`, because all
-  three of these are **keys** and a phone has none: the loop's reserved keys are
-  the one part of every demo that touch cannot reach, and the pause menu they
-  open is reachable only through Escape. Saying so is better than printing
-  <kbd>F11</kbd> at someone with no F11. On-screen controls are the fix and they
-  are `crcbl-ui` widgets — a slice of their own, not a row in this file.
+  three of these are **keys** and a phone has none. Saying so is better than
+  printing <kbd>F11</kbd> at someone with no F11.
+
+  The touch row no longer says "keyboard only" flatly, because that stopped
+  being true of every demo: on-screen controls are `crcbl-ui` widgets a *game*
+  draws, and horde draws a pause button — which opens the pause menu, whose
+  fullscreen and debug-panel buttons a finger can then press. A demo with such a
+  control lists it in its own rows above this include, so the row points there
+  rather than naming a demo this shared file has no business knowing about.
 -->
 <li class="key-row pointer-only">
   <span>Pause and resume</span>
@@ -26,5 +30,5 @@
 </li>
 <li class="key-row touch-only">
   <span>Pause, fullscreen and the debug overlay</span>
-  <span>keyboard only</span>
+  <span>keys — unless a control for them is listed above</span>
 </li>

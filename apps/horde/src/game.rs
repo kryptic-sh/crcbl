@@ -1336,10 +1336,47 @@ pub fn push_out_of_props(position: DVec3, radius: f64, props: &[PropView]) -> DV
 // Input
 // ---------------------------------------------------------------------------
 
-const ACTION_UP: &str = "up";
-const ACTION_DOWN: &str = "down";
-const ACTION_LEFT: &str = "left";
-const ACTION_RIGHT: &str = "right";
+/// Where the player is walking, as **one** action with a value rather than four
+/// with a flag each.
+///
+/// It was four — `up`, `down`, `left`, `right`, a `Binding::Key` apiece — and
+/// four buttons is a shape only a keyboard has. A stick reports a *direction*,
+/// and an action that could only be pressed or not had nowhere to put one:
+/// binding a stick to four buttons would mean the widget deciding, before the
+/// binding layer ever saw it, which of eight directions the thumb meant. So the
+/// keyboard's four keys are a [`Binding::Wasd`] composite now — the same
+/// normalised vector, from the same action — and the on-screen stick is a
+/// [`Binding::Virtual`] beside it. Nothing downstream can tell them apart, which
+/// is the whole of `docs/plan/19-input.md`'s claim.
+const ACTION_MOVE: &str = "move";
+
+/// The id the on-screen stick reports under — `docs/plan/19-input.md`'s
+/// `Virtual("stick_move")`.
+///
+/// Private on purpose: `crate::app` owns the widget and hands its deflection to
+/// [`Game::stick_moved`], so nothing outside this file has to know that the
+/// binding layer calls it this.
+const STICK_MOVE: &str = "stick_move";
+
+/// How far the stick has to be pushed before it asks for anything, as a
+/// fraction of its throw.
+///
+/// A floating stick centres itself under the finger that landed, so this is not
+/// there to swallow a resting offset — there is none. It is there because the
+/// wizard walks at one speed: a thumb a few pixels off centre would otherwise
+/// commit to a direction at full speed, and the eight-way split below would pick
+/// that direction out of noise.
+const MOVE_DEAD_ZONE: f32 = 0.25;
+
+/// Where one of the eight directions ends and the next begins: `sin(π/8)`, the
+/// component a unit vector has at 22.5° off an axis.
+///
+/// Applied to the **normalised** direction, so the eight sectors are 45° wide
+/// each and a diagonal is no harder to hold than a cardinal.
+/// `the_eight_sectors_are_the_angle_they_claim` checks this against `f32::sin`,
+/// because a transcribed constant is a transcription until something computes
+/// it.
+const MOVE_SECTOR: f32 = 0.382_683_43;
 /// The one edge that both **starts** a waiting run and **restarts** a live one.
 ///
 /// Two jobs on one action, the way asteroids' `fire` both begins a game and
@@ -1375,6 +1412,35 @@ struct Intent {
     /// Which level-up button was pressed this tick, one-based, or zero for
     /// none. An edge for the same reason `restart` is.
     choose: u8,
+}
+
+/// The four digital directions a stick deflection asks for, as
+/// `(up, down, left, right)`.
+///
+/// **This game walks at one speed**, and it always has: [`Intent::direction`]
+/// normalises, so a wizard leaning on the stick and a wizard leaning on `W`
+/// cover the same ground. That is what makes an eight-way reduction of the
+/// analog value the honest one rather than a loss — the wire form carries four
+/// bits, the simulation reads a normalised direction, and an analog magnitude
+/// would have nowhere to go on either side.
+///
+/// Two thresholds, and they measure different things: [`MOVE_DEAD_ZONE`] is
+/// about *how far* the thumb has moved and rejects the middle of the pad,
+/// [`MOVE_SECTOR`] is about *which way* it points and splits the rest into eight
+/// equal sectors. Folding them into one would make a stick pushed gently
+/// north-east ask for nothing while the same push due north asked for a walk.
+fn eight_way(x: f32, y: f32) -> (bool, bool, bool, bool) {
+    let length = x.hypot(y);
+    if length < MOVE_DEAD_ZONE {
+        return (false, false, false, false);
+    }
+    let (x, y) = (x / length, y / length);
+    (
+        y >= MOVE_SECTOR,
+        y <= -MOVE_SECTOR,
+        x <= -MOVE_SECTOR,
+        x >= MOVE_SECTOR,
+    )
 }
 
 impl Intent {
@@ -2960,6 +3026,9 @@ pub struct Game {
     ticks_run: u64,
     /// Queued key events from the shell pump, replayed after `begin_tick`.
     pending_keys: Vec<(KeyCode, bool)>,
+    /// The on-screen stick's deflection since the last tick — see
+    /// [`Game::stick_moved`]. `None` on a tick nothing reported one.
+    pending_stick: Option<(f32, f32)>,
     /// The output stream and the six cues. On the facade rather than in the
     /// simulation: the module runs inside the server's tick and must stay a pure
     /// function of its inputs, and an audio device is neither.
@@ -3089,11 +3158,31 @@ impl Game {
         let player_entity = world.spawn();
 
         let mut action_map = ActionMap::new();
+        // **Three bindings, three devices, one action.** Two keyboard
+        // composites because this game has always taken WASD *and* the arrows,
+        // and one on-screen stick because a phone has neither. They sum inside
+        // the unit disc, so a player pressing a key while pushing the stick asks
+        // for one direction rather than for twice the speed.
+        action_map.declare(ActionDecl {
+            name: ACTION_MOVE.into(),
+            kind: ActionKind::Axis2,
+            bindings: vec![
+                Binding::Wasd {
+                    up: KeyCode::KeyW,
+                    down: KeyCode::KeyS,
+                    left: KeyCode::KeyA,
+                    right: KeyCode::KeyD,
+                },
+                Binding::Wasd {
+                    up: KeyCode::ArrowUp,
+                    down: KeyCode::ArrowDown,
+                    left: KeyCode::ArrowLeft,
+                    right: KeyCode::ArrowRight,
+                },
+                Binding::Virtual(STICK_MOVE.into()),
+            ],
+        });
         for (name, keys) in [
-            (ACTION_UP, vec![KeyCode::ArrowUp, KeyCode::KeyW]),
-            (ACTION_DOWN, vec![KeyCode::ArrowDown, KeyCode::KeyS]),
-            (ACTION_LEFT, vec![KeyCode::ArrowLeft, KeyCode::KeyA]),
-            (ACTION_RIGHT, vec![KeyCode::ArrowRight, KeyCode::KeyD]),
             (ACTION_RESTART, vec![KeyCode::KeyR, KeyCode::Space]),
             (ACTION_CHOOSE[0], vec![KeyCode::Digit1]),
             (ACTION_CHOOSE[1], vec![KeyCode::Digit2]),
@@ -3177,6 +3266,7 @@ impl Game {
             sim_time: Duration::ZERO,
             ticks_run: 0,
             pending_keys: Vec::new(),
+            pending_stick: None,
             audio: crate::audio::Audio::new(setup.headless),
             best: crate::best::Best::load(setup.headless),
             state: GameState::WaitingToStart,
@@ -3215,6 +3305,18 @@ impl Game {
         self.pending_keys.push((key, pressed));
     }
 
+    /// Where the on-screen stick is deflected to, +X right and +Y up.
+    ///
+    /// Queued like a key and for the same reason — the widget is driven from the
+    /// shell's pump, once per frame, and the action map's bookkeeping is per
+    /// tick. Unlike a key it is a **level**, so a second report before the next
+    /// tick replaces the first rather than queueing behind it: what the tick
+    /// wants is where the thumb is now, and where it was two milliseconds ago is
+    /// not an edge anybody can lose.
+    pub fn stick_moved(&mut self, x: f32, y: f32) {
+        self.pending_stick = Some((x, y));
+    }
+
     /// Advances the simulation by exactly one fixed tick.
     ///
     /// Call it from the loop's fixed-timestep accumulator — once per tick, not
@@ -3225,6 +3327,14 @@ impl Game {
         for (key, pressed) in std::mem::take(&mut self.pending_keys) {
             self.action_map.key_event(key, pressed);
         }
+        // Only when the widget reported one. A finger resting on the stick
+        // moves nothing and so reports nothing, and the map holds the last
+        // deflection across ticks — a value pushed in every tick regardless
+        // would be the same value, and a value *cleared* every tick would
+        // centre the stick under a thumb that never let go.
+        if let Some((x, y)) = self.pending_stick.take() {
+            self.action_map.virtual_stick(STICK_MOVE, x, y);
+        }
 
         // First match wins, so two digits in one frame take the earlier button
         // rather than the later one — the same rule an edge follows everywhere
@@ -3233,11 +3343,13 @@ impl Game {
             .iter()
             .position(|name| self.action_map.just_pressed(name))
             .map_or(0, |index| index as u8 + 1);
+        let (x, y) = self.action_map.axis2(ACTION_MOVE);
+        let (up, down, left, right) = eight_way(x, y);
         let intent = Intent {
-            up: self.action_map.button_held(ACTION_UP),
-            down: self.action_map.button_held(ACTION_DOWN),
-            left: self.action_map.button_held(ACTION_LEFT),
-            right: self.action_map.button_held(ACTION_RIGHT),
+            up,
+            down,
+            left,
+            right,
             restart: self.action_map.just_pressed(ACTION_RESTART),
             choose,
         };
@@ -3330,13 +3442,21 @@ impl Game {
         // `Playing` after it, the same claim the other three samples make. `run`
         // is beside it for a bug report, and because it is what tells a restart
         // from a start — only a real restart edge advances it.
+        //
+        // **Where the wizard is standing is in the line for the same reason**,
+        // and it is the only thing here a *movement* input changes: nothing else
+        // in this game moves the player, so a position that differs between two
+        // heartbeats is the player having walked and cannot be anything else.
+        // `web/tools/browser-e2e.mjs` reads it to see a finger drive the stick.
         if state_changed || self.ticks_run.is_multiple_of(60) {
             crcbl::log::info!(
-                "[HUD] {:?}  run: {}  time: {:.1}  best: {}  kills: {}  hp: {:.0}  lvl: {}  \
-                 enemies: {}  bolts: {}  gems: {}",
+                "[HUD] {:?}  run: {}  time: {:.1}  x: {:.2}  y: {:.2}  best: {}  kills: {}  \
+                 hp: {:.0}  lvl: {}  enemies: {}  bolts: {}  gems: {}",
                 self.state,
                 self.run,
                 self.elapsed,
+                self.player.x,
+                self.player.y,
                 self.best.get(),
                 self.kills,
                 self.player_hp,
@@ -6732,6 +6852,127 @@ mod tests {
                 "restart {index} re-dealt an earlier run's seed",
             );
         }
+    }
+
+    // ---- the movement action -------------------------------------------------
+
+    /// [`MOVE_SECTOR`] is the angle it claims to be, computed rather than
+    /// eyeballed.
+    ///
+    /// A transcribed constant is a transcription until something checks it, and
+    /// nothing else in this file would notice a digit dropped from the middle of
+    /// it: the eight sectors would simply stop being equal.
+    #[test]
+    fn the_eight_sectors_are_the_angle_they_claim() {
+        let want = (std::f32::consts::PI / 8.0).sin();
+        assert!(
+            (MOVE_SECTOR - want).abs() < 1e-6,
+            "MOVE_SECTOR is {MOVE_SECTOR}, sin(π/8) is {want}",
+        );
+
+        // Either side of the boundary between "due east" and "north-east", at
+        // full deflection. One degree in from each side, so the check is about
+        // the split and not about a float landing exactly on it.
+        let at = |degrees: f32| {
+            let radians = degrees.to_radians();
+            eight_way(radians.cos(), radians.sin())
+        };
+        assert_eq!(at(21.5), (false, false, false, true), "east");
+        assert_eq!(at(23.5), (true, false, false, true), "north-east");
+        assert_eq!(at(66.5), (true, false, false, true), "still north-east");
+        assert_eq!(at(68.5), (true, false, false, false), "north");
+        assert_eq!(at(180.0), (false, false, true, false), "west");
+        assert_eq!(at(-90.0), (false, true, false, false), "south");
+    }
+
+    /// A thumb that has barely moved asks for nothing at all.
+    #[test]
+    fn a_stick_inside_the_dead_zone_asks_for_nothing() {
+        assert_eq!(eight_way(0.0, 0.0), (false, false, false, false));
+        let inside = MOVE_DEAD_ZONE * 0.99;
+        assert_eq!(
+            eight_way(inside, 0.0),
+            (false, false, false, false),
+            "a nudge inside the dead zone started a walk",
+        );
+        // …and a hair outside it does ask, or the dead zone is the whole pad.
+        let outside = MOVE_DEAD_ZONE * 1.01;
+        assert_eq!(eight_way(outside, 0.0), (false, false, false, true));
+    }
+
+    /// **The keyboard still asks for exactly what it always asked for.**
+    ///
+    /// The four button actions became one `Axis2`, and the thing that must not
+    /// have changed is what a key press means. Driven through the real action
+    /// map rather than through [`eight_way`] alone, because the composite's
+    /// normalisation is half of the answer.
+    #[test]
+    fn the_keyboard_asks_for_what_it_always_did() {
+        let mut game = Game::new(true, DEFAULT_TICK_HZ).expect("a game");
+        let directions = |game: &Game| {
+            let (x, y) = game.action_map.axis2(ACTION_MOVE);
+            eight_way(x, y)
+        };
+
+        game.key_event(KeyCode::KeyW, true);
+        game.tick();
+        assert_eq!(directions(&game), (true, false, false, false), "W is north");
+
+        game.key_event(KeyCode::KeyD, true);
+        game.tick();
+        assert_eq!(
+            directions(&game),
+            (true, false, false, true),
+            "W and D together are north-east, not one of them",
+        );
+
+        game.key_event(KeyCode::KeyS, true);
+        game.tick();
+        assert_eq!(
+            directions(&game),
+            (false, false, false, true),
+            "W and S cancel, which is what four separate buttons also did",
+        );
+
+        // The arrows are the second composite, and they mean the same thing.
+        for key in [KeyCode::KeyW, KeyCode::KeyD, KeyCode::KeyS] {
+            game.key_event(key, false);
+        }
+        game.key_event(KeyCode::ArrowLeft, true);
+        game.tick();
+        assert_eq!(directions(&game), (false, false, true, false), "west");
+    }
+
+    /// **The stick and the keyboard are one action**, and the stick's value
+    /// survives the ticks between the frames a finger reports on.
+    #[test]
+    fn the_stick_drives_the_same_action_the_keys_do() {
+        let mut game = Game::new(true, DEFAULT_TICK_HZ).expect("a game");
+
+        game.stick_moved(0.0, -1.0);
+        game.tick();
+        let (x, y) = game.action_map.axis2(ACTION_MOVE);
+        assert!(
+            (x.abs() < 1e-6) && (y + 1.0).abs() < 1e-6,
+            "the stick reached the move action as ({x}, {y})",
+        );
+        assert_eq!(eight_way(x, y), (false, true, false, false), "south");
+
+        // Five ticks with nothing reported: a finger resting on the glass
+        // moves nothing and sends nothing, and the wizard must keep walking.
+        for _ in 0..5 {
+            game.tick();
+        }
+        let (_, y) = game.action_map.axis2(ACTION_MOVE);
+        assert!(
+            (y + 1.0).abs() < 1e-6,
+            "the stick centred itself under a thumb that never let go: y is {y}",
+        );
+
+        // Centred, and the walk stops.
+        game.stick_moved(0.0, 0.0);
+        game.tick();
+        assert_eq!(game.action_map.axis2(ACTION_MOVE), (0.0, 0.0));
     }
 
     // ---- experience, pickups and the level-up --------------------------------
