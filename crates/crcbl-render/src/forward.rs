@@ -33,9 +33,10 @@
 //! table, holding **both** halves of "texture indices + factors", with
 //! [`mesh::GpuInstance::material`] selecting a row. Three rows are resident and
 //! two of them exist to be seen: [`ForwardRenderer::set_tinted_pyramid`]'s
-//! differs from the default row in its factor alone, and
+//! differs from the default row in its factor and its roughness, and
 //! [`ForwardRenderer::set_textured_pyramid`]'s in its base-colour page layer
-//! alone.
+//! alone. See this module's `material_rows` for why the shading factor rides on
+//! that row rather than on a fourth.
 //!
 //! The page is the texture side, and it is one `D2Array` image rather than an
 //! array of descriptors — `BindingModel::ArrayPages` rather than `Bindless`.
@@ -225,6 +226,23 @@ const POOL_MATERIAL_CAPACITY: u32 = 1024;
 /// See [`ForwardRenderer::set_tinted_pyramid`], which is the pair this exists
 /// for.
 const PYRAMID_TINT: [f32; 4] = [0.15, 0.45, 1.0, 1.0];
+
+/// The second material's roughness, and the whole of what makes the **shading**
+/// half of the row visible.
+///
+/// Well under [`mesh::GpuMaterial::UNTINTED`]'s, so the same lobe under the same
+/// sun draws a tight bright highlight here where the neutral row draws a broad
+/// faint one. Not lower still: a roughness near zero puts the whole lobe inside
+/// a handful of pixels, and a highlight a rasteriser can miss is not something
+/// a frame comparison can measure.
+///
+/// **This is the only place in the engine where two materials differ in a
+/// shading factor**, which is what makes
+/// `crcbl`'s `the_smooth_pyramid_holds_a_tighter_highlight_than_the_rough_one`
+/// possible at all — see this module's `material_rows` for why the frame can
+/// attribute the difference to this number and not to where the two pyramids
+/// stand.
+const PYRAMID_ROUGHNESS: f32 = 0.25;
 
 /// The base-colour page's extent, in texels — square, and **two**.
 ///
@@ -678,7 +696,7 @@ pub struct ForwardRenderer {
     /// would name row 0 by accident — which is a material, and only *happens*
     /// to be this one.
     untinted_material: u32,
-    /// The row [`PYRAMID_TINT`] went into.
+    /// The row [`PYRAMID_TINT`] and [`PYRAMID_ROUGHNESS`] went into.
     tinted_material: u32,
     /// The row that is [`mesh::GpuMaterial::UNTINTED`] with
     /// [`CHECKER_LAYER`] in place of [`UNTEXTURED_LAYER`] — the same factor as
@@ -3212,12 +3230,24 @@ impl ForwardRenderer {
     /// be released on a failure without the borrow that filling it takes, which
     /// is the same shape [`ForwardRenderer::residents`] has.
     ///
-    /// **The three rows are one row and two single-column edits of it**, which
-    /// is what makes each column's evidence its own. The tinted row differs
-    /// from the untinted one in its factor and nothing else; the textured row
-    /// differs from it in its page layer and nothing else. A row that changed
-    /// both would be a frame in which neither column could be told from the
-    /// other.
+    /// **The three rows are one row and two edits of it, and no edit can be
+    /// mistaken for another** — which is what makes each column's evidence its
+    /// own. The textured row differs from the untinted one in its page layer
+    /// and nothing else. The tinted row differs in its base-colour factor and
+    /// in [`PYRAMID_ROUGHNESS`], which is two columns rather than one, and the
+    /// reason that is still separable is that the two do disjoint things to a
+    /// frame: a factor cannot narrow a highlight and a roughness cannot tint a
+    /// surface, so the colour assertions read one and the highlight assertion
+    /// reads the other.
+    ///
+    /// The roughness had to go on *this* row rather than on either of the
+    /// others, and it is the geometry that decides it. `Scene::Cube` puts this
+    /// pyramid at `+X` and the default sun comes from `+X`, so its front face is
+    /// the one place in that frame where a surface sits at the mirror direction
+    /// — and a specular lobe's width is only legible where its peak actually
+    /// lands. On the two left-hand pyramids the same pair of roughnesses draws
+    /// very nearly the same face, which is exactly why the frame comparison uses
+    /// them as its control.
     fn material_rows(
         device: &dyn Device,
         materials: &mut MaterialTable,
@@ -3237,6 +3267,7 @@ impl ForwardRenderer {
             device,
             &mesh::GpuMaterial {
                 base_color: PYRAMID_TINT,
+                roughness: PYRAMID_ROUGHNESS,
                 ..mesh::GpuMaterial::UNTINTED
             },
         )?;
@@ -5332,7 +5363,8 @@ mod tests {
     }
 
     /// **The two pyramids differ in exactly one field, and it is the material
-    /// id — which names a row holding a different colour.**
+    /// id — which names a row holding a different colour and a different
+    /// roughness.**
     ///
     /// The whole of what §3.2's table buys, stated as the two things that have
     /// to be true at once. Placed at the *same* transform, so "differ only in
@@ -5395,9 +5427,20 @@ mod tests {
             row(tinted.material),
             mesh::GpuMaterial {
                 base_color: PYRAMID_TINT,
+                roughness: PYRAMID_ROUGHNESS,
                 ..mesh::GpuMaterial::UNTINTED
             },
-            "the tinted pyramid's row must be the tint"
+            "the tinted pyramid's row must be the tint and the tighter lobe"
+        );
+        // The shading half of that row, on its own: a roughness equal to the
+        // neutral row's would leave `crcbl`'s render e2e comparing one lobe
+        // against itself, and that test would go green on a shader that had
+        // never read the column.
+        assert_ne!(
+            row(plain.material).roughness,
+            row(tinted.material).roughness,
+            "the two rows must differ in roughness, or the highlight the render e2e measures \
+             is not attributable to the material"
         );
         assert_ne!(
             row(plain.material),

@@ -354,6 +354,19 @@ fn scene_lights() -> [crcbl_render::Light; 3] {
     // top-right pyramid strongly blue, so a green light there would come out
     // blue and say nothing about which light lit it. The blue light goes where
     // the blue material is; the two neutral pyramids take the other two.
+    //
+    // **"The material" is the mesh's own vertex colour as much as the row's
+    // factor**, and the green light is where that was learnt. Every pyramid
+    // turns the same purple `+Z` face at the camera — `PYRAMID_SIDE_COLORS`'
+    // third entry, whose blue is nearly three times its green — so the light
+    // over the untinted-but-textured pyramid is the one fighting its own
+    // surface. It carried the frame while `mesh.slang` shaded with a Blinn lobe
+    // at a fixed strength of 0.35: that highlight was white and bright enough to
+    // pull the pixel to the light's hue on its own. A GGX lobe at four per cent
+    // dielectric reflectance is several times dimmer there, so the tie is now
+    // decided by the diffuse alone — and the diffuse of a green light on a
+    // purple face is a coin toss. Its blue is therefore held down to the same
+    // figure the red light's blue already carries.
     [
         at(
             -PYRAMID_COLUMN,
@@ -364,7 +377,7 @@ fn scene_lights() -> [crcbl_render::Light; 3] {
         at(
             -PYRAMID_COLUMN,
             -PYRAMID_ROW,
-            glam::Vec3::new(0.1, 1.0, 0.2),
+            glam::Vec3::new(0.1, 1.0, 0.1),
         ),
     ]
 }

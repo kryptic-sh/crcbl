@@ -4985,14 +4985,6 @@ material is what makes this a ring**, and it is the moment
 `instance_pool::DirtyRanges` becomes worth sharing, because there would then be
 two callers that coalesce runs rather than one that writes single rows.
 
-**Specular stayed a constant.** `mesh.slang`'s `SPECULAR_POWER` and
-`SPECULAR_STRENGTH` are documented as belonging in a material and were left
-where they are. The reason they were left has now half expired — the fragment
-stage does reach the table, so the varying that used to be in the way is paid
-for — and what remains is only that nothing varies them. Moving them is two
-floats in `GpuMaterial` and a re-bless. `docs/plan/37-materials.md` owns the
-shading model they are part of.
-
 ## The debug-overlay retrofit: what was rejected, and one engine doc that is now stale
 
 Breakout, flappy and asteroids now contribute `DebugModule` sections
@@ -5685,14 +5677,6 @@ does too.
   `vk_e2e/depth_probe.rs` has its seventh entry and is green in
   `run-vk-e2e.sh`'s `74 tests run: 74 passed`. Left in place only because this
   slice was told to append to this file rather than restructure it.
-- **"Specular stayed a constant" is now a smaller question than it was.** It
-  says moving `SPECULAR_POWER` and `SPECULAR_STRENGTH` into a material "needs
-  the fragment stage to reach the table, which means either a `nointerpolation`
-  integer varying … or two more floats through `VertexOutput`". The varying
-  exists and the fragment stage reaches the table, so what is left is two `f32`
-  columns in `GpuMaterial` and the shading-model decision
-  `docs/plan/37-materials.md` owns — which is the part that was never
-  mechanical.
 
 ### D3D12 allow-list: two entries, and what retires each
 
@@ -7105,3 +7089,121 @@ left:
   the real builder by `crcbl-scene`'s
   `the_hardcoded_meshes_cluster_the_way_the_shaders_crate_says`. That pinning is
   what stops the two drifting; it is not a substitute for deciding.
+
+## The GGX slice: what it left owed (2026-08-13)
+
+`GpuMaterial` gained `metallic` and `roughness` into the row's own padding
+(`MATERIAL_STRIDE` is still 32), `mesh.slang` shades with one Cook-Torrance GGX
+lobe driven by them, and `SPECULAR_POWER`/`SPECULAR_STRENGTH` are gone. The
+decision and its two consequences are written up in
+`docs/plan/18-render-features.md`. What this session did not finish, decided
+against, or found on the way:
+
+- **A metal is black until something reflects in it, and that is the model.**
+  Ambient scales the diffuse albedo and a conductor's is zero, so a fully
+  metallic surface out of every light's reach shades black. Nothing regresses —
+  `GpuMaterial::UNTINTED` is `metallic 0.0` and no scene in the tree sets one
+  higher — and the row that closes it is **screen-space reflections**, with
+  irradiance probes behind it, both P7B in that file's delivery table. Until one
+  of them lands, an author who reaches for `metallic 1.0` gets a black object
+  and is not wrong about the shader.
+- **A zeroed material row is no longer exactly black.** It is `metallic 0.0`, so
+  its `F0` is the dielectric 0.04 and it carries a mirror-sharp four-per-cent
+  highlight where a light happens to reflect off it. Still nothing anyone would
+  mistake for an authored material, and `GpuMaterial`'s docs say so — but the "a
+  row nobody wrote shades black" contract is now "shades black apart from a
+  glint".
+- **The importer reads neither `metallicRoughnessTexture` nor
+  `baseColorTexture`.** `crcbl_scene::gltf_import` takes all three _factors_ off
+  the one `pbr_metallic_roughness()` accessor and leaves both images alone, for
+  the reason the base-colour one was already left: nothing here decodes an
+  image, uploads one, or owns a layer of the renderer's page. The gloss map is
+  the one whose absence is now _visible_ — a document that varies roughness over
+  a surface arrives with the factor applied flat across it.
+- **An imported default material is no longer `GpuMaterial::UNTINTED`**, and
+  that is deliberate. glTF defaults a material to `metallic 1.0, roughness 1.0`;
+  the engine's neutral row is a dielectric at half roughness. The importer
+  reports the document. `gltf_import`'s module docs and its
+  `GLTF_DEFAULT_MATERIAL` test constant are where that is written down, and the
+  `assert_ne!` in
+  `a_material_with_no_factors_takes_the_gltf_defaults_and_a_primitive_may_name_none`
+  is what stops the two quietly becoming equal again.
+- **Considered and declined: coupling the diffuse to `1 - F`.** Energy
+  conservation would scale the Lambert term by one minus the Fresnel
+  reflectance. It is a four-per-cent effect on every dielectric in the tree, it
+  moves every 3D golden a second time, and it buys nothing until a material with
+  a coloured `F0` exists. The lobe is plain Lambert plus GGX.
+- **Considered and declined: keeping the `1 / pi` in `D`.** The engine's diffuse
+  is a bare `albedo * N·L`, so the textbook normal distribution would sit a
+  factor of `pi` under it. Folding the `pi` out of `ggx_lobe` is what puts the
+  two lobes in one convention — argued in the shader and in
+  `docs/plan/18-render-features.md`. It was measured, not assumed: with the `pi`
+  in, `Scene::Lights`' green quadrant lost so much specular that the frame's
+  brightest pixel there stopped leading its own channel.
+
+### Two scene constants the new lobe invalidated
+
+Both were calibrated against a Blinn lobe at a fixed strength of 0.35, which is
+several times brighter than a four-per-cent dielectric GGX lobe at the same
+angles. Neither assertion was weakened; the scenes were recalibrated.
+
+- **`crcbl::screenshot`'s green point light.** `scene_lights`' own rule is that
+  each light's colour is chosen against the material under it — and "the
+  material" turns out to be the mesh's vertex colour as much as the row's
+  factor. Every pyramid shows the same purple `+Z` face
+  (`PYRAMID_SIDE_COLORS[2]`, whose blue is nearly three times its green), so the
+  green light was the one fighting its own surface, and the Blinn highlight was
+  what carried it. Its blue is now 0.1, the same as the red light's weakest
+  channel. **This file is outside the slice's brief and the edit is one
+  constant**; the alternative was to change what
+  `each_point_light_pools_where_it_was_put_and_nowhere_else` asserts, which
+  would have been weakening a test to fit the code.
+- **`render_e2e`'s two-geometry-path comparison is no longer an exact byte
+  compare.** It is now "at most `PATH_LSB_CHANNELS` channels differ, and never
+  by more than 1". The mesh arm and the indirect arm transform a vertex through
+  two different shaders (`mesh_cluster.slang`'s mesh stage, `mesh.slang`'s
+  vertex stage) and are not obliged to contract their multiply-adds alike; a
+  sharper highlight turns that last bit into a pixel where a broad one absorbed
+  it. Measured: llvmpipe disagrees on **one** channel of the dunes frame, by
+  one, out of 196608; radv and wgpu are still byte-for- byte identical on every
+  scene. The budget is 16, two orders of magnitude under anything a level that
+  failed to draw would produce.
+
+### The render-e2e observable, and what it does not say
+
+`the_smooth_pyramid_holds_a_tighter_highlight_than_the_rough_one` in
+`crates/crcbl/tests/render_e2e.rs` is the check that the lobe actually responds
+to the column: `Scene::Cube`'s two top pyramids are the same mesh at the same
+orientation under the same sun, and `crcbl_render::forward`'s
+`PYRAMID_ROUGHNESS` is the only shading difference between their rows. It
+measures the **falloff across one face** — inner block over outer block — on
+both, and requires the smooth one's to exceed the rough one's by
+`HIGHLIGHT_FALLOFF_RATIO`. Proven red: with both rows at one roughness it
+measures 1.057 against 1.003 and fails; as the renderer writes them, 1.357
+against 1.003.
+
+- **It is a falloff and not a width, and the brief that asked for it wanted a
+  width.** "Brighter at its centre and narrower across it" needs the lobe's
+  centre to sit inside the measured surface with room either side. Under a
+  _directional_ light on a _flat_ face the half-vector sweeps monotonically
+  across the face, so the highlight's centre is at the face's inner edge and the
+  frame shows one flank of the lobe. The falloff across that flank is the same
+  claim by the only statistic this geometry supports. A scene with a curved
+  surface, or `Scene::Spot`'s floor with two materials on it, is what would let
+  the width be measured directly — and neither exists.
+- **The right-hand pyramid is the only surface in the frame at the mirror
+  direction.** `DirectionalLight::default`'s sun comes from `+X` and that
+  pyramid stands at `+X`; the left-hand one's face never reaches the reflection
+  angle, which is why the same pair of roughnesses leaves it flat and why it
+  works as the control. The consequence is that the roughness edit had to go on
+  the _tinted_ row, so `material_rows`' "one row and two single-column edits"
+  invariant is now "two edits, neither of which can be mistaken for the other".
+- **Not covered: a metal.** No scene sets `metallic` above zero, so the `F0`
+  interpolation and the `1 - metallic` on the diffuse albedo are compiled,
+  type-checked and never exercised by a rendered pixel. The first scene with a
+  conductor in it is what would test them, and it wants SSR to look like
+  anything.
+- **Not covered locally: Metal, D3D12 and wasm.** The lobe was run on lavapipe,
+  radv and wgpu-on-radv. `msl/mesh.metal` and `dxil/mesh.fragmentMain.dxil` were
+  regenerated and compile, and CI is the only thing that can say the frame they
+  draw matches.

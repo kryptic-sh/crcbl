@@ -27,9 +27,21 @@
 //! baseColorFactor` is defined by the spec as **linear** RGBA, and
 //! [`GpuMaterial::base_color`] is documented as linear RGBA, so the mapping is
 //! an assignment with no conversion: both are the factor a shader multiplies
-//! into albedo before any tonemap or sRGB encode. Both defaults agree too —
-//! glTF's missing-factor default is `[1.0; 4]` and so is
-//! [`GpuMaterial::UNTINTED`].
+//! into albedo before any tonemap or sRGB encode. The same accessor's
+//! `metallicFactor` and `roughnessFactor` go straight into
+//! [`GpuMaterial::metallic`] and [`GpuMaterial::roughness`], which are the same
+//! two numbers under the same names — `mesh.slang` shades with the GGX lobe
+//! glTF's model is written for.
+//!
+//! **An imported default material is therefore not [`GpuMaterial::UNTINTED`].**
+//! It was while the row held a factor alone, because glTF's missing-factor
+//! default is `[1.0; 4]` and so is that row's. The two shading factors do not
+//! agree: glTF defaults a material to `metallic 1.0, roughness 1.0`, which is a
+//! fully rough conductor, where [`GpuMaterial::UNTINTED`] is a dielectric with a
+//! soft highlight. The importer reports what the document says rather than what
+//! the engine's own neutral row happens to be — a document that means "plastic"
+//! writes the factors down, and one that does not means what the specification
+//! says it means.
 //!
 //! The row also has a `base_color_texture` column, and **this importer leaves
 //! it at the untextured layer**. glTF's `baseColorTexture` is an image, and
@@ -64,6 +76,8 @@
 //! [`AssetSource`]: crcbl_assets::AssetSource
 //! [`AssetSource::read`]: crcbl_assets::AssetSource::read
 //! [`GpuMaterial::base_color`]: crcbl_shaders::mesh::GpuMaterial::base_color
+//! [`GpuMaterial::metallic`]: crcbl_shaders::mesh::GpuMaterial::metallic
+//! [`GpuMaterial::roughness`]: crcbl_shaders::mesh::GpuMaterial::roughness
 //! [`GpuMaterial::UNTINTED`]: crcbl_shaders::mesh::GpuMaterial::UNTINTED
 
 use std::path::Path;
@@ -261,10 +275,11 @@ impl GltfPrimitive {
     /// Which of [`GltfScene::materials`] to shade with, if the primitive names
     /// one.
     ///
-    /// `None` means the glTF default material, which is
-    /// [`GpuMaterial::UNTINTED`] plus factors nothing here reads. It is not
-    /// substituted for a real index, because a table row nothing wrote is black
-    /// and the caller has to decide what to put there.
+    /// `None` means the glTF default material — an untinted, fully rough
+    /// conductor, which is *not* [`GpuMaterial::UNTINTED`]; see the [module
+    /// docs](self). It is not substituted for a real index either way, because a
+    /// table row nothing wrote is black and the caller has to decide what to put
+    /// there.
     ///
     /// [`GpuMaterial::UNTINTED`]: crcbl_shaders::mesh::GpuMaterial::UNTINTED
     #[inline]
@@ -463,15 +478,28 @@ fn build(
 ) -> Result<GltfScene, StorageError> {
     let materials = document
         .materials()
-        .map(|material| GpuMaterial {
-            base_color: material.pbr_metallic_roughness().base_color_factor(),
-            // **The factor only; `base_color_texture` is left untextured.**
-            // glTF's `baseColorTexture` is an image this crate does not decode,
-            // upload or own a page layer in — see `docs/backlog.md`'s "The
-            // material table has both halves". Naming layer 0 is the honest
-            // value for that: it is the page's white layer, so an imported
-            // material shades with its factor and nothing else.
-            ..GpuMaterial::UNTINTED
+        .map(|material| {
+            // All three factors off one accessor, which is what makes them one
+            // material rather than a colour and two numbers that could drift.
+            let pbr = material.pbr_metallic_roughness();
+            GpuMaterial {
+                base_color: pbr.base_color_factor(),
+                metallic: pbr.metallic_factor(),
+                roughness: pbr.roughness_factor(),
+                // **The factors only; `base_color_texture` is left untextured.**
+                // glTF's `baseColorTexture` is an image this crate does not
+                // decode, upload or own a page layer in — see
+                // `docs/backlog.md`'s "The material table has both halves".
+                // Naming layer 0 is the honest value for that: it is the page's
+                // white layer, so an imported material shades with its factors
+                // and nothing else.
+                //
+                // `metallicRoughnessTexture` is left out for exactly the same
+                // reason, and it is the one whose absence is *visible*: a
+                // document that varies gloss over a surface arrives with the
+                // factor applied flat across it.
+                base_color_texture: GpuMaterial::UNTINTED.base_color_texture,
+            }
         })
         .collect();
 
@@ -672,6 +700,23 @@ mod tests {
         import_glb, import_gltf_text, replacing, triangle_bin, triangle_json,
     };
 
+    /// The row a glTF material with no `pbrMetallicRoughness` block imports as:
+    /// every factor the specification's own default.
+    ///
+    /// **Deliberately not [`GpuMaterial::UNTINTED`]**, which it was until the row
+    /// grew shading factors. glTF defaults `metallicFactor` and
+    /// `roughnessFactor` to `1.0` — a fully rough conductor — where that row is a
+    /// dielectric at half roughness, and the importer's job is to report the
+    /// document. Written out here rather than derived from `UNTINTED`, so a
+    /// change to the engine's neutral row cannot silently move what a document
+    /// is claimed to say.
+    const GLTF_DEFAULT_MATERIAL: GpuMaterial = GpuMaterial {
+        base_color: [1.0; 4],
+        base_color_texture: 0,
+        metallic: 1.0,
+        roughness: 1.0,
+    };
+
     #[test]
     fn a_minimal_glb_yields_its_positions_normals_texcoords_indices_and_material() {
         let scene = import_glb(&triangle_json(BIN_CHUNK_BUFFER)).unwrap();
@@ -692,11 +737,15 @@ mod tests {
         );
         assert_eq!(primitive.material(), Some(0));
 
+        // The fixture names a `baseColorFactor` and neither shading factor, so
+        // the colour is the document's and the other two are the
+        // specification's defaults — which is the whole of what the mapping
+        // claims.
         assert_eq!(
             scene.materials(),
             [GpuMaterial {
                 base_color: BASE_COLOR,
-                ..GpuMaterial::UNTINTED
+                ..GLTF_DEFAULT_MATERIAL
             }]
         );
     }
@@ -819,8 +868,19 @@ mod tests {
         assert_eq!(primitive.positions().len(), 3);
     }
 
+    /// A material with no `pbrMetallicRoughness` block at all imports as the
+    /// specification's defaults, and **that is no longer the engine's neutral
+    /// row**.
+    ///
+    /// The assertion moved rather than the importer: glTF's default material is
+    /// a fully rough conductor, and a mapping that quietly substituted
+    /// [`GpuMaterial::UNTINTED`] for it would be reporting the engine's
+    /// preference as the document's content. `GLTF_DEFAULT_MATERIAL` is what it
+    /// is asserted against, and the `assert_ne!` below is what says the two are
+    /// genuinely different rows — without it this test would pass again the day
+    /// somebody made them equal.
     #[test]
-    fn a_material_with_no_factors_is_untinted_and_a_primitive_may_name_none() {
+    fn a_material_with_no_factors_takes_the_gltf_defaults_and_a_primitive_may_name_none() {
         let json = replacing(
             &triangle_json(BIN_CHUNK_BUFFER),
             "\"pbrMetallicRoughness\": { \"baseColorFactor\": [0.25, 0.5, 0.75, 1.0] }",
@@ -829,7 +889,13 @@ mod tests {
         let json = replacing(&json, ",\n      \"material\": 0", "");
         let scene = import_glb(&json).unwrap();
 
-        assert_eq!(scene.materials(), [GpuMaterial::UNTINTED]);
+        assert_eq!(scene.materials(), [GLTF_DEFAULT_MATERIAL]);
+        assert_ne!(
+            GLTF_DEFAULT_MATERIAL,
+            GpuMaterial::UNTINTED,
+            "an imported default material used to be the untinted row and is not one any more; \
+             a tree in which they are equal again is one where this test says nothing"
+        );
         assert_eq!(scene.meshes()[0].primitives()[0].material(), None);
     }
 

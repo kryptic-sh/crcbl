@@ -210,9 +210,9 @@ struct GpuMaterial
 {
     float4 base_color;
     uint base_color_texture;
+    float metallic;
+    float roughness;
     uint pad0;
-    uint pad1;
-    uint pad2;
 };
 
 /// One cluster, matching `crcbl_shaders::meshlet::Meshlet`.

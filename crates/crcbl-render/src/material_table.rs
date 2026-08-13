@@ -398,18 +398,25 @@ mod tests {
         .expect("the null backend accepts every descriptor")
     }
 
-    /// A material distinguishable from every other `n`, with no two channels
-    /// equal — so a row read at the wrong offset, or a channel written in the
+    /// A material distinguishable from every other `n`, with no two floats
+    /// equal — so a row read at the wrong offset, or a word written in the
     /// wrong order, is a different value rather than the same one.
     ///
     /// The texture layer is `n + 7` rather than `n`, so it is different from the
     /// row index, from the material number and from every factor in the row: an
     /// index read out of the wrong word cannot come out right by coincidence.
+    ///
+    /// The two shading factors are on the same scheme, and they are the two the
+    /// scheme most has to cover: they sit in what used to be the row's trailing
+    /// padding, so a writer that still stops at the texture index leaves them
+    /// zero and this is what says so.
     fn material(n: u32) -> GpuMaterial {
         let base = n as f32;
         GpuMaterial {
             base_color: [base, base + 0.125, base + 0.25, base + 0.375],
             base_color_texture: n + 7,
+            metallic: base + 0.5,
+            roughness: base + 0.625,
         }
     }
 

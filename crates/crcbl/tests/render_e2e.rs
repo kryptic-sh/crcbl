@@ -357,16 +357,17 @@ fn the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden() {
         Scene::Cube,
         "cube",
         MIN_COLORS_CUBE,
-        the_cube_scene_drew_its_geometry_and_both_material_columns,
+        the_cube_scene_drew_its_geometry_and_every_material_column,
     );
 }
 
 /// [`Scene::Cube`]'s claims, in the order a failure would hit them: something
-/// drew, each of the material row's two columns did something visible, and the
+/// drew, each of the material row's columns did something visible, and the
 /// clear behind the geometry did not leak into the occlusion along its edge.
-fn the_cube_scene_drew_its_geometry_and_both_material_columns(image: &Image) {
+fn the_cube_scene_drew_its_geometry_and_every_material_column(image: &Image) {
     the_cube_is_lit_against_an_unpainted_corner(image);
     the_textured_pyramid_is_quartered_and_the_plain_one_is_flat(image);
+    the_smooth_pyramid_holds_a_tighter_highlight_than_the_rough_one(image);
     the_clear_does_not_brighten_the_silhouette_in_front_of_it(image);
 }
 
@@ -1277,7 +1278,7 @@ fn the_cube_scene_draws_the_same_frame_on_every_geometry_path() {
         Scene::Cube,
         "cube",
         MIN_COLORS_CUBE,
-        the_cube_scene_drew_its_geometry_and_both_material_columns,
+        the_cube_scene_drew_its_geometry_and_every_material_column,
     );
 }
 
@@ -1477,18 +1478,64 @@ fn draw_scene_on_every_geometry_path(
         },
     );
 
-    // Byte equality, not the golden's rasteriser tolerance: this is one adapter
-    // and one driver drawing one scene, so every differing pixel is a difference
-    // the two submissions made.
-    assert_eq!(
-        best.pixels(),
-        lesser.pixels(),
-        "{best_path:?} and {lesser_path:?} draw the {name} scene differently"
-    );
+    // **Byte equality, except on the one scene that earns a budget.** This is one
+    // adapter and one driver drawing one scene, so every differing pixel is a
+    // difference the two submissions made, and the tolerance a *different*
+    // rasteriser is allowed would hide exactly that. See [`path_lsb_channels`]
+    // for why `Dunes` alone is not held to zero.
+    let budget = path_lsb_channels(scene);
+    let (differing, worst) = channels_differing(best, lesser);
     eprintln!(
-        "crcbl render e2e: {name} is byte-identical on {best_path:?} and {lesser_path:?} \
-         ({colors} distinct colour(s))"
+        "crcbl render e2e: {name} on {best_path:?} against {lesser_path:?} — {differing} \
+         channel(s) differ, worst by {worst}, budget {budget} ({colors} distinct colour(s))"
     );
+    assert!(
+        worst <= 1 && differing <= budget,
+        "{best_path:?} and {lesser_path:?} draw the {name} scene differently: {differing} \
+         channel(s) differ, the worst by {worst} — this scene allows at most {budget} \
+         channel(s) and only ever by one, and this is a different picture"
+    );
+}
+
+/// How many channels the two geometry paths may disagree about on `scene`, and
+/// even then only ever by one.
+///
+/// **Zero for every scene but one, and that is the point.** The two paths are
+/// meant to draw the same picture, so a budget handed to every scene would be
+/// slack nobody measured — the exact comparison is what has caught a path
+/// drawing something else, and it keeps its teeth everywhere it still holds.
+/// Verified rather than assumed: radv and wgpu answer zero on every scene, and
+/// llvmpipe answers zero on every scene but the dunes patch.
+///
+/// `Dunes` is the exception because its two arms **deliberately draw different
+/// geometry** — see `crcbl-vk`'s
+/// `the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is`: the uniform
+/// cut is the per-cluster cut's floor, so the mesh arm draws finer clusters. Its
+/// byte equality was therefore always the luckier kind, and `mesh.slang`'s move
+/// from a Blinn lobe to a GGX one is what ran the luck out: a sharper highlight
+/// turns a last-bit difference in a world position into a last-bit difference in
+/// a pixel, where a broad one absorbed it. Measured at **one** channel, off by
+/// one, out of the frame's 196608, on llvmpipe alone.
+///
+/// The budget is two orders of magnitude under anything a level that failed to
+/// draw would produce — the failure this exists for moves whole clusters, not
+/// one channel.
+const fn path_lsb_channels(scene: Scene) -> usize {
+    match scene {
+        Scene::Dunes => 16,
+        _ => 0,
+    }
+}
+
+/// How many channels of `left` and `right` differ, and by how much at worst.
+fn channels_differing(left: &Image, right: &Image) -> (usize, u8) {
+    left.pixels()
+        .iter()
+        .zip(right.pixels())
+        .filter(|(one, other)| one != other)
+        .fold((0usize, 0u8), |(count, worst), (one, other)| {
+            (count + 1, worst.max(one.abs_diff(*other)))
+        })
 }
 
 /// [`Scene::Cube`]'s anti-vacuity claim: a corner still holding the clear, and a
@@ -1548,6 +1595,123 @@ fn the_textured_pyramid_is_quartered_and_the_plain_one_is_flat(image: &Image) {
         textured >= plain + 4,
         "the lower pyramid samples a four-texel layer and the upper one a flat white layer, \
          so it must hold several more distinct colours: {textured} below vs {plain} above"
+    );
+}
+
+/// The frame row [`Scene::Cube`]'s two top pyramids both show their `+Z` face
+/// on, and how far the four measured blocks reach either way.
+///
+/// Both faces run unbroken from row 56 to row 79 at every column the blocks
+/// touch — the base's silhouette starts at 80 — so a block thirteen rows tall
+/// centred here sits inside the face with several rows of margin above and
+/// below. Wide enough for the same reason: a dozen columns average out a
+/// rasteriser's edge pixels without either block reaching the other.
+const PYRAMID_FACE_AT: u32 = 70;
+
+/// The half-extents of each of those blocks.
+const PYRAMID_FACE_BAND: (u32, u32) = (6, 6);
+
+/// The **inner** end of the smooth pyramid's `+Z` face: the column nearest the
+/// frame's centre, where the sun's mirror direction lands.
+///
+/// `DirectionalLight::default`'s sun comes from `+X`, and this is the pyramid at
+/// `+X` — so of everything in this frame it is that face's inner edge that sits
+/// at the reflection angle, and it is the only surface here a specular lobe
+/// peaks on at all. See `crcbl_render`'s `PYRAMID_ROUGHNESS`.
+const SMOOTH_HIGHLIGHT_AT: (u32, u32) = (208, PYRAMID_FACE_AT);
+
+/// The **outer** end of the same face, a fifth of the frame further out.
+///
+/// Same face, same flat normal, same albedo and the same sun, so the only thing
+/// that differs between this block and [`SMOOTH_HIGHLIGHT_AT`] is how far the
+/// half-vector has swung off the mirror direction — which is exactly the axis a
+/// lobe's width is measured along.
+const SMOOTH_TAIL_AT: (u32, u32) = (248, PYRAMID_FACE_AT);
+
+/// [`SMOOTH_HIGHLIGHT_AT`] mirrored onto the rough pyramid, which stands the
+/// same distance the other side of the frame's centre.
+const ROUGH_HIGHLIGHT_AT: (u32, u32) = (EXTENT.0 - SMOOTH_HIGHLIGHT_AT.0, PYRAMID_FACE_AT);
+
+/// And [`SMOOTH_TAIL_AT`] mirrored the same way.
+const ROUGH_TAIL_AT: (u32, u32) = (EXTENT.0 - SMOOTH_TAIL_AT.0, PYRAMID_FACE_AT);
+
+/// How much more the smooth material's face must fall off across its width than
+/// the rough one's.
+///
+/// **This number is the control, not a threshold on a picture.** Set both rows
+/// to one roughness and the two faces measure 1.06 and 1.00 — the smooth
+/// pyramid's small lead there is geometry, because its face is the one at the
+/// mirror angle, and 1.2 sits above it. With the rows as the renderer writes
+/// them the same measurement is 1.36 against 1.00. So the gap this refuses is
+/// the one where nothing read the column, and the margin is about an eighth on
+/// either side of the line.
+const HIGHLIGHT_FALLOFF_RATIO: f32 = 1.20;
+
+/// How far above the clear each of the four blocks must measure.
+///
+/// A frame that drew no pyramid measures the clear in all four, and a ratio
+/// between two equal numbers satisfies any relation asked of it. The clear is
+/// about 37 on this scale and the dimmest of the four blocks about 187, so this
+/// sits between them with room either side.
+const PYRAMID_FACE_LIT_FLOOR: f32 = 100.0;
+
+/// **The shading column of the material row, read off the frame: a smooth
+/// material's highlight falls off across a face and a rough one's does not.**
+///
+/// `Scene::Cube`'s two top pyramids are the same mesh at the same orientation
+/// under the same sun, one either side of the frame's centre, and their rows
+/// differ in a base-colour factor and in `crcbl_render`'s `PYRAMID_ROUGHNESS`.
+/// Each turns the same `+Z` face at the camera, and the sun's mirror direction
+/// lands on the inner edge of the right-hand one — so that face crosses the
+/// specular lobe from its peak to its flank while the left-hand face sits well
+/// off it.
+///
+/// The measurement is therefore a **falloff across one face**, taken on both
+/// pyramids: inner block over outer block, on the same surface, with the
+/// diffuse term constant across it because the normal and the light direction
+/// are. A tight lobe leaves the inner end far brighter than the outer; a broad
+/// one covers the whole face and leaves it flat.
+///
+/// **The rough pyramid is the control and it is what makes this a claim about
+/// the material.** Its face is off the mirror direction, so its falloff is
+/// ~1.00 whatever roughness it carries — and the smooth face's falloff is
+/// ~1.06 when it carries the *same* roughness, because that much of the lead is
+/// the geometry. [`HIGHLIGHT_FALLOFF_RATIO`] is set above that and below the
+/// 1.36 the two rows actually produce, so the assertion is red on a shader that
+/// ignored `GpuMaterial::roughness` and green on one that read it.
+///
+/// **No golden could make this claim.** A lobe of the wrong width draws a
+/// perfectly plausible picture — that is what the Blinn constant this replaced
+/// was — and the reference would simply have been blessed from it.
+fn the_smooth_pyramid_holds_a_tighter_highlight_than_the_rough_one(image: &Image) {
+    let measure = |at| block_brightness(image, at, PYRAMID_FACE_BAND);
+    let smooth = [measure(SMOOTH_HIGHLIGHT_AT), measure(SMOOTH_TAIL_AT)];
+    let rough = [measure(ROUGH_HIGHLIGHT_AT), measure(ROUGH_TAIL_AT)];
+    let clear = block_brightness(image, (2, 2), (2, 2));
+    eprintln!(
+        "crcbl render e2e: cube — the smooth pyramid's face runs {:.1} to {:.1} across its width \
+         and the rough one's {:.1} to {:.1}, against a clear of {clear:.1}",
+        smooth[0], smooth[1], rough[0], rough[1],
+    );
+
+    for (name, blocks) in [("smooth", smooth), ("rough", rough)] {
+        for (end, value) in ["inner", "outer"].into_iter().zip(blocks) {
+            assert!(
+                value > PYRAMID_FACE_LIT_FLOOR,
+                "the {end} end of the {name} pyramid's face measures {value:.1} against a clear \
+                 of {clear:.1}, so there is no lit face here for a highlight to be on"
+            );
+        }
+    }
+
+    let smooth_falloff = smooth[0] / smooth[1];
+    let rough_falloff = rough[0] / rough[1];
+    assert!(
+        smooth_falloff > rough_falloff * HIGHLIGHT_FALLOFF_RATIO,
+        "the smoother material's highlight must be the narrower one: its face falls off by \
+         {smooth_falloff:.3} across its width against the rough pyramid's {rough_falloff:.3}, \
+         and one lobe shading both would leave those within {HIGHLIGHT_FALLOFF_RATIO} of each \
+         other"
     );
 }
 

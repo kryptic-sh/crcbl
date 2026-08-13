@@ -16,6 +16,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_shaders::mesh::GpuMaterial` gained `metallic: f32` and
+  `roughness: f32`, and `mesh.slang` shades with one GGX lobe driven by them.**
+  Anything building a `GpuMaterial` literally has to name the two fields
+  (`..GpuMaterial::UNTINTED` supplies them). `MATERIAL_STRIDE` is **unchanged at
+  32** — both went into padding the row already had — so nothing that writes the
+  table at a stride changes.
+
+  `GpuMaterial::UNTINTED` is no longer "every factor `1.0`": it is
+  `metallic 0.0, roughness 0.5`, an ordinary painted surface, because a lobe is
+  evaluated rather than multiplied by and there is no neutral pair. Half is
+  roughly where a Blinn exponent of 32 sat, so the shading a scene already had
+  is the shading it keeps.
+
+  `mesh.slang`'s `SPECULAR_POWER` and `SPECULAR_STRENGTH` are **deleted**. The
+  lobe is Cook-Torrance — Trowbridge-Reitz `D`, Smith height-correlated
+  visibility, Schlick Fresnel, Lambert diffuse — with
+  `F0 = lerp(0.04, base_color, metallic)` and a diffuse albedo of
+  `base_color * (1 - metallic)`. **A fully metallic surface therefore has no
+  ambient term and is black until it has something to reflect**; screen-space
+  reflections and irradiance probes are the two rows that give it one, and
+  `docs/plan/18-render-features.md` is where that is argued. Every 3D golden
+  moved; `sprite` and `ui` are byte-identical.
+
+- **`crcbl_scene::gltf_import` fills both new factors, so an imported default
+  material is no longer `GpuMaterial::UNTINTED`.** `metallicFactor` and
+  `roughnessFactor` come off the same `pbrMetallicRoughness` accessor the base
+  colour already did. glTF defaults a material to `metallic 1.0, roughness 1.0`
+  — a fully rough conductor — where the engine's neutral row is a dielectric at
+  half roughness, and the importer reports the document rather than the engine's
+  preference. Callers that relied on the old equality have to name the
+  specification's defaults instead.
+
 - **`FrameUniforms` lost `light_direction`, `light_color` and `lod_params`.**
   The sun is a row in the light list now rather than a field, and `lod_params`
   was already dead — documented in-tree as "read by no shader since hysteresis

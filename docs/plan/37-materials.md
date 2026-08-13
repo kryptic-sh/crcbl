@@ -45,6 +45,12 @@ The Unreal material/material-instance split, minus the graph:
 - Runtime: an instance resolves to one **material table row** (parameters
   packed) + bindless texture indices — exactly the stage 3 layout, unchanged.
   Authoring changed; the GPU path did not.
+- `standard_pbr`'s first three parameters already exist in that row and are
+  already shaded: `crcbl_shaders::mesh::GpuMaterial` carries `base_color`,
+  `metallic` and `roughness`, and `mesh.slang` runs one GGX lobe on them — see
+  `docs/plan/18-render-features.md`'s BRDF decision. This topic owns how a
+  parameter block is _declared and authored_, not which parameters the row
+  holds; a template that adds one is what makes the row grow.
 - glTF import (6) emits instances of `standard_pbr` — imported content and
   hand-authored content are the same kind of asset from that moment on.
 

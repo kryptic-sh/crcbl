@@ -144,10 +144,10 @@ pub const MESH_ENTRY_STRIDE: usize = 36;
 /// Bytes per [`GpuMaterial`], and the stride of the material-table storage
 /// buffer.
 ///
-/// One `float4`, one `uint` and three more of padding — 32 rather than 20,
-/// because the row's alignment is the `float4`'s 16 and `std430` rounds the
-/// size up to a multiple of it. Checked against the `ArrayStride` and the
-/// `Offset` decorations `slangc` emits by this module's
+/// One `float4`, one `uint`, two `float` and one more `uint` of padding — 32
+/// rather than 28, because the row's alignment is the `float4`'s 16 and
+/// `std430` rounds the size up to a multiple of it. Checked against the
+/// `ArrayStride` and the `Offset` decorations `slangc` emits by this module's
 /// `the_material_layout_matches_the_offsets_slangc_emits`.
 pub const MATERIAL_STRIDE: usize = 32;
 
@@ -571,7 +571,9 @@ impl GpuMesh {
 /// `docs/plan/03-gpu-driven-rendering.md` §3.2's material table:
 /// [`GpuInstance::material`] indexes an array of these and the fragment stage
 /// multiplies [`GpuMaterial::base_color`] and the texel
-/// [`GpuMaterial::base_color_texture`] selects into the vertex albedo.
+/// [`GpuMaterial::base_color_texture`] selects into the vertex albedo, then
+/// shades it with the one GGX lobe [`GpuMaterial::metallic`] and
+/// [`GpuMaterial::roughness`] parameterise.
 /// [`MaterialTable`](https://docs.rs/crcbl-render) is what writes them.
 ///
 /// # The texture index is an `ArrayPages` layer, not a `Bindless` slot
@@ -597,7 +599,15 @@ impl GpuMesh {
 /// rather than plausible. **The texture column does not change that**: a zeroed
 /// row names layer 0, and zero times any texel is still black.
 ///
-/// `PartialEq` but not `Eq`, for [`GpuMesh`]'s reason: one field is floats.
+/// The two shading factors do not change it either, and one of them is worth
+/// being precise about: a zeroed row is `metallic 0.0`, so its diffuse albedo
+/// is zero and its `F0` is the dielectric `0.04` — the row is black apart from
+/// a mirror-sharp four-per-cent highlight where a light happens to reflect off
+/// it. That is a smaller signal than the flat black the row had before this
+/// column existed, and it is still nothing anyone would mistake for a material
+/// they authored.
+///
+/// `PartialEq` but not `Eq`, for [`GpuMesh`]'s reason: three fields are floats.
 ///
 /// [`BindingModel::Bindless`]: https://docs.rs/crcbl-hal
 /// [`ArrayPages`]: https://docs.rs/crcbl-hal
@@ -617,25 +627,59 @@ pub struct GpuMaterial {
     /// [`crcbl_render::forward`](https://docs.rs/crcbl-render) is the one that
     /// does, and [`GpuMaterial::UNTINTED`] is the row that relies on it.
     pub base_color_texture: u32,
+    /// How metallic the surface is: `0.0` a dielectric, `1.0` a conductor.
+    ///
+    /// glTF's `pbrMetallicRoughness.metallicFactor` exactly, which is what lets
+    /// [`crcbl_scene::gltf_import`](https://docs.rs/crcbl-scene) assign it with
+    /// no conversion. `mesh.slang` reads it twice: it is what the specular
+    /// lobe's `F0` interpolates between `0.04` and the base colour on, and it is
+    /// what scales the diffuse albedo *down* — a conductor has no diffuse
+    /// lobe at all.
+    ///
+    /// **A metal has no ambient term either**, because ambient scales that same
+    /// diffuse albedo. Until screen-space reflections or irradiance probes give
+    /// it something to reflect, a fully metallic surface out of every light's
+    /// reach is black. That is the model being right rather than the shader
+    /// being wrong — see `docs/plan/18-render-features.md`.
+    pub metallic: f32,
+    /// How rough the surface is: `0.0` a mirror, `1.0` fully diffuse.
+    ///
+    /// glTF's `pbrMetallicRoughness.roughnessFactor`, on
+    /// [`metallic`](Self::metallic)'s terms. `mesh.slang` squares it into the
+    /// GGX `alpha` — the usual perceptual parameterisation, so equal steps here
+    /// are roughly equal steps in the look — and clamps it away from zero,
+    /// which a normal distribution divides by.
+    pub roughness: f32,
 }
 
 impl GpuMaterial {
-    /// The material that changes nothing: every factor `1.0`, and the page's
-    /// white layer.
+    /// The material that tints nothing: a plain dielectric with a soft
+    /// highlight, on the page's white layer.
     ///
-    /// Named because a table's rows are black until something writes them, so
-    /// *some* row has to be the one an instance carries when nobody has asked
-    /// for a colour — and `[1.0; 4]` spelled at each such call site is a
-    /// number a reader has to recognise rather than read.
+    /// **Not "every factor `1.0`" any more**, and the two that are not are the
+    /// point. [`base_color`](Self::base_color) is still `[1.0; 4]`, because a
+    /// factor of one is what a multiply into the vertex albedo has to be to
+    /// change nothing. The shading factors have no such neutral value: a lobe is
+    /// evaluated, not multiplied by, so *some* pair of numbers is what an
+    /// instance shades with when nobody has asked. These are
+    /// `metallic 0.0, roughness 0.5` — an ordinary painted surface, and roughly
+    /// what the engine already looked like, since the Blinn exponent of 32 this
+    /// row's lobe replaced sits near a GGX roughness of a half.
+    ///
+    /// Named for the same reason it always was: a table's rows are black until
+    /// something writes them, and the numbers spelled at each such call site
+    /// would be ones a reader has to recognise rather than read.
     pub const UNTINTED: Self = Self {
         base_color: [1.0; 4],
         base_color_texture: 0,
+        metallic: 0.0,
+        roughness: 0.5,
     };
 
     /// The bytes one material-table element holds, in `std430` order.
     ///
-    /// The three trailing `uint`s of padding the shader's struct spells out are
-    /// left as the zeroes the array starts as; nothing reads them.
+    /// The trailing `uint` of padding the shader's struct spells out is left as
+    /// the zero the array starts as; nothing reads it.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; MATERIAL_STRIDE] {
         let mut bytes = [0u8; MATERIAL_STRIDE];
@@ -646,7 +690,11 @@ impl GpuMaterial {
         }
         bytes[at..at + 4].copy_from_slice(&self.base_color_texture.to_le_bytes());
         at += 4;
-        debug_assert_eq!(at + 12, MATERIAL_STRIDE);
+        for value in [self.metallic, self.roughness] {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
+        debug_assert_eq!(at + 4, MATERIAL_STRIDE);
         bytes
     }
 
@@ -671,6 +719,8 @@ impl GpuMaterial {
                     .try_into()
                     .unwrap_or_else(|_| unreachable!("four bytes of a fixed-size array")),
             ),
+            metallic: float_at(20),
+            roughness: float_at(24),
         }
     }
 }
@@ -1695,24 +1745,26 @@ mod tests {
     /// The offsets and the stride `slangc` actually emitted for `GpuMaterial`,
     /// read out of the disassembly.
     ///
-    /// The stride is what this is really for. A one-member `std430` struct is
-    /// the case an implementation is most free to lay out differently from the
-    /// bare vector it wraps, and a table the CPU writes at `index * 16` while a
-    /// shader reads it at some other multiple agrees for row 0 and for nothing
-    /// after it — which is the second material, which is the only reason the
-    /// table exists at all.
+    /// The stride is what this is really for. A `std430` struct whose members
+    /// are a vector and a run of scalars is the case an implementation is most
+    /// free to lay out differently from the sum of its parts, and a table the
+    /// CPU writes at one stride while a shader reads it at another agrees for
+    /// row 0 and for nothing after it — which is the second material, which is
+    /// the only reason the table exists at all.
     #[test]
     fn the_material_layout_matches_the_offsets_slangc_emits() {
         // `OpDecorate %_runtimearr_GpuMaterial_std430 ArrayStride 32`, and
-        // `OpMemberDecorate %GpuMaterial_std430 0 Offset 0` / `1 Offset 16`.
-        // Thirty-two rather than twenty: the row's alignment is the `float4`'s
-        // sixteen, so the trailing `uint` is followed by twelve bytes the
-        // shader's own struct spells out as `pad0`/`pad1`/`pad2`.
+        // `OpMemberDecorate %GpuMaterial_std430 0 Offset 0` / `1 Offset 16` /
+        // `2 Offset 20` / `3 Offset 24`. Thirty-two rather than twenty-eight:
+        // the row's alignment is the `float4`'s sixteen, so the last member is
+        // followed by four bytes the shader's own struct spells out as `pad0`.
         assert_eq!(MATERIAL_STRIDE, 32);
 
         let material = GpuMaterial {
             base_color: [0.25, 0.5, 0.75, 1.0],
             base_color_texture: 3,
+            metallic: 0.125,
+            roughness: 0.375,
         };
         let bytes = material.to_bytes();
         assert_eq!(bytes.len(), MATERIAL_STRIDE);
@@ -1735,10 +1787,16 @@ mod tests {
             3,
             "base_color_texture at offset 16"
         );
+        // **The two shading factors went into the padding the row already had**,
+        // which is what kept the stride at 32 across the change that added them
+        // — so every golden that moved did so for the BRDF and not for a table
+        // the shader started reading at a different pitch.
+        assert_eq!(float_at(20), 0.125, "metallic at offset 20");
+        assert_eq!(float_at(24), 0.375, "roughness at offset 24");
         assert_eq!(
-            bytes[20..MATERIAL_STRIDE],
-            [0u8; 12],
-            "the three pad words the shader declares must stay zero"
+            bytes[28..MATERIAL_STRIDE],
+            [0u8; 4],
+            "the pad word the shader declares must stay zero"
         );
         assert_eq!(GpuMaterial::from_bytes(&bytes), material);
 
@@ -1755,6 +1813,11 @@ mod tests {
             0,
             "the untextured material names the page's white layer"
         );
+        // **The untinted row is not every factor 1.0**, and a `roughness` of
+        // 1.0 would be the fully diffuse extreme rather than the ordinary
+        // painted surface the row is meant to be — see its docs.
+        assert_eq!(GpuMaterial::UNTINTED.metallic, 0.0);
+        assert_eq!(GpuMaterial::UNTINTED.roughness, 0.5);
         assert_ne!(GpuMaterial::UNTINTED, GpuMaterial::default());
 
         // Two materials differing in nothing but their texture are different

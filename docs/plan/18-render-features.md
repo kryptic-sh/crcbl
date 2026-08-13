@@ -146,6 +146,56 @@ wasted.
   moving anything: the visible set is already per-light, and narrowing it is a
   change to one dispatch rather than a change to how many there are.
 
+## The BRDF the "one material model" rule names (decided 2026-08-13)
+
+The rule at the top of this file — "one material model, one BRDF, one set of
+inputs" — had no content behind it. `mesh.slang` shaded with Lambert plus a
+Blinn-Phong lobe whose exponent and strength were two `static const` floats,
+`SPECULAR_POWER = 32.0` and `SPECULAR_STRENGTH = 0.35`, so there was exactly one
+material in the engine however many rows the table held. That is the state the
+SSR row above cannot be built on: screen-space reflections have to know which
+pixels reflect and how sharply, and nothing in the engine could say.
+
+So the material row grew `metallic` and `roughness` — glTF's own two, under
+their own names — and the lobe became **one Cook-Torrance GGX lobe** driven by
+them: Trowbridge-Reitz `D`, Smith height-correlated visibility, Schlick's
+Fresnel, Lambert diffuse. The two constants are deleted, not left beside it.
+
+Why GGX now rather than a roughness-driven Blinn later:
+
+- **The rule is the reason.** A roughness-driven Blinn would be a second
+  material model, and P7C's ray-traced twin shades with the same one — so it
+  would be written once and rewritten once, and in between the two paths would
+  be comparable only by eye.
+- **glTF already speaks it.** The importer reads `metallicFactor` and
+  `roughnessFactor` off the accessor it was already holding for the base colour,
+  so an imported material means what its author meant with no mapping in
+  between.
+- **It costs nothing a device has to have.** The lobe is dot products, a square
+  root and two divides. No `pow` with a variable exponent and no trigonometry,
+  for the reason the rest of `mesh.slang` avoids them: a platform's
+  transcendental functions differ in the last place between the four targets and
+  this file's determinism argument is that it does not use any.
+
+Two consequences worth stating before somebody meets them:
+
+- **A metal has no ambient term, and that is the model rather than a bug.**
+  Ambient scales the diffuse albedo, and a conductor's diffuse albedo is zero —
+  what a metal owes the room is a reflection, not a scatter. So a fully metallic
+  surface out of every light's reach is **black** until it has something to
+  reflect, and the two rows above that give it one are exactly SSR and
+  irradiance probes. Nothing regresses today: `GpuMaterial::UNTINTED` is
+  `metallic 0.0` and no scene in the tree sets one higher.
+- **The engine's Lambert term carries no `1 / pi`, so neither does the specular
+  one.** Trowbridge-Reitz normalises to `alpha2 / (pi * shape * shape)` and
+  Lambert to `albedo / pi`; this engine's diffuse is a bare `albedo * N·L`, the
+  convention where a light's intensity has absorbed the reciprocal. The `pi` is
+  therefore folded out of `D` as well, so the ratio between the two lobes is the
+  physical one. Writing the textbook `D` against this diffuse would put every
+  highlight a factor of `pi` under the surface it sits on, which is not a look
+  anyone chose — and it is what keeps a roughness of a half close to the Blinn
+  exponent of 32 it replaced.
+
 ## Shadows (MVP — lands with P7)
 
 - **Sun: cascaded shadow maps** (CSM), 2–3 cascades, stable (texel-snapped)

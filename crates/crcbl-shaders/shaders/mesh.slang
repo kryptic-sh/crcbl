@@ -420,13 +420,29 @@ struct GpuMaterial
     /// texture leaves this at zero and the multiply below changes nothing —
     /// `crcbl_render`'s forward pass is what fills that layer and says so.
     uint base_color_texture;
+    /// How metallic the surface is: 0 a dielectric, 1 a conductor. glTF's
+    /// `metallicFactor`.
+    ///
+    /// Read twice by `fragmentMain`: `F0` interpolates between the dielectric
+    /// 0.04 and the base colour on it, and the diffuse albedo is scaled *down*
+    /// by it — so a conductor reflects and does not scatter, and has no ambient
+    /// term either. See the accumulation loop.
+    float metallic;
+    /// How rough it is: 0 a mirror, 1 fully diffuse. glTF's `roughnessFactor`.
+    ///
+    /// Squared into the GGX `alpha` rather than used directly, which is the
+    /// usual perceptual parameterisation, and clamped away from zero — the
+    /// normal distribution divides by `alpha` squared.
+    float roughness;
     /// Pads the row to 32 bytes, which is what `std430` rounds it to anyway:
-    /// the struct's alignment is the `float4`'s 16, so a 20-byte row would be
-    /// read at a stride of 32 by a shader while the CPU wrote it at 20. Spelled
+    /// the struct's alignment is the `float4`'s 16, so a 28-byte row would be
+    /// read at a stride of 32 by a shader while the CPU wrote it at 28. Spelled
     /// out rather than implied, exactly as `DrawConstants` below spells its own.
+    ///
+    /// **There were three of these**, and the two shading factors above went
+    /// into two of them — so the row gained a material model without the table's
+    /// stride moving and without a single golden shifting for a layout reason.
     uint pad0;
-    uint pad1;
-    uint pad2;
 };
 
 /// One light, matching `struct GpuLight` in `light_cluster.slang` and
@@ -765,18 +781,80 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
     return output;
 }
 
-/// Blinn-Phong specular exponent.
+/// The smallest roughness the specular lobe is evaluated at.
 ///
-/// One constant rather than a material column, **even now that there is a table
-/// to put it in**: `docs/plan/02-vulkan-backend.md` §2.5 rung 4 is "enough to
-/// see geometry properly; real material model comes with stage 3/5", so how
-/// specular is parameterised at all is part of the shading model
-/// `docs/plan/37-materials.md` owns. `GpuMaterial` carries what §3.2 asks a
-/// material table to carry and nothing a caller would not vary.
-static const float SPECULAR_POWER = 32.0;
+/// `alpha` is the roughness squared and the normal distribution divides by
+/// `alpha` squared, so a roughness of zero is a division by zero — a mirror is
+/// a delta function and a delta function has no finite value to sample.
+/// Clamping rather than guarding the divide keeps the lobe *narrow* at the
+/// limit instead of flattening it, which is what a reader authoring a polished
+/// material expects to happen.
+///
+/// The value is the usual one: at this roughness a highlight is a couple of
+/// pixels across at any resolution this engine renders at, so lowering it
+/// further buys aliasing rather than sharpness.
+static const float MIN_ROUGHNESS = 0.045;
 
-/// How much of the light colour the specular lobe contributes.
-static const float SPECULAR_STRENGTH = 0.35;
+/// The dielectric normal-incidence reflectance every non-metal is given.
+///
+/// Four per cent covers the range real insulators sit in closely enough that a
+/// material column for it would be a knob with no picture behind it. A metal
+/// interpolates away from it towards its own base colour — see `f0_of` below.
+static const float DIELECTRIC_F0 = 0.04;
+
+/// The Cook-Torrance specular lobe, `pi * D * V * F`, without the `N·L` the
+/// accumulation multiplies in.
+///
+/// Trowbridge-Reitz `D`, Smith height-correlated `V` (the visibility form, so
+/// the `1 / (4 N·L N·V)` of the microfacet denominator is already inside it),
+/// and Schlick's `F`. One lobe for every light kind, which is topic 18's "one
+/// material model, one BRDF, one set of inputs" holding by construction.
+///
+/// **The `pi` is the diffuse term's, folded out of here rather than into it.**
+/// Trowbridge-Reitz normalises to `alpha2 / (pi * shape * shape)` and Lambert
+/// to `albedo / pi`, and this engine's diffuse is a bare `albedo * N·L` — the
+/// convention where a light's intensity has absorbed the `1 / pi`. Writing the
+/// textbook `D` against that diffuse would put every highlight a factor of
+/// `pi` under the surface it sits on, which is not a look anyone chose. So the
+/// two lobes share one convention: neither carries its `1 / pi`, and the ratio
+/// between them is the physical one. It is also what keeps a roughness of a
+/// half close to the Blinn exponent of 32 this replaced, so the goldens moved
+/// for the shape of the lobe rather than for its strength.
+///
+/// **No `pow` and no trigonometry anywhere in here**, which is the same rule
+/// `OPEN_BOX_FACES` is built under on the host: a platform's transcendental
+/// functions differ in the last place between targets, and this file's whole
+/// determinism argument is that it does not use any. Schlick's fifth power is
+/// two squarings and a multiply; the rest is dot products, a square root and
+/// two divides.
+///
+/// `alpha2` rather than the roughness, because the caller has clamped and
+/// squared it once for the whole fragment rather than once per light.
+float3 ggx_lobe(float alpha2, float3 f0, float n_dot_l, float n_dot_v, float n_dot_h,
+                float v_dot_h)
+{
+    // Trowbridge-Reitz. The denominator is `alpha2` at `n_dot_h == 1` and grows
+    // from there, so it is only zero when `alpha2` is — which `MIN_ROUGHNESS`
+    // is what rules out. The `max` is the belt on those braces, in the shape
+    // every other divide in this file guards itself with.
+    float shape = n_dot_h * n_dot_h * (alpha2 - 1.0) + 1.0;
+    float d = alpha2 / max(shape * shape, 1e-8);
+
+    // Smith height-correlated visibility. Both square roots are of a value at
+    // least `alpha2`, and the sum is at least that times `n_dot_l + n_dot_v` —
+    // so the guard here is against a fragment where both cosines are zero at
+    // once, which is a surface exactly edge-on to the eye and the light.
+    float lambda_v = n_dot_l * sqrt(n_dot_v * n_dot_v * (1.0 - alpha2) + alpha2);
+    float lambda_l = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - alpha2) + alpha2);
+    float visibility = 0.5 / max(lambda_v + lambda_l, 1e-6);
+
+    // Schlick, as repeated multiplication.
+    float grazing = 1.0 - v_dot_h;
+    float grazing2 = grazing * grazing;
+    float3 fresnel = f0 + (float3(1.0, 1.0, 1.0) - f0) * (grazing2 * grazing2 * grazing);
+
+    return d * visibility * fresnel;
+}
 
 /// Ceiling on the slope-scaled part of the depth bias, in shadow-clip depth.
 ///
@@ -1159,6 +1237,28 @@ float4 fragmentMain(VertexOutput input) : SV_Target
         base_color_sampler, float3(input.uv, float(material.base_color_texture)));
     float4 albedo = input.color * material.base_color * texel;
 
+    // The row's two shading factors, clamped once for the fragment rather than
+    // once per light. `roughness` is squared into GGX's `alpha` — the
+    // perceptual parameterisation glTF authors in — and `alpha` is squared
+    // again inside the lobe, so this is the one place the chain starts.
+    float metallic = saturate(material.metallic);
+    float roughness = clamp(material.roughness, MIN_ROUGHNESS, 1.0);
+    float alpha = roughness * roughness;
+    float alpha2 = alpha * alpha;
+
+    // **A conductor has no diffuse lobe**: what a metal does with light is
+    // reflect it, and its reflectance is coloured where a dielectric's is the
+    // flat `DIELECTRIC_F0`. Both halves are one interpolation each, and the
+    // pair is the whole of what `metallic` means.
+    float3 f0 = lerp(float3(DIELECTRIC_F0, DIELECTRIC_F0, DIELECTRIC_F0), albedo.rgb, metallic);
+    float3 diffuse_albedo = albedo.rgb * (1.0 - metallic);
+
+    // Constant across the fragment's lights, so it is taken once. Clamped off
+    // zero because it is a factor of the visibility term's denominator: a
+    // surface exactly edge-on to the eye is a fragment the rasteriser can still
+    // hand over, and its lobe has to be a finite number.
+    float n_dot_v = max(dot(normal, to_eye), 1e-4);
+
     // This fragment's own froxel, and the only lights it will look at. The view
     // depth is recomputed from the frame's matrix rather than read off
     // `input.position.w`: the four targets this file compiles to have twice
@@ -1210,13 +1310,18 @@ float4 fragmentMain(VertexOutput input) : SV_Target
         float n_dot_l = dot(normal, to_light);
         float diffuse = max(n_dot_l, 0.0);
 
-        // Blinn: the half-vector form, not Phong's reflection vector. Cheaper,
-        // and it is what every later specular model in this engine is a
-        // refinement of.
+        // Cook-Torrance, one GGX lobe, driven by the row's own two factors —
+        // where this was a Blinn power and a strength constant no caller could
+        // vary. The half-vector form survives the change: it is what the
+        // microfacet model is written in, rather than an approximation of it.
         float3 half_vector = normalize(to_light + to_eye);
-        float specular = pow(max(dot(normal, half_vector), 0.0), SPECULAR_POWER);
-        // No light on the back of a surface, whatever the half-vector says.
-        specular *= step(0.0, diffuse) * diffuse;
+        float3 specular = ggx_lobe(alpha2, f0, diffuse, n_dot_v,
+                                   max(dot(normal, half_vector), 0.0),
+                                   max(dot(to_eye, half_vector), 0.0));
+        // No light on the back of a surface, whatever the half-vector says. The
+        // `N·L` the lobe left out is the same one Lambert already carries, so
+        // both terms take it from here and a back-facing fragment loses both.
+        specular *= diffuse;
 
         // The shadow maps, and the *only* place they enter the shading. The sun
         // occludes through its cascades, a spot through the one tile `Selection`
@@ -1262,7 +1367,7 @@ float4 fragmentMain(VertexOutput input) : SV_Target
         specular *= reach;
 
         direct += light.color.rgb * diffuse;
-        gloss += light.color.rgb * (specular * SPECULAR_STRENGTH);
+        gloss += light.color.rgb * specular;
     }
 
     // **Screen-space occlusion scales the ambient term and nothing else**, and
@@ -1282,7 +1387,15 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // the single-light form had — the sum starts at zero and `0 + x` is `x`
     // exactly — so converting the sun from a field to a row is arithmetically a
     // no-op and the goldens are what say so.
-    float3 lit = albedo.rgb * (frame.ambient.rgb * occluded + direct) + gloss;
+    //
+    // **The ambient scales the diffuse albedo, so a metal has no ambient
+    // term** — and that is the model rather than an omission. A conductor
+    // reflects its surroundings instead of scattering them, so what it owes the
+    // room is a *reflection*, which screen-space reflections and irradiance
+    // probes are what will supply. Until one of them exists a fully metallic
+    // surface with no light on it is black. Nothing regresses today, because
+    // `GpuMaterial::UNTINTED`'s metallic is zero and no scene sets one higher.
+    float3 lit = diffuse_albedo * (frame.ambient.rgb * occluded + direct) + gloss;
 
     // Deliberately **not** clamped: the target is `Rgba16Float` and the tonemap
     // pass is what maps this into the swapchain. A `saturate` here would throw
