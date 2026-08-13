@@ -1038,11 +1038,24 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
 
     let reversed_frame = render_probe(&headless, &mut probe, &mut pool, reversed);
     let pixel = reversed_frame.pixel(centre.0, centre.1).expect("inside");
+    // **Neither quad drawing is its own diagnosis, and it must not read as the
+    // projection one.** A black centre says the frame is empty — a device that
+    // rendered nothing, not a depth test that picked the far surface — and the
+    // two want looking at in completely different places. This message said only
+    // "if it is blue…" once, and a black centre on a slow software rasteriser
+    // sent a reader hunting through the projection matrix for an hour.
+    assert!(
+        pixel[0] > 100 || pixel[2] > 100,
+        "neither quad reached the centre: got {pixel:?}, which is neither the \
+         near quad's red nor the far quad's blue. Nothing drew — look at the \
+         device and the submission, not at the projection."
+    );
     assert!(
         pixel[0] > pixel[2] && pixel[0] > 100,
         "under reversed-Z the *near* quad must win the depth test, so the centre \
-         must be red; got {pixel:?}. If it is blue, the projection matrix is not \
-         reversed and every depth comparison in the engine is inverted."
+         must be red; got {pixel:?}. It is the far quad's blue, so the projection \
+         matrix is not reversed and every depth comparison in the engine is \
+         inverted."
     );
 
     // And the far quad really is there, around the edge of the near one — so

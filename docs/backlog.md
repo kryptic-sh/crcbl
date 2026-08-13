@@ -6108,6 +6108,30 @@ passed five times in isolation and on three subsequent full-suite runs.
 Observed, not diagnosed; nothing near it had changed. Recorded so a second
 sighting is a pattern rather than a surprise.
 
+## The Windows lavapipe job produced an empty frame once
+
+`depth_probe::reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not`
+failed on `vk e2e (lavapipe, windows)` with a **black** centre pixel — neither
+quad drew — while the same test passed on Linux lavapipe and radv, and the same
+job was green on the three commits before it.
+
+**Not a regression from the cluster-radius fix**, and that is checkable rather
+than assumed: `depth_probe` draws through `mesh.slang`'s vertex and fragment
+stages with no amplification stage, so `mesh_cluster.slang`'s `cluster_survives`
+is not compiled into the path at all. Every instance it draws is at identity, so
+the radius scaling is `1.0` besides.
+
+That job takes **143 seconds** where the Linux one takes 8, which is the shape
+of a software rasteriser under a slow runner, and an empty frame is what a
+readback that outran the render looks like. Re-run to confirm; recorded so a
+second sighting is a pattern.
+
+**The assertion's message has been improved** because it made this harder than
+it needed to be: it said only "if it is blue, the projection matrix is not
+reversed", which is a real diagnosis for a real failure and the wrong one for an
+empty frame. A black centre now says so in its own words and points at the
+device and the submission rather than the projection.
+
 ## A timing test started its clock after the thread it was timing
 
 `crcbl-mtl`'s `a_wait_sleeps_until_the_presented_handler_reports` asserts the
