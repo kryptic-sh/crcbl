@@ -7367,3 +7367,60 @@ against 1.003.
   radv and wgpu-on-radv. `msl/mesh.metal` and `dxil/mesh.fragmentMain.dxil` were
   regenerated and compile, and CI is the only thing that can say the frame they
   draw matches.
+
+## Re-affirmed: shader artifacts stay committed (2026-08-13)
+
+Asked directly whether the shaders should be built during `cargo build` so no
+binaries live in the repo, and whether committing them is standard practice.
+Answered no on both counts, and recorded here so it is not re-argued from
+scratch.
+
+**Committing prebuilt shaders is a minority pattern**, not an industry standard.
+The common camps are: compile at build time (Khronos' Vulkan samples, most CMake
+projects calling `glslc`); ship text and compile at load (WGSL in wgpu, MSL,
+HLSL through `D3DCompile`); a cook step into a derived-data cache (Unreal,
+Unity); and committing binaries, which is what this repo does.
+
+What makes the choice narrower than it first looks:
+
+- **Two of the four columns are already text.** `wgsl/` and `msl/` carry
+  `text eol=lf` and are source in every meaningful sense — `crcbl-mtl` compiles
+  the `.metal` at device init, which is the load-time camp exactly. Only SPIR-V
+  and DXIL are binary, and that is intrinsic: Vulkan consumes only SPIR-V, D3D12
+  only DXIL.
+- **The size cost is nil.** Every SPIR-V and DXIL blob across the whole history
+  is 186 objects and 0.8 MiB, against a 167 MiB `.git`. Repo weight is not the
+  argument either way. The real cost is review noise — a shader change shows as
+  `Bin 24516 -> 25524 bytes`, which no reviewer can read.
+- **`dxc` is the actual obstacle.** `pinned_dxc` has no `PATH` fallback because
+  distributions ship Shader Model 6.10 preview builds that abort on this source,
+  so there is no package-manager path to a working one; Slang is a GitHub
+  release tarball for the same reason. Building at compile time therefore means
+  every contributor's first `cargo build` and every macOS, Windows and wasm CI
+  leg acquiring two pinned toolchains no package manager provides — in practice
+  a download inside `build.rs`, which puts the network in the build, or a
+  vendored compiler far larger than the artifacts it replaced.
+- **The pin is needed either way, and asymmetrically.** Committed artifacts need
+  the pinned toolchain in one CI job, to verify. Build-time compilation needs it
+  in every build on every platform. Build-time is the more demanding position,
+  not the cheaper one.
+
+**What would change the answer:** topic 6's runtime recompilation for shader hot
+reload at P9. That makes a `slangc`-shaped compiler a dependency anyway, and if
+it is present for hot reload the argument for committing SPIR-V weakens a lot.
+Revisit then, not before.
+
+**One real gap the question surfaced, now fixed:** `.gitattributes` marked
+`*.spv binary` and never `*.dxil`, so DXIL was covered only by git's
+NUL-sniffing heuristic under the file's own `* text=auto`. Nothing was being
+corrupted — git does call it binary today — but the block's stated rule is that
+an artifact whose bytes are a checked invariant should not rely on a heuristic,
+and DXIL is hashed in `spirv/manifest.txt` like everything beside it.
+
+**Coverage gap this leaves standing:** the committed bytes are only ever
+_verified_ by a machine that has the toolchain, which is the one `shaders` CI
+job. If that job were skipped or broken, drift would reach `main` and every
+other leg would build the stale artifact and pass. The manifest hash catches a
+source edited without regenerating; it cannot catch a manifest regenerated
+against a source that was then not committed, which is what the recompile step
+exists for and which only that job always runs.

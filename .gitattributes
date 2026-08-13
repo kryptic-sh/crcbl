@@ -34,6 +34,11 @@
 *.wav  binary
 *.qoa  binary
 *.spv  binary
+# `crates/crcbl-shaders/dxil/*.dxil`: one DXIL container per entry point, hashed
+# in `spirv/manifest.txt` beside the SPIR-V above it. Listed for that file's
+# reason and this block's: git's heuristic does call it binary today, and an
+# artifact whose bytes are a checked invariant should not be relying on one.
+*.dxil binary
 # `crates/crcbl-shaders/clusters/*.dag`: a cooked cluster DAG, compared byte for
 # byte by `tools/cook-clusters.rs --check`. Git's own heuristic would call it
 # binary anyway — it is full of NULs — but an artifact whose bytes are part of a
