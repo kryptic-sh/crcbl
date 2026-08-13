@@ -2668,12 +2668,13 @@ mod tests {
             // pooled transient — so the sequence is asserted here rather than
             // trusted to the graph.
             //
-            // **`ssr` is after `forward` and before `tonemap`, and both halves
-            // matter.** It marches the depth prepass for a colour out of the
-            // scene target, so it cannot run before the pass that wrote that
-            // target; and it *is* the composite, so a tonemap scheduled first
-            // would resolve the frame without the reflections in it. Neither
-            // mistake is visible as anything but a picture.
+            // **`ssr` and `ssr-blur` are after `forward` and before `tonemap`,
+            // and every half matters.** The march reads the depth prepass for a
+            // colour out of the scene target, so it cannot run before the pass
+            // that wrote that target; the blur cannot run before the march it
+            // filters; and the blur *is* the composite, so a tonemap scheduled
+            // first would resolve the frame without the reflections in it. None
+            // of those mistakes is visible as anything but a picture.
             passes.extend([
                 ("render", "shadow"),
                 ("render", "depth-prepass"),
@@ -2681,6 +2682,7 @@ mod tests {
                 ("render", "ssao-blur"),
                 ("render", "forward"),
                 ("render", "ssr"),
+                ("render", "ssr-blur"),
                 ("render", "tonemap"),
             ]);
             passes

@@ -536,8 +536,16 @@ What is still worth doing, and is not decoration:
   by almost nothing.** That is inspectable rather than measured.
 - **The roughness gate makes most of every existing frame identically zero.**
   With the cutoff at 0.5, `GpuMaterial::UNTINTED`'s 0.5 gives exactly zero on
-  every target, and a pixel weighted exactly zero is bit-identical across four
-  rasterisers with no argument required.
+  every target, a pixel weighted exactly zero is bit-identical across four
+  rasterisers with no argument required, and the blur pass returns such a
+  pixel's scene colour untouched rather than adding a filtered zero to it.
+
+  **Noted when the blur was built (2026-08-14):** the blur widens the lobe a
+  single ray can honestly stand for, so it is the natural moment to raise that
+  cutoff — and raising it past a rough conductor at 0.55 takes `UNTINTED` in as
+  well, because no monotone ramp passes 0.55 and stops at 0.5. That trades this
+  claim away, so it was **kept out of the blur slice** and is its own decision;
+  `docs/backlog.md` carries what it costs, measured.
 
 **And the honest part**: those reduce the exposure, they do not bound it. There
 is no argument that puts SSR under `Tolerance::RASTERISER` in general. So a
@@ -569,6 +577,46 @@ a computed LOD, which is a filtered read whose level four rasterisers select
 arithmetic for — the thing the AO pair spent its design avoiding. It is the
 better technique and upgrading is contained to the blur pass, which the code
 should say.
+
+**Built 2026-08-14, and four things about it were not in the paragraph above.**
+
+- **The blur had to become the composite, and the march had to stop being it.**
+  A pass that adds the reflection to the scene colour leaves nothing to filter
+  but the whole frame. So `ssr.slang` writes the reflection alone into an
+  `Rgba16Float` transient of its own and `ssr_blur.slang` writes the sum — which
+  also means the off-switch is now the pair rather than the one pass.
+- **The second weight is on the march's own roughness ramp, not on the
+  reflectivity attachment.** The march already computes `1 - roughness/cutoff`
+  and writes it into the alpha of the image the blur reads, so the blur weighs
+  taps by how near that is to the centre's own value without a second read of
+  the attachment and a second copy of the cutoff. Over the centre's own value
+  rather than a tuned tolerance: a tap on a surface too rough to reflect at all
+  then weighs exactly nothing, which is the case a matt floor under a metal
+  block is.
+- **The depth tolerance is the march's `THICKNESS_FLOOR` times a small
+  multiplier, and the multiplier is not decoration.** `DEPTH_TOLERANCE_RADII`'s
+  shape, but a floor-thickness is a much shorter length than the AO radius: at
+  one of them the filter switches itself off on a floor seen at a shallow angle,
+  which is exactly where a reflection lives, and the stepping survives it. Eight
+  keeps the kernel at full strength across such a surface and still falls to
+  nothing across a silhouette.
+- **The cutoff did not move with it.** The paragraph above pairs the blur with a
+  cutoff a rough conductor clears, and those are two changes with very different
+  blast radii: the filter moves the frames that already reflect, and the cutoff
+  puts `GpuMaterial::UNTINTED` — nearly every surface in the engine — into the
+  march. They were split, and the second is its own slice with its own decision
+  to record. See `docs/backlog.md`.
+
+**What the blur is measurably worth, and what it is not.** The stepping the
+march leaves is gone: `render_e2e`'s `Scene::Ssr` band bends 17.7 levels per row
+with a kernel that keeps only its centre tap and 2.8 with the real one, and that
+is asserted. Cross-driver divergence fell where it mattered — on the 192 pixels
+of `lumen`'s room the blur changed, llvmpipe and radv disagree by at most 8,
+where the unfiltered march's worst in the panel's band was 66. **The roughness
+weight, though, is not separable by any assertion this tree's fixtures
+support**: no fixture puts a mirror-sharp surface beside a rough one at the same
+depth, which is the case it exists for. It is kept on the construction argument,
+and `docs/backlog.md` carries that as a coverage gap rather than as a claim.
 
 ### What is left to later rows
 

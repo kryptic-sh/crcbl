@@ -1,7 +1,5 @@
 @binding(1) @group(0) var scene_depth_0 : texture_depth_2d;
 
-@binding(2) @group(0) var scene_color_0 : texture_2d<f32>;
-
 @binding(3) @group(0) var reflectivity_0 : texture_2d<f32>;
 
 struct _MatrixStorage_float4x4_ColMajorstd140_0
@@ -16,6 +14,8 @@ struct SsrParams_std140_0
 };
 
 @binding(0) @group(0) var<uniform> camera_0 : SsrParams_std140_0;
+@binding(2) @group(0) var scene_color_0 : texture_2d<f32>;
+
 struct FullscreenOutput_0
 {
     @builtin(position) position_0 : vec4<f32>,
@@ -113,8 +113,8 @@ fn fragmentMain( _S8 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
     var _S10 : f32 = f32(height_0);
     var size_3 : vec2<f32> = vec2<f32>(_S9, _S10);
     var _S11 : vec2<i32> = vec2<i32>(position_1.xy);
+    const NOTHING_0 : vec4<f32> = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
     var _S12 : vec3<i32> = vec3<i32>(_S11, i32(0));
-    var lit_0 : vec4<f32> = (textureLoad((scene_color_0), ((_S12)).xy, ((_S12)).z));
     var surface_0 : vec4<f32> = (textureLoad((reflectivity_0), ((_S12)).xy, ((_S12)).z));
     var sharpness_0 : f32 = saturate(1.0f - surface_0.w / 0.5f);
     var depth_2 : f32 = depth_at_0(_S11, extent_3);
@@ -129,7 +129,7 @@ fn fragmentMain( _S8 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
     }
     if(_S13)
     {
-        var _S14 : pixelOutput_0 = pixelOutput_0( lit_0 );
+        var _S14 : pixelOutput_0 = pixelOutput_0( NOTHING_0 );
         return _S14;
     }
     var origin_0 : vec3<f32> = view_position_0(_S11, depth_2, size_3);
@@ -144,7 +144,7 @@ fn fragmentMain( _S8 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
     var facing_0 : f32 = saturate((1.0f - dot(ray_0, _S15)) / 0.05000000074505806f);
     if(facing_0 <= 0.0f)
     {
-        var _S17 : pixelOutput_0 = pixelOutput_0( lit_0 );
+        var _S17 : pixelOutput_0 = pixelOutput_0( NOTHING_0 );
         return _S17;
     }
     var _S18 : f32 = origin_0.z;
@@ -154,7 +154,7 @@ fn fragmentMain( _S8 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
     var _S19 : f32 = clip_start_0.w;
     if(_S19 <= 0.0f)
     {
-        var _S20 : pixelOutput_0 = pixelOutput_0( lit_0 );
+        var _S20 : pixelOutput_0 = pixelOutput_0( NOTHING_0 );
         return _S20;
     }
     var _S21 : vec2<f32> = clip_start_0.xy;
@@ -168,7 +168,7 @@ fn fragmentMain( _S8 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
     var rate_0 : f32 = length(screen_rate_0);
     if(rate_0 < 9.99999997475242708e-07f)
     {
-        var _S26 : pixelOutput_0 = pixelOutput_0( lit_0 );
+        var _S26 : pixelOutput_0 = pixelOutput_0( NOTHING_0 );
         return _S26;
     }
     var forward_0 : vec2<f32> = screen_rate_0 / vec2<f32>(rate_0);
@@ -219,7 +219,7 @@ fn fragmentMain( _S8 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
     var steps_0 : u32 = u32(max(travel_1, 0.0f) / stride_0);
     if(steps_0 == u32(0))
     {
-        var _S29 : pixelOutput_0 = pixelOutput_0( lit_0 );
+        var _S29 : pixelOutput_0 = pixelOutput_0( NOTHING_0 );
         return _S29;
     }
     var _S30 : f32 = f32(steps_0);
@@ -238,7 +238,7 @@ fn fragmentMain( _S8 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
     }
     if(!(when_end_0 > 0.0f))
     {
-        var _S33 : pixelOutput_0 = pixelOutput_0( lit_0 );
+        var _S33 : pixelOutput_0 = pixelOutput_0( NOTHING_0 );
         return _S33;
     }
     var inverse_w_start_0 : f32 = 1.0f / _S19;
@@ -303,7 +303,7 @@ fn fragmentMain( _S8 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
         previous_at_0 = at_1;
         step_0 = step_1;
     }
-    var _S41 : pixelOutput_0 = pixelOutput_0( vec4<f32>(lit_0.xyz + reflection_0, lit_0.w) );
+    var _S41 : pixelOutput_0 = pixelOutput_0( vec4<f32>(reflection_0, sharpness_0) );
     return _S41;
 }
 

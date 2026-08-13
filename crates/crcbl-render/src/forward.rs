@@ -163,7 +163,7 @@ use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
 use crate::scene::{self, Geometry, InstanceDesc, SceneDesc};
 use crate::shadow::{self, Cascades};
 use crate::ssao::{Ssao, cached_group};
-use crate::ssr::Ssr;
+use crate::ssr::{Ssr, SsrImages};
 use crate::texture::{UploadedTexture, upload_texture, upload_texture_layers};
 use crate::transient::TransientImageDesc;
 
@@ -421,13 +421,13 @@ const RENDER_PASSES: u32 = 5 + Ssao::PASSES + Ssr::PASSES;
 /// call.
 const FULLSCREEN_DRAWS: u64 = 1;
 
-/// Full-screen passes the frame records: `ssao`, `ssao-blur`, `ssr` and the
-/// tonemap.
+/// Full-screen passes the frame records: `ssao`, `ssao-blur`, `ssr`, `ssr-blur`
+/// and the tonemap.
 ///
 /// It was the tonemap alone until `docs/plan/18-render-features.md`'s occlusion
 /// slice, which is why [`FULLSCREEN_DRAWS`] is a count *per pass* rather than the
 /// total: the two are different numbers now and were the same one before.
-const FULLSCREEN_PASSES: u64 = 4;
+const FULLSCREEN_PASSES: u64 = 5;
 
 /// The budget an **orthographic** camera selects under: one no group satisfies,
 /// so every group expands and the base level is drawn whole.
@@ -4249,11 +4249,14 @@ impl ForwardRenderer {
         );
         let reflectivity =
             graph.create_image("reflectivity", TransientImageDesc::reflectivity(extent));
-        // The reflection pass's output, and it is the scene target's description
-        // exactly: what that pass writes is the scene colour plus a term, so a
-        // narrower image here would tonemap a truncated frame. Two live requests
-        // for one description are two physical images — see
-        // `TransientPool::image`.
+        // The march's output and the blur's, and both are the scene target's
+        // description exactly. The blur writes the scene colour plus a term, so
+        // a narrower image there would tonemap a truncated frame; the march
+        // writes a reflection *out of* that same colour, so an eight-bit image
+        // here would clip the frame's bright end before the tonemap saw it.
+        // Three live requests for one description are three physical images —
+        // see `TransientPool::image`.
+        let reflection = graph.create_image("reflection", TransientImageDesc::scene_color(extent));
         let composited =
             graph.create_image("scene-reflected", TransientImageDesc::scene_color(extent));
 
@@ -4470,18 +4473,23 @@ impl ForwardRenderer {
             bucket_draws.record(encoder, group, &generated);
         });
 
-        // `docs/plan/18-render-features.md`'s reflection march, and **it is the
-        // composite**: it reads the scene colour, the depth prepass and the
-        // reflectivity attachment and writes their sum, so everything below this
-        // line works on `composited` rather than on `scene_color`. A frame that
-        // did not add it would hand `scene_color` on and be bit-identical.
-        self.ssr.add_pass(
+        // `docs/plan/18-render-features.md`'s reflection march and its blur, and
+        // **the second of them is the composite**: the march reads the scene
+        // colour, the depth prepass and the reflectivity attachment and writes
+        // the reflection alone, and the blur filters that and adds it to the
+        // scene colour — so everything below this line works on `composited`
+        // rather than on `scene_color`. A frame that did not add the pair would
+        // hand `scene_color` on and be bit-identical.
+        self.ssr.add_passes(
             graph,
             frame,
-            scene_depth,
-            scene_color,
-            reflectivity,
-            composited,
+            SsrImages {
+                depth: scene_depth,
+                color: scene_color,
+                reflectivity,
+                reflection,
+                composited,
+            },
         );
 
         // The tonemap group names a *graph-owned* view, so it can only be built
@@ -7271,6 +7279,7 @@ mod tests {
                 "ssao-blur",
                 "forward",
                 "ssr",
+                "ssr-blur",
                 "tonemap",
                 "cull-stats-readback",
             ]

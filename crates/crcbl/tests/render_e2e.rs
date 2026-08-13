@@ -1109,6 +1109,36 @@ const SSR_RATIO: f32 = 1.15;
 /// red — it measures about `64` against a clear of `29`.
 const SSR_LIT_FLOOR: f32 = 10.0;
 
+/// The rows of [`Scene::Ssr`] the stepping is measured down, and the half-width
+/// of the row averaged at each of them.
+///
+/// Inside the reflected pyramid at every one of them: it starts a few rows under
+/// the base, where [`SSR_BAND_ROW`] already sits, and ends before the wedge
+/// narrows past this width. Ten pixels either side of the axis rather than
+/// [`SSR_BAND`]'s five, because what is measured here is a difference *between*
+/// rows and a wider row is a quieter estimate of each.
+const SSR_STEP_ROWS: std::ops::Range<u32> = 122..150;
+
+/// The half-width of each of those rows — see [`SSR_STEP_ROWS`].
+const SSR_STEP_HALF: u32 = 10;
+
+/// How much the reflection may bend from one row of [`SSR_STEP_ROWS`] to the
+/// next, in levels of [`SSR_CHANNEL`], averaged down the band.
+///
+/// **The march's stepping, in one number.** A ray's crossing lands on whichever
+/// tap the walk happened to reach, so the reflected colour quantises and the
+/// band alternates by several levels from one row to the next — visible in the
+/// review frame, and the artefact `ssr_blur.slang` exists to remove. The
+/// measurement is a *second* difference along the column, so a reflection that
+/// merely fades down the band scores zero and only the alternation counts.
+///
+/// The frame this was set against measures 2.8 with the kernel as it stands and
+/// 17.7 with the kernel cut down to its centre tap — which is the same composite
+/// with no filter in it, and is the picture the slice before this one drew. At
+/// the review extent the same pair reads 3.5 against 13.2. This sits between
+/// them with room on both sides at either extent.
+const SSR_STEP_LIMIT: f32 = 8.0;
+
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
 fn the_ssr_scene_reflects_its_pyramid_and_matches_its_golden() {
@@ -1186,6 +1216,71 @@ fn the_floor_reflects_the_pyramid_and_only_under_it(image: &Image) {
              lit floor here for a reflection to be a reflection on"
         );
     }
+    the_reflection_does_not_step_down_the_band(image);
+}
+
+/// [`Scene::Ssr`]'s second claim: **the reflection does not step from one row of
+/// the floor to the next.**
+///
+/// `ssr.slang` walks a fixed pixel stride and takes the first crossing it finds,
+/// so the reflected colour quantises to whichever tap the walk reached — and
+/// consecutive rows of the floor, whose rays differ only slightly, land on
+/// different taps. The band alternates by several levels row to row as a result.
+/// `ssr_blur.slang` is what removes it, and this is the number that says so.
+///
+/// **A second difference rather than a first**, because the reflection is
+/// genuinely a gradient down the band: it fades as the reflected pyramid recedes,
+/// and a first difference would measure that fade rather than the stepping. The
+/// second difference of a straight ramp is zero, so what is left is the bend —
+/// which is the alternation and nothing else.
+///
+/// **No golden could make this claim**, on the ratio above's terms and one more:
+/// the alternation is a few levels on a floor that is already a gradient, and it
+/// sat in the reference for as long as the unfiltered march did. It is also why
+/// every other claim on this scene averages a block: block averaging is exactly
+/// what hides this, so a measurement down single rows is the only one that can
+/// see it.
+fn the_reflection_does_not_step_down_the_band(image: &Image) {
+    let axis = EXTENT.0 / 2;
+    let rows: Vec<f32> = SSR_STEP_ROWS
+        .map(|row| row_channel(image, (axis, row), SSR_STEP_HALF, SSR_CHANNEL))
+        .collect();
+    let bends: Vec<f32> = rows
+        .windows(3)
+        .map(|three| (three[0] - 2.0 * three[1] + three[2]).abs())
+        .collect();
+    #[allow(clippy::cast_precision_loss)]
+    let mean = bends.iter().sum::<f32>() / bends.len() as f32;
+    let worst = bends.iter().fold(0.0f32, |worst, bend| worst.max(*bend));
+    eprintln!(
+        "crcbl render e2e: ssr — the reflection bends {mean:.2} level(s) per row down the band \
+         and {worst:.1} at worst, over {} row(s)",
+        rows.len()
+    );
+    assert!(
+        mean < SSR_STEP_LIMIT,
+        "the reflection alternates by {mean:.2} level(s) from one row to the next, against a \
+         limit of {SSR_STEP_LIMIT} — the march's stepping is in the frame and nothing filtered \
+         it out"
+    );
+}
+
+/// The mean of one channel across a single row, `half` pixels either side of
+/// `at`.
+///
+/// [`block_channel`] with the vertical extent taken away, and a function of its
+/// own because that one averages at least two rows — which is the whole of what
+/// [`the_reflection_does_not_step_down_the_band`] must not do.
+fn row_channel(image: &Image, at: (u32, u32), half: u32, index: usize) -> f32 {
+    let mut total = 0.0f32;
+    let mut count = 0u32;
+    for x in at.0.saturating_sub(half)..(at.0 + half).min(EXTENT.0) {
+        let pixel = image.pixel(x, at.1).expect("inside the frame");
+        total += f32::from(pixel[index]);
+        count += 1;
+    }
+    assert!(count > 0, "an empty row measures nothing");
+    total / count as f32
 }
 
 #[test]
@@ -1702,6 +1797,9 @@ fn draw_scene_on_every_geometry_path(
 /// says in as many words is the exposure a march has and a blurred term does not.
 /// Measured at **one** channel, off by one, out of the frame's 196608, on
 /// llvmpipe alone — radv and wgpu answer zero — and stable across repeated runs.
+/// The blur that followed the march did not change it, which is the answer to
+/// the obvious question: a sixteen-tap denominator makes a disagreement smaller
+/// and does not make the tap the ray landed on the same one.
 ///
 /// Both budgets are two orders of magnitude under anything a level that failed to
 /// draw would produce — the failure this exists for moves whole clusters, not

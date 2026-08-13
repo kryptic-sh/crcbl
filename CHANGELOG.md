@@ -419,13 +419,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 - **Screen-space reflections.** `shaders/ssr.slang` marches the depth prepass in
   screen space, reads `F0` and roughness out of the reflectivity attachment, and
-  adds what it finds to the scene colour — one full-screen pass between the
-  forward pass and the tonemap, added to every frame
-  `ForwardRenderer::add_passes` builds. Mirror-sharp only for now: the weight
-  ramps linearly to nothing at `crcbl_shaders::ssr::ROUGHNESS_CUTOFF` (0.5),
-  which is `GpuMaterial::UNTINTED`'s own roughness, so every surface nobody gave
-  a material to weighs exactly zero and every existing golden but one is
-  bit-identical. A ray that finds nothing adds nothing.
+  writes the reflection it finds; `shaders/ssr_blur.slang` filters that with
+  `ssao_blur.slang`'s 4×4 kernel and adds it to the scene colour — two
+  full-screen passes between the forward pass and the tonemap, added to every
+  frame `ForwardRenderer::add_passes` builds. A ray that finds nothing adds
+  nothing.
+
+  The kernel is weighted on view-space depth **and** on how sharp each tap's own
+  surface is, so a reflecting surface does not average with the matt floor it
+  stands on and a mirror does not average with a rough metal beside it. The
+  second weight is the march's own roughness ramp, which it writes into the
+  alpha of the image the blur reads. What the filter is worth is a number rather
+  than a picture: the reflection in `Scene::Ssr` alternates by 17.7 levels from
+  one row of the floor to the next without it and 2.8 with it.
+
+  Mirror-sharp only for now: the weight ramps linearly to nothing at
+  `crcbl_shaders::ssr::ROUGHNESS_CUTOFF` (0.5), which is
+  `GpuMaterial::UNTINTED`'s own roughness, so every surface nobody gave a
+  material to weighs exactly zero, the blur pass hands such a pixel's scene
+  colour straight through, and every golden in the tree but three is
+  bit-identical.
 
   `ForwardRenderer::add_passes` now returns **the composited frame** rather than
   the target the forward pass wrote. Both are `Rgba16Float` transients of the

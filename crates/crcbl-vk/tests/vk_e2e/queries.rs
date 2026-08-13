@@ -191,6 +191,7 @@ fn per_pass_gpu_timers_report_real_numbers() {
         "ssao-blur",
         "forward",
         "ssr",
+        "ssr-blur",
         "tonemap",
         "cull-stats-readback",
     ]);

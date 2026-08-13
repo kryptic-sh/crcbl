@@ -1,17 +1,17 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
 // `docs/plan/18-render-features.md`'s screen-space reflections: the pass that
-// marches the depth prepass in **screen space** and adds what it finds to the
-// scene colour.
+// marches the depth prepass in **screen space** and writes what it finds.
 //
-// # It is the composite, not a term somebody else adds
+// # It is the reflection alone; `ssr_blur.slang` is the composite
 //
 // It reads three images — the scene colour, the depth prepass and the
 // reflectivity attachment `mesh.slang` writes beside its colour target — and
-// writes their sum into a second `Rgba16Float` target, which the tonemap reads
-// in place of the first. One pass, no blend state, and no feedback loop from an
-// image being both read and written. A frame that does not add this pass hands
-// the old id on and is bit-identical.
+// writes the reflection into an `Rgba16Float` target of its own, with the weight
+// it was computed under in the alpha. `ssr_blur.slang` filters that image and
+// adds it to the scene colour, which is why nothing here loads this pixel's own
+// lit value: a pass that composited would leave the blur no way to filter the
+// reflection without filtering the whole frame with it.
 //
 // # This file's determinism argument is not `ssao.slang`'s
 //
@@ -39,7 +39,9 @@
 // * **[`ROUGHNESS_CUTOFF`] makes most of every existing frame identically
 //   zero.** `crcbl_shaders::mesh::GpuMaterial::UNTINTED`'s roughness is 0.5 and
 //   the ramp is zero from there up, so a pixel shaded through that row is
-//   bit-identical on four rasterisers with no argument required.
+//   bit-identical on four rasterisers with no argument required — and
+//   `ssr_blur.slang` leaves such a pixel's scene colour untouched rather than
+//   adding a filtered zero to it.
 //
 // # The march
 //
@@ -63,12 +65,12 @@
 //
 // # What is left to the rows after this one
 //
-// The rough end is **zero rather than wrong**: a single ray cannot represent a
-// wide lobe, and a sharp reflection on a rough surface reads as a bug on sight.
-// The blur that follows is `ssao_blur.slang`'s kernel gaining a roughness
-// weight; cone tracing over a colour mip chain is the better technique and is
-// refused for this row, because it needs a `SampleLevel` at a computed LOD and
-// that is a filtered read whose level four rasterisers select arithmetic for.
+// The rough end is **one ray and a blur**, which is honest for a lobe a few
+// degrees wide and nothing like a cone trace. `ssr_blur.slang` is that blur —
+// `ssao_blur.slang`'s kernel with a second weight on how sharp each tap's own
+// surface is — and cone tracing over a colour mip chain is the better technique
+// and stays refused, because it needs a `SampleLevel` at a computed LOD and that
+// is a filtered read whose level four rasterisers select arithmetic for.
 // Upgrading is contained to the blur pass.
 //
 // A ray that hits nothing returns **zero**, and zero is correct here: the
@@ -81,7 +83,8 @@
 // [`depth_at`], [`view_position`] and [`normal_at`] are that file's, **copied
 // verbatim** — this repo has no include mechanism by design, because the
 // manifest hashes one source per artifact and an `#include` would be a file
-// whose edits nothing downstream notices. `crcbl_shaders::ssr`'s
+// whose edits nothing downstream notices. `ssr_blur.slang` carries a fourth
+// copy of the first of them. `crcbl_shaders::ssr`'s
 // `the_shared_screen_space_helpers_have_not_drifted` is what holds the copies
 // together; two copies is already the bug, and three without a guard is a drift
 // with a schedule.
@@ -122,9 +125,10 @@ DepthTexture2D scene_depth;
 
 /// The `Rgba16Float` scene target the forward pass wrote.
 ///
-/// Read twice: once at this pixel, whose value is passed straight through, and
-/// once at the crossing the march found, which is what the reflection is made
-/// of. `Texture2D<float4>` and not `DepthTexture2D` — this is an ordinary colour
+/// Read **once**, at the crossing the march found, which is what the reflection
+/// is made of. This pixel's own lit value is not read at all: the composite is
+/// `ssr_blur.slang`'s, so what leaves here is the reflection by itself.
+/// `Texture2D<float4>` and not `DepthTexture2D` — this is an ordinary colour
 /// image, and it lowers to `texture_2d<f32>` against the seam's
 /// `SampleType::Float`.
 [[vk::binding(2, 0)]]
@@ -154,16 +158,21 @@ static const float DEPTH_FAR = 0.0;
 /// The roughness at which the reflection has faded to nothing.
 ///
 /// **This is the statement that the pass is valid only where the lobe is
-/// narrow**, not a gate bolted on for the goldens. A single ray cannot represent
-/// a wide lobe, and the failure mode of pretending otherwise is a sharp
+/// narrow**, not a gate bolted on for the goldens. One ray and
+/// `ssr_blur.slang`'s four-pixel kernel stand for a lobe a few degrees wide and
+/// for nothing wider, and the failure mode of pretending otherwise is a sharp
 /// reflection on a rough surface. The ramp is linear from full strength at a
-/// mirror to zero here, so nothing steps.
+/// mirror to zero here, so nothing steps, and the value of that ramp is what
+/// this pass writes into its alpha for the blur to weigh taps by.
 ///
 /// Half, so `crcbl_shaders::mesh::GpuMaterial::UNTINTED`'s roughness lands on
 /// the zero end exactly and every surface in this engine that nobody gave a
-/// material to weighs nothing at all. `crcbl_shaders::ssr::ROUGHNESS_CUTOFF` is
-/// the Rust mirror, and it is what lets a sample's own tests say which of its
-/// materials this pass can see.
+/// material to weighs nothing at all. **The blur widens the lobe this pass can
+/// stand for and this number has deliberately not moved with it**: raising it
+/// past a rough conductor's roughness takes that row in as well, which is a
+/// change of blast radius rather than of filtering and is its own slice.
+/// `crcbl_shaders::ssr::ROUGHNESS_CUTOFF` is the Rust mirror, and it is what
+/// lets a sample's own tests say which of its materials this pass can see.
 static const float ROUGHNESS_CUTOFF = 0.5;
 
 /// How far a ray may reach, as a share of the frame's shorter axis.
@@ -381,9 +390,13 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float2 size = float2(float(width), float(height));
     int2 pixel = int2(input.position.xy);
 
-    // The scene colour is passed through whatever happens below — this pass *is*
-    // the composite, so every pixel of the target has to be written.
-    float4 lit = scene_color.Load(int3(pixel, 0));
+    // **What a pixel with no reflection writes**, and every pixel of the target
+    // has to be written. The alpha is the ramp `ssr_blur.slang` weighs taps by,
+    // so a zero there says "this surface is not one of mine" to a neighbouring
+    // reflector — which is the same statement as an rgb of zero for a surface
+    // that reflects and found nothing, and deliberately a different one.
+    const float4 NOTHING = float4(0.0, 0.0, 0.0, 0.0);
+
     float4 surface = reflectivity.Load(int3(pixel, 0));
     float sharpness = saturate(1.0 - surface.a / ROUGHNESS_CUTOFF);
     float depth = depth_at(pixel, extent);
@@ -392,7 +405,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // roughness one is what makes most of every existing frame bit-identical.
     if (depth <= DEPTH_FAR || sharpness <= 0.0)
     {
-        return lit;
+        return NOTHING;
     }
 
     float3 origin = view_position(pixel, depth, size);
@@ -414,7 +427,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float facing = saturate((1.0 - dot(ray, -towards)) / BACKWARD_FADE);
     if (facing <= 0.0)
     {
-        return lit;
+        return NOTHING;
     }
 
     // The ray starts off the surface — see [`NORMAL_OFFSET`].
@@ -425,7 +438,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float4 clip_ray = mul(camera.proj, float4(ray, 0.0));
     if (clip_start.w <= 0.0)
     {
-        return lit;
+        return NOTHING;
     }
     float2 at_start = pixel_of(clip_start.xy / clip_start.w, size);
 
@@ -438,7 +451,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float rate = length(screen_rate);
     if (rate < 1e-6)
     {
-        return lit;
+        return NOTHING;
     }
     float2 forward = screen_rate / rate;
 
@@ -504,7 +517,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     uint steps = uint(max(travel, 0.0) / stride);
     if (steps == 0u)
     {
-        return lit;
+        return NOTHING;
     }
     travel = float(steps) * stride;
 
@@ -524,7 +537,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // happens to answer `false` to.
     if (!(when_end > 0.0))
     {
-        return lit;
+        return NOTHING;
     }
 
     // `1/w` and `view/w` are the quantities linear in the *screen* parameter, so
@@ -601,8 +614,10 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
         previous_at = at;
     }
 
-    // Additive, and the alpha is the scene's: the tonemap writes an opaque 1.0
-    // of its own, and a headless probe reading this target should find the same
-    // alpha the forward pass wrote.
-    return float4(lit.rgb + reflection, lit.a);
+    // **The alpha is [`ROUGHNESS_CUTOFF`]'s ramp, not an opacity**, and it is
+    // what `ssr_blur.slang` weighs its taps by: two pixels the march trusted
+    // equally are two pixels whose reflections are the same kind of thing, and
+    // the blur needs that without a second read of the reflectivity attachment
+    // and a second copy of the constant that turns roughness into it.
+    return float4(reflection, sharpness);
 }

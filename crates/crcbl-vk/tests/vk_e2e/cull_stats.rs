@@ -37,13 +37,13 @@ use crate::mesh::{mesh_camera, place_cube, read_stats_word, render_mesh};
 const RING_LATENCY: u64 = crcbl_render::forward::FRAMES_IN_FLIGHT as u64 + 1;
 
 /// The full-screen triangles a forward frame draws: `ssao`'s, `ssao-blur`'s,
-/// `ssr`'s and the tonemap's.
+/// `ssr`'s, `ssr-blur`'s and the tonemap's.
 ///
 /// One instance each, submitted and drawn, and the only draws in a forward frame
 /// the CPU knows the count of. They are on both sides of the submitted/drawn
 /// pair, which is what makes the two comparable — see
 /// `crcbl_render::ForwardRenderer::counters`.
-const FULLSCREEN_INSTANCES: u64 = 4;
+const FULLSCREEN_INSTANCES: u64 = 5;
 
 /// **The culling counters come back off the GPU, and they are the cull's own
 /// answer.**

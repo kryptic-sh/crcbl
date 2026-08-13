@@ -8117,11 +8117,11 @@ three `to_vec`s cost), so the mapping lives in one place.
 The design and its refusals are in `docs/plan/18-render-features.md`'s SSR
 section. This is the slice order and what each one's observable is.
 
-**The attachment slice and the march have landed**, so two remain, in dependency
-order. Each is committable and CI-green alone.
+**The attachment slice, the march and the blur have landed**, so two remain, in
+dependency order. Each is committable and CI-green alone.
 
-What the march found on the way, and what a reader of the design should know
-before writing the next slice:
+What those slices found on the way, and what a reader of the design should know
+before writing the next one:
 
 - **The reach had to become a share of the frame.** The design said a fixed
   pixel stride and a fixed loop bound, which a first cut read as a fixed pixel
@@ -8151,15 +8151,30 @@ before writing the next slice:
   fixture's worth of evidence, not a general argument, and the design's recorded
   resolution — flatten the reflected content or drop the golden and keep the
   ratio — has not had to be used.
-- **The stepping is visible and is slice 2's to remove.** At a 1.5-pixel stride
-  the reflection in `Scene::Ssr` alternates by a few levels row to row. The
-  block averages it away and a reader can see it in the review PNG.
+- **The stepping is gone, and it is measured rather than eyeballed.**
+  `the_reflection_does_not_step_down_the_band` in
+  `crates/crcbl/tests/render_e2e.rs` takes the **second** difference of the
+  reflection down single rows of `Scene::Ssr`, so a reflection that merely fades
+  down the band scores zero and only the alternation counts: 17.7 levels per row
+  with `ssr_blur.slang`'s kernel cut down to its centre tap, 2.8 with the real
+  one, limit 8. A block average hides it, which is why every other claim on that
+  scene cannot see it and why the review PNG was the only evidence before.
+- **The blur reduced cross-driver divergence where it mattered.** On the 192
+  pixels of `lumen`'s room the blur changed, llvmpipe and radv disagree by at
+  most **8** and 27 are over `Tolerance::RASTERISER`; the unfiltered march's
+  worst inside the panel's band was 66. The pixels over tolerance that remain
+  gross (worst 134) are **bit-identical to the pre-blur frame** on llvmpipe, so
+  they are triangle-edge divergence and not the reflection's. A sixteen-tap
+  denominator turning one whole-pixel disagreement into a spread of small ones
+  is exactly what the AO pair's design predicts.
 
-1. **The rough end.** The blur, weighted on view-space depth **and** roughness;
-   cutoff raised so lumen's rough metal reflects. **Observable:** a falloff
-   comparison in the shape of the GGX slice's highlight test — the brass block's
-   reflection varies less across its face than the mirror panel's does across an
-   equal span, both above a floor so two black surfaces cannot satisfy it.
+1. **The roughness cutoff.** Raise `ROUGHNESS_CUTOFF` so `lumen`'s `ROUGH_METAL`
+   (0.55) reflects. **Observable:** a falloff comparison in the shape of the GGX
+   slice's highlight test — the brass block's reflection varies less across its
+   face than the mirror panel's does across an equal span, both above a floor so
+   two black surfaces cannot satisfy it. Split out of the blur slice
+   deliberately; see the section below for what it costs and the two questions
+   it has to answer first.
 2. **What a miss returns.** `frame.ambient.rgb` scaled by the same weight
    instead of zero — the same approximation the diffuse term already makes,
    applied consistently, and **the exact expression the irradiance-probe row
@@ -8197,15 +8212,118 @@ wants a mirror showing the room, the panel wants angling or moving to a side
 wall. That is a change to the sample's content and should not be done on the way
 past.
 
+### The cutoff raise: what it costs, measured before it was declined
+
+The blur slice was written with `ROUGHNESS_CUTOFF` at **0.75** first, run
+end-to-end, and then split back out — so the cost below is measured on this tree
+rather than estimated, and slice 1 above starts from an answer instead of a
+guess.
+
+**Two questions to settle before writing it.**
+
+- **Is 0.75 the smallest cutoff that gets `ROUGH_METAL` reflecting?** It was not
+  derived; it was placed between `lumen`'s brass at 0.55 and its plaster at 0.9.
+  The ramp is `1 - roughness/cutoff`, so brass weighs 0.083 at a cutoff of 0.6,
+  0.214 at 0.7 and 0.267 at 0.75 — and the falloff comparison needs the brass
+  reflection to clear `LIT_FLOOR` and to turn that face's own downward gradient
+  around, which at 0.083 it may not. **Unmeasured below 0.75**, and worth
+  measuring: a lower cutoff buys nothing in blast radius (any value over 0.5
+  takes `UNTINTED` in) but it does keep more of the frame's arithmetic near
+  zero.
+- **Does any cutoff over 0.5 cost the determinism claim?** Yes, and it should go
+  on the record as a decision rather than arrive as a side effect.
+  `GpuMaterial::UNTINTED`'s roughness is exactly 0.5, no monotone ramp passes
+  0.55 and stops at 0.5, and the design's one _unconditional_ determinism
+  statement is that a pixel shaded through that row weighs exactly zero on four
+  rasterisers. Raising the cutoff at all trades that for "the rough end —
+  plaster, a fully rough conductor, `crcbl_scene`'s imported glTF default —
+  weighs exactly zero", which is a real claim and a narrower one.
+
+**What it moved, at 0.75, on llvmpipe.** Nine goldens: `ao` 41.3% of its pixels
+at delta 3, `dunes` 6.6% at 9, `spot_shadow` 5.5% at 16, `cube` 0.07% at 1,
+`lights` 0.04% at 1, `crcbl-vk/mesh_clusters` 12% at 5 — all of those purely
+because `UNTINTED` entered the ramp — plus `ssr` and `point_shadow` moving
+further than the blur alone moved them (0.25 weighs 0.667 where it weighed 0.5)
+and `lumen/room` gaining the brass block's reflection. `ui`, `sprite`, `spot`
+and every sprite and UI golden in `crcbl-vk` stayed byte-identical.
+
+**What it broke.** Two byte-exact geometry-path comparisons: `Scene::Ao` in
+`render_e2e` (four channels, off by one, llvmpipe only, stable over three runs)
+and `crcbl-vk`'s open box in
+`a_multi_cluster_mesh_draws_the_same_frame_through_both_geometry_paths` (one
+channel, off by one, llvmpipe only). Both for `Scene::PointShadow`'s recorded
+reason — a marching pass makes the depth buffer's last bits visible in the
+picture, and the two paths compute the same world position through different
+arithmetic. **If that slice re-adds a budget to `crcbl-vk`, it should be the
+measured value per comparison and not `render_e2e`'s 16**: that constant is
+per-scene there and zero everywhere it holds, and handing a second suite a
+blanket sixteen is slack nobody measured.
+
+**What the observable would be.** A sixth claim in `apps/lumen/tests/golden.rs`,
+in the shape of `render_e2e`'s
+`the_smooth_pyramid_holds_a_tighter_highlight_than_the_rough_one`: two blocks up
+each conductor's face, hung off its bottom edge five half-extents apart, and the
+brass block's falloff asserted above one while the panel's is not. It reads
+1.211 at 256×192 and 1.156 at 1280×960 with the cutoff at 0.75, against 1.007
+and 0.897 with no reflection on that row — so a threshold near 1.08 has about a
+fifteenth of margin either side. **The block's own shading runs the other way**,
+which is what makes the measurement a claim about the reflection: the sun
+reaches that face at a glancing angle and it darkens towards the floor, so a
+build with no reflection on it reads _under_ one. It needs `BLOCK_FOOT` in
+`room.rs` — the middle of the block's bottom edge — and a no-GPU bisection
+beside `the_mirror_panel_reflects_at_its_foot_and_not_at_its_head` showing that
+the block reflects across most of its face where the panel reflects across an
+eighth of its own.
+
+### The roughness weight is unmeasured, and no assertion was invented for it
+
+`ssr_blur.slang`'s second weight is the design's stated reason for this kernel
+rather than a box, and **nothing in the tree separates it**. No fixture puts a
+mirror-sharp surface next to a rough one at the same depth, which is the case it
+exists for. Dropping the factor and re-running at a cutoff of 0.75: `lumen`'s
+panel foot moves 26.6 → 24.3 and the brass block's 110.7 → 108.9, and the
+falloff comparison, `MIRROR_GRADIENT`, `Scene::Ssr`'s ratio and the stepping
+number all stay where they were.
+
+It is kept on the construction argument — a tap on a surface the march had
+nothing to say about weighs exactly nothing, which is what a matt floor under a
+metal block is. What would give it a check is a fixture with the adjacency: a
+mirror-grade strip laid into the brass block's face, or the panel standing on
+the floor rather than on a plinth. Both are changes to a sample's content, which
+the SSR slices have kept declining to make on the way past.
+
+### `crcbl-vk`'s mesh goldens differ from a render on this machine, and always did
+
+`mesh.png`, `mesh_ortho.png` and `mesh_second.png` differ on **100%** of their
+pixels at max channel delta 2, and `mesh_shader_triangle.png` and `triangle.png`
+on a few percent at delta 1 — on llvmpipe, with zero pixels over tolerance, so
+every one of them passes. `crcbl`'s own goldens are exact on the same machine,
+so those files were blessed against a different driver or Mesa version.
+
+Nothing was re-blessed for it. Recorded because a blanket `CRCBL_BLESS=1`
+absorbs that drift into whatever commit runs it — the blur slice did exactly
+that and had to restore four files by name. **Bless the golden that failed, by
+name.**
+
 ### One shared-code hazard
 
-`ssr.slang` re-declares `depth_at`, `view_position` and `normal_at` verbatim,
-because this repo has no include mechanism by design — the manifest hashes one
-source per artifact. `crcbl_shaders::ssr`'s
-`the_shared_screen_space_helpers_have_not_drifted` compares the bodies as text
-and holds all of them: three copies of `depth_at`, two each of `view_position`
-and `normal_at`. (The plan said three copies of `normal_at`; `ssao_blur.slang`
-carries `depth_at` and a `view_z` cut down from `view_position`, not a normal.)
+`ssr.slang` re-declares `depth_at`, `view_position` and `normal_at` verbatim and
+`ssr_blur.slang` re-declares `depth_at` and `view_z`, because this repo has no
+include mechanism by design — the manifest hashes one source per artifact.
+`crcbl_shaders::ssr`'s `the_shared_screen_space_helpers_have_not_drifted`
+compares the bodies as text and holds all of them: four copies of `depth_at`,
+two each of `view_z`, `view_position` and `normal_at`. (The plan said three
+copies of `normal_at`; `ssao_blur.slang` carries `depth_at` and a `view_z` cut
+down from `view_position`, not a normal.)
+
+Two shader **constants** are copied as well, and each has a guard beside that
+one: `DEPTH_FAR`, which every screen-space source declares and
+`the_far_plane_matches_the_constant_the_reflection_pair_declares` checks against
+`crcbl_shaders::ssao::DEPTH_FAR`; and `THICKNESS_FLOOR`, which the march and its
+blur both declare and `the_thickness_floor_matches_the_one_the_march_declares`
+holds together. The blur has no ray, so that floor is the only length the march
+owns which it can still evaluate — which is why it is a copy rather than a
+uniform field.
 
 Making that an equality rather than a substitution cost one rename: all three
 files bind the projection block as `camera` rather than as `ssao`, because
