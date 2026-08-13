@@ -1275,9 +1275,24 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
     let (reversed, standard) = probe_projections();
     let centre = PROBE_CENTRE;
 
-    let reversed_frame =
-        render_probe(&headless, &mut probe, &mut pool, reversed, PROBE_PLAIN_ROW).color;
+    let reversed = render_probe(&headless, &mut probe, &mut pool, reversed, PROBE_PLAIN_ROW);
+    let reversed_frame = reversed.color;
     let pixel = reversed_frame.pixel(centre.0, centre.1).expect("inside");
+    // **What the second attachment holds at the same pixel**, which separates
+    // the two readings the colour cannot. `vk e2e (lavapipe, windows)` has
+    // failed here seven times with the centre at the pass's clear and a
+    // frame-wide count of exactly the far quad's footprint less the near one's,
+    // so the near quad wins the depth test and then shades to the clear. Either
+    // the fragment stage ran and only the lit term came out wrong, or no
+    // fragment ran there at all — and reflectivity says which, because
+    // `mesh.slang` writes it from the material row unconditionally, in the same
+    // invocation, with none of the lighting between. A row's `F0` here and a
+    // black centre means the shading; a cleared reflectivity means no
+    // invocation, which would contradict the depth test the count implies.
+    let reflectivity = reversed
+        .reflectivity
+        .pixel(centre.0, centre.1)
+        .expect("inside");
     // **What the rest of the frame holds, because one pixel cannot say.** A
     // centre holding the clear is either "no fragment survived anywhere" or
     // "fragments landed, but not here", and those want looking at in different
@@ -1304,6 +1319,11 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
          \x20 * If any channel is {poison:#04x} it is the readback \
          destination's own fill, untouched: no copy reached it and the bytes \
          are this harness's, not a frame's.\n\
+         \x20 * The reflectivity attachment holds {reflectivity:?} at this \
+         same pixel. `mesh.slang` writes it from the material row in the same \
+         invocation, with none of the lighting between — so a row's own `F0` \
+         here says the fragment stage ran and only the lit term is wrong, and \
+         a cleared value says no invocation reached this pixel at all.\n\
          \x20 * {drawn} pixel(s) of this frame differ from its corner. Zero \
          means no fragment survived anywhere, so look at the depth clear and \
          the depth state rather than at where the geometry went; a non-zero \
