@@ -405,7 +405,8 @@ pub use window::{
 ///
 /// See the [crate docs](self) for why these live in `crcbl-core`.
 pub use crcbl_core::input::{
-    ButtonState, DeviceId, Keysym, Modifiers, PointerButton, Scancode, ScrollDelta,
+    ButtonState, ContactId, DeviceId, Keysym, Modifiers, PointerButton, Scancode, ScrollDelta,
+    TouchPhase,
 };
 /// Cross-seam vocabulary from `crcbl-core`: the input-event clock, the key
 /// names, and the one sanctioned platform leak.

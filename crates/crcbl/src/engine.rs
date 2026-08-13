@@ -1926,7 +1926,15 @@ impl Clock {
 /// moved here, and it is not trivial code: it carries the last position across
 /// frames because motion and buttons arrive as separate events and a click
 /// carries a position only on some backends.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+///
+/// # Not `Copy`, because of [`touches`](Self::touches)
+///
+/// The pointer collapses to a position and two flags — a batch with five moves
+/// in it has moved the pointer once. Contacts do not: two fingers are two
+/// independent gestures, and a batch that lands one finger and lifts another has
+/// two facts in it that no fixed set of fields can hold. So the batch keeps the
+/// list, and the type is `Clone` rather than `Copy`.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Pending {
     /// Events observed, of every kind.
     pub count: u64,
@@ -1956,12 +1964,45 @@ pub struct Pending {
     /// Both can be true for one batch — a click that begins and ends inside a
     /// single pump — which is why they are two flags and not one state.
     pub pointer_released: bool,
+    /// Every contact this batch carried, in the order the shell reported them.
+    ///
+    /// **Not collapsed per contact**, which is the difference between this and
+    /// the pointer fields above: a finger that lands and lifts inside one pump
+    /// is a tap, and a batch that kept only each contact's latest state would
+    /// report a finger that was never down. On a phone that is every tap, since
+    /// the press and the release of a real one arrive in the same frame.
+    ///
+    /// Positions are framebuffer pixels, like [`pointer`](Self::pointer). The
+    /// game is handed them normalised — see [`TouchUpdate`].
+    ///
+    /// Empty on every backend but the web one today: contacts arrive only where
+    /// [`ShellCaps::TOUCH`](crcbl_shell::ShellCaps::TOUCH) is set.
+    pub touches: Vec<TouchContact>,
     /// [`DEBUG_OVERLAY_KEY`] was pressed, and it was a real press.
     pub toggle_debug_overlay: bool,
     /// [`PAUSE_KEY`] was pressed.
     pub toggle_pause: bool,
     /// [`FULLSCREEN_KEY`] was pressed.
     pub toggle_fullscreen: bool,
+}
+
+/// One contact event, as a batch saw it.
+///
+/// The shell's [`ShellEvent::Touch`] with the
+/// window and the device dropped and the position in framebuffer pixels — the
+/// same reduction [`Pending::pointer`] is. [`TouchUpdate`] is the same fact once
+/// the loop has normalised it for the game; the two are separate types so that a
+/// position cannot cross between the spaces without being converted.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TouchContact {
+    /// Which finger. Unique among the contacts that are down together, and
+    /// reused after one ends — see
+    /// [`ContactId`](crcbl_core::input::ContactId).
+    pub contact: crcbl_core::input::ContactId,
+    /// What it just did.
+    pub phase: crcbl_core::input::TouchPhase,
+    /// Where it is, in framebuffer pixels.
+    pub at: glam::Vec2,
 }
 
 /// Whether [`Pending::observe`] took an event, or left it for the game.
@@ -1982,6 +2023,11 @@ impl Pending {
     /// A frame whose pump delivers no pointer event must not forget the cursor:
     /// starting from [`Default`] would put every menu's hover state at "no
     /// pointer" on any frame the mouse did not move.
+    ///
+    /// Nothing is carried for touch: a contact that did not move this batch has
+    /// no event in it, and a finger's position between events is the game's to
+    /// remember — it knows which of its own controls that finger grabbed, and
+    /// the loop does not.
     #[must_use]
     pub fn carrying(pointer: Option<glam::Vec2>) -> Self {
         Self {
@@ -2035,6 +2081,20 @@ impl Pending {
                     self.pointer_released = true;
                 }
             }
+            // Appended, never merged: see `touches`. A contact's own id is what
+            // tells two fingers apart, so nothing here has to guess which
+            // finger a position belongs to — which is the whole point of the
+            // seam carrying the id.
+            ShellEvent::Touch {
+                contact,
+                phase,
+                position,
+                ..
+            } => self.touches.push(TouchContact {
+                contact: *contact,
+                phase: *phase,
+                at: glam::Vec2::new(position.x as f32, position.y as f32),
+            }),
             ShellEvent::Key {
                 key_code: Some(code),
                 state,
@@ -2510,6 +2570,48 @@ pub struct PointerUpdate {
     pub pressed: bool,
     /// …and came up.
     pub released: bool,
+}
+
+/// One contact, as the *game* sees it.
+///
+/// [`PointerUpdate`]'s counterpart for a finger, in the same normalised surface
+/// coordinates and for the same reason: −1 at one edge and +1 at the other, +X
+/// right and +Y up.
+///
+/// # What a consumer may rely on
+///
+/// * A [`Began`](crcbl_core::input::TouchPhase::Began) arrives before anything
+///   else for a [`contact`](Self::contact), and an
+///   [`Ended`](crcbl_core::input::TouchPhase::Ended) or
+///   [`Cancelled`](crcbl_core::input::TouchPhase::Cancelled) is the last. After
+///   that the id may name a different finger, so state keyed on it must go.
+/// * Two contacts that are down at the same time never share an id.
+/// * **A held contact is cancelled if the window loses focus**, exactly as held
+///   keys are released and a held pointer button comes up. No platform sends
+///   that one, and without it a finger on a stick keeps holding it after the
+///   player has alt-tabbed away.
+///
+/// And the one it must not: there is **no** guarantee that a contact still down
+/// produces an event on every frame. A finger resting on the glass moves
+/// nothing, so a game that reads a stick's value only on the frames a contact
+/// reports must hold the value between them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TouchUpdate {
+    /// Which finger.
+    pub contact: crcbl_core::input::ContactId,
+    /// What it just did.
+    ///
+    /// [`Cancelled`](crcbl_core::input::TouchPhase::Cancelled) is not a quiet
+    /// [`Ended`](crcbl_core::input::TouchPhase::Ended): the system took the
+    /// gesture away rather than the player finishing it, so a tap must not fire
+    /// and a drag must go back where it started.
+    pub phase: crcbl_core::input::TouchPhase,
+    /// Where it is, normalised to the surface.
+    ///
+    /// Present on every phase, including the two that end a contact — the
+    /// platform reports where the finger was when it went, and a control that
+    /// needs to know where a drag finished cannot ask afterwards.
+    pub at: glam::Vec2,
 }
 
 /// Framebuffer pixels to the −1…1 the game binds against, +Y up.
@@ -3262,6 +3364,33 @@ pub trait HostedGame: Sized {
         let _ = pointer;
     }
 
+    /// One finger, once per event the shell reported — see [`TouchUpdate`].
+    ///
+    /// Called for **every** contact, including the primary one that also arrives
+    /// through [`pointer_event`](Self::pointer_event): a game plays with one
+    /// finger through the pointer without overriding this, and a game that wants
+    /// two fingers overrides it and ignores the pointer.
+    /// [`ShellEvent::Touch`] says why the two
+    /// streams overlap.
+    ///
+    /// **A menu on screen does not claim contacts**, which is the one place this
+    /// differs from the pointer. A menu is hit-tested against a position the
+    /// loop knows about; an on-screen stick is the *game's* widget, laid out by
+    /// the game, and the loop cannot tell a contact that landed on one from a
+    /// contact that landed on a panel. Handing the game fewer contacts than the
+    /// screen has would take the decision away from the only code that can make
+    /// it — so the button is claimed on the pointer stream, where the loop
+    /// knows what it is claiming, and contacts are delivered whole.
+    ///
+    /// The empty default is the honest answer for a game played with a
+    /// keyboard and one finger, the same way
+    /// [`debug_sections`](Self::debug_sections)'s is: nothing is verified by
+    /// this method, and a game that never overrides it is a game with no
+    /// on-screen controls.
+    fn touch_event(&mut self, touch: TouchUpdate) {
+        let _ = touch;
+    }
+
     /// The game action a widget id names, or `None` for an id this game's menus
     /// do not use. Never asked about a reserved id — see [`FIRST_GAME_ID`].
     fn menu_action(id: crcbl_ui::WidgetId) -> Option<Self::MenuAction>;
@@ -3413,6 +3542,14 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// next tap, so the bug is not a stuck paddle — it is a button that stops
     /// working.
     pointer_in_game: bool,
+    /// Contacts the game was told began and not yet told ended, with where each
+    /// was last seen.
+    ///
+    /// The contact's half of [`Self::held_keys`], and it exists for the same
+    /// repair: focus loss must deliver an end no platform sends. A cancel and
+    /// not a release, because the player did not lift the finger — see
+    /// [`TouchUpdate::phase`].
+    live_contacts: Vec<(crcbl_core::input::ContactId, glam::Vec2)>,
     mode: ModeRequest,
     budget: FrameBudget,
     ticks: u64,
@@ -3462,6 +3599,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             paused: false,
             held_keys: Vec::new(),
             pointer_in_game: false,
+            live_contacts: Vec::new(),
             mode: ModeRequest::new(),
             budget: FrameBudget::new(config.frames),
             ticks: 0,
@@ -3578,6 +3716,26 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             });
         }
 
+        // Contacts, after the menu has had the pointer: a phone's tap on a
+        // panel is both a widget press and a contact, and the game hears about
+        // them in the order they happened to the player.
+        //
+        // One call per event and none merged, because a tap is a `Began` and an
+        // `Ended` in one batch and a game that only heard the last of them
+        // would never see a finger land.
+        for touch in std::mem::take(&mut pending.touches) {
+            let at = normalised(touch.at, self.gpu.extent());
+            self.live_contacts.retain(|(id, _)| *id != touch.contact);
+            if !touch.phase.ends_contact() {
+                self.live_contacts.push((touch.contact, at));
+            }
+            self.game.touch_event(TouchUpdate {
+                contact: touch.contact,
+                phase: touch.phase,
+                at,
+            });
+        }
+
         // A settings row fired this frame: hand the limit it asked for to the
         // clock before it is advanced, so the frame about to run is the first
         // one the new cap paces.
@@ -3605,6 +3763,17 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                     at: None,
                     pressed: false,
                     released: true,
+                });
+            }
+            // And the same for every finger that was down. **Cancelled, not
+            // ended**: the player did not lift it, so a stick centres and a
+            // charge-up does not fire. Each keeps its last position, which is
+            // where the finger was when the window went away.
+            for (contact, at) in std::mem::take(&mut self.live_contacts) {
+                self.game.touch_event(TouchUpdate {
+                    contact,
+                    phase: crcbl_core::input::TouchPhase::Cancelled,
+                    at,
                 });
             }
         }
@@ -5188,6 +5357,102 @@ mod tests {
         let mut moved = Pending::carrying(last);
         drain(&mut shell, &mut moved);
         assert_eq!(moved.pointer, Some(glam::Vec2::new(7.0, 9.0)));
+    }
+
+    /// **Two contacts arrive as two, and moving one moves only that one.**
+    ///
+    /// The claim the whole seam exists for, made where it can be checked without
+    /// a device: a batch carrying two fingers keeps them apart by id, a move
+    /// updates the finger it names, and the finger that did not move produces
+    /// nothing.
+    #[test]
+    fn a_batch_carries_every_contact_and_a_move_names_the_one_that_moved() {
+        use crcbl_core::input::{ContactId, TouchPhase};
+        let (mut shell, window) = shell();
+        let point = |x: f64, y: f64| crcbl_shell::PhysicalPoint { x, y };
+
+        for (contact, phase, at) in [
+            (1, TouchPhase::Began, point(100.0, 200.0)),
+            (2, TouchPhase::Began, point(500.0, 40.0)),
+            (2, TouchPhase::Moved, point(520.0, 60.0)),
+        ] {
+            shell
+                .touch(window, ContactId(contact), phase, at)
+                .expect("the window is live");
+        }
+
+        let mut pending = Pending::default();
+        let verdicts = drain(&mut shell, &mut pending);
+        assert!(
+            verdicts.iter().all(|verdict| *verdict == Handled::Loop),
+            "a contact was handed to the game raw: {verdicts:?}",
+        );
+        assert_eq!(
+            pending.touches,
+            vec![
+                TouchContact {
+                    contact: ContactId(1),
+                    phase: TouchPhase::Began,
+                    at: glam::Vec2::new(100.0, 200.0),
+                },
+                TouchContact {
+                    contact: ContactId(2),
+                    phase: TouchPhase::Began,
+                    at: glam::Vec2::new(500.0, 40.0),
+                },
+                TouchContact {
+                    contact: ContactId(2),
+                    phase: TouchPhase::Moved,
+                    at: glam::Vec2::new(520.0, 60.0),
+                },
+            ],
+        );
+        // The finger that held still reported once and is still where it landed
+        // — a batch that credited the move to the wrong contact would put it at
+        // the other's position.
+        let first: Vec<glam::Vec2> = pending
+            .touches
+            .iter()
+            .filter(|touch| touch.contact == ContactId(1))
+            .map(|touch| touch.at)
+            .collect();
+        assert_eq!(first, vec![glam::Vec2::new(100.0, 200.0)]);
+
+        // And a contact is not a pointer: the menu's hover state and the
+        // button's edges are the pointer stream's, and a finger must not move
+        // either of them on a backend where both arrive.
+        assert_eq!(pending.pointer, None);
+        assert!(!pending.pointer_pressed && !pending.pointer_released);
+    }
+
+    /// **A tap is a press and a release in one batch, and both survive.**
+    ///
+    /// The case a per-contact fold would lose: on a phone a finger is on the
+    /// glass for a fraction of a frame, so `Began` and `Ended` reach the engine
+    /// in the same pump. Keeping only each contact's latest state would report a
+    /// finger that was never down.
+    #[test]
+    fn a_tap_inside_one_batch_keeps_both_of_its_phases() {
+        use crcbl_core::input::{ContactId, TouchPhase};
+        let (mut shell, window) = shell();
+        let at = crcbl_shell::PhysicalPoint { x: 8.0, y: 9.0 };
+        shell
+            .touch(window, ContactId(4), TouchPhase::Began, at)
+            .expect("the window is live");
+        shell
+            .touch(window, ContactId(4), TouchPhase::Ended, at)
+            .expect("the window is live");
+
+        let mut pending = Pending::default();
+        drain(&mut shell, &mut pending);
+        assert_eq!(
+            pending
+                .touches
+                .iter()
+                .map(|touch| touch.phase)
+                .collect::<Vec<_>>(),
+            vec![TouchPhase::Began, TouchPhase::Ended],
+        );
     }
 
     /// The three reserved keys are the loop's and must not reach the game: one
@@ -7219,6 +7484,8 @@ mod tests {
         ticks: u64,
         /// Every key the loop forwarded, in order.
         keys: Vec<(crcbl_core::input::KeyCode, bool)>,
+        /// Every contact the loop forwarded, in order.
+        touches: Vec<TouchUpdate>,
         /// What each `draw` was told about its frame.
         draws: Vec<FrameInfo>,
         /// Whether the ball has been served.
@@ -7270,6 +7537,10 @@ mod tests {
                 self.served = true;
             }
             self.keys.push((key, pressed));
+        }
+
+        fn touch_event(&mut self, touch: TouchUpdate) {
+            self.touches.push(touch);
         }
 
         /// Asserts rather than ignores: the loop promises never to ask about an
@@ -7869,6 +8140,149 @@ mod tests {
             "a paused frame stopped presenting",
         );
         assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+    }
+
+    /// **The game is handed every contact, normalised, in order.**
+    ///
+    /// The loop's half of the seam: two fingers land, one moves, and the game
+    /// sees three updates whose ids and positions are the fingers' own. The
+    /// positions are the surface's −1…1 with +Y up, like the pointer's — a game
+    /// that had to redo the DPI arithmetic per contact would get it wrong on the
+    /// displays nobody develops on.
+    #[test]
+    fn every_contact_reaches_the_game_normalised_to_the_surface() {
+        use crcbl_core::input::{ContactId, TouchPhase};
+        let mut engine = hosted(None);
+        let window = engine.window();
+        // The fixture's framebuffer, which is what the normalisation divides by.
+        assert_eq!(engine.gpu().extent(), (640, 480));
+
+        for (contact, phase, x, y) in [
+            (1, TouchPhase::Began, 0.0, 0.0),
+            (2, TouchPhase::Began, 640.0, 480.0),
+            (2, TouchPhase::Moved, 320.0, 240.0),
+        ] {
+            engine
+                .shell_mut()
+                .touch(
+                    window,
+                    ContactId(contact),
+                    phase,
+                    crcbl_shell::PhysicalPoint { x, y },
+                )
+                .expect("the window is live");
+        }
+        engine.frame().expect("the fake never fails");
+
+        assert_eq!(
+            engine.game().touches,
+            vec![
+                // Top-left corner: −1 across, +1 up.
+                TouchUpdate {
+                    contact: ContactId(1),
+                    phase: TouchPhase::Began,
+                    at: glam::Vec2::new(-1.0, 1.0),
+                },
+                // Bottom-right corner, which is the other sign in both axes —
+                // a missing Y flip would put this at (1, -1)'s mirror.
+                TouchUpdate {
+                    contact: ContactId(2),
+                    phase: TouchPhase::Began,
+                    at: glam::Vec2::new(1.0, -1.0),
+                },
+                TouchUpdate {
+                    contact: ContactId(2),
+                    phase: TouchPhase::Moved,
+                    at: glam::Vec2::ZERO,
+                },
+            ],
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A finger still down when the window loses focus is cancelled.**
+    ///
+    /// The contact's half of the obligation `held_keys` and `pointer_in_game`
+    /// discharge: no platform reports the end of a gesture that was interrupted
+    /// by the window going away, and a game left holding a finger keeps steering
+    /// with a stick nobody is touching.
+    ///
+    /// **Cancelled and not ended**, because the player did not lift it — the
+    /// difference between a stick centring and a charged attack firing at
+    /// whatever the camera happened to be pointing at.
+    #[test]
+    fn a_contact_held_when_focus_is_lost_is_cancelled_where_it_was_last_seen() {
+        use crcbl_core::input::{ContactId, TouchPhase};
+        let mut engine = hosted(None);
+        let window = engine.window();
+
+        engine
+            .shell_mut()
+            .touch(
+                window,
+                ContactId(1),
+                TouchPhase::Began,
+                crcbl_shell::PhysicalPoint { x: 160.0, y: 120.0 },
+            )
+            .expect("the window is live");
+        // A second finger that ends properly, so the cancel below cannot be a
+        // blanket "cancel everything the game ever heard about".
+        engine
+            .shell_mut()
+            .touch(
+                window,
+                ContactId(2),
+                TouchPhase::Began,
+                crcbl_shell::PhysicalPoint { x: 0.0, y: 0.0 },
+            )
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .touch(
+                window,
+                ContactId(2),
+                TouchPhase::Ended,
+                crcbl_shell::PhysicalPoint { x: 0.0, y: 0.0 },
+            )
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        let before = engine.game().touches.len();
+
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+
+        assert_eq!(
+            &engine.game().touches[before..],
+            &[TouchUpdate {
+                contact: ContactId(1),
+                phase: TouchPhase::Cancelled,
+                // Where it was last seen: (160, 120) of 640×480.
+                at: glam::Vec2::new(-0.5, 0.5),
+            }],
+            "focus loss owed exactly one cancel, for the finger still down",
+        );
+
+        // And it is owed once: a second focus loss has nothing left to cancel.
+        engine
+            .shell_mut()
+            .set_focus(window, true)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            engine.game().touches.len(),
+            before + 1,
+            "the loop cancelled a contact twice: {:?}",
+            engine.game().touches,
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 
     /// **A menu button of the game's reaches the game as its own action.**

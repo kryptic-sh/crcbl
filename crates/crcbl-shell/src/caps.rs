@@ -168,6 +168,25 @@ bitflags::bitflags! {
         /// happens — leave this clear and their `wait_events` returns
         /// immediately, which is always a correct implementation.
         const EVENT_WAIT = 1 << 13;
+
+        /// Fingers arrive as [`ShellEvent::Touch`](crate::ShellEvent::Touch),
+        /// with a contact id and a phase, so more than one can be tracked at a
+        /// time.
+        ///
+        /// **Clear on every desktop backend here**, and that is a statement
+        /// about the backends rather than about the platforms: a Windows laptop
+        /// and a Linux tablet both have touchscreens, and X11 (XInput2
+        /// `XI_TouchBegin`), Wayland (`wl_touch`), Win32 (`WM_POINTERDOWN`) and
+        /// AppKit (`NSTouch`) all have a way to deliver them. None of those
+        /// paths is written, so none of those backends sets this bit and a game
+        /// on them sees no contacts at all — an input that is *absent*, which is
+        /// a different thing from one that silently fails.
+        ///
+        /// A backend that does set it owes the emulated pointer stream for the
+        /// primary contact as well; [`ShellEvent::Touch`](crate::ShellEvent::Touch)
+        /// says why, and that obligation is what stops a backend turning this on
+        /// from breaking every game that binds only the pointer.
+        const TOUCH = 1 << 14;
     }
 }
 
@@ -241,6 +260,9 @@ mod tests {
         assert!(!wayland.contains(ShellCaps::POINTER_WARP));
         assert!(!wayland.contains(ShellCaps::ASPECT_HINT_HONORED));
         assert!(!wayland.contains(ShellCaps::WINDOW_POSITION));
+        // `wl_touch` exists and this backend does not bind it, which is the
+        // whole difference between a platform and a backend.
+        assert!(!wayland.contains(ShellCaps::TOUCH));
         assert!(ShellCaps::DESKTOP.contains(wayland));
         assert_eq!(ShellCaps::default(), ShellCaps::empty());
     }

@@ -45,15 +45,21 @@
 //! `SurfaceTarget` is deliberately exhaustive so a new platform breaks every
 //! HAL backend loudly. `ShellEvent` is the opposite: a consumer that ignores an
 //! event it has never heard of degrades gracefully (touch input does nothing,
-//! rather than doing something wrong), and touch, gamepad hotplug and IME
-//! pre-edit are all scheduled to land later. Breaking every `match` in the
-//! engine for each is not a useful forcing function, it is churn.
+//! rather than doing something wrong), and gamepad hotplug and IME pre-edit are
+//! both scheduled to land later. Breaking every `match` in the engine for each
+//! is not a useful forcing function, it is churn.
+//!
+//! [`Touch`](ShellEvent::Touch) is what that promise looked like when it was
+//! collected: it landed without touching a single `match` outside the shell,
+//! and a game that never heard of it kept playing with one finger because the
+//! primary contact is reported through the pointer variants as well.
 
 use std::path::PathBuf;
 
 use crcbl_core::EventTime;
 use crcbl_core::input::{
-    ButtonState, DeviceId, Keysym, Modifiers, PointerButton, Scancode, ScrollDelta,
+    ButtonState, ContactId, DeviceId, Keysym, Modifiers, PointerButton, Scancode, ScrollDelta,
+    TouchPhase,
 };
 
 use crate::{
@@ -259,6 +265,58 @@ pub enum ShellEvent {
         modifiers: Modifiers,
     },
 
+    /// A finger landed, moved, lifted, or had its gesture taken away.
+    ///
+    /// **One event per contact**, so two fingers moving at once are two events
+    /// and not one averaged pointer. [`ContactId`] carries the identity and
+    /// [`TouchPhase`] the lifecycle; between them a consumer can hold per-finger
+    /// state, which is the whole reason this variant exists and the reason a
+    /// second finger used to be dropped at the backend.
+    ///
+    /// # A touchscreen also produces pointer events, and that is deliberate
+    ///
+    /// The **primary** contact — the first finger of a gesture, and the only one
+    /// while there is only one — is *also* reported as
+    /// [`PointerMotion`](ShellEvent::PointerMotion) and
+    /// [`Button`](ShellEvent::Button), exactly as a browser emulates mouse
+    /// events for touch and Windows synthesizes them from `WM_POINTER`. So a
+    /// game bound to `Binding::MouseButton` is playable with one finger without
+    /// knowing this variant exists, and a game that wants two fingers reads
+    /// `Touch` and ignores the emulation.
+    ///
+    /// That is an obligation on a backend that sets
+    /// [`ShellCaps::TOUCH`](crate::ShellCaps::TOUCH), not an accident of one
+    /// platform: a backend whose window system does not emulate must do it
+    /// itself, or every existing pointer binding stops working the day it
+    /// reports its first contact. Contacts that are not primary have no pointer
+    /// events at all — a second finger is not the first one teleporting.
+    ///
+    /// # No modifiers, and a position that is never absent
+    ///
+    /// A finger carries no `modifiers`: no platform reports keyboard state on a
+    /// touch event, and a field the backends would have to invent is a field a
+    /// consumer would believe. And `position` is a [`PhysicalPoint`] rather than
+    /// an `Option` — a contact is *defined* by where it touches, including on
+    /// the release, and there is no [`PointerMode::Locked`](crate::PointerMode)
+    /// equivalent that could take the position away.
+    Touch {
+        /// Which window.
+        window: WindowId,
+        /// Which touchscreen. Every contact on one screen shares this — see
+        /// [`ContactId`], which is the one that tells fingers apart.
+        device: DeviceId,
+        /// When it happened.
+        time: EventTime,
+        /// Which finger.
+        contact: ContactId,
+        /// What it just did.
+        phase: TouchPhase,
+        /// Where it is, in device pixels. On
+        /// [`Cancelled`](TouchPhase::Cancelled) this is the last place the
+        /// platform knew about rather than a place the user chose.
+        position: PhysicalPoint,
+    },
+
     /// Text was committed — by typing, by an input method, or by a paste the
     /// window system routed as text input.
     ///
@@ -356,6 +414,7 @@ impl ShellEvent {
             | Self::PointerFocus { window, .. }
             | Self::Button { window, .. }
             | Self::Wheel { window, .. }
+            | Self::Touch { window, .. }
             | Self::TextCommit { window, .. }
             | Self::DroppedFile { window, .. }
             | Self::ClipboardData { window, .. } => Some(*window),
@@ -375,6 +434,7 @@ impl ShellEvent {
             | Self::PointerFocus { time, .. }
             | Self::Button { time, .. }
             | Self::Wheel { time, .. }
+            | Self::Touch { time, .. }
             | Self::TextCommit { time, .. }
             | Self::DroppedFile { time, .. } => Some(*time),
             Self::Resized { .. }
@@ -416,6 +476,7 @@ impl ShellEvent {
             Self::PointerFocus { .. } => "PointerFocus",
             Self::Button { .. } => "Button",
             Self::Wheel { .. } => "Wheel",
+            Self::Touch { .. } => "Touch",
             Self::TextCommit { .. } => "TextCommit",
             Self::MonitorsChanged => "MonitorsChanged",
             Self::DroppedFile { .. } => "DroppedFile",
@@ -561,6 +622,14 @@ mod tests {
                 position: None,
                 modifiers: Modifiers::empty(),
             },
+            ShellEvent::Touch {
+                window,
+                device: DeviceId::UNKNOWN,
+                time: EventTime::ZERO,
+                contact: ContactId(1),
+                phase: TouchPhase::Began,
+                position: PhysicalPoint::new(4.0, 5.0),
+            },
             ShellEvent::TextCommit {
                 window,
                 time: EventTime::ZERO,
@@ -593,6 +662,69 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), count, "event names must be unique");
+    }
+
+    /// Two fingers are two contacts, and the event says which is which.
+    ///
+    /// The shape claim in one test: a batch of touch events keyed by
+    /// [`ContactId`] can be reduced to a per-finger position, the two fingers do
+    /// not share an id, and moving one does not move the other. This is what the
+    /// seam is *for* — before it, a second finger had nowhere to go and the web
+    /// backend dropped it.
+    #[test]
+    fn a_batch_of_contacts_keeps_the_two_fingers_apart() {
+        let window = window_id();
+        let touch = |contact: u32, phase: TouchPhase, x: f64, y: f64| ShellEvent::Touch {
+            window,
+            device: DeviceId(3),
+            time: EventTime::from_millis(1),
+            contact: ContactId(contact),
+            phase,
+            position: PhysicalPoint::new(x, y),
+        };
+        let batch = [
+            touch(7, TouchPhase::Began, 10.0, 20.0),
+            touch(9, TouchPhase::Began, 300.0, 400.0),
+            touch(9, TouchPhase::Moved, 305.0, 410.0),
+            touch(7, TouchPhase::Ended, 10.0, 20.0),
+        ];
+
+        let mut live: Vec<(ContactId, TouchPhase, PhysicalPoint)> = Vec::new();
+        for event in &batch {
+            let ShellEvent::Touch {
+                contact,
+                phase,
+                position,
+                ..
+            } = event
+            else {
+                panic!("wrong variant");
+            };
+            live.retain(|(id, ..)| id != contact);
+            if !phase.ends_contact() {
+                live.push((*contact, *phase, *position));
+            }
+        }
+
+        // One finger left, at the place *its own* moves put it — not at the
+        // other's, and not at the average of the two.
+        assert_eq!(
+            live,
+            vec![(
+                ContactId(9),
+                TouchPhase::Moved,
+                PhysicalPoint::new(305.0, 410.0)
+            )]
+        );
+        assert!(TouchPhase::Ended.ends_contact());
+        assert!(TouchPhase::Cancelled.ends_contact());
+        assert!(!TouchPhase::Began.ends_contact());
+        assert!(!TouchPhase::Moved.ends_contact());
+        // A cancel is not an end: they agree that the contact is over and
+        // disagree about everything a consumer does next.
+        assert_ne!(TouchPhase::Ended, TouchPhase::Cancelled);
+        assert!(batch[0].is_input(), "a contact is an input sample");
+        assert_eq!(batch[0].time(), Some(EventTime::from_millis(1)));
     }
 
     #[test]

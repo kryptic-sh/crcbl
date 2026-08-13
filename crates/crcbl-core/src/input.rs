@@ -15,7 +15,8 @@
 //!
 //! ```text
 //! crcbl-core::input   vocabulary — KeyCode, Keysym, PointerButton, Modifiers,
-//!                                  ButtonState, ScrollDelta, DeviceId
+//!                                  ButtonState, ScrollDelta, DeviceId,
+//!                                  ContactId, TouchPhase
 //! crcbl-shell         events     — ShellEvent, which names windows and is only
 //!                                  ever produced by a shell backend
 //! ```
@@ -276,6 +277,94 @@ pub enum PointerButton {
     ///
     /// Bindable and loggable, never interpreted by the engine.
     Other(u16),
+}
+
+/// One finger on a touchscreen, for as long as it stays down.
+///
+/// **Unique among the contacts that are down at the same moment, stable from the
+/// [`TouchPhase::Began`] that starts a gesture to the
+/// [`Ended`](TouchPhase::Ended) or [`Cancelled`](TouchPhase::Cancelled) that
+/// finishes it, and free to be reused after that.** Those three sentences are
+/// the whole contract, and the third is the one that bites: a consumer keying
+/// per-gesture state off this — which finger is holding the movement stick —
+/// must drop that state when the contact ends, or the next finger to land
+/// inherits it.
+///
+/// A contact is not a device. Two fingers on one screen are one [`DeviceId`] and
+/// two `ContactId`s, which is exactly why the id could not be folded into the
+/// device: a per-device registry cannot represent a second finger.
+///
+/// The numbering is the platform's (a browser `pointerId`, a `wl_touch` id, a
+/// Win32 pointer id) and is meaningless to compare against a literal or across
+/// windows — like [`Scancode`], it exists to be matched against *other* ids from
+/// the same stream.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContactId(pub u32);
+
+impl fmt::Display for ContactId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "contact {}", self.0)
+    }
+}
+
+/// Where a [`ContactId`] is in its gesture.
+///
+/// A touchscreen has no "hover": a contact exists from the moment it lands until
+/// the moment it goes away, so this is the lifecycle rather than a button state
+/// — which is why touch does not reuse [`ButtonState`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TouchPhase {
+    /// The finger landed. The first event any [`ContactId`] gets.
+    Began,
+    /// It moved while down.
+    Moved,
+    /// The user lifted it. **The gesture completed**, and a consumer commits
+    /// whatever it meant — a tap fires, a stick centres, a drag lands where it
+    /// was let go.
+    Ended,
+    /// The system took the gesture away: the OS claimed it for an edge swipe,
+    /// palm rejection changed its mind, the window lost focus, the browser
+    /// decided the page was scrolling after all.
+    ///
+    /// **Not an [`Ended`](Self::Ended), and a consumer that treats it as one
+    /// fires actions the user did not ask for.** The position it carries is the
+    /// last one the platform knew, not a place anyone chose, so the answer is to
+    /// undo the interaction rather than complete it — the drag goes back, the
+    /// tap does not fire, the stick centres without the character having lunged.
+    /// What both share is that the contact is over: the id is gone either way,
+    /// and a consumer that ignores this one is left holding a finger that will
+    /// never move again.
+    Cancelled,
+}
+
+impl TouchPhase {
+    /// Whether this phase ends the contact — [`Ended`](Self::Ended) or
+    /// [`Cancelled`](Self::Cancelled).
+    ///
+    /// The test anything tracking live contacts writes; it is the *reason* they
+    /// differ that the two variants exist for, not the fact that they both stop.
+    #[inline]
+    #[must_use]
+    pub const fn ends_contact(self) -> bool {
+        matches!(self, Self::Ended | Self::Cancelled)
+    }
+
+    /// A short, stable name for logs and test assertions.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Began => "Began",
+            Self::Moved => "Moved",
+            Self::Ended => "Ended",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+
+impl fmt::Display for TouchPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// How far a scroll event moved, in the units the device reported.

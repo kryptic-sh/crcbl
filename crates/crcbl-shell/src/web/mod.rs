@@ -23,6 +23,7 @@
 //! | --- | --- |
 //! | [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) | a CSS-sized canvas is scaled by the compositor for free |
 //! | [`FRACTIONAL_SCALE`](ShellCaps::FRACTIONAL_SCALE) | `devicePixelRatio` is fractional and is reported verbatim |
+//! | [`TOUCH`](ShellCaps::TOUCH) | the shim forwards every contact through [`__crcbl_web_touch`](shim::__crcbl_web_touch) |
 //!
 //! Everything else is clear, and each one is a *behaviour* that is missing
 //! rather than a platform that lacks it.
@@ -39,6 +40,23 @@
 //! placed and framed by the document, not by a window system;
 //! [`ASPECT_HINT_HONORED`](ShellCaps::ASPECT_HINT_HONORED) because there is no
 //! interactive resize for the browser to constrain.
+//!
+//! # Touch, and the pointer events that come with it
+//!
+//! A browser reports a finger twice: once as a `PointerEvent` whose
+//! `pointerType` is `"touch"`, and — for the **primary** contact only — as the
+//! mouse events every page written before touch existed depends on. This
+//! backend keeps both. Every contact becomes a [`Touch`](ShellEvent::Touch)
+//! through [`__crcbl_web_touch`](shim::__crcbl_web_touch), and the primary one
+//! *additionally* becomes [`PointerMotion`](ShellEvent::PointerMotion) and
+//! [`Button`](ShellEvent::Button) through the pointer entry points, which is
+//! what [`ShellCaps::TOUCH`] obliges a backend that reports contacts to do.
+//!
+//! The alternative — contacts only, and let the engine synthesize a pointer —
+//! was rejected because the browser is already doing that synthesis, correctly,
+//! including the `isPrimary` rule that says a second finger landing does not
+//! move the mouse. Doing it again a layer up would mean two answers to "where
+//! is the pointer" that agree until they do not.
 //!
 //! # The configure handshake
 //!
@@ -294,7 +312,9 @@ pub(crate) mod shim {
         CANVAS, KEY_SCRATCH, KEY_SCRATCH_CAPACITY, PhysicalPoint, PhysicalSize, ShellEvent,
         event_time, key_code_of, keysym_of, queue_for, scancode_of, with_bridge,
     };
-    use crcbl_core::input::{ButtonState, DeviceId, Modifiers, PointerButton, ScrollDelta};
+    use crcbl_core::input::{
+        ButtonState, ContactId, DeviceId, Modifiers, PointerButton, ScrollDelta, TouchPhase,
+    };
 
     /// `event.ctrlKey`.
     pub const STATE_CTRL: u32 = 1 << 0;
@@ -309,6 +329,32 @@ pub(crate) mod shim {
     pub const STATE_EDGE: u32 = 1 << 4;
     /// `KeyboardEvent.repeat`.
     pub const STATE_REPEAT: u32 = 1 << 5;
+
+    /// A contact landed: a touch `pointerdown`.
+    ///
+    /// The four phases are a small enumeration rather than bits in a `state`
+    /// word because they are exclusive — a contact is in exactly one of them —
+    /// and a bitmask would let a shim describe a finger that both began and
+    /// ended.
+    pub const TOUCH_BEGAN: u32 = 0;
+    /// A contact moved: a touch `pointermove`.
+    pub const TOUCH_MOVED: u32 = 1;
+    /// A contact was lifted: a touch `pointerup`.
+    pub const TOUCH_ENDED: u32 = 2;
+    /// A contact was taken away: a touch `pointercancel`.
+    pub const TOUCH_CANCELLED: u32 = 3;
+
+    /// The phase word of [`__crcbl_web_touch`], or `None` for one this ABI does
+    /// not name.
+    const fn touch_phase(phase: u32) -> Option<TouchPhase> {
+        match phase {
+            TOUCH_BEGAN => Some(TouchPhase::Began),
+            TOUCH_MOVED => Some(TouchPhase::Moved),
+            TOUCH_ENDED => Some(TouchPhase::Ended),
+            TOUCH_CANCELLED => Some(TouchPhase::Cancelled),
+            _ => None,
+        }
+    }
 
     /// The modifier half of a `state` word.
     fn modifiers(state: u32) -> Modifiers {
@@ -550,6 +596,50 @@ pub(crate) mod shim {
         });
     }
 
+    /// One contact of a touch gesture: `pointerdown`, `pointermove`,
+    /// `pointerup` or `pointercancel` whose `pointerType` is `"touch"`.
+    ///
+    /// **Every contact, primary or not**, which is the difference this entry
+    /// point exists to make: the shim's pointer calls above carry the primary
+    /// contact only — a browser's own mouse emulation, and what a game bound to
+    /// [`PointerButton`] plays with — and a second finger had nowhere to go
+    /// before this. The two streams overlap on the primary contact by design;
+    /// [`ShellEvent::Touch`] carries the argument.
+    ///
+    /// `contact` is the DOM `pointerId`. The browser guarantees exactly what
+    /// [`ContactId`](crcbl_core::input::ContactId) promises — distinct for
+    /// contacts that are down together, constant for the life of a gesture,
+    /// reusable afterwards — so it is passed through rather than renumbered
+    /// into ids of our own, which would be a second identity to keep in step
+    /// with the browser's.
+    ///
+    /// `phase` is one of [`TOUCH_BEGAN`], [`TOUCH_MOVED`], [`TOUCH_ENDED`] or
+    /// [`TOUCH_CANCELLED`]. Anything else is dropped with a log line rather
+    /// than guessed at: an unknown phase mapped onto `Moved` would report a
+    /// finger that is still down after it has gone.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub unsafe extern "C" fn __crcbl_web_touch(
+        canvas: u32,
+        time_ms: f64,
+        x: f64,
+        y: f64,
+        contact: u32,
+        phase: u32,
+    ) {
+        let Some(phase) = touch_phase(phase) else {
+            log::debug!("web shim touch with unknown phase {phase} dropped");
+            return;
+        };
+        queue_for(canvas, |window, bridge| ShellEvent::Touch {
+            window,
+            device: DeviceId::UNKNOWN,
+            time: event_time(bridge, time_ms),
+            contact: ContactId(contact),
+            phase,
+            position: PhysicalPoint::new(x, y),
+        });
+    }
+
     /// A `pointerenter` or `pointerleave`.
     #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
     pub unsafe extern "C" fn __crcbl_web_pointer_focus(
@@ -748,7 +838,7 @@ impl Shell for WebShell {
         // `ShellCaps` must be opted into here by someone who implemented it,
         // not inherited by a backend that has never heard of it. See the module
         // docs for why each of the others is clear.
-        ShellCaps::HW_UPSCALE | ShellCaps::FRACTIONAL_SCALE
+        ShellCaps::HW_UPSCALE | ShellCaps::FRACTIONAL_SCALE | ShellCaps::TOUCH
     }
 
     /// Creates the canvas window.
@@ -1030,7 +1120,7 @@ pub fn open(canvas_id: u32) -> Result<WebShell, ShellError> {
 mod tests {
     use super::shim::{STATE_ALT, STATE_CTRL, STATE_EDGE, STATE_REPEAT, STATE_SHIFT, STATE_SUPER};
     use super::*;
-    use crcbl_core::input::{ButtonState, Modifiers, PointerButton};
+    use crcbl_core::input::{ButtonState, ContactId, Modifiers, PointerButton, TouchPhase};
 
     /// A shell with the one window the backend allows, ready for the shim.
     fn shell_with_window(canvas: u32) -> (WebShell, WindowId) {
@@ -1383,7 +1473,7 @@ mod tests {
         let caps = shell.caps();
         assert_eq!(
             caps,
-            ShellCaps::HW_UPSCALE | ShellCaps::FRACTIONAL_SCALE,
+            ShellCaps::HW_UPSCALE | ShellCaps::FRACTIONAL_SCALE | ShellCaps::TOUCH,
             "every other bit names something this backend does not do"
         );
         // The four that used to be advertised with nothing behind them.
@@ -1509,6 +1599,86 @@ mod tests {
         };
         assert!(!*entered);
         assert_eq!(*position, None, "a leave has no position");
+    }
+
+    /// Two fingers reach the queue as two contacts, and a lift ends the right
+    /// one.
+    ///
+    /// The shim's job in one sequence: both contacts arrive, they keep their own
+    /// ids and their own positions, moving one leaves the other where it was,
+    /// and the phases are the ones the DOM event types mean. Before this entry
+    /// point the second contact was dropped in JS and there was nothing here to
+    /// test.
+    #[test]
+    fn every_contact_reaches_the_queue_with_its_own_id_and_place() {
+        use shim::{TOUCH_BEGAN, TOUCH_CANCELLED, TOUCH_ENDED, TOUCH_MOVED};
+        let (mut shell, window) = shell_with_window(0);
+        // SAFETY: the shim ABI; nothing is dereferenced by this entry point.
+        unsafe {
+            shim::__crcbl_web_touch(0, 1.0, 10.0, 20.0, 3, TOUCH_BEGAN);
+            shim::__crcbl_web_touch(0, 2.0, 300.0, 400.0, 4, TOUCH_BEGAN);
+            shim::__crcbl_web_touch(0, 3.0, 310.0, 405.0, 4, TOUCH_MOVED);
+            shim::__crcbl_web_touch(0, 4.0, 10.0, 20.0, 3, TOUCH_ENDED);
+            shim::__crcbl_web_touch(0, 5.0, 310.0, 405.0, 4, TOUCH_CANCELLED);
+            // A phase this ABI does not name is dropped, not guessed at.
+            shim::__crcbl_web_touch(0, 6.0, 0.0, 0.0, 5, 99);
+        }
+
+        let events = drain(&mut shell);
+        let contacts: Vec<(WindowId, ContactId, TouchPhase, PhysicalPoint)> = events
+            .iter()
+            .map(|event| {
+                let ShellEvent::Touch {
+                    window,
+                    contact,
+                    phase,
+                    position,
+                    ..
+                } = event
+                else {
+                    panic!("expected only touch events, got {events:?}");
+                };
+                (*window, *contact, *phase, *position)
+            })
+            .collect();
+        assert_eq!(
+            contacts,
+            vec![
+                (
+                    window,
+                    ContactId(3),
+                    TouchPhase::Began,
+                    PhysicalPoint::new(10.0, 20.0)
+                ),
+                (
+                    window,
+                    ContactId(4),
+                    TouchPhase::Began,
+                    PhysicalPoint::new(300.0, 400.0)
+                ),
+                (
+                    window,
+                    ContactId(4),
+                    TouchPhase::Moved,
+                    PhysicalPoint::new(310.0, 405.0)
+                ),
+                (
+                    window,
+                    ContactId(3),
+                    TouchPhase::Ended,
+                    PhysicalPoint::new(10.0, 20.0)
+                ),
+                (
+                    window,
+                    ContactId(4),
+                    TouchPhase::Cancelled,
+                    PhysicalPoint::new(310.0, 405.0)
+                ),
+            ]
+        );
+        // Each contact carries the DOM event's own timestamp, like every other
+        // input this backend queues.
+        assert_eq!(events[2].time(), Some(EventTime::from_millis(3)));
     }
 
     #[test]

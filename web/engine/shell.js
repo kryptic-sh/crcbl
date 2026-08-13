@@ -1,4 +1,5 @@
-// The canvas half of the shim: size, DPI, focus, fullscreen, keyboard, pointer.
+// The canvas half of the shim: size, DPI, focus, fullscreen, keyboard, pointer,
+// touch.
 //
 // Implements the JS side of `crcbl-shell`'s Web/canvas backend
 // (`crates/crcbl-shell/src/web/mod.rs`). Every browser event becomes one
@@ -31,6 +32,22 @@ export const STATE_SUPER = 1 << 3;
 export const STATE_EDGE = 1 << 4;
 /** `KeyboardEvent.repeat`. */
 export const STATE_REPEAT = 1 << 5;
+
+/**
+ * A contact landed — a touch `pointerdown`.
+ *
+ * The four phases `__crcbl_web_touch` takes, and they are an enumeration rather
+ * than bits in the `state` word above because a contact is in exactly one of
+ * them: a mask would let this shim describe a finger that both began and ended.
+ * They must match the `TOUCH_*` constants in `crates/crcbl-shell/src/web/mod.rs`.
+ */
+export const TOUCH_BEGAN = 0;
+/** A contact moved — a touch `pointermove`. */
+export const TOUCH_MOVED = 1;
+/** A contact was lifted — a touch `pointerup`. */
+export const TOUCH_ENDED = 2;
+/** A contact was taken away — a touch `pointercancel`. */
+export const TOUCH_CANCELLED = 3;
 
 /**
  * Keys the page must not act on itself while the canvas has focus.
@@ -216,15 +233,20 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
   }
 
   /**
-   * Whether this pointer is the one the engine's single-pointer seam models.
+   * Whether this pointer is the one the browser emulates a mouse for.
    *
-   * `crcbl-shell`'s `ShellEvent` has no contact id and no phase, so a second
-   * finger is not a second pointer to it — it is the same one teleporting. The
-   * browser already names the one to keep: `isPrimary` is the first contact of
-   * a gesture, and is always true for a mouse or a pen. Multi-touch is a seam
-   * change and its own slice; dropping the extra contacts is what keeps a
-   * two-finger fumble from moving the paddle to the wrong finger and releasing
-   * the button under the first.
+   * `isPrimary` is the first contact of a gesture and is always true for a mouse
+   * or a pen, and the browser's own rule is that only that contact produces the
+   * compatibility mouse events. The engine's pointer seam is that emulated
+   * mouse: one position, one button, no contact id — so a second finger must not
+   * reach it, or a two-finger fumble would move the paddle to the wrong finger
+   * and release the button under the first.
+   *
+   * The second finger is not dropped any more; it goes to `__crcbl_web_touch`
+   * below, which is a *different* stream with room for it. Keeping the pointer
+   * one primary-only is what lets a game bound to a mouse button carry on
+   * working with a finger, unchanged, while a game that wants two fingers reads
+   * contacts.
    *
    * @param {PointerEvent} event
    */
@@ -234,8 +256,41 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     return event.isPrimary !== false;
   }
 
+  /**
+   * Forwards one contact of a touch gesture, whether or not it is primary.
+   *
+   * Only for `pointerType === 'touch'`. A mouse and a pen are one contact by
+   * construction and are already fully described by the pointer stream; giving
+   * them a contact id as well would hand a game two ways to read the same
+   * finger and no way to tell they were the same one.
+   *
+   * `pointerId` is passed through as the contact id: the browser's guarantee —
+   * distinct while two contacts are down together, constant for a gesture,
+   * reused only afterwards — is exactly what `ContactId` documents, and
+   * renumbering it here would be a second identity to keep in step.
+   *
+   * @param {PointerEvent} event
+   * @param {number} phase one of the `TOUCH_*` constants
+   */
+  function forwardContact(event, phase) {
+    if (event.pointerType !== 'touch') return;
+    const [x, y] = position(event);
+    exports.__crcbl_web_touch(
+      canvasId,
+      event.timeStamp,
+      x,
+      y,
+      event.pointerId >>> 0,
+      phase,
+    );
+  }
+
   /** @param {PointerEvent} event */
   function onPointerMove(event) {
+    // Before the primary filter, and this order is the whole change: a second
+    // finger's move is a real event about a real contact, and only the *pointer*
+    // half of it has nowhere to go.
+    forwardContact(event, TOUCH_MOVED);
     if (!isPrimary(event)) return;
     const [x, y] = position(event);
     exports.__crcbl_web_pointer_motion(canvasId, event.timeStamp, x, y);
@@ -252,9 +307,10 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
 
   /** @param {PointerEvent} event */
   function onPointerButton(event) {
+    const down = event.type === 'pointerdown';
+    forwardContact(event, down ? TOUCH_BEGAN : TOUCH_ENDED);
     if (!isPrimary(event)) return;
     const [x, y] = position(event);
-    const down = event.type === 'pointerdown';
     if (down) {
       heldButton = event.button;
       // Clicking the canvas is how a player expects to give it the keyboard,
@@ -285,9 +341,16 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
    * engine reads that as a button it has never heard of, drops the release, and
    * the handler is inert in exactly the way it was written to prevent.
    *
+   * The *contact* keeps the distinction the pointer stream cannot express. A
+   * pointer has one way to come up, so a cancelled gesture has to arrive as an
+   * ordinary release and a game bound to the button fires as if the player had
+   * let go; `TOUCH_CANCELLED` says what really happened, and a game reading
+   * contacts can undo instead of committing.
+   *
    * @param {PointerEvent} event
    */
   function onPointerCancel(event) {
+    forwardContact(event, TOUCH_CANCELLED);
     if (!isPrimary(event)) return;
     const [x, y] = position(event);
     exports.__crcbl_web_pointer_button(

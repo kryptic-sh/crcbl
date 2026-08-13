@@ -136,7 +136,8 @@ use std::path::PathBuf;
 use core::time::Duration;
 
 use crcbl_core::input::{
-    ButtonState, DeviceId, Keysym, Modifiers, PointerButton, Scancode, ScrollDelta,
+    ButtonState, ContactId, DeviceId, Keysym, Modifiers, PointerButton, Scancode, ScrollDelta,
+    TouchPhase,
 };
 use crcbl_core::time::{ManualTime, TimeSource};
 use crcbl_core::{EventTime, Pool, SurfaceTarget};
@@ -790,6 +791,57 @@ impl HeadlessShell {
             delta,
             position,
             modifiers: self.modifiers,
+        };
+        self.queue.push_back(event);
+        Ok(())
+    }
+
+    /// Injects one contact's landing, move, lift or cancellation.
+    ///
+    /// **One call is one contact**, so a scripted two-finger gesture is two
+    /// interleaved sequences of these — which is the point, and is why there is
+    /// no "set the whole contact list" call that would let a script express a
+    /// state a real touchscreen never reports.
+    ///
+    /// Nothing here checks that a [`Moved`](TouchPhase::Moved) follows a
+    /// [`Began`](TouchPhase::Began), or that an id is not reused while it is
+    /// still down: a test double that refused to produce a malformed stream
+    /// could not be used to check what a consumer does with one.
+    ///
+    /// The emulated pointer events a real touch backend owes for its primary
+    /// contact are **not** synthesized here either — [`move_pointer`] and
+    /// [`button`] are how a script states those, and a test that wants the two
+    /// halves together says so rather than getting a second event it did not
+    /// ask for.
+    ///
+    /// [`move_pointer`]: Self::move_pointer
+    /// [`button`]: Self::button
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale, or
+    /// [`ShellError::Unsupported`] without [`ShellCaps::TOUCH`] — a shell
+    /// configured as a touchless backend must not be able to script a finger,
+    /// or a test would prove something about a platform that cannot happen.
+    pub fn touch(
+        &mut self,
+        window: WindowId,
+        contact: ContactId,
+        phase: TouchPhase,
+        position: PhysicalPoint,
+    ) -> Result<(), ShellError> {
+        self.check_window(window)?;
+        if !self.caps.contains(ShellCaps::TOUCH) {
+            return Err(self.unsupported("touch"));
+        }
+        self.saw_interaction = true;
+        let event = ShellEvent::Touch {
+            window,
+            device: VIRTUAL_DEVICE,
+            time: self.now(),
+            contact,
+            phase,
+            position,
         };
         self.queue.push_back(event);
         Ok(())
@@ -2224,6 +2276,80 @@ mod tests {
         assert!(!entered);
         assert_eq!(*position, None, "a leave has no position");
         assert!(events.iter().all(ShellEvent::is_input));
+    }
+
+    /// Two fingers script as two contacts, and a touchless shell has none.
+    ///
+    /// The second half is the one worth having: a backend with the capability
+    /// clear is a platform where a finger *cannot arrive*, and a script that
+    /// could inject one anyway would let a test assert a game works on a
+    /// touchscreen the shell does not have.
+    #[test]
+    fn contacts_are_injectable_and_a_touchless_shell_refuses_them() {
+        let (mut shell, window) = shell_with_configured_window();
+        assert!(shell.caps().contains(ShellCaps::TOUCH));
+        for (contact, phase, x) in [
+            (1, TouchPhase::Began, 10.0),
+            (2, TouchPhase::Began, 200.0),
+            (2, TouchPhase::Moved, 220.0),
+            (1, TouchPhase::Ended, 10.0),
+            (2, TouchPhase::Cancelled, 220.0),
+        ] {
+            shell
+                .touch(
+                    window,
+                    ContactId(contact),
+                    phase,
+                    PhysicalPoint::new(x, 5.0),
+                )
+                .expect("a contact");
+        }
+        let events = drain(&mut shell);
+        assert_eq!(names(&events), ["Touch"; 5]);
+        let seen: Vec<(ContactId, TouchPhase, f64)> = events
+            .iter()
+            .map(|event| {
+                let ShellEvent::Touch {
+                    contact,
+                    phase,
+                    position,
+                    ..
+                } = event
+                else {
+                    panic!("wrong variant");
+                };
+                (*contact, *phase, position.x)
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                (ContactId(1), TouchPhase::Began, 10.0),
+                (ContactId(2), TouchPhase::Began, 200.0),
+                (ContactId(2), TouchPhase::Moved, 220.0),
+                (ContactId(1), TouchPhase::Ended, 10.0),
+                (ContactId(2), TouchPhase::Cancelled, 220.0),
+            ]
+        );
+        assert!(events.iter().all(ShellEvent::is_input));
+
+        let mut touchless = HeadlessShell::new()
+            .with_caps(ShellCaps::DESKTOP - ShellCaps::TOUCH)
+            .with_configure_delay(0);
+        let window = touchless
+            .create_window(&WindowDesc::default())
+            .expect("window");
+        drain(&mut touchless);
+        assert!(matches!(
+            touchless.touch(
+                window,
+                ContactId(1),
+                TouchPhase::Began,
+                PhysicalPoint::ORIGIN
+            ),
+            Err(ShellError::Unsupported { .. })
+        ));
+        assert!(drain(&mut touchless).is_empty(), "and queued nothing");
     }
 
     #[test]

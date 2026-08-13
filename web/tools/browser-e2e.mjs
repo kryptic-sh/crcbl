@@ -273,10 +273,57 @@ const FOCUS_CLICK_INSET = 8;
 /**
  * How many contacts the emulated touchscreen reports.
  *
- * The checks need two — one to hold and one to fumble with, which is what the
- * shim's `isPrimary` filter is about — and a phone reports about this many.
+ * The checks need two — one to hold and one to move — and a phone reports about
+ * this many.
  */
 const MAX_TOUCH_POINTS = 5;
+
+/**
+ * One `ShellEvent::Touch` as the engine logs it at debug level.
+ *
+ * `Pending::observe` logs every shell event it folds, so this is the seam's own
+ * account of what reached the engine: past the browser, past the JS shim, past
+ * the wasm ABI. Nothing else in the page can see a contact — the demos here bind
+ * the pointer and none of them draws an on-screen control yet — and a check that
+ * watched the *game* instead could only ever assert what the emulated pointer
+ * did, which is the thing that has not changed.
+ *
+ * Matching on `Debug` output is a deliberate coupling to
+ * `crates/crcbl-shell/src/event.rs`: it fails loudly and immediately if the
+ * variant is reshaped, which is the failure mode to want.
+ */
+const TOUCH_LINE =
+  /Touch \{.*?contact: ContactId\((\d+)\).*?phase: (\w+).*?position: PhysicalPoint \{ x: (-?[\d.]+), y: (-?[\d.]+)/;
+
+/** The engine's `LevelFilter::Debug`, the level `TOUCH_LINE` needs. */
+const LOG_DEBUG = 4;
+
+/** …and the level the demos boot at, restored once the contacts are read. */
+const LOG_INFO = 3;
+
+/**
+ * How far a logged contact may sit from where it was dispatched, in device
+ * pixels.
+ *
+ * A dispatched point is rounded to whole CSS pixels and the canvas's own box is
+ * fractional, so a couple of pixels of slack is the coordinate arithmetic and
+ * not the engine. It stays far tighter than the gap between the two contacts
+ * below — hundreds of pixels — which is what the tolerance must not swallow.
+ */
+const CONTACT_TOLERANCE = 4;
+
+/**
+ * Where the two contacts of the multi-touch check land, as fractions of the
+ * canvas box.
+ *
+ * Low on the canvas, so the press that starts each one lands below a centred
+ * menu and cannot fire a widget; far apart across it, so a check that confused
+ * one contact with the other cannot pass inside `CONTACT_TOLERANCE`.
+ */
+const CONTACT_BAND = 0.85;
+const CONTACT_A = 0.25;
+const CONTACT_B = 0.6;
+const CONTACT_B_MOVED = 0.75;
 
 /**
  * How many `touchMove`s a drag is dispatched as.
@@ -304,10 +351,10 @@ const PADDLE_TOLERANCE = 0.015;
  * How long the paddle is given to arrive where a finger put it.
  *
  * A deadline on a poll rather than a sleep, everywhere but one: it is also the
- * window "a second contact moves nothing" watches nothing happen for, and a
- * negative claim has no observable to poll. The control inside that check — the
- * first contact moving, inside this same window — is what stops a window too
- * short to show a move from making it pass for free.
+ * window "a second contact leaves the emulated pointer alone" watches nothing
+ * happen for, and a negative claim has no observable to poll. The control inside
+ * that check — the first contact moving, inside this same window — is what stops
+ * a window too short to show a move from making it pass for free.
  */
 const PADDLE_SETTLE_MS = 1_500;
 
@@ -1801,6 +1848,101 @@ try {
       `scrollY ${beforeDrag.scroll} -> ${afterDrag.scroll}`
   );
 
+  // **Two fingers, and the seam has room for both.**
+  //
+  // This is the multi-touch claim itself and it is about the *engine*, not about
+  // any game: every demo runs the same loop, so it is asserted for every demo
+  // rather than only for the ones that bind a pointer. Until `ShellEvent::Touch`
+  // existed the shim dropped every non-primary contact on the floor, and the
+  // check that stood here asserted exactly that — a second contact moving
+  // nothing.
+  //
+  // The observable is the engine's own debug log of the events it folded, which
+  // is the only place a contact is visible from a browser: the demos bind the
+  // pointer, and none of them draws an on-screen control yet. `Pending::observe`
+  // writes those lines, so a contact appearing there has crossed the browser,
+  // the shim, the wasm ABI and the shell queue.
+  const contactsFrom = (mark) =>
+    consoleLines
+      .slice(mark)
+      .map((line) => TOUCH_LINE.exec(line))
+      .filter((found) => found !== null)
+      .map(([, id, phase, x, y]) => ({
+        id: Number(id),
+        phase,
+        x: Number(x),
+        y: Number(y),
+      }));
+
+  const dpr = await evaluate(page, `devicePixelRatio`);
+  /** Where a dispatched point should turn up, in the canvas's device pixels. */
+  const inCanvas = (point) => ({
+    x: (point.x - canvas.x) * dpr,
+    y: (point.y - canvas.y) * dpr,
+  });
+  const near = (got, want) =>
+    Math.abs(got.x - want.x) <= CONTACT_TOLERANCE &&
+    Math.abs(got.y - want.y) <= CONTACT_TOLERANCE;
+
+  const debugOn = await evaluate(page, `crcbl.logLevel(${LOG_DEBUG})`);
+  const contactMark = consoleLines.length;
+  const first = spot(CONTACT_A, CONTACT_BAND);
+  const second = spot(CONTACT_B, CONTACT_BAND);
+  const secondMoved = spot(CONTACT_B_MOVED, CONTACT_BAND);
+  await touch('touchStart', [contact(first, 1)]);
+  await touch('touchStart', [contact(first, 1), contact(second, 2)]);
+  // Only the second point changes, which is what makes "moving one moves only
+  // that one" a question with two possible answers.
+  await touch('touchMove', [contact(first, 1), contact(secondMoved, 2)]);
+  await touch('touchEnd');
+  // The lines arrive a frame later — the engine folds the batch on its next
+  // pump and the page drains the log queue after that.
+  await until(async () => {
+    const seen = contactsFrom(contactMark);
+    return seen.filter((c) => c.phase === 'Ended').length >= 2 ? seen : null;
+  }, PADDLE_SETTLE_MS);
+  await evaluate(page, `crcbl.logLevel(${LOG_INFO})`);
+
+  const seen = contactsFrom(contactMark);
+  // Found by *position*, not by counting: the gesture before this one is still
+  // flushing its own lines through the log queue when the mark is taken, so the
+  // window can legitimately open on a stray `Ended` from the drag above. Which
+  // id landed where is the claim, and it is one a leftover line cannot answer.
+  const began = seen.filter((c) => c.phase === 'Began');
+  const idAt = (point) =>
+    began.find((c) => near(c, inCanvas(point)))?.id ?? null;
+  const firstId = idAt(first);
+  const secondId = idAt(second);
+  // Every later report of the first contact, which must still be where it was
+  // put: a move credited to the wrong contact shows up here as the held finger
+  // having jumped across the canvas.
+  const heldStrayed = seen.some(
+    (c) => c.id === firstId && c.phase !== 'Began' && !near(c, inCanvas(first))
+  );
+  const movedSecond = seen.filter(
+    (c) => c.phase === 'Moved' && near(c, inCanvas(secondMoved))
+  );
+  const ended = new Set(
+    seen.filter((c) => c.phase === 'Ended').map((c) => c.id)
+  );
+  check(
+    'F',
+    'a second contact arrives as its own contact and moves only itself',
+    debugOn === 1 &&
+      firstId !== null &&
+      secondId !== null &&
+      firstId !== secondId &&
+      !heldStrayed &&
+      movedSecond.length > 0 &&
+      movedSecond.every((c) => c.id === secondId) &&
+      ended.has(firstId) &&
+      ended.has(secondId),
+    debugOn === 1
+      ? `contacts ${JSON.stringify(seen.map((c) => [c.id, c.phase, Math.round(c.x)]))}` +
+          ` — held ${firstId}, moved ${secondId}`
+      : 'the engine refused the debug log level, so no contact could be seen'
+  );
+
   // Everything past here is about what the *game* does with a finger, so a demo
   // that binds no pointer input stops at the page-level claims above rather than
   // dispatching taps and asserting they did something. `EXPECTATIONS` says
@@ -1862,10 +2004,16 @@ try {
           : 'no paddle in the bottom band of the frame'
       );
 
-      // **The `isPrimary` filter.** The engine's pointer seam has no contact id,
-      // so a second finger is not a second pointer to it — it is the same one
-      // teleporting. One contact holds the paddle while another lands elsewhere
-      // and moves; the paddle must stay with the first.
+      // **The `isPrimary` filter, which is now about the pointer only.** A
+      // second finger does not move the mouse — that is the browser's own rule
+      // for its emulated pointer events and the shim keeps it — so the paddle,
+      // which binds `Binding::PointerPosition`, stays with the first contact
+      // while a second one lands elsewhere and moves.
+      //
+      // The contact check above is what proves the second finger was not
+      // *dropped*; this one is what proves it did not reach the pointer, and the
+      // pair is the whole design: a game bound to a mouse plays with one finger
+      // exactly as it did before multi-touch landed.
       //
       // Two things keep the negative claim honest. The page's count of
       // non-primary presses says the browser really did deliver a second
@@ -1891,7 +2039,7 @@ try {
       const secondary = (await delivered()).secondary;
       check(
         'F',
-        'a second contact moves nothing',
+        'a second contact leaves the emulated pointer alone',
         secondary > 0 &&
           anchored.reached &&
           fumbled?.count > 0 &&

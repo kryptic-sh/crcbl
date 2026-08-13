@@ -5913,10 +5913,54 @@ All were real, all are fixed, and all three are invisible to a mouse:
 - **Pause, fullscreen and the debug overlay are keyboard-only on a phone.** The
   demo pages now say so rather than printing `F11` at someone with no keyboard;
   making them reachable is on-screen-controls work.
-- **`ShellEvent` still has no touch variant** — no contact id, no phase, no
-  multi-touch. Fine for the web demos, and the gap to close before claiming
-  mobile support generally. Topic 19's `ActionMap` sketch already has a `touch:`
-  slot, so the design exists and only the implementation is missing.
+- **The seam carries contacts now.**
+  `ShellEvent::Touch { contact, phase, position }` with `ContactId` and
+  `TouchPhase`, routed to `HostedGame::touch_event`. Decisions taken:
+  - **A touchscreen produces both streams**: every contact as `Touch`, and the
+    _primary_ contact additionally as the emulated pointer. That is the
+    browser's own compatibility rule, and it is now an obligation on any backend
+    that sets `ShellCaps::TOUCH`. The engine deliberately does **not**
+    synthesize the pointer itself — the browser already does it correctly,
+    including "a second finger does not move the mouse", and doing it again a
+    layer up gives two answers to "where is the pointer" that agree until they
+    do not. A game bound only to `Binding::MouseButton` sees exactly what it saw
+    before.
+  - **A contact id is unique among contacts that are down together and reused
+    afterwards.** State keyed on one must be dropped when the contact ends or
+    the next finger inherits it — said on `ContactId`. The numbering is the
+    platform's, passed through rather than renumbered.
+  - **`Cancelled` is not `Ended`.** The system took the gesture; the position is
+    the last one the platform knew rather than a place anyone chose, so a
+    consumer undoes rather than commits. All they share is that the contact is
+    over, which is `ends_contact()`.
+  - **A menu does not claim contacts.** A menu is hit-tested against a position
+    the loop knows; an on-screen stick is the game's own widget, and handing the
+    game fewer contacts than the screen has takes the decision away from the
+    only code that can make it.
+  - **`Pending` lost `Copy`** (contacts are a `Vec`, appended rather than
+    merged, because a tap is a `Began` and an `Ended` in one pump). No app
+    needed a change.
+  - **Contacts carry no pressure, radius or tilt.** No consumer, and the
+    platforms disagree about what they mean.
+
+- **No desktop backend implements touch, and none claims to.**
+  `ShellCaps::TOUCH` is clear on all of them, and `caps.rs` names the path each
+  would have to write — `XI_TouchBegin`, `wl_touch`, `WM_POINTERDOWN`, `NSTouch`
+  — and says the bit is clear because the code is not written, not because the
+  platform lacks it. `HeadlessShell::touch` returns `Unsupported` without the
+  cap, so a test cannot script a finger on a shell modelling a touchless
+  backend.
+- **The browser gate reads contacts out of the engine's Debug log**, because no
+  demo draws an on-screen control yet and the pointer is the only other place a
+  contact surfaces. That is a deliberate coupling to `ShellEvent`'s `Debug`
+  shape: it will fail loudly if the variant is reshaped, which is the intended
+  behaviour, but it is not a contract anyone declared.
+- **Horde still has no on-screen controls.** The seam is the prerequisite and it
+  is done; the widgets are topic 19's `Virtual("stick_move")` — an on-screen
+  control id emitted by a `crcbl-ui` widget acting as a virtual device, **not**
+  a binding on a raw contact. `crcbl-input` was deliberately not touched: raw
+  contacts feed the widgets, the widgets feed `ActionMap`, and a contact binding
+  now would be the speculative half.
 - **`web/engine/shell.js` is the one web file prettier would rewrite**, and it
   was already so before this work: 350 lines of drift at `HEAD`, against
   `demo.js`, `style.css` and the templates which all pass. Reformatting it is a

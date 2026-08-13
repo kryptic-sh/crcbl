@@ -334,6 +334,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The seam carries multiple contacts.**
+  `ShellEvent::Touch { contact, phase, position }` with `ContactId` and
+  `TouchPhase`, routed to a new `HostedGame::touch_event`. The web shell stops
+  throwing away every contact but the first — there is somewhere for them to go
+  now.
+
+  **A touchscreen produces both streams**: every contact as `Touch`, and the
+  primary contact additionally as the emulated pointer, which is the browser's
+  own compatibility rule and is now an obligation on any backend setting
+  `ShellCaps::TOUCH`. A game bound only to `Binding::MouseButton` therefore sees
+  exactly what it saw before. A contact id is unique among contacts that are
+  down together and reused after one ends, so state keyed on one must be dropped
+  when it ends. `Cancelled` is not `Ended`: the system took the gesture, so the
+  position is the last one the platform knew rather than a place anyone chose,
+  and a consumer undoes rather than commits.
+
+  No desktop backend implements touch and none claims to — `caps.rs` names the
+  path each would have to write and says the bit is clear because the code is
+  not written. `Pending` is no longer `Copy`.
+
 - **Flappy and breakout play on a touchscreen.** Flappy taps to flap; breakout's
   paddle follows a finger and a tap serves. `Binding::PointerPosition { axis }`
   is new and feeds an `Axis1` normalised to the surface at −1…+1 — not an
