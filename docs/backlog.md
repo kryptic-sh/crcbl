@@ -4960,9 +4960,11 @@ ahead of a second caller.
 
 **A page is one image, which is the limit `Bindless` exists to lift.** Every
 layer shares an extent, a format and a mip count, so two textures of different
-sizes cannot share a page and `crcbl_render::forward` uploads its layers at
-build with the extent compiled in. Real content does not look like that. See the
-wgpu entry below for what stands between here and the bindless form.
+sizes cannot share a page. The extent is the caller's now — `PageDesc::extent`,
+whatever `PageDesc::opaque_white` was given, asserted against the recorded
+copies by `forward`'s `an_app_page_and_table_reach_the_device_whole` — but it is
+still _one_ extent for every layer. Real content does not look like that. See
+the wgpu entry below for what stands between here and the bindless form.
 
 **No mip chain, and the sampler is nearest because of it.** §3.2 makes mip
 generation a compute pass of its own and it is not written, so
@@ -4972,9 +4974,11 @@ rather than a smoother picture. The first minified material texture is what
 makes the compute pass worth writing.
 
 **Nothing imports a texture.** `crcbl-scene` parses glTF materials and this
-slice did not wire it: the page's layers are two constants in
-`crcbl_render::forward` (`UNTEXTURED_TEXELS`, `CHECKER_TEXELS`). Wiring it needs
-a decoder, a page allocator and a lifetime story for a layer, which is P9's.
+slice did not wire it. An application can now author layers — `PageDesc` at its
+own extent, `push_layer` per layer — but it has to produce the texels itself:
+the demo's are `crcbl_render::scene`'s `CHECKER_TEXELS` and whatever
+`PageDesc::opaque_white` writes into layer 0. Wiring an importer needs a
+decoder, a page allocator and a lifetime story for a layer, which is P9's.
 
 **A material is a start-up write.** `MaterialTable` is one host-visible buffer
 with no ring — the mesh table's shape, not `InstancePool`'s — because nothing
@@ -7636,8 +7640,10 @@ instances are a runtime API: `ForwardRenderer::add_instance` / `set_instance` /
 `remove_instance` over a `scene::InstanceDesc`, with the five `set_*` methods
 surviving as wrappers; and `begin_frame` no longer takes the cube's transform —
 the cube is an ordinary instance every caller places for itself, by
-`scene::DEMO_CUBE` and the other public demo indices. What is left is everything
-below.
+`scene::DEMO_CUBE` and the other public demo indices. Materials and page layers
+are the caller's too: `PageDesc` at the caller's own extent, `push_layer` per
+layer, `SceneDesc::materials` row by row, refused at build when a row names a
+layer the page has not got. What is left is everything below.
 
 ### The shape
 
@@ -7653,16 +7659,17 @@ already assign to P9.
 ### The slices left, in dependency order
 
 Each is independently committable and CI-green, and the six apps build at every
-boundary. **The first two must leave every golden byte-identical** — the demo
-scene is a caller of the new API rather than a special case inside the renderer,
-so a golden that moves in them is a bug in the move, not a re-bless.
+boundary. **The first must leave every golden byte-identical** — the demo scene
+is a caller of the new API rather than a special case inside the renderer, so a
+golden that moves in it is a bug in the move, not a re-bless.
 
-1. App-supplied materials and page layers.
-2. App-supplied meshes, which is mostly making the failure paths honest.
-3. Reach the cook from an app: `crcbl-scene` behind a non-default `scene`
-   feature so `gltf` does not reach a wasm binary, and the meshlet/DAG cook
-   moved out of `crcbl-shaders/tools/cook-clusters.rs` into the crate.
-4. `apps/lumen` on top of it.
+1. App-supplied meshes, which is mostly making the failure paths honest —
+   `MeshPoolError::PoolExhausted` reaching the caller un-flattened.
+2. Reach the cook from an app: the `crcbl` facade, `crcbl-scene` behind a
+   non-default `scene` feature so `gltf` does not reach a wasm binary, the
+   meshlet/DAG cook moved out of `crcbl-shaders/tools/cook-clusters.rs` into the
+   crate, and the five demo setters dropped.
+3. `apps/lumen` on top of it.
 
 ### Flat meshes only, and why that is not negotiable yet
 
@@ -7740,6 +7747,45 @@ unspellable; and every description check runs from the top of
 `ForwardRenderer::check_scene`, before the first device object exists, which
 `a_refused_description_creates_nothing_at_all` reads off the recorder's live
 object count.
+
+### The materials-and-layers slice was almost entirely already done
+
+Recorded because the next reader will otherwise re-derive it. Of the three
+things that slice was scoped as, the first description slice had already
+delivered all three:
+
+- The constants a caller reads the pattern off — `PYRAMID_TINT`,
+  `PYRAMID_ROUGHNESS`, `CHECKER_TEXELS`, `CHECKER_LAYER`, `PAGE_EXTENT` — are
+  public on `crcbl_render::scene`, and `scene::demo` builds its page through
+  `PageDesc::opaque_white` and `push_layer` like any other caller.
+  `UNTEXTURED_TEXELS` does not exist any more: layer 0's texels are
+  `opaque_white`'s to write, which is what makes the mistake unspellable.
+- A row naming a layer the page has not got is already refused by
+  `ForwardRenderer::check_scene`, naming the row, the layer and the page's layer
+  count, before any device object exists — and
+  `a_refused_description_creates_nothing_at_all` already has an arm for it. Not
+  duplicated.
+- `PageDesc` already lets a caller append layers and gives it no way to spell a
+  bad layer 0, its fields being private and `opaque_white` its only constructor.
+
+What was actually missing was **evidence**, not mechanism: every scene built
+anywhere in the tree was `scene::demo()` — three rows, two layers, one extent —
+so a `with_scene` that uploaded the first two layers and stopped, or inserted
+the first three rows and stopped, would have left all eleven goldens
+byte-identical and passed everything else. `forward`'s
+`an_app_page_and_table_reach_the_device_whole` is what closes that: a four-layer
+page at an extent that is not `PAGE_EXTENT` and six material rows, checked
+against the recorded `CopyBufferToImage` per layer and against the material
+buffer's bytes per row. Shown red three ways — the page upload truncated, the
+row insert truncated, and the row insert reversed.
+
+**Considered and declined: a `PageDesc::layer_bytes` accessor.** `extent² × 4`
+is computed in `opaque_white`, in `check` and by any app producing texels for
+`push_layer`, so there is a real second caller for it. Left out anyway: it is a
+convenience rather than a sufficiency gap — an app has `extent()` and the RGBA8
+layout is documented on `push_layer` — and this slice's whole obligation was not
+to manufacture work. Revisit if a second page format arrives, at which point the
+arithmetic stops being a constant an app can safely transcribe.
 
 The instance-index risk is now **documented rather than removed**, on
 `ForwardRenderer::add_instance`: the index is the LOD hysteresis key and the

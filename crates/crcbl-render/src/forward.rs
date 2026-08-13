@@ -6044,6 +6044,147 @@ mod tests {
         renderer.destroy(device.as_ref());
     }
 
+    /// **A page and a material table that are the caller's own, not
+    /// [`scene::demo`]'s**: a different extent, more layers than the demo page
+    /// holds, and rows past the three the demo writes.
+    ///
+    /// Every other scene in the tree is `scene::demo()` — with a mesh appended,
+    /// at most — so until this nothing had put an app-supplied *layer* or an
+    /// app-supplied *row* through [`ForwardRenderer::with_scene`] at all. A
+    /// build that uploaded the demo's two layers and stopped, or that inserted
+    /// its three rows and stopped, would leave every golden byte-identical and
+    /// pass every other assertion in this module: the demo scene cannot tell a
+    /// table filled from the description from one filled up to the description's
+    /// third row.
+    ///
+    /// Read off the recorder rather than off the description, because the
+    /// description is the input. The copies are what reached the image and the
+    /// table buffer is what the shader indexes, and neither is a restatement of
+    /// what was handed in.
+    #[test]
+    fn an_app_page_and_table_reach_the_device_whole() {
+        use crcbl_hal::null::Command;
+
+        /// Not [`scene::PAGE_EXTENT`], so an extent that had been compiled in
+        /// rather than read off the page shows up as a copy of the wrong size.
+        const APP_EXTENT: u32 = 4;
+        let layer_bytes = APP_EXTENT as usize * APP_EXTENT as usize * 4;
+
+        // Layers past the white one, each flat and each a value of its own: a
+        // build that uploaded one layer twice, or that stopped short, is a
+        // different sequence of copies.
+        let mut page = scene::PageDesc::opaque_white(APP_EXTENT);
+        let app_layers: Vec<u32> = [0x11_u8, 0x22, 0x33]
+            .into_iter()
+            .map(|value| page.push_layer(vec![value; layer_bytes]))
+            .collect();
+
+        let mut scene = scene::demo();
+        scene.page = page;
+        // One row per appended layer, and each with a factor of its own as well,
+        // so a row that landed at another row's id is not a row that happens to
+        // look like it.
+        for (nth, &layer) in app_layers.iter().enumerate() {
+            let shade = 0.25 * (nth as f32 + 1.0);
+            scene.materials.push(mesh::GpuMaterial {
+                base_color: [shade, shade, shade, 1.0],
+                base_color_texture: layer,
+                ..mesh::GpuMaterial::UNTINTED
+            });
+        }
+        assert!(
+            scene.materials.len() > scene::demo().materials.len()
+                && scene.page.layers().len() > scene::demo().page.layers().len(),
+            "the description under test must exceed the demo's in both, or this is a \
+             demo test wearing another name"
+        );
+
+        let (recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::with_scene(device.as_ref(), queue, Format::Rgba8UnormSrgb, &scene)
+                .expect("a page and a table of the caller's own are ones this can make resident");
+
+        // The page, layer by layer. Filtered by image because the build uploads
+        // the ambient-occlusion placeholder through the same path.
+        let copies: Vec<crcbl_hal::BufferImageCopy> = recorder
+            .commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                Command::CopyBufferToImage(copy)
+                    if copy.image == renderer.base_color_page.image =>
+                {
+                    Some(copy)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            copies
+                .iter()
+                .map(|copy| copy.image_subresource.base_layer)
+                .collect::<Vec<u32>>(),
+            (0..u32::try_from(scene.page.layers().len()).expect("a page of a few layers"))
+                .collect::<Vec<u32>>(),
+            "every layer the description carries must be copied into the page, in order"
+        );
+        assert!(
+            copies
+                .iter()
+                .all(|copy| copy.image_extent == crcbl_hal::Extent3d::d2(APP_EXTENT, APP_EXTENT)),
+            "the page is the extent the caller wrote, not the demo's: {copies:?}"
+        );
+
+        // The table, row by row, out of the buffer `mesh.slang` indexes.
+        let bytes = recorder
+            .buffer_bytes(renderer.materials.buffer())
+            .expect("the table is live");
+        let row = |id: u32| {
+            let at = id as usize * crcbl_shaders::mesh::MATERIAL_STRIDE;
+            mesh::GpuMaterial::from_bytes(
+                bytes[at..at + crcbl_shaders::mesh::MATERIAL_STRIDE]
+                    .try_into()
+                    .expect("one row"),
+            )
+        };
+        assert_eq!(
+            renderer.material_ids.len(),
+            scene.materials.len(),
+            "one id per description row, whatever the count"
+        );
+        for (index, wrote) in scene.materials.iter().enumerate() {
+            assert_eq!(
+                &row(renderer.material_ids[index]),
+                wrote,
+                "description row {index} must be the row its id names"
+            );
+        }
+
+        // And a caller can place an object through a row only its own
+        // description has, which is the whole point of the rows being the
+        // caller's.
+        let last = scene.materials.len() - 1;
+        let handle = renderer
+            .add_instance(&InstanceDesc {
+                mesh: DEMO_CUBE,
+                material: last,
+                transform: Mat4::IDENTITY,
+            })
+            .expect("an empty pool of thousands has room for one object");
+        assert_eq!(
+            renderer
+                .instances
+                .get(handle)
+                .expect("a just-added instance is live")
+                .material,
+            renderer.material_ids[last],
+            "an InstanceDesc's material index resolves through the description, not \
+             through a table id the caller cannot know"
+        );
+
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
     /// **The frame records two compute dispatches and exactly one indirect draw
     /// per bucket — whatever is in the scene.**
     ///

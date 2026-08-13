@@ -624,8 +624,11 @@ pub struct GpuMaterial {
     /// **Layer 0 is the untextured value by convention**, and the convention is
     /// the page owner's to keep: whoever fills the page writes a white texel
     /// there, so a material that names no texture multiplies by `1.0`.
-    /// [`crcbl_render::forward`](https://docs.rs/crcbl-render) is the one that
-    /// does, and [`GpuMaterial::UNTINTED`] is the row that relies on it.
+    /// `crcbl_render::scene`'s
+    /// [`PageDesc`](https://docs.rs/crcbl-render/latest/crcbl_render/scene/struct.PageDesc.html)
+    /// is the one that does — it owns layer 0 and gives a caller no way to
+    /// spell it any other way — and [`GpuMaterial::UNTINTED`] is the row that
+    /// relies on it.
     pub base_color_texture: u32,
     /// How metallic the surface is: `0.0` a dielectric, `1.0` a conductor.
     ///

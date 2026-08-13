@@ -29,9 +29,12 @@
 //! **This type does not own the page.** It stores an index and nothing else:
 //! which image the layers live in, how many there are and what layer 0 holds
 //! are [`crate::forward`]'s, exactly as which *mesh* a `GpuInstance::mesh`
-//! names is [`crate::mesh_pool`]'s. What that costs is stated rather than
-//! hidden: a row naming a layer the page does not have samples out of range,
-//! and nothing here can tell.
+//! names is [`crate::mesh_pool`]'s. So a row naming a layer the page does not
+//! have samples out of range and nothing *here* can tell — which is why the
+//! type that does own both refuses it: [`ForwardRenderer::with_scene`] checks
+//! every [`SceneDesc::materials`] row against the page's layer count before it
+//! creates anything, and names the row and the layer when it declines. A row
+//! reaching [`MaterialTable::insert`] has already been through that.
 //!
 //! Still absent, and still deliberately: every other texture slot a material
 //! could have — normal, metallic-roughness, emissive — and the mip chain that
@@ -96,6 +99,8 @@
 //! [`ArrayPages`]: crcbl_hal::BindingModel::ArrayPages
 //! [`GpuMaterial::base_color`]: crcbl_shaders::mesh::GpuMaterial::base_color
 //! [`GpuMaterial::base_color_texture`]: crcbl_shaders::mesh::GpuMaterial::base_color_texture
+//! [`ForwardRenderer::with_scene`]: crate::forward::ForwardRenderer::with_scene
+//! [`SceneDesc::materials`]: crate::scene::SceneDesc::materials
 
 use crcbl_core::{Handle, Pool};
 use crcbl_hal::{BufferDesc, BufferHandle, BufferUsage, Device, HalError, MemoryLocation};
