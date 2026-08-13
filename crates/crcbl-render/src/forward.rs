@@ -152,6 +152,7 @@ use crate::camera::{Camera, DirectionalLight};
 use crate::cluster_pool::{ClusterPool, ClusterRange, PooledMesh};
 use crate::counters::FrameCounters;
 use crate::cull::Frustum;
+use crate::cull_stats::CullStatsRing;
 use crate::draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 use crate::graph::{BufferId, ImageId, ImportedBuffer, ImportedImage, RenderGraph};
 use crate::instance_pool::{InstanceHandle, InstancePool, InstancePoolDesc};
@@ -479,13 +480,16 @@ const fn shadow_cull(slot: usize) -> usize {
     shadow::CASCADES + slot
 }
 
-/// The render passes [`ForwardRenderer::add_passes`] records itself: the shadow
-/// atlas's, the forward pass and the tonemap.
+/// The passes [`ForwardRenderer::add_passes`] records itself: the shadow
+/// atlas's, the forward pass, the tonemap and the culling-statistics copy.
 ///
 /// Every other pass in the frame belongs to a [`DrawGen`] or to the
 /// [`LightGrid`], which is why this is the only count written here rather than
-/// derived — see [`ForwardRenderer::MAX_PASSES`].
-const RENDER_PASSES: u32 = 3;
+/// derived — see [`ForwardRenderer::MAX_PASSES`]. The copy is counted even
+/// though a device that refused the readback records three rather than four:
+/// this is a ceiling, and one that came up short would silently stop timing the
+/// last pass of every frame.
+const RENDER_PASSES: u32 = 4;
 
 /// Draws the tonemap pass records: the full-screen triangle, drawn once.
 ///
@@ -813,6 +817,19 @@ pub struct ForwardRenderer {
     /// them as `ShaderRead` from the start would skip the one barrier that gives
     /// them a layout at all.
     shadow_imported: ResourceState,
+
+    /// Topic 03 §3.6's one permitted readback: the camera cull's statistics, on
+    /// a delayed ring — see [`crate::cull_stats`], which is where the shape and
+    /// the latency are argued.
+    ///
+    /// **The camera's cull only.** [`ForwardRenderer::shadow_draws`] each have a
+    /// statistics buffer of their own and none of them is read: a cascade's
+    /// survivor count is a different question about a different frustum, and
+    /// added into this one it would produce a number larger than the pool holds.
+    ///
+    /// [`None`] on a device that would not give out the buffers, which is what
+    /// makes the counters row degrade to `indirect` rather than fail.
+    cull_stats: Option<CullStatsRing>,
 
     tonemap_layout: BindGroupLayoutHandle,
     tonemap_pipeline_layout: PipelineLayoutHandle,
@@ -2630,6 +2647,12 @@ impl ForwardRenderer {
             // Nothing has written either image yet, so the first frame's graph
             // is what gives them a layout.
             shadow_imported: ResourceState::Undefined,
+            // [`FRAMES_IN_FLIGHT`], the number every other ring here is sized
+            // by, so a slot has been through the whole loop before it is read.
+            // `culls_clusters` rather than the device's feature bits: what
+            // decides whether the cluster word is a count is whether *this
+            // renderer* built an amplification stage.
+            cull_stats: CullStatsRing::new(device, FRAMES_IN_FLIGHT, culls_clusters),
             tonemap_layout,
             tonemap_pipeline_layout,
             tonemap_pipeline,
@@ -2991,6 +3014,15 @@ impl ForwardRenderer {
         // The instance pool owns the ring, so its slot is the frame index the
         // uniform buffer and the bind group below are picked with.
         self.frame = self.instances.begin_frame(device)?;
+
+        // Requests the readback the *last* frame's copy earned and resolves the
+        // slot that has come round, which is why it is here rather than beside
+        // the copy: a readback covers work already submitted, and last frame's
+        // copy was submitted before this call and this frame's has not been
+        // recorded yet. No fence, no wait — see [`crate::cull_stats`].
+        if let Some(stats) = self.cull_stats.as_mut() {
+            stats.begin_frame(device);
+        }
 
         // A minimised window reports a zero extent in *either* dimension, and
         // `Projection::matrix` asserts a finite positive aspect. Guarding only
@@ -3979,6 +4011,17 @@ impl ForwardRenderer {
                 encoder.draw(0..3, 0..1);
             });
 
+        // **Last, and that is the point.** Three passes add to the statistics
+        // buffer — the cull dispatch, the light grid's overflow counter and the
+        // amplification stage inside the forward pass — so a copy scheduled any
+        // earlier would take a total the frame had not finished writing. The
+        // graph puts it in `TransferSrc` for this and back into the state the
+        // next frame on this slot imports it in; there is not a barrier written
+        // here.
+        if let Some(stats) = self.cull_stats.as_ref() {
+            stats.add_copy_pass(graph, generated.visible_count_id);
+        }
+
         scene_color
     }
 
@@ -4330,7 +4373,7 @@ impl ForwardRenderer {
     /// Zero draws until a frame has been built: this reports what was recorded,
     /// not what a frame would record.
     ///
-    /// # Two of the four counters are [`None`] here, on every geometry path
+    /// # The triangles are [`None`] here, on every geometry path
     ///
     /// Every draw this renderer records except the tonemap's is **indirect**:
     /// the instance count and the index range live in the argument buffer
@@ -4339,15 +4382,30 @@ impl ForwardRenderer {
     /// [`GeometryPath::MeshShader`] and of
     /// both indirect tails alike — the three differ in which call is recorded,
     /// not in who decides the counts — so
-    /// [`FrameCounters::drawn`](crate::counters::FrameCounters::drawn) and
     /// [`FrameCounters::triangles`](crate::counters::FrameCounters::triangles)
-    /// are [`None`] whatever the device supports.
+    /// is [`None`] whatever the device supports. Nothing counts a triangle on
+    /// the GPU either, and a cluster count times a nominal triangles-per-cluster
+    /// would read as authoritative and be neither.
     ///
-    /// The survivor counts *are* on the GPU, in
-    /// [`DrawGen::visible_count`](crate::draw_gen::DrawGen::visible_count), and
-    /// topic 03 §3.6 allows exactly one readback to fetch them. Nothing copies
-    /// that buffer out yet; see [`crate::counters`], which is where the gap is
-    /// written down.
+    /// # The instances drawn come back off the GPU, a few frames late
+    ///
+    /// [`FrameCounters::drawn`](crate::counters::FrameCounters::drawn) is
+    /// `cull.slang`'s survivor count, off [`crate::cull_stats`]'s delayed ring,
+    /// plus the tonemap's own triangle — the one draw here whose instance the
+    /// CPU knows about, and the one that is also in
+    /// [`instances`](crate::counters::FrameCounters::instances). So the pair is
+    /// comparable: the same quantity submitted and kept.
+    ///
+    /// **The camera's cull alone.** The shadow culls test other frustums and
+    /// their survivors are counted into buffers of their own; adding them here
+    /// would give a "drawn" larger than "submitted" on any frame with a shadow
+    /// in it.
+    ///
+    /// It is [`None`] — the row says `indirect` — for the first few frames of a
+    /// renderer's life, while the ring has not come round, and for good on a
+    /// device that would not give out a readback.
+    /// [`cull_frame`](crate::counters::FrameCounters::cull_frame) is which frame
+    /// the number is about whenever there is one.
     ///
     /// [`FrameCounters::instances`](crate::counters::FrameCounters::instances)
     /// is known and is the plan's "submitted" half: the live instances
@@ -4358,12 +4416,30 @@ impl ForwardRenderer {
         if self.recorded_draws == 0 {
             return FrameCounters::default();
         }
+        let stats = self.cull_stats();
         FrameCounters {
             draws: self.recorded_draws,
             instances: self.instances.len() as u64 + TONEMAP_DRAWS,
-            drawn: None,
+            // The tonemap's triangle is submitted and drawn, and it is not in
+            // the cull's count — it is a direct draw of one instance, added on
+            // both sides so the two halves of the row measure the same thing.
+            drawn: stats.map(|stats| stats.instances + TONEMAP_DRAWS),
             triangles: None,
+            clusters: stats.and_then(|stats| stats.clusters),
+            cull_frame: stats.map(|stats| stats.frame),
         }
+    }
+
+    /// What the camera's cull kept, on the frame the ring has reached.
+    ///
+    /// Topic 03 §3.6's one permitted readback, and [`None`] until it has come
+    /// round — see [`crate::cull_stats`] for the latency and for what makes it
+    /// free of any wait. [`counters`](Self::counters) is where this reaches the
+    /// panel; it is exposed on its own because the frame number and the cluster
+    /// word are both things a test asserts about directly.
+    #[must_use]
+    pub fn cull_stats(&self) -> Option<crate::cull_stats::CullStats> {
+        self.cull_stats.as_ref().and_then(CullStatsRing::latest)
     }
 
     /// Describes the imported swapchain image the frame ends in.
@@ -4391,6 +4467,9 @@ impl ForwardRenderer {
 
     /// Releases everything, in dependency order. The device must be idle.
     pub fn destroy(self, device: &dyn Device) {
+        if let Some(stats) = self.cull_stats {
+            stats.destroy(device);
+        }
         if let Some((_, group)) = self.tonemap_group {
             device.destroy_bind_group(group);
         }
@@ -5150,10 +5229,14 @@ mod tests {
     /// counter wired to a constant — or to the pool's *capacity*, which does not
     /// move — fails too.
     ///
-    /// `drawn` and `triangles` are asserted [`None`]. That is the assertion that
+    /// `drawn` and `triangles` are asserted [`None`] **on the frames this test
+    /// runs**, which are inside [`crate::cull_stats`]'s latency: nothing has come
+    /// back off the GPU yet, and a `drawn` that was `Some` here would be a
+    /// number invented before any readback landed. That is the assertion that
     /// catches the tempting version of this method: an instance count taken from
     /// the pool and reported as "drawn" would read as a culling win of exactly
     /// zero on every frame, which is the number the whole cull exists to change.
+    /// What happens once the ring *has* come round is the test below.
     #[test]
     fn the_forward_counters_are_the_recorded_draws_and_admit_what_they_cannot_know() {
         let (recorder, device, queue) = open();
@@ -5180,8 +5263,9 @@ mod tests {
         );
         assert_eq!(
             counters.drawn, None,
-            "the survivor count is in a buffer this side never reads",
+            "the ring has not come round, so there is no survivor count yet",
         );
+        assert_eq!(counters.cull_frame, None, "and no frame to stamp it with");
         assert_eq!(counters.triangles, None);
         first.release(device.as_ref());
 
@@ -5205,6 +5289,63 @@ mod tests {
 
         second.finish(device.as_ref(), renderer);
     }
+
+    /// **Once the ring has come round, `drawn` is a number and it says which
+    /// frame it is from.**
+    ///
+    /// The other half of the test above: `indirect` while the readback is in
+    /// flight, a count afterwards, and a `cull_frame` naming a frame several
+    /// behind the one just recorded. The null backend executes no copy, so the
+    /// *value* here is the tonemap's own draw and nothing else — what the cull
+    /// really kept is asserted against a real GPU, in `crcbl-vk`'s and
+    /// `crcbl-wgpu`'s end-to-end suites, where a scene is culled on purpose.
+    ///
+    /// The frame number is the assertion with teeth here: a resolve that read
+    /// the slot it had just written would report the frame it is on, and a
+    /// `cull_frame` left at `None` would put a latent number on the panel with
+    /// nothing to say how old it is.
+    #[test]
+    fn the_culling_counters_arrive_a_few_frames_late_and_say_which_frame() {
+        let (_recorder, device, queue) = open();
+        let mut renderer =
+            ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
+        let latency = CULL_STATS_LATENCY;
+
+        let mut frames = Vec::new();
+        for _ in 0..latency {
+            frames.push(frame(device.as_ref(), &mut renderer, queue));
+            assert_eq!(
+                renderer.counters().drawn,
+                None,
+                "inside the ring's latency there is nothing back yet",
+            );
+        }
+
+        frames.push(frame(device.as_ref(), &mut renderer, queue));
+        let counters = renderer.counters();
+        assert_eq!(
+            counters.drawn,
+            Some(TONEMAP_DRAWS),
+            "the survivor count the null backend produced is zero, plus the tonemap's own \
+             instance — which is on both sides of the row",
+        );
+        assert_eq!(
+            counters.cull_frame,
+            Some(1),
+            "the report is the oldest frame in the ring, not the frame just recorded",
+        );
+        assert_eq!(renderer.cull_stats().expect("the ring came round").frame, 1,);
+
+        for frame in frames {
+            frame.release(device.as_ref());
+        }
+        renderer.destroy(device.as_ref());
+    }
+
+    /// How many frames behind the culling counters are, as this renderer builds
+    /// its ring — [`FRAMES_IN_FLIGHT`] slots plus the one that makes a reused
+    /// slot's submission certainly complete.
+    const CULL_STATS_LATENCY: usize = FRAMES_IN_FLIGHT + 1;
 
     /// **A light that takes a shadow tile moves the draw count**, because the
     /// shadow pass records one call per bucket per occupied view.
@@ -5744,8 +5885,11 @@ mod tests {
                 expected.push("light-cluster".to_string());
             }
         }
+        // And the culling-statistics copy **last**, after every pass that adds
+        // to the buffer it reads — the cull dispatch, the clustering pass and
+        // the amplification stage inside the colour pass.
         expected.extend(
-            ["shadow", "forward", "tonemap"]
+            ["shadow", "forward", "tonemap", "cull-stats-readback"]
                 .into_iter()
                 .map(str::to_string),
         );

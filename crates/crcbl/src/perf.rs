@@ -43,10 +43,12 @@
 //!
 //! # The frame's counters go on the same trace
 //!
-//! [`sample_counters`] is the other half of this module's vocabulary: the four
-//! names a frame's [`FrameCounters`] are sampled under, so a trace carries what
-//! the frame *drew* beside how long it took. The numbers themselves are
-//! [`crcbl_render::counters`]' — nothing here recounts them.
+//! [`sample_counters`] is the other half of this module's vocabulary: the names
+//! a frame's [`FrameCounters`] are sampled under, so a trace carries what the
+//! frame *drew* beside how long it took. The numbers themselves are
+//! [`crcbl_render::counters`]' — nothing here recounts them, including
+//! [`CULL_FRAME_COUNTER`], which is how a trace says that two of those records
+//! are about an older frame than the span holding them.
 //!
 //! **The subtraction is the whole point of the row it feeds.** Under vsync the
 //! present wait is most of a frame, so a "CPU frame time" that included it would
@@ -109,6 +111,21 @@ pub const DRAWN_COUNTER: &str = "instances-drawn";
 /// same terms as [`DRAWN_COUNTER`].
 pub const TRIANGLES_COUNTER: &str = "triangles";
 
+/// Clusters the amplification stage kept — [`FrameCounters::clusters`]. Absent
+/// on every geometry path that has no such stage, on the same terms as
+/// [`DRAWN_COUNTER`].
+pub const CLUSTERS_COUNTER: &str = "clusters";
+
+/// Which frame [`DRAWN_COUNTER`] and [`CLUSTERS_COUNTER`] are about, when they
+/// came off the GPU — [`FrameCounters::cull_frame`].
+///
+/// **Sampled as a counter rather than written into their names**, because it is
+/// the only way a trace consumer can tell that those two records belong to an
+/// older frame than the span they are sampled inside. Absent on a frame whose
+/// counters are all the CPU's own, which is where there is no second lag to
+/// declare.
+pub const CULL_FRAME_COUNTER: &str = "cull-frame";
+
 /// Puts this frame's counters on the trace, beside its spans.
 ///
 /// `docs/plan/40-profiling.md`'s "counters are spans' siblings", and the caller
@@ -132,6 +149,12 @@ pub fn sample_counters(counters: FrameCounters) {
     }
     if let Some(triangles) = counters.triangles {
         crcbl_core::trace::counter(TRIANGLES_COUNTER, triangles);
+    }
+    if let Some(clusters) = counters.clusters {
+        crcbl_core::trace::counter(CLUSTERS_COUNTER, clusters);
+    }
+    if let Some(frame) = counters.cull_frame {
+        crcbl_core::trace::counter(CULL_FRAME_COUNTER, frame);
     }
 }
 

@@ -77,8 +77,8 @@ use crate::hal::{
     SurfaceHandle, SurfaceTarget, SwapchainDesc, SwapchainHandle,
 };
 use crate::render::{
-    Camera, DirectionalLight, FontAtlas, ForwardRenderer, GraphError, Projection, RenderGraph,
-    SampleMode, SheetDesc, SheetId, Sprite, SpriteRenderer, TransientPool, UiRenderer,
+    Camera, DirectionalLight, FontAtlas, ForwardRenderer, FrameCounters, GraphError, Projection,
+    RenderGraph, SampleMode, SheetDesc, SheetId, Sprite, SpriteRenderer, TransientPool, UiRenderer,
 };
 use crate::ui::draw_list::DrawList;
 
@@ -918,6 +918,19 @@ enum SceneState {
 }
 
 impl SceneState {
+    /// What this scene's renderer recorded for the frame just drawn.
+    ///
+    /// One renderer per scene, so this is that renderer's own
+    /// [`counters`](ForwardRenderer::counters) rather than a sum — a game adds
+    /// up several, and this module draws exactly one thing.
+    fn counters(&self) -> FrameCounters {
+        match self {
+            Self::Forward { renderer, .. } => renderer.counters(),
+            Self::Sprite { renderer, .. } => renderer.counters(),
+            Self::Ui { renderer, .. } => renderer.counters(),
+        }
+    }
+
     /// Builds the renderer this scene needs, and uploads whatever it draws.
     fn open(
         scene: Scene,
@@ -1443,6 +1456,21 @@ impl OffscreenSetup {
     #[must_use]
     pub fn caps(&self) -> crate::hal::DeviceCaps {
         self.device.caps()
+    }
+
+    /// What the last [`draw_and_readback`](Self::draw_and_readback) recorded,
+    /// and what the GPU has told it since.
+    ///
+    /// The same [`FrameCounters`] a game puts on its debug panel, which is what
+    /// makes it worth asserting here: a headless run is the only place a
+    /// cross-backend test can watch the culling counters come back off the GPU,
+    /// and `crcbl_render::cull_stats`' ring means they arrive several frames
+    /// after the frame they describe — see
+    /// [`FrameCounters::cull_frame`](crate::render::FrameCounters::cull_frame),
+    /// which says which frame that was.
+    #[must_use]
+    pub fn counters(&self) -> FrameCounters {
+        self.scene.counters()
     }
 
     /// Records, submits, and reads back one frame.

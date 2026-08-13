@@ -127,6 +127,7 @@ pub mod camera;
 pub mod cluster_pool;
 pub mod counters;
 pub mod cull;
+pub mod cull_stats;
 pub mod draw_gen;
 pub mod forward;
 pub mod graph;
@@ -148,7 +149,7 @@ pub mod ui_pass;
 pub use button_skin::{ButtonSkin, screen_rect_to_target};
 pub use camera::{Camera, DirectionalLight, Projection};
 pub use cluster_pool::{ClusterPool, ClusterRange};
-pub use counters::{FrameCounters, INDIRECT};
+pub use counters::{FrameCounters, INDIRECT, UNKNOWN};
 /// Re-exported because [`SheetDesc::sample`] is spelled in it: a crate whose
 /// public API names a foreign type and does not export it is one every caller
 /// has to add a dependency for.
@@ -169,6 +170,7 @@ pub use crcbl_ui::text::FontAtlas;
 /// crate's button API should not have to add a second dependency to call it.
 pub use crcbl_ui::{ButtonState, SkinInsets};
 pub use cull::{Aabb, Frustum, visible_instances};
+pub use cull_stats::{CullStats, CullStatsRing};
 pub use draw_gen::{DrawGen, DrawGenDesc, GeneratedDraws};
 pub use forward::{ForwardRenderer, SHADOW_LOD_BIAS};
 pub use graph::{

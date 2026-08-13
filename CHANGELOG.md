@@ -334,6 +334,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The culling stats come back off the GPU, so the culling win is visible.** A
+  ring of `HostReadback` buffers, one per frame in flight plus one, fed by a
+  copy the render graph schedules and resolved only when a slot comes back round
+  — the shape `PassTimers` already uses, and for the same reason: the latency
+  _is_ the synchronisation, so there is no fence, no `wait_idle` and no poll
+  loop. `instances drawn` and `clusters drawn` are numbers now instead of
+  `indirect`, and a new `cull frame` row says which frame they came from.
+
+  **`RenderGraph::add_copy_pass` and `PassKind::Copy` are new**, and were
+  unavoidable: the seam allows a copy only outside a pass scope, and every
+  existing pass kind opens one. So a copy could not be a convention about what a
+  compute body may do — it had to be a kind whose body runs with no scope open.
+  `GraphError::AttachmentInComputePass` became
+  `AttachmentOutsideRenderPass { kind, .. }` to cover both.
+
+  Only the camera's cull is read. A cascade's survivors answer a different
+  question about a different frustum, and summing them would produce a number
+  larger than the instance count. A device that refuses the readback reports
+  nothing rather than zero, and the cluster word — written by the amplification
+  stage, so absent on three of the four ways the engine draws — reads `unknown`
+  rather than `0` where nothing counted it.
+
 - **One place a frame's draws and instances are counted.**
   `crcbl_render::FrameCounters`: each renderer answers with its own record and a
   caller sums them, the same shape the timed-pass bound already uses. The debug

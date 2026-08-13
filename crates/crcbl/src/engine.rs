@@ -4176,6 +4176,8 @@ mod tests {
                 instances: commands,
                 drawn: Some(commands),
                 triangles: Some(commands * 2),
+                clusters: Some(0),
+                cull_frame: None,
             };
             Ok(FrameOutcome::Presented)
         }
@@ -7601,6 +7603,11 @@ mod tests {
                             Counter(counters.triangles.expect("nor is the index count hidden")),
                             1
                         ),
+                        (
+                            crate::perf::CLUSTERS_COUNTER,
+                            Counter(counters.clusters.expect("nor is a cluster count in flight")),
+                            1
+                        ),
                     ],
                     "the frame's counters, inside the frame span, with their values",
                 );
@@ -7612,6 +7619,8 @@ mod tests {
                     instances: 7,
                     drawn: None,
                     triangles: None,
+                    clusters: None,
+                    cull_frame: None,
                 });
                 assert_eq!(
                     span_shapes(&crcbl_core::trace::drain()),
@@ -7620,6 +7629,29 @@ mod tests {
                         (crate::perf::INSTANCES_COUNTER, Counter(7), 0),
                     ],
                     "an unknown counter must leave no record, not a zero one",
+                );
+
+                // And the frame stamp is sampled with them where there is one,
+                // so a consumer can see that `instances-drawn` is about frame 37
+                // rather than about the span it arrived in.
+                crate::perf::sample_counters(crcbl_render::FrameCounters {
+                    draws: 9,
+                    instances: 7,
+                    drawn: Some(4),
+                    triangles: None,
+                    clusters: Some(2),
+                    cull_frame: Some(37),
+                });
+                assert_eq!(
+                    span_shapes(&crcbl_core::trace::drain()),
+                    vec![
+                        (crate::perf::DRAWS_COUNTER, Counter(9), 0),
+                        (crate::perf::INSTANCES_COUNTER, Counter(7), 0),
+                        (crate::perf::DRAWN_COUNTER, Counter(4), 0),
+                        (crate::perf::CLUSTERS_COUNTER, Counter(2), 0),
+                        (crate::perf::CULL_FRAME_COUNTER, Counter(37), 0),
+                    ],
+                    "a latent counter must carry the frame it is about",
                 );
             },
         );

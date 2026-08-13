@@ -810,6 +810,13 @@ impl SpriteRenderer {
             instances,
             drawn: Some(instances),
             triangles: Some(instances * TRIANGLES_PER_QUAD),
+            // A quad is not cluster geometry, so this pass drew no clusters and
+            // says so as a number. `None` would be "nothing counted", which
+            // would make the panel's cluster row unknown on every sprite frame.
+            clusters: Some(0),
+            // Nothing here came off the GPU: these are this frame's own counts,
+            // on the one lag the whole section shares.
+            cull_frame: None,
         }
     }
 

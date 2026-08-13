@@ -1536,3 +1536,86 @@ fn the_ui_panel_is_painted_and_the_bar_blends_over_two_backgrounds(image: &Image
          not reach the panel at all"
     );
 }
+
+/// **The culling counters reach the CPU on whichever backend drew the frame**,
+/// several frames after the frame they are about.
+///
+/// This is `docs/plan/40-profiling.md`'s item 8 checked on the backend
+/// `CRCBL_GPU` names — and the point of running it here rather than only in
+/// `crcbl-vk`'s suite is **wgpu**, whose readback is asynchronous by nature:
+/// `map_async` resolves on a later turn of the event loop and only inside a
+/// poll, so a ring that works against Vulkan's always-mapped allocation says
+/// nothing about a browser's. `crcbl_render::cull_stats`' poll shape is what has
+/// to hold on both, and the frame loop below never waits for it.
+///
+/// # What this asserts, and what it deliberately leaves to `crcbl-vk`
+///
+/// [`Scene::Cube`] has nothing outside the camera's frustum, so the survivor
+/// count here **equals** the submitted count and this cannot tell a cull from a
+/// counter wired to the pool's size. That claim needs a scene with something
+/// parked off screen, and it is made against a real driver by `crcbl-vk`'s
+/// `the_culling_counters_come_back_off_the_gpu_and_are_the_culls_own_answer`.
+///
+/// What it does assert is everything that is backend-shaped:
+///
+/// * nothing is reported while the ring has not come round, so a number here is
+///   not one the CPU made up before any readback landed;
+/// * the number that arrives is the instance survivor **word** — reading the
+///   cluster word or the light-overflow word beside it, or a buffer no copy ever
+///   reached, would all give zero, and zero is not this scene;
+/// * it is stamped with the frame it came from, and that frame is older than the
+///   frame just drawn.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_culling_counters_come_back_off_the_gpu_on_this_backend() {
+    crcbl_core::log::init_logging();
+
+    let mut setup = OffscreenSetup::open(EXTENT.0, EXTENT.1, Scene::Cube)
+        .unwrap_or_else(|why| panic!("a GPU backend opens for the cube scene: {why}"));
+    eprintln!(
+        "crcbl render e2e: culling counters on {backend}, {path:?}",
+        backend = setup.backend(),
+        path = setup.caps().geometry_path(),
+    );
+
+    // The ring is one longer than the frames the loop keeps in flight, so a slot
+    // is read only once its submission has certainly completed.
+    let latency =
+        u64::try_from(crcbl::render::forward::FRAMES_IN_FLIGHT + 1).expect("a ring of a few slots");
+
+    for frame in 1..=latency {
+        setup.draw_and_readback().expect("the frame renders");
+        let counters = setup.counters();
+        assert_eq!(
+            counters.drawn, None,
+            "frame {frame} is inside the ring's latency, so the row must still say `indirect`",
+        );
+        assert_eq!(counters.cull_frame, None);
+    }
+
+    setup.draw_and_readback().expect("the frame renders");
+    let counters = setup.counters();
+    eprintln!(
+        "crcbl render e2e: counters after {} frames — {counters:?}",
+        latency + 1,
+    );
+    let drawn = counters
+        .drawn
+        .expect("the ring has come round, so there is a survivor count");
+    assert_eq!(
+        drawn, counters.instances,
+        "every instance in this scene is in front of the camera, so the cull kept them all \
+         — and a zero here is a copy that never landed: {counters:?}",
+    );
+    assert!(
+        drawn > 1,
+        "one would be the tonemap's own triangle and nothing else: {counters:?}",
+    );
+    assert_eq!(
+        counters.cull_frame,
+        Some(1),
+        "the report is the first frame's, {latency} frames later: {counters:?}",
+    );
+
+    setup.finish().expect("the device reaches idle");
+}

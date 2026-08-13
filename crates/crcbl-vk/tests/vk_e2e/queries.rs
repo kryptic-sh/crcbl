@@ -179,7 +179,11 @@ fn per_pass_gpu_timers_report_real_numbers() {
             expected.push("light-cluster");
         }
     }
-    expected.extend(["shadow", "forward", "tonemap"]);
+    // And the culling-statistics copy, which the graph schedules like any other
+    // pass and the timers therefore bracket like any other pass — a copy is a
+    // cost in the frame, and one that never appeared in the report would be a
+    // cost nothing could see.
+    expected.extend(["shadow", "forward", "tonemap", "cull-stats-readback"]);
     assert_eq!(
         timings
             .passes

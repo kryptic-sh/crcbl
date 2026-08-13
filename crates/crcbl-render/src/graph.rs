@@ -292,13 +292,25 @@ pub enum PassKind {
     Render,
     /// A compute pass, with none.
     Compute,
+    /// A copy, which opens **no** scope at all.
+    ///
+    /// The seam's rule is that "copies, barriers and query writes are legal only
+    /// *outside* any pass", so a body that copies cannot run inside either of
+    /// the other two. The graph still computes this pass's barriers and orders
+    /// it against its neighbours exactly as it does for them — the only
+    /// difference is that [`CompiledGraph::execute`] opens nothing around the
+    /// body.
+    Copy,
 }
 
 impl PassKind {
-    const fn name(self) -> &'static str {
+    /// What this kind is called in the graph dump and in errors.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Render => "render",
             Self::Compute => "compute",
+            Self::Copy => "copy",
         }
     }
 }
@@ -420,6 +432,27 @@ impl<'a> RenderGraph<'a> {
     /// [`PassBuilder::execute`].
     pub fn add_compute_pass(&mut self, label: impl Into<String>) -> PassBuilder<'_, 'a> {
         PassBuilder::new(self, PassKind::Compute, label.into())
+    }
+
+    /// Starts declaring a copy. Add it with [`PassBuilder::execute`].
+    ///
+    /// **The one way a copy happens inside a frame.** The seam only allows a
+    /// copy outside a pass scope, so a body that calls
+    /// [`copy_buffer_to_buffer`](CommandEncoder::copy_buffer_to_buffer) from a
+    /// render or compute pass is a scope violation the null backend records —
+    /// which is why this is a kind of its own rather than a convention about
+    /// what a compute body may do.
+    ///
+    /// It is otherwise an ordinary pass: it declares what it reads in
+    /// [`ResourceState::TransferSrc`] and what it writes in
+    /// [`ResourceState::TransferDst`], and the graph emits the transitions
+    /// around it. A caller with a destination the graph does not know about — a
+    /// [`MemoryLocation::HostReadback`](crcbl_hal::MemoryLocation::HostReadback)
+    /// staging buffer, which no pass can bind and no pass can be ordered
+    /// against — names it in the body and declares only the source, exactly as
+    /// [`crate::cull_stats`] does.
+    pub fn add_copy_pass(&mut self, label: impl Into<String>) -> PassBuilder<'_, 'a> {
+        PassBuilder::new(self, PassKind::Copy, label.into())
     }
 
     /// How many passes have been declared.
@@ -662,7 +695,9 @@ impl<'g, 'a> PassBuilder<'g, 'a> {
     ///
     /// `body` runs inside the pass scope: the graph has already emitted the
     /// barriers, opened the pass and set a full-target viewport and scissor, so
-    /// a body is normally a pipeline bind, a bind group and a draw.
+    /// a body is normally a pipeline bind, a bind group and a draw. A
+    /// [`PassKind::Copy`] body runs outside every scope instead — see
+    /// [`RenderGraph::add_copy_pass`].
     pub fn execute(self, body: impl FnOnce(&mut PassContext<'_>) + 'a) {
         self.graph.passes.push(Pass {
             label: self.label,
@@ -1046,7 +1081,9 @@ impl<'a> CompiledGraph<'a> {
     /// Realises the transients out of `pool`, then for each pass in order:
     /// writes a start timestamp, emits its barrier batch as one call, opens the
     /// pass, sets a full-target viewport and scissor, runs the body, closes the
-    /// pass and writes an end timestamp. Finally emits the barriers that return
+    /// pass and writes an end timestamp — except a [`PassKind::Copy`], whose
+    /// body runs with no scope open at all, because that is the only place the
+    /// seam permits a copy. Finally emits the barriers that return
     /// imported resources to their required states, and tells `pool` what this
     /// frame left each physical transient in — which is what the *next* frame's
     /// first barrier uses as its source scope.
@@ -1114,6 +1151,8 @@ impl<'a> CompiledGraph<'a> {
                         label: Some(&pass.label),
                     });
                 }
+                // Nothing is opened: a copy is only legal outside every scope.
+                PassKind::Copy => {}
             }
 
             {
@@ -1129,6 +1168,7 @@ impl<'a> CompiledGraph<'a> {
             match pass.kind {
                 PassKind::Render => encoder.end_render_pass(),
                 PassKind::Compute => encoder.end_compute_pass(),
+                PassKind::Copy => {}
             }
             // The release half of any queue-ownership transfer a later pass
             // acquires. Outside the pass scope, because the seam only allows
@@ -1486,9 +1526,11 @@ pub enum GraphError {
         /// Array layers the image has.
         layers: u32,
     },
-    /// A compute pass attached something.
-    #[error("compute pass `{pass}` attaches `{resource}`; compute passes have no attachments")]
-    AttachmentInComputePass {
+    /// A pass that opens no render scope attached something.
+    #[error("{kind} pass `{pass}` attaches `{resource}`; only a render pass has attachments")]
+    AttachmentOutsideRenderPass {
+        /// Which kind of pass declared it — [`PassKind::name`].
+        kind: &'static str,
         /// Pass label.
         pass: String,
         /// Resource label.
@@ -2206,8 +2248,9 @@ fn validate(
     for pass in passes {
         let mut seen_depth = false;
         for (position, access) in pass.images.iter().enumerate() {
-            if pass.kind == PassKind::Compute && access.attachment.is_some() {
-                return Err(GraphError::AttachmentInComputePass {
+            if pass.kind != PassKind::Render && access.attachment.is_some() {
+                return Err(GraphError::AttachmentOutsideRenderPass {
+                    kind: pass.kind.name(),
                     pass: pass.label.clone(),
                     resource: images[access.image.index()].label.clone(),
                 });
@@ -2289,7 +2332,7 @@ fn validate(
 }
 
 fn render_area(images: &[ImageNode], pass: &Pass<'_>) -> Result<Rect2d, GraphError> {
-    if pass.kind == PassKind::Compute {
+    if pass.kind != PassKind::Render {
         return Ok(Rect2d::from_size(0, 0));
     }
     let mut area: Option<(&str, (u32, u32))> = None;

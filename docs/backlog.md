@@ -6203,21 +6203,44 @@ What is left:
 - **Nothing is instrumented outside the loop.** No spans in `crcbl-ecs`,
   `crcbl-phys` or `crcbl-jobs`, and none of the panel's other rows: the pass
   list, the CPU breakdown, memory, jobs, the freeze toggle.
-- **The culling stats never leave the GPU, so two counters read `indirect`.**
-  `DrawGen::visible_count` is `DeviceLocal` with `TRANSFER_SRC` and nothing
-  copies it back — the plan listed that readback under "what already exists" and
-  it never did; only tests read it, by hand, outside the frame loop. Until the
-  ring exists, instances-drawn and triangles are unknown wherever a
-  `ForwardRenderer` is in the frame, and clusters-drawn and its level histogram
-  cannot be reported at all. The slice is: a `HostReadback` buffer per frame in
-  flight, a copy the graph schedules rather than the hand-written barriers
-  `screenshot.rs` uses, and four-backend verification. **This is the single
-  thing most worth building next in topic 40** — it is what makes the culling
-  win visible, and the plan's counters row is half-blank without it.
-- **The cluster survivor word is written by the amplification stage**, so even
-  with the ring it is blank on both indirect tails and on `MESH_SHADER` without
-  `TASK_SHADER`. A cluster count that exists on one of four paths needs a story
-  before it becomes a row.
+- **The culling-stats ring reads the camera's cull only.** Each shadow `DrawGen`
+  has a stats buffer and none is read: a cascade's survivors answer a different
+  question about a different frustum, and summing them would produce a number
+  larger than the instance count. If a shadow cull's cost ever needs measuring
+  it wants a row of its own, not a place in this sum.
+- **The ring's request happens at the next `begin_frame`, not where the copy is
+  scheduled** — a copy is recorded, not submitted, so the readback cannot be
+  requested until the frame that contains it has gone. That puts a contract on
+  callers: submit the graph you executed before starting the next frame. It is
+  documented on `CullStatsRing::begin_frame` and **cannot be enforced from
+  inside the ring**; a caller that breaks it gets stats attributed to the wrong
+  frame.
+- **`triangles drawn` is still `indirect` on the forward path.** The ring gives
+  instances and clusters; triangles would need instances-drawn multiplied by
+  per-mesh index counts, and the nominal-per-cluster shortcut is the
+  authoritative-looking lie this slice refused.
+- **The cluster survivor word is written by the amplification stage**, so it is
+  `unknown` on both indirect tails and on `MESH_SHADER` without `TASK_SHADER` —
+  a claim now rather than a blank, but still a counter that exists on one of the
+  four ways the engine draws.
+- **`Scene::Cube` culls nothing**, so the cross-backend readback test can only
+  assert `drawn == submitted`; the actually-culled claim is vk-only. A scene
+  with something off-screen would let wgpu, Metal and D3D12 assert it too.
+- **`crcbl-wgpu`'s e2e suite has no `crcbl-render` dev-dependency**, so wgpu's
+  coverage of the ring lives in `crcbl`'s `render_e2e` instead. Adding the
+  dev-dep, as `crcbl-vk` has, was not taken.
+- **Metal and D3D12 have never run the readback.** Cross-target type-checks
+  only, as ever.
+- **One wgpu e2e test passes only on lavapipe.**
+  `a_wgpu_bind_group_layout_wgpu_rejects_arrives_as_an_error_from_the_call`
+  fails on radv with `Backend("wgpu create_bind_group_layout: Out of Memory")`
+  and passes under `CRCBL_WGPU_ICD=…/lvp_icd.json`, which is what CI pins — so
+  CI is green and a local run on real hardware reports a false failure.
+  **Pre-existing and unrelated to the readback work**, confirmed by running the
+  suite at `HEAD` in a clean worktree. The test asserts wgpu refuses a layout;
+  radv refuses it with a different error, so the assertion is really about which
+  driver is underneath. Worth either pinning the ICD in the script the way
+  `run-vk-e2e.sh` does, or asserting the refusal rather than its wording.
 - **The whole counters section lags the frame by one, uniformly.** The panel is
   gathered in `draw_debug_overlay`, which runs before `GameGpu::frame` records
   anything. Stated in the module docs and asserted by

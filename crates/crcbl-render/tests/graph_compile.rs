@@ -1259,24 +1259,31 @@ fn two_depth_attachments_are_refused() {
     );
 }
 
+/// Only a render pass has attachments, and the error names which kind declared
+/// one — so the copy pass, which opens no scope either, is refused on the same
+/// terms rather than through a check that only knew about compute.
 #[test]
-fn an_attachment_on_a_compute_pass_is_refused() {
-    let harness = Harness::open();
-    let pool = TransientPool::new();
-    let mut graph = harness.graph();
-    let color = graph.create_image("scene", scene_color());
-    graph
-        .add_compute_pass("confused")
-        .clear_color(color, [0.0; 4])
-        .execute(|_| {});
+fn an_attachment_outside_a_render_pass_is_refused() {
+    for kind in ["compute", "copy"] {
+        let harness = Harness::open();
+        let pool = TransientPool::new();
+        let mut graph = harness.graph();
+        let color = graph.create_image("scene", scene_color());
+        let pass = if kind == "compute" {
+            graph.add_compute_pass("confused")
+        } else {
+            graph.add_copy_pass("confused")
+        };
+        pass.clear_color(color, [0.0; 4]).execute(|_| {});
 
-    let error = graph
-        .compile(&pool)
-        .expect_err("compute passes have no attachments");
-    assert!(
-        matches!(error, GraphError::AttachmentInComputePass { .. }),
-        "{error}"
-    );
+        let error = graph
+            .compile(&pool)
+            .expect_err("only a render pass has attachments");
+        assert!(
+            matches!(error, GraphError::AttachmentOutsideRenderPass { kind: named, .. } if named == kind),
+            "{error}"
+        );
+    }
 }
 
 /// A transient nothing uses has no lifetime, so it cannot be allocated or

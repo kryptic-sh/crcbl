@@ -515,6 +515,10 @@ impl UiRenderer {
             instances: 1,
             drawn: Some(1),
             triangles: Some(self.last_index_count[self.frame] as u64 / 3),
+            // No cluster geometry and no readback: a known zero and no second
+            // lag to declare — see [`crate::counters`].
+            clusters: Some(0),
+            cull_frame: None,
         }
     }
 
