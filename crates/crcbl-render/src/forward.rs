@@ -1498,14 +1498,15 @@ impl ForwardRenderer {
     /// dynamic rendering checks pipeline and attachment formats against each
     /// other at pass-begin time, not at creation.
     ///
-    /// # The description is read by position, for now
+    /// # The demo setters still read the description by position
     ///
-    /// Instances are not a runtime API yet, so the five `set_*` methods and
-    /// [`ForwardRenderer::begin_frame`] place objects of description meshes
-    /// named by **position**: the cube, the pyramid, the open box and the dunes
-    /// patch of [`scene::demo`], in that order, shaded through the first three
-    /// material rows. A description shorter than that is refused rather than
-    /// accepted into a renderer whose `set_pyramid` has no mesh to name.
+    /// Instances are a runtime API — [`ForwardRenderer::add_instance`], which
+    /// names its mesh and its row by description index — but the five `set_*`
+    /// wrappers beside it name description meshes by **position**: the cube, the
+    /// pyramid, the open box and the dunes patch of [`scene::demo`], in that
+    /// order, shaded through the first three material rows. A description
+    /// shorter than that is refused rather than accepted into a renderer whose
+    /// `set_pyramid` has no mesh to name.
     ///
     /// # Errors
     ///
@@ -1513,14 +1514,19 @@ impl ForwardRenderer {
     /// resident as written: fewer meshes or material rows than the paragraph
     /// above names, a page layer that is not the extent's worth of RGBA8, a page
     /// whose layer 0 is not opaque white, a material row naming a layer the page
-    /// has not got, or a DAG carrying a vertex array for anything but each of
-    /// its levels. Every one of those is settled **before the first device
+    /// has not got, a DAG carrying a vertex array for anything but each of its
+    /// levels, or more vertices, indices, mesh table entries or material rows
+    /// than [`SceneDesc::capacities`] reserves — that last naming the pool, the
+    /// capacity and what the description needs, because the answer to it is to
+    /// raise the number. Every one of those is settled **before the first device
     /// object exists**, so a refusal leaks nothing.
     ///
-    /// [`HalError`] otherwise, from any seam call. A backend that cannot build a pipeline
-    /// says so here rather than drawing nothing later, and a failure part-way
-    /// through releases everything already created, so a caller that retries or
-    /// exits leaves nothing behind.
+    /// [`HalError`] otherwise, from any seam call — including the geometry a
+    /// pool refuses for itself, such as vertex bytes that are not a whole number
+    /// of vertices. A backend that cannot build a pipeline says so here rather
+    /// than drawing nothing later, and a failure part-way through releases
+    /// everything already created, so a caller that retries or exits leaves
+    /// nothing behind.
     pub fn with_scene(
         device: &dyn Device,
         queue: QueueHandle,
@@ -1606,6 +1612,64 @@ impl ForwardRenderer {
                         level.positions.len()
                     ));
                 }
+            }
+        }
+
+        // **Capacity, summed over the whole description**, which is the one
+        // refusal no pool can make for itself. `MeshPool` and `MaterialTable`
+        // do refuse their own overflow, but they refuse it part way through
+        // filling something that already exists, and the pair of numbers
+        // [`MeshPoolError::PoolExhausted`](crate::mesh_pool::MeshPoolError::PoolExhausted)
+        // carries to tell fragmentation from a full pool says nothing *here*:
+        // the pool was created empty a few lines below, nothing has been freed
+        // in it, so its free list is one block and the largest block and the
+        // total are the same number. At build the answer is always "raise this
+        // capacity", so it is said by name and before anything is created.
+        let mut vertices: u64 = 0;
+        let mut indices: u64 = 0;
+        for desc in &scene.meshes {
+            match &desc.geometry {
+                Geometry::Flat {
+                    vertices: bytes,
+                    indices: list,
+                    ..
+                } => {
+                    // Bytes that are not a whole number of vertices are the
+                    // pool's to refuse, and it refuses before it allocates.
+                    vertices += (bytes.len() / mesh::VERTEX_STRIDE) as u64;
+                    indices += list.len() as u64;
+                }
+                Geometry::Dag { levels, dag } => {
+                    for bytes in levels {
+                        vertices += (bytes.len() / mesh::VERTEX_STRIDE) as u64;
+                    }
+                    for level in &dag.levels {
+                        // The call the upload itself makes, so the two cannot
+                        // disagree about what a level costs.
+                        indices += level.indices().len() as u64;
+                    }
+                }
+            }
+        }
+        let entries: u64 = scene
+            .meshes
+            .iter()
+            .map(|desc| desc.geometry.levels() as u64)
+            .sum();
+        for (pool, needed, capacity) in [
+            ("vertex pool", vertices, scene.capacities.vertices),
+            ("index pool", indices, scene.capacities.indices),
+            ("mesh table", entries, scene.capacities.meshes),
+            (
+                "material table",
+                scene.materials.len() as u64,
+                scene.capacities.materials,
+            ),
+        ] {
+            if needed > u64::from(capacity) {
+                return refuse(format!(
+                    "the {pool} holds {capacity} and the description needs {needed}"
+                ));
             }
         }
         Ok(())
@@ -5709,38 +5773,95 @@ mod tests {
     /// only walks the happy path.
     ///
     /// Each arm below is a *different* refusal, so a check that stopped running
-    /// would show up as one arm leaking rather than as all of them.
+    /// would show up as one arm leaking rather than as all of them — and each
+    /// names a fragment of the message it must be refused *with*, or an arm
+    /// would pass on some other check's answer.
     #[test]
     fn a_refused_description_creates_nothing_at_all() {
-        /// One way of writing a description the renderer cannot build.
-        type Break = fn(&mut SceneDesc<'static>);
+        /// One way of writing a description the renderer cannot build, and the
+        /// words that say it was this refusal rather than another.
+        type Break = (&'static str, fn(&mut SceneDesc<'static>), &'static str);
 
-        let cases: [(&str, Break); 5] = [
-            ("too few meshes", |scene| {
-                scene.meshes.truncate(REQUIRED_MESHES - 1);
-            }),
-            ("too few material rows", |scene| {
-                scene.materials.truncate(REQUIRED_MATERIALS - 1);
-            }),
-            ("a row naming a layer the page has not got", |scene| {
-                scene.materials[DEMO_TEXTURED].base_color_texture = 7;
-            }),
+        let cases: [Break; 9] = [
+            (
+                "too few meshes",
+                |scene| {
+                    scene.meshes.truncate(REQUIRED_MESHES - 1);
+                },
+                "a scene of 3 mesh(es)",
+            ),
+            (
+                "too few material rows",
+                |scene| {
+                    scene.materials.truncate(REQUIRED_MATERIALS - 1);
+                },
+                "and 2 material row(s)",
+            ),
+            (
+                "a row naming a layer the page has not got",
+                |scene| {
+                    scene.materials[DEMO_TEXTURED].base_color_texture = 7;
+                },
+                "material row 2 samples page layer 7",
+            ),
             // The one page refusal a caller can actually spell: `push_layer`
             // takes bytes it cannot measure against the extent.
-            ("a page layer of the wrong length", |scene| {
-                scene.page = scene::PageDesc::opaque_white(scene::PAGE_EXTENT);
-                scene.page.push_layer(vec![0x00; 4]);
-                scene.materials[DEMO_TEXTURED].base_color_texture = scene::CHECKER_LAYER;
-            }),
-            ("a DAG level with no vertices", |scene| {
-                let Geometry::Dag { levels, .. } = &mut scene.meshes[DEMO_DUNES].geometry else {
-                    panic!("the demo description's fourth mesh is the DAG");
-                };
-                levels.pop();
-            }),
+            (
+                "a page layer of the wrong length",
+                |scene| {
+                    scene.page = scene::PageDesc::opaque_white(scene::PAGE_EXTENT);
+                    scene.page.push_layer(vec![0x00; 4]);
+                    scene.materials[DEMO_TEXTURED].base_color_texture = scene::CHECKER_LAYER;
+                },
+                "page layer 1 carries 4 bytes",
+            ),
+            (
+                "a DAG level with no vertices",
+                |scene| {
+                    let Geometry::Dag { levels, .. } = &mut scene.meshes[DEMO_DUNES].geometry
+                    else {
+                        panic!("the demo description's fourth mesh is the DAG");
+                    };
+                    levels.pop();
+                },
+                "vertex array(s) for a DAG of",
+            ),
+            // The four capacities, each of which is a pool a caller sized and
+            // a description outgrew. Written as a capacity the description is
+            // too large for rather than as a description too large for the
+            // default, because that is the shape of the mistake: the numbers on
+            // `Capacities` are the ones an application picks.
+            (
+                "more vertices than the pool holds",
+                |scene| {
+                    scene.capacities.vertices = 1;
+                },
+                "the vertex pool holds 1 and the description needs",
+            ),
+            (
+                "more indices than the pool holds",
+                |scene| {
+                    scene.capacities.indices = 1;
+                },
+                "the index pool holds 1 and the description needs",
+            ),
+            (
+                "more meshes than the table holds",
+                |scene| {
+                    scene.capacities.meshes = 1;
+                },
+                "the mesh table holds 1 and the description needs",
+            ),
+            (
+                "more material rows than the table holds",
+                |scene| {
+                    scene.capacities.materials = 2;
+                },
+                "the material table holds 2 and the description needs 3",
+            ),
         ];
 
-        for (what, break_it) in cases {
+        for (what, break_it, says) in cases {
             let (recorder, device, queue) = open();
             let before = recorder.total_live_objects();
             let mut scene = scene::demo();
@@ -5752,6 +5873,10 @@ mod tests {
                 matches!(error, HalError::InvalidDescriptor(_)),
                 "{what} must be refused as an invalid descriptor, not as {error:?}"
             );
+            assert!(
+                error.to_string().contains(says),
+                "{what} must be refused with a message saying so, and this one says {error}"
+            );
             assert_eq!(
                 recorder.total_live_objects(),
                 before,
@@ -5760,6 +5885,128 @@ mod tests {
             );
             recorder.assert_valid();
         }
+
+        // **And the refusal that is not free**, which is the half of the
+        // handover every arm above walks past: `check_scene` settles what the
+        // whole description says, and what one mesh's *bytes* say is the pool's,
+        // which only sees them one upload at a time. Vertex bytes that are not a
+        // whole number of vertices reach `MeshPool::upload` — so the third of
+        // the four meshes is refused with the pool created, two device-local
+        // buffers in it and the first two meshes already staged into them.
+        // `build_geometry` is what releases that, and it can only do so because
+        // the pool is not the rollback's until it has returned.
+        let (recorder, device, queue) = open();
+        let before = recorder.total_live_objects();
+        // So the count below is this build's and not `open`'s.
+        recorder.clear();
+        let mut scene = scene::demo();
+        let Geometry::Flat { vertices, .. } = &mut scene.meshes[DEMO_OPEN_BOX].geometry else {
+            panic!("the demo description's third mesh is flat");
+        };
+        vertices.to_mut().push(0);
+        let error =
+            ForwardRenderer::with_scene(device.as_ref(), queue, Format::Rgba8UnormSrgb, &scene)
+                .expect_err("a mesh of part of a vertex must be refused");
+        assert!(
+            error.to_string().contains("is not a whole number of"),
+            "the pool's own refusal reaches the caller with its numbers, and this \
+             one says {error}"
+        );
+        assert!(
+            recorder
+                .events()
+                .iter()
+                .any(|event| matches!(event, crcbl_hal::null::Event::Created { .. })),
+            "this arm is evidence about the rollback only if the refusal came after \
+             something had been created"
+        );
+        assert_eq!(
+            recorder.total_live_objects(),
+            before,
+            "a mesh refused part way through the list left the geometry pool behind, \
+             which is exactly what `build_geometry` being self-cleaning is for"
+        );
+        recorder.assert_valid();
+    }
+
+    /// **The one capacity a description cannot be checked against, and the one
+    /// an application is expected to handle while it runs.**
+    ///
+    /// Every other number on [`scene::Capacities`] sizes something the
+    /// description fills once, so `check_scene` refuses an over-large one before
+    /// a device object exists. Objects are placed at any point in a renderer's
+    /// life, so the only honest answer for that one is the error
+    /// [`ForwardRenderer::add_instance`] returns — and it returns
+    /// [`InstancePoolError`] rather than a [`HalError`], so the capacity and
+    /// what is in it survive to the caller that chose them.
+    ///
+    /// It also gives [`Capacities::instances`](scene::Capacities::instances) a
+    /// value of its own rather than the default, which is what makes the pool
+    /// fillable at all: a renderer that ignored the number the description
+    /// carries and reserved the default would draw every frame in the tree
+    /// identically and refuse nothing here.
+    #[test]
+    fn a_full_instance_pool_reaches_the_application_that_sized_it() {
+        let (recorder, device, queue) = open();
+        let mut scene = scene::demo();
+        scene.capacities.instances = 2;
+        let mut renderer =
+            ForwardRenderer::with_scene(device.as_ref(), queue, Format::Rgba8UnormSrgb, &scene)
+                .expect("a scene with room for two objects builds");
+        let place = |renderer: &mut ForwardRenderer| {
+            renderer.add_instance(&InstanceDesc {
+                mesh: DEMO_CUBE,
+                material: DEMO_UNTINTED,
+                transform: Mat4::IDENTITY,
+            })
+        };
+        place(&mut renderer).expect("the first of two");
+        place(&mut renderer).expect("the second of two");
+        let error = place(&mut renderer).expect_err("a third object has no slot to go in");
+        assert!(
+            matches!(
+                error,
+                InstancePoolError::PoolFull {
+                    capacity: 2,
+                    in_use: 2
+                }
+            ),
+            "a full pool must reach the caller as a full pool, with the capacity it \
+             chose; this arrived as {error}"
+        );
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **A description that exactly fills what it reserved is built, not
+    /// refused.**
+    ///
+    /// The other side of the capacity check, and the side nothing else in the
+    /// tree can fail on: every other scene reserves far more than it holds, so a
+    /// comparison written `>=` instead of `>` would pass the whole suite and
+    /// refuse only the application that had sized its pools exactly right.
+    ///
+    /// The two capacities asserted here are the two a caller can size without
+    /// re-deriving anything the renderer knows: one mesh table entry per
+    /// [`Geometry::levels`], which is what that method is documented to answer,
+    /// and one row per material. The four rows share one comparison, so they
+    /// stand or fall together.
+    #[test]
+    fn a_description_that_exactly_fits_its_capacities_is_built() {
+        let (recorder, device, queue) = open();
+        let mut scene = scene::demo();
+        scene.capacities.meshes = scene
+            .meshes
+            .iter()
+            .map(|desc| u32::try_from(desc.geometry.levels()).expect("a few levels"))
+            .sum();
+        scene.capacities.materials =
+            u32::try_from(scene.materials.len()).expect("a few material rows");
+        let renderer =
+            ForwardRenderer::with_scene(device.as_ref(), queue, Format::Rgba8UnormSrgb, &scene)
+                .expect("a description that fits exactly is not too large for itself");
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
     }
 
     /// The property the whole arrangement exists for: the pool's second

@@ -7643,7 +7643,9 @@ the cube is an ordinary instance every caller places for itself, by
 `scene::DEMO_CUBE` and the other public demo indices. Materials and page layers
 are the caller's too: `PageDesc` at the caller's own extent, `push_layer` per
 layer, `SceneDesc::materials` row by row, refused at build when a row names a
-layer the page has not got. What is left is everything below.
+layer the page has not got. The pools are sized by `Capacities`, and a
+description that outgrows one of the four is refused up front rather than part
+way through filling it. What is left is everything below.
 
 ### The shape
 
@@ -7663,13 +7665,11 @@ boundary. **The first must leave every golden byte-identical** — the demo scen
 is a caller of the new API rather than a special case inside the renderer, so a
 golden that moves in it is a bug in the move, not a re-bless.
 
-1. App-supplied meshes, which is mostly making the failure paths honest —
-   `MeshPoolError::PoolExhausted` reaching the caller un-flattened.
-2. Reach the cook from an app: the `crcbl` facade, `crcbl-scene` behind a
+1. Reach the cook from an app: the `crcbl` facade, `crcbl-scene` behind a
    non-default `scene` feature so `gltf` does not reach a wasm binary, the
    meshlet/DAG cook moved out of `crcbl-shaders/tools/cook-clusters.rs` into the
    crate, and the five demo setters dropped.
-3. `apps/lumen` on top of it.
+2. `apps/lumen` on top of it.
 
 ### Flat meshes only, and why that is not negotiable yet
 
@@ -7688,11 +7688,16 @@ the type rather than discovered.
 
 The `POOL_*` constants are fields of `Capacities` now, whose `Default` is the
 numbers the engine shipped. Growth is out for the reason `mesh_pool` already
-argues — every bind group names those buffers. `MeshPoolError::PoolExhausted`
-must reach the caller rather than being flattened, because it distinguishes
-fragmentation from a full pool. Worth knowing while sizing: raising the instance
-cap is not linear, since the LOD hysteresis buffer is per instance per `DrawGen`
-and there are five.
+argues — every bind group names those buffers. A description that outgrows one
+is refused by `ForwardRenderer::check_scene`, before the first device object
+exists, naming the pool, the capacity and what the description needs; the plan's
+"`MeshPoolError::PoolExhausted` must reach the caller un-flattened" turned out
+to be the wrong answer to that, for the reason the `SceneError` entry below now
+records. Worth knowing while sizing: raising the instance cap is not linear,
+since the LOD hysteresis buffer is per instance per `DrawGen` and there are
+five. `Capacities::instances` is the one number no description can be measured
+against — objects are placed while the renderer runs — so filling it is
+`InstancePoolError::PoolFull` from `add_instance` and nothing earlier.
 
 ### Effect toggles are NOT part of this
 
@@ -7746,7 +7751,9 @@ are built by walking the mesh list, so a duplicate is not refused but
 unspellable; and every description check runs from the top of
 `ForwardRenderer::check_scene`, before the first device object exists, which
 `a_refused_description_creates_nothing_at_all` reads off the recorder's live
-object count.
+object count — with one arm deliberately refused _after_ the pool exists, so
+that count is evidence about `build_geometry`'s rollback and not only about
+`check_scene`.
 
 ### The materials-and-layers slice was almost entirely already done
 
@@ -7832,16 +7839,31 @@ half's 10. It places the cube in both halves now, so the two differ in the
 pyramid alone, which is what the test was always about. Nothing else in the tree
 draws a frame with an empty pool.
 
-### Considered and declined in the description slice: a `SceneError`
+### Declined twice: a `SceneError`, and the second reason retires the condition
 
-The plan sanctioned adding one. Not added: every refusal `check_scene` makes is
-already `HalError::InvalidDescriptor` with a message naming the entry, which is
-the shape `MeshPool`, `ClusterPool` and `MaterialTable` already refuse in, and a
-new error type that converted straight into `HalError` at its only call site
-would be indirection with one implementation. Revisit at the app-supplied-mesh
-slice, where `MeshPoolError::PoolExhausted` has to reach the caller un-flattened
-— that is a real distinction `HalError` cannot carry, and it is what would
-justify the type.
+The description slice declined one as indirection with a single implementation,
+and set a condition for revisiting it: `MeshPoolError::PoolExhausted` reaching
+the caller un-flattened, because its `largest_free`-versus-`total_free` pair
+tells fragmentation from a genuinely full pool and `HalError` cannot carry that
+distinction. The capacity slice revisited it and **declined again, because the
+condition is not reachable at `with_scene`**.
+
+`build_geometry` creates the `MeshPool` and then fills it; nothing is ever freed
+in between, and `FreeList::alloc` is first-fit over a list that starts as one
+block, so every allocation comes off the front of a single trailing block and
+`largest_free == total_free` at every failure. The refusal a build can actually
+produce says so out loud — breaking the new check and letting the pool refuse
+instead prints
+`the largest free block holds 1 and 1 are free in total, out of a capacity of 1`.
+So the only thing exhaustion can mean here is "too small", the only answer is
+"raise the capacity", and both are known from the description before a device
+object exists. `check_scene` says it there instead, naming the pool, the
+capacity and the need.
+
+The condition becomes real when meshes can be freed and re-uploaded during a
+renderer's life — P9's streaming `add_mesh`, deliberately deferred — and that is
+the slice where the type earns itself. Not before: today it would still be one
+implementation, and it would be carrying a distinction that cannot arise.
 
 ### `add_instance` cannot refuse a DAG the device cannot draw, and `set_dunes` can
 
@@ -7852,21 +7874,61 @@ every cluster of a bucket, and for a DAG that is every level at once.
 `add_instance` cannot, because its only error is `InstancePoolError` and "this
 device cannot choose a level" is not a full pool. **Documented instead**, on
 `add_instance`: a caller placing a `Geometry::Dag` mesh asks
-`ForwardRenderer::culls_clusters` first. Turning it into a refusal wants the
-error type the entry above declines, so the two decisions are the same one.
-Nothing checks that a caller obeys, and no test covers a `Geometry::Dag`
-instance placed on that device shape.
+`ForwardRenderer::culls_clusters` first. Turning it into a refusal wants an
+error type on `add_instance` that says something other than "full pool", which
+is the type the entry above has now declined twice — so this stays documented
+until that one arrives. Nothing checks that a caller obeys, and no test covers a
+`Geometry::Dag` instance placed on that device shape.
 
-### `place`'s swallowed pool-full failure, after the instance slice
+### `place`'s swallowed pool-full failure: the capacity slice kept it
 
-Unchanged, and deliberately so. `ForwardRenderer::place` — the body the five
-demo setters share — logs `InstancePoolError::PoolFull` and drops the object,
-because none of those five signatures says anything about a pool. What changed
-is that an application no longer goes through it: `add_instance` returns the
-error. So the swallowing is now confined to the demo wrappers, which the samples
-and the golden suite are the only callers of, and where a full pool means a
-caller filled a pool it also sized. The capacity slice decides whether that
-stays.
+`ForwardRenderer::place` — the body the five demo setters share — logs
+`InstancePoolError::PoolFull` and drops the object, because none of those five
+signatures says anything about a pool. The capacity slice's job was to decide
+whether that stays, and it does: an application does not go through `place` at
+all, and `forward`'s
+`a_full_instance_pool_reaches_the_application_that_sized_it` is what says so — a
+scene built with `capacities.instances` of 2 refuses the third `add_instance`
+with `PoolFull { capacity: 2, in_use: 2 }`, un-flattened, carrying the number
+the caller itself chose. The swallowing is confined to the five wrappers the
+cook slice deletes outright, whose only callers are the samples and the golden
+suite. Nothing further to do; it goes when they go.
+
+### Where the capacity slice drew the line, and what it left to the pool
+
+`check_scene` owns what only the whole description knows — the four totals
+(vertices, indices, mesh table entries, material rows) against `Capacities`, and
+the cross-references between page, rows and DAG levels. What one mesh's _bytes_
+say stays the pool's: `MeshPoolError::VertexStrideMismatch` and `EmptyMesh` are
+still raised from inside `build_geometry`, mesh by mesh, and arrive as
+`HalError::Backend` carrying their numbers.
+
+**Considered and declined: hoisting those two into `check_scene` as well.** It
+would make every description refusal free, and it would also make the
+self-cleaning branch of `build_geometry` unreachable from any description — dead
+code with a test that could no longer drive it. Left where it is deliberately,
+so `a_refused_description_creates_nothing_at_all`'s last arm is a real path: it
+appends one byte to the open box's vertices, which is refused on the third of
+four meshes with the pool created, its buffers live and two meshes already
+staged into them, and asserts both that something _was_ created (or the arm
+proves nothing about the rollback) and that the live-object count came back.
+Shown red by removing `pool.destroy(device)` from `build_geometry` — 8 objects
+leaked, and that arm was the **only** failure in the whole `crcbl-render` suite.
+
+The four capacity refusals are `HalError::InvalidDescriptor` like every other
+`check_scene` answer, each asserted against a fragment of its own message so an
+arm cannot pass on another check's refusal, and each shown red by deleting its
+row from the table — every one of them then reached the pool and came back as
+`Backend`. The opposite mistake has its own test, because nothing else in the
+tree could fail on it: every other scene reserves far more than it holds, so a
+comparison written `>=` would pass the entire suite and refuse only the
+application that had sized its pools exactly right.
+`a_description_that_exactly_fits_its_capacities_is_built` is what fails there.
+
+Not covered, and not attempted: `Capacities::lights` has no description to be
+measured against — a caller sets lights per frame — and no test drives its
+overflow; and no non-default `Capacities` value has ever reached a real device,
+since every end-to-end run is still `scene::demo()`.
 
 ### Coverage gap: a description that is not `scene::demo()` has never reached a device
 

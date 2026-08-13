@@ -178,6 +178,15 @@ pub struct Capacities {
     /// hysteresis state is one word per instance per resident group per
     /// [`DrawGen`](crate::draw_gen::DrawGen), and there is a generator for the
     /// camera, one per shadow cascade and one per shadow light slot.
+    ///
+    /// The one capacity here that a description cannot be measured against,
+    /// because objects are placed while the renderer runs rather than at build:
+    /// filling it is
+    /// [`InstancePoolError::PoolFull`](crate::instance_pool::InstancePoolError::PoolFull)
+    /// from [`ForwardRenderer::add_instance`], which is where a caller finds out
+    /// it is this number that wants raising.
+    ///
+    /// [`ForwardRenderer::add_instance`]: crate::forward::ForwardRenderer::add_instance
     pub instances: u32,
     /// Rows the material table holds.
     ///

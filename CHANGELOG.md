@@ -414,11 +414,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   description mesh — built by walking that list, so `draw_gen.slang`'s
   first-match scatter cannot be given two buckets naming one mesh. A description
   that cannot be made resident is refused as `HalError::InvalidDescriptor`
-  **before the first device object exists**, so a rejection leaks nothing.
+  **before the first device object exists**, so a rejection leaks nothing —
+  including one that outgrows the pools it sized: a description needing more
+  vertices, indices, mesh table entries or material rows than `Capacities`
+  reserves is refused up front, naming the pool, the capacity and the need,
+  rather than part way through filling one. `Capacities::instances` is the one
+  exception, because objects are placed while the renderer runs: filling it is
+  `InstancePoolError::PoolFull` from `add_instance`.
 
-  Instances are not a runtime API yet: the five `set_*` methods and
-  `begin_frame` still name description meshes and rows by position, and
-  `with_scene` refuses a description shorter than they need. That, and
+  The five `set_*` methods still name description meshes and rows by position,
+  and `with_scene` refuses a description shorter than they need. That, and
   `Geometry::Dag`'s documented limitation that `crcbl_scene::simplify` is
   position-only so a coarse level's attributes are the caller's to supply, are
   in `docs/backlog.md`.
