@@ -30,7 +30,7 @@
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Booted, Clock, ExitReason, FrameInfo, HostedGame, RunSummary, wait_for_configure,
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, PointerUpdate, RunSummary, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
@@ -247,6 +247,20 @@ impl HostedGame for Flappy {
         // Forwarded to the game, which replays it at the start of the next
         // tick. A frame that runs no ticks loses nothing.
         self.game.key_event(key, pressed);
+    }
+
+    /// **A tap is a flap, and the position is nobody's business here.**
+    ///
+    /// This game has one action and no aim: where the finger landed says
+    /// nothing, so [`PointerUpdate::at`] is dropped and only the edges are
+    /// forwarded. Breakout is the sample that needs the other half.
+    fn pointer_event(&mut self, pointer: PointerUpdate) {
+        if pointer.pressed {
+            self.game.pointer_button(true);
+        }
+        if pointer.released {
+            self.game.pointer_button(false);
+        }
     }
 
     fn menu_action(id: crcbl::ui::WidgetId) -> Option<Flap> {
@@ -1208,6 +1222,176 @@ mod tests {
         assert!(
             engine.is_paused(),
             "the click that handed the keyboard back also resumed the game",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A tap on the canvas flaps, through the loop a browser drives.**
+    ///
+    /// The game's own test proves the binding; this one proves the *route* —
+    /// the shell's button event, the menu declining to claim it because none is
+    /// on screen, and the engine handing it to the game. A phone has no keys,
+    /// so every link in that chain is load-bearing here in a way it is not for
+    /// any other input this sample takes.
+    #[test]
+    fn a_tap_during_play_flaps_the_bird() {
+        use crcbl::core::input::PointerButton;
+        use crcbl::shell::{ButtonState as PointerState, PhysicalPoint};
+
+        let mut engine = scripted(&headless(120));
+        let window = engine.window();
+
+        // Started with the keyboard, so the tap below is the only pointer input
+        // in the run and cannot be credited with something a key did.
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::Space)
+            .expect("the window is live");
+        run_frames(&mut engine, 20);
+        assert_eq!(engine.game().game().state, GameState::Playing);
+        assert!(
+            engine.menu_layout().is_none(),
+            "a run in progress shows no menu, so nothing else can claim the tap",
+        );
+        // Gravity is the only other thing that touches this velocity and it
+        // only ever lowers it, so "higher than it was" is a flap and cannot be
+        // anything else.
+        let before = engine.game().game().bird_velocity.y;
+
+        let at = PhysicalPoint::new(8.0, 8.0);
+        for state in [PointerState::Pressed, PointerState::Released] {
+            engine
+                .shell_mut()
+                .button(window, PointerButton::Left, state, Some(at))
+                .expect("the window is live");
+        }
+        run_frames(&mut engine, 1);
+
+        assert!(
+            engine.game().game().bird_velocity.y > before,
+            "the tap never reached the flap action: the bird went from {before} \
+             to {}, which is what gravity alone does",
+            engine.game().game().bird_velocity.y,
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **Two taps in a row are two flaps, however fast they land.**
+    ///
+    /// A tap quicker than a frame arrives as a press *and* a release in one
+    /// pump — which on a phone is every tap, because a finger is on the glass
+    /// for a fraction of a frame at 60 Hz. The release has to be forwarded on
+    /// the same frame as the press it answers; a loop that only forwards a
+    /// release when it already believed the button was down drops it, leaves
+    /// the game holding the button, and the *second* tap raises no edge. The
+    /// first tap still works, which is what makes this the shape a
+    /// one-tap-and-assert test cannot see.
+    #[test]
+    fn a_tap_that_opens_and_closes_in_one_frame_still_flaps_the_next_time() {
+        use crcbl::core::input::PointerButton;
+        use crcbl::shell::{ButtonState as PointerState, PhysicalPoint};
+
+        let mut engine = scripted(&headless(200));
+        let window = engine.window();
+        let at = PhysicalPoint::new(8.0, 8.0);
+        let tap = |engine: &mut Loop<HeadlessShell>| {
+            for state in [PointerState::Pressed, PointerState::Released] {
+                engine
+                    .shell_mut()
+                    .button(window, PointerButton::Left, state, Some(at))
+                    .expect("the window is live");
+            }
+        };
+
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::Space)
+            .expect("the window is live");
+        run_frames(&mut engine, 20);
+        assert_eq!(engine.game().game().state, GameState::Playing);
+
+        tap(&mut engine);
+        run_frames(&mut engine, 20);
+        let before = engine.game().game().bird_velocity.y;
+        tap(&mut engine);
+        run_frames(&mut engine, 1);
+        assert!(
+            engine.game().game().bird_velocity.y > before,
+            "the second tap raised no edge, so the first one's release never \
+             arrived: {before} to {}",
+            engine.game().game().bird_velocity.y,
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A finger still down when the window loses focus does not kill the
+    /// button.**
+    ///
+    /// No platform sends the release for a pointer that was down when focus
+    /// left — the same hole [`ShellEvent::Focus`] documents for keys — and a
+    /// game left holding the button sees no *edge* on the next tap. So the
+    /// symptom is not a stuck bird: it is a game that never flaps again, which
+    /// on a phone is a game that is over. Tabbing away mid-tap is the ordinary
+    /// way to reach it.
+    #[test]
+    fn a_tap_held_across_a_focus_loss_still_flaps_afterwards() {
+        use crcbl::core::input::PointerButton;
+        use crcbl::shell::{ButtonState as PointerState, PhysicalPoint};
+
+        let mut engine = scripted(&headless(200));
+        let window = engine.window();
+        let at = PhysicalPoint::new(8.0, 8.0);
+
+        engine
+            .shell_mut()
+            .key_press(window, KeyCode::Space)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, KeyCode::Space)
+            .expect("the window is live");
+        run_frames(&mut engine, 20);
+        assert_eq!(engine.game().game().state, GameState::Playing);
+
+        // Down, and never up: the finger is on the glass when the tab goes.
+        engine
+            .shell_mut()
+            .button(window, PointerButton::Left, PointerState::Pressed, Some(at))
+            .expect("the window is live");
+        run_frames(&mut engine, 1);
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        run_frames(&mut engine, 1);
+        assert!(engine.is_paused(), "a blurred window is paused");
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        run_frames(&mut engine, 2);
+        assert!(!engine.is_paused(), "Escape resumes");
+
+        let before = engine.game().game().bird_velocity.y;
+        engine
+            .shell_mut()
+            .button(window, PointerButton::Left, PointerState::Pressed, Some(at))
+            .expect("the window is live");
+        run_frames(&mut engine, 1);
+        assert!(
+            engine.game().game().bird_velocity.y > before,
+            "the next tap raised no edge, so the button was still down: {before} \
+             to {}",
+            engine.game().game().bird_velocity.y,
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

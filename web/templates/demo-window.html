@@ -26,9 +26,24 @@
   </div>
 </div>
 
-<div class="note">
+<div class="note pointer-only">
   <strong>Click the canvas first.</strong> A canvas has to hold keyboard focus
   to receive keys, and browsers will not start audio until you have interacted
   with the page. Clicking away pauses the game and lets go of whatever key was
   held — no platform sends the release for a key that was down when focus left.
+</div>
+
+<!--
+  The same note for a visitor with no keyboard and no cursor. Two blocks rather
+  than one with the words swapped, because they do not say the same thing: there
+  is no focus to give a canvas by touch, and the reason to touch it first is the
+  audio gesture instead. `web/style.css` shows exactly one of them.
+-->
+<div class="note touch-only">
+  <strong>Touch reaches the engine.</strong> A contact arrives as an ordinary
+  pointer, and the first one is also the gesture a browser waits for before it
+  will start audio. Whether <em>this</em> demo can be played with one is in its
+  controls below — not all of them can. Switching tabs pauses the game and lets
+  go of whatever was held: no platform sends the release for an input that was
+  down when focus left.
 </div>

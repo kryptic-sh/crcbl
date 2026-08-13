@@ -30,7 +30,7 @@
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
-    Booted, Clock, ExitReason, FrameInfo, HostedGame, RunSummary, wait_for_configure,
+    Booted, Clock, ExitReason, FrameInfo, HostedGame, PointerUpdate, RunSummary, wait_for_configure,
 };
 use crcbl::prelude::*;
 use crcbl::shell::{
@@ -239,7 +239,13 @@ impl HostedGame for Breakout {
         menu::menus()
     }
 
-    fn tick(&mut self, _gpu: &mut Gpu, _tick_dt: f64) {
+    fn tick(&mut self, gpu: &mut Gpu, _tick_dt: f64) {
+        // Here rather than on resize, because this is where the camera's extent
+        // is in hand and there is no cheaper place to be right: a tick that ran
+        // with last size's mapping would put the paddle somewhere the finger is
+        // not, on exactly the frame a phone rotates.
+        self.game
+            .set_view_half_width(f64::from(crate::gpu::camera_half_width(gpu.extent())));
         self.game.tick();
     }
 
@@ -247,6 +253,25 @@ impl HostedGame for Breakout {
         // Forwarded to the game, which replays it at the start of the next
         // tick. A frame that runs no ticks loses nothing.
         self.game.key_event(key, pressed);
+    }
+
+    /// **The paddle follows the finger, and a tap serves.**
+    ///
+    /// Only the x coordinate: this game's one axis is the width of the court.
+    /// The conversion from the surface's −1…1 to world units is the game's, and
+    /// it happens in [`Game::tick`] against the half width [`Self::tick`] hands
+    /// over — the engine has no idea where this camera is pointed and the sample
+    /// has no business doing DPI arithmetic.
+    fn pointer_event(&mut self, pointer: PointerUpdate) {
+        if let Some(at) = pointer.at {
+            self.game.pointer_moved(at.x);
+        }
+        if pointer.pressed {
+            self.game.pointer_button(true);
+        }
+        if pointer.released {
+            self.game.pointer_button(false);
+        }
     }
 
     fn menu_action(id: crcbl::ui::WidgetId) -> Option<Launch> {
@@ -1114,6 +1139,102 @@ mod tests {
         assert!(
             engine.is_paused(),
             "the click that handed the keyboard back also resumed the game",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The pointer reaches the paddle, in the space the surface is in.**
+    ///
+    /// The routing test, and the one that pins the conversion the *engine*
+    /// owns: framebuffer pixels to the −1…1 a binding is declared against. The
+    /// three positions are chosen so that no camera arithmetic is needed to say
+    /// what the right answer is — the middle of the surface is the middle of
+    /// the field, and each edge is the wall on that side — so an axis
+    /// normalised 0…1, one still in pixels, and an inverted one each land
+    /// somewhere this rejects.
+    ///
+    /// It also pins that a menu on screen does **not** claim the pointer's
+    /// position: this run is a fresh game, so the start panel is up the whole
+    /// time, and a paddle that could not be lined up before serving would be a
+    /// paddle a phone cannot aim.
+    #[test]
+    fn the_paddle_follows_the_pointer_across_the_surface() {
+        use crcbl::shell::PhysicalPoint;
+
+        let mut engine = scripted(&headless(60));
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+        let (width, height) = engine.extent();
+        let middle_y = f64::from(height) / 2.0;
+        let paddle_x = |engine: &Loop<HeadlessShell>| engine.game().game().paddle_x();
+
+        let point_at = |engine: &mut Loop<HeadlessShell>, x: f64| {
+            engine
+                .shell_mut()
+                .move_pointer(window, PhysicalPoint::new(x, middle_y), (0.0, 0.0))
+                .expect("the window is live");
+            run_frames(engine, 2);
+        };
+
+        point_at(&mut engine, f64::from(width) / 2.0);
+        assert!(
+            paddle_x(&engine).abs() < 1e-6,
+            "the middle of the surface is the middle of the field, got {}",
+            paddle_x(&engine),
+        );
+
+        point_at(&mut engine, f64::from(width));
+        assert!(
+            (paddle_x(&engine) - (crate::game::WORLD_RIGHT - crate::game::PADDLE_HALF_WIDTH)).abs()
+                < 1e-6,
+            "the right edge of the surface is the right wall, got {}",
+            paddle_x(&engine),
+        );
+
+        point_at(&mut engine, 0.0);
+        assert!(
+            (paddle_x(&engine) - (crate::game::WORLD_LEFT + crate::game::PADDLE_HALF_WIDTH)).abs()
+                < 1e-6,
+            "the left edge of the surface is the left wall, got {}",
+            paddle_x(&engine),
+        );
+
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A menu on screen owns the button.**
+    ///
+    /// The start panel is up on a fresh game, and a tap that both fired the
+    /// widget under it and served the ball would be one gesture doing two
+    /// things. The corner is [`the browser gate's own inset`](self) — the point
+    /// the sibling test proves is over no button — so this is a tap on the
+    /// panel's backdrop, which is where a phone's misses land.
+    #[test]
+    fn a_tap_beside_a_menu_does_not_reach_the_game() {
+        use crcbl::core::input::PointerButton;
+        use crcbl::shell::{ButtonState as PointerState, PhysicalPoint};
+
+        let mut engine = scripted(&headless(60));
+        let window = engine.window();
+        run_frames(&mut engine, 2);
+        assert!(
+            engine.menu_layout().is_some(),
+            "a fresh game shows the start menu, which is what this is about",
+        );
+
+        let at = PhysicalPoint::new(8.0, 8.0);
+        for state in [PointerState::Pressed, PointerState::Released] {
+            engine
+                .shell_mut()
+                .button(window, PointerButton::Left, state, Some(at))
+                .expect("the window is live");
+        }
+        run_frames(&mut engine, 4);
+
+        assert_eq!(
+            engine.game().game().state,
+            GameState::WaitingForLaunch,
+            "a tap on the menu's backdrop served the ball",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

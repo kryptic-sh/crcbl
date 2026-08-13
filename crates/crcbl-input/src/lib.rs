@@ -55,11 +55,26 @@ impl Default for ButtonAction {
     }
 }
 
-/// 1-D analog axis: −1.0 … 1.0 (triggers, scroll wheels).
+/// 1-D analog axis: −1.0 … 1.0 (triggers, scroll wheels, an absolute pointer
+/// coordinate).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Axis1Action {
     /// Current axis value.
     pub value: f32,
+    /// True on the tick a [`Binding::PointerPosition`] on this action reported a
+    /// coordinate different from the one it was holding.
+    ///
+    /// The edge an *absolute* source has and a relative one does not. A scroll
+    /// axis returns to zero every [`ActionMap::begin_tick`], so a non-zero value
+    /// already means "this moved"; a pointer axis holds its position across
+    /// ticks — that is the whole point of it — so its value says where the
+    /// pointer is and nothing about whether the player just asked for anything.
+    ///
+    /// Cleared by [`ActionMap::begin_tick`], like [`ButtonAction::just_pressed`].
+    /// A consumer that drives one thing from both a pointer and the keyboard
+    /// reads this to decide which spoke most recently — see the
+    /// [`Binding::PointerPosition`] docs.
+    pub pointer_moved: bool,
 }
 
 /// 2-D analog axis (WASD composite, stick, mouse motion).
@@ -89,10 +104,25 @@ pub enum ActionValue {
 // Bindings
 // ---------------------------------------------------------------------------
 
+/// Which coordinate of the pointer a [`Binding::PointerPosition`] reads.
+///
+/// One binding with an axis rather than a `PointerX`/`PointerY` pair: the two
+/// would be the same variant twice, and a rebind menu listing both as unrelated
+/// sources is a menu that has to explain why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerAxis {
+    /// Horizontal: −1.0 at the left edge of the surface, +1.0 at the right.
+    X,
+    /// Vertical: −1.0 at the **bottom** edge, +1.0 at the top.
+    Y,
+}
+
 /// A binding source: what raw input triggers this action.
 ///
 /// For P2 only keyboard and mouse are supported; gamepad lands at P10 and
-/// touch post-MVP.
+/// multi-touch post-MVP. A single touch contact needs nothing extra — the
+/// platforms deliver it as an ordinary pointer, so [`Binding::MouseButton`] and
+/// [`Binding::PointerPosition`] are what a phone plays a game through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Binding {
     /// A single key.
@@ -103,6 +133,41 @@ pub enum Binding {
     MouseMotion,
     /// Mouse scroll wheel.
     MouseScroll,
+    /// Where the pointer **is**, normalised to the surface it is over: −1.0 at
+    /// one edge, +1.0 at the other, with +X right and +Y up.
+    ///
+    /// Drives an [`ActionKind::Axis1`], whose −1…1 range is already exactly a
+    /// normalised coordinate. Feeding an `Axis2` instead would put a *place* in
+    /// the same value as [`Binding::Wasd`]'s *direction*, and a consumer handed
+    /// `(0.5, 0.0)` could not tell "half way to the right edge" from "moving
+    /// right at half speed"; a fourth [`ActionKind`] for one binding would be a
+    /// whole value shape for a case `Axis1` already covers. Any other kind
+    /// ignores this binding, as [`Binding::MouseMotion`] does on a button.
+    ///
+    /// **Normalised, not pixels**, because pixels are the surface's business:
+    /// a device-pixel coordinate makes every consumer redo the DPI arithmetic
+    /// the windowing layer already did, and get it wrong on exactly the displays
+    /// nobody develops on. What the consumer still owns is the step from the
+    /// surface to its own world — a camera's half width is not the map's to
+    /// know.
+    ///
+    /// **A pointer that leaves keeps its last position.** Leaving is not a
+    /// command: the platform reports it with no coordinate at all, so there is
+    /// nothing to resolve, and an axis that recentred itself would walk a
+    /// paddle to the middle of the field every time a finger lifted.
+    ///
+    /// **On an axis that also has a relative source** — a [`Binding::KeyAxis`],
+    /// a [`Binding::MouseScroll`] — this one wins whenever the pointer has a
+    /// position, because summing them would add a place to a rate and produce
+    /// neither. That is a resolution, not an arbitration: a consumer whose
+    /// keyboard means something genuinely different from its pointer (a paddle
+    /// driven left at a speed, versus a paddle put at a coordinate) declares two
+    /// actions and picks between them with
+    /// [`Axis1Action::pointer_moved`].
+    PointerPosition {
+        /// Which coordinate this action reads.
+        axis: PointerAxis,
+    },
     /// Two keys driving one 1-D axis: `negative` contributes −1.0, `positive`
     /// +1.0, and both at once cancel.
     ///
@@ -211,7 +276,10 @@ impl ActionSlot {
                 a.just_pressed = false;
                 a.just_released = false;
             }
-            ActionValue::Axis1(a) => a.value = 0.0,
+            ActionValue::Axis1(a) => {
+                a.value = 0.0;
+                a.pointer_moved = false;
+            }
             ActionValue::Axis2(a) => {
                 a.x = 0.0;
                 a.y = 0.0;
@@ -264,6 +332,14 @@ pub struct ActionMap {
     held_buttons: HashSet<PointerButton>,
     mouse_delta: (f32, f32),
     scroll_delta: (f32, f32),
+    /// Where the pointer is, normalised to the surface, or `None` until one has
+    /// ever reported a position.
+    ///
+    /// Not cleared by [`ActionMap::begin_tick`] and not cleared when the pointer
+    /// leaves — unlike the two deltas above, this is a *level* and it is the
+    /// last thing the player actually asked for. See
+    /// [`Binding::PointerPosition`].
+    pointer: Option<(f32, f32)>,
 
     /// Seconds elapsed since creation (advanced by `begin_tick`).
     ///
@@ -285,6 +361,7 @@ impl ActionMap {
             held_buttons: HashSet::new(),
             mouse_delta: (0.0, 0.0),
             scroll_delta: (0.0, 0.0),
+            pointer: None,
             elapsed: 0.0,
         }
     }
@@ -388,7 +465,10 @@ impl ActionMap {
                 left,
                 right,
             } => *up == key || *down == key || *left == key || *right == key,
-            Binding::MouseButton(_) | Binding::MouseMotion | Binding::MouseScroll => false,
+            Binding::MouseButton(_)
+            | Binding::MouseMotion
+            | Binding::MouseScroll
+            | Binding::PointerPosition { .. } => false,
         });
     }
 
@@ -430,10 +510,52 @@ impl ActionMap {
         self.resolve_matching(|b| matches!(b, Binding::MouseScroll));
     }
 
+    /// Feed the pointer's position, normalised to the surface: −1.0 at one edge
+    /// and +1.0 at the other, +X right and +Y up.
+    ///
+    /// The caller does the conversion because the caller is the only thing that
+    /// knows the surface — see [`Binding::PointerPosition`], which also says why
+    /// a pointer that *leaves* is not reported here at all.
+    ///
+    /// A coordinate equal to the one already held is dropped, so
+    /// [`Axis1Action::pointer_moved`] means the pointer moved rather than that
+    /// an event arrived. Non-finite coordinates are dropped like
+    /// [`ActionMap::mouse_motion`]'s deltas: a `NaN` would poison every
+    /// comparison downstream of the axis.
+    pub fn pointer_position(&mut self, x: f32, y: f32) {
+        if !x.is_finite() || !y.is_finite() {
+            return;
+        }
+        let moved = Some((x, y));
+        if self.pointer == moved {
+            return;
+        }
+        self.pointer = moved;
+
+        for i in 0..self.slots.len() {
+            let slot = &self.slots[i];
+            let drives = slot
+                .decl
+                .bindings
+                .iter()
+                .any(|b| matches!(b, Binding::PointerPosition { .. }));
+            if !slot.enabled || !drives {
+                continue;
+            }
+            self.resolve_one(i);
+            // Set here rather than in `resolve_one`, which also runs from
+            // `begin_tick`: an edge raised by re-resolving an unchanged value
+            // would be raised on every tick forever.
+            if let ActionValue::Axis1(axis) = &mut self.slots[i].value {
+                axis.pointer_moved = true;
+            }
+        }
+    }
+
     /// Called at the start of each server tick.
     ///
-    /// - Resets per-frame edge flags (`just_pressed`, `just_released`) on every
-    ///   button action.
+    /// - Resets per-frame edge flags (`just_pressed`, `just_released` on every
+    ///   button action, `pointer_moved` on every 1-D axis).
     /// - Zeroes accumulated mouse-motion and scroll deltas.
     /// - Advances the internal clock by `dt` seconds so that [`ButtonState::Held`]
     ///   durations are up-to-date next time a button action is resolved.
@@ -456,8 +578,10 @@ impl ActionMap {
             if !self.slots[i].enabled {
                 continue;
             }
-            if let ActionValue::Button(a) = &mut self.slots[i].value {
-                a.reset_edges();
+            match &mut self.slots[i].value {
+                ActionValue::Button(a) => a.reset_edges(),
+                ActionValue::Axis1(a) => a.pointer_moved = false,
+                ActionValue::Axis2(_) => {}
             }
             // Re-resolve to update Held duration and zero out axis deltas.
             self.resolve_one(i);
@@ -580,6 +704,7 @@ impl ActionMap {
         let held_buttons = &self.held_buttons;
         let mouse_delta = self.mouse_delta;
         let scroll_delta = self.scroll_delta;
+        let pointer = self.pointer;
         let elapsed = self.elapsed;
 
         let slot = &mut self.slots[idx];
@@ -591,7 +716,9 @@ impl ActionMap {
                 let down = bindings.iter().any(|b| match b {
                     Binding::Key(k) => held_keys.contains(k),
                     Binding::MouseButton(b) => held_buttons.contains(b),
-                    Binding::MouseMotion | Binding::MouseScroll => false,
+                    Binding::MouseMotion
+                    | Binding::MouseScroll
+                    | Binding::PointerPosition { .. } => false,
                     Binding::KeyAxis { negative, positive } => {
                         held_keys.contains(negative) || held_keys.contains(positive)
                     }
@@ -637,28 +764,47 @@ impl ActionMap {
                 }
             }
             ActionKind::Axis1 => {
-                let mut value: f32 = 0.0;
+                // The absolute source, if this action has one and a pointer has
+                // ever reported a position. It **replaces** the relative
+                // contributions below rather than adding to them: a place and a
+                // rate do not sum. See [`Binding::PointerPosition`].
+                let absolute = pointer.and_then(|(px, py)| {
+                    bindings.iter().find_map(|binding| match binding {
+                        Binding::PointerPosition { axis } => Some(match axis {
+                            PointerAxis::X => px,
+                            PointerAxis::Y => py,
+                        }),
+                        _ => None,
+                    })
+                });
 
-                for binding in bindings {
-                    match binding {
-                        Binding::MouseScroll => {
-                            value += scroll_delta.1;
-                        }
-                        Binding::Key(k) if held_keys.contains(k) => {
-                            value += 1.0;
-                        }
-                        Binding::KeyAxis { negative, positive } => {
-                            if held_keys.contains(negative) {
-                                value -= 1.0;
+                let mut value: f32 = absolute.unwrap_or(0.0);
+
+                if absolute.is_none() {
+                    for binding in bindings {
+                        match binding {
+                            Binding::MouseScroll => {
+                                value += scroll_delta.1;
                             }
-                            if held_keys.contains(positive) {
+                            Binding::Key(k) if held_keys.contains(k) => {
                                 value += 1.0;
                             }
+                            Binding::KeyAxis { negative, positive } => {
+                                if held_keys.contains(negative) {
+                                    value -= 1.0;
+                                }
+                                if held_keys.contains(positive) {
+                                    value += 1.0;
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
 
+                // The surface's edge is the axis's end, whatever the caller
+                // passed: a coordinate outside it is a pointer outside the
+                // window, not a stronger command.
                 value = value.clamp(-1.0, 1.0);
 
                 let action = match &mut slot.value {
@@ -740,6 +886,7 @@ impl std::fmt::Debug for ActionMap {
             )
             .field("held_keys", &self.held_keys.len())
             .field("held_buttons", &self.held_buttons.len())
+            .field("pointer", &self.pointer)
             .field("elapsed", &self.elapsed)
             .finish_non_exhaustive()
     }
@@ -1230,6 +1377,175 @@ mod tests {
         assert_eq_axis1(v, -1.0);
     }
 
+    // -- ActionMap: absolute pointer position --------------------------------
+
+    fn decl_axis1_pointer(name: &str, axis: PointerAxis) -> ActionDecl {
+        ActionDecl {
+            name: name.to_owned(),
+            kind: ActionKind::Axis1,
+            bindings: vec![Binding::PointerPosition { axis }],
+        }
+    }
+
+    /// **Each axis reads its own coordinate, at the value it was given.**
+    ///
+    /// Two actions on one map and asymmetric coordinates, because that is what
+    /// a swapped axis fails: a pointer at `(0.5, 0.5)` puts the right answer on
+    /// both of them.
+    #[test]
+    fn a_pointer_position_lands_on_the_axis_it_is_bound_to() {
+        let mut map = ActionMap::new();
+        map.declare(decl_axis1_pointer("aim_x", PointerAxis::X));
+        map.declare(decl_axis1_pointer("aim_y", PointerAxis::Y));
+
+        assert_eq!(
+            map.axis1("aim_x"),
+            0.0,
+            "an axis nothing has pointed at yet is idle, not at the left edge",
+        );
+
+        map.begin_tick(TICK);
+        map.pointer_position(-0.75, 0.25);
+
+        assert_eq_axis1(map.action("aim_x").unwrap(), -0.75);
+        assert_eq_axis1(map.action("aim_y").unwrap(), 0.25);
+    }
+
+    /// **The position is a level: it survives ticks, unlike a scroll delta.**
+    ///
+    /// This is also what "a pointer that leaves keeps its last position" means
+    /// mechanically — leaving reports no coordinate, so nothing here is fed and
+    /// the axis is exactly where the last real position put it.
+    #[test]
+    fn an_absolute_axis_holds_its_position_across_ticks() {
+        let mut map = ActionMap::new();
+        map.declare(decl_axis1_pointer("aim", PointerAxis::X));
+        map.declare(decl_axis1_scroll("zoom"));
+
+        map.begin_tick(TICK);
+        map.pointer_position(0.6, 0.0);
+        map.mouse_scroll(0.0, 1.0);
+        assert_eq_axis1(map.action("aim").unwrap(), 0.6);
+        assert_eq_axis1(map.action("zoom").unwrap(), 1.0);
+
+        map.begin_tick(TICK);
+        assert_eq_axis1(map.action("zoom").unwrap(), 0.0);
+        assert_eq_axis1(map.action("aim").unwrap(), 0.6);
+    }
+
+    /// **`pointer_moved` is an edge, and it is about the pointer moving.**
+    ///
+    /// A tick that re-sends the coordinate the axis already holds raises
+    /// nothing: a consumer arbitrating between the pointer and the keyboard
+    /// reads this as "the player just asked for this", and a browser that
+    /// re-reports a resting cursor would otherwise hold the keyboard off
+    /// forever.
+    #[test]
+    fn the_pointer_edge_is_one_tick_wide_and_only_for_a_new_position() {
+        let mut map = ActionMap::new();
+        map.declare(decl_axis1_pointer("aim", PointerAxis::X));
+
+        let moved = |map: &ActionMap| match map.action("aim") {
+            Some(ActionValue::Axis1(axis)) => axis.pointer_moved,
+            other => panic!("expected Axis1, got {other:?}"),
+        };
+
+        map.begin_tick(TICK);
+        assert!(!moved(&map), "nothing has pointed anywhere yet");
+        map.pointer_position(0.2, 0.0);
+        assert!(moved(&map), "the pointer moved on this tick");
+
+        map.begin_tick(TICK);
+        assert!(!moved(&map), "the edge is one tick wide");
+        assert_eq_axis1(map.action("aim").unwrap(), 0.2);
+
+        map.pointer_position(0.2, 0.0);
+        assert!(
+            !moved(&map),
+            "the same coordinate again is not the player asking for anything",
+        );
+        map.pointer_position(0.2, 0.9);
+        assert!(
+            moved(&map),
+            "the other coordinate changing is still the pointer moving",
+        );
+    }
+
+    /// **An absolute source replaces the relative ones on the same axis.**
+    ///
+    /// Summing them would add a place to a rate. The keyboard drives the axis
+    /// while no pointer has ever reported a position, and stops the moment one
+    /// has — which is the documented reason a game whose keys mean something
+    /// *different* from its pointer declares two actions instead of one.
+    #[test]
+    fn an_absolute_binding_replaces_the_relative_ones_on_the_same_axis() {
+        let mut map = ActionMap::new();
+        map.declare(ActionDecl {
+            name: "slide".to_owned(),
+            kind: ActionKind::Axis1,
+            bindings: vec![
+                Binding::KeyAxis {
+                    negative: KeyCode::ArrowLeft,
+                    positive: KeyCode::ArrowRight,
+                },
+                Binding::PointerPosition {
+                    axis: PointerAxis::X,
+                },
+            ],
+        });
+
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::ArrowRight, true);
+        assert_eq_axis1(map.action("slide").unwrap(), 1.0);
+
+        map.pointer_position(-0.5, 0.0);
+        assert_eq_axis1(map.action("slide").unwrap(), -0.5);
+    }
+
+    /// **The surface's edge is the end of the axis.**
+    #[test]
+    fn a_pointer_outside_the_surface_is_clamped_to_its_edge() {
+        let mut map = ActionMap::new();
+        map.declare(decl_axis1_pointer("aim", PointerAxis::X));
+
+        map.pointer_position(4.0, 0.0);
+        assert_eq_axis1(map.action("aim").unwrap(), 1.0);
+
+        map.pointer_position(-4.0, 0.0);
+        assert_eq_axis1(map.action("aim").unwrap(), -1.0);
+    }
+
+    /// **A pointer binding joins the keys on a button, it does not replace
+    /// them.**
+    ///
+    /// The flap that a phone taps and a keyboard presses is one action with
+    /// both bindings on it, and each still fires on its own. A binding list
+    /// that had been overwritten rather than appended to passes every test that
+    /// only ever presses the pointer.
+    #[test]
+    fn a_pointer_button_joins_the_keys_bound_to_the_same_action() {
+        let mut map = ActionMap::new();
+        map.declare(ActionDecl {
+            name: "flap".to_owned(),
+            kind: ActionKind::Button,
+            bindings: vec![
+                Binding::Key(KeyCode::Space),
+                Binding::MouseButton(PointerButton::Left),
+            ],
+        });
+
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::Space, true);
+        assert!(map.just_pressed("flap"), "the key still flaps");
+        map.key_event(KeyCode::Space, false);
+
+        map.begin_tick(TICK);
+        map.mouse_button(PointerButton::Left, true);
+        assert!(map.just_pressed("flap"), "and so does the tap");
+        map.mouse_button(PointerButton::Left, false);
+        assert!(map.just_released("flap"));
+    }
+
     // -- begin_tick resets edges and deltas ----------------------------------
 
     #[test]
@@ -1573,6 +1889,22 @@ mod tests {
         assert_eq_axis2(map.action("look").unwrap(), 3.0, -4.0);
     }
 
+    /// A non-finite pointer coordinate must not become the axis a paddle is
+    /// positioned from — and must not evict the last good position either.
+    #[test]
+    fn a_non_finite_pointer_position_is_dropped_and_the_last_one_survives() {
+        let mut map = ActionMap::new();
+        map.declare(decl_axis1_pointer("aim", PointerAxis::X));
+
+        map.pointer_position(0.4, 0.0);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            map.pointer_position(bad, 0.0);
+            map.pointer_position(0.0, bad);
+        }
+
+        assert_eq_axis1(map.action("aim").unwrap(), 0.4);
+    }
+
     /// A non-finite `dt` must not poison the clock every `Held` duration is
     /// measured against.
     #[test]
@@ -1886,7 +2218,13 @@ mod tests {
 
     #[test]
     fn axis_defaults_are_zero() {
-        assert_eq!(Axis1Action::default(), Axis1Action { value: 0.0 });
+        assert_eq!(
+            Axis1Action::default(),
+            Axis1Action {
+                value: 0.0,
+                pointer_moved: false,
+            }
+        );
         assert_eq!(Axis2Action::default(), Axis2Action { x: 0.0, y: 0.0 });
     }
 

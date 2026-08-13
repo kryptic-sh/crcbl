@@ -4,16 +4,27 @@
   one appears on every demo's controls list from this file alone.
 
   Goes inside a page's `<ul class="keys">`, after that game's own rows.
+
+  The rows are `pointer-only` and the last one is `touch-only`, because all
+  three of these are **keys** and a phone has none: the loop's reserved keys are
+  the one part of every demo that touch cannot reach, and the pause menu they
+  open is reachable only through Escape. Saying so is better than printing
+  <kbd>F11</kbd> at someone with no F11. On-screen controls are the fix and they
+  are `crcbl-ui` widgets — a slice of their own, not a row in this file.
 -->
-<li class="key-row">
+<li class="key-row pointer-only">
   <span>Pause and resume</span>
   <span><kbd>Esc</kbd></span>
 </li>
-<li class="key-row">
+<li class="key-row pointer-only">
   <span>Fullscreen</span>
   <span><kbd>F11</kbd></span>
 </li>
-<li class="key-row">
+<li class="key-row pointer-only">
   <span>Debug overlay</span>
   <span><kbd>F3</kbd></span>
+</li>
+<li class="key-row touch-only">
+  <span>Pause, fullscreen and the debug overlay</span>
+  <span>keyboard only</span>
 </li>

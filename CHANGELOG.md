@@ -334,6 +334,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Flappy and breakout play on a touchscreen.** Flappy taps to flap; breakout's
+  paddle follows a finger and a tap serves. `Binding::PointerPosition { axis }`
+  is new and feeds an `Axis1` normalised to the surface at −1…+1 — not an
+  `Axis2`, which would put a _place_ in the same value shape as
+  `Binding::Wasd`'s _direction_. Within one action an absolute binding replaces
+  the relative ones rather than summing, because a place plus a rate is neither.
+
+  **`HostedGame::pointer_event` is new, and it is why none of this worked
+  before.** Touch reached the shell, but the loop swallowed every pointer event
+  — `Pending::observe` returned `Handled::Loop` for `ShellEvent::Button` and a
+  game could only be handed keys, so no pointer binding could ever have fired.
+
+  The pointer wins on the tick it moves and the keyboard owns every other tick,
+  so arrow keys still work with a cursor over the field; a pointer that leaves
+  keeps its last position, which is what stops the paddle walking to the middle
+  on every tap. The canvas takes `touch-action: none`, without which the browser
+  claims the gesture mid-drag.
+
+  **Horde stays keyboard-only** — a movement stick needs on-screen controls and
+  real multi-touch — and asteroids is excluded on purpose: three concurrent
+  controls have no phone layout better than the keyboard one.
+
 - **The culling stats come back off the GPU, so the culling win is visible.** A
   ring of `HostReadback` buffers, one per frame in flight plus one, fed by a
   copy the render graph schedules and resolved only when a slot comes back round

@@ -33,7 +33,7 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crcbl::core::input::KeyCode;
+use crcbl::core::input::{KeyCode, PointerButton};
 use crcbl::ecs::{Entity, GameModule, World};
 use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
 use crcbl::math::DVec3;
@@ -767,6 +767,19 @@ impl crcbl::ui::DebugModule for CourseStats {
     }
 }
 
+/// One raw input event, waiting for the tick that will replay it.
+///
+/// One queue rather than one per device: the order the player pressed things in
+/// is the order the action map has to see them in, and two queues drained one
+/// after the other lose it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Queued {
+    /// A key went down or came up.
+    Key(KeyCode, bool),
+    /// The pointer's primary button went down or came up — a click, or a tap.
+    Button(bool),
+}
+
 pub struct Game {
     pub bird_entity: Entity,
     action_map: ActionMap,
@@ -782,8 +795,8 @@ pub struct Game {
     tick_period: Duration,
     sim_time: Duration,
     ticks_run: u64,
-    /// Queued key events from the shell pump, replayed after `begin_tick`.
-    pending_keys: Vec<(KeyCode, bool)>,
+    /// Queued raw input from the shell pump, replayed after `begin_tick`.
+    pending_input: Vec<Queued>,
     pub audio: crate::audio::Audio,
     pub best: crcbl::store::record::Record,
     /// Mirrors of the shared state, refreshed after each tick so the render and
@@ -876,8 +889,17 @@ impl Game {
             name: ACTION_FLAP.into(),
             kind: ActionKind::Button,
             // Two keys for one action, because the browser demo is played with
-            // whichever one the visitor tries first.
-            bindings: vec![Binding::Key(KeyCode::Space), Binding::Key(KeyCode::ArrowUp)],
+            // whichever one the visitor tries first — and the pointer, because
+            // a phone has neither. One tap is the whole of this game's input,
+            // so binding the button beside the keys is all a touchscreen needs:
+            // the platforms deliver a contact as an ordinary pointer, and the
+            // action map ORs its bindings, so the key and the tap each still
+            // flap on their own.
+            bindings: vec![
+                Binding::Key(KeyCode::Space),
+                Binding::Key(KeyCode::ArrowUp),
+                Binding::MouseButton(PointerButton::Left),
+            ],
         });
         action_map.declare(ActionDecl {
             name: ACTION_RESTART.into(),
@@ -936,7 +958,7 @@ impl Game {
             tick_period,
             sim_time: Duration::ZERO,
             ticks_run: 0,
-            pending_keys: Vec::new(),
+            pending_input: Vec::new(),
             audio: crate::audio::Audio::new(headless),
             best: crate::best::open(headless),
             state: GameState::WaitingToStart,
@@ -972,7 +994,16 @@ impl Game {
     /// late is a flap that did not happen, because there is nothing else in the
     /// input to smooth over it.
     pub fn key_event(&mut self, key: KeyCode, pressed: bool) {
-        self.pending_keys.push((key, pressed));
+        self.pending_input.push(Queued::Key(key, pressed));
+    }
+
+    /// Queue a tap — or a click — for replay at the start of the next tick.
+    ///
+    /// The pointer's half of [`key_event`](Self::key_event), queued for the same
+    /// reason and even more urgently: a flap is an edge, and this is the only
+    /// input a phone has.
+    pub fn pointer_button(&mut self, pressed: bool) {
+        self.pending_input.push(Queued::Button(pressed));
     }
 
     /// Advances the simulation by exactly one fixed tick.
@@ -982,8 +1013,13 @@ impl Game {
     pub fn tick(&mut self) {
         let dt = self.tick_period.as_secs_f64();
         self.action_map.begin_tick(dt as f32);
-        for (key, pressed) in std::mem::take(&mut self.pending_keys) {
-            self.action_map.key_event(key, pressed);
+        for queued in std::mem::take(&mut self.pending_input) {
+            match queued {
+                Queued::Key(key, pressed) => self.action_map.key_event(key, pressed),
+                Queued::Button(pressed) => {
+                    self.action_map.mouse_button(PointerButton::Left, pressed);
+                }
+            }
         }
 
         let intent = Intent {
@@ -1369,6 +1405,64 @@ mod tests {
             "the tick that consumed the press must be the tick that flapped: {}",
             harness.game.bird_velocity.y
         );
+    }
+
+    /// **A tap is a flap.**
+    ///
+    /// The whole of this game on a phone: the pointer button is bound beside
+    /// the two keys, so a contact the platform reports as an ordinary pointer
+    /// press reaches the same action. Asserted on the bird's velocity rather
+    /// than on the state, because starting a run is something a stuck action
+    /// does once and a working one does on every tap — the second flap below is
+    /// what tells them apart.
+    #[test]
+    fn a_tap_flaps_the_way_a_key_does() {
+        let mut harness = Harness::new(60, 60);
+        harness.game.pointer_button(true);
+        harness.game.pointer_button(false);
+        harness.game.tick();
+        assert_eq!(harness.game.state, GameState::Playing, "the tap started it");
+        assert!(
+            (harness.game.bird_velocity.y - FLAP_SPEED).abs() < 1e-9,
+            "the tick that consumed the tap must be the tick that flapped: {}",
+            harness.game.bird_velocity.y,
+        );
+
+        // Fall for a while, then tap again: an action left holding the button
+        // raises no second edge, which is what a missing release looks like.
+        for _ in 0..10 {
+            harness.game.tick();
+        }
+        assert!(
+            harness.game.bird_velocity.y < FLAP_SPEED,
+            "the bird has to be past its peak climb, or the assertion below \
+             passes without a second flap",
+        );
+        harness.game.pointer_button(true);
+        harness.game.tick();
+        assert!(
+            (harness.game.bird_velocity.y - FLAP_SPEED).abs() < 1e-9,
+            "the second tap did not flap: {}",
+            harness.game.bird_velocity.y,
+        );
+    }
+
+    /// **The keys are still bound, next to the tap.**
+    ///
+    /// A binding list that had been overwritten rather than appended to passes
+    /// every test above.
+    #[test]
+    fn both_keys_still_flap_now_that_the_pointer_is_bound_too() {
+        for key in [KeyCode::Space, KeyCode::ArrowUp] {
+            let mut harness = Harness::new(60, 60);
+            harness.game.key_event(key, true);
+            harness.game.tick();
+            assert!(
+                (harness.game.bird_velocity.y - FLAP_SPEED).abs() < 1e-9,
+                "{key:?} stopped flapping: {}",
+                harness.game.bird_velocity.y,
+            );
+        }
     }
 
     /// Gravity is real: an un-flapped bird falls, and falls faster the longer it

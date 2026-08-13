@@ -490,10 +490,46 @@ a.feat:hover {
      focus ring drawn over a game viewport reads as a rendering artifact. The
      frame lights up instead: same signal, right idiom. */
   outline: none;
+  /* The single line that makes a phone able to play any of this. Without it the
+     browser claims a touch for scrolling or zooming the page: `pointermove`
+     stops arriving mid-drag, the gesture ends in a `pointercancel`, and the
+     demo looks dead even though every event is wired. It also takes double-tap
+     zoom off the canvas, which is what a game bound to taps has instead of a
+     `user-scalable=no` on the whole document — that would suppress zoom on the
+     prose too, and iOS has ignored it since iOS 10 anyway. */
+  touch-action: none;
+  /* A drag across a canvas otherwise starts selecting the page around it, and
+     a long press raises the OS callout menu over the game. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 .stage:focus-within {
   border-color: var(--accent-dim);
+}
+
+/* ── one page, two input stories ─────────────────────────────────────────────
+   A phone visitor has no keyboard and nothing to click, so "click the canvas
+   first" and a list of function keys are instructions they cannot follow. The
+   copy for each is written out and the media query picks one: `(hover: none)
+   and (pointer: coarse)` is the pair that means a finger — coarse alone also
+   matches a TV remote, and hover alone matches a stylus. */
+
+.touch-only {
+  display: none;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  .touch-only {
+    /* `revert`, not `block`: these are `<li>` as often as `<div>`, and a list
+       item forced to `block` loses its row layout. */
+    display: revert;
+  }
+
+  .pointer-only {
+    display: none;
+  }
 }
 
 .status {

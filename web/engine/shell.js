@@ -215,14 +215,35 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     syncSize(true);
   }
 
+  /**
+   * Whether this pointer is the one the engine's single-pointer seam models.
+   *
+   * `crcbl-shell`'s `ShellEvent` has no contact id and no phase, so a second
+   * finger is not a second pointer to it — it is the same one teleporting. The
+   * browser already names the one to keep: `isPrimary` is the first contact of
+   * a gesture, and is always true for a mouse or a pen. Multi-touch is a seam
+   * change and its own slice; dropping the extra contacts is what keeps a
+   * two-finger fumble from moving the paddle to the wrong finger and releasing
+   * the button under the first.
+   *
+   * @param {PointerEvent} event
+   */
+  function isPrimary(event) {
+    // `undefined` on the PointerEvent-less paths a test double can take; only an
+    // explicit `false` is a secondary contact.
+    return event.isPrimary !== false;
+  }
+
   /** @param {PointerEvent} event */
   function onPointerMove(event) {
+    if (!isPrimary(event)) return;
     const [x, y] = position(event);
     exports.__crcbl_web_pointer_motion(canvasId, event.timeStamp, x, y);
   }
 
   /** @param {PointerEvent} event */
   function onPointerButton(event) {
+    if (!isPrimary(event)) return;
     const [x, y] = position(event);
     const down = event.type === 'pointerdown';
     // Clicking the canvas is how a player expects to give it the keyboard, and
@@ -235,6 +256,31 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
       y,
       event.button,
       modifiers(event) | (down ? STATE_EDGE : 0),
+    );
+  }
+
+  /**
+   * A gesture the browser took away, reported as the button coming up.
+   *
+   * `pointercancel` fires **instead of** `pointerup` — the OS claimed the touch
+   * for a system gesture, or the contact count changed — so without this the
+   * engine is left holding the button down for good. A held button raises no
+   * press *edge*, so the symptom is not a stuck control: it is a game whose tap
+   * silently stops working, on touch only, and only after something else on the
+   * phone interrupted it.
+   *
+   * @param {PointerEvent} event
+   */
+  function onPointerCancel(event) {
+    if (!isPrimary(event)) return;
+    const [x, y] = position(event);
+    exports.__crcbl_web_pointer_button(
+      canvasId,
+      event.timeStamp,
+      x,
+      y,
+      event.button,
+      modifiers(event),
     );
   }
 
@@ -258,6 +304,7 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
 
   /** @param {PointerEvent} event */
   function onPointerFocus(event) {
+    if (!isPrimary(event)) return;
     const [x, y] = position(event);
     exports.__crcbl_web_pointer_focus(
       canvasId,
@@ -292,6 +339,7 @@ export function attachShell({ exports, memory, canvas, canvasId }) {
     [canvas, 'pointermove', onPointerMove, undefined],
     [canvas, 'pointerdown', onPointerButton, undefined],
     [canvas, 'pointerup', onPointerButton, undefined],
+    [canvas, 'pointercancel', onPointerCancel, undefined],
     [canvas, 'pointerenter', onPointerFocus, undefined],
     [canvas, 'pointerleave', onPointerFocus, undefined],
     // `passive: false` or `preventDefault` is ignored and the page scrolls.

@@ -5808,75 +5808,91 @@ layout error — run on every adapter, so that half is not skip-shaped.
   its own pass with its own `DrawGen` and its own history. Not done because
   nothing yet shows the near cascade wants a different figure from the far one.
 
-## Mobile input for the demo games, and how much of it is already free
+## Mobile input: flappy and breakout play on a touchscreen; horde does not
 
-The Pages site is the main way anyone sees this engine, and a phone visitor can
-currently do nothing at all. Requested for **breakout, horde and flappy** — the
-three whose controls survive a touchscreen.
+Flappy taps to flap and breakout's paddle follows a finger. **Horde is still
+keyboard-only** — its movement is a stick, which needs on-screen controls as
+`crcbl-ui` widgets emitting virtual-device events and real multi-touch, and that
+is topic 19's post-MVP row rather than a binding. **Asteroids is deliberately
+excluded**: rotate, thrust and fire are three concurrent controls with no room
+on a phone screen, and every layout for that shape is worse than the keyboard
+one; it would want a redesigned control scheme, not buttons bolted on.
 
-**The surprise from surveying it: single touch already reaches the engine.**
-`web/engine/shell.js` listens on
-`pointerdown`/`pointermove`/`pointerup`/`pointerenter`, and Pointer Events unify
-mouse, pen and touch — so a tap or drag on a phone already arrives as a
-`ShellEvent::Button` / `PointerMotion` today, with no seam change and no new
-backend. **What is missing is that no sample binds pointer input at all**: every
-one of them declares `Binding::Key(..)` and nothing else. So the cheap half of
-this is bindings and page ergonomics, not plumbing.
+**The survey that preceded this work was wrong about the cheap half.** It said
+single touch already reached the engine and that only bindings and page
+ergonomics were missing. Touch reached the _shell_, but the loop swallowed every
+pointer event — `Pending::observe` returned `Handled::Loop` for
+`ShellEvent::Button` and `HostedGame` had only `key_event`, so no binding in any
+sample could ever have fired. `HostedGame::pointer_event` and the routing in
+`Loop::frame_body` are new. Worth remembering as a shape: "the events arrive"
+was true and told us nothing about whether anything consumed them.
 
-### Per game, cheapest first
+### Decisions taken
 
-- **flappy — nearly free.** One action, one tap. `Binding::MouseButton` on the
-  flap action and a phone works. This is the one to do first, and it is the
-  proof that the pointer path carries touch.
-- **breakout — needs one new binding kind.** The paddle wants an **absolute**
-  pointer position, and `Binding` has `MouseButton`, `MouseMotion` (a _delta_)
-  and `MouseScroll` — nothing that says "where the finger is". A drag composed
-  from deltas works but drifts and cannot be re-grabbed. Adding
-  `Binding::PointerPosition` (or an `Axis1` fed by it) is the honest fix and is
-  small; the alternative is a game-side hack in one sample, which is the wrong
-  place.
-- **horde — needs the real thing.** Movement is a stick, so this is topic 19's
-  post-MVP row: on-screen controls as `crcbl-ui` widgets emitting virtual-device
-  events, a bindable device like any other. Multi-touch matters here (move and
-  aim at once) and that is where single-pointer emulation genuinely stops being
-  enough.
-- **asteroids — deliberately not in scope**, and the reason should be recorded
-  rather than inferred: rotate, thrust and fire are three concurrent controls on
-  a screen with no room for them, and every phone layout for that shape is worse
-  than the keyboard one. If it is ever wanted, it wants a redesigned control
-  scheme rather than buttons bolted to the existing one.
-- **hud** — no game input by design; already recorded.
+- **`Binding::PointerPosition { axis }` feeding an `Axis1`**, normalised to the
+  surface at −1…+1 with +X right and +Y up. Not an `Axis2`, which would put a
+  _place_ in the same value shape as `Binding::Wasd`'s _direction_ — handed
+  `(0.5, 0.0)` a consumer cannot tell "half way right" from "moving right at
+  half speed". The pixel→normalised step happens once in the engine loop; the
+  surface→world step stays in the game, because the play field is not the
+  canvas.
+- **An absolute binding replaces the relative ones within one `Axis1`** rather
+  than summing: a place plus a rate is neither.
+- **The pointer wins on the tick it moves; the keyboard owns every other tick.**
+  A resting mouse is not a command, so arrow keys still work on a desktop with a
+  cursor over the field, and a lifted finger has not asked for anything. That is
+  what `Axis1Action::pointer_moved` exists for — the edge an absolute source has
+  and a relative one does not.
+- **A pointer that leaves keeps its last position.** A leave carries no
+  coordinate so nothing is fed to the map at all, which is why the paddle stays
+  put instead of walking to the middle on every tap — a touch pointer is
+  destroyed on `pointerup`, so a lift is a leave.
+- **Breakout's launch is bound to the pointer too.** A lost life returns to
+  `WaitingForLaunch` with no menu on screen, so without it a phone could move
+  the paddle and never serve again.
+- **The viewport meta is unchanged and zoom is not suppressed.** `layout.html`
+  is shared with every prose page, iOS Safari has ignored `user-scalable=no`
+  since iOS 10, and `touch-action: none` on the canvas already kills double-tap
+  zoom — which is the actual complaint. Suppressing it would be an accessibility
+  regression that does nothing on the platform it targets.
 
-### Page ergonomics, which nothing has
+### Three touch bugs the survey did not predict
 
-- **`touch-action: none` on the canvas.** Without it the browser claims the
-  gesture for scrolling and zooming, and `pointermove` stops arriving mid-drag.
-  This is the single most likely reason a first attempt "does not work" despite
-  the events being wired.
-- `layout.html` sets `width=device-width, initial-scale=1` and nothing else; a
-  game canvas also wants zoom suppressed so a double-tap does not scale the
-  page.
-- **The "click the canvas to focus" affordance is meaningless on touch**, and
-  the `demo-window.html` keys partial tells a phone user to press keys they do
-  not have. Both need a touch-aware variant.
+All were real, all are fixed, and all three are invisible to a mouse:
 
-### What the native seam still lacks
+- **`pointercancel` was unhandled.** The OS taking over a gesture leaves the
+  button down forever, and a held button raises no _edge_ — so the tap silently
+  stops working.
+- **Non-primary contacts were forwarded** into a seam with no contact ids, so a
+  second finger read as the first one teleporting.
+- **A tap that opened and closed inside one pump dropped its release** — which
+  on a phone is every tap. The first tap worked and the second did nothing.
+  Found by writing the test first and watching it fail.
 
-`ShellEvent` has `PointerMotion`, `Button`, `PointerFocus` and `Wheel` and **no
-touch variant at all** — no contact id, no phase, no multi-touch. That is fine
-for the web demos, which is what was asked for, and it is the gap to close
-before claiming mobile support generally. Topic 19 already schedules on-screen
-controls post-MVP "with mobile-web interest" and its `ActionMap` sketch already
-has a `touch:` slot, so the design exists and only the implementation is
-missing.
+### What is left
 
-### Testing
-
-The browser gate dispatches key events (`web/tools/browser-e2e.mjs`'s
-`EXPECTATIONS` carries a `key` per demo). A touch path needs its own coverage —
-synthesised pointer events with `pointerType: 'touch'` — or it will be the one
-input path nothing exercises. Note `apps/hud` already sets `key: null`, so the
-harness has a precedent for a demo whose input is not a keypress.
+- **Nothing has run on a phone**, and the browser gate cannot substitute:
+  `web/tools/browser-e2e.mjs` dispatches `Input.dispatchMouseEvent` only, so
+  `touch-action: none`, the `isPrimary` filter, `pointercancel` and the
+  `(hover: none) and (pointer: coarse)` copy have never executed in any browser
+  — only the mouse path of the same plumbing has. The fix is a group using
+  `Input.dispatchTouchEvent` (a tap, then a drag, asserting the paddle's HUD
+  value moves) plus `Emulation.setTouchEmulationEnabled` for the media query.
+  **This is the gap worth closing first.**
+- **Pause, fullscreen and the debug overlay are keyboard-only on a phone.** The
+  demo pages now say so rather than printing `F11` at someone with no keyboard;
+  making them reachable is on-screen-controls work.
+- **`ShellEvent` still has no touch variant** — no contact id, no phase, no
+  multi-touch. Fine for the web demos, and the gap to close before claiming
+  mobile support generally. Topic 19's `ActionMap` sketch already has a `touch:`
+  slot, so the design exists and only the implementation is missing.
+- **`web/engine/shell.js` is the one web file prettier would rewrite**, and it
+  was already so before this work: 350 lines of drift at `HEAD`, against
+  `demo.js`, `style.css` and the templates which all pass. Reformatting it is a
+  350-line diff unrelated to whatever change happens to touch it, so it has been
+  hand-matched to the existing style instead. Worth deciding once, deliberately.
+  Note the local wrapper prints `Prettier: All files formatted correctly`
+  **while exiting 1** — read the exit code, not the line.
 
 ## What `crcbl lod` left owed
 

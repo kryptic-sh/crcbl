@@ -2483,6 +2483,48 @@ impl PointerCapture {
     }
 }
 
+/// One frame's worth of pointer, as the *game* sees it.
+///
+/// The pointer's half of [`HostedGame::key_event`], and it is not a `ShellEvent`
+/// for the same reason that one is not: what reaches the game is what the menu
+/// and the loop did not claim, in the units a game can bind to.
+///
+/// **The position is normalised to the surface**, −1 at one edge and +1 at the
+/// other, +X right and **+Y up**. Framebuffer pixels are the loop's business: a
+/// game handed them would redo the DPI arithmetic the windowing layer already
+/// did, once per sample, and get it wrong on the displays nobody develops on. A
+/// game still owns the step from the surface to its own world — a camera's half
+/// width is not the loop's to know.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PointerUpdate {
+    /// Where the pointer moved to this frame, or `None` on a frame it did not
+    /// move.
+    ///
+    /// **A pointer that leaves the window reports `None` too**, rather than a
+    /// last position or a recentring: leaving is not a command, and a game that
+    /// was told "the pointer is now nowhere" has no better answer than the one
+    /// it already had. [`crcbl_input::Binding::PointerPosition`] holds the last
+    /// position for exactly this reason.
+    pub at: Option<glam::Vec2>,
+    /// The primary button went down this frame, over no menu.
+    pub pressed: bool,
+    /// …and came up.
+    pub released: bool,
+}
+
+/// Framebuffer pixels to the −1…1 the game binds against, +Y up.
+fn normalised(point: glam::Vec2, extent: (u32, u32)) -> glam::Vec2 {
+    let width = extent.0.max(1) as f32;
+    let height = extent.1.max(1) as f32;
+    glam::Vec2::new(
+        point.x / width * 2.0 - 1.0,
+        // Window pixels count down from the top and every game's world counts
+        // up, so the flip belongs here rather than in each game's sign that
+        // nobody can justify from the call site.
+        1.0 - point.y / height * 2.0,
+    )
+}
+
 /// What firing a menu button asks the loop to do.
 ///
 /// An action rather than a key: a button that "pressed Space" would be a menu
@@ -3200,6 +3242,26 @@ pub trait HostedGame: Sized {
     /// A key the menu did not claim.
     fn key_event(&mut self, key: crcbl_core::input::KeyCode, pressed: bool);
 
+    /// The pointer, once the menu has had its turn — see [`PointerUpdate`].
+    ///
+    /// Called only on a frame where the pointer did something — and once more
+    /// on a frame that lost focus while the button was down, which is a release
+    /// no platform sends and the loop owes. A game that binds no pointer input
+    /// never overrides this, exactly as it never overrides
+    /// [`debug_sections`](Self::debug_sections): the empty body is what "this
+    /// game is played with the keyboard" looks like, and it is a statement
+    /// about the game rather than a check that passes by doing nothing.
+    ///
+    /// **A menu on screen owns the button.** A press over one fires the widget
+    /// under it and is not delivered here, or a tap on `TRY AGAIN` would both
+    /// restart the run and flap. The *position* is delivered either way — a
+    /// place is not a command, and a paddle that stopped following the finger
+    /// while a panel was up would be a paddle the player cannot line up before
+    /// serving.
+    fn pointer_event(&mut self, pointer: PointerUpdate) {
+        let _ = pointer;
+    }
+
     /// The game action a widget id names, or `None` for an id this game's menus
     /// do not use. Never asked about a reserved id — see [`FIRST_GAME_ID`].
     fn menu_action(id: crcbl_ui::WidgetId) -> Option<Self::MenuAction>;
@@ -3341,6 +3403,16 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// Keys forwarded to the game as pressed and not yet released, so focus
     /// loss can release them — see [`lose_focus`].
     held_keys: Vec<crcbl_core::input::KeyCode>,
+    /// Whether the game was told the pointer button is down and not yet told it
+    /// came up.
+    ///
+    /// The pointer's half of [`Self::held_keys`], and it exists for the same two
+    /// repairs: a release must reach a game that was told about the press even
+    /// if a menu opened in between, and focus loss must deliver one that no
+    /// platform will send. A game left holding the button sees no *edge* on the
+    /// next tap, so the bug is not a stuck paddle — it is a button that stops
+    /// working.
+    pointer_in_game: bool,
     mode: ModeRequest,
     budget: FrameBudget,
     ticks: u64,
@@ -3389,6 +3461,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             debug: crcbl_ui::DebugOverlay::with_visible(config.debug_overlay),
             paused: false,
             held_keys: Vec::new(),
+            pointer_in_game: false,
             mode: ModeRequest::new(),
             budget: FrameBudget::new(config.frames),
             ticks: 0,
@@ -3467,6 +3540,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // is resolved here and not inside the pump: the rectangles depend on the
         // framebuffer's size, and a click checked against last frame's would
         // miss on the frame a resize lands.
+        // Before `resolve`, which is what folds this batch's position in: a
+        // frame whose pump carried no pointer event has not moved the pointer,
+        // and a game told it moved to where it already was would treat a resting
+        // cursor as the player asking for something every frame.
+        let pointer_moved = pending.pointer != self.pointer.at();
         let pointer_input = self.pointer.resolve(&pending);
         let from_pointer = self
             .menus
@@ -3475,6 +3553,29 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             if let Some(action) = MenuAction::from_id(id, G::menu_action) {
                 self.apply(action)?;
             }
+        }
+
+        // What is left of the pointer once the menu has had it. `showing` is
+        // last frame's menu for the same reason the keyboard's claim is: the
+        // panel the player tapped is the one that was on screen when they did.
+        let pressed = pending.pointer_pressed && !showing;
+        // `|| pressed` because a tap faster than a frame is one batch, and its
+        // release has to go out with the press it answers — which on a phone is
+        // every tap. Without it the game keeps the button down, and the *next*
+        // tap raises no edge: the first one works and the second does nothing,
+        // which is the shape a single-tap test cannot see.
+        let released = pending.pointer_released && (self.pointer_in_game || pressed);
+        let at = pointer_moved
+            .then_some(pending.pointer)
+            .flatten()
+            .map(|point| normalised(point, self.gpu.extent()));
+        if pressed || released || at.is_some() {
+            self.pointer_in_game = (self.pointer_in_game || pressed) && !released;
+            self.game.pointer_event(PointerUpdate {
+                at,
+                pressed,
+                released,
+            });
         }
 
         // A settings row fired this frame: hand the limit it asked for to the
@@ -3495,6 +3596,17 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             lose_focus(&mut self.held_keys, &mut self.paused, |key| {
                 game.key_event(key, false);
             });
+            // The same obligation for the button: no platform sends the release
+            // for a pointer that was down when focus left, and a game still
+            // holding it sees no edge on the next tap.
+            if self.pointer_in_game {
+                self.pointer_in_game = false;
+                self.game.pointer_event(PointerUpdate {
+                    at: None,
+                    pressed: false,
+                    released: true,
+                });
+            }
         }
         if pending.toggle_pause {
             self.paused = !self.paused;

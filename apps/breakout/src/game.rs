@@ -34,7 +34,10 @@
 //!   path the ball actually took during the tick that just ran, at whatever rate
 //!   the server was built with.
 //! * The paddle is integrated by `PADDLE_SPEED * tick_dt` per **tick**, so its
-//!   speed is a property of simulated time and not of the frame rate.
+//!   speed is a property of simulated time and not of the frame rate. A paddle
+//!   driven by a *pointer* is assigned rather than integrated — a place has no
+//!   speed — and the rate it appears to move at is the player's hand, which no
+//!   clock in here governs.
 //!
 //! [`Game`] is the client-side facade: it resolves input into an
 //! [`Intent`], hands the intent to the module, advances the server and client by
@@ -56,9 +59,9 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crcbl::core::input::KeyCode;
+use crcbl::core::input::{KeyCode, PointerButton};
 use crcbl::ecs::{Entity, GameModule, World};
-use crcbl::input::{ActionDecl, ActionKind, ActionMap, Binding};
+use crcbl::input::{ActionDecl, ActionKind, ActionMap, ActionValue, Binding, PointerAxis};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{ColliderComponent, PhysicsSystem, RigidBody, Transform};
@@ -152,6 +155,16 @@ const ACTION_LEFT: &str = "move_left";
 const ACTION_RIGHT: &str = "move_right";
 const ACTION_LAUNCH: &str = "launch";
 const ACTION_RESTART: &str = "restart";
+/// Where along the field the player is pointing, −1 to +1 across the camera.
+///
+/// **A third movement action rather than a third binding on the other two**,
+/// because the pointer and the keys do not mean the same thing here. An arrow
+/// key is a *rate*: hold it and the paddle slides at [`PADDLE_SPEED`]. A finger
+/// is a *place*: the paddle is under it, at once, however far that is. The
+/// action map resolves bindings on one action into one value, and there is no
+/// value that is both — so the two stay apart and [`run_tick`] arbitrates
+/// between them. See [`Intent::aim`] for which wins.
+const ACTION_AIM: &str = "aim";
 
 /// Brick grid layout.
 pub const BRICK_ROWS: usize = 4;
@@ -193,7 +206,7 @@ pub enum GameState {
 
 /// One tick of player intent, resolved from the action map on the client and
 /// consumed by the server-side module.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Intent {
     left: bool,
     right: bool,
@@ -201,17 +214,39 @@ struct Intent {
     launch: bool,
     /// Restart unconditionally (a menu action, and what the restart test uses).
     restart: bool,
+    /// Put the paddle's centre here, in world x — a pointer, not a key.
+    ///
+    /// **`Some` only on a tick the pointer actually moved**, which is the whole
+    /// arbitration between the two ways to drive the paddle: the pointer wins
+    /// the tick it speaks and the keyboard owns every other one. A mouse resting
+    /// somewhere is not a command, so the arrow keys still work on a desktop
+    /// with a cursor sitting over the field; a finger lifted off the glass has
+    /// not asked for anything either, so the paddle stays where it was rather
+    /// than snapping back to a cursor or to the middle.
+    aim: Option<f64>,
 }
 
+/// How many bytes [`Intent::to_wire`] produces: a flag byte, then the aim.
+const INTENT_WIRE_LEN: usize = 1 + size_of::<f32>();
+
 impl Intent {
-    /// The wire form handed to `Client::set_input`. One byte of flags: small
-    /// enough that the per-tick payload is a fixed-size copy rather than a
-    /// structure the game re-encodes every frame.
-    fn to_wire(self) -> u8 {
-        u8::from(self.left)
+    /// The wire form handed to `Client::set_input`: one byte of flags, then the
+    /// aim as a little-endian `f32` in world x.
+    ///
+    /// Fixed size, so the per-tick payload is a copy rather than a structure the
+    /// game re-encodes every frame. `f32` rather than the `f64` the simulation
+    /// runs in, because this is a pointing device's resolution and not the
+    /// physics'. Bit 4 says whether the four bytes mean anything — a sentinel
+    /// value would be a coordinate the field could legitimately contain, and
+    /// `NaN` as one is a value that compares unequal to itself.
+    fn to_wire(self) -> [u8; INTENT_WIRE_LEN] {
+        let flags = u8::from(self.left)
             | (u8::from(self.right) << 1)
             | (u8::from(self.launch) << 2)
             | (u8::from(self.restart) << 3)
+            | (u8::from(self.aim.is_some()) << 4);
+        let aim = (self.aim.unwrap_or(0.0) as f32).to_le_bytes();
+        [flags, aim[0], aim[1], aim[2], aim[3]]
     }
 }
 
@@ -319,11 +354,26 @@ fn run_tick(logic: &mut GameLogic, world: &mut World) {
     }
 
     // --- paddle ---------------------------------------------------------
-    let dir = f64::from(i8::from(intent.right) - i8::from(intent.left));
-    logic.paddle_x = (logic.paddle_x + dir * PADDLE_SPEED * dt).clamp(
-        WORLD_LEFT + PADDLE_HALF_WIDTH,
-        WORLD_RIGHT - PADDLE_HALF_WIDTH,
-    );
+    //
+    // Two ways in and one paddle. A pointer states a place, so it is assigned;
+    // the keys state a rate, so they are integrated. `dir` is what the ball's
+    // bounce reads as english, and both paths have to answer it — a paddle
+    // dragged across the field is being driven just as hard as one held on an
+    // arrow key, and expressing the drag in units of [`PADDLE_SPEED`] is what
+    // makes the two comparable rather than making a flick worth a full ±1 and a
+    // nudge worth the same.
+    let (paddle_x, dir) = match intent.aim {
+        Some(aim) => {
+            let placed = clamp_paddle(aim);
+            let travelled = (placed - logic.paddle_x) / (PADDLE_SPEED * dt);
+            (placed, travelled.clamp(-1.0, 1.0))
+        }
+        None => {
+            let dir = f64::from(i8::from(intent.right) - i8::from(intent.left));
+            (clamp_paddle(logic.paddle_x + dir * PADDLE_SPEED * dt), dir)
+        }
+    };
+    logic.paddle_x = paddle_x;
 
     let paddle = logic.paddle;
     let paddle_x = logic.paddle_x;
@@ -523,6 +573,19 @@ fn with_physics<R>(world: &mut World, f: impl FnOnce(&mut PhysicsSystem) -> R) -
     world.system_mut::<PhysicsSystem>().map(f)
 }
 
+/// Where the paddle's centre may be: far enough in that the bar itself stays
+/// between the walls.
+///
+/// One function because the paddle now arrives at a position two ways — driven
+/// by the keys, or put there by a pointer — and a clamp applied on one path and
+/// forgotten on the other is a paddle that leaves the court.
+fn clamp_paddle(x: f64) -> f64 {
+    x.clamp(
+        WORLD_LEFT + PADDLE_HALF_WIDTH,
+        WORLD_RIGHT - PADDLE_HALF_WIDTH,
+    )
+}
+
 /// The velocity a launch gives the ball: up and slightly to the right, at the
 /// speed every ball starts at.
 fn launch_velocity() -> DVec3 {
@@ -703,6 +766,21 @@ impl crcbl::ui::DebugModule for BoardStats {
     }
 }
 
+/// One raw input event, waiting for the tick that will replay it.
+///
+/// One queue rather than one per device: the order the player did things in is
+/// the order the action map has to see them in, and a tap is a position and a
+/// button press that must not be split apart.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Queued {
+    /// A key went down or came up.
+    Key(KeyCode, bool),
+    /// The pointer's primary button went down or came up — a click, or a tap.
+    Button(bool),
+    /// The pointer moved to here, normalised across the surface.
+    Pointer(f32),
+}
+
 pub struct Game {
     pub paddle_entity: Entity,
     pub ball_entity: Entity,
@@ -725,8 +803,17 @@ pub struct Game {
     ticks_run: u64,
     pub audio: crate::audio::Audio,
     pub high_score: crcbl::store::record::Record,
-    /// Queued key events from the shell pump, replayed after `begin_tick`.
-    pending_keys: Vec<(KeyCode, bool)>,
+    /// Queued raw input from the shell pump, replayed after `begin_tick`.
+    pending_input: Vec<Queued>,
+    /// Half the width the camera shows, in world units.
+    ///
+    /// What turns [`ACTION_AIM`]'s −1…1 into a place on the field. It is not
+    /// [`WORLD_RIGHT`]: the camera widens to fit the field into whatever aspect
+    /// ratio the surface has — see `crate::gpu::camera_half_width`, which is
+    /// where this comes from — so a finger at the edge of a wide window is
+    /// outside the court, and the paddle clamps rather than the mapping lying
+    /// about where the finger was.
+    view_half_width: f64,
     /// Mirrors of the shared state, refreshed after each tick so the render and
     /// HUD paths never take the lock.
     pub score: u32,
@@ -850,12 +937,26 @@ impl Game {
         action_map.declare(ActionDecl {
             name: ACTION_LAUNCH.into(),
             kind: ActionKind::Button,
-            bindings: vec![Binding::Key(KeyCode::Space)],
+            // The tap joins Space rather than replacing it. A life lost puts the
+            // game back in `WaitingForLaunch` with no menu on screen — that is
+            // deliberate, see `menu::MenuKind::of` — so without this a phone
+            // could move the paddle and never serve again.
+            bindings: vec![
+                Binding::Key(KeyCode::Space),
+                Binding::MouseButton(PointerButton::Left),
+            ],
         });
         action_map.declare(ActionDecl {
             name: ACTION_RESTART.into(),
             kind: ActionKind::Button,
             bindings: vec![Binding::Key(KeyCode::KeyR)],
+        });
+        action_map.declare(ActionDecl {
+            name: ACTION_AIM.into(),
+            kind: ActionKind::Axis1,
+            bindings: vec![Binding::PointerPosition {
+                axis: PointerAxis::X,
+            }],
         });
 
         let shared = Arc::new(Mutex::new(GameLogic {
@@ -907,7 +1008,12 @@ impl Game {
             ticks_run: 0,
             audio: crate::audio::Audio::new(headless),
             high_score: crate::high_score::open(headless),
-            pending_keys: Vec::new(),
+            pending_input: Vec::new(),
+            // The field's own half width until a camera says otherwise, which
+            // `crate::app::Breakout::tick` does on every tick it runs. A game
+            // built headless and driven by a test has no surface at all, and
+            // "the edge of the court" is the only honest answer for one.
+            view_half_width: WORLD_RIGHT,
             score: 0,
             lives: STARTING_LIVES,
             state: GameState::WaitingForLaunch,
@@ -938,7 +1044,35 @@ impl Game {
     /// it is also what makes a frame that runs no ticks lossless: the events
     /// simply wait for the next one.
     pub fn key_event(&mut self, key: KeyCode, pressed: bool) {
-        self.pending_keys.push((key, pressed));
+        self.pending_input.push(Queued::Key(key, pressed));
+    }
+
+    /// Queue a tap — or a click — for replay at the start of the next tick.
+    ///
+    /// The pointer's half of [`key_event`](Self::key_event), queued for the same
+    /// reason: launching is an edge, and an edge fed before `begin_tick` is an
+    /// edge `begin_tick` erases.
+    pub fn pointer_button(&mut self, pressed: bool) {
+        self.pending_input.push(Queued::Button(pressed));
+    }
+
+    /// Queue the pointer's position, normalised across the surface: −1 at the
+    /// left edge, +1 at the right.
+    ///
+    /// Normalised rather than in world units because the surface is the
+    /// engine's and the camera is this crate's; [`Self::set_view_half_width`] is
+    /// the second half of that conversion.
+    pub fn pointer_moved(&mut self, x: f32) {
+        self.pending_input.push(Queued::Pointer(x));
+    }
+
+    /// Tell the game how much of the field the camera is showing, in world
+    /// units either side of the origin.
+    ///
+    /// See [`Self::view_half_width`]. Called once a tick from the app, which is
+    /// where the GPU's extent is.
+    pub fn set_view_half_width(&mut self, half_width: f64) {
+        self.view_half_width = half_width;
     }
 
     /// Whether the action map reports the move-left action held.
@@ -957,6 +1091,21 @@ impl Game {
         self.action_map.button_held(ACTION_LEFT)
     }
 
+    /// Where the player is pointing on the field, on the ticks they are
+    /// pointing at all.
+    ///
+    /// `None` unless the pointer moved since the last tick — which is what
+    /// leaves the keyboard in charge of a game being played with the keyboard
+    /// while a mouse rests over the window, and what leaves the paddle where a
+    /// lifted finger left it. See [`Intent::aim`].
+    fn aim(&self) -> Option<f64> {
+        let ActionValue::Axis1(axis) = self.action_map.action(ACTION_AIM)? else {
+            return None;
+        };
+        axis.pointer_moved
+            .then(|| f64::from(axis.value) * self.view_half_width)
+    }
+
     /// Advances the simulation by exactly one fixed tick.
     ///
     /// Call it from the loop's fixed-timestep accumulator — once per tick, not
@@ -964,8 +1113,16 @@ impl Game {
     pub fn tick(&mut self) {
         let dt = self.tick_period.as_secs_f64();
         self.action_map.begin_tick(dt as f32);
-        for (key, pressed) in std::mem::take(&mut self.pending_keys) {
-            self.action_map.key_event(key, pressed);
+        for queued in std::mem::take(&mut self.pending_input) {
+            match queued {
+                Queued::Key(key, pressed) => self.action_map.key_event(key, pressed),
+                Queued::Button(pressed) => {
+                    self.action_map.mouse_button(PointerButton::Left, pressed);
+                }
+                // The y coordinate is nothing this game reads, and the action
+                // map wants both — a pointer is at a place, not on an axis.
+                Queued::Pointer(x) => self.action_map.pointer_position(x, 0.0),
+            }
         }
 
         let intent = Intent {
@@ -973,6 +1130,7 @@ impl Game {
             right: self.action_map.button_held(ACTION_RIGHT),
             launch: self.action_map.just_pressed(ACTION_LAUNCH),
             restart: self.action_map.just_pressed(ACTION_RESTART),
+            aim: self.aim(),
         };
 
         let ticks_before = {
@@ -981,6 +1139,11 @@ impl Game {
             logic.intent.right = intent.right;
             logic.intent.launch |= intent.launch;
             logic.intent.restart |= intent.restart;
+            // `or` rather than `=`: an aim raised on a frame that ran no ticks
+            // must survive until a tick consumes it, exactly as the edges above
+            // do — and a later tick's `None` is "the pointer said nothing", not
+            // "the pointer went away".
+            logic.intent.aim = intent.aim.or(logic.intent.aim);
             logic.ticks
         };
 
@@ -988,7 +1151,9 @@ impl Game {
         // takes the *input bytes*, and wraps them in `ClientToServer::Input`
         // itself, so encoding a whole message here and passing it as the data
         // field nested one inside the other.
-        self.session.client_mut().set_input(vec![intent.to_wire()]);
+        self.session
+            .client_mut()
+            .set_input(intent.to_wire().to_vec());
 
         self.sim_time += self.tick_period;
         let server_ticks = self.session.server_mut().update(self.sim_time);
@@ -1702,6 +1867,105 @@ mod tests {
             (slow.game.paddle_x() - expected).abs() < 1e-9,
             "paddle moved {} where {expected} was owed",
             slow.game.paddle_x(),
+        );
+    }
+
+    /// **A pointer at a known place puts the paddle at a known x.**
+    ///
+    /// The whole of the touch paddle in one assertion, and the numbers are
+    /// exact rather than "it moved": a half width of ten and a pointer half way
+    /// to the right edge is world x = 5, and every way of getting the space
+    /// wrong — a coordinate still in pixels, an axis normalised 0…1 instead of
+    /// −1…1, a sign flip — lands somewhere else.
+    #[test]
+    fn the_paddle_goes_where_the_pointer_points() {
+        let mut h = Harness::new(60, 60);
+        h.game.set_view_half_width(10.0);
+        // The first frame establishes the clock's baseline and runs no tick, so
+        // input queued before it would simply still be queued.
+        h.frame();
+        assert_eq!(h.ticks, 0, "the first frame is the baseline");
+
+        h.game.pointer_moved(0.5);
+        h.frame();
+        assert!(
+            (h.game.paddle_x() - 5.0).abs() < 1e-9,
+            "half way right of a ten-unit half width is x = 5, got {}",
+            h.game.paddle_x(),
+        );
+
+        h.game.pointer_moved(-0.25);
+        h.frame();
+        assert!(
+            (h.game.paddle_x() + 2.5).abs() < 1e-9,
+            "a second position moves it, got {}",
+            h.game.paddle_x(),
+        );
+    }
+
+    /// **A pointer that stops speaking leaves the paddle where it is, and hands
+    /// the keys back.**
+    ///
+    /// The arbitration between the two ways to drive this paddle, in the order
+    /// a phone and a desktop each exercise it: a finger lifted (or a mouse gone
+    /// still) is not a command, so the paddle neither recentres nor snaps to a
+    /// resting cursor — and the arrow keys carry on from wherever the pointer
+    /// left it rather than being dead for as long as a cursor is over the
+    /// window.
+    #[test]
+    fn a_still_pointer_holds_the_paddle_and_leaves_the_keyboard_in_charge() {
+        let mut h = Harness::new(60, 60);
+        h.game.set_view_half_width(10.0);
+        h.frame();
+
+        h.game.pointer_moved(-0.5);
+        h.frame();
+        let placed = h.game.paddle_x();
+        assert!((placed + 5.0).abs() < 1e-9, "got {placed}");
+
+        for _ in 0..10 {
+            h.frame();
+        }
+        assert!(
+            (h.game.paddle_x() - placed).abs() < 1e-9,
+            "ten ticks with a still pointer moved the paddle to {}",
+            h.game.paddle_x(),
+        );
+
+        h.game.key_event(KeyCode::ArrowRight, true);
+        let before = h.ticks;
+        for _ in 0..10 {
+            h.frame();
+        }
+        let expected = placed + (h.ticks - before) as f64 * PADDLE_SPEED * h.game.tick_dt_secs();
+        assert!(
+            (h.game.paddle_x() - expected).abs() < 1e-9,
+            "the keys drove the paddle to {} where {expected} was owed — a \
+             pointer that keeps winning every tick is a keyboard that stopped \
+             working",
+            h.game.paddle_x(),
+        );
+    }
+
+    /// **A tap serves the ball.**
+    ///
+    /// `WaitingForLaunch` after a lost life shows no menu at all — see
+    /// `menu::MenuKind::of` — so this binding is the only thing between a phone
+    /// and a game it can never restart.
+    #[test]
+    fn a_tap_launches_the_ball_the_way_space_does() {
+        let mut h = Harness::new(60, 60);
+        h.frame();
+        assert_eq!(h.game.state, GameState::WaitingForLaunch);
+
+        h.game.pointer_button(true);
+        h.game.pointer_button(false);
+        h.frame();
+
+        assert_eq!(
+            h.game.state,
+            GameState::Playing,
+            "the tap never reached the launch action",
         );
     }
 

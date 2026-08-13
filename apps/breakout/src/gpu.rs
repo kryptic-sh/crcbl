@@ -81,6 +81,25 @@ pub fn camera_half_height(extent: (u32, u32)) -> f32 {
     half_height.max(half_width / aspect)
 }
 
+/// Half the horizontal extent of the orthographic camera for an `extent`-sized
+/// viewport, in world units.
+///
+/// The other half of [`camera_half_height`] — [`Projection::Orthographic`]
+/// derives the width from the aspect ratio, so this is the derivation, written
+/// down where something other than the projection can use it.
+///
+/// **This is what the surface's edge is worth on the field.** A pointer
+/// normalised to −1…1 across the surface is multiplied by this to land on a
+/// world x, which is why it is not [`crate::game::WORLD_RIGHT`]: the camera
+/// widens past the court on a viewport too narrow to show it otherwise, and a
+/// mapping that assumed the field filled the surface would put the paddle short
+/// of the finger by exactly the margin.
+#[must_use]
+pub fn camera_half_width(extent: (u32, u32)) -> f32 {
+    let aspect = extent.0.max(1) as f32 / extent.1.max(1) as f32;
+    camera_half_height(extent) * aspect
+}
+
 /// Slack kept between the play field and the edge of the surface, in world
 /// units.
 ///
