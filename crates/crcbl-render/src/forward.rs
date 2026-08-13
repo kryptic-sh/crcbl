@@ -898,7 +898,7 @@ pub struct ForwardRenderer {
     /// Rebuilt only when the scene target's view changes, which is only on a
     /// resize. The graph hands the view to the pass body; caching against it is
     /// what keeps a steady-state frame free of descriptor writes.
-    tonemap_group: Option<(ImageViewHandle, BindGroupHandle)>,
+    tonemap_group: Option<(Vec<ImageViewHandle>, BindGroupHandle)>,
 
     /// The format the tonemap pipeline was built for. A swapchain format change
     /// needs a new pipeline, which is why it is remembered rather than assumed.
@@ -938,7 +938,7 @@ pub struct ForwardRenderer {
     /// [`ForwardRenderer::mesh_groups`] is the fallback and is *not* dead weight:
     /// it is what the depth prepass binds, because that pass runs before there is
     /// any occlusion to name.
-    ambient_occlusion_groups: Vec<Option<(ImageViewHandle, BindGroupHandle)>>,
+    ambient_occlusion_groups: Vec<Option<(Vec<ImageViewHandle>, BindGroupHandle)>>,
     /// `[frame]`: the depth prepass's group — the camera's, with the occlusion
     /// placeholder and **a culling-statistics buffer of its own**.
     ///
@@ -4468,11 +4468,10 @@ impl ForwardRenderer {
             let group = cached_group(
                 cached_mesh,
                 device,
-                view,
+                &[(AMBIENT_OCCLUSION_BINDING, view)],
                 "mesh frame",
                 mesh_layout,
                 entries,
-                AMBIENT_OCCLUSION_BINDING,
             )
             // Falling back to the group built at `build` rather than dropping
             // the frame: it names the white placeholder, so the picture loses
@@ -4518,9 +4517,14 @@ impl ForwardRenderer {
                         resource: BindingResource::Sampler(sampler),
                     },
                 ];
-                let Some(group) =
-                    cached_group(cached, device, view, "tonemap scene", layout, entries, 0)
-                else {
+                let Some(group) = cached_group(
+                    cached,
+                    device,
+                    &[(0, view)],
+                    "tonemap scene",
+                    layout,
+                    entries,
+                ) else {
                     return;
                 };
                 let encoder = ctx.encoder();

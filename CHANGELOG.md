@@ -338,10 +338,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   prepass — driven by the existing depth-only pipeline with the camera's own
   bind group and draws, so no new pipeline or shader — feeds an `ssao` pass that
   reconstructs normals from depth and takes eight hemisphere samples, a `4x4`
-  box blur, and a texel fetch in the forward shader that multiplies
-  `frame.ambient.rgb` **alone**. Darkening the tonemap's input instead would
-  have darkened direct light and highlights, which is what the plan's one-line
-  row invited and what it now refuses in writing.
+  blur weighted by view-space depth, and a texel fetch in the forward shader
+  that multiplies `frame.ambient.rgb` **alone**. Darkening the tonemap's input
+  instead would have darkened direct light and highlights, which is what the
+  plan's one-line row invited and what it now refuses in writing.
 
   **The rotation comes from a sixteen-entry constant table indexed by
   `pixel.xy & 3`, never a float hash, and the blur is not optional.** Each AO
@@ -351,12 +351,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   an integer index into a constant array is bit-identical by inspection, and the
   blur's footprint is exactly the noise tile.
 
+  **The blur weights each tap by how far its view-space depth is from the
+  centre's**, because a box kernel averages a foreground pixel's occlusion with
+  a background that is not the same surface — and the far plane is written
+  "fully unoccluded", so every silhouette carried a bright fringe one kernel
+  deep. It unprojects through the same `SsaoParams` buffer the occlusion pass
+  writes, so there is no second uniform block and no new knob: the tolerance is
+  derived from the AO radius, half weight at one radius and none at two. The
+  weight is a linear ramp rather than a threshold, since a binary test on the
+  output pixel is the same driver-disagreement hazard the constant rotation
+  table exists to avoid. The consequence to know about is that the sixteen-tap
+  divisor is now sixteen only where every tap counts — full strength on a flat
+  surface, weaker exactly at a silhouette.
+
   **The check is a structural ratio, not the golden**: a band inside a concave
   corner against a band on the same surface at the same camera distance, because
-  an AO pass writing a constant 1.0 draws a perfectly plausible frame. AO is
-  always on, and its off-switch is a 1×1 white texture rather than a shader
-  permutation. `cube`, `lights`, `dunes`, `spot_shadow` and `point_shadow` were
-  re-blessed; `spot` is unchanged to the pixel, which is what says the term is
+  an AO pass writing a constant 1.0 draws a perfectly plausible frame. The blur
+  has one of its own — the plain pyramid's underside in the cube frame, whose
+  pixels are the ambient term alone, must not brighten along the edge the clear
+  stands behind. AO is always on, and its off-switch is a 1×1 white texture
+  rather than a shader permutation. `ao`, `cube`, `lights`, `dunes`,
+  `spot_shadow` and `point_shadow` were re-blessed; `spot`, `sprite` and `ui`
+  are unchanged to the pixel, and `spot` staying so is what says the term is
   contact occlusion rather than a global scale.
 
 - **Flappy and breakout can be paused with a finger, and a second finger can

@@ -6167,9 +6167,11 @@ reasons. What the first slice deferred or turned up:
   it needs `GreaterOrEqual` and depth invariance across four rasterisers, which
   only CI can settle. The engine now has per-pass GPU timers and frame counters,
   so that change can be **measured** rather than assumed when it is made.
-- **The blur is a box, so AO bleeds across silhouettes as a halo.** A bilateral
-  blur is the fix; it is the thing a reviewer sees first and the natural slice
-  2, with half-resolution AO after it.
+- **AO still runs at full resolution.** Half-resolution AO with an upsample was
+  the slice after the bilateral blur and has not been done. It is the one of the
+  two that costs quality for speed, so it wants the per-pass GPU timers pointed
+  at `ssao` and `ssao-blur` first — nobody has measured what the pair actually
+  costs.
 - **`SSAO_RADIUS` is 0.5 and the kernel reaches ~⅞ of it laterally**, both tuned
   against `Scene::Ao` alone. The first, normal-hugging kernel gave a ratio of
   1.03 — visually nothing. Nothing has tuned these against a real scene, and
@@ -6194,7 +6196,46 @@ reasons. What the first slice deferred or turned up:
   `lights`, `dunes`, `spot_shadow` and `point_shadow` moved; `ui`, `sprite` and
   **`spot`** did not. `spot` staying bit-identical is the evidence the term is
   contact AO rather than a global scale — it is the one 3D scene with nothing
-  near anything else.
+  near anything else. The depth-weighted blur moved the same five plus `ao`
+  itself and left the same three byte-identical, `spot` included, which is that
+  evidence a second time.
+
+### What the depth-weighted blur left owed
+
+`ssao_blur.slang` now weights its 4×4 kernel by view-space depth. What that
+slice deferred or turned up:
+
+- **The determinism margin is weaker at a silhouette, and nothing has measured
+  the new one.** The box divided an isolated driver disagreement by sixteen
+  everywhere; the weighted kernel divides by sixteen on a flat surface and by as
+  little as one where every neighbour is rejected. The header says so, and the
+  frames drawn on radv, lavapipe and wgpu still agree to one channel level — but
+  that is three rasterisers agreeing, not a bound. What would settle it is the
+  CI matrix's Metal and D3D12 legs.
+- **A depth-only weight cannot separate two surfaces that meet.** `Scene::Ao`'s
+  floor still brightens by a level or two in the row where it meets a wall — the
+  wall and the floor have the _same_ view-space depth at that crease and differ
+  only in gradient, so every tap keeps nearly full weight. Fixing it means a
+  normal term in the weight, which means either reconstructing the normal a
+  second time in the blur or the normal attachment the AO section refuses. Not
+  done, and not obviously worth it: it is a two-level artifact on one row.
+- **`DEPTH_TOLERANCE_RADII` is 2.0 and has been tuned against nothing.** It puts
+  half weight at exactly one `SSAO_RADIUS` and zero at two, which is derived
+  rather than fitted, and no real scene has been through it — the same gap
+  `SSAO_RADIUS` itself has, and the same answer: `lumen` (sample 13).
+- **The halo check lives in `Scene::Cube`, not `Scene::Ao`.**
+  `the_clear_does_not_brighten_the_silhouette_in_front_of_it` reads the plain
+  pyramid's underside, because the AO scene's camera looks into a closed trough
+  and its frame contains no far plane at all — nothing there can show a halo.
+  The AO scene is still the one that says occlusion happens; it cannot say
+  anything about this kernel. If `Scene::Ao` ever grows a silhouette against the
+  clear, the check belongs there instead.
+- **The check depends on where a pyramid's base lands in the frame.**
+  `PYRAMID_UNDERSIDE_RIM_AT` and its neighbour are pixel coordinates on a
+  six-row-tall surface; a change to that camera or that mesh moves them, and the
+  failure would read as a halo rather than as a moved band. The anti-vacuity
+  floor beside it catches the worst version — both bands landing on the clear —
+  and nothing catches the band sliding onto the teal side face.
 
 ## What punctual-light shadows left owed
 

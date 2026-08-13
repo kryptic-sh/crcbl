@@ -221,7 +221,8 @@ first.
   **Multiplying the tonemap's input is refused**, and refused in writing because
   the one-line row invites it: it darkens direct light and highlights.
 - **Classic normal-oriented hemisphere SSAO, eight samples, a sixteen-entry
-  constant rotation table indexed by `pixel.xy & 3`, and a 4×4 box blur.** Not
+  constant rotation table indexed by `pixel.xy & 3`, and a 4×4 blur over the
+  result** — a box in the first slice, depth-weighted in the second (below). Not
   GTAO yet — its horizon integral is several times the work for quality nobody
   can resolve at the goldens' 256×192, and CI's rasterisers are software.
   Upgrading is a change to one function in one shader, the same shape
@@ -236,8 +237,9 @@ first.
   `frac(sin(dot(…)))` hashes amplify float differences _by construction_, which
   is the opposite of what a golden needs; an integer index into a constant array
   is bit-identical by inspection. The blur's footprint is exactly the noise
-  tile, so it both removes the banding and divides an isolated flipped sample by
-  sixteen.
+  tile, so it removes the banding, and where all sixteen of its taps count it
+  divides an isolated flipped sample by sixteen — which the depth-weighted
+  kernel below is precise about, because it is no longer sixteen everywhere.
 - **The golden is not the instrument.** An AO pass writing a constant 1.0 draws
   a perfectly plausible frame. The check is a **structural ratio**, in the shape
   `SPOT_SHADOW_RATIO` already uses: a band inside a concave corner must be
@@ -274,8 +276,62 @@ first.
 - **A `Load` on a depth texture with no sampler** is the corner this engine has
   already been bitten in once, over `DepthTexture2D` versus `Texture2D<float>`.
 - **The box blur bleeds AO across silhouettes** as a halo. A bilateral blur is
-  the fix and is deliberately deferred to the slice after the first frame
-  exists.
+  the fix and was deliberately deferred to the slice after the first frame
+  exists — the section below is that slice.
+
+### The depth-weighted blur (decided 2026-08-13)
+
+The first slice shipped the box, and the risk above is what it cost: a box
+kernel averages a foreground pixel's occlusion with a background that is not the
+same surface, and the far plane is written "fully unoccluded", so every
+silhouette in the frame carries a bright fringe exactly one kernel deep.
+Replacing the kernel is a change to `ssao_blur.slang` and its bind group, which
+is what the first slice said it would be.
+
+- **Weight on view-space Z, never on the raw reversed-Z delta.** A depth
+  difference is not a distance: the same one-metre gap is an enormous reversed-Z
+  delta in front of the eye and almost none near the far plane, so a tolerance
+  on the stored value would be a different filter in every part of the frame.
+  The blur unprojects, exactly as `ssao.slang` does.
+- **So the blur binds the same `SsaoParams` block**, rather than growing one of
+  its own: `inv_proj` and the radius are already written there once per frame.
+  The consequence is that the blur's bind group names a per-frame buffer, so its
+  cache became a ring for the reason the occlusion pass's already was — a single
+  cache keyed on the views hands the even frames' block to the odd ones. The
+  helper both passes share now keys on every view it was given rather than on
+  one, because the blur's group names two transients and is stale when either
+  moves.
+- **The weight is a ramp and never a cut.** `if (abs(dz) < threshold)` would put
+  a _binary_ decision on the output pixel, which is precisely what the rotation
+  table spends its whole argument keeping off the input samples: two drivers
+  resolve the borderline case differently and the entire pixel jumps.
+- **The tolerance is derived from the AO radius, not a new uniform field.** The
+  radius is the only length these two passes have — `ssao.slang` gathers within
+  it and its falloff is at full strength inside it — so it is already this
+  pair's answer to "are these two pixels near enough to be occluding each
+  other". A knob nobody adjusts would be a fourth thing the Rust mirror has to
+  agree about for a number that is not free to move.
+- **The far plane is the halo's mechanism, and its test is the one comparison
+  that stays.** A far tap gets no weight and a far centre returns 1.0 unchanged,
+  as `ssao.slang` already does at the same pixel. That test compares against an
+  exact constant rather than between two computed depths, so two drivers either
+  both take it or neither does.
+- **What the division by sixteen is worth now, in writing.** It is the full
+  sixteen wherever every tap counts, which is any surface facing the camera and
+  therefore most of a frame — and it falls towards one exactly where taps are
+  rejected, at a silhouette and at the far plane. The trade is deliberate: the
+  taps a box spent there were a halo in every frame, and what is given up is
+  margin against a driver disagreement that may be in none of them.
+- **The observable is in `Scene::Cube`, and it is not the scene named after
+  AO.** `Scene::Ao` looks into a closed trough, so every pixel of that frame is
+  geometry: it has no far plane to bleed and no silhouette to bleed across, and
+  the kernel change moves it by one channel level in a couple of hundred pixels.
+  The cube frame has the plain pyramid's underside — one flat normal pointing
+  down, one flat albedo, and no direct light on it, so its pixels are the
+  ambient term times the occlusion and nothing else. The band along its
+  silhouette measures about a thirteenth over the band two rows in with a box
+  kernel and about a fortieth with this one, on both of the rasterisers it was
+  run on.
 
 ## Post-processing stack
 

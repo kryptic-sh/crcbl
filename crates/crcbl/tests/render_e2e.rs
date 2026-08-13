@@ -362,10 +362,12 @@ fn the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden() {
 }
 
 /// [`Scene::Cube`]'s claims, in the order a failure would hit them: something
-/// drew, and each of the material row's two columns did something visible.
+/// drew, each of the material row's two columns did something visible, and the
+/// clear behind the geometry did not leak into the occlusion along its edge.
 fn the_cube_scene_drew_its_geometry_and_both_material_columns(image: &Image) {
     the_cube_is_lit_against_an_unpainted_corner(image);
     the_textured_pyramid_is_quartered_and_the_plain_one_is_flat(image);
+    the_clear_does_not_brighten_the_silhouette_in_front_of_it(image);
 }
 
 /// The dunes patch — `docs/plan/25-lod.md`'s cluster DAG — on the backend
@@ -1546,6 +1548,95 @@ fn the_textured_pyramid_is_quartered_and_the_plain_one_is_flat(image: &Image) {
         textured >= plain + 4,
         "the lower pyramid samples a four-texel layer and the upper one a flat white layer, \
          so it must hold several more distinct colours: {textured} below vs {plain} above"
+    );
+}
+
+/// The half-extents of each band read off the plain pyramid's underside, in
+/// pixels.
+///
+/// **That underside is a surface whose pixels are the occlusion channel and
+/// nothing else.** `crcbl_shaders::mesh::pyramid_vertices` gives the base one
+/// flat normal pointing straight down and one flat albedo, and
+/// `DirectionalLight::default`'s sun is above it — so no direct term reaches it,
+/// every pixel of it is the ambient term times that albedo, and `mesh.slang`
+/// scales exactly that term by the blurred occlusion. Anything that varies
+/// across it is occlusion.
+///
+/// Two rows tall because the whole base is six rows of frame, being seen almost
+/// edge-on, and twenty columns placed where those rows are the base alone: the
+/// teal side face intrudes to the right of them and the base's own sloping
+/// silhouette climbs a row to the left of them.
+const PYRAMID_UNDERSIDE_BAND: (u32, u32) = (10, 1);
+
+/// The centre of the band on the last rows of that underside before the clear
+/// behind it.
+///
+/// `ssao_blur.slang`'s kernel reaches two pixels down, so these two rows are
+/// exactly the ones whose taps fall on the far plane, and the rows above them
+/// are exactly the ones whose taps do not.
+const PYRAMID_UNDERSIDE_RIM_AT: (u32, u32) = (54, 85);
+
+/// And the same band two rows further in: same face, same albedo, same ambient,
+/// and no tap of the blur's kernel on anything but the surface itself.
+const PYRAMID_UNDERSIDE_INSIDE_AT: (u32, u32) = (54, 83);
+
+/// How much brighter the rim band may be than the band inside it.
+///
+/// **This is the halo, in one number.** A blur that averages the far plane's
+/// "nothing occludes here" into the pixels along a silhouette lifts the rim and
+/// leaves the rows behind it alone; one that weights its taps by view-space
+/// depth cannot, because a tap on the far plane weighs nothing. The frame this
+/// was set against measures the rim about a fortieth over the band inside it
+/// with `ssao_blur.slang`'s depth-weighted kernel and about a thirteenth over it
+/// with a box, on lavapipe and on radv alike — so this sits between the two with
+/// room on both sides rather than on a boundary two rasterisers could straddle.
+const PYRAMID_HALO_RATIO: f32 = 1.04;
+
+/// How far above the clear the underside must measure.
+///
+/// [`AO_LIT_FLOOR`]'s job on this scene: a frame that lost the pyramid measures
+/// the clear in both bands, and a ratio between two equal numbers is not
+/// evidence of anything.
+const PYRAMID_UNDERSIDE_LIT_FLOOR: f32 = 10.0;
+
+/// [`Scene::Cube`]'s claim about `ssao_blur.slang`: **the clear does not
+/// brighten the silhouette standing in front of it.**
+///
+/// The far plane has no surface, so `ssao.slang` writes "fully unoccluded" over
+/// every pixel the geometry never covered. A box blur then averages that value
+/// into the occlusion of the pixels along a silhouette, which draws a bright
+/// fringe exactly one kernel deep around everything in the frame — the halo
+/// `docs/plan/18-render-features.md` records. A kernel weighted on view-space
+/// depth gives those taps no weight, so the rim keeps its own occlusion.
+///
+/// **No golden could make this claim.** A halo is a plausible picture: a smooth,
+/// symmetric, faintly brighter edge, and it sat in the reference for as long as
+/// the box blur did. Only a relation between two bands of one flat surface can
+/// say the edge is wrong, and only a surface with no direct light on it can say
+/// the difference between them is occlusion rather than shading.
+///
+/// It is this scene and not [`Scene::Ao`], whose name suggests it: that camera
+/// looks into a closed trough, so every pixel of that frame is geometry and the
+/// frame holds no far plane to bleed and no silhouette to bleed across. See
+/// `docs/backlog.md`.
+fn the_clear_does_not_brighten_the_silhouette_in_front_of_it(image: &Image) {
+    let rim = block_brightness(image, PYRAMID_UNDERSIDE_RIM_AT, PYRAMID_UNDERSIDE_BAND);
+    let inside = block_brightness(image, PYRAMID_UNDERSIDE_INSIDE_AT, PYRAMID_UNDERSIDE_BAND);
+    let clear = block_brightness(image, (2, 2), (2, 2));
+    eprintln!(
+        "crcbl render e2e: cube — the pyramid's underside measures {rim:.1} along its silhouette \
+         and {inside:.1} two rows in, against a clear of {clear:.1}"
+    );
+    assert!(
+        inside > clear + PYRAMID_UNDERSIDE_LIT_FLOOR,
+        "the band two rows inside the pyramid's silhouette measures {inside:.1} against a clear \
+         of {clear:.1}, so there is no lit underside here for a halo to be a halo on"
+    );
+    assert!(
+        rim < inside * PYRAMID_HALO_RATIO,
+        "the pyramid's underside must not brighten along the edge the clear stands behind: \
+         {rim:.1} on the last two rows against {inside:.1} two rows in — that is the far plane's \
+         unoccluded 1.0 blurred into the rim"
     );
 }
 

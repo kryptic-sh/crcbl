@@ -144,16 +144,16 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssao_blur]
 source = shaders/ssao_blur.slang
-source-sha256 = 77d48a278d6f64790e23883b42b8c39145c2f7c959ddb719d797c06d11670fde
+source-sha256 = 92fb6bab3294c76e6ea7601845cd287788d43ec727b0aafe274efff2e532fa71
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssao_blur.spv
-spirv-sha256 = 26c74852b9c9283d6f35f352d1b01da9a9519faaca5b49d03804282d4d862fe8
+spirv-sha256 = 4953989a442a83b0dfa2b6f377d9c96ffb361c242772ae04cf198f9acde8f411
 wgsl = wgsl/ssao_blur.wgsl
-wgsl-sha256 = a3bc01989cdd20f4c821ece0517738df8eeb3ee75575819c49d0f288cdb80df3
+wgsl-sha256 = 110259a96e68914f8bf879f9c907834792db84ad1348a0a10ab62b2ef06e050d
 msl = msl/ssao_blur.metal
-msl-sha256 = 9ffdb25bb2f095b376c37a6e51d261972475219f9dd737c8c5c339ba31252244
+msl-sha256 = 40014429797a61f7d01c0d55a5a4605fbec136bcfbf4316cebe7d0aaff286bd8
 dxil = vertexMain:dxil/ssao_blur.vertexMain.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/ssao_blur.fragmentMain.dxil:8f7a9e0d827e21487d151f1e73bebb6c6dc288774ce2f27f3c70839695a1920b
+dxil = fragmentMain:dxil/ssao_blur.fragmentMain.dxil:52c85fa33c86ba2182d248fe4bb5f7c215ee386c237c776dbfff05d378ad162a
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [tonemap]
