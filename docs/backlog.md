@@ -6011,12 +6011,14 @@ All were real, all are fixed, and all three are invisible to a mouse:
   decision.
 - **Horde's in-frame HUD still says "WASD to move" on a phone.**
 - **`web/engine/shell.js` is the one web file prettier would rewrite**, and it
-  was already so before this work: 350 lines of drift at `HEAD`, against
-  `demo.js`, `style.css` and the templates which all pass. Reformatting it is a
-  350-line diff unrelated to whatever change happens to touch it, so it has been
-  hand-matched to the existing style instead. Worth deciding once, deliberately.
-  Note the local wrapper prints `Prettier: All files formatted correctly`
-  **while exiting 1** — read the exit code, not the line.
+  was already so before any of this work — `demo.js`, `style.css` and the
+  templates all pass. Reformatting it is a whole-file diff unrelated to whatever
+  change happens to touch it, so it is hand-matched to the existing style
+  instead, and the drift grows with every edit. Worth deciding once,
+  deliberately; measure it with `prettier` rather than trusting a figure written
+  here, because it moves. Note the local wrapper prints
+  `Prettier: All files formatted correctly` **while exiting 1** — read the exit
+  code, not the line.
 
 ## What `crcbl lod` left owed
 
@@ -6077,9 +6079,10 @@ recorded in `docs/plan/18-render-features.md`. What is left:
 
 Its doc says "Rigid (rotation + translation), so its upper-left 3×3 transforms
 normals correctly without an inverse-transpose", declared
-character-for-character in four `.slang` files plus Rust and held there by an
-equality test. **It is false** for two shipped scenes: the `Scene::Ao` trough is
-`scale(6, 2, 1.6)` and `Scene::Spot`'s floor is a cube scaled `6 × 0.2 × 6`.
+character-for-character in every `.slang` file that reads a transform — `mesh`,
+`cull` and `draw_gen` — and held there by an equality test. **It is false** for
+two shipped scenes: the `Scene::Ao` trough is `scale(6, 2, 1.6)` and
+`Scene::Spot`'s floor is a cube scaled `6 × 0.2 × 6`.
 
 The culling half of that lie is fixed (see the cluster-radius entry). The normal
 half is not, and it is a different failure: a non-uniformly scaled instance
