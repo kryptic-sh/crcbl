@@ -16,6 +16,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`mesh.slang`'s `fragmentMain` writes two colour targets, so a pipeline built
+  from `crcbl_shaders::MESH` needs two `ColorTargetState`s.** Target 0 is the
+  `Rgba16Float` scene colour it always wrote; target 1 is `Rgba8Unorm` carrying
+  `rgb = F0` and `a = roughness` — the two values the GGX lobe was already
+  computing and throwing away. A pipeline left with one target has a fragment
+  stage writing location 1 into an attachment that is not there, which WebGPU
+  refuses outright and Vulkan reports as a warning at best.
+
+  It is still **one** fragment entry point and one shader module: both
+  `GeometryPath` pipelines gained one array element, and no golden moved on any
+  of the four rasterisers. `crcbl_render::ForwardRenderer` needs nothing from a
+  caller — it attaches its own transient, cleared to zero — and **nothing reads
+  the attachment yet**, so the picture is unchanged. See
+  `docs/plan/18-render-features.md`'s screen-space reflections section for what
+  will.
+
 - **The five demo setters are gone: `ForwardRenderer::set_pyramid`,
   `set_tinted_pyramid`, `set_textured_pyramid`, `set_open_box` and
   `set_dunes`.** Every one of them named a `scene::demo()` mesh and material row
@@ -400,6 +416,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   silence. Failures are now tracked per submission and logged as errors.
 
 ### Added
+
+- **`crcbl_render::TransientImageDesc::reflectivity`** — the `Rgba8Unorm`
+  transient the forward pass writes `F0` and roughness into, beside
+  `scene_color`, `scene_depth` and `ambient_occlusion`. `COLOR_ATTACHMENT` and
+  `TRANSFER_SRC`, the second so a headless probe can read it back; it gains
+  `SAMPLED` when a pass samples it. The forward pass clears it to zero, so a
+  pixel no geometry covered says "nothing reflects here" rather than holding
+  whatever was in the memory.
 
 - **`apps/lumen` — the lighting acceptance fixture, at milestone 1a.** One
   indoor room, described by the sample rather than by the engine: nine meshes

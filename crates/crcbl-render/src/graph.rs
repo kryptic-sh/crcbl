@@ -2371,8 +2371,7 @@ fn render_area(images: &[ImageNode], pass: &Pass<'_>) -> Result<Rect2d, GraphErr
     }
 }
 
-/// Convenience descriptions for the two transients every frame in this engine
-/// has.
+/// Convenience descriptions for the transients a frame in this engine has.
 impl TransientImageDesc {
     /// The HDR scene target: `Rgba16Float`, rendered into and then sampled.
     ///
@@ -2430,6 +2429,39 @@ impl TransientImageDesc {
             extent,
             format: Format::R8Unorm,
             usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::SAMPLED),
+            samples: 1,
+            mip_levels: 1,
+        }
+    }
+
+    /// The reflectivity channel: `Rgba8Unorm`, `rgb` the surface's `F0` and `a`
+    /// its roughness, written by the forward pass beside its colour target.
+    ///
+    /// `docs/plan/18-render-features.md`'s screen-space reflections run after
+    /// that pass, so the only per-pixel data they would otherwise have are the
+    /// depth buffer and the scene colour — neither of which says which surfaces
+    /// reflect or how sharply. `mesh.slang`'s `FragmentOutput` is the other half
+    /// of this description, and it carries the material's *inputs* rather than an
+    /// evaluated shading term.
+    ///
+    /// Eight bits per channel on the argument [`ambient_occlusion`] already
+    /// makes for its one: every value here is bounded in `0..=1`, and the
+    /// quantisation is below what a reflection approximating a whole room can
+    /// resolve.
+    ///
+    /// `TRANSFER_SRC` for [`scene_color`]'s reason — so a headless probe can read
+    /// the attachment back and say what it holds, which is what makes "the
+    /// forward pass writes the bound material row" a test result rather than a
+    /// claim about a buffer nothing looks at.
+    ///
+    /// [`ambient_occlusion`]: TransientImageDesc::ambient_occlusion
+    /// [`scene_color`]: TransientImageDesc::scene_color
+    #[must_use]
+    pub const fn reflectivity(extent: (u32, u32)) -> Self {
+        Self {
+            extent,
+            format: Format::Rgba8Unorm,
+            usage: ImageUsage::COLOR_ATTACHMENT.union(ImageUsage::TRANSFER_SRC),
             samples: 1,
             mip_levels: 1,
         }

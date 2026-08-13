@@ -2822,7 +2822,18 @@ impl ForwardRenderer {
             // the same module they always did.
             dxil: &MESH.dxil_containers(),
         })?;
-        let mesh_targets = [ColorTargetState::opaque(Format::Rgba16Float)];
+        // **Two targets, one fragment stage.** `mesh.slang`'s `FragmentOutput`
+        // writes the shaded colour at 0 and
+        // `docs/plan/18-render-features.md`'s reflectivity channel at 1, and
+        // both pipeline shapes below name that same entry point — so the second
+        // target is one element of this array and not a third pipeline, a
+        // second entry point or a new interpolant. The refusal the AO section
+        // records was about the depth prepass, which has no fragment stage and
+        // no colour target at all; it does not reach this array.
+        let mesh_targets = [
+            ColorTargetState::opaque(Format::Rgba16Float),
+            ColorTargetState::opaque(Format::Rgba8Unorm),
+        ];
         // Shared by both pipeline shapes, because the only thing that differs
         // is which stage produces the geometry.
         //
@@ -4190,6 +4201,8 @@ impl ForwardRenderer {
             "ssao-blurred",
             TransientImageDesc::ambient_occlusion(extent),
         );
+        let reflectivity =
+            graph.create_image("reflectivity", TransientImageDesc::reflectivity(extent));
 
         let group = self.mesh_groups[self.frame];
         let emit = self.emit;
@@ -4314,6 +4327,14 @@ impl ForwardRenderer {
         let pass = graph
             .add_render_pass("forward")
             .clear_color(scene_color, SCENE_CLEAR)
+            // `mesh.slang`'s second target, and **cleared rather than loaded or
+            // discarded**. A pixel no geometry covered has no material, and the
+            // pass that will read this marches a ray from whatever it finds
+            // there — so the value that has to be in it is the one that says
+            // "nothing reflects here", not the last frame's or an undefined
+            // one. Zero in every channel is that value: an `F0` of zero
+            // reflects nothing whatever the roughness beside it says.
+            .clear_color(reflectivity, [0.0; 4])
             .clear_depth(scene_depth)
             // The occlusion channel this frame's ambient term is scaled by. The
             // blur pass wrote it as a colour attachment a moment ago, so this

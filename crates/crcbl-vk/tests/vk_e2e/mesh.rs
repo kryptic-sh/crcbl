@@ -1855,6 +1855,13 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
             )
             .expect("reconfigure keeps the handle valid");
 
+        // How many physical images one frame of this renderer needs, read off
+        // the last compiled frame. The ceiling below is a multiple of it, and
+        // taking it from the graph is what keeps that ceiling a statement about
+        // *retirement*: a pass added to the forward path changes this number,
+        // and a figure written down here would turn that into a failure about
+        // something else entirely.
+        let mut per_frame = 0;
         // Two frames per size, so the second one exercises the *reuse* path
         // rather than only the create path.
         for _ in 0..2 {
@@ -1889,6 +1896,7 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
                 let _ = renderer.add_passes(&mut graph, target, extent);
                 graph.compile(&pool).expect("a legal frame")
             };
+            per_frame = compiled.physical_image_count();
             // Every *render* pass renders at the size that was just
             // configured, which is the graph deriving its render area from the
             // attachments rather than from anything remembered. A compute pass
@@ -1953,10 +1961,15 @@ fn the_graph_and_its_pool_survive_a_resize_storm() {
             pool.retire_unused(device);
         }
 
-        // The pool must converge rather than accumulate one pair of targets per
-        // size the window passed through. Two live transients, plus at most
-        // `RETIRE_AFTER_FRAMES` generations of stale ones.
-        let ceiling = 2 * (crcbl_render::transient::RETIRE_AFTER_FRAMES as usize + 1);
+        // The pool must converge rather than accumulate one set of targets per
+        // size the window passed through: this frame's own transients, plus at
+        // most `RETIRE_AFTER_FRAMES` generations of stale ones.
+        assert!(
+            per_frame > 0,
+            "the frame declared no transient images, so the ceiling below is zero \
+             and the assertion after it could not fail"
+        );
+        let ceiling = per_frame * (crcbl_render::transient::RETIRE_AFTER_FRAMES as usize + 1);
         assert!(
             pool.image_count() <= ceiling,
             "after resizing to {extent:?} the pool holds {} images, over the {ceiling} \

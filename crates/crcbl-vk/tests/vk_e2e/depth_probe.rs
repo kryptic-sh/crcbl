@@ -1,19 +1,32 @@
-//! Reversed-Z, proved rather than asserted.
+//! `mesh.slang` driven through a pipeline this file builds by hand, so a
+//! question about the *pipeline* can be asked without a scene around it.
 //!
-//! `docs/plan/02-vulkan-backend.md` locks reversed-Z, which is the kind of
-//! decision a comment can claim and nothing checks. The one test here renders
-//! two overlapping quads — the near one drawn first, so draw order cannot carry
-//! it — twice, through the same pipeline, the same `CompareOp::Greater` and the
-//! same clear of 0.0, changing only the projection matrix. Under the engine's
-//! projection the near quad wins and the frame is red; under a conventional
-//! `0 at near, 1 at far` one the far quad has the larger depth value, passes
-//! `Greater`, and overwrites it. Both outcomes are asserted, so the test fails
-//! under standard-Z in the direction that names which convention is in force.
+//! Two questions are asked here, and they share one fixture because they share
+//! one pipeline.
+//!
+//! **Reversed-Z, proved rather than asserted.** `docs/plan/02-vulkan-backend.md`
+//! locks it, which is the kind of decision a comment can claim and nothing
+//! checks. Two overlapping quads — the near one drawn first, so draw order
+//! cannot carry it — are rendered twice, through the same pipeline, the same
+//! `CompareOp::Greater` and the same clear of 0.0, changing only the projection
+//! matrix. Under the engine's projection the near quad wins and the frame is
+//! red; under a conventional `0 at near, 1 at far` one the far quad has the
+//! larger depth value, passes `Greater`, and overwrites it. Both outcomes are
+//! asserted, so the test fails under standard-Z in the direction that names
+//! which convention is in force.
+//!
+//! **The reflectivity attachment carries the row it was told to.**
+//! `docs/plan/18-render-features.md`'s screen-space reflections read `F0` and a
+//! roughness out of a second colour target the forward pass writes, and nothing
+//! in a rendered picture shows what is in it — a wrong channel, a wrong row or a
+//! target that was never written all produce exactly the frame the goldens
+//! already hold. So this file reads that attachment back and says what it found.
 //!
 //! It borrows `mesh`'s extent and shader but is not part of that module,
-//! because it is not a picture of a scene: the conventional projection it
-//! builds for the control is one nothing in the engine ever constructs, and it
-//! exists only so the reversed-Z result has something to be different from.
+//! because neither question is a picture of a scene: the conventional projection
+//! built for the control is one nothing in the engine ever constructs, and the
+//! reflectivity frame is deliberately shaded through a row that makes the colour
+//! target nearly black.
 
 use crate::harness::{Headless, POISON, poisoned};
 use crate::mesh::MESH_EXTENT;
@@ -43,8 +56,13 @@ struct DepthProbe {
     uniforms: crcbl_hal::BufferHandle,
     /// One `GpuInstance` at identity. `mesh.slang` reads its transform out of
     /// this rather than out of the uniform block, and the probe's geometry is
-    /// already in world space — so the instance is a constant and this buffer
-    /// is written once, at construction.
+    /// already in world space — so the transform is a constant.
+    ///
+    /// Written per frame rather than at construction, because its
+    /// [`material`](crcbl_shaders::mesh::GpuInstance::material) is the one field
+    /// that varies: it is how a frame says which row of [`PROBE_MATERIALS`] its
+    /// fragments shade through, and the reflectivity assertion exists to check
+    /// that the row named here is the row that arrives.
     instances: crcbl_hal::BufferHandle,
     /// One `DrawConstants` block naming instance zero. The probe has one
     /// instance, so this is the identity — but `mesh.slang` reads the block
@@ -123,6 +141,68 @@ const PROBE_FAR: f32 = 100.0;
 /// to say what that reading means.
 const PROBE_CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
+/// The near quad's vertex colour: the red the reversed-Z assertion looks for at
+/// the centre, and **the albedo the reflectivity assertion derives its `F0`
+/// from** — a conductor's `F0` is its base colour, so the value expected at the
+/// centre is this multiplied by the material row's factor rather than a triple
+/// written down beside it.
+const NEAR_QUAD_COLOR: [f32; 3] = [0.9, 0.05, 0.05];
+
+/// The far quad's vertex colour: the blue that must still be visible around the
+/// near quad's edge.
+const FAR_QUAD_COLOR: [f32; 3] = [0.05, 0.1, 0.9];
+
+/// The probe's material table. Row [`PROBE_PLAIN_ROW`] is what the reversed-Z
+/// frames shade through and row [`PROBE_REFLECTIVE_ROW`] is what the
+/// reflectivity frame does.
+///
+/// **Two rows, because one row cannot fail a wrong-row bug.** The reflectivity
+/// assertion reads the attachment a fragment wrote after being told to use the
+/// second row; a shader that resolved the *first* one — or a host that never
+/// wrote the instance's index — would produce a perfectly plausible triple, and
+/// the only thing that separates the two answers is that the rows differ. They
+/// differ in both fields and by a wide margin, which is what lets the assertion
+/// be a tolerance around one value rather than a preference between two close
+/// ones.
+const PROBE_MATERIALS: [crcbl_shaders::mesh::GpuMaterial; 2] = [
+    // The row this probe has always shaded through. Its `F0` is the flat
+    // dielectric 0.04 and its roughness is 0.5, so it is far from the row below
+    // in every channel of the attachment.
+    crcbl_shaders::mesh::GpuMaterial::UNTINTED,
+    crcbl_shaders::mesh::GpuMaterial {
+        // **Not `[1.0; 4]`, and the blue factor is the reason.** `F0` here is
+        // the quad's own albedo, and the near quad's green and blue are equal —
+        // two equal channels are two a swizzle could swap unseen. Scaling one of
+        // them makes all three of the expected triple distinct.
+        base_color: [1.0, 1.0, 0.4, 1.0],
+        base_color_texture: 0,
+        // **A conductor, so `F0` is coloured.** A dielectric's `F0` is grey
+        // whatever its albedo, and a grey triple cannot fail a channel swap.
+        metallic: 1.0,
+        // Far from the row above's 0.5, and far from every channel of the `F0`
+        // beside it — so a wrong row fails on the alpha and a swap of the `rgb`
+        // and `a` halves fails on all four.
+        roughness: 0.25,
+    },
+];
+
+/// The row of [`PROBE_MATERIALS`] the reversed-Z frames shade through, and the
+/// one the reflectivity assertion must **not** find.
+const PROBE_PLAIN_ROW: usize = 0;
+
+/// The row of [`PROBE_MATERIALS`] the reflectivity frame shades through.
+const PROBE_REFLECTIVE_ROW: usize = 1;
+
+/// How far a channel of the reflectivity attachment may sit from the value its
+/// material row implies, as a fraction of full scale.
+///
+/// Two counts of the `Rgba8Unorm` target it was written through. One is the
+/// quantisation itself; the second is the last bit of a multiply of three floats
+/// that four rasterisers are not obliged to round identically. Both together are
+/// an order of magnitude below what separates the two rows — the assertion names
+/// the distance it is really discriminating.
+const REFLECTIVITY_TOLERANCE: f32 = 2.0 / 255.0;
+
 impl DepthProbe {
     /// The two quads, near-first, in `crcbl_shaders::mesh::MeshVertex` layout,
     /// with the box they fit in.
@@ -136,8 +216,8 @@ impl DepthProbe {
         // frame is a red square inside a blue ring and a *wrong* one is a plain
         // blue rectangle — two visibly different pictures, not two shades.
         let quads = [
-            (0.3f32, 0.25f32, [0.9f32, 0.05, 0.05]),
-            (-0.3, 0.6, [0.05, 0.1, 0.9]),
+            (0.3f32, 0.25f32, NEAR_QUAD_COLOR),
+            (-0.3, 0.6, FAR_QUAD_COLOR),
         ];
         let mut vertices = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
@@ -261,17 +341,6 @@ impl DepthProbe {
                 memory: MemoryLocation::HostUpload,
             })
             .expect("an instance buffer");
-        device
-            .write_buffer(
-                instances,
-                0,
-                &crcbl_shaders::mesh::GpuInstance {
-                    transform: glam::Mat4::IDENTITY.to_cols_array(),
-                    ..crcbl_shaders::mesh::GpuInstance::default()
-                }
-                .to_bytes(),
-            )
-            .expect("write");
 
         let draw_constants = device
             .create_buffer(&BufferDesc {
@@ -289,24 +358,27 @@ impl DepthProbe {
             )
             .expect("write");
 
-        // One untinted row, so `instance.material == 0` multiplies the albedo
-        // by 1.0 and this probe's depth answers stay the answers it recorded
-        // before §3.2 existed.
+        // [`PROBE_MATERIALS`], both rows. Row `PROBE_PLAIN_ROW` is the untinted
+        // one, so a frame naming it multiplies the albedo by 1.0 and this
+        // probe's depth answers stay the answers it recorded before §3.2
+        // existed; the reflectivity frame names the other.
         let materials = device
             .create_buffer(&BufferDesc {
                 label: Some("probe materials"),
-                size: crcbl_shaders::mesh::MATERIAL_STRIDE as u64,
+                size: (PROBE_MATERIALS.len() * crcbl_shaders::mesh::MATERIAL_STRIDE) as u64,
                 usage: BufferUsage::STORAGE,
                 memory: MemoryLocation::HostUpload,
             })
             .expect("a material table");
-        device
-            .write_buffer(
-                materials,
-                0,
-                &crcbl_shaders::mesh::GpuMaterial::UNTINTED.to_bytes(),
-            )
-            .expect("write");
+        for (row, material) in PROBE_MATERIALS.iter().enumerate() {
+            device
+                .write_buffer(
+                    materials,
+                    (row * crcbl_shaders::mesh::MATERIAL_STRIDE) as u64,
+                    &material.to_bytes(),
+                )
+                .expect("write");
+        }
 
         let mesh_table = device
             .create_buffer(&BufferDesc {
@@ -730,7 +802,17 @@ impl DepthProbe {
                 dxil: &[],
             })
             .expect("the committed SPIR-V is accepted");
-        let color_targets = [crcbl_hal::ColorTargetState::opaque(headless.format)];
+        // **Two, because `fragmentMain` writes two.** A fragment stage writing
+        // location 1 into a pipeline with one attachment is a validation error
+        // under WebGPU's rules and, on Vulkan, a warning at best — so a
+        // hand-built pipeline that kept one target would be this suite passing
+        // while the real forward pass gained an output. The second's format is
+        // the one `crcbl_render::TransientImageDesc::reflectivity` names, and
+        // the pass below attaches an image of exactly that description.
+        let color_targets = [
+            crcbl_hal::ColorTargetState::opaque(headless.format),
+            crcbl_hal::ColorTargetState::opaque(Format::Rgba8Unorm),
+        ];
         let pipeline = device.create_graphics_pipeline(&crcbl_hal::GraphicsPipelineDesc {
             label: Some("depth probe"),
             layout: pipeline_layout,
@@ -847,7 +929,6 @@ fn probe_sun() -> crcbl_shaders::light::GpuLight {
     }
 }
 
-/// Renders the probe with `view_proj` and reads the frame back.
 /// How many pixels of `frame` differ from the pixel at its top-left corner.
 ///
 /// The corner stands in for "what this frame looks like where nothing drew":
@@ -868,14 +949,46 @@ fn pixels_unlike_the_corner(frame: &crcbl_golden::Image) -> usize {
         .count()
 }
 
+/// Both of a probe frame's colour attachments, read back.
+struct ProbeFrame {
+    /// Attachment 0: the swapchain image the two quads were drawn into.
+    color: crcbl_golden::Image,
+    /// Attachment 1: `Rgba8Unorm`, `rgb` each fragment's `F0` and `a` its
+    /// roughness.
+    ///
+    /// Carried as an [`Image`](crcbl_golden::Image) for its `pixel` accessor and
+    /// nothing else — these bytes are material data rather than a picture, and
+    /// no golden holds them.
+    reflectivity: crcbl_golden::Image,
+}
+
+/// Renders the probe with `view_proj`, shading through row `material` of
+/// [`PROBE_MATERIALS`], and reads both of its colour attachments back.
 fn render_probe(
     headless: &Headless,
     probe: &mut DepthProbe,
     pool: &mut crcbl_render::TransientPool,
     view_proj: glam::Mat4,
-) -> crcbl_golden::Image {
+    material: usize,
+) -> ProbeFrame {
     let device = headless.device.as_ref();
     let (width, height) = MESH_EXTENT;
+
+    // The one field of the instance that varies between this file's frames.
+    // Written here rather than at construction so the row a frame shades through
+    // is the frame's own decision — see the field.
+    device
+        .write_buffer(
+            probe.instances,
+            0,
+            &crcbl_shaders::mesh::GpuInstance {
+                transform: glam::Mat4::IDENTITY.to_cols_array(),
+                material: u32::try_from(material).expect("a table of a few rows"),
+                ..crcbl_shaders::mesh::GpuInstance::default()
+            }
+            .to_bytes(),
+        )
+        .expect("write");
 
     let uniforms = crcbl_shaders::mesh::FrameUniforms {
         view_proj: view_proj.to_cols_array(),
@@ -905,15 +1018,29 @@ fn render_probe(
     let acquired = device
         .acquire_next_frame(headless.swapchain)
         .expect("an image");
+    // Four bytes a pixel for both attachments: the swapchain's format and
+    // `Rgba8Unorm` are the same size, so one figure covers both readbacks.
     let bytes = u64::from(width) * u64::from(height) * 4;
-    let staging = device
-        .create_buffer(&BufferDesc {
-            label: Some("probe readback"),
-            size: bytes,
-            usage: BufferUsage::TRANSFER_DST,
-            memory: MemoryLocation::HostReadback,
-        })
-        .expect("a readback buffer");
+    let readback = |label| {
+        device
+            .create_buffer(&BufferDesc {
+                label: Some(label),
+                size: bytes,
+                usage: BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::HostReadback,
+            })
+            .expect("a readback buffer")
+    };
+    let staging = readback("probe readback");
+    let reflectivity_staging = readback("probe reflectivity readback");
+
+    // Where the graph's realised reflectivity handle lands, so the copy below
+    // can name it. A transient has no handle until the pool has given it one, so
+    // there is nothing to write down before the frame runs. `Cell` rather than a
+    // channel: the pass body runs synchronously inside `execute`, on this
+    // thread — `mesh`'s HDR probe reads its target back the same way.
+    let reflectivity_handle: std::cell::Cell<Option<crcbl_hal::ImageHandle>> =
+        std::cell::Cell::new(None);
 
     let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
         label: Some("probe frame"),
@@ -957,9 +1084,20 @@ fn render_probe(
                 final_state: ResourceState::ShaderRead,
             },
         );
+        // `mesh.slang`'s second output, described exactly as the forward pass
+        // describes its own — so what this file's pipeline is validated against
+        // is the real transient rather than a lookalike declared here.
+        let reflectivity = graph.create_image(
+            "probe-reflectivity",
+            crcbl_render::TransientImageDesc::reflectivity(MESH_EXTENT),
+        );
         graph
             .add_render_pass("probe")
             .clear_color(target, PROBE_CLEAR)
+            // **Cleared to zero, and the corner assertion is what reads it.** A
+            // pixel no fragment covered has no material, and zero is the triple
+            // that says so.
+            .clear_color(reflectivity, [0.0; 4])
             // The reversed-Z clear: `depth::CLEAR` = 0.0, so any geometry beats
             // the empty buffer under `Greater`.
             .clear_depth(depth)
@@ -971,24 +1109,48 @@ fn render_probe(
                 encoder.bind_index_buffer(probe.indices, 0, crcbl_hal::IndexFormat::Uint32);
                 encoder.draw_indexed(0..12, 0, 0..1);
             });
+        // One declaration, and the graph works out that the reflectivity target
+        // has to move from a colour attachment to a copy source. There is not
+        // one hand-written barrier in this file either.
+        let sink = &reflectivity_handle;
+        graph
+            .add_compute_pass("reflectivity probe")
+            .use_image(reflectivity, ResourceState::TransferSrc)
+            .execute(move |ctx| sink.set(Some(ctx.image(reflectivity))));
         graph.compile(&*pool).expect("a legal frame")
     };
     compiled
         .execute(device, pool, encoder.as_mut(), None)
         .expect("executed");
 
+    let layers = ImageSubresourceLayers {
+        aspect: ImageAspect::COLOR,
+        mip: 0,
+        base_layer: 0,
+        layer_count: 1,
+    };
+    // Both copies sit outside every pass and need no barrier of their own: the
+    // graph left the swapchain image in `TransferSrc` because the import asked
+    // for it, and the reflectivity target for the same reason.
     encoder.copy_image_to_buffer(&BufferImageCopy {
         buffer: staging,
         buffer_offset: 0,
         buffer_row_length: 0,
         buffer_image_height: 0,
         image: acquired.image,
-        image_subresource: ImageSubresourceLayers {
-            aspect: ImageAspect::COLOR,
-            mip: 0,
-            base_layer: 0,
-            layer_count: 1,
-        },
+        image_subresource: layers,
+        image_offset: crcbl_hal::Offset3d::default(),
+        image_extent: Extent3d::d2(width, height),
+    });
+    encoder.copy_image_to_buffer(&BufferImageCopy {
+        buffer: reflectivity_staging,
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image: reflectivity_handle
+            .get()
+            .expect("the reflectivity probe pass ran"),
+        image_subresource: layers,
         image_offset: crcbl_hal::Offset3d::default(),
         image_extent: Extent3d::d2(width, height),
     });
@@ -1021,36 +1183,47 @@ fn render_probe(
          frame here to read. Look at the submission and the readback, not at \
          what was drawn."
     );
+    let mut reflectivity = poisoned(bytes as usize);
+    headless.readback(reflectivity_staging, bytes, &mut reflectivity);
+    assert!(
+        reflectivity.iter().any(|&byte| byte != POISON),
+        "all {bytes} bytes of the reflectivity readback are still {POISON:#04x} — \
+         no copy reached it, so there is nothing here to say what the second \
+         attachment holds. Look at the copy and the transient's usage flags."
+    );
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);
+    device.destroy_buffer(reflectivity_staging);
 
     let order = match headless.format {
         Format::Bgra8Unorm | Format::Bgra8UnormSrgb => crcbl_golden::ChannelOrder::Bgra,
         _ => crcbl_golden::ChannelOrder::Rgba,
     };
-    crcbl_golden::Image::from_readback(width, height, &pixels, order).expect("one image")
+    ProbeFrame {
+        color: crcbl_golden::Image::from_readback(width, height, &pixels, order)
+            .expect("one image"),
+        // `Rgba` whatever the swapchain carries: this attachment's format is
+        // `TransientImageDesc::reflectivity`'s, not the presentation surface's.
+        reflectivity: crcbl_golden::Image::from_readback(
+            width,
+            height,
+            &reflectivity,
+            crcbl_golden::ChannelOrder::Rgba,
+        )
+        .expect("one image"),
+    }
 }
 
-/// **Reversed-Z, on the GPU, discriminated against the alternative.**
+/// The two projections this file renders through: the engine's own reversed-Z
+/// matrix, and the conventional control the reversed-Z test discriminates
+/// against.
 ///
-/// `docs/plan/02-vulkan-backend.md` locks reversed-Z, and it is the kind of
-/// decision a comment can claim and nothing checks. This renders the *same*
-/// geometry through the *same* pipeline with the *same* `Greater` compare op and
-/// the *same* clear of 0.0, twice, changing one thing: the projection matrix.
-///
-/// * With the engine's reversed-Z projection, the near quad wins → **red**.
-/// * With a conventional `0 at near, 1 at far` projection, the far quad has the
-///   larger depth value, passes `Greater`, and overwrites it → **blue**.
-///
-/// So this test would fail under standard-Z, in the direction that says which
-/// convention is in force — which is the point.
-#[test]
-#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
-fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
-    let headless = Headless::open_for_mesh();
-    let mut probe = DepthProbe::new(&headless);
-    let mut pool = crcbl_render::TransientPool::new();
-
+/// Built together and from one view and one field of view, because the whole
+/// force of that test is that **only the projection differs** — two call sites
+/// each composing their own would be two places for that to stop being true.
+/// The centre of the near quad is where both tests sample, and it is the same
+/// pixel in both because the camera is.
+fn probe_projections() -> (glam::Mat4, glam::Mat4) {
     #[allow(clippy::cast_precision_loss)]
     let aspect = MESH_EXTENT.0 as f32 / MESH_EXTENT.1 as f32;
     let view = glam::camera::rh::view::look_at_mat4(
@@ -1072,10 +1245,38 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
     // suite reaches for glam directly.
     let standard =
         glam::camera::rh::proj::directx::perspective(fov, aspect, PROBE_NEAR, PROBE_FAR) * view;
+    (reversed, standard)
+}
 
-    let centre = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2);
+/// The pixel both tests sample: the centre of the frame, which under the
+/// engine's projection is inside the near quad.
+const PROBE_CENTRE: (u32, u32) = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2);
 
-    let reversed_frame = render_probe(&headless, &mut probe, &mut pool, reversed);
+/// **Reversed-Z, on the GPU, discriminated against the alternative.**
+///
+/// `docs/plan/02-vulkan-backend.md` locks reversed-Z, and it is the kind of
+/// decision a comment can claim and nothing checks. This renders the *same*
+/// geometry through the *same* pipeline with the *same* `Greater` compare op and
+/// the *same* clear of 0.0, twice, changing one thing: the projection matrix.
+///
+/// * With the engine's reversed-Z projection, the near quad wins → **red**.
+/// * With a conventional `0 at near, 1 at far` projection, the far quad has the
+///   larger depth value, passes `Greater`, and overwrites it → **blue**.
+///
+/// So this test would fail under standard-Z, in the direction that says which
+/// convention is in force — which is the point.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
+    let headless = Headless::open_for_mesh();
+    let mut probe = DepthProbe::new(&headless);
+    let mut pool = crcbl_render::TransientPool::new();
+
+    let (reversed, standard) = probe_projections();
+    let centre = PROBE_CENTRE;
+
+    let reversed_frame =
+        render_probe(&headless, &mut probe, &mut pool, reversed, PROBE_PLAIN_ROW).color;
     let pixel = reversed_frame.pixel(centre.0, centre.1).expect("inside");
     // **What the rest of the frame holds, because one pixel cannot say.** A
     // centre holding the clear is either "no fragment survived anywhere" or
@@ -1134,7 +1335,8 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
          {pixel:?} at {ring:?}"
     );
 
-    let standard_frame = render_probe(&headless, &mut probe, &mut pool, standard);
+    let standard_frame =
+        render_probe(&headless, &mut probe, &mut pool, standard, PROBE_PLAIN_ROW).color;
     let pixel = standard_frame.pixel(centre.0, centre.1).expect("inside");
     assert!(
         pixel[2] > pixel[0] && pixel[2] > 100,
@@ -1148,6 +1350,121 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
          pipeline, the same compare op, only the projection differs",
         reversed_frame.pixel(centre.0, centre.1).expect("inside"),
         standard_frame.pixel(centre.0, centre.1).expect("inside"),
+    );
+
+    probe.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// **The second colour attachment carries the material row the instance named.**
+///
+/// `docs/plan/18-render-features.md`'s screen-space reflections read `F0` and a
+/// roughness out of a target the forward pass writes beside its colour, and
+/// **nothing in a rendered picture shows what is in it**: a wrong channel, a
+/// wrong row, or a target the fragment stage never wrote all leave the frame
+/// exactly as every golden already has it. So this reads the attachment back and
+/// says what it holds.
+///
+/// The frame is shaded through [`PROBE_REFLECTIVE_ROW`] — a conductor, so its
+/// `F0` is its albedo and therefore coloured, with all three channels distinct.
+/// Three things are asserted, each failing a different mistake:
+///
+/// * The centre carries that row's `F0` and roughness. A swap of the `rgb` and
+///   `a` halves fails all four channels; so does a target left at its clear.
+/// * It is not the neighbouring row's answer: that row is a dielectric, whose
+///   `F0` is grey whatever its albedo, and its roughness is twice this one's.
+/// * A corner no fragment covered is exactly zero — the clear the design asks
+///   for, so a later march cannot start from a pixel that has no material.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing_drew() {
+    let headless = Headless::open_for_mesh();
+    let mut probe = DepthProbe::new(&headless);
+    let mut pool = crcbl_render::TransientPool::new();
+
+    let (reversed, _) = probe_projections();
+    let frame = render_probe(
+        &headless,
+        &mut probe,
+        &mut pool,
+        reversed,
+        PROBE_REFLECTIVE_ROW,
+    )
+    .reflectivity;
+
+    let row = PROBE_MATERIALS[PROBE_REFLECTIVE_ROW];
+    let plain = PROBE_MATERIALS[PROBE_PLAIN_ROW];
+    // **Derived from the fixture rather than written down.** `metallic` is 1.0,
+    // so `F0` is the albedo — the near quad's own vertex colour times the row's
+    // factor times the page's white texel — and the alpha is the row's
+    // roughness. A hand-written quadruple here would go on describing the old
+    // material the day either constant moves.
+    let expected = [
+        NEAR_QUAD_COLOR[0] * row.base_color[0],
+        NEAR_QUAD_COLOR[1] * row.base_color[1],
+        NEAR_QUAD_COLOR[2] * row.base_color[2],
+        row.roughness,
+    ];
+
+    let centre = PROBE_CENTRE;
+    let pixel = frame.pixel(centre.0, centre.1).expect("inside");
+    for (channel, want) in expected.iter().enumerate() {
+        let got = f32::from(pixel[channel]) / 255.0;
+        assert!(
+            (got - want).abs() <= REFLECTIVITY_TOLERANCE,
+            "channel {channel} of the reflectivity attachment at {centre:?} is \
+             {got}, and the bound material row says {want}. The whole pixel is \
+             {pixel:?}.\n\
+             \x20 * All four channels wrong, with `rgb` holding what `a` should: \
+             the two halves of `mesh.slang`'s `FragmentOutput.reflectivity` are \
+             swapped.\n\
+             \x20 * All four zero: no fragment wrote here, or the pipeline's \
+             second target and the pass's second attachment disagree — the pass \
+             would have cleared it and nothing else would have touched it."
+        );
+    }
+
+    // **And demonstrably not the row beside it**, checked as its own statement so
+    // a wrong row names itself instead of arriving as "channel 0 was off by
+    // 0.86". A dielectric's `F0` is the same number in all three channels
+    // whatever its base colour, which is exactly what this must not be.
+    assert!(
+        pixel[0] != pixel[1] || pixel[1] != pixel[2],
+        "the reflectivity at {centre:?} is the grey {pixel:?}, but the bound row \
+         is a conductor and its `F0` is its albedo. A grey triple is what row \
+         {PROBE_PLAIN_ROW} produces, so either the fragment stage resolved that \
+         row or it ignored `metallic`."
+    );
+    let roughness = f32::from(pixel[3]) / 255.0;
+    assert!(
+        (roughness - row.roughness).abs() < (roughness - plain.roughness).abs(),
+        "the reflectivity alpha at {centre:?} is {roughness}, which is nearer row \
+         {PROBE_PLAIN_ROW}'s roughness of {} than the bound row {PROBE_REFLECTIVE_ROW}'s \
+         {}. The two rows differ by design; reading the wrong one is what this \
+         separation exists to catch.",
+        plain.roughness,
+        row.roughness,
+    );
+
+    // The clear, which is the half of this slice a drawn pixel cannot show.
+    // Neither quad reaches the corner — the near one spans 34 pixels from the
+    // centre and the far one 60 — so this is the attachment's load op and
+    // nothing else.
+    let corner = frame.pixel(0, 0).expect("inside");
+    assert_eq!(
+        corner, [0; 4],
+        "a pixel no geometry covered must hold zero in every channel: it has no \
+         material, and `docs/plan/18-render-features.md` asks for the clear that \
+         says so rather than one a later march would read as a reflective \
+         surface. Got {corner:?}."
+    );
+
+    eprintln!(
+        "vk e2e: reflectivity at {centre:?} is {pixel:?} — row \
+         {PROBE_REFLECTIVE_ROW}'s F0 {:?} and roughness {}",
+        [expected[0], expected[1], expected[2]],
+        row.roughness,
     );
 
     probe.destroy(headless.device.as_ref());

@@ -1214,8 +1214,47 @@ uint froxel_of(float2 pixel, float depth)
     return (index * grid_y + tile_y) * grid_x + tile_x;
 }
 
+/// The forward pass's two colour attachments, one field per target.
+///
+/// This was a bare `float4` until `docs/plan/18-render-features.md`'s
+/// screen-space reflections, which run after this pass and therefore have only
+/// the depth buffer and the scene colour to work from — neither of which says
+/// which surfaces reflect or how sharply. **Both of the numbers that do are
+/// already computed below** for the GGX lobe and were being thrown away, so what
+/// the second target costs is a write rather than an evaluation.
+///
+/// # One entry point, still
+///
+/// A struct return is not a second fragment stage: `fragmentMain` is named by
+/// the vertex pipeline and by the mesh-shader pipeline alike, and both gained
+/// one element in the same `ColorTargetState` array. That is the design's own
+/// claim in `docs/plan/18-render-features.md` — the AO section's refusal of an
+/// attachment was about the depth *prepass*, which has no fragment stage and no
+/// colour target at all — and it holds here rather than being assumed.
+struct FragmentOutput
+{
+    /// The shaded colour, into the `Rgba16Float` scene target.
+    float4 lit : SV_Target0;
+    /// The reflectivity channel, into an `Rgba8Unorm` target: `rgb` is `F0` and
+    /// `a` is the roughness.
+    ///
+    /// **The material's inputs, not an evaluated shading term.** Baking the
+    /// environment-specular weight here would be one channel cheaper and would
+    /// freeze this file's version of the lobe into a buffer; storing `F0` and
+    /// the roughness is what lets a later pass evaluate the *same* lobe, which
+    /// is the whole of topic 18's "one material model, one BRDF, one set of
+    /// inputs".
+    ///
+    /// Eight bits per channel, because both are bounded in `0..=1` and neither
+    /// error survives the approximation reading them: a dielectric's `0.04`
+    /// quantises to `10/255`, and a roughness drives a lobe's width. The
+    /// hardware's own clamp is what keeps a `base_color` factor above one from
+    /// writing an `F0` past it.
+    float4 reflectivity : SV_Target1;
+};
+
 [shader("fragment")]
-float4 fragmentMain(VertexOutput input) : SV_Target
+FragmentOutput fragmentMain(VertexOutput input)
 {
     // Interpolation denormalises, so both of these are renormalised per
     // fragment. Skipping it makes large triangles darken towards their centres.
@@ -1397,8 +1436,15 @@ float4 fragmentMain(VertexOutput input) : SV_Target
     // `GpuMaterial::UNTINTED`'s metallic is zero and no scene sets one higher.
     float3 lit = diffuse_albedo * (frame.ambient.rgb * occluded + direct) + gloss;
 
+    FragmentOutput output;
     // Deliberately **not** clamped: the target is `Rgba16Float` and the tonemap
     // pass is what maps this into the swapchain. A `saturate` here would throw
     // away the very range HDR-from-P1 exists to carry — see `tonemap.slang`.
-    return float4(lit, albedo.a);
+    output.lit = float4(lit, albedo.a);
+    // The two values the lobe above was evaluated from, written out rather than
+    // dropped. `roughness` is the *clamped* one — what the shading used — so a
+    // pass reading this evaluates the same lobe this one did rather than the
+    // row's unclamped number.
+    output.reflectivity = float4(f0, roughness);
+    return output;
 }
