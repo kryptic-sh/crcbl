@@ -249,6 +249,29 @@ enum HazardShape {
 /// flight; a wrong answer here is then the layer's behaviour rather than the
 /// GPU's speed.
 ///
+/// # A `no` here is not a knob somebody forgot to turn on
+///
+/// Checked on 2026-08-13, against `VK_LAYER_KHRONOS_validation` spec 1.4.357,
+/// after a cross-frame write-after-write in the culling-stats ring was found by
+/// CI's layer and by nothing here:
+///
+/// * the layer's own manifest declares `syncval_submit_time_validation` with
+///   `default: True`, so submit-time validation is already on;
+/// * the layer **does** read `VK_KHRONOS_VALIDATION_*` settings —
+///   `VK_KHRONOS_VALIDATION_VALIDATE_SYNC=false` turns record-time sync
+///   validation off and makes the test above fail, which is how that was
+///   established rather than assumed;
+/// * setting `VK_KHRONOS_VALIDATION_SYNCVAL_SUBMIT_TIME_VALIDATION=true`, its
+///   `VK_LAYER_`-prefixed spelling, and a `VK_LAYER_SETTINGS_PATH` file saying
+///   the same, each change nothing;
+/// * and raising `PAYLOAD` to 512 MiB — the theory being that this backend's
+///   timeline query after every submit lets the layer retire the first batch
+///   before the second is validated — changes nothing either.
+///
+/// So this answer is a property of the layer build, and CI is the only oracle
+/// for the whole hazard class. Anyone tempted to re-run that experiment should
+/// read this list first and then go further than it did.
+///
 /// Its own instance, because the report it produces is dirty by construction and
 /// must not land on a caller's.
 fn queue_hazard_reported(shape: HazardShape) -> bool {

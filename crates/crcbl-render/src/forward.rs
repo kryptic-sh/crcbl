@@ -4018,7 +4018,7 @@ impl ForwardRenderer {
         // graph puts it in `TransferSrc` for this and back into the state the
         // next frame on this slot imports it in; there is not a barrier written
         // here.
-        if let Some(stats) = self.cull_stats.as_ref() {
+        if let Some(stats) = self.cull_stats.as_mut() {
             stats.add_copy_pass(graph, generated.visible_count_id);
         }
 

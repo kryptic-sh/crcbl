@@ -80,7 +80,7 @@ use crcbl_hal::{
 };
 use crcbl_shaders::cull;
 
-use crate::graph::{BufferId, RenderGraph};
+use crate::graph::{BufferId, ImportedBuffer, RenderGraph};
 
 /// Bytes of one slot: the whole statistics buffer, in one copy.
 ///
@@ -125,6 +125,19 @@ struct Slot {
     /// refuses a second request against a buffer that already has one in
     /// flight. A ring is exactly the shape that has several in flight.
     buffer: BufferHandle,
+    /// What the **last frame that used this slot** left the buffer in, and what
+    /// [`CullStatsRing::add_copy_pass`] imports it as.
+    ///
+    /// [`ResourceState::Undefined`] until a copy has been declared into it, and
+    /// [`ResourceState::TransferDst`] thereafter — the shape
+    /// `ForwardRenderer::shadow_imported` has, for the same reason. **This is
+    /// the field the whole cross-frame hazard turns on**: the previous write to
+    /// this buffer is another frame's `copy_buffer_to_buffer`, in another
+    /// submission, and a barrier naming `Undefined` as its source carries no
+    /// source scope at all — `srcStageMask = NONE` — so it would order the two
+    /// writes against nothing. Naming `TransferDst` is what gives the graph's
+    /// barrier a real prior access to depend on.
+    imported: ResourceState,
     /// The frame whose copy the body stamped into this slot, once it ran.
     frame: Option<u64>,
     /// The request made for it, one frame after that copy was recorded.
@@ -185,6 +198,10 @@ impl CullStatsRing {
             }) {
                 Ok(buffer) => slots.push(Slot {
                     buffer,
+                    // Nothing has written it, which is the one state a barrier
+                    // may name as a source without ordering anything: there is
+                    // nothing to order against yet.
+                    imported: ResourceState::Undefined,
                     frame: None,
                     readback: None,
                 }),
@@ -290,22 +307,62 @@ impl CullStatsRing {
     /// copy scheduled between them reads a total half the frame has not
     /// contributed to yet.
     ///
-    /// The destination is deliberately not in the graph. It is a
-    /// [`MemoryLocation::HostReadback`] buffer that no pass can bind and nothing
-    /// else in the frame touches, so there is no hazard to order and no state to
-    /// track — the same treatment every staging buffer in the engine gets.
-    pub fn add_copy_pass(&self, graph: &mut RenderGraph<'_>, stats: BufferId) {
+    /// # The destination is in the graph too, and it has to be
+    ///
+    /// A slot is written by a copy this frame and was written by a copy
+    /// [`latency`](Self::latency) frames ago — **two writes, in two
+    /// submissions, with nothing between them**. That is a write-after-write
+    /// hazard exactly like the one the graph already computes for the depth
+    /// transient across a frame boundary, and it is not made safe by the
+    /// readback's completion point: a timeline gates the *host's read*, which is
+    /// a different edge from the GPU's second write.
+    ///
+    /// So the slot is imported with what the previous turn of the ring left it
+    /// in — `Undefined` the first time and `TransferDst` thereafter — and the
+    /// copy declares
+    /// [`ResourceState::TransferDst`] on it, which makes the graph emit
+    /// `TransferDst → TransferDst` before the copy: a barrier whose source scope
+    /// covers that earlier submission's transfer write. An earlier version of
+    /// this function left the destination out on the grounds that "nothing else
+    /// in the frame touches it", which is true and beside the point — the
+    /// conflicting access is in *another* frame. CI's validation layer reported
+    /// it as `SYNC-HAZARD-WRITE-AFTER-WRITE … write_barriers: 0`; ours cannot
+    /// see across submissions at all.
+    ///
+    /// The state never changes after that, which is also what D3D12 requires: a
+    /// resource on the `READBACK` heap is created in `COPY_DEST` and pinned
+    /// there for its lifetime, so `TransferDst` is the only state this buffer
+    /// may ever be declared in.
+    pub fn add_copy_pass(&mut self, graph: &mut RenderGraph<'_>, stats: BufferId) {
         if self.off {
             return;
         }
-        let dst = self.slots[self.current].buffer;
         let frame = self.frames;
         let recorded = Arc::clone(&self.recorded);
+        let slot = &mut self.slots[self.current];
+        let handle = slot.buffer;
+        let dst = graph.import_buffer(
+            "cull-stats-slot",
+            ImportedBuffer {
+                buffer: handle,
+                initial: slot.imported,
+                final_state: ResourceState::TransferDst,
+            },
+        );
+        // Set here rather than from inside the body, and deliberately: a graph
+        // that is built and dropped leaves the buffer in whatever it was, and
+        // claiming a write that never happened only makes the *next* barrier
+        // wait for something already finished. Claiming `Undefined` after a
+        // write that did happen would drop the source scope, which is the bug
+        // this whole comment is about.
+        slot.imported = ResourceState::TransferDst;
         graph
             .add_copy_pass("cull-stats-readback")
             .use_buffer(stats, ResourceState::TransferSrc)
+            .use_buffer(dst, ResourceState::TransferDst)
             .execute(move |ctx| {
                 let src = ctx.buffer(stats);
+                let dst = ctx.buffer(dst);
                 ctx.encoder().copy_buffer_to_buffer(&BufferCopy {
                     src,
                     src_offset: 0,
@@ -573,6 +630,94 @@ mod tests {
         );
 
         harness.finish(ring);
+    }
+
+    /// **A frame's write to a slot is ordered against the write the last frame
+    /// on that slot made** — the cross-submission hazard, caught with no driver
+    /// in the room.
+    ///
+    /// This is the bug this ring shipped with and CI's validation layer caught:
+    /// `SYNC-HAZARD-WRITE-AFTER-WRITE … write_barriers: 0`, one frame's
+    /// `vkCmdCopyBuffer` into a slot against an earlier frame's copy into the
+    /// same slot, in an earlier submission, with nothing between them. The
+    /// readback's completion point does not help: a timeline gates the *host's*
+    /// read, which is a different edge from the GPU's second write.
+    ///
+    /// It is asserted here, against the null backend, because the layer that
+    /// found it is one this repository cannot run everywhere: local runs report
+    /// `cross-submission=no` and see nothing of this class. That makes a
+    /// device-free assertion the durable half — the same argument
+    /// `crcbl-render`'s `a_second_frame_barriers_against_what_the_first_one_left`
+    /// makes for the depth transient.
+    ///
+    /// Both ends are checked, and the first is what stops the second being
+    /// vacuous: the **first** use of a slot names `Undefined` (there is nothing
+    /// to order against), and the **reusing** frame names `TransferDst` (there
+    /// is). A version that imported `Undefined` every time would emit a barrier
+    /// that passes a "was there a barrier" test and orders nothing at all,
+    /// because `Undefined` as a source expands to `srcStageMask = NONE`.
+    #[test]
+    fn a_reused_slot_barriers_against_the_frame_that_wrote_it_last() {
+        let mut harness = Harness::open();
+        let mut ring = harness.ring(false);
+
+        // The first turn of the ring: this slot has never been written.
+        harness.frame(&mut ring);
+        let slot = ring.slots[ring.current].buffer;
+        assert_eq!(
+            barrier_before_the_copy_into(&harness.recorder, slot),
+            Some((ResourceState::Undefined, ResourceState::TransferDst)),
+            "a slot nothing has written orders against nothing, and says so",
+        );
+
+        // Round the ring until this same slot comes up again.
+        for _ in 1..ring.latency() {
+            harness.recorder.clear();
+            harness.frame(&mut ring);
+            assert_ne!(
+                ring.slots[ring.current].buffer, slot,
+                "the ring must hand out a different slot until it has turned over",
+            );
+        }
+        harness.recorder.clear();
+        harness.frame(&mut ring);
+        assert_eq!(
+            ring.slots[ring.current].buffer, slot,
+            "the ring has come round and this frame reuses the first slot",
+        );
+        assert_eq!(
+            barrier_before_the_copy_into(&harness.recorder, slot),
+            Some((ResourceState::TransferDst, ResourceState::TransferDst)),
+            "the copy into a reused slot must be ordered against the copy that wrote it last, \
+             and a source of `Undefined` would carry no scope to order against",
+        );
+
+        harness.finish(ring);
+    }
+
+    /// The transition a recorded frame put on `buffer` **before** the copy that
+    /// writes it, or `None` if there was no such barrier.
+    ///
+    /// The ordering is the assertion, not a detail: a barrier recorded *after*
+    /// the copy orders the frame after next and leaves this one hazardous, and
+    /// it would satisfy a test that only asked whether a barrier existed.
+    fn barrier_before_the_copy_into(
+        recorder: &Recorder,
+        buffer: BufferHandle,
+    ) -> Option<(ResourceState, ResourceState)> {
+        let mut transition = None;
+        for command in recorder.commands() {
+            match command {
+                Command::Barrier { buffers, .. } => {
+                    if let Some(found) = buffers.iter().find(|barrier| barrier.buffer == buffer) {
+                        transition = Some((found.from, found.to));
+                    }
+                }
+                Command::CopyBufferToBuffer(copy) if copy.dst == buffer => return transition,
+                _ => {}
+            }
+        }
+        None
     }
 
     /// **A slot is read only once the ring has come back round to it**, and the

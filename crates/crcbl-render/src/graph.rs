@@ -446,11 +446,18 @@ impl<'a> RenderGraph<'a> {
     /// It is otherwise an ordinary pass: it declares what it reads in
     /// [`ResourceState::TransferSrc`] and what it writes in
     /// [`ResourceState::TransferDst`], and the graph emits the transitions
-    /// around it. A caller with a destination the graph does not know about — a
+    /// around it.
+    ///
+    /// **Declare the destination too**, even when it is a
     /// [`MemoryLocation::HostReadback`](crcbl_hal::MemoryLocation::HostReadback)
-    /// staging buffer, which no pass can bind and no pass can be ordered
-    /// against — names it in the body and declares only the source, exactly as
-    /// [`crate::cull_stats`] does.
+    /// staging buffer no pass can bind and nothing else in the frame touches.
+    /// A destination the graph does not know about gets no barrier, and the
+    /// access it needs ordering against is not in this frame at all: it is the
+    /// *previous* write to the same buffer, one turn of a ring ago, in another
+    /// submission. That is a write-after-write with `write_barriers: 0`, and it
+    /// is the bug [`crate::cull_stats`] shipped and this sentence exists to stop
+    /// repeating — import it with what the last frame left it in, exactly as
+    /// every other cross-frame resource here is imported.
     pub fn add_copy_pass(&mut self, label: impl Into<String>) -> PassBuilder<'_, 'a> {
         PassBuilder::new(self, PassKind::Copy, label.into())
     }
