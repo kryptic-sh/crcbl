@@ -172,6 +172,103 @@ wasted.
   tail the device selected; nothing in the shadow path depends on the binding
   model.
 
+## Screen-space AO: what the one-line row was missing (decided 2026-08-13)
+
+The table above says "screen-space AO" and nothing else, and — exactly as the
+shadow rows were not implementable before the light list existed — that row sits
+on three things this engine does not have:
+
+- **There is no depth prepass, and the depth buffer is built never to be read.**
+  `TransientImageDesc::scene_depth` carries `DEPTH_STENCIL_ATTACHMENT` and
+  nothing else, and its doc says "never sampled"; the forward pass attaches it
+  with `clear_depth`, which discards on store.
+- **The ambient term is unseparable after the forward pass.** `mesh.slang`
+  computes `albedo * (ambient + direct) + gloss` in one line to one target, so
+  anything downstream can only scale all three — and AO must darken ambient
+  alone.
+- **`LightingPath` has no consumer.** It is read by `Debug` impls, one log line
+  and adapter tests. Only `GeometryPath` branches anything, so "the rasterised
+  twin's AO" cannot be gated on the selector this file names.
+
+So **the AO row is a depth-prepass row**, and the prepass is the structural
+part. SSR will want the same depth, so it is a P7B cost that AO happens to pay
+first.
+
+### The decisions
+
+- **Add a depth prepass, and it is unusually cheap here.** `shadow_pipeline` is
+  already the depth-only twin of the colour pipeline, built from the same
+  modules and the same layout; driven with the camera's bind group and the
+  camera's already-generated draws it _is_ a scene depth prepass — no new
+  pipeline, no new shader, no new bind group. `PassBuilder::depth_read` and
+  `DepthStencilState::equal_depth_read_only` both already exist with no
+  production caller, and `graph_compile.rs` already asserts the
+  `DepthStencilWrite → DepthStencilRead` barrier for exactly this pair.
+- **Reconstruct normals from depth; do not add a normal attachment.** Under this
+  ordering an attachment is not merely MRT bandwidth — the prepass has no colour
+  target at all, so it would mean a third geometry pipeline per `GeometryPath`,
+  a new fragment entry point compiled to four targets, and a new `VertexOutput`
+  consumer, for a buffer one pass reads. Use the four-tap closest-neighbour
+  reconstruction rather than the two-tap `ddx`/`ddy` one: the naive version
+  straddles the depth discontinuity at every silhouette and draws a dark rim
+  around every object. Escalating later is contained to the prepass pipeline and
+  the AO shader's first ten lines, and the code should say so.
+- **AO is produced before the forward pass and consumed inside it**, as an
+  integer texel fetch by `SV_Position.xy` multiplying `frame.ambient.rgb` alone.
+  The shader already indexes a screen-space structure that way — `froxel_of`
+  takes `SV_Position.xy` — and a `Load` needs no sampler, no UV and no
+  filtering, which is one less thing for four backends to disagree about.
+  **Multiplying the tonemap's input is refused**, and refused in writing because
+  the one-line row invites it: it darkens direct light and highlights.
+- **Classic normal-oriented hemisphere SSAO, eight samples, a sixteen-entry
+  constant rotation table indexed by `pixel.xy & 3`, and a 4×4 box blur.** Not
+  GTAO yet — its horizon integral is several times the work for quality nobody
+  can resolve at the goldens' 256×192, and CI's rasterisers are software.
+  Upgrading is a change to one function in one shader, the same shape
+  `tonemap.slang` already documents for its curve; the pass, the resource, the
+  binding and the test are unchanged.
+- **The rotation comes from an integer-indexed constant table, never a float
+  hash**, and **the blur is not optional**. This is the determinism rule and it
+  is why the design looks conservative. Each AO sample is a binary depth
+  comparison, so one sample landing on the threshold resolves differently on two
+  drivers and swings that pixel by an eighth — far past
+  `Tolerance::RASTERISER`'s delta of 2. Interleaved-gradient noise and
+  `frac(sin(dot(…)))` hashes amplify float differences _by construction_, which
+  is the opposite of what a golden needs; an integer index into a constant array
+  is bit-identical by inspection. The blur's footprint is exactly the noise
+  tile, so it both removes the banding and divides an isolated flipped sample by
+  sixteen.
+- **The golden is not the instrument.** An AO pass writing a constant 1.0 draws
+  a perfectly plausible frame. The check is a **structural ratio**, in the shape
+  `SPOT_SHADOW_RATIO` already uses: a band inside a concave corner must be
+  measurably darker than a band on the same surface, at the same camera
+  distance, with the same normal and the same distance from every light, outside
+  the corner. That survives one-level driver drift and fails a no-op pass, an
+  inverted normal, and a result that never reaches the shading line.
+- **AO is always on, and the off-switch is data rather than a branch.** There is
+  no device fact to gate on — every backend has a fullscreen draw, a sampled
+  `D32Float` and an `R8Unorm` target — and inventing a capability that is really
+  a performance opinion is what topic 39 exists to prevent. A renderer-owned 1×1
+  `R8Unorm` cleared to 1.0, bound when the AO passes are not added, is the
+  `shadow_placeholder` pattern already in the tree, and it makes a later quality
+  knob a two-line change rather than a shader permutation.
+
+### Risks this carries
+
+- **Depth invariance.** `GreaterOrEqual` in the forward pass needs its
+  `SV_Position.z` bit-identical to the prepass's. Same module, same entry point,
+  same matrix, but two pipelines can be compiled differently and a marginally
+  farther fragment is rejected, which looks like holes. Nothing in the shaders
+  carries an invariance decoration. The four CI rasterisers are the measurement;
+  the zero-risk fallback is to keep the forward pass writing depth and forgo the
+  overdraw win, and **that fallback is taken by saying so in the code, never by
+  re-blessing a golden around it**.
+- **A `Load` on a depth texture with no sampler** is the corner this engine has
+  already been bitten in once, over `DepthTexture2D` versus `Texture2D<float>`.
+- **The box blur bleeds AO across silhouettes** as a halo. A bilateral blur is
+  the fix and is deliberately deferred to the slice after the first frame
+  exists.
+
 ## Post-processing stack
 
 Pipeline order (all at internal render resolution, before the topic 15
