@@ -17,7 +17,7 @@
 //! clear, the extent and `triangle.slang` so that the indirect path varies
 //! nothing but its arguments.
 
-use crate::harness::{Headless, instance};
+use crate::harness::{DeviceSlot, Headless, instance, poisoned};
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
@@ -79,7 +79,7 @@ impl Headless {
             .expect("the ring is created");
         Self {
             instance,
-            device,
+            device: DeviceSlot::new(device),
             surface,
             swapchain,
             queue,
@@ -349,7 +349,7 @@ fn render_triangle(headless: &Headless, resources: &TriangleResources) -> crcbl_
             after: None,
         })
         .expect("a readback request");
-    let mut bytes = vec![0u8; byte_count as usize];
+    let mut bytes = poisoned(byte_count as usize);
     // Poll with a deadline, never a fixed sleep — `docs/plan/12-testing.md`.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {

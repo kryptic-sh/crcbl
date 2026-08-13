@@ -196,6 +196,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# `--success-output immediate` rather than `--no-capture`, which is what this
+# passed for most of its life. `--no-capture` hands the test binary the real
+# stdio, and nextest cannot then interleave two tests' output — so it silently
+# forces one thread and prints `warning: ignoring --test-threads because
+# --no-capture is specified` on every run. The `--test-threads 1` that used to
+# sit beside it was therefore dead, and the suite ran serially on both legs
+# whatever either flag said. Capturing instead lets nextest use the runner's
+# cores, and `immediate` keeps every line the greps below need — the adapter
+# line, the sync-validation reach — in the log, ahead of the summary, which is
+# the ordering both this file and `run-vk-e2e.ps1` read. `run-dx12-e2e.sh`,
+# `run-mtl-e2e.sh` and `run-render-e2e.sh` were already spelled this way.
 set +e
 cargo nextest run \
     --locked \
@@ -203,8 +214,7 @@ cargo nextest run \
     --features vk-e2e \
     --test vk_e2e \
     --run-ignored all \
-    --test-threads 1 \
-    --no-capture \
+    --success-output immediate \
     "$@" 2>&1 | tee "$OUTPUT"
 STATUS=${PIPESTATUS[0]}
 set -e

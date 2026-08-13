@@ -17,7 +17,7 @@
 //! updated the host mirror and never reached the device passes everything
 //! above them.
 
-use crate::harness::Headless;
+use crate::harness::{Headless, poisoned};
 use crcbl_hal::{
     Barriers, BufferDesc, BufferUsage, CommandEncoderDesc, MemoryLocation, ResourceState,
     SubmitInfo,
@@ -566,7 +566,7 @@ impl CullProbe {
         device.wait_idle().expect("idle");
         device.destroy_command_buffer(commands);
 
-        let mut bytes = vec![0u8; (visible_bytes + 4) as usize];
+        let mut bytes = poisoned((visible_bytes + 4) as usize);
         headless.readback(self.staging, visible_bytes + 4, &mut bytes);
         let words: Vec<u32> = bytes
             .chunks_exact(4)

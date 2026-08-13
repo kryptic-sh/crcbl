@@ -190,7 +190,7 @@ fn a_vulkan_device_outlives_the_instance_that_made_it() {
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn a_vulkan_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
-    let headless = Headless::open();
+    let mut headless = Headless::open();
     let device = &headless.device;
 
     // The handle dies here, mid-life of the swapchain built on it.
@@ -255,7 +255,7 @@ fn a_vulkan_swapchain_keeps_working_after_its_surface_handle_is_destroyed() {
     // the surface handle. `Headless::finish` cannot be used because it destroys
     // the surface, which this test already did.
     device.destroy_swapchain(headless.swapchain);
-    drop(headless.device);
+    headless.device.destroy();
     headless.instance.validation_report().assert_clean();
 }
 

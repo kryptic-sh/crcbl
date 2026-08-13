@@ -18,7 +18,7 @@
 //! no fences to destroy. The sequence is written here anyway because it is the
 //! same one the windowed sandbox runs drive.
 
-use crate::harness::{CLEAR, EXTENT, Headless};
+use crate::harness::{CLEAR, EXTENT, Headless, poisoned};
 use crcbl_hal::{
     Barriers, BufferDesc, BufferUsage, ClearValue, ColorAttachment, CommandEncoderDesc,
     CompositeAlpha, Extent3d, Format, ImageDesc, ImageSubresourceRange, ImageType, ImageUsage,
@@ -259,7 +259,7 @@ fn a_failed_submit_does_not_wedge_the_retire_timeline() {
             after: None,
         })
         .expect("a readback request");
-    let mut bytes = vec![0u8; 256];
+    let mut bytes = poisoned(256);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         match device
@@ -328,7 +328,7 @@ fn a_readback_whose_wait_semaphore_is_destroyed_fails_cleanly() {
         .expect("a readback request");
     device.destroy_semaphore(semaphore);
 
-    let mut bytes = vec![0u8; 64];
+    let mut bytes = poisoned(64);
     let error = device
         .poll_readback(readback, &mut bytes)
         .expect_err("a destroyed wait semaphore must fail the poll, not be UB");

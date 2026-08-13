@@ -15,7 +15,7 @@
 //! builds for the control is one nothing in the engine ever constructs, and it
 //! exists only so the reversed-Z result has something to be different from.
 
-use crate::harness::Headless;
+use crate::harness::{Headless, POISON, poisoned};
 use crate::mesh::MESH_EXTENT;
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Device, Extent3d,
@@ -115,6 +115,13 @@ const PROBE_NEAR: f32 = 0.1;
 /// The probe's far plane — used **only** by the conventional control matrix; the
 /// engine's own projection has none.
 const PROBE_FAR: f32 = 100.0;
+/// What the probe's render pass clears its colour target to.
+///
+/// Opaque black, so a pixel no fragment reached reads back as `[0, 0, 0, 255]`
+/// — the value `vk e2e (lavapipe, windows)` has twice found at the centre. It
+/// is named rather than written into the pass because the assertion below has
+/// to say what that reading means.
+const PROBE_CLEAR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 impl DepthProbe {
     /// The two quads, near-first, in `crcbl_shaders::mesh::MeshVertex` layout,
@@ -932,7 +939,7 @@ fn render_probe(
         );
         graph
             .add_render_pass("probe")
-            .clear_color(target, [0.0, 0.0, 0.0, 1.0])
+            .clear_color(target, PROBE_CLEAR)
             // The reversed-Z clear: `depth::CLEAR` = 0.0, so any geometry beats
             // the empty buffer under `Greater`.
             .clear_depth(depth)
@@ -980,8 +987,20 @@ fn render_probe(
         )
         .expect("present");
 
-    let mut pixels = vec![0u8; bytes as usize];
+    let mut pixels = poisoned(bytes as usize);
     headless.readback(staging, bytes, &mut pixels);
+    // The poison, cashed in. Left to the pixel assertions below it is only
+    // advisory — every channel of `POISON` is above the threshold the first of
+    // them uses, so an uncopied frame sails past it and fails the *second* one
+    // with a message about the projection matrix. Asked here it is a diagnosis:
+    // this fires when and only when no copy reached the destination.
+    assert!(
+        pixels.iter().any(|&byte| byte != POISON),
+        "all {bytes} bytes of the readback are still {POISON:#04x} — this is the \
+         harness's own fill, so no copy reached the destination and there is no \
+         frame here to read. Look at the submission and the readback, not at \
+         what was drawn."
+    );
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);
 
@@ -1039,16 +1058,24 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
     let reversed_frame = render_probe(&headless, &mut probe, &mut pool, reversed);
     let pixel = reversed_frame.pixel(centre.0, centre.1).expect("inside");
     // **Neither quad drawing is its own diagnosis, and it must not read as the
-    // projection one.** A black centre says the frame is empty — a device that
-    // rendered nothing, not a depth test that picked the far surface — and the
-    // two want looking at in completely different places. This message said only
-    // "if it is blue…" once, and a black centre on a slow software rasteriser
-    // sent a reader hunting through the projection matrix for an hour.
+    // projection one.** The two want looking at in completely different places.
+    // This message said only "if it is blue…" once, and a black centre on a
+    // slow software rasteriser sent a reader hunting through the projection
+    // matrix for an hour; it then said "nothing drew", which is a narrower
+    // claim than the pixel supports. What the pixel supports is below.
     assert!(
         pixel[0] > 100 || pixel[2] > 100,
         "neither quad reached the centre: got {pixel:?}, which is neither the \
-         near quad's red nor the far quad's blue. Nothing drew — look at the \
-         device and the submission, not at the projection."
+         near quad's red nor the far quad's blue. Do not look at the \
+         projection; read what the centre holds instead.\n\
+         \x20 * If it is this pass's own clear ({PROBE_CLEAR:?} encoded to \
+         unorm bytes), the copy landed and carried a cleared pixel — so either \
+         the draw produced no fragment there or the pass never executed, and \
+         this pixel alone does not separate the two.\n\
+         \x20 * If any channel is {poison:#04x} it is the readback \
+         destination's own fill, untouched: no copy reached it and the bytes \
+         are this harness's, not a frame's.",
+        poison = POISON,
     );
     assert!(
         pixel[0] > pixel[2] && pixel[0] > 100,

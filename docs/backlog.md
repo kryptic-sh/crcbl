@@ -6098,24 +6098,50 @@ sighting is a pattern rather than a surprise.
 ## The Windows lavapipe job produces an empty frame intermittently
 
 `depth_probe::reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not`
-fails on `vk e2e (lavapipe, windows)` with a **black** centre pixel — neither
-quad drew — while the same test passes on Linux lavapipe and radv, and the same
-job is green on the commits either side of it.
+fails on `vk e2e (lavapipe, windows)` with `[0, 0, 0, 255]` at the centre pixel,
+while the same test passes on Linux lavapipe and radv, and the same job is green
+on the commits either side of it.
 
 **It has now happened twice**, on `e8d3dab` and on `0b10832`, with unrelated
 changes under it both times and a re-run green both times. That is a flake, not
-a sighting: the second occurrence is what this entry was recorded to wait for,
-and it has arrived. What it is _not_ is a mystery about which failure it is —
-the improved assertion below fired on the second one and said "Nothing drew" in
-its own words, so the frame is empty rather than mis-projected and the place to
-look is the device and the submission.
+a sighting.
 
-Nobody has looked there yet. What would settle it: the job draws through
-`crcbl-vk`'s offscreen ring, so the question is whether the readback's wait can
-return before the render has landed on a runner this slow, or whether the device
-is lost and the failure is being reported as a black frame instead. Both are
-answerable from that job's own log without reproducing it locally, which is just
-as well — see below on why the local suite cannot.
+**What that pixel says, and what it does not.** `[0, 0, 0, 255]` is
+`depth_probe::PROBE_CLEAR` encoded — the pass's own clear colour, alpha
+included. So the copy landed and carried a _cleared_ pixel: either the draw
+produced no fragment at the centre, or the pass never executed. "Nothing drew"
+is narrower than that and was never established; the assertion said it for one
+commit and now says what is known instead.
+
+Which of the two it is, the next occurrence answers from the job log alone:
+
+- every readback destination is filled with `harness::POISON` before it is
+  polled, so a copy that never landed reads back as `0xa5` instead of as the
+  zeroes a legitimately black frame also produces. `depth_probe::render_probe`
+  asserts on that case by name, ahead of the colour assertions — `POISON` is
+  above the threshold the first of those uses, so left to them it would have
+  been diagnosed as a projection failure.
+- `Headless` has a `Drop` that fires only when the thread is panicking and
+  prints what `finish` would have asserted on: `wait_idle`'s answer, naming
+  `VK_ERROR_DEVICE_LOST` when that is what comes back, and the validation
+  report's counts and summary. `finish` is the last line of a test, so before
+  this the device's verdict and the layer's were discarded on exactly the runs
+  that went red.
+- `harness::instance` installs `crcbl_core::log::init_logging`, so the debug
+  messenger's `log::error!`/`log::warn!` reach stderr when the layer emits them.
+
+**Two claims in the previous version of this entry were wrong.** Both were ours
+and neither survived checking:
+
+- The Linux leg does **not** take "single-digit seconds". Read out of the two
+  jobs' own logs, the same 95 tests take 142.05s on `vk e2e (lavapipe, windows)`
+  against 32.35s on `vk e2e (lavapipe)` — 4.39x, not the order of magnitude the
+  entry implied. The single-digit figure was the `run-render-e2e.sh` step, which
+  is a different suite.
+- "An empty frame is what a readback that outran the render looks like" is
+  contradicted by those timings: the failing frames were not slow, and the two
+  failing runs' totals bracket the green one. The theory is dropped rather than
+  carried forward; it was never more than a shape.
 
 **Not a regression from the cluster-radius fix**, and that is checkable rather
 than assumed: `depth_probe` draws through `mesh.slang`'s vertex and fragment
@@ -6123,15 +6149,170 @@ stages with no amplification stage, so `mesh_cluster.slang`'s `cluster_survives`
 is not compiled into the path at all. Every instance it draws is at identity, so
 the radius scaling is `1.0` besides.
 
-That job takes over two minutes where the Linux one takes single-digit seconds,
-which is the shape of a software rasteriser under a slow runner, and an empty
-frame is what a readback that outran the render looks like.
+## The vk e2e suites report nothing the validation layer says
 
-**The assertion's message has been improved** because it made this harder than
-it needed to be: it said only "if it is blue, the projection matrix is not
-reversed", which is a real diagnosis for a real failure and the wrong one for an
-empty frame. A black centre now says so in its own words and points at the
-device and the submission rather than the projection.
+Fixed for `crcbl-vk`, still open everywhere else, and worth stating on its own
+because it is a hole in a suite whose module doc opens with "Every test asserts
+a clean validation report".
+
+`crcbl_vk::debug::messenger_body` routes every message the layer emits into
+`log::error!`/`log::warn!` as well as into the counting sink. Nothing in the vk
+e2e test tree installed a `log::Log`, so the facade dropped all of it: the whole
+66,836-line Windows job log contained no VUID text anywhere, **including from
+`validation_gate::a_deliberate_violation_is_caught_by_the_layer`, whose entire
+job is to provoke one**. "The layer was silent" was therefore never evidence —
+the channel was closed. `harness::instance` now installs the engine's own
+`crcbl_core::log` sink, and the counting sink was always independent of this, so
+no assertion changes; what changes is that a message is readable at the moment
+it is emitted rather than only as a count at teardown.
+
+Still open, and not touched here:
+
+- **`crcbl-wgpu`, `crcbl-dx12` and `crcbl-mtl`'s e2e trees have the same hole.**
+  None of them calls `init_logging` anywhere under `tests/`. `crcbl-shell`'s
+  suites and `crcbl/tests/render_e2e.rs` do. Grep for `init_logging` under a
+  crate's `tests/` to check; the fix is the one line `harness::instance` now
+  carries.
+- **The messenger asks the layer for `ERROR` and `WARNING` only**
+  (`debug::messenger_create_info`), so `INFO`/`VERBOSE` never arrive whatever
+  `CRCBL_LOG` says. Deliberate — the comment there explains that `INFO` is where
+  the loader narrates its manifest search — but it means `CRCBL_LOG=trace` buys
+  nothing from the layer itself.
+
+## Where the Windows vk e2e leg's time goes, and the one measurement nobody has taken
+
+The leg is 4.39x the Linux one (142.05s against 32.35s over the same 95 tests),
+read out of the two jobs' logs. Inside that:
+
+- **GPU time is at parity.** The same four-frame test measures 8.856 ms of GPU
+  work on Windows against 7.629 ms on Linux while wall time is 7.4x apart, so
+  four frames of GPU work is 1.7% of that test's runtime and ~98% of a rendering
+  test's cost on Windows is host-side, on every recorded command. The
+  inter-frame gaps are flat (1.927, 1.904, 1.656, 1.643 s), which rules out
+  one-time shader JIT.
+- **The loader's debug output is not the cost.** 2035 occurrences of the
+  package-scan line, 19 per test; a 421-line test completes in 0.075s on Windows
+  against 0.086s on Linux. `VK_LOADER_DEBUG: all` is deliberate and the reason
+  is written above it in `ci.yml` — leave it on.
+- **Serial execution was a large part of it, and is fixed.** Both harnesses
+  passed `--no-capture`, which hands the test binary the real stdio and so
+  silently forces one thread: nextest printed
+  `warning: ignoring --test-threads because --no-capture is specified` on every
+  run of both legs, making the `--test-threads 1` beside it dead. Both now pass
+  `--success-output immediate` instead. Measured locally on this workstation,
+  from the suite's own summary line: lavapipe 9.786s -> 1.439s, radv 7.753s ->
+  1.193s.
+- **`crcbl-wgpu/tests/run-wgpu-e2e.sh` still carries the same dead pair** —
+  `--test-threads 1` immediately followed by `--no-capture`, so nextest warns
+  and serialises that suite too. Left alone deliberately: it is a different
+  suite on a different job, and turning its parallelism on wants its own
+  several-runs-per-driver check, which is exactly what turned up the
+  deletion-queue bug below. `run-cli-e2e.sh`, `run-wayland-e2e.sh`,
+  `run-x11-e2e.sh` and `run-win32-e2e.ps1` pass `--test-threads 1` _without_
+  `--no-capture`, so theirs is effective and deliberate — `run-win32-e2e.ps1`'s
+  header says why.
+
+### The suspicion that is still unmeasured: synchronisation validation
+
+`CRCBL_VK_SYNC_VALIDATION: '1'` is set on both legs and sync validation is
+expensive. **Nobody has measured what it costs on the Windows leg**, and turning
+it off is a coverage decision that is not ours to take —
+`docs/plan/ 02-vulkan-backend.md` names sync bugs as this stage's headline risk
+and this as the mitigation.
+
+What makes it worth measuring rather than arguing about: that leg's own probe
+reports
+`sync-validation reach: record-time=yes one-submission=yes cross-submission=no`,
+where the Linux leg reports `cross-submission=yes`. So the Windows leg is paying
+for sync validation and getting **less** from it than the leg beside it — the
+class of hazard that only submit-time validation can see is out of its scope,
+and `crcbl-render`'s graph-compile suite is what actually gates that class.
+
+The measurement, to be run as a one-off and then reverted:
+
+1. On `vk e2e (lavapipe, windows)`, in the `Run the suite against lavapipe`
+   step's `env:` block, change `CRCBL_VK_SYNC_VALIDATION: '1'` to `'0'`. That
+   variable is read by `crcbl_vk::debug::sync_validation_wanted` and by nothing
+   else; leave `CRCBL_VK_VALIDATION` alone, or the whole suite fails on
+   `ValidationReport::assert_clean`'s "validation was not enabled".
+2. Read the `Summary [...] 95 tests run` line the harness prints, against the
+   142.05s the same line reports today. Read the `vk e2e: gpu` timings in the
+   same log too: they should not move at all, because sync validation is host
+   work.
+3. What each outcome means:
+   - **Most of the 142s goes away** — sync validation is the cost. The decision
+     in front of the user is then whether the Windows leg keeps paying for a
+     layer that already reports `cross-submission=no`, given the Linux leg runs
+     the same suite with the fuller reach. Note that
+     `validation_gate::synchronisation_validation_catches_a_missing_barrier`
+     skips itself when the variable is not `1`, so switching it off silently
+     removes that test's teeth — it would need a matching `if:` on the job.
+   - **Little changes** — sync validation is not it, and the next suspect is
+     ordinary validation plus Windows' per-call overhead, which the same
+     procedure measures by flipping `CRCBL_VK_VALIDATION` instead. That one is a
+     bigger coverage loss and would only ever be a diagnostic run.
+
+## `crcbl-vk`'s deletion queue frees a buffer a recorded command buffer still references
+
+**A real use-after-free, reproduced, not fixed here.** Found because the vk e2e
+suite started running in parallel; it is not caused by that change and
+reproduces on a pristine worktree of `e875e44`, the commit this work sits on.
+
+`retire::two_submissions_referencing_one_destroyed_buffer_keep_it_alive` records
+two command buffers against one source buffer, destroys the buffer, then submits
+both. Under parallel load on lavapipe, roughly one run in three:
+
+```text
+VUID-vkQueueSubmit2-commandBuffer-03874: VkCommandBuffer [copy to B] which was
+recorded but now has become invalid to use because the following objects bound
+to the command buffer were invalidated
+ VkBuffer [destroyed, still referenced] was destroyed
+```
+
+followed by a SIGSEGV inside lavapipe.
+
+The mechanism, from `crcbl_vk::device`'s `submit`: a destroyed object is parked
+by `park` at `submissions() + 1`; `submit` calls `trash.extend_matching` for the
+objects referenced by the command buffers **in that submit** and then calls
+`poll_retire` at the end of it. A command buffer that was recorded against the
+same object and has not been submitted yet is invisible to both. So submit(A)'s
+trailing `poll_retire` frees the buffer the moment A completes, while B — still
+only recorded — references it. Serially, A has not finished microseconds after
+`vkQueueSubmit2`, which is the only reason this has ever passed; the test's own
+doc already says the timing is what decides it.
+
+What a fix looks like: `poll_retire` must not free an item any live command
+buffer still references. `CommandBufferEntry::references` already holds the raw
+handles, so the check is available; the question is whether it belongs as a
+predicate in `RetireQueue::retire` or as a re-park at `submissions() + 1`. Both
+want a deterministic unit test beside `extend_matching`'s, since the e2e test is
+a smoke test by construction.
+
+Until then the test is quarantined in `.config/nextest.toml` with
+`threads-required = "num-cpus"` so it runs alone, which restores the timing it
+has always relied on. **That override is hiding this bug and goes when this
+entry does.** Evidence, on an RX 7900 XTX workstation against
+`/usr/share/vulkan/icd.d/lvp_icd.json`: 30 consecutive runs of the test alone
+are green; the whole suite in parallel failed 2 of 3 runs before the override
+and 1 of 4 on a **pristine worktree of `e875e44`**, which is the commit this
+work sits on — so the parallelism exposes it and did not introduce it.
+
+## `CARGO_NET_OFFLINE` on the vk e2e steps: looked at, not applied
+
+`Updating crates.io index` costs about 7.4s per cargo invocation on the Windows
+leg despite `--locked`, and `CARGO_NET_OFFLINE=true` would remove it. **Not
+applied, because the workflow cannot be read as making it safe.**
+`Swatinem/rust-cache@v2` restore is best-effort — a cold key, an evicted entry
+or a changed lockfile hash all leave the registry index absent — and no step in
+either vk e2e job runs `cargo fetch` first, so an offline cargo would fail the
+job outright rather than fetch. Making it safe means an explicit
+`cargo fetch --locked` step before the suite, and only then the variable; that
+is a workflow change with its own failure mode and wants the user's call.
+
+The other cost in the same job, also untouched: the pinned LunarG SDK install is
+about 46s and `Swatinem/rust-cache` does not cover it, since it caches cargo
+directories and not `C:\VulkanSDK`. An `actions/cache` keyed on
+`VULKAN_SDK_VERSION` would, at the cost of a second cache to reason about.
 
 ## A timing test started its clock after the thread it was timing
 

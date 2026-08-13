@@ -128,7 +128,7 @@ fn out_of_range_query_commands_fail_recording_not_the_driver() {
 #[test]
 #[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
 fn a_failed_recording_finishes_with_an_error_rather_than_hanging() {
-    let headless = Headless::open();
+    let mut headless = Headless::open();
     let device = &headless.device;
 
     let acquired = device
@@ -165,6 +165,6 @@ fn a_failed_recording_finishes_with_an_error_rather_than_hanging() {
     device.wait_idle().expect("idle");
     device.destroy_swapchain(headless.swapchain);
     headless.instance.destroy_surface(headless.surface);
-    drop(headless.device);
+    headless.device.destroy();
     headless.instance.validation_report().assert_clean();
 }

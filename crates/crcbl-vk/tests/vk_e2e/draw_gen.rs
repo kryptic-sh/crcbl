@@ -19,7 +19,7 @@
 //! Metal is on and no adapter this suite can see would ever select it, so
 //! without that subtraction the arm would be code no machine here runs.
 
-use crate::harness::Headless;
+use crate::harness::{Headless, poisoned};
 use crate::mesh::{MESH_EXTENT, mesh_camera};
 use crcbl_hal::{
     Barriers, BufferCopy, BufferDesc, BufferHandle, BufferUsage, CommandEncoderDesc, Features,
@@ -360,7 +360,7 @@ fn generate_with(
         )
         .expect("present");
 
-    let mut bytes = vec![0u8; total as usize];
+    let mut bytes = poisoned(total as usize);
     headless.readback(staging, total, &mut bytes);
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);

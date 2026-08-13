@@ -20,7 +20,7 @@
 //! and `GeometryPath::MeshShader` had none until this slice, because nothing
 //! could select it.
 
-use crate::harness::{Headless, instance};
+use crate::harness::{DeviceSlot, Headless, instance, poisoned};
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
@@ -92,7 +92,7 @@ impl Headless {
             .expect("the ring is created");
         Self {
             instance,
-            device,
+            device: DeviceSlot::new(device),
             surface,
             swapchain,
             queue,
@@ -407,7 +407,7 @@ fn render_mesh_shader(
         )
         .expect("present");
 
-    let mut bytes = vec![0u8; byte_count as usize];
+    let mut bytes = poisoned(byte_count as usize);
     headless.readback(staging, byte_count, &mut bytes);
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);

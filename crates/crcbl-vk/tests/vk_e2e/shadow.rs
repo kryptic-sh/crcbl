@@ -43,7 +43,7 @@
 //! is not the sun needs a caster the *light* can see past and the *camera*
 //! cannot, which the sun's overhead arrangement does not give.
 
-use crate::harness::Headless;
+use crate::harness::{Headless, poisoned};
 use crate::mesh::MESH_EXTENT;
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Extent3d, Features,
@@ -244,9 +244,9 @@ fn render_scene(scene: &ShadowScene<'_>) -> ShadowFrame {
         .expect("present");
     device.wait_idle().expect("idle");
 
-    let mut color = vec![0u8; color_bytes as usize];
+    let mut color = poisoned(color_bytes as usize);
     headless.readback(color_staging, color_bytes, &mut color);
-    let mut atlas_raw = vec![0u8; atlas_bytes as usize];
+    let mut atlas_raw = poisoned(atlas_bytes as usize);
     headless.readback(atlas_staging, atlas_bytes, &mut atlas_raw);
     let atlas = atlas_raw
         .chunks_exact(4)

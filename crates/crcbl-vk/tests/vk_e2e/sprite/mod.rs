@@ -23,7 +23,7 @@
 //! subtree and import this fixture anyway, because they are sprite quads with a
 //! different generator in front of them.
 
-use crate::harness::{Headless, instance};
+use crate::harness::{DeviceSlot, Headless, instance, poisoned};
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, CompositeAlpha, Device,
@@ -308,7 +308,7 @@ impl Headless {
             .expect("the ring is created");
         Self {
             instance,
-            device,
+            device: DeviceSlot::new(device),
             surface,
             swapchain,
             queue,
@@ -422,7 +422,7 @@ pub(crate) fn render_sprites(
         )
         .expect("present");
 
-    let mut color = vec![0u8; color_bytes as usize];
+    let mut color = poisoned(color_bytes as usize);
     headless.readback(staging, color_bytes, &mut color);
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);

@@ -18,7 +18,7 @@
 //! validation error rather than a wrong picture, so that test's assertion is
 //! `Headless::finish`'s report.
 
-use crate::harness::{Headless, instance};
+use crate::harness::{DeviceSlot, Headless, POISON, instance, poisoned};
 use crcbl_core::SurfaceTarget;
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, CompositeAlpha,
@@ -108,7 +108,7 @@ impl Headless {
             .expect("the ring is created");
         Self {
             instance,
-            device,
+            device: DeviceSlot::new(device),
             surface,
             swapchain,
             queue,
@@ -323,9 +323,9 @@ pub(crate) fn render_mesh(
         )
         .expect("present");
 
-    let mut color = vec![0u8; color_bytes as usize];
+    let mut color = poisoned(color_bytes as usize);
     headless.readback(color_staging, color_bytes, &mut color);
-    let mut hdr = vec![0u8; hdr_bytes as usize];
+    let mut hdr = poisoned(hdr_bytes as usize);
     headless.readback(hdr_staging, hdr_bytes, &mut hdr);
 
     device.destroy_command_buffer(commands);
@@ -973,7 +973,7 @@ pub(crate) fn read_stats_word(
         .submit(headless.queue, &SubmitInfo::new(&[commands]))
         .expect("submit");
 
-    let mut bytes = [0u8; 4];
+    let mut bytes = [POISON; 4];
     headless.readback(staging, 4, &mut bytes);
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);
@@ -1371,7 +1371,7 @@ fn generated_dispatch(
         .submit(headless.queue, &SubmitInfo::new(&[commands]))
         .expect("submit");
 
-    let mut bytes = vec![0u8; total as usize];
+    let mut bytes = poisoned(total as usize);
     headless.readback(staging, total, &mut bytes);
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);
@@ -1973,7 +1973,7 @@ fn read_cut(
         .submit(headless.queue, &SubmitInfo::new(&[commands]))
         .expect("submit");
 
-    let mut words = vec![0u8; bytes as usize];
+    let mut words = poisoned(bytes as usize);
     headless.readback(staging, bytes, &mut words);
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);
@@ -2654,7 +2654,7 @@ fn selected_dunes_level(
         .submit(headless.queue, &SubmitInfo::new(&[commands]))
         .expect("submit");
 
-    let mut words = vec![0u8; bytes as usize];
+    let mut words = poisoned(bytes as usize);
     headless.readback(staging, bytes, &mut words);
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);

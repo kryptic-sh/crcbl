@@ -19,7 +19,7 @@
 //! `crcbl-render` rather than under `apps/`: this crate cannot see `apps/`, and
 //! a golden image of a replica would be evidence about the replica.
 
-use crate::harness::Headless;
+use crate::harness::{Headless, poisoned};
 use crate::sprite::{SPRITE_CLEAR, background_rgb, close, report_goldens, rgb, sprite_golden};
 use crcbl_hal::{
     BufferDesc, BufferImageCopy, BufferUsage, CommandEncoderDesc, Extent3d, Format, ImageAspect,
@@ -155,7 +155,7 @@ fn render_menu(
         )
         .expect("present");
 
-    let mut color = vec![0u8; color_bytes as usize];
+    let mut color = poisoned(color_bytes as usize);
     headless.readback(staging, color_bytes, &mut color);
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);

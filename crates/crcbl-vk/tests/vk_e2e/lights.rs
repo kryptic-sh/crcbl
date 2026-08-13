@@ -19,7 +19,7 @@ use crcbl_render::{Light, PointLight, SpotLight};
 use crcbl_shaders::light::{CLUSTER_LIGHT_CAPACITY, CLUSTER_OVERFLOW_WORD, CLUSTER_STRIDE};
 use glam::Vec3;
 
-use crate::harness::Headless;
+use crate::harness::{Headless, poisoned};
 use crate::mesh::{MESH_EXTENT, mesh_camera, read_stats_word, render_mesh};
 
 /// Where the cube is, and where a light has to be to reach it.
@@ -206,7 +206,7 @@ fn assignments(headless: &Headless, renderer: &crcbl_render::ForwardRenderer) ->
         .submit(headless.queue, &SubmitInfo::new(&[commands]))
         .expect("submit");
 
-    let mut bytes = vec![0u8; size as usize];
+    let mut bytes = poisoned(size as usize);
     headless.readback(staging, size, &mut bytes);
     device.destroy_command_buffer(commands);
     device.destroy_buffer(staging);

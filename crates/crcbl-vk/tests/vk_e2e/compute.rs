@@ -14,7 +14,7 @@
 //! rewrite in place on Tier A, a loud refusal on Tier B — and prints which one
 //! it took, so a run cannot check less than it looks.
 
-use crate::harness::Headless;
+use crate::harness::{Headless, poisoned};
 use crcbl_hal::{
     Barriers, BufferDesc, BufferUsage, CommandEncoderDesc, Device, Features, MemoryLocation,
     ResourceState, SubmitInfo,
@@ -448,7 +448,7 @@ impl ComputeProbe {
 
     /// The staging buffer's contents, as the `u32`s the probe writes.
     fn read_words(&self, headless: &Headless) -> Vec<u32> {
-        let mut bytes = vec![0u8; probe_bytes() as usize];
+        let mut bytes = poisoned(probe_bytes() as usize);
         headless.readback(self.staging, probe_bytes(), &mut bytes);
         bytes
             .chunks_exact(4)

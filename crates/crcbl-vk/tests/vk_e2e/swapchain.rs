@@ -23,7 +23,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::harness::{CLEAR, EXTENT, Headless};
+use crate::harness::{CLEAR, EXTENT, Headless, poisoned};
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
     CommandEncoderDesc, CompositeAlpha, Extent3d, Format, ImageAspect, ImageSubresourceLayers,
@@ -148,7 +148,7 @@ fn a_vulkan_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
         .expect("a readback request");
 
     // Poll with a deadline, never a fixed sleep — `docs/plan/12-testing.md`.
-    let mut bytes = vec![0u8; pixels as usize];
+    let mut bytes = poisoned(pixels as usize);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         match device

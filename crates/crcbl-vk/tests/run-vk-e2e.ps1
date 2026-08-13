@@ -188,14 +188,26 @@ try {
         # hour of CI, so the run has to report everything it knows in one. The
         # zero-count and cancelled-run gates below are what keep "no failures"
         # from meaning "nothing ran".
+        #
+        # `--success-output immediate` rather than `--no-capture`, which is what
+        # this passed for most of its life. `--no-capture` hands the test binary
+        # the real stdio, and nextest cannot then interleave two tests' output —
+        # so it silently forces one thread and prints `warning: ignoring
+        # --test-threads because --no-capture is specified` on every run. The
+        # `--test-threads 1` that used to sit beside it was therefore dead, and
+        # this leg ran serially whatever either flag said, which is where most
+        # of its wall clock went. Capturing instead lets nextest use the
+        # runner's cores, and `immediate` keeps every line the matches below
+        # need — the adapter line, the sync-validation reach — in the log, ahead
+        # of the summary, which is the ordering the count match relies on.
+        # `run-vk-e2e.sh` is the twin and carries the same two flags.
         cargo nextest run `
             --locked `
             --package crcbl-vk `
             --features vk-e2e `
             --test vk_e2e `
             --run-ignored all `
-            --test-threads 1 `
-            --no-capture `
+            --success-output immediate `
             --no-fail-fast `
             @args 2>&1 | Tee-Object -FilePath $log
         $status = $LASTEXITCODE

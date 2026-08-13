@@ -18,7 +18,7 @@
 //! `DRAW_INDIRECT_COUNT`; both tests assert whichever arm the device offers and
 //! name it in the output, so a Tier B machine cannot pass by checking less.
 
-use crate::harness::Headless;
+use crate::harness::{Headless, poisoned};
 use crate::triangle::{TRIANGLE_CLEAR, TRIANGLE_EXTENT};
 use crcbl_hal::{
     Barriers, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
@@ -480,7 +480,7 @@ impl QuadrantResources {
             )
             .expect("present");
 
-        let mut bytes = vec![0u8; byte_count as usize];
+        let mut bytes = poisoned(byte_count as usize);
         headless.readback(staging, byte_count, &mut bytes);
         device.destroy_command_buffer(commands);
         device.destroy_buffer(staging);
