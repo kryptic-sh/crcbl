@@ -1,7 +1,7 @@
 //! `mesh.slang` driven through a pipeline this file builds by hand, so a
 //! question about the *pipeline* can be asked without a scene around it.
 //!
-//! Two questions are asked here, and they share one fixture because they share
+//! Three questions are asked here, and they share one fixture because they share
 //! one pipeline.
 //!
 //! **Reversed-Z, proved rather than asserted.** `docs/plan/02-vulkan-backend.md`
@@ -22,11 +22,19 @@
 //! target that was never written all produce exactly the frame the goldens
 //! already hold. So this file reads that attachment back and says what it found.
 //!
+//! **A 1×1 occlusion image reads as its one texel, everywhere.** That is what
+//! `crcbl_render::forward`'s ambient-occlusion off-switch is, and an unclamped
+//! `Load` at `SV_Position.xy` does not do it — the fetch lands outside a
+//! one-texel image at every pixel but the origin and yields zero, which reads as
+//! total occlusion. The probe already binds exactly that placeholder, so the
+//! question is asked here by darkening the light list until ambient is the whole
+//! of the frame's colour.
+//!
 //! It borrows `mesh`'s extent and shader but is not part of that module,
-//! because neither question is a picture of a scene: the conventional projection
-//! built for the control is one nothing in the engine ever constructs, and the
+//! because none of the three is a picture of a scene: the conventional projection
+//! built for the control is one nothing in the engine ever constructs, the
 //! reflectivity frame is deliberately shaded through a row that makes the colour
-//! target nearly black.
+//! target nearly black, and the occlusion frame has no direct light in it at all.
 
 use crate::harness::{Headless, POISON, poisoned};
 use crate::mesh::MESH_EXTENT;
@@ -93,7 +101,12 @@ struct DepthProbe {
     /// quads the colours this test asserts, because the material row names
     /// layer 0 and the shader multiplies by what it finds there.
     base_color_page: crcbl_render::UploadedTexture,
-    /// `mesh.slang`'s occlusion channel, one white texel — see the bind group.
+    /// `mesh.slang`'s occlusion channel, one white texel — `crcbl_render::forward`'s
+    /// own placeholder, and the subject of this file's third question.
+    ///
+    /// **Deliberately smaller than the frame**, which is the whole point: the
+    /// shader has to clamp its fetch to reach this texel at all, and every frame
+    /// this file renders is drawn through it.
     occlusion: crcbl_render::UploadedTexture,
     base_color_sampler: crcbl_hal::SamplerHandle,
     /// A 1×1 `D32Float` image standing in for topic 18's shadow atlas, and its
@@ -152,6 +165,14 @@ const NEAR_QUAD_COLOR: [f32; 3] = [0.9, 0.05, 0.05];
 /// near quad's edge.
 const FAR_QUAD_COLOR: [f32; 3] = [0.05, 0.1, 0.9];
 
+/// The ambient term every frame this file renders carries.
+///
+/// Named rather than written into the uniforms, because the occlusion assertion
+/// multiplies by it: with the light list darkened, `mesh.slang`'s whole output is
+/// `diffuse_albedo * ambient * occluded`, and that assertion has to be derived
+/// from the value the frame really carried rather than from a literal beside it.
+const PROBE_AMBIENT: [f32; 4] = [0.2, 0.2, 0.2, 0.0];
+
 /// The probe's material table. Row [`PROBE_PLAIN_ROW`] is what the reversed-Z
 /// frames shade through and row [`PROBE_REFLECTIVE_ROW`] is what the
 /// reflectivity frame does.
@@ -202,6 +223,17 @@ const PROBE_REFLECTIVE_ROW: usize = 1;
 /// an order of magnitude below what separates the two rows — the assertion names
 /// the distance it is really discriminating.
 const REFLECTIVITY_TOLERANCE: f32 = 2.0 / 255.0;
+
+/// How far a channel of the ambient-only frame may sit from the value the
+/// fixture implies, as a fraction of full scale.
+///
+/// Wider than [`REFLECTIVITY_TOLERANCE`] because that attachment is linear and
+/// this one is not: the colour target is `Rgba8UnormSrgb`, so the hardware
+/// applies a transfer function whose slope is steep down where the green and blue
+/// channels sit, and a last-bit disagreement in linear light arrives here
+/// magnified. It is still far below what the assertion discriminates, which is a
+/// channel at zero.
+const OCCLUSION_TOLERANCE: f32 = 3.0 / 255.0;
 
 impl DepthProbe {
     /// The two quads, near-first, in `crcbl_shaders::mesh::MeshVertex` layout,
@@ -524,7 +556,10 @@ impl DepthProbe {
 
         // `mesh.slang`'s occlusion channel, bound white so the probe's ambient
         // term is unscaled — `crcbl_render::forward`'s placeholder, by hand,
-        // because this file builds its own layout out of the same shader.
+        // because this file builds its own layout out of the same shader. One
+        // texel against a frame of `MESH_EXTENT`, so the ambient term is unscaled
+        // only if the shader clamps its fetch; see the field, and the test that
+        // asks.
         let occlusion = crcbl_render::upload_texture(
             device,
             headless.queue,
@@ -949,6 +984,23 @@ fn pixels_unlike_the_corner(frame: &crcbl_golden::Image) -> usize {
         .count()
 }
 
+/// `value` in linear light, encoded the way this probe's `Rgba8UnormSrgb`
+/// swapchain encodes what a fragment wrote into it.
+///
+/// IEC 61966-2-1's transfer function, which the Vulkan specification's sRGB
+/// conversion is. It is here because the occlusion assertion below compares a
+/// *derived* colour with a readback byte, and the value `mesh.slang` returns is
+/// not the value that lands in the buffer — the other assertions in this file
+/// read either a linear attachment or a channel ordering, and needed no such
+/// thing.
+fn srgb_encode(value: f32) -> f32 {
+    if value <= 0.003_130_8 {
+        value * 12.92
+    } else {
+        1.055 * value.powf(1.0 / 2.4) - 0.055
+    }
+}
+
 /// Both of a probe frame's colour attachments, read back.
 struct ProbeFrame {
     /// Attachment 0: the swapchain image the two quads were drawn into.
@@ -993,7 +1045,7 @@ fn render_probe(
     let uniforms = crcbl_shaders::mesh::FrameUniforms {
         view_proj: view_proj.to_cols_array(),
         camera_position: [0.0, 0.0, PROBE_EYE, 1.0],
-        ambient: [0.2, 0.2, 0.2, 0.0],
+        ambient: PROBE_AMBIENT,
         // This probe binds no shadow atlas and draws through a pipeline of its
         // own, so the cascades are never sampled. Identity matrices and a zero
         // reach say that plainly: a fragment whose eye distance is past every
@@ -1485,6 +1537,120 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
          {PROBE_REFLECTIVE_ROW}'s F0 {:?} and roughness {}",
         [expected[0], expected[1], expected[2]],
         row.roughness,
+    );
+
+    probe.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// **A fragment reading a 1×1 occlusion image gets that image's one texel.**
+///
+/// This is the property `crcbl_render::forward`'s AO off-switch rests on, and it
+/// is the one that was not true: `mesh.slang` fetches the occlusion channel with
+/// a `Load` at `SV_Position.xy`, and a `Load` outside a texture's extent yields
+/// **zero** rather than the nearest texel. Bound to a frame larger than one
+/// pixel, an unclamped fetch therefore reads the renderer's white placeholder as
+/// *total* occlusion everywhere but the origin — which is not an error anywhere,
+/// on any backend, and arrives only as a frame that lost its ambient term.
+///
+/// So the frame is shaded with **nothing but ambient**: the light list is
+/// darkened, which zeroes `direct` and `gloss` exactly, and `mesh.slang`'s whole
+/// output becomes `diffuse_albedo * ambient * occluded`. The occlusion factor is
+/// then the only unknown left in a pixel, and the expected colour is derived from
+/// the fixture rather than written down beside it.
+///
+/// Two assertions, in the order that separates the two ways this can be black:
+///
+/// * The reflectivity attachment at the same pixel is not the pass's clear.
+///   `mesh.slang` writes it from the material row in the same invocation with
+///   none of the lighting between, so this is the fragment stage having run —
+///   without it, a frame where no geometry drew reads exactly like a frame that
+///   read `0.0` out of the placeholder.
+/// * The colour is the ambient term. An unclamped `Load` fails this at every
+///   channel with a pixel of zeroes.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_fragment_reads_the_one_texel_occlusion_placeholder_as_no_occlusion() {
+    let headless = Headless::open_for_mesh();
+    let device = headless.device.as_ref();
+    let mut probe = DepthProbe::new(&headless);
+    let mut pool = crcbl_render::TransientPool::new();
+
+    // The one light darkened rather than removed. The froxel grid this fixture
+    // fills by hand lists light zero, so an empty list would change what the
+    // cluster lookup finds as well as what it contributes — and a colour of zero
+    // is what makes `direct` and `gloss` exactly zero rather than merely small.
+    device
+        .write_buffer(
+            probe.lights,
+            0,
+            &crcbl_shaders::light::GpuLight {
+                color: [0.0; 4],
+                ..probe_sun()
+            }
+            .to_bytes(),
+        )
+        .expect("write");
+
+    let (reversed, _) = probe_projections();
+    let frame = render_probe(&headless, &mut probe, &mut pool, reversed, PROBE_PLAIN_ROW);
+    let centre = PROBE_CENTRE;
+
+    let reflectivity = frame
+        .reflectivity
+        .pixel(centre.0, centre.1)
+        .expect("inside");
+    assert_ne!(
+        reflectivity, [0; 4],
+        "no fragment wrote the second attachment at {centre:?}, so nothing was \
+         shaded there and the colour below cannot say anything about the \
+         occlusion read. Look at the geometry, the depth state and the \
+         projection — not at `mesh.slang`'s occlusion fetch."
+    );
+
+    // What `mesh.slang` computes when ambient is the whole of the light: the
+    // near quad's vertex colour through the bound row, times the frame's ambient,
+    // times the occlusion the fragment read. Derived from the fixture — a triple
+    // written down here would go on describing the old quad the day any of the
+    // three constants moves — and encoded, because the target is an sRGB format
+    // and the shader's output is linear.
+    let row = PROBE_MATERIALS[PROBE_PLAIN_ROW];
+    let mut expected = [0.0f32; 3];
+    for (channel, want) in expected.iter_mut().enumerate() {
+        // `1.0 - metallic` is the shader's own diffuse albedo, spelled out
+        // because a conductor has no ambient term at all and this row's being a
+        // dielectric is what makes the assertion possible.
+        *want = srgb_encode(
+            NEAR_QUAD_COLOR[channel]
+                * row.base_color[channel]
+                * (1.0 - row.metallic)
+                * PROBE_AMBIENT[channel],
+        );
+    }
+
+    let pixel = frame.color.pixel(centre.0, centre.1).expect("inside");
+    for (channel, want) in expected.iter().enumerate() {
+        let got = f32::from(pixel[channel]) / 255.0;
+        assert!(
+            (got - want).abs() <= OCCLUSION_TOLERANCE,
+            "channel {channel} of the ambient-only frame at {centre:?} is {got}, \
+             and the fixture says {want}. The whole pixel is {pixel:?}, and the \
+             reflectivity attachment says a fragment ran here.\n\
+             \x20 * Every channel at zero: the occlusion fetch returned `0.0`. \
+             The bound image is one texel and the frame is {extent:?}, so this \
+             is `mesh.slang`'s `Load` reading outside the texture — the \
+             coordinate is not being clamped against `GetDimensions`.\n\
+             \x20 * One channel off: the ambient term reached the frame and \
+             something else in the fixture moved. Re-derive from \
+             `NEAR_QUAD_COLOR`, the bound material row and `PROBE_AMBIENT`.",
+            extent = MESH_EXTENT,
+        );
+    }
+
+    eprintln!(
+        "vk e2e: a 1×1 occlusion image bound to a {MESH_EXTENT:?} frame reads as \
+         no occlusion — centre {pixel:?}, ambient-only expectation {expected:?}"
     );
 
     probe.destroy(headless.device.as_ref());

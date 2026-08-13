@@ -434,8 +434,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   descriptor, never a shader permutation: shadows off records no cull and no
   draw into the atlas, which keeps its reversed-Z clear and reads as fully lit;
   reflections off tonemaps the forward pass's own scene colour, bit for bit;
-  ambient occlusion off replaces the pass pair with a clear of the occlusion
-  channel to 1.0. `apps/lumen` reaches all three from the command line with
+  ambient occlusion off records neither occlusion pass and binds a
+  renderer-owned 1×1 white image in place of the channel, which `mesh.slang`
+  reads as "nothing occludes" because it clamps that fetch to the image it is
+  reading. `apps/lumen` reaches all three from the command line with
   `--no-shadows`, `--no-ao` and `--no-reflections`, and its debug panel and
   headless summary both name the **resolved** set.
 

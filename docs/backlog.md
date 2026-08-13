@@ -7695,48 +7695,47 @@ Note the shape it would be a demo _of_: the browser runs
 `LightingPath:: Rasterised` by construction, which is the whole reason the
 charter wants the page. That argument is unaffected by the deferral and stays.
 
-## The effect toggles landed, and three things about them are owed (2026-08-14)
+## The pinned shader compilers ARE installed here (2026-08-14)
+
+**A previous entry in this file said they were not, and that claim blocked a
+real improvement for a day.** It is worth its own heading because the next
+reader has to be able to trust the rest of this file: an entry claiming a tool
+is missing is one nobody re-checks, and this one was never true. Both pinned
+compilers are on the development machine, at the versions
+`crates/crcbl-shaders/tools/compile-shaders.sh` names:
+
+- `~/.local/slang/bin/slangc` — `2026.14`, the script's `SLANG_VERSION`
+- `~/.local/dxc/bin/dxc` — `1.9(1-0d3ee6b5)(1.9.0.1)`, the script's
+  `DXC_VERSION`
+
+So editing a `.slang` is ordinary work here, not something to defer.
+`crates/crcbl-shaders/build.rs` verifies each source by SHA-256 against
+`spirv/manifest.txt`, so _any_ edit — a comment included — fails the build until
+the artifacts are regenerated, and the regeneration is one command:
+
+```
+CRCBL_SLANGC=~/.local/slang/bin/slangc CRCBL_DXC=~/.local/dxc/bin/dxc \
+  crates/crcbl-shaders/tools/compile-shaders.sh
+```
+
+then the same script with `--check`. Note that `CRCBL_DXC` has no PATH fallback
+by design, and Arch's `directx-shader-compiler` is a preview build the script
+refuses — so the path above is not interchangeable with whatever `which dxc`
+finds.
+
+## The effect toggles landed, and two things about them are owed (2026-08-14)
 
 `crcbl_render::effects` is topic 39's resolution point: `RenderEffects` is the
 effect set, `EffectRequest` carries the three requested layers,
 `EffectRequest::resolve` applies the order, and `ForwardRenderer::begin_frame`
 resolves once per frame and freezes the answer. What follows is what that left.
 
-### `mesh.slang` reads the occlusion channel with an unclamped `Load`
-
-**The finding that changed the design, and it was found on hardware rather than
-reasoned about.** Topic 18 sanctions a 1×1 white `R8Unorm` as the AO off-switch;
-`mesh.slang`'s `ambient_occlusion.Load(int3(int2(input.position.xy), 0))`
-fetches by absolute pixel, and a `Load` outside a texture's extent yields
-**zero**. The first AO-off frame drawn that way was black wherever ambient was
-the whole of the light, on radv, with nothing reporting an error. What ships
-instead is an `ssao-none` render pass clearing a frame-sized occlusion transient
-to `AMBIENT_OCCLUSION_NONE`.
-
-Owed: `min` the load coordinate against `ambient_occlusion.GetDimensions()`. It
-would
-
-- let the `ssao-none` pass go away and make the AO-off frame strictly cheaper,
-- make `mesh.slang`'s binding-22 doc comment true again — it still says a 1×1
-  white image is bound when the passes are not added, which is now wrong,
-- and make `ForwardRenderer::add_passes`' bind-group-failure fallback harmless
-  instead of a frame with no ambient term (that group names the 1×1
-  placeholder).
-
-**It was not done because it needs the pinned shader compiler.**
-`crates/crcbl-shaders/build.rs` verifies each `.slang` by SHA-256 against
-`spirv/manifest.txt`, so _any_ edit to the source — including a comment — fails
-the build until the artifacts are regenerated, and neither `slangc` nor
-`CRCBL_DXC` is installed on the development machine. Whoever has the toolchain
-should take it; the change is one `min` and a comment.
-
 ### Two of the four toggle layers have no source in the tree
 
-`EffectRequest::camera` and `EffectRequest::video` are fields nothing but a
-test writes. They are present because the _order_ is what was built — a
-resolution point missing two of its inputs cannot be shown to apply them in the
-right order — and `crcbl_render::effects`' module docs carry a table saying
-which are wired.
+`EffectRequest::camera` and `EffectRequest::video` are fields nothing but a test
+writes. They are present because the _order_ is what was built — a resolution
+point missing two of its inputs cannot be shown to apply them in the right order
+— and `crcbl_render::effects`' module docs carry a table saying which are wired.
 
 - **Camera stack.** There is no render-stack RON. Nothing in the workspace reads
   or writes RON at all, there is no `ron` dependency and no `.ron` file, and

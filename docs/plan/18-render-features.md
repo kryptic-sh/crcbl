@@ -305,28 +305,29 @@ first.
   `shadow_placeholder` pattern already in the tree, and it makes a later quality
   knob a two-line change rather than a shader permutation.
 
-  **Corrected when the switch was built (2026-08-14): the placeholder cannot be
-  1×1, and the reason is the read rather than the write.** `mesh.slang` fetches
-  this channel with `ambient_occlusion.Load(int3(int2(input.position.xy), 0))` —
-  a `Load` at the fragment's own pixel, chosen in that file for having no
-  sampler, no UV and no texel-centre arithmetic for four backends to disagree
-  about. A `Load` outside a texture's extent yields **zero**, not its one texel,
-  so a 1×1 image bound to a frame-sized read occludes everything: the first
-  AO-off frame drawn this way was black wherever ambient was the whole of the
-  light, on real hardware, with nothing reporting an error.
+  **Qualified when the switch was built (2026-08-14): the 1×1 form is not free,
+  and what it costs is a line in the shader rather than a pass.** `mesh.slang`
+  fetches this channel with a `Load` at the fragment's own pixel, chosen in that
+  file for having no sampler, no UV and no texel-centre arithmetic for four
+  backends to disagree about. A `Load` outside a texture's extent yields
+  **zero**, not its one texel, so an unclamped fetch reads a 1×1 image as total
+  occlusion everywhere but the origin: the first AO-off frame drawn that way was
+  black wherever ambient was the whole of the light, on real hardware, with
+  nothing reporting an error.
 
-  What ships instead is the same idea at the extent the read needs: the
-  occlusion transient is created whatever the toggle says, and a frame with AO
-  off records an `ssao-none` pass that **clears it to 1.0** in place of the
-  pair. Every property the placeholder was chosen for survives — no shader
-  permutation, no uniform branch, one pipeline, a value that occludes nothing —
-  and the cost is one clear of an `R8Unorm` image and no draw. The 1×1
-  placeholder keeps its other job, filling the binding for the shadow pass and
-  the depth prepass, neither of which has a fragment stage to sample it with.
+  So the fetch is clamped — `min` against `ambient_occlusion.GetDimensions()` —
+  and with that, the paragraph above ships as written. A frame with AO off
+  records **no occlusion pass at all** and takes no frame-sized image out of the
+  transient pool; every property the placeholder was chosen for survives, and
+  the clamp costs nothing on a frame-sized channel, where every fragment is
+  inside the image already. `crcbl-vk`'s `depth_probe` is what asks whether the
+  clamp is there: it binds the same one-texel image to a frame of `MESH_EXTENT`,
+  darkens the light list until ambient is the whole of the colour, and asserts
+  the ambient term arrived.
 
-  A `min` against `GetDimensions` in `mesh.slang` would let the 1×1 form work as
-  this paragraph originally described, and is the cheaper answer; it needs the
-  pinned shader compiler, so `docs/backlog.md` carries it.
+  A frame-sized transient cleared to 1.0 by an `ssao-none` pass was what shipped
+  first, on 2026-08-14, before the shader could be edited. It was correct and
+  strictly more expensive, and it is gone.
 
 ### Risks this carries
 

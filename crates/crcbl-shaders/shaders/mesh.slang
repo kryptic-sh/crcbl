@@ -689,13 +689,22 @@ StructuredBuffer<uint> cluster_lights;
 /// `ssao_blur.slang` left it: one `R8Unorm` channel the size of the frame, `1.0`
 /// where nothing occludes.
 ///
-/// # Fetched by pixel, not sampled
+/// # Fetched by pixel, not sampled, and clamped to the image
 ///
 /// A `Load` at `SV_Position.xy` — the same value `froxel_of` above is indexed by,
-/// and for the same reason. This image is exactly the size of the frame being
-/// drawn, so there is a texel per fragment and no interpolation to want: a `Load`
-/// needs no sampler, no UV and no texel-centre arithmetic, which is one less
-/// thing for four backends to disagree about.
+/// and for the same reason. When the occlusion pair ran, this image is exactly
+/// the size of the frame being drawn, so there is a texel per fragment and no
+/// interpolation to want: a `Load` needs no sampler, no UV and no texel-centre
+/// arithmetic, which is one less thing for four backends to disagree about.
+///
+/// **The coordinate is clamped against `GetDimensions` all the same**, and that
+/// clamp is what lets the off-switch below be one texel rather than a frame-sized
+/// clear. A `Load` outside a texture's extent yields *zero* rather than the
+/// nearest texel, so an unclamped fetch reads a 1×1 placeholder as total
+/// occlusion at every pixel but one — a frame with no ambient term at all, black
+/// wherever ambient is the whole of the light. That was found on hardware, with
+/// nothing anywhere reporting an error. A frame-sized channel is unaffected by
+/// the clamp: every fragment of the frame is inside the image already.
 ///
 /// # It is bound on every path, and is `1.0` when the passes are not there
 ///
@@ -1419,7 +1428,18 @@ FragmentOutput fragmentMain(VertexOutput input)
     // the room. Multiplying the tonemap pass's input instead is the same mistake
     // one pass later and is refused in `docs/plan/18-render-features.md` in
     // writing, because the one-line feature row invites it.
-    float occluded = ambient_occlusion.Load(int3(int2(input.position.xy), 0));
+    //
+    // **The fetch is clamped to the image's extent**, which is what makes the
+    // renderer's 1×1 white off-switch read as "nothing occludes" instead of as
+    // total occlusion — the binding's own declaration argues that at length. It
+    // costs nothing on a frame-sized channel, where every fragment is inside the
+    // image already.
+    uint occlusion_width;
+    uint occlusion_height;
+    ambient_occlusion.GetDimensions(occlusion_width, occlusion_height);
+    int2 occlusion_texel = min(int2(input.position.xy),
+                               int2(occlusion_width, occlusion_height) - 1);
+    float occluded = ambient_occlusion.Load(int3(occlusion_texel, 0));
 
     // Ambient is not the sun and keeps its full value in shadow, which is what
     // stops a shadowed surface from being black. The association here is the one

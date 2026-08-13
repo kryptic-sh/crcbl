@@ -241,11 +241,11 @@ const SSAO_BIAS: f32 = 0.02;
 
 /// The `R8Unorm` texel that occludes nothing: `1.0`, which is `0xFF`.
 ///
-/// What [`ForwardRenderer::ambient_occlusion_placeholder`] holds, and what the
-/// `ssao-none` pass clears the occlusion channel to on a frame drawing without
-/// [`RenderEffects::AMBIENT_OCCLUSION`] — so `mesh.slang` multiplies
-/// `frame.ambient.rgb` by it and the ambient term is untouched. Any other value
-/// would be a silent global ambient scale.
+/// What [`ForwardRenderer::ambient_occlusion_placeholder`] holds, and therefore
+/// what `mesh.slang` reads on a frame drawing without
+/// [`RenderEffects::AMBIENT_OCCLUSION`] — it multiplies `frame.ambient.rgb` by
+/// this and the ambient term is untouched. Any other value would be a silent
+/// global ambient scale.
 const AMBIENT_OCCLUSION_NONE: u8 = 0xFF;
 
 /// The reversed-Z far plane, in the two places that have to agree about it.
@@ -775,20 +775,19 @@ pub struct ForwardRenderer {
     /// the mesh layout can fill [`AMBIENT_OCCLUSION_BINDING`] without naming an
     /// occlusion image that does not exist yet.
     ///
-    /// [`ForwardRenderer::shadow_placeholder`]'s argument, one binding along, and
-    /// **nothing samples this one either**: the two passes whose groups name it
-    /// are the shadow pass and the depth prepass, and a depth-only pipeline has
-    /// no fragment stage. The forward pass always binds a frame-sized occlusion
-    /// channel instead — the occlusion pair's output, or the `ssao-none` clear
-    /// where the pair was not added.
+    /// [`ForwardRenderer::shadow_placeholder`]'s argument, one binding along.
+    /// The shadow pass and the depth prepass name it and never sample it — a
+    /// depth-only pipeline has no fragment stage — and **the forward pass names
+    /// it too on a frame drawing without [`RenderEffects::AMBIENT_OCCLUSION`]**,
+    /// where it is the whole of that effect's off-switch. An AO-on frame binds
+    /// the occlusion pair's blurred output instead.
     ///
-    /// **It is white all the same**, and that is not decoration: it is the value
-    /// that occludes nothing, so a group that reached the fragment stage by
-    /// mistake would lose the occlusion rather than the whole ambient term. What
-    /// stops that being the *sanctioned* off-switch is that `mesh.slang` reads
-    /// the binding with a `Load`, and a `Load` past a 1×1 image's one texel is
-    /// zero on every backend — see the `ssao-none` pass in
-    /// [`add_passes`](ForwardRenderer::add_passes).
+    /// **It is white because that is the value that occludes nothing**, which is
+    /// what makes it an honest stand-in for "no occlusion was computed" rather
+    /// than decoration. That it *reads* as white is `mesh.slang`'s doing: the
+    /// binding is fetched with a `Load`, and a `Load` past a 1×1 image's one
+    /// texel is zero on every backend, so the shader clamps the coordinate to the
+    /// image's extent. See [`add_passes`](ForwardRenderer::add_passes).
     ///
     /// It is uploaded rather than cleared, so it is in
     /// [`ResourceState::ShaderRead`] from the moment it exists and no pass has to
@@ -1065,14 +1064,13 @@ struct MeshGroup {
     /// [`ForwardRenderer::shadow_placeholder`], which is where that is argued.
     shadow_map: ImageViewHandle,
     /// Binding [`AMBIENT_OCCLUSION_BINDING`]. The blurred occlusion channel for
-    /// the forward pass, and the white placeholder for every group built before
-    /// the graph has realised one — see
-    /// [`ForwardRenderer::ambient_occlusion_placeholder`].
+    /// a forward pass that computed one, and the white placeholder everywhere
+    /// else — see [`ForwardRenderer::ambient_occlusion_placeholder`].
     ///
     /// **Every group built at `build` names the placeholder**, including the
-    /// camera's: the occlusion image is a graph transient whose view exists only
-    /// at execute time, so the camera's group is rebuilt against it inside the
-    /// forward pass and cached — the shape
+    /// camera's: the occlusion image may be a graph transient whose view exists
+    /// only at execute time, so the camera's group is rebuilt against whatever
+    /// the frame bound inside the forward pass and cached — the shape
     /// [`ForwardRenderer::tonemap_group`] already has.
     ambient_occlusion: ImageViewHandle,
 }
@@ -4312,12 +4310,13 @@ impl ForwardRenderer {
             self.lights
                 .add_pass(graph, self.frame, generated.visible_count_id, self.grid);
 
-        // The occlusion placeholder, imported once and read by the two passes
-        // whose bind groups name it: the shadow pass's views and the depth
-        // prepass's copy of the camera's group. It was uploaded at build, so it
-        // is already in `ShaderRead` and the graph has nothing to transition —
-        // declaring it is what keeps that true if a later pass wants it in some
-        // other state.
+        // The occlusion placeholder, imported once and read by every pass whose
+        // bind group names it: the shadow pass's views, the depth prepass's copy
+        // of the camera's group, and — on a frame drawing without
+        // `RenderEffects::AMBIENT_OCCLUSION` — the forward pass itself. It was
+        // uploaded at build, so it is already in `ShaderRead` and the graph has
+        // nothing to transition; declaring it is what keeps that true if a later
+        // pass wants it in some other state.
         let occlusion_placeholder = graph.import_image(
             "ssao-placeholder",
             ImportedImage {
@@ -4343,18 +4342,23 @@ impl ForwardRenderer {
             graph.create_image("scene-color", TransientImageDesc::scene_color(extent));
         let scene_depth =
             graph.create_image("scene-depth", TransientImageDesc::scene_depth(extent));
-        // The occlusion channel the forward pass reads, **created whatever the
-        // occlusion pass is doing** — see the pass that fills it below. Only the
-        // pair's intermediate is conditional: a transient nothing reads or writes
-        // is a physical image taken out of the pool for a pass that does not
-        // exist.
-        let occlusion_blurred = graph.create_image(
-            "ssao-blurred",
-            TransientImageDesc::ambient_occlusion(extent),
-        );
-        let occlusion_raw = effects
-            .contains(RenderEffects::AMBIENT_OCCLUSION)
-            .then(|| graph.create_image("ssao", TransientImageDesc::ambient_occlusion(extent)));
+        // The occlusion pair's two transients, and **both are conditional**: a
+        // transient nothing reads or writes is a physical image taken out of the
+        // pool for a pass that does not exist. What the forward pass binds when
+        // they are absent is the 1×1 placeholder — see the pair below.
+        //
+        // The blur's target is requested first, which is the order the two were
+        // requested in when only one of them was conditional. The pool hands out
+        // physical images in request order, and an AO-on frame has to be the
+        // frame it was before this became a pair.
+        let occlusion_pair = effects.contains(RenderEffects::AMBIENT_OCCLUSION).then(|| {
+            let blurred = graph.create_image(
+                "ssao-blurred",
+                TransientImageDesc::ambient_occlusion(extent),
+            );
+            let raw = graph.create_image("ssao", TransientImageDesc::ambient_occlusion(extent));
+            (raw, blurred)
+        });
         // **Created whatever the reflections are doing**, unlike the pair above.
         // It is the forward pass's second colour attachment, which is in that
         // pipeline whether or not anything reads what it wrote — see the
@@ -4495,45 +4499,38 @@ impl ForwardRenderer {
         });
 
         let frame = self.frame;
-        // `docs/plan/18-render-features.md`'s occlusion pair, or the value that
-        // stands for "no occlusion was computed" where it is switched off.
+        // `docs/plan/18-render-features.md`'s occlusion pair, or the one texel
+        // that stands for "no occlusion was computed" where it is switched off.
         //
-        // # Why the switched-off arm is a clear and not the 1×1 placeholder
+        // # The switched-off arm is the 1×1 placeholder, and the shader is what
+        // makes that work
         //
         // Topic 18 sanctions the placeholder — "a renderer-owned 1×1 `R8Unorm`
-        // cleared to 1.0, bound when the AO passes are not added" — and **that
-        // does not work, for a reason the paragraph could not have known**:
-        // `mesh.slang` reads this channel with a `Load` at `SV_Position.xy`,
-        // and a `Load` outside a texture's extent yields zero rather than its
-        // one texel. A 1×1 image bound to a 1280×960 frame therefore occludes
-        // *everything* — the frame that found it is black wherever ambient is
-        // the whole of the light.
+        // cleared to 1.0, bound when the AO passes are not added" — and it is
+        // what this binds. The property it rests on is not free: `mesh.slang`
+        // reads this channel with a `Load` at `SV_Position.xy`, and a `Load`
+        // outside a texture's extent yields **zero** rather than the nearest
+        // texel, so the fetch has to be clamped against the image's own extent
+        // or a one-texel image occludes everything but the origin. That clamp is
+        // in `mesh.slang` and `crcbl-vk`'s `depth_probe` is what asks whether it
+        // is; a frame drawn without it is black wherever ambient is the whole of
+        // the light, on real hardware, with nothing reporting an error.
         //
-        // A frame-sized channel cleared to [`AMBIENT_OCCLUSION_NONE`] is the
-        // same idea at the extent the read needs, and it keeps every property
-        // the placeholder was chosen for: no shader permutation, no uniform
-        // branch, one pipeline, and a value that occludes nothing. It costs a
-        // clear of an `R8Unorm` image and records no draw.
+        // So an AO-off frame records **no occlusion pass at all** and takes no
+        // frame-sized image out of the transient pool: no shader permutation, no
+        // uniform branch, one pipeline, and a bound value that occludes nothing.
         //
-        // The 1×1 placeholder keeps its other job, which is filling the binding
-        // for the two depth-only passes — neither has a fragment stage, so
-        // neither ever samples it. `docs/backlog.md` carries what a shader-side
-        // clamp would buy, since editing `mesh.slang` needs the pinned compiler.
-        match occlusion_raw {
-            Some(raw) => {
+        // The placeholder's other job is unchanged — filling the binding for the
+        // two depth-only passes, neither of which has a fragment stage and so
+        // neither of which ever samples it.
+        let occlusion = match occlusion_pair {
+            Some((raw, blurred)) => {
                 self.ssao
-                    .add_passes(graph, frame, scene_depth, raw, occlusion_blurred);
+                    .add_passes(graph, frame, scene_depth, raw, blurred);
+                blurred
             }
-            None => {
-                graph
-                    .add_render_pass("ssao-none")
-                    .clear_color(
-                        occlusion_blurred,
-                        [f32::from(AMBIENT_OCCLUSION_NONE) / 255.0; 4],
-                    )
-                    .execute(|_| {});
-            }
-        }
+            None => occlusion_placeholder,
+        };
 
         let pass = graph
             .add_render_pass("forward")
@@ -4569,11 +4566,13 @@ impl ForwardRenderer {
                     ..crcbl_hal::ClearValue::default()
                 },
             )
-            // The occlusion channel this frame's ambient term is scaled by. The
-            // blur pass — or the clear that stands in for the pair — wrote it as
-            // a colour attachment a moment ago, so this declaration is the
-            // barrier into a shader-readable layout.
-            .read_image(occlusion_blurred)
+            // The occlusion channel this frame's ambient term is scaled by. On
+            // an AO-on frame the blur pass wrote it as a colour attachment a
+            // moment ago, so this declaration is the barrier into a
+            // shader-readable layout; on an AO-off frame it is the imported
+            // placeholder, which is in that layout already and has nothing to
+            // transition.
+            .read_image(occlusion)
             // **The barrier out of the shadow pass's depth attachment.** The
             // atlas is in this pass's bind group at `SHADOW_ATLAS_BINDING`, and
             // without this declaration the graph leaves it in
@@ -4608,14 +4607,16 @@ impl ForwardRenderer {
         // `ForwardRenderer::mesh_group_entries`.
         //
         //
-        // The occlusion image is a frame-sized transient whether the pair ran or
-        // a clear stood in for it, so this rebuild is unconditional and there is
-        // one shape of forward pass rather than two.
+        // The rebuild is unconditional, so there is one shape of forward pass
+        // rather than two: the group is cached against the view it was built
+        // from, so an AO-off frame naming the placeholder's view and an AO-on
+        // frame naming the blur's target are the same code and one cache miss
+        // apiece when a toggle moves.
         let entries = self.mesh_group_entries[self.frame].clone();
         let mesh_layout = self.mesh_layout;
         let cached_mesh = &mut self.ambient_occlusion_groups[self.frame];
         pass.execute(move |ctx| {
-            let view = ctx.image_view(occlusion_blurred);
+            let view = ctx.image_view(occlusion);
             let device = ctx.device();
             let group = cached_group(
                 cached_mesh,
@@ -4626,12 +4627,12 @@ impl ForwardRenderer {
                 entries,
             )
             // Falling back to the group built at `build` rather than dropping
-            // the frame. **That group names the 1×1 placeholder, and
-            // `mesh.slang` reads this binding with a `Load`** — so the fallback
-            // frame has no ambient term at all rather than an unoccluded one.
-            // It is still the better of the two outcomes on a descriptor
-            // failure, and `docs/backlog.md` carries the shader-side clamp that
-            // would make it the harmless one.
+            // the frame, and **the fallback costs the occlusion and nothing
+            // else**: that group names the 1×1 white placeholder, which
+            // `mesh.slang` clamps its `Load` into and reads as "nothing
+            // occludes". A descriptor failure therefore draws the frame this
+            // scene would have drawn with the effect switched off, rather than
+            // one with no ambient term in it.
             .unwrap_or(group);
             let encoder = ctx.encoder();
             bucket_draws.open(encoder);
@@ -7913,21 +7914,17 @@ mod tests {
             "the spot must actually hold a slot, or the shadow arm below is only about cascades"
         );
 
-        // The occlusion pair leaves a clear behind it — the frame-sized white
-        // channel `mesh.slang`'s `Load` needs, which the 1×1 placeholder cannot
-        // be. The reflection pair leaves nothing, because nothing reads what it
-        // would have written.
-        for (off, gone, instead) in [
+        // **Neither pair leaves anything behind it**, and for the same reason:
+        // nothing reads what it would have written. The occlusion pair's reader
+        // binds the 1×1 white placeholder instead — `mesh.slang` clamps its
+        // `Load` into it — and the reflection pair's reader tonemaps the forward
+        // pass's own colour.
+        for (off, gone) in [
             (
                 RenderEffects::AMBIENT_OCCLUSION,
                 ["ssao", "ssao-blur"].as_slice(),
-                Some("ssao-none"),
             ),
-            (
-                RenderEffects::REFLECTIONS,
-                ["ssr", "ssr-blur"].as_slice(),
-                None,
-            ),
+            (RenderEffects::REFLECTIONS, ["ssr", "ssr-blur"].as_slice()),
         ] {
             let labels = without(&mut renderer, off);
             assert_eq!(
@@ -7935,24 +7932,15 @@ mod tests {
                 RenderEffects::all().difference(off),
                 "{off:?}: the frame must have resolved to the set the request asked for"
             );
-            let mut expected: Vec<String> = Vec::with_capacity(all_on.len());
-            for label in &all_on {
-                if !gone.contains(&label.as_str()) {
-                    expected.push(label.clone());
-                    continue;
-                }
-                // In the first one's place, so the stand-in is asserted to be
-                // where the pair was and not merely somewhere in the frame.
-                if label == gone[0]
-                    && let Some(instead) = instead
-                {
-                    expected.push(instead.to_string());
-                }
-            }
+            let expected: Vec<String> = all_on
+                .iter()
+                .filter(|label| !gone.contains(&label.as_str()))
+                .cloned()
+                .collect();
             assert_eq!(
                 labels, expected,
-                "{off:?}: the frame must lose {gone:?}, gain {instead:?} in their place, and \
-                 keep every other pass"
+                "{off:?}: the frame must lose {gone:?}, gain nothing in their place, and keep \
+                 every other pass"
             );
         }
 

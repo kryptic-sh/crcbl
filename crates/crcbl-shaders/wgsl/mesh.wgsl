@@ -488,7 +488,10 @@ fn fragmentMain( _S19 : pixelInput_0, @builtin(position) position_3 : vec4<f32>)
         direct_0 = direct_1;
         gloss_0 = gloss_1;
     }
-    var _S37 : vec3<i32> = vec3<i32>(vec2<i32>(_S24), i32(0));
+    var occlusion_width_0 : u32;
+    var occlusion_height_0 : u32;
+    {var dim = textureDimensions((ambient_occlusion_0));((occlusion_width_0)) = dim.x;((occlusion_height_0)) = dim.y;};
+    var _S37 : vec3<i32> = vec3<i32>(min(vec2<i32>(_S24), vec2<i32>(i32(occlusion_width_0), i32(occlusion_height_0)) - vec2<i32>(i32(1))), i32(0));
     var output_1 : FragmentOutput_0;
     output_1.lit_0 = vec4<f32>(diffuse_albedo_0 * (frame_0.ambient_0.xyz * vec3<f32>((textureLoad((ambient_occlusion_0), ((_S37)).xy, ((_S37)).z).x)) + direct_0) + gloss_0, albedo_0.w);
     output_1.reflectivity_0 = vec4<f32>(f0_1, roughness_1);
