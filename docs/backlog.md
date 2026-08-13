@@ -7497,12 +7497,11 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
   section reports the resolved set. `ForwardRenderer::set_effect_request` takes
   a whole `EffectRequest`, so a menu row is read-modify-write on
   `effect_request()` and needs no new engine API.
-- **A CI leg.** `apps/lumen/tests/run-lumen-golden.sh` exists and passes on
-  radv, lavapipe and wgpu locally; nothing in `.github/workflows` runs it, so
-  the golden can rot exactly the way `run-render-e2e.sh`'s existed to stop
-  happening. Rule 12 also wants each sample's CI run to exercise the runner's
-  path **plus one below it**, which
-  `--force-geometry indirect-per-batch --force-binding array-pages` now makes
+- **Rule 12's second path.** The CI leg itself exists — `vk e2e (lavapipe)`'s
+  `Draw lumen's room on lavapipe` step runs
+  `apps/lumen/tests/run-lumen-golden.sh` and its whole suite. What it does not
+  do is exercise the runner's path **plus one below it**, which
+  `--force-geometry indirect-per-batch --force-binding array-pages` makes
   possible and no job does.
 - **The Pages web demo**, whose six-place checklist is the entry below.
 - **Sound.** Rule 8 says no sample ships silent after P4A. lumen has no audio at
@@ -7776,10 +7775,14 @@ effect on. The first rule that fires arrives with the ray-traced variants, which
 
 ### Coverage gaps this slice leaves
 
-- **No CI job runs the toggle frames.** They are asserted by
-  `every_effect_toggles_and_the_frame_says_so` in `apps/lumen/tests/golden.rs`,
-  which is `#[ignore]`d and feature-gated; the missing CI leg is the entry in
-  the lumen section above and this is a second consumer of it.
+- **The toggle frames do run in CI**, and this entry said they did not. The
+  `Draw lumen's room on lavapipe` step in `vk e2e (lavapipe)` runs
+  `apps/lumen/tests/run-lumen-golden.sh`, which drives the whole suite —
+  `every_effect_toggles_and_the_frame_says_so` included, three tests, all
+  passing there. What is still missing is rule 12's second half: the run
+  exercises the runner's own path and not one below it, which
+  `--force-geometry indirect-per-batch --force-binding array-pages` now makes
+  possible and no job does.
 - **The `[engine.video]` and camera layers are untested against a real source**,
   because they have none. What is tested is the order, with values a test wrote.
 - **`EffectOverride::force(.., None)` — releasing an override — has no caller
