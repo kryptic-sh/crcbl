@@ -383,6 +383,194 @@ is what the first slice said it would be.
   kernel and about a fortieth with this one, on both of the rasterisers it was
   run on.
 
+## Screen-space reflections (decided 2026-08-14)
+
+The third P7B row. SSR runs after the forward pass, so the only per-pixel data
+downstream are the depth buffer and the `Rgba16Float` scene colour — and a
+reflection needs to know which surfaces reflect and how sharply, which is `F0`
+and `roughness`.
+
+### The AO section's refusal of an attachment does not transfer
+
+The paragraph above refuses a normal attachment because "the prepass has no
+colour target at all, so it would mean a third geometry pipeline per
+`GeometryPath`, a new fragment entry point compiled to four targets, and a new
+`VertexOutput` consumer". **Every clause of that is a fact about the depth
+prepass**, which is built from the shadow pipeline with no fragment stage and no
+colour targets. On the **forward** pass none of it holds: both forward pipelines
+already take one `ColorTargetState` array and both name the same fragment entry,
+so a second target is one array element and no new pipeline, no new entry point
+and no new interpolant. Recorded here so the refusal is not applied by analogy
+to a pass it was never about.
+
+### The decision
+
+- **One new colour attachment on the forward pass: `Rgba8Unorm`, `rgb = F0`,
+  `a = roughness`.** Both values are bounded in `0..=1`, which is the argument
+  the AO transient already makes for its single channel; a dielectric's `0.04`
+  quantises to `10/255` and a roughness drives a lobe width, and neither error
+  is resolvable in a reflection that is itself an approximation.
+  `max_color_attachments` is 4 on the minimum capability profile.
+- **It carries the material, not the shading.** Baking the evaluated
+  environment-specular weight would be one channel cheaper and would freeze a
+  shading decision into a buffer. This topic's first rule is one material model,
+  one BRDF, **one set of inputs** — `F0` and `roughness` are the inputs, and
+  storing them is what lets the irradiance-probe row evaluate the same lobe
+  rather than inherit SSR's version of it.
+- **The normal stays reconstructed from depth**, sharing the AO pass's four-tap
+  function — but see the escalation clause below, because the cost of a wrong
+  normal is not the same for the two features.
+- **The pass is the composite.** It reads scene colour, depth and reflectivity
+  and writes their sum into a second `Rgba16Float` transient, which `add_passes`
+  returns in place of the scene colour. One pass, no blend state, no feedback
+  loop. A frame that does not add it returns the old id and the picture is
+  bit-identical — the same data-not-a-branch off-switch AO has, needing no
+  placeholder because nothing in `mesh.slang` reads the result.
+
+### What is refused
+
+- **Packing into the scene target's alpha.** Nothing reads it today — the
+  tonemap samples `rgb` and writes a literal 1.0 — but one channel cannot carry
+  a coloured `F0` and a roughness, so the packing is a scalar-reflectance design
+  wearing a bandwidth argument. It also takes the name away from a channel that
+  already has one, and that transparency will want.
+- **A material-id channel with the pass reading the table itself.** Exactly
+  right for untextured materials and exactly wrong for textured ones: the
+  fragment stage multiplies the row by the vertex colour and the page texel, and
+  a metal's base colour **is** its `F0`.
+- **A G-buffer.** This attachment moves no shading: the forward pass still
+  evaluates the whole BRDF, still reads the froxel list, still writes to
+  target 0. The line to hold is that the attachment gains a field when a pass
+  reads it, never because a G-buffer "should have" one.
+- **Reading last frame's colour with reprojection.** Motion vectors are
+  post-MVP, and a history buffer makes a golden a function of how many frames
+  were drawn before it.
+- **A planar reflection pass.** It would give a perfect mirror with no march,
+  and it is per-plane, a second geometry pass per mirror, and useless on
+  anything curved. It is the right answer for the render-to-texture camera this
+  document already names, and belongs in that section.
+
+### The escalation clause, written before it is needed
+
+Reconstructed normals are exact on a plane and wrong on a one-pixel rim at every
+silhouette, where the four-tap reconstruction keeps whichever neighbour is
+nearer and at an edge that neighbour is on the other surface. **For AO a wrong
+normal costs a pixel an eighth of its occlusion; for SSR a wrong normal is a
+wrong ray, and a wrong ray fetches an arbitrary colour.** So: if a fringe of
+unrelated colour one pixel deep appears at silhouettes, the fix is a second
+attachment carrying the view-space normal, **not** a tuning of the march. That
+escalation is contained to the fragment stage's return struct, one target state,
+one transient and the SSR shader's first ten lines, and it moves no golden
+because only the SSR pass reads it.
+
+### The march
+
+Screen-space DDA over the projected segment, fixed pixel stride, no jitter, no
+refinement pass.
+
+- **Screen space, not view space.** A world-unit step is tens of pixels near the
+  eye and a fraction of one far away, so the same constants would be a different
+  tracer in a room and on a planet. A pixel step is a pixel step everywhere, and
+  it makes the loop bound a property of the screen rather than of the scene's
+  scale — which matters because CI's rasterisers are software and the loop bound
+  is the whole cost.
+- **The segment is clipped to the viewport before the walk**, so every tap is
+  in-bounds by construction and a ray leaving the screen stops being a branch.
+  It ends at the clipped endpoint with a **border ramp** on its weight; a hard
+  stop draws a visible line where reflections end.
+- **A ray that hits nothing returns zero, and zero is correct.** The reflection
+  is additive, so a miss adds nothing and the surface looks as it does today.
+  That is why the table's Reflections cell says "screen-space reflections, probe
+  fallback" — the fallback is the next row.
+- **Behind an object, the depth buffer has no information, and this is where the
+  plausible wrong answer lives.** A tap says the ray is behind the _front_
+  surface, not how thick that surface is. A tap counts as a hit only within a
+  thickness bound; past it the tap is **no evidence and the march continues**.
+  Treating any "behind" as a hit is the classic SSR smear — it reflects the
+  nearest foreground object into every distant reflection and reads as a comet
+  tail off every silhouette. **The thickness is derived from the ray's own depth
+  advance per step**, floored by a constant, rather than being a fourth number
+  the Rust mirror has to agree about.
+- **No binary-search refinement.** The crossing is interpolated linearly between
+  the last two taps' depth deltas. A bisection is a cascade of binary
+  comparisons; an interpolation is arithmetic on two values already fetched.
+- Three more, each hiding a wrong answer: **start the ray off the surface**
+  along the normal or the first tap self-intersects; **clip against the near
+  plane** or a ray pointing towards the camera crosses `w <= 0` and every
+  projected coordinate after it is nonsense; and **fade rays pointing back at
+  the viewer**, which have almost no on-screen evidence to find.
+
+### Determinism: the goldens cannot carry this one
+
+**The AO argument does not transfer, and the difference is quantitative.** That
+pass can say a flipped sample costs an eighth and the blur then divides it by
+sixteen. A march has no such denominator: the first tap whose comparison flips
+**is** the answer. Two drivers disagreeing in the last bit can tap a
+neighbouring pixel at the crossing, or miss the crossing entirely at the last
+step — the second costs the whole reflection at that pixel.
+
+What is still worth doing, and is not decoration:
+
+- **No jitter of any kind**, for the rotation table's reason applied to a case
+  where it matters more. Stepping artefacts get lived with or blurred; they do
+  not get dithered away.
+- **Every weight is continuous and goes to zero exactly where the decision is
+  fragile.** A hit at the last step is at maximum distance and its fade is near
+  zero; a hit near the border is on the border ramp; a tap that barely satisfies
+  the thickness bound is on that ramp's low end. **The pixels where two drivers
+  can disagree are, by construction, the pixels whose reflection is multiplied
+  by almost nothing.** That is inspectable rather than measured.
+- **The roughness gate makes most of every existing frame identically zero.**
+  With the cutoff at 0.5, `GpuMaterial::UNTINTED`'s 0.5 gives exactly zero on
+  every target, and a pixel weighted exactly zero is bit-identical across four
+  rasterisers with no argument required.
+
+**And the honest part**: those reduce the exposure, they do not bound it. There
+is no argument that puts SSR under `Tolerance::RASTERISER` in general. So a
+golden stays a review aid, every real check is a **structural ratio between two
+blocks of one frame** (which one-driver drift moves together), and a fixture's
+reflections must come from **large, low-frequency reflected content** — if the
+reflected surface is a flat lit floor, picking the neighbouring tap changes
+nothing. **If a golden flaps between CI's legs, the resolution is not to widen
+the tolerance and not to re-bless per driver**: it is to make that fixture's
+reflected content flatter, or to drop that golden and keep the ratio. Written
+down before the first flap, because widening a tolerance will look like a
+one-line fix at the time.
+
+### Roughness
+
+The first slice does **sharp mirror reflections only, and the rough end is zero
+rather than wrong**. A single ray cannot represent a wide lobe, and the failure
+mode of pretending otherwise is a sharp reflection on a rough surface, which
+reads as a bug on sight. The roughness fade is not a gate bolted on for the
+goldens — it is the statement that this pass is valid only where the lobe is
+narrow.
+
+The blur that follows is the AO blur's kernel, not a mip chain: proven in this
+tree against real silhouettes, and gaining one factor — taps are weighted by how
+close their roughness is to the centre's, so a mirror beside a rough metal does
+not average the two. **Cone tracing over a colour mip chain is refused for this
+row**: it needs mip generation on an `Rgba16Float` target and a `SampleLevel` at
+a computed LOD, which is a filtered read whose level four rasterisers select
+arithmetic for — the thing the AO pair spent its design avoiding. It is the
+better technique and upgrading is contained to the blur pass, which the code
+should say.
+
+### What is left to later rows
+
+No temporal anything. No Hi-Z traversal. No back-face or thickness buffer. No
+half-resolution SSR — half-res AO is already owed and unmeasured, and a second
+unmeasured quality-for-speed trade should not land before the timers have been
+pointed at the first. No `LightingPath` gate, which still has no consumer. **No
+specular occlusion**: AO scales the ambient term alone, a highlight is an image
+of a light, and a reflection is an image of the room in one direction — none of
+the three take the same occlusion factor, and if one is wanted it is its own
+term and its own decision. And **SSR on transparency is out, with the
+interaction recorded now**: a transparent surface writing the reflectivity
+attachment would overwrite the opaque `F0` behind it while the scene colour at
+that pixel is a blend. Every SSR has this; writing it down is what stops the
+transparency row rediscovering it as a bug.
+
 ## Post-processing stack
 
 Pipeline order (all at internal render resolution, before the topic 15

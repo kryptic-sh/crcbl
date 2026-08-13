@@ -8111,3 +8111,77 @@ and `crcbl_render::scene::Geometry::Flat` takes a
 `crcbl_shaders::meshlet::MeshClusters`. `ClusterDag::cook` goes through it now
 too (`level.clusters.clone().into_clusters()`, the same three allocations the
 three `to_vec`s cost), so the mapping lives in one place.
+
+## Screen-space reflections: the slice plan (decided 2026-08-14)
+
+The design and its refusals are in `docs/plan/18-render-features.md`'s SSR
+section. This is the slice order and what each one's observable is.
+
+**Four slices, in dependency order.** Each is committable and CI-green alone.
+
+1. **The reflectivity attachment.** The fragment stage returns two `SV_Target`s;
+   the forward pipelines gain one `Rgba8Unorm` target state; a transient beside
+   the AO one, cleared to zero so a pixel geometry never covered cannot drive a
+   march with garbage. `depth_probe`'s hand-built pipeline attaches the second
+   target too — a fragment stage writing location 1 into a pipeline with one
+   attachment is a validation error under wgpu's rules. **Observable:** a probe
+   reads attachment 1 back and asserts the bound material row's `F0` and
+   `roughness` and not the neighbouring row's, proven red by swapping the two
+   channels. **Plus the negative claim, which is the one with teeth**: every
+   golden byte-identical, because adding a second output can in principle change
+   codegen for the first on four rasterisers.
+2. **The march, mirror-sharp, composited.** `ssr.slang` plus an `ssr.rs` in the
+   AO pass's shape. Roughness cutoff at 0.5. **Observable:** a new `Scene::Ssr`
+   — a smooth floor with the plain pyramid standing on it, which is the case SSR
+   is good at and satisfies the low-frequency requirement the determinism
+   section asks of a golden. The floor block directly below the pyramid must be
+   measurably brighter than one at the same depth, same lights, same normal,
+   same material, off to the side. That fails a no-op, a constant, and an
+   inverted ray direction, and it is a ratio between two blocks of one frame.
+3. **The rough end.** The blur, weighted on view-space depth **and** roughness;
+   cutoff raised so lumen's rough metal reflects. **Observable:** a falloff
+   comparison in the shape of the GGX slice's highlight test — the brass block's
+   reflection varies less across its face than the mirror panel's does across an
+   equal span, both above a floor so two black surfaces cannot satisfy it.
+4. **What a miss returns.** `frame.ambient.rgb` scaled by the same weight
+   instead of zero — the same approximation the diffuse term already makes,
+   applied consistently, and **the exact expression the irradiance-probe row
+   replaces**, which is what makes that row additive instead of a rewrite.
+   Deliberately last: widest blast radius, smallest value, and the easiest to
+   decline if the probe row is close.
+
+### lumen's mirror panel is close to SSR's worst case
+
+Worked out by hand from the room's plane and camera constants, **not measured**:
+the panel faces `+Z` at the camera, so its rays point back past the viewer, and
+its centre reflects a point on the front wall behind the camera — off screen, a
+miss. Only where the panel point is below eye height do rays go downward, so
+roughly the bottom two thirds reflect towards the floor and only the lowest part
+finds it while still on screen.
+
+That is still a good observable and arguably a better one than a full mirror:
+**a block near the panel's bottom must be measurably brighter than one near its
+top** — same material row, same face, same normal, same `F0`, same roughness,
+same absence of direct light, differing only in whether the ray finds the floor
+on screen. The transition height is derivable on the CPU, so both blocks are
+computed rather than eyeballed.
+
+**`METAL_DARKNESS` must be replaced by that gradient, not deleted and not
+weakened.** lumen's golden currently asserts the panel is three times darker
+than the plaster behind it, and its doc calls that the sample's central honest
+claim. The claim was true of the model; the model changes, so the claim changes
+— and its replacement has to be stronger. Lowering the number to keep it green
+would be making the test pass the code.
+
+**Considered, and for the sample's owner rather than the SSR slice:** if lumen
+wants a mirror showing the room, the panel wants angling or moving to a side
+wall. That is a change to the sample's content and should not be done on the way
+past.
+
+### One shared-code hazard
+
+`ssr.slang` re-declares `depth_at`, `view_position` and `normal_at` verbatim,
+because this repo has no include mechanism by design — the manifest hashes one
+source per artifact. That makes **three** copies of `normal_at`. A test
+asserting the three bodies are textually identical goes in with slice 2; two
+copies is already the bug, and three without a guard is a drift with a schedule.
