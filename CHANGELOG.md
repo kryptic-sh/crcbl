@@ -1059,6 +1059,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The sun lit a strip along the foot of every wall, a band down the side of
+  anything standing against one, and a bright cornice under a ceiling.** In
+  `apps/lumen`'s room those measured 0.60 m, 0.58 m and a band three times
+  brighter than the surface it sat on — enough to read as a pillar or a window
+  reveal that is not in the scene. The sun's shadow bias was denominated in a
+  cascade's clip depth, so its world meaning was that number times the cascade's
+  whole depth range, `2 · radius` plus `crcbl_render::shadow`'s 40 m caster
+  reach: 0.83 m of slack against walls 0.15 m thick, and it grew with any scene
+  that needed more caster reach.
+
+  It is now denominated in **texels of the cascade the fragment landed in** and
+  applied to the world position before projecting — the same shape and the same
+  unit `mesh.slang`'s punctual lights already used. The same three artefacts
+  measure 0.375 m, 0.368 m and a lift of 5.7 luma instead of 112. A near cascade
+  is now biased proportionally less than a far one, where the old denomination
+  had that backwards.
+
+  Two goldens moved with it: `apps/lumen/tests/golden/room.png` and
+  `crates/crcbl/tests/golden/dunes.png`. Nothing new self-shadows —
+  `docs/plan/18-render-features.md` carries the measurements either side, and
+  what stops the strip shrinking further.
+
 - **`crcbl-vk` freed a destroyed resource while a command buffer that was
   recorded and not yet submitted still referenced it — a use-after-free the
   driver reads through.** The seam permits record → destroy → submit, and the

@@ -146,6 +146,67 @@ wasted.
   moving anything: the visible set is already per-light, and narrowing it is a
   change to one dispatch rather than a change to how many there are.
 
+### A fifth, taken 2026-08-14: the sun's bias is denominated in texels
+
+The sun's shadow comparison used to be biased in **shadow-clip depth**, on the
+argument that an orthographic projection distributes depth linearly so one
+number means one world distance everywhere in the map. True, and exactly the
+defect: the distance it meant was that number times the cascade's whole depth
+range, which is `2 · radius + CASTER_REACH`. On the outer cascade that is 88 m,
+of which 40 is caster reach — so a bias of 0.0094 in clip was **0.83 m of world
+slack** against walls 0.15 m thick, and it grew whenever a scene needed casters
+to stand further off the near plane.
+
+`sun_visibility` now does what `punctual_visibility` already did: it offsets the
+world position towards the light before projecting, by a multiple of the world
+footprint of one texel of the cascade the fragment landed in
+(`2 · radius / TILE`). The two light types are biased in one unit, and the
+number scales with the map's resolution instead of with a caster budget. It also
+means a **near** cascade is biased proportionally less than a far one; the old
+denomination had that backwards, giving cascade 0 the larger world slack of the
+two because its depth range is a larger multiple of its texel.
+
+Measured on radv (and confirmed on llvmpipe) through `apps/lumen`'s 1280×960
+review frames, which is the tree's grazing-sun fixture — `N·L` of 0.30 on the
+floor, a slope of 3.17, and a 0.15 m shell for the slack to show past:
+
+| Artefact                              | Before  | After   |
+| ------------------------------------- | ------- | ------- |
+| Lit strip at the `-x` wall's foot     | 0.601 m | 0.375 m |
+| Lit band down the back wall's left    | 0.579 m | 0.368 m |
+| Sawtooth band at the back wall's head | 0.113 m | 0.051 m |
+
+The sawtooth also fell from 112 luma above the correctly shadowed wall to 5.7,
+which is the part of it a reviewer sees: a bright cornice became a dotted line.
+
+**What stopped it going further is the dunes patch, and that is worth writing
+down.** With the constant term at half a texel the strip measures 0.140 m — a
+quarter of what it was — but `crcbl_render::scene::demo`'s dunes patch then
+self-shadows in a cross-hatch on its own triangulation. That patch is an
+analytic height field sampled onto one-metre quads and shaded with the field's
+_exact_ normal, so `tan(acos(N·L))` describes a surface the triangle underneath
+does not have, and the slope term is too small by however much the two disagree.
+Covering it takes about five texels of constant bias that no slope can predict,
+and every scene pays for it. The measured trade, all at a slope coefficient of
+2:
+
+| Constant, in texels | lumen's strip | dunes' valley floor |
+| ------------------- | ------------- | ------------------- |
+| 0.5                 | 0.140 m       | heavy cross-hatch   |
+| 1                   | 0.160 m       | cross-hatch         |
+| 2                   | 0.203 m       | cross-hatch         |
+| 3                   | 0.244 m       | faint cross-hatch   |
+| 4                   | 0.289 m       | a trace             |
+| 5                   | 0.330 m       | clean               |
+| 6 (shipped)         | 0.375 m       | clean               |
+
+Five is where the trace stops being visible in the dunes frame; six is that with
+margin, and the margin costs four and a half centimetres of lumen's strip.
+
+The next move on this path is a bias driven from the **geometric** normal, or a
+normal-offset bias — either would let the constant fall back towards a half
+texel and take the strip with it. Neither is built.
+
 ## The BRDF the "one material model" rule names (decided 2026-08-13)
 
 The rule at the top of this file — "one material model, one BRDF, one set of

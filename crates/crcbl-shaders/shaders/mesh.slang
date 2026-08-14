@@ -198,9 +198,9 @@ static const uint SHADOW_ATLAS_ROWS = 2;
 
 /// The side of one tile in texels, matching `crcbl_shaders::mesh::SHADOW_TILE`.
 ///
-/// Read here because a spot's bias is denominated in *tile texels* — see
-/// `SPOT_DEPTH_BIAS_TEXELS` — and the world footprint of one texel is what that
-/// converts through.
+/// Read here because every shadow bias in this file is denominated in *tile
+/// texels* — see `PUNCTUAL_DEPTH_BIAS_TEXELS` — and the world footprint of one
+/// texel is what that converts through, for a cascade as much as for a cone.
 static const float SHADOW_TILE = 1024.0;
 
 /// Which atlas tile light tile `tile` of the light region was rendered into.
@@ -270,9 +270,9 @@ struct FrameUniforms
     /// happen, but would be silent if it did — selects the widest cascade rather
     /// than a zero that shadows everything.
     float4 cascade_far;
-    /// `x`: one shadow-atlas texel in `u`. `y`: one texel in `v`. `z`: the
-    /// constant depth bias the **cascades** compare with. `w`: the slope-scaled
-    /// coefficient the bias adds on top of it, per unit of `tan(acos(N·L))`.
+    /// `x`: one shadow-atlas texel in `u`. `y`: one texel in `v`. `z`: how many
+    /// **cascade texels** the sun's shadow comparison is moved towards the
+    /// light. `w`: how many more of them it moves per unit of `tan(acos(N·L))`.
     ///
     /// Both texel sizes are carried even where the grid is square and they are
     /// equal: the kernel below steps in tile space and scales back by the grid's
@@ -280,9 +280,13 @@ struct FrameUniforms
     /// six tiles arrive. Deriving one from the other is how the PCF kernel ends
     /// up sampling a rectangle.
     ///
-    /// The two biases are the sun's alone — a spot's map is a perspective
-    /// projection whose depth precision is distributed nothing like a cascade's,
-    /// and `spot_visibility` biases in world units before projecting instead.
+    /// **`z` and `w` are counts of texels, not depths.** `sun_visibility` is
+    /// what converts them, through the world footprint of one texel of whichever
+    /// cascade the fragment landed in — the same denomination
+    /// `PUNCTUAL_DEPTH_BIAS_TEXELS` carries for a cone and a cube face, so the
+    /// sun and the punctual lights are biased in one unit rather than two. They
+    /// are the sun's numbers all the same: a cascade's footprint is a different
+    /// arithmetic from a frustum's, and only the cascades read these.
     float4 shadow_params;
     /// The froxel grid's extent: `x` froxels across the screen, `y` down it, `z`
     /// depth slices, `w` how many pixels wide and tall one tile is.
@@ -865,13 +869,20 @@ float3 ggx_lobe(float alpha2, float3 f0, float n_dot_l, float n_dot_v, float n_d
     return d * visibility * fresnel;
 }
 
-/// Ceiling on the slope-scaled part of the depth bias, in shadow-clip depth.
+/// Ceiling on the slope factor every shadow bias in this file is scaled by.
 ///
 /// `tan(acos(N·L))` runs to infinity as a surface turns edge-on to the light,
 /// and an unbounded bias there is peter-panning — the contact point of a shadow
 /// slides away from its caster. Bounded rather than removed because the same
 /// term is what keeps a *steeply* lit surface free of acne; the clamp is the
 /// standard pairing.
+///
+/// **A bound on the tangent, and on nothing else** — it is not denominated in
+/// depth, in texels or in world units, which is why one number serves
+/// `sun_visibility` and `punctual_visibility` even though what each multiplies
+/// it by is different. Five is a surface about 79° from the light: past that the
+/// diffuse term this multiplies is under a fifth of its peak, so a shadow that
+/// detaches there costs less picture than the acne the unclamped term prevents.
 static const float SHADOW_SLOPE_BIAS_CLAMP = 5.0;
 
 /// 3×3 PCF over tile `tile`, at `tile_uv` in that tile's own `0..1` space.
@@ -907,12 +918,12 @@ float tile_pcf(uint tile, float2 tile_uv, float reference)
 /// The fraction of the sun this fragment can see: `1.0` fully lit, `0.0` fully
 /// shadowed, and the values between are the PCF filter.
 ///
-/// `n_dot_l` is the *unclamped* Lambert term. A surface facing away from the
-/// light is already black from the diffuse term, and asking the shadow map about
-/// it is both wasted work and the place self-shadowing acne is worst, so it
-/// returns early — the caller multiplies the result into a diffuse term that is
-/// zero there anyway.
-float sun_visibility(float3 world_position, float n_dot_l)
+/// `to_light` is the unit vector towards the sun and `n_dot_l` the *unclamped*
+/// Lambert term. A surface facing away from the light is already black from the
+/// diffuse term, and asking the shadow map about it is both wasted work and the
+/// place self-shadowing acne is worst, so it returns early — the caller
+/// multiplies the result into a diffuse term that is zero there anyway.
+float sun_visibility(float3 world_position, float3 to_light, float n_dot_l)
 {
     if (n_dot_l <= 0.0)
     {
@@ -935,7 +946,35 @@ float sun_visibility(float3 world_position, float n_dot_l)
         }
     }
 
-    float4 clip = mul(frame.shadow_view_proj[cascade], float4(world_position, 1.0));
+    // The bias, and it is `punctual_visibility`'s exactly: the world position is
+    // moved towards the light before projecting, by a multiple of the world
+    // footprint of one texel of *this cascade's* map. A cascade is an
+    // orthographic box of `2 * radius` fitted to `SHADOW_TILE` texels, and its
+    // radius is the split distance the selection above read — the same
+    // arithmetic `crcbl_render::shadow::cascade_matrix` snaps its origin to.
+    //
+    // **A number in texels rather than in shadow-clip depth**, which is the
+    // whole of this: acne is the map quantising a receiver's own depth away
+    // across one texel, so the error to cover scales with the texel's footprint
+    // and with the surface's slope. A constant added in clip instead scales with
+    // the cascade's whole depth range — `2 * radius` plus `CASTER_REACH`, tens
+    // of metres of it belonging to casters standing off the near plane — so the
+    // same number meant 0.83 m of world slack on the outer cascade and lit a
+    // strip along the foot of every wall.
+    //
+    // What the two counts are and why they are what they are lives on the host,
+    // in `crcbl_render::shadow`: the slope term is this kernel's reach, and the
+    // constant covers surfaces whose shading normal does not describe the
+    // triangle it is interpolated across, which no slope read off `N` can.
+    float cosine = saturate(n_dot_l);
+    float slope = sqrt(saturate(1.0 - cosine * cosine)) / max(cosine, 1e-4);
+    float texel_world = 2.0 * frame.cascade_far[cascade] / SHADOW_TILE;
+    float offset = texel_world
+                 * (frame.shadow_params.z
+                    + frame.shadow_params.w * min(slope, SHADOW_SLOPE_BIAS_CLAMP));
+
+    float4 clip = mul(frame.shadow_view_proj[cascade],
+                      float4(world_position + to_light * offset, 1.0));
     // Orthographic, so `w` is 1 and the divide is a formality — written out
     // anyway because nothing in this file may assume which constructor built a
     // matrix, which is `Projection`'s whole point on the CPU side.
@@ -952,18 +991,14 @@ float sun_visibility(float3 world_position, float n_dot_l)
     // projections push into the viewport rather than into the matrix.
     float2 tile_uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 
-    // Slope-scaled bias: `tan(acos(x)) == sqrt(1 - x²) / x`, computed that way
-    // rather than through two transcendentals.
-    float cosine = saturate(n_dot_l);
-    float slope = sqrt(saturate(1.0 - cosine * cosine)) / max(cosine, 1e-4);
-    float bias = frame.shadow_params.z
-               + frame.shadow_params.w * min(slope, SHADOW_SLOPE_BIAS_CLAMP);
-    // **Added, not subtracted.** Reversed-Z: a larger depth is nearer the
-    // light, so moving the receiver's reference *up* is moving it towards the
-    // light, which is the direction that stops a surface shadowing itself.
-    float reference = ndc.z + bias;
-
-    return tile_pcf(cascade, tile_uv, reference);
+    // The offset is already in `ndc.z`, and it moved the reference *up* —
+    // reversed-Z, so a larger depth is nearer the light, which is the direction
+    // that stops a surface shadowing itself. Moving the world position along
+    // `to_light` cannot move `tile_uv`: the projection's own depth axis is that
+    // direction, so the sample stays in the texel it belonged to and only the
+    // depth compared there changes. That is what makes this the same thing a
+    // clip-space bias did, denominated in something that means a distance.
+    return tile_pcf(cascade, tile_uv, ndc.z);
 }
 
 /// How far a punctual light's shadow comparison is moved towards the light, in
@@ -971,20 +1006,29 @@ float sun_visibility(float3 world_position, float n_dot_l)
 ///
 /// # Why texels rather than depth
 ///
-/// The cascades bias in shadow-clip depth because an orthographic projection
-/// distributes depth linearly, so one number means the same world distance
-/// everywhere in the map. A perspective projection does not: under reversed-Z
-/// its depth resolution piles up at the near plane, and a constant that stops
-/// acne on a receiver near the light is a shadow detached from its caster on one
-/// far from it. The two are not the same knob spelled differently.
+/// Acne is the shadow map quantising a receiver's own depth away across one
+/// texel, so the error to cover is a *world distance*: the footprint of one
+/// texel at the receiver, times how fast the surface climbs across it. Nothing
+/// in that depends on how a projection distributes depth, and a bias denominated
+/// in clip depth picks up the projection's range as a factor it has no business
+/// carrying — which for the cascades meant tens of metres of `CASTER_REACH`
+/// setting the size of a light leak. `sun_visibility` carries the same
+/// denomination for the same reason, so the sun and the punctual lights are
+/// biased in one unit.
+///
+/// A perspective map has a second reason on top of that one: under reversed-Z
+/// its depth resolution piles up at the near plane, so a clip-depth constant
+/// that stops acne on a receiver near the light is a shadow detached from its
+/// caster on one far from it — not the same knob spelled differently, but a
+/// different knob at every depth.
 ///
 /// So the offset is applied to the **world position, before projecting**, which
 /// makes it independent of the projection entirely, and it is denominated in the
-/// thing that actually causes acne: the world footprint of one shadow-map texel
-/// at the receiver, which for a frustum of half-angle `θ` at axial depth `d` is
-/// `2 d tan θ / SHADOW_TILE`. A surface at slope `s` to the light climbs `s`
-/// times that across one texel, which is the depth error the map quantised away,
-/// which is the term below.
+/// footprint of one shadow-map texel at the receiver — which for a frustum of
+/// half-angle `θ` at axial depth `d` is `2 d tan θ / SHADOW_TILE`, and for a
+/// cascade of radius `r` is the constant `2 r / SHADOW_TILE`. A surface at slope
+/// `s` to the light climbs `s` times that across one texel, which is the term
+/// below.
 ///
 /// **That is also why one pair of numbers covers a point light's faces as well
 /// as a spot's cone**, whose fields of view are nothing like each other: a face
@@ -1386,7 +1430,7 @@ FragmentOutput fragmentMain(VertexOutput input)
         // window and its cone, and the shadow is a third factor on it.
         if (light.kind == KIND_DIRECTIONAL)
         {
-            reach = sun_visibility(input.world_position, n_dot_l);
+            reach = sun_visibility(input.world_position, to_light, n_dot_l);
         }
         else if (light.kind == KIND_POINT)
         {

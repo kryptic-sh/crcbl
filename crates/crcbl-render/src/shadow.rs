@@ -200,25 +200,81 @@ const SPLIT_LAMBDA: f32 = 0.7;
 /// A caster between the sun and the cascade's sphere is outside the sphere and
 /// must still darken what is inside it, so the light's box is pulled back this
 /// far and its near plane put at zero. Too small and a tall object stops casting
-/// as the camera approaches its base; too large and the depth range — and with
-/// it the meaning of [`CONSTANT_BIAS`] — stretches for nothing.
+/// as the camera approaches its base; too large and the depth range stretches
+/// for nothing.
+///
+/// **It used to set the size of a light leak, and no longer does.** The sun's
+/// bias was denominated in shadow-clip depth, so its world meaning was this
+/// number plus `2 * radius` — 88 m on the outer cascade, of which 40 was this —
+/// and a bias of 0.0094 in clip was 0.83 m of world slack against walls 0.15 m
+/// thick. [`DEPTH_BIAS_TEXELS`] is what removed the coupling; this is a caster
+/// budget again and nothing else reads it.
 const CASTER_REACH: f32 = 40.0;
 
-/// The constant part of the shadow comparison's depth bias, in shadow-clip
-/// depth.
+/// The constant part of the sun's shadow comparison bias, in **texels of the
+/// cascade the fragment landed in**.
 ///
-/// Reversed-Z, so this is *added* to the receiver's depth: it moves the
-/// reference towards the light, which is the direction that stops a surface
-/// shadowing itself. See `sun_visibility` in `shaders/mesh.slang`.
-const CONSTANT_BIAS: f32 = 0.0015;
+/// # Texels, because a texel is what acne is made of
+///
+/// Acne is the shadow map quantising a receiver's own depth away across one
+/// texel, so what has to be covered is a world distance: the footprint of one
+/// texel, times how fast the surface climbs across it. `sun_visibility` in
+/// `shaders/mesh.slang` converts through `2 * radius / TILE` — the footprint of
+/// one texel of a cascade of that radius — and offsets the world position
+/// towards the light before projecting, exactly as `punctual_visibility` does
+/// for a cone or a cube face. One denomination for both light types.
+///
+/// The number this replaced was denominated in shadow-clip depth, which for an
+/// orthographic projection is linear and therefore looks like a world distance
+/// — the argument the shader used to carry. What it actually scaled with was the
+/// cascade's whole depth range, [`CASTER_REACH`] included, so it grew when a
+/// scene needed more caster reach and shrank when it needed less. The visible
+/// consequence was `apps/lumen`'s room: a lit strip 0.60 m wide along the foot
+/// of a wall, and a band down the left of the back wall three times too bright.
+///
+/// # This is the term the *slope* cannot predict, and one scene sets it
+///
+/// Depth quantisation is not what it covers: a cascade's range is tens of metres
+/// over a `D32Float`, so that error is micrometres and [`SLOPE_BIAS_TEXELS`]
+/// covers the rest of what a texel's footprint explains. What is left over is
+/// surfaces whose **shading normal does not describe their geometry**, where
+/// `tan(acos(N·L))` is a slope the triangle underneath does not have and the
+/// slope term is therefore too small by however much they disagree.
+///
+/// `crcbl_render::scene::demo`'s dunes patch is that surface, and it is what
+/// this number was measured against: an analytic height field sampled onto
+/// one-metre quads and shaded with the field's *exact* normal, so the normal
+/// turns smoothly across a facet that does not. Its valley floors self-shadow in
+/// a cross-hatch on the triangulation at anything under five of these texels,
+/// where the slope term alone offers under two. Six is that with margin, and it
+/// is the number `apps/lumen`'s wall-foot strip pays for: at one texel the strip
+/// is 0.16 m and the dunes hatch, at six it is 0.38 m and no scene speckles.
+///
+/// A bias driven from the **geometric** normal, or a normal-offset one, is what
+/// would let this come back down — `docs/backlog.md` carries that as the next
+/// thing on this path. Until then the constant is a cover for it.
+///
+/// Measured on radv and on llvmpipe, at 1280×960 for `apps/lumen` and 256×192
+/// for the dunes golden.
+const DEPTH_BIAS_TEXELS: f32 = 6.0;
 
-/// The slope-scaled part, per unit of `tan(acos(N·L))`.
+/// The slope-scaled part, per unit of `tan(acos(N·L))`, in the same texels.
 ///
 /// A surface nearly edge-on to the light spans many times its own depth across
 /// one shadow texel, so a constant bias that suits a face pointing at the sun is
-/// nowhere near enough there. The shader clamps how far this can go, because the
-/// unbounded version detaches a shadow from its caster.
-const SLOPE_BIAS: f32 = 0.0025;
+/// nowhere near enough there. The shader clamps how far this can go
+/// (`SHADOW_SLOPE_BIAS_CLAMP`), because the unbounded version detaches a shadow
+/// from its caster.
+///
+/// The 3×3 kernel's taps reach one texel out and each is a hardware-bilinear
+/// comparison over a 2×2 neighbourhood, so the furthest a comparison is made is
+/// a texel and a half from the receiver's own. `apps/lumen`'s floor is the
+/// fixture that pins it: it lies at a slope of 3.17, and with the constant term
+/// held at a half texel its sunlit stretch is exactly as bright as an unshadowed
+/// one from two of these and dims measurably below — a couple of percent at one
+/// and a half, near a tenth at a half. Which is the kernel's reach, arrived at from a
+/// frame rather than from the arithmetic above.
+const SLOPE_BIAS_TEXELS: f32 = 2.0;
 
 /// The cascade matrices a frame shades and culls with.
 ///
@@ -303,7 +359,9 @@ impl Cascades {
     }
 
     /// The `shadow_params` vector the fragment stage reads: the atlas's two
-    /// texel sizes, then the constant and slope-scaled biases.
+    /// texel sizes, then the constant and slope-scaled biases — the biases in
+    /// **cascade texels**, which is the unit this module's `DEPTH_BIAS_TEXELS`
+    /// explains and `sun_visibility` in `shaders/mesh.slang` converts.
     ///
     /// **Both texel sizes, even where the grid is square and they are equal.**
     /// The shader's PCF kernel steps in *tile* space and scales by
@@ -319,7 +377,7 @@ impl Cascades {
             reason = "an atlas extent is a few thousand texels"
         )]
         let inverse = [1.0 / width as f32, 1.0 / height as f32];
-        [inverse[0], inverse[1], CONSTANT_BIAS, SLOPE_BIAS]
+        [inverse[0], inverse[1], DEPTH_BIAS_TEXELS, SLOPE_BIAS_TEXELS]
     }
 }
 
@@ -816,8 +874,7 @@ impl Selection {
 /// All three components, not just the two across the map: the depth range is
 /// derived from `z`, so leaving it unquantised would move the near and far
 /// planes every frame and with them the depth a given caster stores — which is
-/// the same shimmer one axis further in, and it changes what [`CONSTANT_BIAS`]
-/// is worth.
+/// the same shimmer one axis further in.
 fn snap_to_texel(position: Vec3, texel: f32) -> Vec3 {
     if texel <= 0.0 || !texel.is_finite() {
         return position;
