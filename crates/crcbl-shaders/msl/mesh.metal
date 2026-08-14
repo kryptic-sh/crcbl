@@ -1156,20 +1156,20 @@ struct pixelInput_0
 #line 1739
     float3 _S95 = probe_irradiance_0(_S70.world_position_6, normal_2, &kernelContext_8);
 
-#line 1757
+#line 1761
     thread FragmentOutput_0 output_0;
 
 
 
     (&output_0)->lit_0 = float4(diffuse_albedo_0 * ((_S94 + _S95) * float3(occluded_0)  + direct_0) + gloss_0, albedo_0.w);
 
-#line 1766
+#line 1770
     (&output_0)->reflectivity_0 = float4(f0_1, saturate(1.0f - roughness_1 / 0.5f));
     return output_0;
 }
 
 
-#line 1767
+#line 1771
 struct vertexMain_Result_0
 {
     float4 position_3 [[position]];

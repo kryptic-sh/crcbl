@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Draw lumen's room on a named backend, check the five lighting claims, and
+# Draw lumen's room on a named backend, check every lighting claim, and
 # compare the frame against its checked-in golden.
 #
 #   CRCBL_GPU=vk apps/lumen/tests/run-lumen-golden.sh [extra nextest args…]
@@ -120,4 +120,4 @@ if [ -z "$ADAPTER" ]; then
 fi
 echo "lumen golden: ${ADAPTER#*lumen golden: }"
 
-echo "lumen golden: the room drew, made its five claims and matched on $CRCBL_GPU"
+echo "lumen golden: the room drew, made its lighting claims and matched on $CRCBL_GPU"

@@ -669,10 +669,13 @@ pub struct GpuMaterial {
     /// lobe at all.
     ///
     /// **A metal has no ambient term either**, because ambient scales that same
-    /// diffuse albedo. Until screen-space reflections or irradiance probes give
-    /// it something to reflect, a fully metallic surface out of every light's
-    /// reach is black. That is the model being right rather than the shader
-    /// being wrong — see `docs/plan/18-render-features.md`.
+    /// diffuse albedo. What it gets instead is a reflection: `ssr.slang` marches
+    /// for one, and a march that finds nothing returns the irradiance probes as
+    /// its environment, so a fully metallic surface out of every light's reach
+    /// is the environment rather than black. It is black only under a zeroed
+    /// probe volume with nothing on screen to reflect. That is the model being
+    /// right rather than the shader being wrong — see
+    /// `docs/plan/18-render-features.md`.
     pub metallic: f32,
     /// How rough the surface is: `0.0` a mirror, `1.0` fully diffuse.
     ///

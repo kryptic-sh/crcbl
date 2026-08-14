@@ -7471,6 +7471,20 @@ source edited without regenerating; it cannot catch a manifest regenerated
 against a source that was then not committed, which is what the recompile step
 exists for and which only that job always runs.
 
+**Editing a comment in a `.slang` rewrites `msl/` and nothing else** —
+surprising but not a bug, and worth knowing before it is diagnosed a second
+time. Slang's MSL backend emits `#line` directives pointing back into the
+`.slang`, so adding or removing a comment line shifts them and changes the
+`.metal` bytes and its `msl-sha256`. Measured on the comment above
+`mesh.slang`'s `float3 lit = …`, which grew by four lines: the entire
+`msl/mesh.metal` diff was three `#line` directives moving by exactly four, and
+`spirv-sha256`, `wgsl-sha256` and both `dxil` hashes were unchanged. So the
+other three backends are comment-invariant and MSL is not. Two consequences: a
+comment-only shader edit still has to be regenerated like any other (the
+manifest hashes the **source**), and the `msl/` churn in that diff is noise
+rather than codegen — a reviewer should read the `#line` numbers and stop, not
+go looking for what moved.
+
 ## `apps/lumen` is at milestone 1a: what it owes next (2026-08-14)
 
 The entry this replaces said lumen could not be built because the engine had no
@@ -7481,9 +7495,6 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
 
 ### Owed, in the order a slice would take them
 
-- **Irradiance probes.** Topic 18's last `Rasterised` row, and the only thing
-  that will make lumen's mirror panel and metal block anything other than black
-  above the band screen-space reflections reach.
 - **Ray tracing** — acceleration structures, `LightingPath::RayTraced`, and the
   side-by-side and A/B-flip modes the charter's milestones 2 and 3 want. The
   selector already exists and every device in the tree resolves to `Rasterised`
@@ -7553,6 +7564,23 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
   returned, leaving both behind. Fixed in the same change as `open_forward`,
   because the new entry point made the refusal path reachable from an
   application.
+- **Coverage gap: nothing in the tree asserts a debug row's _text_.**
+  `apps/lumen/src/app.rs`'s `f3_shows_the_path_report_and_the_unbuilt_notice`
+  checks that the section titles exist and that the row _labels_ — `geometry`,
+  `lighting`, `metal`, `mode` — reached the draw list. The value each row
+  carries is asserted nowhere: `apps/lumen/src/gpu.rs`'s `row_str("metal", …)`
+  changed from calling the metals black to calling them reflection-lit and no
+  test went red. Verified by grepping the whole tree for both strings; only the
+  `gpu.rs` call site has either. **A test that closed it** would read the row's
+  value back off the panel — the section's rows rather than `ui_text`'s labels —
+  and assert the `metal` row names a reflection, so a row that goes stale
+  against the shader fails instead of drifting. **Not written, because it is a
+  judgement rather than a correction:** pinning the panel's prose in a test
+  makes every wording pass a test edit too, which is friction on exactly the
+  copy that should stay current; against that, the panel is lumen's user-visible
+  claim about what the renderer did, and it has now been wrong once. Whether the
+  assertion should be on the exact string or on a keyword the wording must
+  contain is the same call.
 
 ## The AO tuning constants, measured against a real frame (2026-08-13)
 

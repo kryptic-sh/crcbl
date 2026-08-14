@@ -1741,12 +1741,16 @@ FragmentOutput fragmentMain(VertexOutput input)
     // **The ambient scales the diffuse albedo, so a metal has no ambient
     // term** — and that is the model rather than an omission. A conductor
     // reflects its surroundings instead of scattering them, so what it owes the
-    // room is a *reflection*, which screen-space reflections are what will
-    // supply: the probe grid above is the diffuse half of the same design and
-    // the specular half is what an `ssr.slang` miss will return. Until then a
-    // fully metallic surface with no light on it is black. Nothing regresses
-    // today, because `GpuMaterial::UNTINTED`'s metallic is zero and no scene
-    // sets one higher.
+    // room is a *reflection*, and `ssr.slang` is what supplies it: the probe
+    // grid above is the diffuse half of one design, an `ssr.slang` miss returns
+    // those same probes as the specular half, and `ssr_blur.slang` is what adds
+    // the result on top of this pass's output. So a fully metallic surface out
+    // of every light's reach is the environment rather than black, and black
+    // only under a zeroed probe volume with nothing on screen for it to
+    // reflect. `apps/lumen/src/room.rs`'s `MIRROR` and `ROUGH_METAL` rows are
+    // conductors, and `apps/lumen/tests/golden.rs`'s
+    // `zero_probes_only_remove_the_ssr_and_rough_fallbacks` is what measures
+    // those two shares apart on them.
     //
     // **Occlusion scales the probes too**, and that is the same statement as
     // above rather than a new one: how much of the surrounding room a surface
