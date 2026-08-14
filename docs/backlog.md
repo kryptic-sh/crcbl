@@ -7775,16 +7775,9 @@ for the same reason occlusion did not.
 
 ### The slices
 
-1. **The probe table, additive and zero.** `crcbl_shaders::probe` with
-   `GpuProbe`, `ProbeVolume`, the encoders and a Rust mirror of the SH
-   evaluation tested against the literature's values; `SceneDesc.probes`;
-   `Capacities.probes` and its row in `check_scene`; a `ProbeTable` on
-   `MaterialTable`'s shape; the mesh binding; `probe_irradiance` added to
-   `frame.ambient.rgb`. **Observable:** every existing golden byte-identical.
-   **Owed:** no scene supplies a probe.
-2. **`Scene::Probes` and its golden.** The open box with the ambient at zero and
-   the sun down, two probes with opposite-coloured L1, and a ratio between two
-   blocks. **Owed:** lumen has none; the metal is still black.
+1. ~~The probe table, additive and zero.~~ **Shipped** as `ce253ad`.
+2. **`Scene::Probes` and its golden — written, reverted, and owed again.** See
+   "the probes fixture is a full-frame gradient" below before rebuilding it.
 3. **lumen's room gets a volume.** A `probes()` beside `room()` computed from
    the room's own constants. **Observable:** the coloured wall finally tints the
    plaster beside it, which retires `lib.rs`'s standing "the coloured wall does
@@ -7846,6 +7839,79 @@ because a room needs light that differs between the window and the far corner.
 
 The design was produced without running anything: every number in it is a
 constant read out of a source file. No frame, no benchmark, no test.
+
+## The probes fixture is a full-frame gradient, and WARP will not have it (2026-08-14)
+
+`a5f0e29` added `Scene::Probes` and `a88d671` reverted it. **The probe maths was
+not what broke** — on the WARP run that failed, the shader and
+`crcbl_shaders::probe`'s Rust mirror agreed to 0.07 levels and the two geometry
+paths were bit-identical, so the evaluation is right on that device. What failed
+was the golden: max channel delta 8, **1212 pixels (2.47%) over tolerance
+against `Tolerance::RASTERISER`'s 1% budget**.
+
+### Why, and it is a lesson about fixtures rather than about probes
+
+The fixture was designed so that **every pixel is the probe term and nothing
+else** — ambient exactly zero, the sun parallel to the floor so Lambert and the
+specular lobe vanish, the measured bands twice the occlusion radius from any
+wall. That makes the anti-vacuity argument airtight and it is why the shader
+could be compared against the mirror absolutely rather than only as a ratio.
+
+It also makes the whole frame one smooth gradient, which removes the margin an
+8-bit golden lives on. Every other scene's cross-driver drift is confined to
+edges, so a handful of pixels exceed tolerance and the _ratio_ stays tiny —
+`point_shadow` on the very same WARP run has max channel delta **34** and
+passes, because only 0.057% of its pixels are affected. A gradient spanning the
+frame has no such confinement.
+
+**The two properties are in tension and that was not seen when the design was
+written.** "Every pixel is the effect" and "an 8-bit golden survives four
+rasterisers" pull against each other, and this is the first fixture in the tree
+where the effect covers the whole frame rather than a shape inside it.
+
+### Rebuilding it: two options, and the numbers needed to choose
+
+- **A scene-scoped budget**, the way `path_lsb_channels` in
+  `crates/crcbl/tests/render_e2e.rs` already scopes an allowance to
+  `Scene::Dunes`. Honest if the argument is written down — the 1% ratio was
+  derived for localised edges, not for content that is gradient everywhere.
+  Dishonest if it is picked to be whatever makes WARP pass, which is the trap.
+- **A fixture that is not gradient-dominated**: keep the probe term as the only
+  term but give the frame flat regions — facing quads at distinct normals rather
+  than one floor across the interpolation. The ratio assertion survives; the
+  golden regains its margin.
+
+**Neither can be chosen from this machine.** The failure only appears on dx12
+under WARP, which needs Windows, so any fix validated locally is a guess pushed
+to CI. Get the WARP numbers for a candidate fixture before blessing anything —
+the previous attempt passed radv, lavapipe, both geometry paths and a four-way
+negative control, and still broke `main`.
+
+### Not at issue
+
+`ce253ad` (slice 1) was never implicated and stays. The design's determinism
+argument — that probe evaluation has no comparison between fetched values to
+diverge on — was _supported_ by this run, not contradicted: radv against
+lavapipe is max delta 2, and WARP agrees with the host mirror to 0.07 levels.
+The 8-bit golden is the fragile part, not the arithmetic.
+
+## The Pages browser gate fails on the runner's GPU stack, not on the code
+
+`ce253ad`'s Pages run failed in `build the demo site` at "Render breakout in a
+real browser", with the runner's GPU process dying during initialisation:
+`VerifyExtensionsPresent: Extension not supported: VK_KHR_surface`, then
+`eglInitialize Vulkan failed with error EGL_NOT_INITIALIZED`, then
+`Exiting GPU process due to errors during initialization`. The next commit's
+Pages run passed with no change to anything the gate touches, and `breakout` was
+not modified in that commit or any near it.
+
+So it is the ANGLE/Vulkan stack on the ubuntu runner image, not the demo.
+Recorded because a red Pages run on a commit that did not touch wasm is going to
+look like a real break to whoever sees it next, and because a gate that fails
+this way occasionally is a gate people learn to re-run rather than read. **Not
+fixed, and not obviously ours to fix** — if it recurs, the question to answer is
+whether the gate should demand a software GL/Vulkan fallback explicitly rather
+than taking whatever the image offers.
 
 ## The lumen web demo is deferred, and what naming a new demo costs
 
