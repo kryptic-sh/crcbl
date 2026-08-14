@@ -187,8 +187,10 @@ analytic height field sampled onto one-metre quads and shaded with the field's
 _exact_ normal, so `tan(acos(N·L))` describes a surface the triangle underneath
 does not have, and the slope term is too small by however much the two disagree.
 Covering it takes about five texels of constant bias that no slope can predict,
-and every scene pays for it. The measured trade, all at a slope coefficient of
-2:
+and every scene pays for it. **The trade this table records is superseded by the
+sixth decision below**, which removed the cross-hatch it is a schedule of; it is
+kept because the sixth's own table is read against it. All at a slope
+coefficient of 2:
 
 | Constant, in texels | lumen's strip | dunes' valley floor |
 | ------------------- | ------------- | ------------------- |
@@ -198,14 +200,97 @@ and every scene pays for it. The measured trade, all at a slope coefficient of
 | 3                   | 0.244 m       | faint cross-hatch   |
 | 4                   | 0.289 m       | a trace             |
 | 5                   | 0.330 m       | clean               |
-| 6 (shipped)         | 0.375 m       | clean               |
+| 6 (shipped then)    | 0.375 m       | clean               |
 
 Five is where the trace stops being visible in the dunes frame; six is that with
 margin, and the margin costs four and a half centimetres of lumen's strip.
 
 The next move on this path is a bias driven from the **geometric** normal, or a
-normal-offset bias — either would let the constant fall back towards a half
-texel and take the strip with it. Neither is built.
+normal-offset bias — either would let the constant fall back and take the strip
+with it.
+
+### A sixth, taken 2026-08-14: the slope is read off the facet, not the shading normal
+
+That next move, built. `mesh.slang`'s `geometric_normal_of` takes the normal of
+the triangle the rasteriser actually drew —
+`cross(ddx(world_position), ddy(world_position))`, whose two derivatives span
+the facet's tangent plane — and `shadow_slope` reads `tan(acos(Ng·L))` off it
+for both `sun_visibility` and `punctual_visibility`. The facet is computed in
+`fragmentMain` and passed in rather than taken inside those functions, because
+`ddx`/`ddy` exist only in a fragment stage and a function that silently depends
+on where it is called from is worse than a parameter.
+
+**The sign is aligned to the shading normal rather than hard-coded, and that is
+load-bearing.** Which way the bare cross product points depends on the target's
+screen-space Y direction and on the primitive's winding, and this file compiles
+to four targets. Measured through the SPIR-V artifact on radv by writing
+`0.5 + 0.5 * dot(normalize(cross(ddx, ddy)), N)` to the lit target: a scene of
+flat slabs read exactly 0 everywhere, so the bare cross product is
+**anti-parallel** to the authored normal there, and negating it read exactly 1.
+A hard-coded `cross(ddx, ddy)` would have been the negation of a bias on that
+target. The other three were not measured.
+
+**Both light types read the same normal.** Acne is a property of the triangle
+rasterised into a map, and a punctual map rasterises the same triangles the
+sun's does, so a light type reading a different normal for the same surface
+would need bias constants of its own for no reason anyone could state.
+`PUNCTUAL_DEPTH_BIAS_TEXELS` and `PUNCTUAL_SLOPE_BIAS_TEXELS` are unchanged and
+no punctual golden moved: `Scene::SpotShadow` and `Scene::PointShadow` receive
+on a flat floor, where the facet and the shading normal are the same vector.
+
+What it removed from the dunes is the **broad cross-hatch** over the valley
+floors. What is left at a low constant is a different artefact — a dotted
+hairline along a facet _seam_, where two triangles of different slope are biased
+by different amounts and the texel their shared edge falls in stores the steeper
+one's depth. No slope read off either facet predicts the other's, so a constant
+is still what covers it; it is simply a much smaller one. The re-measured trade,
+slope coefficient still 2, on radv:
+
+| Constant, in texels | lumen's strip | dunes, shading normal | dunes, facet normal |
+| ------------------- | ------------- | --------------------- | ------------------- |
+| 0                   | 0.128 m       | heavy cross-hatch     | seam on most edges  |
+| 0.5                 | 0.149 m       | —                     | seam on many edges  |
+| 1                   | 0.170 m       | —                     | seam on some edges  |
+| 2                   | 0.213 m       | faint cross-hatch     | a few isolated dots |
+| 3 (shipped)         | 0.256 m       | —                     | clean               |
+| 6 (shipped before)  | 0.382 m       | clean                 | clean               |
+
+Graded from the 1280×960 frame and from the golden's own 256×192, which is where
+the aliasing is worst. The lumen column does not depend on which normal is read:
+that room is built of flat slabs, so its frames at 6.0 are **byte-identical**
+either way, which is also the cleanest evidence that the change does nothing
+except where the two normals disagree.
+
+**Three is shipped with no margin above it**, deliberately unlike the six it
+replaces. Six was one over the first clean value because what it covered was an
+unexplained shortfall; three covers a bounded, understood quantity, so margin in
+it is lumen's strip bought back for nothing.
+
+Re-measured through `apps/lumen`'s 1280×960 review frames, on the same fixtures
+as the fifth decision's table:
+
+| Artefact                            | Texels off `N` | Texels off `Ng` |
+| ----------------------------------- | -------------- | --------------- |
+| Lit strip at the `-x` wall's foot   | 0.382 m        | 0.256 m         |
+| Lit band down the back wall's left  | 0.373 m        | 0.244 m         |
+| Cornice lift over the shadowed wall | 61 luma        | 21 luma         |
+
+The two "texels" columns are this session's own re-measurement of the shipped
+tree either side of the change, taken as the half-fall of a luma profile walked
+out from the wall; the fifth decision's 0.375 m and 0.368 m are the same
+artefacts measured by that session and are quoted here unchanged. The cornice
+figure is a **peak** luma over the correctly shadowed wall below it, and it does
+not reproduce the fifth decision's 5.7: on the shipped tree, before this change,
+the band under the ceiling peaks 61 luma over the wall at 2.96 m and 0.08 m
+tall, which is nearer that decision's _before_ figure than its after. Whatever
+statistic produced 5.7 is not recorded and was not recovered, so the two rows
+above are a matched pair and the 5.7 is not comparable with either.
+
+Goldens moved: `apps/lumen/tests/golden/room.png` (145 of 49152 pixels, all in
+the three fixtures above plus the metal block's and plinth's contact shadows)
+and `crates/crcbl/tests/golden/dunes.png` (19 pixels, all along shadow
+terminators on the dune flanks). Every other golden in the tree still matches
+within tolerance and was left alone.
 
 ## The BRDF the "one material model" rule names (decided 2026-08-13)
 

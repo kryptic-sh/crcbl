@@ -272,7 +272,8 @@ struct FrameUniforms
     float4 cascade_far;
     /// `x`: one shadow-atlas texel in `u`. `y`: one texel in `v`. `z`: how many
     /// **cascade texels** the sun's shadow comparison is moved towards the
-    /// light. `w`: how many more of them it moves per unit of `tan(acos(N·L))`.
+    /// light. `w`: how many more of them it moves per unit of `tan(acos(Ng·L))`,
+    /// the rasterised facet's slope — see `shadow_slope`.
     ///
     /// Both texel sizes are carried even where the grid is square and they are
     /// equal: the kernel below steps in tile space and scales back by the grid's
@@ -871,11 +872,16 @@ float3 ggx_lobe(float alpha2, float3 f0, float n_dot_l, float n_dot_v, float n_d
 
 /// Ceiling on the slope factor every shadow bias in this file is scaled by.
 ///
-/// `tan(acos(N·L))` runs to infinity as a surface turns edge-on to the light,
+/// `tan(acos(Ng·L))` runs to infinity as a surface turns edge-on to the light,
 /// and an unbounded bias there is peter-panning — the contact point of a shadow
 /// slides away from its caster. Bounded rather than removed because the same
 /// term is what keeps a *steeply* lit surface free of acne; the clamp is the
 /// standard pairing.
+///
+/// It binds more often now that the slope is read off the facet rather than off
+/// the shading normal: a fragment whose triangle faces away from the light while
+/// its interpolated normal still faces it gets the clamp, where before it got a
+/// finite slope. `shadow_slope` argues why that is the answer wanted there.
 ///
 /// **A bound on the tangent, and on nothing else** — it is not denominated in
 /// depth, in texels or in world units, which is why one number serves
@@ -884,6 +890,70 @@ float3 ggx_lobe(float alpha2, float3 f0, float n_dot_l, float n_dot_v, float n_d
 /// diffuse term this multiplies is under a fifth of its peak, so a shadow that
 /// detaches there costs less picture than the acne the unclamped term prevents.
 static const float SHADOW_SLOPE_BIAS_CLAMP = 5.0;
+
+/// The normal of the triangle the rasteriser actually drew, from the
+/// screen-space derivatives of the world position.
+///
+/// The two derivatives of a perspective-correct varying span the facet's tangent
+/// plane, so their cross product is that facet's normal — *exactly*, for the
+/// planar triangle it came from, where `shading_normal` is only what the corners'
+/// own normals interpolate to. That difference is the whole reason this exists:
+/// every shadow bias below is a distance the surface climbs across one shadow
+/// texel, and a shading normal that describes a smooth field rather than the
+/// facet under it makes that distance too small by however much the two disagree.
+///
+/// **A fragment stage only**, which is why the visibility functions take the
+/// result rather than computing it: `ddx`/`ddy` are a quad's finite differences
+/// and have no meaning in any other stage. Both are taken from the same
+/// primitive — a quad belongs to one triangle, helper lanes included — so a
+/// fragment on a silhouette gets its own triangle's facet and not a blend of two.
+///
+/// **The sign comes from `shading_normal`, not from the cross product's own
+/// handedness.** Which way `cross(ddx, ddy)` points depends on the target's
+/// screen-space Y direction and on the primitive's winding, and this file
+/// compiles to four targets; the shading normal already carries the side the
+/// author meant, so aligning to it is correct on all of them by construction
+/// where a hard-coded sign would be correct on some. A facet in the other
+/// hemisphere would turn every bias below into its own negation.
+///
+/// It is not a hypothetical sign, either. Measured through the SPIR-V artifact
+/// on radv by writing `0.5 + 0.5 * dot(normalize(cross(ddx, ddy)), N)` to the
+/// lit target: every fragment of a scene of flat slabs read exactly 0, so the
+/// bare cross product is **anti-parallel** to the authored normal there, and
+/// negating it read exactly 1. The other three targets were not measured.
+float3 geometric_normal_of(float3 world_position, float3 shading_normal)
+{
+    float3 facet = cross(ddx(world_position), ddy(world_position));
+    float extent = length(facet);
+    if (extent < 1e-12)
+    {
+        // Nothing to read: a primitive whose world position does not vary across
+        // the quad has no tangent plane, and the shading normal is the honest
+        // answer rather than a normalised zero.
+        return shading_normal;
+    }
+    facet /= extent;
+    return dot(facet, shading_normal) < 0.0 ? -facet : facet;
+}
+
+/// How far the rasterised surface climbs across one shadow texel, per texel of
+/// footprint: `tan(acos(Ng·L))`, bounded by `SHADOW_SLOPE_BIAS_CLAMP`.
+///
+/// One function for the sun and for the punctual lights, because it is one piece
+/// of knowledge — what a bias in texels has to be multiplied by — and the clamp
+/// belongs with it rather than at each call site.
+///
+/// `geometric_normal` is `geometric_normal_of`'s, and passing the *shading*
+/// normal here is the defect that function exists to remove. A facet turned away
+/// from the light gives a non-positive cosine and therefore the clamp, which is
+/// the conservative answer: such a fragment is at or past the terminator of the
+/// surface that shadows it, and it is where acne is worst.
+float shadow_slope(float3 geometric_normal, float3 to_light)
+{
+    float cosine = saturate(dot(geometric_normal, to_light));
+    float slope = sqrt(saturate(1.0 - cosine * cosine)) / max(cosine, 1e-4);
+    return min(slope, SHADOW_SLOPE_BIAS_CLAMP);
+}
 
 /// 3×3 PCF over tile `tile`, at `tile_uv` in that tile's own `0..1` space.
 ///
@@ -923,7 +993,13 @@ float tile_pcf(uint tile, float2 tile_uv, float reference)
 /// diffuse term, and asking the shadow map about it is both wasted work and the
 /// place self-shadowing acne is worst, so it returns early — the caller
 /// multiplies the result into a diffuse term that is zero there anyway.
-float sun_visibility(float3 world_position, float3 to_light, float n_dot_l)
+///
+/// `geometric_normal` is `geometric_normal_of`'s and drives the slope term
+/// alone. The early return above stays on `n_dot_l`, which is the *shading*
+/// normal's: what it says is "this fragment's diffuse term is already zero", and
+/// that is a fact about the normal the shading used.
+float sun_visibility(float3 world_position, float3 to_light, float n_dot_l,
+                     float3 geometric_normal)
 {
     if (n_dot_l <= 0.0)
     {
@@ -964,14 +1040,14 @@ float sun_visibility(float3 world_position, float3 to_light, float n_dot_l)
     //
     // What the two counts are and why they are what they are lives on the host,
     // in `crcbl_render::shadow`: the slope term is this kernel's reach, and the
-    // constant covers surfaces whose shading normal does not describe the
-    // triangle it is interpolated across, which no slope read off `N` can.
-    float cosine = saturate(n_dot_l);
-    float slope = sqrt(saturate(1.0 - cosine * cosine)) / max(cosine, 1e-4);
+    // constant is what a texel's own quantisation costs on top of it. The slope
+    // is read off the **facet**, so a surface shaded with a normal its triangles
+    // do not have gets the bias its triangles need — which is what let that
+    // constant halve. `crcbl_render::shadow::DEPTH_BIAS_TEXELS` has the numbers.
     float texel_world = 2.0 * frame.cascade_far[cascade] / SHADOW_TILE;
     float offset = texel_world
                  * (frame.shadow_params.z
-                    + frame.shadow_params.w * min(slope, SHADOW_SLOPE_BIAS_CLAMP));
+                    + frame.shadow_params.w * shadow_slope(geometric_normal, to_light));
 
     float4 clip = mul(frame.shadow_view_proj[cascade],
                       float4(world_position + to_light * offset, 1.0));
@@ -1079,14 +1155,21 @@ static const float PUNCTUAL_SLOPE_BIAS_TEXELS = 4.0;
 /// `PUNCTUAL_DEPTH_BIAS_TEXELS`, which is what that footprint is multiplied by.
 /// `to_light` is the unit vector towards the light and `n_dot_l` the unclamped
 /// Lambert term, both already computed by the shading loop.
+///
+/// **`geometric_normal` drives the slope here for the same reason it does in
+/// `sun_visibility`, and the consistency is deliberate.** Acne is a property of
+/// the triangle that was rasterised into the map, and a punctual map rasterises
+/// the same triangles the sun's does — so a light type reading a different normal
+/// for the same surface would need a bias pair of its own for no reason anyone
+/// could state. It moves no fixture the two constants above were set from:
+/// `Scene::SpotShadow` and `Scene::PointShadow` receive on a flat floor, where
+/// the facet and the shading normal are the same vector.
 float punctual_visibility(uint tile, float3 world_position, float3 to_light, float n_dot_l,
-                          float texel_world)
+                          float texel_world, float3 geometric_normal)
 {
-    float cosine = saturate(n_dot_l);
-    float slope = sqrt(saturate(1.0 - cosine * cosine)) / max(cosine, 1e-4);
     float offset = texel_world
                  * (PUNCTUAL_DEPTH_BIAS_TEXELS
-                    + PUNCTUAL_SLOPE_BIAS_TEXELS * min(slope, SHADOW_SLOPE_BIAS_CLAMP));
+                    + PUNCTUAL_SLOPE_BIAS_TEXELS * shadow_slope(geometric_normal, to_light));
 
     float4 clip = mul(frame.light_view_proj[tile], float4(world_position + to_light * offset, 1.0));
     // **`w` first, and this is the difference from the cascades.** An
@@ -1121,7 +1204,7 @@ float punctual_visibility(uint tile, float3 world_position, float3 to_light, flo
 /// `tile` is the light's `shadow_tile` and the caller has already checked it
 /// names a real light tile. The rest is `punctual_visibility`'s.
 float spot_visibility(GpuLight light, uint tile, float3 world_position, float3 to_light,
-                      float n_dot_l)
+                      float n_dot_l, float3 geometric_normal)
 {
     if (n_dot_l <= 0.0)
     {
@@ -1142,7 +1225,7 @@ float spot_visibility(GpuLight light, uint tile, float3 world_position, float3 t
     // too large at the rim.
     float axial = max(dot(world_position - light.position.xyz, normalize(light.direction.xyz)), 0.0);
     return punctual_visibility(tile, world_position, to_light, n_dot_l,
-                               2.0 * tan_outer * axial / SHADOW_TILE);
+                               2.0 * tan_outer * axial / SHADOW_TILE, geometric_normal);
 }
 
 /// Which of a point light's six faces `from_light` — the direction from the
@@ -1179,7 +1262,7 @@ uint point_face(float3 from_light)
 /// light tiles it holds, and the face selected below is added to it. The caller
 /// has already checked that the whole run is inside the light region.
 float point_visibility(GpuLight light, uint base, float3 world_position, float3 to_light,
-                       float n_dot_l)
+                       float n_dot_l, float3 geometric_normal)
 {
     if (n_dot_l <= 0.0)
     {
@@ -1193,7 +1276,7 @@ float point_visibility(GpuLight light, uint base, float3 world_position, float3 
     // than read off the row.
     float axial = max(max(abs(from_light.x), abs(from_light.y)), abs(from_light.z));
     return punctual_visibility(base + point_face(from_light), world_position, to_light, n_dot_l,
-                               2.0 * axial / SHADOW_TILE);
+                               2.0 * axial / SHADOW_TILE, geometric_normal);
 }
 
 /// How bright a punctual light is at `distance`, reaching **exactly zero** at
@@ -1313,6 +1396,10 @@ FragmentOutput fragmentMain(VertexOutput input)
     // fragment. Skipping it makes large triangles darken towards their centres.
     float3 normal = normalize(input.world_normal);
     float3 to_eye = normalize(frame.camera_position.xyz - input.world_position);
+    // The facet under the shading normal, taken once for the fragment and read
+    // by the shadow biases alone — never by the shading, which is the authored
+    // normal's job. `geometric_normal_of` says why it cannot live inside them.
+    float3 geometric_normal = geometric_normal_of(input.world_position, normal);
 
     // The material row, resolved here rather than at the corners. `material` is
     // flat, so every fragment of a primitive reads the row its instance named.
@@ -1430,7 +1517,7 @@ FragmentOutput fragmentMain(VertexOutput input)
         // window and its cone, and the shadow is a third factor on it.
         if (light.kind == KIND_DIRECTIONAL)
         {
-            reach = sun_visibility(input.world_position, to_light, n_dot_l);
+            reach = sun_visibility(input.world_position, to_light, n_dot_l, geometric_normal);
         }
         else if (light.kind == KIND_POINT)
         {
@@ -1447,13 +1534,13 @@ FragmentOutput fragmentMain(VertexOutput input)
             if (light.shadow_tile <= SHADOW_LIGHT_TILES - SHADOW_POINT_FACES)
             {
                 reach *= point_visibility(light, light.shadow_tile, input.world_position, to_light,
-                                          n_dot_l);
+                                          n_dot_l, geometric_normal);
             }
         }
         else if (light.shadow_tile < SHADOW_LIGHT_TILES)
         {
             reach *= spot_visibility(light, light.shadow_tile, input.world_position, to_light,
-                                     n_dot_l);
+                                     n_dot_l, geometric_normal);
         }
         diffuse *= reach;
         specular *= reach;

@@ -236,29 +236,40 @@ const CASTER_REACH: f32 = 40.0;
 ///
 /// Depth quantisation is not what it covers: a cascade's range is tens of metres
 /// over a `D32Float`, so that error is micrometres and [`SLOPE_BIAS_TEXELS`]
-/// covers the rest of what a texel's footprint explains. What is left over is
-/// surfaces whose **shading normal does not describe their geometry**, where
-/// `tan(acos(N·L))` is a slope the triangle underneath does not have and the
-/// slope term is therefore too small by however much they disagree.
+/// covers what a texel's footprint explains on the facet the fragment is on. What
+/// is left over is the **seam between two facets**: adjacent triangles of a
+/// tessellated surface climb at different rates, so each is biased by its own
+/// slope and the texel their shared edge falls in stores the steeper one's depth.
+/// No slope read off either facet predicts the other's, and this is what covers
+/// the difference.
 ///
-/// `crcbl_render::scene::demo`'s dunes patch is that surface, and it is what
-/// this number was measured against: an analytic height field sampled onto
-/// one-metre quads and shaded with the field's *exact* normal, so the normal
-/// turns smoothly across a facet that does not. Its valley floors self-shadow in
-/// a cross-hatch on the triangulation at anything under five of these texels,
-/// where the slope term alone offers under two. Six is that with margin, and it
-/// is the number `apps/lumen`'s wall-foot strip pays for: at one texel the strip
-/// is 0.16 m and the dunes hatch, at six it is 0.38 m and no scene speckles.
+/// `crcbl_render::scene::demo`'s dunes patch is the surface that sets it — an
+/// analytic height field sampled onto one-metre quads, so a facet's neighbours
+/// are as far from it in slope as anything in the tree. At three of these texels
+/// its valley floors show no seam at either extent it is drawn at; at two a
+/// dotted line reappears along one edge run, and below one it is a line on most
+/// of them. Three is where the frame stops showing it and there is **no margin
+/// above it**, which is a deliberate difference from what this number used to be:
+/// what it now covers is a bounded, understood quantity rather than a cover for
+/// an unknown, so buying margin in it is buying `apps/lumen`'s wall-foot strip
+/// back for nothing.
 ///
-/// A bias driven from the **geometric** normal, or a normal-offset one, is what
-/// would let this come back down — `docs/backlog.md` carries that as the next
-/// thing on this path. Until then the constant is a cover for it.
+/// Six was the number before `sun_visibility` read the slope off the geometric
+/// normal — the facet the rasteriser drew — rather than off the interpolated
+/// shading one. `geometric_normal_of` in `shaders/mesh.slang` is that change and
+/// argues it; what it removed was a *broad cross-hatch* over the dunes' whole
+/// valley floor, which was the artefact six texels were paying for. Measured
+/// through `apps/lumen`'s review frames, the strip at the `-x` wall's foot went
+/// 0.382 m → 0.256 and the band down the back wall's left edge 0.373 → 0.244.
 ///
-/// Measured on radv and on llvmpipe, at 1280×960 for `apps/lumen` and 256×192
-/// for the dunes golden.
-const DEPTH_BIAS_TEXELS: f32 = 6.0;
+/// Measured on radv, at 1280×960 for `apps/lumen` and at both 1280×960 and the
+/// golden's 256×192 for the dunes patch.
+const DEPTH_BIAS_TEXELS: f32 = 3.0;
 
-/// The slope-scaled part, per unit of `tan(acos(N·L))`, in the same texels.
+/// The slope-scaled part, per unit of `tan(acos(Ng·L))`, in the same texels.
+///
+/// `Ng` and not `N`: the slope is read off the rasterised facet, which is
+/// `geometric_normal_of` in `shaders/mesh.slang` and its own reason.
 ///
 /// A surface nearly edge-on to the light spans many times its own depth across
 /// one shadow texel, so a constant bias that suits a face pointing at the sun is

@@ -1059,6 +1059,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A third off what is left of that strip, by biasing the shadow against the
+  triangle the rasteriser drew rather than the normal interpolated across it.**
+  `mesh.slang`'s slope term read `tan(acos(N·L))` off the shading normal, so a
+  surface shaded with normals its triangles do not have — an analytic height
+  field on one-metre quads is the extreme case — asked for less bias than its
+  facets needed and self-shadowed in a cross-hatch. The constant term was
+  covering that for every scene in the tree. `geometric_normal_of` takes the
+  facet from the screen-space derivatives of the world position, `shadow_slope`
+  reads the slope off it, and `crcbl_render::shadow::DEPTH_BIAS_TEXELS` comes
+  down from 6.0 to 3.0.
+
+  In `apps/lumen`'s room the strip at a wall's foot goes 0.382 m → 0.256, the
+  band down the back wall's left edge 0.373 → 0.244, and the cornice under the
+  ceiling from 61 luma over the shadowed wall to 21. Both light types read the
+  same normal, so a spot's and a point light's maps are biased against their
+  receivers' facets too; no punctual golden moved, because the scenes that
+  exercise them receive on flat floors. The two goldens that moved are
+  `apps/lumen/tests/golden/room.png` and `crates/crcbl/tests/golden/dunes.png`.
+
 - **The sun lit a strip along the foot of every wall, a band down the side of
   anything standing against one, and a bright cornice under a ceiling.** In
   `apps/lumen`'s room those measured 0.60 m, 0.58 m and a band three times
@@ -1071,10 +1090,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
   It is now denominated in **texels of the cascade the fragment landed in** and
   applied to the world position before projecting — the same shape and the same
-  unit `mesh.slang`'s punctual lights already used. The same three artefacts
-  measure 0.375 m, 0.368 m and a lift of 5.7 luma instead of 112. A near cascade
-  is now biased proportionally less than a far one, where the old denomination
-  had that backwards.
+  unit `mesh.slang`'s punctual lights already used. The first two artefacts
+  measure 0.375 m and 0.368 m; the cornice thins, by an amount the entry above
+  quantifies against a metric that reproduces. A near cascade is now biased
+  proportionally less than a far one, where the old denomination had that
+  backwards.
 
   Two goldens moved with it: `apps/lumen/tests/golden/room.png` and
   `crates/crcbl/tests/golden/dunes.png`. Nothing new self-shadows —

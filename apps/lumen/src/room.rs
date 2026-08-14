@@ -191,9 +191,10 @@ pub const SUNLIT_FLOOR: Vec3 = Vec3::new(2.6, 0.0, -2.6);
 /// not decoration: the sun's shadow peter-pans at the wall's foot and leaves a
 /// lit strip there, so a sample taken inside it is a measurement of the shadow
 /// bias rather than of the ambient. The strip measured 0.60 m before the sun's
-/// bias was denominated in cascade texels and 0.38 m after —
+/// bias was denominated in cascade texels, 0.38 m after, and 0.26 m once the
+/// slope term read the rasterised facet's normal instead of the shading one —
 /// `crcbl_render::shadow::DEPTH_BIAS_TEXELS` carries what is left of it and why
-/// — and this point is 1.2 m clear of the wall either way.
+/// — and this point is 1.2 m clear of the wall at every one of them.
 pub const SHADED_FLOOR: Vec3 = Vec3::new(-1.8, 0.0, -1.0);
 
 /// The rough metal block: minimum corner.
