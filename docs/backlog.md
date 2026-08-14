@@ -7514,17 +7514,13 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
 
 ### Findings the first real room produced
 
-- **The sun's shadow peter-pans at contacts.** A lit strip runs along the foot
-  of every wall the sun's shadow should cover, and a brighter, sawtoothed band
-  runs along the head of the back wall where the ceiling should be shadowing it.
-  Both are the shadow detaching from its caster at the contact, which is a
-  depth-bias and cascade-resolution artefact rather than anything lumen does:
-  the room is slabs with real thickness, and the geometry above the strip is a
-  metre of solid wall. Measured on radv at 1280×960: shadowed floor luma is 49
-  at 0.8 m from the `-x` wall and 138 at 0.25 m from it, which is the _reverse_
-  of the occlusion gradient beside it. **Not fixed** — it is a topic 18
-  shadow-bias question with goldens attached, and lumen is now the frame that
-  shows it.
+- **The sun's shadow peter-pans at contacts.** A lit strip along the foot of
+  every wall the sun should be shadowing, and a sawtoothed band at the head of
+  the back wall where the ceiling should be. **Now diagnosed** — see "lumen's
+  left-side light bleed" below, which supersedes what this bullet used to guess.
+  It is one defect rather than the two this said, its cause is a named constant,
+  and the strip is narrower than the "metre wide" figure that reached
+  `room.rs`'s `AMBIENT_FLOOR` doc comment.
 - **A single-quad wall casts no shadow at all.** Back faces are culled in the
   shadow pass as well as the colour one, so an inward-facing quad is invisible
   to the sun. lumen's first frame was an evenly lit floor with a window that did
@@ -7665,6 +7661,110 @@ point. **Nothing was retuned.**
   backwards. That is the peter-panning recorded in the lumen entry above, not
   AO. Anyone repeating this measurement must take it on a wall whose foot the
   sun does not reach, which is why the numbers above are from the back wall.
+
+## lumen's left-side light bleed: one defect, and `CASTER_REACH` sets its size (2026-08-14)
+
+Raised from a screenshot of `apps/lumen`'s room. Investigated on radv at
+1280×960 through the toggle frames `every_effect_toggles_and_the_frame_says_so`
+writes under `target/lumen/`. **Not fixed.**
+
+### It is one defect, not the several it looks like
+
+Every artefact on the left of that frame disappears under `--no-shadows` and is
+untouched by `--no-ao` and `--no-reflections`. They are all the sun's
+shadow-comparison bias:
+
+- **The pale strip at the foot of the `-x` wall** — the one the entry above
+  already recorded. Floor sun visibility is a full `1.00` from the corner out to
+  0.55 m, falling to shadow past 0.65 m. Luma 140 lit against 48 shadowed.
+  **Measured 0.60 m wide, not the "metre" that entry claimed** — and that figure
+  was copied into `room.rs`'s `AMBIENT_FLOOR` doc comment, so it wants
+  correcting in both places when this is fixed.
+- **The bright band down the left edge of the back wall — new, and not recorded
+  anywhere before.** It reads as a pillar or a window reveal and is neither: it
+  is the leftmost 0.575 m of the back wall lit at visibility `1.00`, luma 175
+  against the 58.9 the rest of that wall correctly gets. A factor of three, on a
+  surface whose only occluder is the `-x` wall's outer face 0.72 m away. This is
+  the part of the report that the existing entry does not cover.
+- **The sawtoothed band at the head of the back wall.** Same bias; the ceiling's
+  _top_ face is the occluder, because its bottom face is back-facing to the sun
+  and culled in the shadow pass.
+- **The sunlit shaft through the window is correct and is not part of this.**
+  Its side boundaries match the analytic ones derived from `room::sun` and the
+  window opening to within a texel. Worth knowing, because the shaft and the
+  wall-foot strip are adjacent and easy to read as one bleed.
+
+### The cause, and the constant nobody would look at
+
+The bias is constant plus slope-scaled, applied in `sun_visibility` in
+`mesh.slang` from `CONSTANT_BIAS` and `SLOPE_BIAS` in `crcbl-render`'s `shadow`
+module. Both are small. The problem is what they are denominated in.
+
+`cascade_matrix` builds an orthographic projection whose depth range is
+`2 · radius + CASTER_REACH`, and the bias is added in that **clip** space. So
+its world meaning scales with the cascade's whole depth range. With `CASCADES`
+of 2, `DISTANCE` 24 and `SPLIT_LAMBDA` 0.7, the outer cascade's range is 88 m,
+of which `CASTER_REACH` alone is 40. The floor's slope term puts the bias at
+0.0094 in clip, and **0.0094 × 88 m is 0.83 m of world slack** — against a shell
+0.15 m thick (`room::SHELL`). Any surface whose occluder is nearer than that
+along the light ray is wrongly lit, which is precisely the set of surfaces
+above.
+
+That arithmetic predicts the strip at 0.5985 m against 0.61 measured, and the
+back wall's lit band ending at x = −2.4238 against −2.425 measured. Two
+independent confirmations, which is why the diagnosis is stated as measured
+rather than suspected.
+
+`SHADOW_SLOPE_BIAS_CLAMP` is not involved — the floor's slope is 3.17 and the
+clamp is 5.0.
+
+### What a fix would change, ranked
+
+1. **`CASTER_REACH` is the highest-leverage number**, and the one nobody looks
+   at when the symptom reads "shadow bias": it is 45% of the outer cascade's
+   range and shrinking it scales the world slack down proportionally. What it
+   costs is casters standing off the near end of the cascade, which is what it
+   is for.
+2. **Denominate the sun's bias the way the punctual path already does.**
+   `mesh.slang`'s `PUNCTUAL_DEPTH_BIAS_TEXELS` and `PUNCTUAL_SLOPE_BIAS_TEXELS`
+   offset the world position before projecting, in texel footprints. The comment
+   beside the cascade path argues it does not need this because orthographic
+   depth is linear — true, and exactly why the number scales with `CASTER_REACH`
+   instead of with resolution.
+3. A normal-offset bias, which nothing in the tree implements.
+4. **Lowering `CONSTANT_BIAS`/`SLOPE_BIAS` is the tempting one and the wrong
+   one** — it trades peter-panning for acne without touching the reason the
+   world slack is metres wide.
+
+### The `-x` wall is not leaking, which had to be checked first
+
+`room.rs`'s floor slab tops out at y = 0.0 and the window wall's lowest slab
+starts there, sharing the edge at x = −3.0 exactly over matching z runs; the
+back wall closes the corner and the ceiling caps the walls. No gap. The backlog
+already records a shell gap once reading as a shadow failure, so this was the
+cheap check that decides everything else — and separately, a literal aperture
+would not make `sun_visibility` return `1.00` across a full 0.6 m.
+
+### Gaps, and one number that does not reconcile
+
+- **The investigation's texel-denominated figures do not survive checking.** It
+  reported the strip as 5.52 cascade-1 texels and the sawtooth period as exactly
+  one. But `TILE` is 1024 and the outer cascade spans 48 m, so a texel is 0.047
+  m — making the strip about 12.8 texels and the sawtooth period about 3.5. The
+  world-space measurements and the bias arithmetic above do not depend on this;
+  the texel counts, and with them the claim that the sawtooth is single-texel
+  quantisation, are **unresolved** and should be re-derived by whoever fixes it.
+- **The shaft over-reaches its sill edge by 0.185 m and the bias cannot explain
+  it** — the sill silhouette is 2.99 m from the receiver, far outside 0.83 m.
+  Suspected sub-kernel occluder (the sill's top face is 0.15 m, narrower than
+  the PCF footprint), not measured.
+- **The metal block's control is contaminated**: the point light is in reach and
+  `--no-shadows` turns its shadow off too, so that surface cannot isolate the
+  sun's contribution.
+- **Cascade 0 is unmeasured** — its stretch of the wall foot falls below the
+  frame. Predicted 0.259 m against the outer cascade's 0.599.
+- One backend, one resolution, one camera. The `--no-shadows` implementation was
+  not read; its effect is inferred from the frames it produced.
 
 ## The lumen web demo is deferred, and what naming a new demo costs
 
