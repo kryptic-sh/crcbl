@@ -76,9 +76,11 @@ pub const SHADOW_POINT_FACES: usize = 6;
 
 /// The side of one shadow-atlas tile, in texels.
 ///
-/// Read by the shader as well as by the host: the bias `mesh.slang` applies to a
-/// spot's comparison is denominated in *tile texels*, so it has to know how many
-/// of them the tile has. See `SPOT_DEPTH_BIAS_TEXELS` there.
+/// Read by the shader as well as by the host: every shadow bias `mesh.slang`
+/// applies — a cascade's as much as a cone's — is denominated in *tile texels*,
+/// so it has to know how many of them the tile has. See
+/// `PUNCTUAL_DEPTH_BIAS_TEXELS` there, and `crcbl_render::shadow`'s
+/// `DEPTH_BIAS_TEXELS` for the sun's.
 pub const SHADOW_TILE: u32 = 1024;
 
 /// Tiles across the shadow atlas.
