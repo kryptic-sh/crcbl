@@ -459,6 +459,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and the centre against `probe::irradiance_at`, asserts the endpoint regions
   remain flat, matches a golden, and renders through both geometry paths.
 
+  SSR misses now evaluate the same probe table as approximate L1 radiance and
+  blend it with screen-space hits by the march's confidence. The pass removes
+  the diffuse clamped-cosine transfer from each stored SH band before specular
+  evaluation; a zero volume preserves the previous hit arithmetic exactly.
+  lumen's golden gate renders authored and zeroed rows separately, proving the
+  off-screen part of its mirror is lit by probe data while its screen-space hit
+  remains.
+
 - **`apps/lumen`'s pause menu switches the effects, mid-run.** Three rows below
   `CAMERA` — `SHADOWS`, `AO` and `REFLECTIONS`, the words `--no-shadows`,
   `--no-ao` and `--no-reflections` already use — each labelled with what the

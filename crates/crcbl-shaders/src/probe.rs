@@ -85,7 +85,10 @@ pub const PROBE_VOLUME_SIZE: usize = 48;
 /// every direction — this module's
 /// `a_constant_environment_integrates_to_pi_times_its_radiance` is that
 /// statement as a test.
-const TRANSFER_L0: f32 = std::f32::consts::PI;
+///
+/// [`GpuProbe::radiance`] divides the stored constant coefficient by this value
+/// before evaluating a specular probe lookup.
+pub const TRANSFER_L0: f32 = std::f32::consts::PI;
 
 /// The same for the linear band — `Â₁`, which is `2π/3`.
 ///
@@ -93,7 +96,10 @@ const TRANSFER_L0: f32 = std::f32::consts::PI;
 /// radiance field `L(ω) = b + c(ω·u)` — which L1 represents *exactly*, so no
 /// truncation error stands between the two — reaches a surface as
 /// `E(n) = πb + (2π/3)c(u·n)`.
-const TRANSFER_L1: f32 = 2.0 * std::f32::consts::PI / 3.0;
+///
+/// [`GpuProbe::radiance`] divides the stored linear coefficients by this value
+/// before evaluating a specular probe lookup.
+pub const TRANSFER_L1: f32 = 2.0 * std::f32::consts::PI / 3.0;
 
 /// What one sample of the environment adds to a probe's constant band.
 ///
@@ -181,6 +187,31 @@ impl GpuProbe {
     pub fn irradiance(&self, normal: [f32; 3]) -> [f32; 3] {
         let channel = |sh: &[f32; 4]| {
             (sh[0] * normal[0] + sh[1] * normal[1] + sh[2] * normal[2] + sh[3]).max(0.0)
+        };
+        [
+            channel(&self.sh_r),
+            channel(&self.sh_g),
+            channel(&self.sh_b),
+        ]
+    }
+
+    /// The approximate L1 radiance this irradiance probe represents in
+    /// `direction`, in linear RGB.
+    ///
+    /// [`Self::accumulate`] stores irradiance coefficients after the clamped
+    /// cosine transfer. Specular reflection needs incident radiance instead, so
+    /// undo that transfer per band before evaluating the same L1 basis: `xyz` is
+    /// divided by [`TRANSFER_L1`] and `w` by [`TRANSFER_L0`]. Like
+    /// [`Self::irradiance`], this clamps L1 ringing rather than allowing a
+    /// reflection to subtract light.
+    #[must_use]
+    pub fn radiance(&self, direction: [f32; 3]) -> [f32; 3] {
+        let channel = |sh: &[f32; 4]| {
+            (sh[0] / TRANSFER_L1 * direction[0]
+                + sh[1] / TRANSFER_L1 * direction[1]
+                + sh[2] / TRANSFER_L1 * direction[2]
+                + sh[3] / TRANSFER_L0)
+                .max(0.0)
         };
         [
             channel(&self.sh_r),
@@ -518,6 +549,64 @@ mod tests {
                 irradiance[0], irradiance[1],
                 "three equal channels must integrate alike"
             );
+        }
+    }
+
+    /// Stored probe coefficients are irradiance, so a specular lookup must undo
+    /// the constant-band transfer instead of directly evaluating its `w` lane.
+    #[test]
+    fn a_constant_irradiance_probe_decodes_to_its_radiance() {
+        let radiance = [0.25f32, 0.5, 2.0];
+        let probe = GpuProbe {
+            sh_r: [0.0, 0.0, 0.0, TRANSFER_L0 * radiance[0]],
+            sh_g: [0.0, 0.0, 0.0, TRANSFER_L0 * radiance[1]],
+            sh_b: [0.0, 0.0, 0.0, TRANSFER_L0 * radiance[2]],
+        };
+
+        for direction in directions() {
+            let decoded = probe.radiance(direction);
+            for channel in 0..3 {
+                assert!(
+                    (decoded[channel] - radiance[channel]).abs() < 1e-6,
+                    "channel {channel} facing {direction:?} decoded {} instead of {}",
+                    decoded[channel],
+                    radiance[channel]
+                );
+            }
+        }
+    }
+
+    /// A specular lookup also has to undo the linear band's different transfer;
+    /// direct evaluation scales the constant and linear terms by `π` and `2π/3`.
+    #[test]
+    fn a_linear_irradiance_probe_decodes_to_its_radiance() {
+        let source = [0.6f32, 0.8, 0.0];
+        let (constant, linear) = (2.0f32, 1.5f32);
+        let band = [
+            TRANSFER_L1 * linear * source[0],
+            TRANSFER_L1 * linear * source[1],
+            TRANSFER_L1 * linear * source[2],
+            TRANSFER_L0 * constant,
+        ];
+        let probe = GpuProbe {
+            sh_r: band,
+            sh_g: band,
+            sh_b: band,
+        };
+
+        for direction in [source, [-source[0], -source[1], -source[2]]] {
+            let expected = constant
+                + linear
+                    * (direction[0] * source[0]
+                        + direction[1] * source[1]
+                        + direction[2] * source[2]);
+            let decoded = probe.radiance(direction);
+            for channel in decoded {
+                assert!(
+                    (channel - expected).abs() < 1e-6,
+                    "facing {direction:?} decoded {channel} instead of {expected}"
+                );
+            }
         }
     }
 

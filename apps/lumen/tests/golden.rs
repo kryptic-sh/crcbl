@@ -39,6 +39,7 @@ use crcbl::hal::{AdapterInfo, BindingModel, Features, Format, GeometryPath};
 use crcbl::math::Vec3;
 use crcbl::render::{Camera, EffectOverride, EffectRequest, ForwardRenderer, RenderEffects};
 use crcbl::screenshot::{ForwardScene, OffscreenSetup};
+use crcbl::shaders::probe::GpuProbe;
 use crcbl_golden::{ChannelOrder, Golden, Image};
 use crcbl_lumen::{Forced, room};
 
@@ -103,41 +104,25 @@ const SHADED: Vec3 = room::SHADED_FLOOR;
 /// rather than black, deliberately, and the tonemap compresses the bright end.
 const SHAFT_RATIO: f32 = 2.0;
 
-/// How much darker the mirror-grade panel is than the plaster behind it.
+/// How much of nearby plaster's brightness the mirror's SSR-miss control point
+/// must retain.
 ///
-/// **What was the sample's central honest claim, and is now half of it.** Both
-/// points face `+Z`, both are out of the lamp's reach and both are out of the
-/// sun's, so the direct term is zero on each and the only thing left is the
-/// ambient — which scales the *diffuse* albedo, and a conductor has none. That
-/// is the model `docs/plan/18-render-features.md` documents, and this is what
-/// says the frame still shows it: a build in which metals had picked up an
-/// ambient term would fail here rather than quietly getting prettier.
+/// This is a non-black fallback control, not a claim that the mirror is brighter
+/// than plaster or that it rejects whole-frame brightening. The fixed Vulkan run
+/// measured a 0.24 ratio, so this leaves margin for rasterisation variation.
+const MIRROR_FRACTION_OF_PLASTER: f32 = 0.20;
+
+/// How much a fully screen-space hit may vary when the probe rows are zeroed.
 ///
-/// The model has since gained the other half — a conductor with no ambient
-/// **reflects** instead — so this number is read at [`MIRROR_AT`], which is above
-/// the band of the panel that reflects anything, and [`MIRROR_GRADIENT`] is the
-/// claim about the band. The number itself has not moved: lowering it to keep it
-/// green would be making the test pass the code.
-const METAL_DARKNESS: f32 = 3.0;
+/// The fixed Vulkan run measured a 5.1% difference at this pixel; 6% leaves
+/// rasterisation margin while rejecting a fallback substituted for the hit.
+const SSR_HIT_TOLERANCE: f32 = 0.06;
 
 /// How much brighter the foot of the mirror panel is than its face further up.
 ///
-/// **The sample's central honest claim now.** The panel looks straight at the
-/// camera, which is close to screen-space reflection's worst case: a ray leaving
-/// it goes back past the eye, so only the lowest part of the face sends one that
-/// reaches the floor while still inside the frame —
-/// `crcbl_lumen::room::MIRROR_FOOT` carries the geometry and
-/// `the_mirror_panel_reflects_at_its_foot_and_not_at_its_head` derives the band
-/// with no GPU. The two blocks are one material row, one face, one normal, one
-/// `F0`, one roughness and no direct light on either; the only thing that differs
-/// is whether the ray finds anything.
-///
-/// Three, and it is the ratio [`METAL_DARKNESS`] used to make about the whole
-/// panel — because the control here is a *conductor with no reflection*, which
-/// this model says is black, and the frame this was set against measures it at
-/// exactly zero against a foot near twenty. A build that reflected everywhere,
-/// or one that reflected nothing, closes that gap from one end or the other.
-const MIRROR_GRADIENT: f32 = 3.0;
+/// The probe fallback fills both regions; the foot still has its screen-space
+/// hit, so this is a modest relation rather than the old black-miss contrast.
+const MIRROR_GRADIENT: f32 = 1.05;
 
 /// The floor a lit block's mean brightness has to clear, out of 255.
 ///
@@ -280,7 +265,8 @@ fn below_features() -> Features {
 /// separates them: every claim below is about a frame, and a frame is the one
 /// thing that does not say which tail drew it.
 fn draw(extent: (u32, u32), effects: RenderEffects) -> (Image, String) {
-    let (image, paths, _) = draw_with(extent, effects, OffscreenSetup::OPTIONAL_FEATURES);
+    let (image, paths, _) =
+        draw_with_probes(extent, effects, OffscreenSetup::OPTIONAL_FEATURES, false);
     (image, paths)
 }
 
@@ -301,6 +287,17 @@ fn draw_with(
     effects: RenderEffects,
     optional_features: Features,
 ) -> (Image, String, AdapterInfo) {
+    draw_with_probes(extent, effects, optional_features, false)
+}
+
+/// [`draw_with`] with every authored probe row replaced by [`GpuProbe::ZERO`]
+/// while retaining the same probe-grid volume and table capacity.
+fn draw_with_probes(
+    extent: (u32, u32),
+    effects: RenderEffects,
+    optional_features: Features,
+    zero_probes: bool,
+) -> (Image, String, AdapterInfo) {
     // A logger before anything opens: without one, every line a backend emits on
     // the way to a device goes nowhere, and a failure inside `open` names the
     // call that noticed rather than the one that caused it.
@@ -314,7 +311,7 @@ fn draw_with(
             Ok(ForwardScene {
                 camera: room::fixed_camera(),
                 sun: room::sun(),
-                renderer: Box::new(build(device, queue, format, effects)?),
+                renderer: Box::new(build(device, queue, format, effects, zero_probes)?),
             })
         },
     )
@@ -392,8 +389,13 @@ fn build(
     queue: crcbl::hal::QueueHandle,
     format: Format,
     effects: RenderEffects,
+    zero_probes: bool,
 ) -> Result<ForwardRenderer, crcbl::screenshot::OffscreenError> {
-    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &room::room())?;
+    let mut scene = room::room();
+    if zero_probes {
+        scene.probes.probes.fill(GpuProbe::ZERO);
+    }
+    let mut renderer = ForwardRenderer::with_scene(device, queue, format, &scene)?;
     // The **programmatic** layer of topic 39's resolution order, which is the
     // one a test has any business driving — see `crcbl::render::effects`.
     renderer.set_effect_request(EffectRequest {
@@ -539,7 +541,7 @@ fn inspect(image: &Image, extent: (u32, u32), block: (u32, u32)) {
         "the shaded floor is at {shaded:.1}/255, so the ambient term reached nothing"
     );
 
-    // ---- 3. a conductor has no ambient, and it shows ------------------------
+    // ---- 3. a conductor reflects the probe environment on an SSR miss --------
     let mirror = brightness(image, project(&camera, extent, MIRROR_AT), block);
     // Read again by claim 6 below, which is the far half of the bounce pair.
     let at_plaster = project(&camera, extent, PLASTER_AT);
@@ -547,13 +549,12 @@ fn inspect(image: &Image, extent: (u32, u32), block: (u32, u32)) {
     assert!(
         plaster > LIT_FLOOR,
         "the plaster wall is at {plaster:.1}/255, so there is nothing to compare the \
-         metal against"
+         mirror against"
     );
     assert!(
-        mirror * METAL_DARKNESS < plaster,
-        "the mirror panel is at {mirror:.1} and the plaster behind it at {plaster:.1} — a \
-         fully metallic surface has no diffuse albedo for the ambient to scale, so this \
-         says metals picked one up"
+        mirror > LIT_FLOOR && mirror > plaster * MIRROR_FRACTION_OF_PLASTER,
+        "the SSR-miss point is {mirror:.1} and nearby plaster is {plaster:.1} — the probe \
+         fallback is absent or the probe buffer was not bound"
     );
 
     // ---- 4. what a conductor owes the room instead is a reflection ----------
@@ -648,6 +649,49 @@ fn the_fixed_camera_draws_the_room_and_matches_its_golden() {
     let (image, paths) = draw(EXTENT, RenderEffects::all());
     inspect(&image, EXTENT, BLOCK);
     check_golden(&image, &paths);
+}
+
+/// **Zeroing authored probe rows darkens an SSR miss but not an SSR hit.**
+///
+/// The zero control retains the authored volume and row count, so it exercises
+/// the same binding and lookup shape while removing only the fallback radiance.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-lumen-golden.sh"]
+fn zero_probes_only_remove_the_ssr_miss_fallback() {
+    let effects = RenderEffects::all();
+    let (authored, _, authored_adapter) =
+        draw_with(EXTENT, effects, OffscreenSetup::OPTIONAL_FEATURES);
+    let (zeroed, _, zeroed_adapter) =
+        draw_with_probes(EXTENT, effects, OffscreenSetup::OPTIONAL_FEATURES, true);
+    assert_eq!(
+        authored_adapter, zeroed_adapter,
+        "the authored and zero-probe frames opened different adapters, so they are not a control"
+    );
+
+    let camera = room::fixed_camera();
+    let miss = project(&camera, EXTENT, MIRROR_AT);
+    let foot = project(&camera, EXTENT, room::MIRROR_FOOT);
+    let hit = (foot.0, foot.1.saturating_sub(1));
+    let authored_miss = brightness(&authored, miss, BLOCK);
+    let zeroed_miss = brightness(&zeroed, miss, BLOCK);
+    let authored_hit = brightness(&authored, hit, (1, 1));
+    let zeroed_hit = brightness(&zeroed, hit, (1, 1));
+    eprintln!(
+        "lumen probes: SSR miss {authored_miss:.1} -> {zeroed_miss:.1}, \
+         SSR hit {authored_hit:.1} -> {zeroed_hit:.1}"
+    );
+    assert!(
+        authored_miss > LIT_FLOOR && zeroed_miss <= 1.0,
+        "the SSR miss reads {authored_miss:.1} with authored probes and {zeroed_miss:.1} with \
+         zero rows — the fallback must be the only light removed"
+    );
+    let hit_tolerance_percent = SSR_HIT_TOLERANCE * 100.0;
+    assert!(
+        (authored_hit - zeroed_hit).abs() < authored_hit * SSR_HIT_TOLERANCE,
+        "the real SSR hit moved from {authored_hit:.1} to {zeroed_hit:.1}; the measured \
+         {hit_tolerance_percent:.0}% tolerance covers the remaining probe blend but not \
+         replacing a valid screen hit with the fallback"
+    );
 }
 
 /// **The same room on the path below this device's own, against the same
@@ -903,9 +947,9 @@ fn every_effect_toggles_and_the_frame_says_so() {
          a conductor with no ambient and no reflection is black, and this one is not"
     );
     assert!(
-        (missing_off - missing_on).abs() <= 1.0,
-        "the part of the same face that reflects nothing moved from {missing_on:.1} to \
-         {missing_off:.1} — removing the march changed a pixel it never wrote"
+        missing_on > LIT_FLOOR && missing_off <= 1.0,
+        "the SSR-miss point reads {missing_on:.1} with reflections and {missing_off:.1} without — \
+         the probe fallback was not supplied by the reflection pass"
     );
 }
 

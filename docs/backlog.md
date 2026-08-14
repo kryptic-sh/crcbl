@@ -7786,12 +7786,15 @@ for the same reason occlusion did not.
    computes the sun's analytic first bounce from the room's own constants. The
    coloured wall measurably tints the plaster beside it, and the golden moves
    for the reason its module docs name.
-4. **The specular fallback.** `SsrParams` gains `inv_view`; the march returns
-   `lerp(environment, hit, confidence) * fresnel`. **Observable:** the point on
-   lumen's mirror panel above the reflecting band becomes measurably non-zero.
-   **`METAL_DARKNESS` inverts** — it currently asserts that point is essentially
-   black and its doc says that is the model. Rewriting it is part of the slice,
-   not a follow-up.
+4. ~~The specular fallback.~~ **Shipped in this slice:** `SsrParams` carries
+   `inv_view` and the probe volume, the SSR pass binds the existing read-only
+   probe table, and misses return its approximate L1 radiance through the same
+   Fresnel term as hits. The stored diffuse-irradiance rows have their per-band
+   clamped-cosine transfer removed before evaluation. The arithmetic keeps the
+   old hit multiplication order, so a zero volume adds exact zero rather than
+   changing half-float rounding. lumen's authored-versus-zero control moves the
+   SSR miss from 20.3 to 0.0 while its real hit moves 51.6 to 49.0, within the
+   measured 6% budget.
 5. **The roughness cutoff**, only if Q1 says the gate stays. This is the
    existing SSR cutoff item, whose cost is already measured below.
 

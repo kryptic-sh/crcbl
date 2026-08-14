@@ -16,13 +16,11 @@
 //!
 //! [`tests::the_shared_screen_space_helpers_have_not_drifted`]: self
 
-/// Bytes of the uniform block: two `float4x4`.
+/// Bytes of the uniform block: three `float4x4`, two `float4`, and one `uint4`.
 ///
-/// `std140` gives a `float4x4` four sixteen-byte columns and the total is
-/// already a multiple of sixteen, so there is no tail padding to write — unlike
-/// [`crate::ssao::PARAMS_SIZE`], whose third row exists for the radius and the
-/// bias this pass has no use for.
-pub const PARAMS_SIZE: usize = 64 + 64;
+/// `std140` gives each row sixteen-byte alignment, so the three matrices and
+/// probe-volume header fill the block without tail padding.
+pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE;
 
 /// The roughness at which `ssr.slang`'s reflection has faded to nothing,
 /// matching `static const float ROUGHNESS_CUTOFF` in that file.
@@ -76,22 +74,38 @@ pub struct SsrParams {
     /// is affine in the ray parameter, which is the whole of what lets the
     /// segment be clipped once and interpolated per step.
     pub proj: [f32; 16],
+    /// View → world, so the screen-space origin and reflection direction can
+    /// evaluate the world-space probe grid.
+    pub inv_view: [f32; 16],
+    /// The probe grid header, matching [`crate::probe::ProbeVolume`].
+    pub probe_volume: crate::probe::ProbeVolume,
 }
 
 impl SsrParams {
     /// The block as the bytes a uniform buffer holds.
     ///
-    /// Little-endian throughout. There is no padding to write: the two matrices
-    /// fill [`PARAMS_SIZE`] exactly.
+    /// Little-endian throughout. There is no padding to write: the matrices and
+    /// probe volume fill [`PARAMS_SIZE`] exactly.
     #[must_use]
     pub fn to_bytes(self) -> [u8; PARAMS_SIZE] {
         let mut bytes = [0u8; PARAMS_SIZE];
         let mut at = 0;
-        for value in self.inv_proj.into_iter().chain(self.proj) {
+        for value in self
+            .inv_proj
+            .into_iter()
+            .chain(self.proj)
+            .chain(self.inv_view)
+        {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
         }
-        debug_assert_eq!(at, PARAMS_SIZE, "the two matrices fill the block exactly");
+        bytes[at..at + crate::probe::PROBE_VOLUME_SIZE]
+            .copy_from_slice(&self.probe_volume.to_bytes());
+        at += crate::probe::PROBE_VOLUME_SIZE;
+        debug_assert_eq!(
+            at, PARAMS_SIZE,
+            "the matrices and probe volume fill the block exactly"
+        );
         bytes
     }
 }
@@ -218,6 +232,58 @@ mod tests {
         );
     }
 
+    /// The shader and Rust mirror undo the same per-band irradiance transfer.
+    #[test]
+    fn the_probe_transfer_constants_match_ssr_slang() {
+        let source = include_str!("../shaders/ssr.slang");
+        for (name, expected) in [
+            ("PROBE_TRANSFER_L0", crate::probe::TRANSFER_L0),
+            ("PROBE_TRANSFER_L1", crate::probe::TRANSFER_L1),
+        ] {
+            let declaration = format!("static const float {name} = ");
+            let at = source
+                .find(&declaration)
+                .unwrap_or_else(|| panic!("ssr.slang does not declare `{name}`"));
+            let rest = &source[at + declaration.len()..];
+            let end = rest
+                .find(';')
+                .unwrap_or_else(|| panic!("ssr.slang's `{name}` declaration has no semicolon"));
+            let actual: f32 = rest[..end]
+                .parse()
+                .unwrap_or_else(|error| panic!("ssr.slang's `{name}` is not a float: {error}"));
+            assert_eq!(
+                actual, expected,
+                "ssr.slang decodes a probe with {name}={actual}, but GpuProbe::radiance uses \
+                 {expected}"
+            );
+        }
+    }
+
+    /// A zero probe volume must leave a hit's old `hit_color * fresnel * confidence`
+    /// arithmetic byte-for-byte intact; only the miss share is added.
+    #[test]
+    fn zero_environment_keeps_the_hit_multiplication_order() {
+        let source = include_str!("../shaders/ssr.slang");
+        assert!(
+            source.contains(
+                "reflection = hit_color * fresnel * confidence\n                    + environment * fresnel * (1.0 - confidence);"
+            ),
+            "ssr.slang must retain hit_color * fresnel * confidence before adding the probe fallback"
+        );
+
+        let hit = 0.700_000_05f32;
+        let fresnel = 0.300_000_04f32;
+        let confidence = 0.900_000_04f32;
+        let old = hit * fresnel * confidence;
+        let with_zero_environment =
+            hit * fresnel * confidence + 0.0f32 * fresnel * (1.0 - confidence);
+        assert_eq!(
+            with_zero_environment.to_bits(),
+            old.to_bits(),
+            "adding a zero probe fallback must not round a valid SSR hit differently"
+        );
+    }
+
     /// **The blur's depth tolerance is the march's own floor**, and the two
     /// files must name the same number for it.
     ///
@@ -263,23 +329,44 @@ mod tests {
         let proj = source
             .find("float4x4 proj;")
             .expect("ssr.slang declares `float4x4 proj;`");
+        let inv_view = source
+            .find("float4x4 inv_view;")
+            .expect("ssr.slang declares `float4x4 inv_view;`");
+        let probe_origin = source
+            .find("float4 probe_origin;")
+            .expect("ssr.slang declares `float4 probe_origin;`");
         assert!(
-            inv_proj < proj,
+            inv_proj < proj && proj < inv_view && inv_view < probe_origin,
             "ssr.slang declares the block in a different order than `to_bytes` writes it"
         );
     }
 
     /// The layout claim, checked rather than asserted in prose.
     #[test]
-    fn the_block_is_two_matrices_and_nothing_else() {
+    fn the_block_serializes_matrices_and_probe_volume() {
         let mut inv_proj = [0.0f32; 16];
         inv_proj[0] = 1.0;
         let mut proj = [0.0f32; 16];
         proj[15] = 2.0;
-        let bytes = SsrParams { inv_proj, proj }.to_bytes();
+        let inv_view = [3.0f32; 16];
+        let probe_volume = crate::probe::ProbeVolume {
+            origin: [4.0, 5.0, 6.0],
+            inv_spacing: [7.0, 8.0, 9.0],
+            counts: [10, 11, 12],
+        };
+        let bytes = SsrParams {
+            inv_proj,
+            proj,
+            inv_view,
+            probe_volume,
+        }
+        .to_bytes();
 
         assert_eq!(bytes.len(), PARAMS_SIZE);
         assert_eq!(&bytes[0..4], &1.0f32.to_le_bytes());
         assert_eq!(&bytes[124..128], &2.0f32.to_le_bytes());
+        assert_eq!(&bytes[128..132], &3.0f32.to_le_bytes());
+        assert_eq!(&bytes[192..196], &4.0f32.to_le_bytes());
+        assert_eq!(&bytes[236..240], &1320u32.to_le_bytes());
     }
 }

@@ -3850,6 +3850,8 @@ impl ForwardRenderer {
             ssr::SsrParams {
                 inv_proj: inv_projection.to_cols_array(),
                 proj: projection.to_cols_array(),
+                inv_view: camera.view().inverse().to_cols_array(),
+                probe_volume: self.probe_volume,
             },
         )?;
 
@@ -4424,6 +4426,16 @@ impl ForwardRenderer {
             self.lights
                 .add_pass(graph, self.frame, generated.visible_count_id, self.grid);
 
+        let probe_buffer = self.probes.buffer();
+        let probe_table = graph.import_buffer(
+            "probes",
+            ImportedBuffer {
+                buffer: probe_buffer,
+                initial: ResourceState::ShaderRead,
+                final_state: ResourceState::ShaderRead,
+            },
+        );
+
         // The occlusion placeholder, imported once and read by every pass whose
         // bind group names it: the shadow pass's views, the depth prepass's copy
         // of the camera's group, and — on a frame drawing without
@@ -4773,6 +4785,8 @@ impl ForwardRenderer {
                         reflection,
                         composited,
                     },
+                    probe_buffer,
+                    probe_table,
                 );
                 composited
             }

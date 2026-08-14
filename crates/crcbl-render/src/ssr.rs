@@ -189,6 +189,16 @@ impl Ssr {
                 count: 1,
                 flags: BindingFlags::empty(),
             },
+            BindGroupLayoutEntry {
+                binding: 4,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
         ];
         let layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("ssr"),
@@ -336,6 +346,8 @@ impl Ssr {
         graph: &mut RenderGraph<'a>,
         frame: usize,
         images: SsrImages,
+        probes: BufferHandle,
+        probe_id: crate::graph::BufferId,
     ) {
         let SsrImages {
             depth,
@@ -375,6 +387,7 @@ impl Ssr {
             .read_image(color)
             .read_image(depth)
             .read_image(reflectivity)
+            .read_buffer(probe_id)
             .execute(move |ctx| {
                 let color_view = ctx.image_view(color);
                 let depth_view = ctx.image_view(depth);
@@ -404,6 +417,11 @@ impl Ssr {
                         binding: 3,
                         array_index: 0,
                         resource: BindingResource::ImageView(material_view),
+                    },
+                    BindGroupEntry {
+                        binding: 4,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(probes),
                     },
                 ];
                 let Some(group) = cached_group(

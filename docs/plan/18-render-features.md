@@ -1011,14 +1011,27 @@ fallback is the irradiance-probe row's business, and putting it here first is
 what makes that row additive." So:
 
 ```
-reflection = lerp(probe_radiance(world_position, reflection_dir), hit_color, confidence) * fresnel;
+hit = hit_color * fresnel * confidence;
+fallback = probe_radiance(world_position, reflection_dir) * fresnel * (1 - confidence);
+reflection = hit + fallback;
 ```
 
-`confidence` is the existing hit weight. Three things follow: no double-counting
-by construction, the zero-probe case stays bit-identical because
-`lerp(0, hit, c) == hit * c`, and **a fully metallic surface stops being
-black**, because a conductor's only non-direct light is a reflection and now it
-has one everywhere the surface faces rather than only where the march lands.
+`confidence` is the existing hit weight. Written as two terms rather than the
+algebraically equivalent `lerp`: with a zero probe volume, `fallback` is exactly
+zero and the pre-probe `hit_color * fresnel * confidence` multiplication order
+is unchanged, so existing SSR hits remain bit-identical instead of moving by a
+half-float rounding level.
+
+The table stores _irradiance_ coefficients with the diffuse clamped-cosine
+transfer already folded in. Specular needs radiance, so `probe_radiance` divides
+the constant band by `π` and the linear band by `2π/3` before evaluating the L1
+basis. Directly dotting the stored rows would brighten a constant environment by
+`π` and distort its directional term.
+
+Three things follow: no double-counting by construction, the zero-probe case
+stays bit-identical, and **a fully metallic surface stops being black**, because
+a conductor's only non-direct light is a reflection and now it has one
+everywhere the surface faces rather than only where the march lands.
 
 **The honest limit:** an L1 probe is a very blurry environment. On a rough metal
 it is close to right; on a mirror it is a smooth gradient where a room should

@@ -73,10 +73,10 @@
 // is a filtered read whose level four rasterisers select arithmetic for.
 // Upgrading is contained to the blur pass.
 //
-// A ray that hits nothing returns **zero**, and zero is correct here: the
-// reflection is additive, so a miss adds nothing and the surface looks as it did
-// before this pass existed. The ambient fallback is the irradiance-probe row's
-// business, and putting it here first is what makes that row additive.
+// A ray that hits nothing returns the irradiance-probe environment. The march's
+// confidence blends that environment into a screen hit, so a zeroed probe volume
+// still returns zero bit-for-bit while a conductor reflects something outside the
+// frame.
 //
 // # The three functions this file shares with `ssao.slang`
 //
@@ -103,6 +103,20 @@ struct SsrParams
     float4x4 inv_proj;
     /// View → clip, for projecting the reflected ray onto the screen.
     float4x4 proj;
+    /// View → world, for evaluating the world-space probe grid.
+    float4x4 inv_view;
+    /// Matching `crcbl_shaders::probe::ProbeVolume`; kept in this pass's block
+    /// because a probe lookup needs it before it can address the storage table.
+    float4 probe_origin;
+    float4 probe_inv_spacing;
+    uint4 probe_counts;
+};
+
+struct GpuProbe
+{
+    float4 sh_r;
+    float4 sh_g;
+    float4 sh_b;
 };
 
 [[vk::binding(0, 0)]]
@@ -143,6 +157,12 @@ Texture2D<float4> scene_color;
 /// the depth test below before that matters.
 [[vk::binding(3, 0)]]
 Texture2D<float4> reflectivity;
+
+/// The same read-only irradiance table the forward pass binds to `mesh.slang`.
+/// Appending it keeps Metal's declaration-order argument numbering aligned with
+/// the renderer layout.
+[[vk::binding(4, 0)]]
+StructuredBuffer<GpuProbe> probes;
 
 /// The reversed-Z far plane: `crcbl_hal::depth::CLEAR`, and the value
 /// `ssao.slang` declares under this name.
@@ -366,6 +386,63 @@ float thickness_at(float advance, float depth)
     return max(advance, abs(depth) * THICKNESS_FLOOR);
 }
 
+/// The clamped-cosine transfer of the stored irradiance probe's constant band:
+/// `π`. Specular lookup undoes it to recover approximate L1 radiance.
+static const float PROBE_TRANSFER_L0 = 3.14159265358979323846;
+
+/// The clamped-cosine transfer of the stored irradiance probe's linear band:
+/// `2π/3`. Specular lookup undoes it to recover approximate L1 radiance.
+static const float PROBE_TRANSFER_L1 = 2.0943951023931954923;
+
+/// The grid's manually trilinear L1 radiance evaluation in the reflection
+/// direction. The stored coefficients are irradiance: undo the clamped-cosine
+/// transfer per band before evaluating them. A zero volume addresses row zero of
+/// the zeroed table and returns exactly zero.
+float3 probe_environment(float3 world_position, float3 direction)
+{
+    float3 last = max(float3(camera.probe_counts.xyz) - 1.0, float3(0.0, 0.0, 0.0));
+    float3 grid = clamp((world_position - camera.probe_origin.xyz) * camera.probe_inv_spacing.xyz,
+                        float3(0.0, 0.0, 0.0), last);
+    float3 base = floor(grid);
+    float3 f = grid - base;
+    uint3 lo = uint3(base);
+    uint3 hi = uint3(min(base + 1.0, last));
+    uint total = max(camera.probe_counts.w, 1u) - 1u;
+    uint index000 = min((lo.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + lo.x, total);
+    uint index100 = min((lo.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + hi.x, total);
+    uint index010 = min((lo.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + lo.x, total);
+    uint index110 = min((lo.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + hi.x, total);
+    uint index001 = min((hi.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + lo.x, total);
+    uint index101 = min((hi.z * camera.probe_counts.y + lo.y) * camera.probe_counts.x + hi.x, total);
+    uint index011 = min((hi.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + lo.x, total);
+    uint index111 = min((hi.z * camera.probe_counts.y + hi.y) * camera.probe_counts.x + hi.x, total);
+    GpuProbe x00 = probes[index000];
+    GpuProbe x10 = probes[index010];
+    GpuProbe x01 = probes[index001];
+    GpuProbe x11 = probes[index011];
+    GpuProbe y00 = probes[index100];
+    GpuProbe y10 = probes[index110];
+    GpuProbe y01 = probes[index101];
+    GpuProbe y11 = probes[index111];
+    GpuProbe z0;
+    z0.sh_r = lerp(lerp(x00.sh_r, y00.sh_r, f.x), lerp(x10.sh_r, y10.sh_r, f.x), f.y);
+    z0.sh_g = lerp(lerp(x00.sh_g, y00.sh_g, f.x), lerp(x10.sh_g, y10.sh_g, f.x), f.y);
+    z0.sh_b = lerp(lerp(x00.sh_b, y00.sh_b, f.x), lerp(x10.sh_b, y10.sh_b, f.x), f.y);
+    GpuProbe z1;
+    z1.sh_r = lerp(lerp(x01.sh_r, y01.sh_r, f.x), lerp(x11.sh_r, y11.sh_r, f.x), f.y);
+    z1.sh_g = lerp(lerp(x01.sh_g, y01.sh_g, f.x), lerp(x11.sh_g, y11.sh_g, f.x), f.y);
+    z1.sh_b = lerp(lerp(x01.sh_b, y01.sh_b, f.x), lerp(x11.sh_b, y11.sh_b, f.x), f.y);
+    GpuProbe cell;
+    cell.sh_r = lerp(z0.sh_r, z1.sh_r, f.z);
+    cell.sh_g = lerp(z0.sh_g, z1.sh_g, f.z);
+    cell.sh_b = lerp(z0.sh_b, z1.sh_b, f.z);
+    return max(float3(
+                   dot(cell.sh_r.xyz / PROBE_TRANSFER_L1, direction) + cell.sh_r.w / PROBE_TRANSFER_L0,
+                   dot(cell.sh_g.xyz / PROBE_TRANSFER_L1, direction) + cell.sh_g.w / PROBE_TRANSFER_L0,
+                   dot(cell.sh_b.xyz / PROBE_TRANSFER_L1, direction) + cell.sh_b.w / PROBE_TRANSFER_L0),
+               float3(0.0, 0.0, 0.0));
+}
+
 [shader("vertex")]
 FullscreenOutput vertexMain(uint index: SV_VertexID)
 {
@@ -414,6 +491,10 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float3 towards = normalize(origin);
     float3 ray = reflect(towards, normal);
 
+    float3 world_position = mul(camera.inv_view, float4(origin, 1.0)).xyz;
+    float3 reflection_direction = normalize(mul(camera.inv_view, float4(ray, 0.0)).xyz);
+    float3 environment = probe_environment(world_position, reflection_direction);
+
     // Schlick, and it is `mesh.slang`'s expansion rather than a `pow`: the same
     // fragment evaluated the same Fresnel term for its lights, and a reflection
     // is the same lobe pointed at the room instead of at a light.
@@ -425,10 +506,6 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
 
     // A ray retracing the view ray asks about a point behind the camera.
     float facing = saturate((1.0 - dot(ray, -towards)) / BACKWARD_FADE);
-    if (facing <= 0.0)
-    {
-        return NOTHING;
-    }
 
     // The ray starts off the surface — see [`NORMAL_OFFSET`].
     float3 start = origin + normal * (abs(origin.z) * NORMAL_OFFSET);
@@ -438,7 +515,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float4 clip_ray = mul(camera.proj, float4(ray, 0.0));
     if (clip_start.w <= 0.0)
     {
-        return NOTHING;
+        return float4(environment * fresnel, sharpness);
     }
     float2 at_start = pixel_of(clip_start.xy / clip_start.w, size);
 
@@ -451,7 +528,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float rate = length(screen_rate);
     if (rate < 1e-6)
     {
-        return NOTHING;
+        return float4(environment * fresnel, sharpness);
     }
     float2 forward = screen_rate / rate;
 
@@ -517,7 +594,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     uint steps = uint(max(travel, 0.0) / stride);
     if (steps == 0u)
     {
-        return NOTHING;
+        return float4(environment * fresnel, sharpness);
     }
     travel = float(steps) * stride;
 
@@ -537,7 +614,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // happens to answer `false` to.
     if (!(when_end > 0.0))
     {
-        return NOTHING;
+        return float4(environment * fresnel, sharpness);
     }
 
     // `1/w` and `view/w` are the quantities linear in the *screen* parameter, so
@@ -556,7 +633,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float previous_z = start.z;
     float2 previous_at = at_start;
 
-    float3 reflection = float3(0.0, 0.0, 0.0);
+    float3 reflection = environment * fresnel;
     for (uint step = 1u; step <= steps; ++step)
     {
         float along = float(step) / float(steps);
@@ -602,8 +679,10 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
                     saturate((1.0 - float(step) / float(MAX_STEPS)) / DISTANCE_FADE);
                 float bound = saturate(1.0 - behind / thickness);
 
-                reflection = scene_color.Load(int3(hit, 0)).rgb
-                    * fresnel * (sharpness * facing * border * distance * bound);
+                float confidence = sharpness * facing * border * distance * bound;
+                float3 hit_color = scene_color.Load(int3(hit, 0)).rgb;
+                reflection = hit_color * fresnel * confidence
+                    + environment * fresnel * (1.0 - confidence);
                 break;
             }
             // Past the bound: the tap is no evidence and the march continues.
