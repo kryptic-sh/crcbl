@@ -441,12 +441,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   prerequisite rather than on taste: a gather bake needs a ray-triangle
   intersector and a BVH, and `crcbl-phys` has neither.
 
-  **Nothing renders differently yet.** No scene in the tree authors a volume,
-  the default grid is empty, an empty grid evaluates to exactly zero and
-  `x + 0 == x`, so every golden is byte-identical and none was re-blessed. A
-  description whose probe count disagrees with its volume's counts, or which
-  needs more rows than `Capacities::probes` reserves, is refused by name at
-  `ForwardRenderer::with_scene` like every other capacity.
+  **Every scene that existed before this renders identically.** They author no
+  volume, the default grid is empty, an empty grid evaluates to exactly zero and
+  `x + 0 == x`, so every golden already in the tree is byte-identical and none
+  was re-blessed. A description whose probe count disagrees with its volume's
+  counts, or which needs more rows than `Capacities::probes` reserves, is
+  refused by name at `ForwardRenderer::with_scene` like every other capacity.
+
+- **`Scene::Probes` and `crcbl screenshot --scene probes`: the first frame in
+  the tree with a probe in it.** A wide shallow room lit by a two-probe grid and
+  by nothing else — the sun is horizontal, so its contribution to the floor is
+  exactly zero rather than merely small, and the ambient it carries is zero. The
+  two probes hold identical constant bands and swap which colour arrives from
+  overhead, so the two ends of one flat floor differ in the spherical harmonic's
+  _linear_ band alone.
+
+  It exists to compare the two implementations of one evaluation: the suite
+  reads the frame back and asserts it against
+  `crcbl_shaders::probe::irradiance_at`, the host mirror of `mesh.slang`'s
+  `probe_irradiance`, which nothing had ever done — the literature tests bind
+  the mirror, and a volume of zeroes says nothing about either. The two agree to
+  0.13 levels of 255 on radv and 0.18 on lavapipe.
+  `crcbl::screenshot::probe_grid` and `PROBE_CAMERA_UP` are public so that
+  comparison can be made against the rows the device was given rather than a
+  copy of them.
+
+  An exhaustive `match` on `crcbl::screenshot::Scene` gains an arm.
 
 - **`apps/lumen`'s pause menu switches the effects, mid-run.** Three rows below
   `CAMERA` — `SHADOWS`, `AO` and `REFLECTIONS`, the words `--no-shadows`,
