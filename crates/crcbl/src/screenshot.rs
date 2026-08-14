@@ -252,6 +252,46 @@ pub enum Scene {
     /// twenty-fifth — and `ssr_sun` for why the sun has no X component, which is
     /// what makes the two bands beside the reflection its controls.
     Ssr,
+    /// `docs/plan/18-render-features.md`'s **irradiance probes**: the inside of
+    /// a room, looked straight down into, lit by the probe grid and by nothing
+    /// else at all.
+    ///
+    /// The floor has two broad, flat probe-lit regions separated by the grid's
+    /// narrow interpolation interval. This keeps the fixture's probe-only mirror
+    /// check while confining rasteriser disagreement to the transition instead of
+    /// making the entire frame a smooth gradient.
+    ///
+    /// **The only built-in screenshot fixture that isolates the probe term.**
+    /// Slice 1 landed the whole data path with every existing golden
+    /// byte-identical, which is exactly what an
+    /// additive term that is everywhere zero looks like — so `mesh.slang`'s
+    /// `probe_irradiance` and
+    /// [`crcbl_shaders::probe::irradiance_at`](crate::shaders::probe::irradiance_at)
+    /// were two implementations of one thing with nothing comparing them. This
+    /// scene is what compares them: `tests/render_e2e.rs` evaluates the Rust
+    /// mirror at the same world positions the device shaded and asserts the two
+    /// agree, which needs a frame whose pixels are the probe term and a scene
+    /// whose probes it can read. [`probe_grid`] is that scene's rows, public for
+    /// that reason.
+    ///
+    /// # Every measured pixel is the probe term
+    ///
+    /// * `DirectionalLight::ambient` and its direct colour are exactly zero — see
+    ///   `probe_sun` — so neither flat ambient, Lambert, nor the specular lobe can
+    ///   contribute on any surface.
+    /// * The measured bands are centred a full unit from every wall — twice
+    ///   `crcbl_render::ForwardRenderer`'s occlusion radius — so `ssao.slang`
+    ///   finds nothing within reach and the occlusion scaling is exactly one.
+    ///
+    /// What is left is `albedo × probe_irradiance`, which makes an absolute
+    /// comparison against the Rust mirror possible rather than only a ratio.
+    ///
+    /// The geometry is the open box alone — the cube every other forward scene
+    /// places is not here, because this frame's whole content is one floor under
+    /// one authored environment. See `probe_room` for the room's shape and
+    /// `probe_grid` for why the two probes differ in the *direction* their light
+    /// arrives from and not in how much of it there is.
+    Probes,
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
@@ -796,6 +836,220 @@ fn ssr_sun() -> crcbl_render::DirectionalLight {
     }
 }
 
+/// How wide the narrow interpolation interval in [`Scene::Probes`] is, in world
+/// units.
+///
+/// Most of the floor lies outside this interval and clamps to one of the two
+/// probes, forming flat regions. The interval itself still exercises coefficient
+/// interpolation and is checked against the Rust mirror.
+const PROBE_BLEND_WIDTH: f32 = 0.4;
+
+/// How wide [`Scene::Probes`]' room is, in world units — the axis its probe grid
+/// runs along.
+///
+/// **Wide enough that a band a unit clear of either wall is still well inside
+/// the frame**, which is the whole of what this number buys: occlusion scales
+/// the probe term exactly as it scales the flat ambient, and a band close enough
+/// to a wall to be darkened would be measuring `ssao.slang` instead. A unit is
+/// twice `crcbl_render::ForwardRenderer`'s occlusion radius, so the occlusion
+/// there is not merely near one, it is one.
+const PROBE_ROOM_WIDTH: f32 = 3.2;
+
+/// How deep the room is, across the grid's axis.
+///
+/// Narrower than [`PROBE_ROOM_WIDTH`] so both of the `±Z` walls are inside the
+/// frame `probe_camera` looks through — the room reads as a room rather than as
+/// an unbounded plane — and still a full unit from the bands, which sit on the
+/// frame's `z = 0` axis.
+const PROBE_ROOM_DEPTH: f32 = 2.0;
+
+/// How tall its walls are.
+///
+/// [`AO_WALL`]'s height, and nothing measured here depends on it: the probe
+/// field is a function of `x` alone, the walls carry no part of the linear band
+/// because their normals are horizontal, and they are context rather than
+/// measurement.
+const PROBE_ROOM_HEIGHT: f32 = 2.0;
+
+/// How far above the floor [`Scene::Probes`]' camera stands, in world units.
+///
+/// `AO_CAMERA_UP`'s height, and public for the reason [`Scene::Probes`] gives:
+/// `tests/render_e2e.rs` has to turn a pixel back into the world position the
+/// fragment stage shaded there before it can evaluate the Rust mirror at it, and
+/// that inversion is this number and the field of view. Written down once here
+/// rather than twice, because the two copies would agree until somebody moved
+/// the camera.
+pub const PROBE_CAMERA_UP: f32 = 2.2;
+
+/// The radiance of each of the two coloured sources `probe_grid` projects, in
+/// linear RGB.
+///
+/// Chosen so the *brightest* floor pixel in the frame stays under what the
+/// swapchain holds.
+///
+/// A source of radiance `L` covering a fraction `Ω/4π` of the sphere peaks at
+/// `(Â₀ + 3Â₁)·Ω/(4π)` times `L` on a surface facing it — the two transfer
+/// coefficients are [`crcbl_shaders::probe`](crate::shaders::probe)'s, and the
+/// surface is the floor face of `crcbl_shaders::mesh::OPEN_BOX_FACES`, whose
+/// albedo scales the product. A source bright enough for that to reach one would
+/// flatten a lit region, and `tonemap.slang`'s `saturate` is where that would
+/// happen without saying so.
+const PROBE_RADIANCE: f32 = 0.7;
+
+/// The radiance arriving from the four horizontal directions, in linear RGB.
+///
+/// **A dim neutral surround, and it is not decoration.** The two sources are
+/// pure red and pure blue, so without this the green channel of every pixel in
+/// the frame would be exactly zero and the room would be a two-colour gradient
+/// rather than a lit room — which is a poorer picture for a reviewer and one
+/// fewer channel for the mirror comparison to read.
+///
+/// **Deliberately small**, because all it can reach is the constant band: it is
+/// identical in both probes, so it adds the same amount to both of the bands
+/// `tests/render_e2e.rs` compares and pulls the ratio between them towards one.
+/// The measurement gets weaker as this grows, and buys nothing but a lighter
+/// room.
+const PROBE_SURROUND: f32 = 0.035;
+
+/// [`Scene::Probes`]' room: the open box scaled to [`PROBE_ROOM_WIDTH`] ×
+/// [`PROBE_ROOM_HEIGHT`] × [`PROBE_ROOM_DEPTH`] and lifted so its floor is the
+/// plane `y = 0`.
+///
+/// [`ao_box`]'s transform for [`ao_box`]'s reason, including why a non-uniform
+/// scale is safe on this mesh alone. The floor being exactly `y = 0` is what
+/// lets `tests/render_e2e.rs` name a band's world position without
+/// reconstructing anything.
+fn probe_room() -> glam::Mat4 {
+    glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5 * PROBE_ROOM_HEIGHT, 0.0))
+        * glam::Mat4::from_scale(glam::Vec3::new(
+            PROBE_ROOM_WIDTH,
+            PROBE_ROOM_HEIGHT,
+            PROBE_ROOM_DEPTH,
+        ))
+}
+
+/// The camera [`Scene::Probes`] is drawn with: straight down at the floor.
+///
+/// [`ao_camera`]'s view, and the band placement rests on it for that function's
+/// reason and one of this scene's own: looking down `-Y` at a plane `y = 0` maps
+/// world to pixels **linearly**, so the inverse `tests/render_e2e.rs` needs to
+/// evaluate the mirror at a pixel is a division rather than an unprojection.
+fn probe_camera() -> Camera {
+    Camera {
+        eye: glam::Vec3::new(0.0, PROBE_CAMERA_UP, 0.0),
+        target: glam::Vec3::ZERO,
+        up: glam::Vec3::Z,
+        projection: Projection::Perspective {
+            fov_y: std::f32::consts::FRAC_PI_3,
+            near: 0.01,
+        },
+    }
+}
+
+/// The sun [`Scene::Probes`] runs under with its direct and flat ambient terms
+/// exactly zero, leaving the probe grid as the only lighting contribution.
+fn probe_sun() -> crcbl_render::DirectionalLight {
+    dimmed_sun(0.0, 0.0)
+}
+
+/// [`Scene::Probes`]' irradiance volume: two probes along `x`, at the endpoints
+/// of the narrow central blend interval.
+///
+/// **Public so `tests/render_e2e.rs` evaluates the Rust mirror over the rows the
+/// device was actually given**, rather than over a second copy of them written
+/// out beside the assertion. A copy is a thing that can drift, and the whole
+/// point of that comparison is that one set of coefficients went two ways.
+///
+/// # The two probes differ in *where their light comes from* and in nothing else
+///
+/// Each one is the same six-direction environment: a coloured source overhead, a
+/// coloured source underfoot, and a dim neutral surround from each of the four
+/// horizontal directions. What the two swap is which colour is which — red is
+/// overhead at the `-X` end and underfoot at the `+X` end, blue the other way
+/// round.
+///
+/// That swap is the design of the fixture, and the alternative is what it is
+/// avoiding. Two probes differing in how *much* light they hold would light the
+/// two ends of the floor differently through their **constant** band alone, and
+/// then a shader that evaluated `sh.w` and dropped the three dot products
+/// entirely would draw the same gradient and pass. Swapping the poles leaves
+/// every constant band identical between the two rows — each holds one source's
+/// worth of red and one of blue whichever way up they are — so the only thing
+/// that can separate the two ends of the floor is `dot(sh, float4(N, 1))`'s
+/// linear half. Zero the linear coefficients and the frame goes flat.
+///
+/// A field like this is not a room anybody has stood in, and that is the same
+/// bargain `ao_sun` makes by pointing a sun straight up: the scene is built so
+/// exactly one term can move the measurement.
+///
+/// # Why a grid of two and not one probe
+///
+/// A `1×1×1` volume never addresses a row past the first, never interpolates and
+/// never exercises the `x`-fastest index — it is the degenerate volume with one
+/// row filled in. This two-probe grid confines interpolation to
+/// [`PROBE_BLEND_WIDTH`] at the room's centre: the broad regions outside it clamp
+/// to either probe, while the centre still detects a lookup that ignores world
+/// position or reads the wrong axis.
+#[must_use]
+pub fn probe_grid() -> crate::render::scene::ProbeGrid {
+    // Six directions of equal solid angle, which is the coarsest partition of
+    // the sphere that can hold a source on each pole and a surround around the
+    // middle. `accumulate` is the only correct way to fill a row — the band
+    // scales and the basis normalisations are folded into it — so the fixture
+    // authors an environment and projects it rather than writing coefficients.
+    let solid_angle = 4.0 * std::f32::consts::PI / 6.0;
+    let end = |overhead: [f32; 3], underfoot: [f32; 3]| {
+        let mut probe = crate::shaders::probe::GpuProbe::ZERO;
+        probe.accumulate([0.0, 1.0, 0.0], overhead, solid_angle);
+        probe.accumulate([0.0, -1.0, 0.0], underfoot, solid_angle);
+        for horizontal in [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, -1.0],
+        ] {
+            probe.accumulate(horizontal, [PROBE_SURROUND; 3], solid_angle);
+        }
+        probe
+    };
+    let red = [PROBE_RADIANCE, 0.0, 0.0];
+    let blue = [0.0, 0.0, PROBE_RADIANCE];
+    crate::render::scene::ProbeGrid {
+        volume: crate::shaders::probe::ProbeVolume {
+            // The probes are close together at the room's centre. Everything
+            // beyond their interval clamps to an endpoint, producing broad flat
+            // regions while the central interval still blends both rows.
+            origin: [-0.5 * PROBE_BLEND_WIDTH, 0.5 * PROBE_ROOM_HEIGHT, 0.0],
+            inv_spacing: [1.0 / PROBE_BLEND_WIDTH, 0.0, 0.0],
+            counts: [2, 1, 1],
+        },
+        probes: vec![end(red, blue), end(blue, red)],
+    }
+}
+
+/// The engine's own description with [`probe_grid`] in it, and nothing else
+/// changed.
+///
+/// The residents, the material rows and the page are [`scene::demo`]'s, so this
+/// frame's geometry is the same open box every other scene here can draw and the
+/// only difference from the description behind [`ForwardRenderer::new`] is the
+/// volume — which is what makes this golden evidence about the probes rather
+/// than about a new scene.
+///
+/// The capacity comes from the volume's own `total` rather than from the row
+/// count, so the reservation and the grid cannot disagree about a number
+/// `ProbeGrid::check` would then refuse.
+///
+/// [`scene::demo`]: crate::render::scene::demo
+/// [`ForwardRenderer::new`]: crate::render::ForwardRenderer::new
+fn probe_scene() -> crate::render::scene::SceneDesc<'static> {
+    let probes = probe_grid();
+    let mut scene = crate::render::scene::demo();
+    scene.capacities.probes = probes.volume.total();
+    scene.probes = probes;
+    scene
+}
+
 /// Where [`Scene::SpotShadow`] puts its light.
 ///
 /// **45° from vertical, and that angle is the whole scene.** The camera looks
@@ -1279,9 +1533,10 @@ fn place(renderer: &mut ForwardRenderer, mesh: usize, material: usize, model: gl
 
 /// The demo scene's cube, placed **before anything else**.
 ///
-/// Every forward scene here draws it — as the subject in [`Scene::Cube`], as the
-/// floor in [`Scene::Spot`] and its two shadow siblings, and parked out of frame
-/// in [`Scene::Ao`]. The renderer used to insert it at build and rewrite it from
+/// Every forward scene here draws it but [`Scene::Probes`], whose room is the
+/// open box alone — as the subject in [`Scene::Cube`], as the floor in
+/// [`Scene::Spot`] and its two shadow siblings, and parked out of frame in
+/// [`Scene::Ao`]. The renderer used to insert it at build and rewrite it from
 /// every `begin_frame`; it is an ordinary instance now, so the caller places it,
 /// and placing it first is what keeps it in the pool slot it has always had.
 fn place_cube(renderer: &mut ForwardRenderer, model: glam::Mat4) {
@@ -1520,6 +1775,22 @@ impl SceneState {
                 Self::Forward {
                     camera: ssr_camera(),
                     light: ssr_sun(),
+                    renderer: Box::new(renderer),
+                }
+            }
+            Scene::Probes => {
+                // **The only scene here built from a description of its own**,
+                // and the only thing that differs from `scene::demo`'s is the
+                // probe grid — see `probe_scene`. The room is the open box and
+                // nothing else: no cube, parked or otherwise, because a second
+                // object standing on this floor is a second thing occluding the
+                // bands that are the measurement.
+                let mut renderer =
+                    ForwardRenderer::with_scene(device, queue, format, &probe_scene())?;
+                place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, probe_room());
+                Self::Forward {
+                    camera: probe_camera(),
+                    light: probe_sun(),
                     renderer: Box::new(renderer),
                 }
             }
@@ -2729,7 +3000,7 @@ mod tests {
         // which is six tiles, and the light region holds six — so the most
         // influential one is shadowed and the other two light without occluding.
         let lights_passes = forward_passes(1);
-        let expected: [(Scene, &[(&str, &str)]); 9] = [
+        let expected: [(Scene, &[(&str, &str)]); 10] = [
             (Scene::Cube, &cube_passes),
             // Not the cube scene's passes: `Scene::Lights` is the cube scene
             // with a longer light list, the clustering dispatch is one per
@@ -2766,6 +3037,13 @@ mod tests {
             // atlas tile and no cull of its own. The `ssr` pass itself is in
             // every row here — it is not a scene's to opt into.
             (Scene::Ssr, &cube_passes),
+            // And a third time for `Scene::Probes`. A probe volume adds **no
+            // pass at all** — it is a storage buffer the forward pass already
+            // binds — which is the strongest reason the irradiance-probe design
+            // gives for preferring a grid over anything needing a pass of its
+            // own, and this row is where that stops being a claim about the
+            // design and becomes a fact about a recorded frame.
+            (Scene::Probes, &cube_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

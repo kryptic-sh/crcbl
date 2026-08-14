@@ -452,6 +452,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   reserves, is refused by name at `ForwardRenderer::with_scene` like every other
   capacity.
 
+  `crcbl screenshot --scene probes` is the dedicated device-path fixture. Its
+  two-probe grid clamps most of the floor to broad endpoint regions and confines
+  interpolation to a narrow central band, avoiding the cross-rasteriser drift of
+  the reverted full-frame gradient. The render e2e gate compares each endpoint
+  and the centre against `probe::irradiance_at`, asserts the endpoint regions
+  remain flat, matches a golden, and renders through both geometry paths.
+
 - **`apps/lumen`'s pause menu switches the effects, mid-run.** Three rows below
   `CAMERA` — `SHADOWS`, `AO` and `REFLECTIONS`, the words `--no-shadows`,
   `--no-ao` and `--no-reflections` already use — each labelled with what the

@@ -7776,8 +7776,12 @@ for the same reason occlusion did not.
 ### The slices
 
 1. ~~The probe table, additive and zero.~~ **Shipped** as `ce253ad`.
-2. **`Scene::Probes` and its golden — written, reverted, and owed again.** See
-   "the probes fixture is a full-frame gradient" below before rebuilding it.
+2. ~~`Scene::Probes` and its golden.~~ **Shipped in this slice:** the
+   replacement clamps most of the floor to either endpoint probe and confines
+   interpolation to a narrow central band. The e2e fixture compares both
+   endpoint colours and the centre against the Rust mirror, asserts the outer
+   regions stay flat, and runs both geometry paths. See "the probes fixture is a
+   full-frame gradient" below for why the first version was reverted.
 3. ~~lumen's room gets a volume.~~ **Shipped in this slice:** `bounce::probes()`
    computes the sun's analytic first bounce from the room's own constants. The
    coloured wall measurably tints the plaster beside it, and the golden moves
@@ -7894,6 +7898,16 @@ argument — that probe evaluation has no comparison between fetched values to
 diverge on — was _supported_ by this run, not contradicted: radv against
 lavapipe is max delta 2, and WARP agrees with the host mirror to 0.07 levels.
 The 8-bit golden is the fragile part, not the arithmetic.
+
+**Resolved by the replacement fixture.** The two probes now occupy a narrow
+interval at the room's centre, so most floor pixels clamp to one endpoint and
+form broad flat regions; only the central band interpolates. The semantic check
+compares two separated blocks inside each endpoint region, so widening the
+interval back across the room fails before a golden can be re-blessed. That
+negative control was run with the interval widened to the room width: both probe
+tests failed on an 11.60-level change against their 0.5-level flatness budget.
+The replacement is exact on radv; WARP remains the CI verdict because it cannot
+be run on this machine.
 
 ## The Pages browser gate fails on the runner's GPU stack, not on the code
 
