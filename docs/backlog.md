@@ -7662,70 +7662,88 @@ point. **Nothing was retuned.**
   AO. Anyone repeating this measurement must take it on a wall whose foot the
   sun does not reach, which is why the numbers above are from the back wall.
 
-## The sun's shadow still peter-pans, at a third of its old size (2026-08-14)
+## The sun's shadow peter-pans on a facet seam, at 0.26 m (2026-08-14)
 
-The bleed raised from a screenshot of `apps/lumen`'s room was one defect: the
-sun's bias was denominated in a cascade's clip depth, so its world meaning was
-multiplied by that cascade's whole depth range. `DEPTH_BIAS_TEXELS` in
-`crcbl_render::shadow` and `sun_visibility` in `mesh.slang` now denominate it in
-cascade texels, offsetting the world position before projecting, and the strip
-at a wall's foot went 0.601 m → 0.375, the band down the back wall's left edge
-0.579 m → 0.368, and the cornice under the ceiling 112 luma → 5.7. That much has
-shipped; what follows is what it did not finish.
+Two slices have run at this. The bias was re-denominated from cascade clip depth
+into cascade texels (`DEPTH_BIAS_TEXELS`, `sun_visibility`), then its slope term
+was moved from the interpolated shading normal onto the rasterised facet
+(`geometric_normal_of`, `shadow_slope`). `apps/lumen`'s wall-foot strip went
+0.601 m → 0.382 → 0.256, and the band down the back wall's left edge 0.579 →
+0.373 → 0.244. Both shipped. What is left is below.
 
-### The constant is a cover for a bias that reads the wrong normal
+### What the second slice found, against what this entry predicted
 
-`DEPTH_BIAS_TEXELS` is 6.0, and the residual 0.375 m strip is what those six
-texels cost. It is not six because acne needs six — the slope term covers what a
-texel's footprint explains. It is six because **`crcbl_render::scene::demo`'s
-dunes patch shades an analytic height field's exact normal across one-metre
-quads**, so `tan(acos(N·L))` describes a surface the triangles underneath do not
-have, and the slope term is short by however much they disagree. Measured trade,
-slope term held at 2.0:
+**This entry predicted the constant would fall to about half a texel once the
+slope read the geometric normal. It did not — it fell from 6.0 to 3.0.** The
+prediction was wrong in an informative way, and the reason is a second artefact
+the first diagnosis did not see.
 
-| `DEPTH_BIAS_TEXELS` | lumen's strip | dunes              |
-| ------------------- | ------------- | ------------------ |
-| 0.5                 | 0.140 m       | heavy cross-hatch  |
-| 3                   | 0.244 m       | faint hatch        |
-| 5                   | 0.330 m       | clean              |
-| 6 (shipped)         | 0.375 m       | clean, with margin |
+The geometric normal removes the _broad cross-hatch_ over the dunes' valley
+floor, which is real and is what six texels were paying for. Underneath it is a
+**facet seam**: adjacent triangles of a tessellated surface climb at different
+rates, each is biased by its own slope, and the texel their shared edge falls in
+stores the steeper one's depth. No slope read off either facet predicts the
+other's, so a constant still covers it — a smaller one. Measured, slope
+coefficient held at 2.0:
 
-**The fix that removes the trade is a bias driven from the geometric normal**
-(`ddx`/`ddy` of the world position, or a normal-offset formulation), which
-describes the triangle actually rasterised rather than the normal interpolated
-across it. With it the constant falls back towards a half texel and the strip
-with it — roughly 0.14 m on the table above. Not built. This is the next thing
-on this path and the only one that makes the remaining strip go away without
-buying acne somewhere else.
+| `DEPTH_BIAS_TEXELS` | lumen's strip | dunes, shading `N` | dunes, facet `Ng`   |
+| ------------------- | ------------- | ------------------ | ------------------- |
+| 0                   | 0.128 m       | heavy cross-hatch  | seam on most edges  |
+| 1                   | 0.170 m       | —                  | seam on some edges  |
+| 2                   | 0.213 m       | faint cross-hatch  | a few isolated dots |
+| 3 (shipped)         | 0.256 m       | —                  | clean               |
+| 6 (was)             | 0.382 m       | clean              | clean               |
 
-**Considered and declined:** shrinking `CASTER_REACH`. It was the number that
-set the leak's size under the old denomination and no longer sets anything — the
-coupling is gone, so turning it down now buys nothing and costs casters standing
-off the cascade's near plane.
+Shipped at 3.0 with **no margin above it**, deliberately unlike the 6-over-5 it
+replaced: six covered an unexplained shortfall, three covers a bounded and
+understood one, so margin here is lumen's strip bought back for nothing. 4.0
+would cost about 0.29 m if that judgement is ever revisited.
 
-### Still open, and not addressed by the fix
+**The facet-seam mechanism is inference from the pictures, not instrumented.**
+What is measured is that the broad hatch goes and a dotted hairline on triangle
+edges appears in its place; the account of why fits and was not confirmed by
+reading the shadow map.
 
-- **The sunlit shaft over-reaches its sill edge by 0.185 m**, and the bias
-  cannot explain it: the sill silhouette is 2.99 m from the receiver, far
-  outside even the old 0.83 m of slack. Suspected sub-kernel occluder — the
-  sill's top face is 0.15 m, narrower than the PCF footprint — **not measured**.
-- **Cascade 0 is still unmeasured.** Every artefact measured, before and after,
-  is in cascade 1; the nearest floor point the fixed camera reaches is 4.74 m
-  against a 4.699 m split. Cascade 0's bias is tighter by arithmetic and no
-  frame shows it.
-- **The texel arithmetic in the original investigation never reconciled.** It
-  reported the strip as 5.52 cascade-1 texels, but `TILE` is 1024 over a 48 m
-  cascade, making a texel 0.047 m and the strip about 12.8. Every measurement
-  that survived into the fix is world-space and does not depend on it, so this
-  is a loose end rather than a live doubt — but the claim that the wall-head
-  sawtooth is single-texel quantisation rested on it and is **unverified**.
-- **One backend.** vk on radv, cross-checked on llvmpipe. wgpu, mtl and dx12
-  were not run; the MSL and DXIL artifacts compile and no frame from them was
-  inspected. `run-cross-backend-e2e.sh` was not run for this change.
-- **The dunes diagnosis is inference.** The hatch follows the one-metre
-  triangulation rather than cluster boundaries, which points at shading-normal
-  versus facet and away from a shadow-pass LOD mismatch — but the shadow pass's
-  LOD selection was not instrumented to rule the second out.
+### What would take the strip below 0.26 m
+
+Nothing cheap. The remaining constant is covering a real quantity, so lowering
+it alone brings the seam back — the table is the evidence. Removing the seam
+means biasing per-edge rather than per-facet, which nothing in the tree does and
+which is a research task rather than a slice. **Recorded as the floor of this
+approach** rather than as work: 0.256 m on a 0.15 m shell is a shadow that still
+detaches, and the next real gain is more likely to come from the shadow map's
+resolution at the contact than from the bias.
+
+### Still open
+
+- **The sunlit shaft over-reaches its sill edge by 0.185 m**, unexplained by the
+  bias at any denomination — the sill silhouette is 2.99 m from the receiver.
+  Suspected sub-kernel occluder, the sill's top face being narrower than the PCF
+  footprint. **Not measured**, and untouched by either slice.
+- **The cornice metric never reconciled between the two slices.** The first
+  reported the band at the back wall's head going 112 luma → 5.7; the second,
+  measuring peak luma in the band over the wall below it, read 61 on the
+  _unmodified_ tree and 21 after. The second slice's pair is matched and
+  reproducible; the first's statistic was not recorded and could not be
+  recovered, and the figure has been dropped from `CHANGELOG.md`. **Only the
+  second pair should be quoted.**
+- **Cascade 0 is still unmeasured** across all of this. Every artefact measured
+  is in cascade 1 — the nearest floor point the fixed camera reaches is 4.74 m
+  against a 4.699 m split.
+- **The geometric normal's sign was measured on SPIR-V/radv only.** It is
+  derived from the shading normal rather than hard-coded, which makes the other
+  three targets correct by construction; none of them was run.
+- **One backend throughout.** vk on radv, cross-checked on lavapipe, which
+  improved slightly on both slices. wgpu, mtl and dx12 were not run;
+  `run-cross-backend-e2e.sh` was not run for either change.
+- **The dunes acne grading is visual**, backed by amplified difference maps. A
+  radius-4 high-pass misses the cross-hatch entirely — its wavelength is tens of
+  pixels — and a deficit-against-clean-reference measure conflates acne with
+  legitimate shadow tightening at low bias. No numeric acne metric in this tree
+  is trustworthy on its own.
+- **`crates/crcbl-shaders/src/mesh.rs` has a stale doc reference** on
+  `SHADOW_TILE`: it names `SPOT_DEPTH_BIAS_TEXELS`, which is now
+  `PUNCTUAL_DEPTH_BIAS_TEXELS`. Pre-existing and one line to fix.
 
 ## The lumen web demo is deferred, and what naming a new demo costs
 
