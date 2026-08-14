@@ -682,18 +682,6 @@ fn the_spot_shadow_scene_draws_the_same_frame_on_every_geometry_path() {
     );
 }
 
-/// Every pixel of a block `half` wide and `half` tall about `centre`, clipped to
-/// the frame.
-///
-/// One definition because three readers walk the same block and one of them —
-/// [`predicted_block_channel`] — is a *model* of what the other two measure. Two
-/// loops that have to agree pixel for pixel are two loops that will not.
-fn block_pixels(centre: (u32, u32), half: (u32, u32)) -> impl Iterator<Item = (u32, u32)> {
-    (centre.1.saturating_sub(half.1)..(centre.1 + half.1).min(EXTENT.1)).flat_map(move |y| {
-        (centre.0.saturating_sub(half.0)..(centre.0 + half.0).min(EXTENT.0)).map(move |x| (x, y))
-    })
-}
-
 /// The mean brightness of a `width` by `height` block of the frame centred on
 /// `(x, y)`, summed over RGB.
 ///
@@ -703,10 +691,12 @@ fn block_pixels(centre: (u32, u32), half: (u32, u32)) -> impl Iterator<Item = (u
 fn block_brightness(image: &Image, centre: (u32, u32), half: (u32, u32)) -> f32 {
     let mut total = 0.0f32;
     let mut count = 0u32;
-    for (x, y) in block_pixels(centre, half) {
-        let pixel = image.pixel(x, y).expect("inside the frame");
-        total += f32::from(pixel[0]) + f32::from(pixel[1]) + f32::from(pixel[2]);
-        count += 1;
+    for y in centre.1.saturating_sub(half.1)..(centre.1 + half.1).min(EXTENT.1) {
+        for x in centre.0.saturating_sub(half.0)..(centre.0 + half.0).min(EXTENT.0) {
+            let pixel = image.pixel(x, y).expect("inside the frame");
+            total += f32::from(pixel[0]) + f32::from(pixel[1]) + f32::from(pixel[2]);
+            count += 1;
+        }
     }
     assert!(count > 0, "an empty block measures nothing");
     total / (count as f32 * 3.0)
@@ -722,10 +712,12 @@ fn block_brightness(image: &Image, centre: (u32, u32), half: (u32, u32)) -> f32 
 fn block_channel(image: &Image, centre: (u32, u32), half: (u32, u32), index: usize) -> f32 {
     let mut total = 0.0f32;
     let mut count = 0u32;
-    for (x, y) in block_pixels(centre, half) {
-        let pixel = image.pixel(x, y).expect("inside the frame");
-        total += f32::from(pixel[index]);
-        count += 1;
+    for y in centre.1.saturating_sub(half.1)..(centre.1 + half.1).min(EXTENT.1) {
+        for x in centre.0.saturating_sub(half.0)..(centre.0 + half.0).min(EXTENT.0) {
+            let pixel = image.pixel(x, y).expect("inside the frame");
+            total += f32::from(pixel[index]);
+            count += 1;
+        }
     }
     assert!(count > 0, "an empty block measures nothing");
     total / count as f32
@@ -1289,337 +1281,6 @@ fn row_channel(image: &Image, at: (u32, u32), half: u32, index: usize) -> f32 {
     }
     assert!(count > 0, "an empty row measures nothing");
     total / count as f32
-}
-
-/// The anti-vacuity floor for [`Scene::Probes`].
-///
-/// **Far above every other floor here, and it is the probe field itself.** This
-/// frame is one flat floor whose colour is a function of `x` alone, so the
-/// gradient contributes about a colour per column of it and the frame runs well
-/// past this number — [`Image::distinct_colors`] stops counting at the floor it
-/// is given, so the suite's own line reports the floor rather than the total.
-///
-/// What a floor this high separates is measured rather than guessed, and both
-/// figures come from breaking the scene and reading this assertion's message: a
-/// volume whose linear band is zeroed draws a *flat* floor and measures **221**,
-/// and a volume of nothing at all leaves the floor black and measures **2**. A
-/// floor of 16 — every other scene's here — would pass the first of those.
-const MIN_COLORS_PROBES: usize = 512;
-
-/// How many pixels of the frame one world unit of [`Scene::Probes`]' floor is.
-///
-/// [`POINT_PIXELS_PER_UNIT`]'s arithmetic through `screenshot`'s own
-/// [`PROBE_CAMERA_UP`](crcbl::screenshot::PROBE_CAMERA_UP): the frame's short
-/// half-axis covers `up * tan(30°)` of floor and a pixel is that over half the
-/// frame's height. Read from that constant rather than written out again,
-/// because this scene inverts the mapping as well as using it and the two copies
-/// would agree only until somebody moved the camera.
-const PROBE_PIXELS_PER_UNIT: f32 =
-    (EXTENT.1 as f32 / 2.0) / (crcbl::screenshot::PROBE_CAMERA_UP * 0.577_350_3);
-
-/// Where a point on [`Scene::Probes`]' floor lands in the frame.
-///
-/// [`point_pixel`]'s flip for [`point_pixel`]'s reason: the camera looks down
-/// `-Y` with `+Z` up, so world `+X` is the frame's left and world `+Z` is its
-/// top.
-fn probe_pixel(x: f32, z: f32) -> (u32, u32) {
-    let column = EXTENT.0 as f32 / 2.0 - x * PROBE_PIXELS_PER_UNIT;
-    let row = EXTENT.1 as f32 / 2.0 - z * PROBE_PIXELS_PER_UNIT;
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "both bands below are inside the frame, which the block reader asserts"
-    )]
-    (column as u32, row as u32)
-}
-
-/// The world position on the floor that a pixel's **centre** sees — the inverse
-/// of [`probe_pixel`], and the thing the mirror comparison is evaluated at.
-///
-/// An inverse exists in closed form only because the camera looks straight down
-/// at the plane `y = 0`: the projection of that plane is then linear in `x` and
-/// `z`, so this is a subtraction and a division rather than an unprojection
-/// through the frame's matrices. `+ 0.5` because a fragment is shaded at its
-/// pixel's centre and the field this evaluates has a gradient across it: the
-/// bright band moves about three quarters of a level per pixel, so getting the
-/// convention wrong would spend a third of [`PROBE_MIRROR_LEVELS`] on nothing.
-fn probe_world(column: u32, row: u32) -> [f32; 3] {
-    let x = (EXTENT.0 as f32 / 2.0 - (column as f32 + 0.5)) / PROBE_PIXELS_PER_UNIT;
-    let z = (EXTENT.1 as f32 / 2.0 - (row as f32 + 0.5)) / PROBE_PIXELS_PER_UNIT;
-    [x, 0.0, z]
-}
-
-/// The half-extent of each band [`Scene::Probes`] is measured over, in pixels.
-///
-/// [`AO_BAND`]'s size, and it fits for a reason of its own: the probe field
-/// varies across the block, so every pixel of it is predicted separately and the
-/// block is an average of a gradient rather than of one value. Wide enough that
-/// `ssao.slang`'s 4×4 rotation tile and the box blur over it have averaged out,
-/// narrow enough to be a small fraction of [`PROBE_BAND_AT`]'s clearance from
-/// the nearest wall.
-const PROBE_BAND: (u32, u32) = (5, 5);
-
-/// How far from the frame's centre the two bands sit, in world units.
-///
-/// **The same distance on both sides, and that is the whole claim.** The camera
-/// looks straight down, the floor is one flat quad of one albedo, the sun's
-/// contribution to it is exactly zero — see `screenshot`'s `probe_sun` — and the
-/// occlusion at this distance from every wall is one. Two points at `±x` on that
-/// floor therefore differ in exactly one thing: which way the probe grid says the
-/// light at them arrives from.
-///
-/// A unit clear of the `±X` walls at `PROBE_ROOM_WIDTH / 2`, which is twice
-/// `crcbl_render::ForwardRenderer`'s occlusion radius — so the bands are outside
-/// the darkening, not merely near its edge.
-const PROBE_BAND_AT: f32 = 0.6;
-
-/// How much more of its own colour each end of the floor must carry than the
-/// other end does.
-///
-/// [`AO_RATIO`]'s shape and, like it, a number set under what the frame measures
-/// rather than at it: the run that blessed the golden reads about `1.99` on red
-/// and `1.96` on blue, both after the sRGB encode has compressed a linear ratio
-/// of over four. This is a floor with margin under those and far over the
-/// two-level drift `crcbl_golden::Tolerance::RASTERISER` allows.
-///
-/// **What it separates is the linear band of the spherical harmonic, alone.**
-/// The two probes hold identical *constant* bands — see `screenshot`'s
-/// `probe_grid`, which is built that way on purpose — so a shader that evaluated
-/// `sh.w` and dropped the three dot products draws a uniform floor and lands at
-/// exactly `1.00`, as does a zeroed linear band, as does a flat ambient in place
-/// of the grid.
-const PROBE_RATIO: f32 = 1.5;
-
-/// How far the frame may sit from what
-/// [`crcbl_shaders::probe::irradiance_at`](crcbl::shaders::probe::irradiance_at)
-/// predicts for it, in levels of 255.
-///
-/// **This is the number slice 1 owed.** The Rust mirror and `mesh.slang`'s
-/// `probe_irradiance` are two implementations of one evaluation, and until this
-/// scene existed nothing had ever compared them: the literature tests bind the
-/// mirror, every golden in the tree was drawn with a volume of zeroes, and
-/// `x + 0 == x` says nothing about the arithmetic on either side.
-///
-/// A rendered pixel has been through the whole shading chain, so the comparison
-/// is only worth making because this scene takes that chain apart — every step
-/// between the two is either exact or absent:
-///
-/// * `lit = diffuse_albedo * (irradiance * occluded + direct) + gloss`, and
-///   `direct` and `gloss` are **exactly zero** on this floor because the sun is
-///   horizontal and the floor's normal is `+Y`.
-/// * `occluded` is **exactly one**: `ssao.slang` finds nothing within its radius
-///   of a band this far from every wall, and `blocked == 0` gives `1.0` rather
-///   than something near it.
-/// * `diffuse_albedo` is the floor face's own colour out of
-///   `crcbl_shaders::mesh::OPEN_BOX_FACES` — the material row is untinted, its
-///   page layer is the white one and its metallic is zero.
-/// * `tonemap.slang` is `saturate(color * 1.0)`, the identity below one, and the
-///   scene's radiances are chosen so the brightest floor pixel stays under it.
-/// * The swapchain is sRGB, so the only remaining step is the standard transfer
-///   function, which [`srgb_encode`] is.
-///
-/// So what is left for this tolerance to cover is 8-bit rounding, the sRGB
-/// encode's own precision, and half a pixel of disagreement about where a
-/// fragment centre is. Measured over six channel/band pairs at **0.13 levels at
-/// worst on radv** and **0.18 on lavapipe** — a five-fold margin under this
-/// budget, with the rest of it left for the encode's own allowance on a backend
-/// nothing here has run.
-///
-/// **What it can and cannot catch was measured too**, by scaling the mirror's
-/// result and watching this go red: a systematic error of 2% moves the worst
-/// pair by 1.64 levels and fails, and one of 1% would move it by about 0.8 and
-/// would not. So the honest statement is that this catches a disagreement of
-/// roughly a per cent and a half or more — which is every shape of transcription
-/// slip the two implementations can have, since a permuted lane, a dropped band
-/// or a transfer coefficient off by a factor moves the bright band by tens of
-/// levels.
-///
-/// **It is also the anti-vacuity claim**, and a stronger one than a floor: it
-/// asserts a *value*, so an unpainted frame misses it by the whole of the value.
-const PROBE_MIRROR_LEVELS: f32 = 1.0;
-
-/// The sRGB transfer function, encoding linear light into the swapchain's
-/// levels.
-///
-/// The standard piecewise curve — IEC 61966-2-1, and what Vulkan's
-/// `*_SRGB` formats are defined to apply on a write. Written out rather than
-/// reached for because nothing in this workspace has needed it before: the
-/// engine hands linear colour to an sRGB attachment and the hardware encodes it,
-/// so this is the only place that has ever had to say what the hardware did.
-fn srgb_encode(linear: f32) -> f32 {
-    if linear <= 0.003_130_8 {
-        12.92 * linear
-    } else {
-        1.055 * linear.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-/// The floor's albedo, read out of the mesh the room is made of.
-///
-/// Read rather than written down: it is the one number in the forward model
-/// below that belongs to somebody else, and a copy of it here would be a second
-/// place that has to change when the open box is recoloured.
-fn probe_floor_albedo() -> [f32; 3] {
-    crcbl::shaders::mesh::OPEN_BOX_FACES
-        .iter()
-        .find(|face| face.name == "floor")
-        .expect("the open box has a floor")
-        .color
-}
-
-/// What the Rust mirror says one channel of one block of [`Scene::Probes`]
-/// should measure, in the frame's own levels.
-///
-/// The forward model [`PROBE_MIRROR_LEVELS`] justifies: the irradiance the mirror
-/// gives the floor's normal at each pixel's own world position, times the floor's
-/// albedo, through the sRGB encode. Per pixel and then averaged, in the same
-/// order and over the same pixels [`block_channel`] reads, because the field has
-/// a gradient across the block and the encode is not linear — evaluating the
-/// centre and encoding once is a different number.
-fn predicted_block_channel(centre: (u32, u32), half: (u32, u32), index: usize) -> f32 {
-    let grid = crcbl::screenshot::probe_grid();
-    let albedo = probe_floor_albedo();
-    let mut total = 0.0f32;
-    let mut count = 0u32;
-    for (x, y) in block_pixels(centre, half) {
-        let irradiance = crcbl::shaders::probe::irradiance_at(
-            &grid.volume,
-            &grid.probes,
-            probe_world(x, y),
-            [0.0, 1.0, 0.0],
-        );
-        let lit = (albedo[index] * irradiance[index]).min(1.0);
-        total += srgb_encode(lit) * 255.0;
-        count += 1;
-    }
-    assert!(count > 0, "an empty block predicts nothing");
-    total / count as f32
-}
-
-#[test]
-#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
-fn the_probes_scene_lights_its_room_and_matches_its_golden() {
-    draw_scene_and_match_its_golden(
-        Scene::Probes,
-        "probes",
-        MIN_COLORS_PROBES,
-        the_probe_grid_lights_each_end_of_the_room_in_its_own_colour,
-    );
-}
-
-#[test]
-#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
-fn the_probes_scene_draws_the_same_frame_on_every_geometry_path() {
-    draw_scene_on_every_geometry_path(
-        Scene::Probes,
-        "probes",
-        MIN_COLORS_PROBES,
-        the_probe_grid_lights_each_end_of_the_room_in_its_own_colour,
-    );
-}
-
-/// [`Scene::Probes`]' claim: **the two ends of one flat floor carry opposite
-/// colours, and the frame is the irradiance the Rust mirror computes.**
-///
-/// **The golden cannot make either claim.** A probe volume that evaluated to its
-/// constant band alone draws a flat lit floor, which is a perfectly plausible
-/// picture of a room under an even sky and would be blessed without comment; so
-/// would a volume whose linear band was zero, and so would a flat ambient with no
-/// probes in it at all. Every one of those is a *uniform* change, and the first
-/// claim here is a ratio between two bands of one frame, which no uniform change
-/// can move.
-///
-/// Two bands, both on the floor, both [`PROBE_BAND_AT`] from the frame's centre:
-///
-/// * `-X`, nearest the probe whose red source is overhead. It must be
-///   unmistakably the redder of the two.
-/// * `+X`, nearest the probe whose blue source is overhead. It must be
-///   unmistakably the bluer.
-///
-/// **The two ratios run in opposite directions, and that is what nothing else can
-/// fake.** Anything that brightens or darkens one side of the frame — a vignette,
-/// a light nobody meant to leave on, an occlusion field that is not symmetric —
-/// moves red and blue *together* and satisfies neither ratio. Only a field whose
-/// linear band changes sign across the room moves them apart.
-///
-/// Then the second claim: [`the_shader_and_the_rust_mirror_agree_about_the_irradiance`],
-/// which is what closes the gap the probe row's first slice left open.
-///
-/// [`the_shader_and_the_rust_mirror_agree_about_the_irradiance`]: fn@the_shader_and_the_rust_mirror_agree_about_the_irradiance
-fn the_probe_grid_lights_each_end_of_the_room_in_its_own_colour(image: &Image) {
-    let band =
-        |x: f32, channel: usize| block_channel(image, probe_pixel(x, 0.0), PROBE_BAND, channel);
-    let red = (band(-PROBE_BAND_AT, 0), band(PROBE_BAND_AT, 0));
-    let blue = (band(-PROBE_BAND_AT, 2), band(PROBE_BAND_AT, 2));
-    eprintln!(
-        "crcbl render e2e: probes — red {:.1} at -X against {:.1} at +X; \
-         blue {:.1} against {:.1}",
-        red.0, red.1, blue.0, blue.1
-    );
-    assert!(
-        red.1 * PROBE_RATIO < red.0,
-        "the -X end of the floor must carry unmistakably more red than the +X end, at the same \
-         distance from the eye, on the same surface, under the same albedo and with no direct \
-         light on either: {:.1} against {:.1} — the probes' linear band is not in this frame",
-        red.0,
-        red.1
-    );
-    assert!(
-        blue.0 * PROBE_RATIO < blue.1,
-        "and the +X end must carry unmistakably more blue than the -X end: {:.1} against {:.1} \
-         — a frame that leads in red *and* in blue at the same end is one thing brightening a \
-         side of the room, not two probes disagreeing about where the light comes from",
-        blue.1,
-        blue.0
-    );
-    the_shader_and_the_rust_mirror_agree_about_the_irradiance(image);
-}
-
-/// [`Scene::Probes`]' second claim, and the one this scene exists for: **the
-/// device's `probe_irradiance` computes what
-/// [`crcbl_shaders::probe::irradiance_at`](crcbl::shaders::probe::irradiance_at)
-/// computes.**
-///
-/// The probe row landed as two implementations of one evaluation — a Slang
-/// function and a Rust mirror of it — checked against the literature on the host
-/// side and against nothing at all on the device side, because no scene had a
-/// probe in it and an additive term that is everywhere zero moves no golden. This
-/// is the comparison that was owed.
-///
-/// Every channel of both bands, absolutely rather than in proportion, because
-/// this scene is built so the whole chain between the two is exact — see
-/// [`PROBE_MIRROR_LEVELS`], which is where each step of it is named. Both bands
-/// and all three channels rather than one: the two bands blend the pair of probes
-/// in opposite proportions, the red and blue channels carry the linear band in
-/// opposite directions, and the green channel carries no linear band at all — so
-/// between them they read every coefficient the volume holds.
-///
-/// **A wrong tolerance here would be the worst kind of green light**, so the
-/// number is measured rather than chosen; the printed line is what a later run
-/// checks it against.
-fn the_shader_and_the_rust_mirror_agree_about_the_irradiance(image: &Image) {
-    let mut worst = 0.0f32;
-    for (side, x) in [("-X", -PROBE_BAND_AT), ("+X", PROBE_BAND_AT)] {
-        let at = probe_pixel(x, 0.0);
-        for (name, channel) in [("red", 0), ("green", 1), ("blue", 2)] {
-            let measured = block_channel(image, at, PROBE_BAND, channel);
-            let predicted = predicted_block_channel(at, PROBE_BAND, channel);
-            let miss = (measured - predicted).abs();
-            worst = worst.max(miss);
-            assert!(
-                miss <= PROBE_MIRROR_LEVELS,
-                "the {side} band's {name} channel measures {measured:.2} and the Rust mirror of \
-                 `probe_irradiance` predicts {predicted:.2} for it, a miss of {miss:.2} level(s) \
-                 against a budget of {PROBE_MIRROR_LEVELS} — the shader and the host disagree \
-                 about the same coefficients, or this frame did not reach the swapchain through \
-                 the sRGB encode this model assumes"
-            );
-        }
-    }
-    eprintln!(
-        "crcbl render e2e: probes — the shader and the Rust mirror agree to {worst:.2} level(s) \
-         at worst over both bands and all three channels"
-    );
 }
 
 #[test]

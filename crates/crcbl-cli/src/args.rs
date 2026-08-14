@@ -156,7 +156,6 @@ OPTIONS:
                            ao                  the inside of a box, ambient only
                            ssr                 a pyramid reflected in a smooth
                                                floor
-                           probes              a room lit by irradiance probes
                            sprite              four sprites over three batches
                            ui                  text, a rect and an outline
         --size WxH       Output dimensions. Default: 1920x1080. Each edge must
@@ -683,7 +682,6 @@ const SCENES: &[crcbl::screenshot::Scene] = {
         Scene::PointShadow,
         Scene::Ao,
         Scene::Ssr,
-        Scene::Probes,
         Scene::Sprite,
         Scene::Ui,
     ]
@@ -705,7 +703,6 @@ const fn scene_name(scene: crcbl::screenshot::Scene) -> &'static str {
         Scene::PointShadow => "point_shadow",
         Scene::Ao => "ao",
         Scene::Ssr => "ssr",
-        Scene::Probes => "probes",
         Scene::Sprite => "sprite",
         Scene::Ui => "ui",
     }
