@@ -39,13 +39,16 @@
 //! screen — see [`MIRROR_FOOT`]. The rough metal block is untouched, because its
 //! roughness is above the cutoff a single ray is honest at
 //! ([`crcbl::shaders::ssr::ROUGHNESS_CUTOFF`]); the blur that lowers it and the
-//! irradiance probes that would fill in a miss are both unbuilt. The debug panel
-//! says so on a row of its own, and `docs/backlog.md` carries it as owed work.
+//! specular probe fallback that would fill an SSR miss are both unbuilt. The
+//! debug panel says so on a row of its own, and `docs/backlog.md` carries it as
+//! owed work.
 //!
-//! **The coloured wall does not bounce**, for the neighbouring reason: bounced
-//! light is global illumination, and there is none. It is a coloured wall that
-//! takes the sun; what it will look like when it bounces is what milestone 3
-//! will show.
+//! **The coloured wall bounces**, and [`crate::bounce`] is the whole of how: a
+//! single analytic gather of the sun's first bounce off this room's interior,
+//! baked from these constants into the irradiance volume [`room`] hands over. It
+//! is one bounce off one box rather than a global-illumination solve, and what
+//! it leaves out — every occluder standing in the room, and every bounce after
+//! the first — is named in that module's docs.
 //!
 //! Neither is faked. A fixture whose job is showing what the renderer does must
 //! not flatter it.
@@ -55,7 +58,7 @@ use std::borrow::Cow;
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{
     Camera, Capacities, DirectionalLight, ForwardRenderer, Geometry, InstanceDesc,
-    InstancePoolError, Light, MeshDesc, PageDesc, PointLight, ProbeGrid, Projection, SceneDesc,
+    InstancePoolError, Light, MeshDesc, PageDesc, PointLight, Projection, SceneDesc,
 };
 use crcbl::shaders::mesh::{self, GpuMaterial, MeshVertex};
 
@@ -197,6 +200,32 @@ pub const SUNLIT_FLOOR: Vec3 = Vec3::new(2.6, 0.0, -2.6);
 /// — and this point is 1.2 m clear of the wall at every one of them.
 pub const SHADED_FLOOR: Vec3 = Vec3::new(-1.8, 0.0, -1.0);
 
+/// A point on the plaster back wall **beside the coloured wall**, where that
+/// wall's bounce lands.
+///
+/// Public because it is half of the golden suite's claim about
+/// [`crate::bounce`], and the pair is only evidence while both halves are what
+/// this module says they are —
+/// `the_two_back_wall_samples_differ_in_the_bounce_and_in_nothing_else` is what
+/// checks that with no GPU.
+///
+/// **Off the wall rather than on it, and below eye height rather than at it.**
+/// Both are the whole of what makes this a measurement: nearer the corner and
+/// the golden's block would take in the coloured wall itself, which is a reading
+/// of the material row rather than of its bounce; higher up and it is further
+/// from the only part of that wall the sun reaches, which is a strip along its
+/// foot — the tint measured half again as strong here as at eye height.
+pub const TINTED_PLASTER: Vec3 = Vec3::new(2.6, 1.0, -HALF_DEPTH);
+
+/// The mirror of [`TINTED_PLASTER`] across the room's axis.
+///
+/// Same wall, same material row, same normal, same height, the same distance
+/// from the end wall beside it — and the width of the room away from the only
+/// saturated surface in it. The whole of what separates the two is which wall's
+/// bounce reaches them, which is what makes the ratio between them a claim about
+/// the volume rather than about two arbitrary pixels.
+pub const UNTINTED_PLASTER: Vec3 = Vec3::new(-TINTED_PLASTER.x, TINTED_PLASTER.y, TINTED_PLASTER.z);
+
 /// The rough metal block: minimum corner.
 ///
 /// Standing free on the open floor, between the window's light and the camera,
@@ -286,9 +315,10 @@ pub const FLOOR: usize = 1;
 
 /// The coloured wall's row.
 ///
-/// Saturated, so the light it would bounce is unmistakably its own colour when
-/// there is finally a bounce to see. Today it is a coloured wall and the room
-/// beside it is not tinted, which is exactly what "there is no GI" looks like.
+/// Saturated, so the light it bounces is unmistakably its own colour. It is the
+/// only row in this room that is not a grey, which is what lets
+/// [`crate::bounce`] be measured at all: light arriving at a probe redder than
+/// sunlit plaster has been off this wall and off nothing else.
 pub const BOUNCE: usize = 2;
 
 /// The mirror-grade panel's row: metallic, and as smooth as the lobe is worth
@@ -327,16 +357,16 @@ const ROUGH_METAL_ROUGHNESS: f32 = 0.55;
 /// tonemap's top end over the whole room — the first frame of this room was a
 /// white floor at 250/255 with a shaft of sunlight on it nobody could see. Real
 /// white paint is around here.
-const PLASTER_COLOR: [f32; 4] = [0.82, 0.80, 0.78, 1.0];
+pub(crate) const PLASTER_COLOR: [f32; 4] = [0.82, 0.80, 0.78, 1.0];
 
 /// [`FLOOR`]'s base colour, on [`PLASTER_COLOR`]'s terms and darker still: this
 /// row is multiplied by [`FLOOR_TEXELS`] as well, which is what a floor with a
 /// pattern on it reflects.
-const FLOOR_COLOR: [f32; 4] = [0.62, 0.60, 0.57, 1.0];
+pub(crate) const FLOOR_COLOR: [f32; 4] = [0.62, 0.60, 0.57, 1.0];
 
 /// [`BOUNCE`]'s base colour: a strong warm red, at a factor a diffuse surface
 /// can carry without clipping under the sun.
-const BOUNCE_COLOR: [f32; 4] = [0.72, 0.11, 0.09, 1.0];
+pub(crate) const BOUNCE_COLOR: [f32; 4] = [0.72, 0.11, 0.09, 1.0];
 
 /// [`ROUGH_METAL`]'s base colour, which for a conductor is its **F0**: brass.
 ///
@@ -564,8 +594,9 @@ fn shell_slab(label: &'static str, min: Vec3, max: Vec3) -> MeshDesc<'static> {
 // The description
 // ---------------------------------------------------------------------------
 
-/// Everything the room makes resident: nine meshes, five material rows and a
-/// two-layer page.
+/// Everything the room makes resident: nine meshes, five material rows, a
+/// two-layer page and the irradiance volume [`crate::bounce`] bakes from the
+/// constants above.
 ///
 /// The mesh order is [`FLOOR_MESH`] through [`BLOCK_MESH`] and the row order is
 /// [`PLASTER`] through [`ROUGH_METAL`]; both are load-bearing, and the constants
@@ -672,7 +703,7 @@ pub fn room() -> SceneDesc<'static> {
             },
         ],
         page,
-        probes: ProbeGrid::default(),
+        probes: crate::bounce::probes(),
         capacities: CAPACITIES,
     }
 }
@@ -692,12 +723,11 @@ pub const CAPACITIES: Capacities = Capacities {
     instances: 64,
     materials: 8,
     lights: 8,
-    // **No probes yet.** `docs/plan/18-render-features.md`'s irradiance grid is
-    // authored per scene, this room authors none, and a grid of nothing adds
-    // exactly zero — so the goldens below are the ones they always were. The
-    // slice that gives the room a volume is the one that retires this crate's
-    // standing "the coloured wall does not bounce".
-    probes: 0,
+    // The irradiance volume [`crate::bounce`] bakes, whose size is that module's
+    // `PROBE_COUNTS` rather than a number written twice — `ProbeGrid::check`
+    // refuses a table that disagrees with its own volume, and this pool is the
+    // only other place the count appears.
+    probes: crate::bounce::PROBE_TOTAL,
 };
 
 /// Which mesh each object in the room is, and which row it shades through, in
@@ -994,6 +1024,11 @@ mod tests {
         assert!(scene.meshes.len() as u32 <= CAPACITIES.meshes);
         assert!(scene.materials.len() as u32 <= CAPACITIES.materials);
         assert!(OBJECTS.len() as u32 <= CAPACITIES.instances);
+        // The probe pool is the one that has to match **exactly** rather than
+        // fit: `ProbeGrid::check` refuses a table whose length differs from its
+        // own volume, and the pool is what the rows are copied into.
+        assert_eq!(scene.probes.probes.len() as u32, CAPACITIES.probes);
+        assert_eq!(scene.probes.volume.total(), CAPACITIES.probes);
         // The sun takes a row of the light list too, so the lamp needs room
         // beside it rather than exactly the whole list.
         const {
@@ -1238,6 +1273,102 @@ mod tests {
             "the ray back from {SHADED_FLOOR:?} meets the wall at ({dark_height:.2}, \
              {dark_run:.2}), which is inside the opening — both samples are lit"
         );
+    }
+
+    /// **[`TINTED_PLASTER`] and [`UNTINTED_PLASTER`] differ in the coloured
+    /// wall's bounce and in nothing else**, which is what makes the golden
+    /// suite's red-to-blue ratio between them a claim about [`crate::bounce`]
+    /// rather than about the sun.
+    ///
+    /// Built on
+    /// [`the_two_floor_samples_differ_in_the_sun_and_in_nothing_else`]'s terms,
+    /// and the direct term is the half that matters: both points are on the back
+    /// wall's inner face, whose normal is `+Z` and whose dot with [`sun`]'s
+    /// direction is **positive** — so this is a wall the sun could reach, and the
+    /// whole claim would collapse if it did. It does not, and the two miss the
+    /// opening in different ways, which is worth knowing because one mistake
+    /// cannot have produced both:
+    ///
+    /// - from [`TINTED_PLASTER`] the ray back along the sun crosses the window
+    ///   wall's plane **above the head** of the opening, and past its end as
+    ///   well;
+    /// - from [`UNTINTED_PLASTER`] it crosses at a height the opening does cover,
+    ///   and more than two metres beyond the end of it.
+    ///
+    /// Neither is within [`lamp`]'s reach at `t = 0`, which is the time the
+    /// golden draws: the orbit's nearest approach to either is well over
+    /// [`LAMP_REACH`].
+    ///
+    /// [`the_two_floor_samples_differ_in_the_sun_and_in_nothing_else`]: fn@the_two_floor_samples_differ_in_the_sun_and_in_nothing_else
+    #[test]
+    fn the_two_back_wall_samples_differ_in_the_bounce_and_in_nothing_else() {
+        let towards = sun().direction;
+        // The back wall is a wall the sun's direction faces, so there is
+        // something for the two points to be denied.
+        assert!(
+            Vec3::Z.dot(towards) > 0.0,
+            "the back wall faces away from the sun, so being unlit says nothing"
+        );
+
+        for point in [TINTED_PLASTER, UNTINTED_PLASTER] {
+            assert_eq!(
+                point.z, -HALF_DEPTH,
+                "{point:?} is not on the back wall's inner face"
+            );
+            assert!(
+                point.x.abs() < HALF_WIDTH && point.y > 0.0 && point.y < HEIGHT,
+                "{point:?} is outside the room"
+            );
+            let Light::Point(light) = lamp(0.0) else {
+                panic!("the lamp is a point light");
+            };
+            assert!(
+                point.distance(light.position) > light.radius,
+                "{point:?} is inside the lamp's radius, so the two samples do not differ in \
+                 the bounce alone"
+            );
+
+            // Back along the sun, to each of the three planes the ray could
+            // leave the room through from here. The sun is at `-x`, `+y`, `+z`,
+            // so the other three planes are behind it.
+            let to_window = (point.x + HALF_WIDTH) / -towards.x;
+            let to_ceiling = (HEIGHT - point.y) / towards.y;
+            let to_front = (HALF_DEPTH - point.z) / towards.z;
+            let crossing = point + towards * to_window;
+            let blocked = to_ceiling < to_window
+                || to_front < to_window
+                || !(WINDOW_SILL..=WINDOW_HEAD).contains(&crossing.y)
+                || crossing.z.abs() > WINDOW_HALF;
+            assert!(
+                blocked,
+                "the ray back from {point:?} leaves through the opening at \
+                 ({:.2}, {:.2}) after {to_window:.2} m, with the ceiling {to_ceiling:.2} m \
+                 away — this point is in full sun and the pair measures the sun",
+                crossing.y, crossing.z
+            );
+        }
+
+        // And the two are the same point mirrored, so nothing but the wall they
+        // stand beside separates them.
+        assert_eq!(TINTED_PLASTER.x, -UNTINTED_PLASTER.x);
+        assert_eq!(
+            (TINTED_PLASTER.y, TINTED_PLASTER.z),
+            (UNTINTED_PLASTER.y, UNTINTED_PLASTER.z)
+        );
+        // Clear of the coloured wall itself, and of everything standing in the
+        // room: a block of pixels centred on either has to be plaster.
+        for (min, max) in [
+            (PLINTH_MIN, PLINTH_MAX),
+            (MIRROR_MIN, MIRROR_MAX),
+            (BLOCK_MIN, BLOCK_MAX),
+        ] {
+            for point in [TINTED_PLASTER, UNTINTED_PLASTER] {
+                assert!(
+                    point.z < min.z || point.z > max.z,
+                    "{point:?} is inside the object spanning {min:?}..{max:?}"
+                );
+            }
+        }
     }
 
     /// [`MIRROR_FOOT`] and [`MIRROR_MISSES`] are on one face of one material and

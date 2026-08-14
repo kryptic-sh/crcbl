@@ -7778,10 +7778,10 @@ for the same reason occlusion did not.
 1. ~~The probe table, additive and zero.~~ **Shipped** as `ce253ad`.
 2. **`Scene::Probes` and its golden — written, reverted, and owed again.** See
    "the probes fixture is a full-frame gradient" below before rebuilding it.
-3. **lumen's room gets a volume.** A `probes()` beside `room()` computed from
-   the room's own constants. **Observable:** the coloured wall finally tints the
-   plaster beside it, which retires `lib.rs`'s standing "the coloured wall does
-   not bounce". Its golden moves for a reason its own module doc names.
+3. ~~lumen's room gets a volume.~~ **Shipped in this slice:** `bounce::probes()`
+   computes the sun's analytic first bounce from the room's own constants. The
+   coloured wall measurably tints the plaster beside it, and the golden moves
+   for the reason its module docs name.
 4. **The specular fallback.** `SsrParams` gains `inv_view`; the march returns
    `lerp(environment, hit, confidence) * fresnel`. **Observable:** the point on
    lumen's mirror panel above the reflecting band becomes measurably non-zero.

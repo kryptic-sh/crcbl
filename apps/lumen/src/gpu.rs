@@ -202,15 +202,18 @@ impl crcbl::ui::DebugModule for Paths {
 /// a conductor has none — see [`crate::room`] — so this says it on the screen
 /// where the black is, rather than only in a document nobody has open. Since
 /// screen-space reflections landed the panel's *foot* is lit and the rest of it
-/// is not, which is a picture that needs the row more rather than less.
+/// is not, which is a picture that needs the row more rather than less. The
+/// irradiance volume [`crate::bounce`] bakes does not change that: it is the
+/// diffuse half of the probe design, and a conductor has no diffuse lobe for it
+/// to reach.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Unbuilt;
 
 impl crcbl::ui::DebugModule for Unbuilt {
     fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
         section.set_title("unbuilt");
-        section.row_str("metal", "black: SSR misses, no probes");
-        section.row_str("bounce wall", "no GI: it does not bounce");
+        section.row_str("metal", "black: probes are diffuse, SSR miss is not");
+        section.row_str("bounce wall", "one analytic bounce, no GI solve");
         // The per-effect toggles used to be a row here. They are built — the
         // `paths` section's `effects` row is what this frame drew — so what is
         // still owed is the two request layers with no source in the tree.

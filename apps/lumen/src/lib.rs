@@ -20,15 +20,24 @@
 //!
 //! # What is not here, and where it is written down
 //!
-//! Irradiance probes, ray tracing, the render-to-texture monitor camera and the
-//! Pages web demo are all out of scope for this milestone and all recorded in
-//! `docs/backlog.md`. Two of them are visible in the picture rather than merely
-//! absent from it: **a fully metallic surface has no ambient term and renders
-//! near-black wherever a screen-space reflection finds nothing**, and the
-//! coloured wall does not bounce. [`room`]'s module docs
-//! say why, the debug panel's `unbuilt` section says it on screen, and neither
-//! is faked — a fixture whose job is showing what the renderer does must not
-//! flatter it.
+//! Ray tracing, the render-to-texture monitor camera and the Pages web demo are
+//! out of scope for this milestone and recorded in `docs/backlog.md`. One thing
+//! is visible in the picture rather than merely absent from it: **a fully
+//! metallic surface has no ambient term and renders near-black wherever a
+//! screen-space reflection finds nothing**. The irradiance volume [`bounce`]
+//! bakes does not fill that in — it is the *diffuse* half of
+//! `docs/plan/18-render-features.md`'s probe design, and the specular half a
+//! reflection miss would return is unbuilt.
+//!
+//! **The coloured wall does bounce**, which it did not before [`bounce`]: a
+//! single analytic gather of the sun's first bounce off the room's interior,
+//! computed from the room's own dimensions into the probe volume the scene
+//! carries. It is one bounce against one axis-aligned box and not a general
+//! global-illumination solution — nothing inside the room occludes it and
+//! nothing bounces twice — and that module's docs name each limit. [`room`]'s
+//! module docs say the rest, the debug panel's `unbuilt` section says it on
+//! screen, and none of it is faked: a fixture whose job is showing what the
+//! renderer does must not flatter it.
 //!
 //! # Rule 11 does not apply
 //!
@@ -44,6 +53,7 @@
 
 mod app;
 mod args;
+pub mod bounce;
 mod camera;
 mod gpu;
 mod menu;

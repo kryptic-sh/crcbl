@@ -441,12 +441,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   prerequisite rather than on taste: a gather bake needs a ray-triangle
   intersector and a BVH, and `crcbl-phys` has neither.
 
-  **Nothing renders differently yet.** No scene in the tree authors a volume,
-  the default grid is empty, an empty grid evaluates to exactly zero and
-  `x + 0 == x`, so every golden is byte-identical and none was re-blessed. A
-  description whose probe count disagrees with its volume's counts, or which
-  needs more rows than `Capacities::probes` reserves, is refused by name at
-  `ForwardRenderer::with_scene` like every other capacity.
+  `apps/lumen` now authors a deterministic volume baked from the room's own
+  dimensions: cube-face quadrature gathers the sun's first bounce from the
+  axis-aligned shell, including visibility through the window reveal. The
+  coloured wall measurably tints neighbouring plaster; interior props, lamp
+  bounce and later bounces remain intentionally outside this analytic model.
+  Other scenes retain the empty default, which evaluates to exactly zero and
+  leaves their goldens byte-identical. A description whose probe count disagrees
+  with its volume's counts, or which needs more rows than `Capacities::probes`
+  reserves, is refused by name at `ForwardRenderer::with_scene` like every other
+  capacity.
 
 - **`apps/lumen`'s pause menu switches the effects, mid-run.** Three rows below
   `CAMERA` — `SHADOWS`, `AO` and `REFLECTIONS`, the words `--no-shadows`,

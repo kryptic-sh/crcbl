@@ -1,5 +1,5 @@
 //! The room off a real device, from the fixed camera, against a checked-in
-//! golden — and five claims about the lighting in front of it.
+//! golden — and six claims about the lighting in front of it.
 //!
 //! # A golden alone cannot make a claim about lighting
 //!
@@ -11,7 +11,7 @@
 //! before it are about **where** the frame is bright and dark, in the shape
 //! `crates/crcbl/tests/render_e2e.rs` uses.
 //!
-//! Each of the five is a ratio between two blocks of pixels rather than an
+//! Each of the six is a ratio between two blocks of pixels rather than an
 //! absolute value, because an absolute one is a second golden written in
 //! numbers: it moves when the tonemap moves, and it says nothing a reviewer can
 //! act on.
@@ -80,7 +80,7 @@ const MIN_COLORS: usize = 64;
 const BLOCK: (u32, u32) = (4, 4);
 
 // ---------------------------------------------------------------------------
-// The five claims, as world positions
+// The claims, as world positions
 // ---------------------------------------------------------------------------
 
 /// A floor point **inside** the shaft of sunlight through the window.
@@ -168,7 +168,33 @@ const BOUNCE_AT: Vec3 = Vec3::new(room::HALF_WIDTH, 1.4, -2.0);
 const MIRROR_AT: Vec3 = room::MIRROR_MISSES;
 
 /// A point on the plaster back wall, clear of the panel and of the plinth.
-const PLASTER_AT: Vec3 = Vec3::new(-2.6, 1.5, -room::HALF_DEPTH);
+///
+/// [`room::UNTINTED_PLASTER`] — the far half of the bounce claim below, and the
+/// module that owns it is where the proof that nothing but the bounce separates
+/// it from [`TINTED_AT`] lives.
+const PLASTER_AT: Vec3 = room::UNTINTED_PLASTER;
+
+/// The same plaster **beside the coloured wall**, mirrored across the room's
+/// axis — [`room::TINTED_PLASTER`].
+const TINTED_AT: Vec3 = room::TINTED_PLASTER;
+
+/// How much redder, in red-to-blue, the plaster beside the coloured wall has to
+/// read than the same plaster across the room.
+///
+/// **The rendered symptom of the coloured wall's isolated CPU contribution.** A
+/// ratio of ratios, so it survives the tonemap and exposure the way every other
+/// claim here does. `bounce::the_environment_beside_the_coloured_wall_is_the_red_one`
+/// suppresses only `Face::Bounce` while preserving every neutral-surface bounce;
+/// that control establishes this ratio's coloured source. This assertion verifies
+/// the resulting rendered tint, not isolation by pixels alone.
+///
+/// Ten per cent, against a measured seventeen at [`EXTENT`] and nineteen at
+/// [`REVIEW_EXTENT`]. Not higher: the two blocks differ in one term of the
+/// shading added to a flat ambient, and the tonemap and the sRGB encode both
+/// compress that difference rather than preserving it — the same tint is half as
+/// large again in the linear irradiance the shader read, which is what
+/// `crcbl_lumen::bounce`'s own CPU claim measures.
+const BOUNCE_TINT: f32 = 1.10;
 
 /// Floor in the plinth's contact corner, where ambient occlusion is strongest.
 ///
@@ -515,7 +541,9 @@ fn inspect(image: &Image, extent: (u32, u32), block: (u32, u32)) {
 
     // ---- 3. a conductor has no ambient, and it shows ------------------------
     let mirror = brightness(image, project(&camera, extent, MIRROR_AT), block);
-    let plaster = brightness(image, project(&camera, extent, PLASTER_AT), block);
+    // Read again by claim 6 below, which is the far half of the bounce pair.
+    let at_plaster = project(&camera, extent, PLASTER_AT);
+    let plaster = brightness(image, at_plaster, block);
     assert!(
         plaster > LIT_FLOOR,
         "the plaster wall is at {plaster:.1}/255, so there is nothing to compare the \
@@ -565,6 +593,47 @@ fn inspect(image: &Image, extent: (u32, u32), block: (u32, u32)) {
         red / sum > BOUNCE_REDNESS,
         "the coloured wall reads {red:.1} / {green:.1} / {blue:.1} — its material row's \
          base-colour factor did not reach the fragment stage"
+    );
+
+    // ---- 6. and the coloured wall tints the plaster beside it ---------------
+    //
+    // Two blocks of the back wall's inner face at one height, mirrored across
+    // the room's axis: same material row, same normal, same depth, neither in
+    // the sun and neither in the lamp's reach —
+    // `room::the_two_back_wall_samples_differ_in_the_bounce_and_in_nothing_else`
+    // is what proves each has matching direct-light terms with no GPU. The CPU
+    // bounce control suppresses only Face::Bounce while retaining neutral rows;
+    // this assertion observes that isolated source's rendered tint rather than
+    // claiming the two pixel blocks isolate it on their own.
+    let tinted = project(&camera, extent, TINTED_AT);
+    // The block has to stay off the coloured wall itself, or this measures the
+    // material row rather than its bounce — and how many pixels that is depends
+    // on the extent, so it is asked of the projection rather than written down.
+    let corner = project(
+        &camera,
+        extent,
+        Vec3::new(room::HALF_WIDTH, TINTED_AT.y, TINTED_AT.z),
+    );
+    assert!(
+        tinted.0 + block.0 < corner.0,
+        "the block beside the coloured wall reaches to {} and the wall's own corner is at \
+         {} — this block has the wall in it",
+        tinted.0 + block.0,
+        corner.0
+    );
+    let tinted_brightness = brightness(image, tinted, block);
+    assert!(
+        tinted_brightness > LIT_FLOOR,
+        "the plaster beside the coloured wall is at {tinted_brightness:.1}/255, so there is \
+         nothing to take a ratio of"
+    );
+    let tinted_redness = channel(image, tinted, block, 0) / channel(image, tinted, block, 2);
+    let plain_redness = channel(image, at_plaster, block, 0) / channel(image, at_plaster, block, 2);
+    assert!(
+        tinted_redness > plain_redness * BOUNCE_TINT,
+        "the plaster beside the coloured wall reads a red-to-blue of {tinted_redness:.3} and \
+         the same plaster across the room {plain_redness:.3} — the CPU control isolates the \
+         coloured wall's contribution, and its rendered tint is missing"
     );
 }
 
@@ -670,7 +739,7 @@ fn the_room_draws_the_same_on_a_path_below_the_devices_own() {
     );
 
     // Every claim, on every arm: the golden is a comparison of pixels and the
-    // five in front of it are what say the frame holds the room at all, so an
+    // six in front of it are what say the frame holds the room at all, so an
     // arm that lost a mesh or a material row on the way down its lesser tail
     // fails on the claim rather than on a diff nobody can read.
     for (image, paths) in [(&best, &best_paths), (&lesser, &lesser_paths)] {
