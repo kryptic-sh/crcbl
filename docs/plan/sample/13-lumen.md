@@ -86,6 +86,23 @@ app can bake a mesh. `docs/backlog.md` carries what that left owed.
   with `--force-geometry` and `--force-binding` opening a device without the
   features that select anything better. `IndirectPerBatch / ArrayPages` — the
   browser's shape — runs on this desktop.
+- **Rule 12's other half: a second path actually drawn** (2026-08-14). Saying
+  which path a frame took is not the same as having taken more than one, and
+  until now every frame the golden suite drew came off the best tail the adapter
+  reports. `the_room_draws_the_same_on_a_path_below_the_devices_own` draws the
+  room twice through `OffscreenSetup::open_forward_with` — once on the adapter's
+  own selectors, once with the features that select anything above `Forced`'s
+  floor withheld — and holds **both arms to the one golden**: a lesser path is a
+  constraint on data layout rather than a separate renderer, so a difference
+  between the arms is a bug in the better path and a per-path reference is what
+  would bless it. The subtraction is done by `Forced::optional_features`, the
+  same function `--force-*` goes through, so it cannot drift from the flags a
+  selector reads. Measured: radv resolves the arms to `MeshShader / Bindless`
+  and `IndirectPerBatch / ArrayPages`, and llvmpipe reports mesh shading and
+  bindless too, so the lavapipe leg of `vk e2e` draws the same pair — the arms
+  are asserted to differ exactly when the adapter offers one of the withheld
+  flags, so a device already at the floor would be a checked claim rather than a
+  silent skip.
 - **Every effect toggles independently, and there are frames to prove it**
   (2026-08-14). `--no-shadows`, `--no-ao` and `--no-reflections` drive the
   programmatic layer of topic 39's resolution order; the panel's `paths` section

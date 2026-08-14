@@ -417,6 +417,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::screenshot::OffscreenSetup::open_forward_with`** — `open_forward`
+  taking the optional feature set to open the device with, instead of always
+  asking for `OffscreenSetup::OPTIONAL_FEATURES`. `open_with` is the same knob
+  for the `Scene` variants this module owns; this is it for a `ForwardScene` the
+  caller built. An adapter reports what it reports, so withholding a feature it
+  has is the only way one machine draws an application's scene on more than one
+  `GeometryPath` — without it every such frame comes off the best tail available
+  and the lesser paths, which is what browsers and Apple devices run, are never
+  executed. `open_forward` is unchanged for existing callers: it delegates here
+  with `OPTIONAL_FEATURES` and still draws on the best path the adapter offers.
+
 - **Per-effect toggles, resolved through topic 39's four layers.**
   `crcbl_render::effects` is the resolution point: `RenderEffects` is the effect
   set (`SHADOWS`, `AMBIENT_OCCLUSION`, `REFLECTIONS`), `EffectRequest` carries

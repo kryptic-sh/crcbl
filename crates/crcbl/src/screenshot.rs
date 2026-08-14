@@ -1774,7 +1774,8 @@ impl OffscreenSetup {
     ///
     /// The device asks for [`Self::OPTIONAL_FEATURES`], so the room is drawn on
     /// the best path the adapter offers — [`Self::caps`] is what says which that
-    /// was.
+    /// was. [`Self::open_forward_with`] is the same frame on a path the caller
+    /// names instead.
     ///
     /// A `build` that fails hands its error back and **nothing is left behind**:
     /// the swapchain, the surface and the device are released before this
@@ -1784,6 +1785,34 @@ impl OffscreenSetup {
     ///
     /// The same as [`Self::open`], plus whatever `build` returns.
     pub fn open_forward<F>(width: u32, height: u32, build: F) -> Result<Self, OffscreenError>
+    where
+        F: FnOnce(&dyn Device, QueueHandle, Format) -> Result<ForwardScene, OffscreenError>,
+    {
+        Self::open_forward_with(width, height, Self::OPTIONAL_FEATURES, build)
+    }
+
+    /// [`Self::open_forward`] asking the device for `optional_features` instead
+    /// of [`Self::OPTIONAL_FEATURES`].
+    ///
+    /// [`Self::open_with`] is this knob one scene down, and it is here for the
+    /// same reason: an adapter reports what it reports, so the only way a caller
+    /// on one machine reaches more than one
+    /// [`GeometryPath`](crate::hal::GeometryPath) is to open a device *without*
+    /// a feature the adapter has. Without it every frame an application's scene
+    /// draws comes off the best tail this machine offers, and the lesser ones —
+    /// which is what browsers and Apple devices run — are code no run here
+    /// executes. `apps/lumen/tests/golden.rs` draws its room through both and
+    /// holds the two arms to one golden.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::open_forward`].
+    pub fn open_forward_with<F>(
+        width: u32,
+        height: u32,
+        optional_features: Features,
+        build: F,
+    ) -> Result<Self, OffscreenError>
     where
         F: FnOnce(&dyn Device, QueueHandle, Format) -> Result<ForwardScene, OffscreenError>,
     {
@@ -1800,7 +1829,7 @@ impl OffscreenSetup {
             crate::backend::open()?,
             width,
             height,
-            Self::OPTIONAL_FEATURES,
+            optional_features,
             |device, queue, format| build(device, queue, format).map(SceneState::from),
         )
     }

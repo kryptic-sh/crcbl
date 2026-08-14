@@ -16,6 +16,16 @@
 //! numbers: it moves when the tonemap moves, and it says nothing a reviewer can
 //! act on.
 //!
+//! # Two capability paths, one golden
+//!
+//! Rule 12 asks a sample's CI run for "the path its runner selects plus one
+//! below it", and an adapter reports what it reports — so the lesser path is
+//! reached by opening a device *without* the features that select the better
+//! one. [`the_room_draws_the_same_on_a_path_below_the_devices_own`] is that
+//! second arm, and it is held to the **same** reference: a lesser path is a
+//! constraint on data layout rather than a separate renderer, so a difference
+//! between the arms is a bug and a second golden would bless it.
+//!
 //! # Feature-gated *and* ignored
 //!
 //! The pair `crcbl`'s `render-e2e` uses. A plain `cargo test --workspace
@@ -25,12 +35,12 @@
 
 #![cfg(feature = "golden-e2e")]
 
-use crcbl::hal::Format;
+use crcbl::hal::{AdapterInfo, BindingModel, Features, Format, GeometryPath};
 use crcbl::math::Vec3;
 use crcbl::render::{Camera, EffectOverride, EffectRequest, ForwardRenderer, RenderEffects};
 use crcbl::screenshot::{ForwardScene, OffscreenSetup};
 use crcbl_golden::{ChannelOrder, Golden, Image};
-use crcbl_lumen::room;
+use crcbl_lumen::{Forced, room};
 
 /// The extent the checked-in golden is blessed at.
 ///
@@ -199,32 +209,94 @@ const UNCHANGED: f32 = 0.02;
 // Rendering
 // ---------------------------------------------------------------------------
 
-/// Opens a device, builds the room on it, and reads one frame back.
+/// The selectors [`the_room_draws_the_same_on_a_path_below_the_devices_own`]
+/// holds its lesser arm at.
+///
+/// The floor of both axes — the browser's shape, which
+/// `docs/plan/sample/13-lumen.md` already names as the combination this desktop
+/// can be made to run. The floor rather than one named step down because an
+/// adapter reports what it reports: from here, *any* adapter offering anything
+/// above the floor gives the two arms a real difference to compare, and the one
+/// that offers nothing above it says so through the assertion rather than
+/// quietly.
+const BELOW: Forced = Forced {
+    geometry: Some(GeometryPath::IndirectPerBatch),
+    binding: Some(BindingModel::ArrayPages),
+};
+
+/// What to ask the lesser arm's device for: [`draw`]'s own set, minus the flags
+/// whose presence would select something above [`BELOW`].
+///
+/// **The subtraction is `crcbl_lumen`'s, not this file's.** `Forced` is what the
+/// binary's `--force-geometry` and `--force-binding` go through, so taking the
+/// difference there and applying it here means a selector that grows a flag
+/// moves this arm too, instead of leaving a second table behind still naming the
+/// old ones.
+///
+/// It has to be a difference rather than `BELOW.optional_features()` outright,
+/// because the two sets do **not** share a base:
+/// `Forced::optional_features` starts from `GpuContextDesc::default`'s optional
+/// set plus `TASK_SHADER`, which also carries the timestamp, present-feedback
+/// and present-timing flags [`OffscreenSetup::OPTIONAL_FEATURES`] never asks
+/// for. An arm opened from a different base than the one it is compared against
+/// is not a comparison.
+fn below_features() -> Features {
+    let selecting = Forced::default()
+        .optional_features()
+        .difference(BELOW.optional_features());
+    OffscreenSetup::OPTIONAL_FEATURES.difference(selecting)
+}
+
+/// Opens a device on the best path this adapter offers, builds the room on it,
+/// and reads one frame back.
+///
+/// [`draw_with`] is this asking for something less, which is the whole of what
+/// separates them: every claim below is about a frame, and a frame is the one
+/// thing that does not say which tail drew it.
+fn draw(extent: (u32, u32), effects: RenderEffects) -> (Image, String) {
+    let (image, paths, _) = draw_with(extent, effects, OffscreenSetup::OPTIONAL_FEATURES);
+    (image, paths)
+}
+
+/// [`draw`] opening the device with `optional_features` instead of
+/// [`OffscreenSetup::OPTIONAL_FEATURES`], and naming the adapter it opened.
 ///
 /// Everything below the renderer — the offscreen surface, the adapter pin, the
 /// ring, the barriers around the readback and the row unpadding — is
 /// [`OffscreenSetup`]'s, reached through
-/// [`OffscreenSetup::open_forward`](crcbl::screenshot::OffscreenSetup::open_forward).
+/// [`OffscreenSetup::open_forward_with`](crcbl::screenshot::OffscreenSetup::open_forward_with).
 /// A sample rebuilding that for itself is exactly what
 /// `docs/plan/sample/00-samples-overview.md` rule 1 forbids.
-fn draw(extent: (u32, u32), effects: RenderEffects) -> (Image, String) {
+///
+/// The adapter comes back because two arms are only a comparison if they opened
+/// the same one, and that is a claim the caller has to make.
+fn draw_with(
+    extent: (u32, u32),
+    effects: RenderEffects,
+    optional_features: Features,
+) -> (Image, String, AdapterInfo) {
     // A logger before anything opens: without one, every line a backend emits on
     // the way to a device goes nowhere, and a failure inside `open` names the
     // call that noticed rather than the one that caused it.
     crcbl::core::log::init_logging();
 
-    let mut setup = OffscreenSetup::open_forward(extent.0, extent.1, |device, queue, format| {
-        Ok(ForwardScene {
-            camera: room::fixed_camera(),
-            sun: room::sun(),
-            renderer: Box::new(build(device, queue, format, effects)?),
-        })
-    })
+    let mut setup = OffscreenSetup::open_forward_with(
+        extent.0,
+        extent.1,
+        optional_features,
+        |device, queue, format| {
+            Ok(ForwardScene {
+                camera: room::fixed_camera(),
+                sun: room::sun(),
+                renderer: Box::new(build(device, queue, format, effects)?),
+            })
+        },
+    )
     .unwrap_or_else(|why| panic!("a GPU backend opens for lumen's room: {why}"));
 
     let backend = setup.backend();
     let caps = setup.caps();
-    let adapter = setup.adapter();
+    let adapter = setup.adapter().clone();
     // Printed unconditionally and read with `--success-output immediate`: on a
     // green run — the run where the selected path is worth knowing — nextest
     // captures this and it is otherwise invisible.
@@ -240,18 +312,30 @@ fn draw(extent: (u32, u32), effects: RenderEffects) -> (Image, String) {
         caps.binding_model(),
         caps.lighting_path(),
     );
-    eprintln!("lumen golden: {paths} at {}x{}", extent.0, extent.1);
-    // The device took the best path its adapter offers. The frame alone cannot
-    // say — every path draws this room identically by construction — so a
-    // request that omitted a selector's flag would leave the renderer on a
-    // lesser tail with every assertion below still passing.
+    eprintln!(
+        "lumen golden: {paths} at {}x{}, asked for {optional_features:?}",
+        extent.0, extent.1,
+    );
+    // **The device landed on exactly the path its request names.** The frame
+    // alone cannot say — every path draws this room identically by construction
+    // — so an arm on a tail other than the one it asked for would leave every
+    // assertion below still passing. Met against the adapter, so on the default
+    // request this is the claim it has always made, "the best path the adapter
+    // offers"; on a forced one it is the lesser path, and an arm that got the
+    // better tail anyway is a self-comparison wearing a cross-path label.
+    let granted = optional_features.intersection(adapter.caps.features);
     assert_eq!(
-        caps.geometry_path(),
-        adapter.caps.geometry_path(),
-        "adapter {} offers {:?} and the device opened on {:?}",
+        (caps.geometry_path(), caps.binding_model()),
+        (
+            GeometryPath::from_features(granted),
+            BindingModel::from_features(granted),
+        ),
+        "adapter {} offers {:?}, this run asked for {optional_features:?}, and the device \
+         opened on {:?} / {:?}",
         adapter.name,
-        adapter.caps.geometry_path(),
+        adapter.caps.features,
         caps.geometry_path(),
+        caps.binding_model(),
     );
 
     let format = setup.format();
@@ -272,7 +356,7 @@ fn draw(extent: (u32, u32), effects: RenderEffects) -> (Image, String) {
     };
     let image = Image::from_readback(width, height, &pixels, order)
         .expect("the readback is exactly one image");
-    (image, paths)
+    (image, paths, adapter)
 }
 
 /// The room, made resident and placed, on a device the caller opened, drawing
@@ -494,14 +578,119 @@ fn inspect(image: &Image, extent: (u32, u32), block: (u32, u32)) {
 fn the_fixed_camera_draws_the_room_and_matches_its_golden() {
     let (image, paths) = draw(EXTENT, RenderEffects::all());
     inspect(&image, EXTENT, BLOCK);
+    check_golden(&image, &paths);
+}
 
+/// **The same room on the path below this device's own, against the same
+/// golden.**
+///
+/// `docs/plan/sample/00-samples-overview.md` rule 12 asks each sample's CI run
+/// to exercise "the path its runner selects plus one below it". Every other test
+/// here opens through [`draw`], which asks for
+/// [`OffscreenSetup::OPTIONAL_FEATURES`] — so without this one every frame the
+/// suite draws comes off the best tail the adapter reports, and the lesser ones,
+/// which is what browsers and Apple devices run, are code no run here executes.
+/// The sample already *said* which path it took; this is what makes it take more
+/// than one.
+///
+/// # One golden, both arms
+///
+/// Both frames are held to `tests/golden/room.png` rather than each to a
+/// reference of its own. `docs/plan/03-gpu-driven-rendering.md` §3.5's design
+/// rule is that a lesser path is a constraint on data layout and not a separate
+/// renderer, so a difference between the arms is a **bug in the better path** —
+/// and a second reference is exactly what would bless it.
+///
+/// # It cannot pass vacuously
+///
+/// Two frames drawn by the same code match perfectly, so the arms have to have
+/// actually differed. Both are asserted to open the same adapter, and the
+/// selectors they resolve to are asserted to differ **exactly when that adapter
+/// offers one of the flags [`BELOW`] withholds**. A device already at the floor
+/// of both axes — a software rasteriser, `crcbl-wgpu` — is a legitimate run of
+/// this test, and the printed line and that assertion are what keep it from
+/// being a silent one.
+///
+/// That pair is each other's alibi, though: a [`below_features`] withholding
+/// *nothing* leaves both halves false on every machine, and the comparison then
+/// holds trivially — which is what it did the first time it was broken on
+/// purpose to watch it fail. So the withheld set is asserted non-empty first,
+/// which is the claim that the second arm is a second arm at all.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-lumen-golden.sh"]
+fn the_room_draws_the_same_on_a_path_below_the_devices_own() {
+    let below = below_features();
+    // Only the flags a *selector* reads decide whether the arms can differ:
+    // `TASK_SHADER` comes out beside `MESH_SHADER` because it is an
+    // amplification stage in front of one, and no selector reads it — see
+    // `GeometryPath::INPUTS`, which is the table `downgrades` answers from.
+    let withheld = OffscreenSetup::OPTIONAL_FEATURES
+        .difference(below)
+        .intersection(GeometryPath::INPUTS.union(BindingModel::INPUTS));
+    // **Before either device opens**, and before the two claims below, which are
+    // each other's alibi otherwise: an empty set here makes "the arms differ" and
+    // "the adapter offers something better" both false on every machine, and the
+    // test would then compare a frame against itself and report a lesser path
+    // exercised.
+    assert!(
+        !withheld.is_empty(),
+        "the lesser arm asks for {below:?}, which withholds no selector input at all — it is \
+         the same request as the arm it is compared against"
+    );
+
+    let (best, best_paths, adapter) = draw_with(
+        EXTENT,
+        RenderEffects::all(),
+        OffscreenSetup::OPTIONAL_FEATURES,
+    );
+    let (lesser, lesser_paths, lesser_adapter) = draw_with(EXTENT, RenderEffects::all(), below);
+    assert_eq!(
+        adapter, lesser_adapter,
+        "the two arms opened different adapters, so they are not a comparison"
+    );
+
+    let offers_better = adapter.caps.features.intersects(withheld);
+    eprintln!(
+        "lumen golden: {best_paths} against {lesser_paths} — withheld {withheld:?}, \
+         adapter {name} has {held:?}",
+        name = adapter.name,
+        held = adapter.caps.features.intersection(withheld),
+    );
+    assert_eq!(
+        best_paths != lesser_paths,
+        offers_better,
+        "the adapter {} one of {withheld:?} and the two arms resolved to {best_paths} and \
+         {lesser_paths} — one of those two facts is wrong, and a self-comparison that reads \
+         as a cross-path one is worse than no test",
+        if offers_better {
+            "offers"
+        } else {
+            "offers none of"
+        },
+    );
+
+    // Every claim, on every arm: the golden is a comparison of pixels and the
+    // five in front of it are what say the frame holds the room at all, so an
+    // arm that lost a mesh or a material row on the way down its lesser tail
+    // fails on the claim rather than on a diff nobody can read.
+    for (image, paths) in [(&best, &best_paths), (&lesser, &lesser_paths)] {
+        inspect(image, EXTENT, BLOCK);
+        check_golden(image, paths);
+    }
+}
+
+/// Holds one frame to the checked-in reference, and says what it found.
+///
+/// `label` is the arm's [`draw_with`] path row, so a failure names the tail the
+/// frame came off rather than only the frame.
+fn check_golden(image: &Image, label: &str) {
     let reference = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/room.png");
     let comparison = Golden::new(reference)
-        .check(&image)
+        .check(image)
         .expect("the reference is readable")
         .into_result()
-        .unwrap_or_else(|message| panic!("{message}"));
-    eprintln!("lumen golden: room on {paths} — {}", comparison.summary());
+        .unwrap_or_else(|message| panic!("on {label}: {message}"));
+    eprintln!("lumen golden: room on {label} — {}", comparison.summary());
 }
 
 /// **The same claims at twenty-five times the pixels**, written where a human
