@@ -20,12 +20,12 @@
 //!
 //! # What is not here, and where it is written down
 //!
-//! Irradiance probes, ray tracing, the render-to-texture monitor camera, a UI
-//! for the effect toggles and the Pages web demo are all out of scope for this
-//! milestone and all recorded in `docs/backlog.md`. Two of them are visible in
-//! the picture rather than merely absent from it: **a fully metallic surface has
-//! no ambient term and renders near-black wherever a screen-space reflection
-//! finds nothing**, and the coloured wall does not bounce. [`room`]'s module docs
+//! Irradiance probes, ray tracing, the render-to-texture monitor camera and the
+//! Pages web demo are all out of scope for this milestone and all recorded in
+//! `docs/backlog.md`. Two of them are visible in the picture rather than merely
+//! absent from it: **a fully metallic surface has no ambient term and renders
+//! near-black wherever a screen-space reflection finds nothing**, and the
+//! coloured wall does not bounce. [`room`]'s module docs
 //! say why, the debug panel's `unbuilt` section says it on screen, and neither
 //! is faked — a fixture whose job is showing what the renderer does must not
 //! flatter it.
@@ -55,4 +55,7 @@ pub use args::{
 };
 pub use camera::{Flyer, SPEED, TURN};
 pub use gpu::{Forced, Gpu, GpuError, Paths, Unbuilt};
-pub use menu::{CAMERA_ID, CameraMode, LumenAction, Menus, action_for, menus, pause_menu};
+pub use menu::{
+    AO_ID, CAMERA_ID, CameraMode, LumenAction, Menus, REFLECTIONS_ID, SHADOWS_ID, action_for,
+    menus, pause_menu, toggled_effect,
+};

@@ -417,6 +417,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/lumen`'s pause menu switches the effects, mid-run.** Three rows below
+  `CAMERA` — `SHADOWS`, `AO` and `REFLECTIONS`, the words `--no-shadows`,
+  `--no-ao` and `--no-reflections` already use — each labelled with what the
+  frame is drawing and each swapping it on ENTER. Comparing a shadowed room with
+  an unshadowed one is now a keypress instead of a restart with a different
+  flag, and the flags still set the state the panel opens in.
+
+  A row shows the **resolved** answer rather than the requested one, so an
+  effect a device cannot draw reads `UNAVAILABLE` rather than `OFF` and the
+  panel never offers a switch that does nothing. Pressing such a row changes
+  nothing, since the device clamp is the last layer and no override can escape
+  it. Under the row, `crcbl_lumen::toggled_effect` is read-modify-write on the
+  **programmatic** layer of the resolution order alone: the camera stack and
+  `[engine.video]` fields come back as they went in.
+
 - **`crcbl::screenshot::OffscreenSetup::open_forward_with`** — `open_forward`
   taking the optional feature set to open the device with, instead of always
   asking for `OffscreenSetup::OPTIONAL_FEATURES`. `open_with` is the same knob

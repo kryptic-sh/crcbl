@@ -115,6 +115,29 @@ app can bake a mesh. `docs/backlog.md` carries what that left owed.
   contact corner goes 47.1 → 53.8 with occlusion off while open floor does not
   move, and the mirror panel's foot goes 18.7 → 1.2 with the march off while the
   part of the same face that reflected nothing stays at 0.0.
+- **The effect matrix from the pause menu, and not only from the command line**
+  (2026-08-14). Three rows — `SHADOWS`, `AO` and `REFLECTIONS`, the words the
+  `--no-*` flags already use — each labelled with what the frame draws and each
+  swapping it on ENTER, so holding a lit room against an unlit one is a keypress
+  rather than a restart of the fixture. A row is read-modify-write on the
+  **programmatic** layer and nothing else (`crcbl_lumen::toggled_effect`):
+  it leaves the camera-stack and `[engine.video]` fields as it found them, which
+  is what stops a panel silently discarding a decision it was never asked about
+  once either of those gains a source, and it is the one layer that can move a
+  decision upward, so a row turns shadows back on after `--no-shadows`. What a
+  row _shows_ is the **resolved** answer — `EffectRequest::resolve` against what
+  the device permits — and an effect the device cannot draw reads `UNAVAILABLE`
+  rather than `OFF`, so the panel never offers a tick that does nothing.
+
+  **This is one third of milestone 4's matrix, not the whole of it.** Every
+  effect is reachable from the programmatic layer, from the menu and from the
+  command line; the camera stack and `[engine.video]` still have no source in
+  this tree, so a toggle "exercising all three layers" is not something the
+  sample can yet do. No device here clamps an effect either, so the
+  `UNAVAILABLE` arm is covered by a unit test that constructs the device set —
+  `a_row_the_device_cannot_draw_reads_as_unavailable` — rather than by a machine
+  that reports one.
+
 - **A golden frame with five structural claims in front of it**
   (`apps/lumen/tests/golden.rs`): the sun reaches the floor through the opening
   and not beside it, the shaded floor is ambient rather than black, a conductor
@@ -148,8 +171,8 @@ would change most.
 Recorded in `docs/backlog.md` rather than here: irradiance probes, ray tracing
 and the acceleration structures, the render-to-texture monitor camera, the
 camera-stack and `[engine.video]` layers of the toggle resolution order (the
-programmatic one is built and is what the `--no-*` flags drive), a UI for the
-toggles, the Pages web demo, and a CI leg that runs the golden suite.
+programmatic one is built and is what both the `--no-*` flags and the pause
+menu's rows drive), the Pages web demo, and a CI leg that runs the golden suite.
 
 ## Milestones
 

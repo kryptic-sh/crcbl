@@ -374,6 +374,36 @@ impl Gpu {
         self.paths
     }
 
+    /// The three requested layers of the toggle resolution order — what a caller
+    /// editing one of them starts from.
+    #[must_use]
+    pub const fn effect_request(&self) -> EffectRequest {
+        self.renderer.effect_request()
+    }
+
+    /// Which effects this **device** permits: the fourth layer, which clamps
+    /// last and cannot be overridden upward.
+    ///
+    /// What tells an effect a run switched off from one this device could never
+    /// draw — the pause menu's rows are the only thing that asks, and a row that
+    /// could not tell them apart would offer a switch that does nothing.
+    #[must_use]
+    pub const fn device_effects(&self) -> RenderEffects {
+        self.renderer.device_effects()
+    }
+
+    /// Replaces the requested layers, and re-resolves what [`Gpu::paths`]
+    /// reports.
+    ///
+    /// The panel's `effects` row and the headless summary both name what the
+    /// frame draws, so a request arriving mid-run has to move them: a report
+    /// resolved once at open would go on printing the command line's answer
+    /// after a menu row changed it.
+    pub fn set_effect_request(&mut self, request: EffectRequest) {
+        self.renderer.set_effect_request(request);
+        self.paths.effects = self.renderer.resolved_effects();
+    }
+
     /// The swapchain's current size — the one it was **configured** at.
     #[must_use]
     pub const fn extent(&self) -> (u32, u32) {

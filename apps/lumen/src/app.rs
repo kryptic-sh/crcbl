@@ -24,12 +24,20 @@
 //! hold. So [`Lumen`] keeps the [`Paths`] the device resolved, copied once from
 //! [`Gpu::paths`] at [`with_shell`] — which is also what puts them in
 //! [`Summary`], where a headless run can print them.
+//!
+//! The pause menu's effect rows are the same shape and the same reason:
+//! [`HostedGame::apply`] is handed no GPU either, so a press edits the
+//! [`EffectRequest`] [`Lumen`] holds and [`HostedGame::draw`] — which is handed
+//! one — hands it over and re-reads what came back out of the four layers. The
+//! device layer is copied once beside it, because it cannot change mid-run and
+//! a row cannot be labelled without it.
 
 use crcbl::core::input::KeyCode;
 use crcbl::engine::{
     Booted, Clock, ExitReason, FrameInfo, HostedGame, RunSummary, open_window, wait_for_configure,
 };
 use crcbl::prelude::*;
+use crcbl::render::{EffectRequest, RenderEffects};
 use crcbl::shell::{
     DisplayMode, LogicalSize, ShellBackend as Backend, WindowDesc, open, open_backend,
 };
@@ -90,22 +98,43 @@ pub struct Lumen {
     /// swap so a reviewer who looks at the golden pose and swaps back is where
     /// they left off.
     flyer: Flyer,
-    /// What the device resolved, copied once — see the module docs.
+    /// What the device resolved, copied once — see the module docs — and its
+    /// `effects` re-read each [`HostedGame::draw`], because the pause menu can
+    /// move that one mid-run.
     paths: Paths,
-    /// The value the pause panel was last built for — `None` until the first
-    /// pause, so the panel is always rebuilt once with the real value.
-    shown: Option<CameraMode>,
+    /// The three requested layers of topic 39's order, as the pause menu has
+    /// them: the command line wrote the first version at start-up and the
+    /// effect rows edit the programmatic one — see [`menu::toggled_effect`].
+    ///
+    /// Held here rather than read off the renderer per press because
+    /// [`HostedGame::apply`] is handed no GPU; [`HostedGame::draw`] is where it
+    /// reaches one.
+    effect_request: EffectRequest,
+    /// The fourth layer, copied once for the reason [`Paths`] is: a row is built
+    /// where there is no GPU to ask, and it cannot say "unavailable" without it.
+    device_effects: RenderEffects,
+    /// The values the pause panel was last built for — `None` until the first
+    /// pause, so the panel is always rebuilt once with the real ones.
+    shown: Option<(CameraMode, EffectRequest)>,
 }
 
 impl Lumen {
-    /// A fixture starting on `camera`, drawn through `paths`, with the free
+    /// A fixture starting on `camera`, drawn through `paths` with `effects`
+    /// asked for on a device that permits `device_effects`, and with the free
     /// camera at the golden pose.
     #[must_use]
-    pub fn new(camera: CameraMode, paths: Paths) -> Self {
+    pub fn new(
+        camera: CameraMode,
+        paths: Paths,
+        effects: EffectRequest,
+        device_effects: RenderEffects,
+    ) -> Self {
         Self {
             camera,
             flyer: Flyer::at(&room::fixed_camera()),
             paths,
+            effect_request: effects,
+            device_effects,
             shown: None,
         }
     }
@@ -208,7 +237,11 @@ pub fn with_shell<S: Shell + ?Sized>(
         options.forced,
         options.effects,
     )?;
+    // All three read before the bundle moves into `Booted`: what the flags asked
+    // for, resolved into a request, and what this device permits.
     let paths = gpu.paths();
+    let effects = gpu.effect_request();
+    let device_effects = gpu.device_effects();
 
     Ok(Loop::new(
         Booted {
@@ -218,7 +251,7 @@ pub fn with_shell<S: Shell + ?Sized>(
             clock_source,
             events,
         },
-        Lumen::new(options.camera, paths),
+        Lumen::new(options.camera, paths, effects, device_effects),
         options.common.loop_config(),
     ))
 }
@@ -275,26 +308,36 @@ impl HostedGame for Lumen {
                 // down when the panel opened has no release coming.
                 self.flyer.release_all();
             }
+            // Read-modify-write on the layer a panel owns, leaving the camera
+            // stack and `[engine.video]` as they were — `menu::toggled_effect`
+            // is where that is argued. It reaches the renderer in `draw`.
+            LumenAction::ToggleEffect(effect) => {
+                self.effect_request =
+                    menu::toggled_effect(self.effect_request, self.device_effects, effect);
+            }
         }
     }
 
     fn menu_kind(&mut self, menus: &mut Menus, paused: bool) -> bool {
-        if paused && self.shown != Some(self.camera) {
+        if paused && self.shown != Some((self.camera, self.effect_request)) {
             // A row's label changed (or this is the first pause): rebuild the
-            // panel with the value in force, restoring the selection so a press
+            // panel with the values in force, restoring the selection so a press
             // on a row does not throw the reviewer back to the top.
             let selected = menus
                 .current()
                 .and_then(crcbl::ui::menu::Menu::selected_item)
                 .map(|item| item.id);
-            menus.replace(true, menu::pause_menu(self.camera));
+            menus.replace(
+                true,
+                menu::pause_menu(self.camera, self.effect_request, self.device_effects),
+            );
             if let Some(id) = selected {
                 menus
                     .current_mut()
                     .expect("the pause menu is in the set")
                     .select_id(id);
             }
-            self.shown = Some(self.camera);
+            self.shown = Some((self.camera, self.effect_request));
         }
         paused
     }
@@ -302,8 +345,16 @@ impl HostedGame for Lumen {
     fn draw(&mut self, gpu: &mut Gpu, _draw_list: &mut DrawList, _frame: FrameInfo) {
         // The fixture draws no HUD of its own: everything it has to say about a
         // frame is a debug-panel row. What `draw` does is hand over the camera
-        // the ticks moved.
+        // the ticks moved, and the effect request the pause menu edited.
         gpu.set_camera(self.camera());
+        // Here rather than in `tick`, which does not run while paused: the row
+        // that was just pressed is on a panel over a frame that has to change
+        // behind it. `set_effect_request` lands on this frame — `begin_frame`
+        // has not run yet — and the frame in flight never moves.
+        gpu.set_effect_request(self.effect_request);
+        // Re-read rather than recomputed: the device clamps last, so what the
+        // panel and the summary report comes back off the renderer.
+        self.paths = gpu.paths();
     }
 
     /// Three sections, and each is something the charter asks for.
@@ -400,6 +451,33 @@ mod tests {
         options.common.frames = Some(frames);
         options.common.backend = Some(crcbl::backend::GpuBackend::Null);
         options
+    }
+
+    /// Walks `downs` rows down the open panel and presses ENTER on the row it
+    /// lands on.
+    ///
+    /// **The selection persists across a pause** — `menu_kind` rebuilds the
+    /// panel and restores the selected id — so a second visit to the same row is
+    /// `downs` of zero. The label assertions each caller makes afterwards are
+    /// what say the right row fired.
+    fn press_row(engine: &mut Loop<HeadlessShell>, window: crcbl::shell::WindowId, downs: usize) {
+        for _ in 0..downs {
+            engine
+                .shell_mut()
+                .key_press(window, MENU_DOWN_KEY)
+                .expect("the window is live");
+        }
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .key_press(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        engine
+            .shell_mut()
+            .key_release(window, MENU_ACTIVATE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
     }
 
     /// Every `Text` command the frame handed to the UI pass.
@@ -586,31 +664,9 @@ mod tests {
         engine.frame().expect("a frame");
         assert!(engine.is_paused());
 
-        // `downs` arrow presses, then Enter. **The selection persists across a
-        // pause** — `menu_kind` rebuilds the panel and restores the selected id
-        // — so the first visit walks down to the CAMERA row and the second one
-        // is already on it. The label assertions after each call are what say
-        // the right row fired.
-        let press_camera_row = |engine: &mut Loop<HeadlessShell>, downs: usize| {
-            for _ in 0..downs {
-                engine
-                    .shell_mut()
-                    .key_press(window, MENU_DOWN_KEY)
-                    .expect("the window is live");
-            }
-            engine.frame().expect("a frame");
-            engine
-                .shell_mut()
-                .key_press(window, MENU_ACTIVATE_KEY)
-                .expect("the window is live");
-            engine.frame().expect("a frame");
-            engine
-                .shell_mut()
-                .key_release(window, MENU_ACTIVATE_KEY)
-                .expect("the window is live");
-            engine.frame().expect("a frame");
-        };
-        press_camera_row(&mut engine, 3);
+        // Three rows down from RESUME is CAMERA; the second visit is already on
+        // it, which is what `press_row`'s docs are about.
+        press_row(&mut engine, window, 3);
         assert_eq!(engine.game().camera_mode(), CameraMode::Free);
         assert!(
             ui_text(&engine).iter().any(|text| text == "CAMERA: FREE"),
@@ -646,7 +702,7 @@ mod tests {
             .key_press(window, PAUSE_KEY)
             .expect("the window is live");
         engine.frame().expect("a frame");
-        press_camera_row(&mut engine, 0);
+        press_row(&mut engine, window, 0);
         assert_eq!(engine.game().camera_mode(), CameraMode::Fixed);
         assert!(
             ui_text(&engine).iter().any(|text| text == "CAMERA: FIXED"),
@@ -659,6 +715,71 @@ mod tests {
             "swapping back did not return to the golden pose",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **An effect row reaches the renderer, and every report follows it.**
+    ///
+    /// The observable is the **resolved** set read back off the renderer, not a
+    /// field on [`Lumen`]: a press that edited the request and never reached
+    /// `set_effect_request` would leave the frame drawing every effect while the
+    /// row and the panel both said `OFF`. What the removed passes do to the
+    /// picture is `tests/golden.rs`'s
+    /// `every_effect_toggles_and_the_frame_says_so`; this is the wiring in
+    /// between, which no golden can see.
+    #[test]
+    fn an_effect_row_reaches_the_renderer_and_the_reports() {
+        use crcbl::render::RenderEffects;
+
+        let mut engine = scripted(&headless(400));
+        let window = engine.window();
+        engine.frame().expect("a frame");
+        assert_eq!(
+            engine.gpu().paths().effects,
+            RenderEffects::all(),
+            "a run that asked for nothing draws every effect",
+        );
+
+        engine
+            .shell_mut()
+            .key_press(window, PAUSE_KEY)
+            .expect("the window is live");
+        engine.frame().expect("a frame");
+        assert!(engine.is_paused());
+
+        // Four rows down from RESUME is SHADOWS: the panel is the loop's three,
+        // then CAMERA, then one row per effect.
+        press_row(&mut engine, window, 4);
+        assert_eq!(
+            engine.gpu().paths().effects,
+            RenderEffects::all().difference(RenderEffects::SHADOWS),
+            "the row did not reach the renderer, or took more than shadows",
+        );
+        assert_eq!(engine.gpu().paths().effects_row(), "ao ssr");
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "SHADOWS: OFF"),
+            "the row's label must show what the frame now draws: {:?}",
+            ui_text(&engine),
+        );
+
+        // And the same row puts it back, which is the comparison the charter's
+        // matrix is for: one keypress between a shadowed room and an unshadowed
+        // one, with no restart in between.
+        press_row(&mut engine, window, 0);
+        assert_eq!(engine.gpu().paths().effects, RenderEffects::all());
+        assert!(
+            ui_text(&engine).iter().any(|text| text == "SHADOWS: ON"),
+            "the row's label must show the value it went back to: {:?}",
+            ui_text(&engine),
+        );
+
+        // Off again, so the summary is asked about a run the menu changed.
+        press_row(&mut engine, window, 0);
+        let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
+        assert_eq!(
+            summary.paths.effects,
+            RenderEffects::all().difference(RenderEffects::SHADOWS),
+            "the summary reports the set the run ended on",
+        );
     }
 
     /// The lamp moves, and it moves on the **clock** rather than on the frame
