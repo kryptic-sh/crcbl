@@ -86,6 +86,14 @@ struct DepthProbe {
     materials: crcbl_hal::BufferHandle,
     lights: crcbl_hal::BufferHandle,
     light_grid: crcbl_hal::BufferHandle,
+    /// A one-row irradiance probe table, left **zeroed**.
+    ///
+    /// `mesh.slang` reads it unconditionally and clamps every fetch into it, so
+    /// a probe binding nothing would be a pipeline that fails to create. Zeroed
+    /// because the frame block's volume is the default one: the grid evaluates
+    /// to exactly zero and this probe's ambient answers stay the answers it
+    /// recorded before there was a grid at all.
+    probes: crcbl_hal::BufferHandle,
     /// A one-entry run of visible instances, holding the index 0.
     ///
     /// `mesh.slang` reads its instance out of a run rather than naming one,
@@ -497,6 +505,19 @@ impl DepthProbe {
             .write_buffer(light_grid, 0, &grid_bytes)
             .expect("write");
 
+        // The irradiance probe table, one cleared row — see the field.
+        let probes = device
+            .create_buffer(&BufferDesc {
+                label: Some("probe irradiance probes"),
+                size: crcbl_shaders::probe::PROBE_STRIDE as u64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a probe table");
+        device
+            .write_buffer(probes, 0, &crcbl_shaders::probe::GpuProbe::ZERO.to_bytes())
+            .expect("write");
+
         // §3.2's texture side, in its smallest honest form: one layer, one
         // texel, opaque white. `Rgba8UnormSrgb` for `crcbl_render::forward`'s
         // reason — the format is the sRGB decode, and `0xFF` decodes to exactly
@@ -732,6 +753,17 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl_hal::BindingFlags::empty(),
             },
+            crcbl_hal::BindGroupLayoutEntry {
+                binding: 23,
+                visibility: crcbl_hal::ShaderStages::VERTEX
+                    .union(crcbl_hal::ShaderStages::FRAGMENT),
+                kind: crcbl_hal::BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: false,
+                },
+                count: 1,
+                flags: crcbl_hal::BindingFlags::empty(),
+            },
         ];
         let layout = device
             .create_bind_group_layout(&crcbl_hal::BindGroupLayoutDesc {
@@ -810,6 +842,11 @@ impl DepthProbe {
                 array_index: 0,
                 resource: crcbl_hal::BindingResource::ImageView(occlusion.view),
             },
+            crcbl_hal::BindGroupEntry {
+                binding: 23,
+                array_index: 0,
+                resource: crcbl_hal::BindingResource::whole_buffer(probes),
+            },
         ];
         let group = device
             .create_bind_group(&crcbl_hal::BindGroupDesc {
@@ -877,6 +914,7 @@ impl DepthProbe {
         Self {
             lights,
             light_grid,
+            probes,
             vertices,
             indices,
             uniforms,
@@ -914,6 +952,7 @@ impl DepthProbe {
         self.occlusion.destroy(device);
         device.destroy_buffer(self.visible_instances);
         device.destroy_buffer(self.mesh_table);
+        device.destroy_buffer(self.probes);
         device.destroy_buffer(self.light_grid);
         device.destroy_buffer(self.lights);
         device.destroy_buffer(self.materials);
@@ -1062,6 +1101,11 @@ fn render_probe(
         // carries `NO_SHADOW_TILE`, so nothing in this frame reads these.
         light_view_proj: [glam::Mat4::IDENTITY.to_cols_array();
             crcbl_shaders::mesh::SHADOW_LIGHT_TILES],
+        // No irradiance grid: this probe's own pipeline binds a single zeroed
+        // probe row, and the default volume is what makes the fragment stage
+        // add exactly nothing to `PROBE_AMBIENT` — see
+        // `crcbl_shaders::probe`.
+        probes: crcbl_shaders::probe::ProbeVolume::default(),
     };
     device
         .write_buffer(probe.uniforms, 0, &uniforms.to_bytes())

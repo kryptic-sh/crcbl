@@ -159,6 +159,19 @@ struct FrameUniforms
     /// cascades' terms exactly: this file does not shade, and a spot's or a point
     /// light's face's map is rendered through `view_proj` like every other pass.
     float4x4 light_view_proj[SHADOW_LIGHT_TILES];
+    /// The irradiance grid's origin, reciprocal spacing and counts. **Read by
+    /// nothing here**, on the cascades' terms exactly: this file does not shade,
+    /// and the grid is `mesh.slang`'s `fragmentMain`'s alone.
+    ///
+    /// Declared all the same, because the two blocks are one buffer. The
+    /// *binding* the rows arrive on needs no mirror — it is 23, past everything
+    /// this file declares — but a member of the shared block is not a binding,
+    /// and a block short of three rows here would be one whose earlier members
+    /// this file still reads correctly and whose size the two stages disagree
+    /// about.
+    float4 probe_origin;
+    float4 probe_inv_spacing;
+    uint4 probe_counts;
 };
 
 /// Matching `struct GpuLight` in `mesh.slang`.

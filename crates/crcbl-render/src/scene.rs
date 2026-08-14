@@ -74,6 +74,7 @@ use crcbl_hal::HalError;
 use crcbl_shaders::cluster_dag::ClusterDag;
 use crcbl_shaders::mesh;
 use crcbl_shaders::meshlet::MeshClusters;
+use crcbl_shaders::probe;
 use glam::Mat4;
 
 /// The second material's base colour, and the whole of what makes it visible.
@@ -200,6 +201,19 @@ pub struct Capacities {
     /// from the list is missing from every froxel and no counter in the frame
     /// would say so.
     pub lights: u32,
+    /// Rows the irradiance probe table holds.
+    ///
+    /// One per probe of [`SceneDesc::probes`], which is a
+    /// description-measurable number like [`materials`](Self::materials) and is
+    /// refused at build rather than at runtime.
+    ///
+    /// **Zero is a scene with no probes**, which is what the engine's own
+    /// [`demo`] has: the table still holds one cleared row, because a buffer of
+    /// no bytes is not a buffer, and reading that row adds exactly nothing. The
+    /// default is deliberately not larger — a probe grid is authored, and
+    /// reserving device memory for one nobody wrote is memory taken from every
+    /// existing caller for a feature they have not used.
+    pub probes: u32,
 }
 
 impl Default for Capacities {
@@ -211,6 +225,7 @@ impl Default for Capacities {
             instances: 16 * 1024,
             materials: 1024,
             lights: 1024,
+            probes: 0,
         }
     }
 }
@@ -342,6 +357,77 @@ impl<'a> PageDesc<'a> {
     }
 }
 
+/// `docs/plan/18-render-features.md`'s irradiance volume: where the probes are,
+/// and what each of them holds.
+///
+/// The diffuse half of that topic's global-illumination row. `mesh.slang`
+/// interpolates the grid trilinearly and **adds** the result to the flat ambient
+/// term, so a description with no probes draws the frame it always did — see
+/// [`crcbl_shaders::probe`], which is where the spherical harmonics live and
+/// where they are checked against the literature.
+///
+/// # The irradiance is authored, not baked
+///
+/// [`GpuProbe::accumulate`](probe::GpuProbe::accumulate) is how an application
+/// turns an environment into a row, and it is the only correct way to fill one.
+/// There is no bake tool, on a hard prerequisite rather than on taste: a gather
+/// bake casts rays at scene triangles, and this engine has no ray-triangle
+/// intersector and no BVH — `crcbl_phys`'s `query` module has ray-vs-sphere,
+/// ray-vs-AABB and ray-vs-capsule and nothing else.
+///
+/// # [`Default`] is the volume that changes no pixel
+///
+/// No probes and a grid of no extent, which is what every existing caller gets:
+/// the shader's fetch clamps onto the table's cleared first row and adds
+/// exactly zero. There is no branch anywhere selecting it, and no
+/// [`RenderEffects`](crate::effects::RenderEffects) bit — the off-switch is the
+/// scene.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProbeGrid {
+    /// Where the grid is, how far apart its probes are, and how many there are
+    /// on each axis.
+    pub volume: probe::ProbeVolume,
+    /// One row per probe, **`x`-fastest**: index
+    /// `(z · counts.y + y) · counts.x + x`.
+    ///
+    /// Its length must be [`volume`](Self::volume)'s
+    /// [`total`](probe::ProbeVolume::total), which
+    /// [`ForwardRenderer::with_scene`](crate::forward::ForwardRenderer::with_scene)
+    /// checks before it creates anything, through this type's own `check`.
+    pub probes: Vec<probe::GpuProbe>,
+}
+
+impl ProbeGrid {
+    /// Whether this grid can be uploaded as written, checked by
+    /// [`ForwardRenderer::with_scene`](crate::forward::ForwardRenderer::with_scene)
+    /// before it creates anything.
+    ///
+    /// The one thing that has to hold: the volume's counts multiply out to
+    /// exactly as many rows as there are probes. **That is what bounds the
+    /// shader's fetch**, and it is not a tidiness — `mesh.slang` addresses a
+    /// cell through the counts, so a grid claiming more probes than it carries
+    /// would read rows the description never wrote, and one claiming fewer would
+    /// leave part of the volume unlit while the table held the light for it.
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::InvalidDescriptor`] naming both numbers.
+    pub(crate) fn check(&self) -> Result<(), HalError> {
+        let total = self.volume.total() as usize;
+        if total == self.probes.len() {
+            return Ok(());
+        }
+        Err(HalError::InvalidDescriptor(format!(
+            "the probe grid is {}×{}×{}, which is {total} probe(s), and the \
+             description carries {}",
+            self.volume.counts[0],
+            self.volume.counts[1],
+            self.volume.counts[2],
+            self.probes.len()
+        )))
+    }
+}
+
 /// One resident mesh's geometry, as the renderer needs it: triangles for a
 /// vertex stage, clusters for a mesh stage, and nothing else.
 ///
@@ -435,6 +521,12 @@ pub struct SceneDesc<'a> {
     pub materials: Vec<mesh::GpuMaterial>,
     /// The base-colour page the rows above index.
     pub page: PageDesc<'a>,
+    /// `docs/plan/18-render-features.md`'s irradiance volume, **added** to the
+    /// flat ambient term wherever it covers.
+    ///
+    /// [`ProbeGrid::default`] is a grid of nothing and changes no pixel, which
+    /// is what a description that does not mention it gets.
+    pub probes: ProbeGrid,
     /// How much room each pool reserves.
     pub capacities: Capacities,
 }
@@ -616,6 +708,11 @@ pub fn demo() -> SceneDesc<'static> {
             },
         ],
         page,
+        // **No probes**, and that is what keeps every golden in the tree
+        // byte-identical: the grid is authored per scene, this description
+        // authors none, and a grid of nothing adds exactly zero. The sample
+        // that has one is `apps/lumen`'s room.
+        probes: ProbeGrid::default(),
         capacities: Capacities::default(),
     }
 }
@@ -840,8 +937,66 @@ mod tests {
                 instances: 16 * 1024,
                 materials: 1024,
                 lights: 1024,
+                probes: 0,
             }
         );
         assert_eq!(demo().capacities, Capacities::default());
+    }
+
+    /// **The engine's own scene has no probes**, which is the whole of why
+    /// adding the grid moved no golden: an empty volume evaluates to exactly
+    /// zero and the shader adds it to the ambient term.
+    #[test]
+    fn the_demo_scene_authors_no_probes() {
+        let scene = demo();
+        assert_eq!(scene.probes, ProbeGrid::default());
+        assert!(scene.probes.probes.is_empty());
+        assert_eq!(scene.probes.volume.total(), 0);
+        assert_eq!(scene.capacities.probes, 0);
+        scene
+            .probes
+            .check()
+            .expect("an empty grid uploads as written");
+    }
+
+    /// **A grid whose counts disagree with its rows is refused**, in both
+    /// directions — the check that bounds the shader's fetch.
+    #[test]
+    fn a_grid_that_would_read_rows_it_does_not_carry_is_refused() {
+        let two = vec![probe::GpuProbe::ZERO; 2];
+        let claims_more = ProbeGrid {
+            volume: probe::ProbeVolume {
+                counts: [2, 2, 1],
+                ..probe::ProbeVolume::default()
+            },
+            probes: two.clone(),
+        };
+        claims_more
+            .check()
+            .expect_err("a 2×2×1 grid carrying two probes would read rows it never wrote");
+
+        let claims_fewer = ProbeGrid {
+            volume: probe::ProbeVolume {
+                counts: [1, 1, 1],
+                ..probe::ProbeVolume::default()
+            },
+            probes: two.clone(),
+        };
+        claims_fewer
+            .check()
+            .expect_err("a one-probe grid carrying two leaves one unreachable");
+
+        // And the shape that agrees is accepted, or the two refusals above
+        // would pass on a check that refused everything.
+        ProbeGrid {
+            volume: probe::ProbeVolume {
+                counts: [2, 1, 1],
+                inv_spacing: [1.0; 3],
+                origin: [0.0; 3],
+            },
+            probes: two,
+        }
+        .check()
+        .expect("two probes on a 2×1×1 grid");
     }
 }

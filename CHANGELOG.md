@@ -16,6 +16,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`SceneDesc` and `Capacities` each gained a field**, so a struct literal
+  spelling every one of them needs the new one: `probes: ProbeGrid::default()`
+  and `probes: 0` are the values that change nothing. `..Default::default()`
+  callers are unaffected. See the irradiance-probe entry under _Added_ for what
+  the fields are for.
+
 - **`mesh.slang`'s `fragmentMain` writes two colour targets, so a pipeline built
   from `crcbl_shaders::MESH` needs two `ColorTargetState`s.** Target 0 is the
   `Rgba16Float` scene colour it always wrote; target 1 is `Rgba8Unorm` carrying
@@ -416,6 +422,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   silence. Failures are now tracked per submission and logged as errors.
 
 ### Added
+
+- **`SceneDesc::probes` and `Capacities::probes`: an irradiance-probe volume a
+  scene can author.** `docs/plan/18-render-features.md`'s diffuse global
+  illumination as a static grid of L1 spherical-harmonic probes —
+  `crcbl_render::ProbeGrid` is the volume (an origin, a reciprocal spacing and a
+  count per axis) and `crcbl_shaders::probe::GpuProbe` is one probe's row.
+  `mesh.slang` interpolates the grid trilinearly and **adds** the result to
+  `frame.ambient.rgb`, so an author who wants the probes to be the whole
+  environment sets `DirectionalLight::ambient` to zero. It adds no render pass
+  and no device requirement.
+
+  Fill a row with `GpuProbe::accumulate(direction, radiance, solid_angle)`,
+  summed over a partition of the sphere: it is the projection with the
+  clamped-cosine transfer already folded in, and it is the only correct way to
+  fill one — the band scales come from Ramamoorthi & Hanrahan 2001 and are
+  checked against that paper's values. There is no bake tool, on a hard
+  prerequisite rather than on taste: a gather bake needs a ray-triangle
+  intersector and a BVH, and `crcbl-phys` has neither.
+
+  **Nothing renders differently yet.** No scene in the tree authors a volume,
+  the default grid is empty, an empty grid evaluates to exactly zero and
+  `x + 0 == x`, so every golden is byte-identical and none was re-blessed. A
+  description whose probe count disagrees with its volume's counts, or which
+  needs more rows than `Capacities::probes` reserves, is refused by name at
+  `ForwardRenderer::with_scene` like every other capacity.
 
 - **`apps/lumen`'s pause menu switches the effects, mid-run.** Three rows below
   `CAMERA` — `SHADOWS`, `AO` and `REFLECTIONS`, the words `--no-shadows`,

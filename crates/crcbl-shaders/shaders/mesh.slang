@@ -241,7 +241,8 @@ struct FrameUniforms
     float4x4 view_proj;
     /// World-space eye position in `xyz`; `w` unused.
     float4 camera_position;
-    /// Flat ambient term in `rgb`; `w` unused. A real irradiance probe is P7.
+    /// Flat ambient term in `rgb`; `w` unused. The irradiance grid below is
+    /// **added** to it rather than replacing it.
     ///
     /// **Ambient is not a light and is not a row**: it stands in for every
     /// bounce the direct terms do not carry, so it has no position, no cluster
@@ -324,6 +325,26 @@ struct FrameUniforms
     /// so adding it moved no existing member's offset — which is what let the
     /// cascade goldens stay byte-identical across the change that introduced it.
     float4x4 light_view_proj[SHADOW_LIGHT_TILES];
+    /// Where probe `(0, 0, 0)` of the irradiance grid is, in world space; `w`
+    /// unused. Matching `crcbl_shaders::probe::ProbeVolume`.
+    ///
+    /// **These three are last in the block**, on `light_view_proj`'s terms
+    /// exactly: no existing member's offset moves, so every golden blessed
+    /// before the grid existed still matches.
+    float4 probe_origin;
+    /// One over the grid's spacing on each axis; `w` unused.
+    ///
+    /// Inverted on the host so this stage multiplies rather than divides. An
+    /// axis whose reciprocal is zero collapses onto probe 0, which is what the
+    /// grid of a scene with no probes carries.
+    float4 probe_inv_spacing;
+    /// `xyz`: how many probes the grid holds on each axis. `w`: their product,
+    /// which is how many rows `probes` holds and the bound every fetch below is
+    /// clamped against.
+    ///
+    /// All zero for a scene with no probes, and `probe_irradiance` then returns
+    /// exactly zero with no branch anywhere — see it.
+    uint4 probe_counts;
 };
 
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
@@ -448,6 +469,27 @@ struct GpuMaterial
     /// into two of them — so the row gained a material model without the table's
     /// stride moving and without a single golden shifting for a layout reason.
     uint pad0;
+};
+
+/// One irradiance probe, matching `crcbl_shaders::probe::GpuProbe`.
+///
+/// `docs/plan/18-render-features.md`'s L1 spherical-harmonic probe: four
+/// coefficients per colour channel, packed `(L1x, L1y, L1z, L0)` so that the
+/// irradiance a normal receives is `dot(sh, float4(N, 1))` and nothing else. No
+/// `pow` and no trigonometry — the rule `ggx_lobe` is already held to.
+///
+/// The coefficients are **irradiance**, not radiance: the clamped-cosine
+/// convolution is a per-band scale and the host folded it in when it filled the
+/// row. `crcbl_shaders::probe` is where that arithmetic lives and where it is
+/// checked against the literature it comes from.
+struct GpuProbe
+{
+    /// The red channel's four coefficients.
+    float4 sh_r;
+    /// The green channel's.
+    float4 sh_g;
+    /// The blue channel's.
+    float4 sh_b;
 };
 
 /// One light, matching `struct GpuLight` in `light_cluster.slang` and
@@ -725,6 +767,25 @@ StructuredBuffer<uint> cluster_lights;
 /// note in `crcbl_render::forward` on why the list stays ascending.
 [[vk::binding(22, 0)]]
 Texture2D<float> ambient_occlusion;
+
+/// `docs/plan/18-render-features.md`'s irradiance grid, row by row — the
+/// `FrameUniforms::probe_*` header above says where they are.
+///
+/// **Appended after the occlusion channel, never inserted**, which is the same
+/// rule that put that one last: `crcbl-mtl` gives a resource the next index in
+/// its Metal argument table by counting the same-table entries of the layout
+/// list, and Slang numbers a stage's arguments by declaration order, so the two
+/// agree only while both ascend. 23 is past everything `mesh_cluster.slang`
+/// declares as well — that file reaches 21 — so it needs no mirror there and no
+/// index it already owns moves.
+///
+/// **Bound on every path, and a scene with no probes binds a single zeroed
+/// row.** A storage buffer has to have a size, so the table is at least one row
+/// whatever the scene, and `probe_irradiance` reads that row and adds zero. The
+/// off-switch is the grid's counts being zero rather than a branch here — the
+/// same shape as the white 1×1 image `ambient_occlusion` falls back to.
+[[vk::binding(23, 0)]]
+StructuredBuffer<GpuProbe> probes;
 
 struct VertexOutput
 {
@@ -1350,6 +1411,99 @@ uint froxel_of(float2 pixel, float depth)
     return (index * grid_y + tile_y) * grid_x + tile_x;
 }
 
+/// One row of the probe table, by grid cell, clamped into the buffer.
+///
+/// The clamp is against `probe_counts.w` — the product the host wrote — for the
+/// reason `ambient_occlusion`'s `GetDimensions` clamp exists: it makes the fetch
+/// a fact about the buffer rather than a promise about whoever filled the
+/// header. `max(total, 1)` is what keeps the empty grid on row 0, which every
+/// table has because a buffer of no bytes is not a buffer.
+GpuProbe probe_at(uint3 cell)
+{
+    uint index = (cell.z * frame.probe_counts.y + cell.y) * frame.probe_counts.x + cell.x;
+    return probes[min(index, max(frame.probe_counts.w, 1u) - 1u)];
+}
+
+/// Two probes blended coefficient by coefficient — one axis of the trilinear
+/// interpolation below.
+GpuProbe lerp_probe(GpuProbe a, GpuProbe b, float t)
+{
+    GpuProbe blended;
+    blended.sh_r = lerp(a.sh_r, b.sh_r, t);
+    blended.sh_g = lerp(a.sh_g, b.sh_g, t);
+    blended.sh_b = lerp(a.sh_b, b.sh_b, t);
+    return blended;
+}
+
+/// The irradiance `docs/plan/18-render-features.md`'s probe grid gives a surface
+/// at `world_position` facing `normal`, in linear RGB.
+///
+/// Mirrored on the host by `crcbl_shaders::probe::irradiance_at`, which is where
+/// the spherical harmonics are checked against the literature they come from.
+///
+/// # A grid of nothing evaluates to zero, and there is no branch
+///
+/// A scene with no probes carries counts of zero and a reciprocal spacing of
+/// zero. Then `last` is zero on every axis, the grid coordinate is zero, both
+/// corners of every axis are probe 0, and that row is the zeroed one every table
+/// starts as — so the three dot products are zero and `frame.ambient.rgb + 0.0`
+/// is `frame.ambient.rgb` **exactly**, on every target. That is what let the
+/// grid land with no golden re-blessed.
+///
+/// # Interpolated coefficients, not interpolated evaluations
+///
+/// The eight corners are blended as *coefficients* and evaluated once, so the
+/// whole lookup is seven blends, three dot products and one clamp whatever the
+/// grid's size — where evaluating each corner first would be twenty-four dot
+/// products. It is also the more correct of the two: irradiance is linear in the
+/// coefficients until the clamp, and clamping once at the end is clamping the
+/// interpolated field rather than eight samples of it.
+///
+/// The clamp itself is not defensive. L1 is a truncated series and a truncated
+/// series rings: an environment concentrated in one direction evaluates negative
+/// on the far side, and a surface there would *subtract* light.
+///
+/// # Outside the grid clamps to its surface
+///
+/// The same choice the shadow sampler makes at a cascade's edge: an environment
+/// does not stop at the last probe, and fading to zero there would put a seam in
+/// mid-air. What it costs is that a room's lighting extends past its probes,
+/// which is a gradient rather than an artefact.
+float3 probe_irradiance(float3 world_position, float3 normal)
+{
+    // The last addressable probe on each axis. `max(…, 0)` is what keeps an axis
+    // with no probes — or with exactly one — addressing probe 0 rather than
+    // probe -1.
+    float3 last = max(float3(frame.probe_counts.xyz) - 1.0, float3(0.0, 0.0, 0.0));
+    float3 grid = clamp((world_position - frame.probe_origin.xyz) * frame.probe_inv_spacing.xyz,
+                        float3(0.0, 0.0, 0.0), last);
+    float3 base = floor(grid);
+    float3 f = grid - base;
+
+    uint3 lo = uint3(base);
+    // `min` against the axis's last probe rather than `+ 1` outright: at the far
+    // face there is no next probe, and `f` is zero there, so the corner is
+    // weighed out rather than wrapped around.
+    uint3 hi = uint3(min(base + 1.0, last));
+
+    // Seven blends over the coefficients. The far corner's weight reaches
+    // exactly zero at the boundary where the cell index changes — `lerp(a, b,
+    // 0.0)` is `a` — so a fragment landing in cell `i` at `f≈1` and one landing
+    // in cell `i+1` at `f≈0` compute the same value, which is the whole of this
+    // grid's determinism argument.
+    GpuProbe x00 = lerp_probe(probe_at(uint3(lo.x, lo.y, lo.z)), probe_at(uint3(hi.x, lo.y, lo.z)), f.x);
+    GpuProbe x10 = lerp_probe(probe_at(uint3(lo.x, hi.y, lo.z)), probe_at(uint3(hi.x, hi.y, lo.z)), f.x);
+    GpuProbe x01 = lerp_probe(probe_at(uint3(lo.x, lo.y, hi.z)), probe_at(uint3(hi.x, lo.y, hi.z)), f.x);
+    GpuProbe x11 = lerp_probe(probe_at(uint3(lo.x, hi.y, hi.z)), probe_at(uint3(hi.x, hi.y, hi.z)), f.x);
+    GpuProbe y0 = lerp_probe(x00, x10, f.y);
+    GpuProbe y1 = lerp_probe(x01, x11, f.y);
+    GpuProbe cell = lerp_probe(y0, y1, f.z);
+
+    float4 basis = float4(normal, 1.0);
+    return max(float3(dot(cell.sh_r, basis), dot(cell.sh_g, basis), dot(cell.sh_b, basis)),
+               float3(0.0, 0.0, 0.0));
+}
+
 /// The forward pass's two colour attachments, one field per target.
 ///
 /// This was a bare `float4` until `docs/plan/18-render-features.md`'s
@@ -1578,14 +1732,28 @@ FragmentOutput fragmentMain(VertexOutput input)
     // exactly — so converting the sun from a field to a row is arithmetically a
     // no-op and the goldens are what say so.
     //
+    // `docs/plan/18-render-features.md`'s irradiance grid, **added** to the flat
+    // term rather than replacing it: the sum starts at the ambient and a grid of
+    // nothing contributes exactly zero, so the whole feature is data and there
+    // is no branch anywhere selecting it. An author who wants the probes to be
+    // the whole of the environment sets `DirectionalLight::ambient` to zero.
+    float3 irradiance = frame.ambient.rgb + probe_irradiance(input.world_position, normal);
+
     // **The ambient scales the diffuse albedo, so a metal has no ambient
     // term** — and that is the model rather than an omission. A conductor
     // reflects its surroundings instead of scattering them, so what it owes the
-    // room is a *reflection*, which screen-space reflections and irradiance
-    // probes are what will supply. Until one of them exists a fully metallic
-    // surface with no light on it is black. Nothing regresses today, because
-    // `GpuMaterial::UNTINTED`'s metallic is zero and no scene sets one higher.
-    float3 lit = diffuse_albedo * (frame.ambient.rgb * occluded + direct) + gloss;
+    // room is a *reflection*, which screen-space reflections are what will
+    // supply: the probe grid above is the diffuse half of the same design and
+    // the specular half is what an `ssr.slang` miss will return. Until then a
+    // fully metallic surface with no light on it is black. Nothing regresses
+    // today, because `GpuMaterial::UNTINTED`'s metallic is zero and no scene
+    // sets one higher.
+    //
+    // **Occlusion scales the probes too**, and that is the same statement as
+    // above rather than a new one: how much of the surrounding room a surface
+    // can see is what modulates the environment reaching it, and the grid is an
+    // environment.
+    float3 lit = diffuse_albedo * (irradiance * occluded + direct) + gloss;
 
     FragmentOutput output;
     // Deliberately **not** clamped: the target is `Rgba16Float` and the tonemap

@@ -183,6 +183,11 @@ pub mod mesh;
 /// shades from, in the layouts those shaders declare.
 pub mod light;
 
+/// The irradiance probe row and grid header `mesh.slang` adds to the ambient
+/// term, in the layouts that shader declares — and the Rust mirror of the
+/// spherical-harmonic evaluation it does it with.
+pub mod probe;
+
 /// The cluster record `mesh_cluster.slang` indexes, in the layout that shader
 /// declares. `crcbl_scene::meshlet` is what builds them.
 pub mod meshlet;

@@ -769,11 +769,17 @@ mod tests {
                 // `StructuredBuffer` rather than `RW`, because this file only
                 // reads what `light_cluster.slang` wrote.
                 //
-                // Last is that file's screen-space occlusion channel at binding
+                // Then that file's screen-space occlusion channel at binding
                 // 22, and therefore `t9`: an ordinary `Texture2D<float>` read by
                 // `Load`, so it takes no sampler beside it.
+                //
+                // Last is the same topic's irradiance probe table at binding 23,
+                // and therefore `t10` — a read-only `StructuredBuffer` like the
+                // light list, appended past the occlusion channel because this
+                // whole list only ever grows at its top.
                 &[
                     Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler, Srv, Srv, Srv,
+                    Srv,
                 ],
             ),
             (

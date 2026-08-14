@@ -29,6 +29,8 @@
 //!
 //! [`bind_index_buffer`]: https://docs.rs/crcbl-hal
 
+use crate::probe::{PROBE_VOLUME_SIZE, ProbeVolume};
+
 /// Bytes per vertex: four `float4`s, no padding.
 pub const VERTEX_STRIDE: usize = 64;
 
@@ -121,10 +123,12 @@ const _: () = assert!(
 /// Bytes in the frame uniform block.
 ///
 /// One `float4x4` (64), two `float4` (16 each), [`SHADOW_CASCADES`] more
-/// `float4x4`, two closing `float4`, a `uint4` and [`SHADOW_LIGHT_TILES`] more
-/// `float4x4`. Checked against the `Offset` decorations `slangc` emits by this
-/// module's `the_uniform_block_matches_the_offsets_slangc_emits`.
-pub const FRAME_UNIFORMS_SIZE: usize = 96 + 64 * SHADOW_CASCADES + 48 + 64 * SHADOW_LIGHT_TILES;
+/// `float4x4`, two closing `float4`, a `uint4`, [`SHADOW_LIGHT_TILES`] more
+/// `float4x4` and the irradiance grid's [`PROBE_VOLUME_SIZE`] header. Checked
+/// against the `Offset` decorations `slangc` emits by this module's
+/// `the_uniform_block_matches_the_offsets_slangc_emits`.
+pub const FRAME_UNIFORMS_SIZE: usize =
+    96 + 64 * SHADOW_CASCADES + 48 + 64 * SHADOW_LIGHT_TILES + PROBE_VOLUME_SIZE;
 
 /// Bytes per [`GpuInstance`], and the stride of the instance storage buffer.
 ///
@@ -270,6 +274,24 @@ pub struct FrameUniforms {
     /// no existing member's offset — which is what let the cascade goldens stay
     /// byte-identical across the change that introduced it.
     pub light_view_proj: [[f32; 16]; SHADOW_LIGHT_TILES],
+    /// `docs/plan/18-render-features.md`'s irradiance grid: where the probes
+    /// are, how far apart, and how many.
+    ///
+    /// The rows themselves are a storage buffer of
+    /// [`GpuProbe`](crate::probe::GpuProbe) — only the header rides here, on
+    /// [`cluster_grid`](Self::cluster_grid)'s terms, because a fragment needs it
+    /// before it knows which row to fetch.
+    ///
+    /// **[`ProbeVolume::default`] is a grid of nothing**, and the whole feature
+    /// is additive: a scene with no probes evaluates to exactly zero and the
+    /// shader has no branch for it. See [`crate::probe`].
+    ///
+    /// **Last in the block**, for [`light_view_proj`](Self::light_view_proj)'s
+    /// reason exactly: no existing member's offset moves, so every golden
+    /// blessed before this member existed still matches.
+    ///
+    /// [`ProbeVolume::default`]: crate::probe::ProbeVolume::default
+    pub probes: ProbeVolume,
 }
 
 impl FrameUniforms {
@@ -309,6 +331,11 @@ impl FrameUniforms {
         for matrix in &self.light_view_proj {
             put(&mut bytes, &mut at, matrix);
         }
+        // The grid header, written by the type that owns its layout rather than
+        // unpacked here: it is three `std140` rows with two padding lanes in
+        // them, and a second spelling of that is a second place for it to drift.
+        bytes[at..at + PROBE_VOLUME_SIZE].copy_from_slice(&self.probes.to_bytes());
+        at += PROBE_VOLUME_SIZE;
         debug_assert_eq!(at, FRAME_UNIFORMS_SIZE);
         bytes
     }
@@ -1323,12 +1350,13 @@ mod tests {
     #[test]
     fn the_uniform_block_matches_the_offsets_slangc_emits() {
         assert_eq!(
-            FRAME_UNIFORMS_SIZE, 656,
+            FRAME_UNIFORMS_SIZE, 704,
             "at two cascades and six light tiles"
         );
         // `OpMemberDecorate %FrameUniforms_std140 n Offset …` — 0, 64, 80, 96,
-        // 224, 240, 256, 272 — and
-        // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64`.
+        // 224, 240, 256, 272, 656, 672, 688 — and
+        // `OpDecorate %_arr_mat4v4float_int_2 ArrayStride 64`. The last three
+        // are the grid header's rows, which this side writes as one group.
         let cascades = 64 * SHADOW_CASCADES;
         let lights = 64 * SHADOW_LIGHT_TILES;
         let offsets = [
@@ -1340,8 +1368,19 @@ mod tests {
             112 + cascades,
             128 + cascades,
             144 + cascades,
+            144 + cascades + lights,
         ];
-        let sizes = [64usize, 16, 16, cascades, 16, 16, 16, lights];
+        let sizes = [
+            64usize,
+            16,
+            16,
+            cascades,
+            16,
+            16,
+            16,
+            lights,
+            PROBE_VOLUME_SIZE,
+        ];
         for (index, (offset, size)) in offsets.iter().zip(&sizes).enumerate() {
             assert_eq!(
                 offset + size,
@@ -1377,6 +1416,11 @@ mod tests {
             shadow_params: [30.0; 4],
             cluster_grid: [41, 42, 43, 44],
             light_view_proj,
+            probes: ProbeVolume {
+                origin: [60.0, 61.0, 62.0],
+                inv_spacing: [63.0, 64.0, 65.0],
+                counts: [2, 3, 4],
+            },
         };
         let bytes = uniforms.to_bytes();
         let at =
@@ -1417,6 +1461,30 @@ mod tests {
                 144 + cascades + 64 * index
             );
         }
+        // And the grid header past the end of them, row by row: three `std140`
+        // rows with a padding lane in each of the first two, and the total in
+        // the last one's.
+        let probes = 144 + cascades + lights;
+        assert_eq!(
+            [at(probes), at(probes + 4), at(probes + 8)],
+            [60.0, 61.0, 62.0],
+            "the probe grid's origin"
+        );
+        assert_eq!(
+            [at(probes + 16), at(probes + 20), at(probes + 24)],
+            [63.0, 64.0, 65.0],
+            "the probe grid's reciprocal spacing"
+        );
+        assert_eq!(
+            [
+                word_at(probes + 32),
+                word_at(probes + 36),
+                word_at(probes + 40),
+                word_at(probes + 44)
+            ],
+            [2, 3, 4, 24],
+            "the probe grid's counts and their product"
+        );
     }
 
     /// The offsets `slangc` actually emitted for `GpuInstance`, read out of the

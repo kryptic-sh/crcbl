@@ -55,7 +55,7 @@ use std::borrow::Cow;
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{
     Camera, Capacities, DirectionalLight, ForwardRenderer, Geometry, InstanceDesc,
-    InstancePoolError, Light, MeshDesc, PageDesc, PointLight, Projection, SceneDesc,
+    InstancePoolError, Light, MeshDesc, PageDesc, PointLight, ProbeGrid, Projection, SceneDesc,
 };
 use crcbl::shaders::mesh::{self, GpuMaterial, MeshVertex};
 
@@ -672,6 +672,7 @@ pub fn room() -> SceneDesc<'static> {
             },
         ],
         page,
+        probes: ProbeGrid::default(),
         capacities: CAPACITIES,
     }
 }
@@ -691,6 +692,12 @@ pub const CAPACITIES: Capacities = Capacities {
     instances: 64,
     materials: 8,
     lights: 8,
+    // **No probes yet.** `docs/plan/18-render-features.md`'s irradiance grid is
+    // authored per scene, this room authors none, and a grid of nothing adds
+    // exactly zero — so the goldens below are the ones they always were. The
+    // slice that gives the room a volume is the one that retires this crate's
+    // standing "the coloured wall does not bounce".
+    probes: 0,
 };
 
 /// Which mesh each object in the room is, and which row it shades through, in

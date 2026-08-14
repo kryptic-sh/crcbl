@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn an_application_bakes_its_own_mesh_and_the_renderer_makes_it_resident() {
         use crcbl_hal::{DeviceDesc, Format, QueueKind};
-        use crcbl_render::scene::{Capacities, Geometry, MeshDesc, PageDesc, SceneDesc};
+        use crcbl_render::scene::{Capacities, Geometry, MeshDesc, PageDesc, ProbeGrid, SceneDesc};
         use crcbl_shaders::mesh;
         use std::borrow::Cow;
 
@@ -401,6 +401,7 @@ mod tests {
             }],
             materials: vec![mesh::GpuMaterial::UNTINTED],
             page: PageDesc::opaque_white(1),
+            probes: ProbeGrid::default(),
             capacities: Capacities::default(),
         };
 

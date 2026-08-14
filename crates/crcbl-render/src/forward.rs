@@ -161,6 +161,7 @@ use crate::light::{Light, sun_row};
 use crate::light_grid::{FROXEL_CAPACITY, FrameView, Grid, LightGrid, LightGridDesc};
 use crate::material_table::{MaterialTable, MaterialTableDesc};
 use crate::mesh_pool::{MeshPool, MeshPoolDesc, MeshPoolError};
+use crate::probe::{ProbeTable, ProbeTableDesc};
 use crate::scene::{self, Geometry, InstanceDesc, SceneDesc};
 use crate::shadow::{self, Cascades};
 use crate::ssao::{Ssao, cached_group};
@@ -215,6 +216,24 @@ const LIGHT_GRID_BINDING: u32 = 21;
 /// past everything `mesh_cluster.slang` declares as well, which is why that file
 /// needs no mirror of this one: no index it already owns moves.
 const AMBIENT_OCCLUSION_BINDING: u32 = 22;
+
+/// The bind-group slot `docs/plan/18-render-features.md`'s irradiance probes are
+/// read through.
+///
+/// **Appended past [`AMBIENT_OCCLUSION_BINDING`], never inserted**, for exactly
+/// the reason that constant gives: `crcbl-mtl` gives a resource the next index
+/// in its Metal argument table by counting the same-table entries of the layout
+/// list, and Slang numbers a stage's arguments by declaration order, so the two
+/// agree only while both ascend. Appending changes no index below it —
+/// `msl/mesh.metal` still takes `lights [[buffer(7)]]` and
+/// `cluster_lights [[buffer(8)]]`, and this one lands on `buffer(9)`.
+///
+/// 23 is past everything `mesh_cluster.slang` declares, which reaches 21, so
+/// that file needs no mirror of this *binding*. It does mirror the frame block's
+/// new members, which is a different thing: the two files read one uniform
+/// buffer and their `FrameUniforms` declarations are held identical by
+/// `crcbl_shaders::cull`'s own lint.
+const PROBE_TABLE_BINDING: u32 = 23;
 
 /// The radius `ssao.slang` gathers occlusion within, in **world units**.
 ///
@@ -551,6 +570,22 @@ pub struct ForwardRenderer {
     /// by accident, which is a material and only *happens* to be the untinted
     /// one.
     material_ids: Vec<u32>,
+    /// `docs/plan/18-render-features.md`'s irradiance grid, row by row.
+    ///
+    /// One buffer shared by every frame's bind group, like the material table
+    /// and for a stronger version of its reason: a probe is written when the
+    /// scene is made resident and there is no call that rewrites one. See
+    /// [`crate::probe`].
+    probes: ProbeTable,
+    /// Where those rows are, which rides in the frame block rather than in a
+    /// buffer of its own — a fragment needs it before it knows which row to
+    /// fetch.
+    ///
+    /// Kept rather than re-derived because [`SceneDesc`] is read once, at build.
+    /// [`ProbeVolume::default`](crcbl_shaders::probe::ProbeVolume::default) is a
+    /// grid of nothing, which is what a description with no probes leaves here
+    /// and what makes the whole feature add zero.
+    probe_volume: crcbl_shaders::probe::ProbeVolume,
     /// §3.2's texture side: one `D2Array` image whose layers the material rows
     /// index. One page, bound once, for every material — see the module docs on
     /// why this is [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) and not
@@ -909,6 +944,8 @@ struct Rollback {
     instances: Option<InstancePool>,
     /// The material table, which owns one buffer.
     materials: Option<MaterialTable>,
+    /// The irradiance probe table, which owns one buffer.
+    probes: Option<ProbeTable>,
     /// The cull and draw-argument passes, which own two pipelines and a ring of
     /// buffers each — and which clean themselves up on their own failure path,
     /// so this only carries one that was built.
@@ -981,6 +1018,9 @@ impl Rollback {
         if let Some(draws) = self.draws {
             draws.destroy(device);
         }
+        if let Some(table) = self.probes {
+            table.destroy(device);
+        }
         if let Some(table) = self.materials {
             table.destroy(device);
         }
@@ -1020,6 +1060,13 @@ struct SharedBindings<'a> {
     /// dispatches for one camera.
     lights: BufferHandle,
     light_grid: BufferHandle,
+    /// Binding [`PROBE_TABLE_BINDING`], the irradiance grid's rows.
+    ///
+    /// Shared rather than per-group for the light list's reason and one more of
+    /// its own: the grid is written once at build and never varies by frame or
+    /// by view. A cascade reads it too and never looks — the depth-only pipeline
+    /// has no fragment stage of its own.
+    probes: BufferHandle,
 }
 
 /// The half of a mesh-layout bind group that differs between the colour pass and
@@ -1252,6 +1299,13 @@ impl MeshGroup {
             binding: AMBIENT_OCCLUSION_BINDING,
             array_index: 0,
             resource: BindingResource::ImageView(self.ambient_occlusion),
+        });
+        // And the irradiance grid past it, which is where the list now ends —
+        // see [`PROBE_TABLE_BINDING`].
+        entries.push(BindGroupEntry {
+            binding: PROBE_TABLE_BINDING,
+            array_index: 0,
+            resource: BindingResource::whole_buffer(shared.probes),
         });
         entries
     }
@@ -1592,6 +1646,10 @@ impl ForwardRenderer {
         // is where a page can be built wrong and where the check can be made to
         // fail; see `PageDesc::check`.
         scene.page.check()?;
+        // The probe grid's counts against the rows it carries, which is what
+        // bounds the shader's fetch. Checked by the type that owns the grid, on
+        // `PageDesc::check`'s terms exactly — see `ProbeGrid::check`.
+        scene.probes.check()?;
         // A row naming a layer the page does not have is an out-of-range sample,
         // which nothing below the seam reports.
         let layers = scene.page.layers().len();
@@ -1682,6 +1740,11 @@ impl ForwardRenderer {
                 "material table",
                 scene.materials.len() as u64,
                 scene.capacities.materials,
+            ),
+            (
+                "probe table",
+                scene.probes.probes.len() as u64,
+                scene.capacities.probes,
             ),
         ] {
             if needed > u64::from(capacity) {
@@ -1796,6 +1859,26 @@ impl ForwardRenderer {
         let (materials, material_ids) = Self::build_materials(device, scene)?;
         let material_buffer = materials.buffer();
         rollback.materials = Some(materials);
+
+        // `docs/plan/18-render-features.md`'s irradiance grid, filled once and
+        // never again — see [`crate::probe`], which is where that decision
+        // lives. **Created even for a description with no probes**, because
+        // every group of this layout has to fill [`PROBE_TABLE_BINDING`] and the
+        // honest filler for "no probes were authored" is the zeroed row the
+        // shader's clamp lands on.
+        let probe_table = ProbeTable::new(
+            device,
+            &ProbeTableDesc {
+                label: Some("forward"),
+                capacity: scene.capacities.probes,
+            },
+        )?;
+        // Into the rollback before it is filled, so a write that fails releases
+        // the buffer rather than leaking it.
+        rollback.probes = Some(probe_table);
+        let probe_table = rollback.probes.as_ref().expect("just stored");
+        let probe_buffer = probe_table.buffer();
+        probe_table.fill(device, &scene.probes.probes)?;
 
         // **Empty.** Every object in the scene arrives through
         // [`ForwardRenderer::add_instance`], including the demo scene's cube: a
@@ -2423,6 +2506,26 @@ impl ForwardRenderer {
             count: 1,
             flags: BindingFlags::empty(),
         });
+        // The irradiance grid, past the occlusion channel — see
+        // [`PROBE_TABLE_BINDING`] on why the list only ever grows at its top.
+        //
+        // `geometry` beside `FRAGMENT` for binding 7's reason exactly, and
+        // `msl/mesh.metal` is again the proof rather than the theory: its
+        // `vertexMain` takes `probes [[buffer(9)]]` whether it reads it or not.
+        mesh_entries.push(BindGroupLayoutEntry {
+            binding: PROBE_TABLE_BINDING,
+            visibility: geometry.union(ShaderStages::FRAGMENT),
+            kind: BindingKind::StorageBuffer {
+                // **Read-only, which is what lets the table be host-visible at
+                // all**: the seam refuses a *writable* storage binding of a
+                // host-visible buffer, and nothing writes a probe on the GPU —
+                // the whole grid is authored and uploaded once.
+                read_only: true,
+                dynamic: false,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        });
 
         let mesh_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
             label: Some("mesh frame"),
@@ -2709,6 +2812,7 @@ impl ForwardRenderer {
                 shadow_sampler,
                 lights: lights.lights(frame),
                 light_grid: lights.grid(frame),
+                probes: probe_buffer,
             };
             let buffer = device.create_buffer(&BufferDesc {
                 label: Some("mesh frame uniforms"),
@@ -3168,6 +3272,11 @@ impl ForwardRenderer {
                 .take()
                 .unwrap_or_else(|| unreachable!("the table was placed in the rollback above")),
             material_ids,
+            probes: rollback
+                .probes
+                .take()
+                .unwrap_or_else(|| unreachable!("the table was placed in the rollback above")),
+            probe_volume: scene.probes.volume,
             base_color_page,
             base_color_sampler,
             draws: rollback.draws.take().unwrap_or_else(|| {
@@ -3700,6 +3809,11 @@ impl ForwardRenderer {
             shadow_params: Cascades::params(),
             cluster_grid: self.grid.to_frame_block(),
             light_view_proj,
+            // The scene's grid, unchanged since `with_scene` read it: the
+            // probes are static and nothing here varies them per frame. A
+            // description with no probes leaves the default, which evaluates to
+            // exactly zero in the shader.
+            probes: self.probe_volume,
         };
         device.write_buffer(self.uniforms[self.frame], 0, &uniforms.to_bytes())?;
 
@@ -5315,6 +5429,7 @@ impl ForwardRenderer {
         // them.
         self.lights.destroy(device);
         self.draws.destroy(device);
+        self.probes.destroy(device);
         self.materials.destroy(device);
         self.instances.destroy(device);
         self.pool.destroy(device);
@@ -6139,6 +6254,7 @@ mod tests {
             }],
             materials: vec![mesh::GpuMaterial::UNTINTED],
             page: scene::PageDesc::opaque_white(1),
+            probes: scene::ProbeGrid::default(),
             capacities: scene::Capacities::default(),
         };
         assert!(
