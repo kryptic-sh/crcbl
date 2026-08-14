@@ -7758,6 +7758,95 @@ already in that crate. Whoever does it should decide whether the links should
 point at the `crcbl` CLI's bake command or be deleted, rather than mechanically
 repointing them.
 
+## Irradiance probes: the slice plan (designed 2026-08-14)
+
+The design is `docs/plan/18-render-features.md`'s "Irradiance probes: the
+design" — a static grid of L1 spherical-harmonic probes in a read-only storage
+buffer, adding no render pass, added to `frame.ambient` for diffuse and returned
+by an SSR miss for specular. Read it first; this is only the order to build it
+in and the decisions still open.
+
+Nothing of it is built. Verified while reviewing the design: the seam permits a
+read-only storage binding of a host-visible buffer (only writable ones are
+refused), `crcbl_shaders::ssr`'s `UNTINTED.roughness >= ROUGHNESS_CUTOFF`
+compile-time assertion exists as the design describes, and appending a mesh
+binding after `AMBIENT_OCCLUSION_BINDING` needs no `mesh_cluster.slang` mirror
+for the same reason occlusion did not.
+
+### The slices
+
+1. **The probe table, additive and zero.** `crcbl_shaders::probe` with
+   `GpuProbe`, `ProbeVolume`, the encoders and a Rust mirror of the SH
+   evaluation tested against the literature's values; `SceneDesc.probes`;
+   `Capacities.probes` and its row in `check_scene`; a `ProbeTable` on
+   `MaterialTable`'s shape; the mesh binding; `probe_irradiance` added to
+   `frame.ambient.rgb`. **Observable:** every existing golden byte-identical.
+   **Owed:** no scene supplies a probe.
+2. **`Scene::Probes` and its golden.** The open box with the ambient at zero and
+   the sun down, two probes with opposite-coloured L1, and a ratio between two
+   blocks. **Owed:** lumen has none; the metal is still black.
+3. **lumen's room gets a volume.** A `probes()` beside `room()` computed from
+   the room's own constants. **Observable:** the coloured wall finally tints the
+   plaster beside it, which retires `lib.rs`'s standing "the coloured wall does
+   not bounce". Its golden moves for a reason its own module doc names.
+4. **The specular fallback.** `SsrParams` gains `inv_view`; the march returns
+   `lerp(environment, hit, confidence) * fresnel`. **Observable:** the point on
+   lumen's mirror panel above the reflecting band becomes measurably non-zero.
+   **`METAL_DARKNESS` inverts** — it currently asserts that point is essentially
+   black and its doc says that is the model. Rewriting it is part of the slice,
+   not a follow-up.
+5. **The roughness cutoff**, only if Q1 says the gate stays. This is the
+   existing SSR cutoff item, whose cost is already measured below.
+
+**The cheapest useful version is not a separate slice.** One probe and a 1×1×1
+grid is slice 1 with `probes.len() == 1` — the ambient becomes directional,
+which is most of what a probe buys on a picture, and lumen's panel goes
+non-black across its whole face. Stopping after slice 4 with a single probe
+requires rewriting nothing to add the grid later. The grid is recommended anyway
+because a room needs light that differs between the window and the far corner.
+
+### Decisions this needs before slice 4
+
+- **Q1: does the probe half of the environment specular evaluate above
+  `ROUGHNESS_CUTOFF`?** **Yes** makes lumen's brass block stop being black with
+  no cutoff change and is physically right — a wide lobe is where a blurry probe
+  is _more_ honest than one ray. It costs the SSR design's one unconditional
+  determinism claim: `UNTINTED.roughness >= ROUGHNESS_CUTOFF` exists so that
+  every untinted surface is bit-identical across four rasterisers by
+  construction, and every surface would now carry a probe term. Every 3D golden
+  moves once. **No** keeps that and leaves the brass black until slice 5.
+  **Recommendation: yes, as its own slice after 4** so the churn is isolated —
+  and note it makes the pending cutoff-raise item largely unnecessary, which is
+  worth weighing while that one is still undecided.
+- **Q2: does this get a `RenderEffects` bit?** **Recommend no.** The off-switch
+  is the scene, and a zero volume is bit-identical, so there is nothing to
+  resolve through four layers. `effects.rs`'s own rule is that an effect which
+  is off is a frame with fewer passes and never a shader branch — a probe bit
+  removes no pass. If lumen's milestone-4 matrix wants a row anyway, it should
+  swap the bound table for the zero one, which is still data and still no
+  branch. It is public API shape, so it is yours.
+
+### Named limits, so they are not rediscovered
+
+- **Light leaking is the grid's real weakness** — a probe inside a wall lights
+  the room beyond it. lumen's room is a single box so it will not show there; a
+  scene with two rooms will. The literature's answers are per-probe visibility
+  or DDGI's depth moments, neither in scope.
+- **An L1 probe in a mirror is a gradient, not a room.** Fixing that is
+  prefiltered radiance cubemaps, which need the filtered read `ssr.slang`
+  refuses. Trigger: when somebody looks at lumen's panel and objects.
+- **With `REFLECTIONS` off, metals go black again**, because the reflection pair
+  is what draws the environment specular. Coherent rather than a defect, and
+  `--no-reflections` showing it is honest.
+- **The bake tool is deferred on a hard prerequisite**, not on taste: a gather
+  bake needs a ray-triangle intersector and a BVH, and `crcbl-phys` has neither
+  — only ray-vs-sphere, ray-vs-AABB and ray-vs-capsule.
+
+### Not verified
+
+The design was produced without running anything: every number in it is a
+constant read out of a source file. No frame, no benchmark, no test.
+
 ## The lumen web demo is deferred, and what naming a new demo costs
 
 Native first, deliberately: the sample's job is to make the lighting visible and
