@@ -7908,13 +7908,18 @@ of the frame, effectively the reverted fixture's result — even though every
 semantic check passed and the shader agreed with the Rust mirror to 0.20 levels.
 The gradient had been confined, but not enough to fit the global 1% budget.
 
-The interval is now `0.1` units, projected to 7.558040 pixels in the fixture.
-Scaling WARP's observed count by that width predicts 304 pixels, or 0.618490% of
-the frame; only the Windows run can confirm it. The semantic check also compares
-the centre against both endpoints now, so narrowing the band cannot quietly
-replace interpolation with endpoint selection. The widened-to-room negative
-control still fails on an 11.60-level endpoint-region change against its
-0.5-level flatness budget.
+Reducing the interval to `0.1` units disproved that diagnosis: WARP again
+reported exactly 1,216 over-tolerance pixels. The uploaded actual/diff artifact
+located every one on the thin oblique `±X` wall strips — 656 on the left and 560
+on the right. The floor had 8,825 differing pixels but none over tolerance and a
+maximum channel delta of 2. The wall strips reached 7 and 8 respectively.
+
+The room is now wide enough to crop those `±X` strips while retaining the `±Z`
+walls as context. That changes no measured floor point, probe row, tolerance, or
+semantic assertion. The centre is still compared against both endpoints, and the
+widened-to-room negative control still fails on an 11.60-level endpoint-region
+change against its 0.5-level flatness budget. Only the next WARP run can confirm
+the crop.
 
 ## The Pages browser gate fails on the runner's GPU stack, not on the code
 

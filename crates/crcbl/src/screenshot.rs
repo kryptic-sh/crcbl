@@ -847,13 +847,18 @@ const PROBE_BLEND_WIDTH: f32 = 0.1;
 /// How wide [`Scene::Probes`]' room is, in world units — the axis its probe grid
 /// runs along.
 ///
-/// **Wide enough that a band a unit clear of either wall is still well inside
-/// the frame**, which is the whole of what this number buys: occlusion scales
-/// the probe term exactly as it scales the flat ambient, and a band close enough
-/// to a wall to be darkened would be measuring `ssao.slang` instead. A unit is
-/// twice `crcbl_render::ForwardRenderer`'s occlusion radius, so the occlusion
-/// there is not merely near one, it is one.
-const PROBE_ROOM_WIDTH: f32 = 3.2;
+/// Wide enough that the `±X` walls stay outside the frame: WARP's arithmetic
+/// disagreement was local to their thin, oblique strips rather than this scene's
+/// flat floor measurement. The `±Z` walls remain visible, so the room still has
+/// context, while every visible floor sample is a broad flat-facing region.
+///
+/// A unit clear of either wall is still well inside the frame, which is the whole
+/// of what this number buys: occlusion scales the probe term exactly as it scales
+/// the flat ambient, and a band close enough to a wall to be darkened would be
+/// measuring `ssao.slang` instead. A unit is twice
+/// `crcbl_render::ForwardRenderer`'s occlusion radius, so the occlusion there is
+/// not merely near one, it is one.
+const PROBE_ROOM_WIDTH: f32 = 3.6;
 
 /// How deep the room is, across the grid's axis.
 ///
