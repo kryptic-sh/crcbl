@@ -7882,22 +7882,6 @@ effect on. The first rule that fires arrives with the ray-traced variants, which
   "auto" is the obvious consumer and leaving the tri-state out would have made
   that a breaking change; nothing exercises it end to end.
 
-## `crcbl::screenshot`'s `ao_box` warns about a bug that is fixed
-
-`crates/crcbl/src/screenshot.rs`'s `ao_box` doc says a box that large "slid
-sideways from the eye stops drawing altogether — the frame comes back as clear
-colour, on every geometry path, with the instance passing a host-side frustum
-test", and arranges the scene to stay clear of it.
-
-That is the bug `e8d3dab` fixed: a cluster's bounding radius was not scaled by
-its instance transform, so a scaled instance's clusters were rejected while the
-instance was kept. The entry above under punctual-light shadows records the fix
-and says only the amplification path was affected. The comment is now a warning
-about something that no longer happens, and it constrains where a future scene
-may put a large box for no reason. Not touched here because re-verifying it
-means deliberately sliding the AO box off-axis and re-blessing nothing — a
-ten-minute job for somebody already in that file.
-
 ## The scene API: the slice plan (decided 2026-08-13)
 
 `apps/lumen` could not be built because an application cannot describe a scene:

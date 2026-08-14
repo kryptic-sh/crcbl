@@ -624,11 +624,15 @@ const AO_CAMERA_UP: f32 = 2.2;
 /// is handed. A mesh with an oblique face would need the inverse transpose, which
 /// nothing in this engine builds.
 ///
-/// **Centred on the camera's axis, and that is not decoration.** A box this large
-/// slid sideways from the eye stops drawing altogether — the frame comes back as
-/// clear colour, on every geometry path, with the instance passing a host-side
-/// frustum test. It reproduces without any of this slice's passes, so it is not
-/// theirs; the scene is arranged to stay clear of it rather than to chase it.
+/// **Centred on the camera's axis because that is where the claim is measured**,
+/// and no longer to avoid anything. This once said a box this large slid
+/// sideways stopped drawing altogether: a cluster's bounding radius was tested
+/// against a world-space frustum while still in mesh space, so a scaled instance
+/// lost every cluster while the instance-level cull kept it. This very mesh is
+/// what that fix was measured on — its world radius is 3.10 against a local 0.71.
+/// Re-checked by sliding this box 3.0 along `x` and rendering: both geometry
+/// paths draw, and the only assertion that fails is the occlusion ratio, because
+/// the camera then frames open floor instead of the corner.
 fn ao_box() -> glam::Mat4 {
     glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5 * AO_WALL, 0.0))
         * glam::Mat4::from_scale(glam::Vec3::new(AO_RUN, AO_WALL, AO_TROUGH))
