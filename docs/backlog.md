@@ -7516,11 +7516,11 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
 
 - **The sun's shadow peter-pans at contacts.** A lit strip along the foot of
   every wall the sun should be shadowing, and a sawtoothed band at the head of
-  the back wall where the ceiling should be. **Now diagnosed** — see "lumen's
-  left-side light bleed" below, which supersedes what this bullet used to guess.
-  It is one defect rather than the two this said, its cause is a named constant,
-  and the strip is narrower than the "metre wide" figure that reached
-  `room.rs`'s `AMBIENT_FLOOR` doc comment.
+  the back wall where the ceiling should be. **Diagnosed and largely fixed** —
+  see "the sun's shadow still peter-pans" below. It was one defect rather than
+  the two this bullet used to claim, and the strip was 0.60 m rather than the
+  "metre wide" it said, a figure that had reached `room.rs`'s `SHADED_FLOOR` doc
+  comment and is corrected in both places.
 - **A single-quad wall casts no shadow at all.** Back faces are culled in the
   shadow pass as well as the colour one, so an inward-facing quad is invisible
   to the sun. lumen's first frame was an evenly lit floor with a window that did
@@ -7662,109 +7662,70 @@ point. **Nothing was retuned.**
   AO. Anyone repeating this measurement must take it on a wall whose foot the
   sun does not reach, which is why the numbers above are from the back wall.
 
-## lumen's left-side light bleed: one defect, and `CASTER_REACH` sets its size (2026-08-14)
+## The sun's shadow still peter-pans, at a third of its old size (2026-08-14)
 
-Raised from a screenshot of `apps/lumen`'s room. Investigated on radv at
-1280×960 through the toggle frames `every_effect_toggles_and_the_frame_says_so`
-writes under `target/lumen/`. **Not fixed.**
+The bleed raised from a screenshot of `apps/lumen`'s room was one defect: the
+sun's bias was denominated in a cascade's clip depth, so its world meaning was
+multiplied by that cascade's whole depth range. `DEPTH_BIAS_TEXELS` in
+`crcbl_render::shadow` and `sun_visibility` in `mesh.slang` now denominate it in
+cascade texels, offsetting the world position before projecting, and the strip
+at a wall's foot went 0.601 m → 0.375, the band down the back wall's left edge
+0.579 m → 0.368, and the cornice under the ceiling 112 luma → 5.7. That much has
+shipped; what follows is what it did not finish.
 
-### It is one defect, not the several it looks like
+### The constant is a cover for a bias that reads the wrong normal
 
-Every artefact on the left of that frame disappears under `--no-shadows` and is
-untouched by `--no-ao` and `--no-reflections`. They are all the sun's
-shadow-comparison bias:
+`DEPTH_BIAS_TEXELS` is 6.0, and the residual 0.375 m strip is what those six
+texels cost. It is not six because acne needs six — the slope term covers what a
+texel's footprint explains. It is six because **`crcbl_render::scene::demo`'s
+dunes patch shades an analytic height field's exact normal across one-metre
+quads**, so `tan(acos(N·L))` describes a surface the triangles underneath do not
+have, and the slope term is short by however much they disagree. Measured trade,
+slope term held at 2.0:
 
-- **The pale strip at the foot of the `-x` wall** — the one the entry above
-  already recorded. Floor sun visibility is a full `1.00` from the corner out to
-  0.55 m, falling to shadow past 0.65 m. Luma 140 lit against 48 shadowed.
-  **Measured 0.60 m wide, not the "metre" that entry claimed** — and that figure
-  was copied into `room.rs`'s `AMBIENT_FLOOR` doc comment, so it wants
-  correcting in both places when this is fixed.
-- **The bright band down the left edge of the back wall — new, and not recorded
-  anywhere before.** It reads as a pillar or a window reveal and is neither: it
-  is the leftmost 0.575 m of the back wall lit at visibility `1.00`, luma 175
-  against the 58.9 the rest of that wall correctly gets. A factor of three, on a
-  surface whose only occluder is the `-x` wall's outer face 0.72 m away. This is
-  the part of the report that the existing entry does not cover.
-- **The sawtoothed band at the head of the back wall.** Same bias; the ceiling's
-  _top_ face is the occluder, because its bottom face is back-facing to the sun
-  and culled in the shadow pass.
-- **The sunlit shaft through the window is correct and is not part of this.**
-  Its side boundaries match the analytic ones derived from `room::sun` and the
-  window opening to within a texel. Worth knowing, because the shaft and the
-  wall-foot strip are adjacent and easy to read as one bleed.
+| `DEPTH_BIAS_TEXELS` | lumen's strip | dunes              |
+| ------------------- | ------------- | ------------------ |
+| 0.5                 | 0.140 m       | heavy cross-hatch  |
+| 3                   | 0.244 m       | faint hatch        |
+| 5                   | 0.330 m       | clean              |
+| 6 (shipped)         | 0.375 m       | clean, with margin |
 
-### The cause, and the constant nobody would look at
+**The fix that removes the trade is a bias driven from the geometric normal**
+(`ddx`/`ddy` of the world position, or a normal-offset formulation), which
+describes the triangle actually rasterised rather than the normal interpolated
+across it. With it the constant falls back towards a half texel and the strip
+with it — roughly 0.14 m on the table above. Not built. This is the next thing
+on this path and the only one that makes the remaining strip go away without
+buying acne somewhere else.
 
-The bias is constant plus slope-scaled, applied in `sun_visibility` in
-`mesh.slang` from `CONSTANT_BIAS` and `SLOPE_BIAS` in `crcbl-render`'s `shadow`
-module. Both are small. The problem is what they are denominated in.
+**Considered and declined:** shrinking `CASTER_REACH`. It was the number that
+set the leak's size under the old denomination and no longer sets anything — the
+coupling is gone, so turning it down now buys nothing and costs casters standing
+off the cascade's near plane.
 
-`cascade_matrix` builds an orthographic projection whose depth range is
-`2 · radius + CASTER_REACH`, and the bias is added in that **clip** space. So
-its world meaning scales with the cascade's whole depth range. With `CASCADES`
-of 2, `DISTANCE` 24 and `SPLIT_LAMBDA` 0.7, the outer cascade's range is 88 m,
-of which `CASTER_REACH` alone is 40. The floor's slope term puts the bias at
-0.0094 in clip, and **0.0094 × 88 m is 0.83 m of world slack** — against a shell
-0.15 m thick (`room::SHELL`). Any surface whose occluder is nearer than that
-along the light ray is wrongly lit, which is precisely the set of surfaces
-above.
+### Still open, and not addressed by the fix
 
-That arithmetic predicts the strip at 0.5985 m against 0.61 measured, and the
-back wall's lit band ending at x = −2.4238 against −2.425 measured. Two
-independent confirmations, which is why the diagnosis is stated as measured
-rather than suspected.
-
-`SHADOW_SLOPE_BIAS_CLAMP` is not involved — the floor's slope is 3.17 and the
-clamp is 5.0.
-
-### What a fix would change, ranked
-
-1. **`CASTER_REACH` is the highest-leverage number**, and the one nobody looks
-   at when the symptom reads "shadow bias": it is 45% of the outer cascade's
-   range and shrinking it scales the world slack down proportionally. What it
-   costs is casters standing off the near end of the cascade, which is what it
-   is for.
-2. **Denominate the sun's bias the way the punctual path already does.**
-   `mesh.slang`'s `PUNCTUAL_DEPTH_BIAS_TEXELS` and `PUNCTUAL_SLOPE_BIAS_TEXELS`
-   offset the world position before projecting, in texel footprints. The comment
-   beside the cascade path argues it does not need this because orthographic
-   depth is linear — true, and exactly why the number scales with `CASTER_REACH`
-   instead of with resolution.
-3. A normal-offset bias, which nothing in the tree implements.
-4. **Lowering `CONSTANT_BIAS`/`SLOPE_BIAS` is the tempting one and the wrong
-   one** — it trades peter-panning for acne without touching the reason the
-   world slack is metres wide.
-
-### The `-x` wall is not leaking, which had to be checked first
-
-`room.rs`'s floor slab tops out at y = 0.0 and the window wall's lowest slab
-starts there, sharing the edge at x = −3.0 exactly over matching z runs; the
-back wall closes the corner and the ceiling caps the walls. No gap. The backlog
-already records a shell gap once reading as a shadow failure, so this was the
-cheap check that decides everything else — and separately, a literal aperture
-would not make `sun_visibility` return `1.00` across a full 0.6 m.
-
-### Gaps, and one number that does not reconcile
-
-- **The investigation's texel-denominated figures do not survive checking.** It
-  reported the strip as 5.52 cascade-1 texels and the sawtooth period as exactly
-  one. But `TILE` is 1024 and the outer cascade spans 48 m, so a texel is 0.047
-  m — making the strip about 12.8 texels and the sawtooth period about 3.5. The
-  world-space measurements and the bias arithmetic above do not depend on this;
-  the texel counts, and with them the claim that the sawtooth is single-texel
-  quantisation, are **unresolved** and should be re-derived by whoever fixes it.
-- **The shaft over-reaches its sill edge by 0.185 m and the bias cannot explain
-  it** — the sill silhouette is 2.99 m from the receiver, far outside 0.83 m.
-  Suspected sub-kernel occluder (the sill's top face is 0.15 m, narrower than
-  the PCF footprint), not measured.
-- **The metal block's control is contaminated**: the point light is in reach and
-  `--no-shadows` turns its shadow off too, so that surface cannot isolate the
-  sun's contribution.
-- **Cascade 0 is unmeasured** — its stretch of the wall foot falls below the
-  frame. Predicted 0.259 m against the outer cascade's 0.599.
-- One backend, one resolution, one camera. The `--no-shadows` implementation was
-  not read; its effect is inferred from the frames it produced.
+- **The sunlit shaft over-reaches its sill edge by 0.185 m**, and the bias
+  cannot explain it: the sill silhouette is 2.99 m from the receiver, far
+  outside even the old 0.83 m of slack. Suspected sub-kernel occluder — the
+  sill's top face is 0.15 m, narrower than the PCF footprint — **not measured**.
+- **Cascade 0 is still unmeasured.** Every artefact measured, before and after,
+  is in cascade 1; the nearest floor point the fixed camera reaches is 4.74 m
+  against a 4.699 m split. Cascade 0's bias is tighter by arithmetic and no
+  frame shows it.
+- **The texel arithmetic in the original investigation never reconciled.** It
+  reported the strip as 5.52 cascade-1 texels, but `TILE` is 1024 over a 48 m
+  cascade, making a texel 0.047 m and the strip about 12.8. Every measurement
+  that survived into the fix is world-space and does not depend on it, so this
+  is a loose end rather than a live doubt — but the claim that the wall-head
+  sawtooth is single-texel quantisation rested on it and is **unverified**.
+- **One backend.** vk on radv, cross-checked on llvmpipe. wgpu, mtl and dx12
+  were not run; the MSL and DXIL artifacts compile and no frame from them was
+  inspected. `run-cross-backend-e2e.sh` was not run for this change.
+- **The dunes diagnosis is inference.** The hatch follows the one-metre
+  triangulation rather than cluster boundaries, which points at shading-normal
+  versus facet and away from a shadow-pass LOD mismatch — but the shadow pass's
+  LOD selection was not instrumented to rule the second out.
 
 ## The lumen web demo is deferred, and what naming a new demo costs
 
