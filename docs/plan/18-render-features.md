@@ -556,9 +556,9 @@ is what the first slice said it would be.
 ## Screen-space reflections (decided 2026-08-14)
 
 The third P7B row. SSR runs after the forward pass, so the only per-pixel data
-downstream are the depth buffer and the `Rgba16Float` scene colour — and a
-reflection needs to know which surfaces reflect and how sharply, which is `F0`
-and `roughness`.
+are the depth buffer, the `Rgba16Float` scene colour and the reflectivity
+attachment — and a reflection needs to know its coloured `F0` and whether its
+lobe is narrow enough for a screen-space ray.
 
 ### The AO section's refusal of an attachment does not transfer
 
@@ -576,17 +576,19 @@ to a pass it was never about.
 ### The decision
 
 - **One new colour attachment on the forward pass: `Rgba8Unorm`, `rgb = F0`,
-  `a = roughness`.** Both values are bounded in `0..=1`, which is the argument
-  the AO transient already makes for its single channel; a dielectric's `0.04`
-  quantises to `10/255` and a roughness drives a lobe width, and neither error
-  is resolvable in a reflection that is itself an approximation.
-  `max_color_attachments` is 4 on the minimum capability profile.
-- **It carries the material, not the shading.** Baking the evaluated
-  environment-specular weight would be one channel cheaper and would freeze a
-  shading decision into a buffer. This topic's first rule is one material model,
-  one BRDF, **one set of inputs** — `F0` and `roughness` are the inputs, and
-  storing them is what lets the irradiance-probe row evaluate the same lobe
-  rather than inherit SSR's version of it.
+  `a = sharpness`.** Sharpness is the clamped screen-march ramp
+  `1 - roughness / ROUGHNESS_CUTOFF`: zero means the surface keeps its probe
+  environment but cannot honestly launch one screen-space ray. Encoding the
+  endpoint rather than reconstructing it from quantised roughness is
+  load-bearing — `0.5` may round to either neighbouring byte, while zero
+  survives every `Rgba8Unorm` backend exactly. `max_color_attachments` is 4 on
+  the minimum capability profile.
+- **It carries the two values the downstream reflection pair consumes.** `F0`
+  colours Fresnel for every surface. Sharpness gates the march and controls how
+  strongly the blur moves from the direct centre fallback to filtered SSR. The
+  original roughness remains in the material row for the forward GGX lobe; the
+  attachment does not pretend a single screen-space ray can evaluate a broad
+  lobe.
 - **The normal stays reconstructed from depth**, sharing the AO pass's four-tap
   function — but see the escalation clause below, because the cost of a wrong
   normal is not the same for the two features.
@@ -662,10 +664,12 @@ refinement pass.
   in-bounds by construction and a ray leaving the screen stops being a branch.
   It ends at the clipped endpoint with a **border ramp** on its weight; a hard
   stop draws a visible line where reflections end.
-- **A ray that hits nothing returns zero, and zero is correct.** The reflection
-  is additive, so a miss adds nothing and the surface looks as it does today.
-  That is why the table's Reflections cell says "screen-space reflections, probe
-  fallback" — the fallback is the next row.
+- **A ray that hits nothing returns the probe environment.** The same L1 table
+  used for diffuse irradiance is decoded back to approximate directional
+  radiance, multiplied by Fresnel, and blended against a hit by confidence. A
+  zero probe volume returns exact zero and preserves the old hit multiplication
+  order. This is why the table's Reflections cell says "screen-space
+  reflections, probe fallback" rather than claiming screen space is complete.
 - **Behind an object, the depth buffer has no information, and this is where the
   plausible wrong answer lives.** A tap says the ray is behind the _front_
   surface, not how thick that surface is. A tap counts as a hit only within a
@@ -704,18 +708,19 @@ What is still worth doing, and is not decoration:
   the thickness bound is on that ramp's low end. **The pixels where two drivers
   can disagree are, by construction, the pixels whose reflection is multiplied
   by almost nothing.** That is inspectable rather than measured.
-- **The roughness gate makes most of every existing frame identically zero.**
-  With the cutoff at 0.5, `GpuMaterial::UNTINTED`'s 0.5 gives exactly zero on
-  every target, a pixel weighted exactly zero is bit-identical across four
-  rasterisers with no argument required, and the blur pass returns such a
-  pixel's scene colour untouched rather than adding a filtered zero to it.
+- **The roughness gate makes the screen march identically absent on most
+  surfaces.** With the cutoff at 0.5, `GpuMaterial::UNTINTED`'s 0.5 encodes
+  sharpness as exact zero in `Rgba8Unorm` on every target. Such a pixel still
+  receives probe environment specular, but it returns before any projected-ray
+  setup or depth tap. `Scene::Probes` explicitly disables reflections because
+  its absolute Rust mirror predicts diffuse irradiance alone.
 
-  **Noted when the blur was built (2026-08-14):** the blur widens the lobe a
-  single ray can honestly stand for, so it is the natural moment to raise that
-  cutoff — and raising it past a rough conductor at 0.55 takes `UNTINTED` in as
-  well, because no monotone ramp passes 0.55 and stops at 0.5. That trades this
-  claim away, so it was **kept out of the blur slice** and is its own decision;
-  `docs/backlog.md` carries what it costs, measured.
+  **Resolved when probe specular landed (2026-08-14):** the cutoff stays at 0.5
+  and gates only the screen march. A rough conductor therefore receives the
+  broad, low-frequency probe environment without pretending one projected ray
+  represents its lobe, while `UNTINTED` retains an exact-zero march endpoint.
+  Raising the cutoff is unnecessary unless a later fixture specifically needs
+  sharper SSR on rougher surfaces.
 
 **And the honest part**: those reduce the exposure, they do not bound it. There
 is no argument that puts SSR under `Tolerance::RASTERISER` in general. So a
@@ -731,12 +736,12 @@ one-line fix at the time.
 
 ### Roughness
 
-The first slice does **sharp mirror reflections only, and the rough end is zero
-rather than wrong**. A single ray cannot represent a wide lobe, and the failure
-mode of pretending otherwise is a sharp reflection on a rough surface, which
-reads as a bug on sight. The roughness fade is not a gate bolted on for the
-goldens — it is the statement that this pass is valid only where the lobe is
-narrow.
+The screen-space half does **sharp mirror reflections only**. A single ray
+cannot represent a wide lobe, and the failure mode of pretending otherwise is a
+sharp reflection on a rough surface, which reads as a bug on sight. The
+sharpness ramp is therefore a statement that the march is valid only where the
+lobe is narrow; it does not gate probe environment specular, whose low-frequency
+L1 result is more honest for a broad lobe than one ray.
 
 The blur that follows is the AO blur's kernel, not a mip chain: proven in this
 tree against real silhouettes, and gaining one factor — taps are weighted by how
@@ -755,14 +760,14 @@ should say.
   but the whole frame. So `ssr.slang` writes the reflection alone into an
   `Rgba16Float` transient of its own and `ssr_blur.slang` writes the sum — which
   also means the off-switch is now the pair rather than the one pass.
-- **The second weight is on the march's own roughness ramp, not on the
-  reflectivity attachment.** The march already computes `1 - roughness/cutoff`
-  and writes it into the alpha of the image the blur reads, so the blur weighs
-  taps by how near that is to the centre's own value without a second read of
-  the attachment and a second copy of the cutoff. Over the centre's own value
-  rather than a tuned tolerance: a tap on a surface too rough to reflect at all
-  then weighs exactly nothing, which is the case a matt floor under a metal
-  block is.
+- **The second weight is the sharpness ramp carried through the reflection.**
+  `mesh.slang` computes `saturate(1 - roughness/cutoff)` before `Rgba8Unorm`
+  storage, and the march copies that value into the reflection alpha. Zero
+  sharpness returns the probe fallback before march setup and the blur
+  composites that centre value directly. Positive sharpness uses
+  `lerp(centre, filtered, sharpness)`, so approaching the cutoff is continuous
+  rather than switching from a filtered neighbourhood to an unrelated centre
+  sample.
 - **The depth tolerance is the march's `THICKNESS_FLOOR` times a small
   multiplier, and the multiplier is not decoration.** `DEPTH_TOLERANCE_RADII`'s
   shape, but a floor-thickness is a much shorter length than the AO radius: at
@@ -1006,9 +1011,7 @@ refusal above is untouched.
 
 ### The specular half goes where the SSR design already left room for it
 
-`ssr.slang` says of a miss: "A ray that hits nothing returns zero… The ambient
-fallback is the irradiance-probe row's business, and putting it here first is
-what makes that row additive." So:
+`ssr.slang` fills the space a screen-space miss leaves with probe radiance:
 
 ```
 hit = hit_color * fresnel * confidence;
@@ -1031,7 +1034,10 @@ basis. Directly dotting the stored rows would brighten a constant environment by
 Three things follow: no double-counting by construction, the zero-probe case
 stays bit-identical, and **a fully metallic surface stops being black**, because
 a conductor's only non-direct light is a reflection and now it has one
-everywhere the surface faces rather than only where the march lands.
+everywhere the surface faces rather than only where the march lands. This also
+holds at and above `ROUGHNESS_CUTOFF`: zero sharpness returns the probe term
+before screen-march setup, and the blur composites that centre value directly.
+Positive sharpness blends continuously from it into filtered SSR.
 
 **The honest limit:** an L1 probe is a very blurry environment. On a rough metal
 it is close to right; on a mirror it is a smooth gradient where a room should

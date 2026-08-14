@@ -1475,8 +1475,8 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
 
 /// **The second colour attachment carries the material row the instance named.**
 ///
-/// `docs/plan/18-render-features.md`'s screen-space reflections read `F0` and a
-/// roughness out of a target the forward pass writes beside its colour, and
+/// `docs/plan/18-render-features.md`'s screen-space reflections read `F0` and
+/// SSR sharpness out of a target the forward pass writes beside its colour, and
 /// **nothing in a rendered picture shows what is in it**: a wrong channel, a
 /// wrong row, or a target the fragment stage never wrote all leave the frame
 /// exactly as every golden already has it. So this reads the attachment back and
@@ -1486,10 +1486,10 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
 /// `F0` is its albedo and therefore coloured, with all three channels distinct.
 /// Three things are asserted, each failing a different mistake:
 ///
-/// * The centre carries that row's `F0` and roughness. A swap of the `rgb` and
-///   `a` halves fails all four channels; so does a target left at its clear.
+/// * The centre carries that row's `F0` and SSR sharpness. A swap of the `rgb`
+///   and `a` halves fails all four channels; so does a target left at its clear.
 /// * It is not the neighbouring row's answer: that row is a dielectric, whose
-///   `F0` is grey whatever its albedo, and its roughness is twice this one's.
+///   `F0` is grey whatever its albedo, and its sharpness differs by design.
 /// * A corner no fragment covered is exactly zero — the clear the design asks
 ///   for, so a later march cannot start from a pixel that has no material.
 #[test]
@@ -1512,15 +1512,14 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
     let row = PROBE_MATERIALS[PROBE_REFLECTIVE_ROW];
     let plain = PROBE_MATERIALS[PROBE_PLAIN_ROW];
     // **Derived from the fixture rather than written down.** `metallic` is 1.0,
-    // so `F0` is the albedo — the near quad's own vertex colour times the row's
-    // factor times the page's white texel — and the alpha is the row's
-    // roughness. A hand-written quadruple here would go on describing the old
-    // material the day either constant moves.
+    // factor times the page's white texel — and alpha is SSR's sharpness ramp.
+    // A hand-written quadruple here would go on describing the old material the
+    // day either constant moves.
     let expected = [
         NEAR_QUAD_COLOR[0] * row.base_color[0],
         NEAR_QUAD_COLOR[1] * row.base_color[1],
         NEAR_QUAD_COLOR[2] * row.base_color[2],
-        row.roughness,
+        (1.0 - row.roughness / crcbl_shaders::ssr::ROUGHNESS_CUTOFF).clamp(0.0, 1.0),
     ];
 
     let centre = PROBE_CENTRE;
@@ -1552,15 +1551,16 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
          {PROBE_PLAIN_ROW} produces, so either the fragment stage resolved that \
          row or it ignored `metallic`."
     );
-    let roughness = f32::from(pixel[3]) / 255.0;
+    let sharpness = f32::from(pixel[3]) / 255.0;
+    let plain_sharpness =
+        (1.0 - plain.roughness / crcbl_shaders::ssr::ROUGHNESS_CUTOFF).clamp(0.0, 1.0);
     assert!(
-        (roughness - row.roughness).abs() < (roughness - plain.roughness).abs(),
-        "the reflectivity alpha at {centre:?} is {roughness}, which is nearer row \
-         {PROBE_PLAIN_ROW}'s roughness of {} than the bound row {PROBE_REFLECTIVE_ROW}'s \
-         {}. The two rows differ by design; reading the wrong one is what this \
-         separation exists to catch.",
-        plain.roughness,
-        row.roughness,
+        (sharpness - expected[3]).abs() < (sharpness - plain_sharpness).abs(),
+        "the reflectivity alpha at {centre:?} is {sharpness}, which is nearer row \
+         {PROBE_PLAIN_ROW}'s sharpness of {plain_sharpness} than the bound row \
+         {PROBE_REFLECTIVE_ROW}'s {}. The two rows differ by design; reading the wrong one is \
+         what this separation exists to catch.",
+        expected[3],
     );
 
     // The clear, which is the half of this slice a drawn pixel cannot show.
@@ -1578,9 +1578,9 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_zero_where_nothing
 
     eprintln!(
         "vk e2e: reflectivity at {centre:?} is {pixel:?} — row \
-         {PROBE_REFLECTIVE_ROW}'s F0 {:?} and roughness {}",
+         {PROBE_REFLECTIVE_ROW}'s F0 {:?} and sharpness {}",
         [expected[0], expected[1], expected[2]],
-        row.roughness,
+        expected[3],
     );
 
     probe.destroy(headless.device.as_ref());
@@ -1651,6 +1651,12 @@ fn a_fragment_reads_the_one_texel_occlusion_placeholder_as_no_occlusion() {
          shaded there and the colour below cannot say anything about the \
          occlusion read. Look at the geometry, the depth state and the \
          projection — not at `mesh.slang`'s occlusion fetch."
+    );
+    assert_eq!(
+        reflectivity[3], 0,
+        "the cutoff material's reflectivity alpha at {centre:?} must survive the \
+         Rgba8Unorm attachment as exact zero so SSR cannot start a march; got \
+         {reflectivity:?}"
     );
 
     // What `mesh.slang` computes when ambient is the whole of the light: the

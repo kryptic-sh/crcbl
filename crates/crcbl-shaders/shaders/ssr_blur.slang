@@ -47,10 +47,11 @@
 // on both drivers or the pixel was borderline anyway — but a disagreement in one
 // tap now costs a sixteenth of a pixel rather than all of it.
 //
-// **A surface at or above the cutoff leaves with its scene colour untouched**,
-// bit for bit, because the centre's own ramp is zero there and this pass returns
-// early. That is what keeps a frame with no sub-cutoff material in it identical
-// to the frame the engine drew before either of these passes existed.
+// **A surface at or above the cutoff carries only its probe fallback**, with
+// zero alpha. The zero alpha is still the condition that keeps the sharpness
+// kernel's denominator safe, so that fallback is added from the centre rather
+// than filtered. With a zero probe volume the centre value is zero and the scene
+// colour remains bit-identical.
 
 /// Everything this pass needs that is not in a texture, and it is
 /// `ssr.slang`'s block — same members, same order, same buffer.
@@ -226,17 +227,19 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // The scene colour is passed through whatever happens below — this pass is
     // the composite, so every pixel of the target has to be written.
     float4 lit = scene_color.Load(int3(pixel, 0));
-    float sharpness = reflection.Load(int3(pixel, 0)).a;
+    float4 centre = reflection.Load(int3(pixel, 0));
+    float sharpness = centre.a;
     float centre_depth = depth_at(pixel, extent);
-    // Nothing was drawn here, or what was drawn is too rough for this pass to
-    // have anything to say about. **Both leave the scene colour bit-identical**,
-    // which is the whole of what keeps a frame with no sub-cutoff material in it
-    // the frame the engine drew before either reflection pass existed — and it
-    // is also what makes the divisor below safe, since the ramp this tests is
-    // what the roughness weight divides by.
-    if (centre_depth <= DEPTH_FAR || sharpness <= 0.0)
+    // Nothing was drawn here. A rough surface has no screen-space ray, but its
+    // centre may carry a probe fallback; add that directly rather than dividing
+    // the sharpness kernel by its zero alpha.
+    if (centre_depth <= DEPTH_FAR)
     {
         return lit;
+    }
+    if (sharpness <= 0.0)
+    {
+        return float4(lit.rgb + centre.rgb, lit.a);
     }
 
     float centre_z = view_z(pixel, centre_depth, size);
@@ -282,9 +285,9 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
         }
     }
 
-    // Additive, and the alpha is the scene's: the tonemap writes an opaque 1.0
-    // of its own, and a headless probe reading this target should find the same
-    // alpha the forward pass wrote. The divisor is at least the centre tap's
-    // one, by the construction above.
-    return float4(lit.rgb + total / weight, lit.a);
+    // The zero-sharpness branch above is this expression's limit: as sharpness
+    // approaches zero, retain the centre's direct probe fallback rather than
+    // abruptly replacing it with a fully filtered neighbourhood.
+    float3 filtered = total / weight;
+    return float4(lit.rgb + lerp(centre.rgb, filtered, sharpness), lit.a);
 }

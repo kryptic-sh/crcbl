@@ -579,7 +579,7 @@ fn fragmentMain( _S35 : pixelInput_0, @builtin(position) position_3 : vec4<f32>)
     var _S54 : vec3<i32> = vec3<i32>(min(vec2<i32>(_S41), vec2<i32>(i32(occlusion_width_0), i32(occlusion_height_0)) - vec2<i32>(i32(1))), i32(0));
     var output_1 : FragmentOutput_0;
     output_1.lit_0 = vec4<f32>(diffuse_albedo_0 * ((frame_0.ambient_0.xyz + probe_irradiance_0(_S35.world_position_7, normal_2)) * vec3<f32>((textureLoad((ambient_occlusion_0), ((_S54)).xy, ((_S54)).z).x)) + direct_0) + gloss_0, albedo_0.w);
-    output_1.reflectivity_0 = vec4<f32>(f0_1, roughness_1);
+    output_1.reflectivity_0 = vec4<f32>(f0_1, saturate(1.0f - roughness_1 / 0.5f));
     return output_1;
 }
 

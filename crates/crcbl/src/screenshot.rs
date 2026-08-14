@@ -80,9 +80,9 @@ use crate::render::scene::{
     DEMO_CUBE, DEMO_DUNES, DEMO_OPEN_BOX, DEMO_PYRAMID, DEMO_TEXTURED, DEMO_TINTED, DEMO_UNTINTED,
 };
 use crate::render::{
-    Camera, DirectionalLight, FontAtlas, ForwardRenderer, FrameCounters, GraphError, InstanceDesc,
-    Projection, RenderGraph, SampleMode, SheetDesc, SheetId, Sprite, SpriteRenderer, TransientPool,
-    UiRenderer,
+    Camera, DirectionalLight, EffectOverride, EffectRequest, FontAtlas, ForwardRenderer,
+    FrameCounters, GraphError, InstanceDesc, Projection, RenderEffects, RenderGraph, SampleMode,
+    SheetDesc, SheetId, Sprite, SpriteRenderer, TransientPool, UiRenderer,
 };
 use crate::ui::draw_list::DrawList;
 
@@ -1792,6 +1792,15 @@ impl SceneState {
                 // bands that are the measurement.
                 let mut renderer =
                     ForwardRenderer::with_scene(device, queue, format, &probe_scene())?;
+                // The fixture's measured pixels are diffuse probe irradiance.
+                // Reflections now evaluate rough surfaces too, so refuse their
+                // pair here rather than letting specular contaminate the Rust
+                // mirror comparison below.
+                renderer.set_effect_request(EffectRequest {
+                    programmatic: EffectOverride::none()
+                        .force(RenderEffects::REFLECTIONS, Some(false)),
+                    ..EffectRequest::default()
+                });
                 place(&mut renderer, DEMO_OPEN_BOX, DEMO_UNTINTED, probe_room());
                 Self::Forward {
                     camera: probe_camera(),
@@ -2997,6 +3006,11 @@ mod tests {
             passes
         };
         let cube_passes = forward_passes(0);
+        // The probe fixture disables reflections: its Rust mirror predicts only
+        // diffuse irradiance, and a rough probe fallback would be an unmodelled
+        // specular term in every measured floor pixel.
+        let mut probe_passes = forward_passes(0);
+        probe_passes.retain(|(_, label)| *label != "ssr" && *label != "ssr-blur");
         // The spot scene's one light is a spot, it is the only candidate, and
         // there are tiles left after the cascades — so it holds one.
         let spot_shadow_passes = forward_passes(1);
@@ -3042,13 +3056,11 @@ mod tests {
             // atlas tile and no cull of its own. The `ssr` pass itself is in
             // every row here — it is not a scene's to opt into.
             (Scene::Ssr, &cube_passes),
-            // And a third time for `Scene::Probes`. A probe volume adds **no
-            // pass at all** — it is a storage buffer the forward pass already
-            // binds — which is the strongest reason the irradiance-probe design
-            // gives for preferring a grid over anything needing a pass of its
-            // own, and this row is where that stops being a claim about the
-            // design and becomes a fact about a recorded frame.
-            (Scene::Probes, &cube_passes),
+            // Unlike the other forward scenes, `Scene::Probes` explicitly
+            // refuses the reflection pair: its absolute Rust-mirror assertion
+            // measures diffuse irradiance alone, and rough probe specular would
+            // otherwise be an unmodelled addition to every floor pixel.
+            (Scene::Probes, &probe_passes),
             (
                 Scene::Sprite,
                 &[("render", "scene background"), ("render", "sprites")],

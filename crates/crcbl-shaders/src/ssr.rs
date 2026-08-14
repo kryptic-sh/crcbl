@@ -22,19 +22,17 @@
 /// probe-volume header fill the block without tail padding.
 pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE;
 
-/// The roughness at which `ssr.slang`'s reflection has faded to nothing,
-/// matching `static const float ROUGHNESS_CUTOFF` in that file.
+/// The roughness at which SSR's sharpness ramp reaches zero, matching
+/// `static const float ROUGHNESS_CUTOFF` in both shader sources.
 ///
-/// **The statement that the pass is valid only where the lobe is narrow.** One
-/// ray and `ssr_blur.slang`'s four-pixel kernel stand for a lobe a few degrees
-/// wide and for nothing wider, so the weight ramps linearly from full strength
-/// at a mirror to zero here, and a surface at or above this roughness weighs
-/// exactly zero on every target.
+/// `mesh.slang` evaluates the ramp before storing it in `Rgba8Unorm`, so the
+/// cutoff's zero endpoint reloads exactly; `ssr.slang` reads that sharpness
+/// directly rather than reconstructing it from quantized roughness.
 ///
 /// Half, so [`crate::mesh::GpuMaterial::UNTINTED`]'s roughness lands on the zero
-/// end exactly. Public because a *sample* has to be able to say which of its own
-/// materials this pass can see — see `lumen`'s room, whose mirror panel is under
-/// it and whose brass block is over it.
+/// end exactly. Public because a *sample* has to distinguish materials the
+/// screen-space march can see from rough conductors that receive only probe
+/// fallback — see `lumen`'s room.
 ///
 /// **The blur widens the lobe a single ray can stand for and this number has
 /// deliberately not moved with it.** Raising it past `lumen`'s brass block at
@@ -45,13 +43,13 @@ pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE;
 pub const ROUGHNESS_CUTOFF: f32 = 0.5;
 
 /// `UNTINTED` is the row an instance written by omission shades through, and it
-/// must weigh **exactly** zero in the march.
+/// must skip the screen-space march exactly.
 ///
-/// That is what makes every existing frame's untextured, untinted geometry
-/// bit-identical across four rasterisers with no argument about the march at all
-/// — the determinism section's one unconditional claim. A compile-time assertion
-/// rather than a test because both sides are constants, and this way a build that
-/// lowered either one never links.
+/// A zero probe volume then contributes exact zero, preserving the old frame;
+/// authored probes are deliberately not covered by that property because even
+/// rough geometry now receives their environment fallback. A compile-time
+/// assertion rather than a test because both sides are constants, and this way a
+/// build that lowered either one never links.
 const _: () = assert!(
     crate::mesh::GpuMaterial::UNTINTED.roughness >= ROUGHNESS_CUTOFF,
     "GpuMaterial::UNTINTED's roughness is under ssr.slang's cutoff, so every surface nobody \
@@ -216,20 +214,22 @@ mod tests {
         }
     }
 
-    /// The cutoff and the shader must name the same roughness.
+    /// The cutoff's source copies and Rust mirror must name the same roughness.
     ///
-    /// A sample's own tests read [`ROUGHNESS_CUTOFF`] to say which of its
-    /// materials this pass can see, so a drift here would make those tests
-    /// assert about a threshold no shader uses.
+    /// `mesh.slang` uses it to encode the sharpness ramp while `ssr.slang` names
+    /// its zero endpoint for the contract; a drift makes the attachment lie.
     #[test]
-    fn the_roughness_cutoff_matches_the_constant_ssr_slang_declares() {
-        let source = include_str!("../shaders/ssr.slang");
+    fn the_roughness_cutoff_matches_every_shader_source_copy() {
         let declaration = format!("static const float ROUGHNESS_CUTOFF = {ROUGHNESS_CUTOFF:.1};");
-        assert!(
-            source.contains(&declaration),
-            "ssr.slang does not declare `{declaration}`; ROUGHNESS_CUTOFF has drifted from the \
-             shader"
-        );
+        for (name, source) in [
+            ("mesh.slang", include_str!("../shaders/mesh.slang")),
+            ("ssr.slang", include_str!("../shaders/ssr.slang")),
+        ] {
+            assert!(
+                source.contains(&declaration),
+                "{name} does not declare `{declaration}`; ROUGHNESS_CUTOFF has drifted"
+            );
+        }
     }
 
     /// The shader and Rust mirror undo the same per-band irradiance transfer.
@@ -284,7 +284,55 @@ mod tests {
         );
     }
 
-    /// **The blur's depth tolerance is the march's own floor**, and the two
+    /// Rough geometry has no screen-space ray, but still carries its authored
+    /// environment and the composite must not send that value through the
+    /// sharpness kernel whose denominator is zero.
+    #[test]
+    fn rough_surfaces_skip_the_march_and_composite_their_probe_fallback() {
+        let march = include_str!("../shaders/ssr.slang");
+        assert!(
+            march.contains(
+                "if (sharpness <= 0.0)\n    {\n        return float4(environment * fresnel, 0.0);\n    }"
+            ),
+            "rough surfaces must return their probe fallback with zero sharpness before march setup"
+        );
+        let blur = include_str!("../shaders/ssr_blur.slang");
+        assert!(
+            blur.contains(
+                "if (sharpness <= 0.0)\n    {\n        return float4(lit.rgb + centre.rgb, lit.a);\n    }"
+            ),
+            "the blur must add a zero-sharpness probe fallback directly instead of filtering it"
+        );
+
+        let lit = 0.125f32;
+        let environment = 0.6f32;
+        let fresnel = 0.8f32;
+        let fallback = environment * fresnel;
+        assert_eq!(lit + fallback, 0.605);
+        assert_eq!(lit + 0.0f32 * fresnel, lit);
+    }
+
+    /// Positive sharpness blends continuously from the direct centre fallback to
+    /// the fully filtered reflection, making the zero branch its limit.
+    #[test]
+    fn the_blur_blends_toward_the_centre_as_sharpness_reaches_zero() {
+        let blur = include_str!("../shaders/ssr_blur.slang");
+        assert!(
+            blur.contains("float3 filtered = total / weight;\n    return float4(lit.rgb + lerp(centre.rgb, filtered, sharpness), lit.a);"),
+            "ssr_blur.slang must blend the filtered reflection toward the centre by sharpness"
+        );
+
+        let centre = 2.0f32;
+        let filtered = 10.0f32;
+        let sharpness = 0.001f32;
+        let blended = centre + (filtered - centre) * sharpness;
+        assert!(
+            (blended - centre).abs() < 0.01,
+            "a nearly rough surface must approach the zero-sharpness centre: {blended}"
+        );
+        assert_eq!(centre + (filtered - centre), filtered);
+    }
+
     /// files must name the same number for it.
     ///
     /// `ssr_blur.slang` has no ray, so the only length the march has that it can

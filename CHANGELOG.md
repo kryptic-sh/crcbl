@@ -25,10 +25,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`mesh.slang`'s `fragmentMain` writes two colour targets, so a pipeline built
   from `crcbl_shaders::MESH` needs two `ColorTargetState`s.** Target 0 is the
   `Rgba16Float` scene colour it always wrote; target 1 is `Rgba8Unorm` carrying
-  `rgb = F0` and `a = roughness` — the two values the GGX lobe was already
-  computing and throwing away. A pipeline left with one target has a fragment
-  stage writing location 1 into an attachment that is not there, which WebGPU
-  refuses outright and Vulkan reports as a warning at best.
+  `rgb = F0` and `a = sharpness`, the screen-march ramp that reaches exact zero
+  at `ROUGHNESS_CUTOFF`. A pipeline left with one target has a fragment stage
+  writing location 1 into an attachment that is not there, which WebGPU refuses
+  outright and Vulkan reports as a warning at best.
 
   It is still **one** fragment entry point and one shader module: both
   `GeometryPath` pipelines gained one array element, and no golden moved on any
@@ -465,7 +465,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   evaluation; a zero volume preserves the previous hit arithmetic exactly.
   lumen's golden gate renders authored and zeroed rows separately, proving the
   off-screen part of its mirror is lit by probe data while its screen-space hit
-  remains.
+  remains. Rough surfaces receive the same environment specular even though
+  `ROUGHNESS_CUTOFF` prevents them from screen-space marching: attachment alpha
+  stores that march's sharpness ramp, so cutoff alpha survives `Rgba8Unorm` as
+  exact zero. The blur composites that zero-sharpness probe fallback directly;
+  positive sharpness blends continuously from the centre fallback into filtered
+  SSR. The dedicated `Scene::Probes` fixture disables reflections so its
+  absolute Rust comparison remains a diffuse-irradiance contract.
 
 - **`apps/lumen`'s pause menu switches the effects, mid-run.** Three rows below
   `CAMERA` — `SHADOWS`, `AO` and `REFLECTIONS`, the words `--no-shadows`,
@@ -524,12 +530,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   statements and what each would take.
 
 - **Screen-space reflections.** `shaders/ssr.slang` marches the depth prepass in
-  screen space, reads `F0` and roughness out of the reflectivity attachment, and
-  writes the reflection it finds; `shaders/ssr_blur.slang` filters that with
-  `ssao_blur.slang`'s 4×4 kernel and adds it to the scene colour — two
-  full-screen passes between the forward pass and the tonemap, added to every
-  frame `ForwardRenderer::add_passes` builds. A ray that finds nothing adds
-  nothing.
+  screen space, reads `F0` and screen-march sharpness out of the reflectivity
+  attachment, and writes the reflection it finds; `shaders/ssr_blur.slang`
+  filters that with `ssao_blur.slang`'s 4×4 kernel and adds it to the scene
+  colour — two full-screen passes between the forward pass and the tonemap,
+  added to every frame `ForwardRenderer::add_passes` builds. A ray that finds
+  nothing adds the probe environment; a zero probe volume still adds exact zero.
 
   The kernel is weighted on view-space depth **and** on how sharp each tap's own
   surface is, so a reflecting surface does not average with the matt floor it

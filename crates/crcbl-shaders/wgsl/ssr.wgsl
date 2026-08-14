@@ -189,38 +189,34 @@ fn fragmentMain( _S31 : pixelInput_0, @builtin(position) position_1 : vec4<f32>)
     const NOTHING_0 : vec4<f32> = vec4<f32>(0.0f, 0.0f, 0.0f, 0.0f);
     var _S35 : vec3<i32> = vec3<i32>(_S34, i32(0));
     var surface_0 : vec4<f32> = (textureLoad((reflectivity_0), ((_S35)).xy, ((_S35)).z));
-    var sharpness_0 : f32 = saturate(1.0f - surface_0.w / 0.5f);
+    var sharpness_0 : f32 = surface_0.w;
     var depth_2 : f32 = depth_at_0(_S34, extent_3);
-    var _S36 : bool;
     if(depth_2 <= 0.0f)
     {
-        _S36 = true;
-    }
-    else
-    {
-        _S36 = sharpness_0 <= 0.0f;
-    }
-    if(_S36)
-    {
-        var _S37 : pixelOutput_0 = pixelOutput_0( NOTHING_0 );
-        return _S37;
+        var _S36 : pixelOutput_0 = pixelOutput_0( NOTHING_0 );
+        return _S36;
     }
     var origin_0 : vec3<f32> = view_position_0(_S34, depth_2, size_3);
     var normal_0 : vec3<f32> = normal_at_0(_S34, origin_0, extent_3, size_3);
     var towards_0 : vec3<f32> = normalize(origin_0);
     var ray_0 : vec3<f32> = reflect(towards_0, normal_0);
-    var _S38 : vec4<f32> = vec4<f32>(ray_0, 0.0f);
-    var environment_0 : vec3<f32> = probe_environment_0((((vec4<f32>(origin_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_view_0.data_0[i32(0)][i32(0)], camera_0.inv_view_0.data_0[i32(1)][i32(0)], camera_0.inv_view_0.data_0[i32(2)][i32(0)], camera_0.inv_view_0.data_0[i32(3)][i32(0)], camera_0.inv_view_0.data_0[i32(0)][i32(1)], camera_0.inv_view_0.data_0[i32(1)][i32(1)], camera_0.inv_view_0.data_0[i32(2)][i32(1)], camera_0.inv_view_0.data_0[i32(3)][i32(1)], camera_0.inv_view_0.data_0[i32(0)][i32(2)], camera_0.inv_view_0.data_0[i32(1)][i32(2)], camera_0.inv_view_0.data_0[i32(2)][i32(2)], camera_0.inv_view_0.data_0[i32(3)][i32(2)], camera_0.inv_view_0.data_0[i32(0)][i32(3)], camera_0.inv_view_0.data_0[i32(1)][i32(3)], camera_0.inv_view_0.data_0[i32(2)][i32(3)], camera_0.inv_view_0.data_0[i32(3)][i32(3)])))).xyz, normalize((((_S38) * (mat4x4<f32>(camera_0.inv_view_0.data_0[i32(0)][i32(0)], camera_0.inv_view_0.data_0[i32(1)][i32(0)], camera_0.inv_view_0.data_0[i32(2)][i32(0)], camera_0.inv_view_0.data_0[i32(3)][i32(0)], camera_0.inv_view_0.data_0[i32(0)][i32(1)], camera_0.inv_view_0.data_0[i32(1)][i32(1)], camera_0.inv_view_0.data_0[i32(2)][i32(1)], camera_0.inv_view_0.data_0[i32(3)][i32(1)], camera_0.inv_view_0.data_0[i32(0)][i32(2)], camera_0.inv_view_0.data_0[i32(1)][i32(2)], camera_0.inv_view_0.data_0[i32(2)][i32(2)], camera_0.inv_view_0.data_0[i32(3)][i32(2)], camera_0.inv_view_0.data_0[i32(0)][i32(3)], camera_0.inv_view_0.data_0[i32(1)][i32(3)], camera_0.inv_view_0.data_0[i32(2)][i32(3)], camera_0.inv_view_0.data_0[i32(3)][i32(3)])))).xyz));
-    var _S39 : vec3<f32> = (vec3<f32>(0) - towards_0);
+    var _S37 : vec4<f32> = vec4<f32>(ray_0, 0.0f);
+    var environment_0 : vec3<f32> = probe_environment_0((((vec4<f32>(origin_0, 1.0f)) * (mat4x4<f32>(camera_0.inv_view_0.data_0[i32(0)][i32(0)], camera_0.inv_view_0.data_0[i32(1)][i32(0)], camera_0.inv_view_0.data_0[i32(2)][i32(0)], camera_0.inv_view_0.data_0[i32(3)][i32(0)], camera_0.inv_view_0.data_0[i32(0)][i32(1)], camera_0.inv_view_0.data_0[i32(1)][i32(1)], camera_0.inv_view_0.data_0[i32(2)][i32(1)], camera_0.inv_view_0.data_0[i32(3)][i32(1)], camera_0.inv_view_0.data_0[i32(0)][i32(2)], camera_0.inv_view_0.data_0[i32(1)][i32(2)], camera_0.inv_view_0.data_0[i32(2)][i32(2)], camera_0.inv_view_0.data_0[i32(3)][i32(2)], camera_0.inv_view_0.data_0[i32(0)][i32(3)], camera_0.inv_view_0.data_0[i32(1)][i32(3)], camera_0.inv_view_0.data_0[i32(2)][i32(3)], camera_0.inv_view_0.data_0[i32(3)][i32(3)])))).xyz, normalize((((_S37) * (mat4x4<f32>(camera_0.inv_view_0.data_0[i32(0)][i32(0)], camera_0.inv_view_0.data_0[i32(1)][i32(0)], camera_0.inv_view_0.data_0[i32(2)][i32(0)], camera_0.inv_view_0.data_0[i32(3)][i32(0)], camera_0.inv_view_0.data_0[i32(0)][i32(1)], camera_0.inv_view_0.data_0[i32(1)][i32(1)], camera_0.inv_view_0.data_0[i32(2)][i32(1)], camera_0.inv_view_0.data_0[i32(3)][i32(1)], camera_0.inv_view_0.data_0[i32(0)][i32(2)], camera_0.inv_view_0.data_0[i32(1)][i32(2)], camera_0.inv_view_0.data_0[i32(2)][i32(2)], camera_0.inv_view_0.data_0[i32(3)][i32(2)], camera_0.inv_view_0.data_0[i32(0)][i32(3)], camera_0.inv_view_0.data_0[i32(1)][i32(3)], camera_0.inv_view_0.data_0[i32(2)][i32(3)], camera_0.inv_view_0.data_0[i32(3)][i32(3)])))).xyz));
+    var _S38 : vec3<f32> = (vec3<f32>(0) - towards_0);
     var f0_0 : vec3<f32> = surface_0.xyz;
-    var grazing_0 : f32 = 1.0f - saturate(dot(normal_0, _S39));
+    var grazing_0 : f32 = 1.0f - saturate(dot(normal_0, _S38));
     var grazing2_0 : f32 = grazing_0 * grazing_0;
     var fresnel_0 : vec3<f32> = f0_0 + (vec3<f32>(1.0f, 1.0f, 1.0f) - f0_0) * vec3<f32>((grazing2_0 * grazing2_0 * grazing_0));
-    var _S40 : f32 = saturate((1.0f - dot(ray_0, _S39)) / 0.05000000074505806f);
+    if(sharpness_0 <= 0.0f)
+    {
+        var _S39 : pixelOutput_0 = pixelOutput_0( vec4<f32>(environment_0 * fresnel_0, 0.0f) );
+        return _S39;
+    }
+    var _S40 : f32 = saturate((1.0f - dot(ray_0, _S38)) / 0.05000000074505806f);
     var _S41 : f32 = origin_0.z;
     var start_0 : vec3<f32> = origin_0 + normal_0 * vec3<f32>((abs(_S41) * 0.00499999988824129f));
     var clip_start_0 : vec4<f32> = (((vec4<f32>(start_0, 1.0f)) * (mat4x4<f32>(camera_0.proj_0.data_0[i32(0)][i32(0)], camera_0.proj_0.data_0[i32(1)][i32(0)], camera_0.proj_0.data_0[i32(2)][i32(0)], camera_0.proj_0.data_0[i32(3)][i32(0)], camera_0.proj_0.data_0[i32(0)][i32(1)], camera_0.proj_0.data_0[i32(1)][i32(1)], camera_0.proj_0.data_0[i32(2)][i32(1)], camera_0.proj_0.data_0[i32(3)][i32(1)], camera_0.proj_0.data_0[i32(0)][i32(2)], camera_0.proj_0.data_0[i32(1)][i32(2)], camera_0.proj_0.data_0[i32(2)][i32(2)], camera_0.proj_0.data_0[i32(3)][i32(2)], camera_0.proj_0.data_0[i32(0)][i32(3)], camera_0.proj_0.data_0[i32(1)][i32(3)], camera_0.proj_0.data_0[i32(2)][i32(3)], camera_0.proj_0.data_0[i32(3)][i32(3)]))));
-    var clip_ray_0 : vec4<f32> = (((_S38) * (mat4x4<f32>(camera_0.proj_0.data_0[i32(0)][i32(0)], camera_0.proj_0.data_0[i32(1)][i32(0)], camera_0.proj_0.data_0[i32(2)][i32(0)], camera_0.proj_0.data_0[i32(3)][i32(0)], camera_0.proj_0.data_0[i32(0)][i32(1)], camera_0.proj_0.data_0[i32(1)][i32(1)], camera_0.proj_0.data_0[i32(2)][i32(1)], camera_0.proj_0.data_0[i32(3)][i32(1)], camera_0.proj_0.data_0[i32(0)][i32(2)], camera_0.proj_0.data_0[i32(1)][i32(2)], camera_0.proj_0.data_0[i32(2)][i32(2)], camera_0.proj_0.data_0[i32(3)][i32(2)], camera_0.proj_0.data_0[i32(0)][i32(3)], camera_0.proj_0.data_0[i32(1)][i32(3)], camera_0.proj_0.data_0[i32(2)][i32(3)], camera_0.proj_0.data_0[i32(3)][i32(3)]))));
+    var clip_ray_0 : vec4<f32> = (((_S37) * (mat4x4<f32>(camera_0.proj_0.data_0[i32(0)][i32(0)], camera_0.proj_0.data_0[i32(1)][i32(0)], camera_0.proj_0.data_0[i32(2)][i32(0)], camera_0.proj_0.data_0[i32(3)][i32(0)], camera_0.proj_0.data_0[i32(0)][i32(1)], camera_0.proj_0.data_0[i32(1)][i32(1)], camera_0.proj_0.data_0[i32(2)][i32(1)], camera_0.proj_0.data_0[i32(3)][i32(1)], camera_0.proj_0.data_0[i32(0)][i32(2)], camera_0.proj_0.data_0[i32(1)][i32(2)], camera_0.proj_0.data_0[i32(2)][i32(2)], camera_0.proj_0.data_0[i32(3)][i32(2)], camera_0.proj_0.data_0[i32(0)][i32(3)], camera_0.proj_0.data_0[i32(1)][i32(3)], camera_0.proj_0.data_0[i32(2)][i32(3)], camera_0.proj_0.data_0[i32(3)][i32(3)]))));
     var _S42 : f32 = clip_start_0.w;
     if(_S42 <= 0.0f)
     {
@@ -346,15 +342,16 @@ fn fragmentMain( _S31 : pixelInput_0, @builtin(position) position_1 : vec4<f32>)
         {
             gap_0 = 1.0f;
         }
+        var _S63 : bool;
         if(previous_gap_0 > 0.0f)
         {
-            _S36 = gap_0 < 0.0f;
+            _S63 = gap_0 < 0.0f;
         }
         else
         {
-            _S36 = false;
+            _S63 = false;
         }
-        if(_S36)
+        if(_S63)
         {
             var behind_0 : f32 = - gap_0;
             var thickness_0 : f32 = thickness_at_0(abs(ray_z_0 - previous_z_0), ray_z_0);
@@ -363,8 +360,8 @@ fn fragmentMain( _S31 : pixelInput_0, @builtin(position) position_1 : vec4<f32>)
                 var hit_at_0 : vec2<f32> = mix(previous_at_0, at_1, vec2<f32>((previous_gap_0 / max(previous_gap_0 - gap_0, 9.99999993922529029e-09f))));
                 var hit_ndc_0 : vec2<f32> = ndc_of_0(hit_at_0, size_3);
                 var confidence_0 : f32 = sharpness_0 * _S40 * saturate((1.0f - max(abs(hit_ndc_0.x), abs(hit_ndc_0.y))) / 0.15000000596046448f) * saturate((1.0f - _S61 / 96.0f) / 0.25f) * saturate(1.0f - behind_0 / thickness_0);
-                var _S63 : vec3<i32> = vec3<i32>(clamp(vec2<i32>(hit_at_0), vec2<i32>(i32(0), i32(0)), extent_3 - vec2<i32>(i32(1), i32(1))), i32(0));
-                reflection_0 = (textureLoad((scene_color_0), ((_S63)).xy, ((_S63)).z)).xyz * fresnel_0 * vec3<f32>(confidence_0) + _S60 * vec3<f32>((1.0f - confidence_0));
+                var _S64 : vec3<i32> = vec3<i32>(clamp(vec2<i32>(hit_at_0), vec2<i32>(i32(0), i32(0)), extent_3 - vec2<i32>(i32(1), i32(1))), i32(0));
+                reflection_0 = (textureLoad((scene_color_0), ((_S64)).xy, ((_S64)).z)).xyz * fresnel_0 * vec3<f32>(confidence_0) + _S60 * vec3<f32>((1.0f - confidence_0));
                 break;
             }
         }
@@ -374,7 +371,7 @@ fn fragmentMain( _S31 : pixelInput_0, @builtin(position) position_1 : vec4<f32>)
         previous_at_0 = at_1;
         step_0 = step_1;
     }
-    var _S64 : pixelOutput_0 = pixelOutput_0( vec4<f32>(reflection_0, sharpness_0) );
-    return _S64;
+    var _S65 : pixelOutput_0 = pixelOutput_0( vec4<f32>(reflection_0, sharpness_0) );
+    return _S65;
 }
 

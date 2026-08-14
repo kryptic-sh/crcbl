@@ -7766,12 +7766,10 @@ buffer, adding no render pass, added to `frame.ambient` for diffuse and returned
 by an SSR miss for specular. Read it first; this is only the order to build it
 in and the decisions still open.
 
-Nothing of it is built. Verified while reviewing the design: the seam permits a
-read-only storage binding of a host-visible buffer (only writable ones are
-refused), `crcbl_shaders::ssr`'s `UNTINTED.roughness >= ROUGHNESS_CUTOFF`
-compile-time assertion exists as the design describes, and appending a mesh
-binding after `AMBIENT_OCCLUSION_BINDING` needs no `mesh_cluster.slang` mirror
-for the same reason occlusion did not.
+All slices are built. The seam still permits a read-only storage binding of a
+host-visible buffer, and appending the mesh binding after
+`AMBIENT_OCCLUSION_BINDING` needed no `mesh_cluster.slang` mirror for the same
+reason occlusion did not.
 
 ### The slices
 
@@ -7795,8 +7793,16 @@ for the same reason occlusion did not.
    changing half-float rounding. lumen's authored-versus-zero control moves the
    SSR miss from 20.3 to 0.0 while its real hit moves 51.6 to 49.0, within the
    measured 6% budget.
-5. **The roughness cutoff**, only if Q1 says the gate stays. This is the
-   existing SSR cutoff item, whose cost is already measured below.
+5. ~~The roughness cutoff decision.~~ **Shipped without raising it:**
+   `ROUGHNESS_CUTOFF` gates only screen-space marching. Rough surfaces still
+   evaluate probe environment specular and return it with exact-zero sharpness,
+   so the blur composites that centre fallback directly. Positive sharpness
+   blends continuously from the centre value into filtered SSR. The reflectivity
+   attachment stores sharpness rather than quantised roughness so the cutoff
+   endpoint survives `Rgba8Unorm` exactly; Vulkan readback asserts alpha zero.
+   lumen's fully metallic brass at roughness 0.55 measures 97.4 with authored
+   probes and 89.7 with zeroed rows. `Scene::Probes` disables reflections so its
+   diffuse Rust-mirror contract remains absolute.
 
 **The cheapest useful version is not a separate slice.** One probe and a 1×1×1
 grid is slice 1 with `probes.len() == 1` — the ambient becomes directional,
@@ -7805,20 +7811,15 @@ non-black across its whole face. Stopping after slice 4 with a single probe
 requires rewriting nothing to add the grid later. The grid is recommended anyway
 because a room needs light that differs between the window and the far corner.
 
-### Decisions this needs before slice 4
+### Decisions
 
 - **Q1: does the probe half of the environment specular evaluate above
-  `ROUGHNESS_CUTOFF`?** **Yes** makes lumen's brass block stop being black with
-  no cutoff change and is physically right — a wide lobe is where a blurry probe
-  is _more_ honest than one ray. It costs the SSR design's one unconditional
-  determinism claim: `UNTINTED.roughness >= ROUGHNESS_CUTOFF` exists so that
-  every untinted surface is bit-identical across four rasterisers by
-  construction, and every surface would now carry a probe term. Every 3D golden
-  moves once. **No** keeps that and leaves the brass black until slice 5.
-  **Recommendation: yes, as its own slice after 4** so the churn is isolated —
-  and note it makes the pending cutoff-raise item largely unnecessary, which is
-  worth weighing while that one is still undecided.
-- **Q2: does this get a `RenderEffects` bit?** **Recommend no.** The off-switch
+  `ROUGHNESS_CUTOFF`?** **Resolved yes.** A wide lobe is where the low-frequency
+  probe is more honest than one screen-space ray. The cutoff therefore gates the
+  march only; rough surfaces return probe environment with zero sharpness, and
+  the blur composites that centre value without filtering. This keeps
+  `UNTINTED`'s exact-zero march endpoint without leaving lumen's brass black.
+- **Q2: does this get a `RenderEffects` bit?** **Resolved no.** The off-switch
   is the scene, and a zero volume is bit-identical, so there is nothing to
   resolve through four layers. `effects.rs`'s own rule is that an effect which
   is off is a frame with fewer passes and never a shader branch — a probe bit
@@ -8450,8 +8451,10 @@ three `to_vec`s cost), so the mapping lives in one place.
 The design and its refusals are in `docs/plan/18-render-features.md`'s SSR
 section. This is the slice order and what each one's observable is.
 
-**The attachment slice, the march and the blur have landed**, so two remain, in
-dependency order. Each is committable and CI-green alone.
+**The attachment, march, blur, probe fallback and rough-surface integration have
+landed.** The cutoff remains at 0.5 because it gates marching rather than probe
+environment specular; the measured cutoff raise below remains a declined
+alternative, not pending work.
 
 What those slices found on the way, and what a reader of the design should know
 before writing the next one:
@@ -8501,19 +8504,14 @@ before writing the next one:
   denominator turning one whole-pixel disagreement into a spread of small ones
   is exactly what the AO pair's design predicts.
 
-1. **The roughness cutoff.** Raise `ROUGHNESS_CUTOFF` so `lumen`'s `ROUGH_METAL`
-   (0.55) reflects. **Observable:** a falloff comparison in the shape of the GGX
-   slice's highlight test — the brass block's reflection varies less across its
-   face than the mirror panel's does across an equal span, both above a floor so
-   two black surfaces cannot satisfy it. Split out of the blur slice
-   deliberately; see the section below for what it costs and the two questions
-   it has to answer first.
-2. **What a miss returns.** `frame.ambient.rgb` scaled by the same weight
-   instead of zero — the same approximation the diffuse term already makes,
-   applied consistently, and **the exact expression the irradiance-probe row
-   replaces**, which is what makes that row additive instead of a rewrite.
-   Deliberately last: widest blast radius, smallest value, and the easiest to
-   decline if the probe row is close.
+1. ~~**The roughness cutoff.**~~ **Resolved without raising it.** lumen's
+   `ROUGH_METAL` receives probe environment specular above the cutoff; one
+   screen-space ray remains disabled because it cannot represent that broad
+   lobe. The authored-versus-zero control is the observable.
+2. ~~**What a miss returns.**~~ **Shipped as probe radiance.** The pass removes
+   the diffuse transfer from the stored L1 rows, evaluates the reflection
+   direction, and blends fallback against hits by confidence. A zero table
+   preserves the old hit arithmetic exactly.
 
 ### lumen's mirror panel is close to SSR's worst case
 

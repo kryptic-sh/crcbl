@@ -870,6 +870,13 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
 /// further buys aliasing rather than sharpness.
 static const float MIN_ROUGHNESS = 0.045;
 
+/// The roughness where SSR's sharpness ramp reaches zero.
+///
+/// This mirrors `ssr.slang`'s constant. The attachment stores the resulting
+/// ramp, rather than this value, because zero round-trips exactly through
+/// `Rgba8Unorm`.
+static const float ROUGHNESS_CUTOFF = 0.5;
+
 /// The dielectric normal-incidence reflectance every non-metal is given.
 ///
 /// Four per cent covers the range real insulators sit in closely enough that a
@@ -1526,20 +1533,12 @@ struct FragmentOutput
     /// The shaded colour, into the `Rgba16Float` scene target.
     float4 lit : SV_Target0;
     /// The reflectivity channel, into an `Rgba8Unorm` target: `rgb` is `F0` and
-    /// `a` is the roughness.
+    /// `a` is SSR's already-evaluated sharpness ramp.
     ///
-    /// **The material's inputs, not an evaluated shading term.** Baking the
-    /// environment-specular weight here would be one channel cheaper and would
-    /// freeze this file's version of the lobe into a buffer; storing `F0` and
-    /// the roughness is what lets a later pass evaluate the *same* lobe, which
-    /// is the whole of topic 18's "one material model, one BRDF, one set of
-    /// inputs".
-    ///
-    /// Eight bits per channel, because both are bounded in `0..=1` and neither
-    /// error survives the approximation reading them: a dielectric's `0.04`
-    /// quantises to `10/255`, and a roughness drives a lobe's width. The
-    /// hardware's own clamp is what keeps a `base_color` factor above one from
-    /// writing an `F0` past it.
+    /// The ramp is stored rather than roughness: `Rgba8Unorm` cannot preserve the
+    /// cutoff exactly, while its zero endpoint does. `ssr.slang` therefore reads
+    /// alpha directly and a material at the cutoff skips marching on every
+    /// backend.
     float4 reflectivity : SV_Target1;
 };
 
@@ -1760,10 +1759,10 @@ FragmentOutput fragmentMain(VertexOutput input)
     // pass is what maps this into the swapchain. A `saturate` here would throw
     // away the very range HDR-from-P1 exists to carry — see `tonemap.slang`.
     output.lit = float4(lit, albedo.a);
-    // The two values the lobe above was evaluated from, written out rather than
-    // dropped. `roughness` is the *clamped* one — what the shading used — so a
-    // pass reading this evaluates the same lobe this one did rather than the
-    // row's unclamped number.
-    output.reflectivity = float4(f0, roughness);
+    // `roughness` is the clamped lobe input. Store SSR's already-evaluated
+    // sharpness ramp: its zero endpoint survives `Rgba8Unorm` exactly, unlike
+    // the cutoff roughness it replaces.
+    float sharpness = saturate(1.0 - roughness / ROUGHNESS_CUTOFF);
+    output.reflectivity = float4(f0, sharpness);
     return output;
 }

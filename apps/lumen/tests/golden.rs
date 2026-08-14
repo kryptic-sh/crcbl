@@ -124,6 +124,10 @@ const SSR_HIT_TOLERANCE: f32 = 0.06;
 /// hit, so this is a modest relation rather than the old black-miss contrast.
 const MIRROR_GRADIENT: f32 = 1.05;
 
+/// The minimum authored-to-zeroed brightness ratio the brass probe fallback
+/// control must retain. Vulkan measured 97.4/89.7, so this leaves margin.
+const BRASS_PROBE_RATIO: f32 = 1.05;
+
 /// The floor a lit block's mean brightness has to clear, out of 255.
 ///
 /// What separates "correctly dark" from "nothing drew". Every ratio above is
@@ -651,13 +655,14 @@ fn the_fixed_camera_draws_the_room_and_matches_its_golden() {
     check_golden(&image, &paths);
 }
 
-/// **Zeroing authored probe rows darkens an SSR miss but not an SSR hit.**
+/// **Zeroing authored probe rows removes fallbacks from SSR misses and rough
+/// conductors, but preserves a screen-space hit.**
 ///
 /// The zero control retains the authored volume and row count, so it exercises
 /// the same binding and lookup shape while removing only the fallback radiance.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-lumen-golden.sh"]
-fn zero_probes_only_remove_the_ssr_miss_fallback() {
+fn zero_probes_only_remove_the_ssr_and_rough_fallbacks() {
     let effects = RenderEffects::all();
     let (authored, _, authored_adapter) =
         draw_with(EXTENT, effects, OffscreenSetup::OPTIONAL_FEATURES);
@@ -672,18 +677,27 @@ fn zero_probes_only_remove_the_ssr_miss_fallback() {
     let miss = project(&camera, EXTENT, MIRROR_AT);
     let foot = project(&camera, EXTENT, room::MIRROR_FOOT);
     let hit = (foot.0, foot.1.saturating_sub(1));
+    let brass = project(&camera, EXTENT, room::BRASS_AT);
     let authored_miss = brightness(&authored, miss, BLOCK);
     let zeroed_miss = brightness(&zeroed, miss, BLOCK);
     let authored_hit = brightness(&authored, hit, (1, 1));
     let zeroed_hit = brightness(&zeroed, hit, (1, 1));
+    let authored_brass = brightness(&authored, brass, BLOCK);
+    let zeroed_brass = brightness(&zeroed, brass, BLOCK);
     eprintln!(
         "lumen probes: SSR miss {authored_miss:.1} -> {zeroed_miss:.1}, \
-         SSR hit {authored_hit:.1} -> {zeroed_hit:.1}"
+         SSR hit {authored_hit:.1} -> {zeroed_hit:.1}, \
+         rough brass {authored_brass:.1} -> {zeroed_brass:.1}"
     );
     assert!(
         authored_miss > LIT_FLOOR && zeroed_miss <= 1.0,
         "the SSR miss reads {authored_miss:.1} with authored probes and {zeroed_miss:.1} with \
          zero rows — the fallback must be the only light removed"
+    );
+    assert!(
+        authored_brass > LIT_FLOOR && authored_brass > zeroed_brass * BRASS_PROBE_RATIO,
+        "the rough brass reads {authored_brass:.1} with authored probes and {zeroed_brass:.1} with \
+         zero rows — it must be lit and retain at least a {BRASS_PROBE_RATIO:.2} probe ratio"
     );
     let hit_tolerance_percent = SSR_HIT_TOLERANCE * 100.0;
     assert!(

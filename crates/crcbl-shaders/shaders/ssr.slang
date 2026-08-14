@@ -36,12 +36,11 @@
 //   by construction, the pixels whose reflection is multiplied by almost
 //   nothing. That is inspectable rather than measured, and it reduces the
 //   exposure rather than bounding it.
-// * **[`ROUGHNESS_CUTOFF`] makes most of every existing frame identically
-//   zero.** `crcbl_shaders::mesh::GpuMaterial::UNTINTED`'s roughness is 0.5 and
-//   the ramp is zero from there up, so a pixel shaded through that row is
-//   bit-identical on four rasterisers with no argument required — and
-//   `ssr_blur.slang` leaves such a pixel's scene colour untouched rather than
-//   adding a filtered zero to it.
+// * **[`ROUGHNESS_CUTOFF`] makes screen-space marching skip most of every
+//   existing frame.** `crcbl_shaders::mesh::GpuMaterial::UNTINTED`'s roughness
+//   is 0.5 and the ramp is zero from there up, so a pixel shaded through that row
+//   takes only its probe-environment fallback. With a zero probe volume that
+//   fallback is zero, and `ssr_blur.slang` leaves the scene colour untouched.
 //
 // # The march
 //
@@ -148,13 +147,11 @@ DepthTexture2D scene_depth;
 [[vk::binding(2, 0)]]
 Texture2D<float4> scene_color;
 
-/// The reflectivity attachment: `rgb` is the surface's `F0` and `a` is the
-/// **clamped** roughness the forward pass's lobe was evaluated with.
+/// The reflectivity attachment: `rgb` is the surface's `F0` and `a` is SSR's
+/// already-evaluated sharpness ramp.
 ///
-/// `mesh.slang`'s `FragmentOutput::reflectivity` is the other half. A pixel no
-/// geometry covered holds zero in every channel, which is an `F0` that reflects
-/// nothing whatever the roughness beside it says — but such a pixel leaves on
-/// the depth test below before that matters.
+/// `mesh.slang` evaluates the ramp before writing its `Rgba8Unorm` attachment,
+/// so the zero at [`ROUGHNESS_CUTOFF`] reloads exactly on every backend.
 [[vk::binding(3, 0)]]
 Texture2D<float4> reflectivity;
 
@@ -475,12 +472,10 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     const float4 NOTHING = float4(0.0, 0.0, 0.0, 0.0);
 
     float4 surface = reflectivity.Load(int3(pixel, 0));
-    float sharpness = saturate(1.0 - surface.a / ROUGHNESS_CUTOFF);
+    float sharpness = surface.a;
     float depth = depth_at(pixel, extent);
-    // Nothing was drawn here, or what was drawn is too rough for one ray to
-    // stand for its lobe. Both leave with the scene colour untouched, and the
-    // roughness one is what makes most of every existing frame bit-identical.
-    if (depth <= DEPTH_FAR || sharpness <= 0.0)
+    // The far plane has no surface, so it has neither a probe lookup nor a ray.
+    if (depth <= DEPTH_FAR)
     {
         return NOTHING;
     }
@@ -503,6 +498,14 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float grazing = 1.0 - n_dot_v;
     float grazing2 = grazing * grazing;
     float3 fresnel = f0 + (float3(1.0, 1.0, 1.0) - f0) * (grazing2 * grazing2 * grazing);
+
+    // A probe is a blurry environment, so it remains valid when a single
+    // screen-space ray is not. Its zero alpha keeps it out of the sharpness
+    // kernel; `ssr_blur.slang` composites this centre value directly.
+    if (sharpness <= 0.0)
+    {
+        return float4(environment * fresnel, 0.0);
+    }
 
     // A ray retracing the view ray asks about a point behind the camera.
     float facing = saturate((1.0 - dot(ray, -towards)) / BACKWARD_FADE);

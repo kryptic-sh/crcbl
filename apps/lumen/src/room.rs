@@ -33,15 +33,14 @@
 //! is a reflection.
 //!
 //! Some of that has landed. `docs/plan/18-render-features.md`'s screen-space
-//! reflections now light **the foot of the mirror panel**, and only the foot: the
+//! reflections light **the foot of the mirror panel**, and only the foot: the
 //! panel faces the camera, so a ray leaving it goes back past the eye and only
 //! the lowest part of the face sends one that reaches the floor while still on
-//! screen — see [`MIRROR_FOOT`]. The rough metal block is untouched, because its
-//! roughness is above the cutoff a single ray is honest at
-//! ([`crcbl::shaders::ssr::ROUGHNESS_CUTOFF`]); the blur that lowers it and the
-//! specular probe fallback that would fill an SSR miss are both unbuilt. The
-//! debug panel says so on a row of its own, and `docs/backlog.md` carries it as
-//! owed work.
+//! screen — see [`MIRROR_FOOT`]. The rough metal block receives the authored
+//! probe environment directly because its roughness is above the cutoff a single
+//! ray is honest at ([`crcbl::shaders::ssr::ROUGHNESS_CUTOFF`]); it never fakes a
+//! sharp screen-space hit. The debug panel says so on a row of its own, and
+//! `docs/backlog.md` carries the remaining work.
 //!
 //! **The coloured wall bounces**, and [`crate::bounce`] is the whole of how: a
 //! single analytic gather of the sun's first bounce off this room's interior,
@@ -236,6 +235,17 @@ const BLOCK_MIN: Vec3 = Vec3::new(0.55, 0.0, -1.35);
 /// The rough metal block's maximum corner.
 const BLOCK_MAX: Vec3 = Vec3::new(1.45, 0.95, -0.45);
 
+/// A point in the centre of the brass block's camera-facing face.
+///
+/// It is clear of every silhouette, and is the read point lumen's authored-vs-
+/// zero-probe control uses: its roughness is above the SSR cutoff, so any probe
+/// contribution here must be the direct rough fallback rather than a screen hit.
+pub const BRASS_AT: Vec3 = Vec3::new(
+    0.5 * (BLOCK_MIN.x + BLOCK_MAX.x),
+    0.5 * (BLOCK_MIN.y + BLOCK_MAX.y),
+    BLOCK_MAX.z,
+);
+
 // ---------------------------------------------------------------------------
 // The page
 // ---------------------------------------------------------------------------
@@ -346,9 +356,12 @@ const PLASTER_ROUGHNESS: f32 = 0.9;
 /// How rough [`MIRROR`] is.
 const MIRROR_ROUGHNESS: f32 = 0.05;
 
-/// How rough [`ROUGH_METAL`] is. Well clear of [`MIRROR_ROUGHNESS`], so the two
+/// How rough [`ROUGH_METAL`] is. Well clear of `MIRROR_ROUGHNESS`, so the two
 /// conductors are not a subtle pair.
-const ROUGH_METAL_ROUGHNESS: f32 = 0.55;
+pub const BRASS_ROUGHNESS: f32 = 0.55;
+
+/// The brass control's material is fully metallic.
+pub const BRASS_METALLIC: f32 = 1.0;
 
 /// [`PLASTER`]'s base colour: painted white, which is not `1.0`.
 ///
@@ -698,8 +711,8 @@ pub fn room() -> SceneDesc<'static> {
             GpuMaterial {
                 base_color: ROUGH_METAL_COLOR,
                 base_color_texture: UNTEXTURED_LAYER,
-                metallic: 1.0,
-                roughness: ROUGH_METAL_ROUGHNESS,
+                metallic: BRASS_METALLIC,
+                roughness: BRASS_ROUGHNESS,
             },
         ],
         page,
@@ -976,9 +989,42 @@ mod tests {
         let mirror = scene.materials[MIRROR];
         let rough = scene.materials[ROUGH_METAL];
         assert_eq!(mirror.metallic, rough.metallic, "both rows are conductors");
+        assert_eq!(
+            rough.metallic, BRASS_METALLIC,
+            "the brass control must be fully metallic"
+        );
+        assert_eq!(rough.roughness, BRASS_ROUGHNESS);
+        assert!(
+            rough.roughness >= crcbl::shaders::ssr::ROUGHNESS_CUTOFF,
+            "the brass control must skip SSR marching: {} < {}",
+            rough.roughness,
+            crcbl::shaders::ssr::ROUGHNESS_CUTOFF
+        );
         assert!(
             mirror.roughness < rough.roughness,
             "the mirror row must be the smoother of the pair: {mirror:?} vs {rough:?}"
+        );
+    }
+
+    /// [`BRASS_AT`] is centred on the block's camera-facing face and clear of
+    /// its silhouettes, so the probe control samples brass rather than an edge.
+    #[test]
+    fn the_brass_control_is_centred_on_the_camera_facing_block_face() {
+        let camera = fixed_camera();
+        assert!(
+            camera.eye.z > BLOCK_MAX.z,
+            "the camera is not in front of the block's +Z face"
+        );
+        assert_eq!(BRASS_AT.x, 0.5 * (BLOCK_MIN.x + BLOCK_MAX.x));
+        assert_eq!(BRASS_AT.y, 0.5 * (BLOCK_MIN.y + BLOCK_MAX.y));
+        assert_eq!(BRASS_AT.z, BLOCK_MAX.z);
+        let clearance = (BRASS_AT.x - BLOCK_MIN.x)
+            .min(BLOCK_MAX.x - BRASS_AT.x)
+            .min(BRASS_AT.y - BLOCK_MIN.y)
+            .min(BLOCK_MAX.y - BRASS_AT.y);
+        assert!(
+            clearance > 0.1,
+            "{BRASS_AT:?} is only {clearance:.3} m from a block silhouette"
         );
     }
 

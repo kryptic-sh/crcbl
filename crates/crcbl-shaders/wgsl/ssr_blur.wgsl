@@ -65,20 +65,17 @@ fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
     var _S4 : vec2<i32> = vec2<i32>(position_1.xy);
     var _S5 : vec3<i32> = vec3<i32>(_S4, i32(0));
     var lit_0 : vec4<f32> = (textureLoad((scene_color_0), ((_S5)).xy, ((_S5)).z));
-    var sharpness_0 : f32 = (textureLoad((reflection_0), ((_S5)).xy, ((_S5)).z)).w;
+    var centre_0 : vec4<f32> = (textureLoad((reflection_0), ((_S5)).xy, ((_S5)).z));
+    var sharpness_0 : f32 = centre_0.w;
     var centre_depth_0 : f32 = depth_at_0(_S4, extent_2);
-    var _S6 : bool;
     if(centre_depth_0 <= 0.0f)
     {
-        _S6 = true;
+        var _S6 : pixelOutput_0 = pixelOutput_0( lit_0 );
+        return _S6;
     }
-    else
+    if(sharpness_0 <= 0.0f)
     {
-        _S6 = sharpness_0 <= 0.0f;
-    }
-    if(_S6)
-    {
-        var _S7 : pixelOutput_0 = pixelOutput_0( lit_0 );
+        var _S7 : pixelOutput_0 = pixelOutput_0( vec4<f32>(lit_0.xyz + centre_0.xyz, lit_0.w) );
         return _S7;
     }
     var centre_z_0 : f32 = view_z_0(_S4, centre_depth_0, size_0);
@@ -109,16 +106,17 @@ fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
             var tap_0 : vec2<i32> = clamp(_S4 + vec2<i32>(x_0, y_0), vec2<i32>(i32(0), i32(0)), extent_2 - vec2<i32>(i32(1), i32(1)));
             var _S10 : vec3<i32> = vec3<i32>(tap_0, i32(0));
             var tapped_0 : vec4<f32> = (textureLoad((reflection_0), ((_S10)).xy, ((_S10)).z));
+            var _S11 : bool;
             if(x_0 != i32(0))
             {
-                _S6 = true;
+                _S11 = true;
             }
             else
             {
-                _S6 = y_0 != i32(0);
+                _S11 = y_0 != i32(0);
             }
             var share_0 : f32;
-            if(_S6)
+            if(_S11)
             {
                 var depth_1 : f32 = depth_at_0(tap_0, extent_2);
                 var away_0 : f32 = abs(view_z_0(tap_0, depth_1, size_0) - centre_z_0);
@@ -144,7 +142,7 @@ fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
         }
         y_0 = y_0 + i32(1);
     }
-    var _S11 : pixelOutput_0 = pixelOutput_0( vec4<f32>(lit_0.xyz + total_0 / vec3<f32>(weight_0), lit_0.w) );
-    return _S11;
+    var _S12 : pixelOutput_0 = pixelOutput_0( vec4<f32>(lit_0.xyz + mix(centre_0.xyz, total_0 / vec3<f32>(weight_0), vec3<f32>(sharpness_0)), lit_0.w) );
+    return _S12;
 }
 

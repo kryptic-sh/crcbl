@@ -212,7 +212,7 @@ impl Ssr {
         })?;
 
         // **The same shape as the march, with the raw reflection where the
-        // reflectivity attachment was.** The blur reads the roughness ramp out
+        // reflectivity attachment was.** The blur reads the sharpness ramp out
         // of that image's alpha rather than reading the attachment a second
         // time, which is why this list is not one binding longer — see
         // `shaders/ssr_blur.slang`.
