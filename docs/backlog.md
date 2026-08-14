@@ -7491,18 +7491,17 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
   implying a choice was made.
 - **The render-to-texture monitor camera**, and with it a consumer for the
   camera-stack layer of the toggle resolution order. One camera per frame today.
-- **A UI for the toggles.** The charter's milestone 4 wants the effect matrix
-  reachable from the pause menu as well as from the command line; `--no-shadows`
-  / `--no-ao` / `--no-reflections` are what exist, and the panel's `paths`
-  section reports the resolved set. `ForwardRenderer::set_effect_request` takes
-  a whole `EffectRequest`, so a menu row is read-modify-write on
-  `effect_request()` and needs no new engine API.
-- **Rule 12's second path.** The CI leg itself exists — `vk e2e (lavapipe)`'s
-  `Draw lumen's room on lavapipe` step runs
-  `apps/lumen/tests/run-lumen-golden.sh` and its whole suite. What it does not
-  do is exercise the runner's path **plus one below it**, which
-  `--force-geometry indirect-per-batch --force-binding array-pages` makes
-  possible and no job does.
+- **The rest of milestone 4's matrix.** The three effect rows are on the pause
+  menu now, doing read-modify-write on the programmatic layer. What the charter
+  asks for beyond them — the side-by-side and A/B-flip comparison modes — needs
+  the monitor camera above, and the toggles' `--help` text still describes only
+  the flags, with no line pointing at the rows the way `--camera`'s does.
+- **`UNAVAILABLE` has never run on hardware.** The effect rows report a
+  device-clamped effect as unavailable rather than off, and a press on such a
+  row is a deliberate no-op. Both are covered by a constructed device set only,
+  because no device in this tree clamps any of the three effects. It is the same
+  shape as the shadow-atlas rule considered and declined below: the arm exists
+  and nothing can reach it here.
 - **The Pages web demo**, whose six-place checklist is the entry below.
 - **Sound.** Rule 8 says no sample ships silent after P4A. lumen has no audio at
   all, and it is not obvious it should: it is an acceptance fixture with no
@@ -7744,6 +7743,20 @@ resolution at the contact than from the bias.
 - **`crates/crcbl-shaders/src/mesh.rs` has a stale doc reference** on
   `SHADOW_TILE`: it names `SPOT_DEPTH_BIAS_TEXELS`, which is now
   `PUNCTUAL_DEPTH_BIAS_TEXELS`. Pre-existing and one line to fix.
+
+## `crcbl-sprite` has six unresolved doc links, and `cargo doc` is a gate
+
+`cargo doc --no-deps` emits six
+`unresolved link to \`crate::bake\``warnings, all from`crcbl-sprite`: `src/crpix.rs`once and`src/load.rs`five times, two of them naming`crate::bake::duration_ms`and`crate::bake::aseprite_json`. So a `bake`
+module was removed or renamed and its referrers were not followed.
+
+Recorded because `cargo doc` is its own gate here — clippy and the tests pass
+straight through an unusable public API — and six standing warnings are the
+noise that makes a seventh, real one invisible. Not fixed: nothing this session
+touched `crcbl-sprite`, and finding where `bake` went is a job for somebody
+already in that crate. Whoever does it should decide whether the links should
+point at the `crcbl` CLI's bake command or be deleted, rather than mechanically
+repointing them.
 
 ## The lumen web demo is deferred, and what naming a new demo costs
 
