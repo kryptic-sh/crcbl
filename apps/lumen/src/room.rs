@@ -22,25 +22,32 @@
 //! moving light". Each of those is one thing below, and each is placed where the
 //! [`fixed_camera`] can see it at once.
 //!
-//! # Two of them do not look like their names yet, and that is the model
+//! # Two of them are lit by reflection alone, and that is the model
 //!
-//! **The mirror-grade panel and the rough metal block render near-black**, and a
-//! reader who did not expect that would call it a bug. It is not.
+//! **Neither metal surface has an ambient term**, and a reader who expected one
+//! would call the result a bug. It is not.
 //! [`GpuMaterial::metallic`](crcbl::shaders::mesh::GpuMaterial::metallic) scales
 //! the diffuse albedo *down* — a conductor has no diffuse lobe — and the ambient
 //! term multiplies that same diffuse albedo, so a fully metallic surface out of
 //! every light's specular reach has nothing left to shade with. What fills it in
-//! is a reflection.
+//! is a reflection, and both of them now get one.
 //!
-//! Some of that has landed. `docs/plan/18-render-features.md`'s screen-space
-//! reflections light **the foot of the mirror panel**, and only the foot: the
-//! panel faces the camera, so a ray leaving it goes back past the eye and only
-//! the lowest part of the face sends one that reaches the floor while still on
-//! screen — see [`MIRROR_FOOT`]. The rough metal block receives the authored
-//! probe environment directly because its roughness is above the cutoff a single
-//! ray is honest at ([`crcbl::shaders::ssr::ROUGHNESS_CUTOFF`]); it never fakes a
-//! sharp screen-space hit. The debug panel says so on a row of its own, and
-//! `docs/backlog.md` carries the remaining work.
+//! `docs/plan/18-render-features.md`'s screen-space reflections light **the foot
+//! of the mirror panel**, and only the foot: the panel faces the camera, so a
+//! ray leaving it goes back past the eye and only the lowest part of the face
+//! sends one that reaches the floor while still on screen — see [`MIRROR_FOOT`].
+//! Everywhere else on that face the march finds nothing and returns the
+//! irradiance volume [`crate::bounce`] bakes as its environment, so the face is
+//! dim rather than black — see [`MIRROR_MISSES`]. The rough metal block receives
+//! that same environment directly because its roughness is above the cutoff a
+//! single ray is honest at ([`crcbl::shaders::ssr::ROUGHNESS_CUTOFF`]); it never
+//! fakes a sharp screen-space hit, and most of what lights it is the sun's own
+//! specular with the environment on top. `apps/lumen/tests/golden.rs`'s
+//! `zero_probes_only_remove_the_ssr_and_rough_fallbacks` is what measures each
+//! share, by zeroing the probe rows and reading the difference at
+//! [`MIRROR_MISSES`], [`MIRROR_FOOT`] and [`BRASS_AT`]. That the environment is
+//! baked rather than traced is what the debug panel says on a row of its own,
+//! and `docs/backlog.md` carries the remaining work.
 //!
 //! **The coloured wall bounces**, and [`crate::bounce`] is the whole of how: a
 //! single analytic gather of the sun's first bounce off this room's interior,

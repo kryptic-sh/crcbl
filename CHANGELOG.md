@@ -591,13 +591,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   keyboard free-fly camera, and `--force-geometry` / `--force-binding` for
   running the frame on a path below the one this device selects.
 
-  **The metal is near-black on purpose.** Ambient scales the diffuse albedo and
-  a conductor has none, so a fully metallic surface out of every light's
-  specular reach has nothing to shade with until screen-space reflections or
-  irradiance probes exist. The debug panel's `unbuilt` section says so on the
-  screen, and `docs/plan/sample/13-lumen.md` says what is still owed —
-  reflections, probes, ray tracing, the monitor camera, per-effect toggles and
-  the web demo.
+  **The metal is lit by reflection alone.** Ambient scales the diffuse albedo
+  and a conductor has none, so a fully metallic surface out of every light's
+  specular reach has nothing to shade with but a reflection. Both halves of that
+  are built — see the screen-space-reflection and irradiance-probe entries above
+  — so the debug panel's `unbuilt` section no longer reports the metal as black;
+  its `metal` row now names what a reflection actually falls back to, which is a
+  baked probe volume rather than a trace of the room.
+  `docs/plan/sample/13-lumen.md` says what is still owed — ray tracing, the
+  monitor camera and the web demo.
 
   `apps/lumen/tests/run-lumen-golden.sh` renders the fixed camera on a named
   backend and checks five claims about **where** the frame is bright and dark

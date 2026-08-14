@@ -61,8 +61,8 @@ USAGE:
 
 Not a game. One indoor scene chosen for lighting rather than for geometry: a
 window, a mirror-grade panel, a rough metal block, a coloured wall and a moving
-light. The mirror and the block render near-black on purpose — see the debug
-panel's 'unbuilt' section, and docs/plan/sample/13-lumen.md.
+light. The two metals have no ambient term and are lit by reflection alone —
+see the debug panel's 'unbuilt' section, and docs/plan/sample/13-lumen.md.
 
 OPTIONS:
     --headless           Run without a window (for CI / determinism tests)

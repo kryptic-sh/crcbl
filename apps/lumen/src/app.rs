@@ -362,8 +362,10 @@ impl HostedGame for Lumen {
     /// Rule 12's path reporting is the first — a fixture that did not say which
     /// arm it drew through would be one whose picture nobody could attribute.
     /// The second is the sample's own honesty: the mirror panel and the metal
-    /// block are near-black, and a reviewer has to be told that on the screen
-    /// where the black is rather than in a document nobody has open. The third
+    /// block are lit by reflection alone, and what stands in for the reflection
+    /// this path cannot trace is a baked probe volume — a reviewer has to be
+    /// told that on the screen rather than in a document nobody has open. The
+    /// third
     /// is where the camera is, which is what turns "this looks wrong" into a
     /// position somebody else can stand at.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {

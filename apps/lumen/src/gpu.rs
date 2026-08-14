@@ -197,22 +197,23 @@ impl crcbl::ui::DebugModule for Paths {
 
 /// What the room is waiting on, as a panel section.
 ///
-/// **The row that stops a reviewer filing a bug.** The mirror panel and the
-/// metal block render near-black because ambient scales the diffuse albedo and
-/// a conductor has none — see [`crate::room`] — so this says it on the screen
-/// where the black is, rather than only in a document nobody has open. Since
-/// screen-space reflections landed the panel's *foot* is lit and the rest of it
-/// is not, which is a picture that needs the row more rather than less. The
-/// irradiance volume [`crate::bounce`] bakes does not change that: it is the
-/// diffuse half of the probe design, and a conductor has no diffuse lobe for it
-/// to reach.
+/// **The row that stops a reviewer filing a bug.** Ambient scales the diffuse
+/// albedo and a conductor has none — see [`crate::room`] — so a reflection is
+/// the whole of what lights either metal surface, and both now get one: the
+/// mirror panel takes a screen-space hit at its foot and the irradiance volume
+/// [`crate::bounce`] bakes everywhere else on that face, and the brass block,
+/// whose roughness is above [`crcbl::shaders::ssr::ROUGHNESS_CUTOFF`], takes
+/// that volume directly without marching at all. What is left to say on the
+/// screen is what that environment *is*: baked and blurry, and the only answer
+/// there is for anything the frame cannot see. Ray tracing is what replaces it,
+/// and the `paths` section's `ray tracing` row is where that is named.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Unbuilt;
 
 impl crcbl::ui::DebugModule for Unbuilt {
     fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
         section.set_title("unbuilt");
-        section.row_str("metal", "black: probes are diffuse, SSR miss is not");
+        section.row_str("metal", "reflection only: SSR hit or baked probe");
         section.row_str("bounce wall", "one analytic bounce, no GI solve");
         // The per-effect toggles used to be a row here. They are built — the
         // `paths` section's `effects` row is what this frame drew — so what is
@@ -761,7 +762,7 @@ mod tests {
             plain[1].1, forced[1].1,
             "forcing the geometry axis must not relabel the binding one"
         );
-        // The row that keeps a reviewer from filing the black metal as a bug is
+        // The row that tells a reviewer this frame is the rasterised one is
         // present in both.
         assert!(
             plain.iter().any(|(label, _)| label == "ray tracing"),

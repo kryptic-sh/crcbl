@@ -23,11 +23,17 @@
 //! Ray tracing, the render-to-texture monitor camera and the Pages web demo are
 //! out of scope for this milestone and recorded in `docs/backlog.md`. One thing
 //! is visible in the picture rather than merely absent from it: **a fully
-//! metallic surface has no ambient term and renders near-black wherever a
-//! screen-space reflection finds nothing**. The irradiance volume [`bounce`]
-//! bakes does not fill that in — it is the *diffuse* half of
-//! `docs/plan/18-render-features.md`'s probe design, and the specular half a
-//! reflection miss would return is unbuilt.
+//! metallic surface has no ambient term, so a reflection is the whole of what
+//! lights it**. Both halves of `docs/plan/18-render-features.md`'s probe design
+//! are built now — the volume [`bounce`] bakes is the diffuse half, and a
+//! screen-space reflection that finds nothing returns that same volume as its
+//! environment — so neither metal surface is black any more. What stands there
+//! instead is a *baked* environment rather than a trace of the room, and above
+//! the mirror panel's reflecting band it is the whole of what the face shows:
+//! `tests/golden.rs`'s `zero_probes_only_remove_the_ssr_and_rough_fallbacks`
+//! zeroes the probe rows and takes that point to nothing while the panel's real
+//! screen-space hit stays where it was. Ray tracing is what replaces it, and the
+//! debug panel's `ray tracing` row says which path this frame took.
 //!
 //! **The coloured wall does bounce**, which it did not before [`bounce`]: a
 //! single analytic gather of the sun's first bounce off the room's interior,
