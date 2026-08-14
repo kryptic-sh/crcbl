@@ -7902,15 +7902,19 @@ diverge on — was _supported_ by this run, not contradicted: radv against
 lavapipe is max delta 2, and WARP agrees with the host mirror to 0.07 levels.
 The 8-bit golden is the fragile part, not the arithmetic.
 
-**Resolved by the replacement fixture.** The two probes now occupy a narrow
-interval at the room's centre, so most floor pixels clamp to one endpoint and
-form broad flat regions; only the central band interpolates. The semantic check
-compares two separated blocks inside each endpoint region, so widening the
-interval back across the room fails before a golden can be re-blessed. That
-negative control was run with the interval widened to the room width: both probe
-tests failed on an 11.60-level change against their 0.5-level flatness budget.
-The replacement is exact on radv; WARP remains the CI verdict because it cannot
-be run on this machine.
+**The first replacement preserved the semantics but not WARP's budget.** With a
+`0.4`-unit interval, WARP still reported 1,216 pixels over tolerance — 2.4740%
+of the frame, effectively the reverted fixture's result — even though every
+semantic check passed and the shader agreed with the Rust mirror to 0.20 levels.
+The gradient had been confined, but not enough to fit the global 1% budget.
+
+The interval is now `0.1` units, projected to 7.558040 pixels in the fixture.
+Scaling WARP's observed count by that width predicts 304 pixels, or 0.618490% of
+the frame; only the Windows run can confirm it. The semantic check also compares
+the centre against both endpoints now, so narrowing the band cannot quietly
+replace interpolation with endpoint selection. The widened-to-room negative
+control still fails on an 11.60-level endpoint-region change against its
+0.5-level flatness budget.
 
 ## The Pages browser gate fails on the runner's GPU stack, not on the code
 

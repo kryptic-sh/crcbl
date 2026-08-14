@@ -842,7 +842,7 @@ fn ssr_sun() -> crcbl_render::DirectionalLight {
 /// Most of the floor lies outside this interval and clamps to one of the two
 /// probes, forming flat regions. The interval itself still exercises coefficient
 /// interpolation and is checked against the Rust mirror.
-const PROBE_BLEND_WIDTH: f32 = 0.4;
+const PROBE_BLEND_WIDTH: f32 = 0.1;
 
 /// How wide [`Scene::Probes`]' room is, in world units — the axis its probe grid
 /// runs along.
@@ -987,7 +987,7 @@ fn probe_sun() -> crcbl_render::DirectionalLight {
 /// A `1×1×1` volume never addresses a row past the first, never interpolates and
 /// never exercises the `x`-fastest index — it is the degenerate volume with one
 /// row filled in. This two-probe grid confines interpolation to
-/// [`PROBE_BLEND_WIDTH`] at the room's centre: the broad regions outside it clamp
+/// `PROBE_BLEND_WIDTH` at the room's centre: the broad regions outside it clamp
 /// to either probe, while the centre still detects a lookup that ignores world
 /// position or reads the wrong axis.
 #[must_use]

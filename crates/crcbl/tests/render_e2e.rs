@@ -1397,6 +1397,12 @@ const PROBE_RATIO: f32 = 1.5;
 /// back across the floor because these within-frame comparisons would diverge.
 const PROBE_FLAT_DELTA: f32 = 0.5;
 
+/// Minimum distance in levels from each clamped endpoint at the blend centre.
+///
+/// The centre must observe both probe rows rather than merely select an endpoint;
+/// the Rust mirror below checks the interpolated value itself.
+const PROBE_INTERPOLATION_DELTA: f32 = 5.0;
+
 /// How far the frame may sit from what
 /// [`crcbl_shaders::probe::irradiance_at`](crcbl::shaders::probe::irradiance_at)
 /// predicts for it, in levels of 255.
@@ -1591,6 +1597,19 @@ fn the_probe_grid_lights_each_end_of_the_room_in_its_own_colour(image: &Image) {
                  {PROBE_FLAT_DELTA}; the probe blend has spread back across the floor"
             );
         }
+    }
+    for (name, channel) in [("red", 0), ("blue", 2)] {
+        let minus = band(-PROBE_BAND_AT, channel);
+        let centre = band(0.0, channel);
+        let plus = band(PROBE_BAND_AT, channel);
+        let lower = minus.min(plus);
+        let upper = minus.max(plus);
+        assert!(
+            lower + PROBE_INTERPOLATION_DELTA < centre
+                && centre + PROBE_INTERPOLATION_DELTA < upper,
+            "the centre must interpolate the probe rows in {name}: {centre:.2} must sit at least \
+             {PROBE_INTERPOLATION_DELTA} level(s) inside its endpoints {minus:.2} and {plus:.2}"
+        );
     }
     the_shader_and_the_rust_mirror_agree_about_the_irradiance(image);
 }
