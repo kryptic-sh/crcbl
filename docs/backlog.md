@@ -7768,23 +7768,37 @@ resolution at the contact than from the bias.
   pixels — and a deficit-against-clean-reference measure conflates acne with
   legitimate shadow tightening at low bias. No numeric acne metric in this tree
   is trustworthy on its own.
-- **`crates/crcbl-shaders/src/mesh.rs` has a stale doc reference** on
-  `SHADOW_TILE`: it names `SPOT_DEPTH_BIAS_TEXELS`, which is now
-  `PUNCTUAL_DEPTH_BIAS_TEXELS`. Pre-existing and one line to fix.
 
-## `crcbl-sprite` has six unresolved doc links, and `cargo doc` is a gate
+## Run the local `cargo doc` gate with `--all-features`, as CI does
 
-`cargo doc --no-deps` emits six
-`unresolved link to \`crate::bake\``warnings, all from`crcbl-sprite`: `src/crpix.rs`once and`src/load.rs`five times, two of them naming`crate::bake::duration_ms`and`crate::bake::aseprite_json`. So a `bake`
-module was removed or renamed and its referrers were not followed.
+**Corrected 2026-08-15.** The entry this replaces said `crcbl-sprite` had six
+unresolved `crate::bake` doc links and concluded "a `bake` module was removed or
+renamed and its referrers were not followed". **That diagnosis was wrong.**
+`crates/crcbl-sprite/src/bake.rs` exists and is declared in `lib.rs` behind
+`#[cfg(feature = "bake")]`, and the `bake` feature is off by default because it
+pulls in the PNG encoder a runtime consumer would never call.
 
-Recorded because `cargo doc` is its own gate here — clippy and the tests pass
-straight through an unusable public API — and six standing warnings are the
-noise that makes a seventh, real one invisible. Not fixed: nothing this session
-touched `crcbl-sprite`, and finding where `bake` went is a job for somebody
-already in that crate. Whoever does it should decide whether the links should
-point at the `crcbl` CLI's bake command or be deleted, rather than mechanically
-repointing them.
+So the six warnings are an artefact of **how the gate was invoked**, not a
+defect in the crate. A bare `cargo doc --workspace --no-deps` unifies the `load`
+feature on — something else in the workspace asks for it — while nothing turns
+on `bake`, so `load.rs` compiles and its links into `bake` dangle. CI's `docs`
+job in `.github/workflows/ci.yml` runs `--all-features`, under which every one
+of them resolves; `cargo doc --all-features --no-deps -p crcbl-sprite` was run
+to confirm and emits **zero** warnings.
+
+**The lesson worth keeping is about the gate, not the crate.** A feature-gated
+module is normal Rust and an intra-doc link into one is not a defect, but a doc
+run whose feature set differs from CI's produces warnings CI never sees — and
+standing phantom warnings are exactly the noise that hides a real one. That
+happened twice in one session here: two separate readings took the six at face
+value, and the second wrote this entry's wrong diagnosis. Match CI's invocation
+when running `cargo doc` locally.
+
+**Considered and not taken:** `[package.metadata.docs.rs] all-features = true`
+would make published docs complete regardless. No crate in this workspace sets
+that metadata today, so adding it to one is an inconsistency and adding it to
+all is a convention nobody has asked for. Worth doing as a deliberate sweep if
+these crates are ever published in earnest.
 
 ## Irradiance probes: the slice plan (designed 2026-08-14)
 
