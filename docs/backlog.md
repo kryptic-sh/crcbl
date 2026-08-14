@@ -7797,12 +7797,14 @@ reason occlusion did not.
    `ROUGHNESS_CUTOFF` gates only screen-space marching. Rough surfaces still
    evaluate probe environment specular and return it with exact-zero sharpness,
    so the blur composites that centre fallback directly. Positive sharpness
-   blends continuously from the centre value into filtered SSR. The reflectivity
-   attachment stores sharpness rather than quantised roughness so the cutoff
-   endpoint survives `Rgba8Unorm` exactly; Vulkan readback asserts alpha zero.
-   lumen's fully metallic brass at roughness 0.55 measures 97.4 with authored
-   probes and 89.7 with zeroed rows. `Scene::Probes` disables reflections so its
-   diffuse Rust-mirror contract remains absolute.
+   blends continuously through a square-root filter share; unlike the first
+   linear share, it keeps the existing SSR fixture below its fixed-stride
+   stepping limit. The reflectivity attachment stores sharpness rather than
+   quantised roughness so the cutoff endpoint survives `Rgba8Unorm` exactly;
+   Vulkan readback asserts alpha zero. lumen's fully metallic brass at roughness
+   0.55 measures 97.4 with authored probes and 89.7 with zeroed rows.
+   `Scene::Probes` disables reflections so its diffuse Rust-mirror contract
+   remains absolute.
 
 **The cheapest useful version is not a separate slice.** One probe and a 1×1×1
 grid is slice 1 with `probes.len() == 1` — the ambient becomes directional,

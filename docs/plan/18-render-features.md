@@ -765,9 +765,11 @@ should say.
   storage, and the march copies that value into the reflection alpha. Zero
   sharpness returns the probe fallback before march setup and the blur
   composites that centre value directly. Positive sharpness uses
-  `lerp(centre, filtered, sharpness)`, so approaching the cutoff is continuous
-  rather than switching from a filtered neighbourhood to an unrelated centre
-  sample.
+  `lerp(centre, filtered, sqrt(sharpness))`, so approaching the cutoff is
+  continuous while a half-sharp reflection retains enough filtering to remove
+  the march's fixed-stride stepping. The linear share was measured at 8.46–8.48
+  levels of mean row bend across lavapipe, WARP and Metal against the fixture's
+  limit of 8; the square-root share measures 4.82 on local lavapipe.
 - **The depth tolerance is the march's `THICKNESS_FLOOR` times a small
   multiplier, and the multiplier is not decoration.** `DEPTH_TOLERANCE_RADII`'s
   shape, but a floor-thickness is a much shorter length than the AO radius: at

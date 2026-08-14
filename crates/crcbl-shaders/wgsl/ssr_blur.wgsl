@@ -142,7 +142,7 @@ fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
         }
         y_0 = y_0 + i32(1);
     }
-    var _S12 : pixelOutput_0 = pixelOutput_0( vec4<f32>(lit_0.xyz + mix(centre_0.xyz, total_0 / vec3<f32>(weight_0), vec3<f32>(sharpness_0)), lit_0.w) );
+    var _S12 : pixelOutput_0 = pixelOutput_0( vec4<f32>(lit_0.xyz + mix(centre_0.xyz, total_0 / vec3<f32>(weight_0), vec3<f32>(sqrt(sharpness_0))), lit_0.w) );
     return _S12;
 }
 

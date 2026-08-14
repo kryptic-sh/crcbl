@@ -270,14 +270,14 @@ struct pixelInput_0
     }
 
 #line 250
-    pixelOutput_0 _S15 = { float4(lit_0.xyz + mix(centre_0.xyz, total_0 / float3(weight_0) , float3(sharpness_0) ), lit_0.w) };
+    pixelOutput_0 _S15 = { float4(lit_0.xyz + mix(centre_0.xyz, total_0 / float3(weight_0) , float3(sqrt(sharpness_0)) ), lit_0.w) };
 
-#line 292
+#line 295
     return _S15;
 }
 
 
-#line 292
+#line 295
 struct vertexMain_Result_0
 {
     float4 position_1 [[position]];

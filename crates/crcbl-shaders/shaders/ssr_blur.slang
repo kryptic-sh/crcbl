@@ -287,7 +287,10 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
 
     // The zero-sharpness branch above is this expression's limit: as sharpness
     // approaches zero, retain the centre's direct probe fallback rather than
-    // abruptly replacing it with a fully filtered neighbourhood.
+    // abruptly replacing it with a fully filtered neighbourhood. Square-root
+    // the stored linear ramp before compositing: a partially rough surface still
+    // needs most of the filter that removes the march's fixed-stride stepping.
     float3 filtered = total / weight;
-    return float4(lit.rgb + lerp(centre.rgb, filtered, sharpness), lit.a);
+    float filter_share = sqrt(sharpness);
+    return float4(lit.rgb + lerp(centre.rgb, filtered, filter_share), lit.a);
 }

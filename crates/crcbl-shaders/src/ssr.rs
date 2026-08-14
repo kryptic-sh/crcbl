@@ -313,24 +313,34 @@ mod tests {
     }
 
     /// Positive sharpness blends continuously from the direct centre fallback to
-    /// the fully filtered reflection, making the zero branch its limit.
+    /// the fully filtered reflection. The square-root curve retains enough
+    /// filtering at the middle of the stored linear ramp to remove fixed-stride
+    /// march steps without changing the exact zero fallback.
     #[test]
-    fn the_blur_blends_toward_the_centre_as_sharpness_reaches_zero() {
+    fn the_blur_filters_partially_rough_surfaces_without_discontinuity() {
         let blur = include_str!("../shaders/ssr_blur.slang");
         assert!(
-            blur.contains("float3 filtered = total / weight;\n    return float4(lit.rgb + lerp(centre.rgb, filtered, sharpness), lit.a);"),
-            "ssr_blur.slang must blend the filtered reflection toward the centre by sharpness"
+            blur.contains(
+                "float3 filtered = total / weight;\n    float filter_share = sqrt(sharpness);\n    return float4(lit.rgb + lerp(centre.rgb, filtered, filter_share), lit.a);"
+            ),
+            "ssr_blur.slang must use the continuous square-root filter share"
         );
 
         let centre = 2.0f32;
         let filtered = 10.0f32;
-        let sharpness = 0.001f32;
-        let blended = centre + (filtered - centre) * sharpness;
+        let near_zero_sharpness = 1.0e-8f32;
+        let near_zero = centre + (filtered - centre) * near_zero_sharpness.sqrt();
         assert!(
-            (blended - centre).abs() < 0.01,
-            "a nearly rough surface must approach the zero-sharpness centre: {blended}"
+            (near_zero - centre).abs() < 0.001,
+            "a nearly rough surface must approach the zero-sharpness centre: {near_zero}"
         );
-        assert_eq!(centre + (filtered - centre), filtered);
+
+        let middle = 0.5f32.sqrt();
+        assert!(
+            middle > 0.5 && middle < 1.0,
+            "a partially rough surface must retain more filtering than the linear ramp: {middle}"
+        );
+        assert_eq!(centre + (filtered - centre) * 1.0f32.sqrt(), filtered);
     }
 
     /// files must name the same number for it.

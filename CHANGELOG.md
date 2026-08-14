@@ -470,8 +470,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stores that march's sharpness ramp, so cutoff alpha survives `Rgba8Unorm` as
   exact zero. The blur composites that zero-sharpness probe fallback directly;
   positive sharpness blends continuously from the centre fallback into filtered
-  SSR. The dedicated `Scene::Probes` fixture disables reflections so its
-  absolute Rust comparison remains a diffuse-irradiance contract.
+  SSR through a square-root filter share, retaining enough smoothing at the
+  middle of the ramp to remove fixed-stride march stepping. The dedicated
+  `Scene::Probes` fixture disables reflections so its absolute Rust comparison
+  remains a diffuse-irradiance contract.
 
 - **`apps/lumen`'s pause menu switches the effects, mid-run.** Three rows below
   `CAMERA` — `SHADOWS`, `AO` and `REFLECTIONS`, the words `--no-shadows`,
