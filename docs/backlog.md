@@ -8078,17 +8078,41 @@ builds, so there is no frame time to compare against the other five demos, and
 the timing question the CI step would have answered is still open.
 
 **Do not read this as "it needs a real GPU", which is the heading this entry
-first carried.** What is established is narrower and worse: it needs an adapter
-that permits **more than ten** storage buffers in one stage. One adapter allows
-it (this machine's amd rdna-3) and one refuses (SwiftShader), and nothing here
-establishes where a conforming baseline WebGPU implementation sits — the
-guaranteed minimum is a number in the specification that nobody has looked up,
-and it is at or below SwiftShader's ten rather than above it. So the untested
-population is not "runners without GPUs", it is **every browser and device whose
-adapter reports a ceiling this pass does not fit**, which plausibly includes
-mobile hardware with a real GPU. Anyone picking this up should read the limit
-out of the specification first and record it here, because it decides whether
-the first fix above is a nicety or the browser tier's only path to 3D.
+first carried.** The limit has now been looked up, and it makes SwiftShader the
+generous one rather than the stingy one.
+
+**WebGPU's guaranteed minimum `maxStorageBuffersPerShaderStage` is 8** — the
+default in the specification's supported-limits table. SwiftShader's ten is
+already _above_ the floor, so no conforming WebGPU implementation is obliged to
+run this pass at all and an adapter that refuses it is not defective.
+
+What the field looks like, from web3dsurvey's survey of that limit (cumulative
+share of surveyed devices reporting **at least** each value):
+
+| value | share |
+| ----- | ----- |
+| 8     | 100%  |
+| 9     | 98%   |
+| 16    | 78%   |
+| 31    | 17%   |
+| 48    | 4%    |
+
+Fourteen falls between published buckets, so the share that can host the pass is
+**between 78% and 98%** and the survey cannot narrow it further. The pessimistic
+end is roughly one device in five. This is not a CI-runner problem wearing a
+browser costume; it is a portability ceiling on the GPU-driven path, invisible
+until now only because lumen is the first 3D demo to reach a browser.
+
+That settles the question this entry used to leave open: packing the pass is
+**not a nicety**, it is the browser tier's only path to 3D on the hardware that
+tier runs on. The cheap fix — surfacing the limit so `ForwardRenderer::new`
+refuses by name instead of drawing black — is still worth doing first and
+independently, because a device in that tail currently gets a black canvas and
+no diagnosis.
+
+Sources:
+[WebGPU specification, supported limits](https://www.w3.org/TR/webgpu/#limits) ·
+[web3dsurvey](https://web3dsurvey.com/webgpu/limits/maxStorageBuffersPerShaderStage)
 
 ## The pinned shader compilers ARE installed here (2026-08-14)
 
