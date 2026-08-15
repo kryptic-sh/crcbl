@@ -310,11 +310,12 @@ if [ -z "$TOUCH" ]; then
 fi
 
 # And the same argument again for the command stream. Group G is the only thing
-# anywhere that drives a wasm → JS → wasm round trip through the real transport;
-# every other check passes on a build whose `crcbl-webgpu` exports are never
-# called, because nothing else calls them. Its absence therefore means the round
-# trip stopped happening, not that this demo does not do one.
-ROUND_TRIP="$(grep -F 'wasm encoded an adapter enumeration and the shim decoded it back' "${OUTPUT}.plain" || true)"
+# anywhere that watches a wasm → JS → wasm round trip go through the real
+# transport, in the demo's own frame loop; every other check passes on a build
+# whose `crcbl-webgpu` exports are never called, because nothing else calls
+# them. Its absence therefore means the round trip stopped happening, not that
+# this demo does not do one.
+ROUND_TRIP="$(grep -F 'wasm encoded an adapter enumeration and the demo loop replayed it' "${OUTPUT}.plain" || true)"
 if [ -z "$ROUND_TRIP" ]; then
     echo "crcbl web e2e: the driver never made a command-stream round trip;" >&2
     echo "               crcbl-webgpu's transport is ungated in a real browser" >&2

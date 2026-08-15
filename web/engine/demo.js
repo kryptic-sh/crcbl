@@ -37,7 +37,8 @@
 
 import { attachShell } from './shell.js';
 import { startAudio } from './audio.js';
-import { takeCommandStream } from './gpu-transport.js';
+import { Replayer } from './gpu-replay.js';
+import { putReplyStream, takeCommandStream } from './gpu-transport.js';
 import { drainLog, LOG_INFO } from './log.js';
 import {
   drainFetch,
@@ -281,6 +282,89 @@ export function bootDemo(spec) {
     // an allocation per frame for a poll that answers "nothing" every time.
     const gpuStream = { exports, memory };
 
+    // THE PAGE'S CANVAS REGISTRY, AND THE ONE REPLAYER THAT READS IT.
+    // `SurfaceTarget::Web` is an integer key into this map and nothing else —
+    // no string crosses the wasm boundary — so this is where the demo's canvas
+    // gets the number a `CreateSurface` may name it by, and `CANVAS_ID` is
+    // already that number for the shell.
+    //
+    // One replayer for the life of the page, not one per frame: an enumeration
+    // replayed on one frame is answered on a later one, so a per-frame replayer
+    // would drop every answer it started.
+    const canvases = new Map([[CANVAS_ID, canvas]]);
+    const replayer = new Replayer({ canvases });
+
+    /** What a replay threw, or `null` while none has. See {@link pumpGpu}. */
+    let gpuFailure = null;
+    /** How many frames carrying at least one command have been replayed. */
+    let gpuReplayed = 0;
+    /** How many reply buffers wasm has taken. */
+    let gpuDelivered = 0;
+    /**
+     * The last frame that carried anything, as it was decoded.
+     *
+     * Kept whole rather than summarised so that recording it costs an
+     * assignment and no allocation: the decode has already built these objects,
+     * and `gpu-transport.js` copies every payload out of wasm memory before it
+     * returns, so none of them is a view that a later `memory.grow()` detaches.
+     *
+     * @type {{ baseSequence: bigint, commands: object[] } | null}
+     */
+    let gpuLastFrame = null;
+
+    /**
+     * The page's whole half of the GPU channel: drain, replay, deliver.
+     *
+     * **THE ONE PLACE EITHER BUFFER IS TOUCHED.** There is one channel and one
+     * buffer behind it, so a second drain anywhere in the page would take
+     * commands this one never sees, and a second delivery would offer bytes
+     * this replayer has already cleared. `gpu-probe.js` used to do both and now
+     * does neither — it encodes and it reads state, and this is what moves the
+     * bytes for it and for whatever installs a channel next.
+     *
+     * The order is the seam's: the frame wasm recorded comes out, is executed,
+     * and then whatever answers are ready go back in. The replies crossing here
+     * belong to commands an *earlier* frame started, which is why the replayer
+     * outlives a frame at all.
+     */
+    function pumpGpu() {
+      try {
+        const carried = takeCommandStream(gpuStream);
+        replayer.replay(carried);
+        if (carried !== null && carried.commands.length > 0) {
+          gpuReplayed += 1;
+          gpuLastFrame = carried;
+        }
+        if (
+          replayer.hasReplies &&
+          putReplyStream({ exports, memory, bytes: replayer.replies })
+        ) {
+          // Cleared only once wasm has actually taken them. A `false` is "not
+          // now", and the same bytes are offered again next frame; dropping
+          // them is the one unrecoverable bug this channel can have.
+          replayer.clear();
+          gpuDelivered += 1;
+        }
+      } catch (error) {
+        // LATCHED OFF, AND SAID ONCE, LOUDLY. A throw out of here is an opcode
+        // this page cannot execute or a canvas id it cannot resolve — the page
+        // being wrong rather than a condition that passes — so the next frame
+        // would throw the same way and sixty identical lines a second is how a
+        // message gets lost rather than read. Latching also stops the drain,
+        // which is deliberate: a channel nobody is answering must not look like
+        // one that is.
+        //
+        // The rAF loop itself keeps going. It is the browser's loop and the
+        // engine draws through it, so killing it over a channel fault would
+        // take the demo's picture down as well — and the picture is what says
+        // which half broke. The console line is for the log the browser gate
+        // reads; the status line is for whoever is looking at the page instead.
+        gpuFailure = String(error);
+        console.error(`crcbl: the GPU command stream stopped: ${gpuFailure}`);
+        say('The GPU command stream failed.', gpuFailure, true);
+      }
+    }
+
     let announced = -1;
 
     /** @param {number} now */
@@ -291,20 +375,20 @@ export function bootDemo(spec) {
       const status = api.frame(now);
       log();
       drainFetch({ exports, memory });
-      // NOTHING ENCODES INTO THE STREAM YET, so this returns `null` on every
-      // frame and there is nothing to replay. `crcbl-webgpu` is linked and its
-      // three `__crcbl_web_gpu_stream_*` exports are in the artifact, but no HAL
-      // implementation writes through `StreamChannel::encode` and nothing calls
-      // `crcbl_webgpu::web::install`, so `len` answers 0 — the documented "a
-      // shim that started before the engine did" case, and not a failure.
+      // THE GPU CHANNEL, DRIVEN FROM THE DEMO'S OWN LOOP AND NOWHERE ELSE.
+      // Almost every frame of almost every demo finds nothing: no HAL
+      // implementation writes through `StreamChannel::encode` yet, so unless
+      // something has installed a channel — today only `crcbl-webgpu`'s probe,
+      // which the browser gate drives — `len` answers 0 and this costs one
+      // integer call, the documented "a shim that started before the engine
+      // did" case rather than a failure.
       //
-      // It is called anyway because `gpu-transport.js` was otherwise a module no
-      // page imported. A transport nothing drives is one whose first execution
-      // is also its first real frame, in a browser, under a replayer — so this
-      // runs it on every frame of every demo instead, where the browser gate
-      // sees it. The replayer goes where this result is dropped, when the WebGPU
-      // backend arrives to fill the buffer.
-      takeCommandStream(gpuStream);
+      // It runs anyway, and it runs *here*, because a loop that only ever drops
+      // what it decodes proves nothing about replaying it: the transport, the
+      // replayer and the reply channel would all be meeting their first real
+      // frame in a browser, under a page nobody had driven. This is the loop the
+      // WebGPU backend will use, doing the work that backend will need.
+      if (gpuFailure === null) pumpGpu();
       flush();
 
       if (status !== announced) {
@@ -365,6 +449,30 @@ export function bootDemo(spec) {
           pending: exports.__crcbl_web_fetch_pending(),
           inFlight: exports.__crcbl_web_fetch_inflight(),
         }),
+        // The GPU channel, and the two live objects behind it: the registry a
+        // `CreateSurface` resolves against and the replayer that resolves it.
+        // They are here rather than summarised because what a console — or the
+        // browser gate — has to ask about them is identity, which does not
+        // survive being turned into a number: whether a surface holds the
+        // context of *this* canvas is a comparison of elements.
+        gpu: {
+          canvasId: CANVAS_ID,
+          canvases,
+          replayer,
+          // `baseSequence` as a string: it is a `BigInt`, and neither `JSON`
+          // nor the DevTools protocol carries one.
+          stats: () => ({
+            replayed: gpuReplayed,
+            delivered: gpuDelivered,
+            commands: (gpuLastFrame?.commands ?? []).map((command) =>
+              String(command.name)
+            ),
+            baseSequence:
+              gpuLastFrame === null ? null : String(gpuLastFrame.baseSequence),
+            surfaces: replayer.surfaces.size,
+            failure: gpuFailure,
+          }),
+        },
         logLevel: (/** @type {number} */ level) => api.logLevel(level),
       },
     });

@@ -15,20 +15,25 @@
 // loads it from the demo's own origin, in the demo's own page, next to the demo's
 // own wasm instance — a copy pasted into the driver would be testing the driver.
 //
-// THE ONE ORDERING RULE THAT MATTERS, and the reason `start` is one function
-// rather than two calls a caller makes in order. The demo's frame loop calls
-// `takeCommandStream` on every frame and drops what it decodes, because nothing
-// encodes into the stream yet. The instant the probe installs a channel and
-// writes a command, that loop becomes a competitor: whichever of the two drains
-// the buffer first gets the command, and the other gets an empty frame. So the
-// request and the drain happen in one synchronous run with no `await` between
-// them — a `requestAnimationFrame` callback cannot interleave with synchronous
-// JavaScript, so being uninterruptible is the whole guard.
+// NOTHING HERE MOVES A BYTE ACROSS THE SEAM, and that is the whole shape of
+// this file. `web/engine/demo.js`'s frame loop drains the command stream,
+// replays it and hands the replies back — one drain and one delivery for the
+// page, in `pumpGpu`. There is one channel and one buffer behind it, so a
+// second drain here would take commands that loop never sees and a second
+// delivery would offer bytes its replayer has already cleared.
+//
+// So these functions ask wasm to *encode* something and read where it has got
+// to, and everything in between belongs to the loop: what a frame carried, when
+// it was replayed, what the replayer holds. `globalThis.crcbl.gpu` on a demo
+// page is where the loop reports all three.
+//
+// This is also why there is no ordering rule left to obey. The version of this
+// file that drained had to do its request and its drain in one uninterruptible
+// run, because the demo's loop was a competitor for the same buffer; with one
+// drainer there is no race to lose, and an `await` between any two calls below
+// costs nothing but time.
 
-import { putReplyStream, takeCommandStream } from './gpu-transport.js';
 import { readUtf8 } from './wasm.js';
-
-/** @typedef {import('./gpu-replay.js').Replayer} Replayer */
 
 /**
  * The `PROBE_*` codes `__crcbl_web_gpu_probe_state` answers, from
@@ -89,43 +94,30 @@ export function deviceStateName(state) {
 }
 
 /**
- * Asks wasm to enumerate adapters, and replays the frame that carries the ask.
+ * Asks wasm to encode an adapter enumeration.
  *
- * Synchronous from the request to the replay, for the reason in the header. The
- * WebGPU call the replay starts is not: it is a promise, and its answer is
- * queued into `replayer` whenever it settles, which is why this returns nothing
- * about the adapter and {@link pumpAdapterProbe} exists.
+ * **It is not replayed here, and this call cannot say what the frame carried.**
+ * The command sits in the channel's buffer until the demo's next frame, where
+ * that loop drains it, replays it, and — a frame or more later, because WebGPU's
+ * adapter API is a promise — hands the answer back. What the frame carried is
+ * therefore the loop's to report: `globalThis.crcbl.gpu.stats()` names the
+ * commands of the last frame it replayed, and {@link readAdapterProbe} is where
+ * the answer surfaces.
  *
  * @param {object} options
  * @param {Record<string, Function>} options.exports
- * @param {WebAssembly.Memory} options.memory
- * @param {Replayer} options.replayer
- * @returns {{ started: boolean, commands: string[] }} `started` is false when
- *   wasm would not take the request — a channel already installed by something
- *   else, or a full waiting set — and `commands` names what the frame actually
- *   carried, which is what says the command crossed rather than that it was
- *   written.
+ * @returns {boolean} Whether wasm took the request. `false` is a channel
+ *   already installed by something else, or a full waiting set.
  */
-export function startAdapterProbe({ exports, memory, replayer }) {
-  if (exports.__crcbl_web_gpu_probe_adapters() !== 1) {
-    return { started: false, commands: [] };
-  }
-  // NO `await` BETWEEN THESE TWO. See the header.
-  const frame = takeCommandStream({ exports, memory });
-  const commands = (frame?.commands ?? []).map((command) =>
-    String(command.name)
-  );
-  replayer.replay(frame);
-  return { started: true, commands };
+export function startAdapterProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_adapters() === 1;
 }
 
 /**
- * Asks wasm to open the adapter it was granted, and replays the frame that
- * carries the ask.
+ * Asks wasm to encode a device request against the adapter it was granted.
  *
  * The device half of {@link startAdapterProbe} in every respect, including the
- * one that matters: **no `await` between the request and the drain**, because
- * the demo's frame loop is draining the same buffer.
+ * one that matters: it encodes and returns, and the demo's loop does the rest.
  *
  * The enumeration has to have been answered first — the descriptor names an
  * adapter id from one — so a `false` here right after
@@ -133,83 +125,55 @@ export function startAdapterProbe({ exports, memory, replayer }) {
  *
  * @param {object} options
  * @param {Record<string, Function>} options.exports
- * @param {WebAssembly.Memory} options.memory
- * @param {Replayer} options.replayer
- * @returns {{ started: boolean, commands: string[] }}
+ * @returns {boolean}
  */
-export function startDeviceProbe({ exports, memory, replayer }) {
-  if (exports.__crcbl_web_gpu_probe_device() !== 1) {
-    return { started: false, commands: [] };
-  }
-  // NO `await` BETWEEN THESE TWO. See the header.
-  const frame = takeCommandStream({ exports, memory });
-  const commands = (frame?.commands ?? []).map((command) =>
-    String(command.name)
-  );
-  replayer.replay(frame);
-  return { started: true, commands };
+export function startDeviceProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_device() === 1;
 }
 
 /**
- * Asks wasm to make a surface out of one of the page's canvases, and replays
- * the frame that carries the ask.
+ * Asks wasm to encode a surface creation naming one of the page's canvases.
  *
- * **There is no `pumpSurfaceProbe`, and that is the command rather than a gap.**
+ * **There is no `readSurfaceProbe`, and that is the command rather than a gap.**
  * `CreateSurface` has no entry on the reply channel — wasm names the handle
- * itself and moves on — so there is nothing to poll for and nothing to deliver
- * back. Everything this probe can report, it reports here.
+ * itself and moves on — so there is nothing to poll wasm for. Everything there
+ * is to see is on this side, in the replayer the demo's loop drives:
+ * `globalThis.crcbl.gpu.replayer.surfaces` is the table the context lands in,
+ * keyed by the handle index the command carried, once that loop has replayed
+ * the frame.
  *
- * The same no-`await` rule as its two neighbours, for the same reason: the
- * demo's frame loop drains the same buffer.
- *
- * `replayer` must have been built with a canvas registry that holds a canvas
- * under `canvasId` — `new Replayer({ canvases })`. One that was not **throws a
- * `SurfaceError` out of this call**, because the replay throws it: there is no
- * reply channel to report it on, so the near side is told loudly instead of the
- * far side being told wrongly. `gpu-replay.js` argues that choice where it is
- * made.
+ * `canvasId` must be a key the demo's registry holds — `crcbl.gpu.canvasId` is
+ * the one it registers its own canvas under. One that is not makes the replay
+ * **throw a `SurfaceError` in the demo's frame loop**, because there is no reply
+ * channel to report it on: the near side is told loudly instead of the far side
+ * being told wrongly. `gpu-replay.js` argues that choice where it is made, and
+ * `demo.js` argues what its loop does about it — the throw is latched, logged,
+ * and readable as `crcbl.gpu.stats().failure`.
  *
  * @param {object} options
  * @param {Record<string, Function>} options.exports
- * @param {WebAssembly.Memory} options.memory
- * @param {Replayer} options.replayer
  * @param {number} options.canvasId The registry key of the canvas to present
  *   to. The page's own number: nothing in wasm knows what the shell registered.
- * @returns {{ started: boolean, commands: string[], surface: number | null }}
- *   `surface` is the handle index the command actually carried, read back off
- *   the decoded frame rather than assumed — it is the key the replayer files
- *   the context under, and `replayer.surfaces.get(surface)` is how to find it.
- *   `null` when nothing was encoded.
+ * @returns {boolean} Whether wasm encoded it. `false` is the probe being
+ *   re-entered, or another channel being installed.
  */
-export function startSurfaceProbe({ exports, memory, replayer, canvasId }) {
-  if (exports.__crcbl_web_gpu_probe_surface(canvasId) !== 1) {
-    return { started: false, commands: [], surface: null };
-  }
-  // NO `await` BETWEEN THESE TWO. See the header.
-  const frame = takeCommandStream({ exports, memory });
-  const carried = frame?.commands ?? [];
-  const created = carried.find((command) => command.name === 'CreateSurface');
-  replayer.replay(frame);
-  return {
-    started: true,
-    commands: carried.map((command) => String(command.name)),
-    surface: created ? created.surface.index : null,
-  };
+export function startSurfaceProbe({ exports, canvasId }) {
+  return exports.__crcbl_web_gpu_probe_surface(canvasId) === 1;
 }
 
 /**
- * Hands wasm whatever the replayer has answered, and reads where the probe has
- * got to.
+ * Reads where the adapter probe has got to.
  *
- * Call it once a frame until the state settles. `WAITING` is the ordinary answer
- * on the frames before the browser has resolved its promise, and it is not a
- * failure — it is the whole shape of this seam.
+ * A reader and nothing more: the replies it is reading reached wasm through the
+ * demo's frame loop, which is the page's one delivery. Call it once a frame
+ * until the state settles. `WAITING` is the ordinary answer on the frames before
+ * the browser has resolved its promise, and it is not a failure — it is the
+ * whole shape of this seam.
  *
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @param {Replayer} options.replayer
- * @returns {{ state: number, name: string, text: string, delivered: boolean,
+ * @returns {{ state: number, name: string, text: string,
  *            caps: { featuresLo: number, featuresHi: number, maxImage2d: number } }}
  *   `text` is the adapter's name under `GRANTED`, the reason under `REFUSED`,
  *   and the decode error under `UNDECODABLE`. `caps` is the part of the granted
@@ -217,16 +181,7 @@ export function startSurfaceProbe({ exports, memory, replayer, canvasId }) {
  *   under every state but `GRANTED`, where `0` is also a legal value, so read it
  *   only once the state says so.
  */
-export function pumpAdapterProbe({ exports, memory, replayer }) {
-  let delivered = false;
-  if (replayer.hasReplies) {
-    // Cleared only once wasm has actually taken them. A `false` is "not now",
-    // and the same buffer is offered again next frame; dropping it would leave
-    // a command waiting for ever.
-    delivered = putReplyStream({ exports, memory, bytes: replayer.replies });
-    if (delivered) replayer.clear();
-  }
-
+export function readAdapterProbe({ exports, memory }) {
   // `state` first, `ptr` second: `state` decodes a buffer and clones a string,
   // so it allocates, and an allocation may grow wasm memory and detach any view
   // built before it. `ptr`, `len` and the three numbers below allocate nothing.
@@ -250,36 +205,30 @@ export function pumpAdapterProbe({ exports, memory, replayer }) {
     featuresHi: exports.__crcbl_web_gpu_probe_features_hi() >>> 0,
     maxImage2d: exports.__crcbl_web_gpu_probe_max_image_2d() >>> 0,
   };
-  return { state, name: probeStateName(state), text, delivered, caps };
+  return { state, name: probeStateName(state), text, caps };
 }
 
 /**
- * The same for the device request: deliver, then read where it has got to.
+ * The same for the device request.
  *
- * **Either pump drains for both probes** — there is one channel and one
- * committed buffer, so whichever runs first decodes it and hands each probe its
- * own answer. Calling only this one is therefore enough to settle an
- * enumeration too, and a frame that called neither leaves both waiting.
+ * **Either read drains wasm's reply buffer for both probes** — there is one
+ * channel and one committed buffer, so whichever of the two `state` calls runs
+ * first decodes it and hands each probe its own answer. Calling only this one is
+ * therefore enough to settle an enumeration too, and a frame that called neither
+ * leaves both waiting on a buffer the demo's loop has already delivered.
  *
  * @param {object} options
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
- * @param {Replayer} options.replayer
- * @returns {{ state: number, name: string, reason: string, delivered: boolean,
+ * @returns {{ state: number, name: string, reason: string,
  *            caps: { featuresLo: number, featuresHi: number, maxImage2d: number } }}
  *   `reason` says why no device opened and is empty when one did. `caps` is the
  *   **device's** — not the adapter's — and is all zeros under every state but
  *   `OPENED`, where `0` is also a legal value, so read it only once the state
  *   says so.
  */
-export function pumpDeviceProbe({ exports, memory, replayer }) {
-  let delivered = false;
-  if (replayer.hasReplies) {
-    delivered = putReplyStream({ exports, memory, bytes: replayer.replies });
-    if (delivered) replayer.clear();
-  }
-
-  // `state` first, `ptr` second, for `pumpAdapterProbe`'s reason: this is the
+export function readDeviceProbe({ exports, memory }) {
+  // `state` first, `ptr` second, for `readAdapterProbe`'s reason: this is the
   // call that allocates.
   const state = exports.__crcbl_web_gpu_probe_device_state();
   const reason = readUtf8(
@@ -296,5 +245,5 @@ export function pumpDeviceProbe({ exports, memory, replayer }) {
     featuresHi: exports.__crcbl_web_gpu_probe_device_features_hi() >>> 0,
     maxImage2d: exports.__crcbl_web_gpu_probe_device_max_image_2d() >>> 0,
   };
-  return { state, name: deviceStateName(state), reason, delivered, caps };
+  return { state, name: deviceStateName(state), reason, caps };
 }

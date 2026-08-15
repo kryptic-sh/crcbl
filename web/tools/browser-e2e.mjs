@@ -519,21 +519,23 @@ const STATUS_RUNNING = 3;
 const STATUS_PAUSED = 6;
 
 /**
- * The keys group H registers its two canvases under, in the registry it hands
- * the replayer.
+ * The key group G adds a second, wrong canvas to the demo's registry under.
  *
  * `SurfaceTarget::Web` is an integer into the shell's JS-side canvas registry
- * and nothing else, so these numbers are the page's to choose and mean nothing
- * to wasm — the probe is told which one to name.
+ * and nothing else, so this number is the page's to choose and means nothing to
+ * wasm. The *right* key is not here: `web/engine/demo.js` owns the registry now
+ * and registers its own canvas under its own `CANVAS_ID`, which the driver
+ * reads back as `crcbl.gpu.canvasId` rather than restating.
  *
- * **The decoy is why there are two.** With one canvas in the registry, a
- * replayer that ignored the `canvasId` on the wire and took whatever it found
- * would hand back the right context by accident, and no identity check could
- * tell. It is registered *first*, so "the first entry" is also the wrong
- * answer. `web/tools/gpu-replay.mjs` runs the same shape against a stub.
+ * **The decoy is why a second one is added at all.** With one canvas in the
+ * registry, a replayer that ignored the `canvasId` on the wire and took whatever
+ * it found would hand back the right context by accident, and no identity check
+ * could tell. It is inserted *ahead of* the demo's canvas — group G re-inserts
+ * that one to make it so — because a `Map` keeps insertion order, and the decoy
+ * is only a decoy while "the first entry" is also the wrong answer.
+ * `web/tools/gpu-replay.mjs` runs the same shape against a stub.
  */
 const DECOY_CANVAS_ID = 6;
-const PROBE_CANVAS_ID = 7;
 
 /**
  * How far above its starting height a flappy bird has to climb before the taps
@@ -2611,64 +2613,98 @@ try {
   // what this says — the last check below is that the demo did not notice.
   group('G — the WebGPU command stream makes a round trip');
 
-  // Started in one evaluation, and inside it in one *synchronous* run: the
-  // demo's frame loop calls `takeCommandStream` on every frame, so whichever of
-  // the two drains the buffer first gets the command. See `gpu-probe.js`.
+  // **NOTHING HERE DRAINS, REPLAYS OR DELIVERS.** The probe encodes a command
+  // and the demo's own frame loop does the rest — one drain, one replay, one
+  // delivery per frame, in `web/engine/demo.js`'s `pumpGpu`. So every check
+  // below waits for that loop to have done the work, which is what makes this
+  // group a gate on the loop the WebGPU backend will use rather than on a
+  // replayer the harness stood up for itself. A demo whose loop stopped
+  // replaying fails here even though the transport, the format and the replayer
+  // are all still correct — that is the claim, and no other check makes it.
   //
-  // The replayer is built here and kept on `globalThis.crcblProbe` for the rest
-  // of this group and for group H, which is why the canvas registry group H
-  // needs is handed over now: one replayer, one channel, one demo underneath.
-  // The adapter and device checks below do not read it.
+  // The decoy goes into the demo's *own* registry, which is the only one there
+  // is now, and group H is what reads it back. See DECOY_CANVAS_ID.
   const probe = await evaluate(
     page,
     `(async () => {
-       const { exports, memory } = globalThis.crcbl;
-       const { Replayer } = await import('/engine/gpu-replay.js');
        const { startAdapterProbe } = await import('/engine/gpu-probe.js');
-       // The shell's canvas registry, standing in for one no shell has yet: the
-       // demo's own canvas under the key the surface probe will name, and a
-       // decoy registered ahead of it. See DECOY_CANVAS_ID.
+       const { exports, gpu } = globalThis.crcbl;
        const decoy = document.createElement('canvas');
-       const replayer = new Replayer({
-         canvases: new Map([
-           [${DECOY_CANVAS_ID}, decoy],
-           [${PROBE_CANVAS_ID}, document.getElementById('canvas')],
-         ]),
-       });
-       globalThis.crcblProbe = { exports, memory, replayer, decoy };
-       return startAdapterProbe({ exports, memory, replayer });
+       // Deleted and put back so that the decoy is ahead of it: a Map keeps
+       // insertion order, and a decoy behind the right answer is not one.
+       const canvas = gpu.canvases.get(gpu.canvasId);
+       gpu.canvases.delete(gpu.canvasId);
+       gpu.canvases.set(${DECOY_CANVAS_ID}, decoy);
+       gpu.canvases.set(gpu.canvasId, canvas);
+       globalThis.crcblProbe = { decoy };
+       const before = gpu.stats();
+       return {
+         started: startAdapterProbe({ exports }),
+         replayed: before.replayed,
+         delivered: before.delivered,
+       };
      })()`
   );
+
+  // Polled, because the command is encoded on this evaluation's frame and
+  // replayed on the demo's next one. `stats().replayed` counting up is the loop
+  // saying it took a frame off the channel; `commands` is what that frame
+  // carried, decoded by the loop rather than by anything here.
+  const carried = probe?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(() => {
+             const stats = globalThis.crcbl.gpu.stats();
+             return stats.replayed > ${probe.replayed} || stats.failure
+               ? stats
+               : null;
+           })()`
+        )
+      )
+    : null;
   check(
     'G',
-    'wasm encoded an adapter enumeration and the shim decoded it back',
-    probe?.started === true && probe.commands.join(',') === 'EnumerateAdapters',
-    probe?.started
-      ? `the frame carried [${probe.commands.join(', ')}]`
-      : 'the probe could not install a channel — something else already has one'
+    'wasm encoded an adapter enumeration and the demo loop replayed it',
+    carried?.commands?.join(',') === 'EnumerateAdapters',
+    carried
+      ? `the loop replayed [${carried.commands.join(', ')}] at sequence ${carried.baseSequence}` +
+          `${carried.failure ? ` — ${carried.failure}` : ''}`
+      : probe?.started
+        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+        : 'the probe could not install a channel — something else already has one'
   );
 
-  // Then polled, because the answer cannot be on that frame: WebGPU's adapter
-  // API is a promise and the stream is replayed synchronously once a frame, so
-  // the reply is queued when the browser settles and crosses on a later one.
-  // `WAITING` is the ordinary answer until then and is not a state to report.
+  // Then polled again, because the answer cannot be on the frame that asked:
+  // WebGPU's adapter API is a promise and the stream is replayed synchronously
+  // once a frame, so the reply is queued when the browser settles and the loop
+  // hands it over on a later frame. `WAITING` is the ordinary answer until then
+  // and is not a state to report.
+  //
+  // `delivered` comes from the loop's own counter rather than from this call,
+  // which no longer moves any bytes: it is the loop saying wasm took a reply
+  // buffer, beside wasm saying it understood one.
   const answered = await until(async () =>
     evaluate(
       page,
       `(async () => {
-         const { pumpAdapterProbe, PROBE } = await import('/engine/gpu-probe.js');
-         const { exports, memory, replayer } = globalThis.crcblProbe;
-         const out = pumpAdapterProbe({ exports, memory, replayer });
-         return out.state === PROBE.WAITING ? null : out;
+         const { readAdapterProbe, PROBE } = await import('/engine/gpu-probe.js');
+         const { exports, memory, gpu } = globalThis.crcbl;
+         const out = readAdapterProbe({ exports, memory });
+         return out.state === PROBE.WAITING
+           ? null
+           : { ...out, delivered: gpu.stats().delivered };
        })()`
     )
   );
   check(
     'G',
     'the browser answered it and wasm read the answer back',
-    answered?.name === 'GRANTED' && answered.delivered === true,
+    answered?.name === 'GRANTED' &&
+      answered.delivered > (probe?.delivered ?? 0),
     answered
-      ? `${answered.name}: ${JSON.stringify(answered.text)}`
+      ? `${answered.name}: ${JSON.stringify(answered.text)}, after the loop delivered ` +
+          `${answered.delivered - (probe?.delivered ?? 0)} reply buffer(s)`
       : `no answer in ${TIMEOUT_MS} ms — the reply never reached wasm`
   );
 
@@ -2823,37 +2859,61 @@ try {
     page,
     `(async () => {
        const { startDeviceProbe } = await import('/engine/gpu-probe.js');
-       const { exports, memory, replayer } = globalThis.crcblProbe;
-       return startDeviceProbe({ exports, memory, replayer });
+       const { exports, gpu } = globalThis.crcbl;
+       const before = gpu.stats();
+       return {
+         started: startDeviceProbe({ exports }),
+         replayed: before.replayed,
+         delivered: before.delivered,
+       };
      })()`
   );
+  const deviceCarried = deviceProbe?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(() => {
+             const stats = globalThis.crcbl.gpu.stats();
+             return stats.replayed > ${deviceProbe.replayed} || stats.failure
+               ? stats
+               : null;
+           })()`
+        )
+      )
+    : null;
   check(
     'G',
-    'wasm encoded a device request and the shim decoded it back',
-    deviceProbe?.started === true &&
-      deviceProbe.commands.join(',') === 'RequestDevice',
-    deviceProbe?.started
-      ? `the frame carried [${deviceProbe.commands.join(', ')}]`
-      : 'wasm would not ask — no adapter had been granted, or the waiting set is full'
+    'wasm encoded a device request and the demo loop replayed it',
+    deviceCarried?.commands?.join(',') === 'RequestDevice',
+    deviceCarried
+      ? `the loop replayed [${deviceCarried.commands.join(', ')}] at sequence ${deviceCarried.baseSequence}` +
+          `${deviceCarried.failure ? ` — ${deviceCarried.failure}` : ''}`
+      : deviceProbe?.started
+        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+        : 'wasm would not ask — no adapter had been granted, or the waiting set is full'
   );
 
   const opened = await until(async () =>
     evaluate(
       page,
       `(async () => {
-         const { pumpDeviceProbe, DEVICE } = await import('/engine/gpu-probe.js');
-         const { exports, memory, replayer } = globalThis.crcblProbe;
-         const out = pumpDeviceProbe({ exports, memory, replayer });
-         return out.state === DEVICE.WAITING ? null : out;
+         const { readDeviceProbe, DEVICE } = await import('/engine/gpu-probe.js');
+         const { exports, memory, gpu } = globalThis.crcbl;
+         const out = readDeviceProbe({ exports, memory });
+         return out.state === DEVICE.WAITING
+           ? null
+           : { ...out, delivered: gpu.stats().delivered };
        })()`
     )
   );
   check(
     'G',
     'the browser opened a device and wasm read its capabilities back',
-    opened?.name === 'OPENED' && opened.delivered === true,
+    opened?.name === 'OPENED' &&
+      opened.delivered > (deviceProbe?.delivered ?? 0),
     opened
-      ? `${opened.name}${opened.reason ? `: ${JSON.stringify(opened.reason)}` : ''}`
+      ? `${opened.name}${opened.reason ? `: ${JSON.stringify(opened.reason)}` : ''}` +
+          `, after the loop delivered ${opened.delivered - (deviceProbe?.delivered ?? 0)} reply buffer(s)`
       : `no answer in ${TIMEOUT_MS} ms — requestDevice never settled, or the reply never reached wasm`
   );
 
@@ -2920,10 +2980,11 @@ try {
           'genuinely coincide here and a copy could not be told apart'
   );
 
-  // A channel installed under a running demo must be invisible to it. The demo
-  // has been calling `takeCommandStream` every frame throughout, and from the
-  // moment the probe installed a channel those calls stopped answering "nothing
-  // to do" and started decoding real headers.
+  // A channel installed under a running demo must be invisible to it. The
+  // demo's loop has been draining every frame throughout, and from the moment
+  // the probe installed a channel it stopped answering "nothing to do" and
+  // started decoding real headers, replaying them against WebGPU and handing
+  // replies back — all of it between the engine's frame and the next rAF.
   const survived = await evaluate(page, `crcbl.status()`);
   check(
     'G',
@@ -2937,74 +2998,94 @@ try {
   // object, so what it proves is the bookkeeping: that the `canvasId` on the
   // wire is the key that gets looked up, and that a destroy lets go. What it
   // cannot reach is the only thing a surface finally is — `getContext('webgpu')`
-  // on a real element, answering a real `GPUCanvasContext`. Nothing had ever run
-  // that: until group G started handing the replayer a registry, every
-  // `CreateSurface` in a browser would have thrown `NoSuchCanvas`.
+  // on a real element, answering a real `GPUCanvasContext`. Nothing else runs
+  // that, and the registry it is resolved against is the demo's own.
   //
-  // No poll and no second half, because `CreateSurface` makes no round trip:
-  // wasm names the handle and moves on, so everything there is to see is in the
-  // replayer's own table the moment the frame has been replayed. See
+  // Polled rather than read straight back, for group G's reason and no other:
+  // `CreateSurface` still makes no round trip — wasm names the handle and moves
+  // on — but the replay is the demo loop's, so what there is to see appears on
+  // the loop's next frame rather than in this call. See
   // `crates/crcbl-webgpu/src/probe.rs`.
   group('H — a surface resolves to a real canvas context');
 
-  const surfaceProbe = await evaluate(
+  const surfaceStart = await evaluate(
     page,
     `(async () => {
        const { startSurfaceProbe } = await import('/engine/gpu-probe.js');
-       const { exports, memory, replayer, decoy } = globalThis.crcblProbe;
-       const canvas = document.getElementById('canvas');
-       try {
-         const started = startSurfaceProbe({
-           exports, memory, replayer, canvasId: ${PROBE_CANVAS_ID},
-         });
-         const context = replayer.surfaces.get(started.surface);
-         return {
-           started: started.started,
-           commands: started.commands,
-           surface: started.surface,
-           held: replayer.surfaces.size,
-           // Identity, not existence. \`GPUCanvasContext.canvas\` is the element
-           // the context came out of, so this is the only thing that separates
-           // "the right canvas answered" from "a canvas answered".
-           isTheCanvas: context?.canvas === canvas,
-           isTheDecoy: context?.canvas === decoy,
-           // …and that it is the browser's own class rather than something
-           // shaped like it. Node has no \`GPUCanvasContext\` binding at all, so
-           // this is what a silent fall back to a stub cannot survive.
-           isRealContext:
-             typeof GPUCanvasContext === 'function' &&
-             context instanceof GPUCanvasContext,
-           hasCurrentTexture: typeof context?.getCurrentTexture === 'function',
-         };
-       } catch (error) {
-         // A \`SurfaceError\` out of the replay is the page failing to resolve
-         // the canvas, and it is the one failure this group exists to catch.
-         // Caught here rather than left to abort the run, so it lands as a red
-         // check that names what threw.
-         return { started: false, threw: String(error) };
-       }
+       const { exports, gpu } = globalThis.crcbl;
+       const before = gpu.stats();
+       return {
+         started: startSurfaceProbe({ exports, canvasId: gpu.canvasId }),
+         replayed: before.replayed,
+         canvasId: gpu.canvasId,
+       };
      })()`
   );
+  // A `SurfaceError` out of the replay is the page failing to resolve the
+  // canvas, and it is the one failure this group exists to catch. It is thrown
+  // in the demo's loop now, which latches it and reports it as `stats().failure`
+  // — so it settles this poll and lands as a red check naming what threw,
+  // rather than either aborting the run or timing out with nothing to say.
+  const surfaceProbe = surfaceStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(() => {
+             const { gpu } = globalThis.crcbl;
+             const stats = gpu.stats();
+             if (stats.replayed <= ${surfaceStart.replayed} && !stats.failure) {
+               return null;
+             }
+             const entries = [...gpu.replayer.surfaces.entries()];
+             const last = entries[entries.length - 1];
+             const surface = last ? last[0] : null;
+             const context = last ? last[1] : undefined;
+             return {
+               commands: stats.commands,
+               failure: stats.failure,
+               surface,
+               held: entries.length,
+               // Identity, not existence. \`GPUCanvasContext.canvas\` is the
+               // element the context came out of, so this is the only thing
+               // that separates "the right canvas answered" from "a canvas
+               // answered". Against the page's own element rather than against
+               // whatever the registry holds, so a registry pointing somewhere
+               // else is a failure rather than a tautology.
+               isTheCanvas: context?.canvas === document.getElementById('canvas'),
+               isTheDecoy: context?.canvas === globalThis.crcblProbe.decoy,
+               // …and that it is the browser's own class rather than something
+               // shaped like it. Node has no \`GPUCanvasContext\` binding at all,
+               // so this is what a silent fall back to a stub cannot survive.
+               isRealContext:
+                 typeof GPUCanvasContext === 'function' &&
+                 context instanceof GPUCanvasContext,
+               hasCurrentTexture: typeof context?.getCurrentTexture === 'function',
+             };
+           })()`
+        )
+      )
+    : null;
   check(
     'H',
-    'wasm encoded a surface creation and the shim decoded it back',
-    surfaceProbe?.started === true &&
-      surfaceProbe.commands.join(',') === 'CreateSurface' &&
+    'wasm encoded a surface creation and the demo loop replayed it',
+    surfaceProbe?.commands?.join(',') === 'CreateSurface' &&
       Number.isInteger(surfaceProbe.surface),
-    surfaceProbe?.started
-      ? `the frame carried [${surfaceProbe.commands.join(', ')}] for surface ${surfaceProbe.surface}`
-      : (surfaceProbe?.threw ??
-          'wasm would not encode it — another channel is installed')
+    surfaceProbe
+      ? `the loop replayed [${surfaceProbe.commands.join(', ')}] for surface ${surfaceProbe.surface}` +
+          `${surfaceProbe.failure ? ` — ${surfaceProbe.failure}` : ''}`
+      : surfaceStart?.started
+        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+        : 'wasm would not encode it — another channel is installed'
   );
   check(
     'H',
     'the surface resolved the canvas the page registered and not the decoy',
     surfaceProbe?.isTheCanvas === true && surfaceProbe?.isTheDecoy === false,
     surfaceProbe?.isTheCanvas
-      ? `surface ${surfaceProbe.surface} holds the context of canvas ${PROBE_CANVAS_ID}, of ${surfaceProbe.held} held`
+      ? `surface ${surfaceProbe.surface} holds the context of canvas ${surfaceStart?.canvasId}, of ${surfaceProbe.held} held`
       : `the context under surface ${surfaceProbe?.surface} belongs to ` +
           `${surfaceProbe?.isTheDecoy ? `the decoy at ${DECOY_CANVAS_ID}` : 'no canvas this page registered'}` +
-          `${surfaceProbe?.threw ? ` — ${surfaceProbe.threw}` : ''}`
+          `${surfaceProbe?.failure ? ` — ${surfaceProbe.failure}` : ''}`
   );
   check(
     'H',
@@ -3015,7 +3096,7 @@ try {
       ? 'the context is an instance of this browser GPUCanvasContext and has getCurrentTexture'
       : `instanceof GPUCanvasContext: ${surfaceProbe?.isRealContext}, ` +
           `getCurrentTexture: ${surfaceProbe?.hasCurrentTexture}` +
-          `${surfaceProbe?.threw ? ` — ${surfaceProbe.threw}` : ''}`
+          `${surfaceProbe?.failure ? ` — ${surfaceProbe.failure}` : ''}`
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and

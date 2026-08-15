@@ -9085,21 +9085,18 @@ none, and the failure it prevents already fails loudly in the Pages job on every
 pull request. Worth revisiting if the tag table grows to the full surface and
 the two tables start being edited in separate sessions.
 
-## The command stream is wired but carries nothing
+## The command stream is driven, but only the probe puts anything in it
 
-`crcbl-webgpu`'s transport is linked into every browser artifact and drained
-once a frame by `web/engine/demo.js`, and it returns nothing every time. That is
-the intended state, not an unfinished edge, and both halves say so — but it is
-worth writing down so nobody reads the wiring as a working feature.
+`web/engine/demo.js`'s frame loop drains the stream, replays it and delivers
+replies, on every frame of every demo. The only thing that ever encodes into it
+is `crcbl-webgpu`'s probe, which the browser gate drives; in an ordinary page
+`len` answers 0 and the loop costs one integer call. That is the intended state
+rather than an unfinished edge, but it is worth writing down so nobody reads the
+wiring as a working backend.
 
-- **Nothing calls `crcbl_webgpu::web::install` outside the crate's own tests**,
-  and no HAL implementation writes through `StreamChannel::encode`. This ends
-  when the WebGPU backend lands. The replayer goes where `takeCommandStream`'s
-  result is currently dropped.
-- **The reply channel (JS → wasm) does not exist.** Deliberately out of scope:
-  it arrives with the first HAL call that needs an answer — the device-request
-  poll, `poll_readback`, `query_results`. The out-parameter buffers named in
-  `docs/plan/41-webgpu-stream.md` are absent for the same reason.
+- **No HAL implementation writes through `StreamChannel::encode`.** The probe's
+  shim calls `crcbl_webgpu::web::install` and nothing else does. This ends when
+  the WebGPU backend lands.
 - **"Encoding moves the buffer" is documented, not tested.** The stable half —
   that `release` does not move it — is asserted. Forcing a `Vec` realloc
   deterministically is allocator-dependent, so the moving half rests on the
@@ -9130,32 +9127,26 @@ now; the rewrites were reverted by hand.
 
 ### Not verified
 
-- The three exports on any target other than `wasm32-unknown-unknown` release.
+- The stream exports on any target other than `wasm32-unknown-unknown` release.
   They are `cfg`-gated off elsewhere by design, so there is nothing to run.
-- The transport under a real replayer, which does not exist yet. The node suite
-  drives a synthetic `WebAssembly.Memory`, which is not a real instance.
 
-## The reply channel is built and nothing drives it in a browser
+## What the reply channel still owes
 
-`web/engine/demo.js` drains the command stream every frame, so that transport is
-exercised by the real browser gate. `putReplyStream` has no such caller — the
-reply direction is covered only by node tools driving a synthetic
-`WebAssembly.Memory`, which is not a wasm instance. Wiring it the same way
-(offering an empty buffer, or skipping while `reply_capacity()` is zero) is the
-cheap way to get it under the browser gate before a HAL implementation depends
-on it.
+Both directions now run under the real browser gate: `web/engine/demo.js`'s loop
+calls `putReplyStream` on every frame it has replies, and groups G and H of the
+gate turn on answers that crossed that way. What is left is coverage, not
+wiring.
 
 - **`__crcbl_web_gpu_reply_pending` is exported and nothing calls it.**
   `check-exports.mjs` lists it as informational and does not fail on it. It is
   the diagnostic for "the engine stopped draining"; keep it when a shim reads
   it, drop it if the HAL work arrives without one.
-- **Two doc comments now undercount the exports.** `demo.js`'s comment at the
-  `takeCommandStream` call and `crates/crcbl/src/lib.rs`'s `pub use` doc both
-  say "the three `__crcbl_web_gpu_stream_*` exports". Three is still right for
-  the stream family; the module now exports seven in total, and the sentences
-  read as if they cover the module. The byte-identical-artifact measurement
-  recorded beside the second one was taken before the reply exports existed and
-  has not been re-run.
+- **`crates/crcbl/src/lib.rs`'s `pub use` doc undercounts the exports.** It says
+  "the three `__crcbl_web_gpu_stream_*` exports", which is right for the stream
+  family and reads as if it covers the module — the module exports more than
+  that now. `demo.js` carried the same sentence and no longer does. The
+  byte-identical-artifact measurement recorded beside the `pub use` was taken
+  before the reply exports existed and has not been re-run.
 - **`poll_readback`'s exact-length contract cannot be enforced at decode time.**
   Nothing in a reply buffer says what size the descriptor asked for, so the
   payload's own length prefix is all the decoder has. Whoever implements the HAL
@@ -9216,27 +9207,30 @@ The macOS and Windows **runtime** behaviour of the new registry entry. `crcbl`,
 and `x86_64-pc-windows-msvc`, but no test ran on either platform; that verdict
 only comes from CI.
 
-## The adapter round trip works; the backend does not exist
+## The stream carries adapters, a device and a surface; the backend does not exist
 
-`crcbl-webgpu` can ask a browser to enumerate adapters and read the answer back,
-proven by group G of the browser gate. What stands between that and
-`crcbl::backend` accepting `webgpu`:
+A browser enumerates adapters, opens a device and resolves a real canvas into a
+`GPUCanvasContext`, all through the stream and all proven by groups G and H of
+the browser gate. What stands between that and `crcbl::backend` accepting
+`webgpu`:
 
-- **The rest of `AdapterInfo` on the wire.** `Instance::adapters` returns
-  `Vec<AdapterInfo>` synchronously and has eight fields; the channel carries the
-  id and the name. Vendor and device ids, `DeviceType`, driver and `DeviceCaps`
-  all need reply shapes.
 - **Something that owns a frame loop.** `open` must resolve after at least one
-  round trip, and today only `web/engine/demo.js` pumps frames. The backend
-  needs its own driver rather than borrowing the demo's.
-- **`request_device` and `PendingDevice::poll`**, with their commands and
-  replies.
-- **`create_surface` for `SurfaceTarget::Web`.**
+  round trip. `web/engine/demo.js`'s loop now drains, replays and delivers, so
+  the page's half exists — but it is the demo's loop, and a backend that only
+  works inside `bootDemo` is not a backend. What is owed is the same three steps
+  driven by something the backend constructs.
+- **`impl Instance`, `impl PendingDevice`, `impl Device`.** Each is deliberately
+  absent rather than stubbed, and `instance.rs` and `device.rs` argue why in
+  their module docs: an impl written before the commands exist is a wall of
+  methods that compile and answer nothing, and a `PendingDevice::poll` with no
+  `Device` behind it can only ever answer `Pending`, which passes any test that
+  polls a few times and gives up.
+- **The feature intersection**, which has its own entry below.
 
 ### The probe is temporary and should be deleted, not grown
 
-`crates/crcbl-webgpu/src/probe.rs`, its four `__crcbl_web_gpu_probe_*` exports
-and `web/engine/gpu-probe.js` exist so the round trip is observable from a page
+`crates/crcbl-webgpu/src/probe.rs`, its `__crcbl_web_gpu_probe_*` exports and
+`web/engine/gpu-probe.js` exist so the round trip is observable from a page
 before a backend exists. The probe refuses when anything else has installed a
 channel. **Delete all three when the backend installs its own** — a second way
 to drive the stream is the sort of thing that survives by accident and then has
@@ -9272,12 +9266,23 @@ already does for query sets. Noted in `gpu-replay.js` and in
 `crcbl-webgpu/src/instance.rs`; it is the sort of thing that reads as correct
 right up until a caller believes it.
 
-### `impl Instance` is still blocked, on four methods
+### What `impl Instance` is still blocked on
 
-`backend()` and `adapters()` are answerable today. `create_surface`,
-`destroy_surface`, `surface_caps` and `request_device` have no commands and no
-replies, and three of the four have no way to say "not yet" in their return type
-— which is why the trait is not implemented rather than implemented with stubs.
+`backend()`, `adapters()`, `create_surface`, `destroy_surface` and
+`request_device` all have what they need now. **`surface_caps` does not**: it
+has no command and no reply shape, and unlike the device request there is no
+polled second half to hang the answer on — it returns
+`Result<SurfaceCaps, HalError>` synchronously, and a stream cannot answer during
+the call.
+
+So it has two honest shapes and the choice is open: answer `Err` until a reply
+has arrived, which makes every first call fail and pushes the retry onto the
+caller; or have the instance ask at `create_surface` time and keep the answer,
+so the synchronous call reads a value that crossed a frame earlier. The second
+is what the seam's polled shapes elsewhere suggest, and it is what the swapchain
+slice will need anyway. What must not happen is a `surface_caps` that guesses a
+format: the swapchain slice would believe it, and the guess would be right on
+the machine it was written on.
 
 ### Considered and declined
 
