@@ -2087,14 +2087,20 @@ while `wgpu` still works.** Slice 7 proves the new backend by comparing against
 something trusted, and in a browser the only trusted renderer today is
 `crcbl-wgpu`. Deleting it first leaves nothing to bless from.
 
-1. Parameterise `render_e2e`'s extent and bless the second reference set at the
-   odd size, replacing what the cross-backend script covers there. Independent
-   of everything below and the only slice that must precede the deletion.
-2. Write the stream encoding down: opcodes, handle allocation, the destroy op,
-   and how a marker maps a replayer-side validation error back to the Rust that
-   encoded it. Do this before any of it is built — under a stream the browser's
-   error names the replayer, and without markers slices 5 and 6 are debugged
-   blind.
+1. ~~Parameterise `render_e2e`'s extent and bless the second reference set at
+   the odd size, replacing what the cross-backend script covers there.~~ —
+   **shipped.** `EXTENT_ODD` and three goldens at 97x61 for the scenes the
+   cross-backend script covered. The odd-extent tests pass a no-op inspector,
+   because every per-scene inspector computes its sample points from `EXTENT`;
+   they keep the colour floor and the golden and the code says so.
+2. ~~Write the stream encoding down.~~ — **shipped** as
+   `docs/plan/41-webgpu-stream.md`: what crosses the boundary and what only
+   looks like it must, the three channels, one flush per frame at the
+   `requestAnimationFrame` boundary, the wire conventions inherited from
+   `crcbl-net`'s `codec.rs`, handle allocation on the wasm side with
+   `Handle::to_bits`, the destroy op, and sequence-numbered error attribution.
+   It leaves the opcode numbers to the encoder and the error-scope granularity
+   to a measurement.
 3. Decide `cached_group`'s contract, per "the one real cost" above.
 4. `crcbl-webgpu`: `Instance`, adapter enumeration, `PendingDevice`, `Device`
    creation. Exit: a browser opens a device and the capability selectors report
