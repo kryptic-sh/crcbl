@@ -127,7 +127,7 @@ mod tests {
         }
     }
 
-    /// The engine tests the shared flags; what is flappy's to assert is that
+    /// The engine tests the shared flags; what is asteroids' to assert is that
     /// this game's defaults reach them — the tick rate and the seed, both of
     /// which come from `game.rs` and neither of which the engine can know.
     #[test]

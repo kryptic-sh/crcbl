@@ -23,7 +23,7 @@
 use crcbl::engine::{
     FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions, PendingGpuContext,
 };
-use crcbl::hal::{CommandEncoderDesc, Features};
+use crcbl::hal::CommandEncoderDesc;
 use crcbl::prelude::*;
 use crcbl::render::{
     ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers, RenderGraph, TransientPool,
@@ -66,10 +66,21 @@ pub struct Gpu {
 fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
     GpuContextDesc {
         label: "hud",
-        // Optional, not required: neither changes what is drawn, only how
-        // observable it is. `GPU_DRIVEN` is absent because nothing here issues
-        // an indirect draw — the UI pass uploads a vertex buffer a frame.
-        optional_features: Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
+        // **The engine's bundle, not a subset spelled out here.** This used to
+        // name `TIMESTAMP_QUERY | DEBUG_MARKERS` and argue that `GPU_DRIVEN` was
+        // absent because the UI pass uploads a vertex buffer a frame rather than
+        // issuing an indirect draw. That argument is sound and the code was
+        // still wrong: the list also dropped `PRESENT_FEEDBACK` and
+        // `PRESENT_TIMING`, which have nothing to do with how a frame is drawn.
+        // [`GpuContextDesc::default`] says what that costs — `acquire` calls
+        // `wait_until_presented` every frame and a device never asked for the
+        // capability answers it immediately forever, so the closed pacing loop
+        // becomes dead code, and `display_timing` answers `Unknown` forever.
+        // hud ran open-loop for both reasons and nothing said so.
+        //
+        // Every other sample takes the default whole and asserts it below.
+        // Asking for a capability this sample never exercises costs nothing —
+        // they are optional, so a device without one simply does not have it.
         ..GpuContextDesc::from(gpu)
     }
 }
@@ -386,5 +397,29 @@ impl crcbl::engine::GpuSurface for Gpu {
 
     fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
         Self::resize(self, extent)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **The bundle this sample opens with is the engine's own**, which is the
+    /// check the other samples have carried since one of them shipped a subset
+    /// by hand — and which hud did not have, so it shipped one too.
+    ///
+    /// A hand-written list is a copy, and a copy goes stale the moment
+    /// [`GpuContextDesc::default`] gains a flag. The failure is silent both
+    /// ways: the missing capability changes no picture, only whether the
+    /// engine's pacing loop and display-timing query can reach anything.
+    #[test]
+    fn the_features_this_sample_asks_for_are_the_engine_s_own() {
+        let asked = desc(GpuOptions::default());
+        assert_eq!(asked.label, "hud");
+        assert_eq!(
+            asked.optional_features,
+            GpuContextDesc::default().optional_features,
+            "a subset spelled out here is a copy, and a copy goes stale",
+        );
     }
 }

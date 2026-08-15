@@ -1178,6 +1178,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`apps/hud` opened its device without present feedback or display timing.**
+  Its `desc()` spelled out `TIMESTAMP_QUERY | DEBUG_MARKERS` by hand, dropping
+  `PRESENT_FEEDBACK` and `PRESENT_TIMING` along with the `GPU_DRIVEN` it meant
+  to omit. `GpuContextDesc::default` records what that costs: `acquire` calls
+  `wait_until_presented` every frame and a device never asked for the capability
+  answers immediately forever, so the closed pacing loop is unreachable, and
+  `display_timing` answers `Unknown` forever. hud now takes the engine's bundle
+  whole, and carries the same
+  `the_features_this_sample_asks_for_are_the_engine_s_own` guard the other
+  samples have had since one of them shipped a subset by hand.
+
 - **A warp that moved no pointer reported success on Windows.** `crcbl_shell`'s
   Win32 backend discarded three failures in `warp_to_client` — a stale window, a
   refused `ClientToScreen`, and `SetCursorPos`'s `BOOL` — so

@@ -3475,13 +3475,16 @@ pub trait HostedGame: Sized {
     /// the GPU's pass timings where the device has timestamp queries — and the
     /// panel being drawn, so a game's numbers appear below the engine's.
     ///
-    /// **The empty default is the honest answer for most games**, and it is not
-    /// the "opt-in hook that reports success by doing nothing" shape: nothing is
-    /// being verified here, and a game that adds no section renders a panel with
-    /// no section of its own, which is exactly what four of the five samples
-    /// want. `apps/horde` is the one that does not — it reports how much of its
-    /// field survived the cull, which is the number its whole design argument
-    /// rests on.
+    /// **The empty default is not the "opt-in hook that reports success by
+    /// doing nothing" shape**: nothing is being verified here, and a game that
+    /// adds no section renders a panel with no section of its own, which is a
+    /// complete answer rather than a silent skip.
+    ///
+    /// In practice nearly every sample overrides it — `apps/sandbox` is the one
+    /// that does not — because a sample's own numbers are the reason it exists:
+    /// `apps/horde` reports how much of its field survived the cull, which is
+    /// the number its whole design argument rests on. So the default is what a
+    /// game with nothing to say gets, not what most of them use.
     fn debug_sections(&self, panel: &mut crcbl_ui::DebugPanel) {
         let _ = panel;
     }
