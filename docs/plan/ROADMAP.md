@@ -1775,13 +1775,31 @@ Call sites split three ways, and only the first is in scope:
 
 ### The three questions the slice has to answer first
 
-1. **Does `tracing` replace `crcbl_core::trace`, or sit beside it?** This is the
-   real design question and it is easy to miss. `crcbl_core::trace` already
-   implements spans and counters by hand, with per-thread tracks and a
-   `CRCBL_TRACE` gate, and `crcbl::engine` is instrumented with it end to end —
-   frame, input, tick, draw, present. `tracing`'s spans cover the same ground.
-   Two span systems in one frame is the outcome to avoid; either `tracing`
-   subsumes it or the two get an explicit division of labour written down.
+1. ~~**Does `tracing` replace `crcbl_core::trace`, or sit beside it?**~~
+   **Answered 2026-08-15: it sits beside it, and the boundary is what the output
+   is read by.**
+
+   The two look alike and are not the same kind of thing. `crcbl_core::trace` is
+   a **profiler buffer**: a fixed-capacity per-thread ring
+   (`RECORDS_PER_THREAD`, `MAX_TRACKS`) that `drain()`s a `Snapshot` **every
+   frame, in-process**, into the debug panel and the headless summary —
+   `crcbl::perf` is written around exactly that, down to "half a frame is not a
+   frame" when a drain splits the frame span. It counts what it had to drop so a
+   hole in the trace is _reported_ rather than silently absent, and it costs one
+   relaxed atomic load when disabled.
+
+   `tracing` is a **diagnostic facade**: a global subscriber, structured fields,
+   filtering by target, output a human or a CI log reads after the fact.
+   Reproducing the profiler inside it would mean writing that ring and the drop
+   accounting again as a `Layer`, and being careful about allocation per span to
+   keep the frame cost — which is building the thing that already exists, in a
+   harder place.
+
+   **So the rule is: read by the frame that produced it → `crcbl_core::trace`;
+   read by a person or a log afterwards → `tracing`.** That keeps this slice to
+   the `log::*` sites and leaves `crcbl::perf` untouched, which is also what
+   makes it a slice rather than a rewrite.
+
 2. **What happens to `crcbl_core::log::capture`?** It hands a test the records
    the engine emitted, so a log line that is the only evidence of a decision can
    be asserted on. It has real consumers across the workspace, and every one of
