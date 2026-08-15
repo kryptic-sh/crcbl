@@ -28,11 +28,41 @@
 //! | [`__crcbl_web_gpu_probe_state`](shim::__crcbl_web_gpu_probe_state) | `() -> i32` | Drain whatever JS has committed and answer one of the `PROBE_*` codes. |
 //! | [`__crcbl_web_gpu_probe_text_ptr`](shim::__crcbl_web_gpu_probe_text_ptr) | `() -> i32` | Where the adapter's name, or the reason there is none, starts. |
 //! | [`__crcbl_web_gpu_probe_text_len`](shim::__crcbl_web_gpu_probe_text_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
+//! | [`__crcbl_web_gpu_probe_features_lo`](shim::__crcbl_web_gpu_probe_features_lo) | `() -> i32` | Low 32 bits of the granted adapter's [`Features`](crcbl_hal::Features). |
+//! | [`__crcbl_web_gpu_probe_features_hi`](shim::__crcbl_web_gpu_probe_features_hi) | `() -> i32` | High 32 bits of the same. |
+//! | [`__crcbl_web_gpu_probe_max_image_2d`](shim::__crcbl_web_gpu_probe_max_image_2d) | `() -> i32` | The granted adapter's [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d). |
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
 //! `state` decodes a buffer and clones a string out of it, so it allocates, and
 //! an allocation may grow wasm memory and detach a `Uint8Array` built before the
-//! call. `ptr` and `len` allocate nothing.
+//! call. `ptr` and `len` allocate nothing, and neither do the three below them.
+//!
+//! # Why three numbers and not the whole of `AdapterInfo`
+//!
+//! These exist for the browser gate, and a gate check is only worth its line if a
+//! browser can **corroborate** it — the adapter-name check compares what wasm
+//! received against what `navigator.gpu` tells the same page, which is what makes
+//! it evidence rather than a constant. Two of the seven fields on the wire have
+//! that property: the feature set, which the page can rebuild from
+//! `adapter.features`, and the limits, which the page can read off
+//! `adapter.limits`. Both vary per machine and per browser.
+//!
+//! The other five do not. `vendor_id`, `device_id`, `device_type` and `driver`
+//! are the documented absences — a browser has nothing to disagree with — and
+//! `id` is `0` by construction. Exporting them would add checks that can only
+//! restate a constant, so they are held by `cargo test` and by
+//! `web/tools/gpu-replay.mjs` instead, where the whole record is compared field
+//! for field.
+//!
+//! `max_image_2d` is one limit of nineteen for the same reason: it is
+//! `maxTextureDimension2D`, which differs between a phone and a desktop, so it
+//! catches a limits block that crossed as zeros. What holds the other eighteen is
+//! the mapping check the gate runs in-page against the live adapter, plus the
+//! committed fixture.
+//!
+//! `i32` pairs rather than one `i64` because the whole of this ABI is
+//! `(i32, …) -> i32`, which `docs/plan/41-webgpu-stream.md` sets as the
+//! convention and which needs no `BigInt` on the JS side.
 //!
 //! `web/engine/gpu-probe.js` is the page's half, and
 //! `web/tools/browser-e2e.mjs` is what drives it in a real browser.
@@ -137,14 +167,25 @@ impl Probe {
         match &self.state {
             AdapterProbe::Unasked => PROBE_UNASKED,
             AdapterProbe::Waiting { .. } => PROBE_WAITING,
-            AdapterProbe::Granted { name, .. } => {
-                self.text.clone_from(name);
+            AdapterProbe::Granted { info } => {
+                self.text.clone_from(&info.name);
                 PROBE_GRANTED
             }
             AdapterProbe::Refused { reason } => {
                 self.text.clone_from(reason);
                 PROBE_REFUSED
             }
+        }
+    }
+
+    /// What the granted adapter said about itself, or `None` if none was.
+    ///
+    /// The numeric exports read through this rather than each reaching into the
+    /// enum, so "not granted" is answered in one place instead of three.
+    const fn granted(&self) -> Option<&crcbl_hal::AdapterInfo> {
+        match &self.state {
+            AdapterProbe::Granted { info } => Some(info),
+            _ => None,
         }
     }
 }
@@ -203,13 +244,58 @@ pub mod shim {
             Err(_) => 0,
         })
     }
+
+    /// Reads one number off the granted adapter, or `0`.
+    ///
+    /// **`0` is a legal value for every one of them** — an adapter may
+    /// genuinely have no optional features — so it is not a failure code, and
+    /// these are only meaningful once [`__crcbl_web_gpu_probe_state`] has
+    /// answered [`PROBE_GRANTED`](super::PROBE_GRANTED). Allocates nothing.
+    fn granted_u32(read: impl FnOnce(&crcbl_hal::AdapterInfo) -> u32) -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.granted().map_or(0, read),
+            Err(_) => 0,
+        })
+    }
+
+    /// Low 32 bits of the granted adapter's
+    /// [`Features`](crcbl_hal::Features). `0` when nothing has been granted,
+    /// which is also a legal value for it — read it only once
+    /// [`__crcbl_web_gpu_probe_state`] has answered
+    /// [`PROBE_GRANTED`](super::PROBE_GRANTED).
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_features_lo() -> u32 {
+        granted_u32(|info| info.caps.features.bits() as u32)
+    }
+
+    /// High 32 bits of the same word, on the same terms. Split because the whole
+    /// of this ABI is `(i32, …) -> i32`; see the [module docs](super).
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_features_hi() -> u32 {
+        granted_u32(|info| (info.caps.features.bits() >> 32) as u32)
+    }
+
+    /// The granted adapter's
+    /// [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d) —
+    /// `maxTextureDimension2D` as the browser reported it. `0` when nothing has
+    /// been granted, on the terms [`__crcbl_web_gpu_probe_features_lo`] states.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_max_image_2d() -> u32 {
+        granted_u32(|info| info.caps.limits.max_image_2d)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crcbl_hal::{
+        AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits,
+    };
+
     use super::shim::{
-        __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_state,
-        __crcbl_web_gpu_probe_text_len, __crcbl_web_gpu_probe_text_ptr,
+        __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_features_hi,
+        __crcbl_web_gpu_probe_features_lo, __crcbl_web_gpu_probe_max_image_2d,
+        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_text_len,
+        __crcbl_web_gpu_probe_text_ptr,
     };
     use super::*;
     use crate::web::shim::{
@@ -257,6 +343,32 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_reply_commit(len), 1);
     }
 
+    /// An adapter with a feature set spanning both halves of the `u64` and a
+    /// `max_image_2d` no default would produce, so the three numeric exports
+    /// cannot pass by reading zero or by swapping their halves.
+    fn granted(name: &str) -> AdapterInfo {
+        AdapterInfo {
+            id: AdapterId(0),
+            name: name.into(),
+            vendor_id: 0,
+            device_id: 0,
+            device_type: DeviceType::Other,
+            driver: String::new(),
+            backend: BackendKind::WebGpu,
+            caps: DeviceCaps {
+                // `COMPUTE` is bit 8, `RAY_QUERY` bit 24, `ACCELERATION_STRUCTURE`
+                // bit 26 — all in the low word, which is why the corpus in
+                // `tests/replies` carries the high-word case the enum cannot
+                // reach yet.
+                features: Features::COMPUTE | Features::RAY_QUERY,
+                limits: Limits {
+                    max_image_2d: 16384,
+                    ..Limits::minimum()
+                },
+            },
+        }
+    }
+
     /// The whole exchange through the exports alone, which is what the browser
     /// gate does — with the replayer replaced by a `ReplyWriter`, because a
     /// `cargo test` has no `navigator.gpu` and that is the entire reason the
@@ -272,12 +384,60 @@ mod tests {
         let commands = take_frame();
         assert_eq!(commands, vec![Command::EnumerateAdapters]);
 
+        let info = granted("Cherry MX Blue GPU");
         let mut replies = ReplyWriter::new();
-        replies.adapter(0, 0, "Cherry MX Blue GPU");
+        replies.adapter(0, &info);
         deliver(replies.bytes());
 
         assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_GRANTED);
         assert_eq!(text(), "Cherry MX Blue GPU");
+    }
+
+    /// **The capabilities reach the page too, not only the name.** This is the
+    /// half the browser gate corroborates against `navigator.gpu`, so the three
+    /// exports have to answer the adapter that was granted rather than zeros.
+    #[test]
+    fn the_numeric_exports_answer_the_granted_adapters_capabilities() {
+        // Nothing granted yet: the documented `0`, which is also why these are
+        // read only after `state` said `GRANTED`.
+        assert_eq!(__crcbl_web_gpu_probe_features_lo(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_features_hi(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_max_image_2d(), 0);
+
+        assert_eq!(__crcbl_web_gpu_probe_adapters(), 1);
+        assert_eq!(take_frame(), vec![Command::EnumerateAdapters]);
+        let info = granted("capable");
+        let mut replies = ReplyWriter::new();
+        replies.adapter(0, &info);
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_GRANTED);
+
+        let bits = info.caps.features.bits();
+        assert_eq!(
+            u64::from(__crcbl_web_gpu_probe_features_lo()),
+            bits & 0xFFFF_FFFF
+        );
+        assert_eq!(u64::from(__crcbl_web_gpu_probe_features_hi()), bits >> 32);
+        assert_eq!(
+            __crcbl_web_gpu_probe_max_image_2d(),
+            info.caps.limits.max_image_2d
+        );
+    }
+
+    /// A refusal has no adapter, so the numbers must stay at their "nothing
+    /// granted" value rather than keeping whatever a previous probe left.
+    #[test]
+    fn a_refusal_leaves_the_numeric_exports_at_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_adapters(), 1);
+        assert_eq!(take_frame(), vec![Command::EnumerateAdapters]);
+        let mut replies = ReplyWriter::new();
+        replies.no_adapter(0, "no GPU here");
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_REFUSED);
+        assert_eq!(__crcbl_web_gpu_probe_features_lo(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_features_hi(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_max_image_2d(), 0);
     }
 
     #[test]
@@ -301,7 +461,7 @@ mod tests {
         assert_eq!(take_frame(), vec![Command::EnumerateAdapters]);
 
         let mut replies = ReplyWriter::new();
-        replies.adapter(9_999, 0, "an answer to nothing");
+        replies.adapter(9_999, &granted("an answer to nothing"));
         deliver(replies.bytes());
 
         assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_UNDECODABLE);

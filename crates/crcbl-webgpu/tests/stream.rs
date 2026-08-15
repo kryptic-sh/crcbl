@@ -370,7 +370,7 @@ fn a_code_no_variant_claims_is_refused_rather_than_folded_into_a_neighbour() {
         decode_stream(&bytes),
         Err(DecodeError::InvalidEnum {
             field: "BufferDesc::usage",
-            code: u32::MAX,
+            code: u32::MAX.into(),
         })
     );
 }

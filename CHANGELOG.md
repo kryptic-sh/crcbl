@@ -520,6 +520,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   falls back to another backend, because a fallback here would turn "not built"
   into a passing run on a different backend.
 
+- **The adapter reply now carries the whole of `crcbl_hal::AdapterInfo`**,
+  `DeviceCaps` included, so what a browser reports reaches the capability seam
+  instead of an id and a name. `Reply::Adapter` holds an `AdapterInfo`,
+  `ReplyWriter::adapter` takes `&AdapterInfo`, `AdapterProbe::adapters` returns
+  `Vec<AdapterInfo>`, and neither is `Eq` any more because `Limits` has `f32`
+  fields. The reply wire format is version **2**, and `DecodeError::InvalidEnum`
+  carries a `u64` so a 64-bit feature word fits.
+
+  **The fields WebGPU cannot supply are marked unknown, not filled in.**
+  `vendor_id` and `device_id` are `0`, `device_type` is `Other` — "declined to
+  say" — and `driver` is empty, because `GPUAdapterInfo` gives strings and no
+  numeric ids, and WebGPU never says discrete or integrated. A plausible-looking
+  fabricated id would be indistinguishable downstream from a real one.
+
+  The feature mapping is explicit and lossy in both directions, and both lists
+  are written down where the mapping lives: four HAL flags are granted by core
+  WebGPU, four come from named features, nineteen can never be set, and every
+  WebGPU feature with no HAL bit is dropped — including ones a browser invents,
+  since the code iterates its own table rather than the spec's.
+
+  The browser gate corroborates it: the feature word wasm received is compared
+  against one the page computes from the live `adapter.features`, using bit
+  numbers spelled out in the driver rather than imported from the code under
+  test.
+
 - **The first round trip: wasm asks the browser to enumerate adapters and reads
   the answer back.** `Command::EnumerateAdapters` and `Reply::NoAdapter`, a
   `FAMILY_INSTANCE` tag range, `StreamChannel::encode_awaited`, and

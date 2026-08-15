@@ -9175,3 +9175,49 @@ The round trip on hardware Chromium, on Firefox, or on a browser whose
 `adapter.info` is populated differently. The gate ran under SwiftShader in Xvfb.
 The name check compares against the same browser, so it holds wherever it runs —
 but nowhere else has run it.
+
+## The adapter reply reports features the stream cannot serve
+
+`web/engine/gpu-replay.js` maps a browser's `adapter.features` onto
+`crcbl_hal::Features` and reports what the browser said. That is right while
+there is no device — but it means `TIMESTAMP_QUERY` is reported on a browser
+that has it, while `crcbl-webgpu` has no `create_query_set` command and could
+not serve a query set at all.
+
+**When `impl Instance` lands it must intersect the mapped set with what the
+stream can actually encode**, which is what `crcbl-wgpu`'s own feature mapping
+already does for query sets. Noted in `gpu-replay.js` and in
+`crcbl-webgpu/src/instance.rs`; it is the sort of thing that reads as correct
+right up until a caller believes it.
+
+### `impl Instance` is still blocked, on four methods
+
+`backend()` and `adapters()` are answerable today. `create_surface`,
+`destroy_surface`, `surface_caps` and `request_device` have no commands and no
+replies, and three of the four have no way to say "not yet" in their return type
+— which is why the trait is not implemented rather than implemented with stubs.
+
+### Considered and declined
+
+- **`GPUAdapter.isFallbackAdapter` as `DeviceType::Cpu`.** It grades
+  _performance_, not device class; a fallback adapter is not necessarily a CPU
+  one, and the mapping would put a guess where the honest answer is "declined to
+  say".
+- **Reporting `max_sampler_anisotropy: 16` and granting `SAMPLER_ANISOTROPY`**,
+  the way `crcbl-wgpu` does. WebGPU accepts `maxAnisotropy` above 1 but reports
+  no queryable ceiling, and `Limits` is what the backend _guarantees_ — 16 would
+  be a number nothing told us.
+
+### Coverage gap in what the browser corroborates
+
+Group G corroborates one of nineteen limits through wasm (`max_image_2d`). The
+other eighteen are checked in-page against the live adapter, and field by field
+against a stub in `gpu-replay.mjs` — a weaker claim, since neither goes through
+the wire. `vendor_id`, `device_id`, `device_type` and `driver` are never
+corroborated at all, because a browser has nothing to disagree with.
+
+### Not reviewed
+
+Whether `Features::DEBUG_MARKERS` genuinely reaches a capture tool in every
+browser. It is granted unconditionally on the grounds that `pushDebugGroup` is
+core WebGPU, matching what `crcbl-wgpu` does, but nothing was measured.

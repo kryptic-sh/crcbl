@@ -29,9 +29,18 @@
 //
 // SIXTY-FOUR BITS ARE `BigInt` HERE TOO. A JS number is an exact integer only to
 // 2^53. A sequence number is 64-bit precisely so it never wraps within a
-// session, and a query result is a raw GPU tick count, so both are `BigInt` and
-// a number is refused rather than rounded. Everything else on the wire is 32
+// session, a query result is a raw GPU tick count, and an adapter's feature word
+// and several of its limits are `u64` on the seam — so all of them are `BigInt`
+// and a number is refused rather than rounded. Everything else on the wire is 32
 // bits or narrower and stays a number.
+//
+// A MISSING FIELD IS REFUSED, NOT WRITTEN AS ZERO. `DataView.setUint32` turns
+// `undefined` into `0` without a word, and `0` is a legal value for almost every
+// numeric field on this wire — a vendor id, a feature word, a limit. So a
+// misspelled or absent key would arrive on the far side as a device that
+// genuinely reports nothing, which is the one failure this format cannot detect
+// for itself. Every numeric write therefore names its field and checks its
+// value.
 
 // ── Header ───────────────────────────────────────────────────────────────────
 
@@ -40,8 +49,16 @@ const REPLY_MAGIC = new Uint8Array([
   0x43, 0x52, 0x43, 0x42, 0x4c, 0x52, 0x50, 0x4c,
 ]); // "CRCBLRPL"
 
-/** `tag::REPLY_VERSION`. */
-const REPLY_VERSION = 1;
+/**
+ * `tag::REPLY_VERSION`.
+ *
+ * `2` since an `Adapter` reply stopped being an id and a name and became the
+ * whole of `AdapterInfo`. The word exists for exactly this: the two halves ship
+ * as separate artifacts and are cached independently, so a page holding
+ * yesterday's JavaScript against today's wasm has to be refused at the header
+ * rather than read a name's length prefix as a vendor id.
+ */
+const REPLY_VERSION = 2;
 
 // ── Caps ─────────────────────────────────────────────────────────────────────
 
@@ -63,6 +80,28 @@ const READBACK_PENDING_REPLY_TAG = 0x10;
 const READBACK_READY_REPLY_TAG = 0x11;
 const QUERY_RESULTS_REPLY_TAG = 0x18;
 
+// ── DeviceType codes ─────────────────────────────────────────────────────────
+
+/**
+ * `tag::DEVICE_TYPE_*` — the wire codes for `crcbl_hal::DeviceType`.
+ *
+ * A REPLAYER READING `navigator.gpu` ONLY EVER SENDS `OTHER`, which is the
+ * variant `crcbl-hal` documents as "the backend declined to say". WebGPU does
+ * not report whether an adapter is discrete or integrated — it is a
+ * fingerprinting surface the spec leaves out — and `GPUAdapter.isFallbackAdapter`
+ * is not the same claim, since it grades performance rather than device class.
+ * The other four exist because the field is a `DeviceType` and a wire form for
+ * one has to be total; `gpu-replay.js` is where the choice of `OTHER` is made
+ * and explained.
+ */
+export const DEVICE_TYPE = Object.freeze({
+  CPU: 0x00,
+  INTEGRATED: 0x01,
+  DISCRETE: 0x02,
+  VIRTUAL: 0x03,
+  OTHER: 0x04,
+});
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 /**
@@ -79,7 +118,7 @@ const QUERY_RESULTS_REPLY_TAG = 0x18;
  */
 export class ReplyEncodeError extends Error {
   /**
-   * @param {'InvalidLength'|'NullHandle'|'NotABigInt'} kind
+   * @param {'InvalidLength'|'NullHandle'|'NotABigInt'|'NotANumber'} kind
    * @param {string} message
    * @param {ReplyEncodeErrorDetails} [details]
    */
@@ -113,6 +152,24 @@ class ByteWriter {
   /** What has been written, as a view over this writer's own buffer. */
   get bytes() {
     return this.#bytes.subarray(0, this.#length);
+  }
+
+  /** How much has been written, for {@link ByteWriter#truncate}. */
+  get length() {
+    return this.#length;
+  }
+
+  /**
+   * Drops everything written past `at`.
+   *
+   * What makes a refused reply leave no trace — see {@link ReplyWriter}. Never
+   * a way to *shorten* a reply: the only caller passes a length it took before
+   * the reply began.
+   *
+   * @param {number} at
+   */
+  truncate(at) {
+    this.#length = at;
   }
 
   /** Drops what was written, keeping the allocation. */
@@ -150,8 +207,22 @@ class ByteWriter {
   // the corpus carried a payload big enough to grow: the whole canonical set
   // fitted in the initial buffer.
 
-  /** @param {number} value */
-  putU8(value) {
+  /**
+   * A single byte — a tag, or an enum code. Checked for [`putU32`]'s reason:
+   * `DEVICE_TYPE.CPU` is `0`, so a misspelled lookup writing `undefined` would
+   * arrive as a plausible answer rather than as a malformed one.
+   *
+   * @param {number} value
+   * @param {string} field
+   */
+  putU8(value, field) {
+    if (!Number.isInteger(value) || value < 0 || value > 0xff) {
+      throw new ReplyEncodeError(
+        'NotANumber',
+        `${field} must be an integer in 0..256, not ${String(value)}`,
+        { field }
+      );
+    }
     const at = this.#take(1);
     this.#view.setUint8(at, value);
   }
@@ -162,10 +233,52 @@ class ByteWriter {
     this.#view.setUint16(at, value, true);
   }
 
-  /** @param {number} value */
-  putU32(value) {
+  /**
+   * A `u32`, refusing anything that is not one.
+   *
+   * `setUint32` would take `undefined`, `NaN` or `-1` and write a number the far
+   * side cannot tell from a real answer — see the header. The check is here
+   * rather than at each call site because there are now dozens of them.
+   *
+   * @param {number} value
+   * @param {string} field
+   */
+  putU32(value, field) {
+    if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+      throw new ReplyEncodeError(
+        'NotANumber',
+        `${field} must be an integer in 0..2^32, not ${String(value)}`,
+        { field }
+      );
+    }
     const at = this.#take(4);
     this.#view.setUint32(at, value, true);
+  }
+
+  /**
+   * An `f32`. Finite, because the seam's two float limits are a ratio and a
+   * tick period and neither has a meaning for `NaN` or an infinity — and
+   * because `NaN` does not compare equal to itself, so one written here would
+   * make every round-trip check on the far side fail in a way that reads as a
+   * transport bug.
+   *
+   * The value is `f64` until it lands: what crosses is the nearest `f32`, so a
+   * number that is not exactly representable is rounded here rather than
+   * refused. Every value this file's callers pass is exact in `f32`.
+   *
+   * @param {number} value
+   * @param {string} field
+   */
+  putF32(value, field) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) {
+      throw new ReplyEncodeError(
+        'NotANumber',
+        `${field} must be a finite number, not ${String(value)}`,
+        { field }
+      );
+    }
+    const at = this.#take(4);
+    this.#view.setFloat32(at, value, true);
   }
 
   /**
@@ -223,7 +336,7 @@ class ByteWriter {
         { field, len: bytes.length }
       );
     }
-    this.putU32(bytes.length);
+    this.putU32(bytes.length, field);
     this.putRaw(bytes);
   }
 
@@ -253,7 +366,99 @@ class ByteWriter {
         { field, len: count }
       );
     }
-    this.putU32(count);
+    this.putU32(count, field);
+  }
+
+  /**
+   * `crcbl_hal::Limits`, field by field in declaration order.
+   *
+   * EVERY FIELD, not the handful the engine reads today. `crcbl-render` reads
+   * four of them and `crcbl-hal`'s own descriptor validation reads nine more,
+   * and a field left off the wire is one the far side would have to invent a
+   * ceiling for. `crates/crcbl-webgpu/src/reply.rs` holds the same list in the
+   * same order; the committed fixture is what keeps the two identical.
+   *
+   * The five `u64` fields are `BigInt` for the header's reason. The two `f32`s
+   * are plain numbers, since neither has a range a `double` cannot hold.
+   *
+   * @param {import('./gpu-replay.js').HalLimits} limits
+   */
+  putLimits(limits) {
+    this.putU32(limits.maxImage2d, 'Limits::max_image_2d');
+    this.putU32(limits.maxImage3d, 'Limits::max_image_3d');
+    this.putU32(limits.maxImageArrayLayers, 'Limits::max_image_array_layers');
+    this.putU64(
+      limits.maxStorageBufferRange,
+      'Limits::max_storage_buffer_range'
+    );
+    this.putU64(
+      limits.maxUniformBufferRange,
+      'Limits::max_uniform_buffer_range'
+    );
+    this.putU32(limits.maxBindGroups, 'Limits::max_bind_groups');
+    this.putU32(
+      limits.maxBindlessDescriptors,
+      'Limits::max_bindless_descriptors'
+    );
+    this.putU32(limits.maxPushConstantSize, 'Limits::max_push_constant_size');
+    this.putU32(limits.maxColorAttachments, 'Limits::max_color_attachments');
+    this.putU32(limits.maxSampleCount, 'Limits::max_sample_count');
+    this.putU32(limits.maxDrawIndirectCount, 'Limits::max_draw_indirect_count');
+    const workgroup = limits.maxComputeWorkgroupSize;
+    if (!Array.isArray(workgroup) || workgroup.length !== 3) {
+      throw new ReplyEncodeError(
+        'NotANumber',
+        'Limits::max_compute_workgroup_size must be three numbers',
+        { field: 'Limits::max_compute_workgroup_size' }
+      );
+    }
+    for (const axis of workgroup) {
+      this.putU32(axis, 'Limits::max_compute_workgroup_size');
+    }
+    this.putU32(
+      limits.maxComputeInvocationsPerWorkgroup,
+      'Limits::max_compute_invocations_per_workgroup'
+    );
+    this.putU32(
+      limits.maxComputeWorkgroupsPerDimension,
+      'Limits::max_compute_workgroups_per_dimension'
+    );
+    this.putU64(
+      limits.minUniformBufferOffsetAlignment,
+      'Limits::min_uniform_buffer_offset_alignment'
+    );
+    this.putU64(
+      limits.minStorageBufferOffsetAlignment,
+      'Limits::min_storage_buffer_offset_alignment'
+    );
+    this.putU64(
+      limits.optimalBufferCopyOffsetAlignment,
+      'Limits::optimal_buffer_copy_offset_alignment'
+    );
+    this.putF32(limits.maxSamplerAnisotropy, 'Limits::max_sampler_anisotropy');
+    this.putF32(limits.timestampPeriodNs, 'Limits::timestamp_period_ns');
+  }
+
+  /**
+   * `crcbl_hal::AdapterInfo` in declaration order, `backend` omitted and `caps`
+   * expanded in place.
+   *
+   * `backend` IS NOT ON THE WIRE. It says which crate enumerated the adapter,
+   * not anything about the adapter, so the far side answers it with its own
+   * identity — `BackendKind::WebGpu`, because `crcbl-webgpu` is what decoded.
+   * Sending it would let this file claim to be Vulkan and be believed.
+   *
+   * @param {import('./gpu-replay.js').HalAdapterInfo} info
+   */
+  putAdapterInfo(info) {
+    this.putU32(info.id, 'AdapterInfo::id');
+    this.putString(info.name, 'Adapter::name');
+    this.putU32(info.vendorId, 'AdapterInfo::vendor_id');
+    this.putU32(info.deviceId, 'AdapterInfo::device_id');
+    this.putU8(info.deviceType, 'AdapterInfo::device_type');
+    this.putString(info.driver, 'Adapter::driver');
+    this.putU64(info.features, 'DeviceCaps::features');
+    this.putLimits(info.limits);
   }
 }
 
@@ -301,27 +506,60 @@ export class ReplyWriter {
   }
 
   /**
+   * Writes one whole reply, or none of it.
+   *
+   * A REFUSED REPLY MUST LEAVE NO BYTES BEHIND. A record is written field by
+   * field and any field can be refused, so a throw part-way through would leave
+   * a truncated reply in the buffer — and the caller that catches it goes on to
+   * write a *different* reply after it, because a dropped reply is a command
+   * wasm waits on for ever. That is exactly what `gpu-replay.js` does: an
+   * adapter record that will not encode is caught and answered with a
+   * `NoAdapter` instead. Without this, the buffer it sends would be half an
+   * adapter followed by a refusal, and the far side would refuse the whole
+   * frame's replies as undecodable.
+   *
+   * @param {() => void} write
+   */
+  #atomic(write) {
+    const before = this.#writer.length;
+    try {
+      write();
+    } catch (error) {
+      this.#writer.truncate(before);
+      throw error;
+    }
+  }
+
+  /**
    * Opens a reply: its tag, then the sequence it answers.
    *
    * @param {number} tag
    * @param {bigint} sequence
    */
   #open(tag, sequence) {
-    this.#writer.putU8(tag);
+    this.#writer.putU8(tag, 'Reply::tag');
     this.#writer.putU64(sequence, 'Reply::sequence');
   }
 
   /**
-   * One entry of an adapter enumeration — a partial `AdapterInfo`.
+   * One entry of an adapter enumeration — the whole of `AdapterInfo`.
+   *
+   * Build the argument with `halAdapterInfoFor` in `gpu-replay.js`, which is
+   * where WebGPU's vocabulary is translated into this one and where the fields
+   * WebGPU cannot supply get the values that *mean absent* rather than values
+   * that look real. This method only writes what it is given.
+   *
+   * `info.backend` is neither taken nor written; see
+   * {@link ByteWriter#putAdapterInfo}.
    *
    * @param {bigint} sequence
-   * @param {number} id Position in the enumeration.
-   * @param {string} name Human-readable device name.
+   * @param {import('./gpu-replay.js').HalAdapterInfo} info
    */
-  adapter(sequence, id, name) {
-    this.#open(ADAPTER_REPLY_TAG, sequence);
-    this.#writer.putU32(id);
-    this.#writer.putString(name, 'Adapter::name');
+  adapter(sequence, info) {
+    this.#atomic(() => {
+      this.#open(ADAPTER_REPLY_TAG, sequence);
+      this.#writer.putAdapterInfo(info);
+    });
   }
 
   /**
@@ -336,8 +574,10 @@ export class ReplyWriter {
    * @param {string} reason What `requestAdapter()` said, for a log or a banner.
    */
   noAdapter(sequence, reason) {
-    this.#open(NO_ADAPTER_REPLY_TAG, sequence);
-    this.#writer.putString(reason, 'NoAdapter::reason');
+    this.#atomic(() => {
+      this.#open(NO_ADAPTER_REPLY_TAG, sequence);
+      this.#writer.putString(reason, 'NoAdapter::reason');
+    });
   }
 
   /**
@@ -347,8 +587,10 @@ export class ReplyWriter {
    * @param {{ index: number, generation: number }} readback
    */
   readbackPending(sequence, readback) {
-    this.#open(READBACK_PENDING_REPLY_TAG, sequence);
-    this.#writer.putHandle(readback, 'ReadbackPending::readback');
+    this.#atomic(() => {
+      this.#open(READBACK_PENDING_REPLY_TAG, sequence);
+      this.#writer.putHandle(readback, 'ReadbackPending::readback');
+    });
   }
 
   /**
@@ -363,9 +605,11 @@ export class ReplyWriter {
    * @param {Uint8Array} data
    */
   readbackReady(sequence, readback, data) {
-    this.#open(READBACK_READY_REPLY_TAG, sequence);
-    this.#writer.putHandle(readback, 'ReadbackReady::readback');
-    this.#writer.putBytes(data, 'ReadbackReady::data');
+    this.#atomic(() => {
+      this.#open(READBACK_READY_REPLY_TAG, sequence);
+      this.#writer.putHandle(readback, 'ReadbackReady::readback');
+      this.#writer.putBytes(data, 'ReadbackReady::data');
+    });
   }
 
   /**
@@ -377,12 +621,14 @@ export class ReplyWriter {
    * @param {ArrayLike<bigint>} values
    */
   queryResults(sequence, set, firstQuery, values) {
-    this.#open(QUERY_RESULTS_REPLY_TAG, sequence);
-    this.#writer.putHandle(set, 'QueryResults::set');
-    this.#writer.putU32(firstQuery);
-    this.#writer.putCount(values.length, 'QueryResults::values');
-    for (let i = 0; i < values.length; i += 1) {
-      this.#writer.putU64(values[i], 'QueryResults::values');
-    }
+    this.#atomic(() => {
+      this.#open(QUERY_RESULTS_REPLY_TAG, sequence);
+      this.#writer.putHandle(set, 'QueryResults::set');
+      this.#writer.putU32(firstQuery, 'QueryResults::first_query');
+      this.#writer.putCount(values.length, 'QueryResults::values');
+      for (let i = 0; i < values.length; i += 1) {
+        this.#writer.putU64(values[i], 'QueryResults::values');
+      }
+    });
   }
 }

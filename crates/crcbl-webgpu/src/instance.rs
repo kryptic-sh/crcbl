@@ -9,20 +9,43 @@
 //! is the state between those two moments — the sequence the request was
 //! assigned, and what eventually named it.
 //!
-//! # The trait is not here, and this is not a step towards faking it
+//! # The trait is still not here, and this is not a step towards faking it
 //!
-//! **There is no `impl Instance` in this crate yet**, and there deliberately is
-//! not: [`AdapterInfo`](crcbl_hal::AdapterInfo) has eight fields and this
-//! channel carries two of them, `create_surface` and `request_device` have no
-//! commands, and a `Vec<AdapterInfo>` built by filling the other six with zeros
-//! would compile, satisfy every caller, and be wrong about the device class,
-//! the driver and every capability a renderer selects on. What exists is what is
-//! real: [`AdapterProbe::adapters`] answers the pairs the wire actually carries.
+//! **There is no `impl Instance` in this crate**, and there deliberately is not.
+//! What changed is the reason. The channel now carries the whole of
+//! [`AdapterInfo`], so
+//! [`AdapterProbe::adapters`] answers `Vec<AdapterInfo>` — the real return type
+//! of [`Instance::adapters`](crcbl_hal::Instance::adapters) — rather than the
+//! pairs it could honestly manage before. The trait's other five methods are
+//! what is missing: `backend` is answerable, but `create_surface`,
+//! `destroy_surface`, `surface_caps` and `request_device` have no commands and
+//! no replies, and three of the four cannot return "not yet" — they return a
+//! handle, a [`SurfaceCaps`](crcbl_hal::SurfaceCaps) or a
+//! [`PendingDevice`](crcbl_hal::PendingDevice), and there is nothing truthful to
+//! put in any of them. An impl now would be four stubs and one real method.
+//!
+//! # What this reports is what the *browser* said, not what this crate can do
+//!
+//! The [`DeviceCaps`](crcbl_hal::DeviceCaps) in an answered probe is
+//! `web/engine/gpu-replay.js`'s reading of `adapter.features` and
+//! `adapter.limits`. It is not a promise that this backend can execute those
+//! capabilities: there is no `create_query_set` command yet, so a probe on a
+//! browser with `timestamp-query` reports
+//! [`Features::TIMESTAMP_QUERY`](crcbl_hal::Features::TIMESTAMP_QUERY) while
+//! nothing here could serve it.
+//!
+//! That is the right split while there is no device — the wire's job is to
+//! carry the browser's answer intact — but it stops being right the moment an
+//! `impl Instance` exists, because a capability on the HAL seam is a promise
+//! about what a caller may *ask for*. The impl must intersect this set with what
+//! the stream can encode, the way `crcbl-wgpu`'s `hal_features_for` withholds
+//! the query features its backend refuses.
 //!
 //! # Worked exchange
 //!
 //! ```
 //! use std::rc::Rc;
+//! use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
 //! use crcbl_webgpu::instance::AdapterProbe;
 //! use crcbl_webgpu::web::StreamChannel;
 //! use crcbl_webgpu::{Command, ReplyWriter, decode_stream};
@@ -33,21 +56,32 @@
 //! let probe = AdapterProbe::request(&channel).expect("a fresh channel has room");
 //! let sequence = probe.sequence().expect("a fresh request is waiting");
 //!
-//! // What JS replays, and what it answers with.
+//! // What JS replays, and what it answers with. The three fields WebGPU cannot
+//! // supply are the values that mean absent, not plausible-looking numbers.
 //! let commands = channel.encode(|stream| decode_stream(stream.bytes())).unwrap()?;
 //! assert_eq!(commands, vec![Command::EnumerateAdapters]);
+//! let granted = AdapterInfo {
+//!     id: AdapterId(0),
+//!     name: "Apple M2".into(),
+//!     vendor_id: 0,
+//!     device_id: 0,
+//!     device_type: DeviceType::Other,
+//!     driver: String::new(),
+//!     backend: BackendKind::WebGpu,
+//!     caps: DeviceCaps { features: Features::COMPUTE, limits: Limits::minimum() },
+//! };
 //! let mut replies = ReplyWriter::new();
-//! replies.adapter(sequence, 0, "Apple M2");
+//! replies.adapter(sequence, &granted);
 //!
 //! // A later frame, where the answer lands.
 //! let mut probe = probe;
 //! let decoded = crcbl_webgpu::decode_replies(replies.bytes())?;
 //! assert!(probe.absorb(&decoded));
-//! assert_eq!(probe.adapters(), vec![(crcbl_hal::AdapterId(0), "Apple M2")]);
+//! assert_eq!(probe.adapters(), vec![granted]);
 //! # Ok::<(), crcbl_webgpu::DecodeError>(())
 //! ```
 
-use crcbl_hal::AdapterId;
+use crcbl_hal::AdapterInfo;
 
 use crate::reply::Reply;
 use crate::web::StreamChannel;
@@ -61,7 +95,10 @@ use crate::writer::StreamWriter;
 /// [`absorb`](Self::absorb) whatever
 /// [`drain_replies`](crate::web::StreamChannel::drain_replies) produced, and
 /// reads the outcome when it has one.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// **Not [`Eq`]**, for [`Reply`]'s reason: a granted probe holds
+/// [`Limits`](crcbl_hal::Limits), and two of its fields are `f32`.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum AdapterProbe {
     /// Nothing has been asked. The state a probe is constructed in, and the one
     /// [`request`](Self::request) leaves it in if the channel had no room.
@@ -75,13 +112,15 @@ pub enum AdapterProbe {
     },
     /// The browser granted an adapter.
     Granted {
-        /// Position in the enumeration, which in a browser is always `0`: see
-        /// [`adapters`](Self::adapters).
-        id: AdapterId,
-        /// What the browser calls it. May be empty — a browser is allowed to
-        /// grant an adapter and decline to name it, and the canonical corpus
-        /// carries that case.
-        name: String,
+        /// Everything it said about it.
+        ///
+        /// [`id`](crcbl_hal::AdapterInfo::id) is always `0` in a browser: see
+        /// [`adapters`](Self::adapters). [`name`](crcbl_hal::AdapterInfo::name)
+        /// may be empty — a browser is allowed to grant an adapter and decline
+        /// to name it, and the canonical corpus carries that case — and three
+        /// more fields are always absent, which
+        /// [`reply`](crate::reply) lists.
+        info: AdapterInfo,
     },
     /// No adapter is coming.
     ///
@@ -142,10 +181,7 @@ impl AdapterProbe {
             return false;
         };
         *self = match reply {
-            Reply::Adapter { id, name } => Self::Granted {
-                id: AdapterId(*id),
-                name: name.clone(),
-            },
+            Reply::Adapter { info } => Self::Granted { info: info.clone() },
             Reply::NoAdapter { reason } => Self::Refused {
                 reason: reason.clone(),
             },
@@ -163,21 +199,25 @@ impl AdapterProbe {
         true
     }
 
-    /// What [`Instance::adapters`](crcbl_hal::Instance::adapters) would answer,
-    /// as far as this channel carries it.
+    /// What [`Instance::adapters`](crcbl_hal::Instance::adapters) would answer.
     ///
-    /// **Not `Vec<AdapterInfo>`**, and that is the honest shape rather than a
-    /// missing conversion — see the [module docs](self). Empty while the
-    /// request is in flight *and* when the browser refused, which are different
-    /// facts: [`is_settled`](Self::is_settled) is what tells them apart.
+    /// The real return type now that the channel carries the whole of
+    /// [`AdapterInfo`], rather than the pair of id and name it could honestly
+    /// manage before. Empty while the request is in flight *and* when the
+    /// browser refused, which are different facts:
+    /// [`is_settled`](Self::is_settled) is what tells them apart.
     ///
     /// At most one entry, because WebGPU has no enumeration API to have more:
     /// `navigator.gpu.requestAdapter()` grants one adapter or none, and the id
     /// is its position in that list of one.
+    ///
+    /// Cloned rather than borrowed because that is what the trait returns, and
+    /// because an enumeration happens once at startup — the same trade
+    /// [`AdapterInfo`] itself documents for its two `String`s.
     #[must_use]
-    pub fn adapters(&self) -> Vec<(AdapterId, &str)> {
+    pub fn adapters(&self) -> Vec<AdapterInfo> {
         match self {
-            Self::Granted { id, name } => vec![(*id, name.as_str())],
+            Self::Granted { info } => vec![info.clone()],
             _ => Vec::new(),
         }
     }
@@ -187,11 +227,31 @@ impl AdapterProbe {
 mod tests {
     use std::rc::Rc;
 
+    use crcbl_hal::{AdapterId, BackendKind, DeviceCaps, DeviceType, Features, Limits};
+
     use super::*;
     use crate::{Command, decode_stream};
 
     fn channel() -> Rc<StreamChannel> {
         Rc::new(StreamChannel::new())
+    }
+
+    /// An adapter shaped the way the browser's replayer builds one: the three
+    /// fields WebGPU cannot supply are the values that mean absent.
+    fn granted(name: &str) -> AdapterInfo {
+        AdapterInfo {
+            id: AdapterId(0),
+            name: name.into(),
+            vendor_id: 0,
+            device_id: 0,
+            device_type: DeviceType::Other,
+            driver: String::new(),
+            backend: BackendKind::WebGpu,
+            caps: DeviceCaps {
+                features: Features::COMPUTE,
+                limits: Limits::minimum(),
+            },
+        }
     }
 
     #[test]
@@ -212,17 +272,17 @@ mod tests {
     #[test]
     fn an_adapter_reply_settles_the_probe_and_a_refusal_settles_it_the_other_way() {
         let channel = channel();
-        let mut granted = AdapterProbe::request(&channel).expect("room");
-        let sequence = granted.sequence().expect("a fresh request waits");
-        assert!(granted.absorb(&[(
+        let mut probe = AdapterProbe::request(&channel).expect("room");
+        let sequence = probe.sequence().expect("a fresh request waits");
+        let llvmpipe = granted("llvmpipe");
+        assert!(probe.absorb(&[(
             sequence,
             Reply::Adapter {
-                id: 0,
-                name: "llvmpipe".into(),
+                info: llvmpipe.clone(),
             },
         )]));
-        assert!(granted.is_settled());
-        assert_eq!(granted.adapters(), vec![(AdapterId(0), "llvmpipe")]);
+        assert!(probe.is_settled());
+        assert_eq!(probe.adapters(), vec![llvmpipe]);
 
         let mut refused = AdapterProbe::request(&channel).expect("room");
         let sequence = refused.sequence().expect("a fresh request waits");
@@ -248,8 +308,7 @@ mod tests {
         assert!(!probe.absorb(&[(
             sequence + 1,
             Reply::Adapter {
-                id: 7,
-                name: "someone else's adapter".into(),
+                info: granted("someone else's adapter"),
             },
         )]));
         assert_eq!(probe.sequence(), Some(sequence));
@@ -267,18 +326,46 @@ mod tests {
         probe.absorb(&[(
             sequence,
             Reply::Adapter {
-                id: 0,
-                name: "first".into(),
+                info: granted("first"),
             },
         )]);
         assert!(!probe.absorb(&[(
             sequence,
             Reply::Adapter {
-                id: 0,
-                name: "second".into(),
+                info: granted("second"),
             },
         )]));
-        assert_eq!(probe.adapters(), vec![(AdapterId(0), "first")]);
+        assert_eq!(probe.adapters(), vec![granted("first")]);
+    }
+
+    /// **The capabilities reach the caller, not just the name.** The whole of
+    /// this slice is that a probe answers what a renderer selects its paths on,
+    /// and a `Granted` that dropped `caps` on the way through `absorb` would
+    /// satisfy every assertion above.
+    #[test]
+    fn a_granted_probe_carries_the_capabilities_the_reply_named() {
+        let channel = channel();
+        let mut probe = AdapterProbe::request(&channel).expect("room");
+        let sequence = probe.sequence().expect("a fresh request waits");
+
+        let mut info = granted("timestamping");
+        info.caps.features = Features::COMPUTE | Features::TIMESTAMP_QUERY;
+        info.caps.limits.max_image_2d = 16384;
+        info.caps.limits.timestamp_period_ns = 1.0;
+        assert!(probe.absorb(&[(sequence, Reply::Adapter { info: info.clone() })]));
+
+        let adapters = probe.adapters();
+        assert_eq!(adapters, vec![info]);
+        let caps = adapters[0].caps;
+        assert!(caps.supports(Features::TIMESTAMP_QUERY));
+        assert_eq!(caps.limits.max_image_2d, 16384);
+        // Derived from the features that crossed rather than stored, which is
+        // the thing a renderer actually reads.
+        assert_eq!(caps.binding_model(), crcbl_hal::BindingModel::ArrayPages);
+        assert_eq!(
+            caps.geometry_path(),
+            crcbl_hal::GeometryPath::IndirectPerBatch
+        );
     }
 
     /// The wrong reply shape is settled rather than left waiting for an answer

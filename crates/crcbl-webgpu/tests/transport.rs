@@ -17,6 +17,7 @@
 
 use std::rc::Rc;
 
+use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
 use crcbl_webgpu::web::{StreamChannel, install, is_installed, shim, uninstall};
 use crcbl_webgpu::{Command, DecodeError, Reply, ReplyWriter, StreamReader, decode_stream, tag};
 
@@ -73,6 +74,25 @@ fn readback() -> crcbl_hal::ReadbackHandle {
     crcbl_core::Handle::from_bits((7 << 32) | 3).expect("a non-zero generation")
 }
 
+/// An adapter reply's payload. What it holds does not matter here — this suite
+/// is about the buffers, not the fields — beyond being something that has to
+/// arrive intact through the ABI.
+fn llvmpipe() -> AdapterInfo {
+    AdapterInfo {
+        id: AdapterId(1),
+        name: "llvmpipe".into(),
+        vendor_id: 0,
+        device_id: 0,
+        device_type: DeviceType::Other,
+        driver: String::new(),
+        backend: BackendKind::WebGpu,
+        caps: DeviceCaps {
+            features: Features::COMPUTE,
+            limits: Limits::minimum(),
+        },
+    }
+}
+
 #[test]
 fn the_entry_points_answer_zero_until_a_channel_is_installed() {
     let _guard = shim_guard();
@@ -118,7 +138,7 @@ fn a_reply_reaches_the_engine_and_clears_the_wait_it_answers() {
 
     let mut replies = ReplyWriter::new();
     replies.readback_pending(first, readback());
-    replies.adapter(second, 1, "llvmpipe");
+    replies.adapter(second, &llvmpipe());
     let committed = replies.bytes().len();
     assert_eq!(deliver(&replies), 1);
     assert_eq!(
@@ -136,13 +156,7 @@ fn a_reply_reaches_the_engine_and_clears_the_wait_it_answers() {
                     readback: readback()
                 }
             ),
-            (
-                second,
-                Reply::Adapter {
-                    id: 1,
-                    name: "llvmpipe".into()
-                }
-            ),
+            (second, Reply::Adapter { info: llvmpipe() }),
         ]))
     );
     assert_eq!(channel.waiting_replies(), 0);

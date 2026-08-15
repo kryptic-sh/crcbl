@@ -11,9 +11,88 @@
 //! is shared: both are about the *same* bytes, and a second copy would be a
 //! second thing to keep in step.
 
+use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
 use crcbl_webgpu::{Reply, ReplyWriter};
 
 use crate::corpus::handle;
+
+/// Every [`Features`] flag `web/engine/gpu-replay.js` can ever set, which is the
+/// whole of what a browser can grant.
+///
+/// Spelled out here and **derived from the production mapping table on the
+/// JavaScript side**, which is what makes the fixture a check on the mapping
+/// rather than only on the byte writer: `reply-encode.mjs` runs
+/// `halFeaturesFor` over a stub adapter holding every WebGPU feature name that
+/// maps, and the bits it produces have to be these. Four flags come from a
+/// `GPUFeatureName` and four from core WebGPU, which needs no name at all —
+/// `crate::reply`'s docs and `gpu-replay.js`'s header carry the mapping in both
+/// directions, including what is dropped each way.
+const WEBGPU_REACHABLE: Features = Features::COMPUTE
+    .union(Features::OCCLUSION_QUERY)
+    .union(Features::DEPTH_BIAS_CLAMP)
+    .union(Features::DEBUG_MARKERS)
+    .union(Features::INDIRECT_FIRST_INSTANCE)
+    .union(Features::TIMESTAMP_QUERY)
+    .union(Features::DEPTH_CLAMP)
+    .union(Features::TEXTURE_COMPRESSION_BC);
+
+/// The limits a browser's `GPUSupportedLimits` maps onto, with the four values
+/// WebGPU has no limit for at the numbers `gpu-replay.js` writes.
+///
+/// Not [`Limits::minimum`]: a preset both halves could reach by name would let
+/// a field written in the wrong order still compare equal, and this corpus
+/// exists to make that a byte difference. Every value below is distinct, and the
+/// two `f32`s are exact in `f32` so the JavaScript writer — whose numbers are
+/// `f64` until they reach the wire — produces the same bytes.
+fn every_limit() -> Limits {
+    Limits {
+        max_image_2d: 16384,
+        max_image_3d: 2048,
+        max_image_array_layers: 256,
+        max_storage_buffer_range: 134_217_728,
+        max_uniform_buffer_range: 65536,
+        max_bind_groups: 4,
+        // `0` is the value `Limits` documents for a device without bindless,
+        // and a browser is always such a device.
+        max_bindless_descriptors: 0,
+        max_push_constant_size: 0,
+        max_color_attachments: 8,
+        max_sample_count: 4,
+        max_draw_indirect_count: 1,
+        max_compute_workgroup_size: [256, 254, 64],
+        max_compute_invocations_per_workgroup: 256,
+        max_compute_workgroups_per_dimension: 65535,
+        min_uniform_buffer_offset_alignment: 256,
+        min_storage_buffer_offset_alignment: 128,
+        optimal_buffer_copy_offset_alignment: 512,
+        max_sampler_anisotropy: 1.0,
+        timestamp_period_ns: 1.0,
+    }
+}
+
+/// The [`AdapterInfo`] a browser that granted everything it could would produce.
+///
+/// `vendor_id`, `device_id`, `device_type` and `driver` are the documented
+/// absences rather than plausible values — WebGPU reports no numeric ids, no
+/// device class and no driver at all. `backend` is
+/// [`BackendKind::WebGpu`] because the field never crosses the wire: the decoder
+/// names the crate that decoded, so this is the only value a round trip can
+/// produce.
+fn every_adapter_field() -> AdapterInfo {
+    AdapterInfo {
+        id: AdapterId(3),
+        name: "Apple M2 — ✱".into(),
+        vendor_id: 0,
+        device_id: 0,
+        device_type: DeviceType::Other,
+        driver: String::new(),
+        backend: BackendKind::WebGpu,
+        caps: DeviceCaps {
+            features: WEBGPU_REACHABLE,
+            limits: every_limit(),
+        },
+    }
+}
 
 /// A payload big enough to force a writer past its initial buffer, with a value
 /// per byte so a truncation or a stale write shows up as a byte difference
@@ -45,17 +124,30 @@ pub fn every_reply() -> Vec<(u64, Reply)> {
         (
             9,
             Reply::Adapter {
-                id: 3,
-                name: "Apple M2 — ✱".into(),
+                info: every_adapter_field(),
             },
         ),
-        // The empty twin: a name the browser declined to give is still a name
-        // field, and its length prefix still has to be read.
+        // The other end of the same shape, and **not a browser's answer**: a
+        // name the adapter declined to give, alongside the four fields WebGPU
+        // can never fill carrying real values. The decoder must not know that a
+        // browser cannot fill them — it decodes what the wire says — and this is
+        // what would catch a reader that hard-coded the absences instead.
         (
             2,
             Reply::Adapter {
-                id: 0,
-                name: String::new(),
+                info: AdapterInfo {
+                    id: AdapterId(0),
+                    name: String::new(),
+                    vendor_id: 0x1002,
+                    device_id: 0x744C,
+                    device_type: DeviceType::Discrete,
+                    driver: "radv 25.1.4".into(),
+                    backend: BackendKind::WebGpu,
+                    caps: DeviceCaps {
+                        features: Features::empty(),
+                        limits: Limits::minimum(),
+                    },
+                },
             },
         ),
         (
@@ -142,7 +234,7 @@ pub fn every_reply() -> Vec<(u64, Reply)> {
 /// un-extended.
 pub fn encode_reply(replies: &mut ReplyWriter, sequence: u64, reply: &Reply) {
     match reply {
-        Reply::Adapter { id, name } => replies.adapter(sequence, *id, name),
+        Reply::Adapter { info } => replies.adapter(sequence, info),
         Reply::NoAdapter { reason } => replies.no_adapter(sequence, reason),
         Reply::ReadbackPending { readback } => replies.readback_pending(sequence, *readback),
         Reply::ReadbackReady { readback, data } => {

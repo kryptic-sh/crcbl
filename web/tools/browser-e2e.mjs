@@ -2629,22 +2629,138 @@ try {
   // Asked of the same page, through the same joins `gpu-replay.js` makes, at
   // the same moment — so a replayer that answered with a constant, or with the
   // wrong adapter, differs here. Nothing else in this group would notice.
+  //
+  // The same evaluation also brings back the raw `adapter.features` and
+  // `adapter.limits` — what the browser says, before anything of ours has
+  // touched them — and what the page's own mapping makes of the limits. Those
+  // are what the capability checks below are held against.
   const live = await evaluate(
     page,
     `(async () => {
+       const { halLimitsFor } = await import('/engine/gpu-replay.js');
        const adapter = await navigator.gpu.requestAdapter();
        const info = adapter?.info ?? {};
-       return [info.vendor, info.architecture, info.device, info.description]
-         .filter(Boolean).join(' ');
+       const mapped = halLimitsFor(adapter);
+       return {
+         name: [info.vendor, info.architecture, info.device, info.description]
+           .filter(Boolean).join(' '),
+         features: [...adapter.features].sort(),
+         limits: {
+           maxTextureDimension2D: adapter.limits.maxTextureDimension2D,
+           maxTextureDimension3D: adapter.limits.maxTextureDimension3D,
+           maxTextureArrayLayers: adapter.limits.maxTextureArrayLayers,
+           maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+           maxUniformBufferBindingSize: adapter.limits.maxUniformBufferBindingSize,
+           maxBindGroups: adapter.limits.maxBindGroups,
+           maxColorAttachments: adapter.limits.maxColorAttachments,
+           maxComputeWorkgroupSizeX: adapter.limits.maxComputeWorkgroupSizeX,
+           maxComputeWorkgroupSizeY: adapter.limits.maxComputeWorkgroupSizeY,
+           maxComputeWorkgroupSizeZ: adapter.limits.maxComputeWorkgroupSizeZ,
+           maxComputeInvocationsPerWorkgroup:
+             adapter.limits.maxComputeInvocationsPerWorkgroup,
+           maxComputeWorkgroupsPerDimension:
+             adapter.limits.maxComputeWorkgroupsPerDimension,
+           minUniformBufferOffsetAlignment:
+             adapter.limits.minUniformBufferOffsetAlignment,
+           minStorageBufferOffsetAlignment:
+             adapter.limits.minStorageBufferOffsetAlignment,
+         },
+         // BigInts do not survive the wire back to this driver, and every one
+         // of these is far below 2^53.
+         mapped: Object.fromEntries(
+           Object.entries(mapped).map(([key, value]) =>
+             [key, typeof value === 'bigint' ? Number(value) : value])
+         ),
+       };
      })()`
   );
   check(
     'G',
     'the adapter name wasm received is the one this browser reports',
-    typeof answered?.text === 'string' && answered.text === live,
-    answered?.text === live
-      ? `both say ${JSON.stringify(live)}`
-      : `wasm got ${JSON.stringify(answered?.text)}, the browser says ${JSON.stringify(live)}`
+    typeof answered?.text === 'string' && answered.text === live?.name,
+    answered?.text === live?.name
+      ? `both say ${JSON.stringify(live?.name)}`
+      : `wasm got ${JSON.stringify(answered?.text)}, the browser says ${JSON.stringify(live?.name)}`
+  );
+
+  // **The capabilities crossed too, and they are the browser's own.** The whole
+  // of `AdapterInfo` now travels, and five of its seven wire fields are the
+  // documented absences that a browser has nothing to disagree with — so the two
+  // that vary are the two worth asking a browser about, and both are asked here.
+  //
+  // The expected bits are spelled out below rather than imported from
+  // `gpu-replay.js`: a table taken from the thing under test agrees with it by
+  // construction, and what this check is for is that the table itself is right
+  // about this browser's feature set.
+  const wasmCaps = answered?.caps;
+  // `crcbl_hal::Features` bits: the four core WebGPU grants outright, then the
+  // four with a `GPUFeatureName` behind them.
+  const CORE_FEATURE_BITS = (1 << 8) | (1 << 7) | (1 << 14) | (1 << 18); // COMPUTE, OCCLUSION_QUERY, DEPTH_BIAS_CLAMP, DEBUG_MARKERS
+  const NAMED_FEATURE_BITS = {
+    'depth-clip-control': 1 << 13, // DEPTH_CLAMP
+    'texture-compression-bc': 1 << 16, // TEXTURE_COMPRESSION_BC
+    'timestamp-query': 1 << 5, // TIMESTAMP_QUERY
+    'indirect-first-instance': 1 << 4, // INDIRECT_FIRST_INSTANCE
+  };
+  const expectedFeatures =
+    (live?.features ?? []).reduce(
+      (bits, name) => bits | (NAMED_FEATURE_BITS[name] ?? 0),
+      CORE_FEATURE_BITS
+    ) >>> 0;
+  check(
+    'G',
+    'the feature set wasm received is what this browser actually reports',
+    wasmCaps?.featuresLo === expectedFeatures && wasmCaps?.featuresHi === 0,
+    `wasm got ${wasmCaps?.featuresLo?.toString(16)}/${wasmCaps?.featuresHi?.toString(16)},` +
+      ` ${expectedFeatures.toString(16)} expected from [${(live?.features ?? []).join(', ')}]`
+  );
+  check(
+    'G',
+    'a limit wasm received is the number this browser reports',
+    wasmCaps?.maxImage2d === live?.limits?.maxTextureDimension2D &&
+      wasmCaps?.maxImage2d > 0,
+    `wasm got ${wasmCaps?.maxImage2d}, navigator.gpu says` +
+      ` maxTextureDimension2D ${live?.limits?.maxTextureDimension2D}`
+  );
+
+  // …and the other eighteen limits, which no export carries. Checked where they
+  // can be: against the live adapter, in the page, through the same mapping the
+  // replayer used to fill the reply. `gpu-replay.mjs` does this against a stub
+  // with distinct numbers; this is the same table meeting a real browser's.
+  const limitPairs = [
+    ['maxImage2d', 'maxTextureDimension2D'],
+    ['maxImage3d', 'maxTextureDimension3D'],
+    ['maxImageArrayLayers', 'maxTextureArrayLayers'],
+    ['maxStorageBufferRange', 'maxStorageBufferBindingSize'],
+    ['maxUniformBufferRange', 'maxUniformBufferBindingSize'],
+    ['maxBindGroups', 'maxBindGroups'],
+    ['maxColorAttachments', 'maxColorAttachments'],
+    ['maxComputeInvocationsPerWorkgroup', 'maxComputeInvocationsPerWorkgroup'],
+    ['maxComputeWorkgroupsPerDimension', 'maxComputeWorkgroupsPerDimension'],
+    ['minUniformBufferOffsetAlignment', 'minUniformBufferOffsetAlignment'],
+    ['minStorageBufferOffsetAlignment', 'minStorageBufferOffsetAlignment'],
+  ];
+  const mismatched = limitPairs
+    .filter(([seam, webgpu]) => live?.mapped?.[seam] !== live?.limits?.[webgpu])
+    .map(
+      ([seam, webgpu]) =>
+        `${seam}=${live?.mapped?.[seam]} but ${webgpu}=${live?.limits?.[webgpu]}`
+    );
+  const workgroup = live?.mapped?.maxComputeWorkgroupSize ?? [];
+  if (
+    workgroup[0] !== live?.limits?.maxComputeWorkgroupSizeX ||
+    workgroup[1] !== live?.limits?.maxComputeWorkgroupSizeY ||
+    workgroup[2] !== live?.limits?.maxComputeWorkgroupSizeZ
+  ) {
+    mismatched.push(`maxComputeWorkgroupSize=[${workgroup.join(', ')}]`);
+  }
+  check(
+    'G',
+    'every limit the browser reports lands in the seam field that names it',
+    mismatched.length === 0 && workgroup.length === 3,
+    mismatched.length
+      ? mismatched.join('; ')
+      : `${limitPairs.length + 1} mapped, on maxTextureDimension2D ${live?.limits?.maxTextureDimension2D}`
   );
 
   // A channel installed under a running demo must be invisible to it. The demo

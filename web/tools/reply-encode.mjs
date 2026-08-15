@@ -23,6 +23,16 @@
 // anything. A list derived from the fixture would agree with the fixture by
 // construction.
 //
+// ONE EXCEPTION, AND IT IS THE POINT OF IT. The canonical adapter's feature word
+// is not written out here: it is produced by running `gpu-replay.js`'s real
+// `halFeaturesFor` over a stub adapter holding every `GPUFeatureName` the
+// mapping table claims, plus names it does not. That is not derived from the
+// fixture — it is derived from the production mapping, and compared against a
+// fixture whose bytes came from Rust naming `crcbl_hal::Features` flags. So the
+// comparison below is a cross-language check on the WebGPU→HAL feature mapping
+// itself, not only on the byte writer. Spelling the number out here would have
+// checked nothing but this file's arithmetic.
+//
 // It also asserts what the writer must refuse: a payload past the field cap, an
 // array past the element cap, a handle with no generation, and a sequence handed
 // in as a number rather than a `BigInt`. Each has to throw a typed
@@ -34,7 +44,12 @@
 
 import { readFile } from 'node:fs/promises';
 
-import { ReplyEncodeError, ReplyWriter } from '../engine/gpu-reply.js';
+import {
+  DEVICE_TYPE,
+  ReplyEncodeError,
+  ReplyWriter,
+} from '../engine/gpu-reply.js';
+import { halFeaturesFor } from '../engine/gpu-replay.js';
 
 /** The fixture `crcbl-webgpu`'s `fixture.rs` writes. */
 const FIXTURE = new URL(
@@ -91,9 +106,81 @@ function growthPayload() {
 }
 
 /**
+ * An adapter with every `GPUFeatureName` the mapping table lists, and two it
+ * does not.
+ *
+ * The unmapped pair is not decoration: the mapping iterates its own table, so a
+ * name outside it must contribute nothing, and a rewrite that iterated
+ * `adapter.features` instead would set no bit for them and still pass — unless
+ * they are present and the expected bits are a fixed word from the other
+ * language. They are.
+ */
+function everyMappedFeature() {
+  return {
+    features: new Set([
+      'depth-clip-control',
+      'texture-compression-bc',
+      'timestamp-query',
+      'indirect-first-instance',
+      'shader-f16',
+      'float32-filterable',
+    ]),
+  };
+}
+
+/**
+ * `crcbl_hal::Limits` as `replies::every_limit` spells it, in the seam's names.
+ *
+ * Written out rather than mapped from a stub `GPUSupportedLimits`, because this
+ * check is about the *bytes*: `gpu-replay.mjs` is where the WebGPU→seam limit
+ * mapping is checked field by field, against a stub whose numbers are all
+ * distinct.
+ */
+function everyLimit() {
+  return {
+    maxImage2d: 16384,
+    maxImage3d: 2048,
+    maxImageArrayLayers: 256,
+    maxStorageBufferRange: 134_217_728n,
+    maxUniformBufferRange: 65536n,
+    maxBindGroups: 4,
+    maxBindlessDescriptors: 0,
+    maxPushConstantSize: 0,
+    maxColorAttachments: 8,
+    maxSampleCount: 4,
+    maxDrawIndirectCount: 1,
+    maxComputeWorkgroupSize: [256, 254, 64],
+    maxComputeInvocationsPerWorkgroup: 256,
+    maxComputeWorkgroupsPerDimension: 65535,
+    minUniformBufferOffsetAlignment: 256n,
+    minStorageBufferOffsetAlignment: 128n,
+    optimalBufferCopyOffsetAlignment: 512n,
+    maxSamplerAnisotropy: 1,
+    timestampPeriodNs: 1,
+  };
+}
+
+/**
+ * A well-formed adapter record, for the checks that break exactly one thing
+ * about it. Fresh each call, since several of them mutate it.
+ */
+function browserShapedAdapter() {
+  return {
+    id: 0,
+    name: 'stub',
+    vendorId: 0,
+    deviceId: 0,
+    deviceType: DEVICE_TYPE.OTHER,
+    driver: '',
+    features: 0n,
+    limits: everyLimit(),
+  };
+}
+
+/**
  * The canonical replies, in the order `replies::every_reply` holds them.
  *
- * Two things about this list are load-bearing beyond the field values:
+ * Three things about this list are load-bearing beyond the field values:
  *
  *   * **The sequences are not in order and not contiguous.** A writer that
  *     numbered replies by position would produce a buffer that decodes and is
@@ -101,12 +188,56 @@ function growthPayload() {
  *   * **One sequence and one value are past 2^32.** Both are `BigInt` here for
  *     that reason; as numbers they would round to something that still looks
  *     plausible.
+ *   * **The first adapter's feature word comes from the production mapping**
+ *     rather than from a literal — see the header — while the second adapter is
+ *     deliberately *not* a browser's answer: it fills the four fields WebGPU can
+ *     never fill. The wire has to carry them, because the far side decodes what
+ *     it is sent rather than what a browser could have sent.
  *
  * @param {ReplyWriter} replies
  */
 function encodeCanonicalReplies(replies) {
-  replies.adapter(9n, 3, 'Apple M2 — ✱');
-  replies.adapter(2n, 0, '');
+  replies.adapter(9n, {
+    id: 3,
+    name: 'Apple M2 — ✱',
+    vendorId: 0,
+    deviceId: 0,
+    deviceType: DEVICE_TYPE.OTHER,
+    driver: '',
+    features: halFeaturesFor(everyMappedFeature()),
+    limits: everyLimit(),
+  });
+  replies.adapter(2n, {
+    id: 0,
+    name: '',
+    vendorId: 0x1002,
+    deviceId: 0x744c,
+    deviceType: DEVICE_TYPE.DISCRETE,
+    driver: 'radv 25.1.4',
+    features: 0n,
+    // `Limits::minimum()` on the Rust side — the floor every backend clears.
+    limits: {
+      maxImage2d: 8192,
+      maxImage3d: 2048,
+      maxImageArrayLayers: 256,
+      maxStorageBufferRange: 134_217_728n,
+      maxUniformBufferRange: 65536n,
+      maxBindGroups: 4,
+      maxBindlessDescriptors: 0,
+      maxPushConstantSize: 0,
+      maxColorAttachments: 4,
+      maxSampleCount: 4,
+      maxDrawIndirectCount: 1,
+      maxComputeWorkgroupSize: [256, 256, 64],
+      maxComputeInvocationsPerWorkgroup: 256,
+      maxComputeWorkgroupsPerDimension: 65535,
+      minUniformBufferOffsetAlignment: 256n,
+      minStorageBufferOffsetAlignment: 256n,
+      optimalBufferCopyOffsetAlignment: 256n,
+      maxSamplerAnisotropy: 1,
+      timestampPeriodNs: 0,
+    },
+  });
   replies.readbackPending(17n, handle(51, 52));
   replies.readbackReady(
     5n,
@@ -253,7 +384,68 @@ async function main() {
   checkRefused(
     'a name under the cap in characters and over it in bytes is refused',
     'InvalidLength',
-    () => new ReplyWriter().adapter(1n, 0, '✱'.repeat(MAX_FIELD_BYTES / 2))
+    () =>
+      new ReplyWriter().adapter(1n, {
+        ...browserShapedAdapter(),
+        name: '✱'.repeat(MAX_FIELD_BYTES / 2),
+      })
+  );
+
+  // ---- a field left out is refused, not written as zero -------------------
+  // The one failure this format cannot detect for itself: `0` is a legal value
+  // for a vendor id, a feature word and most limits, so a key that never
+  // arrived would decode as a device that genuinely reports nothing. Each of
+  // these drops one field, and each has to throw where the mistake is.
+  for (const [field, drop] of [
+    ['vendorId', (info) => delete info.vendorId],
+    ['deviceType', (info) => delete info.deviceType],
+    ['limits.maxBindGroups', (info) => delete info.limits.maxBindGroups],
+    [
+      'limits.maxComputeWorkgroupSize',
+      (info) => delete info.limits.maxComputeWorkgroupSize,
+    ],
+    [
+      'limits.timestampPeriodNs',
+      (info) => delete info.limits.timestampPeriodNs,
+    ],
+  ]) {
+    checkRefused(
+      `an adapter missing ${field} is refused rather than written as zero`,
+      'NotANumber',
+      () => {
+        const info = browserShapedAdapter();
+        drop(info);
+        new ReplyWriter().adapter(1n, info);
+      }
+    );
+  }
+  // …and the `u64` half of the same mistake, which lands on the `BigInt` rule.
+  checkRefused(
+    'an adapter whose feature word is a number rather than a BigInt is refused',
+    'NotABigInt',
+    () =>
+      new ReplyWriter().adapter(1n, { ...browserShapedAdapter(), features: 0 })
+  );
+  checkRefused(
+    'a limit that must be a BigInt is refused as a number',
+    'NotABigInt',
+    () => {
+      const info = browserShapedAdapter();
+      info.limits.maxStorageBufferRange = 134_217_728;
+      new ReplyWriter().adapter(1n, info);
+    }
+  );
+  // A workgroup size of the wrong length is a shape mistake rather than a
+  // missing field, and would otherwise write two axes and run on into the
+  // fields after them.
+  checkRefused(
+    'a workgroup size that is not three numbers is refused',
+    'NotANumber',
+    () => {
+      const info = browserShapedAdapter();
+      info.limits.maxComputeWorkgroupSize = [64, 64];
+      new ReplyWriter().adapter(1n, info);
+    }
   );
 
   if (failures.length > 0) {

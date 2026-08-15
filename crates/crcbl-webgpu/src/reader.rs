@@ -182,7 +182,7 @@ impl<'a> StreamReader<'a> {
                 let usage_bits = r.read_u32()?;
                 let usage = BufferUsage::from_bits(usage_bits).ok_or(DecodeError::InvalidEnum {
                     field: "BufferDesc::usage",
-                    code: usage_bits,
+                    code: usage_bits.into(),
                 })?;
                 let memory_code = r.read_u8()?;
                 let memory = tag::memory_location_from_code(memory_code).ok_or(
@@ -250,7 +250,7 @@ impl<'a> StreamReader<'a> {
                 let stages =
                     ShaderStages::from_bits(stage_bits).ok_or(DecodeError::InvalidEnum {
                         field: "PushConstants::stages",
-                        code: stage_bits,
+                        code: stage_bits.into(),
                     })?;
                 let offset = r.read_u32()?;
                 let data = r.read_field("PushConstants::data")?.to_vec();

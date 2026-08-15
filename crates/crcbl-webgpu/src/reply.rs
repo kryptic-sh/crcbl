@@ -45,7 +45,7 @@
 //! | --- | --- |
 //! | a handle and nothing else | [`Reply::ReadbackPending`] |
 //! | a handle and an unbounded byte payload | [`Reply::ReadbackReady`] |
-//! | a scalar and a string | [`Reply::Adapter`] |
+//! | a flat record of scalars, strings, an enum code and a bitflags word | [`Reply::Adapter`] |
 //! | a string alone | [`Reply::NoAdapter`] |
 //! | a counted array of fixed-size elements | [`Reply::QueryResults`] |
 //!
@@ -56,16 +56,194 @@
 //!
 //! Not here, and needed before the HAL can be implemented over this channel: the
 //! device-request poll (a [`DeviceRequestState`](crcbl_hal::DeviceRequestState)
-//! and, on failure, a reason), the rest of
-//! [`AdapterInfo`](crcbl_hal::AdapterInfo) — vendor and device ids, driver,
-//! backend, and the whole of [`DeviceCaps`](crcbl_hal::DeviceCaps) — and
-//! surface capabilities. Each is one of the four shapes above or a composition
-//! of them, which is why stopping here was worth doing.
+//! and, on failure, a reason) and surface capabilities. Both are compositions of
+//! the shapes above.
+//!
+//! # What an adapter reply carries, and what the browser cannot tell it
+//!
+//! [`Reply::Adapter`] is the whole of [`AdapterInfo`]
+//! bar one field, in declaration order with
+//! [`caps`](crcbl_hal::AdapterInfo::caps) expanded in place: `id`, `name`,
+//! `vendor_id`, `device_id`, `device_type`, `driver`, then
+//! [`DeviceCaps::features`](crcbl_hal::DeviceCaps::features) as a `u64` of
+//! [`Features::bits`](crcbl_hal::Features::bits) and every field of
+//! [`Limits`], also in declaration order. Stating the *rule*
+//! rather than a list is deliberate: two hand-written codecs agreeing on
+//! "declaration order, `backend` omitted" is one fact to check, where a copied
+//! list is nineteen.
+//!
+//! **[`backend`](crcbl_hal::AdapterInfo::backend) is the field that is not on
+//! the wire.** It is not a fact about the adapter — it says which crate
+//! enumerated it — so it is answered by the half that knows, which is this one:
+//! the decoder writes [`BackendKind::WebGpu`]
+//! because this crate is what decoded. Carrying it would let a replayer claim to
+//! be Vulkan and be believed.
+//!
+//! **Three fields a browser cannot fill, and what the replayer puts there.**
+//! WebGPU's `GPUAdapterInfo` is four strings and nothing else; it has no numeric
+//! ids and does not say what class of device it found. So
+//! `web/engine/gpu-replay.js` writes the values that *mean absent* rather than
+//! values that look real:
+//!
+//! | Field | Value | Why there is nothing better |
+//! | --- | --- | --- |
+//! | `vendor_id` | `0`, which [`AdapterInfo`] documents as "unknown" | `GPUAdapterInfo.vendor` is a *string* like `"apple"`; deriving a PCI id from it would be an invention indistinguishable downstream from a real one |
+//! | `device_id` | `0`, likewise | there is no numeric device id anywhere in WebGPU |
+//! | `device_type` | [`DeviceType::Other`](crcbl_hal::DeviceType::Other) — "the backend declined to say" | WebGPU deliberately does not report discrete-versus-integrated. `GPUAdapter.isFallbackAdapter` is the nearest thing and is not the same claim: it grades *performance*, not device class, so mapping it to `Cpu` would be a guess |
+//! | `driver` | the empty string | `GPUAdapterInfo` has no driver name or version. Empty is the absence, not a driver called `""` |
+//!
+//! The decode side does not know any of that and must not: it decodes whatever
+//! the wire says, so the same reply written by something that *can* fill those
+//! fields decodes as filled.
 
-use crcbl_hal::{QuerySetHandle, ReadbackHandle};
+use crcbl_hal::{
+    AdapterId, AdapterInfo, BackendKind, DeviceCaps, Features, Limits, QuerySetHandle,
+    ReadbackHandle,
+};
 
 use crate::bytes::{ByteReader, ByteWriter, DecodeError};
 use crate::tag;
+
+// ── The reply stream's own field writers ──────────────────────────────────────
+//
+// [`ByteWriter`] and its primitives live in [`crate::bytes`], shared with the
+// command direction; these are shaped by `crcbl-hal`'s capability types and
+// belong to the reply stream alone — the same split [`crate::writer`] makes for
+// the descriptors. Each is the exact counterpart of a `read_*` below.
+
+impl ByteWriter {
+    /// [`Limits`], field by field in declaration order.
+    ///
+    /// Every field, not a subset the engine happens to read today: the fields
+    /// are read from all over — `crcbl-render` reads
+    /// `optimal_buffer_copy_offset_alignment`, `max_image_2d`,
+    /// `min_uniform_buffer_offset_alignment` and `timestamp_period_ns`, while
+    /// `crcbl-hal`'s own descriptor validation reads `max_sample_count`,
+    /// `max_compute_workgroup_size`, `max_bindless_descriptors`,
+    /// `max_image_array_layers`, `max_color_attachments`, `max_bind_groups`,
+    /// `max_push_constant_size`, `max_sampler_anisotropy` and
+    /// `max_compute_invocations_per_workgroup` — and a field left off the wire
+    /// is one the decoder would have to invent a ceiling for.
+    fn put_limits(&mut self, limits: &Limits) {
+        self.put_u32(limits.max_image_2d);
+        self.put_u32(limits.max_image_3d);
+        self.put_u32(limits.max_image_array_layers);
+        self.put_u64(limits.max_storage_buffer_range);
+        self.put_u64(limits.max_uniform_buffer_range);
+        self.put_u32(limits.max_bind_groups);
+        self.put_u32(limits.max_bindless_descriptors);
+        self.put_u32(limits.max_push_constant_size);
+        self.put_u32(limits.max_color_attachments);
+        self.put_u32(limits.max_sample_count);
+        self.put_u32(limits.max_draw_indirect_count);
+        for axis in limits.max_compute_workgroup_size {
+            self.put_u32(axis);
+        }
+        self.put_u32(limits.max_compute_invocations_per_workgroup);
+        self.put_u32(limits.max_compute_workgroups_per_dimension);
+        self.put_u64(limits.min_uniform_buffer_offset_alignment);
+        self.put_u64(limits.min_storage_buffer_offset_alignment);
+        self.put_u64(limits.optimal_buffer_copy_offset_alignment);
+        self.put_f32(limits.max_sampler_anisotropy);
+        self.put_f32(limits.timestamp_period_ns);
+    }
+
+    /// [`DeviceCaps`]: the feature bits, then the limits.
+    ///
+    /// [`Features`] goes over as `bits()` and comes back through `from_bits`,
+    /// which is the house rule for bitflags and the reason they are exempt from
+    /// the "tags are ours, not the compiler's" rule: each flag is an explicit
+    /// `1 << n`, so the value is already chosen rather than positional.
+    /// Truncating would silently drop a bit the other half meant.
+    fn put_device_caps(&mut self, caps: &DeviceCaps) {
+        self.put_u64(caps.features.bits());
+        self.put_limits(&caps.limits);
+    }
+
+    /// [`AdapterInfo`] in declaration order, `backend` omitted and `caps`
+    /// expanded — see the [module docs](self).
+    fn put_adapter_info(&mut self, info: &AdapterInfo) {
+        self.put_u32(info.id.0);
+        self.put_bytes(info.name.as_bytes());
+        self.put_u32(info.vendor_id);
+        self.put_u32(info.device_id);
+        self.put_u8(tag::device_type_code(info.device_type));
+        self.put_bytes(info.driver.as_bytes());
+        self.put_device_caps(&info.caps);
+    }
+}
+
+impl ByteReader<'_> {
+    /// The counterpart of [`ByteWriter::put_limits`].
+    fn read_limits(&mut self) -> Result<Limits, DecodeError> {
+        Ok(Limits {
+            max_image_2d: self.read_u32()?,
+            max_image_3d: self.read_u32()?,
+            max_image_array_layers: self.read_u32()?,
+            max_storage_buffer_range: self.read_u64()?,
+            max_uniform_buffer_range: self.read_u64()?,
+            max_bind_groups: self.read_u32()?,
+            max_bindless_descriptors: self.read_u32()?,
+            max_push_constant_size: self.read_u32()?,
+            max_color_attachments: self.read_u32()?,
+            max_sample_count: self.read_u32()?,
+            max_draw_indirect_count: self.read_u32()?,
+            max_compute_workgroup_size: [self.read_u32()?, self.read_u32()?, self.read_u32()?],
+            max_compute_invocations_per_workgroup: self.read_u32()?,
+            max_compute_workgroups_per_dimension: self.read_u32()?,
+            min_uniform_buffer_offset_alignment: self.read_u64()?,
+            min_storage_buffer_offset_alignment: self.read_u64()?,
+            optimal_buffer_copy_offset_alignment: self.read_u64()?,
+            max_sampler_anisotropy: self.read_f32()?,
+            timestamp_period_ns: self.read_f32()?,
+        })
+    }
+
+    /// The counterpart of [`ByteWriter::put_device_caps`].
+    ///
+    /// A bit no [`Features`] flag claims is [`DecodeError::InvalidEnum`], never
+    /// a truncation: `from_bits_truncate` would accept a word from a newer build
+    /// and silently report a lesser device.
+    fn read_device_caps(&mut self) -> Result<DeviceCaps, DecodeError> {
+        let bits = self.read_u64()?;
+        let features = Features::from_bits(bits).ok_or(DecodeError::InvalidEnum {
+            field: "DeviceCaps::features",
+            code: bits,
+        })?;
+        Ok(DeviceCaps {
+            features,
+            limits: self.read_limits()?,
+        })
+    }
+
+    /// The counterpart of [`ByteWriter::put_adapter_info`].
+    ///
+    /// [`AdapterInfo::backend`] is not read because it is not written: it names
+    /// the crate that decoded, which is this one.
+    fn read_adapter_info(&mut self) -> Result<AdapterInfo, DecodeError> {
+        let id = AdapterId(self.read_u32()?);
+        let name = self.read_string("Adapter::name")?;
+        let vendor_id = self.read_u32()?;
+        let device_id = self.read_u32()?;
+        let device_type_code = self.read_u8()?;
+        let device_type =
+            tag::device_type_from_code(device_type_code).ok_or(DecodeError::InvalidEnum {
+                field: "Adapter::device_type",
+                code: device_type_code.into(),
+            })?;
+        let driver = self.read_string("Adapter::driver")?;
+        Ok(AdapterInfo {
+            id,
+            name,
+            vendor_id,
+            device_id,
+            device_type,
+            driver,
+            backend: BackendKind::WebGpu,
+            caps: self.read_device_caps()?,
+        })
+    }
+}
 
 // ── Reply ─────────────────────────────────────────────────────────────────────
 
@@ -75,20 +253,28 @@ use crate::tag;
 /// reason: the answer outlives the buffer it arrived in — which here is not a
 /// figure of speech but the detached-view rule, since that buffer is wasm memory
 /// JS wrote into and the next allocation may move it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// **Not [`Eq`]**, and it stopped being so when [`Reply::Adapter`] grew its
+/// [`Limits`], two of whose fields are `f32`. Nothing in this crate needs total
+/// equality, and deriving it would have meant either an ordering on floats that
+/// does not exist or a hand-written `Eq` asserting one.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Reply {
-    /// One entry of an adapter enumeration.
+    /// One entry of an adapter enumeration: the whole of
+    /// [`AdapterInfo`].
     ///
-    /// A partial [`AdapterInfo`](crcbl_hal::AdapterInfo): the id the engine
-    /// passes back in a [`DeviceDesc`](crcbl_hal::DeviceDesc), and the name a
-    /// log or a device-selection screen shows.
+    /// Everything a caller needs to pick an adapter without paying for a device
+    /// — the id it passes back in a [`DeviceDesc`](crcbl_hal::DeviceDesc), the
+    /// name a log or a selection screen shows, and the
+    /// [`DeviceCaps`] every renderer path is selected
+    /// from.
+    ///
+    /// **[`backend`](crcbl_hal::AdapterInfo::backend) did not cross the wire**
+    /// and is always [`BackendKind::WebGpu`]
+    /// here; the three fields WebGPU cannot supply arrive as the values that
+    /// mean absent. The [module docs](self) carry both lists.
     Adapter {
-        /// Position in the enumeration —
-        /// [`AdapterId`](crcbl_hal::AdapterId)'s `u32`, unwrapped, because the
-        /// newtype is a compile-time distinction and has no wire form.
-        id: u32,
-        /// Human-readable device name, as the browser reports it.
-        name: String,
+        /// What the browser said about the adapter it granted.
+        info: AdapterInfo,
     },
     /// The enumeration found nothing, with the reason the browser gave.
     ///
@@ -213,10 +399,17 @@ impl ReplyWriter {
     }
 
     /// [`Reply::Adapter`].
-    pub fn adapter(&mut self, sequence: u64, id: u32, name: &str) {
+    ///
+    /// **[`info.backend`](crcbl_hal::AdapterInfo::backend) is not written**, and
+    /// the argument is taken whole rather than field by field because eight
+    /// positional parameters is how a caller swaps two of them. A reply decoded
+    /// from these bytes always names
+    /// [`BackendKind::WebGpu`], whatever was
+    /// passed here — see the [module docs](self) for why that field belongs to
+    /// the decoder.
+    pub fn adapter(&mut self, sequence: u64, info: &AdapterInfo) {
         self.open(tag::ADAPTER_REPLY_TAG, sequence);
-        self.bytes.put_u32(id);
-        self.bytes.put_bytes(name.as_bytes());
+        self.bytes.put_adapter_info(info);
     }
 
     /// [`Reply::NoAdapter`].
@@ -324,8 +517,7 @@ impl<'a> ReplyReader<'a> {
         let sequence = r.read_u64()?;
         let reply = match opcode {
             tag::ADAPTER_REPLY_TAG => Reply::Adapter {
-                id: r.read_u32()?,
-                name: r.read_string("Adapter::name")?,
+                info: r.read_adapter_info()?,
             },
             tag::NO_ADAPTER_REPLY_TAG => Reply::NoAdapter {
                 reason: r.read_string("NoAdapter::reason")?,

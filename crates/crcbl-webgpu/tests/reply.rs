@@ -14,10 +14,43 @@
 mod corpus;
 mod replies;
 
+use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
 use crcbl_webgpu::{DecodeError, Reply, ReplyReader, ReplyWriter, decode_replies, tag};
 
 use corpus::handle;
 use replies::{encode_all_replies, every_reply};
+
+/// One edit to a baseline value, for the suites that walk a record field by
+/// field.
+type Mutate<T> = fn(&mut T);
+
+/// A minimal adapter, for the tests that are about one field of it.
+fn adapter_info() -> AdapterInfo {
+    AdapterInfo {
+        id: AdapterId(0),
+        name: "ok".into(),
+        vendor_id: 0,
+        device_id: 0,
+        device_type: DeviceType::Other,
+        driver: String::new(),
+        backend: BackendKind::WebGpu,
+        caps: DeviceCaps {
+            features: Features::COMPUTE,
+            limits: Limits::minimum(),
+        },
+    }
+}
+
+/// Where `Adapter::device_type`'s code byte sits, counted from the start of a
+/// buffer holding one adapter reply and nothing else.
+///
+/// Computed from the field widths rather than written as a number, so it follows
+/// the encoding instead of having to be re-derived when a field moves: the
+/// header, then the tag and sequence, then `id`, the length-prefixed `name`, and
+/// the two ids.
+fn device_type_offset(name: &str) -> usize {
+    tag::REPLY_HEADER_BYTES + 1 + 8 + 4 + (4 + name.len()) + 4 + 4
+}
 
 /// A reply buffer's header: the magic and the version word, and no more. There
 /// is no base sequence, because every reply carries its own.
@@ -249,14 +282,238 @@ fn a_handle_field_that_cannot_be_absent_refuses_zero_bits() {
 #[test]
 fn an_adapter_name_that_is_not_utf8_is_refused_rather_than_replaced_with_question_marks() {
     let mut replies = ReplyWriter::new();
-    replies.adapter(3, 0, "ok");
+    replies.adapter(3, &adapter_info());
     let mut bytes = replies.bytes().to_vec();
-    let len = bytes.len();
-    bytes[len - 2..].copy_from_slice(&[0xFF, 0xFE]);
+    // The name's two bytes sit immediately before `vendor_id`, `device_id` and
+    // the device-type code.
+    let at = device_type_offset("ok") - 4 - 4 - 2;
+    bytes[at..at + 2].copy_from_slice(&[0xFF, 0xFE]);
     assert_eq!(
         decode_replies(&bytes),
         Err(DecodeError::NotUtf8 {
             field: "Adapter::name"
+        })
+    );
+}
+
+// ── The adapter record ────────────────────────────────────────────────────────
+
+/// **Every field of [`AdapterInfo`] survives, `backend` excepted.**
+///
+/// The corpus covers this too, but only for the two adapters it holds; this
+/// walks each field on its own so a writer that dropped one — or wrote two in
+/// the wrong order — names the field rather than showing a byte offset.
+#[test]
+fn each_adapter_field_survives_a_round_trip_on_its_own() {
+    let base = AdapterInfo {
+        id: AdapterId(1),
+        name: "base".into(),
+        vendor_id: 2,
+        device_id: 3,
+        device_type: DeviceType::Cpu,
+        driver: "d".into(),
+        backend: BackendKind::WebGpu,
+        caps: DeviceCaps {
+            features: Features::COMPUTE,
+            limits: Limits::minimum(),
+        },
+    };
+
+    let mutations: Vec<(&str, Mutate<AdapterInfo>)> = vec![
+        ("id", |info| info.id = AdapterId(9)),
+        ("name", |info| info.name = "Apple M2 — ✱".into()),
+        ("name empty", |info| info.name = String::new()),
+        ("vendor_id", |info| info.vendor_id = 0x1002),
+        ("device_id", |info| info.device_id = 0x744C),
+        ("device_type", |info| {
+            info.device_type = DeviceType::Integrated;
+        }),
+        ("driver", |info| info.driver = "radv 25.1.4".into()),
+        ("driver empty", |info| info.driver = String::new()),
+        ("features", |info| {
+            info.caps.features = Features::TIMESTAMP_QUERY | Features::DEPTH_CLAMP;
+        }),
+        ("features empty", |info| {
+            info.caps.features = Features::empty();
+        }),
+        ("features all", |info| info.caps.features = Features::all()),
+        ("limits", |info| info.caps.limits = Limits::desktop()),
+    ];
+
+    for (what, mutate) in mutations {
+        let mut info = base.clone();
+        mutate(&mut info);
+        assert_ne!(info, base, "{what} did not change anything");
+
+        let mut replies = ReplyWriter::new();
+        replies.adapter(7, &info);
+        assert_eq!(
+            decode_replies(replies.bytes()),
+            Ok(vec![(7, Reply::Adapter { info })]),
+            "{what}"
+        );
+    }
+}
+
+/// **Every field of [`Limits`] survives, one at a time.**
+///
+/// Driven by moving each field off a baseline rather than by comparing two
+/// presets: a round trip that wrote `max_image_3d` where `max_image_2d` belongs
+/// still compares equal whenever the two happen to agree, which they do in both
+/// presets `crcbl-hal` ships.
+#[test]
+fn each_limits_field_survives_a_round_trip_on_its_own() {
+    let base = Limits::minimum();
+    let mutations: Vec<(&str, Mutate<Limits>)> = vec![
+        ("max_image_2d", |l| l.max_image_2d = 1),
+        ("max_image_3d", |l| l.max_image_3d = 2),
+        ("max_image_array_layers", |l| l.max_image_array_layers = 3),
+        ("max_storage_buffer_range", |l| {
+            l.max_storage_buffer_range = u64::MAX;
+        }),
+        ("max_uniform_buffer_range", |l| {
+            l.max_uniform_buffer_range = 5;
+        }),
+        ("max_bind_groups", |l| l.max_bind_groups = 6),
+        ("max_bindless_descriptors", |l| {
+            l.max_bindless_descriptors = 7;
+        }),
+        ("max_push_constant_size", |l| l.max_push_constant_size = 8),
+        ("max_color_attachments", |l| l.max_color_attachments = 9),
+        ("max_sample_count", |l| l.max_sample_count = 16),
+        ("max_draw_indirect_count", |l| {
+            l.max_draw_indirect_count = 11;
+        }),
+        ("max_compute_workgroup_size x", |l| {
+            l.max_compute_workgroup_size[0] = 12;
+        }),
+        ("max_compute_workgroup_size y", |l| {
+            l.max_compute_workgroup_size[1] = 13;
+        }),
+        ("max_compute_workgroup_size z", |l| {
+            l.max_compute_workgroup_size[2] = 14;
+        }),
+        ("max_compute_invocations_per_workgroup", |l| {
+            l.max_compute_invocations_per_workgroup = 15;
+        }),
+        ("max_compute_workgroups_per_dimension", |l| {
+            l.max_compute_workgroups_per_dimension = 16;
+        }),
+        ("min_uniform_buffer_offset_alignment", |l| {
+            l.min_uniform_buffer_offset_alignment = 17;
+        }),
+        ("min_storage_buffer_offset_alignment", |l| {
+            l.min_storage_buffer_offset_alignment = 18;
+        }),
+        ("optimal_buffer_copy_offset_alignment", |l| {
+            l.optimal_buffer_copy_offset_alignment = 19;
+        }),
+        ("max_sampler_anisotropy", |l| {
+            l.max_sampler_anisotropy = 16.0
+        }),
+        ("timestamp_period_ns", |l| l.timestamp_period_ns = 0.5),
+    ];
+    // One row per field, plus two more for the other two axes of the array.
+    assert_eq!(mutations.len(), 21, "a Limits field has no row here");
+
+    for (what, mutate) in mutations {
+        let mut limits = base;
+        mutate(&mut limits);
+        assert_ne!(limits, base, "{what} did not change anything");
+
+        let info = AdapterInfo {
+            caps: DeviceCaps {
+                features: Features::empty(),
+                limits,
+            },
+            ..adapter_info()
+        };
+        let mut replies = ReplyWriter::new();
+        replies.adapter(1, &info);
+        assert_eq!(
+            decode_replies(replies.bytes()),
+            Ok(vec![(1, Reply::Adapter { info })]),
+            "{what}"
+        );
+    }
+}
+
+/// **`backend` is not on the wire**, so it comes back as the crate that decoded
+/// whatever the encoder was handed. Documented, and this is what says so out
+/// loud: without it a reader that *did* read a backend code off the wire would
+/// look identical on every corpus entry, all of which are `WebGpu` already.
+#[test]
+fn the_backend_field_is_the_decoders_own_rather_than_something_the_wire_carried() {
+    let mut info = adapter_info();
+    info.backend = BackendKind::Vulkan;
+
+    let mut replies = ReplyWriter::new();
+    replies.adapter(0, &info);
+    let decoded = decode_replies(replies.bytes()).expect("a buffer this crate wrote decodes");
+    let [(_, Reply::Adapter { info: back })] = decoded.as_slice() else {
+        panic!("one adapter reply, and it is an adapter reply");
+    };
+    assert_eq!(back.backend, BackendKind::WebGpu);
+    assert_eq!(back.name, info.name, "every other field is the wire's");
+}
+
+/// A feature word with a bit no flag claims is refused rather than truncated.
+///
+/// `from_bits_truncate` would take a word from a build that has more flags than
+/// this one and report a *lesser* device — a downgrade nothing would log,
+/// because from the seam's point of view the adapter simply lacks the feature.
+#[test]
+fn a_feature_bit_no_flag_claims_is_refused_rather_than_dropped() {
+    let mut replies = ReplyWriter::new();
+    replies.adapter(4, &adapter_info());
+    let mut bytes = replies.bytes().to_vec();
+
+    // The feature word follows the device-type code and the empty driver's
+    // length prefix.
+    let at = device_type_offset("ok") + 1 + 4;
+    let unclaimed = Features::all().bits() | (1 << 63);
+    bytes[at..at + 8].copy_from_slice(&unclaimed.to_le_bytes());
+    assert_eq!(
+        decode_replies(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "DeviceCaps::features",
+            code: unclaimed,
+        })
+    );
+
+    // …and every bit that *is* claimed still decodes, so the check above is
+    // about the unclaimed bit rather than about the word being large.
+    bytes[at..at + 8].copy_from_slice(&Features::all().bits().to_le_bytes());
+    let decoded = decode_replies(&bytes).expect("every claimed bit decodes");
+    let [(_, Reply::Adapter { info })] = decoded.as_slice() else {
+        panic!("one adapter reply");
+    };
+    assert_eq!(info.caps.features, Features::all());
+}
+
+/// A device-type code no variant claims is an error, not `Other`.
+///
+/// Falling back to `Other` would read as "the backend declined to say", which is
+/// a real answer a browser gives — so a drifted table would be indistinguishable
+/// from the ordinary case.
+#[test]
+fn a_device_type_code_no_variant_claims_is_refused_rather_than_read_as_other() {
+    let mut replies = ReplyWriter::new();
+    replies.adapter(5, &adapter_info());
+    let mut bytes = replies.bytes().to_vec();
+    let at = device_type_offset("ok");
+    assert_eq!(
+        bytes[at],
+        tag::DEVICE_TYPE_OTHER,
+        "the offset must land on the device-type code"
+    );
+
+    bytes[at] = 0xEE;
+    assert_eq!(
+        decode_replies(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "Adapter::device_type",
+            code: 0xEE,
         })
     );
 }
@@ -287,7 +544,7 @@ fn a_reader_that_has_failed_stays_failed_rather_than_resyncing_mid_body() {
 #[test]
 fn clearing_a_writer_leaves_a_header_and_nothing_else() {
     let mut replies = ReplyWriter::new();
-    replies.adapter(3, 0, "gpu");
+    replies.adapter(3, &adapter_info());
     assert!(replies.bytes().len() > tag::REPLY_HEADER_BYTES);
 
     replies.clear();

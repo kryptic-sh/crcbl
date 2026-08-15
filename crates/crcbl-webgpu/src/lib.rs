@@ -3,9 +3,10 @@
 //! Wasm serialises HAL calls into a buffer it owns; JS decodes that buffer and
 //! replays it against WebGPU, and answers back through a second buffer wasm also
 //! owns. `docs/plan/41-webgpu-stream.md` is the specification, and this crate is
-//! its first four slices — **the encoding, the transport that carries it, the
-//! reply channel that carries answers home, and the first call that makes the
-//! round trip: adapter enumeration**. There is still no
+//! its first slices — **the encoding, the transport that carries it, the reply
+//! channel that carries answers home, and the first call that makes the round
+//! trip: adapter enumeration, answered with the whole of
+//! [`AdapterInfo`](crcbl_hal::AdapterInfo)**. There is still no
 //! [`Instance`](crcbl_hal::Instance), [`Device`](crcbl_hal::Device) or
 //! [`CommandEncoder`](crcbl_hal::CommandEncoder) implementation — see
 //! [`instance`] for what exists instead of a half-filled one — and those are

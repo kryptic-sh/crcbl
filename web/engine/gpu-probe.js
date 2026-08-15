@@ -100,9 +100,13 @@ export function startAdapterProbe({ exports, memory, replayer }) {
  * @param {Record<string, Function>} options.exports
  * @param {WebAssembly.Memory} options.memory
  * @param {Replayer} options.replayer
- * @returns {{ state: number, name: string, text: string, delivered: boolean }}
+ * @returns {{ state: number, name: string, text: string, delivered: boolean,
+ *            caps: { featuresLo: number, featuresHi: number, maxImage2d: number } }}
  *   `text` is the adapter's name under `GRANTED`, the reason under `REFUSED`,
- *   and the decode error under `UNDECODABLE`.
+ *   and the decode error under `UNDECODABLE`. `caps` is the part of the granted
+ *   adapter's `DeviceCaps` the probe exports — see below — and is all zeros
+ *   under every state but `GRANTED`, where `0` is also a legal value, so read it
+ *   only once the state says so.
  */
 export function pumpAdapterProbe({ exports, memory, replayer }) {
   let delivered = false;
@@ -116,12 +120,26 @@ export function pumpAdapterProbe({ exports, memory, replayer }) {
 
   // `state` first, `ptr` second: `state` decodes a buffer and clones a string,
   // so it allocates, and an allocation may grow wasm memory and detach any view
-  // built before it. `ptr` and `len` allocate nothing.
+  // built before it. `ptr`, `len` and the three numbers below allocate nothing.
   const state = exports.__crcbl_web_gpu_probe_state();
   const text = readUtf8(
     memory,
     exports.__crcbl_web_gpu_probe_text_ptr(),
     exports.__crcbl_web_gpu_probe_text_len()
   );
-  return { state, name: probeStateName(state), text, delivered };
+  // THE PART OF THE ANSWER A BROWSER CAN CORROBORATE. The whole of
+  // `AdapterInfo` crosses the wire, but five of its seven wire fields are the
+  // absences WebGPU forces — a browser has nothing to disagree with about a
+  // vendor id it does not have. The feature word and a limit are the two that
+  // vary per machine, so they are what `crates/crcbl-webgpu/src/probe.rs`
+  // exports and what `browser-e2e.mjs` checks against `navigator.gpu`.
+  //
+  // Two halves rather than one `i64`, because the whole of this ABI is
+  // `(i32, …) -> i32`. `>>> 0` because a wasm `i32` arrives signed.
+  const caps = {
+    featuresLo: exports.__crcbl_web_gpu_probe_features_lo() >>> 0,
+    featuresHi: exports.__crcbl_web_gpu_probe_features_hi() >>> 0,
+    maxImage2d: exports.__crcbl_web_gpu_probe_max_image_2d() >>> 0,
+  };
+  return { state, name: probeStateName(state), text, delivered, caps };
 }

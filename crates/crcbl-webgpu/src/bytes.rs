@@ -74,8 +74,13 @@ pub enum DecodeError {
     InvalidEnum {
         /// Field that carried it.
         field: &'static str,
-        /// The code that was read.
-        code: u32,
+        /// The code that was read, widened to the largest a field can carry.
+        ///
+        /// A `u64` because [`Features`](crcbl_hal::Features) is a 64-bit
+        /// bitflags and is refused through `from_bits` rather than truncated —
+        /// a narrower field here would have to drop the half of the value that
+        /// says which bit was unclaimed.
+        code: u64,
     },
     /// A handle field that may not be `None` held zero bits.
     #[error("{field} is a null handle")]

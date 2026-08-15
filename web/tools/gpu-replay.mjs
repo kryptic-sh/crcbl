@@ -32,8 +32,14 @@
 import { readFile } from 'node:fs/promises';
 import { deepStrictEqual } from 'node:assert/strict';
 
-import { ReplyWriter } from '../engine/gpu-reply.js';
-import { ReplayError, Replayer } from '../engine/gpu-replay.js';
+import { DEVICE_TYPE, ReplyWriter } from '../engine/gpu-reply.js';
+import {
+  ReplayError,
+  Replayer,
+  halAdapterInfoFor,
+  halFeaturesFor,
+  halLimitsFor,
+} from '../engine/gpu-replay.js';
 import { decodeStream } from '../engine/gpu-stream.js';
 
 /** The fixture `crcbl-webgpu`'s `fixture.rs` writes. */
@@ -112,14 +118,64 @@ function stubGpu(answer) {
   return stub;
 }
 
-/** An adapter shaped like the browser's, with every `info` field filled. */
-function stubAdapter(info) {
-  return { info };
+/**
+ * A `GPUSupportedLimits` with a **distinct** value in every member.
+ *
+ * Distinct on purpose and not plausible on purpose: the mapping is nineteen
+ * assignments between two sets of names that mostly resemble each other, so two
+ * members swapped is the likeliest way to get it wrong, and a stub full of
+ * realistic numbers — where several members legitimately agree — would let that
+ * pass. Every number here is its own.
+ */
+function stubLimits() {
+  return {
+    maxTextureDimension2D: 101,
+    maxTextureDimension3D: 102,
+    maxTextureArrayLayers: 103,
+    maxStorageBufferBindingSize: 104,
+    maxUniformBufferBindingSize: 105,
+    maxBindGroups: 106,
+    maxColorAttachments: 107,
+    maxComputeWorkgroupSizeX: 108,
+    maxComputeWorkgroupSizeY: 109,
+    maxComputeWorkgroupSizeZ: 110,
+    maxComputeInvocationsPerWorkgroup: 111,
+    maxComputeWorkgroupsPerDimension: 112,
+    minUniformBufferOffsetAlignment: 113,
+    minStorageBufferOffsetAlignment: 114,
+    // Members WebGPU has that the seam does not read. Present so the stub is
+    // shaped like the real thing, and so a mapping that reached for one of them
+    // by mistake would land on a number nothing expects.
+    maxBufferSize: 115,
+    maxVertexBuffers: 116,
+    maxBindingsPerBindGroup: 117,
+  };
+}
+
+/**
+ * An adapter shaped like the browser's, with every `info` field filled.
+ *
+ * `features` and `limits` are what a real `GPUAdapter` always has; the replayer
+ * reads both to build its reply, so a stub without them is not one.
+ *
+ * @param {object} info
+ * @param {string[]} [features] `GPUFeatureName`s the adapter reports.
+ */
+function stubAdapter(info, features = []) {
+  return { info, features: new Set(features), limits: stubLimits() };
 }
 
 /** A one-command frame carrying `command` at `sequence`. */
 function frameOf(command, sequence) {
   return { baseSequence: sequence, commands: [command] };
+}
+
+/**
+ * @param {number} index
+ * @param {number} generation
+ */
+function handle(index, generation) {
+  return { index, generation };
 }
 
 /**
@@ -189,7 +245,18 @@ async function main() {
     );
     checkEqual(
       replayer.replies,
-      expectedReplies((replies) => replies.adapter(7n, 0, 'crcbl stub a stub')),
+      expectedReplies((replies) =>
+        replies.adapter(
+          7n,
+          halAdapterInfoFor(
+            stubAdapter({
+              vendor: 'crcbl',
+              device: 'stub',
+              description: 'a stub',
+            })
+          )
+        )
+      ),
       'the reply is an Adapter naming the command that asked, id 0, every info field joined'
     );
   }
@@ -207,7 +274,12 @@ async function main() {
     await settle();
     checkEqual(
       replayer.replies,
-      expectedReplies((replies) => replies.adapter(base, 0, 'positional')),
+      expectedReplies((replies) =>
+        replies.adapter(
+          base,
+          halAdapterInfoFor(stubAdapter({ device: 'positional' }))
+        )
+      ),
       'a command at base + 0 is answered with exactly that number, past 2^53'
     );
   }
@@ -220,7 +292,9 @@ async function main() {
     await settle();
     checkEqual(
       replayer.replies,
-      expectedReplies((replies) => replies.adapter(4n, 0, '')),
+      expectedReplies((replies) =>
+        replies.adapter(4n, halAdapterInfoFor(stubAdapter({})))
+      ),
       'an adapter with no info is granted with an empty name rather than refused'
     );
   }
@@ -297,8 +371,8 @@ async function main() {
     checkEqual(
       replayer.replies,
       expectedReplies((replies) => {
-        replies.adapter(1n, 0, 'both');
-        replies.adapter(2n, 0, 'both');
+        replies.adapter(1n, halAdapterInfoFor(stubAdapter({ device: 'both' })));
+        replies.adapter(2n, halAdapterInfoFor(stubAdapter({ device: 'both' })));
       }),
       'two frames of answers share one buffer, in the order they settled'
     );
@@ -338,6 +412,190 @@ async function main() {
       wrong.length === 0,
       wrong[0] ??
         `every command this slice cannot replay throws a ReplayError naming it and its sequence (${commands.length - 1} of them)`
+    );
+  }
+
+  // ---- the WebGPU → seam mapping, field by field --------------------------
+  //
+  // NOT CIRCULAR, unlike the reply comparisons above, and deliberately kept
+  // apart from them for that reason. Those build their expectation with the
+  // same `halAdapterInfoFor` the replayer calls, which is fine for what they
+  // assert — the choice of reply, its sequence, and when it arrives — and says
+  // nothing about the mapping. Everything below spells the expected value out.
+  {
+    const bare = stubAdapter({});
+
+    // The four flags core WebGPU grants with no feature name behind them:
+    // COMPUTE (1<<8), OCCLUSION_QUERY (1<<7), DEPTH_BIAS_CLAMP (1<<14),
+    // DEBUG_MARKERS (1<<18).
+    const CORE = (1n << 8n) | (1n << 7n) | (1n << 14n) | (1n << 18n);
+    checkEqual(
+      halFeaturesFor(bare),
+      CORE,
+      'an adapter with no optional features still reports what core WebGPU grants'
+    );
+
+    // Each mapped name, one at a time, so a table row wired to the wrong bit
+    // names itself instead of hiding inside a union.
+    for (const [name, bit, flag] of [
+      ['depth-clip-control', 1n << 13n, 'DEPTH_CLAMP'],
+      ['texture-compression-bc', 1n << 16n, 'TEXTURE_COMPRESSION_BC'],
+      ['timestamp-query', 1n << 5n, 'TIMESTAMP_QUERY'],
+      ['indirect-first-instance', 1n << 4n, 'INDIRECT_FIRST_INSTANCE'],
+    ]) {
+      checkEqual(
+        halFeaturesFor(stubAdapter({}, [name])),
+        CORE | bit,
+        `${name} maps to Features::${flag} and to nothing else`
+      );
+    }
+
+    // **The other direction's loss.** Most `GPUFeatureName`s have no seam flag,
+    // and a device with them has to report exactly what a device without them
+    // does — otherwise a bit is being set by a name nobody chose.
+    checkEqual(
+      halFeaturesFor(
+        stubAdapter({}, [
+          'shader-f16',
+          'float32-filterable',
+          'float32-blendable',
+          'dual-source-blending',
+          'clip-distances',
+          'subgroups',
+          'texture-compression-etc2',
+          'texture-compression-astc',
+          'depth32float-stencil8',
+          'rg11b10ufloat-renderable',
+          'bgra8unorm-storage',
+          'core-features-and-limits',
+        ])
+      ),
+      CORE,
+      'a WebGPU feature with no seam flag is dropped rather than setting one'
+    );
+
+    // The limits, against the distinct stub. Written out rather than looped
+    // over the stub, so a mapping that read the wrong member has to disagree
+    // with a number here.
+    checkEqual(
+      halLimitsFor(stubAdapter({})),
+      {
+        maxImage2d: 101,
+        maxImage3d: 102,
+        maxImageArrayLayers: 103,
+        maxStorageBufferRange: 104n,
+        maxUniformBufferRange: 105n,
+        maxBindGroups: 106,
+        // No bindless model and no push constants in WGSL, so the `0` that
+        // `crcbl_hal::Limits` documents for each of their absences.
+        maxBindlessDescriptors: 0,
+        maxPushConstantSize: 0,
+        maxColorAttachments: 107,
+        // `sampleCount` is specified to be 1 or 4 and no limit reports it.
+        maxSampleCount: 4,
+        // Without a count buffer, one indirect call emits one draw.
+        maxDrawIndirectCount: 1,
+        maxComputeWorkgroupSize: [108, 109, 110],
+        maxComputeInvocationsPerWorkgroup: 111,
+        maxComputeWorkgroupsPerDimension: 112,
+        minUniformBufferOffsetAlignment: 113n,
+        minStorageBufferOffsetAlignment: 114n,
+        // A spec constant — `bytesPerRow` must be a multiple of 256 — and not a
+        // member of `GPUSupportedLimits` at all.
+        optimalBufferCopyOffsetAlignment: 256n,
+        // The floor, because WebGPU reports no anisotropy ceiling to promise.
+        maxSamplerAnisotropy: 1,
+        // No timestamp queries on this stub, so no tick period.
+        timestampPeriodNs: 0,
+      },
+      'every GPUSupportedLimits member lands in the seam field that names it'
+    );
+
+    checkEqual(
+      halLimitsFor(stubAdapter({}, ['timestamp-query'])).timestampPeriodNs,
+      1,
+      "a browser's timestamps are nanoseconds, so the period is 1 once they exist"
+    );
+
+    // **The fields WebGPU cannot supply.** Each is the value that means absent
+    // rather than one that looks real — a fabricated vendor id would be
+    // indistinguishable downstream from a true one.
+    const info = halAdapterInfoFor(
+      stubAdapter({ vendor: 'crcbl', architecture: 'stub-1', device: 'gpu' })
+    );
+    check(
+      info.vendorId === 0 &&
+        info.deviceId === 0 &&
+        info.deviceType === DEVICE_TYPE.OTHER &&
+        info.driver === '' &&
+        info.id === 0,
+      'the fields WebGPU has no answer for are the documented absences' +
+        ` (vendor ${info.vendorId}, device ${info.deviceId},` +
+        ` type ${info.deviceType}, driver ${JSON.stringify(info.driver)})`
+    );
+    check(
+      info.name === 'crcbl stub-1 gpu',
+      `the name is every GPUAdapterInfo string the browser filled (${JSON.stringify(info.name)})`
+    );
+
+    // A `GPUAdapter` whose limits are not numbers is a browser lying to us, and
+    // it has to be named rather than arriving as `BigInt(undefined)` from three
+    // frames away — or, worse, as a zero.
+    let thrown = null;
+    try {
+      halLimitsFor({ info: {}, features: new Set(), limits: {} });
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown instanceof TypeError &&
+        thrown.message.includes('maxStorageBufferBindingSize'),
+      `an adapter with no limits names the member it was missing (${String(thrown)})`
+    );
+  }
+
+  // ---- a reply that will not encode leaves no bytes behind ----------------
+  // The failure this guards is specific and silent: `#adapter` writes a record
+  // field by field, its caller catches a throw and answers `NoAdapter` instead,
+  // and without a rollback the buffer would hold half an adapter followed by a
+  // refusal. wasm refuses that whole frame's replies as undecodable, which
+  // strands every other answer in it.
+  {
+    const replies = new ReplyWriter();
+    replies.readbackPending(1n, handle(1, 1));
+    const good = replies.bytes.slice();
+    let thrown = null;
+    try {
+      // A record with a missing field, which `putAdapterInfo` refuses part-way
+      // through — after the tag and the sequence have been written.
+      replies.adapter(2n, {
+        id: 0,
+        name: 'half',
+        vendorId: 0,
+        deviceId: 0,
+        deviceType: DEVICE_TYPE.OTHER,
+        driver: '',
+        features: 0n,
+        limits: {},
+      });
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown !== null,
+      `the half-written reply was refused (${String(thrown)})`
+    );
+    checkEqual(
+      replies.bytes,
+      good,
+      'and the buffer is byte for byte what it was before the refused call'
+    );
+    // …and the writer still works afterwards, which is what the caller does
+    // next: it answers the same sequence with a refusal instead.
+    replies.noAdapter(2n, 'could not encode this adapter');
+    check(
+      replies.bytes.length > good.length,
+      'a reply written after a refused one still lands'
     );
   }
 

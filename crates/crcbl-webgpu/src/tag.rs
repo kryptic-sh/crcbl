@@ -23,7 +23,7 @@
 //! [`ShaderStages`](crcbl_hal::ShaderStages) declare each bit as an explicit
 //! `1 << n`, so `bits()` is already a chosen wire value rather than a position.
 
-use crcbl_hal::{LoadOp, MemoryLocation, StoreOp};
+use crcbl_hal::{DeviceType, LoadOp, MemoryLocation, StoreOp};
 
 // ── Header ────────────────────────────────────────────────────────────────────
 
@@ -54,7 +54,13 @@ pub const REPLY_MAGIC: &[u8; 8] = b"CRCBLRPL";
 /// Current reply format version. Versioned separately from
 /// [`STREAM_VERSION`]: the two formats change for different reasons, and a
 /// shared number would force one half to be re-blessed for the other's edit.
-pub const REPLY_VERSION: u16 = 1;
+///
+/// `2` since [`Reply::Adapter`](crate::Reply::Adapter) stopped being an id and a
+/// name and became the whole of [`AdapterInfo`](crcbl_hal::AdapterInfo). That is
+/// what the version word is *for*: the two halves ship as separate artifacts and
+/// are cached independently, so a page holding yesterday's JavaScript against
+/// today's wasm would otherwise read a name's length prefix as a vendor id.
+pub const REPLY_VERSION: u16 = 2;
 
 /// Bytes before the first reply: [`REPLY_MAGIC`] and [`REPLY_VERSION`].
 ///
@@ -370,6 +376,52 @@ pub const fn memory_location_from_code(code: u8) -> Option<MemoryLocation> {
     }
 }
 
+// ── DeviceType ────────────────────────────────────────────────────────────────
+//
+// Carried by [`Reply::Adapter`](crate::Reply::Adapter). **A browser never sends
+// anything but [`DEVICE_TYPE_OTHER`]** — WebGPU does not say whether an adapter
+// is discrete or integrated, and `crcbl-webgpu`'s replayer writes the value that
+// means "the backend declined to say" rather than guessing. The other four codes
+// exist because the field is a [`DeviceType`] and a wire form for it must be
+// total; see [`crate::reply`] for the whole list of fields the browser cannot
+// supply.
+
+/// [`DeviceType::Cpu`].
+pub const DEVICE_TYPE_CPU: u8 = 0x00;
+/// [`DeviceType::Integrated`].
+pub const DEVICE_TYPE_INTEGRATED: u8 = 0x01;
+/// [`DeviceType::Discrete`].
+pub const DEVICE_TYPE_DISCRETE: u8 = 0x02;
+/// [`DeviceType::Virtual`].
+pub const DEVICE_TYPE_VIRTUAL: u8 = 0x03;
+/// [`DeviceType::Other`] — and the only one a browser ever produces.
+pub const DEVICE_TYPE_OTHER: u8 = 0x04;
+
+/// The wire code for a [`DeviceType`].
+#[must_use]
+pub const fn device_type_code(kind: DeviceType) -> u8 {
+    match kind {
+        DeviceType::Cpu => DEVICE_TYPE_CPU,
+        DeviceType::Integrated => DEVICE_TYPE_INTEGRATED,
+        DeviceType::Discrete => DEVICE_TYPE_DISCRETE,
+        DeviceType::Virtual => DEVICE_TYPE_VIRTUAL,
+        DeviceType::Other => DEVICE_TYPE_OTHER,
+    }
+}
+
+/// The [`DeviceType`] a wire code names, or `None` if it names none.
+#[must_use]
+pub const fn device_type_from_code(code: u8) -> Option<DeviceType> {
+    match code {
+        DEVICE_TYPE_CPU => Some(DeviceType::Cpu),
+        DEVICE_TYPE_INTEGRATED => Some(DeviceType::Integrated),
+        DEVICE_TYPE_DISCRETE => Some(DeviceType::Discrete),
+        DEVICE_TYPE_VIRTUAL => Some(DeviceType::Virtual),
+        DEVICE_TYPE_OTHER => Some(DeviceType::Other),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -530,6 +582,23 @@ mod tests {
         for m in memory {
             assert_eq!(memory_location_from_code(memory_location_code(m)), Some(m));
         }
+
+        let device_type = [
+            DeviceType::Cpu,
+            DeviceType::Integrated,
+            DeviceType::Discrete,
+            DeviceType::Virtual,
+            DeviceType::Other,
+        ];
+        let codes: Vec<u8> = device_type.iter().map(|k| device_type_code(*k)).collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two DeviceTypes share a code"
+        );
+        for kind in device_type {
+            assert_eq!(device_type_from_code(device_type_code(kind)), Some(kind));
+        }
     }
 
     #[test]
@@ -537,6 +606,10 @@ mod tests {
         assert_eq!(load_op_from_code(0xFF), None);
         assert_eq!(store_op_from_code(0xFF), None);
         assert_eq!(memory_location_from_code(0xFF), None);
+        assert_eq!(device_type_from_code(0xFF), None);
+        // The one directly above the last claimed code, which is where an
+        // off-by-one in either table lands and where `0xFF` never would.
+        assert_eq!(device_type_from_code(DEVICE_TYPE_OTHER + 1), None);
     }
 
     fn distinct(codes: &[u8]) -> usize {
