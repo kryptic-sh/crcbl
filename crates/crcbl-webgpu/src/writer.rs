@@ -5,8 +5,8 @@ use core::ops::Range;
 use crcbl_hal::{
     BindGroupHandle, BufferDesc, BufferHandle, ClearValue, ColorAttachment, DepthStencilAttachment,
     DeviceDesc, Extent3d, GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceRange,
-    ImageViewDesc, ImageViewHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, ShaderStages,
-    SurfaceHandle,
+    ImageViewDesc, ImageViewHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, SamplerDesc,
+    SamplerHandle, ShaderStages, SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -256,6 +256,60 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::create_sampler`](crcbl_hal::Device::create_sampler), with the
+    /// handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason, and fields follow the descriptor's declaration order for
+    /// [`create_image`](Self::create_image)'s — which matters more here than
+    /// anywhere else on this stream, because three [`FilterMode`](crcbl_hal::FilterMode)
+    /// bytes and three [`SamplerAddressMode`](crcbl_hal::SamplerAddressMode)
+    /// bytes go over back to back and every one of the six is a value the other
+    /// five could hold.
+    ///
+    /// **Every float crosses as its bit pattern**, through
+    /// [`f32::to_le_bytes`], which is what [`ClearValue`] already does on this
+    /// stream and what [`Limits`](crcbl_hal::Limits) does on the reply one. Not
+    /// a decimal string and not a widening through `f64`: both are lossy in one
+    /// direction or the other, and a mip clamp that arrived a half-ulp off is a
+    /// sampler nobody can tell is wrong.
+    ///
+    /// **Nothing is resolved and nothing is validated.**
+    /// [`SamplerDesc::lod_max`](crcbl_hal::SamplerDesc::lod_max) is
+    /// [`f32::MAX`] by default and that is a *sentinel*, so it crosses as
+    /// itself — the rule `docs/plan/41-webgpu-stream.md` sets for
+    /// `WHOLE_BUFFER`. [`anisotropy`](crcbl_hal::SamplerDesc::anisotropy) is
+    /// whatever the caller passed, fractional values and values past the
+    /// device's cap included: WebGPU's `maxAnisotropy` is an integer and the
+    /// narrowing belongs to the half that faces WebGPU, exactly as the usage
+    /// words' does. See [`Command::CreateSampler`](crate::Command::CreateSampler).
+    pub fn create_sampler(&mut self, sampler: SamplerHandle, desc: &SamplerDesc<'_>) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_SAMPLER_TAG);
+        self.bytes.put_handle(sampler);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_u8(tag::filter_mode_code(desc.mag_filter));
+        self.bytes.put_u8(tag::filter_mode_code(desc.min_filter));
+        self.bytes.put_u8(tag::filter_mode_code(desc.mip_filter));
+        for mode in desc.address_mode {
+            self.bytes.put_u8(tag::sampler_address_mode_code(mode));
+        }
+        self.bytes.put_f32(desc.lod_min);
+        self.bytes.put_f32(desc.lod_max);
+        self.bytes.put_f32(desc.anisotropy);
+        // A presence byte, because `CompareOp` is not a handle and has no niche
+        // to spare — the house rule for every optional field that is not one.
+        // Folding it into the code table as a reserved "absent" byte would make
+        // a corrupt stream's `None` indistinguishable from a drifted table's.
+        match desc.compare {
+            None => self.bytes.put_u8(tag::ABSENT),
+            Some(op) => {
+                self.bytes.put_u8(tag::PRESENT);
+                self.bytes.put_u8(tag::compare_op_code(op));
+            }
+        }
+        sequence
+    }
+
     // ── Destruction ──────────────────────────────────────────────────────────
 
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
@@ -288,6 +342,17 @@ impl StreamWriter {
     pub fn destroy_image_view(&mut self, view: ImageViewHandle) -> u64 {
         let sequence = self.push_tag(tag::DESTROY_IMAGE_VIEW_TAG);
         self.bytes.put_handle(view);
+        sequence
+    }
+
+    /// [`Device::destroy_sampler`](crcbl_hal::Device::destroy_sampler).
+    ///
+    /// Its own opcode for [`destroy_image_view`](Self::destroy_image_view)'s
+    /// reason: the opcode is what says which table an id indexes, and a sampler
+    /// shares its eight bytes with every other kind quite legitimately.
+    pub fn destroy_sampler(&mut self, sampler: SamplerHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_SAMPLER_TAG);
+        self.bytes.put_handle(sampler);
         sequence
     }
 

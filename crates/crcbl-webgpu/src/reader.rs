@@ -18,9 +18,9 @@
 //! accepts is one the JS replayer can be held to.
 
 use crcbl_hal::{
-    AdapterId, BufferUsage, ClearValue, ColorAttachment, DepthStencilAttachment, Extent3d, Format,
-    ImageAspect, ImageSubresourceRange, ImageType, ImageUsage, ImageViewType, LoadOp, Rect2d,
-    ShaderStages, StoreOp,
+    AdapterId, BufferUsage, ClearValue, ColorAttachment, CompareOp, DepthStencilAttachment,
+    Extent3d, FilterMode, Format, ImageAspect, ImageSubresourceRange, ImageType, ImageUsage,
+    ImageViewType, LoadOp, Rect2d, SamplerAddressMode, ShaderStages, StoreOp,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -64,6 +64,48 @@ impl ByteReader<'_> {
             field,
             code: code.into(),
         })
+    }
+
+    fn read_filter_mode(&mut self, field: &'static str) -> Result<FilterMode, DecodeError> {
+        let code = self.read_u8()?;
+        tag::filter_mode_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    fn read_sampler_address_mode(
+        &mut self,
+        field: &'static str,
+    ) -> Result<SamplerAddressMode, DecodeError> {
+        let code = self.read_u8()?;
+        tag::sampler_address_mode_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    /// The presence byte, then the code if there is one.
+    ///
+    /// The first optional enum on this stream, and it is two reads rather than a
+    /// widened table: a byte that is neither presence value is refused by
+    /// [`read_present`](Self::read_present) naming the field, and a code no
+    /// variant claims is refused here naming the same one — two failures a
+    /// reserved "absent" code inside the table could not tell apart.
+    fn read_opt_compare_op(
+        &mut self,
+        field: &'static str,
+    ) -> Result<Option<CompareOp>, DecodeError> {
+        if !self.read_present(field)? {
+            return Ok(None);
+        }
+        let code = self.read_u8()?;
+        tag::compare_op_from_code(code)
+            .map(Some)
+            .ok_or(DecodeError::InvalidEnum {
+                field,
+                code: code.into(),
+            })
     }
 
     fn read_format(&mut self, field: &'static str) -> Result<Format, DecodeError> {
@@ -310,6 +352,39 @@ impl<'a> StreamReader<'a> {
                     range,
                 })
             }
+            tag::CREATE_SAMPLER_TAG => {
+                // Spelled out one field at a time rather than built inline, for
+                // `CreateImage`'s reason with six fields instead of two: three
+                // `FilterMode` bytes and three `SamplerAddressMode` bytes go
+                // over back to back, and any two of the six read in the wrong
+                // order still decodes to a sampler.
+                let sampler = r.read_handle("CreateSampler::sampler")?;
+                let label = r.read_opt_string("SamplerDesc::label")?;
+                let mag_filter = r.read_filter_mode("SamplerDesc::mag_filter")?;
+                let min_filter = r.read_filter_mode("SamplerDesc::min_filter")?;
+                let mip_filter = r.read_filter_mode("SamplerDesc::mip_filter")?;
+                let address_mode = [
+                    r.read_sampler_address_mode("SamplerDesc::address_mode")?,
+                    r.read_sampler_address_mode("SamplerDesc::address_mode")?,
+                    r.read_sampler_address_mode("SamplerDesc::address_mode")?,
+                ];
+                let lod_min = r.read_f32()?;
+                let lod_max = r.read_f32()?;
+                let anisotropy = r.read_f32()?;
+                let compare = r.read_opt_compare_op("SamplerDesc::compare")?;
+                Ok(Command::CreateSampler {
+                    sampler,
+                    label,
+                    mag_filter,
+                    min_filter,
+                    mip_filter,
+                    address_mode,
+                    lod_min,
+                    lod_max,
+                    anisotropy,
+                    compare,
+                })
+            }
             tag::DESTROY_BUFFER_TAG => Ok(Command::DestroyBuffer {
                 buffer: r.read_handle("DestroyBuffer::buffer")?,
             }),
@@ -321,6 +396,9 @@ impl<'a> StreamReader<'a> {
             }),
             tag::DESTROY_IMAGE_VIEW_TAG => Ok(Command::DestroyImageView {
                 view: r.read_handle("DestroyImageView::view")?,
+            }),
+            tag::DESTROY_SAMPLER_TAG => Ok(Command::DestroySampler {
+                sampler: r.read_handle("DestroySampler::sampler")?,
             }),
             tag::BEGIN_DEBUG_LABEL_TAG => Ok(Command::BeginDebugLabel {
                 label: r.read_string("BeginDebugLabel::label")?,

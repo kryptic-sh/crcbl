@@ -2203,7 +2203,14 @@ something trusted, and in a browser the only trusted renderer today is
      replayer as an **absent** descriptor member rather than a number: WebGPU's
      default for an absent `arrayLayerCount` is 6 on a cube view whatever the
      texture holds, so arithmetic gets mips right and layers wrong.
-   - 5c — samplers, then bind groups.
+   - ~~5c — samplers, on the wire and on the device.~~ — **shipped.** Group L
+     proves a real `GPUSampler` came back. `lod_max`'s `f32::MAX` is the first
+     sentinel on this seam whose resolution is **not** an absent member: an
+     absent `lodMaxClamp` means 32, so omitting it would swap "no limit" for a
+     clamp that nothing anywhere reports. `ClampToBorder` is refused rather than
+     folded into `clamp-to-edge`, which agrees everywhere except the edge texel
+     and would bleed an atlas's neighbour into every seam silently.
+   - 5d — bind groups, and the layouts they are built against.
 6. Pipelines and WGSL modules — the artifacts are already committed and already
    validated.
 7. Command encoding, render and compute passes.

@@ -18,10 +18,11 @@
 use core::ops::Range;
 
 use crcbl_hal::{
-    AdapterId, BindGroupHandle, BufferHandle, BufferUsage, ColorAttachment, DepthStencilAttachment,
-    Extent3d, Features, Format, GraphicsPipelineHandle, ImageHandle, ImageSubresourceRange,
-    ImageType, ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation, PipelineLayoutHandle,
-    Rect2d, ShaderStages, SurfaceHandle,
+    AdapterId, BindGroupHandle, BufferHandle, BufferUsage, ColorAttachment, CompareOp,
+    DepthStencilAttachment, Extent3d, Features, FilterMode, Format, GraphicsPipelineHandle,
+    ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType,
+    MemoryLocation, PipelineLayoutHandle, Rect2d, SamplerAddressMode, SamplerHandle, ShaderStages,
+    SurfaceHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -133,6 +134,64 @@ pub enum Command {
         /// the boundary does not have.
         range: ImageSubresourceRange,
     },
+    /// [`Device::create_sampler`](crcbl_hal::Device::create_sampler), with the
+    /// handle the caller allocated for it.
+    ///
+    /// The whole of [`SamplerDesc`](crcbl_hal::SamplerDesc), flattened as every
+    /// other descriptor here is. **The first command on this stream whose body
+    /// is mostly floats**, and the first carrying an optional *enum*; both are
+    /// spelled out below because each has a value that is easy to get wrong in a
+    /// way nothing downstream reports.
+    ///
+    /// **[`lod_max`](Self::CreateSampler::lod_max) crosses verbatim, sentinel
+    /// included.** [`SamplerDesc::default`](crcbl_hal::SamplerDesc) sets it to
+    /// [`f32::MAX`], meaning "no limit", and that is the sentinel rule
+    /// `docs/plan/41-webgpu-stream.md` states for `WHOLE_BUFFER` and
+    /// [`ImageSubresourceRange::ALL`]: a sentinel is a value the seam defines,
+    /// and an encoder that resolved one would be answering a question only the
+    /// replayer has the information to answer. Here the replayer's answer is
+    /// **not** an absent member — WebGPU's `lodMaxClamp` defaults to a *number*
+    /// rather than to "the rest", so omitting it would silently substitute that
+    /// number for the caller's "no limit". See `web/engine/gpu-replay.js`.
+    ///
+    /// **[`anisotropy`](Self::CreateSampler::anisotropy) crosses verbatim too**,
+    /// fractional and out-of-range values included, for
+    /// [`Command::CreateImage`]'s reason: every `f32` bit pattern is a value the
+    /// wire form claims, so a decoder that refused one would refuse a buffer
+    /// this crate's own writer produced. WebGPU's `maxAnisotropy` is an integer
+    /// and the narrowing is the replayer's.
+    CreateSampler {
+        /// Id the replayer stores the new object at.
+        sampler: SamplerHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Filter when magnifying.
+        mag_filter: FilterMode,
+        /// Filter when minifying.
+        min_filter: FilterMode,
+        /// Filter between mip levels. Third of three identically typed fields,
+        /// which is what makes the order worth pinning: two of them swapped
+        /// still decodes, and still builds a sampler.
+        mip_filter: FilterMode,
+        /// Addressing on U, V and W, in that order.
+        address_mode: [SamplerAddressMode; 3],
+        /// Lowest mip level sampled.
+        lod_min: f32,
+        /// Highest mip level sampled. [`f32::MAX`] is the "no limit" sentinel
+        /// and crosses as itself; see the variant docs.
+        lod_max: f32,
+        /// Anisotropy; `1.0` disables. Carried through whatever it is; see the
+        /// variant docs.
+        anisotropy: f32,
+        /// The comparison a hardware-PCF sampler performs, if it is one.
+        ///
+        /// **Reversed-Z decides which one.** With depth 1.0 at the near plane a
+        /// shadow test is [`CompareOp::Greater`], not `Less` —
+        /// [`SamplerDesc::compare`](crcbl_hal::SamplerDesc::compare) says so and
+        /// [`tag::compare_op_from_code`](crate::tag::compare_op_from_code) says
+        /// what folding the pair would cost.
+        compare: Option<CompareOp>,
+    },
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
     ///
     /// A destroy naming an id whose slot holds nothing is a **no-op for the
@@ -166,6 +225,14 @@ pub enum Command {
     DestroyImageView {
         /// Id to release.
         view: ImageViewHandle,
+    },
+    /// [`Device::destroy_sampler`](crcbl_hal::Device::destroy_sampler).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is.
+    DestroySampler {
+        /// Id to release.
+        sampler: SamplerHandle,
     },
     /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
     BeginDebugLabel {
@@ -287,10 +354,12 @@ impl Command {
             Self::CreateSurface { .. } => "CreateSurface",
             Self::CreateImage { .. } => "CreateImage",
             Self::CreateImageView { .. } => "CreateImageView",
+            Self::CreateSampler { .. } => "CreateSampler",
             Self::DestroyBuffer { .. } => "DestroyBuffer",
             Self::DestroySurface { .. } => "DestroySurface",
             Self::DestroyImage { .. } => "DestroyImage",
             Self::DestroyImageView { .. } => "DestroyImageView",
+            Self::DestroySampler { .. } => "DestroySampler",
             Self::BeginDebugLabel { .. } => "BeginDebugLabel",
             Self::BeginRenderPass { .. } => "BeginRenderPass",
             Self::BindGraphicsPipeline { .. } => "BindGraphicsPipeline",

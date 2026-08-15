@@ -419,6 +419,26 @@ if [ -z "$IMAGE_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the sampler, which is group L and is its own thing for a
+# reason none of the above share: it is the only resource this seam makes whose
+# object reports **nothing** about the descriptor it was made from. A
+# `GPUSampler` has a label and no other readable member, so there is no size or
+# extent to compare and the browser's only way to disagree is the device's error
+# queue. That is what this group reads, and what it is reading for is the
+# `lod_max` sentinel: `f32::MAX` crosses the wire verbatim and has to reach
+# WebGPU as an explicit `lodMaxClamp`, because omitting the member — which is how
+# the image view's range sentinel is spelled — substitutes WebGPU's own default
+# and silently changes which mips every sampler can reach. The node suite proves
+# the descriptor against a stub whose `createSampler` returns a plain object, so
+# only this asks a real device to accept it. Its absence means that stopped
+# happening rather than that this demo has no device.
+SAMPLER_TRIP="$(grep -F 'a real GPUSampler came back from the device with the no-limit lod clamp accepted' "${OUTPUT}.plain" || true)"
+if [ -z "$SAMPLER_TRIP" ]; then
+    echo "crcbl web e2e: the driver never created a sampler on a real device;" >&2
+    echo "               crcbl-webgpu's CreateSampler is ungated in a real browser" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

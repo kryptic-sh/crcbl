@@ -74,10 +74,12 @@ const CREATE_BUFFER_TAG = 0x00;
 const CREATE_SURFACE_TAG = 0x01;
 const CREATE_IMAGE_TAG = 0x02;
 const CREATE_IMAGE_VIEW_TAG = 0x03;
+const CREATE_SAMPLER_TAG = 0x04;
 const DESTROY_BUFFER_TAG = 0x20;
 const DESTROY_SURFACE_TAG = 0x21;
 const DESTROY_IMAGE_TAG = 0x22;
 const DESTROY_IMAGE_VIEW_TAG = 0x23;
+const DESTROY_SAMPLER_TAG = 0x24;
 const BEGIN_DEBUG_LABEL_TAG = 0x40;
 const BEGIN_RENDER_PASS_TAG = 0x41;
 const BIND_GRAPHICS_PIPELINE_TAG = 0x42;
@@ -134,6 +136,62 @@ const IMAGE_TYPE = ['D1', 'D2', 'D3'];
  * six faces become six unrelated slices.
  */
 const IMAGE_VIEW_TYPE = ['D1', 'D2', 'D2Array', 'Cube', 'CubeArray', 'D3'];
+
+/**
+ * `tag::FILTER_MODE_*`.
+ *
+ * Two rows, and read **three times per sampler** — `magFilter`, `minFilter` and
+ * `mipFilter` are three of these bytes back to back. That is what makes so small
+ * a table worth writing out rather than reading as a boolean: with two variants
+ * there is no unclaimed code to land on, so a byte read out of position decodes
+ * to a filter rather than to an error, and a sampler that filters correctly when
+ * magnifying and not when minifying looks like a texture that is merely soft.
+ */
+const FILTER_MODE = ['Nearest', 'Linear'];
+
+/**
+ * `tag::SAMPLER_ADDRESS_*`.
+ *
+ * {@link FILTER_MODE}'s hazard with four rows: `addressMode` is three of these
+ * bytes in a row, for U, V and W.
+ *
+ * `ClampToEdge` and `ClampToBorder` are the pair a gap would cost the most,
+ * because they agree everywhere but the edge texel — one repeats it outwards and
+ * the other fetches transparent black, so the wrong one of the two bleeds an
+ * atlas's neighbour into every seam with nothing anywhere reporting an error.
+ * They also part company at the backend: WebGPU has no border colour at all, so
+ * `gpu-replay.js` refuses one of them and not the other.
+ */
+const SAMPLER_ADDRESS_MODE = [
+  'Repeat',
+  'MirrorRepeat',
+  'ClampToEdge',
+  'ClampToBorder',
+];
+
+/**
+ * `tag::COMPARE_OP_*` — what a hardware-PCF sampler compares with.
+ *
+ * `Greater` and `Less` are the row pair that must never fold. `crcbl_hal`'s
+ * `CompareOp` names the comparison performed rather than what it means for
+ * visibility, and under this engine's reversed-Z it is `Greater` that asks "is
+ * the fragment closer than the stored caster?" — so a shadow sampler that got
+ * `Less` instead lights exactly the surfaces that should be in shadow and
+ * shadows the rest, every frame, with no error anywhere. A `GPUSampler` reports
+ * nothing about the comparison it was built with either, so this table answering
+ * `undefined` for a code it does not claim is the only place the difference is
+ * visible.
+ */
+const COMPARE_OP = [
+  'Never',
+  'Less',
+  'Equal',
+  'LessOrEqual',
+  'Greater',
+  'NotEqual',
+  'GreaterOrEqual',
+  'Always',
+];
 
 /**
  * `tag::FORMAT_*`, code-indexed — the inverse of the table `gpu-reply.js`
@@ -490,6 +548,25 @@ class ByteReader {
   }
 
   /**
+   * A presence byte, then an enum code if there is one.
+   *
+   * The optional-field rule applied to an enum rather than to a string: a
+   * presence byte, because nothing but a handle has a niche to spare. It is two
+   * reads rather than a table with a reserved "absent" row for a reason a
+   * one-variant table would hide — `CompareOp::Never` is code `0`, so a reserved
+   * absent row would put "no comparison at all" and "a comparison that always
+   * fails" one byte apart, and a shadow sampler built with the second returns
+   * zero everywhere.
+   *
+   * @param {string} field
+   * @param {readonly string[]} table
+   * @returns {string | null}
+   */
+  readOptEnum(field, table) {
+    return this.readPresent(field) ? this.readEnum(field, table) : null;
+  }
+
+  /**
    * A bitflags value, as the names of the bits it sets in ascending bit order.
    *
    * Strict, like `from_bits` and unlike `from_bits_truncate`: a bit no flag
@@ -814,6 +891,46 @@ function decodeCommand(r) {
         range: r.readSubresourceRange(),
       };
     }
+    case CREATE_SAMPLER_TAG: {
+      // Spelled out one field at a time, for `CreateImage`'s reason with six
+      // fields instead of two: three `FilterMode` bytes and three
+      // `SamplerAddressMode` bytes go over back to back, and any two of the six
+      // read in the wrong order still decodes to a sampler.
+      //
+      // The three floats cross verbatim, SENTINEL INCLUDED. `lodMax` is
+      // `f32::MAX` for a `SamplerDesc::default`, meaning "no limit", and
+      // resolving it is the replayer's job — `gpu-replay.js` argues what it
+      // resolves to, and it is not an absent member. `anisotropy` is whatever
+      // the caller passed, fractional values and values past the device's cap
+      // included, because every `f32` bit pattern is a value the wire form
+      // claims.
+      const sampler = r.readHandle('CreateSampler::sampler');
+      const label = r.readOptString('SamplerDesc::label');
+      const magFilter = r.readEnum('SamplerDesc::mag_filter', FILTER_MODE);
+      const minFilter = r.readEnum('SamplerDesc::min_filter', FILTER_MODE);
+      const mipFilter = r.readEnum('SamplerDesc::mip_filter', FILTER_MODE);
+      const addressMode = [
+        r.readEnum('SamplerDesc::address_mode', SAMPLER_ADDRESS_MODE),
+        r.readEnum('SamplerDesc::address_mode', SAMPLER_ADDRESS_MODE),
+        r.readEnum('SamplerDesc::address_mode', SAMPLER_ADDRESS_MODE),
+      ];
+      const lodMin = r.readF32();
+      const lodMax = r.readF32();
+      const anisotropy = r.readF32();
+      return {
+        name: 'CreateSampler',
+        sampler,
+        label,
+        magFilter,
+        minFilter,
+        mipFilter,
+        addressMode,
+        lodMin,
+        lodMax,
+        anisotropy,
+        compare: r.readOptEnum('SamplerDesc::compare', COMPARE_OP),
+      };
+    }
     case DESTROY_BUFFER_TAG:
       return {
         name: 'DestroyBuffer',
@@ -836,6 +953,14 @@ function decodeCommand(r) {
       return {
         name: 'DestroyImageView',
         view: r.readHandle('DestroyImageView::view'),
+      };
+    case DESTROY_SAMPLER_TAG:
+      // Its own tag again, and its own table on the far side: a sampler's id
+      // and an image's are allowed to be the same eight bytes, and the probe's
+      // deliberately are.
+      return {
+        name: 'DestroySampler',
+        sampler: r.readHandle('DestroySampler::sampler'),
       };
     case BEGIN_DEBUG_LABEL_TAG:
       return {

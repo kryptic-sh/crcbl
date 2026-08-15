@@ -9,9 +9,9 @@
 mod corpus;
 
 use crcbl_hal::{
-    AdapterId, BufferDesc, BufferUsage, DeviceDesc, Extent3d, Features, Format, ImageAspect,
-    ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType,
-    MemoryLocation, ShaderStages,
+    AdapterId, BufferDesc, BufferUsage, CompareOp, DeviceDesc, Extent3d, Features, FilterMode,
+    Format, ImageAspect, ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
+    ImageViewType, MemoryLocation, SamplerAddressMode, SamplerDesc, ShaderStages,
 };
 use crcbl_webgpu::{Command, DecodeError, StreamReader, StreamWriter, decode_stream, tag};
 
@@ -289,6 +289,340 @@ fn an_image_view_carries_two_handles_that_are_not_interchangeable() {
         image.to_bits(),
         "the test would not notice the two handles swapped otherwise"
     );
+}
+
+/// A sampler with no label, so every field below sits at a fixed offset. The
+/// values differ from each other in every position a neighbour could be read
+/// from; the tests that use it say which pair each one pins.
+fn probe_sampler() -> SamplerDesc<'static> {
+    SamplerDesc {
+        label: None,
+        mag_filter: FilterMode::Linear,
+        min_filter: FilterMode::Nearest,
+        mip_filter: FilterMode::Nearest,
+        address_mode: [
+            SamplerAddressMode::Repeat,
+            SamplerAddressMode::MirrorRepeat,
+            SamplerAddressMode::ClampToBorder,
+        ],
+        lod_min: 0.5,
+        lod_max: 12.25,
+        anisotropy: 4.5,
+        compare: Some(CompareOp::Greater),
+    }
+}
+
+/// Where each field of an unlabelled `create_sampler` body starts: the tag, the
+/// handle and the absent label's presence byte come first.
+const SAMPLER_MAG_AT: usize = tag::HEADER_BYTES + 1 + 8 + 1;
+/// The first of the three address bytes, behind the three filter bytes.
+const SAMPLER_ADDRESS_AT: usize = SAMPLER_MAG_AT + 3;
+/// `lod_min`, behind the three address bytes.
+const SAMPLER_LOD_MIN_AT: usize = SAMPLER_ADDRESS_AT + 3;
+/// `compare`'s presence byte, behind the three floats.
+const SAMPLER_COMPARE_AT: usize = SAMPLER_LOD_MIN_AT + 4 + 4 + 4;
+
+/// **A sampler's nine descriptor fields all cross, in the descriptor's order**,
+/// and this is the command where that claim is worth the most: `mag`, `min` and
+/// `mip` are three identically typed bytes in a row and `address_mode` is three
+/// more, so six of the nine fields are a byte each and could hold each other's
+/// values.
+///
+/// The round trip over the corpus says the whole set survives; what this says is
+/// that no two of them can be swapped without the decode changing. The
+/// assertions at the end are what state that out loud rather than leaving it to
+/// a reader to notice — with only two `FilterMode` variants the trio cannot be
+/// all-distinct, so what is pinned is that `mag` differs from both of the
+/// others, and the corpus carries the two commands that pin `min` against `mip`.
+#[test]
+fn a_sampler_carries_every_field_of_its_descriptor_in_the_descriptors_order() {
+    let sampler = handle(5, 6);
+    let desc = probe_sampler();
+    let mut stream = StreamWriter::new();
+    stream.create_sampler(sampler, &desc);
+    stream.destroy_sampler(handle(7, 8));
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![
+            Command::CreateSampler {
+                sampler,
+                label: None,
+                mag_filter: desc.mag_filter,
+                min_filter: desc.min_filter,
+                mip_filter: desc.mip_filter,
+                address_mode: desc.address_mode,
+                lod_min: desc.lod_min,
+                lod_max: desc.lod_max,
+                anisotropy: desc.anisotropy,
+                compare: desc.compare,
+            },
+            Command::DestroySampler {
+                sampler: handle(7, 8)
+            },
+        ])
+    );
+
+    assert_ne!(
+        desc.mag_filter, desc.min_filter,
+        "the test would not notice mag and min swapped otherwise"
+    );
+    assert_ne!(
+        desc.mag_filter, desc.mip_filter,
+        "the test would not notice mag and mip swapped otherwise"
+    );
+    let [u, v, w] = desc.address_mode;
+    assert!(
+        u != v && v != w && u != w,
+        "two of U, V and W are equal, so the test would not notice them swapped"
+    );
+    let mut floats = vec![
+        desc.lod_min.to_bits(),
+        desc.lod_max.to_bits(),
+        desc.anisotropy.to_bits(),
+    ];
+    floats.sort_unstable();
+    floats.dedup();
+    assert_eq!(
+        floats.len(),
+        3,
+        "two of the sampler's floats are equal, so the test would not notice them swapped"
+    );
+}
+
+/// **The floats survive bit for bit, and one of them is not a short decimal.**
+///
+/// `0.1` is not representable in binary at all: the nearest `f32` is
+/// `0.100000001490116119384765625`, so an encoding that went through a decimal
+/// string — or that widened to `f64` and narrowed back through a different
+/// rounding — lands on a neighbouring value. Comparing with `==` would not see
+/// every such slip, because two `f32`s that differ in the last bit still compare
+/// unequal but a `f64` round trip can land back on the same `f32`; comparing
+/// `to_bits` is what makes this about the bytes.
+#[test]
+fn a_samplers_floats_survive_bit_for_bit_including_one_no_short_decimal_names() {
+    let desc = SamplerDesc {
+        lod_min: 0.1,
+        lod_max: 1.0 / 3.0,
+        anisotropy: core::f32::consts::PI,
+        ..probe_sampler()
+    };
+    let mut stream = StreamWriter::new();
+    stream.create_sampler(handle(1, 1), &desc);
+
+    match &decode_stream(stream.bytes()).expect("a stream this crate wrote decodes")[0] {
+        Command::CreateSampler {
+            lod_min,
+            lod_max,
+            anisotropy,
+            ..
+        } => {
+            assert_eq!(lod_min.to_bits(), desc.lod_min.to_bits());
+            assert_eq!(lod_max.to_bits(), desc.lod_max.to_bits());
+            assert_eq!(anisotropy.to_bits(), desc.anisotropy.to_bits());
+        }
+        other => panic!("expected CreateSampler, got {}", other.name()),
+    }
+
+    // …and the bytes are the little-endian bit pattern, which is the house rule
+    // the header of `crate::tag` states and the thing a decimal encoding would
+    // fail even though it round-tripped through this crate's own reader.
+    let bytes = stream.bytes();
+    assert_eq!(
+        &bytes[SAMPLER_LOD_MIN_AT..SAMPLER_LOD_MIN_AT + 4],
+        &desc.lod_min.to_le_bytes(),
+    );
+    assert_ne!(
+        f64::from(desc.lod_min).to_bits(),
+        0.1_f64.to_bits(),
+        "the value under test has to be one no short decimal names, or an \
+         encoding that went through one would pass this test"
+    );
+}
+
+/// **`lod_max`'s `f32::MAX` crosses as itself and is not resolved here.**
+///
+/// It is [`SamplerDesc::default`]'s "no limit", and the sentinel rule in
+/// `docs/plan/41-webgpu-stream.md` is that a sentinel is a value the seam
+/// defines and that an encoder resolving one is answering a question only the
+/// replayer has the information to answer. So this asserts the four bytes on the
+/// wire rather than the decoded value alone: a writer that turned the sentinel
+/// into WebGPU's own `lodMaxClamp` default — a *number*, not "the rest" —
+/// would still round-trip through this crate's reader and would silently change
+/// which mips every sampler in the engine can reach.
+#[test]
+fn the_no_limit_sentinel_in_lod_max_crosses_as_itself_rather_than_being_resolved() {
+    let desc = SamplerDesc {
+        lod_max: f32::MAX,
+        ..probe_sampler()
+    };
+    assert_eq!(
+        desc.lod_max.to_bits(),
+        SamplerDesc::default().lod_max.to_bits(),
+        "the sentinel under test is the one the seam's own default carries"
+    );
+
+    let mut stream = StreamWriter::new();
+    stream.create_sampler(handle(1, 1), &desc);
+
+    let at = SAMPLER_LOD_MIN_AT + 4;
+    assert_eq!(
+        &stream.bytes()[at..at + 4],
+        &f32::MAX.to_le_bytes(),
+        "the encoder resolved the sentinel instead of carrying it"
+    );
+    match &decode_stream(stream.bytes()).expect("a stream this crate wrote decodes")[0] {
+        Command::CreateSampler { lod_max, .. } => {
+            assert_eq!(lod_max.to_bits(), f32::MAX.to_bits());
+        }
+        other => panic!("expected CreateSampler, got {}", other.name()),
+    }
+}
+
+/// **An absent comparison is not a present one**, which is the optional-field
+/// rule for the first optional *enum* on this stream.
+///
+/// `CompareOp::Never` is the trap: it is the code `0x00`, so a decoder that read
+/// the presence byte as the code — or an encoder that spent a reserved code on
+/// "absent" instead of a byte — would turn "no comparison" into "a comparison
+/// that always fails", which is a shadow sampler that returns zero everywhere.
+#[test]
+fn an_absent_comparison_is_distinguishable_from_a_present_one() {
+    let mut absent = StreamWriter::new();
+    absent.create_sampler(
+        handle(1, 1),
+        &SamplerDesc {
+            compare: None,
+            ..probe_sampler()
+        },
+    );
+    let mut never = StreamWriter::new();
+    never.create_sampler(
+        handle(1, 1),
+        &SamplerDesc {
+            compare: Some(CompareOp::Never),
+            ..probe_sampler()
+        },
+    );
+    assert_ne!(absent.bytes(), never.bytes());
+
+    let absent = decode_stream(absent.bytes()).expect("a stream this crate wrote decodes");
+    let never = decode_stream(never.bytes()).expect("a stream this crate wrote decodes");
+    match (&absent[0], &never[0]) {
+        (
+            Command::CreateSampler {
+                compare: absent, ..
+            },
+            Command::CreateSampler { compare: never, .. },
+        ) => {
+            assert_eq!(*absent, None);
+            assert_eq!(*never, Some(CompareOp::Never));
+        }
+        _ => panic!("expected two CreateSamplers"),
+    }
+
+    // The absent one is a byte shorter, which is what says the code is not
+    // written when there is nothing to write.
+    let mut short = StreamWriter::new();
+    short.create_sampler(
+        handle(1, 1),
+        &SamplerDesc {
+            compare: None,
+            ..probe_sampler()
+        },
+    );
+    assert_eq!(short.bytes().len(), SAMPLER_COMPARE_AT + 1);
+}
+
+/// A filter, address or comparison code no variant claims is an error rather
+/// than the neighbour one byte away — the rule `tag::filter_mode_from_code`,
+/// `tag::sampler_address_mode_from_code` and `tag::compare_op_from_code` state,
+/// seen through a whole command.
+#[test]
+fn a_sampler_code_no_variant_claims_is_refused_rather_than_folded_into_a_neighbour() {
+    let mut stream = StreamWriter::new();
+    stream.create_sampler(handle(1, 1), &probe_sampler());
+    let whole = stream.bytes().to_vec();
+
+    for (at, field) in [
+        (SAMPLER_MAG_AT, "SamplerDesc::mag_filter"),
+        (SAMPLER_MAG_AT + 1, "SamplerDesc::min_filter"),
+        (SAMPLER_MAG_AT + 2, "SamplerDesc::mip_filter"),
+    ] {
+        let mut bytes = whole.clone();
+        bytes[at] = 0x7F;
+        assert_eq!(
+            decode_stream(&bytes),
+            Err(DecodeError::InvalidEnum { field, code: 0x7F }),
+        );
+    }
+
+    // All three address bytes are one field, so all three name it — what the
+    // sweep pins is that each is read rather than one being read three times.
+    for offset in 0..3 {
+        let mut bytes = whole.clone();
+        bytes[SAMPLER_ADDRESS_AT + offset] = 0x7F;
+        assert_eq!(
+            decode_stream(&bytes),
+            Err(DecodeError::InvalidEnum {
+                field: "SamplerDesc::address_mode",
+                code: 0x7F,
+            }),
+            "address byte {offset} is not read"
+        );
+    }
+
+    // The presence byte and the code behind it are separate refusals, and both
+    // name the field: a byte that is neither presence value is not a comparison
+    // this build has never heard of.
+    let mut bytes = whole.clone();
+    bytes[SAMPLER_COMPARE_AT] = 2;
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "SamplerDesc::compare",
+            code: 2,
+        })
+    );
+    let mut bytes = whole.clone();
+    bytes[SAMPLER_COMPARE_AT + 1] = 0x7F;
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "SamplerDesc::compare",
+            code: 0x7F,
+        })
+    );
+
+    // …and the code one past the last claimed one, which is where an off-by-one
+    // in either table lands and where `0x7F` never would.
+    let mut bytes = whole.clone();
+    bytes[SAMPLER_MAG_AT] = tag::FILTER_MODE_LINEAR + 1;
+    assert!(matches!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "SamplerDesc::mag_filter",
+            ..
+        })
+    ));
+    let mut bytes = whole.clone();
+    bytes[SAMPLER_ADDRESS_AT] = tag::SAMPLER_ADDRESS_CLAMP_TO_BORDER + 1;
+    assert!(matches!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "SamplerDesc::address_mode",
+            ..
+        })
+    ));
+    let mut bytes = whole;
+    bytes[SAMPLER_COMPARE_AT + 1] = tag::COMPARE_OP_ALWAYS + 1;
+    assert!(matches!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "SamplerDesc::compare",
+            ..
+        })
+    ));
 }
 
 /// **Zero `mip_levels` and zero `samples` cross rather than being refused**, and
@@ -577,10 +911,10 @@ fn every_command_has_its_own_name() {
     names.sort_unstable();
     names.dedup();
     // `every_command` holds three CreateBuffers, three CreateImages, six
-    // CreateImageViews and two each of BeginRenderPass, BindGroup and
-    // RequestDevice, so the distinct-name count is what the writer has methods
-    // for.
-    assert_eq!(names.len(), 17);
+    // CreateImageViews, four CreateSamplers and two each of BeginRenderPass,
+    // BindGroup and RequestDevice, so the distinct-name count is what the writer
+    // has methods for.
+    assert_eq!(names.len(), 19);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

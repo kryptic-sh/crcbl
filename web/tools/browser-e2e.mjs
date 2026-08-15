@@ -602,6 +602,19 @@ const PROBE_IMAGE_LABEL = 'crcbl-webgpu probe image';
 const PROBE_VIEW_LABEL = 'crcbl-webgpu probe view';
 
 /**
+ * The label `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_SAMPLER_DESC` sets, and
+ * **the only member of the sampler a browser reports at all**.
+ *
+ * There is no `PROBE_SAMPLER_*` number beside it, unlike the buffer's size and
+ * the image's extent, and that is the object rather than an omission: a
+ * `GPUSampler` has no readable filters, address modes or clamps, so there is
+ * nothing a page could pass in and read back. What group L has instead is the
+ * class of what came back and the silence of the device's error queue — see the
+ * group's own comment.
+ */
+const PROBE_SAMPLER_LABEL = 'crcbl-webgpu probe sampler';
+
+/**
  * How far above its starting height a flappy bird has to climb before the taps
  * are the only thing that can have put it there, in the units its HUD prints.
  *
@@ -3562,6 +3575,121 @@ try {
         ? `an instance of this browser's GPUTextureView labelled ${JSON.stringify(imageProbe.viewLabel)}, of ${imageProbe.heldViews} held, and the device reported nothing`
         : `instanceof GPUTextureView: ${imageProbe?.isRealView}, label ${JSON.stringify(imageProbe?.viewLabel)}` +
           `${deviceReport.error ? ` — ${deviceReport.error}` : ''}`
+  );
+
+  // **THE ONLY GATE ON A SAMPLER, AND THE ONE WHERE THE OBJECT SAYS LEAST.**
+  // Group J watches this seam make something the browser then describes back —
+  // a `GPUBuffer` reports its size, usage and label — and group K watches it
+  // make something that describes back nine members. A `GPUSampler` reports its
+  // `label` and nothing else: no filters, no address modes, no clamps. So there
+  // is no "pass a number in and read it back" check available here, and the two
+  // things that are:
+  //
+  //   * the class of what came back, which `instanceof GPUSampler` settles and
+  //     no stub can satisfy — node has no such binding at all; and
+  //   * the device's error queue being empty afterwards, which is the only thing
+  //     anywhere that can say `createSampler` *accepted* the descriptor this
+  //     seam built.
+  //
+  // That second one is what this group exists for, because the descriptor
+  // carries `lod_max: f32::MAX` — `SamplerDesc::default`'s "no limit" sentinel.
+  // It crosses the wire verbatim, and the replayer has to hand WebGPU an
+  // explicit `lodMaxClamp` holding it: omitting the member, which is how the
+  // *view's* range sentinel is spelled one group earlier, would substitute
+  // WebGPU's own default — a number rather than "the rest" — and nothing
+  // downstream reports a mip clamp. `gpu-replay.mjs` proves the descriptor this
+  // seam builds against a stub; only a real `createSampler` can say the browser
+  // takes it.
+  group('L — a sampler is created on the real device');
+
+  const samplerStart = await evaluate(
+    page,
+    `(async () => {
+       const { startSamplerProbe } = await import('/engine/gpu-probe.js');
+       const { exports, gpu } = globalThis.crcbl;
+       const before = gpu.stats();
+       return {
+         started: startSamplerProbe({ exports }),
+         replayed: before.replayed,
+       };
+     })()`
+  );
+  const samplerProbe = samplerStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(() => {
+             const { gpu } = globalThis.crcbl;
+             const stats = gpu.stats();
+             if (stats.replayed <= ${samplerStart.replayed} && !stats.failure) {
+               return null;
+             }
+             const entries = [...gpu.replayer.samplers.entries()];
+             const last = entries[entries.length - 1];
+             const sampler = last ? last[1] : undefined;
+             return {
+               commands: stats.commands,
+               failure: stats.failure,
+               handle: last ? last[0] : null,
+               held: entries.length,
+               // The browser's own class, as groups H, J and K ask. Node has no
+               // \`GPUSampler\` binding at all, so this is what a silent fall
+               // back to a stub cannot survive.
+               isRealSampler:
+                 typeof GPUSampler === 'function' &&
+                 sampler instanceof GPUSampler,
+               // Every other member of a \`GPUSampler\` is absent by design, so
+               // this is the whole of what the object can be asked.
+               label: sampler?.label,
+             };
+           })()`
+        )
+      )
+    : null;
+
+  // Read a moment after the replay rather than during it, for the reason group K
+  // spells out: WebGPU raises a validation error "in a future task", so a queue
+  // read in the evaluation that saw the replay finish is empty whatever
+  // happened — a check that cannot fail. Two animation frames is the same
+  // bounded wait for the same absence, and the failure it guards here is the one
+  // this group exists for: `lod_max`'s sentinel reaching the browser as
+  // something `createSampler` refuses.
+  const samplerReport = samplerProbe
+    ? await evaluate(
+        page,
+        `(async () => {
+           await new Promise((settle) =>
+             requestAnimationFrame(() => requestAnimationFrame(settle))
+           );
+           return { waited: true, error: globalThis.crcbl.gpu.replayer.takeError() };
+         })()`
+      )
+    : null;
+  check(
+    'L',
+    'wasm encoded a sampler creation and the demo loop replayed it',
+    samplerProbe?.commands?.join(',') === 'CreateSampler' &&
+      Number.isInteger(samplerProbe.handle),
+    samplerProbe
+      ? `the loop replayed [${samplerProbe.commands.join(', ')}] for sampler ${samplerProbe.handle}` +
+          `${samplerProbe.failure ? ` — ${samplerProbe.failure}` : ''}`
+      : samplerStart?.started
+        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'L',
+    'a real GPUSampler came back from the device with the no-limit lod clamp accepted',
+    samplerProbe?.isRealSampler === true &&
+      samplerProbe?.label === PROBE_SAMPLER_LABEL &&
+      samplerReport?.waited === true &&
+      samplerReport?.error === null,
+    samplerReport?.waited !== true
+      ? 'the page never got as far as reading the device error queue'
+      : samplerProbe?.isRealSampler && samplerReport.error === null
+        ? `an instance of this browser's GPUSampler labelled ${JSON.stringify(samplerProbe.label)}, of ${samplerProbe.held} held, and the device reported nothing`
+        : `instanceof GPUSampler: ${samplerProbe?.isRealSampler}, label ${JSON.stringify(samplerProbe?.label)}` +
+          `${samplerReport.error ? ` — ${samplerReport.error}` : ''}`
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and

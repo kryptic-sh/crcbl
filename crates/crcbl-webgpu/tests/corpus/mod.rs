@@ -12,10 +12,11 @@
 
 use crcbl_core::Handle;
 use crcbl_hal::{
-    AdapterId, BufferDesc, BufferUsage, ClearValue, ColorAttachment, DepthStencilAttachment,
-    DeviceDesc, Extent3d, Features, Format, ImageAspect, ImageDesc, ImageSubresourceRange,
-    ImageType, ImageUsage, ImageViewDesc, ImageViewType, LoadOp, MemoryLocation, Rect2d,
-    RenderPassDesc, ShaderStages, StoreOp, depth,
+    AdapterId, BufferDesc, BufferUsage, ClearValue, ColorAttachment, CompareOp,
+    DepthStencilAttachment, DeviceDesc, Extent3d, Features, FilterMode, Format, ImageAspect,
+    ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, LoadOp,
+    MemoryLocation, Rect2d, RenderPassDesc, SamplerAddressMode, SamplerDesc, ShaderStages, StoreOp,
+    depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -222,6 +223,104 @@ pub fn every_command() -> Vec<Command> {
                 layer_count: 22,
             },
         },
+        // **Four samplers, because three fields of one kind sit in a row twice.**
+        // `mag`/`min`/`mip` are three `FilterMode`s back to back and there are
+        // only two variants, so no single command can make all three distinct —
+        // the first three below each put the single `Linear` in a different
+        // slot instead, and every pairwise transposition of the trio changes at
+        // least one of them. `address_mode` needs no such trick: each command
+        // spells three *different* modes, in a different rotation each time.
+        //
+        // The floats are all distinct within a command and across the four, and
+        // one of them is deliberately not a short decimal — see `lod_min` below.
+        //
+        // **Every `SamplerAddressMode` appears**, for the reason every
+        // `ImageType` does: the code table in `web/engine/gpu-stream.js` is a
+        // hand-written list and a row the fixture never carries is a row nothing
+        // checks. `ClampToBorder` is also the one WebGPU cannot express, so it
+        // is what the replayer's refusal is driven through.
+        Command::CreateSampler {
+            sampler: handle(83, 84),
+            label: Some("shadow pcf".into()),
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Nearest,
+            mip_filter: FilterMode::Nearest,
+            address_mode: [
+                SamplerAddressMode::Repeat,
+                SamplerAddressMode::MirrorRepeat,
+                SamplerAddressMode::ClampToEdge,
+            ],
+            lod_min: 0.5,
+            // **The sentinel**, on the one sampler here a browser can actually
+            // build: `f32::MAX` is `SamplerDesc::default`'s "no limit" and
+            // crosses verbatim, and only the replayer can resolve it. Putting
+            // it on a sampler the replayer refuses for some other reason would
+            // leave the resolution unobserved.
+            lod_max: f32::MAX,
+            anisotropy: 1.0,
+            // The reversed-Z shadow test. Its opposite is three commands down,
+            // so a table that folded the pair cannot stay green.
+            compare: Some(CompareOp::Greater),
+        },
+        // The unlabelled twin, with the awkward decimal and no comparison.
+        Command::CreateSampler {
+            sampler: handle(85, 86),
+            label: None,
+            mag_filter: FilterMode::Nearest,
+            min_filter: FilterMode::Linear,
+            mip_filter: FilterMode::Nearest,
+            address_mode: [
+                SamplerAddressMode::ClampToBorder,
+                SamplerAddressMode::Repeat,
+                SamplerAddressMode::MirrorRepeat,
+            ],
+            // **`0.1` is not representable in binary and this is deliberate.**
+            // The nearest `f32` is `0.100000001490116119384765625`, so an
+            // encoding that went through a decimal string — or that widened to
+            // `f64` and back — lands on a different number, and a mip clamp a
+            // half-ulp out is a sampler nobody can tell is wrong.
+            lod_min: 0.1,
+            lod_max: 12.25,
+            anisotropy: 1.0,
+            compare: None,
+        },
+        Command::CreateSampler {
+            sampler: handle(87, 88),
+            label: Some(String::new()),
+            mag_filter: FilterMode::Nearest,
+            min_filter: FilterMode::Nearest,
+            mip_filter: FilterMode::Linear,
+            address_mode: [
+                SamplerAddressMode::ClampToEdge,
+                SamplerAddressMode::ClampToBorder,
+                SamplerAddressMode::Repeat,
+            ],
+            lod_min: 2.0,
+            lod_max: 3.0,
+            // Past `1.0` while the filters are not all `Linear`, which WebGPU
+            // forbids outright — the replayer's refusal, driven through a
+            // command the Rust encoder really wrote.
+            anisotropy: 16.0,
+            compare: Some(CompareOp::Less),
+        },
+        Command::CreateSampler {
+            sampler: handle(89, 90),
+            label: Some("aniso".into()),
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Linear,
+            mip_filter: FilterMode::Linear,
+            address_mode: [
+                SamplerAddressMode::MirrorRepeat,
+                SamplerAddressMode::ClampToEdge,
+                SamplerAddressMode::Repeat,
+            ],
+            lod_min: 1.0,
+            lod_max: 8.0,
+            // Fractional, which WebGPU's `GPUSize32` cannot carry: the wire
+            // takes it verbatim and the replayer is what narrows it.
+            anisotropy: 4.5,
+            compare: Some(CompareOp::Always),
+        },
         Command::DestroyBuffer {
             buffer: handle(17, 18),
         },
@@ -236,6 +335,11 @@ pub fn every_command() -> Vec<Command> {
         },
         Command::DestroyImageView {
             view: handle(81, 82),
+        },
+        // Its own command and its own table, for the reason the view's is: a
+        // sampler's id and an image's are allowed to be the same eight bytes.
+        Command::DestroySampler {
+            sampler: handle(91, 92),
         },
         Command::BeginDebugLabel {
             label: "gbuffer — ✱".into(),
@@ -419,10 +523,36 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
                 range: *range,
             },
         ),
+        Command::CreateSampler {
+            sampler,
+            label,
+            mag_filter,
+            min_filter,
+            mip_filter,
+            address_mode,
+            lod_min,
+            lod_max,
+            anisotropy,
+            compare,
+        } => stream.create_sampler(
+            *sampler,
+            &SamplerDesc {
+                label: label.as_deref(),
+                mag_filter: *mag_filter,
+                min_filter: *min_filter,
+                mip_filter: *mip_filter,
+                address_mode: *address_mode,
+                lod_min: *lod_min,
+                lod_max: *lod_max,
+                anisotropy: *anisotropy,
+                compare: *compare,
+            },
+        ),
         Command::DestroyBuffer { buffer } => stream.destroy_buffer(*buffer),
         Command::DestroySurface { surface } => stream.destroy_surface(*surface),
         Command::DestroyImage { image } => stream.destroy_image(*image),
         Command::DestroyImageView { view } => stream.destroy_image_view(*view),
+        Command::DestroySampler { sampler } => stream.destroy_sampler(*sampler),
         Command::BeginDebugLabel { label } => stream.begin_debug_label(label),
         Command::BeginRenderPass {
             label,

@@ -433,6 +433,16 @@ measurement nobody has taken.
   and `layer_count`, and the rule is what generalises — a sentinel is a value
   the seam defines, and an encoder that resolves one is answering a question
   only the replayer has the information to answer.
+
+  **Resolving does not always mean omitting a member**, which both examples above
+  happen to make it look like. `SamplerDesc::lod_max` defaults to `f32::MAX`
+  meaning "no limit", and WebGPU's absent `lodMaxClamp` means the number **32** —
+  so the absence spelling that is right for `arrayLayerCount` would silently swap
+  "no limit" for a clamp here, and nothing reports a mip clamp: not the
+  `GPUSampler`, not a draw, not the error channel. The replayer writes the
+  sentinel out as an explicit clamp instead. What the rule fixes is that the
+  *encoder* never decides; what the resolution is remains the replayer's to work
+  out per field.
 - **`Range<u32>` is passed by value in four encoder methods and is not `Copy`.**
   On the wire it is two `u32`s and nothing more, but it is not a type that can
   be cast wholesale.

@@ -58,6 +58,7 @@ const MAX_ELEMENT_COUNT = 1 << 16;
 // decoder agrees with the decoder by construction.
 const CREATE_IMAGE_TAG = 0x02;
 const CREATE_IMAGE_VIEW_TAG = 0x03;
+const CREATE_SAMPLER_TAG = 0x04;
 const BIND_GROUP_TAG = 0x43;
 const PUSH_CONSTANTS_TAG = 0x44;
 const DRAW_TAG = 0x60;
@@ -345,12 +346,92 @@ const EXPECTED = [
       layerCount: 22,
     },
   },
+  // Four samplers, because two of the descriptor's field groups are three
+  // identically typed values in a row. `magFilter`/`minFilter`/`mipFilter` has
+  // only two variants to draw on, so no single command can make the trio
+  // distinct — the first three below each put the single `Linear` in a different
+  // slot instead, and every pairwise transposition changes at least one of them.
+  // `addressMode` spells three *different* modes in each command, in a different
+  // rotation each time, and all four `SamplerAddressMode` rows appear across the
+  // set — a row the fixture never carries is a row nothing checks.
+  {
+    name: 'CreateSampler',
+    sampler: handle(83, 84),
+    label: 'shadow pcf',
+    magFilter: 'Linear',
+    minFilter: 'Nearest',
+    mipFilter: 'Nearest',
+    addressMode: ['Repeat', 'MirrorRepeat', 'ClampToEdge'],
+    lodMin: 0.5,
+    // `f32::MAX` — `SamplerDesc::default`'s "no limit" sentinel, which crosses
+    // the wire verbatim. Only the replayer resolves it, and `gpu-replay.mjs` is
+    // where what it resolves to is asserted.
+    lodMax: 3.4028234663852886e38,
+    anisotropy: 1,
+    // The reversed-Z shadow test. Its opposite is two commands down, so a table
+    // that folded the pair cannot stay green.
+    compare: 'Greater',
+  },
+  {
+    name: 'CreateSampler',
+    sampler: handle(85, 86),
+    label: null,
+    magFilter: 'Nearest',
+    minFilter: 'Linear',
+    mipFilter: 'Nearest',
+    addressMode: ['ClampToBorder', 'Repeat', 'MirrorRepeat'],
+    // `0.1` is not representable in binary: the nearest `f32` is
+    // `0.100000001490116119384765625`, which is this number read back as a
+    // `f64`. An encoding that went through a decimal string, or that widened to
+    // `f64` and narrowed back through a different rounding, lands elsewhere —
+    // and a mip clamp a half-ulp out is a sampler nobody can tell is wrong.
+    lodMin: 0.10000000149011612,
+    lodMax: 12.25,
+    anisotropy: 1,
+    // Absent, against the three present ones around it. `Never` is code 0, so a
+    // decoder that read the presence byte as the code would turn this into a
+    // comparison that always fails rather than into no comparison at all.
+    compare: null,
+  },
+  {
+    name: 'CreateSampler',
+    sampler: handle(87, 88),
+    label: '',
+    magFilter: 'Nearest',
+    minFilter: 'Nearest',
+    mipFilter: 'Linear',
+    addressMode: ['ClampToEdge', 'ClampToBorder', 'Repeat'],
+    lodMin: 2,
+    lodMax: 3,
+    // Past 1 while the filters are not all linear, which WebGPU forbids: the
+    // wire carries it and the replayer is what refuses it.
+    anisotropy: 16,
+    compare: 'Less',
+  },
+  {
+    name: 'CreateSampler',
+    sampler: handle(89, 90),
+    label: 'aniso',
+    magFilter: 'Linear',
+    minFilter: 'Linear',
+    mipFilter: 'Linear',
+    addressMode: ['MirrorRepeat', 'ClampToEdge', 'Repeat'],
+    lodMin: 1,
+    lodMax: 8,
+    // Fractional, which WebGPU's `GPUSize32` cannot carry: verbatim here, and
+    // narrowed by the replayer.
+    anisotropy: 4.5,
+    compare: 'Always',
+  },
   { name: 'DestroyBuffer', buffer: handle(17, 18) },
   { name: 'DestroySurface', surface: handle(47, 48) },
   // A view and the image it views are separate objects in separate tables, so
   // these are two commands rather than one standing for both.
   { name: 'DestroyImage', image: handle(79, 80) },
   { name: 'DestroyImageView', view: handle(81, 82) },
+  // Its own command and its own table again: a sampler's id and an image's are
+  // allowed to be the same eight bytes.
+  { name: 'DestroySampler', sampler: handle(91, 92) },
   { name: 'BeginDebugLabel', label: 'gbuffer — ✱' },
   {
     name: 'BeginRenderPass',
@@ -481,6 +562,57 @@ function u64le(value) {
     bytes.push(Number((value >> (at * 8n)) & 0xffn));
   }
   return bytes;
+}
+
+/**
+ * `value` as the four little-endian bytes the wire carries an `f32` as.
+ *
+ * Through a `DataView` rather than by hand, because what crosses is the **bit
+ * pattern** of the nearest `f32` and nothing here should be re-deriving IEEE-754
+ * rounding. The hand-built sampler bodies below only need the floats to be
+ * well-formed; what pins their *values* is the fixture.
+ *
+ * @param {number} value
+ * @returns {number[]}
+ */
+function f32le(value) {
+  const bytes = new Uint8Array(4);
+  new DataView(bytes.buffer).setFloat32(0, value, true);
+  return [...bytes];
+}
+
+/**
+ * A hand-built `create_sampler` body, with every byte after the label named.
+ *
+ * `mag`, `min`, `mip`, then U, V and W, then the three floats, then the
+ * comparison's presence byte and — when it is present — its code. The checks
+ * below vary one of those at a time, which is what makes each of them about one
+ * table rather than about the command.
+ *
+ * @param {object} fields
+ * @param {number[]} [fields.filters] The three `FilterMode` codes.
+ * @param {number[]} [fields.address] The three `SamplerAddressMode` codes.
+ * @param {number[]} [fields.compare] The presence byte, and the code if there is
+ *   one.
+ * @returns {number[]}
+ */
+function samplerBody({
+  filters = [1, 1, 1],
+  address = [0, 0, 0],
+  compare = [0],
+}) {
+  return [
+    CREATE_SAMPLER_TAG,
+    ...u32le(1), // the handle's index
+    ...u32le(1), // …and its generation
+    0, // the label, absent
+    ...filters,
+    ...address,
+    ...f32le(0), // lodMin
+    ...f32le(1), // lodMax
+    ...f32le(1), // anisotropy
+    ...compare,
+  ];
 }
 
 /**
@@ -866,6 +998,76 @@ async function main() {
     ]),
     { kind: 'InvalidEnum', field: 'ImageDesc::format', code: 0x1d },
     'a Format code no variant claims is refused where an image names one'
+  );
+
+  // ---- the sampler's three code tables have no catch-all either ------------
+  // Hand-built and one past the last claimed row of each, for the two
+  // dimensionality tables' reason: that is where an off-by-one lands and where
+  // 0xFF never would. Each of the three filter bytes is varied on its own, so a
+  // decoder that read one of them three times names the wrong field here.
+  for (const [at, field] of [
+    [0, 'SamplerDesc::mag_filter'],
+    [1, 'SamplerDesc::min_filter'],
+    [2, 'SamplerDesc::mip_filter'],
+  ]) {
+    const filters = [1, 1, 1];
+    filters[at] = 2; // one past FilterMode::Linear
+    checkRefused(
+      streamOf(header, samplerBody({ filters })),
+      { kind: 'InvalidEnum', field, code: 2 },
+      `a FilterMode code no variant claims is refused where ${field} names one`
+    );
+  }
+  for (const at of [0, 1, 2]) {
+    const address = [0, 0, 0];
+    address[at] = 4; // one past SamplerAddressMode::ClampToBorder
+    checkRefused(
+      streamOf(header, samplerBody({ address })),
+      { kind: 'InvalidEnum', field: 'SamplerDesc::address_mode', code: 4 },
+      `a SamplerAddressMode code no variant claims is refused at U/V/W position ${at}`
+    );
+  }
+  checkRefused(
+    streamOf(header, samplerBody({ compare: [PRESENT, 8] })), // one past Always
+    { kind: 'InvalidEnum', field: 'SamplerDesc::compare', code: 8 },
+    'a CompareOp code no variant claims is refused rather than folded into a neighbour'
+  );
+  // The presence byte and the code behind it are separate refusals naming the
+  // same field: a byte that is neither presence value is not a comparison this
+  // build has never heard of.
+  checkRefused(
+    streamOf(header, samplerBody({ compare: [2, 0] })),
+    { kind: 'InvalidEnum', field: 'SamplerDesc::compare', code: 2 },
+    "a comparison's presence byte of 2 is refused rather than read as truthy"
+  );
+
+  // ---- every CompareOp row is exercised, not just the fixture's four -------
+  // The fixture carries `Greater`, `Less`, `Always` and an absent one, which is
+  // four of nine outcomes. The rest of the table is driven here, spelled out
+  // rather than read off the decoder — a list taken from `gpu-stream.js` would
+  // agree with `gpu-stream.js` whatever it said. `Greater` and `Less` are the
+  // pair that matters: under reversed-Z one is the shadow test and the other is
+  // its exact inverse, and nothing downstream can tell which a sampler got.
+  const COMPARE_OP = [
+    'Never',
+    'Less',
+    'Equal',
+    'LessOrEqual',
+    'Greater',
+    'NotEqual',
+    'GreaterOrEqual',
+    'Always',
+  ];
+  const decodedCompares = COMPARE_OP.map((_, code) => {
+    const [command] = decodeStream(
+      streamOf(header, samplerBody({ compare: [PRESENT, code] }))
+    );
+    return command.compare;
+  });
+  checkEqual(
+    decodedCompares,
+    COMPARE_OP,
+    'every CompareOp code decodes to the variant it names, Greater and Less included'
   );
 
   // ---- the two new bitflags words are strict too ---------------------------

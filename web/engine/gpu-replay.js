@@ -61,6 +61,17 @@
 // failure has to be reported rather than translated: a format this device did
 // not enable the feature for, and an image handle that resolves to nothing.
 //
+// AND THE SAMPLER PAIR, WHICH RUNS AGAINST THE DEVICE AND ANSWERS NOTHING
+// EITHER. `CreateSampler` translates a `crcbl_hal::SamplerDesc` into a
+// `GPUSamplerDescriptor`; `DestroySampler` only lets go, because a `GPUSampler`
+// has no destroy to call. It is the descriptor with the most to decide and the
+// least to check afterwards: three of its nine fields arrive as something WebGPU
+// cannot hold — an address mode it has no word for, a "no limit" sentinel whose
+// spelling is not an absence, and a float where it wants an integer whose
+// validity depends on the filters beside it — and what comes back reports its
+// `label` and nothing else. The block below `webgpuAddressModesFor` is where
+// every one of those is argued.
+//
 // SO A BUFFER THAT CANNOT BE MADE HAS NOWHERE TO BE REPORTED, and the answer is
 // the seam's own: `Device::take_error`, which `crcbl_hal` documents as existing
 // *for WebGPU* and which `docs/plan/41-webgpu-stream.md` has `Gpu::acquire`
@@ -890,6 +901,236 @@ function subresourceCount(count) {
   return count === SUBRESOURCE_ALL ? undefined : count;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// A sampler's vocabulary, in WebGPU's
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// NINE SEAM FIELDS AND ONE WEBGPU DESCRIPTOR, and this is the descriptor where
+// the two vocabularies disagree about *types* rather than about names.
+// `GPUSamplerDescriptor` has a member for every one of `crcbl_hal::SamplerDesc`'s
+// fields, and three of the nine arrive as something WebGPU cannot hold:
+//
+//   * `address_mode` has a fourth variant WebGPU has no word for at all;
+//   * `lod_max` carries a *sentinel* whose WebGPU spelling is not an absence;
+//   * `anisotropy` is a float where WebGPU wants an integer, and an integer
+//     whose validity depends on the three filters beside it.
+//
+// The tables and the two functions below are where each of those is written down
+// rather than smoothed over, in the order `SamplerDesc` declares them.
+//
+// AND WHAT COMES BACK REPORTS NOTHING. A `GPUBuffer` reports its size and usage
+// and a `GPUTexture` reports nine members; a `GPUSampler` reports its `label` and
+// nothing else — no filters, no address modes, no clamps. So every decision here
+// is one no inspection of the result can check afterwards, and the only two
+// things that can: the browser refusing the descriptor on the device's error
+// channel, and `web/tools/gpu-replay.mjs` reading the descriptor this file built
+// before it is handed over.
+
+/**
+ * `crcbl_hal::FilterMode` as WebGPU spells it.
+ *
+ * One to one, and read three times per sampler — `magFilter`, `minFilter` and
+ * `mipmapFilter`. **The third member is not called `mipFilter`**, which is the
+ * one place a name can be typed straight through from the seam and be wrong:
+ * WebGPU spells it `mipmapFilter`, and a `GPUSamplerDescriptor` with an
+ * unrecognised member is not an error — WebIDL ignores it and the sampler is
+ * built with the *default* mipmap filter instead, which is `'nearest'`. That is
+ * a trilinear sampler quietly becoming bilinear, on every mip transition, with
+ * nothing reporting anything.
+ */
+const SAMPLER_FILTER = Object.freeze({ Nearest: 'nearest', Linear: 'linear' });
+
+/**
+ * `crcbl_hal::SamplerAddressMode` as WebGPU spells it, where it has a spelling.
+ *
+ * THREE OF THE FOUR HAVE ONE. `GPUAddressMode` is `'clamp-to-edge'`, `'repeat'`
+ * and `'mirror-repeat'`, and those are exactly `ClampToEdge`, `Repeat` and
+ * `MirrorRepeat`.
+ *
+ * **`ClampToBorder` IS THE ONE WITH NO ROW, AND IT IS REFUSED RATHER THAN
+ * DROPPED**, which is `BufferUsage::DEVICE_ADDRESS`'s and `ImageUsage::PRESENT`'s
+ * decision applied to an enum instead of a flag. WebGPU has no border colour at
+ * all: there is no `GPUAddressMode` for it and no member to put one in, so there
+ * is nothing to ask for. The quiet answers are both worse than a refusal, and
+ * worse here than for those two flags, because the nearest neighbour looks
+ * right: `'clamp-to-edge'` agrees with a transparent-black border everywhere
+ * except the edge texel, so an atlas sampled with it bleeds its neighbour's
+ * colour into every seam, on every frame, and the failure is a fringe a person
+ * has to see rather than anything a log could carry.
+ *
+ * NOTHING GOES THE OTHER WAY: every `GPUAddressMode` has a seam variant above.
+ * WebGPU has no `'mirror-clamp-to-edge'` either — that is a Vulkan and D3D12
+ * mode, and `crcbl_hal::SamplerAddressMode` does not declare one, so there is
+ * nothing on this seam for it to be missing from.
+ */
+const SAMPLER_ADDRESS_MODE = Object.freeze({
+  Repeat: 'repeat',
+  MirrorRepeat: 'mirror-repeat',
+  ClampToEdge: 'clamp-to-edge',
+});
+
+/**
+ * `crcbl_hal::CompareOp` as WebGPU spells it.
+ *
+ * All eight, one to one: `GPUCompareFunction` has exactly the seam's set. The
+ * only translation is the punctuation — `LessOrEqual` is `'less-equal'` and not
+ * `'less-or-equal'`, and a string WebGPU does not have is a `TypeError` out of
+ * `createSampler` rather than a silent default, because this member is an enum
+ * rather than an ignorable dictionary key.
+ *
+ * **`Greater` and `Less` are the pair to check twice.** `crcbl_hal::CompareOp`
+ * names the comparison performed rather than what it means for visibility, and
+ * under this engine's reversed-Z it is `Greater` that asks "is the fragment
+ * closer than the stored caster?" A shadow sampler built with `'less'` instead
+ * lights exactly the surfaces that should be in shadow and shadows the rest,
+ * every frame; the browser reports nothing, because both are valid, and the
+ * `GPUSampler` that comes back cannot be asked which it got.
+ */
+const SAMPLER_COMPARE_FUNCTION = Object.freeze({
+  Never: 'never',
+  Less: 'less',
+  Equal: 'equal',
+  LessOrEqual: 'less-equal',
+  Greater: 'greater',
+  NotEqual: 'not-equal',
+  GreaterOrEqual: 'greater-equal',
+  Always: 'always',
+});
+
+/**
+ * The largest `maxAnisotropy` a `GPUSize32` carries.
+ *
+ * WebIDL converts a `double` to an `unsigned long` **modularly** unless the
+ * member is annotated otherwise, and `GPUSamplerDescriptor.maxAnisotropy` is
+ * not: a value past this wraps rather than being clamped or refused, so
+ * `4294967297` reaches the device as `1` and `f32::MAX` reaches it as something
+ * with no relation to what was asked. {@link webgpuMaxAnisotropyFor} is what
+ * stops that conversion ever happening.
+ */
+const MAX_ANISOTROPY = 0xffff_ffff;
+
+/**
+ * The `GPUAddressMode`s a decoded `SamplerDesc::address_mode` names, or why it
+ * names none.
+ *
+ * {@link webgpuTextureFormatFor}'s shape — `{ value, reason }`, with `reason` a
+ * phrase for a message a person reads and `null` exactly when the value is not.
+ * The three are resolved together rather than one at a time because the refusal
+ * has to say *which axis* carried the mode WebGPU cannot express: all three are
+ * the same enum, so "ClampToBorder" alone would leave a reader guessing.
+ *
+ * @param {readonly string[]} modes The three `crcbl_hal::SamplerAddressMode`
+ *   variant names, for U, V and W in that order, as `gpu-stream.js` decodes
+ *   them.
+ * @returns {{ modes: string[] | null, reason: string | null }}
+ */
+export function webgpuAddressModesFor(modes) {
+  const axes = ['U', 'V', 'W'];
+  const named = [];
+  const refused = [];
+  for (const [at, mode] of modes.entries()) {
+    const name = SAMPLER_ADDRESS_MODE[mode];
+    if (name === undefined) refused.push(`${axes[at] ?? at} is ${mode}`);
+    else named.push(name);
+  }
+  if (refused.length > 0) {
+    return {
+      modes: null,
+      reason:
+        `addresses ${refused.join(', ')}, which is no GPUAddressMode: WebGPU has ` +
+        "'repeat', 'mirror-repeat' and 'clamp-to-edge' and no border colour at all",
+    };
+  }
+  if (named.length !== axes.length) {
+    return {
+      modes: null,
+      reason: `names ${named.length} address mode(s) rather than one per axis`,
+    };
+  }
+  return { modes: named, reason: null };
+}
+
+/**
+ * The `maxAnisotropy` a decoded `SamplerDesc::anisotropy` amounts to, or why it
+ * amounts to none.
+ *
+ * **A FLOAT MEETING A `GPUSize32`, WHICH IS THE WHOLE OF THIS TRANSLATION.**
+ * `crcbl_hal::SamplerDesc::anisotropy` is an `f32` where `1.0` disables, which
+ * is Vulkan's and Metal's shape; WebGPU's `maxAnisotropy` is an integer with a
+ * floor of `1`, and WebIDL's conversion to it is modular rather than clamping —
+ * see {@link MAX_ANISOTROPY}. So every case is decided here rather than left to
+ * the browser:
+ *
+ *   * **Not finite** — refused. A NaN or an infinity is not a ratio, and WebIDL
+ *     would answer `0`, which then fails WebGPU's own floor with a message
+ *     naming neither the field nor the value.
+ *   * **Below `1`** — refused. `1.0` is the seam's own floor, documented as
+ *     "disables", and WebGPU's is the same number; there is nothing below it a
+ *     caller could mean. Clamping up would hide the bug rather than fix it.
+ *   * **Fractional** — floored, not rounded. WebGPU cannot carry the fraction
+ *     and rounding *up* would ask the device for more filtering than the caller
+ *     did; flooring can only ask for less, which is the direction a clamp
+ *     already goes. `1.9` therefore disables anisotropy, exactly as `1.0` does.
+ *   * **Past {@link MAX_ANISOTROPY}** — refused, with the number written out,
+ *     which is the judgement `#createBuffer` makes about a size past
+ *     `Number.MAX_SAFE_INTEGER`. This is the case `f32::MAX` lands in, and it is
+ *     why `lod_max`'s sentinel has nothing to do with this field.
+ *   * **Above `1` with a filter that is not `'linear'`** — refused, and this is
+ *     the only rule here that is WebGPU's rather than arithmetic.
+ *     `GPUSamplerDescriptor` requires all three of `magFilter`, `minFilter` and
+ *     `mipmapFilter` to be `'linear'` when `maxAnisotropy` is above `1`, and a
+ *     descriptor that breaks it is a validation error the browser answers with a
+ *     `GPUSampler` object and a message a turn of the event loop later — so the
+ *     handle would be filled in with an invalid sampler and every draw using it
+ *     would fail again, none of them naming the creation that was wrong. That is
+ *     {@link webgpuTextureFormatFor}'s argument, unchanged.
+ *
+ * **Above `1` with all three filters linear is passed on**, and the clamp is the
+ * device's. {@link halLimitsFor} reports `max_sampler_anisotropy` as `1` because
+ * there is no ceiling this backend can *guarantee* — WebGPU accepts a larger ask
+ * and clamps it to whatever the device does, and reports that number nowhere —
+ * which is a different claim from "more than one is refused". Flattening the ask
+ * to `1` here would make the two claims the same and would cost every caller its
+ * anisotropic filtering silently.
+ *
+ * @param {number} anisotropy The `f32` as it came off the wire.
+ * @param {readonly string[]} filters The three `GPUFilterMode`s already
+ *   translated, in `mag`, `min`, `mipmap` order.
+ * @returns {{ maxAnisotropy: number | null, reason: string | null }}
+ */
+export function webgpuMaxAnisotropyFor(anisotropy, filters) {
+  if (!Number.isFinite(anisotropy)) {
+    return {
+      maxAnisotropy: null,
+      reason: `asks for anisotropy ${anisotropy}, which is not a ratio`,
+    };
+  }
+  if (anisotropy < 1) {
+    return {
+      maxAnisotropy: null,
+      reason:
+        `asks for anisotropy ${anisotropy}, which is below the 1.0 that ` +
+        'SamplerDesc documents as disabling it and below the floor WebGPU validates',
+    };
+  }
+  const value = Math.floor(anisotropy);
+  if (value > MAX_ANISOTROPY) {
+    return {
+      maxAnisotropy: null,
+      reason: `asks for anisotropy ${anisotropy}, which is past the largest maxAnisotropy a GPUSize32 carries`,
+    };
+  }
+  if (value > 1 && filters.some((filter) => filter !== 'linear')) {
+    return {
+      maxAnisotropy: null,
+      reason:
+        `asks for anisotropy ${anisotropy} with filters ${filters.join(', ')}, and ` +
+        "WebGPU allows a maxAnisotropy above 1 only when all three are 'linear'",
+    };
+  }
+  return { maxAnisotropy: value, reason: null };
+}
+
 /**
  * A `GPUAdapter`'s or `GPUDevice`'s `limits` in the seam's names and units.
  *
@@ -1516,6 +1757,18 @@ export class Replayer {
    */
   #imageViews = new HandleTable();
   /**
+   * The `GPUSampler` behind each live sampler handle.
+   *
+   * Its own table for the reason every table here is its own, and the probe's
+   * handles make the case concrete: `PROBE_SAMPLER` carries the same eight bytes
+   * as `PROBE_IMAGE`, `PROBE_IMAGE_VIEW`, `PROBE_BUFFER` and `PROBE_SURFACE`,
+   * deliberately, so five kinds share one index and one generation and only the
+   * opcode says which of these tables an id belongs to.
+   *
+   * @type {HandleTable<GPUSampler>}
+   */
+  #samplers = new HandleTable();
+  /**
    * Errors the device reported out of band, oldest first.
    *
    * `Device::take_error`'s queue, on this side of the seam — see
@@ -1600,6 +1853,20 @@ export class Replayer {
    */
   get imageViews() {
     return this.#imageViews;
+  }
+
+  /**
+   * The samplers that are live right now, on the same terms.
+   *
+   * **The only thing a reader can learn about one of these**, beyond that it is
+   * there: a `GPUSampler` reports its `label` and nothing else, so the browser
+   * gate's evidence is this table's contents and the device's error queue rather
+   * than anything read back off the object.
+   *
+   * @type {HandleTable<GPUSampler>}
+   */
+  get samplers() {
+    return this.#samplers;
   }
 
   /** How many out-of-band errors are waiting to be taken. */
@@ -1726,6 +1993,12 @@ export class Replayer {
           break;
         case 'DestroyImageView':
           this.#destroyImageView(command);
+          break;
+        case 'CreateSampler':
+          this.#createSampler(sequence, command);
+          break;
+        case 'DestroySampler':
+          this.#destroySampler(command);
           break;
         case 'SurfaceCaps':
           this.#surfaceCaps(sequence);
@@ -2277,6 +2550,156 @@ export class Replayer {
    */
   #destroyImageView(command) {
     this.#imageViews.remove(command.view);
+  }
+
+  /**
+   * Creates a sampler on the open device and files it under the handle wasm
+   * allocated.
+   *
+   * `#createBuffer`'s shape once more — synchronous, no reply, every failure
+   * into {@link Replayer#takeError} — and the creation with the *most* to decide
+   * before the browser is asked, because a `GPUSamplerDescriptor`'s members are
+   * a different shape from the seam's in three places. Each refusal is argued
+   * where the table or the function that makes it is: an address mode WebGPU has
+   * no word for at all ({@link webgpuAddressModesFor}); an anisotropy no
+   * `GPUSize32` can carry, or one WebGPU forbids beside these filters
+   * ({@link webgpuMaxAnisotropyFor}); and a filter or comparison name no table
+   * here claims, which is a decoder that has grown a variant this file has not.
+   *
+   * **A NON-FINITE CLAMP IS REFUSED HERE RATHER THAN LEFT TO THE BROWSER.**
+   * `lodMinClamp` and `lodMaxClamp` are WebIDL `float`s, and WebIDL refuses a
+   * NaN or an infinity for one with a `TypeError` naming neither the member nor
+   * the value — thrown out of `createSampler`, which this method would then
+   * report as "could not be created" and nothing more. Every `f32` bit pattern
+   * is a value the wire form claims, so the encoder carries them; this is the
+   * half that has to say which of them WebGPU cannot hold.
+   *
+   * **`lod_max`'s SENTINEL RESOLVES HERE, AND IT RESOLVES TO ITSELF.**
+   * `SamplerDesc::default` sets it to `f32::MAX` meaning "no limit", and the
+   * rule `docs/plan/41-webgpu-stream.md` sets is that a sentinel crosses
+   * verbatim and the replayer resolves it. What it must **not** resolve to is an
+   * absent member, which is how {@link subresourceCount} spells
+   * `ImageSubresourceRange::ALL` and which is exactly wrong here: WebGPU's
+   * default for an absent `lodMaxClamp` is a *number*, not "the rest", so
+   * omitting the member would silently replace "no limit" with a clamp — and a
+   * mip clamp is not a value anything downstream reports, so every sampler in
+   * the engine would quietly stop reaching its smallest mips with nothing
+   * anywhere to attribute it to. Both clamps are therefore always written.
+   *
+   * @param {bigint} sequence
+   * @param {{ sampler: { index: number, generation: number },
+   *           label: string | null, magFilter: string, minFilter: string,
+   *           mipFilter: string, addressMode: string[], lodMin: number,
+   *           lodMax: number, anisotropy: number,
+   *           compare: string | null }} command
+   */
+  #createSampler(sequence, command) {
+    const named = `sampler ${command.sampler.index}.${command.sampler.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was created before any device opened`);
+      return;
+    }
+    // Named `mipmapFilter` from here on, which is WebGPU's spelling of the
+    // seam's `mip_filter` — see `SAMPLER_FILTER` for what a straight-through
+    // name would cost.
+    const [magFilter, minFilter, mipmapFilter] = [
+      command.magFilter,
+      command.minFilter,
+      command.mipFilter,
+    ].map((mode) => SAMPLER_FILTER[mode]);
+    if (
+      magFilter === undefined ||
+      minFilter === undefined ||
+      mipmapFilter === undefined
+    ) {
+      this.#deviceError(
+        `${named} asks for FilterMode::${command.magFilter}/${command.minFilter}/${command.mipFilter},` +
+          ' one of which is no GPUFilterMode'
+      );
+      return;
+    }
+    const address = webgpuAddressModesFor(command.addressMode);
+    if (address.reason !== null) {
+      this.#deviceError(`${named} ${address.reason}`);
+      return;
+    }
+    for (const [clamp, field] of [
+      [command.lodMin, 'lod_min'],
+      [command.lodMax, 'lod_max'],
+    ]) {
+      if (!Number.isFinite(clamp)) {
+        this.#deviceError(
+          `${named} asks for ${field} ${clamp}, which is no GPUSamplerDescriptor clamp`
+        );
+        return;
+      }
+    }
+    const anisotropy = webgpuMaxAnisotropyFor(command.anisotropy, [
+      magFilter,
+      minFilter,
+      mipmapFilter,
+    ]);
+    if (anisotropy.reason !== null) {
+      this.#deviceError(`${named} ${anisotropy.reason}`);
+      return;
+    }
+    // `null` is the absent comparison and stays absent; anything else has to be
+    // a name this table claims, because `GPUCompareFunction` is an enum and a
+    // string outside it is a `TypeError` rather than a default.
+    const compare =
+      command.compare === null
+        ? undefined
+        : SAMPLER_COMPARE_FUNCTION[command.compare];
+    if (command.compare !== null && compare === undefined) {
+      this.#deviceError(
+        `${named} asks for CompareOp::${command.compare}, which is no GPUCompareFunction`
+      );
+      return;
+    }
+    let sampler;
+    try {
+      sampler = this.#device.createSampler({
+        // No label rather than an empty one, as `#createBuffer` passes it.
+        ...(command.label === null ? {} : { label: command.label }),
+        addressModeU: address.modes[0],
+        addressModeV: address.modes[1],
+        addressModeW: address.modes[2],
+        magFilter,
+        minFilter,
+        mipmapFilter,
+        lodMinClamp: command.lodMin,
+        // Always written, never omitted — see this method's docs for what an
+        // absent member would substitute for "no limit".
+        lodMaxClamp: command.lodMax,
+        maxAnisotropy: anisotropy.maxAnisotropy,
+        // Spread rather than assigned, so an absent comparison is an *absent*
+        // member and not one holding `undefined`. WebIDL treats the two alike
+        // and a reader of a recorded descriptor does not — the same care
+        // `#createImageView` takes with the range's counts.
+        ...(compare === undefined ? {} : { compare }),
+      });
+    } catch (error) {
+      this.#deviceError(`${named} could not be created: ${String(error)}`);
+      return;
+    }
+    this.#samplers.insert(command.sampler, sampler);
+  }
+
+  /**
+   * Lets go of a sampler.
+   *
+   * **LETTING GO IS THE WHOLE OF THE RELEASE**, as it is for a view and for a
+   * surface's context: a `GPUSampler` has no `destroy()` — it holds no
+   * allocation of its own, it is a piece of filter state — so there is nothing
+   * to call.
+   *
+   * A destroy naming nothing live is a no-op in both of its ways, exactly as
+   * every other destroy here.
+   *
+   * @param {{ sampler: { index: number, generation: number } }} command
+   */
+  #destroySampler(command) {
+    this.#samplers.remove(command.sampler);
   }
 
   /**

@@ -22,6 +22,40 @@ reaches its second iteration. Vulkan is what gates that loop: it is the only
 backend that asks a driver per call and the only one that can refuse a real
 pairing. Worth knowing before anyone reads a green browser gate as covering it.
 
+### Anisotropy: the limit says one, the replayer passes more through
+
+`halLimitsFor` reports `max_sampler_anisotropy: 1` and withholds
+`Features::SAMPLER_ANISOTROPY`, while `webgpuMaxAnisotropyFor` passes an ask
+above 1 straight to `createSampler` and lets the device clamp. Both halves are
+argued where they are written and neither is a bug, but together they mean a
+caller who respects the reported limit never exercises the pass-through, and one
+who ignores it gets whatever the device does.
+
+The alternative is refusing everything above 1, which would make the seam's
+anisotropic filtering permanently unreachable on WebGPU. That is why it was not
+done — but it is a decision worth confirming rather than one that should sit
+implicit in two files that do not reference each other. WebGPU has no query for
+the maximum a device supports, which is why the reported limit is 1: it is "no
+ceiling this backend can guarantee", not "more than one is refused".
+
+### A `GPUSampler` reports nothing but its label, so no browser check can confirm one
+
+Group L asserts `instanceof GPUSampler` and an empty device error queue, and
+that is the ceiling of what is observable: `GPUSampler` exposes no filters, no
+address modes, no clamps and no comparison. Everything the seam sends is
+verified against the node stub in `web/tools/gpu-replay.mjs` and nowhere else.
+
+So a translation bug that produces a _valid_ sampler with the wrong filtering
+would pass the browser gate. The only thing that would catch it is a rendered
+frame that depends on the sampling — which is what the parity gate in roadmap
+slice 10 is, so this closes there rather than needing its own machinery. Stated
+because "group L is green" must not be read as "the sampler is right".
+
+Related and smaller: the probe uses `anisotropy: 1.0`, so the pass-through above
+is exercised only against the stub. Nothing verifies what a real Dawn does with
+`maxAnisotropy: 16`. Deliberate — the probe exists for the `lod_max` sentinel,
+and an anisotropy probe would be measuring the machine rather than the seam.
+
 ### `ImageDesc` has no `view_formats`, so sRGB reinterpretation cannot work on WebGPU
 
 `ImageViewDesc::format` documents itself as free to differ from the image's "for

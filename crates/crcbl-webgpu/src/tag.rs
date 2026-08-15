@@ -27,8 +27,8 @@
 //! error instead of a silently dropped one.
 
 use crcbl_hal::{
-    CompositeAlpha, DeviceType, Format, ImageType, ImageViewType, LoadOp, MemoryLocation,
-    PresentMode, StoreOp,
+    CompareOp, CompositeAlpha, DeviceType, FilterMode, Format, ImageType, ImageViewType, LoadOp,
+    MemoryLocation, PresentMode, SamplerAddressMode, StoreOp,
 };
 
 use crate::reply::SurfaceCapsFailure;
@@ -234,6 +234,13 @@ pub const CREATE_SURFACE_TAG: u8 = 0x01;
 pub const CREATE_IMAGE_TAG: u8 = 0x02;
 /// [`Command::CreateImageView`](crate::Command::CreateImageView).
 pub const CREATE_IMAGE_VIEW_TAG: u8 = 0x03;
+/// [`Command::CreateSampler`](crate::Command::CreateSampler).
+///
+/// Written out rather than as `FAMILY_CREATE + 4`, for the reason
+/// [`SURFACE_CAPS_TAG`] spells out: a tag derived from its family's base cannot
+/// fail the range walk below, so the check would still run and would no longer
+/// be able to fail.
+pub const CREATE_SAMPLER_TAG: u8 = 0x04;
 /// [`Command::DestroyBuffer`](crate::Command::DestroyBuffer).
 pub const DESTROY_BUFFER_TAG: u8 = 0x20;
 /// [`Command::DestroySurface`](crate::Command::DestroySurface).
@@ -242,6 +249,11 @@ pub const DESTROY_SURFACE_TAG: u8 = 0x21;
 pub const DESTROY_IMAGE_TAG: u8 = 0x22;
 /// [`Command::DestroyImageView`](crate::Command::DestroyImageView).
 pub const DESTROY_IMAGE_VIEW_TAG: u8 = 0x23;
+/// [`Command::DestroySampler`](crate::Command::DestroySampler).
+///
+/// Written out rather than as `FAMILY_DESTROY + 4`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const DESTROY_SAMPLER_TAG: u8 = 0x24;
 /// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel).
 pub const BEGIN_DEBUG_LABEL_TAG: u8 = 0x40;
 /// [`Command::BeginRenderPass`](crate::Command::BeginRenderPass).
@@ -535,6 +547,161 @@ pub const fn image_view_type_from_code(code: u8) -> Option<ImageViewType> {
         IMAGE_VIEW_TYPE_CUBE => Some(ImageViewType::Cube),
         IMAGE_VIEW_TYPE_CUBE_ARRAY => Some(ImageViewType::CubeArray),
         IMAGE_VIEW_TYPE_D3 => Some(ImageViewType::D3),
+        _ => None,
+    }
+}
+
+// ── FilterMode ────────────────────────────────────────────────────────────────
+//
+// Two variants, and a [`SamplerDesc`](crcbl_hal::SamplerDesc) carries **three**
+// of them back to back — `mag_filter`, `min_filter`, `mip_filter`. That is what
+// makes this small table worth writing out: no code here can be folded into a
+// neighbour without landing on the other variant, so the failure a wrong table
+// produces is not a refusal but a sampler that filters correctly in one
+// direction and not the other.
+
+/// [`FilterMode::Nearest`].
+pub const FILTER_MODE_NEAREST: u8 = 0x00;
+/// [`FilterMode::Linear`].
+pub const FILTER_MODE_LINEAR: u8 = 0x01;
+
+/// The wire code for a [`FilterMode`].
+#[must_use]
+pub const fn filter_mode_code(mode: FilterMode) -> u8 {
+    match mode {
+        FilterMode::Nearest => FILTER_MODE_NEAREST,
+        FilterMode::Linear => FILTER_MODE_LINEAR,
+    }
+}
+
+/// The [`FilterMode`] a wire code names, or `None` if it names none.
+///
+/// **`None` rather than [`FilterMode::Linear`] as a default**, tempting though
+/// it is for a two-variant enum where one variant is what every sampler in the
+/// engine actually wants: a code this build does not claim comes from a build
+/// that knows a filter this one does not, and answering with `Linear` would turn
+/// it into trilinear filtering nobody asked for — visible only as softness, and
+/// attributable to nothing.
+#[must_use]
+pub const fn filter_mode_from_code(code: u8) -> Option<FilterMode> {
+    match code {
+        FILTER_MODE_NEAREST => Some(FilterMode::Nearest),
+        FILTER_MODE_LINEAR => Some(FilterMode::Linear),
+        _ => None,
+    }
+}
+
+// ── SamplerAddressMode ────────────────────────────────────────────────────────
+//
+// Also three in a row on the wire — `address_mode` is a `[SamplerAddressMode; 3]`
+// for U, V and W — so this table has [`FilterMode`]'s hazard with four variants
+// instead of two.
+
+/// [`SamplerAddressMode::Repeat`].
+pub const SAMPLER_ADDRESS_REPEAT: u8 = 0x00;
+/// [`SamplerAddressMode::MirrorRepeat`].
+pub const SAMPLER_ADDRESS_MIRROR_REPEAT: u8 = 0x01;
+/// [`SamplerAddressMode::ClampToEdge`].
+pub const SAMPLER_ADDRESS_CLAMP_TO_EDGE: u8 = 0x02;
+/// [`SamplerAddressMode::ClampToBorder`].
+pub const SAMPLER_ADDRESS_CLAMP_TO_BORDER: u8 = 0x03;
+
+/// The wire code for a [`SamplerAddressMode`].
+#[must_use]
+pub const fn sampler_address_mode_code(mode: SamplerAddressMode) -> u8 {
+    match mode {
+        SamplerAddressMode::Repeat => SAMPLER_ADDRESS_REPEAT,
+        SamplerAddressMode::MirrorRepeat => SAMPLER_ADDRESS_MIRROR_REPEAT,
+        SamplerAddressMode::ClampToEdge => SAMPLER_ADDRESS_CLAMP_TO_EDGE,
+        SamplerAddressMode::ClampToBorder => SAMPLER_ADDRESS_CLAMP_TO_BORDER,
+    }
+}
+
+/// The [`SamplerAddressMode`] a wire code names, or `None` if it names none.
+///
+/// **The adjacent pair that costs the most is
+/// [`SAMPLER_ADDRESS_CLAMP_TO_EDGE`] and [`SAMPLER_ADDRESS_CLAMP_TO_BORDER`]**,
+/// because they agree everywhere a test would look and differ exactly at the
+/// edge texel: one repeats the border texel outwards and the other fetches
+/// transparent black. An atlas sampled with the wrong one of the two bleeds its
+/// neighbour's colour into every seam, and there is no error anywhere — the
+/// sampler is valid, the draw succeeds, and the difference is a fringe a person
+/// has to see. The two also part company at the *backend*: WebGPU has no border
+/// colour at all, so one of them is a refusal there and the other is not.
+#[must_use]
+pub const fn sampler_address_mode_from_code(code: u8) -> Option<SamplerAddressMode> {
+    match code {
+        SAMPLER_ADDRESS_REPEAT => Some(SamplerAddressMode::Repeat),
+        SAMPLER_ADDRESS_MIRROR_REPEAT => Some(SamplerAddressMode::MirrorRepeat),
+        SAMPLER_ADDRESS_CLAMP_TO_EDGE => Some(SamplerAddressMode::ClampToEdge),
+        SAMPLER_ADDRESS_CLAMP_TO_BORDER => Some(SamplerAddressMode::ClampToBorder),
+        _ => None,
+    }
+}
+
+// ── CompareOp ─────────────────────────────────────────────────────────────────
+//
+// Carried by [`SamplerDesc::compare`](crcbl_hal::SamplerDesc::compare) — the
+// first optional *enum* on this stream, so it rides a presence byte and this
+// table is read only when that byte says [`PRESENT`].
+
+/// [`CompareOp::Never`].
+pub const COMPARE_OP_NEVER: u8 = 0x00;
+/// [`CompareOp::Less`].
+pub const COMPARE_OP_LESS: u8 = 0x01;
+/// [`CompareOp::Equal`].
+pub const COMPARE_OP_EQUAL: u8 = 0x02;
+/// [`CompareOp::LessOrEqual`].
+pub const COMPARE_OP_LESS_OR_EQUAL: u8 = 0x03;
+/// [`CompareOp::Greater`] — the engine's depth test under reversed-Z.
+pub const COMPARE_OP_GREATER: u8 = 0x04;
+/// [`CompareOp::NotEqual`].
+pub const COMPARE_OP_NOT_EQUAL: u8 = 0x05;
+/// [`CompareOp::GreaterOrEqual`].
+pub const COMPARE_OP_GREATER_OR_EQUAL: u8 = 0x06;
+/// [`CompareOp::Always`].
+pub const COMPARE_OP_ALWAYS: u8 = 0x07;
+
+/// The wire code for a [`CompareOp`].
+#[must_use]
+pub const fn compare_op_code(op: CompareOp) -> u8 {
+    match op {
+        CompareOp::Never => COMPARE_OP_NEVER,
+        CompareOp::Less => COMPARE_OP_LESS,
+        CompareOp::Equal => COMPARE_OP_EQUAL,
+        CompareOp::LessOrEqual => COMPARE_OP_LESS_OR_EQUAL,
+        CompareOp::Greater => COMPARE_OP_GREATER,
+        CompareOp::NotEqual => COMPARE_OP_NOT_EQUAL,
+        CompareOp::GreaterOrEqual => COMPARE_OP_GREATER_OR_EQUAL,
+        CompareOp::Always => COMPARE_OP_ALWAYS,
+    }
+}
+
+/// The [`CompareOp`] a wire code names, or `None` if it names none.
+///
+/// **[`COMPARE_OP_GREATER`] and [`COMPARE_OP_LESS`] are the pair a fold must
+/// never make**, and they are the most dangerous pair in this module.
+/// [`CompareOp`]'s own docs say why: the name is the comparison performed, never
+/// what it means for visibility, and under this engine's reversed-Z it is
+/// `Greater` that asks "is the fragment closer than the stored caster?" A
+/// hardware-PCF shadow sampler that got `Less` instead is not a sampler that
+/// fails — it is one that lights exactly the surfaces that should be in shadow
+/// and shadows the rest, on every frame, with nothing anywhere reporting an
+/// error. Nothing downstream can tell the two apart either, because a
+/// comparison sampler reports nothing about the comparison it was built with —
+/// this table answering `None` for a code it does not claim is the only place
+/// the difference is visible at all.
+#[must_use]
+pub const fn compare_op_from_code(code: u8) -> Option<CompareOp> {
+    match code {
+        COMPARE_OP_NEVER => Some(CompareOp::Never),
+        COMPARE_OP_LESS => Some(CompareOp::Less),
+        COMPARE_OP_EQUAL => Some(CompareOp::Equal),
+        COMPARE_OP_LESS_OR_EQUAL => Some(CompareOp::LessOrEqual),
+        COMPARE_OP_GREATER => Some(CompareOp::Greater),
+        COMPARE_OP_NOT_EQUAL => Some(CompareOp::NotEqual),
+        COMPARE_OP_GREATER_OR_EQUAL => Some(CompareOp::GreaterOrEqual),
+        COMPARE_OP_ALWAYS => Some(CompareOp::Always),
         _ => None,
     }
 }
@@ -873,15 +1040,17 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 17] = [
+    const TAGS: [(&str, u8, u8); 19] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
         ("CreateImageView", CREATE_IMAGE_VIEW_TAG, FAMILY_CREATE),
+        ("CreateSampler", CREATE_SAMPLER_TAG, FAMILY_CREATE),
         ("DestroyBuffer", DESTROY_BUFFER_TAG, FAMILY_DESTROY),
         ("DestroySurface", DESTROY_SURFACE_TAG, FAMILY_DESTROY),
         ("DestroyImage", DESTROY_IMAGE_TAG, FAMILY_DESTROY),
         ("DestroyImageView", DESTROY_IMAGE_VIEW_TAG, FAMILY_DESTROY),
+        ("DestroySampler", DESTROY_SAMPLER_TAG, FAMILY_DESTROY),
         ("BeginDebugLabel", BEGIN_DEBUG_LABEL_TAG, FAMILY_ENCODER),
         ("BeginRenderPass", BEGIN_RENDER_PASS_TAG, FAMILY_ENCODER),
         (
@@ -1074,6 +1243,62 @@ mod tests {
             );
         }
 
+        let filter = [FilterMode::Nearest, FilterMode::Linear];
+        let codes: Vec<u8> = filter.iter().map(|m| filter_mode_code(*m)).collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two FilterModes share a code"
+        );
+        for mode in filter {
+            assert_eq!(filter_mode_from_code(filter_mode_code(mode)), Some(mode));
+        }
+
+        let address = [
+            SamplerAddressMode::Repeat,
+            SamplerAddressMode::MirrorRepeat,
+            SamplerAddressMode::ClampToEdge,
+            SamplerAddressMode::ClampToBorder,
+        ];
+        let codes: Vec<u8> = address
+            .iter()
+            .map(|m| sampler_address_mode_code(*m))
+            .collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two SamplerAddressModes share a code"
+        );
+        for mode in address {
+            assert_eq!(
+                sampler_address_mode_from_code(sampler_address_mode_code(mode)),
+                Some(mode)
+            );
+        }
+
+        let compare = [
+            CompareOp::Never,
+            CompareOp::Less,
+            CompareOp::Equal,
+            CompareOp::LessOrEqual,
+            CompareOp::Greater,
+            CompareOp::NotEqual,
+            CompareOp::GreaterOrEqual,
+            CompareOp::Always,
+        ];
+        let codes: Vec<u8> = compare.iter().map(|op| compare_op_code(*op)).collect();
+        assert_eq!(distinct(&codes), codes.len(), "two CompareOps share a code");
+        for op in compare {
+            assert_eq!(compare_op_from_code(compare_op_code(op)), Some(op));
+        }
+        // The pair whose fold is silent, stated on its own: `Greater` is the
+        // engine's shadow test under reversed-Z and `Less` is its opposite, and
+        // a sampler built with either reports nothing about which it got.
+        assert_ne!(
+            compare_op_code(CompareOp::Greater),
+            compare_op_code(CompareOp::Less)
+        );
+
         let device_type = [
             DeviceType::Cpu,
             DeviceType::Integrated,
@@ -1158,6 +1383,9 @@ mod tests {
         assert_eq!(memory_location_from_code(0xFF), None);
         assert_eq!(image_type_from_code(0xFF), None);
         assert_eq!(image_view_type_from_code(0xFF), None);
+        assert_eq!(filter_mode_from_code(0xFF), None);
+        assert_eq!(sampler_address_mode_from_code(0xFF), None);
+        assert_eq!(compare_op_from_code(0xFF), None);
         assert_eq!(device_type_from_code(0xFF), None);
         assert_eq!(format_from_code(0xFF), None);
         assert_eq!(present_mode_from_code(0xFF), None);
@@ -1167,6 +1395,12 @@ mod tests {
         // off-by-one in either table lands and where `0xFF` never would.
         assert_eq!(image_type_from_code(IMAGE_TYPE_D3 + 1), None);
         assert_eq!(image_view_type_from_code(IMAGE_VIEW_TYPE_D3 + 1), None);
+        assert_eq!(filter_mode_from_code(FILTER_MODE_LINEAR + 1), None);
+        assert_eq!(
+            sampler_address_mode_from_code(SAMPLER_ADDRESS_CLAMP_TO_BORDER + 1),
+            None
+        );
+        assert_eq!(compare_op_from_code(COMPARE_OP_ALWAYS + 1), None);
         assert_eq!(device_type_from_code(DEVICE_TYPE_OTHER + 1), None);
         assert_eq!(format_from_code(FORMAT_BC7_RGBA_UNORM_SRGB + 1), None);
         assert_eq!(present_mode_from_code(PRESENT_MODE_IMMEDIATE + 1), None);

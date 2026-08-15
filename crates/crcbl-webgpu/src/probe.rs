@@ -42,6 +42,7 @@
 //! | [`__crcbl_web_gpu_probe_buffer`](shim::__crcbl_web_gpu_probe_buffer) | `(i32) -> i32` | Encode one [`CreateBuffer`](crate::Command::CreateBuffer) against [`PROBE_BUFFER`], of `size` bytes. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_image`](shim::__crcbl_web_gpu_probe_image) | `(i32, i32, i32) -> i32` | Encode one [`CreateImage`](crate::Command::CreateImage) against [`PROBE_IMAGE`], of `width` by `height` texels with `mip_levels` levels. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_image_view`](shim::__crcbl_web_gpu_probe_image_view) | `() -> i32` | Encode one [`CreateImageView`](crate::Command::CreateImageView) against [`PROBE_IMAGE_VIEW`], viewing [`PROBE_IMAGE`]. `1`, or `0` on the same three conditions. |
+//! | [`__crcbl_web_gpu_probe_sampler`](shim::__crcbl_web_gpu_probe_sampler) | `() -> i32` | Encode one [`CreateSampler`](crate::Command::CreateSampler) against [`PROBE_SAMPLER`], with [`PROBE_SAMPLER_DESC`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps) | `() -> i32` | Encode one [`SurfaceCaps`](crate::Command::SurfaceCaps) and register its wait. `1`, or `0` if there was no room or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_state`](shim::__crcbl_web_gpu_probe_surface_caps_state) | `() -> i32` | Drain, and answer one of the `CAPS_*` codes. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_reason_ptr`](shim::__crcbl_web_gpu_probe_surface_caps_reason_ptr) | `() -> i32` | Where the reason the query answered nothing starts. Empty when it answered. |
@@ -134,6 +135,32 @@
 //! **absent** descriptor member rather than as a number — so a replayer that
 //! passed `4294967295` on builds a view the browser refuses, and only a browser
 //! can say so.
+//!
+//! # The sampler is the same shape a third time, and it reports almost nothing
+//!
+//! [`__crcbl_web_gpu_probe_sampler`](shim::__crcbl_web_gpu_probe_sampler) is
+//! [`__crcbl_web_gpu_probe_image_view`](shim::__crcbl_web_gpu_probe_image_view)
+//! in every structural respect — a device method, so it refuses until a device
+//! has opened; no `state`, because nothing answers a creation; no arguments,
+//! because the descriptor is fixed.
+//!
+//! **What differs is what a browser can be asked about it, and the answer is:
+//! its label.** A `GPUSampler` has no other readable member at all — no filters,
+//! no address modes, no clamps — so the "pass the numbers in, read them back
+//! off the object" argument the image and buffer probes are built on has nothing
+//! to work with here. What is left is exactly what a stub cannot fake: that the
+//! object is an instance of this browser's own `GPUSampler`, and that the device
+//! reported nothing about the descriptor afterwards.
+//!
+//! That second half is what makes [`PROBE_SAMPLER_DESC`] worth choosing rather
+//! than defaulting. Its `lod_max` is [`f32::MAX`] — the "no limit" sentinel
+//! [`SamplerDesc::default`] carries — which crosses the wire verbatim by the
+//! same rule the view's range does, and which the replayer has to hand WebGPU as
+//! an explicit `lodMaxClamp` rather than by omitting the member: WebGPU's own
+//! default for that member is a *number* rather than "the rest", so an omission
+//! silently substitutes it. Only a browser can say the value this seam sends is
+//! one `createSampler` accepts, and it says so by reporting nothing on the
+//! device's error channel.
 //!
 //! Its neighbour [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps)
 //! is the opposite case and has the full awaited shape, because
@@ -238,9 +265,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crcbl_hal::{
-    AdapterId, BufferDesc, BufferHandle, BufferUsage, DeviceDesc, Extent3d, Features, Format,
-    ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewHandle, ImageViewType, MemoryLocation, SurfaceCaps, SurfaceHandle,
+    AdapterId, BufferDesc, BufferHandle, BufferUsage, CompareOp, DeviceDesc, Extent3d, Features,
+    FilterMode, Format, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage,
+    ImageViewDesc, ImageViewHandle, ImageViewType, MemoryLocation, SamplerAddressMode, SamplerDesc,
+    SamplerHandle, SurfaceCaps, SurfaceHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -470,6 +498,69 @@ pub const PROBE_IMAGE_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
     view_type: ImageViewType::D2,
     format: Format::Rgba8Unorm,
     range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
+
+/// The sampler [`shim::__crcbl_web_gpu_probe_sampler`] creates, every time.
+///
+/// The same bits a fourth time, on [`PROBE_IMAGE_VIEW`]'s terms: a handle
+/// carries no kind, so a page filing four kinds under one key would be a
+/// replayer with one table where the crate docs require four.
+pub const PROBE_SAMPLER: SamplerHandle = match SamplerHandle::from_bits(1 << 32) {
+    Some(sampler) => sampler,
+    // Generation `1`, as above.
+    None => panic!("generation 1 is not zero"),
+};
+
+/// The descriptor [`shim::__crcbl_web_gpu_probe_sampler`] asks with.
+///
+/// A `const` rather than a function because there is nothing for a caller to
+/// pass: **a `GPUSampler` reports its `label` and nothing else**, so unlike
+/// [`probe_image_desc`] there is no number a page could hand in and read back
+/// off the object the device made. Every field is chosen here instead, and each
+/// is chosen for what a browser can *refuse*.
+///
+/// **`lod_max` is [`f32::MAX`], which is the sentinel.** It is
+/// [`SamplerDesc::default`]'s "no limit"; it crosses the wire verbatim by the
+/// rule `docs/plan/41-webgpu-stream.md` sets, and the replayer has to hand it to
+/// WebGPU as an explicit `lodMaxClamp` — omitting the member substitutes
+/// WebGPU's own default, which is a number rather than "the rest". This probe is
+/// what puts that in front of a real `createSampler`.
+///
+/// **The three address modes are three different ones**, so all three
+/// `GPUAddressMode` spellings the replayer knows are sent at once and a
+/// translation that wrote a string WebGPU does not have is refused by the
+/// browser. [`SamplerAddressMode::ClampToBorder`] is deliberately absent: WebGPU
+/// has no border colour, so the replayer refuses it, and a probe that asked for
+/// it would be testing the refusal rather than the creation.
+/// `web/tools/gpu-replay.mjs` drives that path against a stub, through a command
+/// the corpus really carries.
+///
+/// **The filters are all [`FilterMode::Linear`] and the anisotropy is `1.0`.**
+/// WebGPU ties a `maxAnisotropy` above `1` to all three filters being `'linear'`
+/// — so the pairing here is the one combination that is valid whichever way the
+/// replayer's rule for anisotropy falls, which keeps this probe about the
+/// sentinel rather than about that rule.
+///
+/// **`compare` is [`CompareOp::Greater`]**, which makes this a comparison
+/// sampler — hardware PCF, and the op the engine's reversed-Z shadow test
+/// actually wants. `None` would exercise an absent member; a present one
+/// exercises the presence byte, the code table, and the `GPUCompareFunction`
+/// spelling all at once, and it is the value a wrong table would silently turn
+/// into its opposite.
+pub const PROBE_SAMPLER_DESC: SamplerDesc<'static> = SamplerDesc {
+    label: Some("crcbl-webgpu probe sampler"),
+    mag_filter: FilterMode::Linear,
+    min_filter: FilterMode::Linear,
+    mip_filter: FilterMode::Linear,
+    address_mode: [
+        SamplerAddressMode::ClampToEdge,
+        SamplerAddressMode::Repeat,
+        SamplerAddressMode::MirrorRepeat,
+    ],
+    lod_min: 0.0,
+    lod_max: f32::MAX,
+    anisotropy: 1.0,
+    compare: Some(CompareOp::Greater),
 };
 
 /// One surface-capability query, from the frame that asked to the frame that
@@ -742,6 +833,26 @@ impl Probe {
         };
         channel
             .encode(|stream| stream.create_image_view(PROBE_IMAGE_VIEW, &PROBE_IMAGE_VIEW_DESC))
+            .is_some()
+    }
+
+    /// Encode one [`CreateSampler`](crate::Command::CreateSampler) against
+    /// [`PROBE_SAMPLER`], with [`PROBE_SAMPLER_DESC`].
+    ///
+    /// [`request_image_view`](Self::request_image_view)'s twin, minus the one
+    /// thing that one cannot check: a sampler names no other resource, so there
+    /// is nothing here that has to already exist. The ordering rule is the same
+    /// — `create_sampler` is a device method — and so is the reason a wait is
+    /// not registered: nothing answers a creation.
+    fn request_sampler(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        channel
+            .encode(|stream| stream.create_sampler(PROBE_SAMPLER, &PROBE_SAMPLER_DESC))
             .is_some()
     }
 
@@ -1135,6 +1246,30 @@ pub mod shim {
         })
     }
 
+    /// Ask the page to make a sampler on the device it opened.
+    ///
+    /// `1` when one [`CreateSampler`](crate::Command::CreateSampler) is on the
+    /// stream; `0` on [`__crcbl_web_gpu_probe_image_view`]'s three conditions.
+    ///
+    /// **No `state` beside it and no arguments either**, and the second of those
+    /// is not the first one's reason. There is nothing to poll for because
+    /// nothing answers a creation; there is nothing to pass in because **a
+    /// `GPUSampler` reports nothing but its `label`** — no filters, no address
+    /// modes, no clamps — so a number chosen by the page could not be read back
+    /// off the object anyway. [`PROBE_SAMPLER_DESC`](super::PROBE_SAMPLER_DESC)
+    /// is chosen for what a browser can refuse instead, and its `lod_max` is the
+    /// [`f32::MAX`] sentinel the replayer has to resolve.
+    /// `crcbl.gpu.replayer.samplers` is the table the `GPUSampler` lands in, and
+    /// a descriptor the browser would not have is reported through
+    /// `Device::take_error`.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_sampler() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_sampler()),
+            Err(_) => 0,
+        })
+    }
+
     /// [`granted_u32`] for the device that opened, on the same terms: `0` is a
     /// legal value for each of these, so they are read only once
     /// [`__crcbl_web_gpu_probe_device_state`] has answered
@@ -1331,10 +1466,10 @@ mod tests {
         __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
         __crcbl_web_gpu_probe_features_hi, __crcbl_web_gpu_probe_features_lo,
         __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
-        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_state,
-        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
-        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
-        __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_sampler,
+        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_surface,
+        __crcbl_web_gpu_probe_surface_caps, __crcbl_web_gpu_probe_surface_caps_cause,
+        __crcbl_web_gpu_probe_surface_caps_format, __crcbl_web_gpu_probe_surface_caps_has_extent,
         __crcbl_web_gpu_probe_surface_caps_present_modes,
         __crcbl_web_gpu_probe_surface_caps_reason_len,
         __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
@@ -1997,6 +2132,80 @@ mod tests {
         assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
         assert_eq!(__crcbl_web_gpu_probe_image(8, 8, 1), 0);
         assert_eq!(__crcbl_web_gpu_probe_image_view(), 0);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// And so does the sampler, which makes four kinds on one set of bits.
+    #[test]
+    fn the_probes_sampler_names_the_same_handle_bits_as_everything_else() {
+        assert_eq!(PROBE_SAMPLER.to_bits(), PROBE_IMAGE_VIEW.to_bits());
+    }
+
+    /// The sampler half: one export, one command, and the descriptor this module
+    /// fixed — sentinel and comparison included, because those are the two
+    /// fields a browser can refuse and the two a wrong translation would change
+    /// without saying so.
+    #[test]
+    fn the_sampler_export_encodes_one_create_sampler_carrying_the_no_limit_sentinel() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_sampler(), 1);
+        assert_eq!(
+            take_frame(),
+            vec![Command::CreateSampler {
+                sampler: PROBE_SAMPLER,
+                label: Some("crcbl-webgpu probe sampler".into()),
+                mag_filter: FilterMode::Linear,
+                min_filter: FilterMode::Linear,
+                mip_filter: FilterMode::Linear,
+                address_mode: [
+                    SamplerAddressMode::ClampToEdge,
+                    SamplerAddressMode::Repeat,
+                    SamplerAddressMode::MirrorRepeat,
+                ],
+                lod_min: 0.0,
+                lod_max: f32::MAX,
+                anisotropy: 1.0,
+                compare: Some(CompareOp::Greater),
+            }]
+        );
+    }
+
+    /// The sentinel is the seam's own, not a large number this module picked:
+    /// the probe's `lod_max` has to be the one `SamplerDesc::default` carries,
+    /// or the gate is putting some other value in front of the browser.
+    #[test]
+    fn the_probe_samplers_lod_max_is_the_default_descriptors_no_limit() {
+        assert_eq!(
+            PROBE_SAMPLER_DESC.lod_max.to_bits(),
+            SamplerDesc::default().lod_max.to_bits()
+        );
+        // …and the three address modes are three different ones, so all three
+        // spellings the replayer knows are exercised at once.
+        let [u, v, w] = PROBE_SAMPLER_DESC.address_mode;
+        assert!(u != v && v != w && u != w);
+    }
+
+    /// **Nothing waits on it**, for the image pair's reason.
+    #[test]
+    fn the_sampler_request_registers_no_wait_because_nothing_answers_it() {
+        open_device();
+        let before = waiting_replies();
+        assert_eq!(__crcbl_web_gpu_probe_sampler(), 1);
+        assert_eq!(waiting_replies(), before);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// **A device has to have opened first**, for the image pair's reason:
+    /// `Device::create_sampler` is a device method too.
+    #[test]
+    fn a_sampler_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_sampler(), 0);
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+
+        grant(&granted("no device yet"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_sampler(), 0);
         assert_eq!(take_frame().len(), 1);
     }
 

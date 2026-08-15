@@ -320,6 +320,41 @@ export function startImageViewProbe({ exports }) {
 }
 
 /**
+ * Asks wasm to encode a sampler creation on the device it opened.
+ *
+ * **There is no `readSamplerProbe`, for {@link startBufferProbe}'s reason:**
+ * `CreateSampler` has no entry on the reply channel either.
+ * `globalThis.crcbl.gpu.replayer.samplers` is the table the `GPUSampler` lands
+ * in, and a descriptor the browser would not have arrives in
+ * `crcbl.gpu.replayer.takeError()`.
+ *
+ * **AND THERE IS NOTHING TO PASS IN**, which is where it differs from
+ * {@link startImageProbe} rather than from {@link startImageViewProbe}: a
+ * `GPUSampler` reports its `label` and nothing else — no filters, no address
+ * modes, no clamps — so a number chosen by the page could not be read back off
+ * the object anyway. The descriptor is fixed in
+ * `crates/crcbl-webgpu/src/probe.rs`, and it is chosen for what a browser can
+ * *refuse*: its `lod_max` is `f32::MAX`, the "no limit" sentinel, which crosses
+ * the wire verbatim and which the replayer has to hand WebGPU as an explicit
+ * `lodMaxClamp`. Omitting the member would substitute WebGPU's own default,
+ * which is a number rather than "the rest", and only a real `createSampler` can
+ * say the value this seam sends is one it accepts — it says so by reporting
+ * nothing on the device's error channel.
+ *
+ * It needs a **device**, as {@link startBufferProbe} does and for the same
+ * reason: `create_sampler` is a device method, so a `false` right after
+ * {@link startDeviceProbe} is that ordering rather than a failure.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded it, on {@link startImageProbe}'s
+ *   terms.
+ */
+export function startSamplerProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_sampler() === 1;
+}
+
+/**
  * Asks wasm to encode a query for what a canvas surface will accept.
  *
  * The third command that makes a round trip, and the encode-and-return half of

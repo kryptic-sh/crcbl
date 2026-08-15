@@ -58,6 +58,7 @@
 //! | an unbounded byte payload | [`StreamWriter::push_constants`] |
 //! | a borrowed `&str` | [`StreamWriter::begin_debug_label`] |
 //! | an optional string, and structs with optional handles | [`StreamWriter::begin_render_pass`] |
+//! | an optional enum — a presence byte and a code | [`StreamWriter::create_sampler`] |
 //! | creation with a caller-allocated handle | [`StreamWriter::create_buffer`] |
 //! | a destroy op | [`StreamWriter::destroy_buffer`] |
 //! | an empty body, answered later | [`StreamWriter::enumerate_adapters`] |
