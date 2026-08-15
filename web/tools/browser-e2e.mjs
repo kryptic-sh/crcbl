@@ -2005,24 +2005,40 @@ try {
   // that one" a question with two possible answers.
   await touch('touchMove', [contact(first, 1), contact(secondMoved, 2)]);
   await touch('touchEnd');
-  // The lines arrive a frame later — the engine folds the batch on its next
-  // pump and the page drains the log queue after that.
-  await until(async () => {
-    const seen = contactsFrom(contactMark);
-    return seen.filter((c) => c.phase === 'Ended').length >= 2 ? seen : null;
-  }, PADDLE_SETTLE_MS);
-  await evaluate(page, `crcbl.logLevel(${LOG_INFO})`);
-
-  const seen = contactsFrom(contactMark);
   // Found by *position*, not by counting: the gesture before this one is still
   // flushing its own lines through the log queue when the mark is taken, so the
   // window can legitimately open on a stray `Ended` from the drag above. Which
   // id landed where is the claim, and it is one a leftover line cannot answer.
-  const began = seen.filter((c) => c.phase === 'Began');
-  const idAt = (point) =>
-    began.find((c) => near(c, inCanvas(point)))?.id ?? null;
-  const firstId = idAt(first);
-  const secondId = idAt(second);
+  const idsOf = (seen) => {
+    const began = seen.filter((c) => c.phase === 'Began');
+    const idAt = (point) =>
+      began.find((c) => near(c, inCanvas(point)))?.id ?? null;
+    return { firstId: idAt(first), secondId: idAt(second) };
+  };
+  const endedIn = (seen) =>
+    new Set(seen.filter((c) => c.phase === 'Ended').map((c) => c.id));
+
+  // The lines arrive a frame later — the engine folds the batch on its next
+  // pump and the page drains the log queue after that.
+  //
+  // **Waiting on these two contacts, not on a count of `Ended`s.** A count lets
+  // the stray the comment above anticipates fill the quota, so the wait returns
+  // one contact early and the claim below reads a line that had not arrived yet
+  // as a contact the engine dropped. Seen in CI as `34/35` with the second
+  // contact holding a `Began` and a `Moved` and no `Ended`.
+  await until(async () => {
+    const seen = contactsFrom(contactMark);
+    const { firstId, secondId } = idsOf(seen);
+    if (firstId === null || secondId === null || firstId === secondId) {
+      return null;
+    }
+    const ended = endedIn(seen);
+    return ended.has(firstId) && ended.has(secondId) ? seen : null;
+  }, PADDLE_SETTLE_MS);
+  await evaluate(page, `crcbl.logLevel(${LOG_INFO})`);
+
+  const seen = contactsFrom(contactMark);
+  const { firstId, secondId } = idsOf(seen);
   // Every later report of the first contact, which must still be where it was
   // put: a move credited to the wrong contact shows up here as the held finger
   // having jumped across the canvas.
@@ -2032,9 +2048,7 @@ try {
   const movedSecond = seen.filter(
     (c) => c.phase === 'Moved' && near(c, inCanvas(secondMoved))
   );
-  const ended = new Set(
-    seen.filter((c) => c.phase === 'Ended').map((c) => c.id)
-  );
+  const ended = endedIn(seen);
   check(
     'F',
     'a second contact arrives as its own contact and moves only itself',
