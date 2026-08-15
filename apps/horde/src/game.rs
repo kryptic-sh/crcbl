@@ -2981,6 +2981,15 @@ pub struct RenderState {
 /// silent bug.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Setup {
+    /// Whether this run opens no audio output and keeps its own high score.
+    ///
+    /// **Defaults to the isolated side**, because a `Setup` that took the
+    /// default is a test's: the other side hands `Audio::new` the machine's
+    /// real output device and `Best::load` the player's saved record, and a
+    /// test may do neither to the person running it. The game itself never
+    /// reads this default — `Options::setup` names the flag's value — so the
+    /// default costs a real run nothing and costs a forgetful test nothing
+    /// either.
     pub headless: bool,
     pub tick_hz: u32,
     pub seed: u64,
@@ -3000,7 +3009,7 @@ pub struct Setup {
 impl Default for Setup {
     fn default() -> Self {
         Self {
-            headless: false,
+            headless: true,
             tick_hz: DEFAULT_TICK_HZ,
             seed: DEFAULT_SEED,
             max_enemies: DEFAULT_MAX_ENEMIES,
@@ -3929,7 +3938,6 @@ mod tests {
             Self::with_setup(
                 frame_hz,
                 &Setup {
-                    headless: true,
                     tick_hz,
                     ..Setup::default()
                 },
@@ -3974,7 +3982,6 @@ mod tests {
             Self::at_the_title_screen(
                 frame_hz,
                 &Setup {
-                    headless: true,
                     tick_hz,
                     ..Setup::default()
                 },
@@ -3996,7 +4003,6 @@ mod tests {
             let mut harness = Self::with_setup(
                 frame_hz,
                 &Setup {
-                    headless: true,
                     tick_hz,
                     seed,
                     ..Setup::default()
@@ -4693,7 +4699,6 @@ mod tests {
     #[test]
     fn the_prop_layout_is_a_pure_function_of_the_seed() {
         let setup = |seed| Setup {
-            headless: true,
             seed,
             ..Setup::default()
         };
@@ -6151,7 +6156,6 @@ mod tests {
         let mut harness = Harness::with_setup(
             60,
             &Setup {
-                headless: true,
                 max_enemies: CAP,
                 ..Setup::default()
             },
@@ -6314,7 +6318,6 @@ mod tests {
         let mut harness = Harness::with_setup(
             60,
             &Setup {
-                headless: true,
                 max_enemies: 120,
                 ..Setup::default()
             },
@@ -6413,7 +6416,6 @@ mod tests {
             let mut harness = Harness::with_setup(
                 60,
                 &Setup {
-                    headless: true,
                     max_enemies: 120,
                     ..Setup::default()
                 },
@@ -6521,7 +6523,6 @@ mod tests {
         let mut harness = Harness::with_setup(
             60,
             &Setup {
-                headless: true,
                 max_enemies: crowd,
                 workers,
                 ..Setup::default()
@@ -6661,7 +6662,6 @@ mod tests {
             let mut harness = Harness::with_setup(
                 60,
                 &Setup {
-                    headless: true,
                     max_enemies: 400,
                     workers,
                     ..Setup::default()
@@ -6766,7 +6766,6 @@ mod tests {
             let mut harness = Harness::with_setup(
                 frame_hz,
                 &Setup {
-                    headless: true,
                     max_enemies: 80,
                     ..Setup::default()
                 },
@@ -6801,7 +6800,6 @@ mod tests {
             let mut harness = Harness::with_setup(
                 60,
                 &Setup {
-                    headless: true,
                     seed,
                     max_enemies: 80,
                     ..Setup::default()
@@ -7422,7 +7420,6 @@ mod tests {
         let mut harness = Harness::with_setup(
             60,
             &Setup {
-                headless: true,
                 max_enemies: 120,
                 ..Setup::default()
             },
@@ -7567,7 +7564,6 @@ mod tests {
         let mut harness = Harness::with_setup(
             60,
             &Setup {
-                headless: true,
                 seed,
                 ..Setup::default()
             },
@@ -8101,7 +8097,6 @@ mod tests {
     #[test]
     fn a_prefilled_field_is_the_size_and_shape_it_was_asked_for() {
         let mut game = Game::with_setup(&Setup {
-            headless: true,
             max_enemies: 10_000,
             ..Setup::default()
         })

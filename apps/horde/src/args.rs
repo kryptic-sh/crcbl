@@ -437,6 +437,17 @@ mod tests {
         assert!(parsed(&["--headless"]).setup().headless);
     }
 
+    /// The direction no other test wants: `Setup::default` is headless so that
+    /// a test's setup opens no audio device and cannot overwrite the player's
+    /// saved record, which means an [`Options::setup`] that stopped naming the
+    /// field — `..Setup::default()` — would turn every windowed run silent,
+    /// windowless and unable to save, while the whole suite stayed green
+    /// because every other case asked for headless anyway.
+    #[test]
+    fn a_run_that_did_not_ask_for_headless_does_not_get_it() {
+        assert!(!parsed(&[]).setup().headless);
+    }
+
     /// Switching the debug overlay on is one flag, and the default follows the
     /// build profile rather than a constant.
     #[test]
