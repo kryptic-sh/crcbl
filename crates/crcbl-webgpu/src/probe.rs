@@ -39,20 +39,28 @@
 //! | [`__crcbl_web_gpu_probe_device_features_hi`](shim::__crcbl_web_gpu_probe_device_features_hi) | `() -> i32` | High 32 bits of the same. |
 //! | [`__crcbl_web_gpu_probe_device_max_image_2d`](shim::__crcbl_web_gpu_probe_device_max_image_2d) | `() -> i32` | The opened device's [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d). |
 //! | [`__crcbl_web_gpu_probe_surface`](shim::__crcbl_web_gpu_probe_surface) | `(i32) -> i32` | Encode one [`CreateSurface`](crate::Command::CreateSurface) against [`PROBE_SURFACE`], naming the canvas that `canvas_id` is the page's registry key for. `1`, or `0` if the probe is re-entered or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps) | `(i32, i32) -> i32` | Encode one [`SurfaceCaps`](crate::Command::SurfaceCaps) naming the surface at that index and that adapter id, and register its wait. `1`, or `0` if there was no room or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_surface_caps_state`](shim::__crcbl_web_gpu_probe_surface_caps_state) | `() -> i32` | Drain, and answer one of the `CAPS_*` codes. |
+//! | [`__crcbl_web_gpu_probe_surface_caps_reason_ptr`](shim::__crcbl_web_gpu_probe_surface_caps_reason_ptr) | `() -> i32` | Where the reason the query answered nothing starts. Empty when it answered. |
+//! | [`__crcbl_web_gpu_probe_surface_caps_reason_len`](shim::__crcbl_web_gpu_probe_surface_caps_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
+//! | [`__crcbl_web_gpu_probe_surface_caps_cause`](shim::__crcbl_web_gpu_probe_surface_caps_cause) | `() -> i32` | Which [`SurfaceCapsFailure`] refused it, as [`crate::tag::surface_caps_failure_code`] spells it. |
+//! | [`__crcbl_web_gpu_probe_surface_caps_format`](shim::__crcbl_web_gpu_probe_surface_caps_format) | `() -> i32` | The surface's [`preferred_format`](SurfaceCaps::preferred_format), as [`crate::tag::format_code`] spells it. |
+//! | [`__crcbl_web_gpu_probe_surface_caps_present_modes`](shim::__crcbl_web_gpu_probe_surface_caps_present_modes) | `() -> i32` | One bit per mode offered, at `1 <<` its [`crate::tag::present_mode_code`]. |
+//! | [`__crcbl_web_gpu_probe_surface_caps_has_extent`](shim::__crcbl_web_gpu_probe_surface_caps_has_extent) | `() -> i32` | `1` if the surface reported a [`current_extent`](SurfaceCaps::current_extent), `0` if it reported none. |
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
 //! a `state` call decodes a buffer and clones a string out of it, so it
 //! allocates, and an allocation may grow wasm memory and detach a `Uint8Array`
-//! built before the call. The pointers, the lengths and the six numbers
-//! allocate nothing.
+//! built before the call. The pointers, the lengths and the numbers allocate
+//! nothing.
 //!
-//! **Either `state` drains for both probes.** There is one channel and one
-//! committed reply buffer, so the first of the two calls in a frame decodes it
-//! and hands each probe its own answer; the second finds nothing left and
-//! reports what its probe now holds. The consequence worth stating: a buffer
-//! that will not decode is reported by whichever was asked first, as that
-//! probe's `*_UNDECODABLE`, and the other reports the state it was already in.
-//! Dropping the other probe's answer instead would leave a command waiting for
+//! **Any one `state` drains for all three probes.** There is one channel and one
+//! committed reply buffer, so the first of the three calls in a frame decodes it
+//! and hands each probe its own answer; the others find nothing left and report
+//! what their probe now holds. The consequence worth stating: a buffer that will
+//! not decode is reported by whichever was asked first, as that probe's
+//! `*_UNDECODABLE`, and the others report the state they were already in.
+//! Dropping the other probes' answers instead would leave a command waiting for
 //! ever, which is the one thing this channel must never do.
 //!
 //! # The device this asks for, and why it asks for so little
@@ -74,7 +82,7 @@
 //! does not have, so it is the refusal case rather than the opening one. See
 //! [`crate::device`].
 //!
-//! # The surface probe is one export, and that is the command's shape
+//! # `CreateSurface` is one export, and that is the command's shape
 //!
 //! [`__crcbl_web_gpu_probe_surface`](shim::__crcbl_web_gpu_probe_surface) has no
 //! `state`, no codes of its own and nothing to absorb, because
@@ -83,6 +91,11 @@
 //! on, and there is nothing for a browser to send back. A state machine here
 //! would have one state and a poll would have nothing to poll for, so the honest
 //! shape is one call that encodes one command and answers whether it went.
+//!
+//! Its neighbour [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps)
+//! is the opposite case and has the full awaited shape, because
+//! [`SurfaceCaps`](crate::Command::SurfaceCaps) **is** answered — with the
+//! capabilities or with a refusal, and both name the sequence it was assigned.
 //!
 //! That also decides where a failure surfaces. A canvas id the page has not
 //! registered, or a canvas that will not give up a `webgpu` context, is a
@@ -124,17 +137,72 @@
 //! `(i32, …) -> i32`, which `docs/plan/41-webgpu-stream.md` sets as the
 //! convention and which needs no `BigInt` on the JS side.
 //!
+//! # Why the preferred format, and not the whole of `SurfaceCaps`
+//!
+//! The same argument, landing on exactly one field. [`SurfaceCaps`] has six, and
+//! five of them are **this seam's decisions rather than the browser's**:
+//! `web/engine/gpu-replay.js` fills [`present_modes`](SurfaceCaps::present_modes)
+//! with `Fifo` alone because WebGPU has no present mode at all,
+//! [`composite_alpha`](SurfaceCaps::composite_alpha) with the two
+//! `GPUCanvasConfiguration.alphaMode` spellings, the two image counts with the
+//! statement that a canvas has one configuration, and
+//! [`current_extent`](SurfaceCaps::current_extent) with nothing. A browser has
+//! no opinion to disagree with about any of them, so an export for each would
+//! buy checks that can only read back what that file wrote.
+//!
+//! [`formats`](SurfaceCaps::formats) is the field the browser fills, and its
+//! first entry — which is what [`preferred_format`](SurfaceCaps::preferred_format)
+//! answers, neither canvas format being sRGB — is `getPreferredCanvasFormat()`.
+//! **That varies by browser and by machine and the page can ask for it
+//! independently**, so it is the one value here a gate check can corroborate
+//! instead of restate, and it is exported as its wire code.
+//!
+//! Two of the other five are exported anyway, doing a different job. The format
+//! is one code out of a record of three lists, two counts and an optional pair,
+//! and it decodes correctly whatever happens to the rest — so
+//! [`present_modes`](SurfaceCaps::present_modes), which the seam promises always
+//! contains [`Fifo`](crcbl_hal::PresentMode::Fifo), and the presence of
+//! [`current_extent`](SurfaceCaps::current_extent), which a browser never has, are
+//! the two cheapest facts that say the rest of the record survived the crossing:
+//! an empty mode list or an extent that appeared from nowhere is a reader that
+//! lost its place after the first list. Neither is a count written into a check,
+//! which would only assert what the replayer chose; both are invariants that hold
+//! however many entries there turn out to be.
+//!
+//! # The capability query takes both ids, so both refusals are reachable
+//!
+//! Its neighbours take what they can: the enumeration takes nothing, and the
+//! device request takes its adapter from the enumeration that was answered and
+//! refuses to encode until there is one. This one takes a surface index and an
+//! adapter id **from the caller**, because [`SurfaceCapsFailure`] is the half of
+//! a refusal a caller branches on and a cause nothing can produce is a cause
+//! nothing checks.
+//!
+//! Index `0` is [`PROBE_SURFACE`], the surface
+//! [`__crcbl_web_gpu_probe_surface`](shim::__crcbl_web_gpu_probe_surface)
+//! creates; any other index names one the replayer has no context for, which is
+//! [`InvalidHandle`](SurfaceCapsFailure::InvalidHandle). Adapter `0` is the one a
+//! browser grants; any other is
+//! [`NoSuchAdapter`](SurfaceCapsFailure::NoSuchAdapter). Both are ordinary
+//! answers rather than thrown frames —
+//! [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) is how adapter
+//! selection is done, so a refusal is a step of it — and both reach wasm through
+//! the same reply channel a success does, which is the property a gate can
+//! actually observe.
+//!
 //! `web/engine/gpu-probe.js` is the page's half, and
 //! `web/tools/browser-e2e.mjs` is what drives it in a real browser.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crcbl_hal::{AdapterId, DeviceDesc, Features, SurfaceHandle};
+use crcbl_hal::{AdapterId, DeviceDesc, Features, SurfaceCaps, SurfaceHandle};
 
 use crate::device::DeviceProbe;
 use crate::instance::AdapterProbe;
+use crate::reply::{Reply, SurfaceCapsFailure};
 use crate::web::{StreamChannel, install};
+use crate::writer::StreamWriter;
 
 /// [`AdapterProbe::Unasked`], or no channel to ask through.
 pub const PROBE_UNASKED: u32 = 0;
@@ -172,6 +240,31 @@ pub const DEVICE_FAILED: u32 = 3;
 /// this is the format's two hand-written sides having drifted.
 pub const DEVICE_UNDECODABLE: u32 = 4;
 
+/// Nothing has been asked, or there is no channel to ask through.
+pub const CAPS_UNASKED: u32 = 0;
+/// The query is out and unanswered.
+///
+/// Real but brief: `web/engine/gpu-replay.js` answers this command *within* the
+/// replay rather than out of a promise, so it settles on the frame the demo's
+/// loop replays it — one frame later than the call that asked, and no more.
+pub const CAPS_WAITING: u32 = 1;
+/// The surface answered; the format, the mode bits and the extent flag carry
+/// what it will accept, and the reason is empty.
+pub const CAPS_ANSWERED: u32 = 2;
+/// The query answered nothing; the reason says what happened and
+/// [`shim::__crcbl_web_gpu_probe_surface_caps_cause`] says which
+/// [`SurfaceCapsFailure`] it was.
+///
+/// **Not an error on this seam.** `surface_caps` is how adapter selection is
+/// done, so a query that answers nothing is a step of it.
+pub const CAPS_REFUSED: u32 = 3;
+/// The committed reply buffer would not decode; the reason is the
+/// [`DecodeError`](crate::DecodeError). [`PROBE_UNDECODABLE`]'s twin, and
+/// distinct from [`CAPS_REFUSED`] for its reason: a refusal is an answer this
+/// seam asked for, and this is the format's two hand-written sides having
+/// drifted.
+pub const CAPS_UNDECODABLE: u32 = 4;
+
 /// The descriptor [`shim::__crcbl_web_gpu_probe_device`] asks with.
 ///
 /// Requires only [`Features::COMPUTE`], which core WebGPU grants with no
@@ -189,22 +282,135 @@ pub const fn probe_device_desc(adapter: AdapterId) -> DeviceDesc<'static> {
     }
 }
 
+/// The handle this module names the surface at `index` by.
+///
+/// Generation `1` in every case, which is the smallest
+/// [`Handle::from_bits`](crcbl_core::Handle::from_bits) accepts and all this
+/// module needs: nothing here destroys a surface, so no index is ever reissued
+/// and a generation has nothing to distinguish.
+const fn surface_at(index: u32) -> SurfaceHandle {
+    match SurfaceHandle::from_bits((1 << 32) | index as u64) {
+        Some(surface) => surface,
+        // Generation `1`, written into the high half above, so this arm is the
+        // expression being wrong rather than a case a caller can reach.
+        None => panic!("generation 1 is not zero"),
+    }
+}
+
 /// The surface [`shim::__crcbl_web_gpu_probe_surface`] creates, every time.
 ///
 /// One fixed handle rather than one drawn from a pool, because the probe has no
 /// pool to draw from: it is an observation point, and identity on this stream is
-/// positional — wasm picks the id, JS files the context under it. Index `0` with
-/// generation `1`, the smallest bit pattern
-/// [`Handle::from_bits`](crcbl_core::Handle::from_bits) accepts.
+/// positional — wasm picks the id, JS files the context under it. Index `0`, so
+/// that is the index
+/// [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps)
+/// asks about to reach a surface that exists.
 ///
 /// Asking twice therefore names this same surface twice, and the replayer's
 /// table takes the second context in the first's place rather than growing.
-pub const PROBE_SURFACE: SurfaceHandle = match SurfaceHandle::from_bits(1 << 32) {
-    Some(surface) => surface,
-    // Generation `1`, written into the high half above, so this arm is the
-    // literal being wrong rather than a case a caller can reach.
-    None => panic!("generation 1 is not zero"),
-};
+pub const PROBE_SURFACE: SurfaceHandle = surface_at(0);
+
+/// One surface-capability query, from the frame that asked to the frame that
+/// was answered.
+///
+/// [`AdapterProbe`] and [`DeviceProbe`] for the third answered command, and
+/// private for the difference between them and it: those two are the seam's own
+/// state machines and live beside the trait methods they will implement, while
+/// nothing outside this module holds one of these. The `impl Instance` that
+/// eventually needs one is where [`AdapterProbe`] is — this module is an
+/// observation point and goes when that arrives.
+///
+/// **Not [`Eq`]**, because [`Answered`](Self::Answered) holds a
+/// [`SurfaceCaps`] and that is not.
+#[derive(Clone, Debug, Default, PartialEq)]
+enum SurfaceCapsProbe {
+    /// Nothing has been asked, or the channel had no room for it.
+    #[default]
+    Unasked,
+    /// The command is on the stream and its answer has not arrived.
+    Waiting {
+        /// Sequence of the [`SurfaceCaps`](crate::Command::SurfaceCaps)
+        /// command, which is what the reply will name.
+        sequence: u64,
+    },
+    /// The surface said what it will accept.
+    Answered {
+        /// The whole record, as it crossed.
+        caps: SurfaceCaps,
+    },
+    /// The query answered nothing, which on this seam is an answer.
+    Refused {
+        /// What the browser said, or what the replayer refused to ask. For a
+        /// log or a banner; never a code to branch on.
+        reason: String,
+        /// Which failure, and the half of this that *is* for branching on.
+        cause: SurfaceCapsFailure,
+    },
+}
+
+impl SurfaceCapsProbe {
+    /// Ask what `surface` will accept on `adapter`, on this frame's stream.
+    ///
+    /// `None` when the channel would not take the query — a full waiting set, or
+    /// a buffer already borrowed — and nothing is encoded then, for
+    /// [`AdapterProbe::request`]'s reason: a command whose sequence nothing
+    /// waits on turns the frame's *entire* reply buffer into a
+    /// [`DecodeError::UnexpectedSequence`](crate::DecodeError::UnexpectedSequence).
+    fn request(
+        channel: &StreamChannel,
+        surface: SurfaceHandle,
+        adapter: AdapterId,
+    ) -> Option<Self> {
+        let sequence = channel
+            .encode_awaited(|stream: &mut StreamWriter| stream.surface_caps(surface, adapter))?;
+        Some(Self::Waiting { sequence })
+    }
+
+    /// The sequence this is waiting on, or `None` if it is not waiting.
+    const fn sequence(&self) -> Option<u64> {
+        match self {
+            Self::Waiting { sequence } => Some(*sequence),
+            _ => None,
+        }
+    }
+
+    /// Take this probe's answer out of a drained frame's replies, if it is
+    /// there.
+    ///
+    /// `true` when this call settled the probe. Everything not naming this
+    /// probe's sequence is left alone rather than consumed —
+    /// [`AdapterProbe::absorb`]'s rule, and what lets all three probes read the
+    /// same drained buffer.
+    fn absorb(&mut self, replies: &[(u64, Reply)]) -> bool {
+        let Some(waiting) = self.sequence() else {
+            return false;
+        };
+        let Some((_, reply)) = replies.iter().find(|(sequence, _)| *sequence == waiting) else {
+            return false;
+        };
+        *self = match reply {
+            Reply::SurfaceCaps { caps } => Self::Answered { caps: caps.clone() },
+            Reply::SurfaceCapsFailed { reason, cause } => Self::Refused {
+                reason: reason.clone(),
+                cause: *cause,
+            },
+            // A reply of another shape naming this sequence is a bug in the
+            // replayer, and it settles rather than waits: the sequence has been
+            // answered and a second answer to it is refused, so nothing else is
+            // coming. `Backend` is the cause that promises nothing, which is the
+            // only honest thing to say about a failure nobody wrote a branch
+            // for — the same judgement `gpu-replay.js` makes at the same seam.
+            other => Self::Refused {
+                reason: format!(
+                    "the replayer answered the capability query with {}",
+                    other.name()
+                ),
+                cause: SurfaceCapsFailure::Backend,
+            },
+        };
+        true
+    }
+}
 
 thread_local! {
     /// The probe's own channel and its state. Thread-local for
@@ -226,10 +432,14 @@ struct Probe {
     text: String,
     device: DeviceProbe,
     /// Why no device opened, or a decode error. Its own string rather than a
-    /// share of [`text`](Self::text): the two probes settle at different times
-    /// and each export reads the text belonging to its own `state` call, so one
+    /// share of [`text`](Self::text): the probes settle at different times and
+    /// each export reads the text belonging to its own `state` call, so one
     /// buffer would mean whichever ran last.
     reason: String,
+    caps: SurfaceCapsProbe,
+    /// Why the capability query answered nothing, or a decode error. Its own
+    /// string for [`reason`](Self::reason)'s reason.
+    caps_reason: String,
 }
 
 impl Probe {
@@ -240,6 +450,8 @@ impl Probe {
             text: String::new(),
             device: DeviceProbe::Unasked,
             reason: String::new(),
+            caps: SurfaceCapsProbe::Unasked,
+            caps_reason: String::new(),
         }
     }
 
@@ -308,12 +520,37 @@ impl Probe {
             .is_some()
     }
 
-    /// Drain what JS has committed and hand **both** probes their answers.
+    /// Encode one [`SurfaceCaps`](crate::Command::SurfaceCaps) asking what the
+    /// surface at `surface` will accept on adapter `adapter`.
+    ///
+    /// **Neither id is taken from what has already happened**, which is the
+    /// difference from [`request_device`](Self::request_device) and is
+    /// deliberate: the two ids are what make
+    /// [`InvalidHandle`](SurfaceCapsFailure::InvalidHandle) and
+    /// [`NoSuchAdapter`](SurfaceCapsFailure::NoSuchAdapter) reachable, and the
+    /// [module docs](self#the-capability-query-takes-both-ids-so-both-refusals-are-reachable)
+    /// carry the argument. Nothing is validated here for the same reason the
+    /// device request validates nothing: the tables are the replayer's.
+    fn request_surface_caps(&mut self, surface: u32, adapter: u32) -> bool {
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(state) =
+            SurfaceCapsProbe::request(channel, surface_at(surface), AdapterId(adapter))
+        else {
+            return false;
+        };
+        self.caps = state;
+        self.caps_reason.clear();
+        true
+    }
+
+    /// Drain what JS has committed and hand **every** probe its answer.
     ///
     /// The error, if the buffer would not decode, for the caller to report as
-    /// its own probe's `*_UNDECODABLE`. One drain for the two of them because
-    /// there is one buffer: absorbing into only the probe that asked would drop
-    /// the other's answer, and a dropped reply is a command that waits for ever.
+    /// its own probe's `*_UNDECODABLE`. One drain for all of them because there
+    /// is one buffer: absorbing into only the probe that asked would drop the
+    /// others' answers, and a dropped reply is a command that waits for ever.
     fn drain(&mut self) -> Option<crate::DecodeError> {
         let channel = self.channel.as_ref()?;
         // `None` is the inbox being borrowed, which nothing here can cause; it
@@ -323,6 +560,7 @@ impl Probe {
             Some(Ok(replies)) => {
                 self.state.absorb(&replies);
                 self.device.absorb(&replies);
+                self.caps.absorb(&replies);
                 None
             }
             Some(Err(error)) => Some(error),
@@ -370,6 +608,26 @@ impl Probe {
         }
     }
 
+    /// Drain, absorb, and report where the capability query has got to.
+    fn caps_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.caps_reason = error.to_string();
+            return CAPS_UNDECODABLE;
+        }
+        match &self.caps {
+            SurfaceCapsProbe::Unasked => CAPS_UNASKED,
+            SurfaceCapsProbe::Waiting { .. } => CAPS_WAITING,
+            SurfaceCapsProbe::Answered { .. } => {
+                self.caps_reason.clear();
+                CAPS_ANSWERED
+            }
+            SurfaceCapsProbe::Refused { reason, .. } => {
+                self.caps_reason.clone_from(reason);
+                CAPS_REFUSED
+            }
+        }
+    }
+
     /// What the granted adapter said about itself, or `None` if none was.
     ///
     /// The numeric exports read through this rather than each reaching into the
@@ -389,6 +647,22 @@ impl Probe {
     const fn opened(&self) -> Option<crcbl_hal::DeviceCaps> {
         self.device.caps()
     }
+
+    /// What the surface said it will accept, or `None` if it has not.
+    const fn accepted(&self) -> Option<&SurfaceCaps> {
+        match &self.caps {
+            SurfaceCapsProbe::Answered { caps } => Some(caps),
+            _ => None,
+        }
+    }
+
+    /// Which failure refused the capability query, or `None` if none did.
+    const fn caps_failure(&self) -> Option<SurfaceCapsFailure> {
+        match &self.caps {
+            SurfaceCapsProbe::Refused { cause, .. } => Some(*cause),
+            _ => None,
+        }
+    }
 }
 
 /// The JS→wasm ABI. See the [module docs](self) for the whole contract.
@@ -396,7 +670,7 @@ impl Probe {
 /// `#[unsafe(no_mangle)]` only on `wasm32`. None of these is `unsafe`: none
 /// dereferences a pointer the caller supplied.
 pub mod shim {
-    use super::{DEVICE_UNASKED, PROBE, PROBE_UNASKED};
+    use super::{CAPS_UNASKED, DEVICE_UNASKED, PROBE, PROBE_UNASKED};
 
     /// Ask the browser what it will grant.
     ///
@@ -546,7 +820,7 @@ pub mod shim {
     /// **THE ONE EXPORT HERE WITH NO `state` BESIDE IT.** Its two neighbours ask
     /// a question and poll for the answer; this one only tells. `create_surface`
     /// makes no round trip — see the [module
-    /// docs](super#the-surface-probe-is-one-export-and-that-is-the-commands-shape)
+    /// docs](super#createsurface-is-one-export-and-that-is-the-commands-shape)
     /// — so `1` says the command was encoded and reached the shim's buffer, and
     /// nothing more. **Whether the page could resolve the canvas is the page's
     /// to report**, and it reports it by throwing out of the replay.
@@ -597,11 +871,161 @@ pub mod shim {
     pub extern "C" fn __crcbl_web_gpu_probe_device_max_image_2d() -> u32 {
         opened_u32(|caps| caps.limits.max_image_2d)
     }
+
+    /// Ask what a surface will accept on an adapter.
+    ///
+    /// `1` when one [`SurfaceCaps`](crate::Command::SurfaceCaps) is on the
+    /// stream with its wait registered; `0` when there was no room, when the
+    /// probe is re-entered, or when another channel is already installed.
+    ///
+    /// **Both ids come from the caller and neither is validated here.**
+    /// `surface` is an index — `0` is [`PROBE_SURFACE`](super::PROBE_SURFACE),
+    /// which [`__crcbl_web_gpu_probe_surface`] creates, and any other index
+    /// names one the replayer has no context for. `adapter` is an
+    /// [`AdapterId`](crcbl_hal::AdapterId) — `0` is the one a browser grants,
+    /// and any other names none. That is what makes both refusals reachable;
+    /// see the [module
+    /// docs](super#the-capability-query-takes-both-ids-so-both-refusals-are-reachable).
+    ///
+    /// Unlike [`__crcbl_web_gpu_probe_device`] this needs no granted adapter to
+    /// have arrived first, so it is legal on any frame — including one where
+    /// nothing has been enumerated, which is the frame that produces
+    /// [`NoSuchAdapter`](crate::SurfaceCapsFailure::NoSuchAdapter).
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_surface_caps(surface: u32, adapter: u32) -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_surface_caps(surface, adapter)),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain the committed replies and report where the capability query has got
+    /// to.
+    ///
+    /// One of the `CAPS_*` codes. **May allocate**, on
+    /// [`__crcbl_web_gpu_probe_state`]'s terms and for its reason — and, like
+    /// it, this is the call that drains for *every* probe.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_surface_caps_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.caps_state(),
+            Err(_) => CAPS_UNASKED,
+        })
+    }
+
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_surface_caps_state`] starts. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_surface_caps_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.caps_reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_surface_caps_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.caps_reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
+    /// Which [`SurfaceCapsFailure`](crate::SurfaceCapsFailure) refused the
+    /// query, as
+    /// [`surface_caps_failure_code`](crate::tag::surface_caps_failure_code)
+    /// spells it.
+    ///
+    /// **`0` is a real code** —
+    /// [`Unsupported`](crate::SurfaceCapsFailure::Unsupported) — and is also
+    /// what this answers when nothing was refused, on the terms
+    /// [`__crcbl_web_gpu_probe_features_lo`] states: read it only once
+    /// [`__crcbl_web_gpu_probe_surface_caps_state`] has answered
+    /// [`CAPS_REFUSED`](super::CAPS_REFUSED). Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_surface_caps_cause() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.caps_failure().map_or(0, |cause| {
+                u32::from(crate::tag::surface_caps_failure_code(cause))
+            }),
+            Err(_) => 0,
+        })
+    }
+
+    /// Reads one number off the capability record the surface answered, or `0`.
+    ///
+    /// [`granted_u32`]'s terms: `0` is a legal value for each of these, so it is
+    /// not a failure code, and they are read only once
+    /// [`__crcbl_web_gpu_probe_surface_caps_state`] has answered
+    /// [`CAPS_ANSWERED`](super::CAPS_ANSWERED). Allocates nothing.
+    fn accepted_u32(read: impl FnOnce(&crcbl_hal::SurfaceCaps) -> u32) -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.accepted().map_or(0, read),
+            Err(_) => 0,
+        })
+    }
+
+    /// The surface's
+    /// [`preferred_format`](crcbl_hal::SurfaceCaps::preferred_format), as
+    /// [`format_code`](crate::tag::format_code) spells it — the browser's
+    /// `getPreferredCanvasFormat()`, having crossed the wire and come back.
+    ///
+    /// **The one number here a page can corroborate**, which is why it is the
+    /// one exported; see the [module
+    /// docs](super#why-the-preferred-format-and-not-the-whole-of-surfacecaps).
+    /// `0` is [`FORMAT_R8_UNORM`](crate::tag::FORMAT_R8_UNORM) as well as
+    /// "nothing answered", so read it only once
+    /// [`__crcbl_web_gpu_probe_surface_caps_state`] has answered
+    /// [`CAPS_ANSWERED`](super::CAPS_ANSWERED).
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_surface_caps_format() -> u32 {
+        accepted_u32(|caps| {
+            caps.preferred_format()
+                .map_or(0, |format| u32::from(crate::tag::format_code(format)))
+        })
+    }
+
+    /// One bit per [`PresentMode`](crcbl_hal::PresentMode) the surface offers,
+    /// at `1 <<` its [`present_mode_code`](crate::tag::present_mode_code).
+    ///
+    /// A word rather than the list itself because what there is to check is a
+    /// membership — [`SurfaceCaps`](crcbl_hal::SurfaceCaps) promises
+    /// [`Fifo`](crcbl_hal::PresentMode::Fifo) is always there — and a bit per
+    /// code answers that without an export per entry. Order is lost, which
+    /// costs nothing: `present_modes` carries no ordering promise, unlike
+    /// [`formats`](crcbl_hal::SurfaceCaps::formats).
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_surface_caps_present_modes() -> u32 {
+        accepted_u32(|caps| {
+            caps.present_modes.iter().fold(0, |bits, mode| {
+                bits | (1u32 << crate::tag::present_mode_code(*mode))
+            })
+        })
+    }
+
+    /// `1` if the surface reported a
+    /// [`current_extent`](crcbl_hal::SurfaceCaps::current_extent), `0` if it
+    /// reported none.
+    ///
+    /// The presence and not the pair, because from a browser the presence is
+    /// the whole fact: WebGPU has no `currentExtent` query and a canvas's own
+    /// size is the page's number rather than the surface's, so `gpu-replay.js`
+    /// answers `None` — and an extent appearing here is either a reader that
+    /// lost its place or a replayer that started handing the shell its own
+    /// request back as confirmation.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_surface_caps_has_extent() -> u32 {
+        accepted_u32(|caps| u32::from(caps.current_extent.is_some()))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crcbl_hal::{AdapterInfo, BackendKind, DeviceCaps, DeviceType, Limits};
+    use crcbl_hal::{
+        AdapterInfo, BackendKind, CompositeAlpha, DeviceCaps, DeviceType, Format, Limits,
+        PresentMode,
+    };
 
     use super::shim::{
         __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_device,
@@ -610,8 +1034,13 @@ mod tests {
         __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
         __crcbl_web_gpu_probe_features_hi, __crcbl_web_gpu_probe_features_lo,
         __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_state,
-        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_text_len,
-        __crcbl_web_gpu_probe_text_ptr,
+        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
+        __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
+        __crcbl_web_gpu_probe_surface_caps_has_extent,
+        __crcbl_web_gpu_probe_surface_caps_present_modes,
+        __crcbl_web_gpu_probe_surface_caps_reason_len,
+        __crcbl_web_gpu_probe_surface_caps_reason_ptr, __crcbl_web_gpu_probe_surface_caps_state,
+        __crcbl_web_gpu_probe_text_len, __crcbl_web_gpu_probe_text_ptr,
     };
     use super::*;
     use crate::web::shim::{
@@ -643,6 +1072,21 @@ mod tests {
             "the probe answered a length with no pointer"
         );
         // SAFETY: `ptr` and `len` are this thread's `Probe::reason`, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        String::from_utf8(bytes.to_vec()).expect("the probe's reason is a Rust String")
+    }
+
+    /// The reason the last `caps_state` call left, read the way JS reads it.
+    fn caps_reason() -> String {
+        let len = __crcbl_web_gpu_probe_surface_caps_reason_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_surface_caps_reason_ptr();
+        assert!(
+            !ptr.is_null(),
+            "the probe answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `Probe::caps_reason`, which
         // nothing between the two calls above can have moved — neither export
         // allocates.
         let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
@@ -1058,6 +1502,256 @@ mod tests {
                 surface: PROBE_SURFACE,
                 canvas_id: 3,
             }]
+        );
+    }
+
+    /// The capabilities a browser answers with, as `gpu-replay.js` builds them:
+    /// the preferred canvas format first, one present mode, no extent.
+    fn canvas_caps(preferred: Format) -> crcbl_hal::SurfaceCaps {
+        crcbl_hal::SurfaceCaps {
+            formats: vec![preferred, Format::Rgba8Unorm],
+            present_modes: vec![PresentMode::Fifo],
+            composite_alpha: vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied],
+            min_image_count: 2,
+            max_image_count: 2,
+            current_extent: None,
+        }
+    }
+
+    /// The whole capability exchange through the exports alone, which is what
+    /// the browser gate drives — and the numbers it reads are the record's, not
+    /// zeros.
+    #[test]
+    fn the_exports_carry_a_capability_query_out_and_the_surfaces_answer_back() {
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_UNASKED);
+        // Nothing answered yet: the documented `0`, which is also why these are
+        // read only after `state` said `ANSWERED`.
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_format(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_present_modes(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_has_extent(), 0);
+
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps(0, 0), 1);
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::SurfaceCaps {
+                surface: PROBE_SURFACE,
+                adapter: AdapterId(0),
+            }]
+        );
+
+        let mut replies = ReplyWriter::new();
+        replies.surface_caps(0, &canvas_caps(Format::Bgra8Unorm));
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_ANSWERED);
+        assert_eq!(caps_reason(), "");
+        // `Bgra8Unorm` rather than the list's first entry by accident: neither
+        // canvas format is sRGB, so `preferred_format` falls through to the
+        // first, which is what the browser preferred.
+        assert_eq!(
+            __crcbl_web_gpu_probe_surface_caps_format(),
+            u32::from(tag::format_code(Format::Bgra8Unorm))
+        );
+        assert_eq!(
+            __crcbl_web_gpu_probe_surface_caps_present_modes(),
+            1 << tag::PRESENT_MODE_FIFO
+        );
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_has_extent(), 0);
+    }
+
+    /// **The format export is the record's, not a constant.** A second run with
+    /// the other canvas format has to move it, or the browser gate's round-trip
+    /// check is comparing something fixed against something live.
+    #[test]
+    fn the_format_export_follows_the_format_the_reply_carried() {
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps(0, 0), 1);
+        assert_eq!(take_frame().len(), 1);
+        let mut replies = ReplyWriter::new();
+        replies.surface_caps(0, &canvas_caps(Format::Rgba8Unorm));
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_ANSWERED);
+        assert_eq!(
+            __crcbl_web_gpu_probe_surface_caps_format(),
+            u32::from(tag::format_code(Format::Rgba8Unorm))
+        );
+        assert_ne!(
+            tag::format_code(Format::Rgba8Unorm),
+            tag::format_code(Format::Bgra8Unorm),
+            "the two canvas formats must differ for this to notice anything"
+        );
+    }
+
+    /// An extent that crossed is reported as present, so the gate's "a browser
+    /// reports none" check is reading a field rather than a hard-wired zero.
+    #[test]
+    fn an_extent_that_crossed_is_reported_as_present() {
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps(0, 0), 1);
+        assert_eq!(take_frame().len(), 1);
+        let mut caps = canvas_caps(Format::Bgra8Unorm);
+        caps.current_extent = Some((1280, 800));
+        let mut replies = ReplyWriter::new();
+        replies.surface_caps(0, &caps);
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_ANSWERED);
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_has_extent(), 1);
+    }
+
+    /// Every present mode has its own bit, so a word carrying one mode cannot
+    /// read as carrying another.
+    #[test]
+    fn each_present_mode_lands_on_its_own_bit() {
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps(0, 0), 1);
+        assert_eq!(take_frame().len(), 1);
+        let mut caps = canvas_caps(Format::Bgra8Unorm);
+        caps.present_modes = vec![PresentMode::Fifo, PresentMode::Mailbox];
+        let mut replies = ReplyWriter::new();
+        replies.surface_caps(0, &caps);
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_ANSWERED);
+        assert_eq!(
+            __crcbl_web_gpu_probe_surface_caps_present_modes(),
+            (1 << tag::PRESENT_MODE_FIFO) | (1 << tag::PRESENT_MODE_MAILBOX)
+        );
+    }
+
+    /// **A refusal is an answer.** It carries what the browser said and the
+    /// cause a caller branches on, and it leaves the capability numbers at their
+    /// "nothing answered" value rather than at whatever a previous query left.
+    #[test]
+    fn a_refused_query_reports_its_cause_and_no_capabilities() {
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps(1, 0), 1);
+        assert_eq!(
+            take_frame(),
+            vec![Command::SurfaceCaps {
+                surface: surface_at(1),
+                adapter: AdapterId(0),
+            }]
+        );
+
+        let mut replies = ReplyWriter::new();
+        replies.surface_caps_failed(
+            0,
+            "no surface 1 is live in this replayer",
+            SurfaceCapsFailure::InvalidHandle,
+        );
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_REFUSED);
+        assert!(caps_reason().contains("surface 1"), "{}", caps_reason());
+        assert_eq!(
+            __crcbl_web_gpu_probe_surface_caps_cause(),
+            u32::from(tag::SURFACE_CAPS_FAILURE_INVALID_HANDLE)
+        );
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_format(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_present_modes(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_has_extent(), 0);
+    }
+
+    /// The two refusals a browser can produce must not arrive as the same
+    /// number: one means "your handle is stale" and the other "there is no such
+    /// adapter", and a caller acts differently on each.
+    #[test]
+    fn the_two_reachable_causes_are_distinguishable_from_each_other() {
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps(0, 9), 1);
+        assert_eq!(
+            take_frame(),
+            vec![Command::SurfaceCaps {
+                surface: PROBE_SURFACE,
+                adapter: AdapterId(9),
+            }]
+        );
+        let mut replies = ReplyWriter::new();
+        replies.surface_caps_failed(
+            0,
+            "no adapter 9 has been enumerated",
+            SurfaceCapsFailure::NoSuchAdapter,
+        );
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_REFUSED);
+        assert_eq!(
+            __crcbl_web_gpu_probe_surface_caps_cause(),
+            u32::from(tag::SURFACE_CAPS_FAILURE_NO_SUCH_ADAPTER)
+        );
+        assert_ne!(
+            tag::SURFACE_CAPS_FAILURE_NO_SUCH_ADAPTER,
+            tag::SURFACE_CAPS_FAILURE_INVALID_HANDLE
+        );
+    }
+
+    /// The query needs neither an adapter nor a device to have been asked for,
+    /// which is what makes the `NoSuchAdapter` case reachable at all — and the
+    /// difference from the device request, which refuses until one is granted.
+    #[test]
+    fn a_capability_query_needs_no_granted_adapter_the_way_a_device_request_does() {
+        assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_UNASKED);
+        assert_eq!(__crcbl_web_gpu_probe_device(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps(0, 0), 1);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// A drifted format lands on whichever probe asked first, and must not read
+    /// as a surface that refused.
+    #[test]
+    fn a_reply_answering_a_query_nobody_made_is_undecodable_rather_than_refused() {
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps(0, 0), 1);
+        assert_eq!(take_frame().len(), 1);
+
+        let mut replies = ReplyWriter::new();
+        replies.surface_caps(9_999, &canvas_caps(Format::Bgra8Unorm));
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_UNDECODABLE);
+        assert!(caps_reason().contains("9999"), "{}", caps_reason());
+    }
+
+    /// **One buffer, three probes.** The capability query is the third, and its
+    /// answer must survive a drain another probe's `state` call performed.
+    #[test]
+    fn one_drain_hands_the_capability_probe_its_answer_too() {
+        grant(&granted("three at once"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps(0, 0), 1);
+        assert_eq!(take_frame().len(), 2);
+
+        // Sequence 0 was the enumeration; the device took 1 and the query 2.
+        let mut replies = ReplyWriter::new();
+        replies.device(1, &device_caps());
+        replies.surface_caps(2, &canvas_caps(Format::Bgra8Unorm));
+        deliver(replies.bytes());
+
+        // The device is asked first, so it is the call that drains. The
+        // capability answer must survive that.
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_OPENED);
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps_state(), CAPS_ANSWERED);
+        assert_eq!(
+            __crcbl_web_gpu_probe_surface_caps_format(),
+            u32::from(tag::format_code(Format::Bgra8Unorm))
+        );
+    }
+
+    /// The index the export takes is the one the handle carries, and index `0`
+    /// is the surface the other export creates — which is the whole reason the
+    /// gate can name a live surface and a dead one apart.
+    #[test]
+    fn index_zero_is_the_surface_the_other_export_creates_and_no_other_index_is() {
+        assert_eq!(surface_at(0), PROBE_SURFACE);
+        assert_ne!(surface_at(1), PROBE_SURFACE);
+        assert_eq!(__crcbl_web_gpu_probe_surface(4), 1);
+        assert_eq!(__crcbl_web_gpu_probe_surface_caps(0, 0), 1);
+        assert_eq!(
+            take_frame(),
+            vec![
+                Command::CreateSurface {
+                    surface: PROBE_SURFACE,
+                    canvas_id: 4,
+                },
+                Command::SurfaceCaps {
+                    surface: PROBE_SURFACE,
+                    adapter: AdapterId(0),
+                },
+            ]
         );
     }
 

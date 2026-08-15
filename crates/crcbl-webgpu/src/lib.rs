@@ -4,10 +4,13 @@
 //! replays it against WebGPU, and answers back through a second buffer wasm also
 //! owns. `docs/plan/41-webgpu-stream.md` is the specification, and this crate is
 //! its first slices — **the encoding, the transport that carries it, the reply
-//! channel that carries answers home, and the two calls that make the round
-//! trip: adapter enumeration, answered with the whole of
-//! [`AdapterInfo`](crcbl_hal::AdapterInfo), and the device request, answered
-//! with the [`DeviceCaps`](crcbl_hal::DeviceCaps) of the device that opened**.
+//! channel that carries answers home, and the calls that make the round trip**:
+//! adapter enumeration, answered with the whole of
+//! [`AdapterInfo`](crcbl_hal::AdapterInfo); the device request, answered with
+//! the [`DeviceCaps`](crcbl_hal::DeviceCaps) of the device that opened; and the
+//! surface pair, where a canvas key becomes a `GPUCanvasContext` and a
+//! capability query answers a [`SurfaceCaps`](crcbl_hal::SurfaceCaps) or says
+//! why it will not.
 //! There is still no [`Instance`](crcbl_hal::Instance),
 //! [`PendingDevice`](crcbl_hal::PendingDevice), [`Device`](crcbl_hal::Device)
 //! or [`CommandEncoder`](crcbl_hal::CommandEncoder) implementation — see

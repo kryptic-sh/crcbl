@@ -1,4 +1,4 @@
-// The page's half of the adapter probe: the round trip, driven end to end.
+// The page's half of the probes: the round trip, driven end to end.
 //
 // `crates/crcbl-webgpu/src/probe.rs` is the contract — the exports, the state
 // codes, and why the module exists at all. The short version: everything else
@@ -70,6 +70,55 @@ export const DEVICE = Object.freeze({
 });
 
 /**
+ * The `CAPS_*` codes `__crcbl_web_gpu_probe_surface_caps_state` answers, from
+ * the same file.
+ *
+ * `REFUSED` is **not** an error on this seam and is the reason this probe has a
+ * `cause` beside its reason: `Instance::surface_caps` is how adapter selection
+ * is done, so a query that answers nothing is an ordinary step of it, and a
+ * caller has to tell "try the next adapter" from "your handle is stale".
+ * `UNDECODABLE` is the format's two halves having drifted, which blames the
+ * other end of the build entirely.
+ */
+export const CAPS = Object.freeze({
+  UNASKED: 0,
+  WAITING: 1,
+  ANSWERED: 2,
+  REFUSED: 3,
+  UNDECODABLE: 4,
+});
+
+/**
+ * The `SurfaceCapsFailure` codes `crates/crcbl-webgpu/src/tag.rs` assigns, which
+ * `__crcbl_web_gpu_probe_surface_caps_cause` answers with.
+ *
+ * `UNSUPPORTED` is `0` and a browser never sends it — `requestAdapter()` grants
+ * at most one adapter and a canvas that gave up a `webgpu` context can present
+ * on it — so it is also, unavoidably, what the export answers when nothing was
+ * refused. That is why the cause is read only once the state says `REFUSED`.
+ */
+export const CAPS_FAILURE = Object.freeze({
+  UNSUPPORTED: 0,
+  INVALID_HANDLE: 1,
+  NO_SUCH_ADAPTER: 2,
+  BACKEND: 3,
+});
+
+/**
+ * The `PresentMode` codes the mode word's bits stand at, from the same file.
+ *
+ * `SurfaceCaps` promises `FIFO` is always offered, and a browser offers nothing
+ * else: WebGPU has no present mode at all and a canvas presents at the
+ * `requestAnimationFrame` boundary, which is what `Fifo` describes.
+ */
+export const PRESENT_MODE = Object.freeze({
+  FIFO: 0,
+  FIFO_RELAXED: 1,
+  MAILBOX: 2,
+  IMMEDIATE: 3,
+});
+
+/**
  * Names for those codes, for a log line that reads.
  *
  * @param {number} state
@@ -91,6 +140,29 @@ export function probeStateName(state) {
 export function deviceStateName(state) {
   const found = Object.entries(DEVICE).find(([, code]) => code === state);
   return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * The same again, for the capability query's codes. Its own function for
+ * {@link deviceStateName}'s reason.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function capsStateName(state) {
+  const found = Object.entries(CAPS).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * The name of the `SurfaceCapsFailure` a `cause` code stands for.
+ *
+ * @param {number} cause
+ * @returns {string}
+ */
+export function capsFailureName(cause) {
+  const found = Object.entries(CAPS_FAILURE).find(([, code]) => code === cause);
+  return found ? found[0] : `unknown(${cause})`;
 }
 
 /**
@@ -159,6 +231,34 @@ export function startDeviceProbe({ exports }) {
  */
 export function startSurfaceProbe({ exports, canvasId }) {
   return exports.__crcbl_web_gpu_probe_surface(canvasId) === 1;
+}
+
+/**
+ * Asks wasm to encode a query for what a surface will accept on an adapter.
+ *
+ * The third command that makes a round trip, and the encode-and-return half of
+ * it: {@link readSurfaceCapsProbe} is where the answer surfaces, and everything
+ * between belongs to the demo's loop.
+ *
+ * **Both ids are yours to choose, and that is the point.** `surface` is an index
+ * — `0` is the one {@link startSurfaceProbe} creates, and any other names one the
+ * replayer holds no context for, which comes back as `INVALID_HANDLE`. `adapter`
+ * is an adapter id — `0` is the one a browser grants, and any other comes back as
+ * `NO_SUCH_ADAPTER`. Neither refusal is thrown and neither kills the frame:
+ * `Instance::surface_caps` is how adapter selection is done, so both are replies.
+ *
+ * Unlike {@link startDeviceProbe} this needs no adapter to have been granted
+ * first — the id is not taken from an enumeration — so it is legal on any frame.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {number} options.surface Index of the surface to ask about.
+ * @param {number} options.adapter Id of the adapter to ask about.
+ * @returns {boolean} Whether wasm took the query. `false` is a channel already
+ *   installed by something else, or a full waiting set.
+ */
+export function startSurfaceCapsProbe({ exports, surface, adapter }) {
+  return exports.__crcbl_web_gpu_probe_surface_caps(surface, adapter) === 1;
 }
 
 /**
@@ -246,4 +346,59 @@ export function readDeviceProbe({ exports, memory }) {
     maxImage2d: exports.__crcbl_web_gpu_probe_device_max_image_2d() >>> 0,
   };
   return { state, name: deviceStateName(state), reason, caps };
+}
+
+/**
+ * The same for the capability query.
+ *
+ * **This read drains wasm's reply buffer for every probe**, on
+ * {@link readDeviceProbe}'s terms and for its reason: there is one channel and
+ * one committed buffer, so whichever `state` call runs first in a frame decodes
+ * it and hands each probe its own answer.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @returns {{ state: number, name: string, reason: string, cause: number,
+ *            causeName: string, format: number, presentModes: number,
+ *            hasExtent: boolean }}
+ *   `reason` says why the query answered nothing and is empty when it answered.
+ *   `cause` is meaningful only under `REFUSED` — `0` is a real cause as well as
+ *   "nothing was refused". `format`, `presentModes` and `hasExtent` are
+ *   meaningful only under `ANSWERED`, where `0` is legal for each, so read them
+ *   only once the state says so.
+ */
+export function readSurfaceCapsProbe({ exports, memory }) {
+  // `state` first, `ptr` second, for `readAdapterProbe`'s reason: this is the
+  // call that allocates.
+  const state = exports.__crcbl_web_gpu_probe_surface_caps_state();
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_surface_caps_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_surface_caps_reason_len()
+  );
+  const cause = exports.__crcbl_web_gpu_probe_surface_caps_cause() >>> 0;
+  // THE PART A BROWSER CAN CORROBORATE IS `format`, AND ONLY IT. The whole of
+  // `SurfaceCaps` crosses the wire, but five of its six fields are decisions
+  // `gpu-replay.js` made rather than answers the browser gave — a browser has no
+  // present mode, no image count and no `currentExtent` to disagree about. The
+  // preferred canvas format is the one field it fills, and the page can ask
+  // `navigator.gpu.getPreferredCanvasFormat()` for itself, which is what makes
+  // `browser-e2e.mjs`'s check on it evidence rather than a constant.
+  //
+  // The other two below are here for a different job: `presentModes` and the
+  // extent flag are the cheapest facts that say the rest of the record survived
+  // the crossing, because a format decodes correctly whatever happened to the
+  // lists behind it. See `crates/crcbl-webgpu/src/probe.rs`.
+  return {
+    state,
+    name: capsStateName(state),
+    reason,
+    cause,
+    causeName: capsFailureName(cause),
+    format: exports.__crcbl_web_gpu_probe_surface_caps_format() >>> 0,
+    presentModes:
+      exports.__crcbl_web_gpu_probe_surface_caps_present_modes() >>> 0,
+    hasExtent: exports.__crcbl_web_gpu_probe_surface_caps_has_extent() === 1,
+  };
 }

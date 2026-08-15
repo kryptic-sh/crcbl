@@ -347,6 +347,20 @@ if [ -z "$SURFACE_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the capability query, which is group I and is its own thing
+# for a reason none of the above share: it is the only check anywhere that holds
+# a value wasm received against what `navigator.gpu` tells the same page *at the
+# same moment*, rather than against a fixture. Everything above passes on a
+# machine whose preferred canvas format nobody ever asked for, and the node suite
+# that drives this command answers it from a stub. Its absence means the round
+# trip stopped being corroborated, not that this demo has no surface.
+CAPS_TRIP="$(grep -F 'the preferred format wasm received is the one this browser prefers' "${OUTPUT}.plain" || true)"
+if [ -z "$CAPS_TRIP" ]; then
+    echo "crcbl web e2e: the driver never held a surface capability against the browser's own answer;" >&2
+    echo "               crcbl-webgpu's SurfaceCaps query is ungated in a real browser" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

@@ -16,13 +16,20 @@
 //! [`AdapterInfo`], so
 //! [`AdapterProbe::adapters`] answers `Vec<AdapterInfo>` — the real return type
 //! of [`Instance::adapters`](crcbl_hal::Instance::adapters) — rather than the
-//! pairs it could honestly manage before. The trait's other five methods are
-//! what is missing: `backend` is answerable, but `create_surface`,
-//! `destroy_surface`, `surface_caps` and `request_device` have no commands and
-//! no replies, and three of the four cannot return "not yet" — they return a
-//! handle, a [`SurfaceCaps`](crcbl_hal::SurfaceCaps) or a
-//! [`PendingDevice`](crcbl_hal::PendingDevice), and there is nothing truthful to
-//! put in any of them. An impl now would be four stubs and one real method.
+//! pairs it could honestly manage before. What is missing is no longer the
+//! encodings: `backend` is answerable, `create_surface`, `destroy_surface`,
+//! `surface_caps` and `request_device` all have their commands, and every one of
+//! them but `destroy_surface` is driven end to end by the browser gate.
+//!
+//! What is missing is the **shape of the answers**.
+//! [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) returns a
+//! [`SurfaceCaps`](crcbl_hal::SurfaceCaps) synchronously and a stream cannot
+//! answer during the call, so the impl has to decide where the answer waits —
+//! refusing until a reply lands, or asking at `create_surface` time and keeping
+//! it. `request_device` has the polled half the seam gives it and is the one
+//! that already fits. Until that is settled an impl would be a real method or
+//! two and a set of calls that answer nothing, which is what the seam's callers
+//! would have to work around for ever afterwards.
 //!
 //! # What this reports is what the *browser* said, not what this crate can do
 //!

@@ -538,6 +538,53 @@ const STATUS_PAUSED = 6;
 const DECOY_CANVAS_ID = 6;
 
 /**
+ * The surface index group I asks about to reach a surface that exists.
+ *
+ * `crates/crcbl-webgpu/src/probe.rs` names its one surface `PROBE_SURFACE` at
+ * index `0`, which is what `startSurfaceProbe` created in group H. Anything else
+ * is an index no `CreateSurface` ever named.
+ */
+const LIVE_SURFACE_INDEX = 0;
+
+/**
+ * …and the index it asks about to reach one that does not.
+ *
+ * **The whole of the refusal check.** A capability query is answered either way,
+ * so "it came back" says nothing on its own; what says the replayer checked its
+ * table is that a handle it holds no context for is refused *as* a stale handle,
+ * by a reply, rather than by a thrown frame or by a capability set built anyway.
+ * Any index but {@link LIVE_SURFACE_INDEX} does it, and this is far enough from
+ * it to be obviously deliberate in a log line.
+ */
+const DEAD_SURFACE_INDEX = 9;
+
+/**
+ * The adapter id a browser's one adapter is enumerated under.
+ *
+ * `navigator.gpu.requestAdapter()` grants one adapter or none, so the id is its
+ * position in a list of one — `crcbl-webgpu`'s `Reply::Adapter` documents it as
+ * always `0` from a browser, and `gpu-replay.js` files the granted adapter there.
+ */
+const GRANTED_ADAPTER_ID = 0;
+
+/**
+ * The `crcbl_hal::Format` code each canvas format the specification defines has,
+ * from `crates/crcbl-webgpu/src/tag.rs`.
+ *
+ * Spelled out here rather than imported from `gpu-replay.js` for the reason the
+ * feature bits in group G are: a table taken from the thing under test agrees
+ * with it by construction, and what the check below is for is that the table
+ * itself is right about what this browser prefers.
+ */
+const SEAM_FORMAT_CODE = Object.freeze({
+  rgba8unorm: 0x02,
+  bgra8unorm: 0x04,
+});
+
+/** The bit `SurfaceCaps::present_modes` sets for `PresentMode::Fifo`. */
+const FIFO_BIT = 1 << 0;
+
+/**
  * How far above its starting height a flappy bird has to climb before the taps
  * are the only thing that can have put it there, in the units its HUD prints.
  *
@@ -3097,6 +3144,174 @@ try {
       : `instanceof GPUCanvasContext: ${surfaceProbe?.isRealContext}, ` +
           `getCurrentTexture: ${surfaceProbe?.hasCurrentTexture}` +
           `${surfaceProbe?.failure ? ` — ${surfaceProbe.failure}` : ''}`
+  );
+
+  // **THE ONLY GATE ON A CAPABILITY QUERY, AND THE ONLY ONE ON A REFUSAL.**
+  // `gpu-replay.mjs` drives the same command under node against a stub whose
+  // `getPreferredCanvasFormat` returns whatever that file wrote a line above, so
+  // what it proves is the encoding and the table lookups. The fact left over is
+  // the one only a browser has: **what this machine's WebGPU actually prefers to
+  // put on a canvas**, which varies by browser and by platform and which no
+  // fixture can contain.
+  //
+  // So the check below asks the page for that answer directly, at the same
+  // moment, and holds wasm's number to it. A replayer that answered with a
+  // constant, or a decoder that read the format list off by one, differs there
+  // and nowhere else in this file.
+  //
+  // The other half is that a refusal is a refusal. `surface_caps` is how adapter
+  // selection is done — its `Err` is an ordinary step, not a catastrophe — so a
+  // query naming a surface nothing created must come back through the reply
+  // channel saying which failure it was, rather than killing the frame the way
+  // an unresolvable `CreateSurface` does. Those two commands fail in deliberately
+  // opposite directions and group H is the other half of the pair.
+  //
+  // Nothing here drains, replays or delivers, for group G's reason.
+  group('I — a surface says what it will accept');
+
+  const capsStart = await evaluate(
+    page,
+    `(async () => {
+       const { startSurfaceCapsProbe } = await import('/engine/gpu-probe.js');
+       const { exports, gpu } = globalThis.crcbl;
+       const before = gpu.stats();
+       return {
+         started: startSurfaceCapsProbe({
+           exports,
+           surface: ${LIVE_SURFACE_INDEX},
+           adapter: ${GRANTED_ADAPTER_ID},
+         }),
+         replayed: before.replayed,
+         delivered: before.delivered,
+       };
+     })()`
+  );
+  const capsCarried = capsStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(() => {
+             const stats = globalThis.crcbl.gpu.stats();
+             return stats.replayed > ${capsStart.replayed} || stats.failure
+               ? stats
+               : null;
+           })()`
+        )
+      )
+    : null;
+  check(
+    'I',
+    'wasm encoded a surface-capability query and the demo loop replayed it',
+    capsCarried?.commands?.join(',') === 'SurfaceCaps',
+    capsCarried
+      ? `the loop replayed [${capsCarried.commands.join(', ')}] at sequence ${capsCarried.baseSequence}` +
+          `${capsCarried.failure ? ` — ${capsCarried.failure}` : ''}`
+      : capsStart?.started
+        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+        : 'wasm would not encode it — another channel is installed, or the waiting set is full'
+  );
+
+  // Polled like group G's answers, and for a weaker version of the same reason:
+  // this command is answered inside the replay rather than out of a promise, so
+  // it settles on the frame the loop replays it — which is still not the frame
+  // that asked.
+  const capsAnswered = await until(async () =>
+    evaluate(
+      page,
+      `(async () => {
+         const { readSurfaceCapsProbe, CAPS } = await import('/engine/gpu-probe.js');
+         const { exports, memory, gpu } = globalThis.crcbl;
+         const out = readSurfaceCapsProbe({ exports, memory });
+         return out.state === CAPS.WAITING
+           ? null
+           : { ...out, delivered: gpu.stats().delivered };
+       })()`
+    )
+  );
+
+  // Asked of the browser, in the same page, at the same moment — the half that
+  // makes the next check a round trip rather than a restatement.
+  const preferredFormat = await evaluate(
+    page,
+    `navigator.gpu.getPreferredCanvasFormat()`
+  );
+  const expectedFormatCode = SEAM_FORMAT_CODE[preferredFormat];
+  check(
+    'I',
+    'the preferred format wasm received is the one this browser prefers',
+    capsAnswered?.name === 'ANSWERED' &&
+      expectedFormatCode !== undefined &&
+      capsAnswered.format === expectedFormatCode,
+    capsAnswered?.name === 'ANSWERED'
+      ? `wasm got format code ${capsAnswered.format}, navigator.gpu prefers ` +
+          `${JSON.stringify(preferredFormat)} which is code ${expectedFormatCode}` +
+          `, after the loop delivered ${capsAnswered.delivered - (capsStart?.delivered ?? 0)} reply buffer(s)`
+      : capsAnswered
+        ? `${capsAnswered.name}: ${JSON.stringify(capsAnswered.reason)}`
+        : `no answer in ${TIMEOUT_MS} ms — the reply never reached wasm`
+  );
+
+  // The two promises the rest of the record carries, and the reason they are
+  // here beside a format that would decode correctly whatever happened to the
+  // lists behind it: an empty mode list, or an extent that appeared from
+  // nowhere, is a reader that lost its place after the first field. Both are
+  // invariants rather than counts — `SurfaceCaps` promises Fifo is always
+  // offered, and a browser has no `currentExtent` to report at all — so neither
+  // asserts a number the replayer chose.
+  check(
+    'I',
+    'the surface offers Fifo and reports no extent of its own',
+    capsAnswered?.name === 'ANSWERED' &&
+      (capsAnswered.presentModes & FIFO_BIT) === FIFO_BIT &&
+      capsAnswered.hasExtent === false,
+    capsAnswered?.name === 'ANSWERED'
+      ? `present modes 0b${capsAnswered.presentModes.toString(2)}, currentExtent ` +
+          `${capsAnswered.hasExtent ? 'present' : 'absent'}`
+      : `state ${capsAnswered?.name}, which carries no capabilities to read`
+  );
+
+  // …and the refusal, driven at a surface index no `CreateSurface` ever named.
+  // Re-asking replaces the probe's state, so the poll below cannot read the
+  // answer above back: wasm is in `WAITING` before this evaluation returns.
+  const refusalStart = await evaluate(
+    page,
+    `(async () => {
+       const { startSurfaceCapsProbe } = await import('/engine/gpu-probe.js');
+       const { exports } = globalThis.crcbl;
+       return startSurfaceCapsProbe({
+         exports,
+         surface: ${DEAD_SURFACE_INDEX},
+         adapter: ${GRANTED_ADAPTER_ID},
+       });
+     })()`
+  );
+  const refused = refusalStart
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(async () => {
+             const { readSurfaceCapsProbe, CAPS } = await import('/engine/gpu-probe.js');
+             const { exports, memory, gpu } = globalThis.crcbl;
+             const out = readSurfaceCapsProbe({ exports, memory });
+             return out.state === CAPS.WAITING
+               ? null
+               : { ...out, failure: gpu.stats().failure };
+           })()`
+        )
+      )
+    : null;
+  check(
+    'I',
+    'a query naming a surface nothing created is refused as a stale handle',
+    refused?.name === 'REFUSED' &&
+      refused.causeName === 'INVALID_HANDLE' &&
+      !refused.failure,
+    refused
+      ? `${refused.name}/${refused.causeName}: ${JSON.stringify(refused.reason)}` +
+          `${refused.failure ? ` — but the frame also threw: ${refused.failure}` : ''}`
+      : refusalStart
+        ? `no answer in ${TIMEOUT_MS} ms — a refusal must still be a reply`
+        : 'wasm would not encode the query'
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and
