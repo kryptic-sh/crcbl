@@ -23,7 +23,7 @@ use crcbl::engine::{
     Booted, Clock, ExitReason, FrameInfo, HostedGame, RunSummary, wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId, open, open_backend};
+use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId};
 
 use crate::game::{Game, HudStats, RenderState};
 use crate::gpu::Gpu;
@@ -103,11 +103,7 @@ pub fn run(options: &Options) -> Result<Summary, HudError> {
 ///
 /// [`HudError`] if any of them refused.
 pub fn start(options: &Options) -> Result<Loop, HudError> {
-    let shell = if options.common.headless {
-        open_backend(Backend::Headless).map_err(HudError::Shell)?
-    } else {
-        open().map_err(HudError::NoWindowSystem)?
-    };
+    let shell = crcbl::engine::open_shell(options.common.headless)?;
     with_shell(shell, options)
 }
 

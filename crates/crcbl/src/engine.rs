@@ -2956,6 +2956,38 @@ pub fn open_window<S: Shell + ?Sized>(
     shell.create_window(desc)
 }
 
+/// Opens the shell a run wants: the headless backend, or whatever this
+/// platform has.
+///
+/// Six samples wrote this out, and each one that got the error mapping wrong
+/// got it wrong invisibly — the two arms take the *same* [`ShellError`] and
+/// differ only in which variant they wrap it in, and only
+/// [`LoopError::NoWindowSystem`] carries the hint telling a user that
+/// `--headless` runs everywhere. Wrapping a failed `open()` as
+/// [`LoopError::Shell`] loses that hint and nothing else changes, so nothing
+/// would have caught it.
+///
+/// **Headless is asked for by name, never reached by fallback.** The registry
+/// deliberately refuses to auto-select it, because a run that silently had no
+/// window would look like a hang rather than like a choice.
+///
+/// Generic over the game's error only, because
+/// [`LoopError`] already is: every sample's error type is an alias for
+/// `LoopError<TheirGameError>`, so there is no per-game enum to convert
+/// through.
+///
+/// # Errors
+///
+/// [`LoopError::Shell`] if the headless backend refused, and
+/// [`LoopError::NoWindowSystem`] if no platform backend could be opened.
+pub fn open_shell<G>(headless: bool) -> Result<Box<dyn Shell>, LoopError<G>> {
+    if headless {
+        crcbl_shell::open_backend(crcbl_shell::ShellBackend::Headless).map_err(LoopError::Shell)
+    } else {
+        crcbl_shell::open().map_err(LoopError::NoWindowSystem)
+    }
+}
+
 /// What a window asks the compositor for when nothing named a size.
 ///
 /// A window system is free to refuse it. Every sample and the `crcbl new`
@@ -4808,6 +4840,19 @@ impl<S: Shell + ?Sized, G: HostedGame> GameLoop for Loop<S, G> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A headless run opens the headless backend by name**, rather than
+    /// falling through to whatever the platform offers.
+    ///
+    /// Asserted on the backend the shell reports, not on `is_ok`: the
+    /// non-headless arm also succeeds on a developer machine with a
+    /// compositor, so a version that ignored the flag entirely would pass an
+    /// `is_ok` check and open a window in CI.
+    #[test]
+    fn a_headless_run_opens_the_headless_backend_by_name() {
+        let shell = open_shell::<core::convert::Infallible>(true).expect("headless always opens");
+        assert_eq!(shell.backend(), crcbl_shell::ShellBackend::Headless);
+    }
 
     /// **`--size` names pixels and the window request is logical**, and the
     /// conversion is at scale 1 rather than at the display's factor.

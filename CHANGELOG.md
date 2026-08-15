@@ -423,6 +423,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::engine::open_shell(headless)`**, which opens the headless backend by
+  name or the platform's, and which all six samples now call instead of writing
+  the pair out.
+
+  The copies were a place to be quietly wrong. Both arms take the _same_
+  `ShellError` and differ only in which `LoopError` variant wraps it, and only
+  `NoWindowSystem` carries the hint telling a user that `--headless` runs
+  everywhere — so mapping a failed `open()` to `Shell` would have lost the hint
+  and changed nothing else. It is generic over the game's error alone because
+  `LoopError` already is.
+
 - **`crcbl::engine::DEFAULT_WINDOW_SIZE` and
   `crcbl::engine::requested_window_size`.** `LogicalSize::new(960.0, 720.0)` was
   a bare literal in all six samples, and the rule beside it — `--size` names

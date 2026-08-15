@@ -38,9 +38,7 @@ use crcbl::engine::{
 };
 use crcbl::prelude::*;
 use crcbl::render::{EffectRequest, RenderEffects};
-use crcbl::shell::{
-    DisplayMode, ShellBackend as Backend, WindowDesc, WindowId, open, open_backend,
-};
+use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowDesc, WindowId};
 use crcbl::ui::draw_list::DrawList;
 
 use crate::args::Options;
@@ -238,14 +236,7 @@ pub fn run(options: &Options) -> Result<Summary, LumenError> {
 ///
 /// [`LumenError`] if any of them refused.
 pub fn start(options: &Options) -> Result<Loop, LumenError> {
-    let shell = if options.common.headless {
-        // By name, never by fallback: the registry deliberately refuses to
-        // auto-select headless, because a run that silently had no window would
-        // look like a hang.
-        open_backend(Backend::Headless).map_err(LumenError::Shell)?
-    } else {
-        open().map_err(LumenError::NoWindowSystem)?
-    };
+    let shell = crcbl::engine::open_shell(options.common.headless)?;
     with_shell(shell, options)
 }
 

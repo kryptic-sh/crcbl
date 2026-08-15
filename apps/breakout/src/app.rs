@@ -34,7 +34,7 @@ use crcbl::engine::{
     TouchUpdate, wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId, open, open_backend};
+use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId};
 
 use crate::game::{self, Game, GameState, RenderState};
 use crate::gpu::Gpu;
@@ -140,11 +140,7 @@ pub fn run(options: &Options) -> Result<Summary, BreakoutError> {
 ///
 /// [`BreakoutError`] if any of them refused.
 pub fn start(options: &Options) -> Result<Loop, BreakoutError> {
-    let shell = if options.common.headless {
-        open_backend(Backend::Headless).map_err(BreakoutError::Shell)?
-    } else {
-        open().map_err(BreakoutError::NoWindowSystem)?
-    };
+    let shell = crcbl::engine::open_shell(options.common.headless)?;
     with_shell(shell, options)
 }
 

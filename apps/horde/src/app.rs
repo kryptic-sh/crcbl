@@ -63,7 +63,7 @@ use crcbl::engine::{
 };
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
-use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId, open, open_backend};
+use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId};
 use crcbl::ui::draw_list::DrawList;
 
 use crate::art::SceneStats;
@@ -196,11 +196,7 @@ pub fn run(options: &Options) -> Result<Summary, HordeError> {
 ///
 /// [`HordeError`] if any of them refused.
 pub fn start(options: &Options) -> Result<Loop, HordeError> {
-    let shell = if options.common.headless {
-        open_backend(Backend::Headless).map_err(HordeError::Shell)?
-    } else {
-        open().map_err(HordeError::NoWindowSystem)?
-    };
+    let shell = crcbl::engine::open_shell(options.common.headless)?;
     with_shell(shell, options)
 }
 
