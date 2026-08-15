@@ -728,6 +728,40 @@ impl crcbl::engine::PolledGpu for Gpu {
 mod tests {
     use super::*;
 
+    /// **An unforced run opens the engine's own bundle**, which is the check
+    /// every other sample carries and this one did not.
+    ///
+    /// The other five assert equality with [`GpuContextDesc::default`]'s
+    /// optional set. This sample cannot: it is the one that overrides the
+    /// field, and it deliberately adds `TASK_SHADER` on top — so the assertion
+    /// is **containment**, which is the part that catches the real failure. If
+    /// [`Forced::optional_features`] were ever rewritten as a hand-written list
+    /// instead of a subtraction from the engine's default, it would go stale
+    /// the moment the engine asked for one more flag, and nothing would say so
+    /// — the same silent shape that left `apps/hud` opening a device without
+    /// `PRESENT_FEEDBACK`.
+    ///
+    /// `TASK_SHADER` is asserted separately rather than folded into the
+    /// expected set, so that dropping it fails here instead of being absorbed
+    /// by a superset check.
+    #[test]
+    fn an_unforced_run_asks_for_everything_the_engine_does() {
+        let asked = desc(GpuOptions::default(), Forced::default());
+        assert_eq!(asked.label, "lumen");
+
+        let engine = GpuContextDesc::default().optional_features;
+        assert!(
+            asked.optional_features.contains(engine),
+            "an unforced run must ask for at least the engine's own set; \
+             missing {:?}",
+            engine.difference(asked.optional_features),
+        );
+        assert!(
+            asked.optional_features.contains(Features::TASK_SHADER),
+            "this sample asks for the amplification stage on top",
+        );
+    }
+
     /// **Forcing a path removes exactly the flags that select a better one**,
     /// and nothing else.
     ///
