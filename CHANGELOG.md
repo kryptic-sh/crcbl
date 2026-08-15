@@ -1178,6 +1178,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A warp that moved no pointer reported success on Windows.** `crcbl_shell`'s
+  Win32 backend discarded three failures in `warp_to_client` — a stale window, a
+  refused `ClientToScreen`, and `SetCursorPos`'s `BOOL` — so
+  `Shell::warp_pointer` returned `Ok(())` having done nothing. Windows refuses a
+  cursor move from a process that is not in the foreground, which is the common
+  case, and the only symptom was a pointer that stayed where it was.
+  `warp_pointer` now returns `ShellError::Backend` naming that requirement. The
+  two internal courtesy warps — the locked-pointer recentre and the initial
+  centring when a lock is taken — log instead, because there the mode is already
+  in force and only the move failed.
+
 - **A third off what is left of that strip, by biasing the shadow against the
   triangle the rasteriser drew rather than the normal interpolated across it.**
   `mesh.slang`'s slope term read `tan(acos(N·L))` off the shading normal, so a

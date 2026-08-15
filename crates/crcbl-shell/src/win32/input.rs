@@ -577,7 +577,14 @@ impl Win32Shell {
         if (x - centre_x).abs() < margin_x && (y - centre_y).abs() < margin_y {
             return;
         }
-        self.warp_to_client(window, centre_x, centre_y);
+        // Logged rather than propagated: this runs inside event handling, where
+        // there is no caller to hand a `Result` to, and a recentre that did not
+        // happen costs the user a pointer resting against an edge rather than a
+        // broken frame. Silence was the old behaviour and is what made the same
+        // refusal invisible in `warp_to_client`.
+        if let Err(why) = self.warp_to_client(window, centre_x, centre_y) {
+            log::warn!("the locked pointer was not recentred: {why}");
+        }
     }
 
     /// The window's client area as the system has it, for the recentre.
@@ -591,20 +598,46 @@ impl Win32Shell {
     /// `ClientToScreen` then `SetCursorPos`: the seam speaks in window pixels
     /// and `SetCursorPos` is in screen ones, and skipping the conversion warps
     /// the pointer to the same offset from the *desktop* corner.
-    pub(super) fn warp_to_client(&self, window: WindowId, x: i32, y: i32) {
-        let Ok(state) = self.window(window) else {
-            return;
-        };
-        let hwnd = state.raw();
+    ///
+    /// # `SetCursorPos` fails when this process is not in the foreground
+    ///
+    /// Windows refuses a cursor move from a background process, and the refusal
+    /// is the `BOOL` rather than an error the caller trips over. **All three
+    /// failures here used to be discarded and this returned `()`**, so a warp
+    /// that moved nothing reported success: the pointer stayed where it was and
+    /// the mismatch surfaced much later, as a coordinate that disagreed with
+    /// what was asked for by exactly the offset requested.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if `window` is not this shell's, and
+    /// [`ShellError::Backend`] if either system call refuses.
+    pub(super) fn warp_to_client(
+        &self,
+        window: WindowId,
+        x: i32,
+        y: i32,
+    ) -> Result<(), ShellError> {
+        let hwnd = self.window(window)?.raw();
         let mut point = Point { x, y };
         // SAFETY: `point` is a live, initialised `POINT` the call converts in
         // place, against a live window of this shell.
         if unsafe { ffi::ClientToScreen(hwnd, &raw mut point) } == 0 {
-            return;
+            return Err(ShellError::Backend(format!(
+                "ClientToScreen refused the conversion of ({x}, {y}) for window {window:?}"
+            )));
         }
         // SAFETY: two integers by value; the system clamps the position to the
         // current clip and to the virtual screen.
-        unsafe { ffi::SetCursorPos(point.x, point.y) };
+        if unsafe { ffi::SetCursorPos(point.x, point.y) } == 0 {
+            return Err(ShellError::Backend(format!(
+                "SetCursorPos refused ({}, {}) — the usual cause is that this \
+                 process is not in the foreground, which Windows requires of a \
+                 caller that moves the cursor",
+                point.x, point.y
+            )));
+        }
+        Ok(())
     }
 
     /// Applies or releases the clip for whichever window currently wants one.

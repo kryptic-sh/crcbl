@@ -49,6 +49,37 @@ after losing focus has taken the desktop hostage.
 Still open and unrelated: the **focus** flake (three instances), where
 `focus_and_confirm` loses the foreground.
 
+**A fourth instance, on a third test, and it found a real bug (2026-08-15).**
+`warping_the_pointer_moves_it_to_a_position_in_the_window` failed on `5889a3c` —
+a commit changing one JavaScript file and two markdown files — reading the
+cursor back at exactly the client origin against an expected origin-plus-offset.
+So the warp had not moved the pointer at all, and the same signature as the
+other three: no shell code in the commit.
+
+The cause is the one this family keeps pointing at. Windows refuses
+`SetCursorPos` from a process that is not in the foreground, and
+`win32::input`'s `warp_to_client` **discarded the `BOOL`** — along with a failed
+`ClientToScreen` and a bad window handle — so a warp that moved nothing returned
+`()` and the seam's `warp_pointer` reported `Ok`. The mismatch then surfaced as
+a coordinate wrong by precisely the offset requested, which reads as a
+conversion bug and is not one. It now returns `ShellError::Backend` naming the
+foreground requirement; the two internal convenience warps
+(`recentre_if_near_edge`, and the initial centring in `set_pointer_mode`) log
+instead of propagating, because in both the pointer mode is already established
+and only the courtesy move failed.
+
+The test is now `#[ignore]`d with the other two. **That does not make the fix a
+quarantine:** the code change stands on its own — three swallowed failures in
+one function — and would be right if the test never flaked again. What the
+`#[ignore]` buys is that the _precondition_ is asserted where it holds.
+
+**Worth noticing about the family as a whole:** three of these have now been
+diagnosed as environmental and one turned out to be a real defect hiding behind
+an environmental symptom. The lesson is not that the quarantine was wrong; it is
+that "flaky on a shared runner" and "swallows the error that makes it flaky" are
+the same finding seen from two ends, and the next one in this family deserves a
+look at what the failing call ignores before it is filed as the desktop's fault.
+
 ### `GpuInstance::flags` is a bare `u32`, not `bitflags`
 
 **Recommendation taken, yours to override.** `LIVE = 1 << 0` is the first

@@ -1353,11 +1353,19 @@ impl Shell for Win32Shell {
             && let Some(size) = self.window(window)?.configuration.map(|config| config.size)
         {
             // Start from the middle, so the first recentre is not immediate.
-            self.warp_to_client(
+            //
+            // Logged rather than propagated: the lock itself is established by
+            // this point — the clip is applied and the cursor hidden — and the
+            // centring is a convenience. Refusing the whole mode change because
+            // the pointer could not be moved would report a lock that is in
+            // fact in force.
+            if let Err(why) = self.warp_to_client(
                 window,
                 i32::try_from(size.width / 2).unwrap_or(0),
                 i32::try_from(size.height / 2).unwrap_or(0),
-            );
+            ) {
+                log::warn!("the pointer lock could not start from the middle: {why}");
+            }
         }
         Ok(())
     }
@@ -1426,8 +1434,7 @@ impl Shell for Win32Shell {
         position: PhysicalPoint,
     ) -> Result<(), ShellError> {
         self.window(window)?;
-        self.warp_to_client(window, position.x as i32, position.y as i32);
-        Ok(())
+        self.warp_to_client(window, position.x as i32, position.y as i32)
     }
 
     fn reply_close_request(
@@ -1651,11 +1658,18 @@ impl Drop for Win32Shell {
 /// Tests that need a real desktop, and are therefore the point of the
 /// `build + test (windows-latest)` CI job.
 ///
-/// **Nothing here is `#[ignore]`d.** `docs/plan/12-testing.md` calls a
-/// silently-skipped suite a known trap, and this slice is deliberately how the
-/// project finds out whether a GitHub runner gives a process a usable window
-/// station: if it does not, [`Win32Shell::open`] fails and every one of these
-/// says so, which is an answer. A skipped test is not.
+/// **Almost nothing here is `#[ignore]`d, and the exceptions are named where
+/// they sit.** `docs/plan/12-testing.md` calls a silently-skipped suite a known
+/// trap, and this slice is deliberately how the project finds out whether a
+/// GitHub runner gives a process a usable window station: if it does not,
+/// [`Win32Shell::open`] fails and every one of these says so, which is an
+/// answer. A skipped test is not.
+///
+/// The exceptions are the three pointer tests whose precondition is a
+/// foreground window on an uncontended desktop, which a shared runner does not
+/// provide. They are not skipped — `run-win32-e2e.ps1` passes `--run-ignored
+/// all` and runs on a real interactive desktop, which is the only place that
+/// precondition holds. Each carries its own comment saying so.
 #[cfg(all(test, target_os = "windows"))]
 mod tests {
     use super::*;
@@ -2852,6 +2866,20 @@ mod tests {
         assert_ne!(frame, 1, "the non-client area is left to DefWindowProc");
     }
 
+    // **The third test of this class, and it is here for the same reason as the
+    // two above.** Windows refuses `SetCursorPos` from a process that is not in
+    // the foreground, so this test's real precondition is `make_foreground`
+    // having taken — which nothing on a shared runner guarantees. It failed on
+    // `5889a3c`, a commit that changed a JavaScript file and two markdown files,
+    // reading back exactly the client origin: the warp had not moved the pointer
+    // at all.
+    //
+    // What that flake bought was a real defect, now fixed: `warp_to_client`
+    // discarded `SetCursorPos`'s `BOOL`, so a warp that moved nothing returned
+    // success and the mismatch surfaced here as a coordinate off by precisely
+    // the offset asked for. It now returns `ShellError::Backend`, which is why
+    // the `expect` below is the assertion that fires first.
+    #[ignore = "needs an uncontended interactive desktop; run-win32-e2e.ps1 runs it"]
     #[test]
     fn warping_the_pointer_moves_it_to_a_position_in_the_window() {
         // What `POINTER_WARP` claims, and the conversion it depends on: the
