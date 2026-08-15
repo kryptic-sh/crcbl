@@ -1274,6 +1274,11 @@ tables):
 - **Pixel art** ([specs/crcbl/pix.md](../specs/crcbl/pix.md)) — `.crpix` text
   baked at build time and drawn through `SpriteRenderer`. Every sample that
   should have pixel art uses it; see the standing requirements above.
+- **Our own WebGPU** (see the 2026-08-15 section at the end of this file) — a
+  planned track, not started. `crcbl-wgpu` is the browser's only renderer and
+  the last place the engine draws through someone else's abstraction; the
+  section carries the survey, the architectural decision it needs first, and
+  what a replacement does _not_ buy.
 - **Sample→engine seams** (see the 2026-08-15 section at the end of this file) —
   a standing sweep rather than a phase. When two samples carry the same
   machinery, it belongs behind an engine seam; when they carry the same
@@ -1856,3 +1861,112 @@ wasm for the page to drain, because `Instant::now` panics on
 `wasm32-unknown-unknown`; the sink's timestamps use `Instant` today. Any
 subscriber that stamps time needs the same treatment, and the browser gate is
 what would catch it not having it.
+
+## Replacing `wgpu` with our own WebGPU path (planned 2026-08-15)
+
+**New track, not yet started.** `crcbl-wgpu` is the browser's only renderer and
+the last place the engine draws through somebody else's abstraction. This is the
+plan to replace it with a backend that talks to WebGPU directly. It is large, it
+has a real decision in it that has not been taken, and the survey below is what
+it should be planned from rather than re-derived.
+
+### What is there now, measured
+
+`crcbl-wgpu` is about 5 900 lines over ten modules against `wgpu` 30, and
+`device.rs` is most of it. It serves **two** roles, and separating them is most
+of the thinking:
+
+- **The browser's only path.** `wasm32` has no other backend; `crcbl-vk` is
+  `cfg`-ed out of the umbrella there.
+- **A second native backend**, selectable as `CRCBL_GPU=wgpu`, whose real job is
+  the cross-backend image gate — `crates/crcbl/tests/run-cross-backend-e2e.sh`
+  renders each scene through `crcbl-vk` and `crcbl-wgpu` and compares.
+
+Natively it is otherwise redundant: `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12`
+already cover Linux, macOS and Windows.
+
+The surface a replacement owes is the HAL's three traits: `Instance` (7
+methods), `Device` (48) and `CommandEncoder` (35), plus `PendingDevice` — which
+already exists precisely because a browser cannot block on `requestDevice`, so
+the awkward part of the shape is built.
+
+### Why it is worth doing
+
+**Every other browser ABI in this engine is ours and imports nothing.** Storage,
+fetch, input, the log queue — each is exports-plus-polling, JS calls in and
+reads a buffer wasm owns. WebGPU is the single exception, and it is the reason
+`wasm-bindgen` is in the build at all: `wgpu`→`web-sys` leaves unresolvable
+`__wbindgen_placeholder__` imports only its CLI can link, which is why
+`web/build.sh` has to read the CLI's version out of `Cargo.lock` to match the
+crate.
+
+It is also the one place the **capability seam** reports someone else's opinion.
+`crcbl-wgpu` maps `wgpu::Features` onto `crcbl_hal::Features` by hand; a direct
+backend reports what the browser actually said.
+
+### The decision this needs first, and it is architectural
+
+Two shapes, and they are not variations on each other.
+
+1. **A JS glue module we own, called through imports.** The conventional answer:
+   wasm calls `createBuffer`, `beginRenderPass` and so on. Simple to write and
+   to debug, and it **ends the no-imports property** —
+   `web/tools/check- exports.mjs` currently asserts every import belongs to
+   `wasm-bindgen`'s glue, and that assertion would become "belongs to our glue"
+   instead. Hundreds of crossings per frame.
+2. **A command stream wasm builds and JS replays.** Keeps the discipline exactly
+   — still exports-plus-polling, still one buffer JS reads — and collapses a
+   frame to a single crossing. It needs an encoding, and it is genuinely harder
+   wherever WebGPU _returns_ something: adapter and device request, buffer
+   mapping, and any error scope. Those become polled the way storage already is.
+
+**Shape 2 is the one that fits what this project has already decided**, and the
+polled-device seam is evidence it can be made to work. It is also the more
+expensive to build and the easier to get subtly wrong. Not a call to make from
+the roadmap.
+
+### What it does _not_ buy, stated so nobody plans on it
+
+**`wasm-bindgen` does not leave.**
+`cargo tree -i wasm-bindgen --target wasm32-unknown-unknown` shows two roots:
+`wgpu`, and `getrandom`, which `crcbl-server` needs for `crypto.getRandomValues`
+behind the resume token. Removing the first leaves the second. Replacing
+`getrandom`'s browser backend is small next to WebGPU, but it has to be in the
+plan or the prize is overstated.
+
+### What breaks, and must be answered before the last slice
+
+- **The cross-backend image gate compares `vk` against `wgpu`.** Retiring the
+  native half of `crcbl-wgpu` removes one side of that comparison. Either the
+  gate becomes vk-versus-mtl/dx12 — which no single CI runner can do, since
+  those are different platforms — or `crcbl-wgpu` stays natively as a test
+  fixture after the browser stops using it. The second is the honest answer and
+  should be said out loud rather than discovered at the end.
+- **`naga` is a `crcbl-shaders` dev-dependency for WGSL validation**, pinned to
+  the version `wgpu` resolves. It survives `wgpu`'s removal, but loses the
+  reason its version is pinned to anything.
+- **`gpu-allocator` leaves with `wgpu-hal`**, and `crcbl-mtl`'s and
+  `crcbl-dx12`'s manifests both have comments reasoning about crates being "in
+  the lockfile already because `wgpu-hal` resolves them". Those comments become
+  wrong.
+
+### Slices, in dependency order
+
+Built **beside** `crcbl-wgpu` and proven against it before anything is retired —
+the same shape P14 used for Metal and D3D12, and the reason those landed without
+a flag day.
+
+1. **Take the decision above**, and write the encoding down if it is shape 2.
+2. `crcbl-webgpu`: `Instance`, adapter enumeration, `PendingDevice`, `Device`
+   creation. Exit: a browser opens a device and the capability selectors report
+   what it has.
+3. Buffers, textures, samplers, bind groups.
+4. Pipelines and WGSL modules — the artifacts are already committed and already
+   validated.
+5. Command encoding, render and compute passes.
+6. Surface, swapchain, present.
+7. **Parity gate**: every `render_e2e` scene drawn through both backends in a
+   browser, compared with `crcbl-golden`'s measured tolerance. This is the exit
+   criterion, and it is what makes the switch a measurement rather than a hope.
+8. Flip the browser default; decide `crcbl-wgpu`'s native fate per the gate
+   question above.
