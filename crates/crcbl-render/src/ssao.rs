@@ -408,6 +408,17 @@ impl Ssao {
 /// the window loses that pass's contribution, the log says why, and the next
 /// frame retries.
 ///
+/// **On a backend whose creation cannot fail synchronously this returns [`Some`]
+/// regardless**, and that is deliberate rather than a gap. A command-stream
+/// backend hands back a handle it allocated itself and learns the browser's
+/// verdict later, so the pass records its draw, the invalid group makes the
+/// submission invalid, and the failure arrives through
+/// [`Device::take_error`](crcbl_hal::Device::take_error) — where
+/// `crcbl::engine`'s frame acquire turns it into an error that stops the frame.
+/// That is louder than skipping a pass, and it is the right way round: a bind
+/// group this code built wrongly is a bug, not a device that ran out of room.
+/// The branch below stays for the backends that can still answer immediately.
+///
 /// It lives in this module because most of its callers do; the other is the
 /// tonemap pass in [`crate::forward`], which is the file this split exists to
 /// stop growing.

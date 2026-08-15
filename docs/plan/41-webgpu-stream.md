@@ -151,8 +151,16 @@ An audit of the workspace found that **no production code inspects which
 creation failure at all — all in `crcbl-render`, all optional subsystems that
 switch themselves off. Three re-express against capability checks or a frame of
 `take_error` delay. The fourth, `cached_group` in `ssao.rs`, sits inside a graph
-execute closure with nowhere to return an error to, and is slice 3's subject —
-**it is not settled by this document.**
+execute closure with nowhere to return an error to.
+
+**Its contract does not change, and nothing has to be built for it.** Under the
+stream it returns `Some` regardless, the pass records its draw, the invalid
+group makes the submission invalid, and the failure arrives through `take_error`
+— which `Gpu::acquire` turns into an error that stops the frame. That is louder
+than skipping a pass and it is the right way round: a bind group this code built
+wrongly is a bug, not a device that ran out of room. The existing `None` branch
+stays for the backends that can still answer immediately, and its documented
+per-frame retry is deliberate rather than a flood to fix.
 
 ### The destroy op
 
@@ -254,7 +262,6 @@ bytes.
 
 ## What this document does not settle
 
-- **`cached_group`'s contract** — slice 3.
 - **Error-scope granularity** — needs a measurement.
 - **The opcode table itself.** The families and the conventions are fixed here;
   the numbers belong with the encoder, next to the tag table, so that adding a

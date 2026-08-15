@@ -2101,7 +2101,12 @@ something trusted, and in a browser the only trusted renderer today is
    `Handle::to_bits`, the destroy op, and sequence-numbered error attribution.
    It leaves the opcode numbers to the encoder and the error-scope granularity
    to a measurement.
-3. Decide `cached_group`'s contract, per "the one real cost" above.
+3. ~~Decide `cached_group`'s contract, per "the one real cost" above.~~ —
+   **decided, and it does not change.** Under the stream it returns `Some`
+   regardless, the invalid group invalidates the submission, and `take_error`
+   stops the frame — louder than skipping a pass, and the right way round for a
+   bind group the engine built wrongly. Recorded on the function itself and in
+   `41-webgpu-stream.md`; no machinery was needed.
 4. `crcbl-webgpu`: `Instance`, adapter enumeration, `PendingDevice`, `Device`
    creation. Exit: a browser opens a device and the capability selectors report
    what it has.
