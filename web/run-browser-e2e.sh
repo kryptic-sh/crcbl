@@ -375,6 +375,23 @@ if [ -z "$BUFFER_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the image and its view, which is group K and is its own
+# thing again: it is the only check anywhere that watches this seam make a
+# resource out of *another* resource it made. A `GPUTextureView` comes from the
+# texture rather than from the device, so the image handle on the wire has to
+# resolve in the replayer's own table first, and the whole-image subresource
+# range has to reach the browser as an absent descriptor member rather than as
+# the `u32::MAX` sentinel the wire carries. The node suite drives both against a
+# stub whose `createTexture` returns a plain object, so only this asks a real
+# device for a real `GPUTexture` and a real `GPUTextureView`. Its absence means
+# that stopped happening rather than that this demo has no device.
+IMAGE_TRIP="$(grep -F 'a real GPUTextureView came back from that texture with the whole-image range accepted' "${OUTPUT}.plain" || true)"
+if [ -z "$IMAGE_TRIP" ]; then
+    echo "crcbl web e2e: the driver never made an image and a view of it on a real device;" >&2
+    echo "               crcbl-webgpu's CreateImage and CreateImageView are ungated in a real browser" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

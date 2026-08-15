@@ -578,6 +578,30 @@ const PROBE_BUFFER_BYTES = 12_288;
 const PROBE_BUFFER_LABEL = 'crcbl-webgpu probe buffer';
 
 /**
+ * The extent and mip count group K asks wasm to make a texture with.
+ *
+ * The driver's numbers rather than wasm's, for {@link PROBE_BUFFER_BYTES}'s
+ * reason: `__crcbl_web_gpu_probe_image` takes all three as arguments and a
+ * browser reports `GPUTexture.width`, `.height` and `.mipLevelCount` off the
+ * object it created, so the two are compared rather than restated.
+ *
+ * A power of two in each axis with a chain shorter than the full one, so the mip
+ * count is a number the extent permits and is visibly not the default of `1`.
+ */
+const PROBE_IMAGE_WIDTH = 256;
+const PROBE_IMAGE_HEIGHT = 128;
+const PROBE_IMAGE_MIPS = 4;
+
+/**
+ * The labels `crates/crcbl-webgpu/src/probe.rs` sets on the image and its view.
+ *
+ * Restated rather than exported through the ABI, for {@link PROBE_BUFFER_LABEL}'s
+ * reason — the point of checking one is that the string *crossed*.
+ */
+const PROBE_IMAGE_LABEL = 'crcbl-webgpu probe image';
+const PROBE_VIEW_LABEL = 'crcbl-webgpu probe view';
+
+/**
  * How far above its starting height a flappy bird has to climb before the taps
  * are the only thing that can have put it there, in the units its HUD prints.
  *
@@ -3363,6 +3387,181 @@ try {
       bufferProbe?.label === PROBE_BUFFER_LABEL,
     `usage 0x${bufferProbe?.usage?.toString(16)} against 0x${bufferProbe?.expectedUsage?.toString(16)}` +
       ` from GPUBufferUsage, label ${JSON.stringify(bufferProbe?.label)}`
+  );
+
+  // **THE ONLY GATE ON AN IMAGE, AND ON A RESOURCE MADE FROM ANOTHER ONE.**
+  // Group J watches this seam make something on the device; this watches it make
+  // something on *that*, which is the shape no command before it has: a
+  // `GPUTextureView` comes from the texture and not from the device, so the
+  // image handle on the wire has to resolve to a live `GPUTexture` in the
+  // replayer's own table before there is anything to call.
+  //
+  // `gpu-replay.mjs` drives both commands under node against a stub device whose
+  // `createTexture` hands back a plain object built from the descriptor, so what
+  // it proves is the translation and the bookkeeping — every table row, every
+  // refusal, and that the range's sentinel reaches `createView` as an absent
+  // member rather than as `4294967295`. What only a browser can establish is
+  // that a real `createTexture` accepted the descriptor this seam builds, that
+  // the `GPUTexture` it answered reports the extent, format, mip count, usage
+  // and label that were asked for, and that a real `createView` accepted the
+  // resolved range — which the number on the wire would have been refused for.
+  group('K — an image and a view of it are created on the real device');
+
+  const imageStart = await evaluate(
+    page,
+    `(async () => {
+       const { startImageProbe, startImageViewProbe } =
+         await import('/engine/gpu-probe.js');
+       const { exports, gpu } = globalThis.crcbl;
+       const before = gpu.stats();
+       // Both on one frame, deliberately: the view names the image the command
+       // before it created, so replaying them together is what says the
+       // replayer's table is filled in before the lookup rather than a frame
+       // later.
+       const image = startImageProbe({
+         exports,
+         width: ${PROBE_IMAGE_WIDTH},
+         height: ${PROBE_IMAGE_HEIGHT},
+         mipLevels: ${PROBE_IMAGE_MIPS},
+       });
+       return {
+         started: image && startImageViewProbe({ exports }),
+         replayed: before.replayed,
+       };
+     })()`
+  );
+  const imageProbe = imageStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(() => {
+             const { gpu } = globalThis.crcbl;
+             const stats = gpu.stats();
+             if (stats.replayed <= ${imageStart.replayed} && !stats.failure) {
+               return null;
+             }
+             const images = [...gpu.replayer.images.entries()];
+             const views = [...gpu.replayer.imageViews.entries()];
+             const image = images.length ? images[images.length - 1][1] : undefined;
+             const view = views.length ? views[views.length - 1][1] : undefined;
+             return {
+               commands: stats.commands,
+               failure: stats.failure,
+               imageHandle: images.length ? images[images.length - 1][0] : null,
+               viewHandle: views.length ? views[views.length - 1][0] : null,
+               heldImages: images.length,
+               heldViews: views.length,
+               // The browser's own classes, as groups H and J ask. Node has no
+               // \`GPUTexture\` or \`GPUTextureView\` binding at all, so this is
+               // what a silent fall back to a stub cannot survive.
+               isRealTexture:
+                 typeof GPUTexture === 'function' && image instanceof GPUTexture,
+               isRealView:
+                 typeof GPUTextureView === 'function' &&
+                 view instanceof GPUTextureView,
+               width: image?.width,
+               height: image?.height,
+               depthOrArrayLayers: image?.depthOrArrayLayers,
+               mipLevelCount: image?.mipLevelCount,
+               dimension: image?.dimension,
+               format: image?.format,
+               usage: image?.usage,
+               label: image?.label,
+               viewLabel: view?.label,
+               // Built from the browser's own namespace object rather than from
+               // the seam's table, as group J does: SAMPLED and TRANSFER_DST are
+               // what \`probe_image_desc\` asks for, and these are the bits this
+               // browser calls them.
+               expectedUsage:
+                 GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+             };
+           })()`
+        )
+      )
+    : null;
+
+  // **THE ONLY THING THAT CAN SAY THE VIEW'S RANGE WAS ACCEPTED**, and it is
+  // read a moment after the replay rather than during it. A `GPUTextureView`
+  // reports nothing but its label, so one built from a range the browser refused
+  // is indistinguishable from a good one by inspection — the refusal arrives on
+  // the *device's* error channel instead, which is the queue
+  // `Device::take_error` drains and which `gpu-replay.js` feeds from its
+  // `uncapturederror` listener.
+  //
+  // WebGPU raises that error "in a future task", so reading the queue in the
+  // same evaluation that saw the replay finish reads it too early and finds an
+  // empty queue whatever happened — which is a check that cannot fail. Two
+  // animation frames inside the page is the wait, and it is a wait for an
+  // *absence*: there is no event that says "no error is coming", so a bounded
+  // one is the only shape available. Measured against the failure it guards —
+  // `ImageSubresourceRange::ALL` passed on as `4294967295`, which Chromium
+  // refuses — this is enough and reading immediately is not.
+  const deviceReport = imageProbe
+    ? await evaluate(
+        page,
+        `(async () => {
+           await new Promise((settle) =>
+             requestAnimationFrame(() => requestAnimationFrame(settle))
+           );
+           // Wrapped rather than returned bare, so that an evaluation that
+           // never ran is distinguishable from a queue that was empty. Both
+           // would arrive here as \`null\`, and one of them is a check that
+           // cannot fail.
+           return { waited: true, error: globalThis.crcbl.gpu.replayer.takeError() };
+         })()`
+      )
+    : null;
+  check(
+    'K',
+    'wasm encoded an image and a view of it, and the demo loop replayed both',
+    imageProbe?.commands?.join(',') === 'CreateImage,CreateImageView' &&
+      Number.isInteger(imageProbe.imageHandle) &&
+      Number.isInteger(imageProbe.viewHandle),
+    imageProbe
+      ? `the loop replayed [${imageProbe.commands.join(', ')}] for image ${imageProbe.imageHandle} and view ${imageProbe.viewHandle}` +
+          `${imageProbe.failure ? ` — ${imageProbe.failure}` : ''}`
+      : imageStart?.started
+        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+        : 'wasm would not encode them — no device has opened, or another channel is installed'
+  );
+  check(
+    'K',
+    'a real GPUTexture came back from the device with the extent, format and mip count asked for',
+    imageProbe?.isRealTexture === true &&
+      imageProbe?.width === PROBE_IMAGE_WIDTH &&
+      imageProbe?.height === PROBE_IMAGE_HEIGHT &&
+      imageProbe?.depthOrArrayLayers === 1 &&
+      imageProbe?.mipLevelCount === PROBE_IMAGE_MIPS &&
+      imageProbe?.dimension === '2d' &&
+      imageProbe?.format === 'rgba8unorm',
+    imageProbe?.isRealTexture
+      ? `an instance of this browser's GPUTexture, ${imageProbe.width}x${imageProbe.height}x${imageProbe.depthOrArrayLayers} ${imageProbe.dimension} ${imageProbe.format}` +
+          ` with ${imageProbe.mipLevelCount} mips, of ${imageProbe.heldImages} held`
+      : `instanceof GPUTexture: ${imageProbe?.isRealTexture}, ${imageProbe?.width}x${imageProbe?.height}` +
+          ` ${imageProbe?.dimension} ${imageProbe?.format}, ${imageProbe?.mipLevelCount} mips` +
+          ` (${PROBE_IMAGE_WIDTH}x${PROBE_IMAGE_HEIGHT} 2d rgba8unorm, ${PROBE_IMAGE_MIPS} mips asked for)`
+  );
+  check(
+    'K',
+    'the browser gave that texture the usage and the label the seam asked for',
+    imageProbe?.usage === imageProbe?.expectedUsage &&
+      imageProbe?.label === PROBE_IMAGE_LABEL,
+    `usage 0x${imageProbe?.usage?.toString(16)} against 0x${imageProbe?.expectedUsage?.toString(16)}` +
+      ` from GPUTextureUsage, label ${JSON.stringify(imageProbe?.label)}`
+  );
+  check(
+    'K',
+    'a real GPUTextureView came back from that texture with the whole-image range accepted',
+    imageProbe?.isRealView === true &&
+      imageProbe?.viewLabel === PROBE_VIEW_LABEL &&
+      deviceReport?.waited === true &&
+      deviceReport?.error === null,
+    deviceReport?.waited !== true
+      ? 'the page never got as far as reading the device error queue'
+      : imageProbe?.isRealView && deviceReport.error === null
+        ? `an instance of this browser's GPUTextureView labelled ${JSON.stringify(imageProbe.viewLabel)}, of ${imageProbe.heldViews} held, and the device reported nothing`
+        : `instanceof GPUTextureView: ${imageProbe?.isRealView}, label ${JSON.stringify(imageProbe?.viewLabel)}` +
+          `${deviceReport.error ? ` — ${deviceReport.error}` : ''}`
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and

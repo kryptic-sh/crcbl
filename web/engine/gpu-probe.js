@@ -263,6 +263,63 @@ export function startBufferProbe({ exports, size }) {
 }
 
 /**
+ * Asks wasm to encode an image creation on the device it opened.
+ *
+ * **There is no `readImageProbe`, for {@link startBufferProbe}'s reason:**
+ * `CreateImage` has no entry on the reply channel either. What there is to see
+ * is on this side — `globalThis.crcbl.gpu.replayer.images` is the table the
+ * `GPUTexture` lands in — and what could not be done is on this side too, in
+ * `crcbl.gpu.replayer.takeError()`.
+ *
+ * It needs a **device**, as {@link startBufferProbe} does and for the same
+ * reason: `create_image` is a device method, so a `false` right after
+ * {@link startDeviceProbe} is that ordering rather than a failure.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {number} options.width Texels across. The page's own number, so what it
+ *   reads back off `GPUTexture.width` is something it chose.
+ * @param {number} options.height Texels down.
+ * @param {number} options.mipLevels How many mip levels to ask for. Must fit the
+ *   extent — a browser refuses a longer chain than the size can hold, and says
+ *   so through `takeError()`.
+ * @returns {boolean} Whether wasm encoded it. `false` is no device open yet, the
+ *   probe being re-entered, or another channel being installed.
+ */
+export function startImageProbe({ exports, width, height, mipLevels }) {
+  return exports.__crcbl_web_gpu_probe_image(width, height, mipLevels) === 1;
+}
+
+/**
+ * Asks wasm to encode a view of the image {@link startImageProbe} created.
+ *
+ * **THE IMAGE HAS TO BE THERE, AND NEITHER SIDE OF THIS CALL CHECKS IT.** The
+ * image lives in the page's replayer and nothing in wasm holds one, so a view
+ * naming an image that was never created — or one already destroyed, or one at a
+ * generation the slot has moved past — is encoded happily and reported by the
+ * replayer through `crcbl.gpu.replayer.takeError()`. It does not throw, because
+ * a view arriving before its image is a far side that got its ordering wrong
+ * mid-frame and taking the frame down would abandon every command after it;
+ * `gpu-replay.js` argues that where it is made.
+ *
+ * **The descriptor takes nothing, and its range is the whole image.** Both
+ * counts are `ImageSubresourceRange::ALL` — `u32::MAX` — which crosses the wire
+ * verbatim, and WebGPU spells "the rest" as an *absent* descriptor member rather
+ * than as a number. So this is the call that puts that resolution in front of a
+ * real browser: `crcbl.gpu.replayer.imageViews` is the table the
+ * `GPUTextureView` lands in, and a replayer that passed `4294967295` on gets a
+ * view the browser refuses.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded it, on {@link startImageProbe}'s
+ *   terms.
+ */
+export function startImageViewProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_image_view() === 1;
+}
+
+/**
  * Asks wasm to encode a query for what a canvas surface will accept.
  *
  * The third command that makes a round trip, and the encode-and-return half of

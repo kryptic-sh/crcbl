@@ -40,6 +40,8 @@
 //! | [`__crcbl_web_gpu_probe_device_max_image_2d`](shim::__crcbl_web_gpu_probe_device_max_image_2d) | `() -> i32` | The opened device's [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d). |
 //! | [`__crcbl_web_gpu_probe_surface`](shim::__crcbl_web_gpu_probe_surface) | `(i32) -> i32` | Encode one [`CreateSurface`](crate::Command::CreateSurface) against [`PROBE_SURFACE`], naming the canvas that `canvas_id` is the page's registry key for. `1`, or `0` if the probe is re-entered or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_buffer`](shim::__crcbl_web_gpu_probe_buffer) | `(i32) -> i32` | Encode one [`CreateBuffer`](crate::Command::CreateBuffer) against [`PROBE_BUFFER`], of `size` bytes. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_image`](shim::__crcbl_web_gpu_probe_image) | `(i32, i32, i32) -> i32` | Encode one [`CreateImage`](crate::Command::CreateImage) against [`PROBE_IMAGE`], of `width` by `height` texels with `mip_levels` levels. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_image_view`](shim::__crcbl_web_gpu_probe_image_view) | `() -> i32` | Encode one [`CreateImageView`](crate::Command::CreateImageView) against [`PROBE_IMAGE_VIEW`], viewing [`PROBE_IMAGE`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps) | `() -> i32` | Encode one [`SurfaceCaps`](crate::Command::SurfaceCaps) and register its wait. `1`, or `0` if there was no room or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_state`](shim::__crcbl_web_gpu_probe_surface_caps_state) | `() -> i32` | Drain, and answer one of the `CAPS_*` codes. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_reason_ptr`](shim::__crcbl_web_gpu_probe_surface_caps_reason_ptr) | `() -> i32` | Where the reason the query answered nothing starts. Empty when it answered. |
@@ -105,6 +107,33 @@
 //! the page for something it has not got. `web/engine/gpu-replay.js` records
 //! exactly that as a `take_error`, which is where a buffer failure goes for
 //! want of a reply channel.
+//!
+//! # The image pair is that shape twice, and the second one names the first
+//!
+//! [`__crcbl_web_gpu_probe_image`](shim::__crcbl_web_gpu_probe_image) is
+//! [`__crcbl_web_gpu_probe_buffer`](shim::__crcbl_web_gpu_probe_buffer) in every
+//! respect — a device method, so it refuses until a device has opened; no
+//! `state`, because nothing answers a creation; the numbers passed in by the
+//! page, so what it reads back off `GPUTexture` is something it chose.
+//!
+//! [`__crcbl_web_gpu_probe_image_view`](shim::__crcbl_web_gpu_probe_image_view)
+//! is the one export here whose command **depends on another command having
+//! worked**, and it cannot check that: the image lives in the page's replayer
+//! and nothing in wasm holds one. So it refuses on the same condition its
+//! neighbour does — no device — and an image handle that resolves to nothing is
+//! the replayer's to report, through `Device::take_error`, exactly as a buffer
+//! that could not be made is. That is a decision `web/engine/gpu-replay.js`
+//! argues rather than an omission here: a view naming a missing image is a far
+//! side that got its ordering wrong mid-frame, and taking the frame down over it
+//! would abandon every command after it.
+//!
+//! The pair is also what puts [`ImageSubresourceRange::ALL`](crcbl_hal::ImageSubresourceRange::ALL)
+//! in front of a real browser. Both counts in
+//! [`PROBE_IMAGE_VIEW_DESC`] are the sentinel, they cross verbatim by the rule
+//! `docs/plan/41-webgpu-stream.md` sets, and WebGPU spells "the rest" as an
+//! **absent** descriptor member rather than as a number — so a replayer that
+//! passed `4294967295` on builds a view the browser refuses, and only a browser
+//! can say so.
 //!
 //! Its neighbour [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps)
 //! is the opposite case and has the full awaited shape, because
@@ -198,7 +227,7 @@
 //! is a question the wire asks any more. The only cause left is
 //! [`Backend`](SurfaceCapsFailure::Backend), which is the replayer meeting
 //! something it did not anticipate — a canvas format this seam has no
-//! [`Format`](crcbl_hal::Format) for — and which nothing here can provoke on
+//! [`Format`] for — and which nothing here can provoke on
 //! demand. So what a browser gate can observe of this command is the *answer*,
 //! and [`CAPS_REFUSED`] is a path `cargo test` drives rather than a browser.
 //!
@@ -209,8 +238,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crcbl_hal::{
-    AdapterId, BufferDesc, BufferHandle, BufferUsage, DeviceDesc, Features, MemoryLocation,
-    SurfaceCaps, SurfaceHandle,
+    AdapterId, BufferDesc, BufferHandle, BufferUsage, DeviceDesc, Extent3d, Features, Format,
+    ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
+    ImageViewHandle, ImageViewType, MemoryLocation, SurfaceCaps, SurfaceHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -356,6 +386,91 @@ pub const fn probe_buffer_desc(size: u64) -> BufferDesc<'static> {
         memory: MemoryLocation::DeviceLocal,
     }
 }
+
+/// The image [`shim::__crcbl_web_gpu_probe_image`] creates, every time.
+///
+/// [`PROBE_BUFFER`]'s twin on its terms, and its bits are that buffer's and that
+/// surface's — deliberately, for the reason stated there: a handle carries no
+/// kind, the opcode is what says which table an id indexes, and a page filing
+/// three kinds under one key would be a replayer with one table where the crate
+/// docs require three.
+pub const PROBE_IMAGE: ImageHandle = match ImageHandle::from_bits(1 << 32) {
+    Some(image) => image,
+    // Generation `1`, written into the high half above, so this arm is the
+    // expression being wrong rather than a case anything can reach.
+    None => panic!("generation 1 is not zero"),
+};
+
+/// The view [`shim::__crcbl_web_gpu_probe_image_view`] creates, every time.
+///
+/// The same bits again, and here the sharing is the *point* rather than an
+/// economy: a view and the image it views are separate objects in separate
+/// tables, and these two carry identical eight bytes, so a replayer that filed
+/// them together would overwrite the image with its own view.
+pub const PROBE_IMAGE_VIEW: ImageViewHandle = match ImageViewHandle::from_bits(1 << 32) {
+    Some(view) => view,
+    // Generation `1`, as above.
+    None => panic!("generation 1 is not zero"),
+};
+
+/// The descriptor [`shim::__crcbl_web_gpu_probe_image`] asks with.
+///
+/// **Every field is one a browser can be held to**, which is
+/// [`probe_buffer_desc`]'s standard and is easier to meet here: a `GPUTexture`
+/// reports its `width`, `height`, `depthOrArrayLayers`, `mipLevelCount`,
+/// `sampleCount`, `dimension`, `format`, `usage` and `label`, where a
+/// `GPUBuffer` reports three things. The extent and the mip count are the
+/// caller's for that reason — a page passes numbers and reads them back off the
+/// object the device made, rather than comparing a constant against itself.
+///
+/// [`Format::Rgba8Unorm`] because it is core WebGPU, which is what makes the
+/// check runnable on the software adapter the browser gate uses: the seam's BC
+/// formats are gated behind `texture-compression-bc` and its depth-stencil pair
+/// behind `depth32float-stencil8`, and a probe that asked for one would be
+/// testing whether *this* machine has the feature. Those paths are held by
+/// `web/tools/gpu-replay.mjs`, which drives the table format by format.
+///
+/// The usage is two flags that map onto two different `GPUTextureUsage` bits, so
+/// a translation that dropped one or or-ed the wrong constant produces a number
+/// the page can see is wrong — [`probe_buffer_desc`]'s argument, unchanged.
+#[must_use]
+pub const fn probe_image_desc(width: u32, height: u32, mip_levels: u32) -> ImageDesc<'static> {
+    ImageDesc {
+        label: Some("crcbl-webgpu probe image"),
+        image_type: ImageType::D2,
+        extent: Extent3d::d2(width, height),
+        format: Format::Rgba8Unorm,
+        mip_levels,
+        samples: 1,
+        usage: ImageUsage::SAMPLED.union(ImageUsage::TRANSFER_DST),
+    }
+}
+
+/// The descriptor [`shim::__crcbl_web_gpu_probe_image_view`] asks with.
+///
+/// A `const` rather than a function because it takes nothing: the image is
+/// [`PROBE_IMAGE`] and every other field is fixed, and the one field worth
+/// choosing is chosen already.
+///
+/// **THAT FIELD IS THE RANGE, AND IT IS [`ImageSubresourceRange::all`].** Both
+/// counts are therefore [`ImageSubresourceRange::ALL`] — `u32::MAX`, which
+/// crosses the wire verbatim by the sentinel rule in
+/// `docs/plan/41-webgpu-stream.md` and which **only the replayer can resolve**.
+/// WebGPU spells "the rest" as an absent descriptor member and refuses
+/// `4294967295` outright, so a replayer that passed the number on produces a
+/// view the browser rejects — and this probe is what puts that path in front of
+/// a real browser rather than a stub. The format is the image's own, so the view
+/// reinterprets nothing: `ImageDesc` has no `view_formats` for WebGPU's
+/// `GPUTextureDescriptor.viewFormats`, so a view that changed format would be
+/// refused by the browser for a reason that is the seam's rather than this
+/// probe's.
+pub const PROBE_IMAGE_VIEW_DESC: ImageViewDesc<'static> = ImageViewDesc {
+    label: Some("crcbl-webgpu probe view"),
+    image: PROBE_IMAGE,
+    view_type: ImageViewType::D2,
+    format: Format::Rgba8Unorm,
+    range: ImageSubresourceRange::all(Format::Rgba8Unorm),
+};
 
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
@@ -585,6 +700,48 @@ impl Probe {
             .encode(|stream| {
                 stream.create_buffer(PROBE_BUFFER, &probe_buffer_desc(u64::from(size)))
             })
+            .is_some()
+    }
+
+    /// Encode one [`CreateImage`](crate::Command::CreateImage) against
+    /// [`PROBE_IMAGE`], of `width` by `height` texels with `mip_levels` levels.
+    ///
+    /// [`request_buffer`](Self::request_buffer)'s twin in every respect,
+    /// including the ordering rule: `create_image` is a device method, so this
+    /// refuses until the device request this probe made has come back.
+    fn request_image(&mut self, width: u32, height: u32, mip_levels: u32) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        channel
+            .encode(|stream| {
+                stream.create_image(PROBE_IMAGE, &probe_image_desc(width, height, mip_levels))
+            })
+            .is_some()
+    }
+
+    /// Encode one [`CreateImageView`](crate::Command::CreateImageView) against
+    /// [`PROBE_IMAGE_VIEW`], viewing [`PROBE_IMAGE`].
+    ///
+    /// **It cannot check that the image is there**, and does not pretend to: the
+    /// image lives in the page's replayer and nothing on this side of the seam
+    /// holds one. What this can check is the same thing its neighbour checks —
+    /// that a device has opened — and the rest is the replayer's, which reports
+    /// an unresolvable image handle through `Device::take_error` rather than by
+    /// refusing to encode. `web/engine/gpu-replay.js` argues that where it is
+    /// made.
+    fn request_image_view(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        channel
+            .encode(|stream| stream.create_image_view(PROBE_IMAGE_VIEW, &PROBE_IMAGE_VIEW_DESC))
             .is_some()
     }
 
@@ -926,6 +1083,58 @@ pub mod shim {
         })
     }
 
+    /// Ask the page to make a texture of `width` by `height` texels with
+    /// `mip_levels` mip levels, on the device it opened.
+    ///
+    /// `1` when one [`CreateImage`](crate::Command::CreateImage) is on the
+    /// stream; `0` when no device has opened yet, when the probe is re-entered,
+    /// or when another channel is already installed.
+    ///
+    /// **No `state` beside it**, on
+    /// [`__crcbl_web_gpu_probe_buffer`]'s terms and for its reason: nothing
+    /// answers a creation. What the page got is the page's to report —
+    /// `crcbl.gpu.replayer.images` is the table the `GPUTexture` lands in — and
+    /// what it could *not* do arrives out of band through `Device::take_error`.
+    ///
+    /// The three numbers are parameters for that export's reason: a browser
+    /// reports `GPUTexture.width`, `.height` and `.mipLevelCount` off the object
+    /// it made, so numbers chosen here rather than by the page would be a check
+    /// comparing a constant against itself.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_image(width: u32, height: u32, mip_levels: u32) -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_image(width, height, mip_levels)),
+            Err(_) => 0,
+        })
+    }
+
+    /// Ask the page to make a view of the texture
+    /// [`__crcbl_web_gpu_probe_image`] created.
+    ///
+    /// `1` when one [`CreateImageView`](crate::Command::CreateImageView) is on
+    /// the stream; `0` on that export's three conditions.
+    ///
+    /// **No arguments, and the descriptor is fixed**, because the one field
+    /// worth varying is already the interesting one:
+    /// [`PROBE_IMAGE_VIEW_DESC`](super::PROBE_IMAGE_VIEW_DESC)'s range is
+    /// [`ImageSubresourceRange::all`](crcbl_hal::ImageSubresourceRange::all), so
+    /// both counts cross as the `u32::MAX` sentinel and the replayer is what has
+    /// to turn them into WebGPU's absent member.
+    /// `crcbl.gpu.replayer.imageViews` is the table the `GPUTextureView` lands
+    /// in.
+    ///
+    /// **The image has to have been created first** and this cannot check it:
+    /// the table is the page's, so a view naming an image that is not there is
+    /// reported by the replayer through `Device::take_error` rather than
+    /// refused here.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_image_view() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_image_view()),
+            Err(_) => 0,
+        })
+    }
+
     /// [`granted_u32`] for the device that opened, on the same terms: `0` is a
     /// legal value for each of these, so they are read only once
     /// [`__crcbl_web_gpu_probe_device_state`] has answered
@@ -1111,8 +1320,8 @@ pub mod shim {
 #[cfg(test)]
 mod tests {
     use crcbl_hal::{
-        AdapterInfo, BackendKind, CompositeAlpha, DeviceCaps, DeviceType, Format, Limits,
-        PresentMode,
+        AdapterInfo, BackendKind, CompositeAlpha, DeviceCaps, DeviceType, Format, ImageAspect,
+        Limits, PresentMode,
     };
 
     use super::shim::{
@@ -1121,6 +1330,7 @@ mod tests {
         __crcbl_web_gpu_probe_device_max_image_2d, __crcbl_web_gpu_probe_device_reason_len,
         __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
         __crcbl_web_gpu_probe_features_hi, __crcbl_web_gpu_probe_features_lo,
+        __crcbl_web_gpu_probe_image, __crcbl_web_gpu_probe_image_view,
         __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_state,
         __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_surface_caps,
         __crcbl_web_gpu_probe_surface_caps_cause, __crcbl_web_gpu_probe_surface_caps_format,
@@ -1678,6 +1888,116 @@ mod tests {
     #[test]
     fn the_probes_buffer_and_surface_name_the_same_handle_bits() {
         assert_eq!(PROBE_BUFFER.to_bits(), PROBE_SURFACE.to_bits());
+    }
+
+    /// And so do the image and its view, which is the pair where the sharing
+    /// costs the most: a view and the image it views are alive at the same time,
+    /// so a replayer with one table would overwrite the image with its own view.
+    #[test]
+    fn the_probes_image_and_view_name_the_same_handle_bits_as_everything_else() {
+        assert_eq!(PROBE_IMAGE.to_bits(), PROBE_BUFFER.to_bits());
+        assert_eq!(PROBE_IMAGE_VIEW.to_bits(), PROBE_IMAGE.to_bits());
+    }
+
+    /// The image half: one export, one command, and the descriptor this module
+    /// fixed — with the three numbers the caller passed, which are the ones a
+    /// browser reports back off the `GPUTexture` it made.
+    #[test]
+    fn the_image_export_encodes_one_create_image_with_the_extent_it_was_given() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_image(256, 128, 4), 1);
+        assert_eq!(
+            take_frame(),
+            vec![Command::CreateImage {
+                image: PROBE_IMAGE,
+                label: Some("crcbl-webgpu probe image".into()),
+                image_type: ImageType::D2,
+                extent: Extent3d::d2(256, 128),
+                format: Format::Rgba8Unorm,
+                mip_levels: 4,
+                samples: 1,
+                usage: ImageUsage::SAMPLED | ImageUsage::TRANSFER_DST,
+            }]
+        );
+    }
+
+    /// The extent and the mip count are the caller's rather than this module's,
+    /// so a second call with different ones has to move them — otherwise the
+    /// browser gate is comparing `GPUTexture.width` against a constant.
+    #[test]
+    fn the_image_extent_and_mip_count_are_the_ones_the_caller_asked_for() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_image(64, 32, 2), 1);
+        let commands = take_frame();
+        let [
+            Command::CreateImage {
+                extent, mip_levels, ..
+            },
+        ] = commands.as_slice()
+        else {
+            panic!("the frame carries one CreateImage: {commands:?}");
+        };
+        assert_eq!(*extent, Extent3d::d2(64, 32));
+        assert_eq!(*mip_levels, 2);
+    }
+
+    /// The view half, and the field this whole pair exists to put on the wire:
+    /// both counts are [`ImageSubresourceRange::ALL`], which crosses verbatim
+    /// and which only the replayer can resolve.
+    #[test]
+    fn the_view_export_encodes_one_create_image_view_carrying_the_sentinel() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_image_view(), 1);
+        assert_eq!(
+            take_frame(),
+            vec![Command::CreateImageView {
+                view: PROBE_IMAGE_VIEW,
+                label: Some("crcbl-webgpu probe view".into()),
+                image: PROBE_IMAGE,
+                view_type: ImageViewType::D2,
+                format: Format::Rgba8Unorm,
+                range: ImageSubresourceRange {
+                    aspect: ImageAspect::COLOR,
+                    base_mip: 0,
+                    mip_count: ImageSubresourceRange::ALL,
+                    base_layer: 0,
+                    layer_count: ImageSubresourceRange::ALL,
+                },
+            }]
+        );
+    }
+
+    /// **Nothing waits on either**, which is the shape both creations share with
+    /// the buffer and the surface: a creation is answered by nothing, so a
+    /// registered wait would hold a slot for a reply that never comes.
+    #[test]
+    fn the_image_requests_register_no_wait_because_nothing_answers_them() {
+        open_device();
+        let before = waiting_replies();
+        assert_eq!(__crcbl_web_gpu_probe_image(8, 8, 1), 1);
+        assert_eq!(__crcbl_web_gpu_probe_image_view(), 1);
+        assert_eq!(waiting_replies(), before);
+        assert_eq!(take_frame().len(), 2);
+    }
+
+    /// **A device has to have opened first**, for the buffer export's reason:
+    /// `Device::create_image` and `Device::create_image_view` are device
+    /// methods, and a page with no device has nothing to call them on.
+    #[test]
+    fn an_image_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_image(8, 8, 1), 0);
+        assert_eq!(__crcbl_web_gpu_probe_image_view(), 0);
+        // Not even a channel: refusing before installing one is what keeps the
+        // "another channel is installed" answer meaningful.
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+
+        // …and both are still refused while the device request is in flight.
+        grant(&granted("no device yet"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_image(8, 8, 1), 0);
+        assert_eq!(__crcbl_web_gpu_probe_image_view(), 0);
+        assert_eq!(take_frame().len(), 1);
     }
 
     /// The capabilities a browser answers with, as `gpu-replay.js` builds them:

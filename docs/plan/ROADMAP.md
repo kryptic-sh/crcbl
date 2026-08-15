@@ -2196,7 +2196,14 @@ something trusted, and in a browser the only trusted renderer today is
      `take_error`-shaped queue rather than a throw or a reply: throwing would
      abandon the rest of the frame, including the draws that wanted the buffer,
      and a reply would name a sequence nothing waits on.
-   - 5b — textures and samplers, then bind groups.
+   - ~~5b — images and image views, on the wire and on the device.~~ —
+     **shipped.** Group K of the gate proves a real `GPUTexture` and a real
+     `GPUTextureView` of _that_ texture came back with the extent, format, mip
+     count and usage asked for. `ImageSubresourceRange::ALL` resolves in the
+     replayer as an **absent** descriptor member rather than a number: WebGPU's
+     default for an absent `arrayLayerCount` is 6 on a cube view whatever the
+     texture holds, so arithmetic gets mips right and layers wrong.
+   - 5c — samplers, then bind groups.
 6. Pipelines and WGSL modules — the artifacts are already committed and already
    validated.
 7. Command encoding, render and compute passes.

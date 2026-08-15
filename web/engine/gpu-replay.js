@@ -48,6 +48,19 @@
 // the handle and moved on. The translation is `webgpuBufferUsageFor` and every
 // bit WebGPU cannot express is named there.
 //
+// AND THE IMAGE PAIR AND THE VIEW PAIR, WHICH RUN AGAINST THE DEVICE AND THE
+// IMAGE. `CreateImage` translates a `crcbl_hal::ImageDesc` into a
+// `GPUTextureDescriptor` and calls `createTexture` on that same device;
+// `CreateImageView` looks its image handle up in the table the first one filled
+// and calls `createView` on the `GPUTexture` it finds, because a view in WebGPU
+// is made by the texture rather than by the device. `DestroyImage` calls
+// `destroy()`; `DestroyImageView` only lets go, because a `GPUTextureView` has
+// no destroy to call. None of the four queues a reply, for `CreateSurface`'s
+// reason. The translations are the block below `webgpuTextureUsageFor` and every
+// seam value WebGPU cannot express is named there — including the two whose
+// failure has to be reported rather than translated: a format this device did
+// not enable the feature for, and an image handle that resolves to nothing.
+//
 // SO A BUFFER THAT CANNOT BE MADE HAS NOWHERE TO BE REPORTED, and the answer is
 // the seam's own: `Device::take_error`, which `crcbl_hal` documents as existing
 // *for WebGPU* and which `docs/plan/41-webgpu-stream.md` has `Gpu::acquire`
@@ -510,6 +523,371 @@ export function webgpuBufferUsageFor(usage, memory) {
   if (located === undefined) unsatisfiable.push(`MemoryLocation::${memory}`);
   else bits |= located;
   return { bits, unsatisfiable };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// An image's vocabulary, in WebGPU's
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// FIVE SEAM FIELDS AND ONE WEBGPU DESCRIPTOR, and every one of the five is a
+// translation with something to argue. `crcbl_hal::ImageDesc` says what an image
+// *is* (`image_type`, `extent`), what it holds (`format`), how much of it there
+// is (`mip_levels`, `samples`) and what it is *for* (`usage`);
+// `GPUTextureDescriptor` has a member for each, and the members are not the same
+// shape. The tables below are where each difference is written down rather than
+// smoothed over, in the order `ImageDesc` declares them.
+//
+// AND `ImageViewDesc` IS THE SECOND HALF, with a difference that decides its
+// whole shape: a view is made by the *image*, not by the device —
+// `GPUTexture.createView` — so the image handle in the descriptor is a lookup
+// this replayer must do rather than a field it passes on. See
+// {@link Replayer#images}.
+//
+// WHAT `ImageDesc` CANNOT SAY, AND WEBGPU NEEDS TO BE TOLD. A
+// `GPUTextureDescriptor` carries `viewFormats`, the list of formats a view of
+// this texture may reinterpret it as, and WebGPU **refuses a view whose format
+// is not the texture's own or one of that list**. `ImageViewDesc::format`
+// documents itself as free to differ "for sRGB reinterpretation", and there is
+// no field on `ImageDesc` that could carry the permission — so this backend
+// creates every texture with WebGPU's default empty list, and a reinterpreting
+// view is refused by the browser on the device's error channel. Nothing here can
+// fix that: the texture is already made by the time the view names its format,
+// and inventing a list would be this file granting a permission the caller never
+// asked for. It is a gap in the seam rather than in this translation, and it is
+// written here because that is where a reader meets it.
+
+/**
+ * The `GPUTextureUsage` bits, as the specification fixes them.
+ *
+ * Spelled out rather than read off `globalThis.GPUTextureUsage`, for
+ * {@link GPU_BUFFER_USAGE}'s reason: these are constants of the format rather
+ * than facts about a browser, and node has none of them to read.
+ * `web/tools/browser-e2e.mjs` holds them against the real namespace object.
+ */
+const GPU_TEXTURE_USAGE = Object.freeze({
+  COPY_SRC: 0x01,
+  COPY_DST: 0x02,
+  TEXTURE_BINDING: 0x04,
+  STORAGE_BINDING: 0x08,
+  RENDER_ATTACHMENT: 0x10,
+});
+
+/**
+ * Every `crcbl_hal::ImageUsage` flag with a `GPUTextureUsage` bit, and the bit.
+ *
+ * Keyed by the names `gpu-stream.js` decodes a usage word into, as
+ * {@link BUFFER_USAGE_MAP} is, so a flag this table does not list cannot be
+ * mapped by accident.
+ *
+ * TWO SEAM FLAGS LAND ON ONE WEBGPU BIT, and it is not a loss.
+ * `COLOR_ATTACHMENT` and `DEPTH_STENCIL_ATTACHMENT` are both
+ * `RENDER_ATTACHMENT`: WebGPU has one attachment usage and reads *which kind*
+ * off the format, so a `depth32float` texture with `RENDER_ATTACHMENT` is a
+ * depth attachment and an `rgba8unorm` one is a colour attachment, with no way
+ * to say either wrongly. The seam's two flags carry the same information twice
+ * over — `ImageAspect::of` derives the same split from the same format — so
+ * nothing is dropped by folding them.
+ *
+ * THE ONE FLAG WITH NO WEBGPU BIT IS `PRESENT`, and it is **refused rather than
+ * dropped**, exactly as `BufferUsage::DEVICE_ADDRESS` is and for a sharper
+ * version of that reason. A presentable image is not something WebGPU's
+ * `createTexture` can make at all: a canvas's texture comes from
+ * `GPUCanvasContext.getCurrentTexture()`, its usage comes from
+ * `GPUCanvasConfiguration.usage`, and it is owned by the canvas for one frame.
+ * So a `CreateImage` asking for `PRESENT` is asking this backend to hand-build a
+ * swapchain image, and dropping the bit would answer with an ordinary texture
+ * that can never be presented — a failure that then surfaces at the present, a
+ * whole frame away from the creation that was wrong.
+ *
+ * NOTHING GOES THE OTHER WAY: every `GPUTextureUsage` bit has a seam flag above.
+ */
+const IMAGE_USAGE_MAP = Object.freeze({
+  TRANSFER_SRC: GPU_TEXTURE_USAGE.COPY_SRC,
+  TRANSFER_DST: GPU_TEXTURE_USAGE.COPY_DST,
+  SAMPLED: GPU_TEXTURE_USAGE.TEXTURE_BINDING,
+  STORAGE: GPU_TEXTURE_USAGE.STORAGE_BINDING,
+  COLOR_ATTACHMENT: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT,
+  DEPTH_STENCIL_ATTACHMENT: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT,
+});
+
+/**
+ * The `GPUTextureUsage` word a decoded `ImageDesc`'s usage amounts to, and
+ * whatever in it WebGPU has no bit for.
+ *
+ * {@link webgpuBufferUsageFor}'s twin, in shape and in what `unsatisfiable`
+ * means: seam names rather than a word, because it is for a message a person
+ * reads, and empty for every descriptor this backend can honour.
+ *
+ * @param {readonly string[]} usage `crcbl_hal::ImageUsage` flag names, as
+ *   `gpu-stream.js` decodes them.
+ * @returns {{ bits: number, unsatisfiable: string[] }}
+ */
+export function webgpuTextureUsageFor(usage) {
+  let bits = 0;
+  const unsatisfiable = [];
+  for (const name of usage) {
+    const bit = IMAGE_USAGE_MAP[name];
+    if (bit === undefined) unsatisfiable.push(`ImageUsage::${name}`);
+    else bits |= bit;
+  }
+  return { bits, unsatisfiable };
+}
+
+/**
+ * Every `crcbl_hal::Format` as WebGPU spells it, and the `GPUFeatureName` that
+ * gates it where one does.
+ *
+ * Keyed by the names `gpu-stream.js` decodes a format code into — `gpu-reply.js`'s
+ * `FORMAT` spelling, `RGBA8_UNORM` rather than the HAL's `Rgba8Unorm` — because
+ * that is what arrives in a command.
+ *
+ * EVERY SEAM FORMAT HAS A WEBGPU NAME, AND ONE OF THEM IS INEXACT.
+ * `D24_UNORM_S8_UINT` becomes `depth24plus-stencil8`, which is not the same
+ * claim: WebGPU deleted `depth24unorm-stencil8` from the specification and what
+ * is left promises *at least* 24 bits of unsigned-normalised depth beside 8 bits
+ * of stencil, leaving the implementation free to back it with a 32-bit float.
+ * It is taken rather than refused for {@link MEMORY_LOCATION_USAGE}'s
+ * `HostUpload` reason — it widens what the caller gets rather than narrowing it,
+ * so it can cost memory and never correctness — and the seam has no call that
+ * could see the difference: there is no image mapping and no subresource layout
+ * on it, so no caller can read the depth plane's bytes and find the layout it
+ * did not expect.
+ *
+ * THE GATED ONES ARE THE TEN A DEVICE MAY NOT HAVE. `texture-compression-bc`
+ * gates every BC format and `depth32float-stencil8` gates the one whose name it
+ * shares; a device that did not enable the feature cannot use the format, and
+ * {@link webgpuTextureFormatFor} is where that is decided.
+ *
+ * `R11G11B10_FLOAT` is `rg11b10ufloat` and is deliberately **not** listed as
+ * gated. The format itself is core; `rg11b10ufloat-renderable` is a feature
+ * about using it as a *render attachment*, which is a property of the usage
+ * rather than of the format, and refusing every such image would refuse the
+ * sampled ones a core device can make perfectly well. A render attachment a
+ * device cannot render to is refused by the browser, which is where a
+ * usage-dependent rule belongs.
+ */
+const TEXTURE_FORMAT = Object.freeze({
+  R8_UNORM: { name: 'r8unorm' },
+  RG8_UNORM: { name: 'rg8unorm' },
+  RGBA8_UNORM: { name: 'rgba8unorm' },
+  RGBA8_UNORM_SRGB: { name: 'rgba8unorm-srgb' },
+  BGRA8_UNORM: { name: 'bgra8unorm' },
+  BGRA8_UNORM_SRGB: { name: 'bgra8unorm-srgb' },
+  RGB10A2_UNORM: { name: 'rgb10a2unorm' },
+  R11G11B10_FLOAT: { name: 'rg11b10ufloat' },
+  R16_FLOAT: { name: 'r16float' },
+  RG16_FLOAT: { name: 'rg16float' },
+  RGBA16_FLOAT: { name: 'rgba16float' },
+  R32_FLOAT: { name: 'r32float' },
+  RG32_FLOAT: { name: 'rg32float' },
+  RGBA32_FLOAT: { name: 'rgba32float' },
+  R32_UINT: { name: 'r32uint' },
+  RG32_UINT: { name: 'rg32uint' },
+  D32_FLOAT: { name: 'depth32float' },
+  D32_FLOAT_S8_UINT: {
+    name: 'depth32float-stencil8',
+    feature: 'depth32float-stencil8',
+  },
+  D24_UNORM_S8_UINT: { name: 'depth24plus-stencil8' },
+  D16_UNORM: { name: 'depth16unorm' },
+  BC1_RGBA_UNORM: { name: 'bc1-rgba-unorm', feature: 'texture-compression-bc' },
+  BC1_RGBA_UNORM_SRGB: {
+    name: 'bc1-rgba-unorm-srgb',
+    feature: 'texture-compression-bc',
+  },
+  BC3_RGBA_UNORM: { name: 'bc3-rgba-unorm', feature: 'texture-compression-bc' },
+  BC3_RGBA_UNORM_SRGB: {
+    name: 'bc3-rgba-unorm-srgb',
+    feature: 'texture-compression-bc',
+  },
+  BC4_R_UNORM: { name: 'bc4-r-unorm', feature: 'texture-compression-bc' },
+  BC5_RG_UNORM: { name: 'bc5-rg-unorm', feature: 'texture-compression-bc' },
+  BC6H_RGB_UFLOAT: {
+    name: 'bc6h-rgb-ufloat',
+    feature: 'texture-compression-bc',
+  },
+  BC7_RGBA_UNORM: { name: 'bc7-rgba-unorm', feature: 'texture-compression-bc' },
+  BC7_RGBA_UNORM_SRGB: {
+    name: 'bc7-rgba-unorm-srgb',
+    feature: 'texture-compression-bc',
+  },
+});
+
+/**
+ * The `GPUTextureFormat` a decoded `Format` names on **this device**, or why it
+ * names none.
+ *
+ * THE DEVICE'S FEATURES AND NOT THE ADAPTER'S, for `halFeaturesFor`'s reason
+ * with a consequence one step sharper: a device reports what was actually
+ * granted, so an adapter that *could* have given `texture-compression-bc` to a
+ * device nobody asked for it for says nothing about whether this texture can be
+ * created.
+ *
+ * **REFUSED HERE RATHER THAN LEFT TO THE BROWSER**, which is the decision this
+ * function exists to make, and it is the shape `#createBuffer` already set for
+ * `BufferUsage::DEVICE_ADDRESS` rather than a new one. The difference between
+ * the two cases is worth stating: that flag has no WebGPU spelling *at all*,
+ * while these formats have one this device may not use — so this is not "WebGPU
+ * cannot express it" but "the device this stream opened cannot". Both are
+ * refused for the same reason, which is what happens to the handle otherwise.
+ * WebGPU answers an unusable format with a `GPUTexture` object and a validation
+ * error a turn of the event loop later, so passing it on would file an *invalid*
+ * texture under the handle and every command naming it afterwards would fail
+ * again, one error per use, none of them naming the creation that was wrong.
+ * Refusing leaves the slot empty and produces exactly one error, at the command
+ * that asked, naming the format and the feature.
+ *
+ * A format with no row at all is the third case and is a different fault: this
+ * file and `gpu-reply.js`'s `FORMAT` table having drifted. It is refused too,
+ * because a nearby format is a colour-space or precision bug nothing downstream
+ * could attribute.
+ *
+ * @param {string} format A `crcbl_hal::Format` name, as `gpu-stream.js` decodes
+ *   it.
+ * @param {ReadonlySet<string> | undefined} features The **device's** own
+ *   `features`.
+ * @returns {{ name: string | null, reason: string | null }} `reason` is a phrase
+ *   for the message a person reads, and is `null` exactly when `name` is not.
+ */
+export function webgpuTextureFormatFor(format, features) {
+  const row = TEXTURE_FORMAT[format];
+  if (row === undefined) {
+    return {
+      name: null,
+      reason: `asks for Format::${format}, which this backend has no GPUTextureFormat for`,
+    };
+  }
+  if (row.feature !== undefined && !features?.has(row.feature)) {
+    return {
+      name: null,
+      reason:
+        `asks for Format::${format}, which WebGPU spells ${row.name} and gates ` +
+        `behind the ${row.feature} feature this device did not enable`,
+    };
+  }
+  return { name: row.name, reason: null };
+}
+
+/**
+ * The `GPUTextureAspect` a decoded `ImageAspect` names, or why it names none.
+ *
+ * A BITFLAGS SET MEETING A THREE-VALUED ENUM, which is the whole of this
+ * translation. `crcbl_hal::ImageAspect` can spell eight combinations and
+ * `GPUTextureAspect` has three words, so four of the eight have no spelling and
+ * two of them share one:
+ *
+ *   * `COLOR` alone is `'all'`. A colour format has one plane, and `'all'` is
+ *     the only aspect WebGPU accepts for it.
+ *   * `DEPTH | STENCIL` is `'all'` too, **and that is not a collision**: the
+ *     texture's format already says which planes exist, so `'all'` means "the
+ *     colour plane" on a colour format and "both planes" on a depth-stencil one.
+ *     The seam's two values carry the same information the format does — which
+ *     is what `ImageAspect::of` is — so nothing is lost.
+ *   * `DEPTH` alone is `'depth-only'` and `STENCIL` alone is `'stencil-only'`,
+ *     the two views WGSL needs to sample a depth-stencil image at all.
+ *   * Everything else — the empty set, and any combination pairing `COLOR` with
+ *     a depth or stencil plane — is refused. WebGPU has no word for "the colour
+ *     plane beside the depth one", and no format on this seam has both.
+ *
+ * @param {readonly string[]} aspect `crcbl_hal::ImageAspect` flag names, as
+ *   `gpu-stream.js` decodes them.
+ * @returns {{ aspect: string | null, reason: string | null }}
+ */
+export function webgpuTextureAspectFor(aspect) {
+  const color = aspect.includes('COLOR');
+  const depth = aspect.includes('DEPTH');
+  const stencil = aspect.includes('STENCIL');
+  if (color && !depth && !stencil) return { aspect: 'all', reason: null };
+  if (!color && depth && stencil) return { aspect: 'all', reason: null };
+  if (!color && depth && !stencil)
+    return { aspect: 'depth-only', reason: null };
+  if (!color && !depth && stencil)
+    return { aspect: 'stencil-only', reason: null };
+  return {
+    aspect: null,
+    reason:
+      `names aspect ${aspect.length === 0 ? '(none)' : aspect.join(' | ')}, ` +
+      "which is no GPUTextureAspect: WebGPU has 'all', 'depth-only' and " +
+      "'stencil-only' and no way to spell a colour plane beside a depth or " +
+      'stencil one, or no plane at all',
+  };
+}
+
+/**
+ * `crcbl_hal::ImageType` as `GPUTextureDescriptor.dimension`.
+ *
+ * One to one, and the *other* half of the pair is where the care goes:
+ * `Extent3d::depth_or_layers` is the depth for `D3` and the array-layer count
+ * otherwise, and `GPUExtent3D.depthOrArrayLayers` is defined with exactly that
+ * rule — the depth of a `'3d'` texture, the layer count of a `'1d'` or `'2d'`
+ * one. **So the pass-through is a real translation and not a coincidence**: both
+ * vocabularies fold the same two meanings into one number and split them on the
+ * same field, which is why the byte that says which is the one
+ * `image_type_from_code` refuses to guess at.
+ *
+ * The two rules differ in one place, and it is a narrowing rather than a
+ * disagreement: WebGPU permits no array layers on a `'1d'` texture at all, so a
+ * `D1` image asking for more than one is refused by the browser. Nothing here
+ * refuses it, because that is a device rule about a descriptor rather than
+ * something this seam cannot express — the same judgement `#createBuffer` makes
+ * about a size the device will not allocate.
+ */
+const TEXTURE_DIMENSION = Object.freeze({ D1: '1d', D2: '2d', D3: '3d' });
+
+/**
+ * `crcbl_hal::ImageViewType` as `GPUTextureViewDescriptor.dimension`.
+ *
+ * One to one again, and this time WebGPU has every one of the six — including
+ * the two pairs `image_view_type_from_code` warns about, which is what makes a
+ * decoder that folded one into its neighbour produce a *valid* view of the wrong
+ * shape rather than a refusal.
+ *
+ * **THE LAYER COUNT IS PART OF THE DIMENSION HERE**, which is why this table is
+ * never read without {@link Replayer#createImageView} resolving the range beside
+ * it. WebGPU validates `arrayLayerCount` against the dimension: exactly `1` for
+ * `'1d'`, `'2d'` and `'3d'`, exactly `6` for `'cube'`, and a multiple of `6` for
+ * `'cube-array'`. A range that disagrees is refused by the browser — and the
+ * defaults it applies when the count is absent are dimension-aware in the same
+ * way, which is the reason `ImageSubresourceRange::ALL` must reach it as an
+ * absence. See {@link subresourceCount}.
+ */
+const VIEW_DIMENSION = Object.freeze({
+  D1: '1d',
+  D2: '2d',
+  D2Array: '2d-array',
+  Cube: 'cube',
+  CubeArray: 'cube-array',
+  D3: '3d',
+});
+
+/**
+ * `ImageSubresourceRange::ALL`, which is `u32::MAX` on the wire.
+ *
+ * `docs/plan/41-webgpu-stream.md` fixes the rule this is half of: a sentinel
+ * meaning "all of it" crosses verbatim, because resolving one is answering a
+ * question only the replayer has the information to answer.
+ */
+const SUBRESOURCE_ALL = 0xffff_ffff;
+
+/**
+ * A `mip_count` or `layer_count` as `GPUTextureViewDescriptor` wants it.
+ *
+ * **THE SENTINEL BECOMES AN ABSENCE, WHICH IS HOW WEBGPU SPELLS "THE REST".**
+ * The wire carries {@link SUBRESOURCE_ALL} and this is the one place with enough
+ * information to resolve it — and the resolution is not a subtraction. Passing
+ * `4294967295` on would be refused outright, and computing
+ * `texture.mipLevelCount - baseMipLevel` here would be right for the mip count
+ * and wrong for the layers: WebGPU's default for an absent `arrayLayerCount`
+ * depends on the view's *dimension*, and is `6` for a `'cube'` and `1` for a
+ * `'2d'` however many layers the texture has. Omitting the member is what gets
+ * every one of those, and it is the only thing that does.
+ *
+ * @param {number} count
+ * @returns {number | undefined} `undefined` for the sentinel, which is what a
+ *   caller spreads into a descriptor as an absent member.
+ */
+function subresourceCount(count) {
+  return count === SUBRESOURCE_ALL ? undefined : count;
 }
 
 /**
@@ -1114,6 +1492,30 @@ export class Replayer {
    */
   #buffers = new HandleTable();
   /**
+   * The `GPUTexture` behind each live image handle.
+   *
+   * {@link Replayer#buffers}'s twin, and a table of its own for that one's
+   * reason — but with a second job the other two do not have: a
+   * `CreateImageView` **looks its image up here**, because WebGPU makes a view
+   * from the texture rather than from the device. So this is the one of these
+   * tables a command reads rather than only writes, and a lookup that finds
+   * nothing is a failure with somewhere to go rather than a `undefined` to carry
+   * on past.
+   *
+   * @type {HandleTable<GPUTexture>}
+   */
+  #images = new HandleTable();
+  /**
+   * The `GPUTextureView` behind each live image-view handle.
+   *
+   * Its own table rather than a share of {@link Replayer#images}, for the reason
+   * every table here is its own: a view handle and its image's handle are
+   * genuinely allowed to carry identical bits, and the fixture's own do.
+   *
+   * @type {HandleTable<GPUTextureView>}
+   */
+  #imageViews = new HandleTable();
+  /**
    * Errors the device reported out of band, oldest first.
    *
    * `Device::take_error`'s queue, on this side of the seam — see
@@ -1180,6 +1582,24 @@ export class Replayer {
    */
   get buffers() {
     return this.#buffers;
+  }
+
+  /**
+   * The images that are live right now, on {@link Replayer#surfaces}'s terms.
+   *
+   * @type {HandleTable<GPUTexture>}
+   */
+  get images() {
+    return this.#images;
+  }
+
+  /**
+   * The image views that are live right now, on the same terms.
+   *
+   * @type {HandleTable<GPUTextureView>}
+   */
+  get imageViews() {
+    return this.#imageViews;
   }
 
   /** How many out-of-band errors are waiting to be taken. */
@@ -1294,6 +1714,18 @@ export class Replayer {
           break;
         case 'DestroyBuffer':
           this.#destroyBuffer(command);
+          break;
+        case 'CreateImage':
+          this.#createImage(sequence, command);
+          break;
+        case 'DestroyImage':
+          this.#destroyImage(command);
+          break;
+        case 'CreateImageView':
+          this.#createImageView(sequence, command);
+          break;
+        case 'DestroyImageView':
+          this.#destroyImageView(command);
           break;
         case 'SurfaceCaps':
           this.#surfaceCaps(sequence);
@@ -1631,6 +2063,220 @@ export class Replayer {
    */
   #destroyBuffer(command) {
     this.#buffers.remove(command.buffer)?.destroy();
+  }
+
+  /**
+   * Creates a texture on the open device and files it under the handle wasm
+   * allocated.
+   *
+   * `#createBuffer`'s shape in every respect — synchronous, no reply, every
+   * failure into {@link Replayer#takeError} — with two refusals of its own that
+   * the buffer pair has no equivalent of, and one it deliberately does not make:
+   *
+   *   * a `Format` this device cannot use, or that this file has no
+   *     `GPUTextureFormat` for at all. See {@link webgpuTextureFormatFor}, which
+   *     is where the choice to refuse here rather than let the browser refuse is
+   *     argued.
+   *   * an `ImageType` this file has no `dimension` for, which is a decoder that
+   *     has grown a variant this table has not. Refused rather than defaulted to
+   *     `'2d'`, because `depth_or_layers` means the depth on a `D3` and the
+   *     layer count on everything else — so a guess here turns a volume into a
+   *     stack of slices with nothing downstream able to tell.
+   *   * **`mip_levels` and `samples` are passed on exactly as they arrived, zero
+   *     included.** The fixture carries a descriptor with both at zero, and no
+   *     device accepts either; that is a descriptor the browser refuses rather
+   *     than a stream this replayer should second-guess, which is the same
+   *     judgement `#createBuffer` makes about a size no device will allocate.
+   *
+   * @param {bigint} sequence
+   * @param {{ image: { index: number, generation: number },
+   *           label: string | null, imageType: string,
+   *           extent: { width: number, height: number, depthOrLayers: number },
+   *           format: string, mipLevels: number, samples: number,
+   *           usage: string[] }} command
+   */
+  #createImage(sequence, command) {
+    const named = `image ${command.image.index}.${command.image.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was created before any device opened`);
+      return;
+    }
+    const dimension = TEXTURE_DIMENSION[command.imageType];
+    if (dimension === undefined) {
+      this.#deviceError(
+        `${named} asks for ImageType::${command.imageType}, which is no GPUTextureDimension`
+      );
+      return;
+    }
+    const format = webgpuTextureFormatFor(
+      command.format,
+      this.#device.features
+    );
+    if (format.reason !== null) {
+      this.#deviceError(`${named} ${format.reason}`);
+      return;
+    }
+    const usage = webgpuTextureUsageFor(command.usage);
+    if (usage.unsatisfiable.length > 0) {
+      this.#deviceError(
+        `${named} asks for ${usage.unsatisfiable.join(', ')}, which WebGPU has no GPUTextureUsage bit for`
+      );
+      return;
+    }
+    let texture;
+    try {
+      texture = this.#device.createTexture({
+        // No label rather than an empty one, as `#createBuffer` passes it.
+        ...(command.label === null ? {} : { label: command.label }),
+        dimension,
+        size: {
+          width: command.extent.width,
+          height: command.extent.height,
+          // The seam's one number under WebGPU's name for the same one. See
+          // `TEXTURE_DIMENSION` for why that is a translation rather than a
+          // coincidence.
+          depthOrArrayLayers: command.extent.depthOrLayers,
+        },
+        format: format.name,
+        mipLevelCount: command.mipLevels,
+        sampleCount: command.samples,
+        usage: usage.bits,
+      });
+    } catch (error) {
+      this.#deviceError(`${named} could not be created: ${String(error)}`);
+      return;
+    }
+    this.#images.insert(command.image, texture);
+  }
+
+  /**
+   * Destroys an image and lets go of its slot.
+   *
+   * `#destroyBuffer`'s twin exactly, including both no-ops: an empty slot and a
+   * slot holding a different generation are the same one branch, because
+   * {@link HandleTable#remove} answers `undefined` for both.
+   *
+   * **IT DOES NOT TOUCH THIS IMAGE'S VIEWS**, which is a decision rather than an
+   * omission. WebGPU makes every view of a destroyed texture unusable on its
+   * own, so there is nothing here that needs doing; and the stream carries a
+   * `DestroyImageView` for each view the caller made, so releasing them here
+   * would let go of slots the far side still believes in and whose ids it will
+   * destroy in their own command.
+   *
+   * @param {{ image: { index: number, generation: number } }} command
+   */
+  #destroyImage(command) {
+    this.#images.remove(command.image)?.destroy();
+  }
+
+  /**
+   * Creates a view of an image this replayer already holds, and files it under
+   * the handle wasm allocated.
+   *
+   * **THE ONE CREATION THAT READS A TABLE**, which is the whole of what makes it
+   * different from the three before it: a `GPUTextureView` comes from
+   * `GPUTexture.createView` and not from the device, so the image handle in the
+   * descriptor has to resolve to something live before there is anything to call
+   * at all.
+   *
+   * A HANDLE THAT RESOLVES TO NOTHING GOES TO THE ERROR QUEUE AND DOES NOT
+   * THROW, which is {@link Replayer#takeError}'s argument applied to the one
+   * case that most looks like it deserves a throw. It covers three faults at
+   * once — an image nothing ever created, one already destroyed, and a
+   * generation the slot has moved past — and all three are a far side that got
+   * its ordering wrong mid-frame, which is precisely the case that class says
+   * must not take the rest of the frame down with it. A throw would abandon
+   * every command after this one, including draws that have nothing to do with
+   * this view; and there is no reply to send, because wasm allocated the view's
+   * handle and moved on.
+   *
+   * THE SUBRESOURCE RANGE IS WHERE THE SENTINEL RESOLVES. See
+   * {@link subresourceCount}: `ImageSubresourceRange::ALL` reaches WebGPU as an
+   * *absent* member, which is how it spells "the rest", and passing the
+   * `4294967295` on the wire would be refused outright.
+   *
+   * @param {bigint} sequence
+   * @param {{ view: { index: number, generation: number },
+   *           label: string | null,
+   *           image: { index: number, generation: number },
+   *           viewType: string, format: string,
+   *           range: { aspect: string[], baseMip: number, mipCount: number,
+   *                    baseLayer: number, layerCount: number } }} command
+   */
+  #createImageView(sequence, command) {
+    const named = `image view ${command.view.index}.${command.view.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was created before any device opened`);
+      return;
+    }
+    const image = this.#images.get(command.image);
+    if (image === undefined) {
+      this.#deviceError(
+        `${named} views image ${command.image.index}.${command.image.generation}, ` +
+          'which this replayer holds no live image under'
+      );
+      return;
+    }
+    const dimension = VIEW_DIMENSION[command.viewType];
+    if (dimension === undefined) {
+      this.#deviceError(
+        `${named} asks for ImageViewType::${command.viewType}, which is no GPUTextureViewDimension`
+      );
+      return;
+    }
+    const format = webgpuTextureFormatFor(
+      command.format,
+      this.#device.features
+    );
+    if (format.reason !== null) {
+      this.#deviceError(`${named} ${format.reason}`);
+      return;
+    }
+    const aspect = webgpuTextureAspectFor(command.range.aspect);
+    if (aspect.reason !== null) {
+      this.#deviceError(`${named} ${aspect.reason}`);
+      return;
+    }
+    const mipLevelCount = subresourceCount(command.range.mipCount);
+    const arrayLayerCount = subresourceCount(command.range.layerCount);
+    let view;
+    try {
+      view = image.createView({
+        ...(command.label === null ? {} : { label: command.label }),
+        dimension,
+        format: format.name,
+        aspect: aspect.aspect,
+        baseMipLevel: command.range.baseMip,
+        // Spread rather than assigned, so that the sentinel is an *absent*
+        // member and not a member holding `undefined`. WebIDL treats the two
+        // alike, and a reader of a recorded descriptor does not.
+        ...(mipLevelCount === undefined ? {} : { mipLevelCount }),
+        baseArrayLayer: command.range.baseLayer,
+        ...(arrayLayerCount === undefined ? {} : { arrayLayerCount }),
+      });
+    } catch (error) {
+      this.#deviceError(`${named} could not be created: ${String(error)}`);
+      return;
+    }
+    this.#imageViews.insert(command.view, view);
+  }
+
+  /**
+   * Lets go of an image view.
+   *
+   * **LETTING GO IS THE WHOLE OF THE RELEASE**, and that is WebGPU rather than a
+   * shortcut: a `GPUTextureView` has no `destroy()` — it holds no allocation of
+   * its own, it is a description of one — so there is nothing to call and
+   * dropping the reference is everything there is to do. `#destroySurface` is
+   * the same shape for the same kind of reason.
+   *
+   * A destroy naming nothing live is a no-op in both of its ways, exactly as
+   * every other destroy here.
+   *
+   * @param {{ view: { index: number, generation: number } }} command
+   */
+  #destroyImageView(command) {
+    this.#imageViews.remove(command.view);
   }
 
   /**

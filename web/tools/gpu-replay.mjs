@@ -42,6 +42,24 @@
 // failing is driven below, because an error that goes nowhere is the same bug as
 // a dropped reply one seam over.
 //
+// THE IMAGE PAIR AND THE VIEW PAIR ANSWER NOTHING EITHER, and they are where
+// the translations get interesting: `ImageDesc`'s five fields become a
+// `GPUTextureDescriptor`'s seven, three of them through tables that lose
+// something, and `ImageViewDesc`'s range becomes members WebGPU wants *absent*
+// rather than numbered. Each table is driven row by row below against values
+// written out here, and each refusal — a usage flag with no bit, a format this
+// device did not enable, an aspect combination WebGPU has no word for, a
+// dimensionality no table claims — is driven through a command and read back out
+// of the `take_error` queue.
+//
+// AND A VIEW NAMES AN IMAGE, which is the one lookup any of these commands
+// makes: a `GPUTextureView` comes from the texture and not from the device, so a
+// `CreateImageView` whose image handle resolves to nothing has nothing to call.
+// All three ways it can — never created, destroyed, a generation the slot has
+// moved past — are driven here, and every one of them has to reach the error
+// queue **without throwing**: a throw would abandon the rest of the frame over a
+// far side that got its ordering wrong.
+//
 // AND THE TABLE UNDER BOTH PAIRS IS THE SAME ONE, which is what the generation
 // checks here are about. A handle is `{ index, generation }` so that a stale one
 // is detectable; the checks below produce a stale one deliberately — an index
@@ -96,6 +114,9 @@ import {
   halLimitsFor,
   webgpuBufferUsageFor,
   webgpuFeaturesFor,
+  webgpuTextureAspectFor,
+  webgpuTextureFormatFor,
+  webgpuTextureUsageFor,
 } from '../engine/gpu-replay.js';
 import { decodeStream } from '../engine/gpu-stream.js';
 
@@ -139,6 +160,30 @@ const GPU_BUFFER_USAGE = Object.freeze({
   INDIRECT: 0x0100,
   QUERY_RESOLVE: 0x0200,
 });
+
+/**
+ * The `GPUTextureUsage` bits, from the WebGPU specification.
+ *
+ * Written out for {@link GPU_BUFFER_USAGE}'s reason, and held against a real
+ * browser's own namespace object by `browser-e2e.mjs` for the same one.
+ */
+const GPU_TEXTURE_USAGE = Object.freeze({
+  COPY_SRC: 0x01,
+  COPY_DST: 0x02,
+  TEXTURE_BINDING: 0x04,
+  STORAGE_BINDING: 0x08,
+  RENDER_ATTACHMENT: 0x10,
+});
+
+/**
+ * `ImageSubresourceRange::ALL`, as it arrives off the wire.
+ *
+ * Written out rather than imported for every other expectation's reason, and
+ * this one earns it twice over: what the checks below assert is that this number
+ * **does not reach a browser**, so a constant taken from the translation that is
+ * meant to remove it would be exactly the wrong source.
+ */
+const SUBRESOURCE_ALL = 0xffff_ffff;
 
 /** @type {string[]} */
 const failures = [];
@@ -324,6 +369,42 @@ const FROM_FIXTURE = {
   createBuffer: null,
 };
 
+/**
+ * The fixture's three `CreateImage`s, with the one usage this backend refuses
+ * taken off the third.
+ *
+ * **The third carries `ImageUsage::all()`**, which includes `PRESENT` — a flag
+ * WebGPU has no bit for, so as written it is a refusal rather than a creation
+ * and is driven as one below. Two of its views are the only ones exercising a
+ * `D1` view and a stencil-only aspect, though, so those need it to exist: this
+ * narrows the usage to the two flags a `D1` LUT would really carry and changes
+ * nothing else. Every other field is still the command the Rust encoder wrote.
+ *
+ * @param {object[]} images
+ */
+function creatableImages(images) {
+  return images.map((image, at) =>
+    at === 2 ? { ...image, usage: ['TRANSFER_DST', 'SAMPLED'] } : image
+  );
+}
+
+/**
+ * A replayer holding all three of the fixture's images, so that its views have
+ * something to name.
+ *
+ * @param {object} [options]
+ * @param {object} [options.device] What `requestDevice` resolves to.
+ * @param {object[]} images The fixture's `CreateImage` commands.
+ */
+async function readyWithImages(images, { device = stubDevice() } = {}) {
+  const { replayer } = await readyWithDevice({ device });
+  const made = creatableImages(images);
+  for (const [at, image] of made.entries()) {
+    replayer.replay(frameOf(image, BigInt(100 + at)));
+  }
+  return { replayer, device, images: made };
+}
+
 /** A one-command frame carrying `command` at `sequence`. */
 function frameOf(command, sequence) {
   return { baseSequence: sequence, commands: [command] };
@@ -385,6 +466,65 @@ function stubBuffer(desc) {
 }
 
 /**
+ * A `GPUTextureView` as `createView` answers one.
+ *
+ * `label` is read off the descriptor for {@link stubBuffer}'s reason. `of` is
+ * **not** a `GPUTextureView` member and could not be: WebGPU gives a view no way
+ * back to its texture at all, which is why "a view of *that* image" is a claim
+ * only a stub can check and why the browser gate checks something else instead.
+ *
+ * @param {{ label?: string }} desc
+ * @param {object} texture The `GPUTexture` whose `createView` made it.
+ */
+function stubTextureView(desc, texture) {
+  return { label: desc.label ?? '', of: texture };
+}
+
+/**
+ * A `GPUTexture` as `createTexture` answers one.
+ *
+ * The members a real one reports back are read off the descriptor rather than
+ * stored beside it, for {@link stubBuffer}'s reason — and there are nine of them
+ * rather than three, which is what makes the image checks below able to compare
+ * what came back against what was asked for field by field.
+ *
+ * `views` is the descriptor list `createView` was handed, in order. It is the
+ * only place the sentinel resolution is visible: an absent `mipLevelCount` and a
+ * present one are two different objects here, and `deepStrictEqual` can tell.
+ *
+ * @param {{ label?: string, dimension: string, format: string,
+ *           mipLevelCount: number, sampleCount: number, usage: number,
+ *           size: { width: number, height: number,
+ *                   depthOrArrayLayers: number } }} desc
+ */
+function stubTexture(desc) {
+  const texture = {
+    label: desc.label ?? '',
+    width: desc.size.width,
+    height: desc.size.height,
+    depthOrArrayLayers: desc.size.depthOrArrayLayers,
+    mipLevelCount: desc.mipLevelCount,
+    sampleCount: desc.sampleCount,
+    dimension: desc.dimension,
+    format: desc.format,
+    usage: desc.usage,
+    /** How many times the replayer destroyed it. */
+    destroys: 0,
+    /** @type {object[]} Every `GPUTextureViewDescriptor` it was handed. */
+    views: [],
+    destroy() {
+      texture.destroys += 1;
+    },
+    /** @param {{ label?: string }} viewDesc */
+    createView(viewDesc) {
+      texture.views.push(viewDesc);
+      return stubTextureView(viewDesc, texture);
+    },
+  };
+  return texture;
+}
+
+/**
  * A `GPUDevice` as `requestDevice()` resolves one: its own features, its own
  * limits, the buffer creation this slice drives, and the error channel WebGPU
  * reports asynchronous failures on.
@@ -399,13 +539,16 @@ function stubBuffer(desc) {
  * @param {unknown} [options.refuseBuffers] What `createBuffer` throws instead of
  *   answering — an allocation failure, which is the one buffer failure WebGPU
  *   raises in the call rather than on the device.
+ * @param {unknown} [options.refuseTextures] The same for `createTexture`.
  */
-function stubDevice(features = [], { refuseBuffers } = {}) {
+function stubDevice(features = [], { refuseBuffers, refuseTextures } = {}) {
   const device = {
     features: new Set(features),
     limits: deviceLimits(),
     /** @type {object[]} Every `GPUBufferDescriptor` it was handed, in order. */
     created: [],
+    /** @type {object[]} Every `GPUTextureDescriptor` it was handed, in order. */
+    createdTextures: [],
     /** @type {Array<[string, Function]>} */
     listeners: [],
     /**
@@ -431,6 +574,12 @@ function stubDevice(features = [], { refuseBuffers } = {}) {
       device.created.push(desc);
       if (refuseBuffers !== undefined) throw refuseBuffers;
       return stubBuffer(desc);
+    },
+    /** @param {object} desc */
+    createTexture(desc) {
+      device.createdTextures.push(desc);
+      if (refuseTextures !== undefined) throw refuseTextures;
+      return stubTexture(desc);
     },
   };
   return device;
@@ -502,19 +651,19 @@ async function openDevice(adapter, command, sequence) {
  * @param {string} [options.canvasFormat] What the stub browser prefers.
  */
 /**
- * A replayer with a device open, which is what a buffer command needs.
+ * A replayer with a device open, which is what every creation below needs.
  *
  * The enumeration and the device request are the fixture's own, and their
- * replies are cleared in between so that what a buffer check then reads out of
- * the buffer is a buffer command's doing. `Device::create_buffer` is a *device*
- * method, so this two-step is the seam's shape rather than scaffolding: a
- * `CreateBuffer` arriving before the device has opened is a real case and has
- * its own check below.
+ * replies are cleared in between so that what a check then reads out of the
+ * buffer is its own command's doing. `create_buffer`, `create_image` and
+ * `create_image_view` are all *device* methods, so this two-step is the seam's
+ * shape rather than scaffolding: a creation arriving before the device has
+ * opened is a real case and each has its own check below.
  *
  * @param {object} [options]
  * @param {object} [options.device] What `requestDevice` resolves to.
  */
-async function readyForBuffers({ device = stubDevice() } = {}) {
+async function readyWithDevice({ device = stubDevice() } = {}) {
   const adapter = openingAdapter({ device });
   const replayer = await openDevice(adapter, FROM_FIXTURE.requestDevice, 20n);
   replayer.clear();
@@ -797,6 +946,39 @@ async function main() {
   const [deviceLocalBuffer, hostUploadBuffer, hostReadbackBuffer] = buffers;
   FROM_FIXTURE.createBuffer = deviceLocalBuffer;
 
+  // The image commands, from the fixture for the same reason again — and here
+  // the corpus buys the most of any command family: three images covering every
+  // `ImageType`, six views covering every `ImageViewType`, both label cases, all
+  // three aspect bits and the `ImageSubresourceRange::ALL` sentinel in each of
+  // the two counts that can carry it. Every one of those is a row of a table
+  // below, replayed as the Rust encoder wrote it.
+  const images = commands.filter((command) => command.name === 'CreateImage');
+  const views = commands.filter(
+    (command) => command.name === 'CreateImageView'
+  );
+  const destroyImage = commands.find(
+    (command) => command.name === 'DestroyImage'
+  );
+  const destroyImageView = commands.find(
+    (command) => command.name === 'DestroyImageView'
+  );
+  check(
+    images.length === 3 &&
+      views.length === 6 &&
+      destroyImage !== undefined &&
+      destroyImageView !== undefined,
+    `the committed stream carries three CreateImages, six CreateImageViews and a destroy for each (${images.length} images, ${views.length} views)`
+  );
+  const [flatImage, volumeImage, lutImage] = images;
+  const [
+    cascadeView,
+    volumeView,
+    lutView,
+    cubeView,
+    cubeArrayView,
+    stencilView,
+  ] = views;
+
   // ---- the answer is not available on the frame that asked ----------------
   // The whole shape of this seam. `replay` returns having *started* the work;
   // the browser answers on its own schedule, and the sequence number is what
@@ -974,6 +1156,10 @@ async function main() {
       'SurfaceCaps',
       'CreateBuffer',
       'DestroyBuffer',
+      'CreateImage',
+      'DestroyImage',
+      'CreateImageView',
+      'DestroyImageView',
     ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;
@@ -1459,7 +1645,7 @@ async function main() {
     // **The descriptor WebGPU is handed.** Four seam fields become three: the
     // label passes through, the size narrows from a `u64` to a number, and
     // `usage` and `memory` are both folded into one `GPUBufferUsage` word.
-    const { replayer, device } = await readyForBuffers();
+    const { replayer, device } = await readyWithDevice();
     replayer.replay(frameOf(deviceLocalBuffer, 21n));
     checkEqual(
       device.created,
@@ -1502,7 +1688,7 @@ async function main() {
     // is the field WebGPU has nowhere to put — there is no heap to select — so
     // each row is a decision `gpu-replay.js` argues and this is what says which
     // decision it made.
-    const { replayer, device } = await readyForBuffers();
+    const { replayer, device } = await readyWithDevice();
     replayer.replay(frameOf(hostUploadBuffer, 22n));
     checkEqual(
       device.created,
@@ -1528,7 +1714,7 @@ async function main() {
     // `HostReadback` is the one location WebGPU can express outright, and the
     // size is put back inside the safe range because the fixture's own is
     // `u64::MAX` — which is a refusal of its own, two checks below.
-    const { replayer, device } = await readyForBuffers();
+    const { replayer, device } = await readyWithDevice();
     replayer.replay(frameOf({ ...hostReadbackBuffer, size: 64n }, 23n));
     checkEqual(
       device.created,
@@ -1552,7 +1738,7 @@ async function main() {
     // **A destroy releases the GPUBuffer as well as the slot.** Dropping the
     // reference alone would leave the allocation alive until the object was
     // collected, which is the whole reason this seam destroys explicitly.
-    const { replayer } = await readyForBuffers();
+    const { replayer } = await readyWithDevice();
     replayer.replay(frameOf(deviceLocalBuffer, 24n));
     const made = replayer.buffers.get(deviceLocalBuffer.buffer);
     replayer.replay(
@@ -1570,7 +1756,7 @@ async function main() {
     // no create in it ever used, which is the legal stream op `crcbl-render`
     // produces when it destroys the handle it pre-allocated for a creation that
     // failed.
-    const { replayer } = await readyForBuffers();
+    const { replayer } = await readyWithDevice();
     let thrown = null;
     try {
       replayer.replay(frameOf(destroyBuffer, 26n));
@@ -1588,7 +1774,7 @@ async function main() {
     // the generation is the one it had before, and the live occupant must
     // survive — with its `destroy()` never called, because a destroyed buffer
     // that something still holds a handle to is worse than a leaked one.
-    const { replayer } = await readyForBuffers();
+    const { replayer } = await readyWithDevice();
     const reissued = handle(
       deviceLocalBuffer.buffer.index,
       deviceLocalBuffer.buffer.generation + 1
@@ -1643,7 +1829,7 @@ async function main() {
     // The buffer takes the surface's own handle, and neither table may see the
     // other — the opcode is the only thing that says which table an id indexes.
     const canvas = stubCanvas('shared-bits');
-    const { replayer } = await readyForBuffers();
+    const { replayer } = await readyWithDevice();
     replayer.replay(frameOf(deviceLocalBuffer, 31n));
     // A canvas the surface command can resolve, on the replayer that already
     // has a device: the registry is fixed at construction, so this drives the
@@ -1678,7 +1864,7 @@ async function main() {
     // WebGPU has no raw GPU pointers — so the creation is refused rather than
     // granted without it. Dropping the bit would hand back a buffer whose
     // address cannot be taken and move the failure to whatever dereferences it.
-    const { replayer, device } = await readyForBuffers();
+    const { replayer, device } = await readyWithDevice();
     replayer.replay(
       frameOf(
         { ...deviceLocalBuffer, usage: ['STORAGE', 'DEVICE_ADDRESS'] },
@@ -1703,7 +1889,7 @@ async function main() {
     // passed on rounded — a buffer of a size nobody asked for, created
     // successfully. This is the fixture's third descriptor replayed exactly as
     // it was written.
-    const { replayer, device } = await readyForBuffers();
+    const { replayer, device } = await readyWithDevice();
     replayer.replay(frameOf(hostReadbackBuffer, 34n));
     const reason = replayer.takeError();
     check(
@@ -1735,7 +1921,7 @@ async function main() {
     const device = stubDevice([], {
       refuseBuffers: new Error('out of memory'),
     });
-    const { replayer } = await readyForBuffers({ device });
+    const { replayer } = await readyWithDevice({ device });
     let thrown = null;
     try {
       replayer.replay(frameOf(deviceLocalBuffer, 36n));
@@ -1755,7 +1941,7 @@ async function main() {
     // a size over `maxBufferSize` is not raised in the call at all: WebGPU hands
     // back a `GPUBuffer` and reports the reason on the device. A replayer that
     // never listened would see nothing but success.
-    const { replayer, device } = await readyForBuffers();
+    const { replayer, device } = await readyWithDevice();
     replayer.replay(frameOf(deviceLocalBuffer, 37n));
     device.report('Buffer usage (MAP_READ|STORAGE) is invalid');
     const reason = replayer.takeError();
@@ -1774,7 +1960,7 @@ async function main() {
     // `uncapturederror` can fire every frame for as long as a page is open. The
     // first errors are kept, because what went wrong first caused the rest; what
     // must not happen is the rest disappearing silently.
-    const { replayer, device } = await readyForBuffers();
+    const { replayer, device } = await readyWithDevice();
     const over = 3;
     for (let i = 0; i < MAX_PENDING_ERRORS + over; i += 1) {
       device.report(`error ${i}`);
@@ -1866,6 +2052,655 @@ async function main() {
       webgpuBufferUsageFor([], 'HostSomethingElse'),
       { bits: 0, unsatisfiable: ['MemoryLocation::HostSomethingElse'] },
       'a memory location with no row is refused rather than read as DeviceLocal'
+    );
+  }
+
+  // ---- the image pair ------------------------------------------------------
+  //
+  // The buffer pair's shape with a descriptor that loses more: `ImageDesc`'s
+  // five fields become a `GPUTextureDescriptor`'s seven, through three tables
+  // that each have something to refuse. What is checked is what reached
+  // `createTexture`, what the table holds afterwards, and where each refusal
+  // went.
+  {
+    // **The descriptor WebGPU is handed**, field for field, from the fixture's
+    // own labelled 2D image.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(flatImage, 40n));
+    checkEqual(
+      device.createdTextures,
+      [
+        {
+          label: 'gbuffer albedo',
+          dimension: '2d',
+          size: { width: 1280, height: 720, depthOrArrayLayers: 3 },
+          format: 'rgba8unorm-srgb',
+          mipLevelCount: 11,
+          sampleCount: 1,
+          // TEXTURE_BINDING (0x4) for SAMPLED and RENDER_ATTACHMENT (0x10) for
+          // COLOR_ATTACHMENT, which is the only attachment bit WebGPU has.
+          usage: 0x14,
+        },
+      ],
+      'a CreateImage reaches the device as one GPUTextureDescriptor'
+    );
+    const made = replayer.images.get(flatImage.image);
+    check(
+      made !== undefined &&
+        made.width === 1280 &&
+        made.height === 720 &&
+        made.depthOrArrayLayers === 3 &&
+        made.format === 'rgba8unorm-srgb' &&
+        made.mipLevelCount === 11 &&
+        made.usage === 0x14,
+      `and the image is findable at its handle with the extent, format, mip count and usage asked for (${made?.width}x${made?.height}x${made?.depthOrArrayLayers}, ${made?.format}, ${made?.mipLevelCount} mips, usage 0x${made?.usage?.toString(16)})`
+    );
+    check(
+      replayer.images.get(
+        handle(flatImage.image.index, flatImage.image.generation + 1)
+      ) === undefined,
+      'a lookup with a stale generation does not find the live image'
+    );
+    check(
+      !replayer.hasReplies &&
+        replayer.inFlight === 0 &&
+        replayer.pendingErrors === 0 &&
+        replayer.takeError() === null,
+      `an image command queues no reply, starts nothing and reports no error (queued ${replayer.hasReplies}, in flight ${replayer.inFlight}, errors ${replayer.pendingErrors})`
+    );
+  }
+  {
+    // **The volume**, which is the case `depth_or_layers` exists to make
+    // dangerous: the same three numbers describe a 64-deep 3D texture here and
+    // 64 flat slices in the image above, and only the dimension says which.
+    // WebGPU folds the two meanings into `depthOrArrayLayers` on exactly the
+    // same rule, so what this checks is that the fold survived rather than that
+    // a number was copied.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(volumeImage, 41n));
+    checkEqual(
+      device.createdTextures,
+      [
+        {
+          dimension: '3d',
+          size: { width: 160, height: 90, depthOrArrayLayers: 64 },
+          format: 'r16float',
+          mipLevelCount: 7,
+          sampleCount: 4,
+          // STORAGE_BINDING (0x8) for STORAGE and COPY_SRC (0x1) for
+          // TRANSFER_SRC.
+          usage: 0x09,
+        },
+      ],
+      'a D3 image is a 3d texture whose depthOrArrayLayers is its depth'
+    );
+    check(
+      !('label' in (device.createdTextures[0] ?? {})),
+      `a descriptor with no label passes none rather than an empty one (${JSON.stringify(device.createdTextures[0]?.label)})`
+    );
+  }
+  {
+    // The `D1` case, with the empty label the seam distinguishes from none and
+    // with `mip_levels` and `samples` **passed on as zero**. No device accepts
+    // either, and that is deliberately not this file's business: an invalid
+    // descriptor is a creation failure the browser reports, exactly as a size no
+    // device will allocate is for a buffer.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(creatableImages(images)[2], 42n));
+    checkEqual(
+      device.createdTextures,
+      [
+        {
+          label: '',
+          dimension: '1d',
+          size: { width: 256, height: 1, depthOrArrayLayers: 1 },
+          format: 'r8unorm',
+          mipLevelCount: 0,
+          sampleCount: 0,
+          // COPY_DST (0x2) for TRANSFER_DST and TEXTURE_BINDING (0x4) for
+          // SAMPLED, which is what `creatableImages` narrowed this one to.
+          usage: 0x06,
+        },
+      ],
+      'a D1 image passes its zero mip and sample counts on rather than second-guessing them'
+    );
+    // …and as the fixture actually wrote it, with `ImageUsage::all()`, the same
+    // command is a refusal: that word carries `PRESENT`.
+    const asWritten = await readyWithDevice();
+    asWritten.replayer.replay(frameOf(lutImage, 43n));
+    const reason = asWritten.replayer.takeError();
+    check(
+      asWritten.device.createdTextures.length === 0 &&
+        asWritten.replayer.images.size === 0 &&
+        String(reason).includes('PRESENT'),
+      `an ImageUsage flag with no GPUTextureUsage bit is refused and named (${asWritten.device.createdTextures.length} created, ${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **A destroy destroys the texture as well as the slot**, which is the whole
+    // reason this seam destroys explicitly rather than dropping a reference.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(flatImage, 44n));
+    const made = replayer.images.get(flatImage.image);
+    replayer.replay(frameOf({ ...destroyImage, image: flatImage.image }, 45n));
+    check(
+      made?.destroys === 1 &&
+        replayer.images.get(flatImage.image) === undefined &&
+        replayer.images.size === 0,
+      `DestroyImage destroys the texture and lets go of the slot (${made?.destroys} destroys, ${replayer.images.size} held)`
+    );
+  }
+  {
+    // **A destroy of an empty slot**, which the fixture's own carries: its
+    // handle is one no create in the corpus ever used.
+    const { replayer } = await readyWithDevice();
+    let thrown = null;
+    try {
+      replayer.replay(frameOf(destroyImage, 46n));
+      replayer.replay(frameOf(destroyImageView, 47n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null &&
+        replayer.images.size === 0 &&
+        replayer.imageViews.size === 0,
+      `a destroy for a handle nothing created is a no-op for both kinds (${String(thrown)})`
+    );
+  }
+  {
+    // **A DESTROY NAMING A STALE GENERATION RELEASES NOTHING.** The live
+    // occupant of a reissued index must survive with its `destroy()` never
+    // called — a destroyed texture something still holds a handle to is worse
+    // than a leaked one.
+    const { replayer } = await readyWithDevice();
+    const reissued = handle(
+      flatImage.image.index,
+      flatImage.image.generation + 1
+    );
+    replayer.replay(frameOf({ ...flatImage, image: reissued }, 48n));
+    const live = replayer.images.get(reissued);
+    let thrown = null;
+    try {
+      replayer.replay(
+        frameOf({ ...destroyImage, image: flatImage.image }, 49n)
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null &&
+        live !== undefined &&
+        live.destroys === 0 &&
+        replayer.images.get(reissued) === live &&
+        replayer.images.size === 1,
+      `a DestroyImage naming a stale generation is a no-op and leaves the live image alone (${String(thrown)}, ${live?.destroys} destroys, ${replayer.images.size} held)`
+    );
+  }
+  {
+    // **An ImageType no table claims.** A decoder that grew a variant this file
+    // has not, and the one enum here where a default would be silent: guessing
+    // `'2d'` for a `D3` turns a volume into a stack of slices, and the bytes are
+    // identical either way.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf({ ...flatImage, imageType: 'D4' }, 50n));
+    const reason = replayer.takeError();
+    check(
+      device.createdTextures.length === 0 &&
+        replayer.images.size === 0 &&
+        String(reason).includes('ImageType::D4'),
+      `an ImageType with no GPUTextureDimension is refused rather than defaulted (${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **An image command before any device opened**, which is the buffer pair's
+    // ordering rule one command kind further along.
+    const replayer = new Replayer({ gpu: stubGpu(async () => null) });
+    replayer.replay(frameOf(flatImage, 51n));
+    const reason = replayer.takeError();
+    check(
+      replayer.images.size === 0 &&
+        String(reason).includes('before any device opened'),
+      `a CreateImage with no device is refused and says so (${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **A `createTexture` that throws.** Most WebGPU failures arrive on the
+    // device's error channel instead, but an allocation failure may throw, and a
+    // throw out of `replay` would abandon every command after it in the frame.
+    const device = stubDevice([], {
+      refuseTextures: new Error('out of memory'),
+    });
+    const { replayer } = await readyWithDevice({ device });
+    let thrown = null;
+    try {
+      replayer.replay(frameOf(flatImage, 52n));
+    } catch (error) {
+      thrown = error;
+    }
+    const reason = replayer.takeError();
+    check(
+      thrown === null &&
+        replayer.images.size === 0 &&
+        String(reason).includes('out of memory'),
+      `a createTexture that throws is recorded rather than thrown on (${String(thrown)}, ${JSON.stringify(reason)})`
+    );
+  }
+
+  // ---- the view pair -------------------------------------------------------
+  //
+  // The one creation that reads a table: a `GPUTextureView` comes from the
+  // texture rather than from the device, so the image handle in the descriptor
+  // has to resolve before there is anything to call. That is what the first
+  // checks here are about, and the sentinel resolution is what the rest are.
+  {
+    // **The descriptor the image is handed**, from the fixture's cube view —
+    // every subresource field holding its own number, so a transposition inside
+    // the range is visible.
+    const { replayer, images: made } = await readyWithImages(images);
+    replayer.replay(frameOf(cubeView, 60n));
+    const image = replayer.images.get(made[0].image);
+    checkEqual(
+      image?.views,
+      [
+        {
+          label: 'sky cube',
+          dimension: 'cube',
+          format: 'rgba8unorm',
+          // ImageAspect::COLOR is 'all': a colour format has one plane and
+          // 'all' is the only aspect WebGPU accepts for it.
+          aspect: 'all',
+          baseMipLevel: 13,
+          mipLevelCount: 14,
+          baseArrayLayer: 15,
+          arrayLayerCount: 16,
+        },
+      ],
+      'a CreateImageView reaches the image it names as one GPUTextureViewDescriptor'
+    );
+    const view = replayer.imageViews.get(cubeView.view);
+    check(
+      view !== undefined && view.of === image,
+      `and the view is findable at its handle, and is a view of *that* image (${view?.of === image})`
+    );
+    check(
+      replayer.imageViews.get(
+        handle(cubeView.view.index, cubeView.view.generation + 1)
+      ) === undefined,
+      'a lookup with a stale generation does not find the live view'
+    );
+  }
+  {
+    // **THE SENTINEL BECOMES AN ABSENCE.** `ImageSubresourceRange::ALL` is
+    // `0xFFFFFFFF` on the wire and WebGPU spells "the rest" as an absent
+    // descriptor member, so what reaches `createView` must not carry the number
+    // at all — passing it on would be refused by the browser and look like a
+    // corrupt stream. The fixture puts the sentinel in `mip_count` on one view
+    // and in `layer_count` on another, so neither can hide the other.
+    const { replayer, images: made } = await readyWithImages(images);
+    replayer.replay(frameOf(volumeView, 61n));
+    replayer.replay(frameOf(cubeArrayView, 62n));
+    const volume = replayer.images.get(made[1].image);
+    checkEqual(
+      volume?.views,
+      [
+        {
+          dimension: '3d',
+          format: 'r16float',
+          aspect: 'all',
+          baseMipLevel: 5,
+          // No `mipLevelCount`: this is the sentinel, resolved.
+          baseArrayLayer: 6,
+          arrayLayerCount: 7,
+        },
+        {
+          dimension: 'cube-array',
+          format: 'bgra8unorm-srgb',
+          aspect: 'all',
+          baseMipLevel: 17,
+          mipLevelCount: 8,
+          baseArrayLayer: 18,
+          // …and no `arrayLayerCount` here, which is the half a subtraction
+          // would get wrong: WebGPU's default for an absent one depends on the
+          // view's dimension, and is 6 for a 'cube' however many layers the
+          // texture has.
+        },
+      ],
+      'ImageSubresourceRange::ALL reaches the browser as an absent member, in either count'
+    );
+    const carried = (volume?.views ?? []).flatMap((desc) =>
+      Object.entries(desc).filter(([, value]) => value === SUBRESOURCE_ALL)
+    );
+    check(
+      carried.length === 0,
+      `and nothing in either descriptor carries ${SUBRESOURCE_ALL} (${JSON.stringify(carried)})`
+    );
+  }
+  {
+    // **Every aspect the fixture spells**, through the commands rather than
+    // through the table alone: a stencil-only view of a depth-stencil image, and
+    // the `D1` view whose colour aspect is `'all'`.
+    const { replayer, images: made } = await readyWithImages(images);
+    replayer.replay(frameOf(stencilView, 63n));
+    replayer.replay(frameOf(lutView, 64n));
+    const lut = replayer.images.get(made[2].image);
+    checkEqual(
+      (lut?.views ?? []).map((desc) => [desc.dimension, desc.aspect]),
+      [
+        ['2d', 'stencil-only'],
+        ['1d', 'all'],
+      ],
+      'ImageAspect::STENCIL is stencil-only and ImageAspect::COLOR is all'
+    );
+  }
+  {
+    // **A view naming an image that resolves to nothing**, in all three of the
+    // ways it can, and none of them may throw: a view arriving before its image
+    // is a far side that got its ordering wrong mid-frame, and a throw would
+    // abandon every command after it in the frame.
+    const { replayer, images: made } = await readyWithImages(images);
+    const never = handle(200, 1);
+    const stale = handle(made[0].image.index, made[0].image.generation + 1);
+    let thrown = null;
+    try {
+      replayer.replay(frameOf({ ...cubeView, image: never }, 65n));
+      replayer.replay(frameOf({ ...cubeView, image: stale }, 66n));
+      // …and one whose image existed and has since been destroyed, which is the
+      // case a table keyed on presence alone would still resolve.
+      replayer.replay(frameOf({ ...destroyImage, image: made[1].image }, 67n));
+      replayer.replay(frameOf(volumeView, 68n));
+    } catch (error) {
+      thrown = error;
+    }
+    const reasons = [
+      replayer.takeError(),
+      replayer.takeError(),
+      replayer.takeError(),
+    ];
+    check(
+      thrown === null &&
+        replayer.imageViews.size === 0 &&
+        reasons.every(
+          (reason) =>
+            typeof reason === 'string' && reason.includes('no live image under')
+        ),
+      `a CreateImageView naming an unresolvable image goes to the error queue and does not throw (${String(thrown)}, ${JSON.stringify(reasons)})`
+    );
+    check(
+      replayer.takeError() === null,
+      'and there is one error per view rather than one per frame'
+    );
+  }
+  {
+    // **A format this device did not enable the feature for.** The fixture's
+    // cascade view asks for `D32FloatS8Uint`, which WebGPU gates behind
+    // `depth32float-stencil8` — so the same command is a refusal on one device
+    // and a view on another, which is what says the check reads the *device's*
+    // features rather than a constant.
+    const plain = await readyWithImages(images);
+    plain.replayer.replay(frameOf(cascadeView, 73n));
+    const reason = plain.replayer.takeError();
+    check(
+      plain.replayer.imageViews.size === 0 &&
+        String(reason).includes('depth32float-stencil8'),
+      `a Format the device did not enable the feature for is refused and names the feature (${JSON.stringify(reason)})`
+    );
+
+    const capable = await readyWithImages(images, {
+      device: stubDevice(['depth32float-stencil8']),
+    });
+    capable.replayer.replay(frameOf(cascadeView, 74n));
+    const view = capable.replayer.imageViews.get(cascadeView.view);
+    checkEqual(
+      capable.replayer.images.get(capable.images[0].image)?.views,
+      [
+        {
+          label: 'cascade 2',
+          dimension: '2d-array',
+          format: 'depth32float-stencil8',
+          // ImageAspect::DEPTH | STENCIL is 'all' too, and it is not a
+          // collision with COLOR's: the format says which planes exist.
+          aspect: 'all',
+          baseMipLevel: 1,
+          mipLevelCount: 2,
+          baseArrayLayer: 3,
+          arrayLayerCount: 4,
+        },
+      ],
+      'and the same command is a view on a device that did enable it'
+    );
+    check(
+      view !== undefined && capable.replayer.takeError() === null,
+      `with nothing in the error queue (${JSON.stringify(capable.replayer.takeError())})`
+    );
+  }
+  {
+    // **A destroy lets go of the view**, and there is nothing else to let go
+    // of: a `GPUTextureView` has no `destroy()` at all, so the slot is the whole
+    // of the release.
+    const { replayer } = await readyWithImages(images);
+    replayer.replay(frameOf(cubeView, 75n));
+    const reissued = handle(cubeView.view.index, cubeView.view.generation + 1);
+    replayer.replay(frameOf({ ...destroyImageView, view: reissued }, 76n));
+    check(
+      replayer.imageViews.get(cubeView.view) !== undefined &&
+        replayer.imageViews.size === 1,
+      `a DestroyImageView naming a stale generation leaves the live view alone (${replayer.imageViews.size} held)`
+    );
+    replayer.replay(frameOf({ ...destroyImageView, view: cubeView.view }, 77n));
+    check(
+      replayer.imageViews.get(cubeView.view) === undefined &&
+        replayer.imageViews.size === 0,
+      `and one naming the live handle lets go of it (${replayer.imageViews.size} held)`
+    );
+  }
+  {
+    // **Four kinds, one set of handle bits.** The image and its view carry
+    // identical bits here — as the probe's own do, deliberately — and neither
+    // table may see the other: the opcode is the only thing that says which
+    // table an id indexes.
+    const { replayer } = await readyWithDevice();
+    const same = flatImage.image;
+    replayer.replay(frameOf({ ...flatImage, image: same }, 80n));
+    replayer.replay(frameOf({ ...cubeView, view: same, image: same }, 81n));
+    const image = replayer.images.get(same);
+    const view = replayer.imageViews.get(same);
+    check(
+      image !== undefined &&
+        view !== undefined &&
+        view.of === image &&
+        replayer.images.size === 1 &&
+        replayer.imageViews.size === 1,
+      `a view may carry its image's handle bits without either table losing an entry (${replayer.images.size} images, ${replayer.imageViews.size} views)`
+    );
+    replayer.replay(frameOf({ ...destroyImageView, view: same }, 82n));
+    check(
+      replayer.images.get(same) === image && image.destroys === 0,
+      `and destroying the view leaves the image alone (${image?.destroys} destroys)`
+    );
+  }
+
+  // ---- the ImageUsage → GPUTextureUsage mapping, flag by flag --------------
+  //
+  // Spelled out rather than compared against the table it is testing, for the
+  // buffer mapping's reason. Each flag on its own, so one wired to the wrong bit
+  // names itself instead of hiding inside a union.
+  {
+    for (const [name, bit, webgpu] of [
+      ['TRANSFER_SRC', GPU_TEXTURE_USAGE.COPY_SRC, 'COPY_SRC'],
+      ['TRANSFER_DST', GPU_TEXTURE_USAGE.COPY_DST, 'COPY_DST'],
+      ['SAMPLED', GPU_TEXTURE_USAGE.TEXTURE_BINDING, 'TEXTURE_BINDING'],
+      ['STORAGE', GPU_TEXTURE_USAGE.STORAGE_BINDING, 'STORAGE_BINDING'],
+      [
+        'COLOR_ATTACHMENT',
+        GPU_TEXTURE_USAGE.RENDER_ATTACHMENT,
+        'RENDER_ATTACHMENT',
+      ],
+      [
+        'DEPTH_STENCIL_ATTACHMENT',
+        GPU_TEXTURE_USAGE.RENDER_ATTACHMENT,
+        'RENDER_ATTACHMENT',
+      ],
+    ]) {
+      checkEqual(
+        webgpuTextureUsageFor([name]),
+        { bits: bit, unsatisfiable: [] },
+        `ImageUsage::${name} maps to GPUTextureUsage.${webgpu} and to nothing else`
+      );
+    }
+    // The two attachment flags share a bit, which is not a loss: WebGPU has one
+    // attachment usage and reads which kind off the format. Asserted rather than
+    // left implicit in the rows above, because it is the one place two seam
+    // values legitimately produce the same number.
+    checkEqual(
+      webgpuTextureUsageFor(['COLOR_ATTACHMENT', 'DEPTH_STENCIL_ATTACHMENT']),
+      { bits: GPU_TEXTURE_USAGE.RENDER_ATTACHMENT, unsatisfiable: [] },
+      'both attachment flags are RENDER_ATTACHMENT, which WebGPU splits by format'
+    );
+    // The one flag with nothing behind it. A presentable image is not something
+    // `createTexture` can make at all — a canvas's texture comes from
+    // `getCurrentTexture()` — so it is named rather than dropped, and the bits
+    // that did map are still reported.
+    checkEqual(
+      webgpuTextureUsageFor(['SAMPLED', 'PRESENT']),
+      {
+        bits: GPU_TEXTURE_USAGE.TEXTURE_BINDING,
+        unsatisfiable: ['ImageUsage::PRESENT'],
+      },
+      'ImageUsage::PRESENT has no GPUTextureUsage bit and comes back unsatisfiable'
+    );
+  }
+
+  // ---- the Format → GPUTextureFormat mapping, row by row -------------------
+  //
+  // Every one of the seam's formats, its WebGPU name written out here, and the
+  // `GPUFeatureName` gating it where one does. The gated rows are driven twice —
+  // against a device that enabled the feature and one that did not — because the
+  // whole point of reading the *device's* features is that the answer moves.
+  {
+    /** Every `Format` name, its WebGPU spelling, and its gate. */
+    const rows = [
+      ['R8_UNORM', 'r8unorm', null],
+      ['RG8_UNORM', 'rg8unorm', null],
+      ['RGBA8_UNORM', 'rgba8unorm', null],
+      ['RGBA8_UNORM_SRGB', 'rgba8unorm-srgb', null],
+      ['BGRA8_UNORM', 'bgra8unorm', null],
+      ['BGRA8_UNORM_SRGB', 'bgra8unorm-srgb', null],
+      ['RGB10A2_UNORM', 'rgb10a2unorm', null],
+      // WebGPU renamed this one: `rg11b10ufloat` carries R:11 G:11 B:10, which
+      // is what the seam spells `R11g11b10Float`.
+      ['R11G11B10_FLOAT', 'rg11b10ufloat', null],
+      ['R16_FLOAT', 'r16float', null],
+      ['RG16_FLOAT', 'rg16float', null],
+      ['RGBA16_FLOAT', 'rgba16float', null],
+      ['R32_FLOAT', 'r32float', null],
+      ['RG32_FLOAT', 'rg32float', null],
+      ['RGBA32_FLOAT', 'rgba32float', null],
+      ['R32_UINT', 'r32uint', null],
+      ['RG32_UINT', 'rg32uint', null],
+      ['D32_FLOAT', 'depth32float', null],
+      ['D32_FLOAT_S8_UINT', 'depth32float-stencil8', 'depth32float-stencil8'],
+      // **The one inexact row.** WebGPU deleted `depth24unorm-stencil8`, and
+      // what is left promises *at least* 24 bits of unsigned-normalised depth —
+      // so this widens what the caller gets rather than narrowing it, and the
+      // seam has no call that could see the difference.
+      ['D24_UNORM_S8_UINT', 'depth24plus-stencil8', null],
+      ['D16_UNORM', 'depth16unorm', null],
+      ['BC1_RGBA_UNORM', 'bc1-rgba-unorm', 'texture-compression-bc'],
+      ['BC1_RGBA_UNORM_SRGB', 'bc1-rgba-unorm-srgb', 'texture-compression-bc'],
+      ['BC3_RGBA_UNORM', 'bc3-rgba-unorm', 'texture-compression-bc'],
+      ['BC3_RGBA_UNORM_SRGB', 'bc3-rgba-unorm-srgb', 'texture-compression-bc'],
+      ['BC4_R_UNORM', 'bc4-r-unorm', 'texture-compression-bc'],
+      ['BC5_RG_UNORM', 'bc5-rg-unorm', 'texture-compression-bc'],
+      ['BC6H_RGB_UFLOAT', 'bc6h-rgb-ufloat', 'texture-compression-bc'],
+      ['BC7_RGBA_UNORM', 'bc7-rgba-unorm', 'texture-compression-bc'],
+      ['BC7_RGBA_UNORM_SRGB', 'bc7-rgba-unorm-srgb', 'texture-compression-bc'],
+    ];
+    const everything = new Set([
+      'texture-compression-bc',
+      'depth32float-stencil8',
+    ]);
+    const wrong = [];
+    const ungated = [];
+    for (const [name, webgpu, feature] of rows) {
+      const granted = webgpuTextureFormatFor(name, everything);
+      if (granted.name !== webgpu || granted.reason !== null) {
+        wrong.push(`${name}: ${JSON.stringify(granted)}`);
+      }
+      // On a device with nothing enabled, a gated format is refused with the
+      // feature named and an ungated one still answers.
+      const bare = webgpuTextureFormatFor(name, new Set());
+      if (feature === null) {
+        if (bare.name !== webgpu)
+          ungated.push(`${name}: ${JSON.stringify(bare)}`);
+      } else if (bare.name !== null || !String(bare.reason).includes(feature)) {
+        ungated.push(`${name}: ${JSON.stringify(bare)}`);
+      }
+    }
+    check(
+      wrong.length === 0,
+      wrong[0] ??
+        `every crcbl_hal::Format has the GPUTextureFormat this file names (${rows.length} of them)`
+    );
+    check(
+      ungated.length === 0,
+      ungated[0] ??
+        'and a device with no features gets the ungated ones and a named refusal for the rest'
+    );
+    // The device's features and never the adapter's, which is the distinction
+    // the whole check rests on: an adapter that could have granted the feature
+    // says nothing about a device nobody asked for it for.
+    check(
+      webgpuTextureFormatFor('BC7_RGBA_UNORM', undefined).name === null,
+      'a source with no features at all refuses a gated format rather than throwing'
+    );
+    // A format with no row is this file and `gpu-reply.js`'s FORMAT table having
+    // drifted, and is refused rather than answered with a neighbour: a nearby
+    // format is a colour-space or precision bug nothing downstream could
+    // attribute.
+    const drifted = webgpuTextureFormatFor('ASTC_4X4_UNORM', everything);
+    check(
+      drifted.name === null &&
+        String(drifted.reason).includes('ASTC_4X4_UNORM'),
+      `a Format this file has no row for is refused and named (${JSON.stringify(drifted)})`
+    );
+  }
+
+  // ---- the ImageAspect → GPUTextureAspect mapping --------------------------
+  //
+  // A bitflags set meeting a three-valued enum: eight combinations spellable,
+  // three words to spell them in. Every combination is driven, because the four
+  // with no spelling are exactly the ones a translation would silently round to
+  // `'all'`.
+  {
+    for (const [aspect, spelled] of [
+      [['COLOR'], 'all'],
+      [['DEPTH', 'STENCIL'], 'all'],
+      [['DEPTH'], 'depth-only'],
+      [['STENCIL'], 'stencil-only'],
+    ]) {
+      checkEqual(
+        webgpuTextureAspectFor(aspect),
+        { aspect: spelled, reason: null },
+        `ImageAspect::${aspect.join(' | ')} is GPUTextureAspect '${spelled}'`
+      );
+    }
+    const refused = [];
+    for (const aspect of [
+      [],
+      ['COLOR', 'DEPTH'],
+      ['COLOR', 'STENCIL'],
+      ['COLOR', 'DEPTH', 'STENCIL'],
+    ]) {
+      const answer = webgpuTextureAspectFor(aspect);
+      if (answer.aspect !== null || answer.reason === null) {
+        refused.push(`${JSON.stringify(aspect)}: ${JSON.stringify(answer)}`);
+      }
+    }
+    check(
+      refused.length === 0,
+      refused[0] ??
+        'and every aspect combination WebGPU has no word for is refused rather than rounded to all'
     );
   }
 

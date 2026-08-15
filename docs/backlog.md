@@ -22,6 +22,45 @@ reaches its second iteration. Vulkan is what gates that loop: it is the only
 backend that asks a driver per call and the only one that can refuse a real
 pairing. Worth knowing before anyone reads a green browser gate as covering it.
 
+### `ImageDesc` has no `view_formats`, so sRGB reinterpretation cannot work on WebGPU
+
+`ImageViewDesc::format` documents itself as free to differ from the image's "for
+sRGB reinterpretation". **On WebGPU that documented capability does not work.**
+`GPUTextureDescriptor.viewFormats` is the list a texture may be reinterpreted
+as, it is fixed at creation, and WebGPU refuses a view whose format is neither
+the texture's own nor in that list. `ImageDesc` has no field to carry one, so
+the replayer creates every texture with the default empty list and any
+reinterpreting view is refused by the browser.
+
+The replayer deliberately does **not** invent a list — granting a permission the
+caller never asked for is worse than the refusal, and on a real driver it costs
+optimisations the texture would otherwise get.
+
+The fix is a `view_formats` field on `crcbl_hal::ImageDesc`. It is not
+WebGPU-specific: Vulkan wants the same list through
+`VkImageFormatListCreateInfo`, and D3D12 has the equivalent. So this is a seam
+gap the WebGPU work surfaced rather than a WebGPU workaround, and it wants doing
+where every backend can use it. Recorded in `web/engine/gpu-replay.js` above
+`GPU_TEXTURE_USAGE` and on the probe's view descriptor.
+
+### The browser gate serves a stale site unless told to rebuild
+
+`web/run-browser-e2e.sh` runs `web/build.sh` only when given `--build` or when
+`target/site` is missing. So editing `web/engine/*.js` and running the gate
+tests the **previous** build, silently. This is not theoretical: it produced
+three false passes in one session before it was noticed, on sabotage runs that
+were supposed to go red.
+
+**CI is not affected** — `.github/workflows/pages.yml` runs `./web/build.sh`
+itself before any gate invocation, on a clean runner. The hazard is entirely
+local iteration, which is also where the gate is most useful.
+
+Not fixed here because the rebuild policy has other callers and a wrong change
+makes CI build twice on every job. The cheap version is a staleness _warning_
+rather than a policy change: if anything under `web/engine` or `web/tools` is
+newer than the built site, say so loudly and carry on. That keeps the fast path
+fast and makes the trap visible.
+
 ### `ImageDesc` and `ImageViewDesc` state contracts nothing enforces
 
 Three of them, found while putting both descriptors on the wire. Each is prose
