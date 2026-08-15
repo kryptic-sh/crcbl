@@ -128,8 +128,8 @@
 
 use crcbl::hal::{Device, HalError};
 use crcbl::math::DVec3;
-use crcbl::render::{Layer, LayerStack, Parallax, SheetDesc, SheetId, Sprite, SpriteRenderer};
-use crcbl::sprite::load::{Loaded, load};
+use crcbl::render::{Layer, LayerStack, Parallax, SheetId, Sprite, SpriteRenderer};
+use crcbl::sprite::load::{Loaded, load_baked};
 use crcbl::sprite::{Clip, Playback, Sheet};
 
 use crate::game::{EnemyKind, Facing, PickupKind, PropKind, RenderState};
@@ -449,10 +449,10 @@ impl Scene {
         let props = baked("props", PROPS_PNG, PROPS_JSON);
         let terrain = baked("terrain", TERRAIN_PNG, TERRAIN_JSON);
 
-        let actors_sheet = register(device, sprites, "actors", &actors)?;
-        let bolt_sheet = register(device, sprites, "bolt", &bolt)?;
-        let props_sheet = register(device, sprites, "props", &props)?;
-        let terrain_sheet = register(device, sprites, "terrain", &terrain)?;
+        let actors_sheet = sprites.register_baked(device, "actors", &actors)?;
+        let bolt_sheet = sprites.register_baked(device, "bolt", &bolt)?;
+        let props_sheet = sprites.register_baked(device, "props", &props)?;
+        let terrain_sheet = sprites.register_baked(device, "terrain", &terrain)?;
 
         // Back to front, and this is the only place the depth order is written
         // down: `LayerStack` has no depth field to disagree with it. All six
@@ -824,28 +824,13 @@ fn rect(centre: DVec3, half: f64) -> [f32; 4] {
 // Start-up helpers
 // ---------------------------------------------------------------------------
 
-/// Decodes one baked sheet.
+/// Decodes one baked sheet at *this crate's* bake rate.
+///
+/// [`ART_TICK_HZ`] is generated into each crate that bakes art, so the rate is
+/// per-crate configuration; the failure policy is the shared half and lives in
+/// [`load_baked`](crcbl::sprite::load::load_baked).
 fn baked(name: &str, png: &[u8], json: Option<&str>) -> Loaded {
-    load(png, json, ART_TICK_HZ)
-        .unwrap_or_else(|error| panic!("the baked {name} sheet did not load: {error}"))
-}
-
-fn register(
-    device: &dyn Device,
-    sprites: &mut SpriteRenderer,
-    label: &str,
-    loaded: &Loaded,
-) -> Result<SheetId, HalError> {
-    sprites.register_sheet(
-        device,
-        &SheetDesc {
-            label,
-            width: loaded.image.width,
-            height: loaded.image.height,
-            sample: loaded.sheet.sample,
-            pixels: &loaded.image.pixels,
-        },
-    )
+    load_baked(name, png, json, ART_TICK_HZ)
 }
 
 /// The single frame of a sheet that has exactly one.

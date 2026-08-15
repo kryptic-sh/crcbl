@@ -58,9 +58,9 @@
 
 use crcbl::hal::{Device, HalError};
 use crcbl::math::DVec3;
-use crcbl::render::{Layer, LayerStack, Parallax, SheetDesc, SheetId, Sprite, SpriteRenderer};
+use crcbl::render::{Layer, LayerStack, Parallax, SheetId, Sprite, SpriteRenderer};
 use crcbl::sprite::Sheet;
-use crcbl::sprite::load::{Loaded, load};
+use crcbl::sprite::load::{Loaded, load_baked};
 
 use crate::game::{
     FLASH_LIFE, RenderState, RockSize, RockView, WORLD_HALF_HEIGHT, WORLD_HALF_WIDTH, lerp_angle,
@@ -231,12 +231,12 @@ impl Scene {
         let bullet = baked("bullet", BULLET_PNG, BULLET_JSON);
         let flash = baked("flash", FLASH_PNG, FLASH_JSON);
 
-        let large_sheet = register(device, sprites, "rock_large", &large)?;
-        let medium_sheet = register(device, sprites, "rock_medium", &medium)?;
-        let small_sheet = register(device, sprites, "rock_small", &small)?;
-        let ship_sheet = register(device, sprites, "ship", &ship)?;
-        let bullet_sheet = register(device, sprites, "bullet", &bullet)?;
-        let flash_sheet = register(device, sprites, "flash", &flash)?;
+        let large_sheet = sprites.register_baked(device, "rock_large", &large)?;
+        let medium_sheet = sprites.register_baked(device, "rock_medium", &medium)?;
+        let small_sheet = sprites.register_baked(device, "rock_small", &small)?;
+        let ship_sheet = sprites.register_baked(device, "ship", &ship)?;
+        let bullet_sheet = sprites.register_baked(device, "bullet", &bullet)?;
+        let flash_sheet = sprites.register_baked(device, "flash", &flash)?;
 
         // Back to front, and this is the only place the depth order is written
         // down: `LayerStack` has no depth field to disagree with it. Both take
@@ -492,28 +492,13 @@ fn rect(centre: DVec3, half_w: f64, half_h: f64) -> [f32; 4] {
 // Start-up helpers
 // ---------------------------------------------------------------------------
 
-/// Decodes one baked sheet.
+/// Decodes one baked sheet at *this crate's* bake rate.
+///
+/// [`ART_TICK_HZ`] is generated into each crate that bakes art, so the rate is
+/// per-crate configuration; the failure policy is the shared half and lives in
+/// [`load_baked`](crcbl::sprite::load::load_baked).
 fn baked(name: &str, png: &[u8], json: Option<&str>) -> Loaded {
-    load(png, json, ART_TICK_HZ)
-        .unwrap_or_else(|error| panic!("the baked {name} sheet did not load: {error}"))
-}
-
-fn register(
-    device: &dyn Device,
-    sprites: &mut SpriteRenderer,
-    label: &str,
-    loaded: &Loaded,
-) -> Result<SheetId, HalError> {
-    sprites.register_sheet(
-        device,
-        &SheetDesc {
-            label,
-            width: loaded.image.width,
-            height: loaded.image.height,
-            sample: loaded.sheet.sample,
-            pixels: &loaded.image.pixels,
-        },
-    )
+    load_baked(name, png, json, ART_TICK_HZ)
 }
 
 /// A single-frame sheet, resolved to the one UV rectangle it will ever use.

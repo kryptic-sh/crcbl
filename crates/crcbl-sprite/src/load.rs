@@ -408,6 +408,30 @@ pub fn load(png: &[u8], sidecar: Option<&str>, tick_hz: u32) -> Result<Loaded, L
     Ok(Loaded { sheet, image })
 }
 
+/// [`load`] for a sheet the build baked in, which cannot fail at run time.
+///
+/// The bytes come from `include_bytes!` on a `build.rs` product, so a failure
+/// here is a broken build rather than bad input: the baker wrote a PNG this
+/// crate's own decoder cannot read, or a sidecar that disagrees with it. There
+/// is no run-time recovery to offer and no caller who could take one, so this
+/// panics with `name` in the message — a `Result` at every call site would be
+/// ceremony around an `unwrap` that can only mean the same thing.
+///
+/// `#[track_caller]` so the panic names the line that asked for the sheet
+/// rather than this function.
+///
+/// Use [`load`] directly for a sheet that arrives at run time, where a failure
+/// is data the caller has to handle.
+///
+/// # Panics
+///
+/// When [`load`] returns a [`LoadError`].
+#[track_caller]
+pub fn load_baked(name: &str, png: &[u8], sidecar: Option<&str>, tick_hz: u32) -> Loaded {
+    load(png, sidecar, tick_hz)
+        .unwrap_or_else(|error| panic!("the baked {name} sheet did not load: {error}"))
+}
+
 // ---------------------------------------------------------------------------
 // The schema, field by field
 // ---------------------------------------------------------------------------

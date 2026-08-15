@@ -78,7 +78,7 @@
 //! own frame and the panel paints over its own labels.
 
 use crcbl_hal::{Device, HalError, QueueHandle};
-use crcbl_sprite::load::{Loaded, load};
+use crcbl_sprite::load::{Loaded, load_baked};
 use crcbl_ui::SkinInsets;
 use crcbl_ui::menu::{Menu, MenuLayout};
 use glam::{Mat4, Vec3};
@@ -87,7 +87,7 @@ use crate::button_skin::{ButtonSkin, screen_rect_to_target};
 use crate::camera::{Camera, Projection};
 use crate::counters::FrameCounters;
 use crate::nine_slice::NineSliceSource;
-use crate::sprite_pass::{SheetDesc, SheetId, Sprite, SpriteRenderer};
+use crate::sprite_pass::{SheetId, Sprite, SpriteRenderer};
 
 // `build.rs` writes this: one `*_PNG` and one `*_JSON` per `assets/*.crpix`.
 include!(concat!(env!("OUT_DIR"), "/menu_art.rs"));
@@ -157,7 +157,7 @@ impl MenuArt {
     /// and insets this module names.
     pub fn register(device: &dyn Device, sprites: &mut SpriteRenderer) -> Result<Self, HalError> {
         let art = baked("menu", MENU_PNG, MENU_JSON);
-        let sheet = register(device, sprites, "menu", &art)?;
+        let sheet = sprites.register_baked(device, "menu", &art)?;
 
         Ok(Self {
             sheet,
@@ -419,28 +419,14 @@ impl MenuRenderer {
 // Start-up helpers
 // ---------------------------------------------------------------------------
 
-/// Decodes one baked sheet.
+/// Decodes one baked sheet at *this crate's* bake rate.
+///
+/// [`ART_TICK_HZ`] is generated into each crate that bakes art, so the rate is
+/// per-crate configuration rather than something the engine can supply; the
+/// failure policy is the shared half and lives in
+/// [`load_baked`](crcbl_sprite::load::load_baked).
 fn baked(name: &str, png: &[u8], json: Option<&str>) -> Loaded {
-    load(png, json, ART_TICK_HZ)
-        .unwrap_or_else(|error| panic!("the baked {name} sheet did not load: {error}"))
-}
-
-fn register(
-    device: &dyn Device,
-    sprites: &mut SpriteRenderer,
-    label: &str,
-    loaded: &Loaded,
-) -> Result<SheetId, HalError> {
-    sprites.register_sheet(
-        device,
-        &SheetDesc {
-            label,
-            width: loaded.image.width,
-            height: loaded.image.height,
-            sample: loaded.sheet.sample,
-            pixels: &loaded.image.pixels,
-        },
-    )
+    load_baked(name, png, json, ART_TICK_HZ)
 }
 
 /// The [`Sheet`](crcbl_sprite::Sheet) a baked pair describes, for the tests

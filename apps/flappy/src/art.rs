@@ -37,9 +37,9 @@
 use crcbl::hal::{Device, HalError};
 use crcbl::math::DVec3;
 use crcbl::render::{
-    Layer, LayerStack, NineSliceSource, Parallax, SheetDesc, SheetId, Sprite, SpriteRenderer,
+    Layer, LayerStack, NineSliceSource, Parallax, SheetId, Sprite, SpriteRenderer,
 };
-use crcbl::sprite::load::{Loaded, load};
+use crcbl::sprite::load::{Loaded, load_baked};
 use crcbl::sprite::{Playback, Sheet};
 
 use crate::game::{GAP_HALF_HEIGHT, PIPE_HALF_WIDTH, PipeView, WORLD_CEILING, WORLD_FLOOR};
@@ -194,10 +194,10 @@ impl Scene {
         let hills = baked("hills", HILLS_PNG, HILLS_JSON);
         let ground = baked("ground", GROUND_PNG, GROUND_JSON);
 
-        let bird_sheet = register(device, sprites, "bird", &bird)?;
-        let pipe_sheet = register(device, sprites, "pipe", &pipe)?;
-        let hills_sheet = register(device, sprites, "hills", &hills)?;
-        let ground_sheet = register(device, sprites, "ground", &ground)?;
+        let bird_sheet = sprites.register_baked(device, "bird", &bird)?;
+        let pipe_sheet = sprites.register_baked(device, "pipe", &pipe)?;
+        let hills_sheet = sprites.register_baked(device, "hills", &hills)?;
+        let ground_sheet = sprites.register_baked(device, "ground", &ground)?;
 
         // Back to front, and this is the only place the depth order is
         // written down: `LayerStack` has no depth field to disagree with it.
@@ -412,28 +412,13 @@ fn tiles(width: f32, parallax: f32, camera: f32, half_width: f32) -> impl Iterat
 // Start-up helpers
 // ---------------------------------------------------------------------------
 
-/// Decodes one baked sheet.
+/// Decodes one baked sheet at *this crate's* bake rate.
+///
+/// [`ART_TICK_HZ`] is generated into each crate that bakes art, so the rate is
+/// per-crate configuration; the failure policy is the shared half and lives in
+/// [`load_baked`](crcbl::sprite::load::load_baked).
 fn baked(name: &str, png: &[u8], json: Option<&str>) -> Loaded {
-    load(png, json, ART_TICK_HZ)
-        .unwrap_or_else(|error| panic!("the baked {name} sheet did not load: {error}"))
-}
-
-fn register(
-    device: &dyn Device,
-    sprites: &mut SpriteRenderer,
-    label: &str,
-    loaded: &Loaded,
-) -> Result<SheetId, HalError> {
-    sprites.register_sheet(
-        device,
-        &SheetDesc {
-            label,
-            width: loaded.image.width,
-            height: loaded.image.height,
-            sample: loaded.sheet.sample,
-            pixels: &loaded.image.pixels,
-        },
-    )
+    load_baked(name, png, json, ART_TICK_HZ)
 }
 
 /// A background band from a single-frame sheet. `bottom` is the band's hang

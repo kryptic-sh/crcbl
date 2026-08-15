@@ -888,6 +888,38 @@ impl SpriteRenderer {
         Ok(id)
     }
 
+    /// [`register_sheet`](Self::register_sheet) for a decoded
+    /// [`Loaded`](crcbl_sprite::load::Loaded).
+    ///
+    /// The mapping from what a sheet decoded to onto what an upload needs —
+    /// size off the image, sampler off the sheet, pixels off the image — is the
+    /// engine's to know, and it was written out at every site that loaded art
+    /// through [`crcbl_sprite::load`]. The two halves come apart in the source
+    /// (`Loaded::image` carries the size the *picture* is, `Loaded::sheet` the
+    /// size the *sidecar claims*), and `load` is what already reconciled them,
+    /// so reading the width back off the sheet here would undo that check.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`register_sheet`](Self::register_sheet) returns.
+    pub fn register_baked(
+        &mut self,
+        device: &dyn Device,
+        label: &str,
+        loaded: &crcbl_sprite::load::Loaded,
+    ) -> Result<SheetId, HalError> {
+        self.register_sheet(
+            device,
+            &SheetDesc {
+                label,
+                width: loaded.image.width,
+                height: loaded.image.height,
+                sample: loaded.sheet.sample,
+                pixels: &loaded.image.pixels,
+            },
+        )
+    }
+
     /// Uploads this frame's sprites and constants, and advances the ring.
     ///
     /// `view_projection` is world → clip, normally
@@ -2434,6 +2466,58 @@ mod tests {
                 EXTENT,
             )
             .expect("upload");
+
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// `register_baked` reads the size off the **image** and the mode off the
+    /// **sheet**, which is the whole content of the mapping it exists to hold.
+    ///
+    /// The two are handed sizes that *disagree* — something
+    /// [`crcbl_sprite::load::load`] rejects outright with `SizeMismatch`, which
+    /// is exactly why it has to be built by hand here. A version that took the
+    /// width off `loaded.sheet` would pass every test that goes through `load`,
+    /// because there the two always agree; it would also be re-deciding a
+    /// question `load` already answered against the picture.
+    #[test]
+    fn a_baked_sheet_is_registered_at_the_size_of_its_image() {
+        use crcbl_sprite::load::{Loaded, Rgba8};
+        use crcbl_sprite::{Frame, Rect, Sheet};
+
+        let recorder = Recorder::new();
+        let (device, queue) = open(&recorder);
+        let mut renderer = SpriteRenderer::new(device.as_ref(), queue, TARGET).expect("built");
+
+        let loaded = Loaded {
+            sheet: Sheet {
+                width: 2,
+                height: 2,
+                frames: vec![Frame {
+                    name: "default".to_owned(),
+                    rect: Rect::new(0, 0, 2, 2),
+                    hold: 1,
+                }],
+                clips: Vec::new(),
+                nine: None,
+                sample: SampleMode::Pixel,
+            },
+            image: Rgba8 {
+                width: 4,
+                height: 2,
+                pixels: vec![255u8; 4 * 2 * 4],
+            },
+        };
+
+        let id = renderer
+            .register_baked(device.as_ref(), "baked", &loaded)
+            .expect("upload");
+
+        assert_eq!(
+            renderer.sheets[id.index() as usize].lane,
+            [4.0, 2.0, SAMPLE_PIXEL, 0.0],
+            "the lane is the image's size and the sheet's mode"
+        );
 
         renderer.destroy(device.as_ref());
         recorder.assert_valid();

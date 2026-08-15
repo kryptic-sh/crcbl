@@ -423,6 +423,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`SpriteRenderer::register_baked` and `crcbl_sprite::load::load_baked`**, the
+  two halves of "turn a baked sheet into a registered one" that every caller of
+  `crcbl_sprite::load` had written out for itself. `register_baked` takes a
+  `&Loaded` and does the `SheetDesc` mapping — size off the image, sampler mode
+  off the sheet; `load_baked` is `load` for bytes that came from
+  `include_bytes!` on a `build.rs` product, panicking with the sheet's name
+  because a failure there is a broken build rather than input a caller could
+  handle. It is `#[track_caller]`, so the panic names the line that asked for
+  the sheet.
+
+  A game that already has an `ART_TICK_HZ` still needs a one-line local wrapper
+  to supply it — that constant is generated per crate, so the rate is the
+  caller's and only the failure policy is shared.
+
 - **`apps/lumen` runs in a browser.** The sixth demo on the Pages site, and the
   first written against `crcbl::web_exports!` rather than migrated onto it:
   `apps/lumen/src/web.rs` is the macro invocation naming the ten
