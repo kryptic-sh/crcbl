@@ -423,6 +423,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::engine::DEFAULT_WINDOW_SIZE` and
+  `crcbl::engine::requested_window_size`.** `LogicalSize::new(960.0, 720.0)` was
+  a bare literal in all six samples, and the rule beside it — `--size` names
+  pixels, a window request is logical, so convert at scale 1 — was written out
+  next to each one. The `crcbl new` scaffold had already given the number a
+  name; now the engine gives it one, and the conversion with it.
+
+  The scale-1 part is the half worth a name. Converting at the display's real
+  factor instead would open a 960×540 window for `--size 1920x1080` on a 2×
+  display, and the headless offscreen ring renders at exactly the extent that
+  was asked for — so the windowed run and the headless one would silently frame
+  different scenes. A test pins it.
+
 - **`Backing::platform(app_name)` and `crcbl_store::web::opfs::installed()`.**
   `platform` is "where this machine keeps a small persistent value" in one place
   — the config directory natively, the installed OPFS store in a browser,

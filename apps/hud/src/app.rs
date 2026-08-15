@@ -23,9 +23,7 @@ use crcbl::engine::{
     Booted, Clock, ExitReason, FrameInfo, HostedGame, RunSummary, wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::shell::{
-    DisplayMode, LogicalSize, ShellBackend as Backend, WindowId, open, open_backend,
-};
+use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId, open, open_backend};
 
 use crate::game::{Game, HudStats, RenderState};
 use crate::gpu::Gpu;
@@ -192,10 +190,7 @@ fn open_the_window<S: Shell + ?Sized>(
         &WindowDesc {
             title: "HUD",
             app_id: "sh.kryptic.crcbl.hud",
-            // `--size` names pixels; the window request is logical at scale 1,
-            // which is exactly the extent the headless offscreen ring renders
-            // at.
-            size: size.map_or(LogicalSize::new(960.0, 720.0), |size| size.to_logical(1.0)),
+            size: crcbl::engine::requested_window_size(size),
             mode,
             ..WindowDesc::default()
         },

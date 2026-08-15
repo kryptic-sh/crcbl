@@ -63,9 +63,7 @@ use crcbl::engine::{
 };
 use crcbl::math::Vec2;
 use crcbl::prelude::*;
-use crcbl::shell::{
-    DisplayMode, LogicalSize, ShellBackend as Backend, WindowId, open, open_backend,
-};
+use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId, open, open_backend};
 use crcbl::ui::draw_list::DrawList;
 
 use crate::art::SceneStats;
@@ -514,9 +512,7 @@ fn open_the_window<S: Shell + ?Sized>(
         &WindowDesc {
             title: "Horde",
             app_id: "sh.kryptic.crcbl.horde",
-            // `--size` names pixels; the window request is logical at scale 1,
-            // which is exactly the extent the headless offscreen ring renders at.
-            size: size.map_or(LogicalSize::new(960.0, 720.0), |size| size.to_logical(1.0)),
+            size: crcbl::engine::requested_window_size(size),
             // Asked for at creation rather than switched to afterwards, so
             // `--fullscreen` does not show a decorated window first.
             mode,

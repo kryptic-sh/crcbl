@@ -34,9 +34,7 @@ use crcbl::engine::{
     TouchUpdate, wait_for_configure,
 };
 use crcbl::prelude::*;
-use crcbl::shell::{
-    DisplayMode, LogicalSize, ShellBackend as Backend, WindowId, open, open_backend,
-};
+use crcbl::shell::{DisplayMode, ShellBackend as Backend, WindowId, open, open_backend};
 
 use crate::game::{self, Game, GameState, RenderState};
 use crate::gpu::Gpu;
@@ -409,9 +407,7 @@ fn open_the_window<S: Shell + ?Sized>(
         &WindowDesc {
             title: "Flappy",
             app_id: "sh.kryptic.crcbl.flappy",
-            // `--size` names pixels; the window request is logical at scale 1,
-            // which is exactly the extent the headless offscreen ring renders at.
-            size: size.map_or(LogicalSize::new(960.0, 720.0), |size| size.to_logical(1.0)),
+            size: crcbl::engine::requested_window_size(size),
             // Asked for at creation rather than switched to afterwards, so
             // `--fullscreen` does not show a decorated window first.
             mode,

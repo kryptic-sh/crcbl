@@ -2956,6 +2956,31 @@ pub fn open_window<S: Shell + ?Sized>(
     shell.create_window(desc)
 }
 
+/// What a window asks the compositor for when nothing named a size.
+///
+/// A window system is free to refuse it. Every sample and the `crcbl new`
+/// scaffold ask for this, and the headless offscreen ring renders at exactly
+/// the extent that was asked for, which is what makes a scale measurement
+/// reproducible across the two.
+pub const DEFAULT_WINDOW_SIZE: crcbl_shell::LogicalSize =
+    crcbl_shell::LogicalSize::new(960.0, 720.0);
+
+/// The size to put in a [`WindowDesc`](crcbl_shell::WindowDesc), given what
+/// `--size` asked for.
+///
+/// **`--size` names pixels and a window request is logical**, so the two are
+/// not the same number on a scaled display. Converting at scale 1 is what makes
+/// them agree: it is the extent the headless offscreen ring renders at, so a
+/// windowed run and a headless one frame the same scene.
+///
+/// One line, and it is here rather than in each game because both halves of it
+/// — the fallback and the scale-1 rule — were written out in every `app.rs` and
+/// in the scaffold, and only the scaffold had given the fallback a name.
+#[must_use]
+pub fn requested_window_size(size: Option<crcbl_shell::PhysicalSize>) -> crcbl_shell::LogicalSize {
+    size.map_or(DEFAULT_WINDOW_SIZE, |size| size.to_logical(1.0))
+}
+
 /// Pumps until `window` reports a size, and returns it.
 ///
 /// A swapchain needs a size and an unconfigured window does not have one, so
@@ -4783,6 +4808,25 @@ impl<S: Shell + ?Sized, G: HostedGame> GameLoop for Loop<S, G> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **`--size` names pixels and the window request is logical**, and the
+    /// conversion is at scale 1 rather than at the display's factor.
+    ///
+    /// That is the whole content of the helper and it is easy to "fix" into a
+    /// bug: converting at the real scale factor would make a `--size 1920x1080`
+    /// run open a 960×540 window on a 2× display, and the headless offscreen
+    /// ring — which renders at exactly the extent that was asked for — would
+    /// then frame a different scene from the windowed run it is supposed to
+    /// match.
+    #[test]
+    fn a_requested_size_is_taken_as_pixels_and_a_missing_one_falls_back() {
+        assert_eq!(requested_window_size(None), DEFAULT_WINDOW_SIZE);
+        assert_eq!(
+            requested_window_size(Some(crcbl_shell::PhysicalSize::new(1920, 1080))),
+            crcbl_shell::LogicalSize::new(1920.0, 1080.0),
+            "the number the command line gave, unscaled",
+        );
+    }
 
     /// A headless shell with one window, so the tests below drive `observe`
     /// through the **real** event path rather than through hand-built structs.

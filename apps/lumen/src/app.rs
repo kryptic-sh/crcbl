@@ -39,7 +39,7 @@ use crcbl::engine::{
 use crcbl::prelude::*;
 use crcbl::render::{EffectRequest, RenderEffects};
 use crcbl::shell::{
-    DisplayMode, LogicalSize, ShellBackend as Backend, WindowDesc, WindowId, open, open_backend,
+    DisplayMode, ShellBackend as Backend, WindowDesc, WindowId, open, open_backend,
 };
 use crcbl::ui::draw_list::DrawList;
 
@@ -309,10 +309,7 @@ fn open_the_window<S: Shell + ?Sized>(
             // 4:3, so a windowed frame and a golden are the same framing: the
             // fixed camera's field of view is vertical, and a different aspect
             // crops or reveals the room's side walls.
-            size: options
-                .common
-                .size
-                .map_or(LogicalSize::new(960.0, 720.0), |size| size.to_logical(1.0)),
+            size: crcbl::engine::requested_window_size(options.common.size),
             mode: options.common.display_mode(),
             ..WindowDesc::default()
         },
