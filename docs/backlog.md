@@ -3,6 +3,45 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### rustc's lint suppression inside external macros is a hazard for every forwarding macro we write
+
+`unconditional_recursion` is a rustc lint and this workspace runs `-D warnings`,
+so a hand-written `fn counters(&self) -> FrameCounters { Self::counters(self) }`
+with no inherent `counters` to reach fails the build. **The same code produced
+by a `#[macro_export]` macro from another crate does not** — rustc suppresses
+its lints in external macro expansions — so it compiles clean and recurses
+forever at run time.
+
+Measured, not assumed: deleting the inherent `counters` from
+`apps/hud/src/gpu.rs` warns with the block written out and compiles silently
+once `crcbl::impl_game_gpu!` produces it.
+
+`impl_game_gpu!` handles its own case with a `const _` block that coerces each
+inherent method to a function pointer in a scope where neither trait is
+imported, so path syntax cannot reach the trait method and a missing one is
+`E0599`. **The general lesson is not handled anywhere**: any future macro that
+expands to `Self::method(self)` forwards has the same hole and will not be
+warned about it. `web_exports!` is not affected — it forwards to free functions
+in `crcbl::web`, not to same-named methods — but it is the kind of macro that
+would be.
+
+Worth deciding whether the guard shape becomes a convention with a name, or
+whether a `trybuild`-style compile-fail test is worth a dev-dependency to pin
+it. Neither has been done.
+
+### Two audits' worth of doc drift is fixed; the mechanism that produced it is not
+
+The 2026-08-15 sweep corrected `docs/plan/ROADMAP.md` and most of the numbered
+stage docs, and the pattern behind the drift was uniform: a doc says work is
+missing, the work lands, and nothing connects the two. Three modules
+(`crcbl_render::counters`, `crcbl_render::cull_stats`,
+`crcbl_shaders::declaration_order`) already quote the sentence they close, in
+their own headers — which is what made them findable — and that convention is
+worth spreading rather than leaving to whoever happens to remember.
+
+Not proposed as a lint: what would have to be checked is prose. Recorded so the
+next sweep starts from "who quotes their plan doc" rather than from nothing.
+
 ### `crcbl-dx12` points at a backlog note about `crcbl::screenshot` that is not here
 
 `an_offscreen_ring_draws_reads_back_and_comes_round_again`, in
