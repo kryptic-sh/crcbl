@@ -9,9 +9,10 @@
 mod corpus;
 
 use crcbl_hal::{
-    AdapterId, BufferDesc, BufferUsage, CompareOp, DeviceDesc, Extent3d, Features, FilterMode,
-    Format, ImageAspect, ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewType, MemoryLocation, SamplerAddressMode, SamplerDesc, ShaderStages,
+    AdapterId, BindGroupLayoutDesc, BindGroupLayoutEntry, BindingFlags, BindingKind, BufferDesc,
+    BufferUsage, CompareOp, DeviceDesc, Extent3d, Features, FilterMode, Format, ImageAspect,
+    ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType,
+    MemoryLocation, SampleType, SamplerAddressMode, SamplerDesc, ShaderStages,
 };
 use crcbl_webgpu::{Command, DecodeError, StreamReader, StreamWriter, decode_stream, tag};
 
@@ -625,6 +626,478 @@ fn a_sampler_code_no_variant_claims_is_refused_rather_than_folded_into_a_neighbo
     ));
 }
 
+// ── Bind-group layouts ────────────────────────────────────────────────────────
+
+/// A read-only storage buffer visible to the vertex stage — the engine's own
+/// vertex-pulling binding, and the entry every test below varies one field of.
+fn probe_entry() -> BindGroupLayoutEntry {
+    BindGroupLayoutEntry {
+        binding: 7,
+        visibility: ShaderStages::VERTEX,
+        kind: BindingKind::StorageBuffer {
+            read_only: true,
+            dynamic: false,
+        },
+        count: 1,
+        flags: BindingFlags::empty(),
+    }
+}
+
+/// Encodes one unlabelled layout holding `entries`.
+fn layout_of(entries: &[BindGroupLayoutEntry]) -> StreamWriter {
+    let mut stream = StreamWriter::new();
+    stream.create_bind_group_layout(
+        handle(1, 1),
+        &BindGroupLayoutDesc {
+            label: None,
+            entries,
+        },
+    );
+    stream
+}
+
+/// The entries' `u32` count in an unlabelled `create_bind_group_layout` body:
+/// the tag, the handle and the absent label's presence byte come first.
+const LAYOUT_COUNT_AT: usize = tag::HEADER_BYTES + 1 + 8 + 1;
+/// The first entry, behind that count.
+const LAYOUT_ENTRY_AT: usize = LAYOUT_COUNT_AT + 4;
+/// The first entry's `BindingKind` code, behind its `binding` and `visibility`.
+const LAYOUT_KIND_AT: usize = LAYOUT_ENTRY_AT + 4 + 4;
+
+/// **A multi-entry layout survives field for field, and a single-entry one would
+/// prove none of it.**
+///
+/// This is the stream's first counted list of *structs*, and the difference from
+/// the lists before it is the stride: a reader out by a byte in `dynamic_offsets`
+/// runs off the end, and one out by a byte here decodes the next entry out of the
+/// middle of this one and answers a layout that is well-formed and describes
+/// different resources.
+///
+/// **What turns it red.** An entry field read in the wrong order — every value
+/// below is distinct in the position a neighbour could be read from. A
+/// `BindingKind` payload read once and copied — the two `StorageBuffer`s differ
+/// in both bools. A list rebuilt from binding numbers rather than kept in slice
+/// order — the third assertion is about exactly that, and
+/// `docs/plan/41-webgpu-stream.md` requires it because a `VARIABLE_COUNT` entry
+/// must be *last in the slice* and not merely highest-numbered.
+#[test]
+fn a_bind_group_layout_carries_a_multi_entry_list_in_the_descriptors_own_order() {
+    let entries = [
+        BindGroupLayoutEntry {
+            binding: 3,
+            visibility: ShaderStages::COMPUTE,
+            kind: BindingKind::StorageBuffer {
+                read_only: false,
+                dynamic: true,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        },
+        BindGroupLayoutEntry {
+            binding: 1,
+            visibility: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+            kind: BindingKind::SampledImage {
+                view_type: ImageViewType::CubeArray,
+                sample_type: SampleType::Depth,
+            },
+            count: 2,
+            flags: BindingFlags::PARTIALLY_BOUND,
+        },
+        BindGroupLayoutEntry {
+            binding: 2,
+            visibility: ShaderStages::FRAGMENT,
+            kind: BindingKind::Sampler { comparison: true },
+            count: 1,
+            flags: BindingFlags::empty(),
+        },
+        probe_entry(),
+    ];
+    let mut stream = StreamWriter::new();
+    stream.create_bind_group_layout(
+        handle(5, 6),
+        &BindGroupLayoutDesc {
+            label: Some("frame"),
+            entries: &entries,
+        },
+    );
+    stream.destroy_bind_group_layout(handle(7, 8));
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![
+            Command::CreateBindGroupLayout {
+                layout: handle(5, 6),
+                label: Some("frame".into()),
+                entries: entries.to_vec(),
+            },
+            Command::DestroyBindGroupLayout {
+                layout: handle(7, 8)
+            },
+        ])
+    );
+
+    let bindings: Vec<u32> = entries.iter().map(|entry| entry.binding).collect();
+    assert_ne!(
+        bindings,
+        {
+            let mut sorted = bindings.clone();
+            sorted.sort_unstable();
+            sorted
+        },
+        "the binding numbers are already ascending, so the test would not notice \
+         a decoder that rebuilt the list from them"
+    );
+    assert!(
+        entries.len() > 1,
+        "one entry says nothing about a counted list's stride"
+    );
+}
+
+/// **Two entries differing in exactly one field are two different layouts**, and
+/// every field is swept on its own so no one of them can stand for the others.
+///
+/// A round trip over a list whose entries differ in several fields at once would
+/// pass for an encoder that wrote one field and left the rest at whatever the
+/// previous entry held. Each case here changes a single field of a single entry
+/// and asserts that both the *bytes* and the decode move — the bytes because a
+/// dropped field round-trips through a reader that also drops it.
+///
+/// **What turns it red.** Any field of `BindGroupLayoutEntry` left off the wire.
+/// Any `BindingKind` payload byte not written, which the last four cases sweep —
+/// `read_only` and `dynamic` are adjacent presence bytes on one variant, and
+/// `view_type` and `sample_type` are adjacent code bytes on another.
+#[test]
+fn two_entries_differing_in_one_field_are_distinguishable_field_by_field() {
+    let base = probe_entry();
+    let variants = [
+        (
+            "binding",
+            BindGroupLayoutEntry {
+                binding: base.binding + 1,
+                ..base
+            },
+        ),
+        (
+            "visibility",
+            BindGroupLayoutEntry {
+                visibility: ShaderStages::FRAGMENT,
+                ..base
+            },
+        ),
+        (
+            "count",
+            BindGroupLayoutEntry {
+                count: base.count + 1,
+                ..base
+            },
+        ),
+        (
+            "flags",
+            BindGroupLayoutEntry {
+                flags: BindingFlags::UPDATE_AFTER_BIND,
+                ..base
+            },
+        ),
+        (
+            "kind",
+            BindGroupLayoutEntry {
+                kind: BindingKind::UniformBuffer { dynamic: false },
+                ..base
+            },
+        ),
+        (
+            "kind::read_only",
+            BindGroupLayoutEntry {
+                kind: BindingKind::StorageBuffer {
+                    read_only: false,
+                    dynamic: false,
+                },
+                ..base
+            },
+        ),
+        (
+            "kind::dynamic",
+            BindGroupLayoutEntry {
+                kind: BindingKind::StorageBuffer {
+                    read_only: true,
+                    dynamic: true,
+                },
+                ..base
+            },
+        ),
+        (
+            "kind::view_type",
+            BindGroupLayoutEntry {
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2Array,
+                    sample_type: SampleType::Float,
+                },
+                ..base
+            },
+        ),
+        (
+            "kind::sample_type",
+            BindGroupLayoutEntry {
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2Array,
+                    sample_type: SampleType::Depth,
+                },
+                ..base
+            },
+        ),
+        (
+            "kind::comparison",
+            BindGroupLayoutEntry {
+                kind: BindingKind::Sampler { comparison: true },
+                ..base
+            },
+        ),
+    ];
+
+    let baseline = layout_of(&[base]);
+    for (field, variant) in variants {
+        assert_ne!(base, variant, "{field}: the pair under test is one value");
+        let changed = layout_of(&[variant]);
+        assert_ne!(
+            baseline.bytes(),
+            changed.bytes(),
+            "{field} is not on the wire"
+        );
+        assert_eq!(
+            decode_stream(changed.bytes()),
+            Ok(vec![Command::CreateBindGroupLayout {
+                layout: handle(1, 1),
+                label: None,
+                entries: vec![variant],
+            }]),
+            "{field} does not survive the round trip"
+        );
+    }
+
+    // The two `SampledImage` cases above differ from each other in one field
+    // too, which is the pair the sweep against `base` cannot pin: both differ
+    // from a `StorageBuffer` in the code byte alone.
+    assert_ne!(
+        layout_of(&[variants[7].1]).bytes(),
+        layout_of(&[variants[8].1]).bytes(),
+        "sample_type is not on the wire beside a view_type that did not change"
+    );
+}
+
+/// **A `BindingKind` code no variant claims is refused**, and this table's fold
+/// costs more than any other on the stream: the variants' payloads are different
+/// lengths, so a code read as its neighbour leaves the cursor inside the entry
+/// and every field after it decodes out of the wrong bytes.
+///
+/// **What turns it red.** A catch-all arm in `read_binding_kind`. A table with a
+/// row too many, which the code one past the last claimed one lands on and which
+/// `0xFF` never would.
+#[test]
+fn a_binding_kind_code_no_variant_claims_is_refused_rather_than_folded_into_a_neighbour() {
+    let whole = layout_of(&[probe_entry()]).bytes().to_vec();
+    assert_eq!(
+        whole[LAYOUT_KIND_AT],
+        tag::BINDING_KIND_STORAGE_BUFFER,
+        "the offsets this test corrupts have moved"
+    );
+
+    for code in [0x7F, tag::BINDING_KIND_CODES] {
+        let mut bytes = whole.clone();
+        bytes[LAYOUT_KIND_AT] = code;
+        assert_eq!(
+            decode_stream(&bytes),
+            Err(DecodeError::InvalidEnum {
+                field: "BindGroupLayoutEntry::kind",
+                code: code.into(),
+            }),
+            "code {code:#04x}"
+        );
+    }
+
+    // …and the payload behind a claimed code is refused on its own terms: a
+    // `bool` is a presence byte, so a third value is an error rather than truth,
+    // and the two enum bytes of a `SampledImage` name their own fields.
+    let mut bytes = whole.clone();
+    bytes[LAYOUT_KIND_AT + 1] = 2;
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "BindingKind::read_only",
+            code: 2,
+        })
+    );
+
+    let sampled = layout_of(&[BindGroupLayoutEntry {
+        kind: BindingKind::SampledImage {
+            view_type: ImageViewType::D2,
+            sample_type: SampleType::Float,
+        },
+        ..probe_entry()
+    }]);
+    let whole = sampled.bytes().to_vec();
+    let mut bytes = whole.clone();
+    bytes[LAYOUT_KIND_AT + 1] = tag::IMAGE_VIEW_TYPE_D3 + 1;
+    assert!(matches!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "BindingKind::view_type",
+            ..
+        })
+    ));
+    let mut bytes = whole;
+    bytes[LAYOUT_KIND_AT + 2] = tag::SAMPLE_TYPE_DEPTH + 1;
+    assert!(matches!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "BindingKind::sample_type",
+            ..
+        })
+    ));
+}
+
+/// **The `u32::MAX` count is a sentinel and the encoder does not resolve it**,
+/// and neither is any `BindingFlags` bit dropped on the way.
+///
+/// `BindGroupLayoutEntry::count`'s docs call `u32::MAX` "as many as this device
+/// can", resolved through `resolved_count` against a device's own
+/// `max_bindless_descriptors` — which is a number **only the far side has**. So
+/// this is `lod_max`'s rule again, and the assertion is on the bytes rather than
+/// on the decode: a writer that resolved the sentinel to some plausible ceiling
+/// would still round-trip through this crate's own reader.
+///
+/// **What turns it red.** An encoder that clamped the count. One that dropped
+/// the flags word because WebGPU has no bindless model — the refusal belongs to
+/// the replayer, which can only refuse what it was told, and a layout silently
+/// downgraded to one fixed descriptor is what `BindingFlags`'s own docs call
+/// reading garbage at index 4097.
+#[test]
+fn the_bindless_count_sentinel_and_its_flags_cross_verbatim_rather_than_being_resolved() {
+    let flags = BindingFlags::VARIABLE_COUNT
+        | BindingFlags::PARTIALLY_BOUND
+        | BindingFlags::UPDATE_AFTER_BIND;
+    let entry = BindGroupLayoutEntry {
+        count: u32::MAX,
+        flags,
+        ..probe_entry()
+    };
+    let stream = layout_of(&[entry]);
+    let bytes = stream.bytes();
+
+    // The count and the flags are the last eight bytes of the body, behind the
+    // `StorageBuffer` code and its two presence bytes.
+    let count_at = LAYOUT_KIND_AT + 1 + 2;
+    assert_eq!(
+        &bytes[count_at..count_at + 4],
+        &u32::MAX.to_le_bytes(),
+        "the encoder resolved the sentinel instead of carrying it"
+    );
+    assert_eq!(
+        &bytes[count_at + 4..count_at + 8],
+        &flags.bits().to_le_bytes(),
+        "the encoder dropped flags the replayer is the one that must refuse"
+    );
+    assert_eq!(bytes.len(), count_at + 8, "the entry has grown a field");
+
+    match &decode_stream(bytes).expect("a stream this crate wrote decodes")[0] {
+        Command::CreateBindGroupLayout { entries, .. } => {
+            assert_eq!(entries[0].count, u32::MAX);
+            assert_eq!(entries[0].flags, flags);
+        }
+        other => panic!("expected CreateBindGroupLayout, got {}", other.name()),
+    }
+
+    // …and an ordinary array count is left alone too, which is what says the
+    // sentinel is carried rather than that nothing is.
+    let fixed = layout_of(&[BindGroupLayoutEntry {
+        count: 64,
+        ..probe_entry()
+    }]);
+    assert_eq!(&fixed.bytes()[count_at..count_at + 4], &64u32.to_le_bytes());
+}
+
+/// A `ShaderStages` or `BindingFlags` bit no flag claims is refused rather than
+/// truncated away — the rule every bitflags field on this stream follows, met by
+/// the two words a layout entry carries.
+///
+/// **What turns it red.** `from_bits_truncate` in either reader. For the
+/// visibility that would hand the replayer a binding narrower than the caller
+/// declared, and the shader compiled against it would read whatever the slot
+/// held; for the flags it is the bindless downgrade `BindingFlags`'s own docs
+/// forbid.
+#[test]
+fn a_visibility_or_binding_flag_bit_no_flag_claims_is_refused_rather_than_dropped() {
+    let whole = layout_of(&[probe_entry()]).bytes().to_vec();
+
+    let visibility_at = LAYOUT_ENTRY_AT + 4;
+    let mut bytes = whole.clone();
+    bytes[visibility_at..visibility_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "BindGroupLayoutEntry::visibility",
+            code: u32::MAX.into(),
+        })
+    );
+
+    // One bit past the last claimed one, which is where a table that stopped a
+    // stage short lands and where `u32::MAX` would not distinguish itself.
+    let unclaimed = ShaderStages::all().bits() | (ShaderStages::all().bits() + 1);
+    let mut bytes = whole.clone();
+    bytes[visibility_at..visibility_at + 4].copy_from_slice(&unclaimed.to_le_bytes());
+    assert!(matches!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "BindGroupLayoutEntry::visibility",
+            ..
+        })
+    ));
+
+    let flags_at = whole.len() - 4;
+    let mut bytes = whole;
+    bytes[flags_at..flags_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "BindGroupLayoutEntry::flags",
+            code: u32::MAX.into(),
+        })
+    );
+}
+
+/// **An empty entry list is a layout, and a destroy naming nothing is a
+/// command.**
+///
+/// The zero count is the length a reader most easily treats as "read until
+/// something stops you", so the command *after* it is what makes the claim
+/// checkable: a reader that consumed one entry anyway would eat the destroy and
+/// the buffer would decode one command short.
+#[test]
+fn an_empty_entry_list_consumes_nothing_and_a_destroy_for_an_unknown_id_decodes() {
+    let mut stream = StreamWriter::new();
+    stream.create_bind_group_layout(
+        handle(1, 1),
+        &BindGroupLayoutDesc {
+            label: Some(""),
+            entries: &[],
+        },
+    );
+    stream.destroy_bind_group_layout(handle(9999, 7));
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![
+            Command::CreateBindGroupLayout {
+                layout: handle(1, 1),
+                label: Some(String::new()),
+                entries: Vec::new(),
+            },
+            Command::DestroyBindGroupLayout {
+                layout: handle(9999, 7)
+            },
+        ])
+    );
+}
+
 /// **Zero `mip_levels` and zero `samples` cross rather than being refused**, and
 /// this is the test that pins the decision.
 ///
@@ -911,10 +1384,10 @@ fn every_command_has_its_own_name() {
     names.sort_unstable();
     names.dedup();
     // `every_command` holds three CreateBuffers, three CreateImages, six
-    // CreateImageViews, four CreateSamplers and two each of BeginRenderPass,
-    // BindGroup and RequestDevice, so the distinct-name count is what the writer
-    // has methods for.
-    assert_eq!(names.len(), 19);
+    // CreateImageViews, four CreateSamplers, six CreateBindGroupLayouts and two
+    // each of BeginRenderPass, BindGroup and RequestDevice, so the distinct-name
+    // count is what the writer has methods for.
+    assert_eq!(names.len(), 21);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

@@ -12,11 +12,11 @@
 
 use crcbl_core::Handle;
 use crcbl_hal::{
-    AdapterId, BufferDesc, BufferUsage, ClearValue, ColorAttachment, CompareOp,
-    DepthStencilAttachment, DeviceDesc, Extent3d, Features, FilterMode, Format, ImageAspect,
-    ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType, LoadOp,
-    MemoryLocation, Rect2d, RenderPassDesc, SamplerAddressMode, SamplerDesc, ShaderStages, StoreOp,
-    depth,
+    AdapterId, BindGroupLayoutDesc, BindGroupLayoutEntry, BindingFlags, BindingKind, BufferDesc,
+    BufferUsage, ClearValue, ColorAttachment, CompareOp, DepthStencilAttachment, DeviceDesc,
+    Extent3d, Features, FilterMode, Format, ImageAspect, ImageDesc, ImageSubresourceRange,
+    ImageType, ImageUsage, ImageViewDesc, ImageViewType, LoadOp, MemoryLocation, Rect2d,
+    RenderPassDesc, SampleType, SamplerAddressMode, SamplerDesc, ShaderStages, StoreOp, depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -321,6 +321,237 @@ pub fn every_command() -> Vec<Command> {
             anisotropy: 4.5,
             compare: Some(CompareOp::Always),
         },
+        // **Six layouts, because this is the first counted list of *structs*.**
+        // Every command above is a fixed set of fields, or a list of scalars
+        // whose stride cannot be wrong. An entry here is five fields deep and
+        // carries an enum whose variants have different-length payloads, so a
+        // stride out by a byte does not truncate — it decodes the next entry out
+        // of the middle of this one and produces a layout that is well-formed
+        // and describes different resources.
+        //
+        // The first is the long one: **every [`BindingKind`] WebGPU can express,
+        // each with both values of every `bool` it carries**, so no payload byte
+        // can be read as its neighbour's without the decode changing. Order is
+        // free here — no entry sets `VARIABLE_COUNT` — which is what makes the
+        // *next* one the order-sensitive case.
+        Command::CreateBindGroupLayout {
+            layout: handle(93, 94),
+            label: Some("frame".into()),
+            entries: vec![
+                // The engine's own geometry binding: vertex pulling reads its
+                // streams out of a read-only storage buffer.
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::VERTEX,
+                    kind: BindingKind::StorageBuffer {
+                        read_only: true,
+                        dynamic: false,
+                    },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+                // The same kind with **both** of its bools the other way round,
+                // so a decoder that read one of them twice cannot stay green.
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::COMPUTE,
+                    kind: BindingKind::StorageBuffer {
+                        read_only: false,
+                        dynamic: true,
+                    },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+                // The substitute for push constants, which WebGPU has none of.
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+                    kind: BindingKind::UniformBuffer { dynamic: true },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::FRAGMENT,
+                    kind: BindingKind::UniformBuffer { dynamic: false },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+                // A `SampleType::Depth` slot beside a comparison sampler, which
+                // is the pair `crcbl-hal` says WebGPU checks against each other:
+                // a depth view is only bindable through a slot that says so.
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: ShaderStages::FRAGMENT,
+                    kind: BindingKind::SampledImage {
+                        view_type: ImageViewType::D2Array,
+                        sample_type: SampleType::Depth,
+                    },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::FRAGMENT,
+                    kind: BindingKind::Sampler { comparison: true },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+                // …and the ordinary pair, so both values of `sample_type` and
+                // both of `comparison` are on the wire.
+                BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: ShaderStages::FRAGMENT,
+                    kind: BindingKind::SampledImage {
+                        view_type: ImageViewType::Cube,
+                        sample_type: SampleType::Float,
+                    },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+                BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: ShaderStages::COMPUTE,
+                    kind: BindingKind::Sampler { comparison: false },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+            ],
+        },
+        // **The portable bindless declaration, and the unlabelled twin.** The
+        // shape `BindGroupLayoutDesc::check_entries`'s own test builds: a
+        // `u32::MAX` count — "as many as this device can", not four billion
+        // descriptors — beside all three `BindingFlags`, on the entry that is
+        // both last in the slice and highest-numbered. It crosses verbatim by
+        // the sentinel rule in `docs/plan/41-webgpu-stream.md`, and **WebGPU has
+        // no binding arrays at all**, so this is the layout the replayer has to
+        // refuse rather than quietly build one descriptor for.
+        Command::CreateBindGroupLayout {
+            layout: handle(95, 96),
+            label: None,
+            entries: vec![
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    kind: BindingKind::StorageBuffer {
+                        read_only: true,
+                        dynamic: false,
+                    },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    kind: BindingKind::SampledImage {
+                        view_type: ImageViewType::D2,
+                        sample_type: SampleType::Float,
+                    },
+                    count: u32::MAX,
+                    flags: BindingFlags::VARIABLE_COUNT
+                        .union(BindingFlags::PARTIALLY_BOUND)
+                        .union(BindingFlags::UPDATE_AFTER_BIND),
+                },
+            ],
+        },
+        // Present-and-empty label, and an **empty entry list**: the counted list
+        // at zero, which is the length a reader most easily mistakes for "read
+        // until something stops you". The command after it is what would be
+        // eaten if it did.
+        Command::CreateBindGroupLayout {
+            layout: handle(97, 98),
+            label: Some(String::new()),
+            entries: Vec::new(),
+        },
+        // **A fixed-size array**, which is the other half of the `count`
+        // decision: `64` is neither `1` nor the sentinel, so a replayer that
+        // treated "not the sentinel" as "one descriptor" would build a
+        // single-slot binding for a sixty-four-slot declaration and every write
+        // past the first would target a slot that does not exist.
+        Command::CreateBindGroupLayout {
+            layout: handle(99, 100),
+            label: Some("texture page".into()),
+            entries: vec![BindGroupLayoutEntry {
+                binding: 8,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2Array,
+                    sample_type: SampleType::Float,
+                },
+                count: 64,
+                flags: BindingFlags::empty(),
+            }],
+        },
+        // **The two stages WebGPU has no `GPUShaderStage` bit for.** Both are
+        // real `ShaderStages` bits and both cross verbatim — the encoding
+        // carries what the caller said and the replayer is what refuses it — and
+        // `ShaderStages::TASK` is bit 4, which is the bit a claimed-bit mask
+        // that stopped at `MESH` would drop. That mask is the JavaScript
+        // decoder's, and this command is what holds it honest.
+        Command::CreateBindGroupLayout {
+            layout: handle(101, 102),
+            label: None,
+            entries: vec![
+                BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: ShaderStages::MESH,
+                    kind: BindingKind::SampledImage {
+                        view_type: ImageViewType::D2Array,
+                        sample_type: SampleType::Float,
+                    },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+                BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: ShaderStages::TASK,
+                    kind: BindingKind::StorageBuffer {
+                        read_only: true,
+                        dynamic: false,
+                    },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+            ],
+        },
+        // **Two entries differing in exactly one field, and sharing a binding
+        // number.** Both halves are deliberate. The single differing field is
+        // `read_only`, so a decoder that read the kind's payload once and copied
+        // it fails here and nowhere else. The shared binding number is what pins
+        // the rule `docs/plan/41-webgpu-stream.md` states about this command: a
+        // decoder must preserve slice order rather than rebuild the list from
+        // binding numbers, and one that keyed entries by binding would collapse
+        // these two into one.
+        //
+        // `check_entries` rejects a duplicated binding number, and that is not a
+        // contradiction — it is the division of labour this command is built on.
+        // The seam's rules are the caller's to enforce before encoding; the
+        // encoding refuses a malformed *stream* and nothing else, and a `u32`
+        // claims every value it can hold. `BindingKind::StorageImage` is here
+        // for a second reason of the same kind: WebGPU's
+        // `GPUStorageTextureBindingLayout.format` is a required member and this
+        // seam's variant carries no format, so it is the one `BindingKind` a
+        // replayer cannot express — and it can only refuse what it was told.
+        Command::CreateBindGroupLayout {
+            layout: handle(103, 104),
+            label: Some("gbuffer store".into()),
+            entries: vec![
+                BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: ShaderStages::COMPUTE,
+                    kind: BindingKind::StorageImage { read_only: false },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+                BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: ShaderStages::COMPUTE,
+                    kind: BindingKind::StorageImage { read_only: true },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                },
+            ],
+        },
         Command::DestroyBuffer {
             buffer: handle(17, 18),
         },
@@ -340,6 +571,12 @@ pub fn every_command() -> Vec<Command> {
         // sampler's id and an image's are allowed to be the same eight bytes.
         Command::DestroySampler {
             sampler: handle(91, 92),
+        },
+        // Its own command and its own table again, and the destroy whose empty
+        // slot is the *ordinary* case: a layout the replayer refused still has
+        // its pre-allocated handle destroyed by the caller.
+        Command::DestroyBindGroupLayout {
+            layout: handle(105, 106),
         },
         Command::BeginDebugLabel {
             label: "gbuffer — ✱".into(),
@@ -548,6 +785,18 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
                 compare: *compare,
             },
         ),
+        Command::CreateBindGroupLayout {
+            layout,
+            label,
+            entries,
+        } => stream.create_bind_group_layout(
+            *layout,
+            &BindGroupLayoutDesc {
+                label: label.as_deref(),
+                entries,
+            },
+        ),
+        Command::DestroyBindGroupLayout { layout } => stream.destroy_bind_group_layout(*layout),
         Command::DestroyBuffer { buffer } => stream.destroy_buffer(*buffer),
         Command::DestroySurface { surface } => stream.destroy_surface(*surface),
         Command::DestroyImage { image } => stream.destroy_image(*image),
