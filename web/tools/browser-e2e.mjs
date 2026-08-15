@@ -709,6 +709,14 @@ function browserFlags(profile, mode) {
     // The canvas is sized by CSS against the viewport, so a fixed window makes
     // the pixel counts below mean the same thing on every machine.
     '--window-size=1024,768',
+    // THIS GATE BOOTS REAL GAMES AND PRESSES REAL KEYS, so it plays their cues
+    // out of the machine's speakers — a launched ball, a broken brick, once per
+    // demo per run. Nothing in this driver asserts anything about audio, so
+    // muting the output costs no coverage; the `AudioContext` and the worklet
+    // still run, which is what `smoke.mjs` and the shim's own checks care
+    // about. It is muted here rather than in the engine because the noise is a
+    // property of running the harness, not of the build under test.
+    '--mute-audio',
   ];
 
   if (mode === 'hardware') {
