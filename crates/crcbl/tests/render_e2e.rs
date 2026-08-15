@@ -70,6 +70,19 @@ use crcbl_golden::{ChannelOrder, Golden, Image};
 /// blocks, and a smaller frame gives it too few of them to mean anything.
 const EXTENT: (u32, u32) = (256, 192);
 
+/// A second size the odd-extent goldens were blessed at, chosen for being
+/// awkward rather than round.
+///
+/// Neither dimension is a multiple of 64, and neither is a multiple of 4.
+/// `tests/run-cross-backend-e2e.sh` is where this size came from and its
+/// `CRCBL_CROSS_SIZES` says what it is for: a readback whose rows are padded to
+/// a backend's own alignment — the 256-byte row pitch wgpu enforces and Vulkan
+/// does not — hands back an image whose stride is wider than its width, and code
+/// that assumes the two are equal produces a sheared frame at this size and a
+/// correct one at every multiple of 64. [`EXTENT`] cannot catch that class,
+/// because 256 already satisfies every alignment anything asks for.
+const EXTENT_ODD: (u32, u32) = (97, 61);
+
 /// The anti-vacuity floor for [`Scene::Cube`]: distinct RGBA colours the frame
 /// must contain.
 ///
@@ -356,6 +369,7 @@ fn the_cube_scene_draws_through_the_forward_renderer_and_matches_its_golden() {
     draw_scene_and_match_its_golden(
         Scene::Cube,
         "cube",
+        EXTENT,
         MIN_COLORS_CUBE,
         the_cube_scene_drew_its_geometry_and_every_material_column,
     );
@@ -399,6 +413,7 @@ fn the_lights_scene_draws_its_point_lights_and_matches_its_golden() {
     draw_scene_and_match_its_golden(
         Scene::Lights,
         "lights",
+        EXTENT,
         MIN_COLORS_LIGHTS,
         each_point_light_pools_where_it_was_put_and_nowhere_else,
     );
@@ -497,6 +512,7 @@ fn the_spot_scene_draws_its_cone_and_matches_its_golden() {
     draw_scene_and_match_its_golden(
         Scene::Spot,
         "spot",
+        EXTENT,
         MIN_COLORS_SPOT,
         the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor,
     );
@@ -666,6 +682,7 @@ fn the_spot_shadow_scene_draws_its_shadow_and_matches_its_golden() {
     draw_scene_and_match_its_golden(
         Scene::SpotShadow,
         "spot_shadow",
+        EXTENT,
         MIN_COLORS_SPOT_SHADOW,
         the_caster_darkens_the_floor_behind_it_and_not_beside_it,
     );
@@ -805,6 +822,7 @@ fn the_point_shadow_scene_draws_both_of_its_shadows_and_matches_its_golden() {
     draw_scene_and_match_its_golden(
         Scene::PointShadow,
         "point_shadow",
+        EXTENT,
         MIN_COLORS_POINT_SHADOW,
         each_caster_darkens_its_own_side_of_the_point_light,
     );
@@ -965,6 +983,7 @@ fn the_ao_scene_occludes_its_corner_and_matches_its_golden() {
     draw_scene_and_match_its_golden(
         Scene::Ao,
         "ao",
+        EXTENT,
         MIN_COLORS_AO,
         the_corner_is_occluded_and_the_open_floor_is_not,
     );
@@ -1153,6 +1172,7 @@ fn the_ssr_scene_reflects_its_pyramid_and_matches_its_golden() {
     draw_scene_and_match_its_golden(
         Scene::Ssr,
         "ssr",
+        EXTENT,
         MIN_COLORS_SSR,
         the_floor_reflects_the_pyramid_and_only_under_it,
     );
@@ -1515,6 +1535,7 @@ fn the_probes_scene_lights_its_room_and_matches_its_golden() {
     draw_scene_and_match_its_golden(
         Scene::Probes,
         "probes",
+        EXTENT,
         MIN_COLORS_PROBES,
         the_probe_grid_lights_each_end_of_the_room_in_its_own_colour,
     );
@@ -1674,6 +1695,7 @@ fn the_dunes_scene_draws_its_cluster_dag_and_matches_its_golden() {
     draw_scene_and_match_its_golden(
         Scene::Dunes,
         "dunes",
+        EXTENT,
         MIN_COLORS_DUNES,
         the_dunes_patch_fills_the_lower_frame_and_leaves_the_sky_alone,
     );
@@ -1733,6 +1755,7 @@ fn the_sprite_scene_draws_through_the_sprite_renderer_and_matches_its_golden() {
     draw_scene_and_match_its_golden(
         Scene::Sprite,
         "sprite",
+        EXTENT,
         MIN_COLORS_SPRITE,
         every_sprite_slot_is_painted_and_the_gaps_are_not,
     );
@@ -1751,12 +1774,76 @@ fn the_ui_scene_draws_through_the_ui_renderer_and_matches_its_golden() {
     draw_scene_and_match_its_golden(
         Scene::Ui,
         "ui",
+        EXTENT,
         MIN_COLORS_UI,
         the_ui_panel_is_painted_and_the_bar_blends_over_two_backgrounds,
     );
 }
 
-/// Draws one frame of `scene` and compares it against `tests/golden/{golden}.png`.
+/// The inspector the [`EXTENT_ODD`] tests pass, and it checks nothing.
+///
+/// **This is where the odd-size tests are weaker than their [`EXTENT`]
+/// counterparts, stated rather than papered over.** Every per-scene inspector in
+/// this file computes its sample points from [`EXTENT`] — fractions of it, or
+/// pixel constants read off a frame of that size — because each was measured
+/// against that frame. At [`EXTENT_ODD`] those coordinates address different
+/// parts of a differently-proportioned picture, so running one here would assert
+/// something nobody measured: it would pass or fail on where the arithmetic
+/// happened to land, which is not evidence either way.
+///
+/// What keeps these tests from being vacuous is the other half of the
+/// anti-vacuity pair — the `min_colors` floor, which is a property of the frame
+/// rather than of any coordinate in it and so carries across sizes unchanged —
+/// together with the golden, which is the whole picture at this extent. The
+/// claim they drop is *where* the scene drew; the claims they keep are that it
+/// drew and that it drew what was reviewed.
+fn nothing_measured_at_this_extent(_image: &Image) {}
+
+/// The cube at [`EXTENT_ODD`] — the row-pitch case, on `mesh.slang`.
+///
+/// The three tests here are what `tests/run-cross-backend-e2e.sh` covered by
+/// rendering every scene at a second, deliberately awkward size. Same scenes,
+/// same floors, against goldens blessed at [`EXTENT_ODD`].
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_cube_scene_draws_at_an_odd_extent_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::Cube,
+        "cube_97x61",
+        EXTENT_ODD,
+        MIN_COLORS_CUBE,
+        nothing_measured_at_this_extent,
+    );
+}
+
+/// The sprite scene at [`EXTENT_ODD`] — the row-pitch case, on `sprite.slang`.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_sprite_scene_draws_at_an_odd_extent_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::Sprite,
+        "sprite_97x61",
+        EXTENT_ODD,
+        MIN_COLORS_SPRITE,
+        nothing_measured_at_this_extent,
+    );
+}
+
+/// The UI scene at [`EXTENT_ODD`] — the row-pitch case, on `ui.slang`.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn the_ui_scene_draws_at_an_odd_extent_and_matches_its_golden() {
+    draw_scene_and_match_its_golden(
+        Scene::Ui,
+        "ui_97x61",
+        EXTENT_ODD,
+        MIN_COLORS_UI,
+        nothing_measured_at_this_extent,
+    );
+}
+
+/// Draws one frame of `scene` at `extent` and compares it against
+/// `tests/golden/{golden}.png`.
 ///
 /// **What the assertions are for, in the order a failure would hit them:**
 ///
@@ -1786,6 +1873,7 @@ fn the_ui_scene_draws_through_the_ui_renderer_and_matches_its_golden() {
 fn draw_scene_and_match_its_golden(
     scene: Scene,
     golden: &str,
+    extent: (u32, u32),
     min_colors: usize,
     inspect: fn(&Image),
 ) {
@@ -1802,7 +1890,7 @@ fn draw_scene_and_match_its_golden(
     // `Debug` and escape the newlines out of the adapter listing a pin miss
     // carries — on a runner nobody can log into, that listing is the whole
     // diagnosis.
-    let mut setup = OffscreenSetup::open(EXTENT.0, EXTENT.1, scene)
+    let mut setup = OffscreenSetup::open(extent.0, extent.1, scene)
         .unwrap_or_else(|why| panic!("a GPU backend opens for the {golden} scene: {why}"));
 
     let backend = setup.backend();
@@ -1885,8 +1973,11 @@ fn draw_scene_and_match_its_golden(
 
     assert_eq!(
         (width, height),
-        EXTENT,
-        "the swapchain handed back an extent the golden was not blessed at"
+        extent,
+        "the swapchain handed back {width}x{height} for a frame asked for at {}x{} — an extent \
+         the {golden} golden was not blessed at",
+        extent.0,
+        extent.1
     );
     let image = Image::from_readback(width, height, &pixels, channel_order(format))
         .expect("the readback is exactly one image");

@@ -7343,13 +7343,31 @@ left:
 
 - **`CRCBL_BLESS` is suite-wide and there is no way to scope it to one golden.**
   Setting it re-blesses every golden the run reaches, so it cannot be used to
-  regenerate a single image — and a suite-wide bless run also fails fast on the
-  first test that objects, which is what stopped one from doing damage here. The
-  safe way to regenerate one golden is to delete that file and run **only** its
-  test (`run-vk-e2e.sh -E 'test(name)'`), because a missing reference is created
-  by `Golden::check` and reported as `Blessed { created: true }`, which the
-  harness turns into a failure saying the run proved nothing. Worth knowing
-  before someone reaches for `CRCBL_BLESS=1` to fix one image.
+  regenerate a single image. The safe way to regenerate one golden is to delete
+  that file and run **only** its test (`run-vk-e2e.sh -E 'test(name)'`), because
+  a missing reference is created by `Golden::check` and reported as
+  `Blessed { created: true }`, which the harness turns into a failure saying the
+  run proved nothing. Worth knowing before someone reaches for `CRCBL_BLESS=1`
+  to fix one image.
+
+  **This entry used to claim that a suite-wide bless "fails fast on the first
+  test that objects", and that is wrong — corrected 2026-08-15.** Adding the
+  `EXTENT_ODD` goldens to `render_e2e` began with an unscoped
+  `CRCBL_BLESS=1 run-render-e2e.sh`, and it rewrote most of the existing
+  references in `crates/crcbl/tests/golden/` before the run ended. Fail-fast
+  cannot protect anything here: nextest runs a process per test, so the other
+  tests have already written their files by the time any one of them reports.
+  The rewritten images still passed `Tolerance::RASTERISER` against the
+  originals — the drift is real but within budget — which is precisely why this
+  is dangerous: nothing goes red, and the blessed-on-lavapipe references
+  silently become blessed-on-whatever-ran-it.
+
+  Scoping the filter is therefore **required, not merely preferable**:
+  `CRCBL_GPU=vk CRCBL_BLESS=1 crates/crcbl/tests/run-render-e2e.sh -E 'test(<name>)'`
+  writes only the goldens those tests reach. A guard in the harness — refusing
+  an unscoped bless, or refusing to overwrite a reference that already matches
+  within tolerance — would be better than a note here, and has not been written.
+
 - **The open box's golden is blessed on lavapipe**, like every other vk golden,
   so CI compares it at zero differing pixels and a local radv run drifts instead
   — 94.55 % of pixels differ at `max channel delta 1`, `0 over tolerance`. That
