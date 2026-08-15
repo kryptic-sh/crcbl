@@ -423,6 +423,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::impl_polled_bundle!`**, which declares a bundle's `Pending` type,
+  its `poll`, and the `open`/`request_open` pair — the blocking and non-blocking
+  halves of start-up, both routed through the _same_ descriptor.
+  `impl_polled_bundle!(gpu: Gpu, pending: PendingGpu, desc: desc)` replaces
+  about thirty lines that five samples carried identically.
+
+  **The descriptor function is named, not generated**, and that is the design
+  rather than an omission. Generating it would leave the label as the only knob
+  and would make each sample's "the features I ask for are the engine's own"
+  test vacuous — a check that cannot fail is not a check, so those tests would
+  have had to go, and what replaced them would have been harder to write than
+  what it replaced. `apps/lumen` could not use a generated one at all:
+  overriding `optional_features` is how it forces a lesser path.
+
 - **`crcbl::impl_game_gpu!` and `crcbl::impl_polled_gpu!`**, which write the
   `GameGpu`/`GpuSurface` and `PolledGpu` impls for a bundle that already has the
   methods as inherent ones. Every sample had these blocks written out byte for

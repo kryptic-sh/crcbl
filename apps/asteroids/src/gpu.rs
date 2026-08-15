@@ -29,17 +29,13 @@
 //! what is already in the target, so it must come after the game, and its panel
 //! is opaque while its labels are UI-pass text, so it must come before the UI.
 
-use crcbl::engine::{
-    FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions, PendingGpuContext,
-};
+use crcbl::engine::{FrameOutcome, GpuContext, GpuContextDesc, GpuError, GpuOptions};
 use crcbl::hal::CommandEncoderDesc;
 use crcbl::math::Vec3;
-use crcbl::prelude::*;
 use crcbl::render::{
     Camera, ForwardRenderer, MAX_TIMED_PASSES, MenuRenderer, PassTimers, Projection, RenderGraph,
     SpriteRenderer, TransientPool, UiRenderer,
 };
-use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::menu::{Menu, MenuLayout};
 use crcbl::ui::text::FontAtlas;
@@ -147,63 +143,11 @@ fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
     }
 }
 
-/// A [`Gpu`] being opened one poll at a time — the browser's half of
-/// [`Gpu::open`].
-#[derive(Debug)]
-pub struct PendingGpu {
-    pending: PendingGpuContext,
-}
-
-impl PendingGpu {
-    /// Advances the open. `Ok(None)` means "not yet, poll again next frame".
-    ///
-    /// # Errors
-    ///
-    /// [`GpuError`] if the device request failed or a renderer refused the
-    /// device it produced.
-    pub fn poll(&mut self) -> Result<Option<Gpu>, GpuError> {
-        match self.pending.poll()? {
-            Some(ctx) => Gpu::from_context(ctx).map(Some),
-            None => Ok(None),
-        }
-    }
-}
+// `PendingGpu`, its `poll`, and the blocking and polled `open`s — both routed
+// through `desc` above, so the two bring-up paths ask for the same device.
+crcbl::impl_polled_bundle!(gpu: Gpu, pending: PendingGpu, desc: desc);
 
 impl Gpu {
-    /// Opens a backend, a surface, a device and a swapchain, and builds the
-    /// sprite, menu and UI renderers.
-    ///
-    /// **Blocks**, so this is the native path only.
-    ///
-    /// # Errors
-    ///
-    /// [`GpuError`] if no backend opened or any HAL call failed.
-    pub fn open<S: Shell + ?Sized>(
-        shell: &S,
-        window: WindowId,
-        extent: (u32, u32),
-        gpu: GpuOptions,
-    ) -> Result<Self, GpuError> {
-        Self::from_context(GpuContext::open(shell, window, extent, &desc(gpu))?)
-    }
-
-    /// Starts opening the same thing without blocking.
-    ///
-    /// # Errors
-    ///
-    /// [`GpuError`] if the registry has no such backend or the window went away
-    /// before its surface could be described.
-    pub fn request_open<S: Shell + ?Sized>(
-        shell: &S,
-        window: WindowId,
-        extent: (u32, u32),
-        gpu: GpuOptions,
-    ) -> Result<PendingGpu, GpuError> {
-        Ok(PendingGpu {
-            pending: GpuContext::request_open(shell, window, extent, &desc(gpu))?,
-        })
-    }
-
     /// Builds this game's renderers on an already-open context, and uploads the
     /// art.
     ///

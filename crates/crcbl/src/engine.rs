@@ -3461,6 +3461,126 @@ macro_rules! impl_polled_gpu {
     };
 }
 
+/// Declares a bundle's `Pending` type and its two bring-up entry points.
+///
+/// Expands to the `$pending` struct wrapping a
+/// [`PendingGpuContext`], its `poll`, and `open`/`request_open` on `$gpu` — the
+/// blocking and non-blocking halves of start-up, both routed through the *same*
+/// `$desc`. That last part is the point: the two paths must ask for the same
+/// device, or a feature only one of them requested is a bug that appears when
+/// the other path runs, which on this project means "in a browser".
+///
+/// The bundle supplies the two things that are its own:
+///
+/// * **`$desc`** — a `fn(GpuOptions) -> GpuContextDesc<'static>`, named rather
+///   than generated. Generating it would make the label the only knob and would
+///   render every sample's "the features I ask for are the engine's own" test
+///   vacuous — a check that cannot fail is not a check, so those tests would
+///   have to go, and what replaced them would be harder to write than what it
+///   replaced. `apps/lumen` could not use a generated one at all: overriding
+///   `optional_features` is how it forces a lesser path.
+/// * **`from_context`** — an inherent `fn(GpuContext) -> Result<Self,
+///   GpuError>` building this game's renderers. Not a trait method, so a bundle
+///   without one fails to compile rather than recursing; see
+///   [`impl_game_gpu!`] for why that distinction matters here.
+///
+/// A bundle whose pending state carries more than the context — `apps/lumen`
+/// again, which holds its forced path and effect set across the request —
+/// writes these out by hand.
+///
+/// # Examples
+///
+/// ```ignore
+/// crcbl::impl_polled_bundle!(gpu: Gpu, pending: PendingGpu, desc: desc);
+/// ```
+#[macro_export]
+macro_rules! impl_polled_bundle {
+    (gpu: $gpu:ty, pending: $pending:ident, desc: $desc:ident $(,)?) => {
+        /// A bundle being opened one poll at a time.
+        ///
+        /// The browser's half of start-up: `requestDevice` is a promise and the
+        /// page's own event loop is what resolves it, so a browser that blocked
+        /// waiting for a device would deadlock against itself. Poll this once
+        /// per `requestAnimationFrame` until it yields.
+        #[derive(Debug)]
+        pub struct $pending {
+            pending: $crate::engine::PendingGpuContext,
+        }
+
+        impl $pending {
+            /// Advances the open. `Ok(None)` means "not yet, poll again next
+            /// frame".
+            ///
+            /// # Errors
+            ///
+            /// [`GpuError`](crate::gpu::GpuError) if the device request failed
+            /// or a renderer refused the device it produced.
+            pub fn poll(
+                &mut self,
+            ) -> ::core::result::Result<::core::option::Option<$gpu>, $crate::engine::GpuError>
+            {
+                match self.pending.poll()? {
+                    ::core::option::Option::Some(ctx) => {
+                        <$gpu>::from_context(ctx).map(::core::option::Option::Some)
+                    }
+                    ::core::option::Option::None => {
+                        ::core::result::Result::Ok(::core::option::Option::None)
+                    }
+                }
+            }
+        }
+
+        impl $gpu {
+            /// Opens a backend, a surface, a device and a swapchain, and builds
+            /// this game's renderers.
+            ///
+            /// **Blocks**, so this is the native path only; a browser calls
+            /// [`request_open`](Self::request_open).
+            ///
+            /// # Errors
+            ///
+            /// [`GpuError`](crate::gpu::GpuError) if no backend opened or any
+            /// HAL call failed.
+            pub fn open<S: $crate::shell::Shell + ?::core::marker::Sized>(
+                shell: &S,
+                window: $crate::shell::WindowId,
+                extent: (u32, u32),
+                gpu: $crate::engine::GpuOptions,
+            ) -> ::core::result::Result<Self, $crate::engine::GpuError> {
+                Self::from_context($crate::engine::GpuContext::open(
+                    shell,
+                    window,
+                    extent,
+                    &$desc(gpu),
+                )?)
+            }
+
+            /// Starts opening the same thing without blocking.
+            ///
+            /// # Errors
+            ///
+            /// [`GpuError`](crate::gpu::GpuError) if the registry has no such
+            /// backend or the window went away before its surface could be
+            /// described. Everything else is reported from `poll`.
+            pub fn request_open<S: $crate::shell::Shell + ?::core::marker::Sized>(
+                shell: &S,
+                window: $crate::shell::WindowId,
+                extent: (u32, u32),
+                gpu: $crate::engine::GpuOptions,
+            ) -> ::core::result::Result<$pending, $crate::engine::GpuError> {
+                ::core::result::Result::Ok($pending {
+                    pending: $crate::engine::GpuContext::request_open(
+                        shell,
+                        window,
+                        extent,
+                        &$desc(gpu),
+                    )?,
+                })
+            }
+        }
+    };
+}
+
 /// What one frame tells the game about the frame around it.
 ///
 /// Passed rather than queried because all four are the loop's own bookkeeping:
