@@ -21,14 +21,23 @@ fn breakout(args: &[&str]) -> Output {
         .expect("the breakout binary runs")
 }
 
-/// Breakout with the null GPU backend pinned.
+/// Breakout headless, with the null GPU backend pinned.
 ///
 /// Same argument as the sandbox's: auto-selection deliberately refuses to fall
 /// through to `null`, so a runner with no usable Vulkan driver has no
 /// auto-selectable backend at all. Pinning it is what makes these assertions
 /// mean the same thing on every platform.
+///
+/// `--headless` is pinned here rather than restated at every call site because
+/// omitting it does not fail a test, it makes the test do something else
+/// entirely: the binary opens a real Wayland or X11 window, opens a real audio
+/// output device, and creates this platform's config directory for `breakout`
+/// on the developer's disk.
+/// Worse for the run that passes no `--frames`, which relies on headless mode
+/// for its budget: windowed it has none, so the test binary waits forever for a
+/// window nobody is there to close rather than reporting a failure.
 fn breakout_null(args: &[&str]) -> Output {
-    let mut argv = vec!["--backend", "null"];
+    let mut argv = vec!["--backend", "null", "--headless"];
     argv.extend_from_slice(args);
     breakout(&argv)
 }
@@ -45,7 +54,7 @@ fn stdout(output: &Output) -> String {
 /// did.
 #[test]
 fn a_headless_run_exits_zero_with_a_summary() {
-    let output = breakout_null(&["--headless", "--frames", "24"]);
+    let output = breakout_null(&["--frames", "24"]);
     assert_eq!(
         code(&output),
         0,
@@ -64,8 +73,8 @@ fn a_headless_run_exits_zero_with_a_summary() {
 /// merely both succeed.
 #[test]
 fn two_headless_runs_produce_identical_output() {
-    let first = breakout_null(&["--headless", "--frames", "24"]);
-    let second = breakout_null(&["--headless", "--frames", "24"]);
+    let first = breakout_null(&["--frames", "24"]);
+    let second = breakout_null(&["--frames", "24"]);
     assert_eq!(stdout(&first), stdout(&second));
     // 24 frames of 1/60 s, the first of which only establishes the clock's
     // baseline: 23 ticks at the default 60 Hz.
@@ -76,7 +85,7 @@ fn two_headless_runs_produce_identical_output() {
 /// end, because nothing will ever close a window that does not exist.
 #[test]
 fn headless_terminates_without_being_given_a_budget() {
-    let output = breakout_null(&["--headless"]);
+    let output = breakout_null(&[]);
     assert_eq!(code(&output), 0);
     assert!(
         stdout(&output).contains("120 frames"),
@@ -116,7 +125,7 @@ fn the_backend_flag_accepts_the_same_names_the_sandbox_does() {
         ])),
         2
     );
-    assert_eq!(code(&breakout_null(&["--headless", "--frames", "1"])), 0,);
+    assert_eq!(code(&breakout_null(&["--frames", "1"])), 0,);
 }
 
 /// The tick rate is a knob, and it changes the simulation rather than the
@@ -124,7 +133,7 @@ fn the_backend_flag_accepts_the_same_names_the_sandbox_does() {
 /// used to reach only a counter in the summary.
 #[test]
 fn the_tick_rate_changes_ticks_and_not_frames() {
-    let output = breakout_null(&["--headless", "--frames", "62", "--tick-hz", "30"]);
+    let output = breakout_null(&["--frames", "62", "--tick-hz", "30"]);
     assert_eq!(code(&output), 0);
     let summary = stdout(&output);
     assert!(summary.contains("62 frames"), "{summary}");
@@ -136,7 +145,7 @@ fn the_tick_rate_changes_ticks_and_not_frames() {
 /// the state the summary must report rather than a fabricated one.
 #[test]
 fn a_run_with_no_input_waits_for_a_launch() {
-    let output = breakout_null(&["--headless", "--frames", "180"]);
+    let output = breakout_null(&["--frames", "180"]);
     assert_eq!(code(&output), 0);
     let summary = stdout(&output);
     assert!(summary.contains("score 0"), "{summary}");
