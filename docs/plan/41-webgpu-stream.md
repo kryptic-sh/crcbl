@@ -70,10 +70,34 @@ no framework to adopt and no reason to depart from what is here.
 - **A tag byte first**, so a decoder dispatches rather than trial-decodes.
   `codec.rs` states the reason and it holds here: a trial decode makes "unknown
   command" indistinguishable from "malformed known command".
-- **Tags grouped by high nibble**, as `codec.rs` groups messages by direction.
-  Command families — creation, destruction, encoder state, draws, dispatch,
-  copies, queries, presentation — get a nibble each, so a corrupt tag usually
-  lands outside a family rather than inside a neighbouring command.
+- **Tags grouped into contiguous ranges by family**, as `codec.rs` groups
+  messages by direction — creation, destruction, encoder state, draws, dispatch,
+  copies, queries, presentation — so a corrupt tag usually lands outside a
+  family rather than inside a neighbouring command.
+
+  **A nibble per family does not fit, and this document said it did.** `Device`
+  declares seventeen `create_*` methods and sixteen `destroy_*`, and
+  `CommandEncoder`'s state commands come to sixteen as well: creation was over a
+  nibble's capacity before a single command existed. The ranges are sized to
+  what each family must eventually hold, the table lives in `crcbl-webgpu`'s
+  `tag` module, and a test walks it to catch a range that overlaps its neighbour
+  or is too small for the HAL methods it has to carry.
+
+- **A presence byte for every optional field that is not a handle**, with any
+  value other than the two canonical ones refused rather than treated as truthy
+  — the shape `crcbl-net`'s `Hello` uses for its optional resume token. Only
+  `Option<Handle>` avoids it, via the niche below. A bare length prefix will not
+  do for `Option<&str>`, because `Some("")` and `None` must stay distinct.
+- **Bitflags go over as `bits()`, and decode through `from_bits`, not
+  `from_bits_truncate`.** They are exempt from the enum rule below for a reason
+  that has to be stated rather than assumed: `BufferUsage`, `ShaderStages`,
+  `ImageAspect` and `ColorWrites` are not enums, and each bit is an explicit
+  `1 << n`, so the value is already chosen rather than positional. Truncating
+  would silently drop a bit the other half meant; `from_bits` makes an unclaimed
+  bit an error.
+- **The writer asserts the same caps the reader enforces**, so nothing this
+  crate encodes is something it would refuse to decode. The numbers live beside
+  the constants in the `tag` module rather than here, where they would drift.
 - **A `u32` little-endian length prefix before every variable-length field**,
   then the raw bytes, written back to back with no padding.
 - **A bounds-checked reader, never hand-rolled offset arithmetic.** `codec.rs`'s
@@ -183,11 +207,21 @@ decoding opcodes — and not the Rust that encoded the command. Without somethin
 carrying the correspondence, slices 5 and 6 are debugged blind. This has to be
 built before them, not after.
 
-**Every command carries a monotonically increasing sequence number.** The
+**Every command has a monotonically increasing sequence number, but it is not a
+field on the wire.** The buffer's header carries the sequence of its _first_
+command and the rest are positional: the nth command decoded is `base + n`. The
 replayer keeps the sequence of the command it is currently executing; when an
 error surfaces it reports `(sequence, message)`. Wasm keeps a side map from
 sequence to opcode and to the `label` the descriptor carried, and renders the
 pair into the string `take_error` hands back.
+
+Positional rather than per-command because a `u32` field would restate what
+sequential decoding already implies, cost four bytes on every command of every
+frame, and create a second source of truth that can disagree with position — and
+because it would **wrap**. At a few thousand commands a frame a `u32` exhausts
+within hours of play, while a counter that never goes on the wire is free to be
+`u64`. The counter carries across a buffer reset, which is what "commands in
+flight since the last drained error" requires.
 
 That map is bounded: it only has to cover commands in flight since the last
 successfully drained error, and it can be dropped entirely in a build that does

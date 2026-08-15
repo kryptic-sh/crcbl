@@ -1,0 +1,22 @@
+[package]
+name = "crcbl-webgpu"
+description = "Crucible WebGPU backend — the wasm → JS command stream encoding"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately empty of anything browser-shaped. This slice is the encoding and
+# nothing else: no `wasm-bindgen`, no `web-sys`, no `js-sys`. The decision that
+# produced that (a pure command stream, so the shell's allowed-import set can go
+# empty) is in `docs/plan/41-webgpu-stream.md`, and a graphics import appearing
+# here would undo it. `crcbl-hal` supplies the descriptors the stream carries,
+# `crcbl-core` the handles, `thiserror` the decode error — the same three
+# `crcbl-net`'s codec has.
+[dependencies]
+crcbl-core = { workspace = true }
+crcbl-hal = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

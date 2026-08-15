@@ -450,6 +450,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-webgpu`, a new crate holding the command-stream encoding** the coming
+  browser backend will speak: wasm serialises HAL calls into a buffer it owns
+  and JS decodes and replays them. This first piece is the encoding alone — a
+  writer, an explicit tag table, and a bounds-checked reader that exists for
+  testing and for dumping a stream, since the production decoder is JS.
+
+  It covers one command per encoding shape rather than the whole HAL surface, so
+  the remaining commands have a worked example to follow. The crate deliberately
+  depends on nothing browser-shaped: no `wasm-bindgen`, `web-sys` or `js-sys`, a
+  graphics import here being the thing the whole design exists to avoid.
+
+  `docs/plan/41-webgpu-stream.md` is the specification.
+
 - **Five logging macros in the engine — `error!`, `warn!`, `info!`, `debug!`,
   `trace!`** — plus `log_at!`, which takes the level and which the other five
   forward to so the target, the level check and the route to the sink are

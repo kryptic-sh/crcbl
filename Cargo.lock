@@ -534,6 +534,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-webgpu"
+version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+ "crcbl-hal",
+ "thiserror 2.0.19",
+]
+
+[[package]]
 name = "crcbl-wgpu"
 version = "0.1.0"
 dependencies = [

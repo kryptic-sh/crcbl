@@ -2110,6 +2110,15 @@ something trusted, and in a browser the only trusted renderer today is
 4. `crcbl-webgpu`: `Instance`, adapter enumeration, `PendingDevice`, `Device`
    creation. Exit: a browser opens a device and the capability selectors report
    what it has.
+   - ~~4a — the encoding itself, provable without a browser.~~ — **shipped.**
+     Writer, explicit tag table, and a reader that exists for tests and for
+     dumping a stream. One command per encoding shape, not the whole surface. It
+     corrected the spec in five places, the load-bearing one being that a nibble
+     per family never fitted the HAL.
+   - 4b — the JS replayer, `BackendKind`, and the `Instance` implementation.
+     Needs a new `BackendKind` variant so the new backend and `crcbl-wgpu` can
+     be selected apart during the transition, which is a HAL change with callers
+     to update.
 5. Buffers, textures, samplers, bind groups.
 6. Pipelines and WGSL modules — the artifacts are already committed and already
    validated.
