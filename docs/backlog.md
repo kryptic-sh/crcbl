@@ -9052,3 +9052,35 @@ now; the rewrites were reverted by hand.
   They are `cfg`-gated off elsewhere by design, so there is nothing to run.
 - The transport under a real replayer, which does not exist yet. The node suite
   drives a synthetic `WebAssembly.Memory`, which is not a real instance.
+
+## The reply channel is built and nothing drives it in a browser
+
+`web/engine/demo.js` drains the command stream every frame, so that transport is
+exercised by the real browser gate. `putReplyStream` has no such caller — the
+reply direction is covered only by node tools driving a synthetic
+`WebAssembly.Memory`, which is not a wasm instance. Wiring it the same way
+(offering an empty buffer, or skipping while `reply_capacity()` is zero) is the
+cheap way to get it under the browser gate before a HAL implementation depends
+on it.
+
+- **`__crcbl_web_gpu_reply_pending` is exported and nothing calls it.**
+  `check-exports.mjs` lists it as informational and does not fail on it. It is
+  the diagnostic for "the engine stopped draining"; keep it when a shim reads
+  it, drop it if the HAL work arrives without one.
+- **Two doc comments now undercount the exports.** `demo.js`'s comment at the
+  `takeCommandStream` call and `crates/crcbl/src/lib.rs`'s `pub use` doc both
+  say "the three `__crcbl_web_gpu_stream_*` exports". Three is still right for
+  the stream family; the module now exports seven in total, and the sentences
+  read as if they cover the module. The byte-identical-artifact measurement
+  recorded beside the second one was taken before the reply exports existed and
+  has not been re-run.
+- **`poll_readback`'s exact-length contract cannot be enforced at decode time.**
+  Nothing in a reply buffer says what size the descriptor asked for, so the
+  payload's own length prefix is all the decoder has. Whoever implements the HAL
+  call owes the comparison against the descriptor it kept — the plan doc used to
+  claim the reply buffer was sized from the descriptor, which is not how a reply
+  stream works, and has been corrected.
+- **Not covered by any reply shape yet:** the device-request poll, the rest of
+  `AdapterInfo` and `DeviceCaps`, surface capabilities, and any reply carrying a
+  `HalError`. The set that exists is deliberately representative, not complete,
+  and the crate docs say so.

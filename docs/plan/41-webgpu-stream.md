@@ -1,11 +1,12 @@
 # Stage 41 — The WebGPU command stream
 
 The encoding `crcbl-webgpu` speaks. Wasm serialises HAL calls into a buffer it
-owns; JS decodes that buffer and replays it against WebGPU. This document fixes
-the conventions and settles the cases that are easy to get wrong. It is slice 2
-of the WebGPU track in `ROADMAP.md`, and it exists because the encoding is the
-one part of that track with no external specification — every bug in it is ours
-alone, and no tool anywhere can see it.
+owns; JS decodes that buffer and replays it against WebGPU, and answers back
+through a second buffer wasm also owns. This document fixes the conventions and
+settles the cases that are easy to get wrong. It is slice 2 of the WebGPU track
+in `ROADMAP.md`, and it exists because the encoding is the one part of that
+track with no external specification — every bug in it is ours alone, and no
+tool anywhere can see it.
 
 The decision that produced it is recorded in `ROADMAP.md`: a pure command
 stream, with no graphics imports, so that `check-exports.mjs`'s allowed-import
@@ -38,14 +39,74 @@ Three things on the HAL seam look like they must cross and do not:
   object as a parameter, and the HAL has an object-safety regression test that
   would fail if one were added.
 
-## The three channels
+## The two channels
+
+**This section said three, and it is two.** The third — out-parameter buffers
+for `poll_readback` and `query_results` — was a separate mechanism only for as
+long as nobody wrote it down as bytes. Both methods answer a call that has
+already returned, so both need the reply channel's sequence number anyway; once
+the reply carries a length-prefixed payload the out-parameter is that payload,
+and a second buffer with a second lifetime buys nothing. What is built:
 
 1. **The command stream**, wasm → JS. One buffer, appended to during a frame,
-   replayed when the frame ends.
-2. **Reply slots**, JS → wasm. For the methods that return something the caller
-   cannot be handed synchronously.
-3. **Out-parameter buffers**, JS → wasm. `poll_readback` and `query_results`
-   take `&mut [T]` and are the only two methods that do.
+   replayed when the frame ends. `crcbl-webgpu`'s `writer`/`reader`, and
+   `web/engine/gpu-stream.js` on the far side.
+2. **The reply stream**, JS → wasm. The same format read the other way, for the
+   methods that return something the caller cannot be handed synchronously —
+   adapter enumeration, the device-request poll, `poll_readback`,
+   `query_results`. `crcbl-webgpu`'s `reply`, and `web/engine/gpu-reply.js` on
+   the far side.
+
+They share their byte primitives — one bounds-checked reader, one writer, one
+error type, in `crcbl-webgpu`'s `bytes` module — because they are one format,
+and two near-identical readers are two places for a bound to be wrong.
+
+### What the reply stream carries, and how a reply names its command
+
+A header of magic and version, then replies back to back, each one a tag byte, a
+`u64` sequence, and a body. Three things differ from the command stream and each
+is forced:
+
+- **A different magic.** `CRCBLRPL` against the stream's `CRCBLGPU`. The two
+  buffers travel opposite ways through the same shim and their tag spaces
+  deliberately reuse numbers, so a channel wired backwards has to fail on the
+  first eight bytes rather than on whichever tag happens to be unclaimed in the
+  other table.
+- **The sequence is a field.** The command stream's numbers are positional — the
+  nth command is `base + n` — and that is exactly what a reply cannot do: JS
+  answers when the browser has an answer, so replies arrive out of order, spread
+  over frames, or never. The number is `u64` for the reason the counter is, and
+  the JS half carries it as a `BigInt` rather than a number.
+- **No base sequence in the header**, because there is nothing positional left
+  for it to anchor.
+
+**A reply for a sequence nothing is waiting on is an error, not a dropped
+record.** Wasm keeps the set of sequences it expects — `expect_reply`, bounded,
+because a reply that never arrives would otherwise leave its sequence registered
+for ever — and `drain_replies` refuses the whole buffer with
+`UnexpectedSequence` if any reply names a number outside it, including a second
+reply to a sequence already answered. A replayer answering the wrong command is
+precisely the bug this channel could otherwise hide, and it looks exactly like
+an answer.
+
+The reply set built so far is **partial and deliberately so**: one reply per
+encoding shape — a handle alone, a handle plus an unbounded payload, a scalar
+plus a string, a counted array of fixed-size elements. The device-request poll,
+the rest of `AdapterInfo`, `DeviceCaps` and surface capabilities are not encoded
+yet; each is one of those four shapes or a composition of them.
+
+### The buffer JS writes into
+
+Wasm owns it, as it owns everything on this seam. The export that sizes it —
+`__crcbl_web_gpu_reply_buffer` — is the one that allocates and therefore **the
+one that can grow wasm memory**, which is `crcbl-store`'s fetch ABI exactly:
+build the `Uint8Array` after that call, from the pointer it returned, and never
+store it. Nothing else in the module can move memory.
+
+A committed buffer the engine has not drained is not overwritten: the next
+`reply_buffer` answers `0` and the shim keeps its replies for the next frame. A
+dropped reply is a command that waits for ever, so "not now" has to be
+expressible and has to be the refusal's meaning.
 
 ### When the stream is replayed
 
@@ -231,6 +292,12 @@ within hours of play, while a counter that never goes on the wire is free to be
 `u64`. The counter carries across a buffer reset, which is what "commands in
 flight since the last drained error" requires.
 
+The reply stream is the exception, and not a contradiction of this: **a reply
+does carry the number, as a `u64` field**, because a reply's position implies
+nothing. The counter's other property is what the reply direction leans on —
+monotonic across frames — so a reply arriving three frames later still names a
+number no other command has had.
+
 That map is bounded: it only has to cover commands in flight since the last
 successfully drained error, and it can be dropped entirely in a build that does
 not want it, at the cost of the attribution.
@@ -270,8 +337,12 @@ measurement nobody has taken.
   holds two `StencilFaceState`s of leaf enums. A decoder written to a
   three-level assumption will be wrong here first.
 - **`poll_readback`'s output length is a hard contract**: exactly
-  `ReadbackDesc::size` bytes, and a wrong length is `InvalidDescriptor`. The
-  reply buffer is sized from the descriptor, never from what JS thinks it wrote.
+  `ReadbackDesc::size` bytes, and a wrong length is `InvalidDescriptor`. On the
+  reply stream the payload carries its own `u32` length like every other
+  variable-length field, so **decoding cannot check this** — nothing in the
+  buffer says what the descriptor asked for. The check belongs to the caller
+  that kept the descriptor, and it is the caller that must make a short answer
+  an `InvalidDescriptor` rather than a short copy.
 - **`WHOLE_BUFFER` is `u64::MAX` and passes through verbatim.** WebGPU's
   `size: undefined` means the same thing; resolving it in the encoder would
   discard that.

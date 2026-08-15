@@ -1,19 +1,34 @@
 //! The WebGPU command stream: the encoding wasm and JS agree on.
 //!
 //! Wasm serialises HAL calls into a buffer it owns; JS decodes that buffer and
-//! replays it against WebGPU. `docs/plan/41-webgpu-stream.md` is the
-//! specification, and this crate is its first two slices — **the encoding, and
-//! the transport that carries it one way**. There is no `Instance`, no `Device`
-//! and no `CommandEncoder` implementation here yet; those are later slices, and
-//! they encode through [`StreamWriter`] when they arrive.
+//! replays it against WebGPU, and answers back through a second buffer wasm also
+//! owns. `docs/plan/41-webgpu-stream.md` is the specification, and this crate is
+//! its first three slices — **the encoding, the transport that carries it, and
+//! the reply channel that carries answers home**. There is no `Instance`, no
+//! `Device` and no `CommandEncoder` implementation here yet; those are later
+//! slices, and they encode through [`StreamWriter`] and read
+//! [`Reply`]s when they arrive.
 //!
-//! Nothing but integers and one wasm-owned buffer crosses the boundary, which is
+//! Nothing but integers and buffers wasm owns crosses the boundary, which is
 //! the convention `crcbl-store`'s fetch ABI and the OPFS entry points already
 //! use. The stream carries no pointers: the trait objects on the HAL seam are
 //! returned and never taken, so each is an id and nothing more. [`web`] is that
-//! boundary: three exports that say where the frame is, how long it is, and that
-//! JS is finished with it. **Only the wasm → JS direction exists** — the reply
-//! channel arrives with the first call that needs an answer.
+//! boundary — where each buffer is, how long it is, and who is finished with it.
+//!
+//! # Two directions, one format
+//!
+//! * **Commands, wasm → JS.** [`StreamWriter`] appends them during a frame;
+//!   [`decode_stream`] (and, in production, `web/engine/gpu-stream.js`) reads
+//!   them back. Sequence numbers are positional and never on the wire.
+//! * **Replies, JS → wasm.** [`ReplyWriter`] — and, in production,
+//!   `web/engine/gpu-reply.js` — encodes the answers to the calls that cannot be
+//!   answered synchronously; [`decode_replies`] reads them. **Each reply carries
+//!   the sequence of the command it answers**, because replies need not arrive in
+//!   order or at all. See [`reply`].
+//!
+//! Both are the same format with the same caps and the same bounds-checked
+//! cursor: one magic per direction, a version word, a tag byte per record, `u32`
+//! length prefixes. Only the header and the tag table differ.
 //!
 //! # What is encoded, and what is not
 //!
@@ -34,7 +49,8 @@
 //!
 //! The rest of the seam is made of these same shapes, so adding a command is
 //! adding a tag in [`tag`] and a method beside its neighbours — not a new
-//! convention.
+//! convention. The reply set is a subset for the same reason and on the same
+//! terms; [`reply`] lists what it covers and what it does not.
 //!
 //! # The wire
 //!
@@ -100,12 +116,16 @@
 //! See [`StreamWriter`] for where the number lives and why it is not a
 //! per-command field.
 
+mod bytes;
 pub mod command;
 pub mod reader;
+pub mod reply;
 pub mod tag;
 pub mod web;
 pub mod writer;
 
+pub use bytes::DecodeError;
 pub use command::Command;
-pub use reader::{DecodeError, StreamReader, decode_stream};
+pub use reader::{StreamReader, decode_stream};
+pub use reply::{Reply, ReplyReader, ReplyWriter, decode_replies};
 pub use writer::StreamWriter;

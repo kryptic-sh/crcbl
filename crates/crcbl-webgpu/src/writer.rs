@@ -2,13 +2,55 @@
 
 use core::ops::Range;
 
-use crcbl_core::Handle;
 use crcbl_hal::{
     BindGroupHandle, BufferDesc, BufferHandle, ClearValue, ColorAttachment, DepthStencilAttachment,
     GraphicsPipelineHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, ShaderStages,
 };
 
+use crate::bytes::ByteWriter;
 use crate::tag;
+
+// ── The command stream's own field writers ────────────────────────────────────
+//
+// [`ByteWriter`] and its primitives live in [`crate::bytes`], shared with the
+// reply direction; these are shaped by `crcbl-hal`'s descriptors and belong to
+// the command stream alone. Each is the exact counterpart of a `read_*` in
+// [`crate::reader`], which is the pairing the round-trip suite exists to hold.
+
+impl ByteWriter {
+    fn put_clear_value(&mut self, clear: ClearValue) {
+        for channel in clear.color {
+            self.put_f32(channel);
+        }
+        self.put_f32(clear.depth);
+        self.put_u32(clear.stencil);
+    }
+
+    fn put_rect(&mut self, rect: Rect2d) {
+        self.put_i32(rect.x);
+        self.put_i32(rect.y);
+        self.put_u32(rect.width);
+        self.put_u32(rect.height);
+    }
+
+    fn put_color_attachment(&mut self, attachment: &ColorAttachment) {
+        self.put_handle(attachment.view);
+        self.put_opt_handle(attachment.resolve);
+        self.put_u8(tag::load_op_code(attachment.load));
+        self.put_u8(tag::store_op_code(attachment.store));
+        self.put_clear_value(attachment.clear);
+    }
+
+    fn put_depth_stencil_attachment(&mut self, attachment: &DepthStencilAttachment) {
+        self.put_handle(attachment.view);
+        self.put_bool(attachment.read_only);
+        self.put_u8(tag::load_op_code(attachment.depth_load));
+        self.put_u8(tag::store_op_code(attachment.depth_store));
+        self.put_u8(tag::load_op_code(attachment.stencil_load));
+        self.put_u8(tag::store_op_code(attachment.stencil_store));
+        self.put_clear_value(attachment.clear);
+    }
+}
 
 /// Appends commands into the byte buffer wasm owns and JS reads in place.
 ///
@@ -45,7 +87,7 @@ use crate::tag;
 /// truncation would bury.
 #[derive(Debug)]
 pub struct StreamWriter {
-    buf: Vec<u8>,
+    bytes: ByteWriter,
     /// Sequence of the first command in `buf`. Written into the header, so the
     /// reader can name every command without a per-command field.
     base_sequence: u64,
@@ -64,7 +106,7 @@ impl StreamWriter {
     #[must_use]
     pub fn new() -> Self {
         let mut writer = Self {
-            buf: Vec::with_capacity(tag::HEADER_BYTES),
+            bytes: ByteWriter::with_capacity(tag::HEADER_BYTES),
             base_sequence: 0,
             next_sequence: 0,
         };
@@ -75,7 +117,7 @@ impl StreamWriter {
     /// The encoded stream, header included.
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
-        &self.buf
+        self.bytes.bytes()
     }
 
     /// The sequence number of the first command in the current buffer.
@@ -95,7 +137,7 @@ impl StreamWriter {
     /// more after the frame that encoded it, so a counter that restarted every
     /// frame would name several different commands with the same number.
     pub fn clear(&mut self) {
-        self.buf.clear();
+        self.bytes.clear();
         self.base_sequence = self.next_sequence;
         self.write_header();
     }
@@ -112,11 +154,11 @@ impl StreamWriter {
     /// [`Device::take_error`](crcbl_hal::Device::take_error).
     pub fn create_buffer(&mut self, buffer: BufferHandle, desc: &BufferDesc<'_>) -> u64 {
         let sequence = self.push_tag(tag::CREATE_BUFFER_TAG);
-        self.put_handle(buffer);
-        self.put_opt_str(desc.label);
-        self.put_u64(desc.size);
-        self.put_u32(desc.usage.bits());
-        self.put_u8(tag::memory_location_code(desc.memory));
+        self.bytes.put_handle(buffer);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_u64(desc.size);
+        self.bytes.put_u32(desc.usage.bits());
+        self.bytes.put_u8(tag::memory_location_code(desc.memory));
         sequence
     }
 
@@ -125,7 +167,7 @@ impl StreamWriter {
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
     pub fn destroy_buffer(&mut self, buffer: BufferHandle) -> u64 {
         let sequence = self.push_tag(tag::DESTROY_BUFFER_TAG);
-        self.put_handle(buffer);
+        self.bytes.put_handle(buffer);
         sequence
     }
 
@@ -134,33 +176,33 @@ impl StreamWriter {
     /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
     pub fn begin_debug_label(&mut self, label: &str) -> u64 {
         let sequence = self.push_tag(tag::BEGIN_DEBUG_LABEL_TAG);
-        self.put_bytes(label.as_bytes());
+        self.bytes.put_bytes(label.as_bytes());
         sequence
     }
 
     /// [`begin_render_pass`](crcbl_hal::CommandEncoder::begin_render_pass).
     pub fn begin_render_pass(&mut self, desc: &RenderPassDesc<'_>) -> u64 {
         let sequence = self.push_tag(tag::BEGIN_RENDER_PASS_TAG);
-        self.put_opt_str(desc.label);
-        self.put_count(desc.color_attachments.len());
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_count(desc.color_attachments.len());
         for attachment in desc.color_attachments {
-            self.put_color_attachment(attachment);
+            self.bytes.put_color_attachment(attachment);
         }
         match &desc.depth_stencil_attachment {
-            None => self.put_u8(tag::ABSENT),
+            None => self.bytes.put_u8(tag::ABSENT),
             Some(attachment) => {
-                self.put_u8(tag::PRESENT);
-                self.put_depth_stencil_attachment(attachment);
+                self.bytes.put_u8(tag::PRESENT);
+                self.bytes.put_depth_stencil_attachment(attachment);
             }
         }
-        self.put_rect(desc.render_area);
+        self.bytes.put_rect(desc.render_area);
         sequence
     }
 
     /// [`bind_graphics_pipeline`](crcbl_hal::CommandEncoder::bind_graphics_pipeline).
     pub fn bind_graphics_pipeline(&mut self, pipeline: GraphicsPipelineHandle) -> u64 {
         let sequence = self.push_tag(tag::BIND_GRAPHICS_PIPELINE_TAG);
-        self.put_handle(pipeline);
+        self.bytes.put_handle(pipeline);
         sequence
     }
 
@@ -176,13 +218,13 @@ impl StreamWriter {
         layout: PipelineLayoutHandle,
     ) -> u64 {
         let sequence = self.push_tag(tag::BIND_GROUP_TAG);
-        self.put_u32(slot);
-        self.put_handle(group);
-        self.put_count(dynamic_offsets.len());
+        self.bytes.put_u32(slot);
+        self.bytes.put_handle(group);
+        self.bytes.put_count(dynamic_offsets.len());
         for offset in dynamic_offsets {
-            self.put_u32(*offset);
+            self.bytes.put_u32(*offset);
         }
-        self.put_handle(layout);
+        self.bytes.put_handle(layout);
         sequence
     }
 
@@ -197,10 +239,10 @@ impl StreamWriter {
         layout: PipelineLayoutHandle,
     ) -> u64 {
         let sequence = self.push_tag(tag::PUSH_CONSTANTS_TAG);
-        self.put_u32(stages.bits());
-        self.put_u32(offset);
-        self.put_bytes(data);
-        self.put_handle(layout);
+        self.bytes.put_u32(stages.bits());
+        self.bytes.put_u32(offset);
+        self.bytes.put_bytes(data);
+        self.bytes.put_handle(layout);
         sequence
     }
 
@@ -209,133 +251,30 @@ impl StreamWriter {
     /// [`draw`](crcbl_hal::CommandEncoder::draw).
     pub fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) -> u64 {
         let sequence = self.push_tag(tag::DRAW_TAG);
-        self.put_u32(vertices.start);
-        self.put_u32(vertices.end);
-        self.put_u32(instances.start);
-        self.put_u32(instances.end);
+        self.bytes.put_u32(vertices.start);
+        self.bytes.put_u32(vertices.end);
+        self.bytes.put_u32(instances.start);
+        self.bytes.put_u32(instances.end);
         sequence
     }
 
-    // ── Field writers ────────────────────────────────────────────────────────
+    // ── Header and tags ──────────────────────────────────────────────────────
 
     fn write_header(&mut self) {
-        self.buf.extend_from_slice(tag::STREAM_MAGIC);
-        self.buf
-            .extend_from_slice(&tag::STREAM_VERSION.to_le_bytes());
-        self.buf
-            .extend_from_slice(&self.base_sequence.to_le_bytes());
+        self.bytes
+            .put_format_header(tag::STREAM_MAGIC, tag::STREAM_VERSION);
+        self.bytes.put_u64(self.base_sequence);
     }
 
     /// Opens a command and assigns it its sequence number.
+    ///
+    /// **The number does not go on the wire** — see the type docs. It is
+    /// assigned here so that the one place a command begins is the one place a
+    /// sequence is spent, whatever the body turns out to be.
     fn push_tag(&mut self, opcode: u8) -> u64 {
-        self.buf.push(opcode);
+        self.bytes.put_u8(opcode);
         let sequence = self.next_sequence;
         self.next_sequence += 1;
         sequence
-    }
-
-    fn put_u8(&mut self, value: u8) {
-        self.buf.push(value);
-    }
-
-    fn put_u32(&mut self, value: u32) {
-        self.buf.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn put_i32(&mut self, value: i32) {
-        self.buf.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn put_u64(&mut self, value: u64) {
-        self.buf.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn put_f32(&mut self, value: f32) {
-        self.buf.extend_from_slice(&value.to_le_bytes());
-    }
-
-    fn put_handle<T>(&mut self, handle: Handle<T>) {
-        self.put_u64(handle.to_bits());
-    }
-
-    /// An optional handle is a bare `u64` with zero for `None`: `to_bits` is
-    /// documented as never zero, which is what the generation's niche was for.
-    fn put_opt_handle<T>(&mut self, handle: Option<Handle<T>>) {
-        self.put_u64(handle.map_or(0, Handle::to_bits));
-    }
-
-    fn put_count(&mut self, count: usize) {
-        assert!(
-            count <= tag::MAX_ELEMENT_COUNT,
-            "{count} elements is past the stream's cap, which the reader enforces"
-        );
-        self.put_u32(count as u32);
-    }
-
-    fn put_bytes(&mut self, bytes: &[u8]) {
-        assert!(
-            bytes.len() <= tag::MAX_FIELD_BYTES,
-            "a {} byte field is past the stream's cap, which the reader enforces",
-            bytes.len()
-        );
-        self.put_u32(bytes.len() as u32);
-        self.buf.extend_from_slice(bytes);
-    }
-
-    /// A presence byte, then the string if there is one — so `Some("")` and
-    /// `None` stay distinguishable, which a bare length prefix cannot do.
-    fn put_opt_str(&mut self, value: Option<&str>) {
-        match value {
-            None => self.put_u8(tag::ABSENT),
-            Some(text) => {
-                self.put_u8(tag::PRESENT);
-                self.put_bytes(text.as_bytes());
-            }
-        }
-    }
-
-    /// A `bool` goes over as a presence byte, and the reader decodes it as one —
-    /// so a value that is neither is refused rather than read as true.
-    ///
-    /// Spelled with the constants rather than `u8::from(value)`. Those agree
-    /// today only because `PRESENT` happens to be 1, which is two independent
-    /// decisions that look like one: an implementer reading the writer alone
-    /// would pair it with a `!= 0` test on the far side, and the strictness the
-    /// reader intends would be gone without either half changing.
-    fn put_bool(&mut self, value: bool) {
-        self.put_u8(if value { tag::PRESENT } else { tag::ABSENT });
-    }
-
-    fn put_clear_value(&mut self, clear: ClearValue) {
-        for channel in clear.color {
-            self.put_f32(channel);
-        }
-        self.put_f32(clear.depth);
-        self.put_u32(clear.stencil);
-    }
-
-    fn put_rect(&mut self, rect: Rect2d) {
-        self.put_i32(rect.x);
-        self.put_i32(rect.y);
-        self.put_u32(rect.width);
-        self.put_u32(rect.height);
-    }
-
-    fn put_color_attachment(&mut self, attachment: &ColorAttachment) {
-        self.put_handle(attachment.view);
-        self.put_opt_handle(attachment.resolve);
-        self.put_u8(tag::load_op_code(attachment.load));
-        self.put_u8(tag::store_op_code(attachment.store));
-        self.put_clear_value(attachment.clear);
-    }
-
-    fn put_depth_stencil_attachment(&mut self, attachment: &DepthStencilAttachment) {
-        self.put_handle(attachment.view);
-        self.put_bool(attachment.read_only);
-        self.put_u8(tag::load_op_code(attachment.depth_load));
-        self.put_u8(tag::store_op_code(attachment.depth_store));
-        self.put_u8(tag::load_op_code(attachment.stencil_load));
-        self.put_u8(tag::store_op_code(attachment.stencil_store));
-        self.put_clear_value(attachment.clear);
     }
 }

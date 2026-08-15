@@ -1,10 +1,14 @@
 //! The canonical stream: one of every command shape, with no two fields alike.
 //!
-//! Shared rather than duplicated, because both tests that use it are about the
+//! Shared rather than duplicated, because every test that uses it is about the
 //! *same* bytes. `stream.rs` round-trips it through this crate's own reader;
 //! `fixture.rs` freezes it into `tests/fixtures/` for the JavaScript decoder to
-//! meet. A second copy of the corpus would be a second thing to keep in step,
+//! meet; `reply.rs` borrows it for the one check that is about both directions
+//! at once. A second copy of the corpus would be a second thing to keep in step,
 //! and the whole point of the fixture is that nothing drifts unnoticed.
+//!
+//! The replies are a sibling module, [`replies`](crate::replies) — see its docs
+//! for why they are not in here.
 
 use crcbl_core::Handle;
 use crcbl_hal::{

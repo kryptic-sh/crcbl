@@ -102,6 +102,13 @@ jobs:
       - name: Drive the command-stream transport
         run: node web/tools/stream-transport.mjs
 
+      # The same drift check pointed the other way. Replies travel JS to wasm,
+      # so the JavaScript side is the encoder and Rust the decoder, and the
+      # fixture is re-encoded here rather than decoded: this fails when the
+      # browser half stops producing what the engine half reads.
+      - name: Re-encode the committed reply-stream fixture
+        run: node web/tools/reply-encode.mjs
+
       # Builds each wasm-ready sample, runs `wasm-bindgen`, assembles
       # `target/site`, and runs two checks against every artifact it produced.
       # They are the real gate, and they are what makes this job worth running

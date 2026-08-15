@@ -1,19 +1,26 @@
-//! The committed stream the JavaScript decoder is held to.
+//! The committed buffers the JavaScript halves are held to.
 //!
-//! `web/engine/gpu-stream.js` is the production decoder, hand-written in another
-//! language, so nothing in either build ever sees both halves of this format at
-//! once. What holds them together is this file and its counterpart
-//! `web/tools/stream-decode.mjs`: this one freezes the canonical stream into
-//! `tests/fixtures/`, that one decodes the same bytes and asserts every field.
+//! Both directions of this format have two hand-written implementations, and no
+//! build anywhere sees both at once:
 //!
-//! So a tag, a field order or a cap changed on the Rust side turns *this* test
-//! red, and the same change made only in JavaScript turns the node test red.
-//! Neither can be satisfied by editing one half alone, which is the only reason
-//! two hand-written decoders are a tolerable arrangement.
+//! * **Commands** are encoded here and decoded by `web/engine/gpu-stream.js`.
+//! * **Replies** are encoded by `web/engine/gpu-reply.js` and decoded here.
+//!
+//! What holds each pair together is a file. This test freezes the canonical
+//! stream and the canonical replies into `tests/fixtures/`; `stream-decode.mjs`
+//! decodes the first and asserts every field, and `reply-encode.mjs` re-encodes
+//! the second and asserts every byte. So a tag, a field order or a cap changed
+//! on the Rust side turns *this* test red, and the same change made only in
+//! JavaScript turns the matching node tool red. Neither can be satisfied by
+//! editing one half alone, which is the only reason four hand-written codecs are
+//! a tolerable arrangement.
 
 mod corpus;
+mod replies;
 
 use std::path::{Path, PathBuf};
+
+use crcbl_webgpu::decode_replies;
 
 /// The environment variable that turns the comparison into a regeneration.
 ///
@@ -22,17 +29,20 @@ use std::path::{Path, PathBuf};
 /// should have to remember a second lever for the same act.
 const BLESS_ENV: &str = "CRCBL_BLESS";
 
-/// Where the committed stream lives, relative to the crate root.
-const FIXTURE: &str = "tests/fixtures/canonical-stream.bin";
+/// Where the committed command stream lives, relative to the crate root.
+const STREAM_FIXTURE: &str = "tests/fixtures/canonical-stream.bin";
+
+/// Where the committed reply stream lives, relative to the crate root.
+const REPLY_FIXTURE: &str = "tests/fixtures/canonical-replies.bin";
 
 /// The regeneration command, quoted in every failure this file can produce.
 const REGENERATE: &str = "CRCBL_BLESS=1 cargo test -p crcbl-webgpu --test fixture";
 
-fn fixture_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE)
+fn fixture_path(fixture: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture)
 }
 
-/// Whether this process was asked to regenerate the fixture.
+/// Whether this process was asked to regenerate the fixtures.
 ///
 /// Anything other than unset, empty or `0` counts, so `CRCBL_BLESS=1` and
 /// `CRCBL_BLESS=true` both work and `CRCBL_BLESS=0` does not — the rule
@@ -54,22 +64,21 @@ fn first_difference(committed: &[u8], encoded: &[u8]) -> usize {
         .unwrap_or_else(|| committed.len().min(encoded.len()))
 }
 
+/// The committed bytes of `fixture`, writing them first if this run was blessed.
+///
 /// **Blessing is not a pass**, for the reason `crcbl_golden::Outcome::into_result`
 /// gives: a run that rewrote the fixture compared nothing, and a gate that any
-/// missing file switches off is not a gate.
-#[test]
-fn the_canonical_stream_still_encodes_to_the_committed_fixture() {
-    let (stream, _) = corpus::encode_all();
-    let encoded = stream.bytes();
-    let path = fixture_path();
-
-    let committed = match std::fs::read(&path) {
+/// missing file switches off is not a gate. So this panics rather than returning
+/// when it writes.
+fn committed(fixture: &str, encoded: &[u8], counterpart: &str) -> Vec<u8> {
+    let path = fixture_path(fixture);
+    let found = match std::fs::read(&path) {
         Ok(bytes) => Some(bytes),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => panic!("{} could not be read: {error}", path.display()),
     };
 
-    if blessing() || committed.is_none() {
+    if blessing() || found.is_none() {
         let directory = path.parent().expect("the fixture path names a directory");
         std::fs::create_dir_all(directory).unwrap_or_else(|error| {
             panic!("{} could not be created: {error}", directory.display())
@@ -80,7 +89,7 @@ fn the_canonical_stream_still_encodes_to_the_committed_fixture() {
             "{} was {} rather than compared, so this run proved nothing. Review the \
              bytes, commit the file, and re-run without {BLESS_ENV}.",
             path.display(),
-            if committed.is_none() {
+            if found.is_none() {
                 "created"
             } else {
                 "re-blessed"
@@ -88,20 +97,58 @@ fn the_canonical_stream_still_encodes_to_the_committed_fixture() {
         );
     }
 
-    let committed = committed.expect("the blessing branch took every `None`");
+    let found = found.expect("the blessing branch took every `None`");
     assert!(
-        committed == encoded,
-        "the canonical stream no longer matches {}.\n  \
+        found == encoded,
+        "{} no longer matches what this crate encodes.\n  \
          encoded:   {} bytes\n  \
          committed: {} bytes\n  \
          first difference at byte {}\n\n\
          Both halves of this format are hand-written, so a change here is a change \
-         web/engine/gpu-stream.js has to make too — update it and the expected commands \
-         in web/tools/stream-decode.mjs in the same commit. Then regenerate with:\n\n    \
-         {REGENERATE}\n",
+         {counterpart} has to make too — update it in the same commit. Then regenerate \
+         with:\n\n    {REGENERATE}\n",
         path.display(),
         encoded.len(),
-        committed.len(),
-        first_difference(&committed, encoded),
+        found.len(),
+        first_difference(&found, encoded),
     );
+    found
+}
+
+#[test]
+fn the_canonical_stream_still_encodes_to_the_committed_fixture() {
+    let (stream, _) = corpus::encode_all();
+    committed(
+        STREAM_FIXTURE,
+        stream.bytes(),
+        "web/engine/gpu-stream.js — and the expected commands in web/tools/stream-decode.mjs",
+    );
+}
+
+#[test]
+fn the_canonical_replies_still_encode_to_the_committed_fixture() {
+    let (replies, _) = replies::encode_all_replies();
+    committed(
+        REPLY_FIXTURE,
+        replies.bytes(),
+        "web/engine/gpu-reply.js — and the expected replies in web/tools/reply-encode.mjs",
+    );
+}
+
+/// **The committed replies still decode to what they were written from.**
+///
+/// A second, independent claim about the same file, and the one that matters in
+/// this direction: the reply fixture is what the *JavaScript writer* is held to,
+/// so the bytes JS produces are only useful if the Rust reader turns them back
+/// into the right replies. The test above would stay green if the reader drifted
+/// away from the writer, because it never decodes anything.
+#[test]
+fn the_committed_replies_decode_to_the_replies_they_were_written_from() {
+    let (replies, expected) = replies::encode_all_replies();
+    let bytes = committed(
+        REPLY_FIXTURE,
+        replies.bytes(),
+        "web/engine/gpu-reply.js — and the expected replies in web/tools/reply-encode.mjs",
+    );
+    assert_eq!(decode_replies(&bytes), Ok(expected));
 }

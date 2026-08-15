@@ -318,6 +318,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl-webgpu`'s byte primitives moved to a shared `bytes` module** so both
+  directions of the stream read and write through one implementation rather than
+  two that can drift. `DecodeError` is still re-exported from the crate root, so
+  callers are unaffected; two of its messages no longer say "command", because
+  they now describe replies too. The command fixture is byte-identical across
+  the move, which is what says the refactor changed no bytes.
+
 - **`wait_for_configure` now logs `shell: first configure at WxH` itself**, so
   the line has one source instead of eight. It existed in `PolledBoot` and in
   every sample; the browser gate asserts it by exact text and reaches only the
@@ -490,6 +497,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   is linked now so the export contract is exercised by the real browser gate
   rather than by a crate no page builds in; it costs about 1.5 KB in each demo's
   shipped wasm, measured.
+
+- **The reply channel, JS to wasm** — `Reply`, `ReplyWriter`, `ReplyReader` and
+  `decode_replies`,
+  `StreamChannel::{expect_reply, waiting_replies, drain_replies}`, four
+  `__crcbl_web_gpu_reply_*` exports, and `web/engine/gpu-reply.js` as the
+  browser-side encoder.
+
+  Replies are a stream of the same shape as the commands, with their own magic
+  so one direction's buffer cannot be read as the other's. Each reply names the
+  command it answers by sequence number, explicitly rather than positionally,
+  because replies need not arrive in order or at all — and **a reply for a
+  sequence nothing is waiting on refuses the whole buffer** rather than being
+  dropped, since a replayer answering the wrong command is precisely the bug
+  this channel would otherwise hide.
+
+  `__crcbl_web_gpu_reply_buffer` is the one export that can grow wasm memory, so
+  it is the one a JS view must be built after and never across.
 
 - **Five logging macros in the engine — `error!`, `warn!`, `info!`, `debug!`,
   `trace!`** — plus `log_at!`, which takes the level and which the other five

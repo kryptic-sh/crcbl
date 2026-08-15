@@ -43,6 +43,35 @@ pub const STREAM_VERSION: u16 = 1;
 /// sequence number of the first command in the buffer.
 pub const HEADER_BYTES: usize = 8 + 2 + 8;
 
+/// Magic bytes at the head of every reply buffer.
+///
+/// A *different* magic from [`STREAM_MAGIC`], not the same one with a direction
+/// flag inside: the two buffers travel opposite ways through the same shim, and
+/// a channel wired backwards must fail on the first eight bytes rather than on
+/// whichever tag happens to be unclaimed in the other table.
+pub const REPLY_MAGIC: &[u8; 8] = b"CRCBLRPL";
+
+/// Current reply format version. Versioned separately from
+/// [`STREAM_VERSION`]: the two formats change for different reasons, and a
+/// shared number would force one half to be re-blessed for the other's edit.
+pub const REPLY_VERSION: u16 = 1;
+
+/// Bytes before the first reply: [`REPLY_MAGIC`] and [`REPLY_VERSION`].
+///
+/// Shorter than [`HEADER_BYTES`] by the base sequence, and deliberately: replies
+/// need not arrive in order or at all, so each carries its own sequence and
+/// there is no positional base to state. See [`REPLY_SEQUENCE_BYTES`].
+pub const REPLY_HEADER_BYTES: usize = 8 + 2;
+
+/// Bytes each reply spends on the sequence it answers, after its tag byte.
+///
+/// The command stream keeps its sequence numbers *off* the wire because they are
+/// positional. Replies cannot: the JS side answers what it can, when it can, and
+/// a reply's position in the buffer says nothing about which command it belongs
+/// to. So the number is a field here — and a `u64` field, because it names a
+/// counter that is 64-bit precisely so it never wraps within a session.
+pub const REPLY_SEQUENCE_BYTES: usize = 8;
+
 // ── Caps ──────────────────────────────────────────────────────────────────────
 
 /// Largest single length-prefixed byte field — a label, a push-constant block.
@@ -56,6 +85,24 @@ pub const MAX_FIELD_BYTES: usize = 1 << 20;
 /// Largest element count in a length-prefixed array — dynamic offsets, colour
 /// attachments. See [`MAX_FIELD_BYTES`] for why the cap exists.
 pub const MAX_ELEMENT_COUNT: usize = 1 << 16;
+
+/// The most bytes wasm will let JS write into one reply buffer.
+///
+/// A bound rather than a limit anyone should reach, in the shape
+/// `crcbl-store`'s `MAX_ASSET_BYTES` has — and it earns its place for a reason
+/// the two caps above do not have: **this length comes from JS** and drives an
+/// allocation wasm makes, so it needs a ceiling that is not "whatever the caller
+/// said". Four times [`MAX_FIELD_BYTES`], so a frame carrying one maximal
+/// payload still has room for the replies around it.
+pub const MAX_REPLY_BYTES: usize = 4 * MAX_FIELD_BYTES;
+
+/// The most sequences that may be waiting for a reply at once.
+///
+/// A reply that never arrives — JS dropped it, or the page lost its device —
+/// leaves its sequence registered for ever, so the waiting set needs a bound for
+/// the reason `crcbl-store`'s `MAX_QUEUED_REQUESTS` has one: past it, the engine
+/// is told no rather than growing a set nothing is draining.
+pub const MAX_WAITING_REPLIES: usize = 1024;
 
 // ── Command families ──────────────────────────────────────────────────────────
 //
@@ -154,6 +201,58 @@ pub const BIND_GROUP_TAG: u8 = 0x43;
 pub const PUSH_CONSTANTS_TAG: u8 = 0x44;
 /// [`Command::Draw`](crate::Command::Draw).
 pub const DRAW_TAG: u8 = 0x60;
+
+// ── Reply families ────────────────────────────────────────────────────────────
+//
+// The reply table is its own space, not a continuation of the command one. The
+// two never meet in a buffer — a reply buffer opens with `REPLY_MAGIC` and
+// nothing else does — so overlapping numbers cannot be confused, and keeping
+// them separate leaves each free to grow without the other's numbering moving.
+//
+// Grouped by the family of call being answered, for the command table's reason:
+// a corrupt tag then usually lands outside a family rather than inside a
+// neighbouring reply.
+
+/// First tag of the instance family: adapter enumeration, device requests.
+pub const REPLY_FAMILY_INSTANCE: u8 = 0x00;
+/// One past the instance family.
+pub const REPLY_FAMILY_INSTANCE_END: u8 = 0x10;
+
+/// First tag of the readback family: [`Device::poll_readback`](crcbl_hal::Device::poll_readback).
+pub const REPLY_FAMILY_READBACK: u8 = 0x10;
+/// One past the readback family.
+pub const REPLY_FAMILY_READBACK_END: u8 = 0x18;
+
+/// First tag of the query family: [`Device::query_results`](crcbl_hal::Device::query_results).
+pub const REPLY_FAMILY_QUERY: u8 = 0x18;
+/// One past the query family.
+pub const REPLY_FAMILY_QUERY_END: u8 = 0x20;
+
+/// Every reply family, as `(first, end)` pairs in ascending order. Walked by the
+/// same test that walks [`FAMILIES`].
+pub const REPLY_FAMILIES: [(u8, u8); 3] = [
+    (REPLY_FAMILY_INSTANCE, REPLY_FAMILY_INSTANCE_END),
+    (REPLY_FAMILY_READBACK, REPLY_FAMILY_READBACK_END),
+    (REPLY_FAMILY_QUERY, REPLY_FAMILY_QUERY_END),
+];
+
+/// One past the last claimed reply tag. Everything above is unassigned.
+pub const REPLY_FAMILIES_END: u8 = REPLY_FAMILY_QUERY_END;
+
+// ── Reply tags ────────────────────────────────────────────────────────────────
+//
+// **A partial set**, one per reply *shape* rather than one per HAL method that
+// needs an answer — see `crate::reply` for what is missing and why that is a
+// deliberate stopping point rather than an oversight.
+
+/// [`Reply::Adapter`](crate::Reply::Adapter).
+pub const ADAPTER_REPLY_TAG: u8 = 0x00;
+/// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending).
+pub const READBACK_PENDING_REPLY_TAG: u8 = 0x10;
+/// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady).
+pub const READBACK_READY_REPLY_TAG: u8 = 0x11;
+/// [`Reply::QueryResults`](crate::Reply::QueryResults).
+pub const QUERY_RESULTS_REPLY_TAG: u8 = 0x18;
 
 // ── Optional fields ───────────────────────────────────────────────────────────
 //
@@ -278,24 +377,60 @@ mod tests {
         ("Draw", DRAW_TAG, FAMILY_DRAW),
     ];
 
-    #[test]
-    fn every_tag_is_unique_and_sits_in_the_family_its_name_claims() {
-        let mut seen: Vec<u8> = TAGS.iter().map(|(_, tag, _)| *tag).collect();
+    /// Every reply tag this slice defines, with the family its name claims.
+    /// Spelled out for the reason [`TAGS`] is.
+    const REPLY_TAGS: [(&str, u8, u8); 4] = [
+        ("Adapter", ADAPTER_REPLY_TAG, REPLY_FAMILY_INSTANCE),
+        (
+            "ReadbackPending",
+            READBACK_PENDING_REPLY_TAG,
+            REPLY_FAMILY_READBACK,
+        ),
+        (
+            "ReadbackReady",
+            READBACK_READY_REPLY_TAG,
+            REPLY_FAMILY_READBACK,
+        ),
+        ("QueryResults", QUERY_RESULTS_REPLY_TAG, REPLY_FAMILY_QUERY),
+    ];
+
+    /// Asserts every tag in `tags` is distinct and inside the range `families`
+    /// gives the family its row names.
+    fn every_tag_sits_in_its_family(tags: &[(&str, u8, u8)], families: &[(u8, u8)]) {
+        let mut seen: Vec<u8> = tags.iter().map(|(_, tag, _)| *tag).collect();
         let count = seen.len();
         seen.sort_unstable();
         seen.dedup();
-        assert_eq!(seen.len(), count, "two commands share a tag");
+        assert_eq!(seen.len(), count, "two rows share a tag");
 
-        for (name, tag, family) in TAGS {
-            let (first, end) = FAMILIES
-                .into_iter()
-                .find(|(first, _)| *first == family)
+        for (name, tag, family) in tags {
+            let (first, end) = families
+                .iter()
+                .find(|(first, _)| first == family)
                 .expect("every family in the table has a range");
             assert!(
-                (first..end).contains(&tag),
+                (*first..*end).contains(tag),
                 "{name} has tag {tag:#04x}, outside its family's {first:#04x}..{end:#04x}"
             );
         }
+    }
+
+    #[test]
+    fn every_tag_is_unique_and_sits_in_the_family_its_name_claims() {
+        every_tag_sits_in_its_family(&TAGS, &FAMILIES);
+    }
+
+    /// The reply table is a separate space with the same discipline, so it gets
+    /// the same walk. The two tables deliberately reuse numbers — `0x00` is both
+    /// `CreateBuffer` and `Adapter` — which is safe only because a reply buffer
+    /// opens with [`REPLY_MAGIC`] and a command buffer never does.
+    #[test]
+    fn every_reply_tag_is_unique_and_sits_in_the_family_its_name_claims() {
+        every_tag_sits_in_its_family(&REPLY_TAGS, &REPLY_FAMILIES);
+        assert_ne!(
+            STREAM_MAGIC, REPLY_MAGIC,
+            "the two tag spaces overlap, so the magics are what keeps them apart"
+        );
     }
 
     /// The ranges must tile without overlapping, and each must be big enough for
@@ -304,16 +439,20 @@ mod tests {
     /// declares seventeen `create_*` methods, which a nibble cannot hold.
     #[test]
     fn the_family_ranges_tile_and_hold_what_the_hal_will_put_in_them() {
-        let mut previous_end = 0u8;
-        for (first, end) in FAMILIES {
-            assert_eq!(
-                first, previous_end,
-                "family {first:#04x} leaves a gap or overlaps its neighbour"
-            );
-            assert!(first < end, "family {first:#04x} is empty");
-            previous_end = end;
-        }
-        assert_eq!(previous_end, FAMILIES_END);
+        let tile = |families: &[(u8, u8)], end_of_all: u8| {
+            let mut previous_end = 0u8;
+            for (first, end) in families {
+                assert_eq!(
+                    *first, previous_end,
+                    "family {first:#04x} leaves a gap or overlaps its neighbour"
+                );
+                assert!(first < end, "family {first:#04x} is empty");
+                previous_end = *end;
+            }
+            assert_eq!(previous_end, end_of_all);
+        };
+        tile(&FAMILIES, FAMILIES_END);
+        tile(&REPLY_FAMILIES, REPLY_FAMILIES_END);
 
         let room = |first: u8, end: u8| usize::from(end - first);
         assert!(

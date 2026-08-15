@@ -1,22 +1,23 @@
 #!/usr/bin/env node
-// The transport's own suite: `web/engine/gpu-transport.js` against a real
-// stream in a synthetic wasm memory.
+// The transport's own suite: `web/engine/gpu-transport.js` against real buffers
+// in a synthetic wasm memory, in both directions.
 //
-// `stream-decode.mjs` beside this one is the *format*'s drift check — it
-// decodes the committed fixture and asserts every field, and it is what goes
-// red when a tag or a field order changes on one side and not the other. This
-// file asserts something else entirely: that the JS half drives the ABI in
-// `crates/crcbl-webgpu/src/web.rs` the way that module's docs say to. Different
-// contract, different failure, so a separate file rather than a second half of
-// that one.
+// `stream-decode.mjs` and `reply-encode.mjs` beside this one are the *formats*'
+// drift checks — one decodes the committed command fixture and asserts every
+// field, the other re-encodes the committed reply fixture and asserts every
+// byte — and they are what go red when a tag or a field order changes on one
+// side and not the other. This file asserts something else entirely: that the
+// JS half drives the ABI in `crates/crcbl-webgpu/src/web.rs` the way that
+// module's docs say to. Different contract, different failure, so a separate
+// file rather than a second half of those.
 //
-// There is no wasm module here and there does not need to be. The ABI is three
-// integer-returning exports and one `WebAssembly.Memory`, so the fake below is
-// the whole of it: a real `Memory`, the committed fixture copied into it at a
-// known offset, and three functions that answer what the Rust exports would.
-// The bytes are genuinely a stream `crcbl_webgpu::StreamWriter` produced —
-// `crates/crcbl-webgpu/tests/fixture.rs` writes them — so nothing here is
-// asserting against a stream this file invented.
+// There is no wasm module here and there does not need to be. The ABI is seven
+// integer-returning exports and one `WebAssembly.Memory`, so the fakes below are
+// the whole of it: a real `Memory`, the committed fixtures, and functions that
+// answer what the Rust exports would — including their refusals, which are the
+// half a shim gets wrong. The bytes are genuinely what
+// `crcbl_webgpu::StreamWriter` and `ReplyWriter` produce, so nothing here is
+// asserting against a buffer this file invented.
 //
 // THE NOT-READY CASE IS DRIVEN, NOT ASSUMED. Every export answers `0` before
 // the engine installs a channel, and a shim that read that as a failure — or,
@@ -25,14 +26,21 @@
 // checks below, because a suite that only ever ran the ready path would be the
 // guard whose scope matches nothing.
 //
+// THE REPLY DIRECTION'S FAKE GROWS MEMORY ON EVERY `reply_buffer`, because the
+// real one may: it is the one export in that module that allocates. A shim that
+// built its view before that call — the ordinary mistake, and the one
+// `crcbl-store`'s fetch ABI documents at length — throws on a detached
+// `Uint8Array` here rather than in a player's browser.
+//
 // Usage:
 //   node web/tools/stream-transport.mjs [path-to-fixture.bin]
 
 import { readFile } from 'node:fs/promises';
 import { deepStrictEqual } from 'node:assert/strict';
 
-import { takeCommandStream } from '../engine/gpu-transport.js';
+import { putReplyStream, takeCommandStream } from '../engine/gpu-transport.js';
 import { StreamDecodeError } from '../engine/gpu-stream.js';
+import { ReplyWriter } from '../engine/gpu-reply.js';
 
 /** The fixture `crcbl-webgpu`'s `fixture.rs` writes. */
 const FIXTURE = new URL(
@@ -51,6 +59,14 @@ const HEADER_BYTES = 8 + 2 + 8;
  * bottom of the heap, and no real allocation ever does.
  */
 const STREAM_PTR = 4096;
+
+/** Where the reply buffer lives. A different address from the command stream's,
+ * so a transport that wrote replies over the frame it just read would be
+ * visible rather than merely wrong. */
+const REPLY_PTR = 16384;
+
+/** `tag::REPLY_HEADER_BYTES`: the magic and the version word. */
+const REPLY_HEADER_BYTES = 8 + 2;
 
 /** @type {string[]} */
 const failures = [];
@@ -139,6 +155,95 @@ function notReadyInstance() {
     },
     __crcbl_web_gpu_stream_release: () => {
       calls.release += 1;
+      return 0;
+    },
+  };
+  return { memory, exports, calls };
+}
+
+/**
+ * A wasm instance with a reply channel installed, whose `reply_buffer` grows
+ * memory exactly as the real one may.
+ *
+ * The four exports are what `crates/crcbl-webgpu/src/web.rs` documents:
+ * `capacity` is the readiness test and is never zero while a channel is
+ * installed, `buffer` sizes the wasm-owned buffer and hands back its address —
+ * refusing while a committed buffer is undrained — and `commit` refuses a
+ * length longer than what was handed out or shorter than a header. `drain`
+ * stands in for the engine.
+ *
+ * @param {number} [capacity]
+ */
+function replyInstance(capacity = 4 << 20) {
+  const memory = new WebAssembly.Memory({ initial: 1, maximum: 16 });
+  const calls = { capacity: 0, pending: 0, buffer: 0, commit: 0 };
+  let handedOut = 0;
+  /** @type {number | null} */
+  let committed = null;
+  const exports = {
+    __crcbl_web_gpu_reply_capacity: () => {
+      calls.capacity += 1;
+      return capacity;
+    },
+    __crcbl_web_gpu_reply_pending: () => {
+      calls.pending += 1;
+      return committed ?? 0;
+    },
+    __crcbl_web_gpu_reply_buffer: (/** @type {number} */ len) => {
+      calls.buffer += 1;
+      if (len > capacity || committed !== null) return 0;
+      // The allocation the real one makes, and therefore the growth: every
+      // `Uint8Array` over the old `memory.buffer` is detached from here on.
+      memory.grow(1);
+      handedOut = len;
+      return REPLY_PTR;
+    },
+    __crcbl_web_gpu_reply_commit: (/** @type {number} */ len) => {
+      calls.commit += 1;
+      if (len > handedOut || len < REPLY_HEADER_BYTES || committed !== null) {
+        return 0;
+      }
+      committed = len;
+      return 1;
+    },
+  };
+  /** What the engine would read, and the release that follows it. */
+  const drain = () => {
+    const bytes =
+      committed === null
+        ? null
+        : new Uint8Array(memory.buffer, REPLY_PTR, committed).slice();
+    committed = null;
+    handedOut = 0;
+    return bytes;
+  };
+  return { memory, exports, calls, drain };
+}
+
+/**
+ * A wasm instance the engine has not installed a reply channel into yet.
+ *
+ * `capacity` answers `0`, and nothing else may be called: a `buffer` call at
+ * that moment would be asking address zero to hold a frame's answers.
+ */
+function notReadyReplyInstance() {
+  const memory = new WebAssembly.Memory({ initial: 1 });
+  const calls = { capacity: 0, pending: 0, buffer: 0, commit: 0 };
+  const exports = {
+    __crcbl_web_gpu_reply_capacity: () => {
+      calls.capacity += 1;
+      return 0;
+    },
+    __crcbl_web_gpu_reply_pending: () => {
+      calls.pending += 1;
+      return 0;
+    },
+    __crcbl_web_gpu_reply_buffer: () => {
+      calls.buffer += 1;
+      return 0;
+    },
+    __crcbl_web_gpu_reply_commit: () => {
+      calls.commit += 1;
       return 0;
     },
   };
@@ -337,6 +442,101 @@ async function main() {
   check(
     broken.calls.release === 1,
     'a frame that threw mid-decode is released anyway'
+  );
+
+  // ---- replies cross the other way, into a buffer that just moved ----------
+  // The whole JS → wasm direction: encode, hand over, and read back what landed
+  // in wasm memory. The fake grows memory inside `reply_buffer`, so a transport
+  // that built its view before that call throws on a detached `Uint8Array`
+  // here — which is the mistake the export's "may grow wasm memory" line
+  // exists for, and the only one in this direction that a test can catch
+  // without a browser.
+  const replies = new ReplyWriter();
+  replies.readbackPending(41n, handle(51, 52));
+  replies.queryResults(0x0000_0001_0000_002an, handle(57, 58), 4, [
+    0xffff_ffff_ffff_ffffn,
+    0n,
+  ]);
+  const encoded = replies.bytes.slice();
+
+  const inbox = replyInstance();
+  let sent = false;
+  try {
+    sent = putReplyStream({ ...inbox, bytes: replies.bytes });
+  } catch (error) {
+    check(false, `the replies are handed over at all (threw ${String(error)})`);
+  }
+  check(sent, 'a buffer of replies is accepted');
+  checkEqual(
+    inbox.calls,
+    { capacity: 1, pending: 0, buffer: 1, commit: 1 },
+    'one capacity, one buffer and one commit per hand-over'
+  );
+  checkEqual(
+    inbox.drain(),
+    encoded,
+    'the bytes wasm reads are the bytes the writer produced, after the grow'
+  );
+
+  // ---- an undrained buffer is not overwritten -----------------------------
+  // Wasm refuses, and the shim's answer to a refusal is to keep the replies —
+  // a dropped reply is a command that waits for ever.
+  const held = replyInstance();
+  check(
+    putReplyStream({ ...held, bytes: replies.bytes }),
+    'the first buffer is taken'
+  );
+  check(
+    putReplyStream({ ...held, bytes: replies.bytes }) === false,
+    'a second buffer is refused while the first is undrained'
+  );
+  checkEqual(
+    held.drain(),
+    encoded,
+    'and the first one is still there, byte for byte'
+  );
+  check(
+    putReplyStream({ ...held, bytes: replies.bytes }),
+    'and the next one is taken once the engine has drained it'
+  );
+
+  // ---- a buffer larger than wasm will take is not offered at all -----------
+  // The capacity is asked for rather than assumed, so this costs one call and
+  // no allocation on the wasm side.
+  const small = replyInstance(REPLY_HEADER_BYTES);
+  check(
+    putReplyStream({ ...small, bytes: replies.bytes }) === false,
+    'a buffer past the capacity is refused'
+  );
+  checkEqual(
+    small.calls,
+    { capacity: 1, pending: 0, buffer: 0, commit: 0 },
+    'and settled by the capacity alone, with nothing allocated'
+  );
+
+  // ---- an engine that has not booted reads as not-ready, not as failure ----
+  const earlyInbox = notReadyReplyInstance();
+  let earlyReplyThrew = null;
+  let earlySent = null;
+  try {
+    earlySent = putReplyStream({ ...earlyInbox, bytes: replies.bytes });
+  } catch (error) {
+    earlyReplyThrew = error;
+  }
+  check(
+    earlyReplyThrew === null,
+    earlyReplyThrew === null
+      ? 'a shim with replies and no channel does not throw'
+      : `a shim with replies and no channel threw ${String(earlyReplyThrew)}`
+  );
+  check(
+    earlySent === false,
+    `no channel installed answers false (${earlySent})`
+  );
+  checkEqual(
+    earlyInbox.calls,
+    { capacity: 1, pending: 0, buffer: 0, commit: 0 },
+    'not-ready is settled by the capacity alone'
   );
 
   if (failures.length > 0) {

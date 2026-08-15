@@ -17,233 +17,22 @@
 //! checked, every enum code is one this crate wrote, and a stream this decoder
 //! accepts is one the JS replayer can be held to.
 
-use crcbl_core::Handle;
 use crcbl_hal::{
     BufferUsage, ClearValue, ColorAttachment, DepthStencilAttachment, LoadOp, Rect2d, ShaderStages,
     StoreOp,
 };
 
+use crate::bytes::{ByteReader, DecodeError};
 use crate::{Command, tag};
 
-// ── Error type ────────────────────────────────────────────────────────────────
+// ── The command stream's own field readers ────────────────────────────────────
+//
+// [`ByteReader`] and its primitives live in [`crate::bytes`], shared with the
+// reply direction. What is below is shaped by `crcbl-hal`'s descriptors and is
+// the command stream's alone, so it is an impl block here rather than one more
+// thing the reply reader has to read past.
 
-/// Everything a malformed stream can be.
-///
-/// Shaped after [`crcbl_net`'s `DecodeError`](https://docs.rs/crcbl-net), which
-/// is the house wire style: the variants say where the decode stopped and what
-/// it wanted, so a report names a field rather than a buffer.
-#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum DecodeError {
-    /// The buffer does not start with [`tag::STREAM_MAGIC`].
-    #[error("not a command stream: bad magic")]
-    BadMagic,
-    /// The buffer's version is not one this build speaks. Reachable in a browser
-    /// in a way it is not in a single binary — the Rust and JS halves ship as
-    /// separate artifacts and are cached independently.
-    #[error("stream format version {found}, expected {expected}")]
-    UnsupportedVersion {
-        /// Version the buffer declared.
-        found: u16,
-        /// Version this build writes and reads.
-        expected: u16,
-    },
-    /// A read ran off the end of the buffer.
-    #[error("stream too short: need {needed} bytes at offset {offset}, have {remaining}")]
-    TooShort {
-        /// Bytes the field wanted.
-        needed: usize,
-        /// Where it started.
-        offset: usize,
-        /// Bytes actually left.
-        remaining: usize,
-    },
-    /// A tag byte no command in [`tag`] claims. Distinguishable from a malformed
-    /// known command precisely because the tag comes first.
-    #[error("unknown command tag: 0x{tag:02x}")]
-    UnknownTag {
-        /// The byte that was read.
-        tag: u8,
-    },
-    /// A length or element count past the cap for its field.
-    #[error("invalid length for {field}: {len}")]
-    InvalidLength {
-        /// Field that declared it.
-        field: &'static str,
-        /// The length declared.
-        len: u32,
-    },
-    /// An enum code, bitflags value or presence byte no variant claims.
-    #[error("invalid code for {field}: 0x{code:x}")]
-    InvalidEnum {
-        /// Field that carried it.
-        field: &'static str,
-        /// The code that was read.
-        code: u32,
-    },
-    /// A handle field that may not be `None` held zero bits.
-    #[error("{field} is a null handle")]
-    NullHandle {
-        /// Field that carried it.
-        field: &'static str,
-    },
-    /// A length-prefixed string that is not UTF-8.
-    #[error("{field} is not valid UTF-8")]
-    NotUtf8 {
-        /// Field that carried it.
-        field: &'static str,
-    },
-}
-
-// ── ByteReader ────────────────────────────────────────────────────────────────
-
-/// Cursor over a stream buffer that bounds-checks every read.
-///
-/// Every decode below goes through this rather than hand-rolling
-/// `if cursor + N > buf.len()` per field: that is one more chance to get a bound
-/// wrong at each of them, and this seam has more fields than the network one
-/// this is copied from.
-pub(crate) struct ByteReader<'a> {
-    buf: &'a [u8],
-    offset: usize,
-}
-
-impl core::fmt::Debug for ByteReader<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ByteReader")
-            .field("len", &self.buf.len())
-            .field("offset", &self.offset)
-            .finish()
-    }
-}
-
-impl<'a> ByteReader<'a> {
-    pub(crate) const fn new(buf: &'a [u8]) -> Self {
-        Self { buf, offset: 0 }
-    }
-
-    pub(crate) const fn remaining(&self) -> usize {
-        self.buf.len().saturating_sub(self.offset)
-    }
-
-    pub(crate) const fn is_empty(&self) -> bool {
-        self.remaining() == 0
-    }
-
-    pub(crate) fn read_bytes(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
-        if self.remaining() < len {
-            return Err(DecodeError::TooShort {
-                needed: len,
-                offset: self.offset,
-                remaining: self.remaining(),
-            });
-        }
-        let slice = &self.buf[self.offset..self.offset + len];
-        self.offset += len;
-        Ok(slice)
-    }
-
-    fn read_array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
-        let bytes = self.read_bytes(N)?;
-        Ok(bytes
-            .try_into()
-            .expect("read_bytes yields exactly the length it was asked for"))
-    }
-
-    pub(crate) fn read_u8(&mut self) -> Result<u8, DecodeError> {
-        Ok(self.read_array::<1>()?[0])
-    }
-
-    pub(crate) fn read_u16(&mut self) -> Result<u16, DecodeError> {
-        Ok(u16::from_le_bytes(self.read_array()?))
-    }
-
-    pub(crate) fn read_u32(&mut self) -> Result<u32, DecodeError> {
-        Ok(u32::from_le_bytes(self.read_array()?))
-    }
-
-    pub(crate) fn read_i32(&mut self) -> Result<i32, DecodeError> {
-        Ok(i32::from_le_bytes(self.read_array()?))
-    }
-
-    pub(crate) fn read_u64(&mut self) -> Result<u64, DecodeError> {
-        Ok(u64::from_le_bytes(self.read_array()?))
-    }
-
-    pub(crate) fn read_f32(&mut self) -> Result<f32, DecodeError> {
-        Ok(f32::from_le_bytes(self.read_array()?))
-    }
-
-    /// A handle that may not be absent. Zero bits are what
-    /// [`Handle::from_bits`] rejects, and no real handle ever has them.
-    fn read_handle<T>(&mut self, field: &'static str) -> Result<Handle<T>, DecodeError> {
-        Handle::from_bits(self.read_u64()?).ok_or(DecodeError::NullHandle { field })
-    }
-
-    /// A handle that may be absent, as a bare `u64` with zero for `None`.
-    fn read_opt_handle<T>(&mut self) -> Result<Option<Handle<T>>, DecodeError> {
-        Ok(Handle::from_bits(self.read_u64()?))
-    }
-
-    fn read_len(&mut self, field: &'static str, cap: usize) -> Result<usize, DecodeError> {
-        let len = self.read_u32()?;
-        if len as usize > cap {
-            return Err(DecodeError::InvalidLength { field, len });
-        }
-        Ok(len as usize)
-    }
-
-    /// A length-prefixed byte field, capped by [`tag::MAX_FIELD_BYTES`].
-    fn read_field(&mut self, field: &'static str) -> Result<&'a [u8], DecodeError> {
-        let len = self.read_len(field, tag::MAX_FIELD_BYTES)?;
-        self.read_bytes(len)
-    }
-
-    fn read_string(&mut self, field: &'static str) -> Result<String, DecodeError> {
-        let bytes = self.read_field(field)?;
-        String::from_utf8(bytes.to_vec()).map_err(|_| DecodeError::NotUtf8 { field })
-    }
-
-    /// A presence byte, then the string if there is one. `Some("")` and `None`
-    /// are different values and stay different here.
-    fn read_opt_string(&mut self, field: &'static str) -> Result<Option<String>, DecodeError> {
-        if self.read_present(field)? {
-            Ok(Some(self.read_string(field)?))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// A presence byte. Anything but the two canonical values is refused rather
-    /// than read as truthy.
-    fn read_present(&mut self, field: &'static str) -> Result<bool, DecodeError> {
-        match self.read_u8()? {
-            tag::ABSENT => Ok(false),
-            tag::PRESENT => Ok(true),
-            code => Err(DecodeError::InvalidEnum {
-                field,
-                code: code.into(),
-            }),
-        }
-    }
-
-    fn read_bool(&mut self, field: &'static str) -> Result<bool, DecodeError> {
-        self.read_present(field)
-    }
-
-    /// An element count, capped by [`tag::MAX_ELEMENT_COUNT`] *and* by the bytes
-    /// left — every element costs at least one byte, so a count past that cannot
-    /// be honest, and neither cap alone bounds the allocation on its own.
-    fn read_count(&mut self, field: &'static str) -> Result<usize, DecodeError> {
-        let count = self.read_len(field, tag::MAX_ELEMENT_COUNT)?;
-        if count > self.remaining() {
-            return Err(DecodeError::InvalidLength {
-                field,
-                len: count as u32,
-            });
-        }
-        Ok(count)
-    }
-
+impl ByteReader<'_> {
     fn read_load_op(&mut self, field: &'static str) -> Result<LoadOp, DecodeError> {
         let code = self.read_u8()?;
         tag::load_op_from_code(code).ok_or(DecodeError::InvalidEnum {
@@ -332,16 +121,7 @@ impl<'a> StreamReader<'a> {
     /// whole header.
     pub fn new(stream: &'a [u8]) -> Result<Self, DecodeError> {
         let mut reader = ByteReader::new(stream);
-        if reader.read_bytes(tag::STREAM_MAGIC.len())? != tag::STREAM_MAGIC {
-            return Err(DecodeError::BadMagic);
-        }
-        let version = reader.read_u16()?;
-        if version != tag::STREAM_VERSION {
-            return Err(DecodeError::UnsupportedVersion {
-                found: version,
-                expected: tag::STREAM_VERSION,
-            });
-        }
+        reader.read_format_header(tag::STREAM_MAGIC, tag::STREAM_VERSION)?;
         let base_sequence = reader.read_u64()?;
         Ok(Self {
             reader,
@@ -523,87 +303,24 @@ pub fn decode_stream(stream: &[u8]) -> Result<Vec<Command>, DecodeError> {
 mod tests {
     use super::*;
 
+    /// The `ByteReader` unit tests moved to [`crate::bytes`] with the type; what
+    /// belongs here is the part of the decode this module owns. The header is
+    /// the smallest of those: `new` reads the base sequence after the shared
+    /// magic-and-version check, and a buffer that stops between the two is short
+    /// rather than corrupt.
     #[test]
-    fn a_read_past_the_end_reports_what_it_wanted_and_what_was_left() {
-        let mut reader = ByteReader::new(&[1, 2, 3]);
-        assert_eq!(reader.read_u16(), Ok(0x0201));
-        assert_eq!(
-            reader.read_u32(),
-            Err(DecodeError::TooShort {
-                needed: 4,
-                offset: 2,
-                remaining: 1,
-            })
-        );
-        // A failed read consumes nothing.
-        assert_eq!(reader.remaining(), 1);
-        assert_eq!(reader.read_u8(), Ok(3));
-        assert!(reader.is_empty());
-    }
+    fn a_header_missing_its_base_sequence_is_too_short_rather_than_a_stream() {
+        let mut header = Vec::new();
+        header.extend_from_slice(tag::STREAM_MAGIC);
+        header.extend_from_slice(&tag::STREAM_VERSION.to_le_bytes());
+        assert_eq!(header.len(), tag::HEADER_BYTES - 8);
+        assert!(matches!(
+            StreamReader::new(&header),
+            Err(DecodeError::TooShort { needed: 8, .. })
+        ));
 
-    #[test]
-    fn a_null_handle_is_refused_where_none_is_not_a_value() {
-        let zero = 0u64.to_le_bytes();
-        let mut reader = ByteReader::new(&zero);
-        assert_eq!(
-            reader.read_handle::<()>("field"),
-            Err(DecodeError::NullHandle { field: "field" })
-        );
-
-        // …and read as `None` where it is.
-        let mut reader = ByteReader::new(&zero);
-        assert_eq!(reader.read_opt_handle::<()>(), Ok(None));
-    }
-
-    #[test]
-    fn a_presence_byte_that_is_neither_value_is_refused_rather_than_read_as_true() {
-        let mut reader = ByteReader::new(&[2]);
-        assert_eq!(
-            reader.read_present("field"),
-            Err(DecodeError::InvalidEnum {
-                field: "field",
-                code: 2
-            })
-        );
-    }
-
-    #[test]
-    fn each_decode_error_prints_the_field_and_offset_that_explain_it() {
-        assert_eq!(
-            DecodeError::TooShort {
-                needed: 8,
-                offset: 1,
-                remaining: 3
-            }
-            .to_string(),
-            "stream too short: need 8 bytes at offset 1, have 3"
-        );
-        assert_eq!(
-            DecodeError::UnknownTag { tag: 0xAB }.to_string(),
-            "unknown command tag: 0xab"
-        );
-        assert_eq!(
-            DecodeError::UnsupportedVersion {
-                found: 2,
-                expected: 1
-            }
-            .to_string(),
-            "stream format version 2, expected 1"
-        );
-        assert_eq!(
-            DecodeError::InvalidLength {
-                field: "PushConstants::data",
-                len: 999
-            }
-            .to_string(),
-            "invalid length for PushConstants::data: 999"
-        );
-        assert_eq!(
-            DecodeError::NullHandle {
-                field: "BindGroup::layout"
-            }
-            .to_string(),
-            "BindGroup::layout is a null handle"
-        );
+        header.extend_from_slice(&7u64.to_le_bytes());
+        let reader = StreamReader::new(&header).expect("a whole header is a stream");
+        assert_eq!(reader.base_sequence(), 7);
     }
 }

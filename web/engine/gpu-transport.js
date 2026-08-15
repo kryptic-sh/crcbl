@@ -1,32 +1,42 @@
-// The wasm side of the command stream: a frame out of wasm memory, decoded.
+// The wasm side of both channels: a frame of commands out of wasm memory, and
+// a buffer of replies back into it.
 //
-// `crates/crcbl-webgpu/src/web.rs` is the contract — the three exports, who
-// owns the buffer, and when it is valid — and this file is the shim its module
-// docs describe. It is deliberately separate from `gpu-stream.js`, which is the
-// *format* and knows nothing about wasm: that decoder takes a `Uint8Array` and
-// is driven under node with no wasm instance anywhere, and folding an ABI into
-// it would give it a dependency it does not have. Format on one side of the
-// seam, transport on the other, exactly as `wasm.js` and `storage.js` divide.
+// `crates/crcbl-webgpu/src/web.rs` is the contract — the seven exports, who
+// owns each buffer, and when it is valid — and this file is the shim its module
+// docs describe. It is deliberately separate from `gpu-stream.js` and
+// `gpu-reply.js`, which are the *formats* and know nothing about wasm: those
+// take and produce a `Uint8Array` and are driven under node with no wasm
+// instance anywhere, and folding an ABI into them would give them a dependency
+// they do not have. Format on one side of the seam, transport on the other,
+// exactly as `wasm.js` and `storage.js` divide.
 //
-// ONE DIRECTION. Wasm → JS and nothing else. There is no reply channel yet: no
-// export here takes a value, and nothing in a frame waits for an answer. The
-// JS → wasm half arrives with the first call that needs one.
+// TWO DIRECTIONS. Commands come out once a frame; replies go in whenever there
+// are any. They are separate buffers with separate lifetimes and nothing in a
+// frame blocks on the other direction — a reply arrives whenever the browser
+// has the answer, named by the sequence of the command it answers.
 //
 // THE DETACHED-VIEW RULE, AND WHERE IT BITES HERE. A `Uint8Array` over
 // `memory.buffer` is detached the moment wasm memory grows, and every access
-// through it then throws. The one view in this file is built from the pointer
-// the call above it just returned and is dropped before the function returns —
-// the rule `wasm.js` enforces by never exporting a view at all.
+// through it then throws. Each view in this file is built from the pointer the
+// call above it just returned and is dropped before its function returns — the
+// rule `wasm.js` enforces by never exporting a view at all.
 //
-// What could detach it is narrower than usual, and worth stating exactly:
-// neither `__crcbl_web_gpu_stream_ptr` nor `__crcbl_web_gpu_stream_len` nor
-// `__crcbl_web_gpu_stream_release` allocates, so none of the three can grow
-// memory. What can is *encoding*, which happens inside the engine's own
-// per-frame export. So a view built here is safe for the whole decode, and
-// would be stale the moment the next frame is recorded. Nothing this function
-// returns is a view: `gpu-stream.js` copies a push-constant block out and
-// decodes a label to a string, so the commands outlive the frame they came
-// from and a later `memory.grow()` cannot reach into them.
+// Which calls can actually detach one is narrower than usual, and worth stating
+// exactly:
+//
+//   * `__crcbl_web_gpu_reply_buffer` CAN. It sizes a `Vec` and is the one export
+//     in that module that allocates. Its view is therefore built strictly after
+//     it returns, from what it returned.
+//   * The stream exports cannot: two read a pointer and a length, one clears a
+//     `Vec` and keeps its allocation. What moves that buffer is *encoding*,
+//     which happens inside the engine's own per-frame export. So the view built
+//     in `takeCommandStream` is safe for the whole decode, and would be stale
+//     the moment the next frame is recorded.
+//
+// Nothing `takeCommandStream` returns is a view: `gpu-stream.js` copies a
+// push-constant block out and decodes a label to a string, so the commands
+// outlive the frame they came from and a later `memory.grow()` cannot reach
+// into them.
 
 import { StreamReader } from './gpu-stream.js';
 
@@ -80,4 +90,48 @@ export function takeCommandStream({ exports, memory }) {
   } finally {
     exports.__crcbl_web_gpu_stream_release();
   }
+}
+
+/**
+ * Hands a buffer of encoded replies to wasm, or reports that it would not take
+ * them.
+ *
+ * `bytes` is what a `ReplyWriter` from `gpu-reply.js` produced: a header and
+ * every reply this side has an answer for, each naming the sequence of the
+ * command it answers.
+ *
+ * `false` is not a failure and not an error — it is "not now", and the caller
+ * **keeps the replies and offers the same buffer again next frame**. There are
+ * four ways to get it, and none of them loses an answer:
+ *
+ * - no channel installed, so the engine has not booted (`capacity` is `0`);
+ * - the buffer is larger than wasm will accept in one go;
+ * - the engine has not drained the last buffer, so wasm will not overwrite it;
+ * - wasm refused the commit, which means the bytes were not delivered.
+ *
+ * Discarding them on a `false` would be the one unrecoverable bug this channel
+ * can have: a dropped reply is a command that waits for ever.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @param {Uint8Array} options.bytes A `ReplyWriter`'s `bytes`.
+ * @returns {boolean} Whether wasm took them.
+ */
+export function putReplyStream({ exports, memory, bytes }) {
+  // The readiness test is the capacity, not the pending count: an installed
+  // channel always answers a non-zero cap, while `pending` is zero on almost
+  // every frame. It doubles as the size check, which is why it is read rather
+  // than hard-coded — the number is a Rust constant, and a shim that baked it in
+  // would keep its old value across a wasm update it did not know about.
+  const capacity = exports.__crcbl_web_gpu_reply_capacity();
+  if (capacity === 0 || bytes.length > capacity) return false;
+
+  // THE VIEW. Built after the call that may have grown memory, from the pointer
+  // that call returned, used before anything else calls back into wasm, and not
+  // stored.
+  const ptr = exports.__crcbl_web_gpu_reply_buffer(bytes.length);
+  if (ptr === 0) return false;
+  new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+  return exports.__crcbl_web_gpu_reply_commit(bytes.length) === 1;
 }
