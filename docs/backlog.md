@@ -9002,3 +9002,53 @@ merely detected. Declined for now: it adds a codegen step to a build that has
 none, and the failure it prevents already fails loudly in the Pages job on every
 pull request. Worth revisiting if the tag table grows to the full surface and
 the two tables start being edited in separate sessions.
+
+## The command stream is wired but carries nothing
+
+`crcbl-webgpu`'s transport is linked into every browser artifact and drained
+once a frame by `web/engine/demo.js`, and it returns nothing every time. That is
+the intended state, not an unfinished edge, and both halves say so — but it is
+worth writing down so nobody reads the wiring as a working feature.
+
+- **Nothing calls `crcbl_webgpu::web::install` outside the crate's own tests**,
+  and no HAL implementation writes through `StreamChannel::encode`. This ends
+  when the WebGPU backend lands. The replayer goes where `takeCommandStream`'s
+  result is currently dropped.
+- **The reply channel (JS → wasm) does not exist.** Deliberately out of scope:
+  it arrives with the first HAL call that needs an answer — the device-request
+  poll, `poll_readback`, `query_results`. The out-parameter buffers named in
+  `docs/plan/41-webgpu-stream.md` are absent for the same reason.
+- **"Encoding moves the buffer" is documented, not tested.** The stable half —
+  that `release` does not move it — is asserted. Forcing a `Vec` realloc
+  deterministically is allocator-dependent, so the moving half rests on the
+  documented rule that a JS view must not outlive the frame it decoded.
+
+### The umbrella's re-export is not what keeps the symbols
+
+`crates/crcbl/src/lib.rs` re-exports `crcbl_webgpu as webgpu` on wasm32, and
+that re-export is **not** required for the exports to reach the artifact.
+Measured: a build with the dependency alone and one with the dependency plus the
+re-export produce a byte-identical `crcbl_breakout.wasm` — compared with `cmp`,
+not a diff wrapper — and `cargo machete` stays green either way.
+
+It is kept so the crate is genuinely named by something rather than the ABI
+resting on rustc keeping an rlib's `#[unsafe(no_mangle)]` symbols when nothing
+references it, which `web/tools/check-exports.mjs`'s own header calls
+unguaranteed. Deleting it is safe today, and `check-exports` is what would
+notice the day that stops being true.
+
+### Prettier rewrites unrelated lines in workflow YAML
+
+Running `prettier --write` on `.github/workflows/pages.yml` reflows unrelated
+double-quoted scalars to single quotes. The repo has no prettier config and no
+prettier step in CI, so on YAML it is a formatter that only ever produces
+drive-by diffs. Either adopt it for YAML with a config that settles quote style,
+or keep it to markdown, where the project rule already puts it. Left alone for
+now; the rewrites were reverted by hand.
+
+### Not verified
+
+- The three exports on any target other than `wasm32-unknown-unknown` release.
+  They are `cfg`-gated off elsewhere by design, so there is nothing to run.
+- The transport under a real replayer, which does not exist yet. The node suite
+  drives a synthetic `WebAssembly.Memory`, which is not a real instance.

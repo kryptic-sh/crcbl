@@ -283,6 +283,7 @@ dependencies = [
  "crcbl-store",
  "crcbl-ui",
  "crcbl-vk",
+ "crcbl-webgpu",
  "crcbl-wgpu",
  "glam",
  "log",

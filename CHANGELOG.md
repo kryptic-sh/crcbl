@@ -478,6 +478,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   2^21, and `WHOLE_BUFFER` read as a number becomes a different, still-enormous
   size that nothing downstream would question.
 
+- **`crcbl::webgpu`, and the browser transport under it.** `crcbl-webgpu` is now
+  a `wasm32`-only dependency of the umbrella, so every demo's artifact exports
+  `__crcbl_web_gpu_stream_len`, `_ptr` and `_release`, and
+  `web/engine/gpu-transport.js` drains them from the shim's frame loop beside
+  the fetch drain.
+
+  **Nothing encodes into the stream yet**, so those exports answer `0` every
+  frame and the drain returns nothing. The transport is wired and gated rather
+  than carrying commands, and both halves say so where a reader will see it. It
+  is linked now so the export contract is exercised by the real browser gate
+  rather than by a crate no page builds in; it costs about 1.5 KB in each demo's
+  shipped wasm, measured.
+
 - **Five logging macros in the engine — `error!`, `warn!`, `info!`, `debug!`,
   `trace!`** — plus `log_at!`, which takes the level and which the other five
   forward to so the target, the level check and the route to the sink are

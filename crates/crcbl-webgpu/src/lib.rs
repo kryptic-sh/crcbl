@@ -2,15 +2,18 @@
 //!
 //! Wasm serialises HAL calls into a buffer it owns; JS decodes that buffer and
 //! replays it against WebGPU. `docs/plan/41-webgpu-stream.md` is the
-//! specification, and this crate is its first slice — **the encoding, and
-//! nothing else**. There is no `Instance`, no `Device`, no `CommandEncoder`
-//! implementation and no browser code here yet; those are later slices, and they
-//! encode through [`StreamWriter`] when they arrive.
+//! specification, and this crate is its first two slices — **the encoding, and
+//! the transport that carries it one way**. There is no `Instance`, no `Device`
+//! and no `CommandEncoder` implementation here yet; those are later slices, and
+//! they encode through [`StreamWriter`] when they arrive.
 //!
 //! Nothing but integers and one wasm-owned buffer crosses the boundary, which is
 //! the convention `crcbl-store`'s fetch ABI and the OPFS entry points already
 //! use. The stream carries no pointers: the trait objects on the HAL seam are
-//! returned and never taken, so each is an id and nothing more.
+//! returned and never taken, so each is an id and nothing more. [`web`] is that
+//! boundary: three exports that say where the frame is, how long it is, and that
+//! JS is finished with it. **Only the wasm → JS direction exists** — the reply
+//! channel arrives with the first call that needs an answer.
 //!
 //! # What is encoded, and what is not
 //!
@@ -100,6 +103,7 @@
 pub mod command;
 pub mod reader;
 pub mod tag;
+pub mod web;
 pub mod writer;
 
 pub use command::Command;

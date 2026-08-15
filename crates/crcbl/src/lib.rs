@@ -23,6 +23,7 @@
 //! crcbl::audio   → crcbl-audio   the mixer, the sound bank, the cue grammar
 //! crcbl::store   → crcbl-store   platform storage and atomic writes
 //! crcbl::sprite  → crcbl-sprite  sheets, clips and the baked-pair reader
+//! crcbl::webgpu  → crcbl-webgpu  the wasm → JS command stream (wasm32 only)
 //! crcbl::math    → glam          the maths the renderer's types are spelled in
 //! crcbl::log     → log           the logging facade the engine records through
 //! crcbl::backend → (this crate)  runtime GPU backend selection
@@ -177,6 +178,38 @@ pub use crcbl_sprite as sprite;
 /// [`crcbl-store`](crcbl_store): platform-standard storage roots, atomic
 /// writes, and the browser's `fetch` and OPFS backends.
 pub use crcbl_store as store;
+/// [`crcbl-webgpu`](crcbl_webgpu): the wasm → JS command stream — the encoding,
+/// and the three `__crcbl_web_gpu_stream_*` exports a browser shim drains it
+/// through.
+///
+/// **`wasm32` only**, like the dependency itself: the transport's whole purpose
+/// is to hand a frame to JavaScript, and a native build has nothing to hand it
+/// to. It is the one backend-adjacent crate this crate re-exports, and it is not
+/// a backend — there is no `Instance` and no `Device` in it, only the encoding
+/// and the seam, which is what keeps "no backend type is reachable from
+/// `crcbl`" true above.
+///
+/// **The manifest entry is what carries the symbols; this line is what stops
+/// that being luck.** The three exports in [`crcbl_webgpu::web::shim`] are
+/// `#[unsafe(no_mangle)]`, and `web/tools/check-exports.mjs`'s own header states
+/// the risk they run: a `no_mangle` symbol in a dependency rlib is not
+/// *guaranteed* to survive into a `cdylib`. Measured on this toolchain it does
+/// even with nothing referencing the crate — dropping this `pub use` and
+/// rebuilding `crcbl_breakout.wasm` produces a byte-identical artifact, `cmp`
+/// says so, and all three symbols are in both. So the re-export is not load
+/// bearing today; it is here so the crate is genuinely named by something,
+/// rather than the ABI resting on a linker behaviour nobody promised. Removing
+/// the dependency line above *does* take all three symbols out of the artifact,
+/// which is the state the gate found and this change fixes.
+///
+/// Nothing encodes into the stream yet — no HAL implementation writes through
+/// [`StreamChannel::encode`](crcbl_webgpu::web::StreamChannel::encode) and
+/// nothing calls [`install`](crcbl_webgpu::web::install) — so the exports answer
+/// `0` on every frame today. That is the documented "a shim that started before
+/// the engine did" case, not a failure, and it stays that way until the WebGPU
+/// backend arrives to encode through it.
+#[cfg(target_arch = "wasm32")]
+pub use crcbl_webgpu as webgpu;
 /// [`glam`]: the linear algebra `crcbl::render`'s cameras and transforms are
 /// spelled in.
 ///

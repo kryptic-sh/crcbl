@@ -37,6 +37,7 @@
 
 import { attachShell } from './shell.js';
 import { startAudio } from './audio.js';
+import { takeCommandStream } from './gpu-transport.js';
 import { drainLog, LOG_INFO } from './log.js';
 import {
   drainFetch,
@@ -274,6 +275,12 @@ export function bootDemo(spec) {
     // takes on the desktop.
     stopButton?.addEventListener('click', () => shell.requestClose());
 
+    // THE COMMAND STREAM'S ARGUMENT, BUILT ONCE. The drain below runs on every
+    // frame of every demo, so the not-ready path has to cost a single integer
+    // call and nothing else — a fresh `{ exports, memory }` per frame would be
+    // an allocation per frame for a poll that answers "nothing" every time.
+    const gpuStream = { exports, memory };
+
     let announced = -1;
 
     /** @param {number} now */
@@ -284,6 +291,20 @@ export function bootDemo(spec) {
       const status = api.frame(now);
       log();
       drainFetch({ exports, memory });
+      // NOTHING ENCODES INTO THE STREAM YET, so this returns `null` on every
+      // frame and there is nothing to replay. `crcbl-webgpu` is linked and its
+      // three `__crcbl_web_gpu_stream_*` exports are in the artifact, but no HAL
+      // implementation writes through `StreamChannel::encode` and nothing calls
+      // `crcbl_webgpu::web::install`, so `len` answers 0 — the documented "a
+      // shim that started before the engine did" case, and not a failure.
+      //
+      // It is called anyway because `gpu-transport.js` was otherwise a module no
+      // page imported. A transport nothing drives is one whose first execution
+      // is also its first real frame, in a browser, under a replayer — so this
+      // runs it on every frame of every demo instead, where the browser gate
+      // sees it. The replayer goes where this result is dropped, when the WebGPU
+      // backend arrives to fill the buffer.
+      takeCommandStream(gpuStream);
       flush();
 
       if (status !== announced) {

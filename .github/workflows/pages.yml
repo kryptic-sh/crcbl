@@ -91,6 +91,17 @@ jobs:
       - name: Decode the committed command-stream fixture
         run: node web/tools/stream-decode.mjs
 
+      # THE TRANSPORT'S OWN CHECK. The step above is the *format*; this one is
+      # the ABI in `crates/crcbl-webgpu/src/web.rs` — that the shim settles
+      # readiness on the length alone, decodes exactly the window the pointer and
+      # length describe, copies payloads out rather than leaving views on wasm
+      # memory, and releases the buffer even when the decode throws. It drives
+      # `web/engine/gpu-transport.js` against a synthetic `WebAssembly.Memory`
+      # holding the same committed fixture, so like the step above it needs
+      # neither a wasm module nor a browser and fails in seconds.
+      - name: Drive the command-stream transport
+        run: node web/tools/stream-transport.mjs
+
       # Builds each wasm-ready sample, runs `wasm-bindgen`, assembles
       # `target/site`, and runs two checks against every artifact it produced.
       # They are the real gate, and they are what makes this job worth running

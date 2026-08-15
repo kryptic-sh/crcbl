@@ -56,6 +56,24 @@ glam = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
 
+# The browser's GPU seam, and only where a browser is. `crcbl-webgpu` is the
+# wasm → JS command stream: pure encoding plus the three `__crcbl_web_gpu_*`
+# entry points `web/engine/gpu-transport.js` drains once a frame. Per-target for
+# the reason `crcbl-vk` below is — the target already says whether a browser is
+# the host — and wasm32 rather than a feature because a native build has no
+# `requestAnimationFrame` to drain it from and would link an ABI nothing can
+# call.
+#
+# **This line is what puts the three symbols in every demo's `.wasm`**, and
+# before it there was no such line: the crate was written, tested and unlinked,
+# so `web/tools/check-exports.mjs` failed in both directions — three symbols
+# declared in Rust and absent from the artifact, three the shim called and could
+# not find. It is also `pub use`d as `crcbl::webgpu` in `src/lib.rs`; see that
+# re-export for what each of the two is actually doing, which was measured
+# rather than assumed.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+crcbl-webgpu = { workspace = true }
+
 # There is no Vulkan in a browser. `crcbl-vk` reaches `libvulkan.so.1` through
 # `ash`, which reaches it through `libloading` — a crate that does not compile
 # for `wasm32-unknown-unknown` at all, so an unconditional dependency here broke
