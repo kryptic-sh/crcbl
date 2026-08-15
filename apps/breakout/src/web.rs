@@ -83,7 +83,7 @@
 use std::rc::Rc;
 
 use crcbl::engine::Clock;
-use crcbl::store::web::{FetchSource, OpfsStorage};
+use crcbl::store::web::FetchSource;
 use crcbl::web::WebPending;
 
 use crate::app::{Loop, PendingLoop};
@@ -138,15 +138,6 @@ crcbl::web_exports! {
     error_len: __crcbl_breakout_error_len,
     log_take: __crcbl_breakout_log_take,
     log_ptr: __crcbl_breakout_log_ptr,
-}
-
-/// The OPFS store the shim restored into, if `prepare` ran.
-///
-/// `crate::high_score`'s browser arm. Returns `None` on a page that never
-/// prepared, which is a shim that started the game before the storage existed.
-#[must_use]
-pub fn opfs_store() -> Option<Rc<OpfsStorage>> {
-    STORAGE.with(|slot| slot.borrow().as_ref().map(|(saves, _)| Rc::clone(saves)))
 }
 
 /// The asset source the shim pre-loads into, if `prepare` ran.

@@ -29,9 +29,8 @@ use crcbl::store::record::{Backing, Record};
 
 /// The application directory. `~/.config/breakout/` on Linux.
 ///
-/// Native only: the browser has no directory to name, and its store arrives
-/// from the shim already open.
-#[cfg(not(target_arch = "wasm32"))]
+/// Names the config directory natively. A browser has no directory to name
+/// and ignores it — see `Backing::platform`.
 const APP: &str = "breakout";
 
 /// The file inside it.
@@ -43,25 +42,9 @@ pub fn open(headless: bool) -> Record {
     let backing = if headless {
         Backing::None
     } else {
-        platform_backing()
+        Backing::platform(APP)
     };
     Record::open(backing, HIGH_SCORE_FILE)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn platform_backing() -> Backing {
-    Backing::config(APP)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn platform_backing() -> Backing {
-    match crate::web::opfs_store() {
-        Some(store) => Backing::Browser(store),
-        None => {
-            crcbl::log::warn!("high_score: no OPFS store installed; scores will not persist");
-            Backing::None
-        }
-    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

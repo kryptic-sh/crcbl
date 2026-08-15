@@ -77,6 +77,37 @@ impl Backing {
             }
         }
     }
+
+    /// Where this platform keeps a small persistent value, whatever it is.
+    ///
+    /// One rule about the platform, in one place: the config directory
+    /// natively, the installed OPFS store in a browser, and [`Backing::None`]
+    /// when neither can be had — which is the ordinary first-run and
+    /// no-shim case, not a failure the caller has to handle.
+    ///
+    /// `app_name` names the directory and so means nothing in a browser, where
+    /// the origin already is the namespace. It stays in the signature rather
+    /// than splitting this into two per-platform functions, because a signature
+    /// per platform pushes the `#[cfg]` back out to every game that calls it —
+    /// which is precisely the four hand-written copies this replaces.
+    #[must_use]
+    pub fn platform(app_name: &str) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::config(app_name)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = app_name;
+            match crate::web::opfs::installed() {
+                Some(store) => Self::Browser(store),
+                None => {
+                    log::warn!("record: no OPFS store installed; values will not persist");
+                    Self::None
+                }
+            }
+        }
+    }
 }
 
 /// A single `u32`, loaded at construction and written when it changes.

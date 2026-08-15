@@ -423,6 +423,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Backing::platform(app_name)` and `crcbl_store::web::opfs::installed()`.**
+  `platform` is "where this machine keeps a small persistent value" in one place
+  — the config directory natively, the installed OPFS store in a browser,
+  `Backing::None` when neither can be had. Four games had written that rule out
+  themselves as a `#[cfg]`-split `platform_backing`, which is a fact about the
+  platform and not about any game.
+
+  `installed()` is what makes the browser arm reachable from the engine: the
+  slot already held a `Weak` for the `__crcbl_web_opfs_*` exports, and it now
+  has a getter, so the record and the entry points read the _same_ store instead
+  of two paths agreeing by convention. A game no longer needs its own
+  `opfs_store` accessor over `web_exports!`'s `STORAGE` cell, and the four that
+  had one have dropped it.
+
 - **`crcbl::impl_polled_bundle!`**, which declares a bundle's `Pending` type,
   its `poll`, and the `open`/`request_open` pair — the blocking and non-blocking
   halves of start-up, both routed through the _same_ descriptor.

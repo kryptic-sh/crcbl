@@ -18,8 +18,8 @@
 //! exports must not collide, so the macro takes each name as an argument rather
 //! than building it from a prefix.
 //!
-//! **What this sample does not add to that.** There is no `opfs_store` and no
-//! `asset_source` accessor here, because hud has nothing to read out of either:
+//! **What this sample does not add to that.** There is no `asset_source`
+//! accessor here, because hud has nothing to read out of it:
 //! it keeps no high score — there is no score — and every byte it draws with
 //! (the glyph atlas, the shaders) is compiled into the module. The two backends
 //! are still installed by the macro's `prepare`, because the shared shim's boot

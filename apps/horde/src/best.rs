@@ -27,9 +27,8 @@ use crcbl::store::record::{Backing, Record};
 
 /// The application directory. `~/.config/horde/` on Linux.
 ///
-/// Native only: the browser has no directory to name, and its store arrives
-/// from the shim already open.
-#[cfg(not(target_arch = "wasm32"))]
+/// Names the config directory natively. A browser has no directory to name
+/// and ignores it — see `Backing::platform`.
 const APP: &str = "horde";
 
 /// The file inside it.
@@ -48,7 +47,7 @@ impl Best {
         let backing = if headless {
             Backing::None
         } else {
-            platform_backing()
+            Backing::platform(APP)
         };
         Self {
             record: Record::open(backing, BEST_FILE),
@@ -82,22 +81,6 @@ impl Best {
             return true;
         }
         false
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn platform_backing() -> Backing {
-    Backing::config(APP)
-}
-
-#[cfg(target_arch = "wasm32")]
-fn platform_backing() -> Backing {
-    match crate::web::opfs_store() {
-        Some(store) => Backing::Browser(store),
-        None => {
-            crcbl::log::warn!("best: no OPFS store installed; runs will not persist");
-            Backing::None
-        }
     }
 }
 

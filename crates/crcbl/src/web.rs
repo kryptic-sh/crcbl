@@ -634,10 +634,13 @@ fn step_from(previous: Option<f64>, now_ms: f64) -> core::time::Duration {
 ///   held for the life of the page. Both crates' `install` keeps only a
 ///   [`std::rc::Weak`], so dropping the `Rc`s would silently turn every
 ///   `__crcbl_web_opfs_*` and `__crcbl_web_fetch_*` call into a `0`.
-/// * `STORAGE` is left reachable from the invoking module on purpose: a sample
-///   that reads its own save file back — `opfs_store` in `apps/breakout` — is
-///   two lines over that cell, written beside the macro rather than emitted by
-///   it, because a sample with no save file wants neither.
+/// * `STORAGE` is left reachable from the invoking module, but **a game that
+///   only wants to read its own save file back no longer needs it**: the `Rc`
+///   it holds is what keeps the installed store alive, and
+///   [`Backing::platform`](crate::store::record::Backing::platform) reaches
+///   that store through `crcbl_store::web::opfs::installed` rather than through
+///   this cell. The samples used to spell out a two-line `opfs_store` accessor
+///   here for that and no longer do.
 /// * The ten exports, each forwarding to [`App`], [`set_log_level`],
 ///   [`log_take`] or [`log_ptr`].
 ///

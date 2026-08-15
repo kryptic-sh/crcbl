@@ -34,9 +34,9 @@
 //! sample's `crcbl::engine::PolledGpu` impl, which says the same thing about the
 //! device request.
 //!
-//! **What this sample does not add to the macro.** There is no `opfs_store` and
-//! no `asset_source` accessor here, because lumen has nothing to read out of
-//! either: it keeps no score — there is no score — and every byte it draws with
+//! **What this sample does not add to the macro.** There is no `asset_source`
+//! accessor here, because lumen has nothing to read out of it:
+//! it keeps no score — there is no score — and every byte it draws with
 //! (the room's geometry, the shaders, the glyph atlas) is compiled into the
 //! module. The two backends are still installed by the macro's `prepare`,
 //! because the shared shim's boot sequence drives both ABIs before it boots the

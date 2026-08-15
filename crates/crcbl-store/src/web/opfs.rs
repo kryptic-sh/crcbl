@@ -784,6 +784,22 @@ pub fn install(store: &Rc<OpfsStorage>) -> bool {
     })
 }
 
+/// The installed store, if one is live on this thread.
+///
+/// The slot holds a [`Weak`], so this is `None` both before [`install`] and
+/// after whoever owned the `Rc` dropped it — the same two states in which every
+/// `__crcbl_web_opfs_*` export answers `0`. A caller that gets `Some` holds the
+/// store alive for as long as it keeps the `Rc`.
+///
+/// This is what lets [`Backing::platform`](crate::record::Backing::platform)
+/// answer for a browser without the game handing its store in: the entry points
+/// and the record now read the same slot rather than two paths agreeing by
+/// convention.
+#[must_use]
+pub fn installed() -> Option<Rc<OpfsStorage>> {
+    STORE.with(|slot| slot.try_borrow().ok().and_then(|slot| slot.upgrade()))
+}
+
 /// Forget the installed store, returning whether there was a live one.
 pub fn uninstall() -> bool {
     STORE.with(|slot| match slot.try_borrow_mut() {
