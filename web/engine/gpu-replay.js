@@ -72,6 +72,20 @@
 // `label` and nothing else. The block below `webgpuAddressModesFor` is where
 // every one of those is argued.
 //
+// AND THE BIND-GROUP-LAYOUT PAIR, WHICH IS THE FIRST COMMAND CARRYING A LIST OF
+// STRUCTS. `CreateBindGroupLayout` translates a `crcbl_hal::BindGroupLayoutDesc`
+// into a `GPUBindGroupLayoutDescriptor` — one entry at a time, in the slice's own
+// order — and calls `createBindGroupLayout` on the device; `DestroyBindGroupLayout`
+// only lets go, because a `GPUBindGroupLayout` has no destroy to call either.
+// Neither queues a reply, for `CreateSurface`'s reason. It is the descriptor
+// whose fields WebGPU has the *least* room for: an entry's `count` and its
+// `BindingFlags` describe a bindless model WebGPU does not have, two of the five
+// `ShaderStages` have no `GPUShaderStage` bit, and one `BindingKind` needs a
+// texture format the seam does not carry. Every one of those is refused rather
+// than smoothed over, and the block below `webgpuShaderStageFor` is where each is
+// argued — including which of `check_entries`'s rules this file re-checks and
+// which it leaves to the browser.
+//
 // SO A BUFFER THAT CANNOT BE MADE HAS NOWHERE TO BE REPORTED, and the answer is
 // the seam's own: `Device::take_error`, which `crcbl_hal` documents as existing
 // *for WebGPU* and which `docs/plan/41-webgpu-stream.md` has `Gpu::acquire`
@@ -1131,6 +1145,265 @@ export function webgpuMaxAnisotropyFor(anisotropy, filters) {
   return { maxAnisotropy: value, reason: null };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// A bind-group layout's vocabulary, in WebGPU's
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// THE TRANSLATION WITH THE MOST THE FAR SIDE CANNOT SAY, and the first where
+// what a field means is *which member exists* rather than what a member holds.
+// `crcbl_hal::BindGroupLayoutEntry` has five fields and
+// `GPUBindGroupLayoutEntry` has `binding`, `visibility` and exactly one of
+// `buffer`, `sampler`, `texture`, `storageTexture` or `externalTexture` — so
+// three of the seam's five fields land somewhere WebGPU has no room for at all:
+//
+//   * `count` — WebGPU CORE HAS NO BINDING ARRAYS. There is no `count` member on
+//     a layout entry, and no `GPUBindGroup` syntax for filling one. Every count
+//     but `1` is refused by {@link Replayer#createBindGroupLayout}, the
+//     `u32::MAX` sentinel loudest of all.
+//   * `flags` — all three `BindingFlags` require
+//     `Features::DESCRIPTOR_INDEXING`, which this backend never reports because
+//     WebGPU has no bindless model. Any flag at all is refused.
+//   * `visibility` — three of the seam's five `ShaderStages` have a
+//     `GPUShaderStage` bit; `MESH` and `TASK` have none, because WebGPU has no
+//     mesh pipeline. Refused rather than dropped, which is the `PRESENT` usage
+//     bit's decision applied to a stage.
+//
+// EACH OF THOSE IS A REFUSAL AND NOT A NARROWING, and the `count` one is the
+// case worth stating on its own: silently accepting a bindless declaration and
+// creating a single-descriptor binding would be the worst outcome available,
+// because every later write to slot 1 upward would target a descriptor that does
+// not exist and the browser would name the *bind group* rather than the layout
+// that was wrong.
+//
+// WHAT THIS FILE DOES NOT CHECK, stated here so nobody assumes it does.
+// `BindGroupLayoutDesc::check_entries` in `crcbl-hal` enforces the seam's own
+// rules — a zero `count`, a binding number declared twice, the `VARIABLE_COUNT`
+// ordering, the bindless ceiling, a stage the device has not got — and **this
+// replayer cannot call it**: it has no `DeviceCaps` and no `crcbl-hal`. So the
+// division is:
+//
+//   * The **ordering rule** — a `VARIABLE_COUNT` entry must be both last in the
+//     slice and highest-numbered — is not re-checked here, and needs no
+//     re-check, because `VARIABLE_COUNT` is refused outright above: no layout
+//     carrying it ever reaches `createBindGroupLayout`, so there is no position
+//     left to get wrong. What this file *does* keep is the order itself —
+//     `gpu-stream.js` decodes the entries in slice order and the loop below
+//     preserves it — because the encoder's caller is entitled to have run
+//     `check_entries` against the list it wrote.
+//   * **Duplicate binding numbers** are left to the browser, deliberately.
+//     WebGPU validates them itself and reports on `uncapturederror`, which is
+//     the same queue `Device::take_error` drains, so the refusal is real and
+//     lands where a person will read it. Re-checking here would duplicate a rule
+//     that is already enforced twice — by `check_entries` before the encode and
+//     by the browser after the replay — and a third copy is a third thing to
+//     drift.
+//
+// AND WHAT COMES BACK REPORTS ITS LABEL AND NOTHING ELSE, exactly as a
+// `GPUSampler` does: a `GPUBindGroupLayout` exposes no entries, no bindings and
+// no visibility. So every decision here is one no inspection of the result can
+// check afterwards, and the two things that can are the browser refusing the
+// descriptor on the device's error channel and `web/tools/gpu-replay.mjs`
+// reading the descriptor this file built before it is handed over.
+
+/**
+ * The `GPUShaderStage` bits, from the WebGPU specification.
+ *
+ * Written out rather than read off the global, because this file is driven under
+ * node where there is no `GPUShaderStage` at all — {@link GPU_BUFFER_USAGE}'s
+ * reason exactly, and `browser-e2e.mjs` is what holds these three against a real
+ * browser's own namespace object.
+ */
+const GPU_SHADER_STAGE = Object.freeze({
+  VERTEX: 0x1,
+  FRAGMENT: 0x2,
+  COMPUTE: 0x4,
+});
+
+/**
+ * Every `crcbl_hal::ShaderStages` flag with a `GPUShaderStage` bit behind it.
+ *
+ * TWO OF THE FIVE ARE MISSING AND ARE REFUSED RATHER THAN DROPPED. `MESH` and
+ * `TASK` are stages WebGPU does not have — there is no mesh pipeline, and
+ * `crcbl_hal::MeshPipelineDesc` has no WebGPU counterpart to be visible to — so
+ * a binding declared visible to one of them cannot be built here at all. Dropping
+ * the bit would produce a layout narrower than the caller asked for, and a
+ * narrower layout does not fail at creation: it fails at the draw, as a shader
+ * reading a binding the pipeline layout says it may not see.
+ */
+const SHADER_STAGE_MAP = Object.freeze({
+  VERTEX: GPU_SHADER_STAGE.VERTEX,
+  FRAGMENT: GPU_SHADER_STAGE.FRAGMENT,
+  COMPUTE: GPU_SHADER_STAGE.COMPUTE,
+});
+
+/**
+ * The `GPUShaderStageFlags` word a decoded `visibility` amounts to, and whatever
+ * in it WebGPU has no bit for.
+ *
+ * {@link webgpuTextureUsageFor}'s twin, in shape and in what `unsatisfiable`
+ * means: seam names rather than a word, because it is for a message a person
+ * reads, and empty for every visibility this backend can honour.
+ *
+ * @param {readonly string[]} visibility `crcbl_hal::ShaderStages` flag names, as
+ *   `gpu-stream.js` decodes them.
+ * @returns {{ bits: number, unsatisfiable: string[] }}
+ */
+export function webgpuShaderStageFor(visibility) {
+  let bits = 0;
+  const unsatisfiable = [];
+  for (const name of visibility) {
+    const bit = SHADER_STAGE_MAP[name];
+    if (bit === undefined) unsatisfiable.push(`ShaderStages::${name}`);
+    else bits |= bit;
+  }
+  return { bits, unsatisfiable };
+}
+
+/**
+ * `crcbl_hal::SampleType` as `GPUTextureBindingLayout.sampleType`.
+ *
+ * `Float` is `'float'` — filterable — rather than `'unfilterable-float'`,
+ * because that is what the variant means: `SampleType`'s own docs call it
+ * "ordinary filterable colour texels". `Depth` is `'depth'`, which is the row
+ * that makes this table load-bearing: a depth-format view is bindable only
+ * through a slot that says `'depth'`, and a comparison sampler is bindable only
+ * beside one.
+ *
+ * WebGPU's other two — `'sint'` and `'uint'` — have no seam variant, which is
+ * `SampleType`'s own decision rather than a gap here: "integer and multisampled
+ * sampled images are things no shader in this engine declares, and a variant
+ * nothing constructs is a variant no backend's mapping was ever checked
+ * against."
+ */
+const SAMPLE_TYPE = Object.freeze({ Float: 'float', Depth: 'depth' });
+
+/**
+ * The `count` that means "as many descriptors as this device can", which is
+ * `u32::MAX` on the wire.
+ *
+ * `BindGroupLayoutEntry::count` documents it as the value the portable bindless
+ * declaration is written with, because a caller cannot know a device's ceiling
+ * before it opens one, and every backend resolves it through `resolved_count`.
+ * **This backend resolves it to a refusal**, which is a resolution and not an
+ * omission: WebGPU has no binding arrays, so there is no number it could become.
+ */
+const BINDING_COUNT_DEVICE_MAX = 0xffff_ffff;
+
+/**
+ * The `GPUBindGroupLayoutEntry` member a decoded `BindingKind` becomes, or why
+ * it becomes none.
+ *
+ * **A MEMBER AND NOT A VALUE**, which is the whole shape of this translation and
+ * the reason it is not a table of strings. WebGPU has no flat binding type: an
+ * entry carries exactly one of `buffer`, `sampler`, `texture`, `storageTexture`
+ * or `externalTexture`, each an object with its own fields, so this decides
+ * *which member exists* as well as what goes in it. The five seam variants land
+ * as:
+ *
+ *   * `UniformBuffer` → `buffer: { type: 'uniform', hasDynamicOffset }`. The
+ *     dynamic offset is the seam's substitute for push constants, which WebGPU
+ *     has none of, so it is the member that matters most here.
+ *   * `StorageBuffer` → `buffer: { type: 'read-only-storage' | 'storage',
+ *     hasDynamicOffset }`. `read_only` is a *type* in WebGPU rather than a flag
+ *     beside one.
+ *   * `SampledImage` → `texture: { sampleType, viewDimension, multisampled:
+ *     false }`. Both of the seam's fields are here because WebGPU puts them in
+ *     the layout, which is why `crcbl_hal::BindingKind::SampledImage` carries
+ *     them at all. `multisampled` is written explicitly and always `false`:
+ *     `SampleType` has no multisampled variant — deliberately, per its own docs
+ *     — so there is nothing this seam could set it from, and an omitted member
+ *     would be the same `false` arrived at by accident.
+ *   * `Sampler` → `sampler: { type: 'comparison' | 'filtering' }`. WebGPU's
+ *     third value, `'non-filtering'`, has no seam variant.
+ *   * `StorageImage` → **nothing, and this is the one WebGPU cannot express.**
+ *     `GPUStorageTextureBindingLayout.format` is a *required* member with no
+ *     default, and `crcbl_hal::BindingKind::StorageImage` carries no format at
+ *     all: it has `read_only` and nothing else, because Vulkan, Metal and D3D12
+ *     take the format off the bound view. There is no value this file could
+ *     supply that would not be a guess, and a guessed storage-texture format is
+ *     a shader writing the wrong number of channels with nothing reporting it.
+ *     So it is refused, and the refusal says which member is missing.
+ *
+ * `externalTexture` is the fifth WebGPU member and nothing on this seam maps to
+ * it: a `GPUExternalTexture` is a video frame, which `crcbl-hal` has no concept
+ * of.
+ *
+ * @param {{ name: string, dynamic?: boolean, readOnly?: boolean,
+ *           viewType?: string, sampleType?: string, comparison?: boolean }} kind
+ *   A `crcbl_hal::BindingKind`, as `gpu-stream.js` decodes it.
+ * @returns {{ layout: object | null, reason: string | null }} `reason` is a
+ *   phrase for the message a person reads, and is `null` exactly when `layout`
+ *   is not.
+ */
+export function webgpuBindingLayoutFor(kind) {
+  switch (kind.name) {
+    case 'UniformBuffer':
+      return {
+        layout: {
+          buffer: { type: 'uniform', hasDynamicOffset: kind.dynamic },
+        },
+        reason: null,
+      };
+    case 'StorageBuffer':
+      return {
+        layout: {
+          buffer: {
+            type: kind.readOnly ? 'read-only-storage' : 'storage',
+            hasDynamicOffset: kind.dynamic,
+          },
+        },
+        reason: null,
+      };
+    case 'SampledImage': {
+      const viewDimension = VIEW_DIMENSION[kind.viewType];
+      if (viewDimension === undefined) {
+        return {
+          layout: null,
+          reason: `is a SampledImage of ImageViewType::${kind.viewType}, which is no GPUTextureViewDimension`,
+        };
+      }
+      const sampleType = SAMPLE_TYPE[kind.sampleType];
+      if (sampleType === undefined) {
+        return {
+          layout: null,
+          reason: `is a SampledImage of SampleType::${kind.sampleType}, which is no GPUTextureSampleType`,
+        };
+      }
+      return {
+        layout: {
+          texture: { sampleType, viewDimension, multisampled: false },
+        },
+        reason: null,
+      };
+    }
+    case 'StorageImage':
+      return {
+        layout: null,
+        reason:
+          'is a BindingKind::StorageImage, which WebGPU cannot express from this ' +
+          'seam: GPUStorageTextureBindingLayout.format is required and has no ' +
+          'default, and BindingKind::StorageImage carries no format for it',
+      };
+    case 'Sampler':
+      return {
+        layout: {
+          sampler: { type: kind.comparison ? 'comparison' : 'filtering' },
+        },
+        reason: null,
+      };
+    // A kind with no case at all is this file and `gpu-stream.js`'s BINDING_KIND
+    // table having drifted, and is refused for `webgpuTextureFormatFor`'s
+    // reason: a nearby member would build a layout describing a different kind
+    // of resource, and every bind group made against it would be refused
+    // naming the group rather than the layout.
+    default:
+      return {
+        layout: null,
+        reason: `is a BindingKind::${kind.name}, which this backend has no GPUBindGroupLayoutEntry member for`,
+      };
+  }
+}
+
 /**
  * A `GPUAdapter`'s or `GPUDevice`'s `limits` in the seam's names and units.
  *
@@ -1769,6 +2042,17 @@ export class Replayer {
    */
   #samplers = new HandleTable();
   /**
+   * The `GPUBindGroupLayout` behind each live layout handle.
+   *
+   * Its own table for the reason every table here is its own, and this is the
+   * kind that will be *read* next: a `GPUBindGroup` is made against a layout, so
+   * this is the second table a later command looks something up in — as
+   * {@link Replayer#images} already is for a view.
+   *
+   * @type {HandleTable<GPUBindGroupLayout>}
+   */
+  #bindGroupLayouts = new HandleTable();
+  /**
    * Errors the device reported out of band, oldest first.
    *
    * `Device::take_error`'s queue, on this side of the seam — see
@@ -1867,6 +2151,21 @@ export class Replayer {
    */
   get samplers() {
     return this.#samplers;
+  }
+
+  /**
+   * The bind-group layouts that are live right now, on the same terms.
+   *
+   * **A `GPUBindGroupLayout` reports its `label` and nothing else** — not its
+   * entries, not their bindings, not their visibility — so this table's contents
+   * and the device's error queue are the whole of what a reader can learn, as
+   * they are for a sampler. What the descriptor was is checkable only before it
+   * is handed over, which is what `web/tools/gpu-replay.mjs` does.
+   *
+   * @type {HandleTable<GPUBindGroupLayout>}
+   */
+  get bindGroupLayouts() {
+    return this.#bindGroupLayouts;
   }
 
   /** How many out-of-band errors are waiting to be taken. */
@@ -1999,6 +2298,12 @@ export class Replayer {
           break;
         case 'DestroySampler':
           this.#destroySampler(command);
+          break;
+        case 'CreateBindGroupLayout':
+          this.#createBindGroupLayout(sequence, command);
+          break;
+        case 'DestroyBindGroupLayout':
+          this.#destroyBindGroupLayout(command);
           break;
         case 'SurfaceCaps':
           this.#surfaceCaps(sequence);
@@ -2700,6 +3005,133 @@ export class Replayer {
    */
   #destroySampler(command) {
     this.#samplers.remove(command.sampler);
+  }
+
+  /**
+   * Creates a bind-group layout on the open device and files it under the handle
+   * wasm allocated.
+   *
+   * `#createSampler`'s shape once more — synchronous, no reply, every failure
+   * into {@link Replayer#takeError} — and the first creation whose body is a
+   * **list**. Three things about that are decisions rather than mechanics.
+   *
+   * **THE WHOLE LAYOUT IS REFUSED, NEVER AN ENTRY DROPPED.** A layout missing one
+   * of its bindings is not a smaller layout, it is a different one: the shader
+   * compiled against the full set declares a binding the pipeline layout says
+   * does not exist, and WebGPU refuses that at the *pipeline*, a command away
+   * from the layout that was wrong. So the loop below returns on the first entry
+   * it cannot express, leaving the slot empty and exactly one error naming the
+   * binding.
+   *
+   * **`count` IS THE ONE THAT MUST NOT BE SMOOTHED OVER.** WebGPU core has no
+   * binding arrays at all — `GPUBindGroupLayoutEntry` has no `count` member —
+   * so `1` is the only count that has a WebGPU spelling. The `u32::MAX` sentinel
+   * gets a message of its own rather than falling into the general one, because
+   * it is a different request: "as many as this device can" is the portable
+   * bindless declaration and a caller writing it wants a bindless page, where a
+   * caller writing `64` wants a fixed array. Accepting either and building a
+   * one-descriptor binding is the worst outcome available here, and it is the
+   * one the browser could not report: every later write to slot 1 upward names a
+   * descriptor that does not exist, and the error arrives against the *bind
+   * group*.
+   *
+   * **THE ENTRIES KEEP THEIR ORDER**, which is `gpu-stream.js`'s doing and this
+   * loop's to preserve. What this file does *not* re-check — the seam's own
+   * `check_entries` rules — is set out in the block above
+   * {@link webgpuShaderStageFor}, along with which side does check each of them.
+   *
+   * @param {bigint} sequence
+   * @param {{ layout: { index: number, generation: number },
+   *           label: string | null,
+   *           entries: Array<{ binding: number, visibility: string[],
+   *                            kind: object, count: number,
+   *                            flags: string[] }> }} command
+   */
+  #createBindGroupLayout(sequence, command) {
+    const named = `bind group layout ${command.layout.index}.${command.layout.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was created before any device opened`);
+      return;
+    }
+    const entries = [];
+    for (const entry of command.entries) {
+      const at = `binding ${entry.binding}`;
+      if (entry.flags.length > 0) {
+        this.#deviceError(
+          `${named} sets ${entry.flags
+            .map((flag) => `BindingFlags::${flag}`)
+            .join(' | ')} on ${at}, and WebGPU has no bindless model at all: ` +
+            'every one of them needs Features::DESCRIPTOR_INDEXING, which no ' +
+            'WebGPU device reports'
+        );
+        return;
+      }
+      if (entry.count === BINDING_COUNT_DEVICE_MAX) {
+        this.#deviceError(
+          `${named} asks for as many descriptors as the device can hold on ${at} ` +
+            '(the u32::MAX count), and WebGPU has no binding arrays: a ' +
+            'GPUBindGroupLayoutEntry has no count member, so there is no number ' +
+            'the sentinel could resolve to'
+        );
+        return;
+      }
+      if (entry.count !== 1) {
+        this.#deviceError(
+          `${named} asks for ${entry.count} descriptors on ${at}, and WebGPU has ` +
+            'no binding arrays: a GPUBindGroupLayoutEntry has no count member, ' +
+            'and one descriptor is not what was asked for'
+        );
+        return;
+      }
+      const visibility = webgpuShaderStageFor(entry.visibility);
+      if (visibility.unsatisfiable.length > 0) {
+        this.#deviceError(
+          `${named} makes ${at} visible to ${visibility.unsatisfiable.join(', ')}, ` +
+            'which WebGPU has no GPUShaderStage bit for'
+        );
+        return;
+      }
+      const layout = webgpuBindingLayoutFor(entry.kind);
+      if (layout.reason !== null) {
+        this.#deviceError(`${named} ${at} ${layout.reason}`);
+        return;
+      }
+      entries.push({
+        binding: entry.binding,
+        visibility: visibility.bits,
+        ...layout.layout,
+      });
+    }
+    let made;
+    try {
+      made = this.#device.createBindGroupLayout({
+        // No label rather than an empty one, as `#createBuffer` passes it.
+        ...(command.label === null ? {} : { label: command.label }),
+        entries,
+      });
+    } catch (error) {
+      this.#deviceError(`${named} could not be created: ${String(error)}`);
+      return;
+    }
+    this.#bindGroupLayouts.insert(command.layout, made);
+  }
+
+  /**
+   * Lets go of a bind-group layout.
+   *
+   * **LETTING GO IS THE WHOLE OF THE RELEASE**, as it is for a sampler and a
+   * view: a `GPUBindGroupLayout` has no `destroy()` — it is a description rather
+   * than an allocation — so there is nothing to call.
+   *
+   * A destroy naming nothing live is a no-op in both of its ways, and here that
+   * is the **ordinary** path rather than an edge one: every layout this file
+   * refuses above leaves its handle empty, and the caller that pre-allocated the
+   * handle destroys it all the same.
+   *
+   * @param {{ layout: { index: number, generation: number } }} command
+   */
+  #destroyBindGroupLayout(command) {
+    this.#bindGroupLayouts.remove(command.layout);
   }
 
   /**

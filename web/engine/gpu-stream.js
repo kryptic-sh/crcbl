@@ -75,11 +75,13 @@ const CREATE_SURFACE_TAG = 0x01;
 const CREATE_IMAGE_TAG = 0x02;
 const CREATE_IMAGE_VIEW_TAG = 0x03;
 const CREATE_SAMPLER_TAG = 0x04;
+const CREATE_BIND_GROUP_LAYOUT_TAG = 0x05;
 const DESTROY_BUFFER_TAG = 0x20;
 const DESTROY_SURFACE_TAG = 0x21;
 const DESTROY_IMAGE_TAG = 0x22;
 const DESTROY_IMAGE_VIEW_TAG = 0x23;
 const DESTROY_SAMPLER_TAG = 0x24;
+const DESTROY_BIND_GROUP_LAYOUT_TAG = 0x25;
 const BEGIN_DEBUG_LABEL_TAG = 0x40;
 const BEGIN_RENDER_PASS_TAG = 0x41;
 const BIND_GRAPHICS_PIPELINE_TAG = 0x42;
@@ -194,6 +196,43 @@ const COMPARE_OP = [
 ];
 
 /**
+ * `tag::SAMPLE_TYPE_*` — what a sampled image's texels mean to the shader.
+ *
+ * Two rows and the loudest failure of any table this size. `crcbl_hal` carries
+ * this field on the *layout* rather than reading it off the bound view because
+ * **WebGPU does**: `GPUTextureBindingLayout.sampleType` is a member of a bind
+ * group layout entry, and a depth-format view is only bindable through a slot
+ * that says `'depth'`. So the two rows are not two spellings of a preference —
+ * they are two different layouts, and a code folded into its neighbour produces
+ * one the browser then refuses every bind group against, naming the group.
+ */
+const SAMPLE_TYPE = ['Float', 'Depth'];
+
+/**
+ * `tag::BINDING_KIND_*`, and the one table here whose rows have **bodies**.
+ *
+ * Every other enum on this stream is a byte that names a value; this one is a
+ * byte that names a *shape*, because `crcbl_hal::BindingKind`'s variants carry
+ * data and the payloads are different lengths — one presence byte, two presence
+ * bytes, or two enum codes. That is what makes a fold here worse than anywhere
+ * else in this file: a code read as its neighbour does not merely mis-name the
+ * binding, it consumes the wrong number of bytes, and every field after it in
+ * the entry — and every entry after that — decodes out of the wrong offsets and
+ * still looks like a layout.
+ *
+ * The rows are read by {@link ByteReader#readBindingKind}, which is where the
+ * bodies live; this table exists so the code and the name meet in one place and
+ * so an unclaimed code is `undefined` rather than a row one along.
+ */
+const BINDING_KIND = [
+  'UniformBuffer',
+  'StorageBuffer',
+  'SampledImage',
+  'StorageImage',
+  'Sampler',
+];
+
+/**
  * `tag::FORMAT_*`, code-indexed — the inverse of the table `gpu-reply.js`
  * exports, and not a second copy of it.
  *
@@ -230,8 +269,36 @@ const BUFFER_USAGE = [
   'QUERY_RESOLVE',
 ];
 
-/** `crcbl_hal::ShaderStages`. */
-const SHADER_STAGES = ['VERTEX', 'FRAGMENT', 'COMPUTE', 'MESH'];
+/**
+ * `crcbl_hal::ShaderStages`.
+ *
+ * **Five bits, and the last two are the ones a browser cannot serve.** `MESH`
+ * (1 << 3) and `TASK` (1 << 4) are real stages on this seam and WebGPU has no
+ * `GPUShaderStage` bit for either, so they are refused by `gpu-replay.js` rather
+ * than dropped here — a bitflags word goes over as `bits()` and comes back
+ * through the equivalent of `from_bits`, and a stage silently missing from a
+ * binding's visibility is a layout narrower than the one that was asked for.
+ * The committed fixture carries a layout entry visible to each, which is what
+ * holds this list at five rows rather than four.
+ */
+const SHADER_STAGES = ['VERTEX', 'FRAGMENT', 'COMPUTE', 'MESH', 'TASK'];
+
+/**
+ * `crcbl_hal::BindingFlags` — descriptor-indexing behaviour for one binding.
+ *
+ * All three require `Features::DESCRIPTOR_INDEXING`, which no WebGPU device ever
+ * reports: WebGPU has no bindless model at all. They are decoded rather than
+ * waved through for the reason that type's own docs give — "a backend without it
+ * must reject a layout that sets any of them rather than silently ignoring it: a
+ * bindless array quietly downgraded to a fixed one reads garbage at index 4097"
+ * — and the rejecting is `gpu-replay.js`'s, which can only refuse what it was
+ * told.
+ */
+const BINDING_FLAGS = [
+  'PARTIALLY_BOUND',
+  'UPDATE_AFTER_BIND',
+  'VARIABLE_COUNT',
+];
 
 /** `crcbl_hal::ImageUsage`. */
 const IMAGE_USAGE = [
@@ -664,6 +731,80 @@ class ByteReader {
     };
   }
 
+  /**
+   * A `crcbl_hal::BindingKind`: a code, then that variant's own fields.
+   *
+   * The one enum on this stream whose rows have bodies, and the reason the
+   * refusal below is not optional: the bodies are different lengths, so a code
+   * this build does not claim cannot be skipped past — there is no way to know
+   * how far. See {@link BINDING_KIND}.
+   *
+   * The shape it answers with is `{ name, …fields }`, which is the shape a
+   * command already has, so `gpu-replay.js` switches on `kind.name` exactly as
+   * `replay` switches on `command.name`.
+   *
+   * @param {string} field
+   * @returns {object}
+   */
+  readBindingKind(field) {
+    const name = this.readEnum(field, BINDING_KIND);
+    switch (name) {
+      case 'UniformBuffer':
+        return { name, dynamic: this.readPresent('BindingKind::dynamic') };
+      case 'StorageBuffer':
+        return {
+          name,
+          readOnly: this.readPresent('BindingKind::read_only'),
+          dynamic: this.readPresent('BindingKind::dynamic'),
+        };
+      case 'SampledImage':
+        return {
+          name,
+          viewType: this.readEnum('BindingKind::view_type', IMAGE_VIEW_TYPE),
+          sampleType: this.readEnum('BindingKind::sample_type', SAMPLE_TYPE),
+        };
+      case 'StorageImage':
+        return { name, readOnly: this.readPresent('BindingKind::read_only') };
+      // The last row, and spelled out rather than left to a `default`: a
+      // `default` here would give a variant added tomorrow an empty body and
+      // leave the cursor one field short, which is the failure the table's own
+      // docs describe.
+      default:
+        return {
+          name,
+          comparison: this.readPresent('BindingKind::comparison'),
+        };
+    }
+  }
+
+  /**
+   * One `crcbl_hal::BindGroupLayoutEntry`, in the order the struct declares its
+   * fields.
+   *
+   * `count` and `flags` cross **verbatim**, sentinel and all: `u32::MAX` means
+   * "as many descriptors as this device can" and is resolved against a device's
+   * own `max_bindless_descriptors`, which is a number this decoder does not have
+   * — and `gpu-replay.js` has no binding arrays to resolve it into, so it
+   * refuses. Both are the sentinel rule in `docs/plan/41-webgpu-stream.md`: the
+   * encoder never decides, and what the resolution is remains the replayer's to
+   * work out per field.
+   *
+   * @returns {{ binding: number, visibility: string[], kind: object,
+   *             count: number, flags: string[] }}
+   */
+  readBindGroupLayoutEntry() {
+    return {
+      binding: this.readU32(),
+      visibility: this.readFlags(
+        'BindGroupLayoutEntry::visibility',
+        SHADER_STAGES
+      ),
+      kind: this.readBindingKind('BindGroupLayoutEntry::kind'),
+      count: this.readU32(),
+      flags: this.readFlags('BindGroupLayoutEntry::flags', BINDING_FLAGS),
+    };
+  }
+
   readColorAttachment() {
     return {
       view: this.readHandle('ColorAttachment::view'),
@@ -931,6 +1072,38 @@ function decodeCommand(r) {
         compare: r.readOptEnum('SamplerDesc::compare', COMPARE_OP),
       };
     }
+    case CREATE_BIND_GROUP_LAYOUT_TAG: {
+      // **A counted list of structs**, which nothing before this command
+      // carries: `dynamic_offsets` is a list of scalars whose stride cannot be
+      // wrong, and this one is five fields deep with an enum whose payloads have
+      // different lengths.
+      //
+      // The entries are pushed in wire order and NEVER SORTED OR KEYED BY
+      // `binding`. `docs/plan/41-webgpu-stream.md` says why: the slice is
+      // order-sensitive, because a `VARIABLE_COUNT` entry must be both last in
+      // it and highest-numbered, and the first half of that rule is a property
+      // of the *list* rather than of its contents. The fixture carries a layout
+      // whose two entries share a binding number, so a decoder that rebuilt the
+      // list from them loses one.
+      const layout = r.readHandle('CreateBindGroupLayout::layout');
+      const label = r.readOptString('BindGroupLayoutDesc::label');
+      const count = r.readCount('BindGroupLayoutDesc::entries');
+      const entries = [];
+      for (let i = 0; i < count; i += 1) {
+        entries.push(r.readBindGroupLayoutEntry());
+      }
+      return { name: 'CreateBindGroupLayout', layout, label, entries };
+    }
+    case DESTROY_BIND_GROUP_LAYOUT_TAG:
+      // Its own tag and its own table again, and the destroy whose empty slot is
+      // the *ordinary* case: the replayer refuses a layout it cannot express —
+      // any `BindingFlags`, any `count` but one, a mesh or task stage — so the
+      // handle the caller pre-allocated is released with nothing behind it every
+      // time that happens.
+      return {
+        name: 'DestroyBindGroupLayout',
+        layout: r.readHandle('DestroyBindGroupLayout::layout'),
+      };
     case DESTROY_BUFFER_TAG:
       return {
         name: 'DestroyBuffer',

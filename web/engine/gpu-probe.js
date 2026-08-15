@@ -355,6 +355,43 @@ export function startSamplerProbe({ exports }) {
 }
 
 /**
+ * Asks wasm to encode a bind-group layout creation on the device it opened.
+ *
+ * **There is no `readBindGroupLayoutProbe`, for {@link startBufferProbe}'s
+ * reason:** `CreateBindGroupLayout` has no entry on the reply channel either.
+ * `globalThis.crcbl.gpu.replayer.bindGroupLayouts` is the table the
+ * `GPUBindGroupLayout` lands in, and a layout the browser would not have arrives
+ * in `crcbl.gpu.replayer.takeError()`.
+ *
+ * **AND NOTHING TO PASS IN**, on {@link startSamplerProbe}'s terms exactly: a
+ * `GPUBindGroupLayout` reports its `label` and nothing else — not its entries,
+ * not their bindings, not their visibility — so a number chosen by the page
+ * could not be read back off the object. The descriptor is fixed in
+ * `crates/crcbl-webgpu/src/probe.rs`.
+ *
+ * **What is new is that the descriptor is a LIST.** Every command before this
+ * one is a fixed set of fields; this one carries four entries, each five fields
+ * deep, each holding an enum whose variants have different-length payloads. A
+ * stride out by a byte therefore does not truncate — it decodes the next entry
+ * out of the middle of this one and produces a layout that is well-formed and
+ * describes different resources. Four entries, and every one of them a kind
+ * WebGPU can express, is what makes a real `createBindGroupLayout` able to
+ * disagree.
+ *
+ * It needs a **device**, as {@link startBufferProbe} does and for the same
+ * reason: `create_bind_group_layout` is a device method, so a `false` right
+ * after {@link startDeviceProbe} is that ordering rather than a failure.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @returns {boolean} Whether wasm encoded it, on {@link startImageProbe}'s
+ *   terms.
+ */
+export function startBindGroupLayoutProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_bind_group_layout() === 1;
+}
+
+/**
  * Asks wasm to encode a query for what a canvas surface will accept.
  *
  * The third command that makes a round trip, and the encode-and-return half of

@@ -615,6 +615,30 @@ const PROBE_VIEW_LABEL = 'crcbl-webgpu probe view';
 const PROBE_SAMPLER_LABEL = 'crcbl-webgpu probe sampler';
 
 /**
+ * The label `crates/crcbl-webgpu/src/probe.rs`'s `PROBE_BIND_GROUP_LAYOUT_DESC`
+ * sets, and — as with a sampler — **the only member of the layout a browser
+ * reports at all**.
+ *
+ * A `GPUBindGroupLayout` exposes no entries, no bindings and no visibility, so
+ * group M's evidence is the class of what came back and the silence of the
+ * device's error queue afterwards. What the descriptor was is checkable only
+ * before it is handed over, which is `web/tools/gpu-replay.mjs`'s job.
+ */
+const PROBE_LAYOUT_LABEL = 'crcbl-webgpu probe layout';
+
+/**
+ * How many entries `PROBE_BIND_GROUP_LAYOUT_ENTRIES` declares.
+ *
+ * Not readable off the `GPUBindGroupLayout` — nothing about a layout is — so
+ * this is not compared against the object. It is what the group's message
+ * *says*, so a person reading a failure knows how much of a list the browser was
+ * asked to take: four entries, not one, because this is the first command whose
+ * body is a counted list of structs and a single-entry layout would decode the
+ * same whatever the stride.
+ */
+const PROBE_LAYOUT_ENTRIES = 4;
+
+/**
  * How far above its starting height a flappy bird has to climb before the taps
  * are the only thing that can have put it there, in the units its HUD prints.
  *
@@ -3690,6 +3714,114 @@ try {
         ? `an instance of this browser's GPUSampler labelled ${JSON.stringify(samplerProbe.label)}, of ${samplerProbe.held} held, and the device reported nothing`
         : `instanceof GPUSampler: ${samplerProbe?.isRealSampler}, label ${JSON.stringify(samplerProbe?.label)}` +
           `${samplerReport.error ? ` — ${samplerReport.error}` : ''}`
+  );
+
+  // **THE ONLY GATE ON A LIST.** Every command groups G to L put in front of a
+  // browser is a fixed set of fields; this one's body is a counted list of
+  // structs, each five fields deep, each carrying an enum whose variants have
+  // different-length payloads. A stride out by a byte therefore does not
+  // truncate — it decodes the next entry out of the middle of this one and
+  // produces a layout that is well-formed and describes different resources.
+  //
+  // A `GPUBindGroupLayout` reports its `label` and nothing else, exactly as a
+  // `GPUSampler` does, so the two things available here are group L's two: the
+  // class of what came back, which `instanceof GPUBindGroupLayout` settles and
+  // no stub can satisfy — node has no such binding — and the device's error
+  // queue being empty afterwards, which is the only thing anywhere that can say
+  // `createBindGroupLayout` *accepted* the four-entry descriptor this seam
+  // built. `gpu-replay.mjs` proves that descriptor against a stub, entry for
+  // entry, and proves every refusal; only a real device can say the browser
+  // takes it.
+  group('M — a bind-group layout is created on the real device');
+
+  const layoutStart = await evaluate(
+    page,
+    `(async () => {
+       const { startBindGroupLayoutProbe } = await import('/engine/gpu-probe.js');
+       const { exports, gpu } = globalThis.crcbl;
+       const before = gpu.stats();
+       return {
+         started: startBindGroupLayoutProbe({ exports }),
+         replayed: before.replayed,
+       };
+     })()`
+  );
+  const layoutProbe = layoutStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(() => {
+             const { gpu } = globalThis.crcbl;
+             const stats = gpu.stats();
+             if (stats.replayed <= ${layoutStart.replayed} && !stats.failure) {
+               return null;
+             }
+             const entries = [...gpu.replayer.bindGroupLayouts.entries()];
+             const last = entries[entries.length - 1];
+             const layout = last ? last[1] : undefined;
+             return {
+               commands: stats.commands,
+               failure: stats.failure,
+               handle: last ? last[0] : null,
+               held: entries.length,
+               // The browser's own class, as groups H, J, K and L ask. Node has
+               // no \`GPUBindGroupLayout\` binding at all, so this is what a
+               // silent fall back to a stub cannot survive.
+               isRealLayout:
+                 typeof GPUBindGroupLayout === 'function' &&
+                 layout instanceof GPUBindGroupLayout,
+               // Every other member of a \`GPUBindGroupLayout\` is absent by
+               // design, so this is the whole of what the object can be asked.
+               label: layout?.label,
+             };
+           })()`
+        )
+      )
+    : null;
+
+  // Read a moment after the replay rather than during it, for the reason groups
+  // K and L spell out: WebGPU raises a validation error "in a future task", so a
+  // queue read in the evaluation that saw the replay finish is empty whatever
+  // happened. The failure it guards here is the list: an entry's `visibility`
+  // arriving as zero, a `texture` member missing its `sampleType`, a
+  // `hasDynamicOffset` under a name WebIDL ignores — every one of those is a
+  // layout the browser refuses and nothing else reports.
+  const layoutReport = layoutProbe
+    ? await evaluate(
+        page,
+        `(async () => {
+           await new Promise((settle) =>
+             requestAnimationFrame(() => requestAnimationFrame(settle))
+           );
+           return { waited: true, error: globalThis.crcbl.gpu.replayer.takeError() };
+         })()`
+      )
+    : null;
+  check(
+    'M',
+    'wasm encoded a bind-group layout creation and the demo loop replayed it',
+    layoutProbe?.commands?.join(',') === 'CreateBindGroupLayout' &&
+      Number.isInteger(layoutProbe.handle),
+    layoutProbe
+      ? `the loop replayed [${layoutProbe.commands.join(', ')}] for layout ${layoutProbe.handle}` +
+          `${layoutProbe.failure ? ` — ${layoutProbe.failure}` : ''}`
+      : layoutStart?.started
+        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'M',
+    'a real GPUBindGroupLayout came back from the device with every entry accepted',
+    layoutProbe?.isRealLayout === true &&
+      layoutProbe?.label === PROBE_LAYOUT_LABEL &&
+      layoutReport?.waited === true &&
+      layoutReport?.error === null,
+    layoutReport?.waited !== true
+      ? 'the page never got as far as reading the device error queue'
+      : layoutProbe?.isRealLayout && layoutReport.error === null
+        ? `an instance of this browser's GPUBindGroupLayout labelled ${JSON.stringify(layoutProbe.label)}, built from ${PROBE_LAYOUT_ENTRIES} entries, of ${layoutProbe.held} held, and the device reported nothing`
+        : `instanceof GPUBindGroupLayout: ${layoutProbe?.isRealLayout}, label ${JSON.stringify(layoutProbe?.label)}` +
+          `${layoutReport.error ? ` — ${layoutReport.error}` : ''}`
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and

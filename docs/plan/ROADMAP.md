@@ -2210,7 +2210,16 @@ something trusted, and in a browser the only trusted renderer today is
      clamp that nothing anywhere reports. `ClampToBorder` is refused rather than
      folded into `clamp-to-edge`, which agrees everywhere except the edge texel
      and would bleed an atlas's neighbour into every seam silently.
-   - 5d — bind groups, and the layouts they are built against.
+   - ~~5d — bind-group layouts.~~ — **shipped.** Group M proves a real
+     `GPUBindGroupLayout` built from a multi-entry descriptor. WebGPU has no
+     binding arrays at all, so any `count` but 1 is refused rather than quietly
+     built as one descriptor — which would leave every later bindless write
+     targeting a slot that does not exist — and the `u32::MAX` sentinel gets its
+     own refusal, because "as many as this device can" and "give me 64" are
+     different asks and a reader has to know which arrived. It also found a live
+     defect: `gpu-stream.js`'s stage table was missing `TASK`, so a stream the
+     Rust writer produces happily would have been refused.
+   - 5e — bind groups themselves, against those layouts.
 6. Pipelines and WGSL modules — the artifacts are already committed and already
    validated.
 7. Command encoding, render and compute passes.

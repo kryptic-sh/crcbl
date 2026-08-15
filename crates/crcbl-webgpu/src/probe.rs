@@ -43,6 +43,7 @@
 //! | [`__crcbl_web_gpu_probe_image`](shim::__crcbl_web_gpu_probe_image) | `(i32, i32, i32) -> i32` | Encode one [`CreateImage`](crate::Command::CreateImage) against [`PROBE_IMAGE`], of `width` by `height` texels with `mip_levels` levels. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_image_view`](shim::__crcbl_web_gpu_probe_image_view) | `() -> i32` | Encode one [`CreateImageView`](crate::Command::CreateImageView) against [`PROBE_IMAGE_VIEW`], viewing [`PROBE_IMAGE`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_sampler`](shim::__crcbl_web_gpu_probe_sampler) | `() -> i32` | Encode one [`CreateSampler`](crate::Command::CreateSampler) against [`PROBE_SAMPLER`], with [`PROBE_SAMPLER_DESC`]. `1`, or `0` on the same three conditions. |
+//! | [`__crcbl_web_gpu_probe_bind_group_layout`](shim::__crcbl_web_gpu_probe_bind_group_layout) | `() -> i32` | Encode one [`CreateBindGroupLayout`](crate::Command::CreateBindGroupLayout) against [`PROBE_BIND_GROUP_LAYOUT`], with [`PROBE_BIND_GROUP_LAYOUT_DESC`]. `1`, or `0` on the same three conditions. |
 //! | [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps) | `() -> i32` | Encode one [`SurfaceCaps`](crate::Command::SurfaceCaps) and register its wait. `1`, or `0` if there was no room or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_state`](shim::__crcbl_web_gpu_probe_surface_caps_state) | `() -> i32` | Drain, and answer one of the `CAPS_*` codes. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_reason_ptr`](shim::__crcbl_web_gpu_probe_surface_caps_reason_ptr) | `() -> i32` | Where the reason the query answered nothing starts. Empty when it answered. |
@@ -162,6 +163,23 @@
 //! one `createSampler` accepts, and it says so by reporting nothing on the
 //! device's error channel.
 //!
+//! # The bind-group layout is that shape a fourth time, and it is a *list*
+//!
+//! [`__crcbl_web_gpu_probe_bind_group_layout`](shim::__crcbl_web_gpu_probe_bind_group_layout)
+//! is [`__crcbl_web_gpu_probe_sampler`](shim::__crcbl_web_gpu_probe_sampler) in
+//! every structural respect, down to what a browser can be asked about the
+//! result: **a `GPUBindGroupLayout` reports its `label` and nothing else**, so
+//! the evidence is again the object's class and the device's silence afterwards.
+//!
+//! What is new is the *body*. Every command before this one is a fixed set of
+//! fields; this one is a counted list of structs, and each struct carries an
+//! enum whose variants have different-length payloads. A stride wrong by a byte
+//! therefore does not truncate — it decodes the next entry out of the middle of
+//! this one, and produces a layout that is well-formed and describes different
+//! resources. [`PROBE_BIND_GROUP_LAYOUT_ENTRIES`] is four entries for that
+//! reason, and every one of them is a kind WebGPU can express, so what a browser
+//! is being asked is whether the *whole list* survived.
+//!
 //! Its neighbour [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps)
 //! is the opposite case and has the full awaited shape, because
 //! [`SurfaceCaps`](crate::Command::SurfaceCaps) **is** answered — with the
@@ -265,10 +283,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crcbl_hal::{
-    AdapterId, BufferDesc, BufferHandle, BufferUsage, CompareOp, DeviceDesc, Extent3d, Features,
+    AdapterId, BindGroupLayoutDesc, BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags,
+    BindingKind, BufferDesc, BufferHandle, BufferUsage, CompareOp, DeviceDesc, Extent3d, Features,
     FilterMode, Format, ImageDesc, ImageHandle, ImageSubresourceRange, ImageType, ImageUsage,
-    ImageViewDesc, ImageViewHandle, ImageViewType, MemoryLocation, SamplerAddressMode, SamplerDesc,
-    SamplerHandle, SurfaceCaps, SurfaceHandle,
+    ImageViewDesc, ImageViewHandle, ImageViewType, MemoryLocation, SampleType, SamplerAddressMode,
+    SamplerDesc, SamplerHandle, ShaderStages, SurfaceCaps, SurfaceHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -563,6 +582,109 @@ pub const PROBE_SAMPLER_DESC: SamplerDesc<'static> = SamplerDesc {
     compare: Some(CompareOp::Greater),
 };
 
+/// The layout [`shim::__crcbl_web_gpu_probe_bind_group_layout`] creates, every
+/// time.
+///
+/// The same bits a fifth time, on [`PROBE_SAMPLER`]'s terms: a handle carries no
+/// kind, so a page filing five kinds under one key would be a replayer with one
+/// table where the crate docs require five.
+pub const PROBE_BIND_GROUP_LAYOUT: BindGroupLayoutHandle =
+    match BindGroupLayoutHandle::from_bits(1 << 32) {
+        Some(layout) => layout,
+        // Generation `1`, as above.
+        None => panic!("generation 1 is not zero"),
+    };
+
+/// The binding slots [`PROBE_BIND_GROUP_LAYOUT_DESC`] declares.
+///
+/// **Four entries, because one proves nothing about a counted list.** This is
+/// the first command on the stream carrying a counted list of *structs*, and a
+/// single-entry layout decodes identically whether the reader advances by an
+/// entry or by a guess — every field after the first would simply be the end of
+/// the command. Four entries means a stride that is wrong by a byte lands inside
+/// the next entry and produces a layout the browser refuses.
+///
+/// **Every one of them is a kind WebGPU can express, and between them they cover
+/// four of `GPUBindGroupLayoutEntry`'s five members.** `buffer` twice, with both
+/// of its `type`s that this seam can reach and `hasDynamicOffset` both ways;
+/// `texture`, whose `sampleType` and `viewDimension` are two more tables;
+/// `sampler`, whose `type` is the comparison flag. [`BindingKind::StorageImage`]
+/// is deliberately absent — `GPUStorageTextureBindingLayout.format` is a
+/// required member and the seam's variant carries no format, so a probe naming
+/// one would be testing the refusal rather than the creation.
+/// `web/tools/gpu-replay.mjs` drives that path against a stub, through a command
+/// the corpus really carries.
+///
+/// **Every `count` is `1` and no entry sets a [`BindingFlags`]**, for the same
+/// reason turned around: WebGPU has no binding arrays at all — a
+/// `GPUBindGroupLayoutEntry` has no `count` member — so anything else here is a
+/// layout the replayer must refuse rather than one a browser can accept. The
+/// bindless declaration is in the corpus instead, where the refusal is what is
+/// being observed.
+///
+/// **Three different [`ShaderStages`], and one entry naming two at once**, so
+/// the `GPUShaderStage` mapping is exercised bit by bit rather than through one
+/// value that could stand for any of them.
+pub const PROBE_BIND_GROUP_LAYOUT_ENTRIES: [BindGroupLayoutEntry; 4] = [
+    // The engine's own geometry binding: vertex pulling reads its streams out of
+    // a read-only storage buffer, which is why this is the first slot of the
+    // first layout this seam ever builds.
+    BindGroupLayoutEntry {
+        binding: 0,
+        visibility: ShaderStages::VERTEX,
+        kind: BindingKind::StorageBuffer {
+            read_only: true,
+            dynamic: false,
+        },
+        count: 1,
+        flags: BindingFlags::empty(),
+    },
+    // The substitute for push constants, which WebGPU has none of: per-draw data
+    // as a dynamic offset into one uniform buffer. `dynamic: true` is therefore
+    // the interesting value rather than an arbitrary one.
+    BindGroupLayoutEntry {
+        binding: 1,
+        visibility: ShaderStages::VERTEX.union(ShaderStages::FRAGMENT),
+        kind: BindingKind::UniformBuffer { dynamic: true },
+        count: 1,
+        flags: BindingFlags::empty(),
+    },
+    BindGroupLayoutEntry {
+        binding: 2,
+        visibility: ShaderStages::FRAGMENT,
+        kind: BindingKind::SampledImage {
+            view_type: ImageViewType::D2,
+            sample_type: SampleType::Float,
+        },
+        count: 1,
+        flags: BindingFlags::empty(),
+    },
+    BindGroupLayoutEntry {
+        binding: 3,
+        visibility: ShaderStages::COMPUTE,
+        kind: BindingKind::Sampler { comparison: false },
+        count: 1,
+        flags: BindingFlags::empty(),
+    },
+];
+
+/// The descriptor [`shim::__crcbl_web_gpu_probe_bind_group_layout`] asks with.
+///
+/// A `const` rather than a function for [`PROBE_IMAGE_VIEW_DESC`]'s reason:
+/// there is nothing for a caller to pass. **A `GPUBindGroupLayout` reports its
+/// `label` and nothing else** — no entries, no bindings, no visibility — so this
+/// is [`PROBE_SAMPLER_DESC`]'s situation exactly, and what a browser can be asked
+/// is the same two things: that the object is an instance of this browser's own
+/// `GPUBindGroupLayout`, and that the device reported nothing about the
+/// descriptor afterwards.
+///
+/// That second half is what the entries are chosen for; see
+/// [`PROBE_BIND_GROUP_LAYOUT_ENTRIES`].
+pub const PROBE_BIND_GROUP_LAYOUT_DESC: BindGroupLayoutDesc<'static> = BindGroupLayoutDesc {
+    label: Some("crcbl-webgpu probe layout"),
+    entries: &PROBE_BIND_GROUP_LAYOUT_ENTRIES,
+};
+
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
 ///
@@ -853,6 +975,39 @@ impl Probe {
         };
         channel
             .encode(|stream| stream.create_sampler(PROBE_SAMPLER, &PROBE_SAMPLER_DESC))
+            .is_some()
+    }
+
+    /// Encode one [`CreateBindGroupLayout`](crate::Command::CreateBindGroupLayout)
+    /// against [`PROBE_BIND_GROUP_LAYOUT`], with
+    /// [`PROBE_BIND_GROUP_LAYOUT_DESC`].
+    ///
+    /// [`request_sampler`](Self::request_sampler)'s twin in every structural
+    /// respect — a device method, so it refuses until a device has opened; no
+    /// wait registered, because nothing answers a creation; no arguments,
+    /// because the descriptor is fixed and a `GPUBindGroupLayout` reports
+    /// nothing a page could have chosen.
+    ///
+    /// **It cannot run [`BindGroupLayoutDesc::check_entries`] and does not
+    /// pretend to**: that check needs a [`DeviceCaps`](crcbl_hal::DeviceCaps),
+    /// which lives on the far side of this seam. The descriptor above is one it
+    /// would pass on any device — no flags, every `count` one, no mesh or task
+    /// visibility — so what this probe puts in front of a browser is the
+    /// creation rather than the refusal.
+    fn request_bind_group_layout(&mut self) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        channel
+            .encode(|stream| {
+                stream.create_bind_group_layout(
+                    PROBE_BIND_GROUP_LAYOUT,
+                    &PROBE_BIND_GROUP_LAYOUT_DESC,
+                )
+            })
             .is_some()
     }
 
@@ -1266,6 +1421,31 @@ pub mod shim {
     pub extern "C" fn __crcbl_web_gpu_probe_sampler() -> u32 {
         PROBE.with(|probe| match probe.try_borrow_mut() {
             Ok(mut probe) => u32::from(probe.request_sampler()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Ask the page to make a bind-group layout on the device it opened.
+    ///
+    /// `1` when one [`CreateBindGroupLayout`](crate::Command::CreateBindGroupLayout)
+    /// is on the stream; `0` on [`__crcbl_web_gpu_probe_sampler`]'s three
+    /// conditions.
+    ///
+    /// **No `state` beside it and no arguments either**, exactly as its
+    /// neighbour has none and for the same two separate reasons: nothing answers
+    /// a creation, and **a `GPUBindGroupLayout` reports its `label` and nothing
+    /// else** — not its entries, not their bindings, not their visibility — so a
+    /// number chosen by the page could not be read back off the object.
+    /// [`PROBE_BIND_GROUP_LAYOUT_DESC`](super::PROBE_BIND_GROUP_LAYOUT_DESC) is
+    /// chosen for what a browser can *refuse* instead, and it carries four
+    /// entries rather than one because this is the stream's first counted list
+    /// of structs. `crcbl.gpu.replayer.bindGroupLayouts` is the table the
+    /// `GPUBindGroupLayout` lands in, and a layout the browser would not have is
+    /// reported through `Device::take_error`.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_bind_group_layout() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_bind_group_layout()),
             Err(_) => 0,
         })
     }

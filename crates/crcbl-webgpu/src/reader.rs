@@ -18,9 +18,10 @@
 //! accepts is one the JS replayer can be held to.
 
 use crcbl_hal::{
-    AdapterId, BufferUsage, ClearValue, ColorAttachment, CompareOp, DepthStencilAttachment,
-    Extent3d, FilterMode, Format, ImageAspect, ImageSubresourceRange, ImageType, ImageUsage,
-    ImageViewType, LoadOp, Rect2d, SamplerAddressMode, ShaderStages, StoreOp,
+    AdapterId, BindGroupLayoutEntry, BindingFlags, BindingKind, BufferUsage, ClearValue,
+    ColorAttachment, CompareOp, DepthStencilAttachment, Extent3d, FilterMode, Format, ImageAspect,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewType, LoadOp, Rect2d, SampleType,
+    SamplerAddressMode, ShaderStages, StoreOp,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -106,6 +107,108 @@ impl ByteReader<'_> {
                 field,
                 code: code.into(),
             })
+    }
+
+    fn read_sample_type(&mut self, field: &'static str) -> Result<SampleType, DecodeError> {
+        let code = self.read_u8()?;
+        tag::sample_type_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    /// A [`BindingKind`] code and that variant's own fields.
+    ///
+    /// **The dispatch lives here rather than in [`crate::tag`]**, and that is
+    /// the shape of the type rather than a preference: every other table there
+    /// answers `Option<Variant>` from a byte, and this enum's variants carry
+    /// data, so there is no `BindingKind` to answer with until the body has been
+    /// read. What `tag` keeps is the writer's half — the codes and
+    /// [`tag::binding_kind_code`]'s exhaustive `match`, which is what stops
+    /// compiling when a variant is added.
+    ///
+    /// The refusing arm is therefore this function's, and it refuses rather than
+    /// folding for a reason particular to this table: the bodies are different
+    /// lengths. A code read as its neighbour does not merely mis-name the
+    /// binding — it consumes the wrong number of bytes and lands the cursor
+    /// inside the next entry, so every field after it is noise that still
+    /// decodes.
+    fn read_binding_kind(&mut self, field: &'static str) -> Result<BindingKind, DecodeError> {
+        let code = self.read_u8()?;
+        match code {
+            tag::BINDING_KIND_UNIFORM_BUFFER => Ok(BindingKind::UniformBuffer {
+                dynamic: self.read_bool("BindingKind::dynamic")?,
+            }),
+            tag::BINDING_KIND_STORAGE_BUFFER => Ok(BindingKind::StorageBuffer {
+                read_only: self.read_bool("BindingKind::read_only")?,
+                dynamic: self.read_bool("BindingKind::dynamic")?,
+            }),
+            tag::BINDING_KIND_SAMPLED_IMAGE => Ok(BindingKind::SampledImage {
+                view_type: self.read_image_view_type("BindingKind::view_type")?,
+                sample_type: self.read_sample_type("BindingKind::sample_type")?,
+            }),
+            tag::BINDING_KIND_STORAGE_IMAGE => Ok(BindingKind::StorageImage {
+                read_only: self.read_bool("BindingKind::read_only")?,
+            }),
+            tag::BINDING_KIND_SAMPLER => Ok(BindingKind::Sampler {
+                comparison: self.read_bool("BindingKind::comparison")?,
+            }),
+            _ => Err(DecodeError::InvalidEnum {
+                field,
+                code: code.into(),
+            }),
+        }
+    }
+
+    /// A [`ShaderStages`] word, through `from_bits` and never
+    /// `from_bits_truncate` — the rule every bitflags field on this stream
+    /// follows, and here the cost of breaking it is a *narrower layout*: a
+    /// binding the caller declared visible to a stage this build has no name for
+    /// would arrive invisible to it, and the shader compiled against it would
+    /// read whatever the slot happened to hold.
+    fn read_shader_stages(&mut self, field: &'static str) -> Result<ShaderStages, DecodeError> {
+        let bits = self.read_u32()?;
+        ShaderStages::from_bits(bits).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: bits.into(),
+        })
+    }
+
+    /// A [`BindingFlags`] word, on [`read_shader_stages`](Self::read_shader_stages)'s
+    /// terms.
+    ///
+    /// `BindingFlags`'s own docs make the strictness obligatory rather than
+    /// stylistic: "a backend without it must reject a layout that sets any of
+    /// them rather than silently ignoring it — a bindless array quietly
+    /// downgraded to a fixed one reads garbage at index 4097." Truncating an
+    /// unclaimed bit here is that downgrade, one layer earlier.
+    fn read_binding_flags(&mut self, field: &'static str) -> Result<BindingFlags, DecodeError> {
+        let bits = self.read_u32()?;
+        BindingFlags::from_bits(bits).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: bits.into(),
+        })
+    }
+
+    /// One [`BindGroupLayoutEntry`], in the order the struct declares its fields.
+    ///
+    /// Spelled out one field at a time rather than built inline for
+    /// `CreateSampler`'s reason: `binding` and `count` are adjacent-in-meaning
+    /// `u32`s that both hold small numbers, and a body that read them in the
+    /// other order still decodes to an entry.
+    fn read_bind_group_layout_entry(&mut self) -> Result<BindGroupLayoutEntry, DecodeError> {
+        let binding = self.read_u32()?;
+        let visibility = self.read_shader_stages("BindGroupLayoutEntry::visibility")?;
+        let kind = self.read_binding_kind("BindGroupLayoutEntry::kind")?;
+        let count = self.read_u32()?;
+        let flags = self.read_binding_flags("BindGroupLayoutEntry::flags")?;
+        Ok(BindGroupLayoutEntry {
+            binding,
+            visibility,
+            kind,
+            count,
+            flags,
+        })
     }
 
     fn read_format(&mut self, field: &'static str) -> Result<Format, DecodeError> {
@@ -385,6 +488,26 @@ impl<'a> StreamReader<'a> {
                     compare,
                 })
             }
+            tag::CREATE_BIND_GROUP_LAYOUT_TAG => {
+                let layout = r.read_handle("CreateBindGroupLayout::layout")?;
+                let label = r.read_opt_string("BindGroupLayoutDesc::label")?;
+                let count = r.read_count("BindGroupLayoutDesc::entries")?;
+                // Pushed in wire order and never sorted: the slice's order is
+                // part of the descriptor's meaning, not a presentation of it.
+                // See `Command::CreateBindGroupLayout`.
+                let mut entries = Vec::with_capacity(count);
+                for _ in 0..count {
+                    entries.push(r.read_bind_group_layout_entry()?);
+                }
+                Ok(Command::CreateBindGroupLayout {
+                    layout,
+                    label,
+                    entries,
+                })
+            }
+            tag::DESTROY_BIND_GROUP_LAYOUT_TAG => Ok(Command::DestroyBindGroupLayout {
+                layout: r.read_handle("DestroyBindGroupLayout::layout")?,
+            }),
             tag::DESTROY_BUFFER_TAG => Ok(Command::DestroyBuffer {
                 buffer: r.read_handle("DestroyBuffer::buffer")?,
             }),
@@ -444,12 +567,7 @@ impl<'a> StreamReader<'a> {
                 })
             }
             tag::PUSH_CONSTANTS_TAG => {
-                let stage_bits = r.read_u32()?;
-                let stages =
-                    ShaderStages::from_bits(stage_bits).ok_or(DecodeError::InvalidEnum {
-                        field: "PushConstants::stages",
-                        code: stage_bits.into(),
-                    })?;
+                let stages = r.read_shader_stages("PushConstants::stages")?;
                 let offset = r.read_u32()?;
                 let data = r.read_field("PushConstants::data")?.to_vec();
                 let layout = r.read_handle("PushConstants::layout")?;

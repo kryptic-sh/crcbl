@@ -27,8 +27,8 @@
 //! error instead of a silently dropped one.
 
 use crcbl_hal::{
-    CompareOp, CompositeAlpha, DeviceType, FilterMode, Format, ImageType, ImageViewType, LoadOp,
-    MemoryLocation, PresentMode, SamplerAddressMode, StoreOp,
+    BindingKind, CompareOp, CompositeAlpha, DeviceType, FilterMode, Format, ImageType,
+    ImageViewType, LoadOp, MemoryLocation, PresentMode, SampleType, SamplerAddressMode, StoreOp,
 };
 
 use crate::reply::SurfaceCapsFailure;
@@ -241,6 +241,11 @@ pub const CREATE_IMAGE_VIEW_TAG: u8 = 0x03;
 /// fail the range walk below, so the check would still run and would no longer
 /// be able to fail.
 pub const CREATE_SAMPLER_TAG: u8 = 0x04;
+/// [`Command::CreateBindGroupLayout`](crate::Command::CreateBindGroupLayout).
+///
+/// Written out rather than as `FAMILY_CREATE + 5`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const CREATE_BIND_GROUP_LAYOUT_TAG: u8 = 0x05;
 /// [`Command::DestroyBuffer`](crate::Command::DestroyBuffer).
 pub const DESTROY_BUFFER_TAG: u8 = 0x20;
 /// [`Command::DestroySurface`](crate::Command::DestroySurface).
@@ -254,6 +259,11 @@ pub const DESTROY_IMAGE_VIEW_TAG: u8 = 0x23;
 /// Written out rather than as `FAMILY_DESTROY + 4`, for [`CREATE_SAMPLER_TAG`]'s
 /// reason.
 pub const DESTROY_SAMPLER_TAG: u8 = 0x24;
+/// [`Command::DestroyBindGroupLayout`](crate::Command::DestroyBindGroupLayout).
+///
+/// Written out rather than as `FAMILY_DESTROY + 5`, for [`CREATE_SAMPLER_TAG`]'s
+/// reason.
+pub const DESTROY_BIND_GROUP_LAYOUT_TAG: u8 = 0x25;
 /// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel).
 pub const BEGIN_DEBUG_LABEL_TAG: u8 = 0x40;
 /// [`Command::BeginRenderPass`](crate::Command::BeginRenderPass).
@@ -706,6 +716,101 @@ pub const fn compare_op_from_code(code: u8) -> Option<CompareOp> {
     }
 }
 
+// ── SampleType ────────────────────────────────────────────────────────────────
+//
+// Carried by [`BindingKind::SampledImage`], and the smallest table here with the
+// loudest failure. `crcbl-hal` says why the field exists at all: **WebGPU puts
+// it in the layout**, as `GPUTextureBindingLayout.sampleType`, and refuses a
+// depth-format view bound through a slot that says `float`. So the two codes are
+// not two spellings of a preference — they are two different bind-group layouts,
+// and a stream that folded one into the other builds a layout the browser then
+// refuses every bind group against.
+
+/// [`SampleType::Float`] — ordinary filterable colour texels.
+pub const SAMPLE_TYPE_FLOAT: u8 = 0x00;
+/// [`SampleType::Depth`] — a depth texture read through a comparison sampler.
+pub const SAMPLE_TYPE_DEPTH: u8 = 0x01;
+
+/// The wire code for a [`SampleType`].
+#[must_use]
+pub const fn sample_type_code(sample_type: SampleType) -> u8 {
+    match sample_type {
+        SampleType::Float => SAMPLE_TYPE_FLOAT,
+        SampleType::Depth => SAMPLE_TYPE_DEPTH,
+    }
+}
+
+/// The [`SampleType`] a wire code names, or `None` if it names none.
+///
+/// **`None` rather than [`SampleType::Float`] as a default**, tempting though it
+/// is for a two-variant enum whose first variant is what nearly every binding
+/// wants: a `Depth` slot arriving as `Float` is a layout WebGPU accepts and then
+/// refuses every depth view against, with the error naming the *bind group*
+/// rather than the layout that was wrong.
+#[must_use]
+pub const fn sample_type_from_code(code: u8) -> Option<SampleType> {
+    match code {
+        SAMPLE_TYPE_FLOAT => Some(SampleType::Float),
+        SAMPLE_TYPE_DEPTH => Some(SampleType::Depth),
+        _ => None,
+    }
+}
+
+// ── BindingKind ───────────────────────────────────────────────────────────────
+//
+// **The one code table here whose enum carries data**, so it is a code plus a
+// body rather than a code alone — and the shape is the reason there is no
+// `binding_kind_from_code`: a code names a variant, and the variant's fields have
+// to be read before there is a [`BindingKind`] to answer with. So this half is
+// the writer's table, [`crate::StreamReader`] holds the dispatch, and the arm
+// that refuses an unclaimed code lives there with the reads it guards.
+//
+// **What each code costs on the far side is not symmetrical**, which is why the
+// codes are spread across the variants rather than grouped by "buffer-ish" and
+// "image-ish": WebGPU does not have a binding *type* at all.
+// `GPUBindGroupLayoutEntry` carries **one of** `buffer`, `sampler`, `texture`,
+// `storageTexture` or `externalTexture` as a *member*, each an object with its
+// own fields, so this byte decides which member exists. A code folded into a
+// neighbour therefore does not mis-set a field — it builds a layout describing a
+// different kind of resource, and every bind group made against it is refused by
+// the browser naming the group. `web/engine/gpu-replay.js` is where that mapping
+// is written out, including the variant WebGPU cannot express.
+
+/// [`BindingKind::UniformBuffer`]; a `bool` `dynamic` follows.
+pub const BINDING_KIND_UNIFORM_BUFFER: u8 = 0x00;
+/// [`BindingKind::StorageBuffer`]; `read_only` then `dynamic`, both `bool`.
+pub const BINDING_KIND_STORAGE_BUFFER: u8 = 0x01;
+/// [`BindingKind::SampledImage`]; an [`ImageViewType`] code then a
+/// [`SampleType`] code.
+pub const BINDING_KIND_SAMPLED_IMAGE: u8 = 0x02;
+/// [`BindingKind::StorageImage`]; a `bool` `read_only` follows.
+pub const BINDING_KIND_STORAGE_IMAGE: u8 = 0x03;
+/// [`BindingKind::Sampler`]; a `bool` `comparison` follows.
+pub const BINDING_KIND_SAMPLER: u8 = 0x04;
+
+/// The wire code for a [`BindingKind`], which is followed by that variant's own
+/// fields.
+///
+/// Exhaustive, so a variant added to `crcbl-hal` stops this file compiling —
+/// which is the moment the number beside it, and the body the reader has to
+/// grow, are both impossible to miss.
+#[must_use]
+pub const fn binding_kind_code(kind: BindingKind) -> u8 {
+    match kind {
+        BindingKind::UniformBuffer { .. } => BINDING_KIND_UNIFORM_BUFFER,
+        BindingKind::StorageBuffer { .. } => BINDING_KIND_STORAGE_BUFFER,
+        BindingKind::SampledImage { .. } => BINDING_KIND_SAMPLED_IMAGE,
+        BindingKind::StorageImage { .. } => BINDING_KIND_STORAGE_IMAGE,
+        BindingKind::Sampler { .. } => BINDING_KIND_SAMPLER,
+    }
+}
+
+/// One past the last claimed [`BindingKind`] code.
+///
+/// What the reader's refusing arm is checked against: `0xFF` never lands on an
+/// off-by-one in the table, and this byte does.
+pub const BINDING_KIND_CODES: u8 = 0x05;
+
 // ── DeviceType ────────────────────────────────────────────────────────────────
 //
 // Carried by [`Reply::Adapter`](crate::Reply::Adapter). **A browser never sends
@@ -1040,12 +1145,22 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 19] = [
+    const TAGS: [(&str, u8, u8); 21] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
         ("CreateImageView", CREATE_IMAGE_VIEW_TAG, FAMILY_CREATE),
         ("CreateSampler", CREATE_SAMPLER_TAG, FAMILY_CREATE),
+        (
+            "CreateBindGroupLayout",
+            CREATE_BIND_GROUP_LAYOUT_TAG,
+            FAMILY_CREATE,
+        ),
+        (
+            "DestroyBindGroupLayout",
+            DESTROY_BIND_GROUP_LAYOUT_TAG,
+            FAMILY_DESTROY,
+        ),
         ("DestroyBuffer", DESTROY_BUFFER_TAG, FAMILY_DESTROY),
         ("DestroySurface", DESTROY_SURFACE_TAG, FAMILY_DESTROY),
         ("DestroyImage", DESTROY_IMAGE_TAG, FAMILY_DESTROY),
@@ -1299,6 +1414,57 @@ mod tests {
             compare_op_code(CompareOp::Less)
         );
 
+        let sample_type = [SampleType::Float, SampleType::Depth];
+        let codes: Vec<u8> = sample_type.iter().map(|t| sample_type_code(*t)).collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two SampleTypes share a code"
+        );
+        for kind in sample_type {
+            assert_eq!(sample_type_from_code(sample_type_code(kind)), Some(kind));
+        }
+
+        // `BindingKind` has no `from_code` — a code names a variant and the
+        // variant's fields have to be read before there is one to answer with —
+        // so what can be checked here is that the five codes are distinct and
+        // that they stop where the reader's refusing arm believes they do. The
+        // round trip is a whole command, in `tests/stream.rs`.
+        let binding_kind = [
+            BindingKind::UniformBuffer { dynamic: false },
+            BindingKind::StorageBuffer {
+                read_only: true,
+                dynamic: false,
+            },
+            BindingKind::SampledImage {
+                view_type: ImageViewType::D2,
+                sample_type: SampleType::Float,
+            },
+            BindingKind::StorageImage { read_only: false },
+            BindingKind::Sampler { comparison: false },
+        ];
+        let codes: Vec<u8> = binding_kind.iter().map(|k| binding_kind_code(*k)).collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two BindingKinds share a code"
+        );
+        assert_eq!(
+            codes.iter().copied().max().map(|top| top + 1),
+            Some(BINDING_KIND_CODES),
+            "BINDING_KIND_CODES is not one past the last claimed code, so the \
+             reader's refusing arm is checked against the wrong byte"
+        );
+        // The payload does not change the code, which is what makes the byte a
+        // *kind* rather than a summary of the variant's fields.
+        assert_eq!(
+            binding_kind_code(BindingKind::StorageBuffer {
+                read_only: false,
+                dynamic: true
+            }),
+            BINDING_KIND_STORAGE_BUFFER
+        );
+
         let device_type = [
             DeviceType::Cpu,
             DeviceType::Integrated,
@@ -1386,6 +1552,7 @@ mod tests {
         assert_eq!(filter_mode_from_code(0xFF), None);
         assert_eq!(sampler_address_mode_from_code(0xFF), None);
         assert_eq!(compare_op_from_code(0xFF), None);
+        assert_eq!(sample_type_from_code(0xFF), None);
         assert_eq!(device_type_from_code(0xFF), None);
         assert_eq!(format_from_code(0xFF), None);
         assert_eq!(present_mode_from_code(0xFF), None);
@@ -1401,6 +1568,7 @@ mod tests {
             None
         );
         assert_eq!(compare_op_from_code(COMPARE_OP_ALWAYS + 1), None);
+        assert_eq!(sample_type_from_code(SAMPLE_TYPE_DEPTH + 1), None);
         assert_eq!(device_type_from_code(DEVICE_TYPE_OTHER + 1), None);
         assert_eq!(format_from_code(FORMAT_BC7_RGBA_UNORM_SRGB + 1), None);
         assert_eq!(present_mode_from_code(PRESENT_MODE_IMMEDIATE + 1), None);

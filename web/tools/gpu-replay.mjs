@@ -126,9 +126,11 @@ import {
   halFeaturesFor,
   halLimitsFor,
   webgpuAddressModesFor,
+  webgpuBindingLayoutFor,
   webgpuBufferUsageFor,
   webgpuFeaturesFor,
   webgpuMaxAnisotropyFor,
+  webgpuShaderStageFor,
   webgpuTextureAspectFor,
   webgpuTextureFormatFor,
   webgpuTextureUsageFor,
@@ -568,6 +570,22 @@ function stubSampler(desc) {
 }
 
 /**
+ * A `GPUBindGroupLayout` as `createBindGroupLayout` answers one.
+ *
+ * {@link stubSampler}'s shape and for its reason: a real one reports its `label`
+ * and nothing else — not its entries, not their bindings, not their visibility —
+ * so every claim about a layout's descriptor below is made against
+ * `device.createdLayouts` rather than against what came back. `of` is the
+ * descriptor it was made from, kept for the checks that need to say *which*
+ * layout a table holds, with the same caveat: no browser offers it.
+ *
+ * @param {{ label?: string }} desc
+ */
+function stubBindGroupLayout(desc) {
+  return { label: desc.label ?? '', of: desc };
+}
+
+/**
  * A `GPUDevice` as `requestDevice()` resolves one: its own features, its own
  * limits, the buffer creation this slice drives, and the error channel WebGPU
  * reports asynchronous failures on.
@@ -584,10 +602,12 @@ function stubSampler(desc) {
  *   raises in the call rather than on the device.
  * @param {unknown} [options.refuseTextures] The same for `createTexture`.
  * @param {unknown} [options.refuseSamplers] The same for `createSampler`.
+ * @param {unknown} [options.refuseLayouts] The same for
+ *   `createBindGroupLayout`.
  */
 function stubDevice(
   features = [],
-  { refuseBuffers, refuseTextures, refuseSamplers } = {}
+  { refuseBuffers, refuseTextures, refuseSamplers, refuseLayouts } = {}
 ) {
   const device = {
     features: new Set(features),
@@ -598,6 +618,11 @@ function stubDevice(
     createdTextures: [],
     /** @type {object[]} Every `GPUSamplerDescriptor` it was handed, in order. */
     createdSamplers: [],
+    /**
+     * @type {object[]} Every `GPUBindGroupLayoutDescriptor` it was handed, in
+     *   order.
+     */
+    createdLayouts: [],
     /** @type {Array<[string, Function]>} */
     listeners: [],
     /**
@@ -635,6 +660,12 @@ function stubDevice(
       device.createdSamplers.push(desc);
       if (refuseSamplers !== undefined) throw refuseSamplers;
       return stubSampler(desc);
+    },
+    /** @param {object} desc */
+    createBindGroupLayout(desc) {
+      device.createdLayouts.push(desc);
+      if (refuseLayouts !== undefined) throw refuseLayouts;
+      return stubBindGroupLayout(desc);
     },
   };
   return device;
@@ -1043,6 +1074,32 @@ async function main() {
   );
   const [shadowSampler, borderSampler, coarseSampler, anisoSampler] = samplers;
 
+  // The bind-group-layout pair, from the fixture for the same reason again — and
+  // here the corpus buys the whole of the refusal set as well as the creation:
+  // one layout holding every `BindingKind` WebGPU can express, one carrying the
+  // portable bindless declaration, one with no entries at all, one with a fixed
+  // array count, one visible to the two stages WebGPU has no bit for, and one
+  // whose kind needs a texture format the seam does not carry. Every one of
+  // those is a branch below, replayed as the Rust encoder wrote it.
+  const layouts = commands.filter(
+    (command) => command.name === 'CreateBindGroupLayout'
+  );
+  const destroyLayout = commands.find(
+    (command) => command.name === 'DestroyBindGroupLayout'
+  );
+  check(
+    layouts.length === 6 && destroyLayout !== undefined,
+    `the committed stream carries six CreateBindGroupLayouts and a DestroyBindGroupLayout (${layouts.length} creates)`
+  );
+  const [
+    frameLayout,
+    bindlessLayout,
+    emptyLayout,
+    arrayLayout,
+    meshLayout,
+    storageImageLayout,
+  ] = layouts;
+
   const [flatImage, volumeImage, lutImage] = images;
   const [
     cascadeView,
@@ -1236,6 +1293,8 @@ async function main() {
       'DestroyImageView',
       'CreateSampler',
       'DestroySampler',
+      'CreateBindGroupLayout',
+      'DestroyBindGroupLayout',
     ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;
@@ -3236,6 +3295,495 @@ async function main() {
       refusals.length === 0,
       refusals[0] ??
         'and every anisotropy WebGPU cannot carry is refused with the reason named'
+    );
+  }
+
+  // ---- the bind-group-layout pair ------------------------------------------
+  //
+  // The creation whose descriptor WebGPU has the least room for, and the first
+  // whose body is a **list**. A `GPUBindGroupLayout` reports its `label` and
+  // nothing else — no entries, no bindings, no visibility — so every claim below
+  // is made against the `GPUBindGroupLayoutDescriptor` the device was *handed*,
+  // as the sampler's are.
+  {
+    // **The whole descriptor, entry for entry**, from the fixture's long layout
+    // — every `BindingKind` this backend can express, each with both values of
+    // every `bool` it carries. Spelled out rather than derived: a list built by
+    // calling the translation would agree with it whatever it said.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(frameLayout, 120n));
+    checkEqual(
+      device.createdLayouts,
+      [
+        {
+          label: 'frame',
+          entries: [
+            {
+              binding: 0,
+              visibility: 0x1, // GPUShaderStage.VERTEX
+              buffer: { type: 'read-only-storage', hasDynamicOffset: false },
+            },
+            {
+              binding: 1,
+              visibility: 0x4, // GPUShaderStage.COMPUTE
+              buffer: { type: 'storage', hasDynamicOffset: true },
+            },
+            {
+              binding: 2,
+              visibility: 0x1 | 0x2,
+              buffer: { type: 'uniform', hasDynamicOffset: true },
+            },
+            {
+              binding: 3,
+              visibility: 0x2, // GPUShaderStage.FRAGMENT
+              buffer: { type: 'uniform', hasDynamicOffset: false },
+            },
+            {
+              binding: 4,
+              visibility: 0x2,
+              texture: {
+                sampleType: 'depth',
+                viewDimension: '2d-array',
+                multisampled: false,
+              },
+            },
+            { binding: 5, visibility: 0x2, sampler: { type: 'comparison' } },
+            {
+              binding: 6,
+              visibility: 0x2,
+              texture: {
+                sampleType: 'float',
+                viewDimension: 'cube',
+                multisampled: false,
+              },
+            },
+            { binding: 7, visibility: 0x4, sampler: { type: 'filtering' } },
+          ],
+        },
+      ],
+      'a CreateBindGroupLayout reaches the device as one GPUBindGroupLayoutDescriptor'
+    );
+    const made = replayer.bindGroupLayouts.get(frameLayout.layout);
+    check(
+      made !== undefined && made.label === 'frame',
+      `and the layout is findable at its handle with the label that was asked for (${JSON.stringify(made?.label)})`
+    );
+    check(
+      replayer.bindGroupLayouts.get(
+        handle(frameLayout.layout.index, frameLayout.layout.generation + 1)
+      ) === undefined,
+      'a lookup with a stale generation does not find the live layout'
+    );
+    check(
+      !replayer.hasReplies &&
+        replayer.inFlight === 0 &&
+        replayer.pendingErrors === 0 &&
+        replayer.takeError() === null,
+      `a layout command queues no reply, starts nothing and reports no error (queued ${replayer.hasReplies}, in flight ${replayer.inFlight}, errors ${replayer.pendingErrors})`
+    );
+  }
+  {
+    // **THE ENTRIES KEEP THE SLICE'S ORDER AND ARE NOT KEYED BY BINDING
+    // NUMBER.** `docs/plan/41-webgpu-stream.md` requires it because a
+    // `VARIABLE_COUNT` entry must be *last in the slice* as well as
+    // highest-numbered, and the fixture's storage-image layout is what makes it
+    // checkable from this side: its two entries share binding 11 and differ in
+    // exactly one field, so a replayer that built its list from a map keyed on
+    // `binding` would hand the device one entry instead of two.
+    //
+    // It is driven with the kind replaced, because `StorageImage` is the one
+    // WebGPU cannot express and is refused two blocks down — leaving this check
+    // about the ordering it is named for. Every other field is the command the
+    // Rust encoder wrote.
+    const sampled = {
+      ...storageImageLayout,
+      entries: storageImageLayout.entries.map((entry) => ({
+        ...entry,
+        kind: {
+          name: 'SampledImage',
+          viewType: 'D2',
+          sampleType: entry.kind.readOnly ? 'Depth' : 'Float',
+        },
+      })),
+    };
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(sampled, 121n));
+    checkEqual(
+      device.createdLayouts[0]?.entries?.map((entry) => [
+        entry.binding,
+        entry.texture?.sampleType,
+      ]),
+      [
+        [11, 'float'],
+        [11, 'depth'],
+      ],
+      'two entries sharing a binding number both reach the device, in slice order'
+    );
+    check(
+      replayer.bindGroupLayouts.get(sampled.layout) !== undefined &&
+        replayer.takeError() === null,
+      'and the layout is built: a duplicate binding is the browser’s to refuse, not this file’s'
+    );
+  }
+  {
+    // **THE `u32::MAX` COUNT IS REFUSED, AND SO IS EVERY OTHER COUNT BUT ONE.**
+    // WebGPU core has no binding arrays: `GPUBindGroupLayoutEntry` has no
+    // `count` member and no `GPUBindGroup` syntax fills one. Accepting either of
+    // these and building a single-descriptor binding is the worst outcome
+    // available — every later write to slot 1 upward would name a descriptor
+    // that does not exist, and the browser would report it against the *bind
+    // group* rather than against the layout that was wrong.
+    //
+    // The two carry different messages deliberately: the sentinel is the
+    // portable bindless declaration and a fixed count is a caller asking for an
+    // array of a size it knows, and a reader has to be able to tell which
+    // arrived.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(arrayLayout, 122n));
+    const fixed = replayer.takeError();
+    // The bindless layout's own flags are refused before its count is reached,
+    // so the sentinel is driven with them cleared — the count is what this check
+    // is named for, and the flags have their own block below.
+    const sentinelOnly = {
+      ...bindlessLayout,
+      entries: bindlessLayout.entries.map((entry) => ({ ...entry, flags: [] })),
+    };
+    replayer.replay(frameOf(sentinelOnly, 123n));
+    const sentinel = replayer.takeError();
+    check(
+      device.createdLayouts.length === 0 &&
+        replayer.bindGroupLayouts.size === 0 &&
+        String(fixed).includes('64 descriptors') &&
+        String(sentinel).includes('as many descriptors as the device can hold'),
+      `a count that is not 1 is refused, and the u32::MAX sentinel says which it was (${JSON.stringify([fixed, sentinel])})`
+    );
+    check(
+      arrayLayout.entries[0]?.count === 64 &&
+        sentinelOnly.entries[1]?.count === 0xffff_ffff,
+      `the commands under test really carry the counts (${arrayLayout.entries[0]?.count}, ${sentinelOnly.entries[1]?.count})`
+    );
+  }
+  {
+    // **EVERY `BindingFlags` IS REFUSED, AND THE REFUSAL NAMES THEM.** All three
+    // require `Features::DESCRIPTOR_INDEXING`, which this backend never reports
+    // because WebGPU has no bindless model at all — so a layout setting any of
+    // them is one this seam cannot build. `BindingFlags`'s own docs make the
+    // loudness obligatory: "a bindless array quietly downgraded to a fixed one
+    // reads garbage at index 4097."
+    //
+    // Each flag on its own as well as the fixture's set of three, because one
+    // standing for the others is a reading the loop would hide — and
+    // `VARIABLE_COUNT` in particular is the one whose *ordering* rule this file
+    // then does not have to re-check, precisely because it never gets this far.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(bindlessLayout, 124n));
+    const all = replayer.takeError();
+    const named = [];
+    for (const [at, flag] of [
+      'PARTIALLY_BOUND',
+      'UPDATE_AFTER_BIND',
+      'VARIABLE_COUNT',
+    ].entries()) {
+      replayer.replay(
+        frameOf(
+          {
+            ...frameLayout,
+            entries: [{ ...frameLayout.entries[0], flags: [flag] }],
+          },
+          BigInt(125 + at)
+        )
+      );
+      named.push(String(replayer.takeError()));
+    }
+    check(
+      device.createdLayouts.length === 0 &&
+        replayer.bindGroupLayouts.size === 0 &&
+        String(all).includes('BindingFlags::VARIABLE_COUNT') &&
+        named.every((reason, at) =>
+          reason.includes(
+            `BindingFlags::${['PARTIALLY_BOUND', 'UPDATE_AFTER_BIND', 'VARIABLE_COUNT'][at]}`
+          )
+        ),
+      `every BindingFlags is refused and named, one at a time and together (${JSON.stringify([all, ...named])})`
+    );
+  }
+  {
+    // **`MESH` AND `TASK` HAVE NO `GPUShaderStage` BIT AND ARE REFUSED**, which
+    // is `ImageUsage::PRESENT`'s decision applied to a stage. Dropping the bit
+    // would be worse than refusing: a layout narrower than the caller asked for
+    // does not fail at creation, it fails at the *pipeline*, as a shader reading
+    // a binding the layout says it may not see.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(meshLayout, 130n));
+    const mesh = replayer.takeError();
+    replayer.replay(
+      frameOf({ ...meshLayout, entries: [meshLayout.entries[1]] }, 131n)
+    );
+    const task = replayer.takeError();
+    check(
+      device.createdLayouts.length === 0 &&
+        replayer.bindGroupLayouts.size === 0 &&
+        String(mesh).includes('ShaderStages::MESH') &&
+        String(task).includes('ShaderStages::TASK'),
+      `a visibility naming a stage WebGPU has no bit for is refused and named (${JSON.stringify([mesh, task])})`
+    );
+  }
+  {
+    // **`StorageImage` IS THE ONE `BindingKind` WEBGPU CANNOT EXPRESS FROM THIS
+    // SEAM**, and the reason is a *missing* field rather than a missing word:
+    // `GPUStorageTextureBindingLayout.format` is required and has no default,
+    // and `crcbl_hal::BindingKind::StorageImage` carries `read_only` and nothing
+    // else — the other three backends take the format off the bound view. There
+    // is no value this backend could supply that would not be a guess.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(storageImageLayout, 132n));
+    const reason = replayer.takeError();
+    check(
+      device.createdLayouts.length === 0 &&
+        replayer.bindGroupLayouts.size === 0 &&
+        String(reason).includes('BindingKind::StorageImage') &&
+        String(reason).includes('format'),
+      `a StorageImage binding is refused and says which member is missing (${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **AN EMPTY ENTRY LIST IS A LAYOUT**, which is the length a loop most
+    // easily treats as nothing to do. WebGPU accepts one, and this seam has to
+    // pass it on rather than skip the creation: the handle wasm allocated has to
+    // hold something, or every bind group made against it fails instead.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(emptyLayout, 133n));
+    checkEqual(
+      device.createdLayouts,
+      // A present-and-empty label, which is not an absent one: the fixture's
+      // third layout carries `Some("")`.
+      [{ label: '', entries: [] }],
+      'a layout with no entries is created with an empty entry list'
+    );
+    check(
+      replayer.bindGroupLayouts.get(emptyLayout.layout) !== undefined &&
+        replayer.takeError() === null,
+      'and it lands in the table like any other'
+    );
+  }
+  {
+    // **A destroy lets go of the layout, and there is nothing else to let go
+    // of**: a `GPUBindGroupLayout` has no `destroy()`, so the slot is the whole
+    // of the release. Both no-ops are driven, and the stale one first: the live
+    // occupant of a reissued index must survive.
+    const { replayer } = await readyWithDevice();
+    replayer.replay(frameOf(frameLayout, 134n));
+    const live = replayer.bindGroupLayouts.get(frameLayout.layout);
+    const reissued = handle(
+      frameLayout.layout.index,
+      frameLayout.layout.generation + 1
+    );
+    let thrown = null;
+    try {
+      replayer.replay(frameOf({ ...destroyLayout, layout: reissued }, 135n));
+      // …and the fixture's own destroy, whose handle no create here ever used.
+      replayer.replay(frameOf(destroyLayout, 136n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null &&
+        replayer.bindGroupLayouts.get(frameLayout.layout) === live &&
+        replayer.bindGroupLayouts.size === 1,
+      `a DestroyBindGroupLayout naming a stale generation or an empty slot is a no-op (${String(thrown)}, ${replayer.bindGroupLayouts.size} held)`
+    );
+    replayer.replay(
+      frameOf({ ...destroyLayout, layout: frameLayout.layout }, 137n)
+    );
+    check(
+      replayer.bindGroupLayouts.get(frameLayout.layout) === undefined &&
+        replayer.bindGroupLayouts.size === 0,
+      `and one naming the live handle lets go of it (${replayer.bindGroupLayouts.size} held)`
+    );
+  }
+  {
+    // **Six kinds, one set of handle bits.** The probe's layout carries the same
+    // eight bytes as its sampler, its image, its view, its buffer and its
+    // surface, deliberately — so this is the shape a replayer with one table
+    // would break, and there are now six tables that must not see each other.
+    const { replayer } = await readyWithDevice();
+    const same = flatImage.image;
+    replayer.replay(frameOf({ ...flatImage, image: same }, 138n));
+    replayer.replay(frameOf({ ...cubeView, view: same, image: same }, 139n));
+    replayer.replay(frameOf({ ...shadowSampler, sampler: same }, 140n));
+    replayer.replay(frameOf({ ...frameLayout, layout: same }, 141n));
+    const image = replayer.images.get(same);
+    check(
+      image !== undefined &&
+        replayer.imageViews.get(same) !== undefined &&
+        replayer.samplers.get(same) !== undefined &&
+        replayer.bindGroupLayouts.get(same) !== undefined &&
+        replayer.bindGroupLayouts.size === 1,
+      `a layout may carry an image's, a view's and a sampler's handle bits without any table losing an entry (${replayer.images.size} images, ${replayer.imageViews.size} views, ${replayer.samplers.size} samplers, ${replayer.bindGroupLayouts.size} layouts)`
+    );
+    replayer.replay(frameOf({ ...destroyLayout, layout: same }, 142n));
+    check(
+      replayer.images.get(same) === image &&
+        image.destroys === 0 &&
+        replayer.samplers.get(same) !== undefined,
+      `and destroying the layout leaves the image and the sampler alone (${image?.destroys} destroys)`
+    );
+  }
+  {
+    // **A layout command before any device opened**, and **a
+    // `createBindGroupLayout` that throws** — the two failures every creation
+    // here shares.
+    const bare = new Replayer({ gpu: stubGpu(async () => null) });
+    bare.replay(frameOf(frameLayout, 143n));
+    const early = bare.takeError();
+
+    const device = stubDevice([], {
+      refuseLayouts: new Error('too many bind group layouts'),
+    });
+    const { replayer } = await readyWithDevice({ device });
+    let thrown = null;
+    try {
+      replayer.replay(frameOf(frameLayout, 144n));
+    } catch (error) {
+      thrown = error;
+    }
+    const refused = replayer.takeError();
+    check(
+      bare.bindGroupLayouts.size === 0 &&
+        String(early).includes('before any device opened') &&
+        thrown === null &&
+        replayer.bindGroupLayouts.size === 0 &&
+        String(refused).includes('too many bind group layouts'),
+      `a CreateBindGroupLayout with no device, and a createBindGroupLayout that throws, are both recorded rather than thrown on (${JSON.stringify([early, refused])}, ${String(thrown)})`
+    );
+  }
+
+  // ---- the ShaderStages → GPUShaderStage mapping, bit by bit ---------------
+  //
+  // Spelled out rather than compared against the table it is testing, for the
+  // usage mappings' reason. Every bit on its own and then together, so one wired
+  // to the wrong constant names itself instead of hiding behind a union.
+  {
+    const wrong = [];
+    for (const [name, bit] of [
+      ['VERTEX', 0x1],
+      ['FRAGMENT', 0x2],
+      ['COMPUTE', 0x4],
+    ]) {
+      const answer = webgpuShaderStageFor([name]);
+      if (answer.bits !== bit || answer.unsatisfiable.length > 0) {
+        wrong.push(`${name}: ${JSON.stringify(answer)}`);
+      }
+    }
+    const all = webgpuShaderStageFor(['VERTEX', 'FRAGMENT', 'COMPUTE']);
+    check(
+      wrong.length === 0 && all.bits === 0x7,
+      wrong[0] ??
+        `every ShaderStages bit maps to its own GPUShaderStage and they or together (0x${all.bits.toString(16)})`
+    );
+    // …and the two with no bit at all are reported rather than dropped, which is
+    // what makes the union above evidence: a mapping that answered 0 for
+    // everything would satisfy neither half.
+    const missing = webgpuShaderStageFor(['VERTEX', 'MESH', 'TASK']);
+    check(
+      missing.bits === 0x1 &&
+        missing.unsatisfiable.join(',') ===
+          'ShaderStages::MESH,ShaderStages::TASK',
+      `MESH and TASK are reported as unsatisfiable rather than dropped (${JSON.stringify(missing)})`
+    );
+    // An empty visibility is a real value — `ShaderStages::empty()` — and is not
+    // a refusal here. WebGPU validates a zero `visibility` itself, which is the
+    // duplicate-binding judgement applied to a second rule.
+    checkEqual(
+      webgpuShaderStageFor([]),
+      { bits: 0, unsatisfiable: [] },
+      'an empty visibility is passed on for the browser to refuse'
+    );
+  }
+
+  // ---- the BindingKind → GPUBindGroupLayoutEntry mapping, row by row -------
+  //
+  // Which *member* each variant becomes, and what goes in it. Spelled out for
+  // the mappings above's reason, and every boolean both ways: `read_only` is a
+  // buffer `type` rather than a flag beside one, and `comparison` is a sampler
+  // `type`, so a translation that inverted either produces a layout WebGPU
+  // accepts and then refuses every bind group against.
+  {
+    const rows = [
+      [
+        { name: 'UniformBuffer', dynamic: false },
+        { buffer: { type: 'uniform', hasDynamicOffset: false } },
+      ],
+      [
+        { name: 'UniformBuffer', dynamic: true },
+        { buffer: { type: 'uniform', hasDynamicOffset: true } },
+      ],
+      [
+        { name: 'StorageBuffer', readOnly: true, dynamic: false },
+        { buffer: { type: 'read-only-storage', hasDynamicOffset: false } },
+      ],
+      [
+        { name: 'StorageBuffer', readOnly: false, dynamic: true },
+        { buffer: { type: 'storage', hasDynamicOffset: true } },
+      ],
+      [
+        { name: 'Sampler', comparison: false },
+        { sampler: { type: 'filtering' } },
+      ],
+      [
+        { name: 'Sampler', comparison: true },
+        { sampler: { type: 'comparison' } },
+      ],
+      [
+        { name: 'SampledImage', viewType: 'D2', sampleType: 'Float' },
+        {
+          texture: {
+            sampleType: 'float',
+            viewDimension: '2d',
+            multisampled: false,
+          },
+        },
+      ],
+      [
+        { name: 'SampledImage', viewType: 'CubeArray', sampleType: 'Depth' },
+        {
+          texture: {
+            sampleType: 'depth',
+            viewDimension: 'cube-array',
+            multisampled: false,
+          },
+        },
+      ],
+    ];
+    checkEqual(
+      rows.map(([kind]) => webgpuBindingLayoutFor(kind).layout),
+      rows.map(([, expected]) => expected),
+      'every BindingKind WebGPU can express becomes the member it names'
+    );
+    // …and the three it cannot: the variant with no format, a view dimension no
+    // table claims, and a sample type no table claims. Each is refused with the
+    // reason named rather than defaulted, for `webgpuTextureFormatFor`'s reason.
+    const refusals = [
+      [{ name: 'StorageImage', readOnly: false }, 'format'],
+      [
+        { name: 'SampledImage', viewType: 'D4', sampleType: 'Float' },
+        'GPUTextureViewDimension',
+      ],
+      [
+        { name: 'SampledImage', viewType: 'D2', sampleType: 'Sint' },
+        'GPUTextureSampleType',
+      ],
+      [{ name: 'ExternalTexture' }, 'no GPUBindGroupLayoutEntry member'],
+    ].map(([kind, phrase]) => {
+      const answer = webgpuBindingLayoutFor(kind);
+      return answer.layout === null && String(answer.reason).includes(phrase)
+        ? null
+        : `${kind.name}: ${JSON.stringify(answer)}`;
+    });
+    check(
+      refusals.every((wrong) => wrong === null),
+      refusals.find((wrong) => wrong !== null) ??
+        'and every BindingKind WebGPU cannot express is refused with the reason named'
     );
   }
 

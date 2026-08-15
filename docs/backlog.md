@@ -22,6 +22,23 @@ reaches its second iteration. Vulkan is what gates that loop: it is the only
 backend that asks a driver per call and the only one that can refuse a real
 pairing. Worth knowing before anyone reads a green browser gate as covering it.
 
+### Two bind-group-layout rules are stated but not observed on a browser
+
+Both are believed on the specification's word, and the browser gate cannot see
+either. Written down so a green group M is not read as covering them.
+
+- **A duplicated `binding` number.** `web/engine/gpu-replay.js` says the browser
+  refuses one, and the corpus carries such a layout — but only
+  `web/tools/gpu-replay.mjs` replays it, against a stub that does not validate.
+  The browser probe's descriptor has unique bindings. A probe entry would close
+  it. `BindGroupLayoutDesc::check_entries` rejects duplicates on the near side
+  anyway, so this is about whether the far side is a second net or no net.
+- **An empty `visibility`.** Measured, not assumed: setting `visibility: 0` on
+  every entry and running the gate left it at 72/72 — Chromium accepts a binding
+  visible to no stage. So group M catches a **missing binding-type member** and
+  does not catch a lost visibility word. That mapping is held by
+  `gpu-replay.mjs`'s bit-by-bit table and by the fixture instead.
+
 ### Anisotropy: the limit says one, the replayer passes more through
 
 `halLimitsFor` reports `max_sampler_anisotropy: 1` and withholds
@@ -7290,6 +7307,13 @@ pass is the likely first, `docs/plan/03-gpu-driven-rendering.md` §3.2 — and n
 that the format half has no `ImageViewType`-shaped answer already sitting in the
 seam: it needs `Format`, and the arm must reject a `Format` wgpu cannot express
 as a storage format rather than substituting one.
+
+**A second backend now confirms this is the seam's hole and not wgpu's.**
+`web/engine/gpu-replay.js` refuses every `StorageImage` binding for the same
+reason, independently: `GPUStorageTextureBindingLayout.format` is a **required**
+member with no default, and the variant carries nothing to put in it. Two
+backends refusing the same variant for the same missing field is what makes this
+a `crcbl-hal` change rather than two workarounds.
 
 ## What the sun shadow pass owes
 

@@ -62,6 +62,7 @@ const CREATE_SAMPLER_TAG = 0x04;
 const BIND_GROUP_TAG = 0x43;
 const PUSH_CONSTANTS_TAG = 0x44;
 const DRAW_TAG = 0x60;
+const CREATE_BIND_GROUP_LAYOUT_TAG = 0x05;
 const REQUEST_DEVICE_TAG = 0x91;
 
 /** @type {string[]} */
@@ -423,6 +424,200 @@ const EXPECTED = [
     anisotropy: 4.5,
     compare: 'Always',
   },
+  // **Six layouts, because this is the first counted list of structs.** An entry
+  // is five fields deep and carries an enum whose variants have different-length
+  // payloads, so a stride out by a byte does not truncate — it decodes the next
+  // entry out of the middle of this one and answers something well-formed.
+  //
+  // The first is the long one: every `BindingKind` WebGPU can express, each with
+  // both values of every `bool` it carries.
+  {
+    name: 'CreateBindGroupLayout',
+    layout: handle(93, 94),
+    label: 'frame',
+    entries: [
+      {
+        binding: 0,
+        visibility: ['VERTEX'],
+        kind: { name: 'StorageBuffer', readOnly: true, dynamic: false },
+        count: 1,
+        flags: [],
+      },
+      // The same kind with both bools the other way round, so a decoder that
+      // read one of them twice cannot stay green.
+      {
+        binding: 1,
+        visibility: ['COMPUTE'],
+        kind: { name: 'StorageBuffer', readOnly: false, dynamic: true },
+        count: 1,
+        flags: [],
+      },
+      {
+        binding: 2,
+        visibility: ['VERTEX', 'FRAGMENT'],
+        kind: { name: 'UniformBuffer', dynamic: true },
+        count: 1,
+        flags: [],
+      },
+      {
+        binding: 3,
+        visibility: ['FRAGMENT'],
+        kind: { name: 'UniformBuffer', dynamic: false },
+        count: 1,
+        flags: [],
+      },
+      // A `Depth` slot beside a comparison sampler, which is the pair WebGPU
+      // checks against each other.
+      {
+        binding: 4,
+        visibility: ['FRAGMENT'],
+        kind: {
+          name: 'SampledImage',
+          viewType: 'D2Array',
+          sampleType: 'Depth',
+        },
+        count: 1,
+        flags: [],
+      },
+      {
+        binding: 5,
+        visibility: ['FRAGMENT'],
+        kind: { name: 'Sampler', comparison: true },
+        count: 1,
+        flags: [],
+      },
+      {
+        binding: 6,
+        visibility: ['FRAGMENT'],
+        kind: { name: 'SampledImage', viewType: 'Cube', sampleType: 'Float' },
+        count: 1,
+        flags: [],
+      },
+      {
+        binding: 7,
+        visibility: ['COMPUTE'],
+        kind: { name: 'Sampler', comparison: false },
+        count: 1,
+        flags: [],
+      },
+    ],
+  },
+  // The portable bindless declaration, and the unlabelled twin: `u32::MAX` means
+  // "as many as this device can" and crosses verbatim, beside all three
+  // `BindingFlags`, on the entry that is both last and highest-numbered.
+  {
+    name: 'CreateBindGroupLayout',
+    layout: handle(95, 96),
+    label: null,
+    entries: [
+      {
+        binding: 0,
+        visibility: ['FRAGMENT'],
+        kind: { name: 'StorageBuffer', readOnly: true, dynamic: false },
+        count: 1,
+        flags: [],
+      },
+      {
+        binding: 1,
+        visibility: ['FRAGMENT'],
+        kind: { name: 'SampledImage', viewType: 'D2', sampleType: 'Float' },
+        count: 0xffffffff,
+        // In ascending bit order, which is the order `readFlags` answers in.
+        flags: ['PARTIALLY_BOUND', 'UPDATE_AFTER_BIND', 'VARIABLE_COUNT'],
+      },
+    ],
+  },
+  // Present-and-empty label, and an empty entry list: the counted list at zero,
+  // which is the length a reader most easily treats as "read until something
+  // stops you". The command after it is what would be eaten if it did.
+  {
+    name: 'CreateBindGroupLayout',
+    layout: handle(97, 98),
+    label: '',
+    entries: [],
+  },
+  // A fixed-size array — neither 1 nor the sentinel, which is the case a
+  // replayer treating "not the sentinel" as "one descriptor" would silently
+  // shrink.
+  {
+    name: 'CreateBindGroupLayout',
+    layout: handle(99, 100),
+    label: 'texture page',
+    entries: [
+      {
+        binding: 8,
+        visibility: ['FRAGMENT'],
+        kind: {
+          name: 'SampledImage',
+          viewType: 'D2Array',
+          sampleType: 'Float',
+        },
+        count: 64,
+        flags: [],
+      },
+    ],
+  },
+  // The two stages WebGPU has no `GPUShaderStage` bit for. `TASK` is bit 4, so
+  // this command is what holds `SHADER_STAGES` at five rows rather than four: a
+  // claimed-bit mask that stopped at `MESH` refuses it outright.
+  {
+    name: 'CreateBindGroupLayout',
+    layout: handle(101, 102),
+    label: null,
+    entries: [
+      {
+        binding: 9,
+        visibility: ['MESH'],
+        kind: {
+          name: 'SampledImage',
+          viewType: 'D2Array',
+          sampleType: 'Float',
+        },
+        count: 1,
+        flags: [],
+      },
+      {
+        binding: 10,
+        visibility: ['TASK'],
+        kind: { name: 'StorageBuffer', readOnly: true, dynamic: false },
+        count: 1,
+        flags: [],
+      },
+    ],
+  },
+  // **Two entries differing in exactly one field, and sharing a binding
+  // number.** The one differing field is `readOnly`, so a decoder that read the
+  // kind's payload once and copied it fails here and nowhere else; the shared
+  // binding number is what says the list is kept in slice order rather than
+  // rebuilt from binding numbers, because a decoder that keyed on them would
+  // collapse these two into one. `check_entries` in `crcbl-hal` rejects a
+  // duplicate binding — this encoding refuses a malformed stream and nothing
+  // else, which is the division of labour.
+  //
+  // `StorageImage` is here for a second reason of the same kind: it is the one
+  // `BindingKind` WebGPU cannot express, and a replayer can only refuse what it
+  // was told.
+  {
+    name: 'CreateBindGroupLayout',
+    layout: handle(103, 104),
+    label: 'gbuffer store',
+    entries: [
+      {
+        binding: 11,
+        visibility: ['COMPUTE'],
+        kind: { name: 'StorageImage', readOnly: false },
+        count: 1,
+        flags: [],
+      },
+      {
+        binding: 11,
+        visibility: ['COMPUTE'],
+        kind: { name: 'StorageImage', readOnly: true },
+        count: 1,
+        flags: [],
+      },
+    ],
+  },
   { name: 'DestroyBuffer', buffer: handle(17, 18) },
   { name: 'DestroySurface', surface: handle(47, 48) },
   // A view and the image it views are separate objects in separate tables, so
@@ -432,6 +627,10 @@ const EXPECTED = [
   // Its own command and its own table again: a sampler's id and an image's are
   // allowed to be the same eight bytes.
   { name: 'DestroySampler', sampler: handle(91, 92) },
+  // Its own command and its own table again, and the destroy whose empty slot is
+  // the ordinary case: a layout the replayer refused still has its pre-allocated
+  // handle destroyed.
+  { name: 'DestroyBindGroupLayout', layout: handle(105, 106) },
   { name: 'BeginDebugLabel', label: 'gbuffer — ✱' },
   {
     name: 'BeginRenderPass',
@@ -612,6 +811,41 @@ function samplerBody({
     ...f32le(1), // lodMax
     ...f32le(1), // anisotropy
     ...compare,
+  ];
+}
+
+/**
+ * A hand-built `create_bind_group_layout` body holding one entry.
+ *
+ * The handle, an absent label, an entry count of one, then the entry: `binding`,
+ * `visibility`, the `BindingKind` code and its body, `count` and `flags`. The
+ * checks below vary one of those at a time, which is what makes each of them
+ * about one table rather than about the command.
+ *
+ * @param {object} fields
+ * @param {number[]} [fields.visibility] The `ShaderStages` word.
+ * @param {number[]} [fields.kind] The `BindingKind` code and its payload.
+ * @param {number[]} [fields.count] The descriptor count.
+ * @param {number[]} [fields.flags] The `BindingFlags` word.
+ * @returns {number[]}
+ */
+function layoutBody({
+  visibility = u32le(1), // ShaderStages::VERTEX
+  kind = [1, 1, 0], // StorageBuffer { read_only: true, dynamic: false }
+  count = u32le(1),
+  flags = u32le(0),
+} = {}) {
+  return [
+    CREATE_BIND_GROUP_LAYOUT_TAG,
+    ...u32le(1), // the handle's index
+    ...u32le(1), // …and its generation
+    0, // the label, absent
+    ...u32le(1), // one entry
+    ...u32le(7), // binding
+    ...visibility,
+    ...kind,
+    ...count,
+    ...flags,
   ];
 }
 
@@ -1104,6 +1338,113 @@ async function main() {
       code: 0xffffffff,
     },
     'a bitflags bit no ImageAspect claims is refused rather than truncated away'
+  );
+
+  // ---- a bind-group layout entry's own tables have no catch-all -----------
+  // Hand-built and one past the last claimed row of each, for the two
+  // dimensionality tables' reason. The `BindingKind` code is the one that costs
+  // the most: its rows have different-length bodies, so a code read as its
+  // neighbour consumes the wrong number of bytes and every field after it in the
+  // entry decodes out of the wrong offsets.
+  checkRefused(
+    streamOf(header, layoutBody({ kind: [5, 0] })), // one past BindingKind::Sampler
+    { kind: 'InvalidEnum', field: 'BindGroupLayoutEntry::kind', code: 5 },
+    'a BindingKind code no variant claims is refused rather than folded into a neighbour'
+  );
+  // …and each payload behind a claimed code is its own field. A `bool` is a
+  // presence byte, so a third value is an error rather than truth.
+  checkRefused(
+    streamOf(header, layoutBody({ kind: [1, 2, 0] })),
+    { kind: 'InvalidEnum', field: 'BindingKind::read_only', code: 2 },
+    "a StorageBuffer's read_only byte of 2 is refused rather than read as truthy"
+  );
+  checkRefused(
+    streamOf(header, layoutBody({ kind: [1, 1, 2] })),
+    { kind: 'InvalidEnum', field: 'BindingKind::dynamic', code: 2 },
+    'and its dynamic byte is a separate field, named separately'
+  );
+  checkRefused(
+    streamOf(header, layoutBody({ kind: [2, 6, 0] })), // one past ImageViewType::D3
+    { kind: 'InvalidEnum', field: 'BindingKind::view_type', code: 6 },
+    "a SampledImage's view_type is refused where no ImageViewType claims it"
+  );
+  checkRefused(
+    streamOf(header, layoutBody({ kind: [2, 1, 2] })), // one past SampleType::Depth
+    { kind: 'InvalidEnum', field: 'BindingKind::sample_type', code: 2 },
+    'a SampleType code no variant claims is refused rather than folded into Float'
+  );
+  // The two bitflags words, which are the fields a `from_bits_truncate` would
+  // quietly narrow: a visibility missing a stage is a binding the shader may not
+  // read, and a dropped `BindingFlags` bit is the bindless downgrade
+  // `crcbl_hal::BindingFlags` forbids by name.
+  checkRefused(
+    streamOf(header, layoutBody({ visibility: u32le(0xffffffff) })),
+    {
+      kind: 'InvalidEnum',
+      field: 'BindGroupLayoutEntry::visibility',
+      code: 0xffffffff,
+    },
+    'a ShaderStages bit no flag claims is refused rather than truncated away'
+  );
+  // One bit past `TASK`, which is where a table that stopped a stage short lands
+  // and where 0xFFFFFFFF would not distinguish itself.
+  checkRefused(
+    streamOf(header, layoutBody({ visibility: u32le(1 << 5) })),
+    {
+      kind: 'InvalidEnum',
+      field: 'BindGroupLayoutEntry::visibility',
+      code: 1 << 5,
+    },
+    'the ShaderStages table is five rows exactly, not merely wide enough'
+  );
+  checkRefused(
+    streamOf(header, layoutBody({ flags: u32le(1 << 3) })),
+    {
+      kind: 'InvalidEnum',
+      field: 'BindGroupLayoutEntry::flags',
+      code: 1 << 3,
+    },
+    'a BindingFlags bit no flag claims is refused rather than truncated away'
+  );
+  // An entry count past what the bytes can hold is refused like every other
+  // counted list, and names this command's field rather than a neighbour's.
+  checkRefused(
+    streamOf(header, [
+      CREATE_BIND_GROUP_LAYOUT_TAG,
+      ...someHandle,
+      0,
+      ...u32le(0xffffffff),
+    ]),
+    {
+      kind: 'InvalidLength',
+      field: 'BindGroupLayoutDesc::entries',
+      len: 0xffffffff,
+    },
+    'an entry count past MAX_ELEMENT_COUNT is refused'
+  );
+
+  // ---- every BindingKind row is exercised, not just the fixture's ---------
+  // The fixture carries all five, but only in the combinations a real layout
+  // would hold. This drives each code on its own with a body of the right
+  // length, spelled out rather than read off the decoder — a list taken from
+  // `gpu-stream.js` would agree with `gpu-stream.js` whatever it said.
+  const decodedKinds = [
+    [[0, 1], { name: 'UniformBuffer', dynamic: true }],
+    [[1, 0, 1], { name: 'StorageBuffer', readOnly: false, dynamic: true }],
+    [
+      [2, 4, 1],
+      { name: 'SampledImage', viewType: 'CubeArray', sampleType: 'Depth' },
+    ],
+    [[3, 1], { name: 'StorageImage', readOnly: true }],
+    [[4, 1], { name: 'Sampler', comparison: true }],
+  ].map(([kind, expected]) => {
+    const [command] = decodeStream(streamOf(header, layoutBody({ kind })));
+    return [command.entries[0].kind, expected];
+  });
+  checkEqual(
+    decodedKinds.map(([actual]) => actual),
+    decodedKinds.map(([, expected]) => expected),
+    'every BindingKind code decodes to the variant it names, with its own body'
   );
 
   // ---- a failed reader stays failed rather than resyncing mid-body --------

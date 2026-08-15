@@ -18,11 +18,11 @@
 use core::ops::Range;
 
 use crcbl_hal::{
-    AdapterId, BindGroupHandle, BufferHandle, BufferUsage, ColorAttachment, CompareOp,
-    DepthStencilAttachment, Extent3d, Features, FilterMode, Format, GraphicsPipelineHandle,
-    ImageHandle, ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType,
-    MemoryLocation, PipelineLayoutHandle, Rect2d, SamplerAddressMode, SamplerHandle, ShaderStages,
-    SurfaceHandle,
+    AdapterId, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle, BufferHandle,
+    BufferUsage, ColorAttachment, CompareOp, DepthStencilAttachment, Extent3d, Features,
+    FilterMode, Format, GraphicsPipelineHandle, ImageHandle, ImageSubresourceRange, ImageType,
+    ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation, PipelineLayoutHandle, Rect2d,
+    SamplerAddressMode, SamplerHandle, ShaderStages, SurfaceHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -192,6 +192,44 @@ pub enum Command {
         /// what folding the pair would cost.
         compare: Option<CompareOp>,
     },
+    /// [`Device::create_bind_group_layout`](crcbl_hal::Device::create_bind_group_layout),
+    /// with the handle the caller allocated for it.
+    ///
+    /// The whole of [`BindGroupLayoutDesc`](crcbl_hal::BindGroupLayoutDesc), and
+    /// **the first command on this stream carrying a counted list of structs**
+    /// rather than of scalars. Two things about that list are the command's
+    /// shape rather than the encoding's convenience.
+    ///
+    /// **Slice order is preserved exactly, and is not rebuilt from binding
+    /// numbers.** `docs/plan/41-webgpu-stream.md` says why:
+    /// [`BindGroupLayoutDesc::entries`](crcbl_hal::BindGroupLayoutDesc::entries)
+    /// is order-sensitive, because a
+    /// [`BindingFlags::VARIABLE_COUNT`](crcbl_hal::BindingFlags::VARIABLE_COUNT)
+    /// entry must be both last in the slice *and* highest-numbered, and every
+    /// "the variable binding is `entries.last()`" reading in a backend depends
+    /// on the first half. A decoder that sorted would be sorting away the one
+    /// property the slice carries beyond its contents.
+    ///
+    /// **Nothing in the descriptor is validated here**, which is
+    /// [`Command::CreateImage`]'s rule met by a much larger descriptor.
+    /// [`BindGroupLayoutDesc::check_entries`](crcbl_hal::BindGroupLayoutDesc::check_entries)
+    /// is where the seam's rules live — a zero `count`, a binding number
+    /// declared twice, the `VARIABLE_COUNT` ordering, a count past
+    /// [`Limits::max_bindless_descriptors`](crcbl_hal::Limits::max_bindless_descriptors),
+    /// a visibility naming a stage the device has not got — and **every one of
+    /// them is a value the wire form claims**, so none of them is a malformed
+    /// stream. The `impl Device` that calls this is what runs `check_entries`;
+    /// this crate's decoder refuses only codes and bits no variant claims. See
+    /// the [crate docs](crate) and `web/engine/gpu-replay.js`, which states what
+    /// the replayer re-checks and what it leaves to the browser.
+    CreateBindGroupLayout {
+        /// Id the replayer stores the new object at.
+        layout: BindGroupLayoutHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Binding slots, **in the descriptor's own order**.
+        entries: Vec<BindGroupLayoutEntry>,
+    },
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
     ///
     /// A destroy naming an id whose slot holds nothing is a **no-op for the
@@ -233,6 +271,16 @@ pub enum Command {
     DestroySampler {
         /// Id to release.
         sampler: SamplerHandle,
+    },
+    /// [`Device::destroy_bind_group_layout`](crcbl_hal::Device::destroy_bind_group_layout).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is — and here the empty slot is the *ordinary*
+    /// case rather than an edge one, because a layout this backend refused to
+    /// build still has its handle destroyed by the caller that pre-allocated it.
+    DestroyBindGroupLayout {
+        /// Id to release.
+        layout: BindGroupLayoutHandle,
     },
     /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
     BeginDebugLabel {
@@ -355,11 +403,13 @@ impl Command {
             Self::CreateImage { .. } => "CreateImage",
             Self::CreateImageView { .. } => "CreateImageView",
             Self::CreateSampler { .. } => "CreateSampler",
+            Self::CreateBindGroupLayout { .. } => "CreateBindGroupLayout",
             Self::DestroyBuffer { .. } => "DestroyBuffer",
             Self::DestroySurface { .. } => "DestroySurface",
             Self::DestroyImage { .. } => "DestroyImage",
             Self::DestroyImageView { .. } => "DestroyImageView",
             Self::DestroySampler { .. } => "DestroySampler",
+            Self::DestroyBindGroupLayout { .. } => "DestroyBindGroupLayout",
             Self::BeginDebugLabel { .. } => "BeginDebugLabel",
             Self::BeginRenderPass { .. } => "BeginRenderPass",
             Self::BindGraphicsPipeline { .. } => "BindGraphicsPipeline",

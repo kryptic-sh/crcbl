@@ -439,6 +439,26 @@ if [ -z "$SAMPLER_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the bind-group layout, which is group M and is its own thing
+# for a reason none of the above share: it is the only command anywhere whose
+# body is a **list**. Every one before it is a fixed set of fields, so a stride
+# cannot be wrong; an entry here is five fields deep and carries an enum whose
+# variants have different-length payloads, and a stride out by a byte decodes the
+# next entry out of the middle of this one and produces a layout that is
+# well-formed and describes different resources. A `GPUBindGroupLayout` reports
+# its label and nothing else, so — as with the sampler — the browser's only way
+# to disagree is the device's error queue, and what it is being asked is whether
+# the whole four-entry list survived. The node suite proves the descriptor and
+# every refusal against a stub whose `createBindGroupLayout` returns a plain
+# object, so only this asks a real device to accept it. Its absence means that
+# stopped happening rather than that this demo has no device.
+LAYOUT_TRIP="$(grep -F 'a real GPUBindGroupLayout came back from the device with every entry accepted' "${OUTPUT}.plain" || true)"
+if [ -z "$LAYOUT_TRIP" ]; then
+    echo "crcbl web e2e: the driver never created a bind-group layout on a real device;" >&2
+    echo "               crcbl-webgpu's CreateBindGroupLayout is ungated in a real browser" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

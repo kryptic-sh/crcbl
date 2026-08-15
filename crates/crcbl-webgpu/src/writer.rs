@@ -3,10 +3,11 @@
 use core::ops::Range;
 
 use crcbl_hal::{
-    BindGroupHandle, BufferDesc, BufferHandle, ClearValue, ColorAttachment, DepthStencilAttachment,
-    DeviceDesc, Extent3d, GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceRange,
-    ImageViewDesc, ImageViewHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, SamplerDesc,
-    SamplerHandle, ShaderStages, SurfaceHandle,
+    BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry, BindGroupLayoutHandle, BindingKind,
+    BufferDesc, BufferHandle, ClearValue, ColorAttachment, DepthStencilAttachment, DeviceDesc,
+    Extent3d, GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceRange, ImageViewDesc,
+    ImageViewHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
+    ShaderStages, SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -55,6 +56,49 @@ impl ByteWriter {
         self.put_u8(tag::load_op_code(attachment.load));
         self.put_u8(tag::store_op_code(attachment.store));
         self.put_clear_value(attachment.clear);
+    }
+
+    /// One [`BindingKind`]: its code, then that variant's own fields.
+    ///
+    /// A code plus a body rather than a code alone, because this is the one HAL
+    /// enum on this stream whose variants carry data — and the bodies are
+    /// different lengths, which is what makes the code byte load-bearing for the
+    /// *cursor* and not only for the meaning. A reader that folded two codes
+    /// together would go on to read the wrong number of bytes and land inside
+    /// the next entry.
+    fn put_binding_kind(&mut self, kind: BindingKind) {
+        self.put_u8(tag::binding_kind_code(kind));
+        match kind {
+            BindingKind::UniformBuffer { dynamic } => self.put_bool(dynamic),
+            BindingKind::StorageBuffer { read_only, dynamic } => {
+                self.put_bool(read_only);
+                self.put_bool(dynamic);
+            }
+            BindingKind::SampledImage {
+                view_type,
+                sample_type,
+            } => {
+                self.put_u8(tag::image_view_type_code(view_type));
+                self.put_u8(tag::sample_type_code(sample_type));
+            }
+            BindingKind::StorageImage { read_only } => self.put_bool(read_only),
+            BindingKind::Sampler { comparison } => self.put_bool(comparison),
+        }
+    }
+
+    /// One [`BindGroupLayoutEntry`], in the order the struct declares its fields.
+    ///
+    /// **`count` and `flags` cross verbatim**, sentinel and all. `count`'s
+    /// [`u32::MAX`] means "as many as this device can" and is resolved through
+    /// [`BindGroupLayoutEntry::resolved_count`](crcbl_hal::BindGroupLayoutEntry::resolved_count)
+    /// against a device's own limits — which is the far side's, not this one's,
+    /// exactly as `docs/plan/41-webgpu-stream.md` requires of every sentinel.
+    fn put_bind_group_layout_entry(&mut self, entry: &BindGroupLayoutEntry) {
+        self.put_u32(entry.binding);
+        self.put_u32(entry.visibility.bits());
+        self.put_binding_kind(entry.kind);
+        self.put_u32(entry.count);
+        self.put_u32(entry.flags.bits());
     }
 
     fn put_depth_stencil_attachment(&mut self, attachment: &DepthStencilAttachment) {
@@ -310,6 +354,48 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::create_bind_group_layout`](crcbl_hal::Device::create_bind_group_layout),
+    /// with the handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason, and fields follow the descriptor's declaration order for
+    /// [`create_image`](Self::create_image)'s.
+    ///
+    /// **The entries go over in the descriptor's own order and are not sorted.**
+    /// [`BindGroupLayoutDesc::entries`] is order-sensitive — a
+    /// [`BindingFlags::VARIABLE_COUNT`](crcbl_hal::BindingFlags::VARIABLE_COUNT)
+    /// entry must be both last in the slice and highest-numbered — so the order
+    /// is part of the value rather than a presentation of it.
+    ///
+    /// **Nothing is validated here, and this descriptor has the most to
+    /// validate on the seam.**
+    /// [`BindGroupLayoutDesc::check_entries`] is what
+    /// enforces the ordering rule, the duplicate-binding rule, the zero-count
+    /// rule, the bindless ceiling and the stage-capability rule — **and it is
+    /// the caller's to run, before it ever reaches this method**. Every one of
+    /// those is a value a `u32` or a `bits()` word legitimately holds, so a
+    /// decoder refusing one would be refusing a buffer this writer produced,
+    /// and this writer asserts only what the reader enforces. The replayer
+    /// cannot run `check_entries` either — it has no `DeviceCaps` and no
+    /// `crcbl-hal` — so `web/engine/gpu-replay.js` states, at the arm that
+    /// builds the layout, which of these rules it re-checks for itself and
+    /// which it leaves to the browser. An unenforced rule both sides assume the
+    /// other checks is the failure this pair of comments exists to prevent.
+    pub fn create_bind_group_layout(
+        &mut self,
+        layout: BindGroupLayoutHandle,
+        desc: &BindGroupLayoutDesc<'_>,
+    ) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_BIND_GROUP_LAYOUT_TAG);
+        self.bytes.put_handle(layout);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_count(desc.entries.len());
+        for entry in desc.entries {
+            self.bytes.put_bind_group_layout_entry(entry);
+        }
+        sequence
+    }
+
     // ── Destruction ──────────────────────────────────────────────────────────
 
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
@@ -353,6 +439,21 @@ impl StreamWriter {
     pub fn destroy_sampler(&mut self, sampler: SamplerHandle) -> u64 {
         let sequence = self.push_tag(tag::DESTROY_SAMPLER_TAG);
         self.bytes.put_handle(sampler);
+        sequence
+    }
+
+    /// [`Device::destroy_bind_group_layout`](crcbl_hal::Device::destroy_bind_group_layout).
+    ///
+    /// Its own opcode for [`destroy_image_view`](Self::destroy_image_view)'s
+    /// reason, and the one destroy here whose **empty slot is ordinary rather
+    /// than exceptional**: the replayer refuses a layout it cannot express — a
+    /// bindless entry, a stage WebGPU has no bit for — so the handle the caller
+    /// pre-allocated is destroyed with nothing behind it every time that
+    /// happens. That is the pattern the crate docs describe, met on the normal
+    /// path.
+    pub fn destroy_bind_group_layout(&mut self, layout: BindGroupLayoutHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_BIND_GROUP_LAYOUT_TAG);
+        self.bytes.put_handle(layout);
         sequence
     }
 
