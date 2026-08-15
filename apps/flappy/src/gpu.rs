@@ -510,73 +510,16 @@ impl Gpu {
     }
 }
 
-/// Lets [`crcbl::engine::PolledBoot`] drive this bundle's arrival.
-///
-/// Two one-line forwards: the methods below already existed for the blocking
-/// path, and the trait is what lets the engine own the state machine that used
-/// to be written out in every sample's `app.rs`. The extent and the resize are
-/// [`crcbl::engine::GpuSurface`]'s, because a running loop asks the same two.
-impl crcbl::engine::PolledGpu for Gpu {
-    type Pending = PendingGpu;
+// ---------------------------------------------------------------------------
+// The engine's seams
+// ---------------------------------------------------------------------------
 
-    fn request<S: Shell + ?Sized>(
-        shell: &S,
-        window: WindowId,
-        extent: (u32, u32),
-        gpu: GpuOptions,
-    ) -> Result<Self::Pending, GpuError> {
-        Self::request_open(shell, window, extent, gpu)
-    }
+// The nine forwards `crcbl::engine` calls this bundle through. Every one of
+// them is a method above; the macro is what stops a sample forgetting one.
+crcbl::impl_game_gpu!(Gpu);
 
-    fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError> {
-        pending.poll()
-    }
-}
-
-/// The frame's half of this bundle, for [`crcbl::engine::Loop`].
-///
-/// Six one-line forwards. Every one already existed for the loop that used to
-/// call them from `app.rs`; the trait is what lets the engine call them instead.
-impl crcbl::engine::GameGpu for Gpu {
-    fn atlas(&self) -> &FontAtlas {
-        Self::atlas(self)
-    }
-
-    fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
-        Self::set_menu(self, menu);
-    }
-
-    fn take_draw_list(&mut self, list: &mut DrawList) {
-        Self::take_draw_list(self, list);
-    }
-
-    fn timings(&self) -> Option<&crcbl::render::FrameTimings> {
-        Self::timings(self)
-    }
-
-    fn counters(&self) -> crcbl::render::FrameCounters {
-        Self::counters(self)
-    }
-
-    fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
-        Self::frame(self)
-    }
-
-    fn destroy(self) -> Result<(), GpuError> {
-        Self::destroy(self)
-    }
-}
-
-/// The two questions both halves of the engine ask a swapchain's owner.
-impl crcbl::engine::GpuSurface for Gpu {
-    fn extent(&self) -> (u32, u32) {
-        Self::extent(self)
-    }
-
-    fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
-        Self::resize(self, extent)
-    }
-}
+// Start-up, driven by `crcbl::engine::PolledBoot` rather than blocked on.
+crcbl::impl_polled_gpu!(gpu: Gpu, pending: PendingGpu);
 
 #[cfg(test)]
 mod tests {

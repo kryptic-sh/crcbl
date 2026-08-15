@@ -3285,6 +3285,182 @@ pub trait GameGpu: GpuSurface + Sized {
     fn destroy(self) -> Result<(), GpuError>;
 }
 
+/// Implements [`GameGpu`] and [`GpuSurface`] for a bundle that already has the
+/// nine methods as inherent ones.
+///
+/// # Why this is a macro and not a blanket impl
+///
+/// Every method here is `Self::method(self)` — the trait exists so the loop can
+/// call methods a sample had already written for itself, not to give them
+/// behaviour. There is nothing to put in a default body and nothing to abstract
+/// over: a blanket impl would need a second trait naming the same nine methods,
+/// which is the duplication moved rather than removed.
+///
+/// What it buys is that the block cannot **drift**: every sample wrote it out
+/// byte for byte, and nine forwards copied six times is nine chances for one
+/// copy to be wired to the wrong method.
+///
+/// # The recursion this had to be made safe against first
+///
+/// Each forward is `Self::method(self)`, and if the bundle has no inherent
+/// method of that name the call resolves to the **trait** method — so it calls
+/// itself forever instead of failing to compile. Written out by hand that is
+/// caught by rustc's `unconditional_recursion`, which this workspace runs as a
+/// denial; but **rustc suppresses its lints inside an external macro's
+/// expansion**, so collapsing the blocks into a macro would have removed the
+/// only thing catching it. Verified by removing an inherent `counters` from a
+/// sample: hand-written it warns, macro-expanded it compiles clean.
+///
+/// So the expansion opens with a `const _` block coercing each inherent method
+/// to a function pointer. Path syntax only considers a trait's methods when the
+/// trait is *in scope*, and neither trait is imported there, so each coercion
+/// can only resolve to the inherent method — a bundle missing one gets `E0599`
+/// naming it. That block is load-bearing, not decoration.
+///
+/// Nothing here is optional: a bundle that wants a different `frame` writes the
+/// impl by hand rather than reaching for a macro flag, because at that point the
+/// block is no longer the shared one.
+///
+/// # Examples
+///
+/// ```ignore
+/// crcbl::impl_game_gpu!(Gpu);
+/// ```
+///
+/// The example is `ignore` because it needs a `Gpu` with all nine inherent
+/// methods. The expansion is exercised by every sample in `apps/`, and its
+/// guard by the experiment described above.
+#[macro_export]
+macro_rules! impl_game_gpu {
+    ($gpu:ty) => {
+        // Every forward below is `Self::method(self)`, and if the bundle has no
+        // inherent method of that name it resolves to the *trait* method — an
+        // infinite recursion rather than a compile error. Written by hand that
+        // is caught by `unconditional_recursion`, but **rustc suppresses its
+        // lints inside an external macro's expansion**, so moving these blocks
+        // into a macro would have removed the only thing catching it.
+        //
+        // This block is what puts it back. Path syntax only considers a trait's
+        // methods when the trait is in scope, and neither trait is imported
+        // here, so each coercion resolves to the inherent method alone — a
+        // bundle missing one fails to compile, naming it.
+        const _: () = {
+            let _: fn(&$gpu) -> (u32, u32) = <$gpu>::extent;
+            let _: fn(
+                &mut $gpu,
+                (u32, u32),
+            ) -> ::core::result::Result<(), $crate::engine::GpuError> = <$gpu>::resize;
+            let _: fn(&$gpu) -> &$crate::ui::FontAtlas = <$gpu>::atlas;
+            let _: fn(
+                &mut $gpu,
+                ::core::option::Option<(&$crate::ui::menu::Menu, &$crate::ui::menu::MenuLayout)>,
+            ) = <$gpu>::set_menu;
+            let _: fn(&mut $gpu, &mut $crate::ui::draw_list::DrawList) = <$gpu>::take_draw_list;
+            let _: fn(&$gpu) -> ::core::option::Option<&$crate::render::FrameTimings> =
+                <$gpu>::timings;
+            let _: fn(&$gpu) -> $crate::render::FrameCounters = <$gpu>::counters;
+            let _: fn(
+                &mut $gpu,
+            ) -> ::core::result::Result<
+                $crate::engine::FrameOutcome,
+                $crate::engine::GpuError,
+            > = <$gpu>::frame;
+            let _: fn($gpu) -> ::core::result::Result<(), $crate::engine::GpuError> =
+                <$gpu>::destroy;
+        };
+
+        impl $crate::engine::GpuSurface for $gpu {
+            fn extent(&self) -> (u32, u32) {
+                Self::extent(self)
+            }
+
+            fn resize(
+                &mut self,
+                extent: (u32, u32),
+            ) -> ::core::result::Result<(), $crate::engine::GpuError> {
+                Self::resize(self, extent)
+            }
+        }
+
+        impl $crate::engine::GameGpu for $gpu {
+            fn atlas(&self) -> &$crate::ui::FontAtlas {
+                Self::atlas(self)
+            }
+
+            fn set_menu(
+                &mut self,
+                menu: ::core::option::Option<(
+                    &$crate::ui::menu::Menu,
+                    &$crate::ui::menu::MenuLayout,
+                )>,
+            ) {
+                Self::set_menu(self, menu);
+            }
+
+            fn take_draw_list(&mut self, list: &mut $crate::ui::draw_list::DrawList) {
+                Self::take_draw_list(self, list);
+            }
+
+            fn timings(&self) -> ::core::option::Option<&$crate::render::FrameTimings> {
+                Self::timings(self)
+            }
+
+            fn counters(&self) -> $crate::render::FrameCounters {
+                Self::counters(self)
+            }
+
+            fn frame(
+                &mut self,
+            ) -> ::core::result::Result<$crate::engine::FrameOutcome, $crate::engine::GpuError>
+            {
+                Self::frame(self)
+            }
+
+            fn destroy(self) -> ::core::result::Result<(), $crate::engine::GpuError> {
+                Self::destroy(self)
+            }
+        }
+    };
+}
+
+/// Implements [`PolledGpu`] for a bundle whose request is a plain forward.
+///
+/// Separate from [`impl_game_gpu!`] because it is the half a sample can
+/// outgrow: `apps/lumen` threads its own defaults into `request_open`, so it
+/// takes the other macro and writes this impl by hand. Folding the two together
+/// behind a flag would put lumen's exception into every other sample's
+/// invocation.
+///
+/// # Examples
+///
+/// ```ignore
+/// crcbl::impl_polled_gpu!(gpu: Gpu, pending: PendingGpu);
+/// ```
+#[macro_export]
+macro_rules! impl_polled_gpu {
+    (gpu: $gpu:ty, pending: $pending:ty $(,)?) => {
+        impl $crate::engine::PolledGpu for $gpu {
+            type Pending = $pending;
+
+            fn request<S: $crate::shell::Shell + ?::core::marker::Sized>(
+                shell: &S,
+                window: $crate::shell::WindowId,
+                extent: (u32, u32),
+                gpu: $crate::engine::GpuOptions,
+            ) -> ::core::result::Result<Self::Pending, $crate::engine::GpuError> {
+                Self::request_open(shell, window, extent, gpu)
+            }
+
+            fn poll_pending(
+                pending: &mut Self::Pending,
+            ) -> ::core::result::Result<::core::option::Option<Self>, $crate::engine::GpuError>
+            {
+                pending.poll()
+            }
+        }
+    };
+}
+
 /// What one frame tells the game about the frame around it.
 ///
 /// Passed rather than queried because all four are the loop's own bookkeeping:

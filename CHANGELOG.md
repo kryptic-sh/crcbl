@@ -423,6 +423,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::impl_game_gpu!` and `crcbl::impl_polled_gpu!`**, which write the
+  `GameGpu`/`GpuSurface` and `PolledGpu` impls for a bundle that already has the
+  methods as inherent ones. Every sample had these blocks written out byte for
+  byte; `impl_game_gpu!(Gpu)` and
+  `impl_polled_gpu!(gpu: Gpu, pending: PendingGpu)` replace them.
+
+  They are two macros rather than one with a flag because `PolledGpu` is the
+  half a bundle can outgrow — `apps/lumen` threads its own defaults into
+  `request_open` and writes that impl by hand.
+
+  **`impl_game_gpu!` opens with a `const _` block coercing each inherent method
+  to a function pointer, and that block is load-bearing.** Each forward is
+  `Self::method(self)`, which resolves to the _trait_ method when the bundle has
+  no inherent one — infinite recursion rather than a compile error. Hand-written
+  that is caught by `unconditional_recursion`, but rustc suppresses its lints
+  inside an external macro's expansion, so the guard restores what the move
+  would otherwise have taken away: a missing method is now `E0599` naming it.
+
 - **`SpriteRenderer::register_baked` and `crcbl_sprite::load::load_baked`**, the
   two halves of "turn a baked sheet into a registered one" that every caller of
   `crcbl_sprite::load` had written out for itself. `register_baked` takes a

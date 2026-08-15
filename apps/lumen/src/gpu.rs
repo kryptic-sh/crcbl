@@ -674,6 +674,18 @@ impl Gpu {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The engine's seams
+// ---------------------------------------------------------------------------
+
+// The nine forwards `crcbl::engine` calls this bundle through. Every one of
+// them is a method above; the macro is what stops a sample forgetting one.
+//
+// `PolledGpu` is written out below instead of taken from
+// `crcbl::impl_polled_gpu!`, because this sample's `request_open` takes its
+// forced path and effect set as well.
+crcbl::impl_game_gpu!(Gpu);
+
 /// Lets [`crcbl::engine::PolledBoot`] drive this bundle's arrival.
 ///
 /// The extent and the resize are [`crcbl::engine::GpuSurface`]'s, because a
@@ -709,48 +721,6 @@ impl crcbl::engine::PolledGpu for Gpu {
 
     fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError> {
         pending.poll()
-    }
-}
-
-/// The frame's half of this bundle, for [`crcbl::engine::Loop`].
-impl crcbl::engine::GameGpu for Gpu {
-    fn atlas(&self) -> &FontAtlas {
-        Self::atlas(self)
-    }
-
-    fn set_menu(&mut self, menu: Option<(&Menu, &MenuLayout)>) {
-        Self::set_menu(self, menu);
-    }
-
-    fn take_draw_list(&mut self, list: &mut DrawList) {
-        Self::take_draw_list(self, list);
-    }
-
-    fn timings(&self) -> Option<&crcbl::render::FrameTimings> {
-        Self::timings(self)
-    }
-
-    fn counters(&self) -> crcbl::render::FrameCounters {
-        Self::counters(self)
-    }
-
-    fn frame(&mut self) -> Result<FrameOutcome, GpuError> {
-        Self::frame(self)
-    }
-
-    fn destroy(self) -> Result<(), GpuError> {
-        Self::destroy(self)
-    }
-}
-
-/// The two questions a running loop asks a swapchain's owner.
-impl crcbl::engine::GpuSurface for Gpu {
-    fn extent(&self) -> (u32, u32) {
-        Self::extent(self)
-    }
-
-    fn resize(&mut self, extent: (u32, u32)) -> Result<(), GpuError> {
-        Self::resize(self, extent)
     }
 }
 
