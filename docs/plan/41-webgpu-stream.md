@@ -43,8 +43,15 @@ Three things on the HAL seam look like they must cross and do not:
   `CreateSurface`: it has no canvas key, and a reserved id standing in for one
   would be a magic number both decoders had to agree on. It gets its own command
   when the parity gate needs frames read back, because the replayer's two jobs
-  differ — one configures a `GPUCanvasContext`, the other rotates a ring of
-  textures nothing presents.
+  differ — one resolves a canvas out of the shim's registry and takes its
+  `webgpu` context, the other has no canvas to resolve and must allocate a ring
+  of textures nothing presents.
+
+  Neither of them **configures** anything. `GPUCanvasContext.configure` takes a
+  `GPUDevice`, and `create_surface` is an `Instance` method the seam lets a
+  caller make before any device exists — the surface is what
+  `DeviceDesc::compatible_surface` then names. The configure call belongs to
+  swapchain creation.
 
 - **Callbacks.** There are none. No method on `Instance`, `Device`,
   `PendingDevice` or `CommandEncoder` takes a closure, function pointer or trait

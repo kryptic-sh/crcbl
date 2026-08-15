@@ -22,6 +22,16 @@
 // browser is asked — each is something WebGPU cannot be told — and every one of
 // the five still answers.
 //
+// THE SURFACE COMMANDS ANSWER NOTHING, so what is checked about them is what
+// they did rather than what they replied: that `CreateSurface` resolved the
+// canvas its own `canvasId` named — a registry with one canvas in it would pass
+// against a replayer that ignored the key altogether, so there are two — that it
+// asked that canvas for `'webgpu'`, that it did **not** configure the context it
+// got, that a `DestroySurface` for a handle nothing created is a no-op, and that
+// one for a live handle lets go. A canvas the registry does not have is the
+// failure this seam has no reply channel for, and the check below is that it
+// throws rather than carrying on with a handle wasm believes in.
+//
 // THE OTHER CLAIM THIS SECTION MAKES is that a device's capabilities are the
 // device's. The stub adapter's limits and the stub device's differ in every
 // member and their feature sets differ too, so a replayer that built its reply
@@ -50,6 +60,7 @@ import { DEVICE_TYPE, ReplyWriter } from '../engine/gpu-reply.js';
 import {
   ReplayError,
   Replayer,
+  SurfaceError,
   halAdapterInfoFor,
   halDeviceCapsFor,
   halFeaturesFor,
@@ -132,6 +143,50 @@ function stubGpu(answer) {
     },
   };
   return stub;
+}
+
+/**
+ * A canvas as much as this seam sees of one: something with a `getContext`.
+ *
+ * `label` is what identifies the context it hands out, because the thing the
+ * surface checks are about is *which* canvas answered — an implementation that
+ * took the first entry in the registry rather than the one the command named
+ * produces a context that is somebody else's, and nothing but identity
+ * distinguishes them.
+ *
+ * `getContext` records what it was asked for and answers the same context
+ * whatever that was, deliberately: a stub that returned `null` for anything but
+ * `'webgpu'` would turn a replayer asking for the wrong string into a *surface
+ * failure*, which is a different check's red. Here it lands on the one check
+ * that is about the string.
+ *
+ * @param {string} label
+ * @param {object} [options]
+ * @param {boolean} [options.grants] Whether the canvas gives up a context at
+ *   all. `false` is a browser with no WebGPU, or a canvas already bound to a
+ *   `2d` context: `getContext` answers `null` rather than throwing.
+ */
+function stubCanvas(label, { grants = true } = {}) {
+  const context = {
+    label,
+    /** How many times the replayer configured it. Must stay zero. */
+    configures: 0,
+    configure() {
+      context.configures += 1;
+    },
+  };
+  const canvas = {
+    label,
+    context,
+    /** @type {string[]} Every `getContext` argument, in order. */
+    asked: [],
+    /** @param {string} type */
+    getContext(type) {
+      canvas.asked.push(type);
+      return grants ? context : null;
+    },
+  };
+  return canvas;
 }
 
 /**
@@ -427,6 +482,20 @@ async function main() {
   );
   FROM_FIXTURE.requestDevice = requestDevice;
 
+  // The surface pair, from the fixture for the same reason and with the same
+  // consequence: the canvas key replayed below is the `u32` the Rust encoder
+  // wrote, not a number invented here.
+  const createSurface = commands.find(
+    (command) => command.name === 'CreateSurface'
+  );
+  const destroySurface = commands.find(
+    (command) => command.name === 'DestroySurface'
+  );
+  check(
+    createSurface !== undefined && destroySurface !== undefined,
+    'the committed stream carries a CreateSurface and a DestroySurface'
+  );
+
   // ---- the answer is not available on the frame that asked ----------------
   // The whole shape of this seam. `replay` returns having *started* the work;
   // the browser answers on its own schedule, and the sequence number is what
@@ -596,7 +665,12 @@ async function main() {
     const replayer = new Replayer({ gpu: stubGpu(async () => null) });
     /** @type {string[]} */
     const wrong = [];
-    const implemented = ['EnumerateAdapters', 'RequestDevice'];
+    const implemented = [
+      'EnumerateAdapters',
+      'RequestDevice',
+      'CreateSurface',
+      'DestroySurface',
+    ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;
       let thrown = null;
@@ -613,10 +687,13 @@ async function main() {
         wrong.push(`${command.name} at ${index}: ${String(thrown)}`);
       }
     }
+    const unimplemented = commands.filter(
+      (command) => !implemented.includes(command.name)
+    ).length;
     check(
       wrong.length === 0,
       wrong[0] ??
-        `every command this slice cannot replay throws a ReplayError naming it and its sequence (${commands.length - 3} of them)`
+        `every command this slice cannot replay throws a ReplayError naming it and its sequence (${unimplemented} of them)`
     );
   }
 
@@ -868,6 +945,135 @@ async function main() {
       answered?.tag === 'DeviceFailed' &&
         String(answered.reason).includes('surface'),
       `a compatible_surface this replayer cannot resolve is refused (${shown(answered)})`
+    );
+  }
+
+  // ---- the surface pair ----------------------------------------------------
+  //
+  // Neither command has a reply, so every check here reads what the replayer
+  // *holds* rather than what it queued. The command and the canvas key are the
+  // fixture's, so the id being resolved is the `u32` the Rust encoder wrote.
+  {
+    // Two canvases, and the one the command names is deliberately not the first
+    // the registry offers: a replayer that ignored `canvasId` and took whatever
+    // came to hand would pass a one-canvas check and has to fail this one.
+    const other = stubCanvas('registered-first');
+    const wanted = stubCanvas('the-one-named');
+    const canvases = new Map([
+      [createSurface.canvasId + 1, other],
+      [createSurface.canvasId, wanted],
+    ]);
+    const replayer = new Replayer({ gpu: stubGpu(async () => null), canvases });
+    replayer.replay(frameOf(createSurface, 2n));
+    const held = replayer.surfaces.get(createSurface.surface.index);
+    check(
+      held === wanted.context && other.asked.length === 0,
+      `CreateSurface holds the context of the canvas its id named (${held?.label ?? 'nothing'},` +
+        ` and the other canvas was asked ${other.asked.length} times)`
+    );
+    checkEqual(
+      wanted.asked,
+      ['webgpu'],
+      'and asks that canvas for the webgpu context specifically'
+    );
+    // **The check that catches the plausible wrong version.** `configure` needs
+    // a `GPUDevice` and this command may legitimately run before one exists, so
+    // configuring belongs to swapchain creation and not here.
+    check(
+      wanted.context.configures === 0,
+      `and does not configure it, which is the swapchain's call (${wanted.context.configures} configures)`
+    );
+    check(
+      !replayer.hasReplies && replayer.inFlight === 0,
+      `a surface command queues no reply and starts nothing (queued ${replayer.hasReplies}, in flight ${replayer.inFlight})`
+    );
+  }
+  {
+    // **A destroy of an empty slot.** `crcbl-render` destroys the handle it
+    // pre-allocated even when the creation it belonged to failed, so an id
+    // nothing here ever created is a legal stream op and not corruption. The
+    // fixture's own destroy names a different handle from its create, so this
+    // is that command replayed exactly as it was written.
+    const replayer = new Replayer({ gpu: stubGpu(async () => null) });
+    let thrown = null;
+    try {
+      replayer.replay(frameOf(destroySurface, 3n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null && replayer.surfaces.size === 0,
+      `DestroySurface for a handle nothing created is a no-op (${String(thrown)})`
+    );
+  }
+  {
+    // …and one for a live handle lets go of it. The destroy is the fixture's
+    // with the create's handle put in, because the two the fixture carries name
+    // different surfaces on purpose.
+    const canvas = stubCanvas('released');
+    const replayer = new Replayer({
+      gpu: stubGpu(async () => null),
+      canvases: new Map([[createSurface.canvasId, canvas]]),
+    });
+    replayer.replay(frameOf(createSurface, 4n));
+    const held =
+      replayer.surfaces.get(createSurface.surface.index) === canvas.context;
+    replayer.replay(
+      frameOf({ ...destroySurface, surface: createSurface.surface }, 5n)
+    );
+    check(
+      held && !replayer.surfaces.has(createSurface.surface.index),
+      `DestroySurface releases the context its handle held (held ${held}, still there ${replayer.surfaces.has(createSurface.surface.index)})`
+    );
+  }
+  {
+    // **A canvas key the page does not have.** There is no reply on this
+    // channel for a `create_surface`, so nothing can be told about it — and the
+    // two quiet options are worse than a throw: carrying on leaves wasm holding
+    // a handle with no context behind it, and inventing a reply would name a
+    // sequence nothing is waiting on. The registry here is the default one, a
+    // `Replayer` constructed with no canvases at all.
+    const replayer = new Replayer({ gpu: stubGpu(async () => null) });
+    let thrown = null;
+    try {
+      replayer.replay(frameOf(createSurface, 6n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown instanceof SurfaceError &&
+        thrown.kind === 'NoSuchCanvas' &&
+        thrown.canvasId === createSurface.canvasId &&
+        thrown.sequence === 6n &&
+        String(thrown.message).includes(String(createSurface.canvasId)),
+      `an unregistered canvas id throws, naming the id and the sequence (${String(thrown)})`
+    );
+    check(
+      replayer.surfaces.size === 0,
+      `and no surface is recorded for it (${replayer.surfaces.size} held)`
+    );
+  }
+  {
+    // **A canvas that gives up no context.** A browser without WebGPU, or a
+    // canvas something already took for a `2d` context: `getContext` answers
+    // `null`, which is a failure of the same kind and is refused the same way.
+    const canvas = stubCanvas('already-2d', { grants: false });
+    const replayer = new Replayer({
+      gpu: stubGpu(async () => null),
+      canvases: new Map([[createSurface.canvasId, canvas]]),
+    });
+    let thrown = null;
+    try {
+      replayer.replay(frameOf(createSurface, 7n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown instanceof SurfaceError &&
+        thrown.kind === 'NoCanvasContext' &&
+        thrown.canvasId === createSurface.canvasId &&
+        replayer.surfaces.size === 0,
+      `a canvas with no webgpu context throws rather than recording nothing quietly (${String(thrown)})`
     );
   }
 

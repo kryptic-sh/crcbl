@@ -8,15 +8,15 @@
 // so it can be driven under node against a stub `navigator.gpu` with no wasm
 // instance anywhere. `web/tools/gpu-replay.mjs` does exactly that.
 //
-// WHAT IT REPLAYS SO FAR IS TWO COMMANDS. `EnumerateAdapters` calls
-// `navigator.gpu.requestAdapter()` and answers with the whole of the seam's
-// `AdapterInfo` — the browser's name for it, its features and its limits in the
-// seam's vocabulary, and the documented absence for the four fields WebGPU has
-// no answer for — or with the reason there is none. `RequestDevice` calls
-// `requestDevice()` on the adapter that enumeration granted and answers with the
-// **device's own** `DeviceCaps`, or with the reason there is no device. The
-// translation is the block below this header and is where every one of those
-// choices is argued.
+// TWO OF THE COMMANDS IT REPLAYS ASK THE BROWSER SOMETHING. `EnumerateAdapters`
+// calls `navigator.gpu.requestAdapter()` and answers with the whole of the
+// seam's `AdapterInfo` — the browser's name for it, its features and its limits
+// in the seam's vocabulary, and the documented absence for the four fields
+// WebGPU has no answer for — or with the reason there is none. `RequestDevice`
+// calls `requestDevice()` on the adapter that enumeration granted and answers
+// with the **device's own** `DeviceCaps`, or with the reason there is no device.
+// The translation is the block below this header and is where every one of
+// those choices is argued.
 //
 // THE FEATURE MAPPING RUNS BOTH WAYS AND IS ONE TABLE. `halFeaturesFor` turns a
 // browser's `GPUFeatureName`s into `crcbl_hal::Features` bits; `webgpuFeaturesFor`
@@ -28,6 +28,16 @@
 // a flag therefore fails the request loudly rather than being dropped from the
 // list, because a device that opened without something the caller declared it
 // could not run without is the one outcome `required` exists to prevent.
+//
+// AND TWO SURFACE COMMANDS, WHICH MAKE NO ROUND TRIP AT ALL. `CreateSurface`
+// looks its `canvasId` up in the canvas registry this replayer was handed —
+// `SurfaceTarget::Web` is that key and nothing else — asks the canvas for its
+// `webgpu` context and holds it against the surface handle; `DestroySurface`
+// drops it again. Neither queues a reply, because neither has one on this
+// channel: wasm allocated the handle itself and moved on, so there is nothing
+// waiting to be answered. Two things about them are decisions rather than
+// omissions, and each is argued where it is made: the context is deliberately
+// **not** configured, and a lookup that finds no canvas throws.
 //
 // Every other command in the stream is *unimplemented*, and says so: `replay`
 // throws a `ReplayError` naming the command and the sequence that carried it,
@@ -512,6 +522,49 @@ export class ReplayError extends Error {
 }
 
 /**
+ * A `CreateSurface` naming a canvas this page cannot present to.
+ *
+ * NOT A `ReplayError`, AND THE DIFFERENCE IS THE WHOLE POINT. That one means
+ * the stream carried an opcode this replayer has no code for; this one means
+ * the code ran and the page could not do it — the registry has no canvas under
+ * that key, or the canvas will not give up a `webgpu` context because the
+ * browser has none or something already took the canvas for a `2d` one. A
+ * reader who cannot tell those apart cannot tell a slice that has not landed
+ * from a page that is misconfigured.
+ *
+ * THROWN OUT OF `replay`, WHICH IS THE LOUDEST HONEST ANSWER AVAILABLE.
+ * `create_surface` has no entry on the reply channel — wasm allocated the
+ * handle and moved on — so there is no way to tell the far side, now or later,
+ * and the two quieter options are both worse than a throw:
+ *
+ *   * Recording nothing and carrying on leaves a handle wasm believes in and
+ *     this replayer has no context for. The failure then surfaces at the first
+ *     command that presents to it, frames or slices away from the canvas id
+ *     that was actually wrong.
+ *   * Queueing a `DeviceFailed` would put a reply on the wire for a sequence
+ *     nothing is waiting on. Wasm attributes replies by sequence, so that is
+ *     not a loud failure but a wrong one.
+ *
+ * A throw stops the frame at the command that failed and names the canvas id it
+ * could not resolve, which is the thing a person has to change.
+ */
+export class SurfaceError extends Error {
+  /**
+   * @param {'NoSuchCanvas'|'NoCanvasContext'} kind
+   * @param {string} message
+   * @param {bigint} sequence The sequence the failing command was assigned.
+   * @param {number} canvasId The registry key it named.
+   */
+  constructor(kind, message, sequence, canvasId) {
+    super(`${message} (command ${sequence})`);
+    this.name = 'SurfaceError';
+    this.kind = kind;
+    this.sequence = sequence;
+    this.canvasId = canvasId;
+  }
+}
+
+/**
  * A device request that failed before the browser was even asked.
  *
  * Every one of these is something WebGPU cannot express and the seam can, so
@@ -597,15 +650,44 @@ export class Replayer {
    * @type {GPUDevice | null}
    */
   #device = null;
+  /**
+   * The canvases a `CreateSurface` may name, by the key it names them with.
+   *
+   * `SurfaceTarget::Web` is "an integer key into the shell's JS-side canvas
+   * registry" and nothing else — no string crosses the wasm boundary — so this
+   * is that registry, and the lookup is the whole of resolving a surface
+   * target.
+   *
+   * @type {{ get(canvasId: number): HTMLCanvasElement | undefined }}
+   */
+  #canvases;
+  /**
+   * The `GPUCanvasContext` behind each live surface, by the handle's index.
+   *
+   * One flat table for this resource kind and keyed on the index alone, which
+   * is what `crcbl-webgpu`'s crate docs require: handles are typed and each
+   * kind's indexes are its own, so a single table shared across kinds would let
+   * a buffer and a surface holding the same index stand on each other.
+   *
+   * @type {Map<number, GPUCanvasContext>}
+   */
+  #surfaces = new Map();
 
   /**
    * @param {object} [options]
    * @param {GPU} [options.gpu] The `navigator.gpu` to replay against. Injected
    *   rather than reached for so the replayer can be driven under node, where
    *   there is none — and so a test can hand it one that refuses.
+   * @param {{ get(canvasId: number): HTMLCanvasElement | undefined }}
+   *   [options.canvases] The shell's canvas registry, injected for the same two
+   *   reasons: node has no DOM to query, and a test needs to hand over one that
+   *   does not have the canvas being asked for. It defaults to empty rather
+   *   than to a document lookup so that constructing a replayer costs nothing
+   *   and touches no DOM.
    */
-  constructor({ gpu = globalThis.navigator?.gpu } = {}) {
+  constructor({ gpu = globalThis.navigator?.gpu, canvases = new Map() } = {}) {
     this.#gpu = gpu;
+    this.#canvases = canvases;
   }
 
   /** Whether there is at least one reply waiting to go to wasm. */
@@ -621,6 +703,22 @@ export class Replayer {
   /** The device this replayer opened, or `null` if none has opened. */
   get device() {
     return this.#device;
+  }
+
+  /**
+   * The contexts of the surfaces that are live right now, by handle index.
+   *
+   * The live table rather than a copy, as `device` hands back the real device:
+   * later slices read it to find the context a present or a swapchain names.
+   * For now the only reader is a test, and what it is there to see is the pair
+   * of things a surface command has to get right — that a `CreateSurface`
+   * resolved the canvas its `canvasId` named, and that a `DestroySurface` let
+   * go of it.
+   *
+   * @type {Map<number, GPUCanvasContext>}
+   */
+  get surfaces() {
+    return this.#surfaces;
   }
 
   /**
@@ -654,6 +752,9 @@ export class Replayer {
    * @throws {ReplayError} On the first command this replayer cannot execute.
    *   The commands before it have already run, which is the same position a
    *   backend is in when a call fails part-way through a frame.
+   * @throws {SurfaceError} On a `CreateSurface` whose canvas this page does not
+   *   have, which is a command that ran and failed rather than one with no
+   *   implementation. See that class for why it is not swallowed.
    */
   replay(frame) {
     if (frame === null || frame === undefined) return;
@@ -670,6 +771,12 @@ export class Replayer {
           break;
         case 'RequestDevice':
           this.#requestDevice(sequence, command);
+          break;
+        case 'CreateSurface':
+          this.#createSurface(sequence, command);
+          break;
+        case 'DestroySurface':
+          this.#destroySurface(command);
           break;
         default:
           throw new ReplayError(String(command.name), sequence);
@@ -811,6 +918,81 @@ export class Replayer {
       .finally(() => {
         this.#inFlight -= 1;
       });
+  }
+
+  /**
+   * Resolves a canvas key to its `GPUCanvasContext` and holds it against the
+   * surface handle wasm allocated.
+   *
+   * Synchronous, unlike the two commands above, because nothing here is a
+   * promise: `getContext` answers in the call. There is no reply either — the
+   * handle came in with the command, so nothing on the far side is waiting to
+   * learn it.
+   *
+   * THE CONTEXT IS DELIBERATELY NOT CONFIGURED, and this is the paragraph that
+   * exists because "we forgot" and "not here on purpose" look identical in
+   * code. `GPUCanvasContext.configure` takes a `GPUDevice`, and this is
+   * `Instance::create_surface` — an `Instance` method, which the seam lets a
+   * caller make before any device exists, and `crcbl-render` does exactly that:
+   * the surface is what `DeviceDesc::compatible_surface` names when the device
+   * is *then* requested. Configuring here would need a device this replayer may
+   * not have, and would pick a format, alpha mode and size that belong to a
+   * swapchain nobody has described yet. That configure call is swapchain
+   * creation's, in a later slice.
+   *
+   * A LOOKUP THAT FAILS THROWS. Both ways it can — no canvas under that key, or
+   * a canvas that will not give up a `webgpu` context — are the page being
+   * wrong rather than the stream being malformed, and {@link SurfaceError} is
+   * where the choice is argued.
+   *
+   * @param {bigint} sequence
+   * @param {{ surface: { index: number, generation: number }, canvasId: number }} command
+   */
+  #createSurface(sequence, command) {
+    const canvas = this.#canvases.get(command.canvasId);
+    if (!canvas) {
+      throw new SurfaceError(
+        'NoSuchCanvas',
+        `no canvas is registered under id ${command.canvasId}`,
+        sequence,
+        command.canvasId
+      );
+    }
+    // `'webgpu'` and never a variable: it is the one context type a surface can
+    // present through, and a canvas that already handed out a `'2d'` context
+    // answers `null` here rather than throwing.
+    const context = canvas.getContext('webgpu');
+    if (!context) {
+      throw new SurfaceError(
+        'NoCanvasContext',
+        `canvas ${command.canvasId} gave up no webgpu context — this browser ` +
+          'has no WebGPU, or the canvas is already bound to another context',
+        sequence,
+        command.canvasId
+      );
+    }
+    this.#surfaces.set(command.surface.index, context);
+  }
+
+  /**
+   * Lets go of a surface's context.
+   *
+   * A DESTROY OF AN EMPTY SLOT IS A NO-OP, not an error, and that is the
+   * stream's rule rather than this file's convenience: `crcbl-render` destroys
+   * a resource whose creation returned an `Err` before it applies `?`, so an id
+   * nothing ever created still arrives here. `crcbl-webgpu`'s own decoder
+   * consults no table for the same reason. `Map.delete` is already that
+   * behaviour, and the `if` a reader might expect to see is what is absent.
+   *
+   * Dropping the reference is the whole of the release. There is no
+   * `unconfigure` to make because {@link Replayer#surfaces}'s contexts are
+   * never configured — see `#createSurface` — and the swapchain slice that
+   * starts configuring them is the one that has to unconfigure here.
+   *
+   * @param {{ surface: { index: number, generation: number } }} command
+   */
+  #destroySurface(command) {
+    this.#surfaces.delete(command.surface.index);
   }
 
   /**

@@ -56,8 +56,9 @@ pub enum Command {
     /// command.** It has no canvas key, and a reserved id standing in for one
     /// would be a magic number two decoders had to agree on. It gets its own
     /// command when the parity gate needs to read frames back, because the
-    /// replayer's two jobs genuinely differ: this one configures a
-    /// `GPUCanvasContext`, that one rotates a ring of textures nothing presents.
+    /// replayer's two jobs genuinely differ: this one resolves a canvas out of
+    /// the shim's registry and takes its `webgpu` context, and that one has no
+    /// canvas to resolve and must allocate a ring of textures nothing presents.
     CreateSurface {
         /// Id the replayer stores the new object at.
         surface: SurfaceHandle,
