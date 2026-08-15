@@ -4,7 +4,8 @@ use core::ops::Range;
 
 use crcbl_hal::{
     BindGroupHandle, BufferDesc, BufferHandle, ClearValue, ColorAttachment, DepthStencilAttachment,
-    DeviceDesc, GraphicsPipelineHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, ShaderStages,
+    DeviceDesc, Extent3d, GraphicsPipelineHandle, ImageDesc, ImageHandle, ImageSubresourceRange,
+    ImageViewDesc, ImageViewHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, ShaderStages,
     SurfaceHandle,
 };
 
@@ -32,6 +33,20 @@ impl ByteWriter {
         self.put_i32(rect.y);
         self.put_u32(rect.width);
         self.put_u32(rect.height);
+    }
+
+    fn put_extent(&mut self, extent: Extent3d) {
+        self.put_u32(extent.width);
+        self.put_u32(extent.height);
+        self.put_u32(extent.depth_or_layers);
+    }
+
+    fn put_subresource_range(&mut self, range: ImageSubresourceRange) {
+        self.put_u32(range.aspect.bits());
+        self.put_u32(range.base_mip);
+        self.put_u32(range.mip_count);
+        self.put_u32(range.base_layer);
+        self.put_u32(range.layer_count);
     }
 
     fn put_color_attachment(&mut self, attachment: &ColorAttachment) {
@@ -184,6 +199,63 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Device::create_image`](crcbl_hal::Device::create_image), with the
+    /// handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason. Fields go on the wire in the order
+    /// [`ImageDesc`] declares them, behind the handle, so
+    /// the two cannot drift apart unnoticed.
+    ///
+    /// **Nothing in the descriptor is validated here, and `mip_levels` and
+    /// `samples` are the two that invite it**: zero is meaningless for both,
+    /// and both cross verbatim anyway. The encoder takes what the caller gives
+    /// it, the decoder is where a malformed *stream* is caught, and a
+    /// descriptor that no device will accept is a creation failure — which this
+    /// seam already has a route for, out of band through
+    /// [`Device::take_error`](crcbl_hal::Device::take_error). Refusing here
+    /// would have to be a panic, since the call returns `Ok(handle)` before the
+    /// replayer has seen anything.
+    ///
+    /// **There is no memory location on the wire** because
+    /// [`ImageDesc`] has no such field: every image the
+    /// seam creates is device-local.
+    pub fn create_image(&mut self, image: ImageHandle, desc: &ImageDesc<'_>) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_IMAGE_TAG);
+        self.bytes.put_handle(image);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_u8(tag::image_type_code(desc.image_type));
+        self.bytes.put_extent(desc.extent);
+        self.bytes.put_u8(tag::format_code(desc.format));
+        self.bytes.put_u32(desc.mip_levels);
+        self.bytes.put_u32(desc.samples);
+        self.bytes.put_u32(desc.usage.bits());
+        sequence
+    }
+
+    /// [`Device::create_image_view`](crcbl_hal::Device::create_image_view), with
+    /// the handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason, and fields follow the descriptor's declaration order for
+    /// [`create_image`](Self::create_image)'s.
+    ///
+    /// **`view` and `desc.image` are two handles a body could transpose**, and
+    /// they mean opposite things: the first is the id being *filled in*, the
+    /// second the id being *read*. The parameter is separate from the
+    /// descriptor for the same reason it is on every other creation method
+    /// here, so a call site cannot supply one where the other belongs.
+    pub fn create_image_view(&mut self, view: ImageViewHandle, desc: &ImageViewDesc<'_>) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_IMAGE_VIEW_TAG);
+        self.bytes.put_handle(view);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_handle(desc.image);
+        self.bytes.put_u8(tag::image_view_type_code(desc.view_type));
+        self.bytes.put_u8(tag::format_code(desc.format));
+        self.bytes.put_subresource_range(desc.range);
+        sequence
+    }
+
     // ── Destruction ──────────────────────────────────────────────────────────
 
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
@@ -197,6 +269,25 @@ impl StreamWriter {
     pub fn destroy_surface(&mut self, surface: SurfaceHandle) -> u64 {
         let sequence = self.push_tag(tag::DESTROY_SURFACE_TAG);
         self.bytes.put_handle(surface);
+        sequence
+    }
+
+    /// [`Device::destroy_image`](crcbl_hal::Device::destroy_image).
+    pub fn destroy_image(&mut self, image: ImageHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_IMAGE_TAG);
+        self.bytes.put_handle(image);
+        sequence
+    }
+
+    /// [`Device::destroy_image_view`](crcbl_hal::Device::destroy_image_view).
+    ///
+    /// Its own opcode rather than a kind byte on one destroy, because the
+    /// opcode is what says which table an id indexes: a view and the image it
+    /// views are separate objects with separate ids, and the two tables
+    /// genuinely issue identical bits.
+    pub fn destroy_image_view(&mut self, view: ImageViewHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_IMAGE_VIEW_TAG);
+        self.bytes.put_handle(view);
         sequence
     }
 

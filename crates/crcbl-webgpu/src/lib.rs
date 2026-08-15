@@ -42,9 +42,13 @@
 //!
 //! # What is encoded, and what is not
 //!
-//! **The command set here is a deliberate subset**, one command per *encoding
-//! shape*, so that every shape the seam has is exercised by a round-trip test
-//! before the other eighty-odd commands are written against it:
+//! **The command set here is a deliberate subset**, and it began as one command
+//! per *encoding shape*, so that every shape the seam has was exercised by a
+//! round-trip test before the rest were written against it. It is no longer only
+//! that — the surface, image and image-view commands are the ones the backend
+//! reached for first, and they brought no new shape with them — but the table
+//! below is still the shape it was built from, and a new command should find
+//! itself a row in it rather than inventing an eleventh:
 //!
 //! | Shape | Command |
 //! | --- | --- |

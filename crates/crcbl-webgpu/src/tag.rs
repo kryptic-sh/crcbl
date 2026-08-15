@@ -19,11 +19,17 @@
 //! the moment the number beside it is impossible to miss.
 //!
 //! Bitflags are the exception, and only because they are not enums:
-//! [`BufferUsage`](crcbl_hal::BufferUsage) and
-//! [`ShaderStages`](crcbl_hal::ShaderStages) declare each bit as an explicit
-//! `1 << n`, so `bits()` is already a chosen wire value rather than a position.
+//! [`BufferUsage`](crcbl_hal::BufferUsage), [`ShaderStages`](crcbl_hal::ShaderStages),
+//! [`ImageUsage`](crcbl_hal::ImageUsage) and [`ImageAspect`](crcbl_hal::ImageAspect)
+//! declare each bit as an explicit `1 << n`, so `bits()` is already a chosen wire
+//! value rather than a position. They cross as `bits()` and come back through
+//! `from_bits` rather than `from_bits_truncate`, so a bit no flag claims is an
+//! error instead of a silently dropped one.
 
-use crcbl_hal::{CompositeAlpha, DeviceType, Format, LoadOp, MemoryLocation, PresentMode, StoreOp};
+use crcbl_hal::{
+    CompositeAlpha, DeviceType, Format, ImageType, ImageViewType, LoadOp, MemoryLocation,
+    PresentMode, StoreOp,
+};
 
 use crate::reply::SurfaceCapsFailure;
 
@@ -224,10 +230,18 @@ pub const FAMILIES_END: u8 = FAMILY_INSTANCE_END;
 pub const CREATE_BUFFER_TAG: u8 = 0x00;
 /// [`Command::CreateSurface`](crate::Command::CreateSurface).
 pub const CREATE_SURFACE_TAG: u8 = 0x01;
+/// [`Command::CreateImage`](crate::Command::CreateImage).
+pub const CREATE_IMAGE_TAG: u8 = 0x02;
+/// [`Command::CreateImageView`](crate::Command::CreateImageView).
+pub const CREATE_IMAGE_VIEW_TAG: u8 = 0x03;
 /// [`Command::DestroyBuffer`](crate::Command::DestroyBuffer).
 pub const DESTROY_BUFFER_TAG: u8 = 0x20;
 /// [`Command::DestroySurface`](crate::Command::DestroySurface).
 pub const DESTROY_SURFACE_TAG: u8 = 0x21;
+/// [`Command::DestroyImage`](crate::Command::DestroyImage).
+pub const DESTROY_IMAGE_TAG: u8 = 0x22;
+/// [`Command::DestroyImageView`](crate::Command::DestroyImageView).
+pub const DESTROY_IMAGE_VIEW_TAG: u8 = 0x23;
 /// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel).
 pub const BEGIN_DEBUG_LABEL_TAG: u8 = 0x40;
 /// [`Command::BeginRenderPass`](crate::Command::BeginRenderPass).
@@ -420,6 +434,107 @@ pub const fn memory_location_from_code(code: u8) -> Option<MemoryLocation> {
         MEMORY_DEVICE_LOCAL => Some(MemoryLocation::DeviceLocal),
         MEMORY_HOST_UPLOAD => Some(MemoryLocation::HostUpload),
         MEMORY_HOST_READBACK => Some(MemoryLocation::HostReadback),
+        _ => None,
+    }
+}
+
+// ── ImageType ─────────────────────────────────────────────────────────────────
+
+/// [`ImageType::D1`].
+pub const IMAGE_TYPE_D1: u8 = 0x00;
+/// [`ImageType::D2`].
+pub const IMAGE_TYPE_D2: u8 = 0x01;
+/// [`ImageType::D3`].
+pub const IMAGE_TYPE_D3: u8 = 0x02;
+
+/// The wire code for an [`ImageType`].
+#[must_use]
+pub const fn image_type_code(image_type: ImageType) -> u8 {
+    match image_type {
+        ImageType::D1 => IMAGE_TYPE_D1,
+        ImageType::D2 => IMAGE_TYPE_D2,
+        ImageType::D3 => IMAGE_TYPE_D3,
+    }
+}
+
+/// The [`ImageType`] a wire code names, or `None` if it names none.
+///
+/// **Never a neighbouring dimensionality**, and this is the table where a
+/// neighbour costs the most: [`Extent3d::depth_or_layers`](crcbl_hal::Extent3d::depth_or_layers)
+/// is *the depth* for [`ImageType::D3`] and *the array-layer count* for every
+/// other variant, so the same three numbers describe two different images
+/// depending only on this byte. Folding [`IMAGE_TYPE_D3`] into
+/// [`IMAGE_TYPE_D2`] turns a 64-deep volume into 64 flat slices — and
+/// [`Extent3d::full_mip_levels`](crcbl_hal::Extent3d::full_mip_levels)'s own
+/// docs give that pair its mip counts, seven against three. Nothing further
+/// down can tell them apart, because the bytes are identical.
+#[must_use]
+pub const fn image_type_from_code(code: u8) -> Option<ImageType> {
+    match code {
+        IMAGE_TYPE_D1 => Some(ImageType::D1),
+        IMAGE_TYPE_D2 => Some(ImageType::D2),
+        IMAGE_TYPE_D3 => Some(ImageType::D3),
+        _ => None,
+    }
+}
+
+// ── ImageViewType ─────────────────────────────────────────────────────────────
+//
+// A separate table from [`ImageType`] and not a superset of it, because the HAL
+// keeps them separate: a view reinterprets its image's dimensionality, so the
+// two fields of a create pair legitimately disagree. Sharing one table would
+// make `D2Array`, `Cube` and `CubeArray` spellable where an image's own
+// dimensionality is asked for.
+
+/// [`ImageViewType::D1`].
+pub const IMAGE_VIEW_TYPE_D1: u8 = 0x00;
+/// [`ImageViewType::D2`].
+pub const IMAGE_VIEW_TYPE_D2: u8 = 0x01;
+/// [`ImageViewType::D2Array`].
+pub const IMAGE_VIEW_TYPE_D2_ARRAY: u8 = 0x02;
+/// [`ImageViewType::Cube`].
+pub const IMAGE_VIEW_TYPE_CUBE: u8 = 0x03;
+/// [`ImageViewType::CubeArray`].
+pub const IMAGE_VIEW_TYPE_CUBE_ARRAY: u8 = 0x04;
+/// [`ImageViewType::D3`].
+pub const IMAGE_VIEW_TYPE_D3: u8 = 0x05;
+
+/// The wire code for an [`ImageViewType`].
+#[must_use]
+pub const fn image_view_type_code(view_type: ImageViewType) -> u8 {
+    match view_type {
+        ImageViewType::D1 => IMAGE_VIEW_TYPE_D1,
+        ImageViewType::D2 => IMAGE_VIEW_TYPE_D2,
+        ImageViewType::D2Array => IMAGE_VIEW_TYPE_D2_ARRAY,
+        ImageViewType::Cube => IMAGE_VIEW_TYPE_CUBE,
+        ImageViewType::CubeArray => IMAGE_VIEW_TYPE_CUBE_ARRAY,
+        ImageViewType::D3 => IMAGE_VIEW_TYPE_D3,
+    }
+}
+
+/// The [`ImageViewType`] a wire code names, or `None` if it names none.
+///
+/// **Never a neighbouring dimensionality**, and here the neighbours are the two
+/// pairs that read the *same* layer range two ways:
+/// [`IMAGE_VIEW_TYPE_D2`]/[`IMAGE_VIEW_TYPE_D2_ARRAY`] and
+/// [`IMAGE_VIEW_TYPE_CUBE`]/[`IMAGE_VIEW_TYPE_CUBE_ARRAY`] are adjacent codes,
+/// and each member of a pair accepts exactly the
+/// [`base_layer`](crcbl_hal::ImageSubresourceRange::base_layer) and
+/// [`layer_count`](crcbl_hal::ImageSubresourceRange::layer_count) the other
+/// does. So a code folded into its neighbour builds a view rather than refusing
+/// one: a cube map's six faces become six unrelated slices, or a shadow
+/// atlas's cascades become one cube. The subresource range cannot contradict
+/// it, because this byte is the only field that says how those layers are to be
+/// read.
+#[must_use]
+pub const fn image_view_type_from_code(code: u8) -> Option<ImageViewType> {
+    match code {
+        IMAGE_VIEW_TYPE_D1 => Some(ImageViewType::D1),
+        IMAGE_VIEW_TYPE_D2 => Some(ImageViewType::D2),
+        IMAGE_VIEW_TYPE_D2_ARRAY => Some(ImageViewType::D2Array),
+        IMAGE_VIEW_TYPE_CUBE => Some(ImageViewType::Cube),
+        IMAGE_VIEW_TYPE_CUBE_ARRAY => Some(ImageViewType::CubeArray),
+        IMAGE_VIEW_TYPE_D3 => Some(ImageViewType::D3),
         _ => None,
     }
 }
@@ -758,11 +873,15 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 13] = [
+    const TAGS: [(&str, u8, u8); 17] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
+        ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
+        ("CreateImageView", CREATE_IMAGE_VIEW_TAG, FAMILY_CREATE),
         ("DestroyBuffer", DESTROY_BUFFER_TAG, FAMILY_DESTROY),
         ("DestroySurface", DESTROY_SURFACE_TAG, FAMILY_DESTROY),
+        ("DestroyImage", DESTROY_IMAGE_TAG, FAMILY_DESTROY),
+        ("DestroyImageView", DESTROY_IMAGE_VIEW_TAG, FAMILY_DESTROY),
         ("BeginDebugLabel", BEGIN_DEBUG_LABEL_TAG, FAMILY_ENCODER),
         ("BeginRenderPass", BEGIN_RENDER_PASS_TAG, FAMILY_ENCODER),
         (
@@ -927,6 +1046,34 @@ mod tests {
             assert_eq!(memory_location_from_code(memory_location_code(m)), Some(m));
         }
 
+        let image_type = [ImageType::D1, ImageType::D2, ImageType::D3];
+        let codes: Vec<u8> = image_type.iter().map(|t| image_type_code(*t)).collect();
+        assert_eq!(distinct(&codes), codes.len(), "two ImageTypes share a code");
+        for kind in image_type {
+            assert_eq!(image_type_from_code(image_type_code(kind)), Some(kind));
+        }
+
+        let view_type = [
+            ImageViewType::D1,
+            ImageViewType::D2,
+            ImageViewType::D2Array,
+            ImageViewType::Cube,
+            ImageViewType::CubeArray,
+            ImageViewType::D3,
+        ];
+        let codes: Vec<u8> = view_type.iter().map(|t| image_view_type_code(*t)).collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two ImageViewTypes share a code"
+        );
+        for kind in view_type {
+            assert_eq!(
+                image_view_type_from_code(image_view_type_code(kind)),
+                Some(kind)
+            );
+        }
+
         let device_type = [
             DeviceType::Cpu,
             DeviceType::Integrated,
@@ -1009,6 +1156,8 @@ mod tests {
         assert_eq!(load_op_from_code(0xFF), None);
         assert_eq!(store_op_from_code(0xFF), None);
         assert_eq!(memory_location_from_code(0xFF), None);
+        assert_eq!(image_type_from_code(0xFF), None);
+        assert_eq!(image_view_type_from_code(0xFF), None);
         assert_eq!(device_type_from_code(0xFF), None);
         assert_eq!(format_from_code(0xFF), None);
         assert_eq!(present_mode_from_code(0xFF), None);
@@ -1016,6 +1165,8 @@ mod tests {
         assert_eq!(surface_caps_failure_from_code(0xFF), None);
         // The one directly above the last claimed code, which is where an
         // off-by-one in either table lands and where `0xFF` never would.
+        assert_eq!(image_type_from_code(IMAGE_TYPE_D3 + 1), None);
+        assert_eq!(image_view_type_from_code(IMAGE_VIEW_TYPE_D3 + 1), None);
         assert_eq!(device_type_from_code(DEVICE_TYPE_OTHER + 1), None);
         assert_eq!(format_from_code(FORMAT_BC7_RGBA_UNORM_SRGB + 1), None);
         assert_eq!(present_mode_from_code(PRESENT_MODE_IMMEDIATE + 1), None);

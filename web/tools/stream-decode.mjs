@@ -56,6 +56,8 @@ const MAX_ELEMENT_COUNT = 1 << 16;
 // The tags the hand-built streams below open with. Restated here rather than
 // imported for the reason the expected commands are: a value taken from the
 // decoder agrees with the decoder by construction.
+const CREATE_IMAGE_TAG = 0x02;
+const CREATE_IMAGE_VIEW_TAG = 0x03;
 const BIND_GROUP_TAG = 0x43;
 const PUSH_CONSTANTS_TAG = 0x44;
 const DRAW_TAG = 0x60;
@@ -191,8 +193,164 @@ const EXPECTED = [
   // from both halves of that handle: a decoder that read it where a handle half
   // is, or dropped it, would not still compare equal here.
   { name: 'CreateSurface', surface: handle(45, 46), canvasId: 19 },
+  // Every `ImageType` and every `ImageViewType` appears below, because a row of
+  // either code table in `gpu-stream.js` that the fixture never carries is a
+  // row nothing checks. Within each command the extent's three components,
+  // `mipLevels` and `samples` are all different numbers, so a field read in the
+  // wrong order decodes to a different value rather than the same one.
+  {
+    name: 'CreateImage',
+    image: handle(61, 62),
+    label: 'gbuffer albedo',
+    imageType: 'D2',
+    extent: { width: 1280, height: 720, depthOrLayers: 3 },
+    format: 'RGBA8_UNORM_SRGB',
+    mipLevels: 11,
+    samples: 1,
+    usage: ['SAMPLED', 'COLOR_ATTACHMENT'],
+  },
+  // `depthOrLayers` is a depth here and an array-layer count above, decided by
+  // nothing but the `imageType` byte.
+  {
+    name: 'CreateImage',
+    image: handle(63, 64),
+    label: null,
+    imageType: 'D3',
+    extent: { width: 160, height: 90, depthOrLayers: 64 },
+    format: 'R16_FLOAT',
+    mipLevels: 7,
+    samples: 4,
+    usage: ['TRANSFER_SRC', 'STORAGE'],
+  },
+  // Zero `mipLevels` and zero `samples`: no device accepts either, and both
+  // cross verbatim. The encoding refuses malformed *streams*, not descriptors a
+  // replayer will reject through `take_error`. `ImageUsage::all()` is what pins
+  // the claimed-bit mask `readFlags` derives from the table's length — a table
+  // shorter than the HAL's refuses this very command.
+  {
+    name: 'CreateImage',
+    image: handle(65, 66),
+    label: '',
+    imageType: 'D1',
+    extent: { width: 256, height: 1, depthOrLayers: 1 },
+    format: 'R8_UNORM',
+    mipLevels: 0,
+    samples: 0,
+    usage: [
+      'TRANSFER_SRC',
+      'TRANSFER_DST',
+      'SAMPLED',
+      'STORAGE',
+      'COLOR_ATTACHMENT',
+      'DEPTH_STENCIL_ATTACHMENT',
+      'PRESENT',
+    ],
+  },
+  // Two handles per view, distinct in both halves: the id being filled in
+  // cannot be confused with the id being read.
+  {
+    name: 'CreateImageView',
+    view: handle(67, 68),
+    label: 'cascade 2',
+    image: handle(61, 62),
+    viewType: 'D2Array',
+    format: 'D32_FLOAT_S8_UINT',
+    range: {
+      aspect: ['DEPTH', 'STENCIL'],
+      baseMip: 1,
+      mipCount: 2,
+      baseLayer: 3,
+      layerCount: 4,
+    },
+  },
+  // `ImageSubresourceRange::ALL` is `0xFFFFFFFF` and crosses as itself. One of
+  // the two counts is the sentinel and the other is not, so the pair cannot be
+  // swapped unnoticed.
+  {
+    name: 'CreateImageView',
+    view: handle(69, 70),
+    label: null,
+    image: handle(63, 64),
+    viewType: 'D3',
+    format: 'R16_FLOAT',
+    range: {
+      aspect: ['COLOR'],
+      baseMip: 5,
+      mipCount: 4294967295,
+      baseLayer: 6,
+      layerCount: 7,
+    },
+  },
+  {
+    name: 'CreateImageView',
+    view: handle(71, 72),
+    label: '',
+    image: handle(65, 66),
+    viewType: 'D1',
+    format: 'R8_UNORM',
+    range: {
+      aspect: ['COLOR'],
+      baseMip: 9,
+      mipCount: 10,
+      baseLayer: 11,
+      layerCount: 12,
+    },
+  },
+  {
+    name: 'CreateImageView',
+    view: handle(73, 74),
+    label: 'sky cube',
+    image: handle(61, 62),
+    viewType: 'Cube',
+    format: 'RGBA8_UNORM',
+    range: {
+      aspect: ['COLOR'],
+      baseMip: 13,
+      mipCount: 14,
+      baseLayer: 15,
+      layerCount: 16,
+    },
+  },
+  // The other half of each adjacent pair of view types, so a table that folded
+  // `Cube` into `CubeArray` cannot stay green.
+  {
+    name: 'CreateImageView',
+    view: handle(75, 76),
+    label: null,
+    image: handle(63, 64),
+    viewType: 'CubeArray',
+    format: 'BGRA8_UNORM_SRGB',
+    range: {
+      aspect: ['COLOR'],
+      baseMip: 17,
+      mipCount: 8,
+      baseLayer: 18,
+      layerCount: 4294967295,
+    },
+  },
+  // The stencil-only view: with `COLOR` and `DEPTH | STENCIL` above, all three
+  // aspect bits are exercised and the claimed-bit mask is held to three.
+  {
+    name: 'CreateImageView',
+    view: handle(77, 78),
+    label: 'stencil',
+    image: handle(65, 66),
+    viewType: 'D2',
+    format: 'D24_UNORM_S8_UINT',
+    range: {
+      aspect: ['STENCIL'],
+      baseMip: 19,
+      mipCount: 20,
+      baseLayer: 21,
+      layerCount: 22,
+    },
+  },
   { name: 'DestroyBuffer', buffer: handle(17, 18) },
   { name: 'DestroySurface', surface: handle(47, 48) },
+  // A view and the image it views are separate objects in separate tables, so
+  // these are two commands rather than one standing for both.
+  { name: 'DestroyImage', image: handle(79, 80) },
+  { name: 'DestroyImageView', view: handle(81, 82) },
   { name: 'BeginDebugLabel', label: 'gbuffer — ✱' },
   {
     name: 'BeginRenderPass',
@@ -664,6 +822,86 @@ async function main() {
     withByte(fixture, usageAt + 4, 0x7f),
     { kind: 'InvalidEnum', field: 'BufferDesc::memory', code: 0x7f },
     'a MemoryLocation code no variant claims is refused'
+  );
+
+  // ---- the two dimensionality tables have no catch-all --------------------
+  // Hand-built rather than reached for by offset into the fixture: these pin
+  // the codes *one past* the last claimed one, which is where an off-by-one in
+  // either table lands and where 0xFF never would. A table with a row too many
+  // accepts this byte; a table with a row too few fails the fixture above.
+  checkRefused(
+    streamOf(header, [
+      CREATE_IMAGE_TAG,
+      ...someHandle,
+      0, // the label, absent
+      3, // one past ImageType::D3
+    ]),
+    { kind: 'InvalidEnum', field: 'ImageDesc::image_type', code: 3 },
+    'an ImageType code no variant claims is refused rather than folded into a neighbour'
+  );
+  checkRefused(
+    streamOf(header, [
+      CREATE_IMAGE_VIEW_TAG,
+      ...someHandle, // the view's own id
+      0,
+      ...someHandle, // the image it views
+      6, // one past ImageViewType::D3
+    ]),
+    { kind: 'InvalidEnum', field: 'ImageViewDesc::view_type', code: 6 },
+    'an ImageViewType code no variant claims is refused rather than folded into a neighbour'
+  );
+  // The format table is the one this slice reuses rather than writing a second
+  // copy of, so it is checked through an image's own field: the byte after the
+  // extent's twelve.
+  checkRefused(
+    streamOf(header, [
+      CREATE_IMAGE_TAG,
+      ...someHandle,
+      0,
+      1, // ImageType::D2
+      ...u32le(8),
+      ...u32le(8),
+      ...u32le(1),
+      0x1d, // one past Format::Bc7RgbaUnormSrgb
+    ]),
+    { kind: 'InvalidEnum', field: 'ImageDesc::format', code: 0x1d },
+    'a Format code no variant claims is refused where an image names one'
+  );
+
+  // ---- the two new bitflags words are strict too ---------------------------
+  checkRefused(
+    streamOf(header, [
+      CREATE_IMAGE_TAG,
+      ...someHandle,
+      0,
+      1, // ImageType::D2
+      ...u32le(8),
+      ...u32le(8),
+      ...u32le(1),
+      0x00, // Format::R8Unorm
+      ...u32le(1), // mip levels
+      ...u32le(1), // samples
+      ...u32le(0xffffffff), // the usage word
+    ]),
+    { kind: 'InvalidEnum', field: 'ImageDesc::usage', code: 0xffffffff },
+    'a bitflags bit no ImageUsage claims is refused rather than truncated away'
+  );
+  checkRefused(
+    streamOf(header, [
+      CREATE_IMAGE_VIEW_TAG,
+      ...someHandle,
+      0,
+      ...someHandle,
+      1, // ImageViewType::D2
+      0x00, // Format::R8Unorm
+      ...u32le(0xffffffff), // the aspect word, which opens the range
+    ]),
+    {
+      kind: 'InvalidEnum',
+      field: 'ImageSubresourceRange::aspect',
+      code: 0xffffffff,
+    },
+    'a bitflags bit no ImageAspect claims is refused rather than truncated away'
   );
 
   // ---- a failed reader stays failed rather than resyncing mid-body --------

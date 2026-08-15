@@ -194,14 +194,23 @@ no framework to adopt and no reason to depart from what is here.
   do for `Option<&str>`, because `Some("")` and `None` must stay distinct.
 - **Bitflags go over as `bits()`, and decode through `from_bits`, not
   `from_bits_truncate`.** They are exempt from the enum rule below for a reason
-  that has to be stated rather than assumed: `BufferUsage`, `ShaderStages`,
-  `ImageAspect` and `ColorWrites` are not enums, and each bit is an explicit
-  `1 << n`, so the value is already chosen rather than positional. Truncating
-  would silently drop a bit the other half meant; `from_bits` makes an unclaimed
-  bit an error.
+  that has to be stated rather than assumed: `BufferUsage`, `ImageUsage`,
+  `ShaderStages`, `ImageAspect` and `ColorWrites` are not enums, and each bit is
+  an explicit `1 << n`, so the value is already chosen rather than positional.
+  Truncating would silently drop a bit the other half meant; `from_bits` makes
+  an unclaimed bit an error.
 - **The writer asserts the same caps the reader enforces**, so nothing this
   crate encodes is something it would refuse to decode. The numbers live beside
   the constants in the `tag` module rather than here, where they would drift.
+- **The encoding refuses a malformed _stream_, never an invalid _descriptor_.**
+  An unclaimed enum code or flag bit is a decode error, because the wire form
+  does not claim that value. A zero `mip_levels`, a zero `samples`, a view
+  format the image cannot be reinterpreted as: every one of those is a value the
+  wire form does claim, and refusing it would have to happen in the writer too —
+  mid frame, in a call whose contract is to return `Ok(handle)` before the
+  replayer has seen anything. Creation failure already has its route out,
+  `take_error`, and an unacceptable descriptor is a creation failure rather than
+  corruption.
 - **A `u32` little-endian length prefix before every variable-length field**,
   then the raw bytes, written back to back with no padding.
 - **A bounds-checked reader, never hand-rolled offset arithmetic.** `codec.rs`'s
@@ -417,9 +426,13 @@ measurement nobody has taken.
   buffer says what the descriptor asked for. The check belongs to the caller
   that kept the descriptor, and it is the caller that must make a short answer
   an `InvalidDescriptor` rather than a short copy.
-- **`WHOLE_BUFFER` is `u64::MAX` and passes through verbatim.** WebGPU's
-  `size: undefined` means the same thing; resolving it in the encoder would
-  discard that.
+- **A sentinel meaning "all of it" passes through verbatim.** `WHOLE_BUFFER` is
+  `u64::MAX` and WebGPU's `size: undefined` means the same thing, so resolving
+  it in the encoder would discard which one the caller said.
+  `ImageSubresourceRange::ALL` is the same rule with `u32::MAX` in `mip_count`
+  and `layer_count`, and the rule is what generalises — a sentinel is a value
+  the seam defines, and an encoder that resolves one is answering a question
+  only the replayer has the information to answer.
 - **`Range<u32>` is passed by value in four encoder methods and is not `Copy`.**
   On the wire it is two `u32`s and nothing more, but it is not a type that can
   be cast wholesale.

@@ -48,6 +48,8 @@
 //
 // Everything else on the wire is 32 bits or narrower and stays a number.
 
+import { FORMAT } from './gpu-reply.js';
+
 // ── Header ───────────────────────────────────────────────────────────────────
 
 /** `tag::STREAM_MAGIC` — the ASCII bytes every stream buffer starts with. */
@@ -70,8 +72,12 @@ const MAX_ELEMENT_COUNT = 1 << 16;
 
 const CREATE_BUFFER_TAG = 0x00;
 const CREATE_SURFACE_TAG = 0x01;
+const CREATE_IMAGE_TAG = 0x02;
+const CREATE_IMAGE_VIEW_TAG = 0x03;
 const DESTROY_BUFFER_TAG = 0x20;
 const DESTROY_SURFACE_TAG = 0x21;
+const DESTROY_IMAGE_TAG = 0x22;
+const DESTROY_IMAGE_VIEW_TAG = 0x23;
 const BEGIN_DEBUG_LABEL_TAG = 0x40;
 const BEGIN_RENDER_PASS_TAG = 0x41;
 const BIND_GRAPHICS_PIPELINE_TAG = 0x42;
@@ -102,6 +108,51 @@ const STORE_OP = ['Store', 'Discard'];
 /** `tag::MEMORY_*`. */
 const MEMORY_LOCATION = ['DeviceLocal', 'HostUpload', 'HostReadback'];
 
+/**
+ * `tag::IMAGE_TYPE_*`.
+ *
+ * A GAP HERE IS THE COSTLIEST GAP IN THIS FILE. `Extent3d.depthOrLayers` is the
+ * depth for `D3` and the array-layer count for everything else, so the same
+ * three numbers describe two different images depending only on this byte —
+ * a 64-deep volume against 64 flat slices, with mip chains of seven levels and
+ * three. Nothing downstream can tell them apart, because the bytes are
+ * identical; the `undefined` this table answers with for an unclaimed code is
+ * the only place the difference is visible.
+ */
+const IMAGE_TYPE = ['D1', 'D2', 'D3'];
+
+/**
+ * `tag::IMAGE_VIEW_TYPE_*`.
+ *
+ * A separate table from {@link IMAGE_TYPE} and not a superset of it, because
+ * the HAL keeps them separate: a view reinterprets its image's dimensionality,
+ * so the two fields of a create pair legitimately disagree.
+ *
+ * `D2`/`D2Array` and `Cube`/`CubeArray` are adjacent codes, and each member of
+ * a pair accepts exactly the `baseLayer` and `layerCount` the other does — so a
+ * code read one along builds a view rather than refusing one, and a cube map's
+ * six faces become six unrelated slices.
+ */
+const IMAGE_VIEW_TYPE = ['D1', 'D2', 'D2Array', 'Cube', 'CubeArray', 'D3'];
+
+/**
+ * `tag::FORMAT_*`, code-indexed — the inverse of the table `gpu-reply.js`
+ * exports, and not a second copy of it.
+ *
+ * The reply direction already carries formats and already keeps this mapping;
+ * a table written out again here would be one more thing to keep in step with
+ * `crates/crcbl-webgpu/src/tag.rs` and would drift from its twin rather than
+ * from the Rust, which is worse — the fixture that pins one would not pin the
+ * other. Inverting it costs a loop at module load and leaves a single place
+ * where a code and a format meet.
+ *
+ * The names are therefore that table's spelling (`BGRA8_UNORM`) rather than the
+ * HAL's (`Bgra8Unorm`), which is what the other tables here use. The reverse
+ * lookup a replayer needs is the imported object itself.
+ */
+const IMAGE_FORMAT = [];
+for (const [name, code] of Object.entries(FORMAT)) IMAGE_FORMAT[code] = name;
+
 // ── Bitflag tables ───────────────────────────────────────────────────────────
 //
 // In ascending bit order, which is the order a decoded flag list comes back in.
@@ -123,6 +174,20 @@ const BUFFER_USAGE = [
 
 /** `crcbl_hal::ShaderStages`. */
 const SHADER_STAGES = ['VERTEX', 'FRAGMENT', 'COMPUTE', 'MESH'];
+
+/** `crcbl_hal::ImageUsage`. */
+const IMAGE_USAGE = [
+  'TRANSFER_SRC',
+  'TRANSFER_DST',
+  'SAMPLED',
+  'STORAGE',
+  'COLOR_ATTACHMENT',
+  'DEPTH_STENCIL_ATTACHMENT',
+  'PRESENT',
+];
+
+/** `crcbl_hal::ImageAspect` — which planes of an image a view touches. */
+const IMAGE_ASPECT = ['COLOR', 'DEPTH', 'STENCIL'];
 
 /**
  * Every bit `crcbl_hal::Features` claims — `Features::all().bits()`.
@@ -490,6 +555,38 @@ class ByteReader {
     };
   }
 
+  /**
+   * A `crcbl_hal::Extent3d`. `depthOrLayers` is the depth for an `ImageType.D3`
+   * and the array-layer count otherwise, and only the image type says which.
+   *
+   * @returns {{ width: number, height: number, depthOrLayers: number }}
+   */
+  readExtent() {
+    return {
+      width: this.readU32(),
+      height: this.readU32(),
+      depthOrLayers: this.readU32(),
+    };
+  }
+
+  /**
+   * A `crcbl_hal::ImageSubresourceRange`. `mipCount` and `layerCount` carry
+   * `ImageSubresourceRange::ALL` — `0xFFFFFFFF`, "every remaining one" —
+   * verbatim: resolving it needs the image's own counts, which the encoder does
+   * not have either.
+   *
+   * @returns {{ aspect: string[], baseMip: number, mipCount: number, baseLayer: number, layerCount: number }}
+   */
+  readSubresourceRange() {
+    return {
+      aspect: this.readFlags('ImageSubresourceRange::aspect', IMAGE_ASPECT),
+      baseMip: this.readU32(),
+      mipCount: this.readU32(),
+      baseLayer: this.readU32(),
+      layerCount: this.readU32(),
+    };
+  }
+
   readColorAttachment() {
     return {
       view: this.readHandle('ColorAttachment::view'),
@@ -668,6 +765,55 @@ function decodeCommand(r) {
         surface: r.readHandle('CreateSurface::surface'),
         canvasId: r.readU32(),
       };
+    case CREATE_IMAGE_TAG: {
+      // Spelled out rather than built inline, for `Draw`'s reason: `mipLevels`
+      // and `samples` are adjacent, identically typed and mean different
+      // things, which is the pair a decoder most easily swaps.
+      //
+      // Both are carried verbatim, ZERO INCLUDED. Neither value is one a device
+      // accepts, and neither is a malformed stream: every `u32` is a value the
+      // wire form claims, so there is nothing here to refuse that a flag word
+      // or an enum table would refuse. An invalid descriptor is a creation
+      // failure, and those arrive through `Device::take_error` rather than out
+      // of a decoder.
+      const image = r.readHandle('CreateImage::image');
+      const label = r.readOptString('ImageDesc::label');
+      const imageType = r.readEnum('ImageDesc::image_type', IMAGE_TYPE);
+      const extent = r.readExtent();
+      const format = r.readEnum('ImageDesc::format', IMAGE_FORMAT);
+      const mipLevels = r.readU32();
+      const samples = r.readU32();
+      return {
+        name: 'CreateImage',
+        image,
+        label,
+        imageType,
+        extent,
+        format,
+        mipLevels,
+        samples,
+        usage: r.readFlags('ImageDesc::usage', IMAGE_USAGE),
+      };
+    }
+    case CREATE_IMAGE_VIEW_TAG: {
+      // Two handles, and they mean opposite things: `view` is the id the
+      // replayer stores the new object at, `image` the id it looks the viewed
+      // object up by. Spelled out so the two cannot be read in the other order.
+      const view = r.readHandle('CreateImageView::view');
+      const label = r.readOptString('ImageViewDesc::label');
+      const image = r.readHandle('ImageViewDesc::image');
+      const viewType = r.readEnum('ImageViewDesc::view_type', IMAGE_VIEW_TYPE);
+      const format = r.readEnum('ImageViewDesc::format', IMAGE_FORMAT);
+      return {
+        name: 'CreateImageView',
+        view,
+        label,
+        image,
+        viewType,
+        format,
+        range: r.readSubresourceRange(),
+      };
+    }
     case DESTROY_BUFFER_TAG:
       return {
         name: 'DestroyBuffer',
@@ -677,6 +823,19 @@ function decodeCommand(r) {
       return {
         name: 'DestroySurface',
         surface: r.readHandle('DestroySurface::surface'),
+      };
+    case DESTROY_IMAGE_TAG:
+      return {
+        name: 'DestroyImage',
+        image: r.readHandle('DestroyImage::image'),
+      };
+    case DESTROY_IMAGE_VIEW_TAG:
+      // Its own tag rather than a kind byte on one destroy: the opcode is what
+      // says which table an id indexes, and a view's table and its image's
+      // genuinely issue identical bits.
+      return {
+        name: 'DestroyImageView',
+        view: r.readHandle('DestroyImageView::view'),
       };
     case BEGIN_DEBUG_LABEL_TAG:
       return {

@@ -9,7 +9,9 @@
 mod corpus;
 
 use crcbl_hal::{
-    AdapterId, BufferDesc, BufferUsage, DeviceDesc, Features, MemoryLocation, ShaderStages,
+    AdapterId, BufferDesc, BufferUsage, DeviceDesc, Extent3d, Features, Format, ImageAspect,
+    ImageDesc, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc, ImageViewType,
+    MemoryLocation, ShaderStages,
 };
 use crcbl_webgpu::{Command, DecodeError, StreamReader, StreamWriter, decode_stream, tag};
 
@@ -178,6 +180,274 @@ fn a_surface_carries_its_canvas_key_as_well_as_its_handle() {
     );
 }
 
+/// **An image's seven descriptor fields all cross, in the descriptor's order.**
+///
+/// The round trip over the corpus says the whole set survives; what this says is
+/// that no two of them can be swapped without the decode changing, which a round
+/// trip over equal values would not. Every number below is distinct, and the
+/// assertions at the end are what state that out loud rather than leaving it to
+/// the reader to notice.
+#[test]
+fn an_image_carries_every_field_of_its_descriptor_in_the_descriptors_order() {
+    let image = handle(5, 6);
+    let desc = ImageDesc {
+        label: Some("depth pyramid"),
+        image_type: ImageType::D3,
+        extent: Extent3d {
+            width: 1024,
+            height: 512,
+            depth_or_layers: 32,
+        },
+        format: Format::R32Float,
+        mip_levels: 10,
+        samples: 2,
+        usage: ImageUsage::STORAGE | ImageUsage::SAMPLED,
+    };
+    let mut stream = StreamWriter::new();
+    stream.create_image(image, &desc);
+    stream.destroy_image(handle(7, 8));
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![
+            Command::CreateImage {
+                image,
+                label: Some("depth pyramid".into()),
+                image_type: desc.image_type,
+                extent: desc.extent,
+                format: desc.format,
+                mip_levels: desc.mip_levels,
+                samples: desc.samples,
+                usage: desc.usage,
+            },
+            Command::DestroyImage {
+                image: handle(7, 8)
+            },
+        ])
+    );
+
+    let mut sorted = vec![
+        desc.extent.width,
+        desc.extent.height,
+        desc.extent.depth_or_layers,
+        desc.mip_levels,
+        desc.samples,
+    ];
+    let count = sorted.len();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        count,
+        "two of the image's numbers are equal, so the test would not notice them swapped"
+    );
+}
+
+/// The same claim for a view, plus the one an image cannot make: **two handles
+/// cross and they mean opposite things.** `view` is the id being filled in and
+/// `image` the id being read, so a body that transposed them would create the
+/// view at the image's id and leave the real one empty.
+#[test]
+fn an_image_view_carries_two_handles_that_are_not_interchangeable() {
+    let view = handle(9, 10);
+    let image = handle(11, 12);
+    let desc = ImageViewDesc {
+        label: None,
+        image,
+        view_type: ImageViewType::CubeArray,
+        format: Format::Bgra8Unorm,
+        range: ImageSubresourceRange {
+            aspect: ImageAspect::COLOR,
+            base_mip: 1,
+            mip_count: 2,
+            base_layer: 3,
+            layer_count: ImageSubresourceRange::ALL,
+        },
+    };
+    let mut stream = StreamWriter::new();
+    stream.create_image_view(view, &desc);
+    stream.destroy_image_view(handle(13, 14));
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![
+            Command::CreateImageView {
+                view,
+                label: None,
+                image,
+                view_type: desc.view_type,
+                format: desc.format,
+                range: desc.range,
+            },
+            Command::DestroyImageView {
+                view: handle(13, 14)
+            },
+        ])
+    );
+    assert_ne!(
+        view.to_bits(),
+        image.to_bits(),
+        "the test would not notice the two handles swapped otherwise"
+    );
+}
+
+/// **Zero `mip_levels` and zero `samples` cross rather than being refused**, and
+/// this is the test that pins the decision.
+///
+/// Both are meaningless to a device, and neither is a malformed *stream*: the
+/// wire form of a `u32` claims every value, so there is nothing here for a
+/// decoder to reject that a `from_bits` or an enum table would reject. Refusing
+/// would also have to happen in the writer, which the crate's own rule requires
+/// — it asserts what the reader enforces — and the writer has only a panic to
+/// refuse with, in the middle of a frame's recording, for a call whose contract
+/// is to return `Ok(handle)` immediately. So an invalid descriptor stays a
+/// creation failure and arrives through `Device::take_error`.
+#[test]
+fn a_zero_mip_count_or_sample_count_is_carried_rather_than_refused() {
+    let mut stream = StreamWriter::new();
+    stream.create_image(
+        handle(1, 1),
+        &ImageDesc {
+            label: None,
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(4, 4),
+            format: Format::R8Unorm,
+            mip_levels: 0,
+            samples: 0,
+            usage: ImageUsage::SAMPLED,
+        },
+    );
+
+    match &decode_stream(stream.bytes()).expect("a stream this crate wrote decodes")[0] {
+        Command::CreateImage {
+            mip_levels,
+            samples,
+            ..
+        } => assert_eq!((*mip_levels, *samples), (0, 0)),
+        other => panic!("expected CreateImage, got {}", other.name()),
+    }
+}
+
+/// A dimensionality code no variant claims is an error rather than the
+/// neighbour one byte away — the rule `tag::image_type_from_code` and
+/// `tag::image_view_type_from_code` state, seen through a whole command.
+#[test]
+fn a_dimensionality_code_no_variant_claims_is_refused_rather_than_folded_into_a_neighbour() {
+    // Tag, the handle, the absent label's presence byte — then the image type.
+    let mut stream = StreamWriter::new();
+    stream.create_image(
+        handle(1, 1),
+        &ImageDesc {
+            label: None,
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(8, 8),
+            format: Format::R8Unorm,
+            mip_levels: 1,
+            samples: 1,
+            usage: ImageUsage::SAMPLED,
+        },
+    );
+    let mut bytes = stream.bytes().to_vec();
+    bytes[tag::HEADER_BYTES + 1 + 8 + 1] = 0x7F;
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "ImageDesc::image_type",
+            code: 0x7F,
+        })
+    );
+
+    // The format is the byte after the extent, and it is the table this slice
+    // reuses rather than writes a second copy of.
+    let mut bytes = stream.bytes().to_vec();
+    bytes[tag::HEADER_BYTES + 1 + 8 + 1 + 1 + 12] = 0x7F;
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "ImageDesc::format",
+            code: 0x7F,
+        })
+    );
+
+    // A view's own dimensionality sits behind a second handle: tag, the view's
+    // id, the absent label, then the image's id.
+    let mut stream = StreamWriter::new();
+    stream.create_image_view(
+        handle(1, 1),
+        &ImageViewDesc {
+            label: None,
+            image: handle(2, 2),
+            view_type: ImageViewType::D2,
+            format: Format::R8Unorm,
+            range: ImageSubresourceRange::all(Format::R8Unorm),
+        },
+    );
+    let mut bytes = stream.bytes().to_vec();
+    bytes[tag::HEADER_BYTES + 1 + 8 + 1 + 8] = 0x7F;
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "ImageViewDesc::view_type",
+            code: 0x7F,
+        })
+    );
+}
+
+/// The two new bitflags words go over as `bits()` and come back through
+/// `from_bits`, so a bit no flag claims is refused rather than truncated away —
+/// which for a usage word would create an image the caller cannot bind, and for
+/// an aspect a view onto a plane nobody named.
+#[test]
+fn an_image_usage_or_aspect_bit_no_flag_claims_is_refused_rather_than_dropped() {
+    let mut stream = StreamWriter::new();
+    stream.create_image(
+        handle(1, 1),
+        &ImageDesc {
+            label: None,
+            image_type: ImageType::D2,
+            extent: Extent3d::d2(8, 8),
+            format: Format::R8Unorm,
+            mip_levels: 1,
+            samples: 1,
+            usage: ImageUsage::SAMPLED,
+        },
+    );
+    // The usage word is the last four bytes of the body.
+    let mut bytes = stream.bytes().to_vec();
+    let usage_at = bytes.len() - 4;
+    bytes[usage_at..].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "ImageDesc::usage",
+            code: u32::MAX.into(),
+        })
+    );
+
+    let mut stream = StreamWriter::new();
+    stream.create_image_view(
+        handle(1, 1),
+        &ImageViewDesc {
+            label: None,
+            image: handle(2, 2),
+            view_type: ImageViewType::D2,
+            format: Format::R8Unorm,
+            range: ImageSubresourceRange::all(Format::R8Unorm),
+        },
+    );
+    // The aspect opens the range, which is the last twenty bytes of the body.
+    let mut bytes = stream.bytes().to_vec();
+    let aspect_at = bytes.len() - 20;
+    bytes[aspect_at..aspect_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "ImageSubresourceRange::aspect",
+            code: u32::MAX.into(),
+        })
+    );
+}
+
 /// **The capability query is a tag and nothing else**, so the byte after it is
 /// the next command's tag.
 ///
@@ -306,10 +576,11 @@ fn every_command_has_its_own_name() {
     let mut names: Vec<&str> = commands.iter().map(Command::name).collect();
     names.sort_unstable();
     names.dedup();
-    // `every_command` holds three CreateBuffers and two each of
-    // BeginRenderPass, BindGroup and RequestDevice, so the distinct-name count
-    // is what the writer has methods for.
-    assert_eq!(names.len(), 13);
+    // `every_command` holds three CreateBuffers, three CreateImages, six
+    // CreateImageViews and two each of BeginRenderPass, BindGroup and
+    // RequestDevice, so the distinct-name count is what the writer has methods
+    // for.
+    assert_eq!(names.len(), 17);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

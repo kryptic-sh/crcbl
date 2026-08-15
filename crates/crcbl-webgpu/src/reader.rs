@@ -18,7 +18,8 @@
 //! accepts is one the JS replayer can be held to.
 
 use crcbl_hal::{
-    AdapterId, BufferUsage, ClearValue, ColorAttachment, DepthStencilAttachment, LoadOp, Rect2d,
+    AdapterId, BufferUsage, ClearValue, ColorAttachment, DepthStencilAttachment, Extent3d, Format,
+    ImageAspect, ImageSubresourceRange, ImageType, ImageUsage, ImageViewType, LoadOp, Rect2d,
     ShaderStages, StoreOp,
 };
 
@@ -46,6 +47,67 @@ impl ByteReader<'_> {
         tag::store_op_from_code(code).ok_or(DecodeError::InvalidEnum {
             field,
             code: code.into(),
+        })
+    }
+
+    fn read_image_type(&mut self, field: &'static str) -> Result<ImageType, DecodeError> {
+        let code = self.read_u8()?;
+        tag::image_type_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    fn read_image_view_type(&mut self, field: &'static str) -> Result<ImageViewType, DecodeError> {
+        let code = self.read_u8()?;
+        tag::image_view_type_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    fn read_format(&mut self, field: &'static str) -> Result<Format, DecodeError> {
+        let code = self.read_u8()?;
+        tag::format_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    /// A bitflags word, through `from_bits` and never `from_bits_truncate`: a
+    /// bit no flag claims is a build that knows a use this one does not, and
+    /// dropping it would create an image the caller cannot bind.
+    fn read_image_usage(&mut self, field: &'static str) -> Result<ImageUsage, DecodeError> {
+        let bits = self.read_u32()?;
+        ImageUsage::from_bits(bits).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: bits.into(),
+        })
+    }
+
+    fn read_image_aspect(&mut self, field: &'static str) -> Result<ImageAspect, DecodeError> {
+        let bits = self.read_u32()?;
+        ImageAspect::from_bits(bits).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: bits.into(),
+        })
+    }
+
+    fn read_extent(&mut self) -> Result<Extent3d, DecodeError> {
+        Ok(Extent3d {
+            width: self.read_u32()?,
+            height: self.read_u32()?,
+            depth_or_layers: self.read_u32()?,
+        })
+    }
+
+    fn read_subresource_range(&mut self) -> Result<ImageSubresourceRange, DecodeError> {
+        Ok(ImageSubresourceRange {
+            aspect: self.read_image_aspect("ImageSubresourceRange::aspect")?,
+            base_mip: self.read_u32()?,
+            mip_count: self.read_u32()?,
+            base_layer: self.read_u32()?,
+            layer_count: self.read_u32()?,
         })
     }
 
@@ -204,11 +266,61 @@ impl<'a> StreamReader<'a> {
                 let canvas_id = r.read_u32()?;
                 Ok(Command::CreateSurface { surface, canvas_id })
             }
+            tag::CREATE_IMAGE_TAG => {
+                // Spelled out rather than built inline: `mip_levels` and
+                // `samples` are adjacent, identically typed `u32`s and mean
+                // different things, which is the pair a decoder most easily
+                // swaps. Both are carried verbatim, zero included — see
+                // `Command::CreateImage`.
+                let image = r.read_handle("CreateImage::image")?;
+                let label = r.read_opt_string("ImageDesc::label")?;
+                let image_type = r.read_image_type("ImageDesc::image_type")?;
+                let extent = r.read_extent()?;
+                let format = r.read_format("ImageDesc::format")?;
+                let mip_levels = r.read_u32()?;
+                let samples = r.read_u32()?;
+                let usage = r.read_image_usage("ImageDesc::usage")?;
+                Ok(Command::CreateImage {
+                    image,
+                    label,
+                    image_type,
+                    extent,
+                    format,
+                    mip_levels,
+                    samples,
+                    usage,
+                })
+            }
+            tag::CREATE_IMAGE_VIEW_TAG => {
+                // Two handles, and the id being filled in comes first — the
+                // one being read is a field of the descriptor and follows the
+                // label, as it does in `ImageViewDesc`.
+                let view = r.read_handle("CreateImageView::view")?;
+                let label = r.read_opt_string("ImageViewDesc::label")?;
+                let image = r.read_handle("ImageViewDesc::image")?;
+                let view_type = r.read_image_view_type("ImageViewDesc::view_type")?;
+                let format = r.read_format("ImageViewDesc::format")?;
+                let range = r.read_subresource_range()?;
+                Ok(Command::CreateImageView {
+                    view,
+                    label,
+                    image,
+                    view_type,
+                    format,
+                    range,
+                })
+            }
             tag::DESTROY_BUFFER_TAG => Ok(Command::DestroyBuffer {
                 buffer: r.read_handle("DestroyBuffer::buffer")?,
             }),
             tag::DESTROY_SURFACE_TAG => Ok(Command::DestroySurface {
                 surface: r.read_handle("DestroySurface::surface")?,
+            }),
+            tag::DESTROY_IMAGE_TAG => Ok(Command::DestroyImage {
+                image: r.read_handle("DestroyImage::image")?,
+            }),
+            tag::DESTROY_IMAGE_VIEW_TAG => Ok(Command::DestroyImageView {
+                view: r.read_handle("DestroyImageView::view")?,
             }),
             tag::BEGIN_DEBUG_LABEL_TAG => Ok(Command::BeginDebugLabel {
                 label: r.read_string("BeginDebugLabel::label")?,

@@ -19,8 +19,9 @@ use core::ops::Range;
 
 use crcbl_hal::{
     AdapterId, BindGroupHandle, BufferHandle, BufferUsage, ColorAttachment, DepthStencilAttachment,
-    Features, GraphicsPipelineHandle, MemoryLocation, PipelineLayoutHandle, Rect2d, ShaderStages,
-    SurfaceHandle,
+    Extent3d, Features, Format, GraphicsPipelineHandle, ImageHandle, ImageSubresourceRange,
+    ImageType, ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation, PipelineLayoutHandle,
+    Rect2d, ShaderStages, SurfaceHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -67,6 +68,71 @@ pub enum Command {
         /// rather than a name so no string crosses the boundary.
         canvas_id: u32,
     },
+    /// [`Device::create_image`](crcbl_hal::Device::create_image), with the
+    /// handle the caller allocated for it.
+    ///
+    /// The whole of [`ImageDesc`](crcbl_hal::ImageDesc), flattened as every
+    /// other descriptor here is. **There is no memory location**, and that is
+    /// the descriptor's own shape rather than a field dropped in the encoding:
+    /// every image the seam creates is
+    /// [`MemoryLocation::DeviceLocal`],
+    /// so there is nothing for a caller to pass.
+    ///
+    /// **[`mip_levels`](Self::CreateImage::mip_levels) and
+    /// [`samples`](Self::CreateImage::samples) cross verbatim, zero included.**
+    /// Zero is meaningless for both, and refusing it here is not this layer's
+    /// job: the wire form of a `u32` claims every value, so a decoder that
+    /// refused zero would refuse a buffer this crate's own writer produced —
+    /// and the writer asserts only what the reader enforces. An invalid
+    /// descriptor is a creation failure, and creation failures arrive out of
+    /// band through [`Device::take_error`](crcbl_hal::Device::take_error), not
+    /// as a panic in the middle of a frame's recording.
+    CreateImage {
+        /// Id the replayer stores the new object at.
+        image: ImageHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Dimensionality.
+        image_type: ImageType,
+        /// Size, and depth or array-layer count — which of the two
+        /// [`Extent3d::depth_or_layers`] means is decided by `image_type`.
+        extent: Extent3d,
+        /// Texel format.
+        format: Format,
+        /// Mip levels. Carried through even when zero; see the variant docs.
+        mip_levels: u32,
+        /// Samples per texel. Carried through even when zero; see the variant
+        /// docs.
+        samples: u32,
+        /// Permitted uses.
+        usage: ImageUsage,
+    },
+    /// [`Device::create_image_view`](crcbl_hal::Device::create_image_view), with
+    /// the handle the caller allocated for it.
+    ///
+    /// The whole of [`ImageViewDesc`](crcbl_hal::ImageViewDesc). **Two handles
+    /// cross and they are not interchangeable**: `view` is the id the replayer
+    /// stores the new object at, and `image` is the id it looks the viewed
+    /// object up by. The opcode is what says which table each indexes, since a
+    /// handle carries no kind.
+    CreateImageView {
+        /// Id the replayer stores the new object at.
+        view: ImageViewHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Image being viewed.
+        image: ImageHandle,
+        /// Dimensionality of the view — the only field saying how
+        /// [`range`](Self::CreateImageView::range)'s layers are to be read.
+        view_type: ImageViewType,
+        /// Format seen through the view, which may differ from the image's.
+        format: Format,
+        /// Subrange covered. [`ImageSubresourceRange::ALL`] crosses as the
+        /// [`u32::MAX`] it is, rather than being resolved here: resolving it
+        /// would need the image's own mip and layer counts, which this side of
+        /// the boundary does not have.
+        range: ImageSubresourceRange,
+    },
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
     ///
     /// A destroy naming an id whose slot holds nothing is a **no-op for the
@@ -82,6 +148,24 @@ pub enum Command {
     DestroySurface {
         /// Id to release.
         surface: SurfaceHandle,
+    },
+    /// [`Device::destroy_image`](crcbl_hal::Device::destroy_image).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is.
+    DestroyImage {
+        /// Id to release.
+        image: ImageHandle,
+    },
+    /// [`Device::destroy_image_view`](crcbl_hal::Device::destroy_image_view).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is. **A view's id is its own**, from a table
+    /// the image's id never indexes, so destroying a view is not destroying
+    /// what it views.
+    DestroyImageView {
+        /// Id to release.
+        view: ImageViewHandle,
     },
     /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
     BeginDebugLabel {
@@ -201,8 +285,12 @@ impl Command {
         match self {
             Self::CreateBuffer { .. } => "CreateBuffer",
             Self::CreateSurface { .. } => "CreateSurface",
+            Self::CreateImage { .. } => "CreateImage",
+            Self::CreateImageView { .. } => "CreateImageView",
             Self::DestroyBuffer { .. } => "DestroyBuffer",
             Self::DestroySurface { .. } => "DestroySurface",
+            Self::DestroyImage { .. } => "DestroyImage",
+            Self::DestroyImageView { .. } => "DestroyImageView",
             Self::BeginDebugLabel { .. } => "BeginDebugLabel",
             Self::BeginRenderPass { .. } => "BeginRenderPass",
             Self::BindGraphicsPipeline { .. } => "BindGraphicsPipeline",

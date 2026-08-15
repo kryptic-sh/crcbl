@@ -22,6 +22,27 @@ reaches its second iteration. Vulkan is what gates that loop: it is the only
 backend that asks a driver per call and the only one that can refuse a real
 pairing. Worth knowing before anyone reads a green browser gate as covering it.
 
+### `ImageDesc` and `ImageViewDesc` state contracts nothing enforces
+
+Three of them, found while putting both descriptors on the wire. Each is prose
+in `crates/crcbl-hal/src/resource.rs` with no check anywhere and no named owner:
+
+- **`ImageDesc::mip_levels` and `samples` have no documented floor.**
+  `BufferDesc::size` says "must be non-zero" and these say nothing, so whether a
+  zero is a seam violation or a backend's problem has no answer. The stream
+  carries them through verbatim — the encoding refuses malformed streams, never
+  invalid descriptors, which `41-webgpu-stream.md` now states as a rule — so the
+  question lands on whatever creates the image.
+- **`ImageViewDesc::format` "must be compatible with" the image's format**, and
+  nothing defines compatibility or says who checks it.
+- **`Extent3d::height` says "`1` for `ImageType::D1`"**, also unenforced.
+
+All three land on the WebGPU replayer in the slice that executes these commands,
+and it has nothing to enforce them against: it sees the descriptor and not the
+seam's intent. What is needed is a decision about where each belongs — the
+descriptor's constructor, a debug assertion in the HAL, or explicitly the
+backend's — not more prose.
+
 ### `#requestDevice`'s `ForeignSurface` refusal now gives a reason that is no longer true
 
 `web/engine/gpu-replay.js` refuses a `RequestDevice` whose `compatibleSurface`

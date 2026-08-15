@@ -13,8 +13,9 @@
 use crcbl_core::Handle;
 use crcbl_hal::{
     AdapterId, BufferDesc, BufferUsage, ClearValue, ColorAttachment, DepthStencilAttachment,
-    DeviceDesc, Features, LoadOp, MemoryLocation, Rect2d, RenderPassDesc, ShaderStages, StoreOp,
-    depth,
+    DeviceDesc, Extent3d, Features, Format, ImageAspect, ImageDesc, ImageSubresourceRange,
+    ImageType, ImageUsage, ImageViewDesc, ImageViewType, LoadOp, MemoryLocation, Rect2d,
+    RenderPassDesc, ShaderStages, StoreOp, depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -60,11 +61,181 @@ pub fn every_command() -> Vec<Command> {
             surface: handle(45, 46),
             canvas_id: 19,
         },
+        // **Every [`ImageType`] appears**, because the code table in
+        // `web/engine/gpu-stream.js` is a hand-written list and a row for a
+        // code the fixture never carries is a row nothing checks. The three
+        // extent components differ from each other and from `mip_levels` and
+        // `samples` in every image below, so a field written in the wrong order
+        // decodes to a different number rather than to the same one.
+        Command::CreateImage {
+            image: handle(61, 62),
+            label: Some("gbuffer albedo".into()),
+            image_type: ImageType::D2,
+            extent: Extent3d {
+                width: 1280,
+                height: 720,
+                depth_or_layers: 3,
+            },
+            format: Format::Rgba8UnormSrgb,
+            mip_levels: 11,
+            samples: 1,
+            usage: ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+        },
+        // The unlabelled twin, and the volume: `depth_or_layers` is a depth
+        // here and an array-layer count above, decided by nothing but the
+        // `image_type` byte.
+        Command::CreateImage {
+            image: handle(63, 64),
+            label: None,
+            image_type: ImageType::D3,
+            extent: Extent3d {
+                width: 160,
+                height: 90,
+                depth_or_layers: 64,
+            },
+            format: Format::R16Float,
+            mip_levels: 7,
+            samples: 4,
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+        },
+        // **Zero `mip_levels` and zero `samples`, deliberately.** No device
+        // accepts either, and both cross verbatim: the encoding refuses
+        // malformed *streams*, not descriptors a replayer will reject through
+        // `take_error`. The two images above are what pin the order of the
+        // pair, since these two values are equal.
+        //
+        // `usage` is `ImageUsage::all()`, which is what pins the claimed-bit
+        // mask the JavaScript decoder enforces — a mask narrower than the HAL's
+        // refuses this very command.
+        Command::CreateImage {
+            image: handle(65, 66),
+            label: Some(String::new()),
+            image_type: ImageType::D1,
+            extent: Extent3d {
+                width: 256,
+                height: 1,
+                depth_or_layers: 1,
+            },
+            format: Format::R8Unorm,
+            mip_levels: 0,
+            samples: 0,
+            usage: ImageUsage::all(),
+        },
+        // **Every [`ImageViewType`] appears too**, for the reason every
+        // `ImageType` does. The two handles in each are distinct in both halves
+        // so the id being filled in cannot be confused with the id being read,
+        // and every subresource field holds its own number so a transposition
+        // inside the range is visible.
+        Command::CreateImageView {
+            view: handle(67, 68),
+            label: Some("cascade 2".into()),
+            image: handle(61, 62),
+            view_type: ImageViewType::D2Array,
+            format: Format::D32FloatS8Uint,
+            range: ImageSubresourceRange {
+                aspect: ImageAspect::DEPTH | ImageAspect::STENCIL,
+                base_mip: 1,
+                mip_count: 2,
+                base_layer: 3,
+                layer_count: 4,
+            },
+        },
+        // `ImageSubresourceRange::ALL` is `u32::MAX` and crosses as itself:
+        // resolving it would need the image's own mip and layer counts, which
+        // this side of the boundary does not have. One of the two counts is the
+        // sentinel and the other is not, so the pair cannot be swapped
+        // unnoticed.
+        Command::CreateImageView {
+            view: handle(69, 70),
+            label: None,
+            image: handle(63, 64),
+            view_type: ImageViewType::D3,
+            format: Format::R16Float,
+            range: ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip: 5,
+                mip_count: ImageSubresourceRange::ALL,
+                base_layer: 6,
+                layer_count: 7,
+            },
+        },
+        Command::CreateImageView {
+            view: handle(71, 72),
+            label: Some(String::new()),
+            image: handle(65, 66),
+            view_type: ImageViewType::D1,
+            format: Format::R8Unorm,
+            range: ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip: 9,
+                mip_count: 10,
+                base_layer: 11,
+                layer_count: 12,
+            },
+        },
+        Command::CreateImageView {
+            view: handle(73, 74),
+            label: Some("sky cube".into()),
+            image: handle(61, 62),
+            view_type: ImageViewType::Cube,
+            format: Format::Rgba8Unorm,
+            range: ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip: 13,
+                mip_count: 14,
+                base_layer: 15,
+                layer_count: 16,
+            },
+        },
+        // The other half of each adjacent pair of view types, so `Cube` and
+        // `CubeArray` are both on the wire and a table that folded one into the
+        // other cannot stay green.
+        Command::CreateImageView {
+            view: handle(75, 76),
+            label: None,
+            image: handle(63, 64),
+            view_type: ImageViewType::CubeArray,
+            format: Format::Bgra8UnormSrgb,
+            range: ImageSubresourceRange {
+                aspect: ImageAspect::COLOR,
+                base_mip: 17,
+                mip_count: 8,
+                base_layer: 18,
+                layer_count: ImageSubresourceRange::ALL,
+            },
+        },
+        // A stencil-only view, which is the one aspect no other command here
+        // sets: with `COLOR` and `DEPTH | STENCIL` above, all three bits are
+        // exercised, and the claimed-bit mask the JavaScript decoder derives is
+        // held to three rather than two.
+        Command::CreateImageView {
+            view: handle(77, 78),
+            label: Some("stencil".into()),
+            image: handle(65, 66),
+            view_type: ImageViewType::D2,
+            format: Format::D24UnormS8Uint,
+            range: ImageSubresourceRange {
+                aspect: ImageAspect::STENCIL,
+                base_mip: 19,
+                mip_count: 20,
+                base_layer: 21,
+                layer_count: 22,
+            },
+        },
         Command::DestroyBuffer {
             buffer: handle(17, 18),
         },
         Command::DestroySurface {
             surface: handle(47, 48),
+        },
+        // A view and the image it views are separate objects in separate
+        // tables, so these are two commands rather than one that could be made
+        // to stand for both.
+        Command::DestroyImage {
+            image: handle(79, 80),
+        },
+        Command::DestroyImageView {
+            view: handle(81, 82),
         },
         Command::BeginDebugLabel {
             label: "gbuffer — ✱".into(),
@@ -210,8 +381,48 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
         Command::CreateSurface { surface, canvas_id } => {
             stream.create_surface(*surface, *canvas_id)
         }
+        Command::CreateImage {
+            image,
+            label,
+            image_type,
+            extent,
+            format,
+            mip_levels,
+            samples,
+            usage,
+        } => stream.create_image(
+            *image,
+            &ImageDesc {
+                label: label.as_deref(),
+                image_type: *image_type,
+                extent: *extent,
+                format: *format,
+                mip_levels: *mip_levels,
+                samples: *samples,
+                usage: *usage,
+            },
+        ),
+        Command::CreateImageView {
+            view,
+            label,
+            image,
+            view_type,
+            format,
+            range,
+        } => stream.create_image_view(
+            *view,
+            &ImageViewDesc {
+                label: label.as_deref(),
+                image: *image,
+                view_type: *view_type,
+                format: *format,
+                range: *range,
+            },
+        ),
         Command::DestroyBuffer { buffer } => stream.destroy_buffer(*buffer),
         Command::DestroySurface { surface } => stream.destroy_surface(*surface),
+        Command::DestroyImage { image } => stream.destroy_image(*image),
+        Command::DestroyImageView { view } => stream.destroy_image_view(*view),
         Command::BeginDebugLabel { label } => stream.begin_debug_label(label),
         Command::BeginRenderPass {
             label,
