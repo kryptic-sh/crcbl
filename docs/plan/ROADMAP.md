@@ -1662,13 +1662,32 @@ be present in some of them.** Two surveys of `apps/*` produced the slices below.
    persistence. The evidence is that the page log carries
    `record: no previous value`, a line only the `Backing::Browser` arm emits.
 
-5. **`open_shell_and_window`** (`crcbl::engine`) — `start`/`with_shell`/
-   `open_the_window`, ~361 lines across six samples plus a seventh fused copy in
-   `crcbl-cli/templates/main.rs.tmpl`. Differs only in the `title`/`app_id`
-   literals, which stay parameters. Related: `LogicalSize::new(960.0, 720.0)` is
-   a bare literal in six `app.rs` files while the scaffold names it
-   `WINDOW_SIZE` — the template found the right factoring and the samples did
-   not.
+5. **`open_shell_and_window`** (`crcbl::engine`) — **half shipped.**
+
+   The `LogicalSize::new(960.0, 720.0)` half is done:
+   `crcbl::engine::DEFAULT_WINDOW_SIZE` and `requested_window_size` now own the
+   literal and the pixels-are-not-logical rule that sat beside it in all six
+   `app.rs` files, and the `crcbl new` template — which had already named the
+   constant and was the reason this was noticed — takes them too.
+
+   **`open_the_window` itself was deliberately left alone.** Its title, app id
+   and error type are the game's, and a wrapper taking all three would need six
+   positional arguments with two adjacent `&str`s among them — the swap hazard
+   `SheetDesc`'s own doc refuses elsewhere. The remaining body is three lines.
+
+   **What is still owed is `start` and `with_shell`**, and the survey's line
+   count was the wrong measure of them. Measured 2026-08-15: `start` is 8 lines
+   in five samples and differs _only_ by the error type; `with_shell` is 28–34
+   lines and differs by the error type plus, in two samples, a single comment.
+   So the duplication is real and almost total.
+
+   **The blocker is the error type, and it is worth thinking about rather than
+   forcing.** Each game has its own — `BreakoutError`, `FlappyError` — with its
+   own `Shell` and `NoWindowSystem` variants, so a shared function has to be
+   generic over something like `E: From<ShellError>` and the `NoWindowSystem`
+   arm has no single conversion. Decide that seam before writing the extraction;
+   a macro would sidestep it, but see slice 2 for what a macro costs in lints
+   that stop firing.
 
 6. **`web_exports!`'s residue** — 899 lines still across six samples, but only
    two real items each: a pure-forwarding `WebPending` impl, and ten literal
