@@ -9084,3 +9084,52 @@ on it.
   `AdapterInfo` and `DeviceCaps`, surface capabilities, and any reply carrying a
   `HalError`. The set that exists is deliberately representative, not complete,
   and the crate docs say so.
+
+## `webgpu` is a name and a refusal, not yet a backend
+
+`crcbl::backend::REGISTRY`'s `GpuBackend::WebGpu` entry returns
+`WEBGPU_NOT_IMPLEMENTED` unconditionally. Replacing it means giving
+`crcbl-webgpu` an `Instance`, adapter enumeration and a device, then deciding
+whether it displaces `GpuBackend::Wgpu`'s automatic selection on wasm32 — wgpu
+is still the browser's only automatic backend, and
+`exactly_one_backend_is_auto_selectable_and_it_depends_on_the_target` is what
+pins that, so the swap is a deliberate edit rather than something that can
+drift.
+
+It is registered rather than left out on purpose: an unregistered name yields
+`UnknownBackend`, which reads as a typo, where the registered refusal reads as
+work not yet done.
+
+### The e2e scripts' backend hints omit `webgpu` deliberately
+
+`crates/crcbl/tests/run-render-e2e.sh` and
+`apps/lumen/tests/run-lumen-golden.sh` carry a "Name one:" usage hint listing
+the backends that can draw a golden. `webgpu` is not among them and should not
+be until it can render. **No script validates backend names against a
+whitelist** — every one passes `CRCBL_GPU` and `--backend` straight through and
+lets the Rust reject them — so these hints are documentation, not gates, and
+nothing fails if they lag.
+
+### `apps/sandbox`'s backend rejection message is stale
+
+Its `Invocation::BadUsage` arm suggests `vk`, `mtl`, `dx12` or `null`. It
+already omitted `wgpu` before this work and now also omits `webgpu`, while the
+`USAGE` text directly above it lists both. Pre-existing drift, left alone as
+outside the task. The other apps do not have the problem: they share
+`crcbl::args::COMMON_OPTIONS_HELP`, which has one rejection message, and a
+per-app test compares each copy against the engine's verbatim.
+
+### The env-var path is not covered automatically
+
+The refusal is tested through `request_open_backend`, which `open()` funnels
+through, and was confirmed by hand against the `sandbox` binary under both
+`CRCBL_GPU=webgpu` and `--backend webgpu` (exit 1, no fallback). Nothing sets
+`BACKEND_ENV_VAR` in a test: it is `unsafe` in edition 2024 and would race the
+other tests sharing the process. Stated as the gap it is.
+
+### Not verified
+
+The macOS and Windows **runtime** behaviour of the new registry entry. `crcbl`,
+`crcbl-mtl` and `crcbl-dx12` all type-check clean against `aarch64-apple-darwin`
+and `x86_64-pc-windows-msvc`, but no test ran on either platform; that verdict
+only comes from CI.

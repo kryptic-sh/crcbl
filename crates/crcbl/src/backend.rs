@@ -32,6 +32,16 @@
 //! [`GpuError::NoBackend`] names the actual problem. Null is reachable only by
 //! asking for it.
 //!
+//! The same rule is why [`GpuBackend::WebGpu`] is **registered and refuses**
+//! rather than absent or aliased. `crcbl-webgpu` is the backend that will
+//! replace `crcbl-wgpu` in the browser, and the two have to be selectable apart
+//! while that happens — but nothing behind `crcbl-webgpu` opens a device yet.
+//! Aliasing `webgpu` onto [`GpuBackend::Wgpu`], which is what `from_name` used
+//! to do, would make every `CRCBL_GPU=webgpu` run report success about wgpu;
+//! leaving the name unregistered would report it as unknown, which reads as a
+//! typo rather than as work not yet done. So the entry exists, is never
+//! automatic, and fails with a message saying which piece is missing.
+//!
 //! # Opening is polled, because the web says so
 //!
 //! [`request_open`] returns a [`PendingInstance`] whose [`poll`](PendingInstance::poll)
@@ -114,6 +124,15 @@ pub enum GpuBackend {
     Null,
     /// `crcbl-wgpu` — wgpu, native or WebGPU (P5).
     Wgpu,
+    /// `crcbl-webgpu` — WebGPU reached straight from wasm, the backend meant to
+    /// replace [`Wgpu`](Self::Wgpu) in the browser.
+    ///
+    /// Selectable by name so the two can be told apart during the transition,
+    /// and **registered but not openable**: `crcbl-webgpu` is the command
+    /// stream today and nothing behind it creates a device, so asking for it
+    /// fails with [`GpuError::Backend`] naming that rather than quietly landing
+    /// on wgpu.
+    WebGpu,
 }
 
 impl GpuBackend {
@@ -127,6 +146,7 @@ impl GpuBackend {
             Self::Dx12 => "dx12",
             Self::Null => "null",
             Self::Wgpu => "wgpu",
+            Self::WebGpu => "webgpu",
         }
     }
 
@@ -134,6 +154,13 @@ impl GpuBackend {
     ///
     /// Accepts the spellings people type: `vk` and `vulkan` are the same thing,
     /// and so are `mtl` and `metal`, `dx12` and `d3d12`, and `null` and `none`.
+    ///
+    /// `wgpu` and `webgpu` are **not** the same thing, and this is the one place
+    /// that decides it: `webgpu` used to be an alias for [`Wgpu`](Self::Wgpu),
+    /// and now names [`WebGpu`](Self::WebGpu), the backend that replaces it in
+    /// the browser. Keeping the alias would have made the transition
+    /// unobservable — every `CRCBL_GPU=webgpu` run would have gone on opening
+    /// wgpu and reported success.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name.trim().to_ascii_lowercase().as_str() {
@@ -141,7 +168,8 @@ impl GpuBackend {
             "mtl" | "metal" => Some(Self::Metal),
             "dx12" | "d3d12" => Some(Self::Dx12),
             "null" | "none" => Some(Self::Null),
-            "wgpu" | "webgpu" => Some(Self::Wgpu),
+            "wgpu" => Some(Self::Wgpu),
+            "webgpu" => Some(Self::WebGpu),
             _ => None,
         }
     }
@@ -213,6 +241,14 @@ struct Registration {
     /// their first poll.
     open: fn() -> InstanceFuture,
 }
+
+/// Why [`GpuBackend::WebGpu`] refuses, worded so a log reader can tell a
+/// not-yet from a broken driver.
+///
+/// Named rather than written into the table, so the registry entry and the test
+/// that proves the refusal point at one string instead of two that can drift.
+const WEBGPU_NOT_IMPLEMENTED: &str = "not implemented yet — `crcbl-webgpu` is the wasm → JS \
+    command stream encoding, and nothing behind it enumerates an adapter or opens a device";
 
 /// Every backend compiled into this build, in the order [`request_open`] tries
 /// them.
@@ -311,6 +347,27 @@ static REGISTRY: &[Registration] = &[
                         what: "no wgpu adapter found",
                     })
             })
+        },
+    },
+    // Registered so the name resolves and **never openable**, which is the
+    // whole point: `webgpu` has to be selectable apart from `wgpu` while
+    // `crcbl-webgpu` grows into the browser backend, and the two failure modes
+    // that would make the transition unreadable are a silent fall-through onto
+    // wgpu and a panic. This entry is neither — it is a named refusal carrying
+    // [`WEBGPU_NOT_IMPLEMENTED`], so `CRCBL_GPU=webgpu` produces a log line
+    // saying the backend has not been written rather than one saying a driver
+    // was missing.
+    //
+    // Not auto anywhere, including wasm32: an automatic entry that always
+    // refuses would only add a failed attempt in front of the wgpu one.
+    Registration {
+        backend: GpuBackend::WebGpu,
+        auto: false,
+        open: || {
+            ready(Err(HalError::Unsupported {
+                backend: crcbl_hal::BackendKind::WebGpu,
+                what: WEBGPU_NOT_IMPLEMENTED,
+            }))
         },
     },
     Registration {
@@ -569,6 +626,7 @@ mod tests {
         #[cfg(target_os = "windows")]
         GpuBackend::Dx12,
         GpuBackend::Wgpu,
+        GpuBackend::WebGpu,
         GpuBackend::Null,
     ];
 
@@ -581,6 +639,7 @@ mod tests {
         GpuBackend::Metal,
         GpuBackend::Dx12,
         GpuBackend::Wgpu,
+        GpuBackend::WebGpu,
         GpuBackend::Null,
     ];
 
@@ -683,6 +742,18 @@ mod tests {
         assert_eq!(GpuBackend::from_name(" DX12 "), Some(GpuBackend::Dx12));
         assert_eq!(GpuBackend::from_name("none"), Some(GpuBackend::Null));
         assert_eq!(GpuBackend::from_name("opengl"), None);
+        // **`wgpu` and `webgpu` are two backends, not two spellings.**
+        // `webgpu` was an alias for `Wgpu` until `crcbl-webgpu` existed, and
+        // the round-trip loop above cannot catch a relapse: `from_name` mapping
+        // `webgpu` back onto `Wgpu` would still round-trip both `as_str`
+        // values. These are the assertions that fail if the alias returns.
+        assert_eq!(GpuBackend::from_name("webgpu"), Some(GpuBackend::WebGpu));
+        assert_eq!(GpuBackend::from_name(" WebGPU "), Some(GpuBackend::WebGpu));
+        assert_eq!(GpuBackend::from_name("wgpu"), Some(GpuBackend::Wgpu));
+        assert_eq!(GpuBackend::WebGpu.to_string(), "webgpu");
+        assert_eq!(GpuBackend::Wgpu.to_string(), "wgpu");
+        assert_ne!(GpuBackend::from_name("webgpu"), Some(GpuBackend::Wgpu));
+        assert_ne!(GpuBackend::from_name("wgpu"), Some(GpuBackend::WebGpu));
         // Every name is distinct, so `CRCBL_GPU` can never name two backends —
         // which an `as_str` arm copied from its neighbour would make possible
         // while every round-trip above still passed.
@@ -769,6 +840,70 @@ mod tests {
         }
     }
 
+    /// **`webgpu` is refused loudly, and is never wgpu standing in for it.**
+    ///
+    /// The transition this variant exists for only means anything if a run that
+    /// asked for `webgpu` and got a picture really was `crcbl-webgpu` drawing
+    /// it. The two ways that could go wrong are a fall-through onto another
+    /// backend and a panic; this asserts it is neither, and that the message
+    /// names the missing piece rather than reading like an absent driver.
+    ///
+    /// The name is resolved through [`GpuBackend::from_name`] rather than
+    /// written as the variant, because what `CRCBL_GPU=webgpu` rests on is the
+    /// *string* reaching this variant — and it used to reach
+    /// [`GpuBackend::Wgpu`].
+    ///
+    /// Polled rather than blocking so it runs on `wasm32` too, which is the
+    /// target the whole transition is about. `open` and `open_backend` are the
+    /// blocking wrappers over exactly this path.
+    #[test]
+    fn webgpu_is_registered_and_refuses_by_name_without_falling_back() {
+        let requested = GpuBackend::from_name("webgpu").expect("the name CRCBL_GPU=webgpu carries");
+        assert_eq!(requested, GpuBackend::WebGpu);
+
+        let mut pending = request_open_backend(requested)
+            .expect("webgpu is registered, so the name resolves rather than reading as a typo");
+        let mut polls = 0;
+        let error = loop {
+            polls += 1;
+            assert!(polls < 64, "a refusal must not poll forever");
+            match pending.poll() {
+                Ok(Some(_)) => panic!("webgpu handed over an instance it does not have"),
+                Ok(None) => continue,
+                Err(error) => break error,
+            }
+        };
+
+        let text = error.to_string();
+        let GpuError::Backend { backend, source } = &error else {
+            panic!(
+                "a named backend that refuses is final, so this is `Backend`, never the \
+                 `NoBackend` of a walk that fell through: {error}"
+            );
+        };
+        assert_eq!(
+            *backend,
+            GpuBackend::WebGpu,
+            "the refusal must name webgpu, not the backend it is replacing"
+        );
+        // Typed, not merely a string: the arm carries `BackendKind::WebGpu`, so
+        // a caller can tell this apart from a driver that would not load.
+        assert!(
+            matches!(
+                source,
+                HalError::Unsupported {
+                    backend: crcbl_hal::BackendKind::WebGpu,
+                    ..
+                }
+            ),
+            "{source}"
+        );
+        assert!(
+            text.contains(WEBGPU_NOT_IMPLEMENTED),
+            "the log line has to say this is a not-yet: {text}"
+        );
+    }
+
     /// **`CRCBL_GPU=dx12` reaches a real D3D12 instance on Windows**, which is
     /// the half of the registration that only a Windows machine can settle.
     ///
@@ -828,6 +963,7 @@ mod tests {
             GpuBackend::Metal => crcbl_hal::BackendKind::Metal,
             GpuBackend::Dx12 => crcbl_hal::BackendKind::Dx12,
             GpuBackend::Wgpu => crcbl_hal::BackendKind::Wgpu,
+            GpuBackend::WebGpu => crcbl_hal::BackendKind::WebGpu,
             GpuBackend::Null => crcbl_hal::BackendKind::Null,
         };
         match request_open_auto(REGISTRY).block() {

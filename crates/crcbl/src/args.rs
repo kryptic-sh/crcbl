@@ -50,7 +50,7 @@ pub const COMMON_OPTIONS_HELP: &str = "\
     --tick-hz <N>        Simulation rate in Hz (default 60). Sets the server's
                          clock, the ECS timestep and every integrator.
     --backend <B>        GPU backend: vk, vulkan, mtl, metal, dx12, d3d12,
-                         null, none or wgpu
+                         null, none, wgpu or webgpu
     --fullscreen         Open borderless instead of windowed. F11 still toggles.
                          A window system may refuse; the summary reports what
                          it actually did, not what was asked for.
@@ -398,7 +398,8 @@ impl Common {
                     Some(backend) => self.backend = Some(backend),
                     None => {
                         return Consumed::Bad(format!(
-                            "unknown backend '{name}' — try `vk`, `mtl`, `dx12`, `null` or `wgpu`"
+                            "unknown backend '{name}' — try `vk`, `mtl`, `dx12`, `null`, \
+                             `wgpu` or `webgpu`"
                         ));
                     }
                 }
@@ -680,6 +681,12 @@ mod tests {
         assert_eq!(
             parsed(&["--backend", "wgpu"]).backend,
             Some(GpuBackend::Wgpu)
+        );
+        // Two backends, not two spellings — `webgpu` reaches `crcbl-webgpu`,
+        // which is the point of it having a name at all.
+        assert_eq!(
+            parsed(&["--backend", "webgpu"]).backend,
+            Some(GpuBackend::WebGpu)
         );
         assert!(rejected(&["--backend", "opengl"]).contains("opengl"));
         assert!(rejected(&["--backend"]).contains("--backend"));

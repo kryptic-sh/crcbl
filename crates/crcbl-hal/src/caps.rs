@@ -36,6 +36,13 @@ pub enum BackendKind {
     Vulkan,
     /// `crcbl-wgpu` — wgpu, native or WebGPU.
     Wgpu,
+    /// `crcbl-webgpu` — WebGPU reached directly from wasm, without wgpu.
+    ///
+    /// Distinct from [`Wgpu`](Self::Wgpu) on purpose: the two are meant to be
+    /// selectable apart while `crcbl-webgpu` grows into the browser backend
+    /// `crcbl-wgpu` currently is there, and a shared name would make a log line
+    /// unable to say which one drew the frame.
+    WebGpu,
     /// `crcbl-mtl` — Metal (P14).
     Metal,
     /// `crcbl-dx12` — Direct3D 12 (P14).
@@ -49,6 +56,7 @@ impl fmt::Display for BackendKind {
         let name = match self {
             Self::Vulkan => "vulkan",
             Self::Wgpu => "wgpu",
+            Self::WebGpu => "webgpu",
             Self::Metal => "metal",
             Self::Dx12 => "dx12",
             Self::Null => "null",
@@ -1270,5 +1278,24 @@ mod tests {
     fn backend_kind_displays_lowercase() {
         assert_eq!(BackendKind::Vulkan.to_string(), "vulkan");
         assert_eq!(BackendKind::Null.to_string(), "null");
+        // `crcbl-wgpu` and `crcbl-webgpu` are two backends that both reach
+        // WebGPU in a browser, and the whole point of the second variant is
+        // that a log line can say which one drew. An `as_str` arm copied from
+        // its neighbour would make them indistinguishable.
+        assert_eq!(BackendKind::Wgpu.to_string(), "wgpu");
+        assert_eq!(BackendKind::WebGpu.to_string(), "webgpu");
+        // Exhaustive on purpose: a variant added without a name of its own
+        // would otherwise share one silently.
+        let every = [
+            BackendKind::Vulkan,
+            BackendKind::Wgpu,
+            BackendKind::WebGpu,
+            BackendKind::Metal,
+            BackendKind::Dx12,
+            BackendKind::Null,
+        ];
+        let names: std::collections::HashSet<String> =
+            every.iter().map(ToString::to_string).collect();
+        assert_eq!(names.len(), every.len(), "two backend kinds share a name");
     }
 }

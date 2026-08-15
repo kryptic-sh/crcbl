@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`"webgpu"` no longer means `wgpu`.** `GpuBackend::from_name("webgpu")`
+  returned `GpuBackend::Wgpu` — an alias — and now returns the new
+  `GpuBackend::WebGpu`. Anything using `CRCBL_GPU=webgpu` or `--backend webgpu`
+  to reach wgpu must spell it `wgpu`.
+
+  The alias had to go for the two backends to be told apart during the
+  transition, and it was worse than a naming wart: left in place, every
+  `CRCBL_GPU=webgpu` run would have opened wgpu and reported success, so the
+  first "the new backend works" would have been evidence about the old one.
+
+  `crcbl_hal::BackendKind` and `crcbl::backend::GpuBackend` each gained a
+  variant, so a downstream exhaustive `match` on either needs a new arm.
+
 - **`crcbl::log` is the engine's own logging module now, not the `log` crate
   re-exported.** `crcbl::log::info!(…)` and its four siblings are `crcbl_core`'s
   macros, reachable both at the crate root (`crcbl_core::info!`) and beside the
@@ -497,6 +510,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   is linked now so the export contract is exercised by the real browser gate
   rather than by a crate no page builds in; it costs about 1.5 KB in each demo's
   shipped wasm, measured.
+
+- **`BackendKind::WebGpu` and `GpuBackend::WebGpu`**, printing and parsing as
+  `"webgpu"`, selectable with `CRCBL_GPU=webgpu` or `--backend webgpu`.
+
+  Asking for it today **fails loudly**: `GpuError::Backend` wrapping
+  `HalError::Unsupported`, whose message says the backend is not implemented yet
+  and what is missing behind it. It is never selected automatically and never
+  falls back to another backend, because a fallback here would turn "not built"
+  into a passing run on a different backend.
 
 - **The reply channel, JS to wasm** — `Reply`, `ReplyWriter`, `ReplyReader` and
   `decode_replies`,

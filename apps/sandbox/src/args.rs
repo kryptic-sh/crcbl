@@ -20,7 +20,8 @@ USAGE:
 OPTIONS:
         --headless        Run against HeadlessShell with a hand-driven clock.
                           Deterministic, needs no display, always terminates.
-        --backend <NAME>  GPU backend: `vk`, `mtl`, `dx12`, `wgpu` or `null`.
+        --backend <NAME>  GPU backend: `vk`, `mtl`, `dx12`, `wgpu`, `webgpu` or
+                          `null`.
                           Default: choose one, which means Metal on macOS and
                           Vulkan everywhere else. `dx12` and `null` are never
                           chosen automatically — `null` renders nothing and
