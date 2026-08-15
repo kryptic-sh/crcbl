@@ -170,7 +170,7 @@ fn every_command_has_its_own_name() {
     names.dedup();
     // `every_command` holds three CreateBuffers, two BeginRenderPasses and two
     // BindGroups, so the distinct-name count is what the writer has methods for.
-    assert_eq!(names.len(), 8);
+    assert_eq!(names.len(), 9);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

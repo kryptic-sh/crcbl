@@ -58,6 +58,7 @@ const MAX_ELEMENT_COUNT = 1 << 16;
 // command buffer never does.
 
 const ADAPTER_REPLY_TAG = 0x00;
+const NO_ADAPTER_REPLY_TAG = 0x01;
 const READBACK_PENDING_REPLY_TAG = 0x10;
 const READBACK_READY_REPLY_TAG = 0x11;
 const QUERY_RESULTS_REPLY_TAG = 0x18;
@@ -321,6 +322,22 @@ export class ReplyWriter {
     this.#open(ADAPTER_REPLY_TAG, sequence);
     this.#writer.putU32(id);
     this.#writer.putString(name, 'Adapter::name');
+  }
+
+  /**
+   * The enumeration found nothing, with the reason the browser gave.
+   *
+   * Not an `adapter` call carrying a sentinel: an enumeration is answered
+   * exactly once — wasm refuses a second reply naming a sequence it has already
+   * had one for — and an empty `name` is a browser that granted an adapter and
+   * declined to name it, which is a different fact.
+   *
+   * @param {bigint} sequence
+   * @param {string} reason What `requestAdapter()` said, for a log or a banner.
+   */
+  noAdapter(sequence, reason) {
+    this.#open(NO_ADAPTER_REPLY_TAG, sequence);
+    this.#writer.putString(reason, 'NoAdapter::reason');
   }
 
   /**

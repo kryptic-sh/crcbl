@@ -2560,6 +2560,105 @@ try {
     }
   }
 
+  // **THE ONLY GATE ON THE COMMAND STREAM'S ROUND TRIP.** Everything else about
+  // that format is checked without a browser: `stream-decode.mjs` decodes the
+  // fixture Rust commits, `reply-encode.mjs` re-encodes the replies Rust reads,
+  // `stream-transport.mjs` drives the ABI against a synthetic
+  // `WebAssembly.Memory`, and `gpu-replay.mjs` runs the replayer against a
+  // `navigator.gpu` that is not one. **None of them can call the real thing**,
+  // which is precisely what this slice added — so the one fact left over is the
+  // one only a browser can establish, and it is established here: a command
+  // encoded in wasm reaches `navigator.gpu`, and what the browser answers gets
+  // back into wasm through the reply channel.
+  //
+  // It runs for every demo because every demo links `crcbl-webgpu` and none of
+  // them drives it: `crcbl::backend`'s registry entry for `webgpu` still
+  // refuses, so the channel the probe installs is the only one in the page. The
+  // engine's own frame loop is drawing throughout, which is the other half of
+  // what this says — the last check below is that the demo did not notice.
+  group('G — the WebGPU command stream makes a round trip');
+
+  // Started in one evaluation, and inside it in one *synchronous* run: the
+  // demo's frame loop calls `takeCommandStream` on every frame, so whichever of
+  // the two drains the buffer first gets the command. See `gpu-probe.js`.
+  const probe = await evaluate(
+    page,
+    `(async () => {
+       const { exports, memory } = globalThis.crcbl;
+       const { Replayer } = await import('/engine/gpu-replay.js');
+       const { startAdapterProbe } = await import('/engine/gpu-probe.js');
+       const replayer = new Replayer();
+       globalThis.crcblProbe = { exports, memory, replayer };
+       return startAdapterProbe({ exports, memory, replayer });
+     })()`
+  );
+  check(
+    'G',
+    'wasm encoded an adapter enumeration and the shim decoded it back',
+    probe?.started === true && probe.commands.join(',') === 'EnumerateAdapters',
+    probe?.started
+      ? `the frame carried [${probe.commands.join(', ')}]`
+      : 'the probe could not install a channel — something else already has one'
+  );
+
+  // Then polled, because the answer cannot be on that frame: WebGPU's adapter
+  // API is a promise and the stream is replayed synchronously once a frame, so
+  // the reply is queued when the browser settles and crosses on a later one.
+  // `WAITING` is the ordinary answer until then and is not a state to report.
+  const answered = await until(async () =>
+    evaluate(
+      page,
+      `(async () => {
+         const { pumpAdapterProbe, PROBE } = await import('/engine/gpu-probe.js');
+         const { exports, memory, replayer } = globalThis.crcblProbe;
+         const out = pumpAdapterProbe({ exports, memory, replayer });
+         return out.state === PROBE.WAITING ? null : out;
+       })()`
+    )
+  );
+  check(
+    'G',
+    'the browser answered it and wasm read the answer back',
+    answered?.name === 'GRANTED' && answered.delivered === true,
+    answered
+      ? `${answered.name}: ${JSON.stringify(answered.text)}`
+      : `no answer in ${TIMEOUT_MS} ms — the reply never reached wasm`
+  );
+
+  // **The name is the browser's own, not a string the round trip invented.**
+  // Asked of the same page, through the same joins `gpu-replay.js` makes, at
+  // the same moment — so a replayer that answered with a constant, or with the
+  // wrong adapter, differs here. Nothing else in this group would notice.
+  const live = await evaluate(
+    page,
+    `(async () => {
+       const adapter = await navigator.gpu.requestAdapter();
+       const info = adapter?.info ?? {};
+       return [info.vendor, info.architecture, info.device, info.description]
+         .filter(Boolean).join(' ');
+     })()`
+  );
+  check(
+    'G',
+    'the adapter name wasm received is the one this browser reports',
+    typeof answered?.text === 'string' && answered.text === live,
+    answered?.text === live
+      ? `both say ${JSON.stringify(live)}`
+      : `wasm got ${JSON.stringify(answered?.text)}, the browser says ${JSON.stringify(live)}`
+  );
+
+  // A channel installed under a running demo must be invisible to it. The demo
+  // has been calling `takeCommandStream` every frame throughout, and from the
+  // moment the probe installed a channel those calls stopped answering "nothing
+  // to do" and started decoding real headers.
+  const survived = await evaluate(page, `crcbl.status()`);
+  check(
+    'G',
+    'the demo kept running with a channel installed under it',
+    survived === STATUS_RUNNING,
+    `status ${survived}`
+  );
+
   // Written whatever the outcome: a black PNG is the evidence for a failure and
   // the first thing a human will ask for. The canvas itself rather than a
   // viewport screenshot — the page's chrome is not what is under test.

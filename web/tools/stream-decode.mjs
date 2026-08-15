@@ -254,6 +254,11 @@ const EXPECTED = [
     vertices: { start: 6, end: 9 },
     instances: { start: 1, end: 5 },
   },
+  // The only body-less command, and last in the corpus so that the byte offsets
+  // the checks below count from the *first* command stay where they are. A
+  // decoder that read one field too many here would run off the end of the
+  // buffer, which is what the truncation sweep sees.
+  { name: 'EnumerateAdapters' },
 ];
 
 /**
@@ -405,10 +410,27 @@ async function main() {
     sweep ?? 'every truncation is short rather than a partial decode'
   );
 
+  // ---- the body-less command really has no body ---------------------------
+  // The fixture ends with `EnumerateAdapters`, whose entire encoding is its tag
+  // byte, so cutting one byte off drops that command and leaves a shorter but
+  // well-formed stream — while cutting two lands inside `Draw`'s last field and
+  // is short. A decoder that read any body at all for the empty command would
+  // fail the first of these, and one that read a byte too few would fail the
+  // second.
+  //
+  // Stated as two cuts rather than one because that is what changed: the check
+  // here used to be "one byte short is TooShort", which was true only for as
+  // long as the last command in the corpus had a body.
+  checkEqual(
+    failureOf(fixture.subarray(0, fixture.length - 1)) ??
+      decodeStream(fixture.subarray(0, fixture.length - 1)),
+    EXPECTED.slice(0, -1),
+    'cutting one byte drops the body-less command and decodes the rest'
+  );
   checkRefused(
-    fixture.subarray(0, fixture.length - 1),
+    fixture.subarray(0, fixture.length - 2),
     { kind: 'TooShort' },
-    'a fixture one byte short is TooShort'
+    'a fixture cut inside a command body is TooShort'
   );
 
   // ---- a corrupt tag is unknown, not a malformed known command ------------

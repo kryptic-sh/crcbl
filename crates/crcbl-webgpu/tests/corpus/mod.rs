@@ -133,6 +133,17 @@ pub fn every_command() -> Vec<Command> {
             vertices: 6..9,
             instances: 1..5,
         },
+        // Last, and not for tidiness: `web/tools/stream-decode.mjs` reaches into
+        // this fixture by byte offset to corrupt one field at a time, and every
+        // one of those offsets is counted from the *first* command. A command
+        // inserted above would move all of them.
+        //
+        // The only body-less command in the corpus, which is a shape of its own:
+        // the byte after this tag is the next command's tag, so a decoder that
+        // read one field too many here would decode the rest of the stream as
+        // garbage — and there is nothing after it, so it is also the case where
+        // that shows up as a clean end rather than as an error.
+        Command::EnumerateAdapters,
     ]
 }
 
@@ -188,6 +199,7 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             vertices,
             instances,
         } => stream.draw(vertices.clone(), instances.clone()),
+        Command::EnumerateAdapters => stream.enumerate_adapters(),
     }
 }
 

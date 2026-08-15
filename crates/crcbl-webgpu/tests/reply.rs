@@ -87,9 +87,10 @@ fn every_reply_has_its_own_name() {
         .collect();
     names.sort_unstable();
     names.dedup();
-    // The corpus holds two Adapters, two ReadbackReadys and two QueryResults, so
-    // the distinct-name count is what the writer has methods for.
-    assert_eq!(names.len(), 4);
+    // The corpus holds two of several shapes — Adapters, NoAdapters,
+    // ReadbackReadys, QueryResults — so the distinct-name count is what the
+    // writer has methods for.
+    assert_eq!(names.len(), 5);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

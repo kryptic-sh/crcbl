@@ -109,6 +109,14 @@ jobs:
       - name: Re-encode the committed reply-stream fixture
         run: node web/tools/reply-encode.mjs
 
+      # The replayer's own logic, with WebGPU stubbed out: that every command
+      # path queues exactly one reply, that an enumeration answers on a later
+      # frame rather than the one that asked, and that a browser with no adapter
+      # is answered rather than left waiting. The real thing needs `navigator.gpu`
+      # and runs in the browser gate; this catches the half that does not.
+      - name: Exercise the command-stream replayer
+        run: node web/tools/gpu-replay.mjs
+
       # Builds each wasm-ready sample, runs `wasm-bindgen`, assembles
       # `target/site`, and runs two checks against every artifact it produced.
       # They are the real gate, and they are what makes this job worth running

@@ -46,7 +46,13 @@
 //! | a handle and nothing else | [`Reply::ReadbackPending`] |
 //! | a handle and an unbounded byte payload | [`Reply::ReadbackReady`] |
 //! | a scalar and a string | [`Reply::Adapter`] |
+//! | a string alone | [`Reply::NoAdapter`] |
 //! | a counted array of fixed-size elements | [`Reply::QueryResults`] |
+//!
+//! [`Reply::NoAdapter`] is the one addition this set has taken since it was
+//! written, and it is not a new shape but a new *fact*: an enumeration is
+//! answered exactly once, so "the browser granted nothing" has nowhere to live
+//! inside [`Reply::Adapter`]. Its own docs carry the argument.
 //!
 //! Not here, and needed before the HAL can be implemented over this channel: the
 //! device-request poll (a [`DeviceRequestState`](crcbl_hal::DeviceRequestState)
@@ -83,6 +89,26 @@ pub enum Reply {
         id: u32,
         /// Human-readable device name, as the browser reports it.
         name: String,
+    },
+    /// The enumeration found nothing, with the reason the browser gave.
+    ///
+    /// **The terminator [`Reply::Adapter`] cannot be**, and the one place this
+    /// slice extended the reply set rather than reusing it. One command is
+    /// answered exactly once — a second reply naming a sequence already answered
+    /// is [`DecodeError::UnexpectedSequence`], the same as a reply for a
+    /// sequence nobody asked — so an enumeration is *one* reply, and there is no
+    /// value of `id` or `name` that means "no adapters": an empty name is a
+    /// browser that declined to name a real adapter, which the canonical corpus
+    /// carries.
+    ///
+    /// Reachable on a machine that has WebGPU and no GPU to run it on, which is
+    /// not a corner: `navigator.gpu.requestAdapter()` resolves `null` for a
+    /// blocklisted driver or a session with no GPU, and the demo shim already
+    /// has a sentence for it.
+    NoAdapter {
+        /// What the browser said, for a log or a banner. Never a code to branch
+        /// on: it is a message from another vendor's runtime.
+        reason: String,
     },
     /// [`poll_readback`](crcbl_hal::Device::poll_readback) answering
     /// [`ReadbackState::Pending`](crcbl_hal::ReadbackState::Pending): the bytes
@@ -128,6 +154,7 @@ impl Reply {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Adapter { .. } => "Adapter",
+            Self::NoAdapter { .. } => "NoAdapter",
             Self::ReadbackPending { .. } => "ReadbackPending",
             Self::ReadbackReady { .. } => "ReadbackReady",
             Self::QueryResults { .. } => "QueryResults",
@@ -190,6 +217,12 @@ impl ReplyWriter {
         self.open(tag::ADAPTER_REPLY_TAG, sequence);
         self.bytes.put_u32(id);
         self.bytes.put_bytes(name.as_bytes());
+    }
+
+    /// [`Reply::NoAdapter`].
+    pub fn no_adapter(&mut self, sequence: u64, reason: &str) {
+        self.open(tag::NO_ADAPTER_REPLY_TAG, sequence);
+        self.bytes.put_bytes(reason.as_bytes());
     }
 
     /// [`Reply::ReadbackPending`].
@@ -293,6 +326,9 @@ impl<'a> ReplyReader<'a> {
             tag::ADAPTER_REPLY_TAG => Reply::Adapter {
                 id: r.read_u32()?,
                 name: r.read_string("Adapter::name")?,
+            },
+            tag::NO_ADAPTER_REPLY_TAG => Reply::NoAdapter {
+                reason: r.read_string("NoAdapter::reason")?,
             },
             tag::READBACK_PENDING_REPLY_TAG => Reply::ReadbackPending {
                 readback: r.read_handle("ReadbackPending::readback")?,

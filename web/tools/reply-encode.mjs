@@ -121,6 +121,11 @@ function encodeCanonicalReplies(replies) {
     1_234_567_890_123n,
   ]);
   replies.queryResults(11n, handle(59, 60), 0, []);
+  // Appended rather than filed beside the two adapters, where they read better:
+  // `replies::every_reply` explains why, and the two lists have to be in the
+  // same order for the same bytes to come out.
+  replies.noAdapter(13n, 'requestAdapter() resolved null — ✱');
+  replies.noAdapter(1n, '');
 }
 
 /**

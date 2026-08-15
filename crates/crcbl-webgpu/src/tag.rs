@@ -160,12 +160,24 @@ pub const FAMILY_PRESENT: u8 = 0x88;
 /// One past the presentation family.
 pub const FAMILY_PRESENT_END: u8 = 0x90;
 
+/// First tag of the instance family: the [`Instance`](crcbl_hal::Instance)
+/// methods that are not creation or destruction — adapter enumeration, the
+/// device request and its poll, surface capabilities.
+///
+/// Appended after the presentation family rather than placed first, where its
+/// name would suggest it belongs: the tags above it are already committed to a
+/// fixture and to a hand-written JavaScript decoder, and moving them would
+/// renumber every one of them for a cosmetic ordering.
+pub const FAMILY_INSTANCE: u8 = 0x90;
+/// One past the instance family.
+pub const FAMILY_INSTANCE_END: u8 = 0xA0;
+
 /// Every family, as `(first, end)` pairs in ascending order.
 ///
 /// The table is what the tests walk, so a family added without a range — or one
 /// that overlaps its neighbour — is caught here rather than by two decoders
 /// quietly disagreeing.
-pub const FAMILIES: [(u8, u8); 8] = [
+pub const FAMILIES: [(u8, u8); 9] = [
     (FAMILY_CREATE, FAMILY_CREATE_END),
     (FAMILY_DESTROY, FAMILY_DESTROY_END),
     (FAMILY_ENCODER, FAMILY_ENCODER_END),
@@ -174,10 +186,11 @@ pub const FAMILIES: [(u8, u8); 8] = [
     (FAMILY_COPY, FAMILY_COPY_END),
     (FAMILY_QUERY, FAMILY_QUERY_END),
     (FAMILY_PRESENT, FAMILY_PRESENT_END),
+    (FAMILY_INSTANCE, FAMILY_INSTANCE_END),
 ];
 
 /// One past the last claimed tag. Everything above is unassigned.
-pub const FAMILIES_END: u8 = FAMILY_PRESENT_END;
+pub const FAMILIES_END: u8 = FAMILY_INSTANCE_END;
 
 // ── Command tags ──────────────────────────────────────────────────────────────
 //
@@ -201,6 +214,8 @@ pub const BIND_GROUP_TAG: u8 = 0x43;
 pub const PUSH_CONSTANTS_TAG: u8 = 0x44;
 /// [`Command::Draw`](crate::Command::Draw).
 pub const DRAW_TAG: u8 = 0x60;
+/// [`Command::EnumerateAdapters`](crate::Command::EnumerateAdapters).
+pub const ENUMERATE_ADAPTERS_TAG: u8 = 0x90;
 
 // ── Reply families ────────────────────────────────────────────────────────────
 //
@@ -247,6 +262,8 @@ pub const REPLY_FAMILIES_END: u8 = REPLY_FAMILY_QUERY_END;
 
 /// [`Reply::Adapter`](crate::Reply::Adapter).
 pub const ADAPTER_REPLY_TAG: u8 = 0x00;
+/// [`Reply::NoAdapter`](crate::Reply::NoAdapter).
+pub const NO_ADAPTER_REPLY_TAG: u8 = 0x01;
 /// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending).
 pub const READBACK_PENDING_REPLY_TAG: u8 = 0x10;
 /// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady).
@@ -362,7 +379,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 8] = [
+    const TAGS: [(&str, u8, u8); 9] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("DestroyBuffer", DESTROY_BUFFER_TAG, FAMILY_DESTROY),
         ("BeginDebugLabel", BEGIN_DEBUG_LABEL_TAG, FAMILY_ENCODER),
@@ -375,12 +392,14 @@ mod tests {
         ("BindGroup", BIND_GROUP_TAG, FAMILY_ENCODER),
         ("PushConstants", PUSH_CONSTANTS_TAG, FAMILY_ENCODER),
         ("Draw", DRAW_TAG, FAMILY_DRAW),
+        ("EnumerateAdapters", ENUMERATE_ADAPTERS_TAG, FAMILY_INSTANCE),
     ];
 
     /// Every reply tag this slice defines, with the family its name claims.
     /// Spelled out for the reason [`TAGS`] is.
-    const REPLY_TAGS: [(&str, u8, u8); 4] = [
+    const REPLY_TAGS: [(&str, u8, u8); 5] = [
         ("Adapter", ADAPTER_REPLY_TAG, REPLY_FAMILY_INSTANCE),
+        ("NoAdapter", NO_ADAPTER_REPLY_TAG, REPLY_FAMILY_INSTANCE),
         (
             "ReadbackPending",
             READBACK_PENDING_REPLY_TAG,
@@ -465,6 +484,16 @@ mod tests {
             "encoder state"
         );
         assert!(room(FAMILY_DRAW, FAMILY_DRAW_END) >= 8, "draw calls");
+        // `Instance` declares seven methods; `create_surface` and
+        // `destroy_surface` belong to the two families above and `create_device`
+        // is provided in terms of `request_device`, which leaves `backend`,
+        // `adapters`, `surface_caps` and `request_device` — and
+        // `PendingDevice::poll`, which is an instance-level call in everything
+        // but its receiver.
+        assert!(
+            room(FAMILY_INSTANCE, FAMILY_INSTANCE_END) >= 5,
+            "instance-level calls"
+        );
     }
 
     /// The `match`es these wrap are exhaustive, so a HAL variant added tomorrow

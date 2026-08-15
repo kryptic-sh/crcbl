@@ -107,6 +107,31 @@ pub fn every_reply() -> Vec<(u64, Reply)> {
                 values: Vec::new(),
             },
         ),
+        // The other half of an enumeration's answer: one command is answered
+        // exactly once, so "no adapter" cannot be an `Adapter` carrying a
+        // sentinel and has a reply of its own.
+        //
+        // **Appended rather than filed beside the two `Adapter`s**, where it
+        // reads better: every entry below an insertion point moves down one, and
+        // two of these sequences would then land on their own index — which is
+        // the coincidence `the_corpus_would_notice_a_sequence_read_from_a_position`
+        // exists to rule out.
+        (
+            13,
+            Reply::NoAdapter {
+                reason: "requestAdapter() resolved null — ✱".into(),
+            },
+        ),
+        // Its empty twin. There is no absent/present distinction to make here —
+        // the reason is a bare length-prefixed string — but a browser that
+        // refused without saying why still has to encode and decode as a
+        // refusal rather than as a short buffer.
+        (
+            1,
+            Reply::NoAdapter {
+                reason: String::new(),
+            },
+        ),
     ]
 }
 
@@ -118,6 +143,7 @@ pub fn every_reply() -> Vec<(u64, Reply)> {
 pub fn encode_reply(replies: &mut ReplyWriter, sequence: u64, reply: &Reply) {
     match reply {
         Reply::Adapter { id, name } => replies.adapter(sequence, *id, name),
+        Reply::NoAdapter { reason } => replies.no_adapter(sequence, reason),
         Reply::ReadbackPending { readback } => replies.readback_pending(sequence, *readback),
         Reply::ReadbackReady { readback, data } => {
             replies.readback_ready(sequence, *readback, data);

@@ -271,6 +271,37 @@ impl StreamChannel {
         Some(f(&mut writer))
     }
 
+    /// Encode one command *and* register the wait for its answer, as one step.
+    ///
+    /// `f` is a single encode method — the sequence it returns is the one that
+    /// gets registered — and `None` means nothing was encoded and nothing
+    /// registered, either because
+    /// [`MAX_WAITING_REPLIES`](crate::tag::MAX_WAITING_REPLIES) are already
+    /// waiting or because a buffer was borrowed.
+    ///
+    /// **The order is what this exists for, and doing it by hand gets it
+    /// wrong.** [`encode`](Self::encode) followed by
+    /// [`expect_reply`](Self::expect_reply) leaves a window in which a command
+    /// is on the stream and nothing is waiting on its sequence — and the reply
+    /// that names it is then refused with
+    /// [`DecodeError::UnexpectedSequence`], which refuses the *whole buffer*,
+    /// taking every other answer in that frame with it. Here the room is
+    /// checked before anything is written, and the registration cannot fail
+    /// once it has been.
+    ///
+    /// Commands with no answer stay on [`encode`](Self::encode): registering a
+    /// wait nothing will ever satisfy fills a bounded set for good.
+    pub fn encode_awaited(&self, f: impl FnOnce(&mut StreamWriter) -> u64) -> Option<u64> {
+        let mut writer = self.writer.try_borrow_mut().ok()?;
+        let mut replies = self.replies.try_borrow_mut().ok()?;
+        if replies.waiting.len() >= tag::MAX_WAITING_REPLIES {
+            return None;
+        }
+        let sequence = f(&mut writer);
+        replies.waiting.insert(sequence);
+        Some(sequence)
+    }
+
     /// Wait for a reply to the command that was assigned `sequence`.
     ///
     /// Register this for every command whose answer the engine intends to read.

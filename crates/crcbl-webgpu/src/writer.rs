@@ -258,6 +258,26 @@ impl StreamWriter {
         sequence
     }
 
+    // ── Instance ─────────────────────────────────────────────────────────────
+
+    /// [`Instance::adapters`](crcbl_hal::Instance::adapters).
+    ///
+    /// **The one command here whose answer comes back**, and the reason the
+    /// returned sequence matters rather than merely existing: something has to
+    /// be waiting on it before the frame ends, or the reply naming it is refused
+    /// as an answer to a command nobody asked — and refused for the whole
+    /// buffer. Reach it through
+    /// [`StreamChannel::encode_awaited`](crate::web::StreamChannel::encode_awaited),
+    /// which encodes and registers in one step;
+    /// [`AdapterProbe::request`](crate::instance::AdapterProbe::request) is that
+    /// call written out.
+    ///
+    /// The body is empty: the HAL call takes nothing, and what comes back is a
+    /// reply rather than a field.
+    pub fn enumerate_adapters(&mut self) -> u64 {
+        self.push_tag(tag::ENUMERATE_ADAPTERS_TAG)
+    }
+
     // ── Header and tags ──────────────────────────────────────────────────────
 
     fn write_header(&mut self) {

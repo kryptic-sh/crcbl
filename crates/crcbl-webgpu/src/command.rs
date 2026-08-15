@@ -101,6 +101,16 @@ pub enum Command {
         /// Instance range.
         instances: Range<u32>,
     },
+    /// [`Instance::adapters`](crcbl_hal::Instance::adapters) — enumerate what
+    /// the browser will grant.
+    ///
+    /// **The only command in this crate whose body is empty**, and the only one
+    /// that is answered: the enumeration cannot be handed back during the call,
+    /// so the replayer queues a [`Reply::Adapter`](crate::Reply::Adapter) or a
+    /// [`Reply::NoAdapter`](crate::Reply::NoAdapter) naming this command's
+    /// sequence, and it arrives a frame or more later. See
+    /// [`crate::instance`] for the side that waits for it.
+    EnumerateAdapters,
 }
 
 impl Command {
@@ -120,6 +130,7 @@ impl Command {
             Self::BindGroup { .. } => "BindGroup",
             Self::PushConstants { .. } => "PushConstants",
             Self::Draw { .. } => "Draw",
+            Self::EnumerateAdapters => "EnumerateAdapters",
         }
     }
 }

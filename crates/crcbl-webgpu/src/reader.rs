@@ -276,6 +276,7 @@ impl<'a> StreamReader<'a> {
                     instances: first_instance..last_instance,
                 })
             }
+            tag::ENUMERATE_ADAPTERS_TAG => Ok(Command::EnumerateAdapters),
             unknown => Err(DecodeError::UnknownTag { tag: unknown }),
         }
     }

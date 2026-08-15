@@ -520,6 +520,27 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   falls back to another backend, because a fallback here would turn "not built"
   into a passing run on a different backend.
 
+- **The first round trip: wasm asks the browser to enumerate adapters and reads
+  the answer back.** `Command::EnumerateAdapters` and `Reply::NoAdapter`, a
+  `FAMILY_INSTANCE` tag range, `StreamChannel::encode_awaited`, and
+  `AdapterProbe` in `crcbl_webgpu::instance`. `web/engine/gpu-replay.js` is the
+  first real replayer — it executes decoded commands against WebGPU — and
+  `web/engine/gpu-probe.js` drives a round trip from a page.
+
+  WebGPU's adapter request is asynchronous and the stream is replayed
+  synchronously once a frame, so the reply lands on a **later** frame, named by
+  the sequence of the command that asked. That is what the sequence numbers were
+  for, and it is now exercised rather than argued.
+
+  The browser gate carries the evidence: it compares the adapter name wasm
+  received against what `navigator.gpu` reports to the same page at the same
+  moment, so a replayer answering with a constant fails it.
+
+  **This is not the backend.** There is no `impl Instance` — `AdapterInfo` has
+  eight fields and this channel carries two — and `crcbl::backend` still refuses
+  `webgpu`. The probe entry points exist to observe the round trip and are
+  deleted when a real backend installs its own channel.
+
 - **The reply channel, JS to wasm** — `Reply`, `ReplyWriter`, `ReplyReader` and
   `decode_replies`,
   `StreamChannel::{expect_reply, waiting_replies, drain_replies}`, four

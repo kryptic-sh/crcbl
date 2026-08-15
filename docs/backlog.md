@@ -9133,3 +9133,45 @@ The macOS and Windows **runtime** behaviour of the new registry entry. `crcbl`,
 `crcbl-mtl` and `crcbl-dx12` all type-check clean against `aarch64-apple-darwin`
 and `x86_64-pc-windows-msvc`, but no test ran on either platform; that verdict
 only comes from CI.
+
+## The adapter round trip works; the backend does not exist
+
+`crcbl-webgpu` can ask a browser to enumerate adapters and read the answer back,
+proven by group G of the browser gate. What stands between that and
+`crcbl::backend` accepting `webgpu`:
+
+- **The rest of `AdapterInfo` on the wire.** `Instance::adapters` returns
+  `Vec<AdapterInfo>` synchronously and has eight fields; the channel carries the
+  id and the name. Vendor and device ids, `DeviceType`, driver and `DeviceCaps`
+  all need reply shapes.
+- **Something that owns a frame loop.** `open` must resolve after at least one
+  round trip, and today only `web/engine/demo.js` pumps frames. The backend
+  needs its own driver rather than borrowing the demo's.
+- **`request_device` and `PendingDevice::poll`**, with their commands and
+  replies.
+- **`create_surface` for `SurfaceTarget::Web`.**
+
+### The probe is temporary and should be deleted, not grown
+
+`crates/crcbl-webgpu/src/probe.rs`, its four `__crcbl_web_gpu_probe_*` exports
+and `web/engine/gpu-probe.js` exist so the round trip is observable from a page
+before a backend exists. The probe refuses when anything else has installed a
+channel. **Delete all three when the backend installs its own** — a second way
+to drive the stream is the sort of thing that survives by accident and then has
+to be kept working.
+
+### One command is answered exactly once
+
+`drain_replies` refuses a second reply for a sequence, in the same buffer or a
+later one, so an enumeration yields one adapter. That fits WebGPU, where
+`requestAdapter()` grants one or none. A backend that must report several needs
+a counted-list reply shape rather than several replies. `Reply::Adapter`'s doc
+still says "one entry of an enumeration", which implies the forbidden thing —
+wording, not behaviour.
+
+### Not verified
+
+The round trip on hardware Chromium, on Firefox, or on a browser whose
+`adapter.info` is populated differently. The gate ran under SwiftShader in Xvfb.
+The name check compares against the same browser, so it holds wherever it runs —
+but nowhere else has run it.

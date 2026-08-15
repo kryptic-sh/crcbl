@@ -70,6 +70,7 @@ const BIND_GRAPHICS_PIPELINE_TAG = 0x42;
 const BIND_GROUP_TAG = 0x43;
 const PUSH_CONSTANTS_TAG = 0x44;
 const DRAW_TAG = 0x60;
+const ENUMERATE_ADAPTERS_TAG = 0x90;
 
 // ── Optional fields ──────────────────────────────────────────────────────────
 
@@ -676,6 +677,12 @@ function decodeCommand(r) {
         instances: { start: firstInstance, end: lastInstance },
       };
     }
+    case ENUMERATE_ADAPTERS_TAG:
+      // The only command with no body: the next byte is the next command's tag.
+      // A decoder that read one field too many here would decode the rest of
+      // the buffer as garbage, which is why the corpus puts one at the end of a
+      // stream and `stream-decode.mjs` sweeps every truncation of it.
+      return { name: 'EnumerateAdapters' };
     default:
       throw new StreamDecodeError(
         'UnknownTag',

@@ -3,11 +3,14 @@
 //! Wasm serialises HAL calls into a buffer it owns; JS decodes that buffer and
 //! replays it against WebGPU, and answers back through a second buffer wasm also
 //! owns. `docs/plan/41-webgpu-stream.md` is the specification, and this crate is
-//! its first three slices — **the encoding, the transport that carries it, and
-//! the reply channel that carries answers home**. There is no `Instance`, no
-//! `Device` and no `CommandEncoder` implementation here yet; those are later
-//! slices, and they encode through [`StreamWriter`] and read
-//! [`Reply`]s when they arrive.
+//! its first four slices — **the encoding, the transport that carries it, the
+//! reply channel that carries answers home, and the first call that makes the
+//! round trip: adapter enumeration**. There is still no
+//! [`Instance`](crcbl_hal::Instance), [`Device`](crcbl_hal::Device) or
+//! [`CommandEncoder`](crcbl_hal::CommandEncoder) implementation — see
+//! [`instance`] for what exists instead of a half-filled one — and those are
+//! later slices, encoding through [`StreamWriter`] and reading [`Reply`]s when
+//! they arrive.
 //!
 //! Nothing but integers and buffers wasm owns crosses the boundary, which is
 //! the convention `crcbl-store`'s fetch ABI and the OPFS entry points already
@@ -46,6 +49,7 @@
 //! | an optional string, and structs with optional handles | [`StreamWriter::begin_render_pass`] |
 //! | creation with a caller-allocated handle | [`StreamWriter::create_buffer`] |
 //! | a destroy op | [`StreamWriter::destroy_buffer`] |
+//! | an empty body, answered later | [`StreamWriter::enumerate_adapters`] |
 //!
 //! The rest of the seam is made of these same shapes, so adding a command is
 //! adding a tag in [`tag`] and a method beside its neighbours — not a new
@@ -118,6 +122,8 @@
 
 mod bytes;
 pub mod command;
+pub mod instance;
+pub mod probe;
 pub mod reader;
 pub mod reply;
 pub mod tag;
@@ -126,6 +132,7 @@ pub mod writer;
 
 pub use bytes::DecodeError;
 pub use command::Command;
+pub use instance::AdapterProbe;
 pub use reader::{StreamReader, decode_stream};
 pub use reply::{Reply, ReplyReader, ReplyWriter, decode_replies};
 pub use writer::StreamWriter;
