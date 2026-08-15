@@ -1866,29 +1866,44 @@ what would catch it not having it.
 
 **New track, not yet started.** `crcbl-wgpu` is the browser's only renderer and
 the last place the engine draws through somebody else's abstraction. This is the
-plan to replace it with a backend that talks to WebGPU directly. It is large, it
-has a real decision in it that has not been taken, and the survey below is what
-it should be planned from rather than re-derived.
+plan to replace it with a backend that talks to WebGPU directly.
+
+The architectural decision this plan opened with has been taken, along with two
+others that widen it. They are recorded first because everything below follows
+from them.
+
+### The decisions, taken 2026-08-15
+
+1. **A command stream wasm builds and JS replays — pure, with no graphics
+   imports.** The alternative was a JS glue module called through imports, which
+   is simpler to debug and would have ended the no-imports property the rest of
+   this engine holds. Rejected: its simplicity advantage does not survive
+   WebGPU's structured descriptors, which force an encoding at
+   `createRenderPipeline` whichever shape is chosen. See "What the HAL already
+   pays for" — the seam this needs is largely already built.
+2. **`wasm-bindgen` leaves the wasm32 graph entirely.** It has exactly two roots
+   (measured 2026-08-15): `wgpu`, and `getrandom` under `crcbl-server`. Removing
+   only the first leaves the second, so the second is in scope here rather than
+   being a caveat on the prize.
+3. **`wgpu` goes natively too**, and the cross-backend image gate goes with it.
+   The oracle becomes `crcbl-golden`'s committed PNG references — which is not a
+   new mechanism, see below.
 
 ### What is there now, measured
 
 `crcbl-wgpu` is about 5 900 lines over ten modules against `wgpu` 30, and
-`device.rs` is most of it. It serves **two** roles, and separating them is most
-of the thinking:
+`device.rs` is most of it. It serves **two** roles:
 
-- **The browser's only path.** `wasm32` has no other backend; `crcbl-vk` is
-  `cfg`-ed out of the umbrella there.
+- **The browser's only path.** `wasm32` has no other backend; `crcbl-vk` sits
+  under a target gate in the umbrella's manifest and `crcbl-wgpu` does not.
 - **A second native backend**, selectable as `CRCBL_GPU=wgpu`, whose real job is
-  the cross-backend image gate — `crates/crcbl/tests/run-cross-backend-e2e.sh`
-  renders each scene through `crcbl-vk` and `crcbl-wgpu` and compares.
+  the cross-backend image gate in `crates/crcbl/tests/run-cross-backend-e2e.sh`.
 
 Natively it is otherwise redundant: `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12`
 already cover Linux, macOS and Windows.
 
-The surface a replacement owes is the HAL's three traits: `Instance` (7
-methods), `Device` (48) and `CommandEncoder` (35), plus `PendingDevice` — which
-already exists precisely because a browser cannot block on `requestDevice`, so
-the awkward part of the shape is built.
+The surface a replacement owes is the HAL's three traits: `Instance`, `Device`
+and `CommandEncoder`, plus `PendingDevice`.
 
 ### Why it is worth doing
 
@@ -1900,55 +1915,166 @@ reads a buffer wasm owns. WebGPU is the single exception, and it is the reason
 `web/build.sh` has to read the CLI's version out of `Cargo.lock` to match the
 crate.
 
+The measurable end state is in `web/tools/check-exports.mjs`, whose
+`ALLOWED_IMPORT_MODULES` set today holds the two `__wbindgen_*` placeholders and
+the emitted glue file. With decisions 1 and 2 both landed that set becomes
+**empty**, and the assertion strengthens from "imports only wasm-bindgen's glue"
+to "imports nothing at all". That file is where this track's success is
+measured.
+
 It is also the one place the **capability seam** reports someone else's opinion.
 `crcbl-wgpu` maps `wgpu::Features` onto `crcbl_hal::Features` by hand; a direct
 backend reports what the browser actually said.
 
-### The decision this needs first, and it is architectural
+### What the HAL already pays for
 
-Two shapes, and they are not variations on each other.
+The command-stream shape is cheaper here than it would be in most engines,
+because four of its costs were already paid for other reasons:
 
-1. **A JS glue module we own, called through imports.** The conventional answer:
-   wasm calls `createBuffer`, `beginRenderPass` and so on. Simple to write and
-   to debug, and it **ends the no-imports property** —
-   `web/tools/check- exports.mjs` currently asserts every import belongs to
-   `wasm-bindgen`'s glue, and that assertion would become "belongs to our glue"
-   instead. Hundreds of crossings per frame.
-2. **A command stream wasm builds and JS replays.** Keeps the discipline exactly
-   — still exports-plus-polling, still one buffer JS reads — and collapses a
-   frame to a single crossing. It needs an encoding, and it is genuinely harder
-   wherever WebGPU _returns_ something: adapter and device request, buffer
-   mapping, and any error scope. Those become polled the way storage already is.
+- **`CommandEncoder` is already fire-and-forget.** Every method on it returns
+  `()` except `finish`. That is the per-frame encode half, and it maps onto a
+  replayed stream with no impedance at all.
+- **`Device` is already handle-based.** Creation returns opaque handles
+  (`BufferHandle`, `GraphicsPipelineHandle`, …), so the id table a stream needs
+  is the seam that already exists rather than new machinery.
+- **The two hard async cases are already polled.** `Instance::request_device`
+  yields a `PendingDevice` with its own `poll`, and buffer mapping is
+  `request_readback` plus `poll_readback`. WebGPU's asynchrony is what those
+  shapes were built for.
+- **The out-of-band error channel already exists.** `Device::take_error` in
+  `crates/crcbl-hal/src/device.rs` is documented as existing _for WebGPU_, born
+  from an invalid shader that was handed back as a valid object and drew a black
+  canvas over a game reporting itself as playing. `Gpu::acquire` in
+  `crates/crcbl/src/engine.rs` drains it at the top of every frame, and flattens
+  whatever comes out to `HalError::Backend(String)` — so variant information is
+  already discarded on that path.
 
-**Shape 2 is the one that fits what this project has already decided**, and the
-polled-device seam is evidence it can be made to work. It is also the more
-expensive to build and the easier to get subtly wrong. Not a call to make from
-the roadmap.
+### The one real cost: synchronous creation errors
 
-### What it does _not_ buy, stated so nobody plans on it
+A stream cannot answer synchronously, so `create_*` has to hand back a
+pre-allocated handle and let failure arrive through `take_error`. An audit of
+every call site in the workspace (2026-08-15) found that **no production code
+anywhere inspects which `HalError` variant a creation call returned** — every
+`matches!(…, HalError::…)` on a live creation result is in a test — and that
+almost every caller propagates with `?`.
 
-**`wasm-bindgen` does not leave.**
-`cargo tree -i wasm-bindgen --target wasm32-unknown-unknown` shows two roots:
-`wgpu`, and `getrandom`, which `crcbl-server` needs for `crypto.getRandomValues`
-behind the resume token. Removing the first leaves the second. Replacing
-`getrandom`'s browser backend is small next to WebGPU, but it has to be in the
-plan or the prize is overstated.
+Four production callers branch, all in `crcbl-render`, and all of one species:
+an _optional_ subsystem that switches itself off rather than failing the frame.
 
-### What breaks, and must be answered before the last slice
+- `PassTimers::new` in `timing.rs` — a refused timestamp query set turns
+  per-pass GPU timing off and the profiler HUD loses its rows.
+- `CullStats::new` in `cull_stats.rs` — a refused readback buffer leaves the
+  culling counters on the GPU.
+- `CullStats::begin_frame` in `cull_stats.rs` — the only per-frame one; a
+  refused `request_readback` calls `give_up`, which latches the subsystem off.
+- `cached_group` in `ssao.rs` — returns `None` on a refused bind group, and its
+  four callers in `ssao.rs` and `ssr.rs` each `let … else { return }` out of a
+  graph execute closure, recording nothing for that pass.
 
-- **The cross-backend image gate compares `vk` against `wgpu`.** Retiring the
-  native half of `crcbl-wgpu` removes one side of that comparison. Either the
-  gate becomes vk-versus-mtl/dx12 — which no single CI runner can do, since
-  those are different platforms — or `crcbl-wgpu` stays natively as a test
-  fixture after the browser stops using it. The second is the honest answer and
-  should be said out loud rather than discovered at the end.
+The first three re-express against capability checks or `take_error` with a
+frame of delay. **`cached_group` is the awkward one** and must be designed
+before slice 3 lands: it sits inside a graph execute closure that has no error
+channel to return to, so under an always-`Ok` contract those passes would record
+draws against a bind group the stream later rejects, and the failure would
+surface as out-of-band noise instead of a skipped draw.
+
+Worth knowing, because it works in our favour: the codebase's stated convention
+is already to branch on **capabilities rather than on creation errors** —
+`mesh_pool.rs` says so in a comment, and its timeline-semaphore fallback keys
+off `Features::TIMELINE_SEMAPHORE`, not off a failed create.
+
+Two smaller shapes the stream must support, both already common in
+`crcbl-render`: holding a creation `Result` unfrozen so a shader module can be
+destroyed before the `?`, and matching `Err` only to destroy a sibling resource
+before returning the same error. Neither needs the error synchronously, but both
+mean **"destroy the thing I just pre-allocated" has to be a valid stream op.**
+
+### Replacing `getrandom`, so `wasm-bindgen` can go
+
+Smaller than the framing suggests. It is a **direct** dependency of exactly one
+crate, `crcbl-server`, whose manifest already splits the `wasm_js` feature per
+target so it does not unify into native builds. There is exactly one call in the
+workspace: `generate_resume_token` in `crates/crcbl-server/src/lib.rs`, filling
+32 bytes.
+
+Those 32 bytes are not an opaque reconnect handle — `SessionKey::derive` in
+`crates/crcbl-net/src/auth.rs` makes them the per-session MAC key, so this is a
+cryptographic requirement and not a convenience.
+
+Two things make the replacement safe:
+
+- **The failure path already exists and is a protocol outcome, not a panic.**
+  `entropy_failure` emits `RejectReason::ENTROPY_FAILURE`. A browser that will
+  not supply entropy — an insecure origin, where `crypto.getRandomValues` is
+  unavailable — must take that path rather than degrade to a weaker source. A
+  session key is the wrong place to be lenient.
+- **The shim rides an established pattern.** `__crcbl_web_fetch_buffer` plus its
+  commit export is the shape: wasm exports a pointer to a buffer it owns, JS
+  fills it, JS calls back in. A **fixed 32-byte static buffer** never grows wasm
+  memory, which sidesteps the detached-view trap `web/engine/wasm.js` documents
+  and keeps this out of that file's list of growth-capable exports.
+
+The workspace has no second entropy source to fall back on. `crcbl-core`'s
+`rand` module is splitmix64's finaliser exposed as pure functions of an index,
+with no `Rng` and no `&mut self` **by design**, so that replay and client/server
+agreement work — the exact opposite of what a session key needs. It is not a
+candidate and should not be reached for.
+
+### The oracle already exists, and is already the primary one
+
+This is the part the first draft of this plan got wrong. `crcbl-golden` is
+**not** a cross-backend comparator; it is exactly the committed-PNG oracle this
+track wants to move to, and it is already what the render suites assert against.
+Blessed references live in `crates/crcbl/tests/golden/`,
+`crates/crcbl-vk/tests/golden/` and `apps/lumen/tests/golden/`; `CRCBL_BLESS=1`
+re-blesses; mismatches drop actual, expected and diff into `target/golden-diff/`
+for CI to upload. Blessing deliberately returns an error rather than passing, so
+a missing reference cannot silently switch a gate off.
+
+`run-cross-backend-e2e.sh` is a **supplementary** second gate that reuses the
+same comparator on two live renders. Decision 3 deletes that script; it does not
+build anything.
+
+**Do not split the references per backend.** The shared set _is_ the
+cross-backend detector: a reference blessed on one backend and checked on the
+others is the same comparison the script performs, spread across CI jobs, and
+`render_e2e.rs` says so. `Tolerance::RASTERISER` was measured for exactly this —
+radv against lavapipe differs on most of the frame on the HDR path at a max
+channel delta of 1, which is why `max_channel_delta` is the load-bearing number
+and the failing-pixel ratio is not. A per-backend split would delete the
+detection this track is trying to preserve, and a mean-error budget was already
+tried and rejected because legitimate HDR drift exceeds a visible recolour
+regression.
+
+**What deleting the script genuinely costs**, and it is one thing: the second
+render size. The cross-backend gate runs its scenes at two sizes, the odd one
+deliberately not a multiple of 64, because a 256-byte row-pitch rule `wgpu`
+enforces and Vulkan does not made every other width pass. `render_e2e` renders
+at a single hard-coded `EXTENT`. **Parameterising that extent, and blessing a
+second reference set at the odd size, is a prerequisite slice** — not a
+follow-up, because once the script is gone nothing else covers that class.
+
+The two bugs the script historically caught were both shader-lowering
+divergences (`SV_InstanceID` and `SV_VertexID` lowering differently to SPIR-V
+and WGSL) where each backend was internally self-consistent. Shared-reference
+goldens catch that class too, provided every backend keeps running `render_e2e`
+against the shared references. CI already anticipated this: a standalone `wgpu`
+`render-e2e` step exists precisely so that `wgpu` draw coverage does not die
+with the cross-backend job.
+
+### What else changes when `wgpu` leaves
+
 - **`naga` is a `crcbl-shaders` dev-dependency for WGSL validation**, pinned to
-  the version `wgpu` resolves. It survives `wgpu`'s removal, but loses the
-  reason its version is pinned to anything.
+  the version `wgpu` resolves. It stays, and loses the reason its version is
+  pinned to anything.
 - **`gpu-allocator` leaves with `wgpu-hal`**, and `crcbl-mtl`'s and
-  `crcbl-dx12`'s manifests both have comments reasoning about crates being "in
-  the lockfile already because `wgpu-hal` resolves them". Those comments become
-  wrong.
+  `crcbl-dx12`'s manifests both reason about crates being "in the lockfile
+  already because `wgpu-hal` resolves them". Those comments become wrong and
+  must be corrected in the same change that drops the dependency.
+- **lumen's browser gap does not close.** It is excluded from the browser gate
+  because SwiftShader caps storage buffers per compute stage below what
+  `crcbl-render`'s draw-argument pass binds. That is the browser's limit, not
+  `wgpu`'s, so our own backend meets it identically.
 
 ### Slices, in dependency order
 
@@ -1956,17 +2082,33 @@ Built **beside** `crcbl-wgpu` and proven against it before anything is retired �
 the same shape P14 used for Metal and D3D12, and the reason those landed without
 a flag day.
 
-1. **Take the decision above**, and write the encoding down if it is shape 2.
-2. `crcbl-webgpu`: `Instance`, adapter enumeration, `PendingDevice`, `Device`
+The ordering constraint that is easy to get wrong: **references must be blessed
+while `wgpu` still works.** Slice 7 proves the new backend by comparing against
+something trusted, and in a browser the only trusted renderer today is
+`crcbl-wgpu`. Deleting it first leaves nothing to bless from.
+
+1. Parameterise `render_e2e`'s extent and bless the second reference set at the
+   odd size, replacing what the cross-backend script covers there. Independent
+   of everything below and the only slice that must precede the deletion.
+2. Write the stream encoding down: opcodes, handle allocation, the destroy op,
+   and how a marker maps a replayer-side validation error back to the Rust that
+   encoded it. Do this before any of it is built — under a stream the browser's
+   error names the replayer, and without markers slices 5 and 6 are debugged
+   blind.
+3. Decide `cached_group`'s contract, per "the one real cost" above.
+4. `crcbl-webgpu`: `Instance`, adapter enumeration, `PendingDevice`, `Device`
    creation. Exit: a browser opens a device and the capability selectors report
    what it has.
-3. Buffers, textures, samplers, bind groups.
-4. Pipelines and WGSL modules — the artifacts are already committed and already
+5. Buffers, textures, samplers, bind groups.
+6. Pipelines and WGSL modules — the artifacts are already committed and already
    validated.
-5. Command encoding, render and compute passes.
-6. Surface, swapchain, present.
-7. **Parity gate**: every `render_e2e` scene drawn through both backends in a
-   browser, compared with `crcbl-golden`'s measured tolerance. This is the exit
-   criterion, and it is what makes the switch a measurement rather than a hope.
-8. Flip the browser default; decide `crcbl-wgpu`'s native fate per the gate
-   question above.
+7. Command encoding, render and compute passes.
+8. Surface, swapchain, present.
+9. Replace `getrandom` with the 32-byte export shim, and empty
+   `ALLOWED_IMPORT_MODULES`.
+10. **Parity gate**: every `render_e2e` scene drawn through the new backend in a
+    browser, checked against the shared references. This is the exit criterion,
+    and it is what makes the switch a measurement rather than a hope.
+11. Flip the browser default, delete `crcbl-wgpu` and
+    `run-cross-backend-e2e.sh`, drop the `wgpu` and `wasm-bindgen` dependencies,
+    and correct the `crcbl-mtl` and `crcbl-dx12` manifest comments.
