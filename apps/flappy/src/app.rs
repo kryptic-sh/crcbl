@@ -169,7 +169,6 @@ pub fn with_shell<S: Shell + ?Sized>(
 
     let mut events = 0;
     let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
-    crcbl::log::info!("shell: first configure at {}x{}", extent.0, extent.1);
 
     let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.gpu())?;
     assemble(

@@ -299,6 +299,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`wait_for_configure` now logs `shell: first configure at WxH` itself**, so
+  the line has one source instead of eight. It existed in `PolledBoot` and in
+  every sample; the browser gate asserts it by exact text and reaches only the
+  `PolledBoot` copy, so the seven it never runs could have drifted from the one
+  it does. A caller that logged it after the call should drop that line — it is
+  emitted from `crcbl::engine` on both paths now, which is the module the gate
+  already expected.
+
 - **`ImageDesc::memory` is gone.** Images are device-local, and the type says so
   by not having the field rather than by refusing the other values at run time —
   `CLAUDE.md`'s own rule, that a contract is enforced rather than documented,

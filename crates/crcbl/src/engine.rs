@@ -2956,6 +2956,19 @@ pub fn open_window<S: Shell + ?Sized>(
     shell.create_window(desc)
 }
 
+/// Reports the size a window first configured at.
+///
+/// **One place, because two paths report it and only one of them is checked.**
+/// The browser gate asserts this line by its exact text — `web/tools/
+/// browser-e2e.mjs` matches "the shell reported the canvas size" against it —
+/// and the browser reaches it through [`PolledBoot`], never through
+/// [`wait_for_configure`]. Every native sample used to carry its own copy of
+/// the `info!`, so the six that the gate does not run could have drifted from
+/// the one it does and nothing would have said so.
+fn log_first_configure(extent: (u32, u32)) {
+    log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+}
+
 /// Opens the shell a run wants: the headless backend, or whatever this
 /// platform has.
 ///
@@ -3035,7 +3048,9 @@ pub fn wait_for_configure<S: Shell + ?Sized>(
             log::debug!("shell event: {event:?}");
         });
         if let Some(size) = shell.window_state(window)?.size() {
-            return Ok((size.width, size.height));
+            let extent = (size.width, size.height);
+            log_first_configure(extent);
+            return Ok(extent);
         }
         if started.elapsed() >= CONFIGURE_TIMEOUT {
             return Err(ConfigureError::TimedOut);
@@ -3247,7 +3262,7 @@ impl<S: Shell + ?Sized, G: PolledGpu> PolledBoot<S, G> {
                     self.stage = BootStage::Configure;
                     return Ok(None);
                 };
-                log::info!("shell: first configure at {}x{}", extent.0, extent.1);
+                log_first_configure(extent);
                 // Left `Done` if this fails, so a failed start-up stays failed
                 // rather than requesting a second device next frame.
                 self.stage = BootStage::Device {

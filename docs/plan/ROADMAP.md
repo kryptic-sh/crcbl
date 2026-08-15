@@ -1662,32 +1662,36 @@ be present in some of them.** Two surveys of `apps/*` produced the slices below.
    persistence. The evidence is that the page log carries
    `record: no previous value`, a line only the `Backing::Browser` arm emits.
 
-5. **`open_shell_and_window`** (`crcbl::engine`) — **half shipped.**
+5. ~~**`open_shell_and_window`**~~ (`crcbl::engine`) — **shipped**, in three
+   pieces, and one of them corrects this entry.
+   - `crcbl::engine::DEFAULT_WINDOW_SIZE` and `requested_window_size` own the
+     `LogicalSize::new(960.0, 720.0)` literal and the pixels-are-not-logical
+     rule that sat beside it in six `app.rs` files. The `crcbl new` template
+     takes them too, rather than keeping the constant it had already named.
+   - `crcbl::engine::open_shell(headless)` replaces the eight-line backend
+     choice in all six. Worth more than its size: both arms take the same
+     `ShellError` and differ only in which `LoopError` variant wraps it, and
+     only `NoWindowSystem` carries the hint that `--headless` runs everywhere.
+   - `log_first_configure` — the `shell: first configure at WxH` line existed
+     **eight times**: `PolledBoot` and seven samples. The browser gate asserts
+     it by exact text and reaches it only through `PolledBoot`, so the seven
+     copies it never runs could have drifted from the one it does.
 
-   The `LogicalSize::new(960.0, 720.0)` half is done:
-   `crcbl::engine::DEFAULT_WINDOW_SIZE` and `requested_window_size` now own the
-   literal and the pixels-are-not-logical rule that sat beside it in all six
-   `app.rs` files, and the `crcbl new` template — which had already named the
-   constant and was the reason this was noticed — takes them too.
+   **A blocker recorded here on 2026-08-15 did not exist.** It said each game
+   had its own error enum whose `NoWindowSystem` variant no generic bound could
+   name. Every sample's error type is in fact a type alias for
+   `crcbl::engine::LoopError<TheirGameError>` — read off the `map_err` call
+   sites instead of the declaration, which is the mistake to not repeat.
 
-   **`open_the_window` itself was deliberately left alone.** Its title, app id
-   and error type are the game's, and a wrapper taking all three would need six
-   positional arguments with two adjacent `&str`s among them — the swap hazard
-   `SheetDesc`'s own doc refuses elsewhere. The remaining body is three lines.
-
-   **What is still owed is `start` and `with_shell`**, and the survey's line
-   count was the wrong measure of them. Measured 2026-08-15: `start` is 8 lines
-   in five samples and differs _only_ by the error type; `with_shell` is 28–34
-   lines and differs by the error type plus, in two samples, a single comment.
-   So the duplication is real and almost total.
-
-   **The blocker is the error type, and it is worth thinking about rather than
-   forcing.** Each game has its own — `BreakoutError`, `FlappyError` — with its
-   own `Shell` and `NoWindowSystem` variants, so a shared function has to be
-   generic over something like `E: From<ShellError>` and the `NoWindowSystem`
-   arm has no single conversion. Decide that seam before writing the extraction;
-   a macro would sidestep it, but see slice 2 for what a macro costs in lints
-   that stop firing.
+   **`with_shell` and `open_the_window` stay.** `open_the_window`'s title, app
+   id and error type are the game's, and a wrapper taking all three needs six
+   positional arguments with two adjacent `&str`s among them. `with_shell` looks
+   like the others and is not: `apps/horde` builds its clock from
+   `!options.real_clock()` rather than from `headless`, with a documented reason
+   about what `--wall-clock` is for, and `apps/lumen` opens its window through a
+   different signature. Extracting it would need a callback per difference,
+   which is more machinery than the handful of genuinely shared lines buys — and
+   those lines are now in the engine anyway.
 
 6. **`web_exports!`'s residue** — 899 lines still across six samples, but only
    two real items each: a pure-forwarding `WebPending` impl, and ten literal
