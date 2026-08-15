@@ -2419,11 +2419,22 @@ it.
 
   **What is actually shared between the four is not the drawing.** Each has a
   private `HudStrings` that rebuilds its strings only when the numbers behind
-  them change — the caching is what keeps a steady-state frame from allocating.
-  But the structs differ in their fields and their cache keys, because each game
-  shows different numbers: that is duplicated _shape_, not duplicated knowledge,
-  and the logic under it is three lines. Extracting it would be an abstraction
-  over a coincidence.
+  them change — the caching avoids the `format!` work each frame. **It does not
+  stop the frame allocating, though four doc comments say it does** (corrected
+  2026-08-15): `DrawList::text` takes `impl Into<String>` and stores
+  `text.into()` into a `DrawCommand::Text { text: String }`, and every sample
+  calls it with `hud.score.as_str()` — so a fresh `String` is allocated per text
+  command per frame and dropped by `DrawList::clear`.
+  `apps/breakout/src/app.rs`'s `draw_hud` names "the sandbox's 'a steady-state
+  frame allocates nothing' property" as the reason the cache exists, and that
+  property is not delivered by this mechanism. **This does not change the
+  decline below** — the `Label`-has-no-colour argument ends adoption on its own
+  — but it removes the strongest stated reason the samples' version is worth
+  keeping, and it means the real fix would be on `DrawList` (a borrowed command,
+  or an arena) rather than in any sample. But the structs differ in their fields
+  and their cache keys, because each game shows different numbers: that is
+  duplicated _shape_, not duplicated knowledge, and the logic under it is three
+  lines. Extracting it would be an abstraction over a coincidence.
 
   **The finding this leaves is about the engine, not the samples**:
   `crcbl_ui::hud` has no consumer anywhere in the workspace. It is either owed a
@@ -5822,15 +5833,21 @@ layout error — run on every adapter, so that half is not skip-shaped.
   its own pass with its own `DrawGen` and its own history. Not done because
   nothing yet shows the near cascade wants a different figure from the far one.
 
-## Mobile input: flappy and breakout play on a touchscreen; horde does not
+## Mobile input: what it decided, and the bugs it found
 
-Flappy taps to flap and breakout's paddle follows a finger. **Horde is still
-keyboard-only** — its movement is a stick, which needs on-screen controls as
-`crcbl-ui` widgets emitting virtual-device events and real multi-touch, and that
-is topic 19's post-MVP row rather than a binding. **Asteroids is deliberately
-excluded**: rotate, thrust and fire are three concurrent controls with no room
-on a phone screen, and every layout for that shape is worse than the keyboard
-one; it would want a redesigned control scheme, not buttons bolted on.
+Flappy taps to flap and breakout's paddle follows a finger. **Horde's half has
+since shipped too** (corrected 2026-08-15): `apps/horde/src/controls.rs` gives
+it a floating `crcbl::ui::TouchStick` and the engine's `PauseControl`, wired
+through `Binding::Virtual`, so the heading this entry carried — "horde does not"
+— and its paragraph calling horde "still keyboard-only" were both out of date,
+as was the claim that on-screen controls were topic 19's post-MVP row. What
+survives is everything below: the decisions, and the bugs the survey did not
+predict.
+
+**Asteroids is deliberately excluded**: rotate, thrust and fire are three
+concurrent controls with no room on a phone screen, and every layout for that
+shape is worse than the keyboard one; it would want a redesigned control scheme,
+not buttons bolted on.
 
 **The survey that preceded this work was wrong about the cheap half.** It said
 single touch already reached the engine and that only bindings and page

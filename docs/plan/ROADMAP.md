@@ -1199,6 +1199,13 @@ tables):
 - **Pixel art** ([specs/crcbl/pix.md](../specs/crcbl/pix.md)) — `.crpix` text
   baked at build time and drawn through `SpriteRenderer`. Every sample that
   should have pixel art uses it; see the standing requirements above.
+- **Sample→engine seams** (see the 2026-08-15 section at the end of this file) —
+  a standing sweep rather than a phase. When two samples carry the same
+  machinery, it belongs behind an engine seam; when they carry the same
+  _content_, it does not. The forcing argument is not tidiness: a hand-copied
+  capability list left `apps/hud` opening a device without present feedback,
+  which four other samples have a test against. A copy in every sample is a bug
+  that can be present in only some of them.
 
 ## Notes
 
@@ -1489,3 +1496,112 @@ allocating, and no `body_mut` — are both taken. This does not retire P8, whose
 batch-query and islands work stands on its own; it retires horde as the argument
 for it, the same way the sample's own measurement retired horde as the argument
 for P7.
+
+## Sample→engine seams: what the samples still copy (2026-08-15)
+
+**New work, added because the pattern keeps costing something.** The browser
+entry point was copied five times before `a1f285e` moved it into
+`crcbl::web_exports!`. While that was landing, `apps/hud` was found opening its
+device without `PRESENT_FEEDBACK` or `PRESENT_TIMING` — a hand-copied capability
+list that had drifted from `GpuContextDesc::default`, leaving the closed pacing
+loop unreachable and `display_timing` answering `Unknown` forever. Four samples
+carry a test against exactly that; hud had none, so it shipped the bug the test
+exists to catch (fixed in `9d2b3f9`).
+
+That is the cost this track is about: **a copy in every sample is a bug that can
+be present in some of them.** Two surveys of `apps/*` produced the slices below.
+
+### The slices, ranked
+
+1. **`SpriteRenderer::register_baked`** (`crcbl-render`). `fn baked` and
+   `fn register` are **byte-identical at five sites** — `art.rs` in asteroids,
+   breakout, flappy and horde, _and the engine's own_
+   `crcbl-render/src/menu.rs`. Verified: all five extract to the same MD5. The
+   mapping `crcbl_sprite::Loaded → SheetDesc` is engine knowledge, and
+   `SheetDesc` gaining a sixth field — a live proposal in `docs/backlog.md`'s
+   Owed section — breaks all five at once. **Do this first:** it is
+   compiler-verified, it is the only candidate whose copies include the engine,
+   and it puts a change into all four `art.rs` files, which is the precondition
+   the backlog itself sets for the `WorldRect`/`SheetUv` newtypes below.
+
+2. **`crcbl::impl_game_gpu!`** — the `PolledGpu`/`GameGpu`/`GpuSurface` forward
+   blocks, 62 lines each and byte-identical across breakout, flappy, asteroids
+   and horde once the game name is normalised; hud and lumen differ only by a
+   doc paragraph and two threaded arguments. Pure `Self::method(self)`
+   delegation with no per-sample content. `engine.rs`'s own doc already concedes
+   the shape: "the trait is what lets the loop above call them". `web_exports!`
+   is the precedent, and a mistake cannot ship silently.
+
+3. **The `desc`/`PendingGpu`/`open`/`request_open` block** — 30 lines of code
+   identical across five samples; every differing line is a comment. **This is
+   the one the hud bug came from**, so the seam would make that class
+   unrepresentable rather than tested for in four places out of six.
+
+4. **`Record::open_for`** (`crcbl-store`) — `platform_backing` is four copies of
+   one rule about the platform, not about any game. Verified with `cmp`:
+   asteroids and flappy are identical, breakout differs _only_ in a log prefix,
+   horde only by its own truncation wrapper. The storage seam is otherwise
+   already closed and closed well — no sample touches `std::fs` at all. The
+   browser arm needs the sample to pass its OPFS handle in rather than the
+   engine reaching for it.
+
+5. **`open_shell_and_window`** (`crcbl::engine`) — `start`/`with_shell`/
+   `open_the_window`, ~361 lines across six samples plus a seventh fused copy in
+   `crcbl-cli/templates/main.rs.tmpl`. Differs only in the `title`/`app_id`
+   literals, which stay parameters. Related: `LogicalSize::new(960.0, 720.0)` is
+   a bare literal in six `app.rs` files while the scaffold names it
+   `WINDOW_SIZE` — the template found the right factoring and the samples did
+   not.
+
+6. **`web_exports!`'s residue** — 899 lines still across six samples, but only
+   two real items each: a pure-forwarding `WebPending` impl, and ten literal
+   symbol names. The impl looks collapsible as-is. The ten names need a proc
+   macro that can build identifiers, because `concat_idents!` is unstable and
+   the names must stay per-sample so two demos in one browser cannot collide —
+   **that means a new dependency, which is the repo owner's call** (see
+   Decisions).
+
+7. **`crcbl_audio::CueDeck`** — the plumbing only: the stream-open-with-null-
+   fallback, the unknown-id guard, the cue→`VoiceMix` conversion and the `plays`
+   counter with its `id - 1` indexing, all repeated across four samples. **Not
+   the sound design**, which is supposed to differ, and not the per-sample debug
+   sections. **Blocked on the `CueGrammar` decision** below — build the seam
+   first and it gets built around a parameter that is about to disappear.
+
+### Decisions this needs, which are the owner's and not a refactor
+
+- **`CueGrammar` on the `Mixer`.** Every call site passes
+  `&CueGrammar::default()` — four in the samples, three more in `crcbl-audio`'s
+  own tests, and **nothing in the workspace ever constructs a non-default one**.
+  Moving it beside the listener collapses `cue(emitter, &grammar)` to
+  `cue(emitter)`. Deliberately not taken when the listener moved, because "this
+  mixer's grammar" is a bigger claim than "this mixer's listener". Slice 7 waits
+  on it.
+- **A proc-macro dependency for identifier concatenation**, for slice 6. Ten
+  lines per sample against one new crate in the tree.
+- **Does `Summary` keep re-flattening `RunSummary`?** Every sample re-declares
+  the same eight fields and copies them one by one (~223 lines total), and drift
+  is already visible in the doc comments. The engine went the _other_ way for
+  arguments — `Common` is a field on each game's `Options` "so adding a shared
+  flag reaches four games without touching four structs" — and `Summary` does
+  the opposite with no stated reason. The counter-argument is real: flattening
+  is what lets `main.rs` write `summary.frames` rather than
+  `summary.run.frames`.
+
+### Deliberately not extracted
+
+Recorded so they are not re-proposed. Each was checked against the rule that DRY
+is about duplicated _knowledge_, not duplicated shape.
+
+- **The `DebugModule` impls.** Same shape, genuinely different numbers, and each
+  sample's doc argues against sharing. This is the seam working.
+- **Action sets and key bindings.** A game is entitled to rebind alone.
+- **`horde/src/controls.rs`.** Its shared parts are _already_ engine —
+  `TouchStick`, `PauseControl`, `CONTROL_STYLE`. What is left is horde's.
+- **`HudStrings` and `draw_hud`.** The keys and strings are content. See the
+  correction in `docs/backlog.md` about what its caching does and does not buy.
+- **`fn still`** in three `art.rs` files — it returns a _game-local_ struct, so
+  sharing it would put a per-sample type in the engine.
+- **`fn item(id, label, hint)`** in four `menu.rs` files — not a seam to extract
+  but 12 lines of pass-through **to delete**: `crcbl_ui::menu::MenuItem::new`
+  already takes `impl Into<String>` and the wrapper adds nothing.
