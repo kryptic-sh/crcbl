@@ -3579,11 +3579,6 @@ the transport seam over a third transport shape.
 - **`21-jobs.md`'s threaded-wasm finding is not reproducible today**: it needs
   `rust-src` on `nightly-2026-07-02`. Unblock with
   `rustup component add rust-src --toolchain nightly-2026-07-02-x86_64-unknown-linux-gnu`.
-- **Sample `web.rs` doc comments are stale.** horde, asteroids and flappy still
-  narrate "the fourth copy … four call sites to migrate" though
-  `crates/crcbl/src/web.rs` closed S1B finding 2. Four passages in horde, two in
-  asteroids, one in flappy. Code comments, not docs, so they are not covered by
-  the plan sweep.
 
 ### Owed by the shader guardrails
 
@@ -8004,9 +7999,11 @@ five that get remembered:
 6. a step in `.github/workflows/pages.yml`, because the gate reads one canvas
    and therefore runs once per demo.
 
-Plus the sample's own `src/web.rs`, which `apps/horde/src/web.rs`'s header
-already flags as the fourth verbatim copy of one file and asks to be shared
-before a fifth is written. lumen would be the fifth.
+Plus the sample's own `src/web.rs` — which is no longer a copy of anything. It
+is a `crcbl::web_exports!` invocation naming lumen's ten symbols, plus its
+`crcbl::web::WebPending` impl; `apps/hud/src/web.rs` is the shortest example to
+follow. lumen would be the sixth demo and the first written against the macro
+rather than migrated to it.
 
 Note the shape it would be a demo _of_: the browser runs
 `LightingPath:: Rasterised` by construction, which is the whole reason the
@@ -8704,3 +8701,75 @@ Making that an equality rather than a substitution cost one rename: all three
 files bind the projection block as `camera` rather than as `ssao`, because
 `view_position`'s body names it. No compiled instruction moved and no golden
 did.
+
+## The browser entry point is shared; what the move left behind (2026-08-15)
+
+S1B finding 2 is closed: `crcbl::web_exports!` writes the ten
+`#[unsafe(no_mangle)]` symbols and the page state, and `apps/asteroids`,
+`apps/breakout`, `apps/flappy`, `apps/horde` and `apps/hud` each invoke it. It
+was landed as a move, and these are the things it deliberately did not fix.
+
+### `asset_source` has no caller in any sample
+
+All four samples that define it — asteroids, breakout, flappy, horde — export
+`pub fn asset_source() -> Option<Rc<FetchSource>>` and nothing in the workspace
+calls it. `opfs_store` is genuinely used (`crate::best` in three of them,
+`crate::high_score` in breakout). `asset_source` is the speculative half.
+
+Left alone because the task was a move and deleting it is a public-API change to
+four sample crates in the same commit as the migration. It is **not** a wasm
+export — it has no `#[unsafe(no_mangle)]`, so removing it cannot change what the
+shim resolves. Deleting it is a two-line-per-sample change whenever someone
+wants it gone.
+
+### The unit test cannot observe `prepare`'s log line
+
+`web::tests::the_generated_exports_drive_the_page` invokes the macro over the
+`FakePending` fixture and drives nine of the ten symbols. It **cannot** assert
+that `prepare` logs, because `log::set_logger` is process-global and
+`args::tests::the_front_end_returns_the_contract_exit_codes` calls
+`crcbl::core::log::init_logging` in the same test binary — whichever runs first
+wins, and the assertion passed alone and failed in the suite. It was observed
+failing both ways before being rewritten to push onto `LOG` directly.
+
+What covers the line instead is `web/tools/smoke.mjs`, which `web/build.sh` runs
+per demo against the real artifact and which asserts "the log queue delivers the
+line prepare wrote". The exact rendered text was also read out of all five
+browser-gate page logs: `<name>: prepared; assets from assets/`, unchanged from
+the literal each sample used to carry, because the macro reaches it through
+`HostedGame::NAME`.
+
+`boot` is the tenth symbol and is not driven by the unit test at all: it opens a
+`Web` shell, which exists only on `wasm32`. The browser gate is its only cover.
+
+### `crates/crcbl/src/web.rs` is now the size that was the reason for the move
+
+It holds the status codes, the log queue, `App`/`Stage`/`WebLoop`/`WebPending`
+and `web_exports!`. The seam if it needs splitting is that last one — the macro
+and its expansion are a separate responsibility from the state machine they
+drive — but it would have to become `crates/crcbl/src/web/` with `mod.rs` and
+`exports.rs`, which was outside this task's file set.
+
+### The macro is reachable by two paths
+
+`#[macro_export]` puts it at `crcbl::web_exports!`, and a
+`#[doc(inline)] pub use` in the module makes `crcbl::web::web_exports!` work
+too. The samples all call it as `crcbl::web_exports!`. Nothing enforces that; a
+future sample writing the longer path is not wrong, just inconsistent.
+
+### Unrelated: the browser gate crashes instead of reporting a bad argument
+
+Found while verifying this move, and nothing to do with it.
+`web/tools/browser-e2e.mjs` declares `const running` **after** the argument
+parsing that can call `fail`, and `fail` calls `stopEverything`, which reads
+`running`. So a mistyped invocation prints its real message and then dies in the
+temporal dead zone with
+`ReferenceError: Cannot access 'running' before initialization`, followed by
+`the driver reported no checks — the gate is not gating`. The diagnosis is
+buried under a stack trace that points at the wrong thing entirely.
+
+Reproduced by passing a positional demo name — the demo is selected by
+`CRCBL_WEB_E2E_DEMO`, not by an argument, which is an easy mistake to make from
+the script's own `--build` usage. Hoisting the `running` declaration above the
+argument parsing is the whole fix. **Not done here** because it is a drive-by in
+a file this task did not otherwise touch.

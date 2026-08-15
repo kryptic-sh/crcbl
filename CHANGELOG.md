@@ -423,6 +423,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::web_exports!`: a sample's browser entry point, written once.** The
+  ten `#[unsafe(no_mangle)] extern "C"` symbols a demo's JS shim calls —
+  `prepare`, `log_level`, `boot`, `frame`, `status`, `shutdown`, `error_ptr`,
+  `error_len`, `log_take`, `log_ptr` — plus the page state they run on, emitted
+  from one place instead of copied per sample. `apps/asteroids`,
+  `apps/breakout`, `apps/flappy`, `apps/horde` and `apps/hud` each dropped their
+  copy; the wasm export set of all five is byte-identical before and after,
+  which is the thing that matters, because the shim resolves these names at run
+  time and a renamed export produces a page that loads and stays blank rather
+  than a build error.
+
+  The macro takes each symbol name as a **named** argument rather than a prefix:
+  `concat_idents!` is not stable, two demos can be open in one browser so the
+  names must not collide, and `web/tools/check-exports.mjs` learns the contract
+  by scanning for literal `__crcbl_…` names on the JS side. What stays in a
+  sample is its `crcbl::web::WebPending` impl — the options the game boots with
+  and the error it fails with are the game's own — and, for the four samples
+  with a save file, the `opfs_store`/`asset_source` accessors over the `STORAGE`
+  cell the macro emits.
+
 - **`SceneDesc::probes` and `Capacities::probes`: an irradiance-probe volume a
   scene can author.** `docs/plan/18-render-features.md`'s diffuse global
   illumination as a static grid of L1 spherical-harmonic probes —

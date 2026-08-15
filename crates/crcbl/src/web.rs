@@ -1,11 +1,13 @@
-//! The half of a browser entry point that is not about any one game.
+//! The browser entry point, written once for every sample.
 //!
-//! A sample's `web.rs` is what the JS shim in `web/` calls: a dozen
+//! A sample's `web.rs` is what the JS shim in `web/` calls: ten
 //! `#[unsafe(no_mangle)] extern "C"` exports named after the demo, a status
 //! code the page polls, and a log queue the page drains once a frame. The
-//! exports have to stay per-game — the shim looks them up by name — and so does
-//! the state machine that holds a game's own `Loop`. Everything else was
-//! identical in all four samples, and it is here.
+//! *symbols* have to stay per-demo — two demos can be open in one browser, and
+//! the shim looks each up by name — but nothing behind them does, and all of
+//! that is here. [`web_exports!`] writes a sample's symbols; what is left in the
+//! sample is its [`WebPending`] impl, because the options a game boots with and
+//! the error it fails with are the game's own.
 //!
 //! What this module owns:
 //!
@@ -17,10 +19,46 @@
 //!   import would be the only one in the module — so lines are queued in wasm
 //!   memory and the shim pulls them across one at a time. Bounded, because a
 //!   page that stops draining must not grow the heap without limit.
+//! * **The five-call protocol** — prepare, boot, one frame per
+//!   `requestAnimationFrame`, status, shutdown — as [`App`], which is the state
+//!   machine each sample used to write out for itself.
 //!
-//! Deliberately **not** here: anything that touches a game's `Loop`. See each
-//! sample's `web.rs` for the state machine, which is the part that genuinely
-//! differs.
+//! # Start-up cannot block, so it is a state machine
+//!
+//! Device creation is polled across the whole HAL seam, because the promise
+//! behind `requestDevice` is resolved by the page's event loop — the very loop a
+//! blocking wait would be sitting inside, so a browser that blocked on it would
+//! deadlock against itself and the tab would simply stop. [`App::frame`]
+//! therefore does one of two different things depending on the stage: while
+//! booting it polls [`WebPending::poll`], and once that yields a loop it runs
+//! frames. Several `requestAnimationFrame` ticks pass before the first frame is
+//! drawn, and that is the design rather than a delay to be optimised away.
+//!
+//! # The clock is the browser's
+//!
+//! [`std::time::Instant::now`] **panics** on `wasm32-unknown-unknown` — the
+//! target has no time implementation at all — so [`crate::engine::Clock::new`]
+//! cannot be used here, and neither can [`crate::core::log::init_logging`],
+//! which stamps its logger with an `Instant`. [`App::boot`] builds the loop on
+//! [`crate::engine::Clock::manual`] and tells it how far to step from the
+//! `performance.now()` the shim passes to [`App::frame`]; the logger is
+//! [`install_logger`]'s, which has no clock at all and lets the console
+//! timestamp the line.
+//!
+//! # A sample's wasm module imports nothing of its own
+//!
+//! Every one of the ABIs a page drives is exports-plus-polling: JS calls in,
+//! reads a buffer wasm owns, and never passes a pointer or a callback the other
+//! way. Logging is the case that would most naturally have been an import —
+//! `console.log` is right there — and it is the queue [`log_take`] drains
+//! instead.
+//!
+//! That is worth the small awkwardness because of what it buys: a sample's only
+//! wasm imports are the ones `wasm-bindgen` generates for `wgpu`'s `web-sys`
+//! calls, which means the import list is a thing CI can assert about.
+//! `web/tools/check-exports.mjs` does exactly that — every import must be in the
+//! `wbg` module, so an accidental `extern "C" { fn … }` somewhere in the engine
+//! turns into a failed check rather than a `LinkError` in someone's browser.
 
 use core::cell::RefCell;
 
@@ -565,6 +603,253 @@ fn step_from(previous: Option<f64>, now_ms: f64) -> core::time::Duration {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The exports
+// ---------------------------------------------------------------------------
+
+/// Writes a sample's browser entry point: the page's state, and the ten
+/// `#[unsafe(no_mangle)] extern "C"` symbols the JS shim calls.
+///
+/// Invoke it at the top level of a sample's `web.rs`, beside that sample's
+/// [`WebPending`] impl.
+///
+/// # Why the symbol names are arguments
+///
+/// Two demos can be open in one browser, so the exports carry the demo's name
+/// or they would collide — and `concat_idents!` is not stable, so the macro
+/// cannot build `__crcbl_asteroids_prepare` out of `asteroids`. Each name is
+/// therefore spelled out at the call site, which is what
+/// `web/tools/check-exports.mjs` wants anyway: it learns the contract by
+/// scanning the JS shim for literal `__crcbl_…` names, and a symbol assembled
+/// from pieces would be invisible to the same search on the Rust side.
+///
+/// The keys are named rather than positional because the failure mode is
+/// silent. A symbol emitted under the wrong name still compiles and still
+/// links; the shim's lookup returns `undefined` at run time, and the page shows
+/// a blank canvas.
+///
+/// # What it expands to
+///
+/// * `APP`, this page's [`App`], and `STORAGE`, the two browser storage handles
+///   held for the life of the page. Both crates' `install` keeps only a
+///   [`std::rc::Weak`], so dropping the `Rc`s would silently turn every
+///   `__crcbl_web_opfs_*` and `__crcbl_web_fetch_*` call into a `0`.
+/// * `STORAGE` is left reachable from the invoking module on purpose: a sample
+///   that reads its own save file back — `opfs_store` in `apps/breakout` — is
+///   two lines over that cell, written beside the macro rather than emitted by
+///   it, because a sample with no save file wants neither.
+/// * The ten exports, each forwarding to [`App`], [`set_log_level`],
+///   [`log_take`] or [`log_ptr`].
+///
+/// What it does **not** expand to is the [`WebPending`] impl: the options a game
+/// boots with, and the error type it fails with, are the game's own.
+///
+/// # Examples
+///
+/// ```ignore
+/// crcbl::web_exports! {
+///     pending: PendingLoop<dyn crcbl::shell::Shell>,
+///     prepare: __crcbl_asteroids_prepare,
+///     log_level: __crcbl_asteroids_log_level,
+///     boot: __crcbl_asteroids_boot,
+///     frame: __crcbl_asteroids_frame,
+///     status: __crcbl_asteroids_status,
+///     shutdown: __crcbl_asteroids_shutdown,
+///     error_ptr: __crcbl_asteroids_error_ptr,
+///     error_len: __crcbl_asteroids_error_len,
+///     log_take: __crcbl_asteroids_log_take,
+///     log_ptr: __crcbl_asteroids_log_ptr,
+/// }
+/// ```
+///
+/// The example is `ignore` because two expansions in one binary would define
+/// the same `APP`; the expansion is exercised instead by this module's own
+/// tests, which invoke the macro over a fixture loop and drive the result.
+#[macro_export]
+macro_rules! web_exports {
+    (
+        pending: $pending:ty,
+        prepare: $prepare:ident,
+        log_level: $log_level:ident,
+        boot: $boot:ident,
+        frame: $frame:ident,
+        status: $status:ident,
+        shutdown: $shutdown:ident,
+        error_ptr: $error_ptr:ident,
+        error_len: $error_len:ident,
+        log_take: $log_take:ident,
+        log_ptr: $log_ptr:ident $(,)?
+    ) => {
+        ::std::thread_local! {
+            /// Everything this demo owns for the life of the page.
+            static APP: ::std::cell::RefCell<$crate::web::App<$pending>> =
+                const { ::std::cell::RefCell::new($crate::web::App::new()) };
+
+            /// The storage handles, held for the life of the page.
+            ///
+            /// Both crates' `install` keeps only a [`std::rc::Weak`]: dropping
+            /// the `Rc` would silently turn every `__crcbl_web_opfs_*` and
+            /// `__crcbl_web_fetch_*` call into a `0`, and the shim's boot
+            /// sequence drives both ABIs before the demo starts.
+            static STORAGE: ::std::cell::RefCell<Option<(
+                ::std::rc::Rc<$crate::store::web::OpfsStorage>,
+                ::std::rc::Rc<$crate::store::web::FetchSource>,
+            )>> = const { ::std::cell::RefCell::new(None) };
+        }
+
+        /// Runs `f` against the page's state.
+        ///
+        /// `absent` is returned when the cell is already borrowed, which can
+        /// only happen if an export were called re-entrantly from another
+        /// export — the shim never does, and answering rather than panicking
+        /// keeps a shim bug from aborting the wasm instance.
+        fn with_app<R>(absent: R, f: impl FnOnce(&mut $crate::web::App<$pending>) -> R) -> R {
+            APP.with(|slot| match slot.try_borrow_mut() {
+                Ok(mut app) => f(&mut app),
+                Err(_) => absent,
+            })
+        }
+
+        /// Install the log sink and the browser storage backends.
+        ///
+        /// The first call the shim makes, and the one that has to happen before
+        /// any `__crcbl_web_fetch_*` or `__crcbl_web_opfs_*` call — both of
+        /// those answer `0` until something is installed, which is the
+        /// documented "a shim that started before the engine did" case rather
+        /// than a failure.
+        ///
+        /// Returns `1`, or `0` if it had already run.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $prepare() -> u32 {
+            $crate::web::install_logger();
+            with_app(0, |app| {
+                if !app.is_idle() {
+                    return 0;
+                }
+
+                let saves = ::std::rc::Rc::new($crate::store::web::OpfsStorage::new());
+                if !$crate::store::web::opfs::install(&saves) {
+                    app.fail("an OPFS store was already installed");
+                    return 0;
+                }
+
+                let assets = match $crate::store::web::FetchSource::new($crate::web::ASSET_BASE) {
+                    Ok(source) => ::std::rc::Rc::new(source),
+                    Err(error) => {
+                        app.fail(error);
+                        return 0;
+                    }
+                };
+                if !$crate::store::web::fetch::install(&assets) {
+                    app.fail("a fetch source was already installed");
+                    return 0;
+                }
+                STORAGE.with(|slot| *slot.borrow_mut() = Some((saves, assets)));
+
+                // The name is `HostedGame::NAME`, reached through the loop this
+                // page runs, rather than a string the call site repeats.
+                $crate::log::info!(
+                    "{}: prepared; assets from {}",
+                    <<$pending as $crate::web::WebPending>::Loop as $crate::web::WebLoop>::NAME,
+                    $crate::web::ASSET_BASE,
+                );
+                app.prepared();
+                1
+            })
+        }
+
+        /// Set the log filter: `0` off, `1` error, `2` warn, `3` info,
+        /// `4` debug, `5` trace.
+        ///
+        /// Returns `1`, or `0` for a level outside that range.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $log_level(level: u32) -> u32 {
+            $crate::web::set_log_level(level)
+        }
+
+        /// Open the shell and the window, and start the polled device request.
+        ///
+        /// The canvas is the one `__crcbl_web_canvas` announced, so that call
+        /// must come first; there is deliberately no argument here, because a
+        /// canvas id that entered wasm through two doors could disagree with
+        /// itself and the shell's event routing would silently drop everything.
+        ///
+        /// Returns `1`, or `0` if the page had not prepared or the shell
+        /// refused.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $boot() -> u32 {
+            with_app(0, $crate::web::App::boot)
+        }
+
+        /// One `requestAnimationFrame`.
+        ///
+        /// `now_ms` is `performance.now()`. Call `__crcbl_web_frame(now_ms)`
+        /// first, so the shell's event-clock reference is this frame's and not
+        /// the previous one's.
+        ///
+        /// Returns the status afterwards; the shim keeps scheduling frames
+        /// while it is `STATUS_BOOTING`, `STATUS_RUNNING` or `STATUS_PAUSED`.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $frame(now_ms: f64) -> u32 {
+            with_app($crate::web::STATUS_FAILED, |app| app.frame(now_ms))
+        }
+
+        /// The status, without advancing anything.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $status() -> u32 {
+            with_app($crate::web::STATUS_FAILED, |app| app.status())
+        }
+
+        /// Tear the loop down: release the swapchain, the device and the
+        /// window.
+        ///
+        /// Returns `1` if there was something to tear down. Safe to call from
+        /// `beforeunload`; a page's OPFS drain should happen *before* it,
+        /// because a game's last write is queued during its last frame.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $shutdown() -> u32 {
+            with_app(0, $crate::web::App::shutdown)
+        }
+
+        /// Address of the last error message (UTF-8, not NUL-terminated), or
+        /// `0`.
+        ///
+        /// Valid until the next export call. Read the length first and decode
+        /// immediately.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $error_ptr() -> *const u8 {
+            with_app(::std::ptr::null(), |app| app.error_ptr())
+        }
+
+        /// The length of that message in bytes.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $error_len() -> u32 {
+            with_app(0, |app| app.error_len())
+        }
+
+        /// Pop one log line into the scratch buffer and return its length in
+        /// bytes.
+        ///
+        /// `0` means the queue is empty. Read the pointer **after** this, not
+        /// before: the two together are one read, and the buffer's contents
+        /// belong to the most recent take.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $log_take() -> u32 {
+            $crate::web::log_take()
+        }
+
+        /// Address of the log scratch buffer, or `0` when nothing has been
+        /// taken.
+        #[unsafe(no_mangle)]
+        pub extern "C" fn $log_ptr() -> *const u8 {
+            $crate::web::log_ptr()
+        }
+    };
+}
+
+#[doc(inline)]
+pub use crate::web_exports;
+
 #[cfg(test)]
 mod tests {
     use log::Log as _;
@@ -869,5 +1154,70 @@ mod tests {
             step_from(Some(1_000.0), 1_016.0),
             core::time::Duration::from_secs_f64(0.016),
         );
+    }
+
+    // ---- the generated exports ----------------------------------------------
+
+    web_exports! {
+        pending: FakePending,
+        prepare: __crcbl_fixture_prepare,
+        log_level: __crcbl_fixture_log_level,
+        boot: __crcbl_fixture_boot,
+        frame: __crcbl_fixture_frame,
+        status: __crcbl_fixture_status,
+        shutdown: __crcbl_fixture_shutdown,
+        error_ptr: __crcbl_fixture_error_ptr,
+        error_len: __crcbl_fixture_error_len,
+        log_take: __crcbl_fixture_log_take,
+        log_ptr: __crcbl_fixture_log_ptr,
+    }
+
+    /// **Every symbol the macro writes is wired to the thing it names.**
+    ///
+    /// This is the failure the macro exists to make impossible and is also the
+    /// one it could introduce: an export that forwards to the wrong call, or
+    /// that the expansion named something else, still compiles and still links.
+    /// The shim's lookup is by name at run time, so the symptom is a blank
+    /// canvas rather than a build error — which is why this drives the generated
+    /// functions and not [`App`].
+    ///
+    /// `boot` is the one export not driven here: it opens a `Web` shell, which
+    /// only exists on `wasm32`. The browser gate covers it, and so does
+    /// `web/tools/smoke.mjs`, which drives the real artifact's ten symbols for
+    /// every demo `web/build.sh` builds.
+    #[test]
+    fn the_generated_exports_drive_the_page() {
+        drain();
+
+        assert_eq!(__crcbl_fixture_status(), STATUS_IDLE);
+        assert_eq!(__crcbl_fixture_error_len(), 0, "nothing has failed yet");
+        assert!(__crcbl_fixture_error_ptr().is_null());
+
+        assert_eq!(__crcbl_fixture_prepare(), 1);
+        assert_eq!(__crcbl_fixture_status(), STATUS_PREPARED);
+        assert_eq!(__crcbl_fixture_prepare(), 0, "preparing twice");
+        assert_eq!(
+            __crcbl_fixture_frame(0.0),
+            STATUS_PREPARED,
+            "a page that never booted must not advance",
+        );
+        assert_eq!(__crcbl_fixture_shutdown(), 0, "there was no loop");
+
+        assert_eq!(__crcbl_fixture_log_level(3), 1);
+        assert_eq!(__crcbl_fixture_log_level(99), 0, "out of range, so refused");
+
+        // The line is pushed onto the queue directly rather than logged, and
+        // the queue is emptied first: whether `prepare`'s own line reached it
+        // depends on which test won the process-wide `log::set_logger` race,
+        // and the claim here is only that the two generated log exports are
+        // this module's queue. `web/tools/smoke.mjs` is what asserts that
+        // `prepare` logs, against the real artifact, for every demo.
+        drain();
+        let line = "a line the shim has not taken yet";
+        LOG.with(|slot| slot.borrow_mut().lines.push_back(line.to_owned()));
+        assert_eq!(__crcbl_fixture_log_take(), line.len() as u32);
+        let buffer = LOG.with(|slot| slot.borrow().current.as_ptr());
+        assert_eq!(__crcbl_fixture_log_ptr(), buffer);
+        assert_eq!(__crcbl_fixture_log_take(), 0, "the queue had one line");
     }
 }
