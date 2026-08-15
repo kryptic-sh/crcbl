@@ -284,16 +284,15 @@ const EXPECTED = [
     optionalFeatures: 0x7ffffffn,
     compatibleSurface: null,
   },
-  // Two ids, in the order the HAL call takes them. The adapter id is neither
-  // half of the surface handle, so a decoder that read the pair the other way
-  // round cannot still compare equal here — and, since the two are different
-  // widths, it would also leave the cursor four bytes out and turn the command
-  // after this one into noise.
-  { name: 'SurfaceCaps', surface: handle(63, 64), adapter: 65 },
-  // The only body-less command, and last in the corpus so that the byte offsets
-  // the checks below count from the *first* command stay where they are. A
-  // decoder that read one field too many here would run off the end of the
-  // buffer, which is what the truncation sweep sees.
+  // Body-less: the surface and the adapter the HAL call takes are validated
+  // against an impl's own tables and never cross. A decoder that still read
+  // them would consume the twelve bytes after this tag, which are the command
+  // below and the end of the buffer — so the pair decodes one command short.
+  { name: 'SurfaceCaps' },
+  // Body-less too, and last in the corpus so that the byte offsets the checks
+  // below count from the *first* command stay where they are. A decoder that
+  // read one field too many here would run off the end of the buffer, which is
+  // what the truncation sweep sees.
   { name: 'EnumerateAdapters' },
 ];
 
@@ -460,25 +459,25 @@ async function main() {
     sweep ?? 'every truncation is short rather than a partial decode'
   );
 
-  // ---- the body-less command really has no body ---------------------------
-  // The fixture ends with `EnumerateAdapters`, whose entire encoding is its tag
-  // byte, so cutting one byte off drops that command and leaves a shorter but
-  // well-formed stream — while cutting two lands inside `Draw`'s last field and
-  // is short. A decoder that read any body at all for the empty command would
-  // fail the first of these, and one that read a byte too few would fail the
-  // second.
+  // ---- the body-less commands really have no body -------------------------
+  // The fixture ends with `SurfaceCaps` then `EnumerateAdapters`, and each is
+  // one tag byte and nothing else. So cutting one byte drops the last, cutting
+  // two drops both, and only the third cut lands inside a body — the last field
+  // of the `RequestDevice` before them — and is short.
   //
-  // Stated as two cuts rather than one because that is what changed: the check
-  // here used to be "one byte short is TooShort", which was true only for as
-  // long as the last command in the corpus had a body.
-  checkEqual(
-    failureOf(fixture.subarray(0, fixture.length - 1)) ??
-      decodeStream(fixture.subarray(0, fixture.length - 1)),
-    EXPECTED.slice(0, -1),
-    'cutting one byte drops the body-less command and decodes the rest'
-  );
+  // Byte for byte, which is what makes it a check on the *shape* rather than on
+  // the count: a decoder that read any body at all for either empty command
+  // fails the first two, and one that read a byte too few fails the third.
+  for (const dropped of [1, 2]) {
+    const short = fixture.subarray(0, fixture.length - dropped);
+    checkEqual(
+      failureOf(short) ?? decodeStream(short),
+      EXPECTED.slice(0, -dropped),
+      `cutting ${dropped} byte(s) drops ${dropped} body-less command(s) and decodes the rest`
+    );
+  }
   checkRefused(
-    fixture.subarray(0, fixture.length - 2),
+    fixture.subarray(0, fixture.length - 3),
     { kind: 'TooShort' },
     'a fixture cut inside a command body is TooShort'
   );

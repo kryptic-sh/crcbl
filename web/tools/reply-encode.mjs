@@ -356,30 +356,19 @@ function encodeCanonicalReplies(replies) {
     maxImageCount: 0,
     currentExtent: [0, 0],
   });
-  // **One per cause, and that is the point of having four.** Every other
-  // consumer of this table agrees with itself by construction — the replayer's
-  // own checks read the same `SURFACE_CAPS_FAILURE` the writer does — so these
-  // four bytes against a fixture Rust wrote are the only thing holding the two
-  // languages' failure codes together. The reason and the cause are independent
-  // halves, so two of them carry no reason.
+  // **One per cause, and the query has one.** Every other consumer of this table
+  // agrees with itself by construction — the replayer's own checks read the same
+  // `SURFACE_CAPS_FAILURE` the writer does — so this byte against a fixture Rust
+  // wrote is the only thing holding the two languages' failure codes together. A
+  // `BACKEND` still spelled `0x03`, as it was while the wire carried four
+  // causes, is a byte difference here and nowhere else. The reason and the cause
+  // are independent halves, so the second of these carries no reason.
   replies.surfaceCapsFailed(
     47n,
-    'surface 63 is not live in this replayer — ✱',
-    SURFACE_CAPS_FAILURE.INVALID_HANDLE
+    'getPreferredCanvasFormat() answered "rgba32float" — ✱',
+    SURFACE_CAPS_FAILURE.BACKEND
   );
-  replies.surfaceCapsFailed(53n, '', SURFACE_CAPS_FAILURE.NO_SUCH_ADAPTER);
-  // **Not a browser's answer.** One adapter, and a canvas that gave up a context
-  // can present on it, so `UNSUPPORTED` is what a Vulkan backend says routinely
-  // and this side never does. The wire carries it because the far side decodes
-  // what it is sent rather than what a browser could have sent.
-  replies.surfaceCapsFailed(
-    59n,
-    'the adapter cannot present to this surface',
-    SURFACE_CAPS_FAILURE.UNSUPPORTED
-  );
-  // The highest code the table claims, so an off-by-one at the end of it is a
-  // byte difference here.
-  replies.surfaceCapsFailed(61n, '', SURFACE_CAPS_FAILURE.BACKEND);
+  replies.surfaceCapsFailed(53n, '', SURFACE_CAPS_FAILURE.BACKEND);
 }
 
 /**
@@ -691,13 +680,12 @@ async function main() {
   }
 
   // ---- and so does the refusal that answers the same query ----------------
-  // Its cause is one byte, and every value of it is legal, so a code that never
-  // arrived would be written as `0` — `UNSUPPORTED`, the one value that tells a
-  // caller to go on to the next adapter. That is the worst of the four for a
-  // mistake to spell, which is why the check is here rather than left to the
-  // far side.
+  // Its cause is one byte, and `0` is the only legal value of it, so a code that
+  // never arrived would be written as exactly the byte a correct call writes —
+  // indistinguishable on the wire and undetectable by the far side. That is why
+  // this check is here rather than left to the decoder.
   checkRefused(
-    'a failure with no cause is refused rather than written as UNSUPPORTED',
+    'a failure with no cause is refused rather than written as BACKEND',
     'NotANumber',
     // @ts-expect-error — the mistake this check exists for.
     () => new ReplyWriter().surfaceCapsFailed(1n, 'stale surface')

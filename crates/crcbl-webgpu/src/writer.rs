@@ -3,9 +3,9 @@
 use core::ops::Range;
 
 use crcbl_hal::{
-    AdapterId, BindGroupHandle, BufferDesc, BufferHandle, ClearValue, ColorAttachment,
-    DepthStencilAttachment, DeviceDesc, GraphicsPipelineHandle, PipelineLayoutHandle, Rect2d,
-    RenderPassDesc, ShaderStages, SurfaceHandle,
+    BindGroupHandle, BufferDesc, BufferHandle, ClearValue, ColorAttachment, DepthStencilAttachment,
+    DeviceDesc, GraphicsPipelineHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, ShaderStages,
+    SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -340,15 +340,12 @@ impl StreamWriter {
     /// [`Reply::SurfaceCaps`](crate::Reply::SurfaceCaps) naming it is refused as
     /// an answer to a command nobody asked — and refused for the whole buffer.
     ///
-    /// **Both arguments in the order the HAL call takes them**, surface then
-    /// adapter, so the two cannot drift apart unnoticed; see
-    /// [`bind_group`](Self::bind_group) for the same discipline applied to the
-    /// argument that is easiest to drop.
-    pub fn surface_caps(&mut self, surface: SurfaceHandle, adapter: AdapterId) -> u64 {
-        let sequence = self.push_tag(tag::SURFACE_CAPS_TAG);
-        self.bytes.put_handle(surface);
-        self.bytes.put_u32(adapter.0);
-        sequence
+    /// **The body is empty, though the HAL call takes a surface and an
+    /// adapter**: the record depends on neither, so the caller's two ids are
+    /// validated where the tables are and never travel. See
+    /// [`Command::SurfaceCaps`](crate::Command::SurfaceCaps).
+    pub fn surface_caps(&mut self) -> u64 {
+        self.push_tag(tag::SURFACE_CAPS_TAG)
     }
 
     // ── Header and tags ──────────────────────────────────────────────────────

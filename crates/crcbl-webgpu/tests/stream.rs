@@ -178,34 +178,36 @@ fn a_surface_carries_its_canvas_key_as_well_as_its_handle() {
     );
 }
 
-/// **The surface and the adapter id are two ids and not one**, and they are the
-/// pair a hand-written decoder most easily reads the other way round: the HAL
-/// call takes them surface-then-adapter, and a second implementation of this
-/// format is free to guess the opposite.
+/// **The capability query is a tag and nothing else**, so the byte after it is
+/// the next command's tag.
 ///
-/// The values are chosen so a swap cannot compare equal — the adapter id is
-/// neither half of the surface handle — and the second command is there because
-/// the two ids differ in width, so reading them the wrong way round does not
-/// merely transpose them: it leaves the cursor four bytes out and turns the next
-/// command into noise. That is what the `EnumerateAdapters` after it detects.
+/// The command after it is what makes that checkable: a writer that still put a
+/// handle and an adapter id on the wire, or a reader that still consumed twelve
+/// bytes, does not merely mis-read one command — it walks into or over its
+/// neighbour, and the buffer decodes to the wrong number of commands. A query on
+/// its own would decode cleanly either way, because a reader running off the end
+/// of a one-command buffer is a `TooShort` that a writer's extra bytes cover up.
+///
+/// `create_surface` before it, so the pair is also the shape the HAL call is
+/// made in: a surface exists, and the query names it nowhere.
 #[test]
-fn a_surface_capability_query_carries_its_surface_and_its_adapter_that_way_round() {
+fn a_surface_capability_query_is_a_tag_with_no_body_after_it() {
     let surface = handle(63, 64);
-    let adapter = AdapterId(65);
     let mut stream = StreamWriter::new();
-    stream.surface_caps(surface, adapter);
+    stream.create_surface(surface, 19);
+    stream.surface_caps();
     stream.enumerate_adapters();
 
     assert_eq!(
         decode_stream(stream.bytes()),
         Ok(vec![
-            Command::SurfaceCaps { surface, adapter },
+            Command::CreateSurface {
+                surface,
+                canvas_id: 19,
+            },
+            Command::SurfaceCaps,
             Command::EnumerateAdapters,
         ])
-    );
-    assert!(
-        ![surface.index(), surface.generation()].contains(&adapter.0),
-        "the test would not notice the adapter id written over a handle half otherwise"
     );
 }
 

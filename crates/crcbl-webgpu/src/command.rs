@@ -137,9 +137,9 @@ pub enum Command {
     /// [`Instance::adapters`](crcbl_hal::Instance::adapters) — enumerate what
     /// the browser will grant.
     ///
-    /// **The only command in this crate whose body is empty**, and the only one
-    /// that is answered: the enumeration cannot be handed back during the call,
-    /// so the replayer queues a [`Reply::Adapter`](crate::Reply::Adapter) or a
+    /// **A body-less command**, as [`Command::SurfaceCaps`] is: the HAL call
+    /// takes nothing. The enumeration cannot be handed back during the call, so
+    /// the replayer queues a [`Reply::Adapter`](crate::Reply::Adapter) or a
     /// [`Reply::NoAdapter`](crate::Reply::NoAdapter) naming this command's
     /// sequence, and it arrives a frame or more later. See
     /// [`crate::instance`] for the side that waits for it.
@@ -172,29 +172,22 @@ pub enum Command {
         /// A surface the device must be able to present to.
         compatible_surface: Option<SurfaceHandle>,
     },
-    /// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) — what this
-    /// surface will accept on this adapter.
+    /// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) — what a
+    /// canvas surface on this instance will accept.
     ///
     /// The third command whose answer comes back, and it is answered by a
-    /// [`Reply::SurfaceCaps`](crate::Reply::SurfaceCaps) naming this command's
-    /// sequence.
+    /// [`Reply::SurfaceCaps`](crate::Reply::SurfaceCaps) or a
+    /// [`Reply::SurfaceCapsFailed`](crate::Reply::SurfaceCapsFailed) naming this
+    /// command's sequence.
     ///
-    /// **Two ids, and the pair the HAL call takes in this order.** They are
-    /// different widths on the wire — a surface is a handle's eight bytes, an
-    /// adapter id is a bare `u32` — so a decoder that read them the other way
-    /// round does not merely swap two values, it runs off into the next
-    /// command. That is the loud failure; the quiet one is a *second* decoder
-    /// choosing the opposite order, which is why the corpus gives the two
-    /// values nothing in common.
-    SurfaceCaps {
-        /// Which surface, as
-        /// [`create_surface`](crate::StreamWriter::create_surface) named it.
-        surface: SurfaceHandle,
-        /// Which adapter, as [`Instance::adapters`](crcbl_hal::Instance::adapters)
-        /// numbered it. Always `0` from a browser, for
-        /// [`Command::RequestDevice::adapter`]'s reason.
-        adapter: AdapterId,
-    },
+    /// **Body-less, though the HAL call takes a surface and an adapter.** The
+    /// record depends on neither: `getPreferredCanvasFormat()` is a method on
+    /// `GPU` and takes no canvas, and the rest of
+    /// [`SurfaceCaps`](crcbl_hal::SurfaceCaps) is fixed for a canvas. So the two
+    /// ids are exactly what an `impl Instance` validates against its own tables
+    /// without asking anyone — a refusal, not a question — and sending them
+    /// would be quoting arguments the answer never reads.
+    SurfaceCaps,
 }
 
 impl Command {
@@ -218,7 +211,7 @@ impl Command {
             Self::Draw { .. } => "Draw",
             Self::EnumerateAdapters => "EnumerateAdapters",
             Self::RequestDevice { .. } => "RequestDevice",
-            Self::SurfaceCaps { .. } => "SurfaceCaps",
+            Self::SurfaceCaps => "SurfaceCaps",
         }
     }
 }

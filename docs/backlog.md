@@ -3,42 +3,24 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
-### A browser can never answer `Unsupported`, so nothing exercises adapter selection
+### Nothing on the WebGPU backend can ever say "try the next adapter"
 
 `surface_caps`'s contract obliges a caller doing selection to read an `Err` as
-"try the next adapter" rather than as fatal, and `apps/sandbox` is the reference
-implementation of that loop. **The WebGPU replayer can never produce the case.**
-A browser grants one adapter, and a canvas that gave up a `webgpu` context can
-present on it — so `SurfaceCapsFailure::Unsupported` has a code and a decoder
-and no way to be raised in a browser. The other three causes are bugs rather
-than selection steps: they answer identically for every adapter a caller goes on
-to try.
+"try the next adapter" rather than as fatal. `crcbl::engine`'s
+`GpuContext::start_device` is the loop that does it — **not** `apps/sandbox`,
+which the HAL doc and `crcbl-vk`'s own comment both still name; the loop moved
+into the engine and those two sentences did not follow it.
 
-So a selection loop written against the WebGPU backend always takes adapter 0
-and never runs its second iteration, and the backend cannot be what gates that
-loop. Vulkan is. Worth knowing before anyone reads a green browser gate as
-covering it.
+**The WebGPU backend can never produce that answer.** Its capability query names
+no adapter — it is an argument-less instance-level question, because the record
+depends on neither the surface nor the adapter — so there is no adapter for a
+refusal to be _about_, and the wire carries one failure cause, `Backend`,
+meaning the query itself broke.
 
-### `SurfaceCaps`'s command names two ids that no round trip can validate
-
-`Command::SurfaceCaps { surface, adapter }` and the `InvalidHandle` /
-`NoSuchAdapter` causes on `Reply::SurfaceCapsFailed` are due to be retired, and
-`ROADMAP.md`'s slice 4i carries the reasoning. The short form: the record
-depends on neither id — `getPreferredCanvasFormat()` is a method on `GPU` and
-takes no canvas — so an impl validates both against its own tables without
-asking anyone, and the wire carries a query with no arguments. `Backend` stays
-as a cause; the other three do not.
-
-Left in place rather than removed now, because removing them before the impl
-exists would leave the gate's group I with nothing to drive and no replacement.
-They go in the same slice as `impl Instance`, so there is never a tree with two
-ways to ask.
-
-**Group I loses one of its four checks when that happens** — the one that drives
-a dead surface handle and expects `InvalidHandle` back. What replaces it is a
-local refusal with no wire involvement, which is a unit test rather than a
-browser check. Worth saying out loud so the count dropping is not read as
-coverage quietly going missing.
+So a selection loop running on this backend always takes adapter 0 and never
+reaches its second iteration. Vulkan is what gates that loop: it is the only
+backend that asks a driver per call and the only one that can refuse a real
+pairing. Worth knowing before anyone reads a green browser gate as covering it.
 
 ### The replayer's surface table is keyed on a handle's index and ignores its generation
 

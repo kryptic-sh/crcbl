@@ -21,15 +21,22 @@
 //! `surface_caps` and `request_device` all have their commands, and every one of
 //! them but `destroy_surface` is driven end to end by the browser gate.
 //!
-//! What is missing is the **shape of the answers**.
-//! [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) returns a
-//! [`SurfaceCaps`](crcbl_hal::SurfaceCaps) synchronously and a stream cannot
-//! answer during the call, so the impl has to decide where the answer waits —
-//! refusing until a reply lands, or asking at `create_surface` time and keeping
-//! it. `request_device` has the polled half the seam gives it and is the one
-//! that already fits. Until that is settled an impl would be a real method or
-//! two and a set of calls that answer nothing, which is what the seam's callers
-//! would have to work around for ever afterwards.
+//! What is missing is a `Device`. Every answer's shape is settled: **the
+//! instance is what waits**, fetching what it cannot answer synchronously before
+//! it is handed over, which is already how
+//! [`Instance::adapters`](crcbl_hal::Instance::adapters) answers a
+//! `Vec<AdapterInfo>` over a promise. That is why
+//! [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) can be
+//! synchronous here at all — `crcbl::engine`'s open calls `create_surface` and
+//! then `surface_caps` on the next line with no frame between them, so a query
+//! at call time could not answer and an `Err` meaning "not yet" would send that
+//! caller to an adapter a browser does not have. `docs/plan/ROADMAP.md`'s slice
+//! 4i carries the whole argument.
+//!
+//! So what an impl still lacks is the far end: `request_device` has the polled
+//! half the seam gives it, and nothing to hand back from it. See [`crate::device`]
+//! for why a `PendingDevice` with no `Device` behind it is a stub that passes
+//! any test which polls a few times and gives up.
 //!
 //! # What this reports is what the *browser* said, not what this crate can do
 //!

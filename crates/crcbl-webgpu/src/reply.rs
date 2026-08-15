@@ -81,7 +81,8 @@
 //! oblige a caller doing selection to treat an `Err` as "try the next adapter",
 //! and a channel with nowhere to put one would have to throw the frame away
 //! over it. Its `cause` is where the two replies differ, and
-//! [`SurfaceCapsFailure`] says why a feature word would not have done.
+//! [`SurfaceCapsFailure`] says which [`HalError`](crcbl_hal::HalError) it
+//! becomes.
 //!
 //! # There is no "still pending" reply, and there must not be
 //!
@@ -387,50 +388,40 @@ impl ByteReader<'_> {
 /// **The machine-readable half of that reply**, and the field an
 /// `impl Instance` turns into a [`HalError`](crcbl_hal::HalError) — the same job
 /// [`Reply::DeviceFailed::unsupported`](Reply::DeviceFailed) does for a device
-/// request, with a different shape because a capability query fails in more than
-/// one way and *the ways are not interchangeable*:
-/// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) obliges a caller
-/// doing adapter selection to treat [`Unsupported`](Self::Unsupported) as "try
-/// the next adapter" rather than as fatal, and the other three are not that —
-/// they are bugs that will answer identically for every adapter the caller goes
-/// on to try. A single "it failed" flag would make an infinite selection loop and
-/// a real refusal look the same.
+/// request.
 ///
-/// **Not a [`HalError`](crcbl_hal::HalError) on the wire**, which would be the
-/// obvious alternative: every variant that could appear carries data the
-/// *command* already said — the adapter index, the surface's handle bits — so
-/// sending one back would be quoting the question inside the answer. This says
-/// which error to build; the impl that builds it has the arguments it asked
-/// with. [`tag`] holds the codes.
+/// **One variant, because the query has one way to fail.**
+/// [`Command::SurfaceCaps`](crate::Command::SurfaceCaps) carries no arguments,
+/// so nothing it names can be refused: a stale surface handle and an adapter
+/// index nothing enumerated are both validated by an `impl Instance` against its
+/// own tables, without asking anyone, and never reach the wire. What is left is
+/// the query itself failing, which is [`Backend`](Self::Backend). "The adapter
+/// cannot present to this surface" — the answer that makes `surface_caps` how
+/// adapter selection is done on a desktop backend — is not among them either,
+/// and not merely because a browser grants one adapter: this command names no
+/// adapter and no surface, so it is not an answer the question has.
+///
+/// An enum rather than the tag alone, because the tag says a query failed and
+/// this says which [`HalError`](crcbl_hal::HalError) to build from it — and
+/// because a second cause is what a later slice adds here rather than a second
+/// reply shape.
+///
+/// **Not a [`HalError`](crcbl_hal::HalError) on the wire**: a `HalError` carries
+/// data — an adapter index, a handle's bits — and an argument-less query has
+/// none to carry back. [`tag`] holds the code.
 ///
 /// **The reason string is never a substitute for this.** It comes from another
 /// vendor's runtime by way of a replayer, and is for a log or a banner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SurfaceCapsFailure {
-    /// The adapter cannot present to this surface —
-    /// [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported), and the only
-    /// one of these that means "try the next adapter".
-    ///
-    /// Routine on a desktop backend — a discrete GPU under an X server with no
-    /// DRI3, the second GPU of a hybrid laptop — and unreachable from a browser,
-    /// where there is one adapter and a canvas that gave up a context can
-    /// present on it. See [`tag`] for why it has a code regardless.
-    Unsupported,
-    /// The surface handle did not resolve: destroyed, never created, or from
-    /// another instance — [`HalError::InvalidHandle`](crcbl_hal::HalError::InvalidHandle).
-    InvalidHandle,
-    /// No adapter was ever enumerated at that index —
-    /// [`HalError::NoSuchAdapter`](crcbl_hal::HalError::NoSuchAdapter).
-    NoSuchAdapter,
     /// The query itself failed — [`HalError::Backend`](crcbl_hal::HalError::Backend),
     /// the arm `surface_caps`'s own docs end with.
     ///
-    /// **The arm that promises nothing**, and the reason the other three exist
-    /// separately: a caller can act on each of those, and this one only says the
-    /// answer is not available. It is what a replayer answers when something it
-    /// did not anticipate went wrong — the browser reporting a canvas format
-    /// this seam has no [`Format`](crcbl_hal::Format) for, say — because the one
-    /// thing it may never do is leave the command unanswered.
+    /// **The arm that promises nothing**: it says only that the answer is not
+    /// available. It is what a replayer answers when something it did not
+    /// anticipate went wrong — the browser reporting a canvas format this seam
+    /// has no [`Format`](crcbl_hal::Format) for, say — because the one thing it
+    /// may never do is leave the command unanswered.
     Backend,
 }
 
@@ -557,8 +548,8 @@ pub enum Reply {
         /// The bytes read back.
         data: Vec<u8>,
     },
-    /// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps): what the
-    /// surface will accept on the adapter the command named.
+    /// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps): what a
+    /// canvas surface on this instance will accept.
     ///
     /// **The whole of [`SurfaceCaps`]**, in declaration order — three counted
     /// lists of enum codes, two counts, and an optional extent. Nothing is
@@ -573,8 +564,9 @@ pub enum Reply {
     /// the order is a value rather than a presentation detail.
     ///
     /// The query's other outcome is [`Reply::SurfaceCapsFailed`], and it is not
-    /// an exceptional one: `surface_caps` is how adapter selection is done, so a
-    /// refusal is an ordinary step of it.
+    /// an exceptional one: `surface_caps` is how adapter selection is done on
+    /// the backends that have more than one adapter, so a refusal is a step of
+    /// it rather than a fault.
     SurfaceCaps {
         /// What the surface will accept.
         caps: SurfaceCaps,
@@ -591,10 +583,10 @@ pub enum Reply {
     ///
     /// [`Reply::DeviceFailed`]'s shape, and the same division of labour: a
     /// string for a person, and beside it the one field a caller may branch on.
-    /// The difference is what that field is — a device request has exactly one
-    /// thing to be refused *for*, so it carries the feature gap, while a
-    /// capability query has four ways to fail that a caller must tell apart.
-    /// [`SurfaceCapsFailure`] carries the argument.
+    /// The difference is what that field is — a device request carries the
+    /// feature gap that refused it, while a capability query carries which
+    /// [`HalError`](crcbl_hal::HalError) to build. See [`SurfaceCapsFailure`]
+    /// for why that is one value today.
     SurfaceCapsFailed {
         /// What the browser said, or what the replayer refused to ask. For a log
         /// or a banner; never a code to branch on.

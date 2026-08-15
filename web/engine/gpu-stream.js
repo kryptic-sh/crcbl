@@ -763,23 +763,16 @@ function decodeCommand(r) {
         compatibleSurface: r.readOptHandle(),
       };
     }
-    case SURFACE_CAPS_TAG: {
-      // Spelled out rather than built inline, for `Draw`'s reason: the two
-      // fields are both ids and the HAL call takes them surface-then-adapter,
-      // which is an order this side has to be *told* rather than infer. They
-      // are also different widths — a handle's eight bytes against a bare
-      // `u32` — so reading them the other way round does not transpose two
-      // values, it leaves the cursor four bytes out and turns the next
-      // command's tag into whatever byte happens to be there.
-      const surface = r.readHandle('SurfaceCaps::surface');
-      const adapter = r.readU32();
-      return { name: 'SurfaceCaps', surface, adapter };
-    }
+    case SURFACE_CAPS_TAG:
+      // No body: the HAL call's surface and adapter are validated where the
+      // handle tables are and never cross. A decoder that still read them would
+      // consume twelve bytes of whatever follows, which is why the corpus puts
+      // a command after this one.
+      return { name: 'SurfaceCaps' };
     case ENUMERATE_ADAPTERS_TAG:
-      // The only command with no body: the next byte is the next command's tag.
-      // A decoder that read one field too many here would decode the rest of
-      // the buffer as garbage, which is why the corpus puts one at the end of a
-      // stream and `stream-decode.mjs` sweeps every truncation of it.
+      // No body either, and last in the corpus: a decoder that read one field
+      // too many here runs off the end of the buffer rather than into a
+      // neighbour, which is why `stream-decode.mjs` sweeps every truncation.
       return { name: 'EnumerateAdapters' };
     default:
       throw new StreamDecodeError(

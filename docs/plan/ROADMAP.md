@@ -2175,11 +2175,16 @@ something trusted, and in a browser the only trusted renderer today is
      `gpu-replay.js`'s `surfaceCapsFor(gpu)` already takes only the `GPU` and
      says the adapter is validated and otherwise unused.
 
-     So `Command::SurfaceCaps` should carry no ids. The `surface` and `adapter`
-     it names today are exactly the two things an impl validates locally without
-     asking anyone, which also retires the `InvalidHandle` and `NoSuchAdapter`
-     causes from the wire — they become local refusals. `Backend` stays. Doing
-     that in the same slice as the impl, rather than leaving two ways to ask.
+     ~~So `Command::SurfaceCaps` should carry no ids.~~ — **done.** It is
+     body-less, and the failure cause is `Backend` alone. `InvalidHandle` and
+     `NoSuchAdapter` left the wire to become local refusals an impl makes
+     against its own tables, and `Unsupported` went with them: a query naming no
+     adapter cannot answer "this adapter cannot present", so keeping the code
+     would have handed an impl a reason to tell a caller to try an adapter the
+     command never named. The remaining cause was renumbered to `0x00` so a JS
+     half that kept the old number fails loudly rather than decoding cleanly.
+     Group I of the gate lost the check that drove a dead surface handle,
+     because the lookup it exercised is gone rather than untested.
 
 5. Buffers, textures, samplers, bind groups.
 6. Pipelines and WGSL modules — the artifacts are already committed and already

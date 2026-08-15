@@ -709,41 +709,26 @@ pub const fn composite_alpha_from_code(code: u8) -> Option<CompositeAlpha> {
 // ── SurfaceCapsFailure ────────────────────────────────────────────────────────
 //
 // The one code table on this seam whose enum is **this crate's own** rather than
-// `crcbl-hal`'s, and it is not a shortcut: every [`HalError`] variant a failed
-// capability query can produce carries data — `NoSuchAdapter(u32)`,
-// `InvalidHandle { kind, bits }` — that the *command* already said, so putting a
-// `HalError` on the wire would be sending back the arguments alongside the
-// answer. What crosses is which error to build, and the impl that builds it has
-// the surface and the adapter it asked with.
+// `crcbl-hal`'s, and it is not a shortcut: a [`HalError`] carries data — a
+// handle's bits, an adapter index — and the query has no arguments to carry
+// back. What crosses is which error to build.
 //
-// The tags are written out for the same reason every other table here is: a
-// variant added to [`SurfaceCapsFailure`] stops [`surface_caps_failure_code`]
-// compiling, which is the moment the number beside it is impossible to miss.
+// **One cause, and the table is written out anyway** for the reason every other
+// table here is: a variant added to [`SurfaceCapsFailure`] stops
+// [`surface_caps_failure_code`] compiling, which is the moment the number beside
+// it is impossible to miss.
 //
-// **A browser never sends [`SURFACE_CAPS_FAILURE_UNSUPPORTED`]**, which is the
-// interesting one: `requestAdapter()` grants at most one adapter and a canvas
-// that gave up a `webgpu` context can present on it, so "this adapter cannot
-// present to this surface" — the answer a Vulkan backend gives routinely, and
-// the whole reason [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps)
-// is how adapter selection is done — has no way to happen there. It has a code
-// because the wire form must be total, exactly as [`DEVICE_TYPE_DISCRETE`] does.
+// The table has no holes, so the code above the last claimed one is `0x01` — the
+// byte a JavaScript half that kept an older, wider table would send, and the
+// byte [`surface_caps_failure_from_code`] answers `None` for.
 
-/// [`SurfaceCapsFailure::Unsupported`] — and the code a browser never sends.
-pub const SURFACE_CAPS_FAILURE_UNSUPPORTED: u8 = 0x00;
-/// [`SurfaceCapsFailure::InvalidHandle`].
-pub const SURFACE_CAPS_FAILURE_INVALID_HANDLE: u8 = 0x01;
-/// [`SurfaceCapsFailure::NoSuchAdapter`].
-pub const SURFACE_CAPS_FAILURE_NO_SUCH_ADAPTER: u8 = 0x02;
-/// [`SurfaceCapsFailure::Backend`].
-pub const SURFACE_CAPS_FAILURE_BACKEND: u8 = 0x03;
+/// [`SurfaceCapsFailure::Backend`] — the only cause the query can answer with.
+pub const SURFACE_CAPS_FAILURE_BACKEND: u8 = 0x00;
 
 /// The wire code for a [`SurfaceCapsFailure`].
 #[must_use]
 pub const fn surface_caps_failure_code(cause: SurfaceCapsFailure) -> u8 {
     match cause {
-        SurfaceCapsFailure::Unsupported => SURFACE_CAPS_FAILURE_UNSUPPORTED,
-        SurfaceCapsFailure::InvalidHandle => SURFACE_CAPS_FAILURE_INVALID_HANDLE,
-        SurfaceCapsFailure::NoSuchAdapter => SURFACE_CAPS_FAILURE_NO_SUCH_ADAPTER,
         SurfaceCapsFailure::Backend => SURFACE_CAPS_FAILURE_BACKEND,
     }
 }
@@ -751,16 +736,14 @@ pub const fn surface_caps_failure_code(cause: SurfaceCapsFailure) -> u8 {
 /// The [`SurfaceCapsFailure`] a wire code names, or `None` if it names none.
 ///
 /// **Never [`SurfaceCapsFailure::Backend`] as a catch-all**, tempting though a
-/// "something went wrong" arm is: it is the one cause that promises nothing, so
-/// a drifted table answering with it would be indistinguishable from a real
-/// backend error — and it would turn the two causes a caller must tell apart,
-/// "try the next adapter" and "your handle is stale", into the same answer.
+/// "something went wrong" arm is now that it is the only arm there is: the
+/// codes a sender can spell and the codes this table claims are the two halves
+/// of a hand-written format, and an arm that took every byte would make them
+/// agree by construction. A JavaScript half still writing the retired causes
+/// must be an error here, which is the only place that drift is visible.
 #[must_use]
 pub const fn surface_caps_failure_from_code(code: u8) -> Option<SurfaceCapsFailure> {
     match code {
-        SURFACE_CAPS_FAILURE_UNSUPPORTED => Some(SurfaceCapsFailure::Unsupported),
-        SURFACE_CAPS_FAILURE_INVALID_HANDLE => Some(SurfaceCapsFailure::InvalidHandle),
-        SURFACE_CAPS_FAILURE_NO_SUCH_ADAPTER => Some(SurfaceCapsFailure::NoSuchAdapter),
         SURFACE_CAPS_FAILURE_BACKEND => Some(SurfaceCapsFailure::Backend),
         _ => None,
     }
@@ -1008,27 +991,17 @@ mod tests {
             );
         }
 
-        let causes = [
-            SurfaceCapsFailure::Unsupported,
-            SurfaceCapsFailure::InvalidHandle,
-            SurfaceCapsFailure::NoSuchAdapter,
-            SurfaceCapsFailure::Backend,
-        ];
-        let codes: Vec<u8> = causes
-            .iter()
-            .map(|c| surface_caps_failure_code(*c))
-            .collect();
+        // No distinctness assertion beside this one, unlike every table above:
+        // `SurfaceCapsFailure` has a single variant, so a "no two share a code"
+        // check over it would hold however the table were written and could
+        // never go red. The round trip still can — and a variant added tomorrow
+        // stops `surface_caps_failure_code` compiling, which is what brings
+        // whoever adds it back to this line.
+        let cause = SurfaceCapsFailure::Backend;
         assert_eq!(
-            distinct(&codes),
-            codes.len(),
-            "two SurfaceCapsFailures share a code"
+            surface_caps_failure_from_code(surface_caps_failure_code(cause)),
+            Some(cause)
         );
-        for cause in causes {
-            assert_eq!(
-                surface_caps_failure_from_code(surface_caps_failure_code(cause)),
-                Some(cause)
-            );
-        }
     }
 
     #[test]

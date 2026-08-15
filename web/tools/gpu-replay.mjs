@@ -378,9 +378,11 @@ async function openDevice(adapter, command, sequence) {
 /**
  * A replayer that has enumerated one adapter and holds the fixture's surface.
  *
- * The two-step is the seam's own shape and not scaffolding, as `openDevice`'s
- * is: a capability query names a surface `create_surface` made and an adapter an
- * enumeration numbered, so a replayer with neither has nothing to answer about.
+ * **Neither is what the query reads**, and that is deliberate rather than left
+ * over: the command carries no ids, so this replayer's surface table and adapter
+ * list are not consulted when it is answered. The two-step is here so the
+ * checks below run against the state a real page is in, and the bare replayer a
+ * few checks further down is what says the answer does not depend on it.
  * The enumeration's reply is cleared in between, so what comes back afterwards
  * is the capability answer alone.
  *
@@ -633,10 +635,10 @@ async function main() {
   );
   FROM_FIXTURE.createSurface = createSurface;
 
-  // The capability query, from the fixture for the same reason again: its
-  // surface handle and its adapter id are the ones the Rust encoder wrote, and
-  // neither names anything a replayer has — which is what the two refusals
-  // below are made of.
+  // The capability query, from the fixture for the same reason again — and here
+  // the point is what it does *not* carry: a decoder that still read a surface
+  // and an adapter off the wire would hand this file an object with fields, and
+  // the replay below would then be driven by something the encoder never wrote.
   const surfaceCaps = commands.find(
     (command) => command.name === 'SurfaceCaps'
   );
@@ -1237,18 +1239,13 @@ async function main() {
   // compared against a number spelled out here — a check that called the
   // translation again would agree with whatever it produced.
   //
-  // AND BOTH REFUSALS ARE REPLIES. `Instance::surface_caps` is the only call
-  // that says whether an adapter can present to a window, so its docs oblige a
-  // caller doing selection to treat a failure as "try the next adapter". A
-  // replayer that threw would take the frame down over an ordinary step of that.
+  // AND ITS REFUSAL IS A REPLY. `Instance::surface_caps` is the only call that
+  // says whether an adapter can present to a window, so its docs oblige a caller
+  // doing selection to treat a failure as an ordinary step. A replayer that
+  // threw would take the frame down over one.
   {
     const { replayer, gpu } = await readyForCaps();
-    const live = {
-      ...surfaceCaps,
-      surface: createSurface.surface,
-      adapter: 0,
-    };
-    replayer.replay(frameOf(live, 11n));
+    replayer.replay(frameOf(surfaceCaps, 11n));
     check(
       replayer.hasReplies && replayer.inFlight === 0,
       `the answer is queued inside the call, with nothing left in flight (queued ${replayer.hasReplies}, in flight ${replayer.inFlight})`
@@ -1293,12 +1290,7 @@ async function main() {
     // does answer has to move when the browser's answer moves; a list written
     // out as a constant cannot.
     const { replayer } = await readyForCaps({ canvasFormat: 'bgra8unorm' });
-    replayer.replay(
-      frameOf(
-        { ...surfaceCaps, surface: createSurface.surface, adapter: 0 },
-        12n
-      )
-    );
+    replayer.replay(frameOf(surfaceCaps, 12n));
     const answered = decodeOneReply(replayer.replies);
     checkEqual(
       answered?.caps?.formats,
@@ -1312,10 +1304,18 @@ async function main() {
     );
   }
   {
-    // **A surface this replayer has no context for.** The fixture's own command
-    // names surface 63, and this replayer holds a different one — so a check
-    // that merely counted surfaces would pass here and this one cannot.
-    const { replayer } = await readyForCaps();
+    // **THE QUERY DEPENDS ON NEITHER TABLE, AND THIS IS WHERE THAT IS SHOWN.**
+    // A bare replayer: nothing enumerated, no canvas registered, no surface
+    // created, and nothing cleared out of the way. Answering it anyway is the
+    // whole of what dropping the two ids from the command means — the surface
+    // and the adapter `Instance::surface_caps` takes are an impl's to validate,
+    // and this side has nothing to say about either.
+    //
+    // A replayer that kept its old lookups fails here rather than anywhere
+    // else in this file, because every other block above has a surface and an
+    // adapter in place.
+    const gpu = stubGpu(async () => openingAdapter());
+    const replayer = new Replayer({ gpu });
     let thrown = null;
     try {
       replayer.replay(frameOf(surfaceCaps, 13n));
@@ -1325,41 +1325,13 @@ async function main() {
     const answered = decodeOneReply(replayer.replies);
     check(
       thrown === null &&
-        answered?.tag === 'SurfaceCapsFailed' &&
-        answered?.sequence === 13n &&
-        answered?.cause === 0x01,
-      `a stale surface is an InvalidHandle refusal rather than a throw (${String(thrown)}, ${answered?.tag} cause ${answered?.cause})`
+        answered?.tag === 'SurfaceCaps' &&
+        answered?.sequence === 13n,
+      `a replayer with no surface and no adapter still answers the query (${String(thrown)}, ${answered?.tag} answering ${answered?.sequence})`
     );
     check(
-      String(answered?.reason).includes(String(surfaceCaps.surface.index)),
-      `and the reason names the handle it could not resolve (${answered?.reason})`
-    );
-  }
-  {
-    // **An adapter no enumeration granted.** The surface is live, so this is the
-    // second id being checked rather than the first failing again — and the
-    // fixture's adapter id is 65, which nothing this replayer answered with
-    // could have been.
-    const { replayer } = await readyForCaps();
-    let thrown = null;
-    try {
-      replayer.replay(
-        frameOf({ ...surfaceCaps, surface: createSurface.surface }, 14n)
-      );
-    } catch (error) {
-      thrown = error;
-    }
-    const answered = decodeOneReply(replayer.replies);
-    check(
-      thrown === null &&
-        answered?.tag === 'SurfaceCapsFailed' &&
-        answered?.sequence === 14n &&
-        answered?.cause === 0x02,
-      `an unenumerated adapter is a NoSuchAdapter refusal rather than a throw (${String(thrown)}, ${answered?.tag} cause ${answered?.cause})`
-    );
-    check(
-      String(answered?.reason).includes(String(surfaceCaps.adapter)),
-      `and the reason names the id nothing granted (${answered?.reason})`
+      replayer.surfaces.size === 0 && gpu.calls === 0,
+      `and it consulted neither table to do it (${replayer.surfaces.size} surfaces, ${gpu.calls} requestAdapter calls)`
     );
   }
   {
@@ -1370,12 +1342,7 @@ async function main() {
     const { replayer } = await readyForCaps({ canvasFormat: 'rgba32float' });
     let thrown = null;
     try {
-      replayer.replay(
-        frameOf(
-          { ...surfaceCaps, surface: createSurface.surface, adapter: 0 },
-          15n
-        )
-      );
+      replayer.replay(frameOf(surfaceCaps, 15n));
     } catch (error) {
       thrown = error;
     }
@@ -1383,7 +1350,10 @@ async function main() {
     check(
       thrown === null &&
         answered?.tag === 'SurfaceCapsFailed' &&
-        answered?.cause === 0x03 &&
+        // Spelled out rather than read off `SURFACE_CAPS_FAILURE`, for the
+        // reason every expected value in this file is: a check that imported
+        // the table would agree with whatever it says.
+        answered?.cause === 0x00 &&
         String(answered?.reason).includes('rgba32float'),
       `an unknown canvas format is a Backend refusal naming it (${String(thrown)}, ${answered?.tag} cause ${answered?.cause}: ${answered?.reason})`
     );

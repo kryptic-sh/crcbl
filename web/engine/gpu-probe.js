@@ -73,10 +73,9 @@ export const DEVICE = Object.freeze({
  * The `CAPS_*` codes `__crcbl_web_gpu_probe_surface_caps_state` answers, from
  * the same file.
  *
- * `REFUSED` is **not** an error on this seam and is the reason this probe has a
- * `cause` beside its reason: `Instance::surface_caps` is how adapter selection
- * is done, so a query that answers nothing is an ordinary step of it, and a
- * caller has to tell "try the next adapter" from "your handle is stale".
+ * `REFUSED` is **not** an error on this seam: `Instance::surface_caps` is how
+ * adapter selection is done, so a query that answers nothing is an ordinary step
+ * of it and comes back through the reply channel rather than as a thrown frame.
  * `UNDECODABLE` is the format's two halves having drifted, which blames the
  * other end of the build entirely.
  */
@@ -92,16 +91,13 @@ export const CAPS = Object.freeze({
  * The `SurfaceCapsFailure` codes `crates/crcbl-webgpu/src/tag.rs` assigns, which
  * `__crcbl_web_gpu_probe_surface_caps_cause` answers with.
  *
- * `UNSUPPORTED` is `0` and a browser never sends it — `requestAdapter()` grants
- * at most one adapter and a canvas that gave up a `webgpu` context can present
- * on it — so it is also, unavoidably, what the export answers when nothing was
- * refused. That is why the cause is read only once the state says `REFUSED`.
+ * One code, because `Command::SurfaceCaps` carries no arguments and so has
+ * nothing to refuse: what is left is the query itself failing. `BACKEND` is `0`,
+ * so it is also, unavoidably, what the export answers when nothing was refused.
+ * That is why the cause is read only once the state says `REFUSED`.
  */
 export const CAPS_FAILURE = Object.freeze({
-  UNSUPPORTED: 0,
-  INVALID_HANDLE: 1,
-  NO_SUCH_ADAPTER: 2,
-  BACKEND: 3,
+  BACKEND: 0,
 });
 
 /**
@@ -234,31 +230,27 @@ export function startSurfaceProbe({ exports, canvasId }) {
 }
 
 /**
- * Asks wasm to encode a query for what a surface will accept on an adapter.
+ * Asks wasm to encode a query for what a canvas surface will accept.
  *
  * The third command that makes a round trip, and the encode-and-return half of
  * it: {@link readSurfaceCapsProbe} is where the answer surfaces, and everything
  * between belongs to the demo's loop.
  *
- * **Both ids are yours to choose, and that is the point.** `surface` is an index
- * — `0` is the one {@link startSurfaceProbe} creates, and any other names one the
- * replayer holds no context for, which comes back as `INVALID_HANDLE`. `adapter`
- * is an adapter id — `0` is the one a browser grants, and any other comes back as
- * `NO_SUCH_ADAPTER`. Neither refusal is thrown and neither kills the frame:
- * `Instance::surface_caps` is how adapter selection is done, so both are replies.
+ * **There is nothing to choose, because the command carries nothing.** The
+ * surface and the adapter `Instance::surface_caps` takes are validated against
+ * an impl's own handle tables and never reach the wire — the record depends on
+ * neither, since `getPreferredCanvasFormat()` is a method on `GPU`.
  *
  * Unlike {@link startDeviceProbe} this needs no adapter to have been granted
- * first — the id is not taken from an enumeration — so it is legal on any frame.
+ * first, so it is legal on any frame.
  *
  * @param {object} options
  * @param {Record<string, Function>} options.exports
- * @param {number} options.surface Index of the surface to ask about.
- * @param {number} options.adapter Id of the adapter to ask about.
  * @returns {boolean} Whether wasm took the query. `false` is a channel already
  *   installed by something else, or a full waiting set.
  */
-export function startSurfaceCapsProbe({ exports, surface, adapter }) {
-  return exports.__crcbl_web_gpu_probe_surface_caps(surface, adapter) === 1;
+export function startSurfaceCapsProbe({ exports }) {
+  return exports.__crcbl_web_gpu_probe_surface_caps() === 1;
 }
 
 /**

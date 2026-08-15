@@ -538,36 +538,6 @@ const STATUS_PAUSED = 6;
 const DECOY_CANVAS_ID = 6;
 
 /**
- * The surface index group I asks about to reach a surface that exists.
- *
- * `crates/crcbl-webgpu/src/probe.rs` names its one surface `PROBE_SURFACE` at
- * index `0`, which is what `startSurfaceProbe` created in group H. Anything else
- * is an index no `CreateSurface` ever named.
- */
-const LIVE_SURFACE_INDEX = 0;
-
-/**
- * …and the index it asks about to reach one that does not.
- *
- * **The whole of the refusal check.** A capability query is answered either way,
- * so "it came back" says nothing on its own; what says the replayer checked its
- * table is that a handle it holds no context for is refused *as* a stale handle,
- * by a reply, rather than by a thrown frame or by a capability set built anyway.
- * Any index but {@link LIVE_SURFACE_INDEX} does it, and this is far enough from
- * it to be obviously deliberate in a log line.
- */
-const DEAD_SURFACE_INDEX = 9;
-
-/**
- * The adapter id a browser's one adapter is enumerated under.
- *
- * `navigator.gpu.requestAdapter()` grants one adapter or none, so the id is its
- * position in a list of one — `crcbl-webgpu`'s `Reply::Adapter` documents it as
- * always `0` from a browser, and `gpu-replay.js` files the granted adapter there.
- */
-const GRANTED_ADAPTER_ID = 0;
-
-/**
  * The `crcbl_hal::Format` code each canvas format the specification defines has,
  * from `crates/crcbl-webgpu/src/tag.rs`.
  *
@@ -3146,25 +3116,26 @@ try {
           `${surfaceProbe?.failure ? ` — ${surfaceProbe.failure}` : ''}`
   );
 
-  // **THE ONLY GATE ON A CAPABILITY QUERY, AND THE ONLY ONE ON A REFUSAL.**
-  // `gpu-replay.mjs` drives the same command under node against a stub whose
-  // `getPreferredCanvasFormat` returns whatever that file wrote a line above, so
-  // what it proves is the encoding and the table lookups. The fact left over is
-  // the one only a browser has: **what this machine's WebGPU actually prefers to
-  // put on a canvas**, which varies by browser and by platform and which no
-  // fixture can contain.
+  // **THE ONLY GATE ON A CAPABILITY QUERY.** `gpu-replay.mjs` drives the same
+  // command under node against a stub whose `getPreferredCanvasFormat` returns
+  // whatever that file wrote a line above, so what it proves is the encoding and
+  // the translation. The fact left over is the one only a browser has: **what
+  // this machine's WebGPU actually prefers to put on a canvas**, which varies by
+  // browser and by platform and which no fixture can contain.
   //
   // So the check below asks the page for that answer directly, at the same
   // moment, and holds wasm's number to it. A replayer that answered with a
   // constant, or a decoder that read the format list off by one, differs there
   // and nowhere else in this file.
   //
-  // The other half is that a refusal is a refusal. `surface_caps` is how adapter
-  // selection is done — its `Err` is an ordinary step, not a catastrophe — so a
-  // query naming a surface nothing created must come back through the reply
-  // channel saying which failure it was, rather than killing the frame the way
-  // an unresolvable `CreateSurface` does. Those two commands fail in deliberately
-  // opposite directions and group H is the other half of the pair.
+  // **There is no refusal check here, and there is nothing to replace it with.**
+  // This group used to drive a surface handle nothing created and expect
+  // `InvalidHandle` back. `Command::SurfaceCaps` carries no ids now — the record
+  // depends on neither, so an `impl Instance` refuses a stale handle against its
+  // own tables without a round trip — and the only cause left, `Backend`, is the
+  // browser naming a canvas format this seam has no `Format` for, which no page
+  // can be made to do. The refusal path is a `cargo test` and a `gpu-replay.mjs`
+  // check; the reply channel carrying one is not a browser fact any more.
   //
   // Nothing here drains, replays or delivers, for group G's reason.
   group('I — a surface says what it will accept');
@@ -3176,11 +3147,7 @@ try {
        const { exports, gpu } = globalThis.crcbl;
        const before = gpu.stats();
        return {
-         started: startSurfaceCapsProbe({
-           exports,
-           surface: ${LIVE_SURFACE_INDEX},
-           adapter: ${GRANTED_ADAPTER_ID},
-         }),
+         started: startSurfaceCapsProbe({ exports }),
          replayed: before.replayed,
          delivered: before.delivered,
        };
@@ -3268,50 +3235,6 @@ try {
       ? `present modes 0b${capsAnswered.presentModes.toString(2)}, currentExtent ` +
           `${capsAnswered.hasExtent ? 'present' : 'absent'}`
       : `state ${capsAnswered?.name}, which carries no capabilities to read`
-  );
-
-  // …and the refusal, driven at a surface index no `CreateSurface` ever named.
-  // Re-asking replaces the probe's state, so the poll below cannot read the
-  // answer above back: wasm is in `WAITING` before this evaluation returns.
-  const refusalStart = await evaluate(
-    page,
-    `(async () => {
-       const { startSurfaceCapsProbe } = await import('/engine/gpu-probe.js');
-       const { exports } = globalThis.crcbl;
-       return startSurfaceCapsProbe({
-         exports,
-         surface: ${DEAD_SURFACE_INDEX},
-         adapter: ${GRANTED_ADAPTER_ID},
-       });
-     })()`
-  );
-  const refused = refusalStart
-    ? await until(async () =>
-        evaluate(
-          page,
-          `(async () => {
-             const { readSurfaceCapsProbe, CAPS } = await import('/engine/gpu-probe.js');
-             const { exports, memory, gpu } = globalThis.crcbl;
-             const out = readSurfaceCapsProbe({ exports, memory });
-             return out.state === CAPS.WAITING
-               ? null
-               : { ...out, failure: gpu.stats().failure };
-           })()`
-        )
-      )
-    : null;
-  check(
-    'I',
-    'a query naming a surface nothing created is refused as a stale handle',
-    refused?.name === 'REFUSED' &&
-      refused.causeName === 'INVALID_HANDLE' &&
-      !refused.failure,
-    refused
-      ? `${refused.name}/${refused.causeName}: ${JSON.stringify(refused.reason)}` +
-          `${refused.failure ? ` — but the frame also threw: ${refused.failure}` : ''}`
-      : refusalStart
-        ? `no answer in ${TIMEOUT_MS} ms — a refusal must still be a reply`
-        : 'wasm would not encode the query'
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and

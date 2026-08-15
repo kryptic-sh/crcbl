@@ -168,26 +168,19 @@ pub fn every_command() -> Vec<Command> {
             optional_features: Features::all(),
             compatible_surface: None,
         },
-        // **The surface and the adapter id have nothing in common.** They are
-        // different widths on the wire, so reading them the other way round
-        // runs off into the next command rather than swapping two values — but
-        // a *second* decoder is free to choose the opposite order, and these
-        // numbers are what make that a visible difference rather than a
-        // coincidence: `65` is neither half of `handle(63, 64)`.
-        Command::SurfaceCaps {
-            surface: handle(63, 64),
-            adapter: AdapterId(65),
-        },
+        // **Body-less, and deliberately not last.** Its whole encoding is one
+        // byte, so a decoder that read a field that is no longer there would
+        // consume the `EnumerateAdapters` below it and end the stream one
+        // command short — which is what the pair says and neither says alone.
+        Command::SurfaceCaps,
         // Last, and not for tidiness: `web/tools/stream-decode.mjs` reaches into
         // this fixture by byte offset to corrupt one field at a time, and every
         // one of those offsets is counted from the *first* command. A command
         // inserted above would move all of them.
         //
-        // The only body-less command in the corpus, which is a shape of its own:
-        // the byte after this tag is the next command's tag, so a decoder that
-        // read one field too many here would decode the rest of the stream as
-        // garbage — and there is nothing after it, so it is also the case where
-        // that shows up as a clean end rather than as an error.
+        // Body-less too, and here it is the *end* of the stream that follows the
+        // tag: a decoder that read one field too many runs off the buffer rather
+        // than into a neighbour, which is the other half of the shape.
         Command::EnumerateAdapters,
     ]
 }
@@ -249,7 +242,7 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             instances,
         } => stream.draw(vertices.clone(), instances.clone()),
         Command::EnumerateAdapters => stream.enumerate_adapters(),
-        Command::SurfaceCaps { surface, adapter } => stream.surface_caps(*surface, *adapter),
+        Command::SurfaceCaps => stream.surface_caps(),
         Command::RequestDevice {
             adapter,
             label,

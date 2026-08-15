@@ -47,10 +47,13 @@
 // fixes. So it queues its reply during `replay` rather than a frame later, and
 // the translation below `surfaceCapsFor` is where every field that has no
 // browser answer is named as such rather than filled in with a plausible number.
-// Its failures — a surface with no context here, an adapter no enumeration
-// granted — are answered with a `SurfaceCapsFailed` reply and never thrown,
-// because `Instance::surface_caps` is how adapter selection is done and a
-// refusal is an ordinary step of it rather than a reason to lose the frame.
+// It carries no arguments, because the record depends on none — that string
+// comes off `navigator.gpu` and not off a canvas — so there is nothing here to
+// look up and nothing to refuse for. The one way it can fail is the browser
+// naming a canvas format this seam has no `Format` for, and that is answered
+// with a `SurfaceCapsFailed` reply rather than thrown, because
+// `Instance::surface_caps` is how adapter selection is done and a refusal is an
+// ordinary step of it rather than a reason to lose the frame.
 //
 // Every other command in the stream is *unimplemented*, and says so: `replay`
 // throws a `ReplayError` naming the command and the sequence that carried it,
@@ -726,8 +729,9 @@ export class DeviceRequestError extends Error {
  * the `cause` of a `SurfaceCapsFailed` reply.
  *
  * `code` is one of `SURFACE_CAPS_FAILURE`, which is what the far side turns into
- * a `HalError` — and the distinction it carries is one a caller acts on:
- * `UNSUPPORTED` means "try the next adapter" and the rest do not.
+ * a `HalError`. There is one such code, and the constructor still takes it
+ * rather than assuming it: the table is what the two languages have to agree on,
+ * and a throw site that spelled the value itself would agree with nothing.
  */
 export class SurfaceCapsError extends Error {
   /**
@@ -929,7 +933,7 @@ export class Replayer {
           this.#destroySurface(command);
           break;
         case 'SurfaceCaps':
-          this.#surfaceCaps(sequence, command);
+          this.#surfaceCaps(sequence);
           break;
         default:
           throw new ReplayError(String(command.name), sequence);
@@ -1149,56 +1153,44 @@ export class Replayer {
   }
 
   /**
-   * Answers what a surface will accept on an adapter, or why it cannot.
+   * Answers what a canvas surface on this instance will accept, or why it
+   * cannot.
    *
    * ANSWERED WITHIN THE CALL, unlike the two commands that make a round trip:
    * nothing here is a promise, so deferring would only make the answer arrive a
    * frame later than it has to. The reply still names the sequence, and the
    * buffer still goes to wasm at the frame boundary.
    *
-   * BOTH IDS ARE CHECKED, AND NEITHER FAILURE THROWS. A surface this replayer
-   * has no context for is `InvalidHandle`; an adapter id outside what an
-   * enumeration granted is `NoSuchAdapter`. Both are the `Err` half of a call
-   * whose `Err` half is ordinary — see {@link SurfaceCapsError} — so both are
-   * replies. Every path below queues exactly one, including the one where the
-   * *reply writer* refuses a field: a record that will not encode is rolled back
-   * whole by the writer and answered as a `Backend` failure instead, so nothing
-   * half-written can reach the buffer.
+   * NOTHING IS LOOKED UP, BECAUSE THE COMMAND NAMES NOTHING. `surface_caps` is
+   * per-surface and per-adapter on this seam because Vulkan's is: presentation
+   * support is a property of a queue family. WebGPU has no such query — the
+   * canvas formats come from `navigator.gpu`, whichever canvas and whichever
+   * adapter — so the two ids the HAL call takes are validated by an
+   * `impl Instance` against its own tables and never travel. This replayer's
+   * surface table and adapter list are therefore not consulted here, which is a
+   * decision rather than an omission.
    *
-   * THE ADAPTER IS VALIDATED AND OTHERWISE UNUSED, which is worth stating
-   * because it looks like an oversight. `surface_caps` is per-adapter on this
-   * seam because Vulkan's is: presentation support is a property of a
-   * queue family. WebGPU has no per-adapter surface query at all — the canvas
-   * formats come from `navigator.gpu` and are the same whichever adapter is
-   * named — so the id's only job here is that a command naming one nothing
-   * granted must not be answered as though it had.
+   * WHAT IS LEFT CAN STILL FAIL, AND DOES NOT THROW. `surfaceCapsFor` refuses a
+   * canvas format this seam has no `Format` for, and the reply writer refuses a
+   * field it will not encode; both are the `Err` half of a call whose `Err` half
+   * is ordinary — see {@link SurfaceCapsError} — so both are replies. Every path
+   * below queues exactly one, and a record that will not encode is rolled back
+   * whole by the writer before the failure is written, so nothing half-written
+   * can reach the buffer.
    *
    * @param {bigint} sequence
-   * @param {{ surface: { index: number, generation: number }, adapter: number }} command
    */
-  #surfaceCaps(sequence, command) {
+  #surfaceCaps(sequence) {
     try {
-      if (!this.#surfaces.has(command.surface.index)) {
-        throw new SurfaceCapsError(
-          SURFACE_CAPS_FAILURE.INVALID_HANDLE,
-          `no surface ${command.surface.index} is live in this replayer`
-        );
-      }
-      if (!this.#adapters[command.adapter]) {
-        throw new SurfaceCapsError(
-          SURFACE_CAPS_FAILURE.NO_SUCH_ADAPTER,
-          `no adapter ${command.adapter} has been enumerated`
-        );
-      }
       this.#replies.surfaceCaps(sequence, surfaceCapsFor(this.#gpu));
     } catch (error) {
       this.#replies.surfaceCapsFailed(
         sequence,
         String(error).slice(0, MAX_REASON_CHARS),
         // Anything this file did not anticipate — a browser with no
-        // `navigator.gpu`, a reply the writer refused — is `Backend`: the cause
-        // that promises nothing, which is the only honest thing to say about a
-        // failure nobody wrote a branch for.
+        // `navigator.gpu`, a reply the writer refused — is `Backend` too: the
+        // cause that promises nothing, which is the only honest thing to say
+        // about a failure nobody wrote a branch for.
         error instanceof SurfaceCapsError
           ? error.code
           : SURFACE_CAPS_FAILURE.BACKEND

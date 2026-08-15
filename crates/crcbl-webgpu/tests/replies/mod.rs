@@ -346,46 +346,27 @@ pub fn every_reply() -> Vec<(u64, Reply)> {
                 },
             },
         ),
-        // **One entry per cause, and that is what the four are for.** Every
-        // other consumer of the failure-code table agrees with itself by
-        // construction — `tag.rs`'s round trip reads its own constants, and the
-        // replayer's checks read the same JavaScript table the writer does — so
-        // this corpus is the only thing that pins the four numbers *across* the
-        // two languages. A code swapped in `gpu-reply.js` is a byte difference
+        // **One entry per cause, and the query has one.** Every other consumer
+        // of the failure-code table agrees with itself by construction —
+        // `tag.rs`'s round trip reads its own constants, and the replayer's
+        // checks read the same JavaScript table the writer does — so this corpus
+        // is the only thing that pins the number *across* the two languages. A
+        // `SURFACE_CAPS_FAILURE.BACKEND` still spelled `0x03` in `gpu-reply.js`,
+        // as it was while the wire carried four causes, is a byte difference
         // here and nowhere else.
         //
         // The reason and the cause are independent halves, as
-        // `Reply::DeviceFailed`'s are, so two of these carry no reason at all.
+        // `Reply::DeviceFailed`'s are, so the second of these carries no reason
+        // at all.
         (
             47,
             Reply::SurfaceCapsFailed {
-                reason: "surface 63 is not live in this replayer — ✱".into(),
-                cause: SurfaceCapsFailure::InvalidHandle,
+                reason: "getPreferredCanvasFormat() answered \"rgba32float\" — ✱".into(),
+                cause: SurfaceCapsFailure::Backend,
             },
         ),
         (
             53,
-            Reply::SurfaceCapsFailed {
-                reason: String::new(),
-                cause: SurfaceCapsFailure::NoSuchAdapter,
-            },
-        ),
-        // **Not a browser's answer**, for the reason the second `Adapter` is not
-        // one: a browser has one adapter and every canvas that gave up a context
-        // can present on it, so `Unsupported` is what a Vulkan backend says
-        // routinely and this replayer never says. The decoder must not know
-        // that — it decodes what the wire carries.
-        (
-            59,
-            Reply::SurfaceCapsFailed {
-                reason: "the adapter cannot present to this surface".into(),
-                cause: SurfaceCapsFailure::Unsupported,
-            },
-        ),
-        // The highest code the table claims, so an off-by-one at the end of it
-        // is a byte difference here.
-        (
-            61,
             Reply::SurfaceCapsFailed {
                 reason: String::new(),
                 cause: SurfaceCapsFailure::Backend,

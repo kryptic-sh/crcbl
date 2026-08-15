@@ -125,8 +125,8 @@ fn every_reply_has_its_own_name() {
     names.sort_unstable();
     names.dedup();
     // The corpus holds two of several shapes — Adapters, NoAdapters, Devices,
-    // DeviceFaileds, ReadbackReadys, QueryResults — three SurfaceCaps and four
-    // SurfaceCapsFaileds, so the distinct-name count is what the writer has
+    // DeviceFaileds, ReadbackReadys, QueryResults, SurfaceCapsFaileds — and
+    // three SurfaceCaps, so the distinct-name count is what the writer has
     // methods for.
     assert_eq!(names.len(), 9);
     assert!(names.iter().all(|name| !name.is_empty()));
@@ -885,84 +885,67 @@ fn a_surface_caps_list_count_past_the_cap_is_refused() {
     );
 }
 
-/// **Every cause survives, and the reason is the other half.**
+/// **The cause survives, and the reason is the other half.**
 ///
 /// [`Reply::DeviceFailed`]'s suite, on the reply that has a code where that one
-/// has a feature word: a caller doing adapter selection has to tell
-/// [`SurfaceCapsFailure::Unsupported`] — "try the next adapter" — from the three
-/// that will answer identically for every adapter it goes on to try, so a writer
-/// that lost the field, or a table that renumbered it, is a selection loop that
-/// never ends.
+/// has a feature word. The two halves are independent — a refusal with nothing
+/// to say still carries its cause, and a writer that lost the field would answer
+/// the same bytes for both rows below.
 #[test]
 fn a_surface_caps_failure_carries_its_reason_and_which_failure_it_was() {
-    let causes = [
-        SurfaceCapsFailure::Unsupported,
-        SurfaceCapsFailure::InvalidHandle,
-        SurfaceCapsFailure::NoSuchAdapter,
-        SurfaceCapsFailure::Backend,
-    ];
-    for cause in causes {
-        for reason in ["adapter 0 cannot present here — ✱", ""] {
-            let mut replies = ReplyWriter::new();
-            replies.surface_caps_failed(6, reason, cause);
-            assert_eq!(
-                decode_replies(replies.bytes()),
-                Ok(vec![(
-                    6,
-                    Reply::SurfaceCapsFailed {
-                        reason: reason.into(),
-                        cause,
-                    }
-                )]),
-                "{reason:?} / {cause:?}"
-            );
-        }
+    let cause = SurfaceCapsFailure::Backend;
+    for reason in ["getPreferredCanvasFormat() answered nonsense — ✱", ""] {
+        let mut replies = ReplyWriter::new();
+        replies.surface_caps_failed(6, reason, cause);
+        assert_eq!(
+            decode_replies(replies.bytes()),
+            Ok(vec![(
+                6,
+                Reply::SurfaceCapsFailed {
+                    reason: reason.into(),
+                    cause,
+                }
+            )]),
+            "{reason:?}"
+        );
     }
-
-    // …and no two causes encode alike, which the round trip above cannot say on
-    // its own: a `code` function answering the same byte for every variant would
-    // decode back to whichever one it named and pass every iteration.
-    let mut encoded: Vec<Vec<u8>> = causes
-        .iter()
-        .map(|cause| {
-            let mut replies = ReplyWriter::new();
-            replies.surface_caps_failed(6, "", *cause);
-            replies.bytes().to_vec()
-        })
-        .collect();
-    let count = encoded.len();
-    encoded.sort_unstable();
-    encoded.dedup();
-    assert_eq!(encoded.len(), count, "two causes encode to the same bytes");
 }
 
-/// A cause code no variant claims is refused, never folded into the nearest one.
+/// A cause code no variant claims is refused, never folded into the one that is.
 ///
-/// The nearest one is the whole problem here: the causes sit on adjacent codes
-/// and the caller's branch on them is "retry with another adapter" against "stop
-/// and report a bug", so a drifted table would turn a stale handle into an
-/// endless walk through adapters and never say why.
+/// **The whole of what the cause byte is now worth.** One variant means the
+/// round trip above cannot fail on a drifted table — every wrong answer is also
+/// the right one — so this is the check that holds the two hand-written halves
+/// of the format together: a `gpu-reply.js` still writing `0x01`, `0x02` or
+/// `0x03`, the codes the retired causes had, must reach wasm as an error naming
+/// the field rather than as a `Backend` refusal nothing produced.
 #[test]
 fn a_surface_caps_failure_cause_no_variant_claims_is_refused() {
     let mut replies = ReplyWriter::new();
-    replies.surface_caps_failed(6, "x", SurfaceCapsFailure::Unsupported);
-    let mut bytes = replies.bytes().to_vec();
+    replies.surface_caps_failed(6, "x", SurfaceCapsFailure::Backend);
+    let bytes = replies.bytes().to_vec();
     // Tag, sequence, the reason's length prefix and its one byte, then the code.
     let at = tag::REPLY_HEADER_BYTES + 1 + 8 + 4 + 1;
     assert_eq!(
         bytes[at],
-        tag::SURFACE_CAPS_FAILURE_UNSUPPORTED,
+        tag::SURFACE_CAPS_FAILURE_BACKEND,
         "the offset must land on the cause byte"
     );
 
-    bytes[at] = 0xEE;
-    assert_eq!(
-        decode_replies(&bytes),
-        Err(DecodeError::InvalidEnum {
-            field: "SurfaceCapsFailed::cause",
-            code: 0xEE,
-        })
-    );
+    // `0x01` is the byte a half that kept the wider table would send first, and
+    // `0xEE` is corruption; both have to be refused, and the first is the one a
+    // decoder tempted into a catch-all would swallow.
+    for code in [0x01u8, 0xEE] {
+        let mut drifted = bytes.clone();
+        drifted[at] = code;
+        assert_eq!(
+            decode_replies(&drifted),
+            Err(DecodeError::InvalidEnum {
+                field: "SurfaceCapsFailed::cause",
+                code: code.into(),
+            })
+        );
+    }
 }
 
 /// **A failure is not an empty capability record**, and the two must not be
@@ -989,7 +972,7 @@ fn a_refusal_is_its_own_reply_and_not_a_capability_record_with_nothing_in_it() {
     success.surface_caps(6, &empty);
 
     let mut failure = ReplyWriter::new();
-    failure.surface_caps_failed(6, "", SurfaceCapsFailure::Unsupported);
+    failure.surface_caps_failed(6, "", SurfaceCapsFailure::Backend);
 
     assert_ne!(success.bytes(), failure.bytes());
     assert_eq!(
@@ -1003,7 +986,7 @@ fn a_refusal_is_its_own_reply_and_not_a_capability_record_with_nothing_in_it() {
             6,
             Reply::SurfaceCapsFailed {
                 reason: String::new(),
-                cause: SurfaceCapsFailure::Unsupported,
+                cause: SurfaceCapsFailure::Backend,
             }
         )])
     );

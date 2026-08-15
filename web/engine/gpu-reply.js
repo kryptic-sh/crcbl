@@ -196,23 +196,23 @@ export const COMPOSITE_ALPHA = Object.freeze({
  * THE HALF OF A REFUSAL A CALLER MAY BRANCH ON, and the reason a refusal is a
  * reply at all rather than a throw: `Instance::surface_caps` is the only call
  * that says whether an adapter can present to a window, so its own docs oblige a
- * caller doing adapter selection to treat a failure as "try the next adapter".
- * That is `UNSUPPORTED`, and it is the only one of these that means it — the
- * other three will answer identically for every adapter the caller goes on to
- * try, so collapsing them into one flag would make an endless selection loop
- * look exactly like a real refusal.
+ * caller doing adapter selection to treat a failure as an ordinary step rather
+ * than a fault, and a channel with nowhere to put one would lose the frame.
  *
- * A REPLAYER READING `navigator.gpu` NEVER SENDS `UNSUPPORTED`: `requestAdapter()`
- * grants at most one adapter and a canvas that gave up a `webgpu` context can
- * present on it. It exists here because the wire form has to be total, as
- * `DEVICE_TYPE`'s unused four do; `gpu-replay.js` is where the three a browser
- * does send are chosen.
+ * ONE ENTRY, BECAUSE THE COMMAND CARRIES NO ARGUMENTS. A stale surface handle
+ * and an adapter index nothing enumerated were the two things this table used to
+ * spell, and both are now refused by an `impl Instance` against its own tables
+ * without a round trip. "The adapter cannot present to this surface" is not here
+ * either: the command names no adapter and no surface, so it is not an answer
+ * the question has. What is left is the query itself failing, which is
+ * `BACKEND`, and `gpu-replay.js` raises it in exactly one place.
+ *
+ * The table has no holes, so `0x01` — the code `INVALID_HANDLE` had — must be
+ * refused by the far side rather than decoded as a neighbour. That is what pins
+ * these two halves together now that there is only one code to agree on.
  */
 export const SURFACE_CAPS_FAILURE = Object.freeze({
-  UNSUPPORTED: 0x00,
-  INVALID_HANDLE: 0x01,
-  NO_SUCH_ADAPTER: 0x02,
-  BACKEND: 0x03,
+  BACKEND: 0x00,
 });
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -853,9 +853,9 @@ export class ReplyWriter {
    * `cause` is one of {@link SURFACE_CAPS_FAILURE} — the machine-readable half
    * of `reason`, and the field an `impl Instance` turns into the matching
    * `HalError`. It goes through `putU8`, so a code that came out of a misspelled
-   * lookup is `undefined` and refused here rather than written as `0`, which is
-   * `UNSUPPORTED` — the one value that tells a caller to go on to the next
-   * adapter, and therefore the worst possible thing for a mistake to spell.
+   * lookup is `undefined` and refused here rather than written as `0` — which is
+   * `BACKEND`, the one legal code, so a mistake would be indistinguishable from
+   * the intended value on the wire.
    *
    * A REFUSAL IS AN ORDINARY ANSWER, not an error path. `surface_caps` is how
    * adapter selection is done, so a caller asks it about adapters expecting some
