@@ -1685,3 +1685,69 @@ is about duplicated _knowledge_, not duplicated shape.
 - **`fn item(id, label, hint)`** in four `menu.rs` files — not a seam to extract
   but 12 lines of pass-through **to delete**: `crcbl_ui::menu::MenuItem::new`
   already takes `impl Into<String>` and the wrapper adds nothing.
+
+## Structured logging: adopt `tracing` (2026-08-15)
+
+**Queued by the repo owner**, who has therefore already taken the new-dependency
+decision this needs. What follows is the survey, so the slice is planned against
+the tree rather than against an idea of it.
+
+### What logs today
+
+The engine logs through the **`log` facade**, and `crcbl_core::log` supplies the
+sink — a small `log::Log` writing to stderr, with `env_logger`-style filtering
+read from `CRCBL_LOG` and longest-prefix directive matching. Its module doc
+states the reason it is hand-written: "every framework that does more brings a
+runtime, a feature matrix, and opinions about async." That argument is what this
+slice has to answer, not ignore.
+
+Call sites split three ways, and only the first is in scope:
+
+- **`log::{trace,debug,info,warn,error}!` across `crates/` and `apps/`** — this
+  is the migration target. `debug`, `info` and `warn` each carry roughly a
+  hundred call sites; `error` is far fewer and `trace` is used once.
+- **`println!`/`eprintln!` in `crcbl-cli` and the samples' `main.rs`** — this is
+  **program output**, not logging, and it must stay exactly as it is. A CLI that
+  routed its results through a log filter would have `CRCBL_LOG=off` silence the
+  answer the user asked for.
+- **`println!`/`eprintln!` in the e2e harnesses** — test progress, read by the
+  harness scripts. Also out of scope.
+
+### The three questions the slice has to answer first
+
+1. **Does `tracing` replace `crcbl_core::trace`, or sit beside it?** This is the
+   real design question and it is easy to miss. `crcbl_core::trace` already
+   implements spans and counters by hand, with per-thread tracks and a
+   `CRCBL_TRACE` gate, and `crcbl::engine` is instrumented with it end to end —
+   frame, input, tick, draw, present. `tracing`'s spans cover the same ground.
+   Two span systems in one frame is the outcome to avoid; either `tracing`
+   subsumes it or the two get an explicit division of labour written down.
+2. **What happens to `crcbl_core::log::capture`?** It hands a test the records
+   the engine emitted, so a log line that is the only evidence of a decision can
+   be asserted on. It has real consumers across the workspace, and every one of
+   them is a test that goes silently vacuous if the replacement subscriber
+   collects nothing. Whatever replaces it must be shown to fail when the log
+   line is removed.
+3. **How far does the dependency reach?** `tracing` itself is small, but
+   `EnvFilter` — the piece that would replace `CRCBL_LOG` parsing — lives in
+   `tracing-subscriber` and brings more. Some crates here are deliberately
+   dependency-light (`crcbl-sprite` builds with none at all), so "which crates
+   get the facade" is a decision, not a sweep.
+
+### What makes it cheap
+
+`tracing` ships a `log` compatibility layer, so **existing `log::*` call sites
+keep working while the sink moves**. That makes this a two-step slice with a
+green tree in the middle: swap the subscriber first and prove the existing call
+sites still arrive, then convert call sites where a span or structured fields
+buy something. Converting all of them mechanically buys nothing on its own —
+`tracing`'s value is in the fields and the spans, and a `tracing::info!` with
+one interpolated string is a `log::info!` with a longer import.
+
+### Not yet decided
+
+Whether the browser build takes the same path. `crcbl_core::log` queues lines in
+wasm for the page to drain, because `Instant::now` panics on
+`wasm32-unknown-unknown`; the sink's timestamps use `Instant` today. Any
+subscriber that stamps time needs the same treatment, and the browser gate is
+what would catch it not having it.
