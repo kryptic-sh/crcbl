@@ -3,6 +3,49 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### The sweep for test-restated isolation defaults is finished, and three candidates were declined
+
+Every sample was reviewed on 2026-08-16 for the shape horde's `Setup` had: a
+knob that keeps a test off real hardware, defaulting to the production value, so
+that every test restates the test value and a test that forgets it opens an
+audio device or writes to the developer's disk. Two instances were found and
+fixed — horde's `Setup::default`, and the `--headless` that `breakout_null` and
+`sandbox_null` did not pin. What follows is what was looked at and left, so the
+idea does not get re-proposed from scratch.
+
+**`Audio::new(true)`, restated 24 times — declined.**
+`apps/asteroids/src/audio.rs` has 8, `apps/horde/src/audio.rs` 7,
+`apps/flappy/src/audio.rs` 6 and `apps/breakout/src/audio.rs` 3, none behind a
+per-file helper. It is repetition, but not this shape: `headless` is a
+**required positional argument** to `Audio::new`, so no default is fighting
+anyone and a test cannot forget it, only actively type `false`. There is no
+silent path to a device. Wrapping it in a per-file helper would be churn for
+symmetry.
+
+**`crcbl::args::Common`'s `headless: false` — must not be flipped.** It looks
+like the horde case and is the opposite of it. `Common::consume` parses by
+mutating a default-constructed `Common` — `"--headless" => self.headless = true`
+— so production genuinely depends on the `false`, and `crcbl::args`'s own tests
+already assert the default is windowed. The test-side restatement it would
+otherwise cause is already absorbed: every app with a loop has a
+`headless(frames)` helper in its `src/app.rs`, so each app states it once. The
+same argument covers `apps/sandbox/src/args.rs::parse` against that app's
+`Options::default`.
+
+**horde's `Setup::workers: None` — declined.** It is the production value
+sitting in a default, and it does hand every horde unit test a machine-wide
+thread pool. But no test site overrides it, so nothing is being fought, and a
+pool is not a device or a file. Revisit only if the pool starts costing suite
+time.
+
+Apps confirmed to have none of the shape, so nobody need look again:
+`asteroids`, `flappy` and `breakout`'s in-crate `game.rs` tests all funnel
+through a single `Harness::new` that passes `headless` once; `hud` and `lumen`
+have no audio, score file or headless knob in their game code; `sim`'s binary
+has no shell, audio or store, so its e2e helper needs no isolation flag at all.
+`crcbl-shell`'s `WindowDesc::default` has `visible: true`, but its callers are
+either real window creation or e2e suites whose point is a real window.
+
 ### Counted claims in doc comments have not been swept, only spot-fixed
 
 `CLAUDE.md`'s rule is that a count of code elements — "four impls", "the three
