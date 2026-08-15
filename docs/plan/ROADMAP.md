@@ -2115,10 +2115,29 @@ something trusted, and in a browser the only trusted renderer today is
      dumping a stream. One command per encoding shape, not the whole surface. It
      corrected the spec in five places, the load-bearing one being that a nibble
      per family never fitted the HAL.
-   - 4b — the JS replayer, `BackendKind`, and the `Instance` implementation.
-     Needs a new `BackendKind` variant so the new backend and `crcbl-wgpu` can
-     be selected apart during the transition, which is a HAL change with callers
-     to update.
+   - ~~4b — the JS decoder, kept honest by a committed fixture.~~ — **shipped.**
+     Writing the second implementation found three defects in the first, the
+     worst being an element cap no test could fail on.
+   - ~~4c — the transport, wasm to JS.~~ — **shipped**, and linked into the
+     umbrella on wasm32 so the export contract is checked by the browser gate
+     rather than by a crate no page builds in.
+   - ~~4d — the reply channel, JS to wasm.~~ — **shipped.** Replies are a stream
+     of the same shape with their own magic; each names the command it answers,
+     and a reply nothing waits on refuses the whole buffer.
+   - ~~4e — `BackendKind::WebGpu`.~~ — **shipped.** `from_name` had been
+     aliasing `"webgpu"` to `wgpu`, so this had to land alone: left in place,
+     every `CRCBL_GPU=webgpu` run would have opened wgpu and reported success.
+     Asking for it now fails loudly and never falls back.
+   - ~~4f — the adapter round trip.~~ — **shipped.** wasm asks, JS calls
+     `navigator.gpu`, the answer returns a frame later named by its sequence.
+     Group G of the browser gate compares the name wasm received against what
+     the same page is told, with a named guard so the group cannot silently stop
+     running.
+   - 4g — the rest of `AdapterInfo` on the wire, a frame loop the backend owns
+     rather than borrowing from `demo.js`, `request_device` with
+     `PendingDevice::poll`, and `create_surface` for `SurfaceTarget::Web`. Those
+     four are what stand between here and `crcbl::backend` accepting `webgpu`.
+     The probe module and its exports are deleted at that point.
 5. Buffers, textures, samplers, bind groups.
 6. Pipelines and WGSL modules — the artifacts are already committed and already
    validated.
