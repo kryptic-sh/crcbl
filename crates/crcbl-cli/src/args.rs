@@ -350,11 +350,13 @@ pub enum Target {
     /// This machine. The default.
     #[default]
     Native,
-    /// The wasm/Pages bundle, which lands at P5.
+    /// The wasm/Pages bundle, which `web/build.sh` builds and this does not.
     ///
-    /// Recognized so it can be *refused* with a phase rather than an "unknown
-    /// target" — the difference between "not yet" and "never" matters to
-    /// someone reading a CI log.
+    /// Recognized so it can be *refused* by name, pointing at the script that
+    /// assembles the bundle, rather than as an "unknown target" — the
+    /// difference between "wrong tool" and "typo" matters to someone reading a
+    /// CI log. See [`crate::cargo`]'s module docs for why it is not just a
+    /// `cargo build` with a `--target` flag.
     Wasm,
 }
 
@@ -424,7 +426,7 @@ pub enum LodAction {
     ///
     /// Recognized so it can be *refused* with a reason rather than as an
     /// unknown subcommand — the difference between "not yet" and "never", the
-    /// same distinction [`Target::Wasm`] is parsed to make.
+    /// same distinction [`Target::Wasm`] is parsed to make about "wrong tool".
     Preview,
 }
 
@@ -1281,8 +1283,9 @@ mod tests {
         );
     }
 
-    /// wasm is P5, and the difference between "unknown" and "not yet" is the
-    /// difference between a typo and a roadmap.
+    /// The difference between "unknown target" and "wrong tool" is the
+    /// difference between a typo and a signpost, so `wasm` parses and is
+    /// refused downstream — see [`crate::cargo`].
     #[test]
     fn wasm_is_a_recognized_target_and_anything_else_is_not() {
         let Command::Build(args) = command(&["build", "--target", "wasm"]) else {

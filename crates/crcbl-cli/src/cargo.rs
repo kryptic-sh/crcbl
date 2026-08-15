@@ -13,14 +13,23 @@
 //! this binary was itself started by Cargo, so a `cargo +nightly` or a rustup
 //! shim does not get lost on the way down.
 //!
-//! # Decision: `--target wasm` fails, and says which phase
+//! # Decision: `--target wasm` fails, and names what to run instead
 //!
-//! `docs/plan/10-wasm-webgpu.md` is P5. The flag is nevertheless *recognized*
-//! here, because "unknown target `wasm`" and "the wasm target lands at P5" send
-//! a reader to two different places — one to check the spelling, the other to
-//! the roadmap. It exits 1 (the command could not be carried out), not 2 (the
-//! invocation was fine), and `--json` carries `"phase": "P5"` so a script can
-//! branch on it without matching prose.
+//! P5 has shipped and six samples deploy to Pages, so the refusal is no longer
+//! "not yet" — it is that **a browser bundle is not a `cargo build`**. Getting
+//! one means `cargo build --target wasm32-unknown-unknown`, then a
+//! `wasm-bindgen` whose version has to match the crate the build resolved, then
+//! the shim, the shader artifacts and the site layout. `web/build.sh` is that
+//! pipeline and is what CI runs; a `crcbl build --target wasm` that shelled out
+//! to Cargo alone would exit 0 having produced something no page can load,
+//! which is the one outcome worse than refusing.
+//!
+//! The flag stays *recognized*, because "unknown target `wasm`" and "use
+//! `web/build.sh`" send a reader to two different places — one to check the
+//! spelling, the other to the tool that does the job. It exits 1 (the command
+//! could not be carried out), not 2 (the invocation was fine), and `--json`
+//! carries `"use": "web/build.sh"` so a script can branch on it without
+//! matching prose.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -77,10 +86,11 @@ pub fn run(args: &RunArgs) -> Result<Outcome, Failure> {
 pub fn build(args: &BuildArgs) -> Result<Outcome, Failure> {
     if args.target == Target::Wasm {
         return Err(Failure::new(
-            "the wasm target lands at P5; `crcbl build --target wasm` does nothing until then",
+            "a browser bundle is not a cargo build: run `web/build.sh`, which pairs the \
+             wasm32 build with the matching wasm-bindgen, the shim and the site layout",
         )
         .with("target", Json::string("wasm"))
-        .with("phase", Json::string("P5")));
+        .with("use", Json::string("web/build.sh")));
     }
 
     let manifest = locate_manifest()?;
@@ -226,18 +236,38 @@ mod tests {
         );
     }
 
+    /// The refusal has to name the tool that *does* the job, not a phase.
+    ///
+    /// It used to say "the wasm target lands at P5", which stopped being true
+    /// when P5 shipped and six samples started deploying to Pages — a refusal
+    /// whose stated reason has expired reads as a bug in the CLI rather than a
+    /// signpost. The machine-readable half is asserted too, because a script
+    /// branching on `--json` is the caller least able to notice prose drift.
     #[test]
-    fn the_wasm_target_is_refused_with_a_phase() {
+    fn the_wasm_target_is_refused_and_points_at_the_bundle_script() {
         let failure = build(&BuildArgs {
             target: Target::Wasm,
             package: None,
             release: false,
             json: false,
         })
-        .expect_err("wasm is P5");
-        assert!(failure.message.contains("P5"), "{}", failure.message);
+        .expect_err("a browser bundle is not a cargo build");
+        assert!(
+            failure.message.contains("web/build.sh"),
+            "{}",
+            failure.message
+        );
+        assert!(
+            !failure.message.contains("P5"),
+            "the refusal must not name a phase that has shipped: {}",
+            failure.message
+        );
         assert_eq!(failure.code, crate::report::EXIT_FAILED);
-        assert!(failure.json.contains(&("phase", Json::string("P5"))));
+        assert!(
+            failure
+                .json
+                .contains(&("use", Json::string("web/build.sh")))
+        );
     }
 
     #[test]

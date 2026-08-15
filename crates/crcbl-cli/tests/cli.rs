@@ -259,10 +259,15 @@ fn json_output_is_one_object_per_invocation() {
     assert!(json.contains(r#""files":["Cargo.toml""#), "{json}");
 }
 
-/// wasm is P5. The refusal is machine-readable, so a CI job can tell "not yet"
-/// from "your flag is wrong" without matching prose.
+/// A browser bundle is `web/build.sh`'s, not `cargo build`'s. The refusal is
+/// machine-readable, so a CI job can tell "wrong tool" from "your flag is
+/// wrong" without matching prose.
+///
+/// This used to assert the refusal named phase P5. P5 shipped, so the assertion
+/// is now the other way round: the message must **not** name a phase, because a
+/// refusal whose stated reason has expired reads as a bug in the CLI.
 #[test]
-fn building_for_wasm_fails_cleanly_with_a_phase() {
+fn building_for_wasm_points_at_the_bundle_script() {
     let temporary = TempDir::new("wasm");
     let output = crcbl(temporary.path(), &["build", "--target", "wasm", "--json"]);
     assert_eq!(code(&output), 1, "a well-formed request that cannot be met");
@@ -271,15 +276,22 @@ fn building_for_wasm_fails_cleanly_with_a_phase() {
         json.starts_with(r#"{"ok":false,"command":"build""#),
         "{json}"
     );
-    assert!(has_field(&json, "phase", r#""P5""#), "{json}");
-    assert!(json.contains("P5"), "the human message names the phase too");
+    assert!(has_field(&json, "use", r#""web/build.sh""#), "{json}");
+    assert!(
+        json.contains("web/build.sh"),
+        "the human message names the script too: {json}"
+    );
+    assert!(
+        !json.contains("P5"),
+        "no expired phase in the refusal: {json}"
+    );
 
     // Without `--json` the same refusal goes to stderr and stdout stays clean,
     // so a shell pipeline is never fed an error message as data.
     let output = crcbl(temporary.path(), &["build", "--target", "wasm"]);
     assert_eq!(code(&output), 1);
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("P5"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("web/build.sh"));
 }
 
 /// The "never required" half of the no-prompt rule: with no terminal to ask,
