@@ -19,6 +19,27 @@ and never runs its second iteration, and the backend cannot be what gates that
 loop. Vulkan is. Worth knowing before anyone reads a green browser gate as
 covering it.
 
+### `SurfaceCaps`'s command names two ids that no round trip can validate
+
+`Command::SurfaceCaps { surface, adapter }` and the `InvalidHandle` /
+`NoSuchAdapter` causes on `Reply::SurfaceCapsFailed` are due to be retired, and
+`ROADMAP.md`'s slice 4i carries the reasoning. The short form: the record
+depends on neither id — `getPreferredCanvasFormat()` is a method on `GPU` and
+takes no canvas — so an impl validates both against its own tables without
+asking anyone, and the wire carries a query with no arguments. `Backend` stays
+as a cause; the other three do not.
+
+Left in place rather than removed now, because removing them before the impl
+exists would leave the gate's group I with nothing to drive and no replacement.
+They go in the same slice as `impl Instance`, so there is never a tree with two
+ways to ask.
+
+**Group I loses one of its four checks when that happens** — the one that drives
+a dead surface handle and expects `InvalidHandle` back. What replaces it is a
+local refusal with no wire involvement, which is a unit test rather than a
+browser check. Worth saying out loud so the count dropping is not read as
+coverage quietly going missing.
+
 ### The replayer's surface table is keyed on a handle's index and ignores its generation
 
 `Replayer`'s `#surfaces` in `web/engine/gpu-replay.js` maps a surface handle's

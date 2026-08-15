@@ -2141,10 +2141,46 @@ something trusted, and in a browser the only trusted renderer today is
      `Offscreen` was decided along the way: it gets its own command rather than
      a reserved canvas id, because a magic number both decoders had to agree on
      is worse than a second opcode.
-   - 4h — a frame loop the backend owns rather than borrowing from `demo.js`,
-     and then `impl Instance`, `impl PendingDevice` and `impl Device`. That is
-     what stands between here and `crcbl::backend` accepting `webgpu`. The probe
-     module and its exports are deleted at that point.
+   - ~~4h — one place drains the stream, and `surface_caps` on the wire.~~ —
+     **shipped.** `demo.js`'s frame loop is the only drain, replay and delivery;
+     the probe encodes and reads state and does neither. Group I of the gate
+     holds the capabilities wasm received against the format the same page gets
+     from `getPreferredCanvasFormat()`, and a query naming a dead surface comes
+     back as a refusal rather than a thrown frame.
+   - 4i — `impl Instance`, `impl PendingDevice`, `impl Device`, and a loop the
+     backend owns rather than `demo.js`'s. That is what stands between here and
+     `crcbl::backend` accepting `webgpu`. The probe module and its exports are
+     deleted at that point.
+
+     **Where `surface_caps`'s answer waits is decided, and it costs part of
+     4h.** `GpuContext::start_device` calls `create_surface` and then
+     `surface_caps` on the next line, inside one `PendingGpuContext::poll`, with
+     no yield between them — so there is no frame boundary to hide a round trip
+     in, and no "prefetch at `create_surface` time" either. Nor can the wait be
+     spelled as an `Err`: that loop advances to the next adapter on one, and a
+     browser has exactly one, so the open would fail permanently with the stage
+     left `Done`.
+
+     The answer is the shape that already covers `Instance::adapters`, which is
+     synchronous over a `requestAdapter` promise: **the instance is what
+     waits.** Its future fetches the record before handing over the
+     `Box<dyn Instance>`, and `surface_caps` answers from it — which is also
+     what `crcbl-wgpu` does with its `adapters` vector, and what `crcbl-mtl` and
+     `crcbl-dx12` do with constants and one live extent read. Only Vulkan
+     queries a driver per call.
+
+     This works because the record depends on **neither the surface nor the
+     adapter**: `getPreferredCanvasFormat()` is a method on `GPU`, taking no
+     canvas, and the rest of `SurfaceCaps` is fixed for a canvas.
+     `gpu-replay.js`'s `surfaceCapsFor(gpu)` already takes only the `GPU` and
+     says the adapter is validated and otherwise unused.
+
+     So `Command::SurfaceCaps` should carry no ids. The `surface` and `adapter`
+     it names today are exactly the two things an impl validates locally without
+     asking anyone, which also retires the `InvalidHandle` and `NoSuchAdapter`
+     causes from the wire — they become local refusals. `Backend` stays. Doing
+     that in the same slice as the impl, rather than leaving two ways to ask.
+
 5. Buffers, textures, samplers, bind groups.
 6. Pipelines and WGSL modules — the artifacts are already committed and already
    validated.
