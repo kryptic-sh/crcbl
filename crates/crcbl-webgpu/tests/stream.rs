@@ -178,6 +178,37 @@ fn a_surface_carries_its_canvas_key_as_well_as_its_handle() {
     );
 }
 
+/// **The surface and the adapter id are two ids and not one**, and they are the
+/// pair a hand-written decoder most easily reads the other way round: the HAL
+/// call takes them surface-then-adapter, and a second implementation of this
+/// format is free to guess the opposite.
+///
+/// The values are chosen so a swap cannot compare equal — the adapter id is
+/// neither half of the surface handle — and the second command is there because
+/// the two ids differ in width, so reading them the wrong way round does not
+/// merely transpose them: it leaves the cursor four bytes out and turns the next
+/// command into noise. That is what the `EnumerateAdapters` after it detects.
+#[test]
+fn a_surface_capability_query_carries_its_surface_and_its_adapter_that_way_round() {
+    let surface = handle(63, 64);
+    let adapter = AdapterId(65);
+    let mut stream = StreamWriter::new();
+    stream.surface_caps(surface, adapter);
+    stream.enumerate_adapters();
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![
+            Command::SurfaceCaps { surface, adapter },
+            Command::EnumerateAdapters,
+        ])
+    );
+    assert!(
+        ![surface.index(), surface.generation()].contains(&adapter.0),
+        "the test would not notice the adapter id written over a handle half otherwise"
+    );
+}
+
 /// The replayer's obligation seen from the decoder's side: the decode consults
 /// no table, so a destroy naming an id nothing created is a well-formed command
 /// rather than corruption. The replayer turns it into a no-op.
@@ -276,7 +307,7 @@ fn every_command_has_its_own_name() {
     // `every_command` holds three CreateBuffers and two each of
     // BeginRenderPass, BindGroup and RequestDevice, so the distinct-name count
     // is what the writer has methods for.
-    assert_eq!(names.len(), 12);
+    assert_eq!(names.len(), 13);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

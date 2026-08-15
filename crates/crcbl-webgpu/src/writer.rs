@@ -3,9 +3,9 @@
 use core::ops::Range;
 
 use crcbl_hal::{
-    BindGroupHandle, BufferDesc, BufferHandle, ClearValue, ColorAttachment, DepthStencilAttachment,
-    DeviceDesc, GraphicsPipelineHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, ShaderStages,
-    SurfaceHandle,
+    AdapterId, BindGroupHandle, BufferDesc, BufferHandle, ClearValue, ColorAttachment,
+    DepthStencilAttachment, DeviceDesc, GraphicsPipelineHandle, PipelineLayoutHandle, Rect2d,
+    RenderPassDesc, ShaderStages, SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -328,6 +328,26 @@ impl StreamWriter {
         self.bytes.put_u64(desc.required_features.bits());
         self.bytes.put_u64(desc.optional_features.bits());
         self.bytes.put_opt_handle(desc.compatible_surface);
+        sequence
+    }
+
+    /// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps).
+    ///
+    /// The third command whose answer comes back, and it goes through
+    /// [`StreamChannel::encode_awaited`](crate::web::StreamChannel::encode_awaited)
+    /// for [`enumerate_adapters`](Self::enumerate_adapters)'s reason: something
+    /// has to be waiting on the returned sequence before the frame ends, or the
+    /// [`Reply::SurfaceCaps`](crate::Reply::SurfaceCaps) naming it is refused as
+    /// an answer to a command nobody asked — and refused for the whole buffer.
+    ///
+    /// **Both arguments in the order the HAL call takes them**, surface then
+    /// adapter, so the two cannot drift apart unnoticed; see
+    /// [`bind_group`](Self::bind_group) for the same discipline applied to the
+    /// argument that is easiest to drop.
+    pub fn surface_caps(&mut self, surface: SurfaceHandle, adapter: AdapterId) -> u64 {
+        let sequence = self.push_tag(tag::SURFACE_CAPS_TAG);
+        self.bytes.put_handle(surface);
+        self.bytes.put_u32(adapter.0);
         sequence
     }
 

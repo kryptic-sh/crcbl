@@ -14,7 +14,10 @@
 mod corpus;
 mod replies;
 
-use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
+use crcbl_hal::{
+    AdapterId, AdapterInfo, BackendKind, CompositeAlpha, DeviceCaps, DeviceType, Features, Format,
+    Limits, PresentMode, SurfaceCaps,
+};
 use crcbl_webgpu::{DecodeError, Reply, ReplyReader, ReplyWriter, decode_replies, tag};
 
 use corpus::handle;
@@ -121,9 +124,9 @@ fn every_reply_has_its_own_name() {
     names.sort_unstable();
     names.dedup();
     // The corpus holds two of several shapes — Adapters, NoAdapters, Devices,
-    // DeviceFaileds, ReadbackReadys, QueryResults — so the distinct-name count
-    // is what the writer has methods for.
-    assert_eq!(names.len(), 7);
+    // DeviceFaileds, ReadbackReadys, QueryResults — and three SurfaceCaps, so
+    // the distinct-name count is what the writer has methods for.
+    assert_eq!(names.len(), 8);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 
@@ -628,6 +631,254 @@ fn a_device_failures_missing_features_are_refused_when_a_bit_is_unclaimed() {
         Err(DecodeError::InvalidEnum {
             field: "DeviceFailed::unsupported",
             code: unclaimed,
+        })
+    );
+}
+
+// ── The surface-capability record ─────────────────────────────────────────────
+
+/// A capability record whose three lists are three **different** lengths.
+///
+/// Equal lengths are how a decoder that read one list's count and walked
+/// another's still passes — and equal is what a browser's own answer looks like,
+/// so it is not a shape a realistic corpus reaches by itself.
+fn caps() -> SurfaceCaps {
+    SurfaceCaps {
+        formats: vec![
+            Format::Bgra8UnormSrgb,
+            Format::Rgba16Float,
+            Format::Bc7RgbaUnormSrgb,
+        ],
+        present_modes: vec![
+            PresentMode::Fifo,
+            PresentMode::FifoRelaxed,
+            PresentMode::Mailbox,
+            PresentMode::Immediate,
+        ],
+        composite_alpha: vec![CompositeAlpha::Opaque, CompositeAlpha::Inherit],
+        min_image_count: 2,
+        max_image_count: 8,
+        current_extent: Some((1920, 1080)),
+    }
+}
+
+/// Where the first code byte of each of [`caps`]'s three lists sits, counted
+/// from the start of a buffer holding one surface-capability reply and nothing
+/// else.
+///
+/// Computed from the field widths rather than written as numbers, so it follows
+/// the encoding instead of having to be re-derived when a field moves: the
+/// header, the tag and sequence, then each list's `u32` count followed by one
+/// byte per element.
+fn list_offsets(caps: &SurfaceCaps) -> [usize; 3] {
+    let formats = tag::REPLY_HEADER_BYTES + 1 + 8 + 4;
+    let present_modes = formats + caps.formats.len() + 4;
+    let composite_alpha = present_modes + caps.present_modes.len() + 4;
+    [formats, present_modes, composite_alpha]
+}
+
+/// One reply carrying `caps`, as bytes.
+fn encoded_caps(caps: &SurfaceCaps) -> Vec<u8> {
+    let mut replies = ReplyWriter::new();
+    replies.surface_caps(8, caps);
+    replies.bytes().to_vec()
+}
+
+/// **Every field of [`SurfaceCaps`] survives, one at a time.**
+///
+/// The corpus covers the record as a whole; this moves each field off a baseline
+/// on its own, so a writer that dropped one — or wrote two in the wrong order —
+/// names the field rather than showing a byte offset. Driven off a baseline
+/// rather than by comparing two presets for
+/// [`each_limits_field_survives_a_round_trip_on_its_own`]'s reason.
+#[test]
+fn each_surface_caps_field_survives_a_round_trip_on_its_own() {
+    let base = caps();
+    let mutations: Vec<(&str, Mutate<SurfaceCaps>)> = vec![
+        ("formats", |c| c.formats = vec![Format::R8Unorm]),
+        ("formats empty", |c| c.formats = Vec::new()),
+        ("formats all", |c| c.formats = Format::ALL.to_vec()),
+        ("present_modes", |c| {
+            c.present_modes = vec![PresentMode::Mailbox];
+        }),
+        ("present_modes empty", |c| c.present_modes = Vec::new()),
+        ("composite_alpha", |c| {
+            c.composite_alpha = vec![CompositeAlpha::PreMultiplied];
+        }),
+        ("composite_alpha empty", |c| {
+            c.composite_alpha = Vec::new();
+        }),
+        ("min_image_count", |c| c.min_image_count = 3),
+        ("max_image_count", |c| c.max_image_count = 16),
+        ("current_extent", |c| {
+            c.current_extent = Some((1280, 720));
+        }),
+        ("current_extent absent", |c| c.current_extent = None),
+        ("current_extent zero", |c| {
+            c.current_extent = Some((0, 0));
+        }),
+    ];
+    // One row per field, plus the spare shapes each list and the extent have.
+    assert_eq!(mutations.len(), 12, "a SurfaceCaps field has no row here");
+
+    for (what, mutate) in mutations {
+        let mut caps = base.clone();
+        mutate(&mut caps);
+        assert_ne!(caps, base, "{what} did not change anything");
+
+        assert_eq!(
+            decode_replies(&encoded_caps(&caps)),
+            Ok(vec![(8, Reply::SurfaceCaps { caps })]),
+            "{what}"
+        );
+    }
+}
+
+/// **The three lists are read by their own counts, in their own order.**
+///
+/// A decoder that walked the wrong count would still decode a record whose lists
+/// happened to be the same length, so the baseline's are 3, 4 and 2 — and the
+/// order inside `formats` is a value rather than a presentation detail, since
+/// [`SurfaceCaps::preferred_format`] documents the list as best first.
+#[test]
+fn each_list_keeps_its_own_length_and_its_own_order() {
+    let caps = caps();
+    let lengths = (
+        caps.formats.len(),
+        caps.present_modes.len(),
+        caps.composite_alpha.len(),
+    );
+    assert_eq!(
+        lengths,
+        (3, 4, 2),
+        "the lists must differ in length or a swapped count still decodes"
+    );
+
+    let decoded = decode_replies(&encoded_caps(&caps)).expect("a buffer this crate wrote decodes");
+    let [(_, Reply::SurfaceCaps { caps: back })] = decoded.as_slice() else {
+        panic!("one surface-capability reply, and it is one");
+    };
+    assert_eq!(back, &caps);
+
+    // Reversed, so the record differs only in the order of one list — which is
+    // what a decoder rebuilding a list from a set would lose.
+    let mut reversed = caps.clone();
+    reversed.formats.reverse();
+    assert_ne!(
+        reversed.formats, caps.formats,
+        "the list is not a palindrome"
+    );
+    let decoded =
+        decode_replies(&encoded_caps(&reversed)).expect("a buffer this crate wrote decodes");
+    assert_eq!(decoded, vec![(8, Reply::SurfaceCaps { caps: reversed })]);
+}
+
+/// **An absent extent cannot be spelled by any present one.**
+///
+/// `None` is a presence byte with nothing behind it, so it is one byte shorter
+/// than every `Some` — including `Some((0, 0))`, which is a real size an
+/// unconfigured or minimised window reports and the reason no sentinel would do.
+/// The Vulkan "no opinion" value is the other reason, and
+/// [`SurfaceCaps::current_extent`] says a backend must map it to `None` rather
+/// than let it into the seam; here it is simply a very large window.
+#[test]
+fn an_absent_extent_is_not_a_zero_one_and_not_a_sentinel() {
+    let absent = SurfaceCaps {
+        current_extent: None,
+        ..caps()
+    };
+    let zero = SurfaceCaps {
+        current_extent: Some((0, 0)),
+        ..caps()
+    };
+    let sentinel = SurfaceCaps {
+        current_extent: Some((u32::MAX, u32::MAX)),
+        ..caps()
+    };
+
+    let absent_bytes = encoded_caps(&absent);
+    let zero_bytes = encoded_caps(&zero);
+    assert_ne!(absent_bytes, zero_bytes);
+    assert_eq!(
+        absent_bytes.len() + 8,
+        zero_bytes.len(),
+        "absent is the presence byte alone; present is that byte and two u32s"
+    );
+
+    for caps in [absent, zero, sentinel] {
+        assert_eq!(
+            decode_replies(&encoded_caps(&caps)),
+            Ok(vec![(8, Reply::SurfaceCaps { caps })])
+        );
+    }
+}
+
+/// The extent's presence byte is refused when it is neither canonical value —
+/// the house rule, and what stops a corrupt byte being read as "present" and
+/// swallowing the next two fields.
+#[test]
+fn an_extent_presence_byte_that_is_neither_value_is_refused_rather_than_read_as_truthy() {
+    let caps = caps();
+    let mut bytes = encoded_caps(&caps);
+    // The two image counts sit between the last list and the presence byte.
+    let at = list_offsets(&caps)[2] + caps.composite_alpha.len() + 4 + 4;
+    assert_eq!(bytes[at], 1, "the offset must land on the presence byte");
+
+    bytes[at] = 2;
+    assert_eq!(
+        decode_replies(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "SurfaceCaps::current_extent",
+            code: 2,
+        })
+    );
+}
+
+/// **A code no variant claims is an error in every one of the three lists**, and
+/// each names its own list.
+///
+/// Never a plausible neighbour: `Bgra8Unorm` and `Bgra8UnormSrgb` are adjacent
+/// codes that differ only in colour space, `Fifo` is the mode every surface is
+/// promised to have, and the two multiplied alpha modes are adjacent and mean
+/// opposite things. Each of those is what a table drifted by one would answer.
+#[test]
+fn an_unclaimed_code_in_any_of_the_three_lists_is_refused_rather_than_folded_into_a_neighbour() {
+    let caps = caps();
+    let fields = [
+        "SurfaceCaps::formats",
+        "SurfaceCaps::present_modes",
+        "SurfaceCaps::composite_alpha",
+    ];
+    for (field, at) in fields.iter().zip(list_offsets(&caps)) {
+        for code in [0x7F, 0xFF] {
+            let mut bytes = encoded_caps(&caps);
+            bytes[at] = code;
+            assert_eq!(
+                decode_replies(&bytes),
+                Err(DecodeError::InvalidEnum {
+                    field,
+                    code: u64::from(code),
+                }),
+                "{field} at {at}"
+            );
+        }
+    }
+}
+
+/// A count past the cap is refused rather than allocated for, in the list whose
+/// elements are one byte each — where the cap and "more elements than bytes
+/// left" are the two bounds `read_count` applies.
+#[test]
+fn a_surface_caps_list_count_past_the_cap_is_refused() {
+    let mut replies = header();
+    replies.push(tag::SURFACE_CAPS_REPLY_TAG);
+    replies.extend_from_slice(&3u64.to_le_bytes());
+    replies.extend_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        decode_replies(&replies),
+        Err(DecodeError::InvalidLength {
+            field: "SurfaceCaps::formats",
+            len: u32::MAX,
         })
     );
 }

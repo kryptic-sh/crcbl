@@ -8,7 +8,7 @@
 //! # The tags are ours, not the compiler's
 //!
 //! None of the HAL enums carries `#[repr(u8)]` or explicit discriminants, so
-//! `as u8` would encode *declaration order* — and [`Format`](crcbl_hal::Format)
+//! `as u8` would encode *declaration order* — and [`Format`]
 //! is deliberately not `#[non_exhaustive]`, so a variant may be inserted in the
 //! middle. That silently renumbers every code after the insertion point, and the
 //! failure lands in a decoder on the other side of a language boundary where
@@ -23,7 +23,7 @@
 //! [`ShaderStages`](crcbl_hal::ShaderStages) declare each bit as an explicit
 //! `1 << n`, so `bits()` is already a chosen wire value rather than a position.
 
-use crcbl_hal::{DeviceType, LoadOp, MemoryLocation, StoreOp};
+use crcbl_hal::{CompositeAlpha, DeviceType, Format, LoadOp, MemoryLocation, PresentMode, StoreOp};
 
 // ── Header ────────────────────────────────────────────────────────────────────
 
@@ -242,6 +242,14 @@ pub const DRAW_TAG: u8 = 0x60;
 pub const ENUMERATE_ADAPTERS_TAG: u8 = 0x90;
 /// [`Command::RequestDevice`](crate::Command::RequestDevice).
 pub const REQUEST_DEVICE_TAG: u8 = 0x91;
+/// [`Command::SurfaceCaps`](crate::Command::SurfaceCaps).
+///
+/// Written out rather than as `FAMILY_INSTANCE + 2`, which is the form this
+/// constant took once and was reverted from: the table below walks every tag
+/// asserting it falls inside its family's range, and a tag *derived* from the
+/// family base cannot fail that assertion. The check would still run and would
+/// no longer be able to fail.
+pub const SURFACE_CAPS_TAG: u8 = 0x92;
 
 // ── Reply families ────────────────────────────────────────────────────────────
 //
@@ -294,6 +302,13 @@ pub const NO_ADAPTER_REPLY_TAG: u8 = 0x01;
 pub const DEVICE_REPLY_TAG: u8 = 0x02;
 /// [`Reply::DeviceFailed`](crate::Reply::DeviceFailed).
 pub const DEVICE_FAILED_REPLY_TAG: u8 = 0x03;
+/// [`Reply::SurfaceCaps`](crate::Reply::SurfaceCaps).
+///
+/// In the instance family because
+/// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) is the call it
+/// answers, not because a surface is involved: the reply table is grouped by
+/// the family of *call*, exactly as the command table is.
+pub const SURFACE_CAPS_REPLY_TAG: u8 = 0x04;
 /// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending).
 pub const READBACK_PENDING_REPLY_TAG: u8 = 0x10;
 /// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady).
@@ -446,6 +461,242 @@ pub const fn device_type_from_code(code: u8) -> Option<DeviceType> {
     }
 }
 
+// ── Format ────────────────────────────────────────────────────────────────────
+//
+// The largest code table on this seam, and the one this module's header is
+// written about: [`Format`] is deliberately not `#[non_exhaustive]`, so a
+// variant may be inserted *in the middle*, and `as u8` would renumber every code
+// after the insertion point without anything failing to compile. So every code
+// is written out and [`format_code`] is an exhaustive `match` — a variant added
+// to `crcbl-hal` stops this file compiling, which is the moment the number
+// beside it is impossible to miss.
+//
+// The order below is declaration order and the codes are contiguous, which is a
+// convenience for a reader and nothing more: nothing derives one from the other,
+// and a variant inserted in the middle tomorrow takes the *next free* code
+// rather than displacing the ones below it.
+
+/// [`Format::R8Unorm`].
+pub const FORMAT_R8_UNORM: u8 = 0x00;
+/// [`Format::Rg8Unorm`].
+pub const FORMAT_RG8_UNORM: u8 = 0x01;
+/// [`Format::Rgba8Unorm`].
+pub const FORMAT_RGBA8_UNORM: u8 = 0x02;
+/// [`Format::Rgba8UnormSrgb`].
+pub const FORMAT_RGBA8_UNORM_SRGB: u8 = 0x03;
+/// [`Format::Bgra8Unorm`].
+pub const FORMAT_BGRA8_UNORM: u8 = 0x04;
+/// [`Format::Bgra8UnormSrgb`].
+pub const FORMAT_BGRA8_UNORM_SRGB: u8 = 0x05;
+/// [`Format::Rgb10a2Unorm`].
+pub const FORMAT_RGB10A2_UNORM: u8 = 0x06;
+/// [`Format::R11g11b10Float`].
+pub const FORMAT_R11G11B10_FLOAT: u8 = 0x07;
+/// [`Format::R16Float`].
+pub const FORMAT_R16_FLOAT: u8 = 0x08;
+/// [`Format::Rg16Float`].
+pub const FORMAT_RG16_FLOAT: u8 = 0x09;
+/// [`Format::Rgba16Float`].
+pub const FORMAT_RGBA16_FLOAT: u8 = 0x0A;
+/// [`Format::R32Float`].
+pub const FORMAT_R32_FLOAT: u8 = 0x0B;
+/// [`Format::Rg32Float`].
+pub const FORMAT_RG32_FLOAT: u8 = 0x0C;
+/// [`Format::Rgba32Float`].
+pub const FORMAT_RGBA32_FLOAT: u8 = 0x0D;
+/// [`Format::R32Uint`].
+pub const FORMAT_R32_UINT: u8 = 0x0E;
+/// [`Format::Rg32Uint`].
+pub const FORMAT_RG32_UINT: u8 = 0x0F;
+/// [`Format::D32Float`].
+pub const FORMAT_D32_FLOAT: u8 = 0x10;
+/// [`Format::D32FloatS8Uint`].
+pub const FORMAT_D32_FLOAT_S8_UINT: u8 = 0x11;
+/// [`Format::D24UnormS8Uint`].
+pub const FORMAT_D24_UNORM_S8_UINT: u8 = 0x12;
+/// [`Format::D16Unorm`].
+pub const FORMAT_D16_UNORM: u8 = 0x13;
+/// [`Format::Bc1RgbaUnorm`].
+pub const FORMAT_BC1_RGBA_UNORM: u8 = 0x14;
+/// [`Format::Bc1RgbaUnormSrgb`].
+pub const FORMAT_BC1_RGBA_UNORM_SRGB: u8 = 0x15;
+/// [`Format::Bc3RgbaUnorm`].
+pub const FORMAT_BC3_RGBA_UNORM: u8 = 0x16;
+/// [`Format::Bc3RgbaUnormSrgb`].
+pub const FORMAT_BC3_RGBA_UNORM_SRGB: u8 = 0x17;
+/// [`Format::Bc4RUnorm`].
+pub const FORMAT_BC4_R_UNORM: u8 = 0x18;
+/// [`Format::Bc5RgUnorm`].
+pub const FORMAT_BC5_RG_UNORM: u8 = 0x19;
+/// [`Format::Bc6hRgbUfloat`].
+pub const FORMAT_BC6H_RGB_UFLOAT: u8 = 0x1A;
+/// [`Format::Bc7RgbaUnorm`].
+pub const FORMAT_BC7_RGBA_UNORM: u8 = 0x1B;
+/// [`Format::Bc7RgbaUnormSrgb`].
+pub const FORMAT_BC7_RGBA_UNORM_SRGB: u8 = 0x1C;
+
+/// The wire code for a [`Format`].
+#[must_use]
+pub const fn format_code(format: Format) -> u8 {
+    match format {
+        Format::R8Unorm => FORMAT_R8_UNORM,
+        Format::Rg8Unorm => FORMAT_RG8_UNORM,
+        Format::Rgba8Unorm => FORMAT_RGBA8_UNORM,
+        Format::Rgba8UnormSrgb => FORMAT_RGBA8_UNORM_SRGB,
+        Format::Bgra8Unorm => FORMAT_BGRA8_UNORM,
+        Format::Bgra8UnormSrgb => FORMAT_BGRA8_UNORM_SRGB,
+        Format::Rgb10a2Unorm => FORMAT_RGB10A2_UNORM,
+        Format::R11g11b10Float => FORMAT_R11G11B10_FLOAT,
+        Format::R16Float => FORMAT_R16_FLOAT,
+        Format::Rg16Float => FORMAT_RG16_FLOAT,
+        Format::Rgba16Float => FORMAT_RGBA16_FLOAT,
+        Format::R32Float => FORMAT_R32_FLOAT,
+        Format::Rg32Float => FORMAT_RG32_FLOAT,
+        Format::Rgba32Float => FORMAT_RGBA32_FLOAT,
+        Format::R32Uint => FORMAT_R32_UINT,
+        Format::Rg32Uint => FORMAT_RG32_UINT,
+        Format::D32Float => FORMAT_D32_FLOAT,
+        Format::D32FloatS8Uint => FORMAT_D32_FLOAT_S8_UINT,
+        Format::D24UnormS8Uint => FORMAT_D24_UNORM_S8_UINT,
+        Format::D16Unorm => FORMAT_D16_UNORM,
+        Format::Bc1RgbaUnorm => FORMAT_BC1_RGBA_UNORM,
+        Format::Bc1RgbaUnormSrgb => FORMAT_BC1_RGBA_UNORM_SRGB,
+        Format::Bc3RgbaUnorm => FORMAT_BC3_RGBA_UNORM,
+        Format::Bc3RgbaUnormSrgb => FORMAT_BC3_RGBA_UNORM_SRGB,
+        Format::Bc4RUnorm => FORMAT_BC4_R_UNORM,
+        Format::Bc5RgUnorm => FORMAT_BC5_RG_UNORM,
+        Format::Bc6hRgbUfloat => FORMAT_BC6H_RGB_UFLOAT,
+        Format::Bc7RgbaUnorm => FORMAT_BC7_RGBA_UNORM,
+        Format::Bc7RgbaUnormSrgb => FORMAT_BC7_RGBA_UNORM_SRGB,
+    }
+}
+
+/// The [`Format`] a wire code names, or `None` if it names none.
+///
+/// **`None` rather than a nearby variant**, and that is the whole reason this
+/// table exists: a code this build does not claim comes from a build that knows
+/// a format this one does not, and answering with its neighbour would report a
+/// surface as offering `Bgra8Unorm` where the other half said `Bgra8UnormSrgb` —
+/// a colour-space bug three layers down from anything that could name it.
+#[must_use]
+pub const fn format_from_code(code: u8) -> Option<Format> {
+    match code {
+        FORMAT_R8_UNORM => Some(Format::R8Unorm),
+        FORMAT_RG8_UNORM => Some(Format::Rg8Unorm),
+        FORMAT_RGBA8_UNORM => Some(Format::Rgba8Unorm),
+        FORMAT_RGBA8_UNORM_SRGB => Some(Format::Rgba8UnormSrgb),
+        FORMAT_BGRA8_UNORM => Some(Format::Bgra8Unorm),
+        FORMAT_BGRA8_UNORM_SRGB => Some(Format::Bgra8UnormSrgb),
+        FORMAT_RGB10A2_UNORM => Some(Format::Rgb10a2Unorm),
+        FORMAT_R11G11B10_FLOAT => Some(Format::R11g11b10Float),
+        FORMAT_R16_FLOAT => Some(Format::R16Float),
+        FORMAT_RG16_FLOAT => Some(Format::Rg16Float),
+        FORMAT_RGBA16_FLOAT => Some(Format::Rgba16Float),
+        FORMAT_R32_FLOAT => Some(Format::R32Float),
+        FORMAT_RG32_FLOAT => Some(Format::Rg32Float),
+        FORMAT_RGBA32_FLOAT => Some(Format::Rgba32Float),
+        FORMAT_R32_UINT => Some(Format::R32Uint),
+        FORMAT_RG32_UINT => Some(Format::Rg32Uint),
+        FORMAT_D32_FLOAT => Some(Format::D32Float),
+        FORMAT_D32_FLOAT_S8_UINT => Some(Format::D32FloatS8Uint),
+        FORMAT_D24_UNORM_S8_UINT => Some(Format::D24UnormS8Uint),
+        FORMAT_D16_UNORM => Some(Format::D16Unorm),
+        FORMAT_BC1_RGBA_UNORM => Some(Format::Bc1RgbaUnorm),
+        FORMAT_BC1_RGBA_UNORM_SRGB => Some(Format::Bc1RgbaUnormSrgb),
+        FORMAT_BC3_RGBA_UNORM => Some(Format::Bc3RgbaUnorm),
+        FORMAT_BC3_RGBA_UNORM_SRGB => Some(Format::Bc3RgbaUnormSrgb),
+        FORMAT_BC4_R_UNORM => Some(Format::Bc4RUnorm),
+        FORMAT_BC5_RG_UNORM => Some(Format::Bc5RgUnorm),
+        FORMAT_BC6H_RGB_UFLOAT => Some(Format::Bc6hRgbUfloat),
+        FORMAT_BC7_RGBA_UNORM => Some(Format::Bc7RgbaUnorm),
+        FORMAT_BC7_RGBA_UNORM_SRGB => Some(Format::Bc7RgbaUnormSrgb),
+        _ => None,
+    }
+}
+
+// ── PresentMode ───────────────────────────────────────────────────────────────
+//
+// **A browser only ever offers [`PRESENT_MODE_FIFO`]** — WebGPU has no present
+// mode at all and its canvas presents at the `requestAnimationFrame` boundary,
+// which is what `Fifo` describes. The other three codes exist because the field
+// is a [`PresentMode`] and a wire form for it must be total: a surface reply
+// written by something that *can* offer them decodes as offering them.
+
+/// [`PresentMode::Fifo`] — and the only one a browser ever produces.
+pub const PRESENT_MODE_FIFO: u8 = 0x00;
+/// [`PresentMode::FifoRelaxed`].
+pub const PRESENT_MODE_FIFO_RELAXED: u8 = 0x01;
+/// [`PresentMode::Mailbox`].
+pub const PRESENT_MODE_MAILBOX: u8 = 0x02;
+/// [`PresentMode::Immediate`].
+pub const PRESENT_MODE_IMMEDIATE: u8 = 0x03;
+
+/// The wire code for a [`PresentMode`].
+#[must_use]
+pub const fn present_mode_code(mode: PresentMode) -> u8 {
+    match mode {
+        PresentMode::Fifo => PRESENT_MODE_FIFO,
+        PresentMode::FifoRelaxed => PRESENT_MODE_FIFO_RELAXED,
+        PresentMode::Mailbox => PRESENT_MODE_MAILBOX,
+        PresentMode::Immediate => PRESENT_MODE_IMMEDIATE,
+    }
+}
+
+/// The [`PresentMode`] a wire code names, or `None` if it names none.
+///
+/// **Never [`PresentMode::Fifo`] as a fallback**, tempting though it is: `Fifo`
+/// is the mode every surface is promised to have, so a drifted table answering
+/// with it would be indistinguishable from a surface that genuinely offers only
+/// that — which is what a browser reports.
+#[must_use]
+pub const fn present_mode_from_code(code: u8) -> Option<PresentMode> {
+    match code {
+        PRESENT_MODE_FIFO => Some(PresentMode::Fifo),
+        PRESENT_MODE_FIFO_RELAXED => Some(PresentMode::FifoRelaxed),
+        PRESENT_MODE_MAILBOX => Some(PresentMode::Mailbox),
+        PRESENT_MODE_IMMEDIATE => Some(PresentMode::Immediate),
+        _ => None,
+    }
+}
+
+// ── CompositeAlpha ────────────────────────────────────────────────────────────
+
+/// [`CompositeAlpha::Opaque`].
+pub const COMPOSITE_ALPHA_OPAQUE: u8 = 0x00;
+/// [`CompositeAlpha::PreMultiplied`].
+pub const COMPOSITE_ALPHA_PRE_MULTIPLIED: u8 = 0x01;
+/// [`CompositeAlpha::PostMultiplied`].
+pub const COMPOSITE_ALPHA_POST_MULTIPLIED: u8 = 0x02;
+/// [`CompositeAlpha::Inherit`].
+pub const COMPOSITE_ALPHA_INHERIT: u8 = 0x03;
+
+/// The wire code for a [`CompositeAlpha`].
+#[must_use]
+pub const fn composite_alpha_code(alpha: CompositeAlpha) -> u8 {
+    match alpha {
+        CompositeAlpha::Opaque => COMPOSITE_ALPHA_OPAQUE,
+        CompositeAlpha::PreMultiplied => COMPOSITE_ALPHA_PRE_MULTIPLIED,
+        CompositeAlpha::PostMultiplied => COMPOSITE_ALPHA_POST_MULTIPLIED,
+        CompositeAlpha::Inherit => COMPOSITE_ALPHA_INHERIT,
+    }
+}
+
+/// The [`CompositeAlpha`] a wire code names, or `None` if it names none.
+///
+/// The two multiplied modes are adjacent codes and mean opposite things about
+/// the colour channels, so folding an unknown code into either is a surface that
+/// composites wrongly and never says why.
+#[must_use]
+pub const fn composite_alpha_from_code(code: u8) -> Option<CompositeAlpha> {
+    match code {
+        COMPOSITE_ALPHA_OPAQUE => Some(CompositeAlpha::Opaque),
+        COMPOSITE_ALPHA_PRE_MULTIPLIED => Some(CompositeAlpha::PreMultiplied),
+        COMPOSITE_ALPHA_POST_MULTIPLIED => Some(CompositeAlpha::PostMultiplied),
+        COMPOSITE_ALPHA_INHERIT => Some(CompositeAlpha::Inherit),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,7 +706,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 12] = [
+    const TAGS: [(&str, u8, u8); 13] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("DestroyBuffer", DESTROY_BUFFER_TAG, FAMILY_DESTROY),
@@ -472,11 +723,12 @@ mod tests {
         ("Draw", DRAW_TAG, FAMILY_DRAW),
         ("EnumerateAdapters", ENUMERATE_ADAPTERS_TAG, FAMILY_INSTANCE),
         ("RequestDevice", REQUEST_DEVICE_TAG, FAMILY_INSTANCE),
+        ("SurfaceCaps", SURFACE_CAPS_TAG, FAMILY_INSTANCE),
     ];
 
     /// Every reply tag this slice defines, with the family its name claims.
     /// Spelled out for the reason [`TAGS`] is.
-    const REPLY_TAGS: [(&str, u8, u8); 7] = [
+    const REPLY_TAGS: [(&str, u8, u8); 8] = [
         ("Adapter", ADAPTER_REPLY_TAG, REPLY_FAMILY_INSTANCE),
         ("NoAdapter", NO_ADAPTER_REPLY_TAG, REPLY_FAMILY_INSTANCE),
         ("Device", DEVICE_REPLY_TAG, REPLY_FAMILY_INSTANCE),
@@ -485,6 +737,7 @@ mod tests {
             DEVICE_FAILED_REPLY_TAG,
             REPLY_FAMILY_INSTANCE,
         ),
+        ("SurfaceCaps", SURFACE_CAPS_REPLY_TAG, REPLY_FAMILY_INSTANCE),
         (
             "ReadbackPending",
             READBACK_PENDING_REPLY_TAG,
@@ -633,6 +886,53 @@ mod tests {
         for kind in device_type {
             assert_eq!(device_type_from_code(device_type_code(kind)), Some(kind));
         }
+
+        // Driven off `Format::ALL` rather than a list written out again here:
+        // `crcbl-hal` keeps that list because its own backends need it, and a
+        // second copy in this crate would be a second place to forget a variant.
+        // What forces a *code* to exist is `format_code`'s exhaustive `match`;
+        // what this checks is that no two of them collide and that the reverse
+        // table agrees.
+        let codes: Vec<u8> = Format::ALL.iter().map(|f| format_code(*f)).collect();
+        assert_eq!(distinct(&codes), codes.len(), "two Formats share a code");
+        for format in Format::ALL {
+            assert_eq!(format_from_code(format_code(*format)), Some(*format));
+        }
+
+        let present = [
+            PresentMode::Fifo,
+            PresentMode::FifoRelaxed,
+            PresentMode::Mailbox,
+            PresentMode::Immediate,
+        ];
+        let codes: Vec<u8> = present.iter().map(|m| present_mode_code(*m)).collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two PresentModes share a code"
+        );
+        for mode in present {
+            assert_eq!(present_mode_from_code(present_mode_code(mode)), Some(mode));
+        }
+
+        let alpha = [
+            CompositeAlpha::Opaque,
+            CompositeAlpha::PreMultiplied,
+            CompositeAlpha::PostMultiplied,
+            CompositeAlpha::Inherit,
+        ];
+        let codes: Vec<u8> = alpha.iter().map(|a| composite_alpha_code(*a)).collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two CompositeAlphas share a code"
+        );
+        for mode in alpha {
+            assert_eq!(
+                composite_alpha_from_code(composite_alpha_code(mode)),
+                Some(mode)
+            );
+        }
     }
 
     #[test]
@@ -641,9 +941,15 @@ mod tests {
         assert_eq!(store_op_from_code(0xFF), None);
         assert_eq!(memory_location_from_code(0xFF), None);
         assert_eq!(device_type_from_code(0xFF), None);
+        assert_eq!(format_from_code(0xFF), None);
+        assert_eq!(present_mode_from_code(0xFF), None);
+        assert_eq!(composite_alpha_from_code(0xFF), None);
         // The one directly above the last claimed code, which is where an
         // off-by-one in either table lands and where `0xFF` never would.
         assert_eq!(device_type_from_code(DEVICE_TYPE_OTHER + 1), None);
+        assert_eq!(format_from_code(FORMAT_BC7_RGBA_UNORM_SRGB + 1), None);
+        assert_eq!(present_mode_from_code(PRESENT_MODE_IMMEDIATE + 1), None);
+        assert_eq!(composite_alpha_from_code(COMPOSITE_ALPHA_INHERIT + 1), None);
     }
 
     fn distinct(codes: &[u8]) -> usize {

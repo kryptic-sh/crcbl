@@ -45,7 +45,10 @@
 import { readFile } from 'node:fs/promises';
 
 import {
+  COMPOSITE_ALPHA,
   DEVICE_TYPE,
+  FORMAT,
+  PRESENT_MODE,
   ReplyEncodeError,
   ReplyWriter,
 } from '../engine/gpu-reply.js';
@@ -306,6 +309,67 @@ function encodeCanonicalReplies(replies) {
   );
   // …and a failure that is not about features: the two halves are independent.
   replies.deviceFailed(29n, '', 0n);
+  // **Three lists of three different lengths**, which is the point of this
+  // entry: three equal counts is what a browser's own answer looks like, and a
+  // writer that emitted one count for all three would still produce the right
+  // bytes for that. The formats end on the highest code the table claims, so an
+  // off-by-one at the end of it is a byte difference here.
+  replies.surfaceCaps(37n, {
+    formats: [
+      FORMAT.BGRA8_UNORM_SRGB,
+      FORMAT.RGBA16_FLOAT,
+      FORMAT.BC7_RGBA_UNORM_SRGB,
+    ],
+    presentModes: [
+      PRESENT_MODE.FIFO,
+      PRESENT_MODE.FIFO_RELAXED,
+      PRESENT_MODE.MAILBOX,
+      PRESENT_MODE.IMMEDIATE,
+    ],
+    compositeAlpha: [COMPOSITE_ALPHA.OPAQUE, COMPOSITE_ALPHA.INHERIT],
+    minImageCount: 2,
+    maxImageCount: 8,
+    currentExtent: [1920, 1080],
+  });
+  // What a WebGPU canvas actually reports, and the **absent** extent: there is
+  // no `currentExtent` query in WebGPU at all, so `null` is the ordinary answer
+  // from this side rather than a corner case.
+  replies.surfaceCaps(41n, {
+    formats: [FORMAT.BGRA8_UNORM],
+    presentModes: [PRESENT_MODE.FIFO],
+    compositeAlpha: [COMPOSITE_ALPHA.OPAQUE, COMPOSITE_ALPHA.PRE_MULTIPLIED],
+    minImageCount: 2,
+    maxImageCount: 2,
+    currentExtent: null,
+  });
+  // **A zero extent that is present.** `[0, 0]` is what an unconfigured or
+  // minimised window reports, so it cannot be the spelling of absent — and
+  // these bytes differ from the entry above by the presence byte itself, not
+  // only by the two zeroes, so a writer that collapsed the two would produce a
+  // buffer eight bytes shorter here rather than the same one.
+  replies.surfaceCaps(43n, {
+    formats: [FORMAT.R8_UNORM],
+    presentModes: [PRESENT_MODE.FIFO],
+    compositeAlpha: [COMPOSITE_ALPHA.POST_MULTIPLIED],
+    minImageCount: 0,
+    maxImageCount: 0,
+    currentExtent: [0, 0],
+  });
+}
+
+/**
+ * A well-formed capability record, for the checks that break exactly one thing
+ * about it. Fresh each call, since several of them mutate it.
+ */
+function browserShapedSurfaceCaps() {
+  return {
+    formats: [FORMAT.BGRA8_UNORM],
+    presentModes: [PRESENT_MODE.FIFO],
+    compositeAlpha: [COMPOSITE_ALPHA.OPAQUE, COMPOSITE_ALPHA.PRE_MULTIPLIED],
+    minImageCount: 2,
+    maxImageCount: 2,
+    currentExtent: null,
+  };
 }
 
 /**
@@ -529,6 +593,77 @@ async function main() {
     () =>
       new ReplyWriter().deviceFailed(1n, 'x'.repeat(MAX_FIELD_BYTES + 1), 0n)
   );
+
+  // ---- the surface-capability record refuses the same mistakes ------------
+  // Its own list, because its fields are shaped unlike an adapter's: three
+  // counted lists and one optional pair, none of which the checks above reach.
+  for (const [field, drop] of [
+    ['formats', (caps) => delete caps.formats],
+    ['presentModes', (caps) => delete caps.presentModes],
+    ['compositeAlpha', (caps) => delete caps.compositeAlpha],
+    ['minImageCount', (caps) => delete caps.minImageCount],
+    ['maxImageCount', (caps) => delete caps.maxImageCount],
+  ]) {
+    checkRefused(
+      `surface caps missing ${field} are refused rather than written as zero`,
+      'NotANumber',
+      () => {
+        const caps = browserShapedSurfaceCaps();
+        drop(caps);
+        new ReplyWriter().surfaceCaps(1n, caps);
+      }
+    );
+  }
+  // A code that came out of a misspelled table lookup is `undefined`, and every
+  // list's first legal code is `0` — `FORMAT.R8_UNORM`, `PRESENT_MODE.FIFO`,
+  // `COMPOSITE_ALPHA.OPAQUE` — so writing it as zero would be a plausible
+  // answer rather than a malformed one.
+  checkRefused(
+    'a format code that is not a number is refused rather than written as zero',
+    'NotANumber',
+    () =>
+      new ReplyWriter().surfaceCaps(1n, {
+        ...browserShapedSurfaceCaps(),
+        formats: [undefined],
+      })
+  );
+  // **An absent extent is `null` and nothing else.** A key that never arrived
+  // is `undefined`, and treating that as absent is exactly the failure this
+  // format cannot detect for itself: the far side would decode a surface that
+  // genuinely reports no size, which is what a browser legitimately says.
+  checkRefused(
+    'a missing currentExtent is refused rather than encoded as absent',
+    'NotANumber',
+    () => {
+      const caps = browserShapedSurfaceCaps();
+      delete caps.currentExtent;
+      new ReplyWriter().surfaceCaps(1n, caps);
+    }
+  );
+  checkRefused(
+    'a currentExtent that is not two numbers is refused',
+    'NotANumber',
+    () =>
+      new ReplyWriter().surfaceCaps(1n, {
+        ...browserShapedSurfaceCaps(),
+        currentExtent: [1920],
+      })
+  );
+  // The two spellings that must not converge, checked as bytes rather than as a
+  // throw: `[0, 0]` is a size, `null` is the absence of one.
+  {
+    const absent = new ReplyWriter();
+    absent.surfaceCaps(1n, browserShapedSurfaceCaps());
+    const zero = new ReplyWriter();
+    zero.surfaceCaps(1n, {
+      ...browserShapedSurfaceCaps(),
+      currentExtent: [0, 0],
+    });
+    check(
+      zero.bytes.length === absent.bytes.length + 8,
+      `a zero extent is present and an absent one is not (${absent.bytes.length} vs ${zero.bytes.length} bytes)`
+    );
+  }
 
   // A workgroup size of the wrong length is a shape mistake rather than a
   // missing field, and would otherwise write two axes and run on into the

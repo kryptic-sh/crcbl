@@ -299,6 +299,11 @@ impl<'a> StreamReader<'a> {
                     compatible_surface,
                 })
             }
+            tag::SURFACE_CAPS_TAG => {
+                let surface = r.read_handle("SurfaceCaps::surface")?;
+                let adapter = AdapterId(r.read_u32()?);
+                Ok(Command::SurfaceCaps { surface, adapter })
+            }
             unknown => Err(DecodeError::UnknownTag { tag: unknown }),
         }
     }

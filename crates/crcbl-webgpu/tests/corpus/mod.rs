@@ -168,6 +168,16 @@ pub fn every_command() -> Vec<Command> {
             optional_features: Features::all(),
             compatible_surface: None,
         },
+        // **The surface and the adapter id have nothing in common.** They are
+        // different widths on the wire, so reading them the other way round
+        // runs off into the next command rather than swapping two values — but
+        // a *second* decoder is free to choose the opposite order, and these
+        // numbers are what make that a visible difference rather than a
+        // coincidence: `65` is neither half of `handle(63, 64)`.
+        Command::SurfaceCaps {
+            surface: handle(63, 64),
+            adapter: AdapterId(65),
+        },
         // Last, and not for tidiness: `web/tools/stream-decode.mjs` reaches into
         // this fixture by byte offset to corrupt one field at a time, and every
         // one of those offsets is counted from the *first* command. A command
@@ -239,6 +249,7 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             instances,
         } => stream.draw(vertices.clone(), instances.clone()),
         Command::EnumerateAdapters => stream.enumerate_adapters(),
+        Command::SurfaceCaps { surface, adapter } => stream.surface_caps(*surface, *adapter),
         Command::RequestDevice {
             adapter,
             label,

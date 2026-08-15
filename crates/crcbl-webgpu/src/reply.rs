@@ -48,6 +48,7 @@
 //! | a flat record of scalars, strings, an enum code and a bitflags word | [`Reply::Adapter`] |
 //! | a string alone | [`Reply::NoAdapter`] |
 //! | a counted array of fixed-size elements | [`Reply::QueryResults`] |
+//! | counted arrays of enum codes, plus an optional non-handle field | [`Reply::SurfaceCaps`] |
 //!
 //! [`Reply::NoAdapter`] was the first addition this set took, and it is not a
 //! new shape but a new *fact*: an enumeration is answered exactly once, so "the
@@ -57,8 +58,18 @@
 //! adapter record, and a reason with the machine-readable half of it beside the
 //! string.
 //!
+//! [`Reply::SurfaceCaps`] is the third addition, and the first that brought a
+//! shape rather than only a fact: a counted array whose elements are *enum
+//! codes* rather than fixed-width scalars, and the seam's first optional field
+//! that is neither a handle nor a string. Both are settled in this module's own
+//! `put_surface_caps` and in [`tag`]'s three new code tables.
+//!
 //! Not here, and needed before the HAL can be implemented over this channel:
-//! surface capabilities, which is a composition of the shapes above.
+//! the *failure* half of a surface-capability query.
+//! [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) answers
+//! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported) for an adapter
+//! that cannot present to the surface, which is
+//! [`Reply::DeviceFailed`]'s shape again and is not encoded yet.
 //!
 //! # There is no "still pending" reply, and there must not be
 //!
@@ -109,7 +120,7 @@
 
 use crcbl_hal::{
     AdapterId, AdapterInfo, BackendKind, DeviceCaps, Features, Limits, QuerySetHandle,
-    ReadbackHandle,
+    ReadbackHandle, SurfaceCaps,
 };
 
 use crate::bytes::{ByteReader, ByteWriter, DecodeError};
@@ -182,6 +193,55 @@ impl ByteWriter {
         self.put_bytes(info.driver.as_bytes());
         self.put_device_caps(&info.caps);
     }
+
+    /// A counted list of enum codes: the count, then one byte per element.
+    ///
+    /// One helper for the three lists [`SurfaceCaps`] carries rather than three
+    /// loops, because they are the same knowledge and not merely the same shape
+    /// — the count's cap, the element width and the ordering rule are one
+    /// decision, and a fix to any of them has to land in all three.
+    fn put_enum_list<T: Copy>(&mut self, items: &[T], code: fn(T) -> u8) {
+        self.put_count(items.len());
+        for item in items {
+            self.put_u8(code(*item));
+        }
+    }
+
+    /// [`SurfaceCaps`], field by field in declaration order.
+    ///
+    /// Every field crosses. **The three lists keep their order**, which is not
+    /// decoration: [`formats`](SurfaceCaps::formats) is documented as best
+    /// first and [`preferred_format`](SurfaceCaps::preferred_format) reads it
+    /// that way, so a decoder that rebuilt the list in any other order would
+    /// change which format a swapchain is created with.
+    ///
+    /// **[`current_extent`](SurfaceCaps::current_extent) gets a presence byte**,
+    /// which is the house rule for every optional field that is not a handle.
+    /// The zero-generation niche that spares `Option<Handle>` one does not apply
+    /// here — a pair of `u32`s has no niche — and no sentinel could stand in for
+    /// it either: `(0, 0)` is a size a window system can report for an
+    /// unconfigured or minimised window, and `(0xFFFF_FFFF, 0xFFFF_FFFF)` is
+    /// the Vulkan spelling of "no opinion" that
+    /// [`SurfaceCaps::current_extent`]'s own docs say a backend must map to
+    /// `None` rather than let escape into the seam. So absent is one byte with
+    /// nothing behind it and present is one byte with eight, and the reader
+    /// refuses any third value of that byte rather than reading it as truthy —
+    /// which is what makes the two impossible to confuse in either direction.
+    fn put_surface_caps(&mut self, caps: &SurfaceCaps) {
+        self.put_enum_list(&caps.formats, tag::format_code);
+        self.put_enum_list(&caps.present_modes, tag::present_mode_code);
+        self.put_enum_list(&caps.composite_alpha, tag::composite_alpha_code);
+        self.put_u32(caps.min_image_count);
+        self.put_u32(caps.max_image_count);
+        match caps.current_extent {
+            None => self.put_u8(tag::ABSENT),
+            Some((width, height)) => {
+                self.put_u8(tag::PRESENT);
+                self.put_u32(width);
+                self.put_u32(height);
+            }
+        }
+    }
 }
 
 impl ByteReader<'_> {
@@ -247,6 +307,62 @@ impl ByteReader<'_> {
             driver,
             backend: BackendKind::WebGpu,
             caps: self.read_device_caps()?,
+        })
+    }
+
+    /// The counterpart of [`ByteWriter::put_enum_list`], bounded by
+    /// [`read_count`](Self::read_count) — the cap the whole format uses for
+    /// element counts, not a second one invented for these three lists.
+    ///
+    /// A code `from_code` does not claim is [`DecodeError::InvalidEnum`] naming
+    /// the list, never the nearest variant: see
+    /// [`tag::format_from_code`] for what a plausible neighbour would cost.
+    fn read_enum_list<T>(
+        &mut self,
+        field: &'static str,
+        from_code: fn(u8) -> Option<T>,
+    ) -> Result<Vec<T>, DecodeError> {
+        let count = self.read_count(field)?;
+        let mut items = Vec::with_capacity(count);
+        for _ in 0..count {
+            let code = self.read_u8()?;
+            items.push(from_code(code).ok_or(DecodeError::InvalidEnum {
+                field,
+                code: code.into(),
+            })?);
+        }
+        Ok(items)
+    }
+
+    /// The counterpart of [`ByteWriter::put_surface_caps`].
+    fn read_surface_caps(&mut self) -> Result<SurfaceCaps, DecodeError> {
+        let formats = self.read_enum_list("SurfaceCaps::formats", tag::format_from_code)?;
+        let present_modes =
+            self.read_enum_list("SurfaceCaps::present_modes", tag::present_mode_from_code)?;
+        let composite_alpha = self.read_enum_list(
+            "SurfaceCaps::composite_alpha",
+            tag::composite_alpha_from_code,
+        )?;
+        let min_image_count = self.read_u32()?;
+        let max_image_count = self.read_u32()?;
+        // Spelled out rather than `Some((self.read_u32()?, self.read_u32()?))`:
+        // the two halves are read in source order either way, but relying on
+        // that to get width-before-height right reads as a coincidence — the
+        // same reason `Draw`'s two ranges are spelled out in `crate::reader`.
+        let current_extent = if self.read_present("SurfaceCaps::current_extent")? {
+            let width = self.read_u32()?;
+            let height = self.read_u32()?;
+            Some((width, height))
+        } else {
+            None
+        };
+        Ok(SurfaceCaps {
+            formats,
+            present_modes,
+            composite_alpha,
+            min_image_count,
+            max_image_count,
+            current_extent,
         })
     }
 }
@@ -374,6 +490,31 @@ pub enum Reply {
         /// The bytes read back.
         data: Vec<u8>,
     },
+    /// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps): what the
+    /// surface will accept on the adapter the command named.
+    ///
+    /// **The whole of [`SurfaceCaps`]**, in declaration order — three counted
+    /// lists of enum codes, two counts, and an optional extent. Nothing is
+    /// dropped on the grounds that a browser cannot fill it, for
+    /// [`Reply::Adapter`]'s reason: the decoder decodes what the wire says, so
+    /// the same reply written by something that *can* fill a field decodes as
+    /// filled.
+    ///
+    /// The three lists keep the order they were written in.
+    /// [`formats`](SurfaceCaps::formats) is documented as best first and
+    /// [`preferred_format`](SurfaceCaps::preferred_format) reads it that way, so
+    /// the order is a value rather than a presentation detail.
+    ///
+    /// **There is no failure arm yet**, and the gap is deliberate rather than
+    /// overlooked: `surface_caps` answers
+    /// [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported) for an
+    /// adapter that cannot present to the surface, and that is a second reply —
+    /// the shape [`Reply::DeviceFailed`] has — which nothing on this side can
+    /// wait for until an `impl Instance` exists to ask.
+    SurfaceCaps {
+        /// What the surface will accept.
+        caps: SurfaceCaps,
+    },
     /// [`query_results`](crcbl_hal::Device::query_results).
     QueryResults {
         /// Which query set.
@@ -398,6 +539,7 @@ impl Reply {
             Self::NoAdapter { .. } => "NoAdapter",
             Self::Device { .. } => "Device",
             Self::DeviceFailed { .. } => "DeviceFailed",
+            Self::SurfaceCaps { .. } => "SurfaceCaps",
             Self::ReadbackPending { .. } => "ReadbackPending",
             Self::ReadbackReady { .. } => "ReadbackReady",
             Self::QueryResults { .. } => "QueryResults",
@@ -489,6 +631,16 @@ impl ReplyWriter {
         self.open(tag::DEVICE_FAILED_REPLY_TAG, sequence);
         self.bytes.put_bytes(reason.as_bytes());
         self.bytes.put_u64(unsupported.bits());
+    }
+
+    /// [`Reply::SurfaceCaps`].
+    ///
+    /// Taken whole rather than field by field, for
+    /// [`adapter`](Self::adapter)'s reason: six positional parameters, three of
+    /// them lists, is how a caller swaps two of them.
+    pub fn surface_caps(&mut self, sequence: u64, caps: &SurfaceCaps) {
+        self.open(tag::SURFACE_CAPS_REPLY_TAG, sequence);
+        self.bytes.put_surface_caps(caps);
     }
 
     /// [`Reply::ReadbackPending`].
@@ -606,6 +758,9 @@ impl<'a> ReplyReader<'a> {
                     unsupported,
                 }
             }
+            tag::SURFACE_CAPS_REPLY_TAG => Reply::SurfaceCaps {
+                caps: r.read_surface_caps()?,
+            },
             tag::READBACK_PENDING_REPLY_TAG => Reply::ReadbackPending {
                 readback: r.read_handle("ReadbackPending::readback")?,
             },

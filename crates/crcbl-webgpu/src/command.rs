@@ -172,6 +172,29 @@ pub enum Command {
         /// A surface the device must be able to present to.
         compatible_surface: Option<SurfaceHandle>,
     },
+    /// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) — what this
+    /// surface will accept on this adapter.
+    ///
+    /// The third command whose answer comes back, and it is answered by a
+    /// [`Reply::SurfaceCaps`](crate::Reply::SurfaceCaps) naming this command's
+    /// sequence.
+    ///
+    /// **Two ids, and the pair the HAL call takes in this order.** They are
+    /// different widths on the wire — a surface is a handle's eight bytes, an
+    /// adapter id is a bare `u32` — so a decoder that read them the other way
+    /// round does not merely swap two values, it runs off into the next
+    /// command. That is the loud failure; the quiet one is a *second* decoder
+    /// choosing the opposite order, which is why the corpus gives the two
+    /// values nothing in common.
+    SurfaceCaps {
+        /// Which surface, as
+        /// [`create_surface`](crate::StreamWriter::create_surface) named it.
+        surface: SurfaceHandle,
+        /// Which adapter, as [`Instance::adapters`](crcbl_hal::Instance::adapters)
+        /// numbered it. Always `0` from a browser, for
+        /// [`Command::RequestDevice::adapter`]'s reason.
+        adapter: AdapterId,
+    },
 }
 
 impl Command {
@@ -195,6 +218,7 @@ impl Command {
             Self::Draw { .. } => "Draw",
             Self::EnumerateAdapters => "EnumerateAdapters",
             Self::RequestDevice { .. } => "RequestDevice",
+            Self::SurfaceCaps { .. } => "SurfaceCaps",
         }
     }
 }

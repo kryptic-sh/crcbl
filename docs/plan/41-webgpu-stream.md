@@ -111,8 +111,26 @@ an answer.
 The reply set built so far is **partial and deliberately so**: one reply per
 encoding shape — a handle alone, a handle plus an unbounded payload, a scalar
 plus a string, a counted array of fixed-size elements. The device-request poll,
-the rest of `AdapterInfo`, `DeviceCaps` and surface capabilities are not encoded
-yet; each is one of those four shapes or a composition of them.
+the rest of `AdapterInfo` and `DeviceCaps` are not encoded yet; each is one of
+those four shapes or a composition of them.
+
+**Surface capabilities was not**, and that sentence used to claim it was.
+`SurfaceCaps` needed two shapes the list above does not hold: a counted array of
+**enum codes**, where — unlike a fixed-size scalar — every element has values no
+variant claims and folding one into its neighbour is a silent wrong answer
+rather than a refusal; and an **optional field that is neither a handle nor a
+string**, which `current_extent: Option<(u32, u32)>` is the first of. Both now
+exist.
+
+The optional one is worth stating as a rule, because the niche argument does not
+reach it. `Option<Handle>` rides the zero-generation niche and `Option<&str>`
+takes a presence byte because `Some("")` and `None` must differ; a fixed-width
+pair has no niche and the tempting mistake is neither of those, it is a
+**sentinel**. There is no value to spare: `(0, 0)` is what an unconfigured or
+minimised window reports, and `0xFFFF_FFFF` is the Vulkan "no opinion" value
+that `SurfaceCaps::current_extent`'s own docs oblige a backend to turn into
+`None` before it reaches the seam. So a presence byte, and a third value of that
+byte is an error.
 
 ### The buffer JS writes into
 

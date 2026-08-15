@@ -78,6 +78,7 @@ const ADAPTER_REPLY_TAG = 0x00;
 const NO_ADAPTER_REPLY_TAG = 0x01;
 const DEVICE_REPLY_TAG = 0x02;
 const DEVICE_FAILED_REPLY_TAG = 0x03;
+const SURFACE_CAPS_REPLY_TAG = 0x04;
 const READBACK_PENDING_REPLY_TAG = 0x10;
 const READBACK_READY_REPLY_TAG = 0x11;
 const QUERY_RESULTS_REPLY_TAG = 0x18;
@@ -102,6 +103,90 @@ export const DEVICE_TYPE = Object.freeze({
   DISCRETE: 0x02,
   VIRTUAL: 0x03,
   OTHER: 0x04,
+});
+
+// ── Optional fields ──────────────────────────────────────────────────────────
+//
+// `tag::ABSENT` and `tag::PRESENT`. Every optional field that is not a handle
+// carries one of these two bytes and nothing else may appear there — the far
+// side refuses a third value rather than reading it as truthy. An
+// `Option<Handle>` needs none of this, because a zero generation is already
+// unambiguous; nothing else on this wire has that niche.
+
+const ABSENT = 0;
+const PRESENT = 1;
+
+// ── Surface capability codes ─────────────────────────────────────────────────
+//
+// `tag::FORMAT_*`, `tag::PRESENT_MODE_*` and `tag::COMPOSITE_ALPHA_*`. Chosen
+// wire numbers, not positions: none of the HAL enums behind them carries
+// explicit discriminants, and `crcbl_hal::Format` is deliberately open to a
+// variant being inserted in the middle, so an encoder that sent declaration
+// order would renumber everything below the insertion point and the failure
+// would land here rather than at the edit. `crates/crcbl-webgpu/src/tag.rs`
+// holds the same tables; the committed fixture keeps the two identical.
+
+/** `tag::FORMAT_*` — the wire codes for `crcbl_hal::Format`. */
+export const FORMAT = Object.freeze({
+  R8_UNORM: 0x00,
+  RG8_UNORM: 0x01,
+  RGBA8_UNORM: 0x02,
+  RGBA8_UNORM_SRGB: 0x03,
+  BGRA8_UNORM: 0x04,
+  BGRA8_UNORM_SRGB: 0x05,
+  RGB10A2_UNORM: 0x06,
+  R11G11B10_FLOAT: 0x07,
+  R16_FLOAT: 0x08,
+  RG16_FLOAT: 0x09,
+  RGBA16_FLOAT: 0x0a,
+  R32_FLOAT: 0x0b,
+  RG32_FLOAT: 0x0c,
+  RGBA32_FLOAT: 0x0d,
+  R32_UINT: 0x0e,
+  RG32_UINT: 0x0f,
+  D32_FLOAT: 0x10,
+  D32_FLOAT_S8_UINT: 0x11,
+  D24_UNORM_S8_UINT: 0x12,
+  D16_UNORM: 0x13,
+  BC1_RGBA_UNORM: 0x14,
+  BC1_RGBA_UNORM_SRGB: 0x15,
+  BC3_RGBA_UNORM: 0x16,
+  BC3_RGBA_UNORM_SRGB: 0x17,
+  BC4_R_UNORM: 0x18,
+  BC5_RG_UNORM: 0x19,
+  BC6H_RGB_UFLOAT: 0x1a,
+  BC7_RGBA_UNORM: 0x1b,
+  BC7_RGBA_UNORM_SRGB: 0x1c,
+});
+
+/**
+ * `tag::PRESENT_MODE_*` — the wire codes for `crcbl_hal::PresentMode`.
+ *
+ * A REPLAYER READING `navigator.gpu` ONLY EVER SENDS `FIFO`. WebGPU has no
+ * present-mode selection at all: a canvas presents at the
+ * `requestAnimationFrame` boundary, which is what `Fifo` describes. The other
+ * three exist because the field is a `PresentMode` and a wire form for one has
+ * to be total.
+ */
+export const PRESENT_MODE = Object.freeze({
+  FIFO: 0x00,
+  FIFO_RELAXED: 0x01,
+  MAILBOX: 0x02,
+  IMMEDIATE: 0x03,
+});
+
+/**
+ * `tag::COMPOSITE_ALPHA_*` — the wire codes for `crcbl_hal::CompositeAlpha`.
+ *
+ * WebGPU's `GPUCanvasAlphaMode` is `'opaque'` or `'premultiplied'`, which are
+ * the first two; the other two have no WebGPU spelling and a replayer never
+ * offers them.
+ */
+export const COMPOSITE_ALPHA = Object.freeze({
+  OPAQUE: 0x00,
+  PRE_MULTIPLIED: 0x01,
+  POST_MULTIPLIED: 0x02,
+  INHERIT: 0x03,
 });
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -372,6 +457,81 @@ class ByteWriter {
   }
 
   /**
+   * A counted list of enum codes: the count, then one byte per element.
+   *
+   * One method for the three lists a `SurfaceCaps` carries rather than three
+   * loops, because they are the same knowledge and not merely the same shape —
+   * the cap, the element width and the ordering rule are one decision.
+   *
+   * The elements go through {@link ByteWriter#putU8}, so a code that came out
+   * of a misspelled table lookup arrives as `undefined` and is refused here
+   * rather than written as `0` — which is `FORMAT.R8_UNORM`,
+   * `PRESENT_MODE.FIFO` and `COMPOSITE_ALPHA.OPAQUE`, all three of them
+   * plausible answers.
+   *
+   * @param {ArrayLike<number>} items
+   * @param {string} field
+   */
+  putEnumList(items, field) {
+    if (!Array.isArray(items)) {
+      throw new ReplyEncodeError('NotANumber', `${field} must be an array`, {
+        field,
+      });
+    }
+    this.putCount(items.length, field);
+    for (const code of items) this.putU8(code, field);
+  }
+
+  /**
+   * `crcbl_hal::SurfaceCaps`, field by field in declaration order.
+   *
+   * THE THREE LISTS KEEP THEIR ORDER. `SurfaceCaps::formats` is documented as
+   * best first and `preferred_format` reads it that way, so the order is a
+   * value rather than a presentation detail — a writer that sorted or
+   * de-duplicated would change which format a swapchain is created with.
+   *
+   * `currentExtent` IS A PRESENCE BYTE, NOT A SENTINEL, and `null` is the only
+   * spelling of absent this method takes. `undefined` is refused for the
+   * header's reason — a key that never arrived would otherwise encode as a
+   * surface that reports no size, which is a real answer — and no numeric pair
+   * could stand in for absent either: `[0, 0]` is what an unconfigured or
+   * minimised window reports, and Vulkan's `0xFFFFFFFF` pair is a value
+   * `crcbl-hal` requires a backend to turn into `None` before it reaches the
+   * seam at all.
+   *
+   * @param {{
+   *   formats: number[],
+   *   presentModes: number[],
+   *   compositeAlpha: number[],
+   *   minImageCount: number,
+   *   maxImageCount: number,
+   *   currentExtent: [number, number] | null,
+   * }} caps
+   */
+  putSurfaceCaps(caps) {
+    this.putEnumList(caps.formats, 'SurfaceCaps::formats');
+    this.putEnumList(caps.presentModes, 'SurfaceCaps::present_modes');
+    this.putEnumList(caps.compositeAlpha, 'SurfaceCaps::composite_alpha');
+    this.putU32(caps.minImageCount, 'SurfaceCaps::min_image_count');
+    this.putU32(caps.maxImageCount, 'SurfaceCaps::max_image_count');
+    const extent = caps.currentExtent;
+    if (extent === null) {
+      this.putU8(ABSENT, 'SurfaceCaps::current_extent');
+      return;
+    }
+    if (!Array.isArray(extent) || extent.length !== 2) {
+      throw new ReplyEncodeError(
+        'NotANumber',
+        'SurfaceCaps::current_extent must be two numbers or null',
+        { field: 'SurfaceCaps::current_extent' }
+      );
+    }
+    this.putU8(PRESENT, 'SurfaceCaps::current_extent');
+    this.putU32(extent[0], 'SurfaceCaps::current_extent');
+    this.putU32(extent[1], 'SurfaceCaps::current_extent');
+  }
+
+  /**
    * `crcbl_hal::Limits`, field by field in declaration order.
    *
    * EVERY FIELD, not the handful the engine reads today. `crcbl-render` reads
@@ -638,6 +798,26 @@ export class ReplyWriter {
       this.#open(DEVICE_FAILED_REPLY_TAG, sequence);
       this.#writer.putString(reason, 'DeviceFailed::reason');
       this.#writer.putU64(unsupported, 'DeviceFailed::unsupported');
+    });
+  }
+
+  /**
+   * What a surface will accept on the adapter the command named.
+   *
+   * The whole of `crcbl_hal::SurfaceCaps`; see
+   * {@link ByteWriter#putSurfaceCaps} for the field order, why the three lists
+   * keep theirs, and why `currentExtent` is `null` rather than a sentinel when
+   * there is no answer — which, in a browser, is always: WebGPU has no
+   * `currentExtent` query, so a replayer's own size comes from the canvas and
+   * belongs to the shell rather than to this record.
+   *
+   * @param {bigint} sequence
+   * @param {Parameters<ByteWriter['putSurfaceCaps']>[0]} caps
+   */
+  surfaceCaps(sequence, caps) {
+    this.#atomic(() => {
+      this.#open(SURFACE_CAPS_REPLY_TAG, sequence);
+      this.#writer.putSurfaceCaps(caps);
     });
   }
 

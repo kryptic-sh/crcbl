@@ -80,6 +80,7 @@ const PUSH_CONSTANTS_TAG = 0x44;
 const DRAW_TAG = 0x60;
 const ENUMERATE_ADAPTERS_TAG = 0x90;
 const REQUEST_DEVICE_TAG = 0x91;
+const SURFACE_CAPS_TAG = 0x92;
 
 // ── Optional fields ──────────────────────────────────────────────────────────
 
@@ -761,6 +762,18 @@ function decodeCommand(r) {
         optionalFeatures,
         compatibleSurface: r.readOptHandle(),
       };
+    }
+    case SURFACE_CAPS_TAG: {
+      // Spelled out rather than built inline, for `Draw`'s reason: the two
+      // fields are both ids and the HAL call takes them surface-then-adapter,
+      // which is an order this side has to be *told* rather than infer. They
+      // are also different widths — a handle's eight bytes against a bare
+      // `u32` — so reading them the other way round does not transpose two
+      // values, it leaves the cursor four bytes out and turns the next
+      // command's tag into whatever byte happens to be there.
+      const surface = r.readHandle('SurfaceCaps::surface');
+      const adapter = r.readU32();
+      return { name: 'SurfaceCaps', surface, adapter };
     }
     case ENUMERATE_ADAPTERS_TAG:
       // The only command with no body: the next byte is the next command's tag.

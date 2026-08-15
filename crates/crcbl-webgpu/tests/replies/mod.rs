@@ -11,7 +11,10 @@
 //! is shared: both are about the *same* bytes, and a second copy would be a
 //! second thing to keep in step.
 
-use crcbl_hal::{AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits};
+use crcbl_hal::{
+    AdapterId, AdapterInfo, BackendKind, CompositeAlpha, DeviceCaps, DeviceType, Features, Format,
+    Limits, PresentMode, SurfaceCaps,
+};
 use crcbl_webgpu::{Reply, ReplyWriter};
 
 use crate::corpus::handle;
@@ -274,6 +277,74 @@ pub fn every_reply() -> Vec<(u64, Reply)> {
                 unsupported: Features::empty(),
             },
         ),
+        // **The three lists are three different lengths**, which is the whole
+        // job of this entry: a decoder that read one list's count and then
+        // walked another's would still decode cleanly if they matched, and
+        // three equal counts is exactly the shape a browser's answer has. The
+        // present modes are all four, so the top of that table is pinned, and
+        // the formats end on the highest code the table claims — the byte an
+        // off-by-one at the end of `format_from_code` gets wrong first.
+        //
+        // **Not a browser's answer**, for the reason the second `Adapter` is
+        // not one: the decoder decodes what the wire says.
+        (
+            37,
+            Reply::SurfaceCaps {
+                caps: SurfaceCaps {
+                    formats: vec![
+                        Format::Bgra8UnormSrgb,
+                        Format::Rgba16Float,
+                        Format::Bc7RgbaUnormSrgb,
+                    ],
+                    present_modes: vec![
+                        PresentMode::Fifo,
+                        PresentMode::FifoRelaxed,
+                        PresentMode::Mailbox,
+                        PresentMode::Immediate,
+                    ],
+                    composite_alpha: vec![CompositeAlpha::Opaque, CompositeAlpha::Inherit],
+                    min_image_count: 2,
+                    max_image_count: 8,
+                    current_extent: Some((1920, 1080)),
+                },
+            },
+        ),
+        // What a WebGPU canvas actually reports, and the **absent** extent: a
+        // browser has no `currentExtent` query at all, so `None` is not a
+        // corner case here but the ordinary answer.
+        (
+            41,
+            Reply::SurfaceCaps {
+                caps: SurfaceCaps {
+                    formats: vec![Format::Bgra8Unorm],
+                    present_modes: vec![PresentMode::Fifo],
+                    composite_alpha: vec![CompositeAlpha::Opaque, CompositeAlpha::PreMultiplied],
+                    min_image_count: 2,
+                    max_image_count: 2,
+                    current_extent: None,
+                },
+            },
+        ),
+        // **A zero extent that is present**, and the reason absence is a
+        // presence byte rather than a sentinel: an unconfigured or minimised
+        // window has size `(0, 0)`, which the seam's own docs call a caller
+        // problem rather than a missing answer. These bytes differ from the
+        // entry above by more than their two zeroes — the presence byte itself
+        // differs — so a writer on either side that collapsed the two would
+        // produce a shorter buffer here rather than the same one.
+        (
+            43,
+            Reply::SurfaceCaps {
+                caps: SurfaceCaps {
+                    formats: vec![Format::R8Unorm],
+                    present_modes: vec![PresentMode::Fifo],
+                    composite_alpha: vec![CompositeAlpha::PostMultiplied],
+                    min_image_count: 0,
+                    max_image_count: 0,
+                    current_extent: Some((0, 0)),
+                },
+            },
+        ),
     ]
 }
 
@@ -303,6 +374,7 @@ pub fn encode_reply(replies: &mut ReplyWriter, sequence: u64, reply: &Reply) {
             reason,
             unsupported,
         } => replies.device_failed(sequence, reason, *unsupported),
+        Reply::SurfaceCaps { caps } => replies.surface_caps(sequence, caps),
         Reply::ReadbackPending { readback } => replies.readback_pending(sequence, *readback),
         Reply::ReadbackReady { readback, data } => {
             replies.readback_ready(sequence, *readback, data);

@@ -3,6 +3,29 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### `surface_caps` has an answer on the wire and no way to say it failed
+
+`Command::SurfaceCaps` and `Reply::SurfaceCaps` encode, and both decoders read
+them. What has no encoding is the other arm: `Instance::surface_caps` returns
+`Result<SurfaceCaps, HalError>` and answers `HalError::Unsupported` for an
+adapter that cannot present to the surface, `InvalidHandle` for a stale one, and
+`NoSuchAdapter` for an unknown one. A replayer that hit any of those today would
+have nothing to send.
+
+`Reply::DeviceFailed` is the precedent — a second tag carrying the reason, named
+by the same sequence — and `41-webgpu-stream.md` describes replies purely as
+answers rather than stating that rule, so it is precedent and not specification.
+The failure arm was deliberately left out of the encoding slice to keep it to
+one shape; it is owed before a replayer arm exists, because a replayer with no
+way to report a refusal will either throw or answer with a fabricated capability
+set. The HAL settles which of those is worse: `surface_caps`'s own doc obliges a
+caller doing selection to read an `Err` as **"try the next adapter", not as
+fatal**, and names `apps/sandbox` as the reference. A throw makes an ordinary
+step of adapter selection kill the frame.
+
+`crates/crcbl-webgpu/src/reply.rs`'s module docs and `Reply::SurfaceCaps`'s own
+doc both say the arm does not exist yet, so the code is not claiming otherwise.
+
 ### The replayer's surface table is keyed on a handle's index and ignores its generation
 
 `Replayer`'s `#surfaces` in `web/engine/gpu-replay.js` maps a surface handle's

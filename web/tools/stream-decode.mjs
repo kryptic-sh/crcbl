@@ -284,6 +284,12 @@ const EXPECTED = [
     optionalFeatures: 0x7ffffffn,
     compatibleSurface: null,
   },
+  // Two ids, in the order the HAL call takes them. The adapter id is neither
+  // half of the surface handle, so a decoder that read the pair the other way
+  // round cannot still compare equal here — and, since the two are different
+  // widths, it would also leave the cursor four bytes out and turn the command
+  // after this one into noise.
+  { name: 'SurfaceCaps', surface: handle(63, 64), adapter: 65 },
   // The only body-less command, and last in the corpus so that the byte offsets
   // the checks below count from the *first* command stay where they are. A
   // decoder that read one field too many here would run off the end of the
