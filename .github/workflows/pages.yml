@@ -81,6 +81,16 @@ jobs:
       - name: Syntax-check the shim
         run: node --check web/engine/*.js web/demos/*/*.js web/tools/*.mjs
 
+      # THE COMMAND STREAM'S DRIFT CHECK. `crcbl-webgpu` encodes the stream in
+      # Rust and `web/engine/gpu-stream.js` decodes it in JavaScript, so the
+      # format has two hand-written halves and no compiler anywhere reads both.
+      # This decodes the fixture the Rust side commits and asserts every field,
+      # which is the only thing in the build that notices when they disagree.
+      # It needs no wasm and no browser, so it runs before the build rather than
+      # inside it, and a mismatch fails in seconds with the field named.
+      - name: Decode the committed command-stream fixture
+        run: node web/tools/stream-decode.mjs
+
       # Builds each wasm-ready sample, runs `wasm-bindgen`, assembles
       # `target/site`, and runs two checks against every artifact it produced.
       # They are the real gate, and they are what makes this job worth running

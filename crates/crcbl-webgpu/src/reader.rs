@@ -438,11 +438,12 @@ impl<'a> StreamReader<'a> {
                     } else {
                         None
                     };
+                let render_area = r.read_rect()?;
                 Ok(Command::BeginRenderPass {
                     label,
                     color_attachments,
                     depth_stencil_attachment,
-                    render_area: r.read_rect()?,
+                    render_area,
                 })
             }
             tag::BIND_GRAPHICS_PIPELINE_TAG => Ok(Command::BindGraphicsPipeline {
@@ -456,11 +457,12 @@ impl<'a> StreamReader<'a> {
                 for _ in 0..count {
                     dynamic_offsets.push(r.read_u32()?);
                 }
+                let layout = r.read_handle("BindGroup::layout")?;
                 Ok(Command::BindGroup {
                     slot,
                     group,
                     dynamic_offsets,
-                    layout: r.read_handle("BindGroup::layout")?,
+                    layout,
                 })
             }
             tag::PUSH_CONSTANTS_TAG => {
@@ -472,11 +474,12 @@ impl<'a> StreamReader<'a> {
                     })?;
                 let offset = r.read_u32()?;
                 let data = r.read_field("PushConstants::data")?.to_vec();
+                let layout = r.read_handle("PushConstants::layout")?;
                 Ok(Command::PushConstants {
                     stages,
                     offset,
                     data,
-                    layout: r.read_handle("PushConstants::layout")?,
+                    layout,
                 })
             }
             tag::DRAW_TAG => {

@@ -8962,3 +8962,43 @@ drive — but it would have to become `crates/crcbl/src/web/` with `mod.rs` and
 `#[doc(inline)] pub use` in the module makes `crcbl::web::web_exports!` work
 too. The samples all call it as `crcbl::web_exports!`. Nothing enforces that; a
 future sample writing the longer path is not wrong, just inconsistent.
+
+## The command stream's contract, read from the other side
+
+`crates/crcbl-webgpu` encodes the browser command stream and
+`web/engine/gpu-stream.js` decodes it. Writing the second implementation against
+the first surfaced six things about the contract. Three were fixed in the same
+change and are gone from here; these are the three that were not.
+
+### A bad presence byte and a bad enum code report the same error
+
+`read_opt_string` passes its own field name down to `read_present`, so a
+malformed presence byte on `BufferDesc::label` surfaces as
+`InvalidEnum { field: "BufferDesc::label", code: 2 }` — the same shape a bad
+`MemoryLocation` code produces. The two are different defects: one is a
+structural framing error, the other a value the far side does not recognise.
+Nothing in the docs says which a reader is looking at, and a JS implementer has
+to trace two calls to find out.
+
+A distinct `DecodeError` variant for a non-canonical presence byte would say it
+plainly. Not done because it widens a public error enum for a case that has not
+bitten anyone, and the JS half matched the current behaviour deliberately so the
+two agree.
+
+### `MEMORY_*` is the only enum code table not named for its enum
+
+`LOAD_OP_*` and `STORE_OP_*` carry their enum's name; `MemoryLocation`'s codes
+are `MEMORY_DEVICE_LOCAL` and siblings. Trivial, and the only cost is that a
+reader has to grep to be sure there is no separate `Memory` enum. Renaming
+touches both halves of the format and the fixture stays valid, since names are
+not on the wire.
+
+### The JS decoder is hand-written against the Rust tag table
+
+The fixture check catches drift, which is why this is not urgent — but it
+catches it rather than preventing it. Generating `gpu-stream.js`'s constants
+from `tag.rs` would make a whole class of disagreement impossible instead of
+merely detected. Declined for now: it adds a codegen step to a build that has
+none, and the failure it prevents already fails loudly in the Pages job on every
+pull request. Worth revisiting if the tag table grows to the full surface and
+the two tables start being edited in separate sessions.

@@ -294,8 +294,16 @@ impl StreamWriter {
         }
     }
 
+    /// A `bool` goes over as a presence byte, and the reader decodes it as one —
+    /// so a value that is neither is refused rather than read as true.
+    ///
+    /// Spelled with the constants rather than `u8::from(value)`. Those agree
+    /// today only because `PRESENT` happens to be 1, which is two independent
+    /// decisions that look like one: an implementer reading the writer alone
+    /// would pair it with a `!= 0` test on the far side, and the strictness the
+    /// reader intends would be gone without either half changing.
     fn put_bool(&mut self, value: bool) {
-        self.put_u8(u8::from(value));
+        self.put_u8(if value { tag::PRESENT } else { tag::ABSENT });
     }
 
     fn put_clear_value(&mut self, clear: ClearValue) {

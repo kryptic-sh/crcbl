@@ -141,6 +141,14 @@ Two consequences:
   byte. This is what the niche was for, and optional handles are common —
   `ColorAttachment::resolve`, `DeviceDesc::compatible_surface`,
   `AcquiredFrame`'s semaphores.
+
+  **"Zero" here means a zero generation, not a zero `u64`**, and a decoder that
+  tests the whole word against zero is subtly wrong on a corrupt stream:
+  `from_bits` rejects any value whose generation half is zero, so bits with a
+  non-zero index and a zero generation are absent too. The packing — generation
+  high, index low — lives in `handle.rs`, and a second decoder must read it
+  there rather than infer it from this sentence.
+
 - **The handle carries no kind.** Every HAL handle is the same eight bytes and
   the type distinction is compile-time only, so **the opcode is what says which
   table an id indexes.** A replayer with one flat table per resource kind is

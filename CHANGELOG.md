@@ -463,6 +463,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
   `docs/plan/41-webgpu-stream.md` is the specification.
 
+- **`web/engine/gpu-stream.js`, the decoding half of that stream**, and a
+  committed fixture that keeps the two halves honest. The format has two
+  hand-written implementations in two languages and no compiler reads both, so
+  the Rust side commits a canonical stream, a Rust test asserts it still encodes
+  byte-for-byte to that fixture, and a node check decodes the same bytes with
+  the JavaScript decoder and asserts every field. Either half drifting fails one
+  of the two. The node check runs in the Pages build, which covers pull
+  requests.
+
+  Handles arrive as `{ index, generation }` rather than one number, and 64-bit
+  scalars as `BigInt`: `Handle::to_bits` puts the generation in the high half,
+  so a handle read as a JS number is silently wrong once the generation passes
+  2^21, and `WHOLE_BUFFER` read as a number becomes a different, still-enormous
+  size that nothing downstream would question.
+
 - **Five logging macros in the engine — `error!`, `warn!`, `info!`, `debug!`,
   `trace!`** — plus `log_at!`, which takes the level and which the other five
   forward to so the target, the level check and the route to the sink are
