@@ -20,6 +20,10 @@
 //! Four copies proved the split: the **policy** differs per game and the
 //! **plumbing** never does. This is the plumbing.
 //!
+//! The platform arms came in last, as [`Backing::platform`]: each game had also
+//! written out "config directory natively, the shim's OPFS store in a browser",
+//! which is a fact about the platform and not about any game.
+//!
 //! # What stays the game's
 //!
 //! What the number *means*, and when it is worth keeping. [`Record::raise`]

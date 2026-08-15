@@ -239,8 +239,9 @@ mod tests {
     /// here rather than merely mentioned: drop a line from the list above and
     /// this stops compiling.
     ///
-    /// It builds the loopback pair the four games build, because that is the
-    /// one place several of the re-exports have to agree on a type. A
+    /// It builds a server and a client over one in-memory transport — the
+    /// shape a single-player sample runs — because that is the one place
+    /// several of the re-exports have to agree on a type. A
     /// [`net::InMemoryTransport`](crcbl_net::InMemoryTransport) handed to a
     /// server and a client that each named their own `crcbl-net` would not
     /// compile, which is the failure this is really guarding.

@@ -3,6 +3,33 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### Counted claims in doc comments have not been swept, only spot-fixed
+
+`CLAUDE.md`'s rule is that a count of code elements — "four impls", "the three
+call sites" — loses the number entirely, because nothing recomputes prose. Two
+present-tense violations were found and fixed on 2026-08-15: `crcbl::args`'s
+`Common` said a shared flag "reaches four games" when six samples hold it, and
+`crcbl`'s umbrella test doc said it builds "the loopback pair the four games
+build" — wrong in composition as well as count, since `apps/horde` has no
+transport at all and `apps/hud` does.
+
+**The sweep was not finished.** A regex over every doc comment in `crates/`
+returns roughly a hundred counted phrases, and most are legitimate and must not
+be "fixed": "two backends" and "three backends" usually name the real backend
+set, "three samples" is often an MSAA sample count, `crcbl-ui/src/budget.rs`
+means statistical samples, and a great many are past-tense accounts of what a
+duplication looked like before it was extracted — which the rule explicitly
+exempts and which are worth keeping.
+
+So the remaining work is not mechanical. What would make it tractable: restrict
+to **present-tense counts of `apps/*`**, which is the population that actually
+grows. Candidates noticed but not verified: `crcbl-render/build.rs` ("five times
+— the four samples and `crates/crcbl-render`", "three games"),
+`crcbl-ui/src/debug.rs` ("four samples each remembering to add the same
+module"), `crcbl-ui/src/menu.rs` ("three samples the same arithmetic"). Each
+needs reading before editing — the count may be right, and the past-tense ones
+are correct as they stand.
+
 ### rustc's lint suppression inside external macros is a hazard for every forwarding macro we write
 
 `unconditional_recursion` is a rustc lint and this workspace runs `-D warnings`,

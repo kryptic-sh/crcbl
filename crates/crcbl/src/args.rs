@@ -174,7 +174,8 @@ pub enum Consumed {
 /// The options every sample has.
 ///
 /// Held as a field on the game's own `Options` rather than flattened into it,
-/// so adding a shared flag reaches four games without touching four structs.
+/// so adding a shared flag reaches every sample without touching any of their
+/// structs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Common {
     /// Run without a window.
