@@ -257,6 +257,68 @@ function encodeCanonicalReplies(replies) {
   // same order for the same bytes to come out.
   replies.noAdapter(13n, 'requestAdapter() resolved null — ✱');
   replies.noAdapter(1n, '');
+  // **The device's own capabilities, and not the adapter's.** The feature word
+  // comes from the production mapping again — over a *device* stub with no
+  // features, which is what `requestDevice()` returns when nothing optional was
+  // asked for — so this number is the four core flags and nothing else, while
+  // the first adapter above has those four plus four more. A replayer that
+  // answered a device request by copying its adapter record would put a
+  // different word here.
+  replies.device(7n, {
+    features: halFeaturesFor(defaultDevice()),
+    limits: {
+      ...everyLimit(),
+      maxImage2d: 8192,
+      timestampPeriodNs: 0,
+    },
+  });
+  replies.device(19n, {
+    features: 0n,
+    // `Limits::minimum()` on the Rust side.
+    limits: {
+      maxImage2d: 8192,
+      maxImage3d: 2048,
+      maxImageArrayLayers: 256,
+      maxStorageBufferRange: 134_217_728n,
+      maxUniformBufferRange: 65536n,
+      maxBindGroups: 4,
+      maxBindlessDescriptors: 0,
+      maxPushConstantSize: 0,
+      maxColorAttachments: 4,
+      maxSampleCount: 4,
+      maxDrawIndirectCount: 1,
+      maxComputeWorkgroupSize: [256, 256, 64],
+      maxComputeInvocationsPerWorkgroup: 256,
+      maxComputeWorkgroupsPerDimension: 65535,
+      minUniformBufferOffsetAlignment: 256n,
+      minStorageBufferOffsetAlignment: 256n,
+      optimalBufferCopyOffsetAlignment: 256n,
+      maxSamplerAnisotropy: 1,
+      timestampPeriodNs: 0,
+    },
+  });
+  // The refusal, with the gap. `TIMELINE_SEMAPHORE` is bit 9 — the flag
+  // `DeviceDesc::for_adapter` requires and WebGPU has no answer for.
+  replies.deviceFailed(
+    3n,
+    'no WebGPU feature satisfies Features(TIMELINE_SEMAPHORE) — ✱',
+    1n << 9n
+  );
+  // …and a failure that is not about features: the two halves are independent.
+  replies.deviceFailed(29n, '', 0n);
+}
+
+/**
+ * A `GPUDevice` stub as `requestDevice()` returns one when nothing optional was
+ * asked for: no features of its own.
+ *
+ * Its `features` is an empty set rather than absent, because that is what a real
+ * device has — and the four bits the mapping produces from it are the ones core
+ * WebGPU grants with no name behind them. Only the features are read from it
+ * here; the limits below are spelled out for `everyLimit`'s reason.
+ */
+function defaultDevice() {
+  return { features: new Set() };
 }
 
 /**
@@ -435,6 +497,39 @@ async function main() {
       new ReplyWriter().adapter(1n, info);
     }
   );
+  // ---- the device replies refuse the same mistakes ------------------------
+  // A device record is the capability half of an adapter's and goes through the
+  // same writer, so what it must refuse is the same list — stated here because
+  // "it shares a method" is a fact about today's code rather than a contract.
+  checkRefused(
+    'a device whose feature word is a number rather than a BigInt is refused',
+    'NotABigInt',
+    () => new ReplyWriter().device(1n, { features: 0, limits: everyLimit() })
+  );
+  checkRefused(
+    'a device missing a limit is refused rather than written as zero',
+    'NotANumber',
+    () => {
+      const limits = everyLimit();
+      delete limits.maxColorAttachments;
+      new ReplyWriter().device(1n, { features: 0n, limits });
+    }
+  );
+  // The failure's two halves: the reason is a string and the gap is a `u64`, so
+  // the gap is where the `BigInt` rule lands.
+  checkRefused(
+    'a failure whose missing-features word is a number is refused',
+    'NotABigInt',
+    // @ts-expect-error — the mistake this check exists for.
+    () => new ReplyWriter().deviceFailed(1n, 'why', 0)
+  );
+  checkRefused(
+    'a failure reason past the field cap is refused',
+    'InvalidLength',
+    () =>
+      new ReplyWriter().deviceFailed(1n, 'x'.repeat(MAX_FIELD_BYTES + 1), 0n)
+  );
+
   // A workgroup size of the wrong length is a shape mistake rather than a
   // missing field, and would otherwise write two axes and run on into the
   // fields after them.

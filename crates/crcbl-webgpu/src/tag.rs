@@ -60,6 +60,20 @@ pub const REPLY_MAGIC: &[u8; 8] = b"CRCBLRPL";
 /// what the version word is *for*: the two halves ship as separate artifacts and
 /// are cached independently, so a page holding yesterday's JavaScript against
 /// today's wasm would otherwise read a name's length prefix as a vendor id.
+///
+/// # A new tag is not a new version, and the difference is the failure mode
+///
+/// Neither word moved when the device request and its two replies were added,
+/// and that is deliberate. A **changed record** — the edit that took this word
+/// to `2` — is invisible to a decoder: the bytes still parse and mean something
+/// else, which is the defect only a version can catch. A **new tag** is not: an
+/// older decoder meeting one answers [`DecodeError::UnknownTag`] naming the
+/// byte, which says more than a header mismatch could and says it about the one
+/// record that is new rather than about the whole buffer. Bumping would also
+/// refuse every buffer from the older half, including the ones it still decodes
+/// perfectly.
+///
+/// [`DecodeError::UnknownTag`]: crate::DecodeError::UnknownTag
 pub const REPLY_VERSION: u16 = 2;
 
 /// Bytes before the first reply: [`REPLY_MAGIC`] and [`REPLY_VERSION`].
@@ -222,6 +236,8 @@ pub const PUSH_CONSTANTS_TAG: u8 = 0x44;
 pub const DRAW_TAG: u8 = 0x60;
 /// [`Command::EnumerateAdapters`](crate::Command::EnumerateAdapters).
 pub const ENUMERATE_ADAPTERS_TAG: u8 = 0x90;
+/// [`Command::RequestDevice`](crate::Command::RequestDevice).
+pub const REQUEST_DEVICE_TAG: u8 = 0x91;
 
 // ── Reply families ────────────────────────────────────────────────────────────
 //
@@ -270,6 +286,10 @@ pub const REPLY_FAMILIES_END: u8 = REPLY_FAMILY_QUERY_END;
 pub const ADAPTER_REPLY_TAG: u8 = 0x00;
 /// [`Reply::NoAdapter`](crate::Reply::NoAdapter).
 pub const NO_ADAPTER_REPLY_TAG: u8 = 0x01;
+/// [`Reply::Device`](crate::Reply::Device).
+pub const DEVICE_REPLY_TAG: u8 = 0x02;
+/// [`Reply::DeviceFailed`](crate::Reply::DeviceFailed).
+pub const DEVICE_FAILED_REPLY_TAG: u8 = 0x03;
 /// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending).
 pub const READBACK_PENDING_REPLY_TAG: u8 = 0x10;
 /// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady).
@@ -431,7 +451,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 9] = [
+    const TAGS: [(&str, u8, u8); 10] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("DestroyBuffer", DESTROY_BUFFER_TAG, FAMILY_DESTROY),
         ("BeginDebugLabel", BEGIN_DEBUG_LABEL_TAG, FAMILY_ENCODER),
@@ -445,13 +465,20 @@ mod tests {
         ("PushConstants", PUSH_CONSTANTS_TAG, FAMILY_ENCODER),
         ("Draw", DRAW_TAG, FAMILY_DRAW),
         ("EnumerateAdapters", ENUMERATE_ADAPTERS_TAG, FAMILY_INSTANCE),
+        ("RequestDevice", REQUEST_DEVICE_TAG, FAMILY_INSTANCE),
     ];
 
     /// Every reply tag this slice defines, with the family its name claims.
     /// Spelled out for the reason [`TAGS`] is.
-    const REPLY_TAGS: [(&str, u8, u8); 5] = [
+    const REPLY_TAGS: [(&str, u8, u8); 7] = [
         ("Adapter", ADAPTER_REPLY_TAG, REPLY_FAMILY_INSTANCE),
         ("NoAdapter", NO_ADAPTER_REPLY_TAG, REPLY_FAMILY_INSTANCE),
+        ("Device", DEVICE_REPLY_TAG, REPLY_FAMILY_INSTANCE),
+        (
+            "DeviceFailed",
+            DEVICE_FAILED_REPLY_TAG,
+            REPLY_FAMILY_INSTANCE,
+        ),
         (
             "ReadbackPending",
             READBACK_PENDING_REPLY_TAG,

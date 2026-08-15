@@ -49,15 +49,26 @@
 //! | a string alone | [`Reply::NoAdapter`] |
 //! | a counted array of fixed-size elements | [`Reply::QueryResults`] |
 //!
-//! [`Reply::NoAdapter`] is the one addition this set has taken since it was
-//! written, and it is not a new shape but a new *fact*: an enumeration is
-//! answered exactly once, so "the browser granted nothing" has nowhere to live
-//! inside [`Reply::Adapter`]. Its own docs carry the argument.
+//! [`Reply::NoAdapter`] was the first addition this set took, and it is not a
+//! new shape but a new *fact*: an enumeration is answered exactly once, so "the
+//! browser granted nothing" has nowhere to live inside [`Reply::Adapter`]. Its
+//! own docs carry the argument. [`Reply::Device`] and [`Reply::DeviceFailed`]
+//! are the second, and the same two shapes again — the capability half of an
+//! adapter record, and a reason with the machine-readable half of it beside the
+//! string.
 //!
-//! Not here, and needed before the HAL can be implemented over this channel: the
-//! device-request poll (a [`DeviceRequestState`](crcbl_hal::DeviceRequestState)
-//! and, on failure, a reason) and surface capabilities. Both are compositions of
-//! the shapes above.
+//! Not here, and needed before the HAL can be implemented over this channel:
+//! surface capabilities, which is a composition of the shapes above.
+//!
+//! # There is no "still pending" reply, and there must not be
+//!
+//! [`DeviceRequestState::Pending`](crcbl_hal::DeviceRequestState::Pending) is
+//! the *absence* of a reply, not a reply. `requestDevice` settles once, so a
+//! per-frame "not yet" would be one reply per frame naming a sequence that is
+//! answered exactly once — which the channel refuses, whole buffer at a time,
+//! as [`DecodeError::UnexpectedSequence`]. The waiting frames are the ones with
+//! nothing in the buffer for that sequence, and [`crate::device`] is what turns
+//! that silence into `Pending`.
 //!
 //! # What an adapter reply carries, and what the browser cannot tell it
 //!
@@ -156,7 +167,7 @@ impl ByteWriter {
     /// `1 << n`, so the value is already chosen rather than positional.
     /// Truncating would silently drop a bit the other half meant.
     fn put_device_caps(&mut self, caps: &DeviceCaps) {
-        self.put_u64(caps.features.bits());
+        self.put_features(caps.features);
         self.put_limits(&caps.limits);
     }
 
@@ -205,13 +216,8 @@ impl ByteReader<'_> {
     /// a truncation: `from_bits_truncate` would accept a word from a newer build
     /// and silently report a lesser device.
     fn read_device_caps(&mut self) -> Result<DeviceCaps, DecodeError> {
-        let bits = self.read_u64()?;
-        let features = Features::from_bits(bits).ok_or(DecodeError::InvalidEnum {
-            field: "DeviceCaps::features",
-            code: bits,
-        })?;
         Ok(DeviceCaps {
-            features,
+            features: self.read_features("DeviceCaps::features")?,
             limits: self.read_limits()?,
         })
     }
@@ -296,6 +302,55 @@ pub enum Reply {
         /// on: it is a message from another vendor's runtime.
         reason: String,
     },
+    /// The browser opened a device, with what *that device* can do.
+    ///
+    /// **Not the adapter's capabilities**, and the distinction is the whole
+    /// point of a separate reply rather than an "ok" flag on
+    /// [`Reply::Adapter`]. WebGPU grants a device the features that were asked
+    /// for and no others, and its limits are the ones that were requested —
+    /// which are the specification's defaults when a request names none — so an
+    /// adapter reporting `timestamp-query` and a 16384-pixel texture yields a
+    /// device with neither unless the request said so. A backend that reported
+    /// the adapter's [`DeviceCaps`] for its device would select render paths
+    /// against capabilities the device does not have.
+    ///
+    /// There is no handle: the [`Device`](crcbl_hal::Device) lives on the far
+    /// side for its whole life, and this crate's command set already names one
+    /// device implicitly — [`Command::CreateBuffer`](crate::Command::CreateBuffer)
+    /// carries no device id either. The side table that stamps object ownership
+    /// arrives with the second device, as
+    /// `docs/plan/41-webgpu-stream.md` says it must.
+    Device {
+        /// What the device the browser opened can do.
+        caps: DeviceCaps,
+    },
+    /// The device request failed, with the reason and the gap that caused it.
+    ///
+    /// **This is the request failing, not a device being lost.** The two are
+    /// different events with different lifetimes: this one answers a
+    /// [`Command::RequestDevice`](crate::Command::RequestDevice) that never
+    /// produced a device, and it is what
+    /// [`PendingDevice::poll`](crcbl_hal::PendingDevice::poll) would report as
+    /// an `Err`. A device *lost* later — WebGPU's `GPUDevice.lost`, or an
+    /// `uncapturederror` on a device that is open and working — belongs to
+    /// [`Device::take_error`](crcbl_hal::Device::take_error) and to a reply this
+    /// slice does not have, because nothing here holds a device long enough to
+    /// lose one.
+    DeviceFailed {
+        /// What the browser said, or what the replayer refused to ask for. For
+        /// a log or a banner; never a code to branch on.
+        reason: String,
+        /// Which of the requested features could not be satisfied, or empty
+        /// when the failure was not about features.
+        ///
+        /// The machine-readable half of `reason`, and the field an
+        /// `impl Instance` would turn into
+        /// [`HalError::UnsupportedFeatures`](crcbl_hal::HalError::UnsupportedFeatures).
+        /// It is a [`Features`] word rather than a phrase inside the string
+        /// because the names belong to this side: `crcbl-hal` spells them, the
+        /// replayer only knows bits and `GPUFeatureName`s.
+        unsupported: Features,
+    },
     /// [`poll_readback`](crcbl_hal::Device::poll_readback) answering
     /// [`ReadbackState::Pending`](crcbl_hal::ReadbackState::Pending): the bytes
     /// are not there yet, and the caller's `out` is left untouched.
@@ -341,6 +396,8 @@ impl Reply {
         match self {
             Self::Adapter { .. } => "Adapter",
             Self::NoAdapter { .. } => "NoAdapter",
+            Self::Device { .. } => "Device",
+            Self::DeviceFailed { .. } => "DeviceFailed",
             Self::ReadbackPending { .. } => "ReadbackPending",
             Self::ReadbackReady { .. } => "ReadbackReady",
             Self::QueryResults { .. } => "QueryResults",
@@ -416,6 +473,22 @@ impl ReplyWriter {
     pub fn no_adapter(&mut self, sequence: u64, reason: &str) {
         self.open(tag::NO_ADAPTER_REPLY_TAG, sequence);
         self.bytes.put_bytes(reason.as_bytes());
+    }
+
+    /// [`Reply::Device`].
+    ///
+    /// `caps` are the *device's*, which are not the adapter's — see
+    /// [`Reply::Device`].
+    pub fn device(&mut self, sequence: u64, caps: &DeviceCaps) {
+        self.open(tag::DEVICE_REPLY_TAG, sequence);
+        self.bytes.put_device_caps(caps);
+    }
+
+    /// [`Reply::DeviceFailed`].
+    pub fn device_failed(&mut self, sequence: u64, reason: &str, unsupported: Features) {
+        self.open(tag::DEVICE_FAILED_REPLY_TAG, sequence);
+        self.bytes.put_bytes(reason.as_bytes());
+        self.bytes.put_u64(unsupported.bits());
     }
 
     /// [`Reply::ReadbackPending`].
@@ -522,6 +595,17 @@ impl<'a> ReplyReader<'a> {
             tag::NO_ADAPTER_REPLY_TAG => Reply::NoAdapter {
                 reason: r.read_string("NoAdapter::reason")?,
             },
+            tag::DEVICE_REPLY_TAG => Reply::Device {
+                caps: r.read_device_caps()?,
+            },
+            tag::DEVICE_FAILED_REPLY_TAG => {
+                let reason = r.read_string("DeviceFailed::reason")?;
+                let unsupported = r.read_features("DeviceFailed::unsupported")?;
+                Reply::DeviceFailed {
+                    reason,
+                    unsupported,
+                }
+            }
             tag::READBACK_PENDING_REPLY_TAG => Reply::ReadbackPending {
                 readback: r.read_handle("ReadbackPending::readback")?,
             },

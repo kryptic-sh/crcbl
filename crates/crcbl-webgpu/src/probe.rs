@@ -28,14 +28,50 @@
 //! | [`__crcbl_web_gpu_probe_state`](shim::__crcbl_web_gpu_probe_state) | `() -> i32` | Drain whatever JS has committed and answer one of the `PROBE_*` codes. |
 //! | [`__crcbl_web_gpu_probe_text_ptr`](shim::__crcbl_web_gpu_probe_text_ptr) | `() -> i32` | Where the adapter's name, or the reason there is none, starts. |
 //! | [`__crcbl_web_gpu_probe_text_len`](shim::__crcbl_web_gpu_probe_text_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
-//! | [`__crcbl_web_gpu_probe_features_lo`](shim::__crcbl_web_gpu_probe_features_lo) | `() -> i32` | Low 32 bits of the granted adapter's [`Features`](crcbl_hal::Features). |
+//! | [`__crcbl_web_gpu_probe_features_lo`](shim::__crcbl_web_gpu_probe_features_lo) | `() -> i32` | Low 32 bits of the granted adapter's [`Features`]. |
 //! | [`__crcbl_web_gpu_probe_features_hi`](shim::__crcbl_web_gpu_probe_features_hi) | `() -> i32` | High 32 bits of the same. |
 //! | [`__crcbl_web_gpu_probe_max_image_2d`](shim::__crcbl_web_gpu_probe_max_image_2d) | `() -> i32` | The granted adapter's [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d). |
+//! | [`__crcbl_web_gpu_probe_device`](shim::__crcbl_web_gpu_probe_device) | `() -> i32` | Encode one device request for the adapter that was granted, and register its wait. `1`, or `0` if nothing has been granted yet, there was no room, or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_device_state`](shim::__crcbl_web_gpu_probe_device_state) | `() -> i32` | Drain, and answer one of the `DEVICE_*` codes. |
+//! | [`__crcbl_web_gpu_probe_device_reason_ptr`](shim::__crcbl_web_gpu_probe_device_reason_ptr) | `() -> i32` | Where the reason no device opened starts. Empty when one did. |
+//! | [`__crcbl_web_gpu_probe_device_reason_len`](shim::__crcbl_web_gpu_probe_device_reason_len) | `() -> i32` | How long it is, in UTF-8 bytes. |
+//! | [`__crcbl_web_gpu_probe_device_features_lo`](shim::__crcbl_web_gpu_probe_device_features_lo) | `() -> i32` | Low 32 bits of the **opened device's** [`Features`]. |
+//! | [`__crcbl_web_gpu_probe_device_features_hi`](shim::__crcbl_web_gpu_probe_device_features_hi) | `() -> i32` | High 32 bits of the same. |
+//! | [`__crcbl_web_gpu_probe_device_max_image_2d`](shim::__crcbl_web_gpu_probe_device_max_image_2d) | `() -> i32` | The opened device's [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d). |
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
-//! `state` decodes a buffer and clones a string out of it, so it allocates, and
-//! an allocation may grow wasm memory and detach a `Uint8Array` built before the
-//! call. `ptr` and `len` allocate nothing, and neither do the three below them.
+//! a `state` call decodes a buffer and clones a string out of it, so it
+//! allocates, and an allocation may grow wasm memory and detach a `Uint8Array`
+//! built before the call. The pointers, the lengths and the six numbers
+//! allocate nothing.
+//!
+//! **Either `state` drains for both probes.** There is one channel and one
+//! committed reply buffer, so the first of the two calls in a frame decodes it
+//! and hands each probe its own answer; the second finds nothing left and
+//! reports what its probe now holds. The consequence worth stating: a buffer
+//! that will not decode is reported by whichever was asked first, as that
+//! probe's `*_UNDECODABLE`, and the other reports the state it was already in.
+//! Dropping the other probe's answer instead would leave a command waiting for
+//! ever, which is the one thing this channel must never do.
+//!
+//! # The device this asks for, and why it asks for so little
+//!
+//! [`probe_device_desc`] requires [`Features::COMPUTE`](crcbl_hal::Features::COMPUTE)
+//! — core WebGPU, so every browser can satisfy it — and asks for **nothing
+//! optional**. That is not timidity: it is what makes the answer checkable. A
+//! device opened with no optional features and no requested limits is the
+//! specification's own default, so the page can open a second one for itself
+//! and compare, and the result differs from the *adapter's* capabilities on any
+//! machine whose adapter reports more than the floor. A request that asked for
+//! everything the adapter had would produce a device whose capabilities equal
+//! the adapter's, and a backend that reported the adapter's record for its
+//! device would then pass.
+//!
+//! [`DeviceDesc::for_adapter`](crcbl_hal::DeviceDesc::for_adapter) is
+//! deliberately *not* what this uses: it requires
+//! [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE), which WebGPU
+//! does not have, so it is the refusal case rather than the opening one. See
+//! [`crate::device`].
 //!
 //! # Why three numbers and not the whole of `AdapterInfo`
 //!
@@ -60,6 +96,13 @@
 //! the mapping check the gate runs in-page against the live adapter, plus the
 //! committed fixture.
 //!
+//! The device's three numbers are the same three for the same reasons, and one
+//! more: **they are what says the device's capabilities are not a copy of the
+//! adapter's.** A page can open its own default device and read `device.features`
+//! and `device.limits.maxTextureDimension2D` off it, and both differ from the
+//! adapter's whenever the adapter reports anything above the specification's
+//! floor.
+//!
 //! `i32` pairs rather than one `i64` because the whole of this ABI is
 //! `(i32, …) -> i32`, which `docs/plan/41-webgpu-stream.md` sets as the
 //! convention and which needs no `BigInt` on the JS side.
@@ -70,6 +113,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use crcbl_hal::{AdapterId, DeviceDesc, Features};
+
+use crate::device::DeviceProbe;
 use crate::instance::AdapterProbe;
 use crate::web::{StreamChannel, install};
 
@@ -89,6 +135,43 @@ pub const PROBE_REFUSED: u32 = 3;
 /// sides having drifted.
 pub const PROBE_UNDECODABLE: u32 = 4;
 
+/// [`DeviceProbe::Unasked`], or no adapter to open.
+pub const DEVICE_UNASKED: u32 = 0;
+/// [`DeviceProbe::Waiting`] — `requestDevice` has not settled.
+///
+/// [`DeviceRequestState::Pending`](crcbl_hal::DeviceRequestState::Pending) seen
+/// through the ABI, and the ordinary answer on every frame between the ask and
+/// the answer.
+pub const DEVICE_WAITING: u32 = 1;
+/// [`DeviceProbe::Opened`]; the three numeric exports carry the device's own
+/// capabilities and the reason is empty.
+pub const DEVICE_OPENED: u32 = 2;
+/// [`DeviceProbe::Failed`]; the reason says what the browser refused, or what
+/// this backend refused to ask it for.
+pub const DEVICE_FAILED: u32 = 3;
+/// The committed reply buffer would not decode; the reason is the
+/// [`DecodeError`](crate::DecodeError). [`PROBE_UNDECODABLE`]'s twin, and
+/// distinct from [`DEVICE_FAILED`] for its reason: a refusal is a browser, and
+/// this is the format's two hand-written sides having drifted.
+pub const DEVICE_UNDECODABLE: u32 = 4;
+
+/// The descriptor [`shim::__crcbl_web_gpu_probe_device`] asks with.
+///
+/// Requires only [`Features::COMPUTE`], which core WebGPU grants with no
+/// `GPUFeatureName` behind it, and asks for nothing optional — see the [module
+/// docs](self#the-device-this-asks-for-and-why-it-asks-for-so-little) for why
+/// the emptiness is the point rather than a placeholder.
+#[must_use]
+pub const fn probe_device_desc(adapter: AdapterId) -> DeviceDesc<'static> {
+    DeviceDesc {
+        label: Some("crcbl-webgpu probe"),
+        adapter,
+        required_features: Features::COMPUTE,
+        optional_features: Features::empty(),
+        compatible_surface: None,
+    }
+}
+
 thread_local! {
     /// The probe's own channel and its state. Thread-local for
     /// [`crate::web`]'s reason: whichever thread the engine runs on is the one
@@ -96,8 +179,8 @@ thread_local! {
     static PROBE: RefCell<Probe> = const { RefCell::new(Probe::new()) };
 }
 
-/// The channel the probe installed, the enumeration it is waiting on, and the
-/// last thing it has to say.
+/// The channel the probe installed, the two calls it is waiting on, and the
+/// last thing each has to say.
 #[derive(Debug)]
 struct Probe {
     /// Held for as long as the probe exists, because
@@ -107,6 +190,12 @@ struct Probe {
     state: AdapterProbe,
     /// The adapter's name, the reason there is none, or a decode error.
     text: String,
+    device: DeviceProbe,
+    /// Why no device opened, or a decode error. Its own string rather than a
+    /// share of [`text`](Self::text): the two probes settle at different times
+    /// and each export reads the text belonging to its own `state` call, so one
+    /// buffer would mean whichever ran last.
+    reason: String,
 }
 
 impl Probe {
@@ -115,6 +204,8 @@ impl Probe {
             channel: None,
             state: AdapterProbe::Unasked,
             text: String::new(),
+            device: DeviceProbe::Unasked,
+            reason: String::new(),
         }
     }
 
@@ -147,22 +238,53 @@ impl Probe {
         true
     }
 
-    /// Drain what JS has committed, absorb this probe's own answer, and report.
-    fn state(&mut self) -> u32 {
-        if let Some(channel) = self.channel.as_ref() {
-            // `None` is the inbox being borrowed, which nothing here can cause;
-            // it reads as "no replies this frame", which is also what an
-            // ordinary frame answers.
-            match channel.drain_replies() {
-                Some(Ok(replies)) => {
-                    self.state.absorb(&replies);
-                }
-                Some(Err(error)) => {
-                    self.text = error.to_string();
-                    return PROBE_UNDECODABLE;
-                }
-                None => {}
+    /// Encode one device request for the adapter that was granted.
+    ///
+    /// `false` when nothing has been granted yet, which is an ordering rule
+    /// rather than a failure: [`DeviceDesc::adapter`](crcbl_hal::DeviceDesc)
+    /// names an adapter from an enumeration, so there has to have been one.
+    fn request_device(&mut self) -> bool {
+        let Some(adapter) = self.granted().map(|info| info.id) else {
+            return false;
+        };
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        let Some(state) = DeviceProbe::request(channel, &probe_device_desc(adapter)) else {
+            return false;
+        };
+        self.device = state;
+        self.reason.clear();
+        true
+    }
+
+    /// Drain what JS has committed and hand **both** probes their answers.
+    ///
+    /// The error, if the buffer would not decode, for the caller to report as
+    /// its own probe's `*_UNDECODABLE`. One drain for the two of them because
+    /// there is one buffer: absorbing into only the probe that asked would drop
+    /// the other's answer, and a dropped reply is a command that waits for ever.
+    fn drain(&mut self) -> Option<crate::DecodeError> {
+        let channel = self.channel.as_ref()?;
+        // `None` is the inbox being borrowed, which nothing here can cause; it
+        // reads as "no replies this frame", which is also what an ordinary
+        // frame answers.
+        match channel.drain_replies() {
+            Some(Ok(replies)) => {
+                self.state.absorb(&replies);
+                self.device.absorb(&replies);
+                None
             }
+            Some(Err(error)) => Some(error),
+            None => None,
+        }
+    }
+
+    /// Drain, absorb, and report where the enumeration has got to.
+    fn state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.text = error.to_string();
+            return PROBE_UNDECODABLE;
         }
         match &self.state {
             AdapterProbe::Unasked => PROBE_UNASKED,
@@ -178,6 +300,26 @@ impl Probe {
         }
     }
 
+    /// Drain, absorb, and report where the device request has got to.
+    fn device_state(&mut self) -> u32 {
+        if let Some(error) = self.drain() {
+            self.reason = error.to_string();
+            return DEVICE_UNDECODABLE;
+        }
+        match &self.device {
+            DeviceProbe::Unasked => DEVICE_UNASKED,
+            DeviceProbe::Waiting { .. } => DEVICE_WAITING,
+            DeviceProbe::Opened { .. } => {
+                self.reason.clear();
+                DEVICE_OPENED
+            }
+            DeviceProbe::Failed { reason, .. } => {
+                self.reason.clone_from(reason);
+                DEVICE_FAILED
+            }
+        }
+    }
+
     /// What the granted adapter said about itself, or `None` if none was.
     ///
     /// The numeric exports read through this rather than each reaching into the
@@ -188,6 +330,15 @@ impl Probe {
             _ => None,
         }
     }
+
+    /// What the opened device said about itself, or `None` if none opened.
+    ///
+    /// **Not [`granted`](Self::granted)'s `caps`**, and the whole reason the
+    /// device has numeric exports of its own: WebGPU grants a device what was
+    /// asked for, which is less than the adapter has.
+    const fn opened(&self) -> Option<crcbl_hal::DeviceCaps> {
+        self.device.caps()
+    }
 }
 
 /// The JS→wasm ABI. See the [module docs](self) for the whole contract.
@@ -195,7 +346,7 @@ impl Probe {
 /// `#[unsafe(no_mangle)]` only on `wasm32`. None of these is `unsafe`: none
 /// dereferences a pointer the caller supplied.
 pub mod shim {
-    use super::{PROBE, PROBE_UNASKED};
+    use super::{DEVICE_UNASKED, PROBE, PROBE_UNASKED};
 
     /// Ask the browser what it will grant.
     ///
@@ -245,6 +396,58 @@ pub mod shim {
         })
     }
 
+    /// Ask the browser to open the adapter it granted.
+    ///
+    /// `1` when one device request is on the stream with its wait registered;
+    /// `0` when no adapter has been granted yet, when there was no room, when
+    /// the probe is re-entered, or when another channel is already installed.
+    ///
+    /// **The enumeration has to have been answered first.** The descriptor names
+    /// an [`AdapterId`](crcbl_hal::AdapterId) from an enumeration, so there is
+    /// nothing to name until one has come back — and `0` here while
+    /// [`__crcbl_web_gpu_probe_state`] still answers
+    /// [`PROBE_WAITING`](super::PROBE_WAITING) is that ordering, not a failure.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_device() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_device()),
+            Err(_) => 0,
+        })
+    }
+
+    /// Drain the committed replies and report where the device request has got
+    /// to.
+    ///
+    /// One of the `DEVICE_*` codes. **May allocate**, on
+    /// [`__crcbl_web_gpu_probe_state`]'s terms and for its reason — and, like
+    /// it, this is the call that drains for *both* probes.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_device_state() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => probe.device_state(),
+            Err(_) => DEVICE_UNASKED,
+        })
+    }
+
+    /// Where the reason belonging to the last
+    /// [`__crcbl_web_gpu_probe_device_state`] starts. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_device_reason_ptr() -> *const u8 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.reason.as_ptr(),
+            Err(_) => core::ptr::null(),
+        })
+    }
+
+    /// How long that reason is, in UTF-8 bytes. Allocates nothing.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_device_reason_len() -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => u32::try_from(probe.reason.len()).unwrap_or(u32::MAX),
+            Err(_) => 0,
+        })
+    }
+
     /// Reads one number off the granted adapter, or `0`.
     ///
     /// **`0` is a legal value for every one of them** — an adapter may
@@ -283,19 +486,54 @@ pub mod shim {
     pub extern "C" fn __crcbl_web_gpu_probe_max_image_2d() -> u32 {
         granted_u32(|info| info.caps.limits.max_image_2d)
     }
+
+    /// [`granted_u32`] for the device that opened, on the same terms: `0` is a
+    /// legal value for each of these, so they are read only once
+    /// [`__crcbl_web_gpu_probe_device_state`] has answered
+    /// [`DEVICE_OPENED`](super::DEVICE_OPENED). Allocates nothing.
+    fn opened_u32(read: impl FnOnce(crcbl_hal::DeviceCaps) -> u32) -> u32 {
+        PROBE.with(|probe| match probe.try_borrow() {
+            Ok(probe) => probe.opened().map_or(0, read),
+            Err(_) => 0,
+        })
+    }
+
+    /// Low 32 bits of the **opened device's**
+    /// [`Features`](crcbl_hal::Features) — what WebGPU granted, which is what
+    /// was asked for and not everything the adapter had.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_device_features_lo() -> u32 {
+        opened_u32(|caps| caps.features.bits() as u32)
+    }
+
+    /// High 32 bits of the same word.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_device_features_hi() -> u32 {
+        opened_u32(|caps| (caps.features.bits() >> 32) as u32)
+    }
+
+    /// The opened device's
+    /// [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d) — the limit the
+    /// *device* was created with, which is the specification's default unless
+    /// something asked for more, and therefore not the adapter's ceiling.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_device_max_image_2d() -> u32 {
+        opened_u32(|caps| caps.limits.max_image_2d)
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crcbl_hal::{
-        AdapterId, AdapterInfo, BackendKind, DeviceCaps, DeviceType, Features, Limits,
-    };
+    use crcbl_hal::{AdapterInfo, BackendKind, DeviceCaps, DeviceType, Limits};
 
     use super::shim::{
-        __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_features_hi,
-        __crcbl_web_gpu_probe_features_lo, __crcbl_web_gpu_probe_max_image_2d,
-        __crcbl_web_gpu_probe_state, __crcbl_web_gpu_probe_text_len,
-        __crcbl_web_gpu_probe_text_ptr,
+        __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_device,
+        __crcbl_web_gpu_probe_device_features_hi, __crcbl_web_gpu_probe_device_features_lo,
+        __crcbl_web_gpu_probe_device_max_image_2d, __crcbl_web_gpu_probe_device_reason_len,
+        __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
+        __crcbl_web_gpu_probe_features_hi, __crcbl_web_gpu_probe_features_lo,
+        __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_state,
+        __crcbl_web_gpu_probe_text_len, __crcbl_web_gpu_probe_text_ptr,
     };
     use super::*;
     use crate::web::shim::{
@@ -316,6 +554,21 @@ mod tests {
         // between the two calls above can have moved — neither export allocates.
         let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
         String::from_utf8(bytes.to_vec()).expect("the probe's text is a Rust String")
+    }
+
+    /// The reason the last `device_state` call left, read the way JS reads it.
+    fn device_reason() -> String {
+        let len = __crcbl_web_gpu_probe_device_reason_len() as usize;
+        let ptr = __crcbl_web_gpu_probe_device_reason_ptr();
+        assert!(
+            !ptr.is_null(),
+            "the probe answered a length with no pointer"
+        );
+        // SAFETY: `ptr` and `len` are this thread's `Probe::reason`, which
+        // nothing between the two calls above can have moved — neither export
+        // allocates.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
+        String::from_utf8(bytes.to_vec()).expect("the probe's reason is a Rust String")
     }
 
     /// Reads the frame out through the transport exports, as the shim does, and
@@ -466,6 +719,205 @@ mod tests {
 
         assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_UNDECODABLE);
         assert!(text().contains("9999"), "{}", text());
+    }
+
+    /// The capabilities an opened device answers with — deliberately *less*
+    /// than [`granted`]'s adapter, which is what a WebGPU device is: the
+    /// features that were asked for, and the specification's default limits.
+    fn device_caps() -> DeviceCaps {
+        DeviceCaps {
+            features: Features::COMPUTE,
+            limits: Limits {
+                max_image_2d: 8192,
+                ..Limits::minimum()
+            },
+        }
+    }
+
+    /// Enumerates, grants `info`, and leaves the probe with an adapter.
+    fn grant(info: &AdapterInfo) {
+        assert_eq!(__crcbl_web_gpu_probe_adapters(), 1);
+        assert_eq!(take_frame(), vec![Command::EnumerateAdapters]);
+        let mut replies = ReplyWriter::new();
+        replies.adapter(0, info);
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_GRANTED);
+    }
+
+    /// The device half of the exchange, through the exports alone — the second
+    /// round trip the browser gate drives.
+    #[test]
+    fn the_exports_carry_a_device_request_out_and_the_devices_own_capabilities_back() {
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_UNASKED);
+        grant(&granted("Cherry MX Blue GPU"));
+
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(
+            take_frame(),
+            vec![Command::RequestDevice {
+                adapter: AdapterId(0),
+                label: Some("crcbl-webgpu probe".into()),
+                required_features: Features::COMPUTE,
+                optional_features: Features::empty(),
+                compatible_surface: None,
+            }]
+        );
+
+        // Sequence 1: the enumeration spent 0.
+        let mut replies = ReplyWriter::new();
+        replies.device(1, &device_caps());
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_OPENED);
+        assert_eq!(device_reason(), "");
+        let bits = device_caps().features.bits();
+        assert_eq!(
+            u64::from(__crcbl_web_gpu_probe_device_features_lo()),
+            bits & 0xFFFF_FFFF
+        );
+        assert_eq!(
+            u64::from(__crcbl_web_gpu_probe_device_features_hi()),
+            bits >> 32
+        );
+        assert_eq!(
+            __crcbl_web_gpu_probe_device_max_image_2d(),
+            device_caps().limits.max_image_2d
+        );
+    }
+
+    /// **The device's numbers are not the adapter's**, and the two sets of
+    /// exports must not read the same store. The corpus here is built so that
+    /// every one of the three differs.
+    #[test]
+    fn the_device_exports_do_not_answer_with_the_adapters_capabilities() {
+        let adapter = granted("capable");
+        grant(&adapter);
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(take_frame().len(), 1);
+        let mut replies = ReplyWriter::new();
+        replies.device(1, &device_caps());
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_OPENED);
+
+        assert_ne!(
+            adapter.caps.features,
+            device_caps().features,
+            "the corpus would not notice a copy otherwise"
+        );
+        assert_ne!(
+            adapter.caps.limits.max_image_2d,
+            device_caps().limits.max_image_2d
+        );
+        assert_eq!(
+            __crcbl_web_gpu_probe_features_lo(),
+            adapter.caps.features.bits() as u32
+        );
+        assert_eq!(
+            __crcbl_web_gpu_probe_device_features_lo(),
+            device_caps().features.bits() as u32
+        );
+        assert_eq!(
+            __crcbl_web_gpu_probe_max_image_2d(),
+            adapter.caps.limits.max_image_2d
+        );
+        assert_eq!(
+            __crcbl_web_gpu_probe_device_max_image_2d(),
+            device_caps().limits.max_image_2d
+        );
+    }
+
+    /// The descriptor names an adapter, so there has to be one. Nothing may be
+    /// encoded before there is.
+    #[test]
+    fn a_device_request_before_an_adapter_is_granted_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_device(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_UNASKED);
+        // Not even a channel: refusing before installing one is what keeps the
+        // "another channel is installed" answer meaningful.
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+
+        // …and it is still refused while the enumeration is in flight.
+        assert_eq!(__crcbl_web_gpu_probe_adapters(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_device(), 0);
+        assert_eq!(take_frame(), vec![Command::EnumerateAdapters]);
+    }
+
+    /// A refusal carries what the browser said and leaves the numbers at their
+    /// "nothing opened" value rather than at whatever a previous answer left.
+    #[test]
+    fn a_refused_device_request_reports_its_reason_and_no_capabilities() {
+        grant(&granted("has an adapter, will not open it"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(take_frame().len(), 1);
+
+        let mut replies = ReplyWriter::new();
+        replies.device_failed(
+            1,
+            "no WebGPU feature satisfies Features(TIMELINE_SEMAPHORE)",
+            Features::TIMELINE_SEMAPHORE,
+        );
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_FAILED);
+        assert!(
+            device_reason().contains("TIMELINE_SEMAPHORE"),
+            "{}",
+            device_reason()
+        );
+        assert_eq!(__crcbl_web_gpu_probe_device_features_lo(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_device_features_hi(), 0);
+        assert_eq!(__crcbl_web_gpu_probe_device_max_image_2d(), 0);
+    }
+
+    /// **One buffer, two probes.** Both answers arrive in the same frame and
+    /// whichever export is asked first is what decodes it — so the other's
+    /// answer has to have been absorbed by then rather than dropped with the
+    /// buffer.
+    #[test]
+    fn one_drain_hands_both_probes_their_own_answer() {
+        // Ask for both before either is answered, so the two replies land
+        // together.
+        assert_eq!(__crcbl_web_gpu_probe_adapters(), 1);
+        assert_eq!(take_frame(), vec![Command::EnumerateAdapters]);
+        let mut replies = ReplyWriter::new();
+        replies.adapter(0, &granted("both at once"));
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_GRANTED);
+
+        // The device request first: a second enumeration puts the adapter probe
+        // back to `Waiting`, and the descriptor has no adapter to name then.
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_adapters(), 1);
+        assert_eq!(take_frame().len(), 2);
+
+        let mut replies = ReplyWriter::new();
+        replies.device(1, &device_caps());
+        replies.adapter(2, &granted("answered second"));
+        deliver(replies.bytes());
+
+        // The device is asked first, so it is the call that drains. The
+        // adapter's answer must survive that.
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_OPENED);
+        assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_GRANTED);
+        assert_eq!(text(), "answered second");
+    }
+
+    /// A drifted format lands on whichever probe asked first, and must not read
+    /// as a browser that refused a device.
+    #[test]
+    fn a_reply_answering_a_device_request_nobody_made_is_undecodable_rather_than_failed() {
+        grant(&granted("adapter"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(take_frame().len(), 1);
+
+        let mut replies = ReplyWriter::new();
+        replies.device(9_999, &device_caps());
+        deliver(replies.bytes());
+
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_UNDECODABLE);
+        assert!(device_reason().contains("9999"), "{}", device_reason());
     }
 
     /// The probe must not take a channel from an engine that has one, because

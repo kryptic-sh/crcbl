@@ -9221,3 +9221,36 @@ corroborated at all, because a browser has nothing to disagree with.
 Whether `Features::DEBUG_MARKERS` genuinely reaches a capture tool in every
 browser. It is granted unconditionally on the grounds that `pushDebugGroup` is
 core WebGPU, matching what `crcbl-wgpu` does, but nothing was measured.
+
+## The device request round-trips; `PendingDevice` is still not implemented
+
+`PendingDevice::poll` returns `DeviceRequestState`, whose `Ready` arm carries a
+`Box<dyn Device>`. With no `Device` impl, `poll` could only ever answer
+`Pending` — a device request that is never ready, on a trait whose contract is
+that it eventually is, and it would pass any test that polls a few times and
+gives up. So the state machine is exposed as `crcbl_webgpu::DeviceProbe`
+instead, and `poll` becomes `absorb` plus a match when `Device` lands.
+
+- **Device loss has no reply.** `GPUDevice.lost` and `uncapturederror` belong to
+  `Device::take_error`; nothing listens for either and there is no tag for them.
+  Deliberate — nothing holds a device long enough to lose one — and a different
+  event from a request that failed.
+- **One device is implied, not enforced.** No command carries a device id. The
+  owner side-table that answers `HalError::ForeignObject` is owed the moment a
+  second device exists, which the HAL's own docs warn about because two pools
+  genuinely issue identical handle bits.
+- **`compatible_surface` crosses and is refused**, loudly, because the replayer
+  has no surface table. `create_surface`, `destroy_surface` and `surface_caps`
+  are still unencoded — the last piece before `impl Instance`.
+- **The "not a copy of its adapter" check degrades on a floor-level adapter**
+  and says so in its detail rather than failing. Forcing a machine-independent
+  difference would need requestable limits on the wire, which `DeviceDesc` does
+  not carry.
+- **The refusal message names bit indices, not flag names** (`bit 9`), because a
+  copy of `Features`'s names in JS would be a second table to keep in step. The
+  names reach a log through the `Features` word the reply carries.
+- **Coverage:** no test opens two devices, and the gate ran only under
+  SwiftShader here — hardware failed the readback control on this machine, which
+  is the documented Xvfb-plus-hardware row rather than a regression.
+- **Pre-existing drift, untouched:** `web/tools/browser-e2e.mjs`'s header still
+  says "Five groups" while A through G exist.

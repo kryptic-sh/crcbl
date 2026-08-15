@@ -39,6 +39,12 @@
 //     would round it to 18446744073709552000: a different size that still looks
 //     enormous, so nothing downstream would question it. Sequence numbers are
 //     64-bit precisely because they are never allowed to wrap within a session.
+//   * `RequestDevice`'s two feature words are `BigInt` too. `crcbl_hal::Features`
+//     is a 64-bit bitflags and the flags it has today all sit in the low
+//     twenty-seven bits, so a number would be exact *for now* — which is the
+//     worst of the three possibilities, since the day a flag is added past bit
+//     53 nothing here would fail, and a required feature would quietly go
+//     missing.
 //
 // Everything else on the wire is 32 bits or narrower and stays a number.
 
@@ -71,6 +77,7 @@ const BIND_GROUP_TAG = 0x43;
 const PUSH_CONSTANTS_TAG = 0x44;
 const DRAW_TAG = 0x60;
 const ENUMERATE_ADAPTERS_TAG = 0x90;
+const REQUEST_DEVICE_TAG = 0x91;
 
 // ── Optional fields ──────────────────────────────────────────────────────────
 
@@ -114,6 +121,25 @@ const BUFFER_USAGE = [
 /** `crcbl_hal::ShaderStages`. */
 const SHADER_STAGES = ['VERTEX', 'FRAGMENT', 'COMPUTE', 'MESH'];
 
+/**
+ * Every bit `crcbl_hal::Features` claims — `Features::all().bits()`.
+ *
+ * A MASK RATHER THAN A NAME TABLE, and the one bitflags field here that gets
+ * one. The other two decode to lists of flag names, which is what makes a
+ * decoded stream readable; a twenty-seven row table for this one would be
+ * twenty-seven more things to keep in step with `crcbl-hal` for a value nothing
+ * downstream reads by name — `gpu-replay.js` maps *bits* to `GPUFeatureName`s.
+ *
+ * It is still checked rather than waved through, because the seam's rule is
+ * `from_bits` and never `from_bits_truncate`: an unclaimed bit is a build that
+ * knows a flag this one does not, and dropping it would turn a feature the
+ * caller required into one nobody asked for. The mask is held honest from
+ * outside — the committed fixture carries a `RequestDevice` whose optional word
+ * is `Features::all()`, so a mask narrower than Rust's refuses the fixture and
+ * `stream-decode.mjs` goes red.
+ */
+const FEATURES_CLAIMED = (1n << 27n) - 1n;
+
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 /**
@@ -130,7 +156,10 @@ const SHADER_STAGES = ['VERTEX', 'FRAGMENT', 'COMPUTE', 'MESH'];
  * @property {number} [needed] Bytes that read wanted.
  * @property {number} [remaining] Bytes actually left.
  * @property {number} [len] A length or count past its cap.
- * @property {number} [code] An enum, bitflags or presence value no variant claims.
+ * @property {number|bigint} [code] An enum, bitflags or presence value no
+ *   variant claims. A `bigint` for the one field that is sixty-four bits wide,
+ *   `crcbl_hal::Features`, because a number could not carry the offending value
+ *   back exactly — which is the whole of what this field is for.
  * @property {number} [found] Version the buffer declared.
  * @property {number} [expected] Version this build speaks.
  */
@@ -416,6 +445,29 @@ class ByteReader {
     return table.filter((_, bit) => (bits & (1 << bit)) !== 0);
   }
 
+  /**
+   * A `crcbl_hal::Features` word, as the `BigInt` it is — sixty-four bits, and
+   * a number is exact only to fifty-three.
+   *
+   * Strict for `readFlags`'s reason and refused the same way; see
+   * {@link FEATURES_CLAIMED} for why this one stays a word rather than becoming
+   * a list of names.
+   *
+   * @param {string} field
+   * @returns {bigint}
+   */
+  readFeatures(field) {
+    const bits = this.readU64();
+    if ((bits & ~FEATURES_CLAIMED) !== 0n) {
+      throw new StreamDecodeError(
+        'InvalidEnum',
+        `invalid code for ${field}: 0x${bits.toString(16)}`,
+        { field, code: bits }
+      );
+    }
+    return bits;
+  }
+
   /** @returns {{ color: number[], depth: number, stencil: number }} */
   readClearValue() {
     return {
@@ -675,6 +727,23 @@ function decodeCommand(r) {
         name: 'Draw',
         vertices: { start: firstVertex, end: lastVertex },
         instances: { start: firstInstance, end: lastInstance },
+      };
+    }
+    case REQUEST_DEVICE_TAG: {
+      // Spelled out rather than built inline, for `Draw`'s reason: the two
+      // feature words are adjacent, identically typed and mean opposite things,
+      // which is the pair a reader most easily swaps.
+      const adapter = r.readU32();
+      const label = r.readOptString('DeviceDesc::label');
+      const requiredFeatures = r.readFeatures('DeviceDesc::required_features');
+      const optionalFeatures = r.readFeatures('DeviceDesc::optional_features');
+      return {
+        name: 'RequestDevice',
+        adapter,
+        label,
+        requiredFeatures,
+        optionalFeatures,
+        compatibleSurface: r.readOptHandle(),
       };
     }
     case ENUMERATE_ADAPTERS_TAG:

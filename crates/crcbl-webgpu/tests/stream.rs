@@ -8,7 +8,9 @@
 
 mod corpus;
 
-use crcbl_hal::{BufferDesc, BufferUsage, MemoryLocation, ShaderStages};
+use crcbl_hal::{
+    AdapterId, BufferDesc, BufferUsage, DeviceDesc, Features, MemoryLocation, ShaderStages,
+};
 use crcbl_webgpu::{Command, DecodeError, StreamReader, StreamWriter, decode_stream, tag};
 
 use corpus::{encode_all, every_command, handle};
@@ -162,15 +164,90 @@ fn a_destroy_for_an_id_the_stream_never_created_decodes_cleanly() {
     );
 }
 
+/// **The two feature words are not interchangeable**, and they are adjacent on
+/// the wire, which is how a pair gets swapped. Required and optional are given
+/// disjoint values so a swap cannot compare equal — and the required word holds
+/// a flag WebGPU cannot satisfy, because dropping those in the encoder is the
+/// mistake that would turn a refusal into a device.
+#[test]
+fn a_device_request_carries_both_feature_words_the_way_round_the_descriptor_had_them() {
+    let desc = DeviceDesc {
+        label: Some("engine"),
+        adapter: AdapterId(2),
+        required_features: Features::COMPUTE | Features::TIMELINE_SEMAPHORE,
+        optional_features: Features::TIMESTAMP_QUERY,
+        compatible_surface: Some(handle(5, 6)),
+    };
+    let mut stream = StreamWriter::new();
+    stream.request_device(&desc);
+
+    let decoded = decode_stream(stream.bytes()).expect("a stream this crate wrote decodes");
+    assert_eq!(
+        decoded,
+        vec![Command::RequestDevice {
+            adapter: AdapterId(2),
+            label: Some("engine".into()),
+            required_features: desc.required_features,
+            optional_features: desc.optional_features,
+            compatible_surface: desc.compatible_surface,
+        }]
+    );
+    assert!(
+        desc.required_features
+            .intersection(desc.optional_features)
+            .is_empty(),
+        "the test would not notice the two words swapped otherwise"
+    );
+}
+
+/// A feature bit no flag claims is refused on the command side too. Truncating
+/// would quietly move a required feature out of the request, which is the one
+/// thing `required` cannot survive.
+#[test]
+fn a_feature_bit_no_flag_claims_in_a_device_request_is_refused_rather_than_dropped() {
+    let mut stream = StreamWriter::new();
+    stream.request_device(&DeviceDesc {
+        label: None,
+        adapter: AdapterId(0),
+        required_features: Features::COMPUTE,
+        optional_features: Features::empty(),
+        compatible_surface: None,
+    });
+    let mut bytes = stream.bytes().to_vec();
+    // Tag, the adapter id, the absent label's presence byte, then the word.
+    let at = tag::HEADER_BYTES + 1 + 4 + 1;
+    let unclaimed = Features::all().bits() | (1 << 32);
+    bytes[at..at + 8].copy_from_slice(&unclaimed.to_le_bytes());
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "DeviceDesc::required_features",
+            code: unclaimed,
+        })
+    );
+
+    // …and the optional word is checked separately, one field further on.
+    let mut bytes = stream.bytes().to_vec();
+    bytes[at + 8..at + 16].copy_from_slice(&unclaimed.to_le_bytes());
+    assert_eq!(
+        decode_stream(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "DeviceDesc::optional_features",
+            code: unclaimed,
+        })
+    );
+}
+
 #[test]
 fn every_command_has_its_own_name() {
     let commands = every_command();
     let mut names: Vec<&str> = commands.iter().map(Command::name).collect();
     names.sort_unstable();
     names.dedup();
-    // `every_command` holds three CreateBuffers, two BeginRenderPasses and two
-    // BindGroups, so the distinct-name count is what the writer has methods for.
-    assert_eq!(names.len(), 9);
+    // `every_command` holds three CreateBuffers and two each of
+    // BeginRenderPass, BindGroup and RequestDevice, so the distinct-name count
+    // is what the writer has methods for.
+    assert_eq!(names.len(), 10);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

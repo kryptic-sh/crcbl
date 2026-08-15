@@ -8,12 +8,26 @@
 // so it can be driven under node against a stub `navigator.gpu` with no wasm
 // instance anywhere. `web/tools/gpu-replay.mjs` does exactly that.
 //
-// WHAT IT REPLAYS SO FAR IS ONE COMMAND. `EnumerateAdapters` calls
+// WHAT IT REPLAYS SO FAR IS TWO COMMANDS. `EnumerateAdapters` calls
 // `navigator.gpu.requestAdapter()` and answers with the whole of the seam's
 // `AdapterInfo` — the browser's name for it, its features and its limits in the
 // seam's vocabulary, and the documented absence for the four fields WebGPU has
-// no answer for — or with the reason there is none. The translation is the block
-// below this header and is where every one of those choices is argued.
+// no answer for — or with the reason there is none. `RequestDevice` calls
+// `requestDevice()` on the adapter that enumeration granted and answers with the
+// **device's own** `DeviceCaps`, or with the reason there is no device. The
+// translation is the block below this header and is where every one of those
+// choices is argued.
+//
+// THE FEATURE MAPPING RUNS BOTH WAYS AND IS ONE TABLE. `halFeaturesFor` turns a
+// browser's `GPUFeatureName`s into `crcbl_hal::Features` bits; `webgpuFeaturesFor`
+// turns a `DeviceDesc`'s bits back into the names `requestDevice` wants. Both
+// read `FEATURE_MAP` and `CORE_FEATURES`, so the pair cannot drift from each
+// other — and the direction that matters for correctness is the new one:
+// `requiredFeatures` fails the *whole* request if it names something the adapter
+// lacks, and a HAL flag with no WebGPU name at all can never be satisfied. Such
+// a flag therefore fails the request loudly rather than being dropped from the
+// list, because a device that opened without something the caller declared it
+// could not run without is the one outcome `required` exists to prevent.
 //
 // Every other command in the stream is *unimplemented*, and says so: `replay`
 // throws a `ReplayError` naming the command and the sequence that carried it,
@@ -213,14 +227,21 @@ const COPY_BYTES_PER_ROW_ALIGNMENT = 256n;
 const MAX_SAMPLE_COUNT = 4;
 
 /**
- * The `crcbl_hal::Features` bits `adapter.features` amounts to.
+ * The `crcbl_hal::Features` bits a `GPUAdapter`'s or `GPUDevice`'s own
+ * `features` amount to.
  *
- * @param {GPUAdapter} adapter
+ * BOTH KINDS, AND THE DIFFERENCE IS NOT COSMETIC. `GPUSupportedFeatures` is the
+ * same shape on either, but the *sets* differ: an adapter reports what it could
+ * grant and a device reports what was actually asked for and given. Reading a
+ * device's caps off its adapter is how a renderer ends up selecting a path
+ * against a feature the device does not have.
+ *
+ * @param {{ features?: ReadonlySet<string> }} source An adapter or a device.
  * @returns {bigint}
  */
-export function halFeaturesFor(adapter) {
+export function halFeaturesFor(source) {
   let bits = CORE_FEATURES;
-  const features = adapter.features;
+  const features = source.features;
   if (features) {
     for (const [name, bit] of Object.entries(FEATURE_MAP)) {
       if (features.has(name)) bits |= bit;
@@ -230,7 +251,85 @@ export function halFeaturesFor(adapter) {
 }
 
 /**
- * `adapter.limits` in the seam's names and units.
+ * The inverse: which `GPUFeatureName`s a `crcbl_hal::Features` word asks for,
+ * and which of its bits nothing in WebGPU can ever satisfy.
+ *
+ * THE SAME TABLE READ BACKWARDS, deliberately — two independently written
+ * mappings would agree until the day one of them was edited. Three kinds of bit
+ * come out of it:
+ *
+ *   * bits in `CORE_FEATURES`, which core WebGPU grants with no name behind
+ *     them, so they need nothing in `requiredFeatures` and are dropped here;
+ *   * bits in `FEATURE_MAP`, which become their `GPUFeatureName`;
+ *   * everything else — nineteen of the seam's twenty-seven flags, listed above
+ *     — which come back in `unsatisfiable`.
+ *
+ * The caller decides what that means, and the two words in a `DeviceDesc` decide
+ * it differently: for `required_features` an unsatisfiable bit fails the
+ * request, and for `optional_features` it is simply not asked for.
+ *
+ * @param {bigint} bits
+ * @returns {{ names: string[], unsatisfiable: bigint }}
+ */
+export function webgpuFeaturesFor(bits) {
+  // Core first: those are granted whether or not anybody names them, so they
+  // are satisfied rather than unsatisfiable.
+  let left = bits & ~CORE_FEATURES;
+  const names = [];
+  for (const [name, bit] of Object.entries(FEATURE_MAP)) {
+    if ((left & bit) !== 0n) {
+      names.push(name);
+      left &= ~bit;
+    }
+  }
+  return { names, unsatisfiable: left };
+}
+
+/**
+ * The `crcbl_hal::Features` bits a list of `GPUFeatureName`s stands for.
+ *
+ * `webgpuFeaturesFor` the other way round again, for the one case that needs it:
+ * a required feature whose name exists but whose *adapter* does not have it. The
+ * refusal has to name the same bits the request did, so that both kinds of
+ * "unsupported" reach the far side in the same shape.
+ *
+ * @param {readonly string[]} names
+ * @returns {bigint}
+ */
+function featuresFromNames(names) {
+  let bits = 0n;
+  for (const name of names) bits |= FEATURE_MAP[name] ?? 0n;
+  return bits;
+}
+
+/**
+ * The bits set in `word`, as the `1 << n` indices `crcbl-hal` declares them
+ * with.
+ *
+ * For a message a person reads. The flag *names* are `crcbl_hal::Features`'s
+ * and stay there: a twenty-seven row copy of them here would be a second thing
+ * to keep in step for the sake of one string, and the reply carries the word
+ * itself so the Rust side can print the names.
+ *
+ * @param {bigint} word
+ * @returns {number[]}
+ */
+function featureBitIndices(word) {
+  const bits = [];
+  for (let bit = 0n; bit < 64n; bit += 1n) {
+    if ((word >> bit) & 1n) bits.push(Number(bit));
+  }
+  return bits;
+}
+
+/**
+ * A `GPUAdapter`'s or `GPUDevice`'s `limits` in the seam's names and units.
+ *
+ * BOTH KINDS, for `halFeaturesFor`'s reason and with a sharper consequence: an
+ * adapter's limits are the ceilings it *could* grant, and a device's are the
+ * ones it was created with — the specification's defaults unless the request
+ * asked for more. The two differ on most real hardware, and reporting the
+ * adapter's for a device would promise a texture size the device will refuse.
  *
  * Four of the nineteen have no `GPUSupportedLimits` member behind them, and each
  * is a value the specification fixes rather than a number invented to fill a
@@ -247,12 +346,13 @@ export function halFeaturesFor(adapter) {
  * withheld to match: a feature saying "anisotropy, see the limit for the cap"
  * beside a cap of 1 would be a contradiction.
  *
- * @param {GPUAdapter} adapter
+ * @param {{ limits?: object, features?: ReadonlySet<string> }} source An
+ *   adapter or a device.
  * @returns {HalLimits}
  */
-export function halLimitsFor(adapter) {
-  const limits = adapter.limits ?? {};
-  const timestamps = Boolean(adapter.features?.has('timestamp-query'));
+export function halLimitsFor(source) {
+  const limits = source.limits ?? {};
+  const timestamps = Boolean(source.features?.has('timestamp-query'));
   /**
    * One `GPUSupportedLimits` member as the `BigInt` the seam wants, naming it
    * if the browser had no number there. `BigInt(undefined)` throws a `TypeError`
@@ -353,6 +453,21 @@ export function halAdapterInfoFor(adapter) {
 }
 
 /**
+ * `crcbl_hal::DeviceCaps` for the device that was actually opened.
+ *
+ * Read off the `GPUDevice` and never off the adapter it came from — see
+ * `halFeaturesFor` and `halLimitsFor` for what differs between the two, and
+ * `crates/crcbl-webgpu/src/reply.rs` for why the seam insists on the
+ * distinction.
+ *
+ * @param {GPUDevice} device
+ * @returns {{ features: bigint, limits: HalLimits }}
+ */
+export function halDeviceCapsFor(device) {
+  return { features: halFeaturesFor(device), limits: halLimitsFor(device) };
+}
+
+/**
  * The reason recorded when `requestAdapter()` grants nothing.
  *
  * A promise that resolves `null` carries no message of its own, and the reason
@@ -397,6 +512,33 @@ export class ReplayError extends Error {
 }
 
 /**
+ * A device request that failed before the browser was even asked.
+ *
+ * Every one of these is something WebGPU cannot express and the seam can, so
+ * refusing here is the only honest answer: passing the request on would open a
+ * device that is missing what the caller said it needed, or attach it to
+ * something that does not exist. It is caught by the replayer and answered as a
+ * `DeviceFailed` reply — never left to reject a promise, because a dropped reply
+ * is a command wasm waits on for ever.
+ *
+ * `unsupported` carries the `crcbl_hal::Features` bits that could not be
+ * satisfied, `0n` when the refusal was not about features.
+ */
+export class DeviceRequestError extends Error {
+  /**
+   * @param {'UnsupportedFeatures'|'NoSuchAdapter'|'ForeignSurface'} kind
+   * @param {string} message
+   * @param {bigint} [unsupported]
+   */
+  constructor(kind, message, unsupported = 0n) {
+    super(message);
+    this.name = 'DeviceRequestError';
+    this.kind = kind;
+    this.unsupported = unsupported;
+  }
+}
+
+/**
  * Everything the browser can say about an adapter, as one line.
  *
  * `GPUAdapter.info` is a `GPUAdapterInfo` with four strings, any of which a
@@ -430,8 +572,31 @@ export class Replayer {
   #replies = new ReplyWriter();
   /** Whether anything has been written into `#replies` since the last clear. */
   #queued = false;
-  /** Enumerations started and not yet answered. */
+  /** Commands started and not yet answered. */
   #inFlight = 0;
+  /**
+   * The adapters this replayer has granted, indexed as it numbered them.
+   *
+   * A `DeviceDesc` names an `AdapterId`, and that id is a position in the list
+   * `Instance::adapters` returned — so the list has to still be here when the
+   * device request arrives, a frame or more later. WebGPU grants one adapter or
+   * none, so this holds at most one entry.
+   *
+   * @type {GPUAdapter[]}
+   */
+  #adapters = [];
+  /**
+   * The device this replayer opened, held for its whole life.
+   *
+   * Not decoration and not for later: the `GPUDevice` lives on this side of the
+   * seam — wasm has an id and nothing more — so dropping the reference would
+   * make it collectable while the reply says a device is open. Later slices
+   * record commands against it; this one only has to keep it alive and let a
+   * test see that it is the device whose capabilities were reported.
+   *
+   * @type {GPUDevice | null}
+   */
+  #device = null;
 
   /**
    * @param {object} [options]
@@ -451,6 +616,11 @@ export class Replayer {
   /** How many commands have been started and not yet answered. */
   get inFlight() {
     return this.#inFlight;
+  }
+
+  /** The device this replayer opened, or `null` if none has opened. */
+  get device() {
+    return this.#device;
   }
 
   /**
@@ -498,6 +668,9 @@ export class Replayer {
         case 'EnumerateAdapters':
           this.#enumerateAdapters(sequence);
           break;
+        case 'RequestDevice':
+          this.#requestDevice(sequence, command);
+          break;
         default:
           throw new ReplayError(String(command.name), sequence);
       }
@@ -532,10 +705,122 @@ export class Replayer {
   }
 
   /**
+   * Opens a device on the adapter the enumeration granted, and queues the
+   * answer for a later frame.
+   *
+   * Deferred to a microtask and answered exactly once on every path, as
+   * `#enumerateAdapters` is and for the same reasons.
+   *
+   * THE DESCRIPTOR IS CHECKED BEFORE THE BROWSER IS ASKED, and each refusal is
+   * something WebGPU has no way to express:
+   *
+   *   * an `adapter` id no enumeration granted — the id is a position in the
+   *     list this replayer answered with, and there is nothing to open;
+   *   * a `compatibleSurface` — the seam's surfaces are a table this replayer
+   *     does not have yet, so a request that names one cannot be honoured and
+   *     must not be honoured *silently*, which would open a headless device for
+   *     a caller that asked for a presentable one;
+   *   * a required feature with no `GPUFeatureName` behind it. `requiredFeatures`
+   *     can only carry names, so such a bit cannot be passed on, and dropping it
+   *     would grant a device the caller declared it could not use.
+   *
+   * Optional features go the other way: only the ones this adapter actually has
+   * are asked for, because `requestDevice` fails the *whole* request over a
+   * feature the adapter lacks — which would turn "nice to have" into fatal.
+   *
+   * THE LIMITS ARE NOT REQUESTED AT ALL, so the device gets the specification's
+   * defaults. `DeviceDesc` carries no limits to ask with, and inventing a
+   * request from the adapter's ceilings would be this file deciding something
+   * the caller did not.
+   *
+   * A DEVICE LOST LATER IS NOT THIS. `GPUDevice.lost` and `uncapturederror`
+   * report a device that opened and then failed, which is
+   * `Device::take_error`'s territory and has no reply on this channel yet;
+   * nothing below listens for either, and a `DeviceFailed` answers only the
+   * request itself.
+   *
+   * @param {bigint} sequence
+   * @param {{ adapter: number, label: string | null, requiredFeatures: bigint,
+   *           optionalFeatures: bigint,
+   *           compatibleSurface: { index: number, generation: number } | null }} command
+   */
+  #requestDevice(sequence, command) {
+    this.#inFlight += 1;
+    Promise.resolve()
+      .then(() => {
+        const adapter = this.#adapters[command.adapter];
+        if (!adapter) {
+          throw new DeviceRequestError(
+            'NoSuchAdapter',
+            `no adapter ${command.adapter} has been enumerated`
+          );
+        }
+        if (command.compatibleSurface) {
+          throw new DeviceRequestError(
+            'ForeignSurface',
+            `compatible_surface names surface ${command.compatibleSurface.index}, ` +
+              'and this replayer has no surface table yet'
+          );
+        }
+        const required = webgpuFeaturesFor(command.requiredFeatures);
+        if (required.unsatisfiable !== 0n) {
+          throw new DeviceRequestError(
+            'UnsupportedFeatures',
+            'no WebGPU feature satisfies required crcbl_hal::Features ' +
+              `0x${required.unsatisfiable.toString(16)} ` +
+              `(bit${featureBitIndices(required.unsatisfiable).length === 1 ? '' : 's'} ` +
+              `${featureBitIndices(required.unsatisfiable).join(', ')})`,
+            required.unsatisfiable
+          );
+        }
+        const missing = required.names.filter(
+          (name) => !adapter.features?.has(name)
+        );
+        if (missing.length > 0) {
+          // The adapter's own gap rather than WebGPU's: the names exist, this
+          // adapter does not have them. Reported with the bits that named them,
+          // so the far side sees the same shape either way.
+          throw new DeviceRequestError(
+            'UnsupportedFeatures',
+            `the adapter does not have required ${missing.join(', ')}`,
+            featuresFromNames(missing)
+          );
+        }
+        const optional = webgpuFeaturesFor(command.optionalFeatures).names;
+        return adapter.requestDevice({
+          ...(command.label === null ? {} : { label: command.label }),
+          requiredFeatures: [
+            ...required.names,
+            ...optional.filter((name) => adapter.features?.has(name)),
+          ],
+        });
+      })
+      .then((device) => {
+        this.#device = device;
+        this.#replies.device(sequence, halDeviceCapsFor(device));
+        this.#queued = true;
+      })
+      .catch((error) => {
+        this.#replies.deviceFailed(
+          sequence,
+          String(error).slice(0, MAX_REASON_CHARS),
+          error instanceof DeviceRequestError ? error.unsupported : 0n
+        );
+        this.#queued = true;
+      })
+      .finally(() => {
+        this.#inFlight -= 1;
+      });
+  }
+
+  /**
    * @param {bigint} sequence
    * @param {GPUAdapter} adapter
    */
   #adapter(sequence, adapter) {
+    // Kept for the device request that may name it, by the id this reply gives
+    // it — which is `0`, because `requestAdapter()` grants one adapter or none.
+    this.#adapters = [adapter];
     this.#replies.adapter(sequence, halAdapterInfoFor(adapter));
     this.#queued = true;
   }

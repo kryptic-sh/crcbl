@@ -4,7 +4,7 @@ use core::ops::Range;
 
 use crcbl_hal::{
     BindGroupHandle, BufferDesc, BufferHandle, ClearValue, ColorAttachment, DepthStencilAttachment,
-    GraphicsPipelineHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, ShaderStages,
+    DeviceDesc, GraphicsPipelineHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, ShaderStages,
 };
 
 use crate::bytes::ByteWriter;
@@ -276,6 +276,30 @@ impl StreamWriter {
     /// reply rather than a field.
     pub fn enumerate_adapters(&mut self) -> u64 {
         self.push_tag(tag::ENUMERATE_ADAPTERS_TAG)
+    }
+
+    /// [`Instance::request_device`](crcbl_hal::Instance::request_device).
+    ///
+    /// The second command whose answer comes back, and it goes through
+    /// [`StreamChannel::encode_awaited`](crate::web::StreamChannel::encode_awaited)
+    /// for [`enumerate_adapters`](Self::enumerate_adapters)'s reason;
+    /// [`DeviceProbe::request`](crate::device::DeviceProbe::request) is that call
+    /// written out.
+    ///
+    /// **Both feature words go over as [`Features::bits`](crcbl_hal::Features::bits),
+    /// whole.** Nothing is filtered here: a bit WebGPU cannot satisfy is still
+    /// what the caller asked for, and dropping it in the encoder would turn a
+    /// required feature the browser does not have into a device that opened
+    /// without it. The replayer holds the WebGPU vocabulary and is where the
+    /// refusal happens — see [`crate::device`].
+    pub fn request_device(&mut self, desc: &DeviceDesc<'_>) -> u64 {
+        let sequence = self.push_tag(tag::REQUEST_DEVICE_TAG);
+        self.bytes.put_u32(desc.adapter.0);
+        self.bytes.put_opt_str(desc.label);
+        self.bytes.put_u64(desc.required_features.bits());
+        self.bytes.put_u64(desc.optional_features.bits());
+        self.bytes.put_opt_handle(desc.compatible_surface);
+        sequence
     }
 
     // ── Header and tags ──────────────────────────────────────────────────────

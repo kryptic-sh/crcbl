@@ -14,6 +14,20 @@
 // `navigator.gpu` is absent altogether, and the reason string is too long for
 // the writer's cap. Each is driven below, and each has to end with a reply.
 //
+// AND THE DEVICE REQUEST HAS FIVE MORE, which is why it has a section of its
+// own: an adapter id nothing enumerated, a `compatible_surface` this replayer
+// has no table for, a required feature with no `GPUFeatureName` at all, a
+// required feature whose name exists and whose adapter does not have it, and a
+// `requestDevice` that simply rejects. The first four are refused *before* the
+// browser is asked — each is something WebGPU cannot be told — and every one of
+// the five still answers.
+//
+// THE OTHER CLAIM THIS SECTION MAKES is that a device's capabilities are the
+// device's. The stub adapter's limits and the stub device's differ in every
+// member and their feature sets differ too, so a replayer that built its reply
+// from the adapter it opened — the obvious mistake, since the adapter is right
+// there — produces different numbers rather than plausible ones.
+//
 // WHAT THIS DOES *NOT* CHECK, so nobody reads more into a green run than is
 // there. The expected bytes below are built with the same `ReplyWriter` the
 // replayer uses, so this says nothing about the reply *format* — a tag or a
@@ -37,8 +51,10 @@ import {
   ReplayError,
   Replayer,
   halAdapterInfoFor,
+  halDeviceCapsFor,
   halFeaturesFor,
   halLimitsFor,
+  webgpuFeaturesFor,
 } from '../engine/gpu-replay.js';
 import { decodeStream } from '../engine/gpu-stream.js';
 
@@ -165,9 +181,111 @@ function stubAdapter(info, features = []) {
   return { info, features: new Set(features), limits: stubLimits() };
 }
 
+/**
+ * The two commands this file dispatches on, taken from the committed fixture by
+ * `main` before anything below runs.
+ *
+ * From the fixture rather than written out here, so what is replayed is a
+ * command the Rust encoder really wrote — the same reason the expected fields
+ * in `stream-decode.mjs` are *not* taken from a decoder.
+ *
+ * @type {{ enumerate: object, requestDevice: object }}
+ */
+const FROM_FIXTURE = { enumerate: null, requestDevice: null };
+
 /** A one-command frame carrying `command` at `sequence`. */
 function frameOf(command, sequence) {
   return { baseSequence: sequence, commands: [command] };
+}
+
+/**
+ * A `GPUSupportedLimits` for a **device**, distinct in every member from
+ * `stubLimits`.
+ *
+ * The point of the whole device section: WebGPU gives a device the limits it
+ * was created with — the specification's defaults, since a `DeviceDesc` asks
+ * for none — and those are not the adapter's ceilings. A replayer that read a
+ * device's capabilities off its adapter would produce `stubLimits`'s numbers
+ * here, and every one of them differs.
+ */
+function deviceLimits() {
+  return {
+    maxTextureDimension2D: 201,
+    maxTextureDimension3D: 202,
+    maxTextureArrayLayers: 203,
+    maxStorageBufferBindingSize: 204,
+    maxUniformBufferBindingSize: 205,
+    maxBindGroups: 206,
+    maxColorAttachments: 207,
+    maxComputeWorkgroupSizeX: 208,
+    maxComputeWorkgroupSizeY: 209,
+    maxComputeWorkgroupSizeZ: 210,
+    maxComputeInvocationsPerWorkgroup: 211,
+    maxComputeWorkgroupsPerDimension: 212,
+    minUniformBufferOffsetAlignment: 213,
+    minStorageBufferOffsetAlignment: 214,
+  };
+}
+
+/**
+ * A `GPUDevice` as `requestDevice()` resolves one: its own features, its own
+ * limits, and nothing else this replayer reads.
+ *
+ * @param {string[]} [features]
+ */
+function stubDevice(features = []) {
+  return { features: new Set(features), limits: deviceLimits() };
+}
+
+/**
+ * An adapter that opens devices and records what it was asked for.
+ *
+ * `requests` is what says the descriptor this replayer built is the one WebGPU
+ * would want — the feature *names*, which is the half of the mapping the reply
+ * comparisons cannot see.
+ *
+ * @param {object} [options]
+ * @param {string[]} [options.features] `GPUFeatureName`s the adapter has.
+ * @param {object} [options.device] What `requestDevice` resolves to.
+ * @param {unknown} [options.refuse] What it rejects with instead.
+ */
+function openingAdapter({ features = [], device, refuse } = {}) {
+  const adapter = {
+    info: { vendor: 'crcbl', device: 'stub' },
+    features: new Set(features),
+    limits: stubLimits(),
+    /** @type {object[]} */
+    requests: [],
+    async requestDevice(desc) {
+      adapter.requests.push(desc);
+      if (refuse !== undefined) throw refuse;
+      return device ?? stubDevice();
+    },
+  };
+  return adapter;
+}
+
+/**
+ * Enumerates `adapter`, then replays `command` and lets the answer settle.
+ *
+ * The two-step is the seam's own shape and not test scaffolding: a device
+ * request names an adapter by the id an *enumeration* gave it, so a replayer
+ * that had never enumerated has nothing to open. The enumeration's own reply is
+ * cleared in between so what comes back is the device answer alone — a `clear`
+ * a page would only ever do once wasm had taken the bytes.
+ *
+ * @param {object} adapter
+ * @param {object} command
+ * @param {bigint} sequence
+ */
+async function openDevice(adapter, command, sequence) {
+  const replayer = new Replayer({ gpu: stubGpu(async () => adapter) });
+  replayer.replay(frameOf(FROM_FIXTURE.enumerate, 0n));
+  await settle();
+  replayer.clear();
+  replayer.replay(frameOf(command, sequence));
+  await settle();
+  return replayer;
 }
 
 /**
@@ -176,6 +294,79 @@ function frameOf(command, sequence) {
  */
 function handle(index, generation) {
   return { index, generation };
+}
+
+/**
+ * The one reply in `bytes`, as far as the checks here need to read it.
+ *
+ * A READER FOR THIS FILE, AND NOT A CODEC. The reply format has exactly two
+ * implementations and both are held to the committed fixture — Rust writes it,
+ * `reply-encode.mjs` re-encodes it byte for byte — so nothing here defines
+ * anything. What this exists for is the refusals: their reason is a string the
+ * replayer *composes*, and asserting on whole buffers would mean restating that
+ * wording verbatim, which pins prose rather than behaviour. So the two fields
+ * that are behaviour — which reply came back, and the feature bits it blames —
+ * are read out and asserted, and the wording is only ever checked for the part
+ * that has to be actionable.
+ *
+ * Only the two device replies are understood; anything else is a bug in the
+ * check that called this. Of a `Device` it reads the feature word and the first
+ * limit, which are the two the checks below are about — and reading them *out
+ * of the buffer* is what makes those checks about the replayer rather than
+ * about the mapping function they would otherwise call twice.
+ *
+ * @param {Uint8Array} bytes A whole reply buffer, header included.
+ * @returns {{ tag: string, sequence: bigint, features?: bigint,
+ *             maxImage2d?: number, reason?: string, unsupported?: bigint }}
+ */
+function decodeOneReply(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  // The header is the magic and the version word; every reply then opens with
+  // its tag and the sequence it answers.
+  let at = 10;
+  const tag = view.getUint8(at);
+  const sequence = view.getBigUint64(at + 1, true);
+  at += 9;
+  if (tag === 0x02) {
+    return {
+      tag: 'Device',
+      sequence,
+      // `DeviceCaps` is the feature word and then `Limits` in declaration
+      // order, whose first field is `max_image_2d`.
+      features: view.getBigUint64(at, true),
+      maxImage2d: view.getUint32(at + 8, true),
+    };
+  }
+  if (tag !== 0x03) {
+    throw new Error(`decodeOneReply does not read tag 0x${tag.toString(16)}`);
+  }
+  const length = view.getUint32(at, true);
+  const reason = new TextDecoder('utf-8', { fatal: true }).decode(
+    bytes.subarray(at + 4, at + 4 + length)
+  );
+  return {
+    tag: 'DeviceFailed',
+    sequence,
+    reason,
+    unsupported: view.getBigUint64(at + 4 + length, true),
+  };
+}
+
+/**
+ * One decoded reply as a line a failure message can carry.
+ *
+ * Hand-written rather than `JSON.stringify`, which throws on a `BigInt` — and
+ * both interesting fields here are one.
+ *
+ * @param {ReturnType<typeof decodeOneReply> | undefined} reply
+ */
+function shown(reply) {
+  if (reply === undefined) return 'nothing';
+  return (
+    `${reply.tag} answering ${reply.sequence}` +
+    `, unsupported 0x${(reply.unsupported ?? 0n).toString(16)}` +
+    `, reason ${JSON.stringify(reply.reason ?? '')}`
+  );
 }
 
 /**
@@ -222,6 +413,19 @@ async function main() {
     `the committed stream carries an EnumerateAdapters (at ${enumerateAt})`
   );
   const enumerate = commands[enumerateAt];
+  FROM_FIXTURE.enumerate = enumerate;
+
+  // The device request the fixture carries with an adapter id an enumeration
+  // can actually have granted. The corpus holds two; the other names adapter 3
+  // and a surface, and is used below for exactly those refusals.
+  const requestDevice = commands.find(
+    (command) => command.name === 'RequestDevice' && command.adapter === 0
+  );
+  check(
+    requestDevice !== undefined,
+    'the committed stream carries a RequestDevice for adapter 0'
+  );
+  FROM_FIXTURE.requestDevice = requestDevice;
 
   // ---- the answer is not available on the frame that asked ----------------
   // The whole shape of this seam. `replay` returns having *started* the work;
@@ -392,8 +596,9 @@ async function main() {
     const replayer = new Replayer({ gpu: stubGpu(async () => null) });
     /** @type {string[]} */
     const wrong = [];
+    const implemented = ['EnumerateAdapters', 'RequestDevice'];
     for (const [index, command] of commands.entries()) {
-      if (command.name === 'EnumerateAdapters') continue;
+      if (implemented.includes(command.name)) continue;
       let thrown = null;
       try {
         replayer.replay(frameOf(command, BigInt(index)));
@@ -411,7 +616,258 @@ async function main() {
     check(
       wrong.length === 0,
       wrong[0] ??
-        `every command this slice cannot replay throws a ReplayError naming it and its sequence (${commands.length - 1} of them)`
+        `every command this slice cannot replay throws a ReplayError naming it and its sequence (${commands.length - 3} of them)`
+    );
+  }
+
+  // ---- the device request --------------------------------------------------
+  //
+  // The second call that makes the round trip, and the first that has a
+  // descriptor to get wrong. Four things are checked here and nowhere else: the
+  // reply carries the **device's** capabilities rather than its adapter's, the
+  // `requiredFeatures` list handed to WebGPU is the inverse of the mapping the
+  // adapter direction uses, every refusal still answers, and a refusal carries
+  // the bits that caused it.
+  {
+    // The answer is not available on the frame that asked, exactly as an
+    // enumeration's is not.
+    const adapter = openingAdapter();
+    const replayer = new Replayer({ gpu: stubGpu(async () => adapter) });
+    replayer.replay(frameOf(enumerate, 0n));
+    await settle();
+    replayer.clear();
+    replayer.replay(frameOf(requestDevice, 4n));
+    check(
+      adapter.requests.length === 0 &&
+        !replayer.hasReplies &&
+        replayer.inFlight === 1,
+      `replay returns without a device (asked ${adapter.requests.length}, queued ${replayer.hasReplies}, in flight ${replayer.inFlight})`
+    );
+    await settle();
+    check(
+      adapter.requests.length === 1 &&
+        replayer.hasReplies &&
+        replayer.inFlight === 0,
+      `the device lands later (asked ${adapter.requests.length}, queued ${replayer.hasReplies}, in flight ${replayer.inFlight})`
+    );
+  }
+  {
+    // **The capabilities are the device's own.** The adapter here has four
+    // mapped features and `stubLimits`'s ceilings; the device it opens has one
+    // feature and `deviceLimits`'s numbers, and every one of them differs.
+    const device = stubDevice(['timestamp-query']);
+    const adapter = openingAdapter({
+      features: [
+        'depth-clip-control',
+        'texture-compression-bc',
+        'timestamp-query',
+        'indirect-first-instance',
+      ],
+      device,
+    });
+    const replayer = await openDevice(adapter, requestDevice, 4n);
+    checkEqual(
+      replayer.replies,
+      expectedReplies((replies) =>
+        replies.device(4n, halDeviceCapsFor(device))
+      ),
+      'the reply is a Device naming the command that asked'
+    );
+
+    // …and what that record actually holds, **read back out of the buffer**
+    // rather than recomputed. A check that called `halDeviceCapsFor` again
+    // would agree with the replayer whichever object the replayer had passed
+    // it, which is exactly the mistake this section exists to catch. CORE is
+    // the four flags core WebGPU grants; `timestamp-query` is bit 5 and is the
+    // only optional one this *device* has.
+    const CORE = (1n << 8n) | (1n << 7n) | (1n << 14n) | (1n << 18n);
+    const sent = decodeOneReply(replayer.replies);
+    checkEqual(
+      sent.features,
+      CORE | (1n << 5n),
+      "the feature word that crossed is the device's own, not the adapter's"
+    );
+    checkEqual(
+      sent.maxImage2d,
+      201,
+      "the limit that crossed is the device's own, not the adapter's"
+    );
+    check(
+      halFeaturesFor(adapter) !== sent.features &&
+        halLimitsFor(adapter).maxImage2d !== sent.maxImage2d,
+      'the adapter and the device disagree, so a copy of either would be visible'
+    );
+    check(
+      replayer.device === device,
+      'the replayer holds the device it reported, so nothing may collect it'
+    );
+  }
+  {
+    // **The descriptor WebGPU is handed.** The fixture's request asks for every
+    // optional feature the seam has; only the mapped names this adapter
+    // actually reports may reach `requiredFeatures`, because `requestDevice`
+    // fails the whole request over one it lacks — which would turn "optional"
+    // into fatal.
+    const adapter = openingAdapter({
+      features: ['timestamp-query', 'texture-compression-bc'],
+    });
+    await openDevice(adapter, requestDevice, 4n);
+    const asked = adapter.requests[0] ?? {};
+    checkEqual(
+      [...(asked.requiredFeatures ?? [])].sort(),
+      ['texture-compression-bc', 'timestamp-query'],
+      'only the optional features this adapter has are asked for'
+    );
+    check(
+      !('requiredLimits' in asked),
+      'no limits are requested, so the device gets the specification defaults'
+    );
+    check(
+      !('label' in asked),
+      'a descriptor with no label passes none rather than an empty one'
+    );
+  }
+  {
+    // A label that *is* present crosses, and lands on the descriptor.
+    const adapter = openingAdapter();
+    await openDevice(
+      adapter,
+      { ...requestDevice, label: 'engine', optionalFeatures: 0n },
+      4n
+    );
+    checkEqual(
+      adapter.requests[0]?.label,
+      'engine',
+      "the descriptor's label reaches requestDevice"
+    );
+  }
+  {
+    // **A required feature with no WebGPU name at all.** `TIMELINE_SEMAPHORE`
+    // is bit 9, WebGPU has no semaphores, and this is the case that must fail
+    // loudly rather than open a device without it — which is what dropping the
+    // bit from the list would do.
+    const adapter = openingAdapter();
+    const replayer = await openDevice(
+      adapter,
+      { ...requestDevice, requiredFeatures: 1n << 9n },
+      6n
+    );
+    check(
+      adapter.requests.length === 0,
+      'the browser is never asked for a feature it cannot express'
+    );
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'DeviceFailed' && answered.unsupported === 1n << 9n,
+      `the refusal names the bits that caused it (${shown(answered)})`
+    );
+    check(
+      String(answered?.reason).includes('bit 9'),
+      `and says which flag, in a message a person can act on (${answered?.reason})`
+    );
+  }
+  {
+    // **A required feature the browser does not have.** The name exists —
+    // `timestamp-query` — and this adapter simply does not report it. Refused
+    // here rather than handed to `requestDevice`, which would reject with a
+    // message that names no seam flag at all.
+    const adapter = openingAdapter({ features: [] });
+    const replayer = await openDevice(
+      adapter,
+      { ...requestDevice, requiredFeatures: 1n << 5n },
+      7n
+    );
+    check(
+      adapter.requests.length === 0,
+      'a required feature the adapter lacks is refused before the request'
+    );
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'DeviceFailed' && answered.unsupported === 1n << 5n,
+      `the refusal carries the same shape as an unmappable one (${shown(answered)})`
+    );
+  }
+  {
+    // A rejected `requestDevice`. The browser was asked and said no, so the
+    // reason is the browser's and there is no feature gap to report.
+    const adapter = openingAdapter({
+      refuse: new Error('device creation failed'),
+    });
+    const replayer = await openDevice(
+      adapter,
+      { ...requestDevice, optionalFeatures: 0n },
+      8n
+    );
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'DeviceFailed' &&
+        answered.unsupported === 0n &&
+        String(answered.reason).includes('device creation failed'),
+      `a rejected requestDevice is answered rather than dropped (${shown(answered)})`
+    );
+  }
+  {
+    // A reason past the writer's cap would throw inside a promise callback and
+    // strand the command; truncation is the guard here as it is for an adapter.
+    const adapter = openingAdapter({
+      refuse: new Error('x'.repeat(4 * 1024 * 1024)),
+    });
+    const replayer = await openDevice(
+      adapter,
+      { ...requestDevice, optionalFeatures: 0n },
+      9n
+    );
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'DeviceFailed' &&
+        String(answered.reason).length === MAX_REASON_CHARS,
+      `a reason past the cap is truncated rather than dropping the reply (${String(answered?.reason).length} chars)`
+    );
+  }
+  {
+    // A device request with no enumeration behind it. The id is a position in a
+    // list this replayer never answered with, so there is nothing to open — and
+    // it still has to answer, because wasm is waiting on that sequence.
+    const replayer = new Replayer({
+      gpu: stubGpu(async () => openingAdapter()),
+    });
+    replayer.replay(frameOf(requestDevice, 3n));
+    await settle();
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'DeviceFailed' &&
+        String(answered.reason).includes('no adapter 0'),
+      `an unenumerated adapter is refused and answered (${shown(answered)})`
+    );
+  }
+  {
+    // The fixture's *other* request: adapter 3, and a `compatible_surface`.
+    // Both are things this replayer cannot honour, and the surface is the one
+    // that must not be honoured silently — a headless device handed to a caller
+    // that asked for a presentable one renders nothing and reports nothing.
+    const withSurface = commands.find(
+      (command) =>
+        command.name === 'RequestDevice' && command.compatibleSurface !== null
+    );
+    check(
+      withSurface !== undefined,
+      'the committed stream carries a RequestDevice naming a surface'
+    );
+    const adapter = openingAdapter();
+    const replayer = await openDevice(
+      adapter,
+      { ...withSurface, adapter: 0 },
+      5n
+    );
+    check(
+      adapter.requests.length === 0,
+      'a request naming a surface never reaches the browser'
+    );
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'DeviceFailed' &&
+        String(answered.reason).includes('surface'),
+      `a compatible_surface this replayer cannot resolve is refused (${shown(answered)})`
     );
   }
 
@@ -515,6 +971,49 @@ async function main() {
       halLimitsFor(stubAdapter({}, ['timestamp-query'])).timestampPeriodNs,
       1,
       "a browser's timestamps are nanoseconds, so the period is 1 once they exist"
+    );
+
+    // **The same table read backwards**, which is what a device request needs.
+    // Spelled out here too: the two directions share a table precisely so they
+    // cannot disagree, and this is what says the sharing works rather than
+    // that it happened.
+    checkEqual(
+      webgpuFeaturesFor(CORE),
+      { names: [], unsatisfiable: 0n },
+      'the core flags need no GPUFeatureName and ask for none'
+    );
+    for (const [name, bit] of [
+      ['depth-clip-control', 1n << 13n],
+      ['texture-compression-bc', 1n << 16n],
+      ['timestamp-query', 1n << 5n],
+      ['indirect-first-instance', 1n << 4n],
+    ]) {
+      checkEqual(
+        webgpuFeaturesFor(bit),
+        { names: [name], unsatisfiable: 0n },
+        `${name} is what that bit asks WebGPU for, and nothing else`
+      );
+      // …and the round trip: what the name maps to is the bit it came from.
+      checkEqual(
+        halFeaturesFor(stubAdapter({}, [name])) & ~CORE,
+        bit,
+        `${name} survives both directions of the mapping`
+      );
+    }
+    // Nineteen of the seam's twenty-seven flags have nothing behind them in
+    // WebGPU. Each comes back as unsatisfiable rather than as silence, which is
+    // what lets a *required* one fail the request.
+    const unmappable =
+      (1n << 9n) | (1n << 0n) | (1n << 22n) | (1n << 24n) | (1n << 12n);
+    checkEqual(
+      webgpuFeaturesFor(unmappable),
+      { names: [], unsatisfiable: unmappable },
+      'TIMELINE_SEMAPHORE, DESCRIPTOR_INDEXING, MESH_SHADER, RAY_QUERY and PUSH_CONSTANTS have no WebGPU name'
+    );
+    checkEqual(
+      webgpuFeaturesFor(CORE | (1n << 5n) | (1n << 9n)),
+      { names: ['timestamp-query'], unsatisfiable: 1n << 9n },
+      'a mixed word is split into what WebGPU can be asked for and what it cannot'
     );
 
     // **The fields WebGPU cannot supply.** Each is the value that means absent

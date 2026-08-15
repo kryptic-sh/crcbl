@@ -18,8 +18,9 @@
 use core::ops::Range;
 
 use crcbl_hal::{
-    BindGroupHandle, BufferHandle, BufferUsage, ColorAttachment, DepthStencilAttachment,
-    GraphicsPipelineHandle, MemoryLocation, PipelineLayoutHandle, Rect2d, ShaderStages,
+    AdapterId, BindGroupHandle, BufferHandle, BufferUsage, ColorAttachment, DepthStencilAttachment,
+    Features, GraphicsPipelineHandle, MemoryLocation, PipelineLayoutHandle, Rect2d, ShaderStages,
+    SurfaceHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -111,6 +112,34 @@ pub enum Command {
     /// sequence, and it arrives a frame or more later. See
     /// [`crate::instance`] for the side that waits for it.
     EnumerateAdapters,
+    /// [`Instance::request_device`](crcbl_hal::Instance::request_device) — open
+    /// the adapter the enumeration granted.
+    ///
+    /// The whole of [`DeviceDesc`](crcbl_hal::DeviceDesc), flattened as every
+    /// other descriptor here is. Answered by a [`Reply::Device`](crate::Reply::Device)
+    /// or a [`Reply::DeviceFailed`](crate::Reply::DeviceFailed) naming this
+    /// command's sequence; see [`crate::device`] for the side that waits.
+    ///
+    /// **The feature words cross as [`Features`] bits, not as WebGPU names.**
+    /// The replayer owns that vocabulary in both directions — it is the half
+    /// that faces WebGPU — so the wire speaks the seam's language here exactly
+    /// as it does for load ops and handles.
+    RequestDevice {
+        /// Which adapter, as [`Instance::adapters`](crcbl_hal::Instance::adapters)
+        /// numbered it. Always `0` from a browser: `requestAdapter()` grants one
+        /// adapter or none.
+        adapter: AdapterId,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Features the caller cannot run without. A bit with no WebGPU name is
+        /// unsatisfiable and **fails the request**; it is never quietly dropped.
+        required_features: Features,
+        /// Features to enable if the adapter has them. Bits with no WebGPU name
+        /// are simply not asked for, which is what optional means.
+        optional_features: Features,
+        /// A surface the device must be able to present to.
+        compatible_surface: Option<SurfaceHandle>,
+    },
 }
 
 impl Command {
@@ -131,6 +160,7 @@ impl Command {
             Self::PushConstants { .. } => "PushConstants",
             Self::Draw { .. } => "Draw",
             Self::EnumerateAdapters => "EnumerateAdapters",
+            Self::RequestDevice { .. } => "RequestDevice",
         }
     }
 }

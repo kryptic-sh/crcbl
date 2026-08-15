@@ -59,6 +59,7 @@ const MAX_ELEMENT_COUNT = 1 << 16;
 const BIND_GROUP_TAG = 0x43;
 const PUSH_CONSTANTS_TAG = 0x44;
 const DRAW_TAG = 0x60;
+const REQUEST_DEVICE_TAG = 0x91;
 
 /** @type {string[]} */
 const failures = [];
@@ -254,6 +255,30 @@ const EXPECTED = [
     vertices: { start: 6, end: 9 },
     instances: { start: 1, end: 5 },
   },
+  // Both feature words are `BigInt`, and the required one carries
+  // `TIMELINE_SEMAPHORE` (1 << 9) — a flag WebGPU cannot satisfy, which crosses
+  // anyway because the replayer is what refuses it.
+  {
+    name: 'RequestDevice',
+    adapter: 3,
+    label: 'device',
+    // COMPUTE (1 << 8) | TIMELINE_SEMAPHORE (1 << 9).
+    requiredFeatures: 0x300n,
+    // TIMESTAMP_QUERY (1 << 5) | TEXTURE_COMPRESSION_BC (1 << 16).
+    optionalFeatures: 0x10020n,
+    compatibleSurface: handle(43, 44),
+  },
+  {
+    name: 'RequestDevice',
+    adapter: 0,
+    label: null,
+    requiredFeatures: 0n,
+    // `Features::all()` — every bit the seam claims, and what pins the
+    // claimed-bit mask in `gpu-stream.js`: a mask narrower than Rust's refuses
+    // this command outright.
+    optionalFeatures: 0x7ffffffn,
+    compatibleSurface: null,
+  },
   // The only body-less command, and last in the corpus so that the byte offsets
   // the checks below count from the *first* command stay where they are. A
   // decoder that read one field too many here would run off the end of the
@@ -274,6 +299,20 @@ function u32le(value) {
     (value >>> 16) & 0xff,
     (value >>> 24) & 0xff,
   ];
+}
+
+/**
+ * `value` as the eight little-endian bytes the wire carries a `u64` as.
+ *
+ * @param {bigint} value
+ * @returns {number[]}
+ */
+function u64le(value) {
+  const bytes = [];
+  for (let at = 0n; at < 8n; at += 1n) {
+    bytes.push(Number((value >> (at * 8n)) & 0xffn));
+  }
+  return bytes;
 }
 
 /**
@@ -568,6 +607,44 @@ async function main() {
     unclaimed,
     { kind: 'InvalidEnum', field: 'BufferDesc::usage', code: 0xffffffff },
     'a bitflags bit no BufferUsage claims is refused rather than truncated away'
+  );
+
+  // ---- a feature bit no flag claims is an error too -----------------------
+  // The sixty-four bit version of the rule above, and the reason `readFeatures`
+  // keeps a claimed-bit mask rather than waving the word through: a bit this
+  // build does not know is a build that knows a flag this one does not, and
+  // truncating it would move a *required* feature out of a request.
+  const unclaimedFeature = 1n << 40n;
+  checkRefused(
+    streamOf(header, [
+      REQUEST_DEVICE_TAG,
+      ...u32le(0), // adapter
+      0, // the label, absent
+      ...u64le(unclaimedFeature),
+    ]),
+    {
+      kind: 'InvalidEnum',
+      field: 'DeviceDesc::required_features',
+      code: unclaimedFeature,
+    },
+    'a Features bit no flag claims is refused rather than truncated away'
+  );
+  // …and the optional word is its own field, one further on: a decoder that
+  // read one word for both would report this as the required one.
+  checkRefused(
+    streamOf(header, [
+      REQUEST_DEVICE_TAG,
+      ...u32le(0),
+      0,
+      ...u64le(0n),
+      ...u64le(unclaimedFeature),
+    ]),
+    {
+      kind: 'InvalidEnum',
+      field: 'DeviceDesc::optional_features',
+      code: unclaimedFeature,
+    },
+    'the two feature words are separate fields and are named separately'
   );
 
   // ---- an enum code no variant claims is refused --------------------------

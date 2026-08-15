@@ -12,8 +12,9 @@
 
 use crcbl_core::Handle;
 use crcbl_hal::{
-    BufferDesc, BufferUsage, ClearValue, ColorAttachment, DepthStencilAttachment, LoadOp,
-    MemoryLocation, Rect2d, RenderPassDesc, ShaderStages, StoreOp, depth,
+    AdapterId, BufferDesc, BufferUsage, ClearValue, ColorAttachment, DepthStencilAttachment,
+    DeviceDesc, Features, LoadOp, MemoryLocation, Rect2d, RenderPassDesc, ShaderStages, StoreOp,
+    depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -133,6 +134,31 @@ pub fn every_command() -> Vec<Command> {
             vertices: 6..9,
             instances: 1..5,
         },
+        // **Every bit of both feature words crosses**, including the ones no
+        // browser can satisfy: the replayer is what refuses them, and it can
+        // only refuse what it was told. `TIMELINE_SEMAPHORE` is required here
+        // for exactly that reason — WebGPU has no semaphores — and a
+        // `compatible_surface` is present so the optional handle appears both
+        // ways round in this corpus.
+        Command::RequestDevice {
+            adapter: AdapterId(3),
+            label: Some("device".into()),
+            required_features: Features::COMPUTE.union(Features::TIMELINE_SEMAPHORE),
+            optional_features: Features::TIMESTAMP_QUERY.union(Features::TEXTURE_COMPRESSION_BC),
+            compatible_surface: Some(handle(43, 44)),
+        },
+        // Its opposite in every field that has one: no label rather than an
+        // empty one, no surface, and the two feature words at their extremes —
+        // `all()` is what pins the claimed-bit mask the JavaScript decoder
+        // enforces, since a mask that drifted from `Features::all()` would
+        // refuse this very command.
+        Command::RequestDevice {
+            adapter: AdapterId(0),
+            label: None,
+            required_features: Features::empty(),
+            optional_features: Features::all(),
+            compatible_surface: None,
+        },
         // Last, and not for tidiness: `web/tools/stream-decode.mjs` reaches into
         // this fixture by byte offset to corrupt one field at a time, and every
         // one of those offsets is counted from the *first* command. A command
@@ -200,6 +226,19 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             instances,
         } => stream.draw(vertices.clone(), instances.clone()),
         Command::EnumerateAdapters => stream.enumerate_adapters(),
+        Command::RequestDevice {
+            adapter,
+            label,
+            required_features,
+            optional_features,
+            compatible_surface,
+        } => stream.request_device(&DeviceDesc {
+            label: label.as_deref(),
+            adapter: *adapter,
+            required_features: *required_features,
+            optional_features: *optional_features,
+            compatible_surface: *compatible_surface,
+        }),
     }
 }
 

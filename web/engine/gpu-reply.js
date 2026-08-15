@@ -76,6 +76,8 @@ const MAX_ELEMENT_COUNT = 1 << 16;
 
 const ADAPTER_REPLY_TAG = 0x00;
 const NO_ADAPTER_REPLY_TAG = 0x01;
+const DEVICE_REPLY_TAG = 0x02;
+const DEVICE_FAILED_REPLY_TAG = 0x03;
 const READBACK_PENDING_REPLY_TAG = 0x10;
 const READBACK_READY_REPLY_TAG = 0x11;
 const QUERY_RESULTS_REPLY_TAG = 0x18;
@@ -440,6 +442,20 @@ class ByteWriter {
   }
 
   /**
+   * `crcbl_hal::DeviceCaps`: the feature bits, then every limit.
+   *
+   * The half of an adapter record that is also a device record, written through
+   * one method for that reason — `crates/crcbl-webgpu/src/reply.rs` has the same
+   * pairing, and two copies would be two places for the field order to drift.
+   *
+   * @param {{ features: bigint, limits: import('./gpu-replay.js').HalLimits }} caps
+   */
+  putDeviceCaps(caps) {
+    this.putU64(caps.features, 'DeviceCaps::features');
+    this.putLimits(caps.limits);
+  }
+
+  /**
    * `crcbl_hal::AdapterInfo` in declaration order, `backend` omitted and `caps`
    * expanded in place.
    *
@@ -457,8 +473,7 @@ class ByteWriter {
     this.putU32(info.deviceId, 'AdapterInfo::device_id');
     this.putU8(info.deviceType, 'AdapterInfo::device_type');
     this.putString(info.driver, 'Adapter::driver');
-    this.putU64(info.features, 'DeviceCaps::features');
-    this.putLimits(info.limits);
+    this.putDeviceCaps(info);
   }
 }
 
@@ -577,6 +592,52 @@ export class ReplyWriter {
     this.#atomic(() => {
       this.#open(NO_ADAPTER_REPLY_TAG, sequence);
       this.#writer.putString(reason, 'NoAdapter::reason');
+    });
+  }
+
+  /**
+   * A device opened, with what **that device** can do.
+   *
+   * Not the adapter's capabilities. WebGPU grants a device the features that
+   * were asked for and the limits that were requested — the specification's
+   * defaults when a request names none — so an adapter with `timestamp-query`
+   * and a 16384-pixel texture yields a device with neither unless the
+   * descriptor said so. Build the argument with `halDeviceCapsFor` in
+   * `gpu-replay.js`, which reads them off the `GPUDevice` rather than off the
+   * adapter it came from.
+   *
+   * @param {bigint} sequence
+   * @param {{ features: bigint, limits: import('./gpu-replay.js').HalLimits }} caps
+   */
+  device(sequence, caps) {
+    this.#atomic(() => {
+      this.#open(DEVICE_REPLY_TAG, sequence);
+      this.#writer.putDeviceCaps(caps);
+    });
+  }
+
+  /**
+   * No device opened, with the reason and the features that were missing.
+   *
+   * `unsupported` is a `crcbl_hal::Features` word — the machine-readable half of
+   * `reason`, and empty when the failure was not about features at all. This
+   * side knows bits and `GPUFeatureName`s; the flag *names* belong to
+   * `crcbl-hal`, which is why the word crosses rather than a phrase built here.
+   *
+   * A REQUEST THAT FAILED IS NOT A DEVICE THAT WAS LOST. This answers a
+   * `RequestDevice` that never produced a device. A `GPUDevice.lost` on a device
+   * that is open and working is a different event with a different home —
+   * `Device::take_error` — and there is no reply for it yet.
+   *
+   * @param {bigint} sequence
+   * @param {string} reason
+   * @param {bigint} unsupported `crcbl_hal::Features` bits, `0n` for none.
+   */
+  deviceFailed(sequence, reason, unsupported) {
+    this.#atomic(() => {
+      this.#open(DEVICE_FAILED_REPLY_TAG, sequence);
+      this.#writer.putString(reason, 'DeviceFailed::reason');
+      this.#writer.putU64(unsupported, 'DeviceFailed::unsupported');
     });
   }
 

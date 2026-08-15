@@ -18,8 +18,8 @@
 //! accepts is one the JS replayer can be held to.
 
 use crcbl_hal::{
-    BufferUsage, ClearValue, ColorAttachment, DepthStencilAttachment, LoadOp, Rect2d, ShaderStages,
-    StoreOp,
+    AdapterId, BufferUsage, ClearValue, ColorAttachment, DepthStencilAttachment, LoadOp, Rect2d,
+    ShaderStages, StoreOp,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -277,6 +277,20 @@ impl<'a> StreamReader<'a> {
                 })
             }
             tag::ENUMERATE_ADAPTERS_TAG => Ok(Command::EnumerateAdapters),
+            tag::REQUEST_DEVICE_TAG => {
+                let adapter = AdapterId(r.read_u32()?);
+                let label = r.read_opt_string("DeviceDesc::label")?;
+                let required_features = r.read_features("DeviceDesc::required_features")?;
+                let optional_features = r.read_features("DeviceDesc::optional_features")?;
+                let compatible_surface = r.read_opt_handle()?;
+                Ok(Command::RequestDevice {
+                    adapter,
+                    label,
+                    required_features,
+                    optional_features,
+                    compatible_surface,
+                })
+            }
             unknown => Err(DecodeError::UnknownTag { tag: unknown }),
         }
     }

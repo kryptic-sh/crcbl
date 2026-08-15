@@ -2566,10 +2566,18 @@ try {
   // `stream-transport.mjs` drives the ABI against a synthetic
   // `WebAssembly.Memory`, and `gpu-replay.mjs` runs the replayer against a
   // `navigator.gpu` that is not one. **None of them can call the real thing**,
-  // which is precisely what this slice added — so the one fact left over is the
-  // one only a browser can establish, and it is established here: a command
-  // encoded in wasm reaches `navigator.gpu`, and what the browser answers gets
-  // back into wasm through the reply channel.
+  // which is precisely what this slice added — so the facts left over are the
+  // ones only a browser can establish, and they are established here: a command
+  // encoded in wasm reaches `navigator.gpu`, what the browser answers gets back
+  // into wasm through the reply channel, and **a device actually opens** on the
+  // adapter that answer named — with the capabilities that device has rather
+  // than the ones its adapter has.
+  //
+  // Every claim below is corroborated against something the page can see for
+  // itself: the adapter's name and features against `navigator.gpu`, the
+  // device's against a device the page opens with the same descriptor. A check
+  // that only read back what wasm sent would prove the transport and nothing
+  // else, and the transport already has a node suite.
   //
   // It runs for every demo because every demo links `crcbl-webgpu` and none of
   // them drives it: `crcbl::backend`'s registry entry for `webgpu` still
@@ -2702,11 +2710,13 @@ try {
     'timestamp-query': 1 << 5, // TIMESTAMP_QUERY
     'indirect-first-instance': 1 << 4, // INDIRECT_FIRST_INSTANCE
   };
-  const expectedFeatures =
-    (live?.features ?? []).reduce(
+  /** The `crcbl_hal::Features` word a list of `GPUFeatureName`s amounts to. */
+  const featureBitsOf = (names) =>
+    (names ?? []).reduce(
       (bits, name) => bits | (NAMED_FEATURE_BITS[name] ?? 0),
       CORE_FEATURE_BITS
     ) >>> 0;
+  const expectedFeatures = featureBitsOf(live?.features);
   check(
     'G',
     'the feature set wasm received is what this browser actually reports',
@@ -2761,6 +2771,114 @@ try {
     mismatched.length
       ? mismatched.join('; ')
       : `${limitPairs.length + 1} mapped, on maxTextureDimension2D ${live?.limits?.maxTextureDimension2D}`
+  );
+
+  // **AND THEN A DEVICE OPENS.** The enumeration proves a command crossed and an
+  // answer came back; this proves the answer was *used*. wasm encodes a
+  // `RequestDevice` naming the adapter it was just granted, the replayer turns
+  // its `crcbl_hal::Features` words back into `GPUFeatureName`s, `requestDevice`
+  // resolves, and the device's own capabilities come home. Nothing without a
+  // browser can reach any of it: `gpu-replay.mjs` drives the same code against a
+  // stub that is not WebGPU.
+  const deviceProbe = await evaluate(
+    page,
+    `(async () => {
+       const { startDeviceProbe } = await import('/engine/gpu-probe.js');
+       const { exports, memory, replayer } = globalThis.crcblProbe;
+       return startDeviceProbe({ exports, memory, replayer });
+     })()`
+  );
+  check(
+    'G',
+    'wasm encoded a device request and the shim decoded it back',
+    deviceProbe?.started === true &&
+      deviceProbe.commands.join(',') === 'RequestDevice',
+    deviceProbe?.started
+      ? `the frame carried [${deviceProbe.commands.join(', ')}]`
+      : 'wasm would not ask — no adapter had been granted, or the waiting set is full'
+  );
+
+  const opened = await until(async () =>
+    evaluate(
+      page,
+      `(async () => {
+         const { pumpDeviceProbe, DEVICE } = await import('/engine/gpu-probe.js');
+         const { exports, memory, replayer } = globalThis.crcblProbe;
+         const out = pumpDeviceProbe({ exports, memory, replayer });
+         return out.state === DEVICE.WAITING ? null : out;
+       })()`
+    )
+  );
+  check(
+    'G',
+    'the browser opened a device and wasm read its capabilities back',
+    opened?.name === 'OPENED' && opened.delivered === true,
+    opened
+      ? `${opened.name}${opened.reason ? `: ${JSON.stringify(opened.reason)}` : ''}`
+      : `no answer in ${TIMEOUT_MS} ms — requestDevice never settled, or the reply never reached wasm`
+  );
+
+  // **What the page can see for itself.** A device opened here, in this browser,
+  // with the descriptor the probe uses — no optional features and no requested
+  // limits — is the same device WebGPU gives the replayer, so its own
+  // `features` and `limits` are what wasm's numbers are held to. Asked of the
+  // browser rather than of anything of ours, which is what makes it evidence.
+  const liveDevice = await evaluate(
+    page,
+    `(async () => {
+       const adapter = await navigator.gpu.requestAdapter();
+       const device = await adapter.requestDevice();
+       return {
+         features: [...device.features].sort(),
+         maxTextureDimension2D: device.limits.maxTextureDimension2D,
+         adapterMaxTextureDimension2D: adapter.limits.maxTextureDimension2D,
+       };
+     })()`
+  );
+  const deviceCaps = opened?.caps;
+  const expectedDeviceFeatures = featureBitsOf(liveDevice?.features);
+  check(
+    'G',
+    "the device's feature set wasm received is what this browser's own device reports",
+    deviceCaps?.featuresLo === expectedDeviceFeatures &&
+      deviceCaps?.featuresHi === 0,
+    `wasm got ${deviceCaps?.featuresLo?.toString(16)}/${deviceCaps?.featuresHi?.toString(16)},` +
+      ` ${expectedDeviceFeatures.toString(16)} expected from [${(liveDevice?.features ?? []).join(', ')}]`
+  );
+  check(
+    'G',
+    "a limit wasm received for the device is the number this browser's device reports",
+    deviceCaps?.maxImage2d === liveDevice?.maxTextureDimension2D &&
+      deviceCaps?.maxImage2d > 0,
+    `wasm got ${deviceCaps?.maxImage2d}, the device says` +
+      ` maxTextureDimension2D ${liveDevice?.maxTextureDimension2D}`
+  );
+
+  // **The device's capabilities are not the adapter's**, which is the claim a
+  // backend gets wrong for free: the adapter is right there when the reply is
+  // built. WebGPU grants a device what was asked for, and the probe asks for
+  // nothing optional and no limits — so on any machine whose adapter reports
+  // more than the specification's floor, the two records differ, and wasm's two
+  // sets of numbers have to differ with them.
+  //
+  // Where an adapter *is* at the floor the two legitimately coincide, and this
+  // says so rather than claiming a distinction it could not observe. The checks
+  // above still hold the device's numbers to a device either way.
+  const adapterIsAboveTheFloor =
+    expectedFeatures !== expectedDeviceFeatures ||
+    live?.limits?.maxTextureDimension2D !== liveDevice?.maxTextureDimension2D;
+  const wasmSaysTheyDiffer =
+    wasmCaps?.featuresLo !== deviceCaps?.featuresLo ||
+    wasmCaps?.maxImage2d !== deviceCaps?.maxImage2d;
+  check(
+    'G',
+    'the device wasm was told about is a device, not a copy of its adapter',
+    adapterIsAboveTheFloor ? wasmSaysTheyDiffer : !wasmSaysTheyDiffer,
+    adapterIsAboveTheFloor
+      ? `adapter ${wasmCaps?.featuresLo?.toString(16)}/${wasmCaps?.maxImage2d}` +
+          ` against device ${deviceCaps?.featuresLo?.toString(16)}/${deviceCaps?.maxImage2d}`
+      : 'this adapter grants nothing beyond the floor, so the two records ' +
+          'genuinely coincide here and a copy could not be told apart'
   );
 
   // A channel installed under a running demo must be invisible to it. The demo

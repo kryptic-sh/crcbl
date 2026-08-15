@@ -4,14 +4,17 @@
 //! replays it against WebGPU, and answers back through a second buffer wasm also
 //! owns. `docs/plan/41-webgpu-stream.md` is the specification, and this crate is
 //! its first slices — **the encoding, the transport that carries it, the reply
-//! channel that carries answers home, and the first call that makes the round
+//! channel that carries answers home, and the two calls that make the round
 //! trip: adapter enumeration, answered with the whole of
-//! [`AdapterInfo`](crcbl_hal::AdapterInfo)**. There is still no
-//! [`Instance`](crcbl_hal::Instance), [`Device`](crcbl_hal::Device) or
-//! [`CommandEncoder`](crcbl_hal::CommandEncoder) implementation — see
-//! [`instance`] for what exists instead of a half-filled one — and those are
-//! later slices, encoding through [`StreamWriter`] and reading [`Reply`]s when
-//! they arrive.
+//! [`AdapterInfo`](crcbl_hal::AdapterInfo), and the device request, answered
+//! with the [`DeviceCaps`](crcbl_hal::DeviceCaps) of the device that opened**.
+//! There is still no [`Instance`](crcbl_hal::Instance),
+//! [`PendingDevice`](crcbl_hal::PendingDevice), [`Device`](crcbl_hal::Device)
+//! or [`CommandEncoder`](crcbl_hal::CommandEncoder) implementation — see
+//! [`instance`] and [`device`] for what exists instead of half-filled ones, and
+//! for why a `PendingDevice` without a `Device` behind it would be a stub
+//! documented as working — and those are later slices, encoding through
+//! [`StreamWriter`] and reading [`Reply`]s when they arrive.
 //!
 //! Nothing but integers and buffers wasm owns crosses the boundary, which is
 //! the convention `crcbl-store`'s fetch ABI and the OPFS entry points already
@@ -51,6 +54,7 @@
 //! | creation with a caller-allocated handle | [`StreamWriter::create_buffer`] |
 //! | a destroy op | [`StreamWriter::destroy_buffer`] |
 //! | an empty body, answered later | [`StreamWriter::enumerate_adapters`] |
+//! | a flat descriptor, answered later | [`StreamWriter::request_device`] |
 //!
 //! The rest of the seam is made of these same shapes, so adding a command is
 //! adding a tag in [`tag`] and a method beside its neighbours — not a new
@@ -123,6 +127,7 @@
 
 mod bytes;
 pub mod command;
+pub mod device;
 pub mod instance;
 pub mod probe;
 pub mod reader;
@@ -133,6 +138,7 @@ pub mod writer;
 
 pub use bytes::DecodeError;
 pub use command::Command;
+pub use device::DeviceProbe;
 pub use instance::AdapterProbe;
 pub use reader::{StreamReader, decode_stream};
 pub use reply::{Reply, ReplyReader, ReplyWriter, decode_replies};

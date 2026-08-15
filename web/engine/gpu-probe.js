@@ -47,6 +47,24 @@ export const PROBE = Object.freeze({
 });
 
 /**
+ * The `DEVICE_*` codes `__crcbl_web_gpu_probe_device_state` answers, from the
+ * same file.
+ *
+ * `WAITING` is the ordinary answer on every frame between the ask and the
+ * answer — `requestDevice` is a promise, and this is
+ * `DeviceRequestState::Pending` seen through the ABI. `FAILED` is the browser
+ * refusing, or wasm refusing to ask; `UNDECODABLE` is the format's two halves
+ * having drifted, which blames the other end of the build entirely.
+ */
+export const DEVICE = Object.freeze({
+  UNASKED: 0,
+  WAITING: 1,
+  OPENED: 2,
+  FAILED: 3,
+  UNDECODABLE: 4,
+});
+
+/**
  * Names for those codes, for a log line that reads.
  *
  * @param {number} state
@@ -54,6 +72,19 @@ export const PROBE = Object.freeze({
  */
 export function probeStateName(state) {
   const found = Object.entries(PROBE).find(([, code]) => code === state);
+  return found ? found[0] : `unknown(${state})`;
+}
+
+/**
+ * The same, for the device's codes. Its own function rather than a second
+ * argument, because the two tables happen to share their numbers and a call
+ * that passed the wrong one would print a plausible name for the wrong state.
+ *
+ * @param {number} state
+ * @returns {string}
+ */
+export function deviceStateName(state) {
+  const found = Object.entries(DEVICE).find(([, code]) => code === state);
   return found ? found[0] : `unknown(${state})`;
 }
 
@@ -77,6 +108,37 @@ export function probeStateName(state) {
  */
 export function startAdapterProbe({ exports, memory, replayer }) {
   if (exports.__crcbl_web_gpu_probe_adapters() !== 1) {
+    return { started: false, commands: [] };
+  }
+  // NO `await` BETWEEN THESE TWO. See the header.
+  const frame = takeCommandStream({ exports, memory });
+  const commands = (frame?.commands ?? []).map((command) =>
+    String(command.name)
+  );
+  replayer.replay(frame);
+  return { started: true, commands };
+}
+
+/**
+ * Asks wasm to open the adapter it was granted, and replays the frame that
+ * carries the ask.
+ *
+ * The device half of {@link startAdapterProbe} in every respect, including the
+ * one that matters: **no `await` between the request and the drain**, because
+ * the demo's frame loop is draining the same buffer.
+ *
+ * The enumeration has to have been answered first — the descriptor names an
+ * adapter id from one — so a `false` here right after
+ * {@link startAdapterProbe} is that ordering rather than a failure.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @param {Replayer} options.replayer
+ * @returns {{ started: boolean, commands: string[] }}
+ */
+export function startDeviceProbe({ exports, memory, replayer }) {
+  if (exports.__crcbl_web_gpu_probe_device() !== 1) {
     return { started: false, commands: [] };
   }
   // NO `await` BETWEEN THESE TWO. See the header.
@@ -142,4 +204,50 @@ export function pumpAdapterProbe({ exports, memory, replayer }) {
     maxImage2d: exports.__crcbl_web_gpu_probe_max_image_2d() >>> 0,
   };
   return { state, name: probeStateName(state), text, delivered, caps };
+}
+
+/**
+ * The same for the device request: deliver, then read where it has got to.
+ *
+ * **Either pump drains for both probes** — there is one channel and one
+ * committed buffer, so whichever runs first decodes it and hands each probe its
+ * own answer. Calling only this one is therefore enough to settle an
+ * enumeration too, and a frame that called neither leaves both waiting.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @param {Replayer} options.replayer
+ * @returns {{ state: number, name: string, reason: string, delivered: boolean,
+ *            caps: { featuresLo: number, featuresHi: number, maxImage2d: number } }}
+ *   `reason` says why no device opened and is empty when one did. `caps` is the
+ *   **device's** — not the adapter's — and is all zeros under every state but
+ *   `OPENED`, where `0` is also a legal value, so read it only once the state
+ *   says so.
+ */
+export function pumpDeviceProbe({ exports, memory, replayer }) {
+  let delivered = false;
+  if (replayer.hasReplies) {
+    delivered = putReplyStream({ exports, memory, bytes: replayer.replies });
+    if (delivered) replayer.clear();
+  }
+
+  // `state` first, `ptr` second, for `pumpAdapterProbe`'s reason: this is the
+  // call that allocates.
+  const state = exports.__crcbl_web_gpu_probe_device_state();
+  const reason = readUtf8(
+    memory,
+    exports.__crcbl_web_gpu_probe_device_reason_ptr(),
+    exports.__crcbl_web_gpu_probe_device_reason_len()
+  );
+  // THE PART A BROWSER CAN CORROBORATE, and here it corroborates something the
+  // adapter's numbers cannot: a page can open its own default device and read
+  // `device.features` and `device.limits` off it, and both differ from the
+  // adapter's on any machine whose adapter reports more than the floor.
+  const caps = {
+    featuresLo: exports.__crcbl_web_gpu_probe_device_features_lo() >>> 0,
+    featuresHi: exports.__crcbl_web_gpu_probe_device_features_hi() >>> 0,
+    maxImage2d: exports.__crcbl_web_gpu_probe_device_max_image_2d() >>> 0,
+  };
+  return { state, name: deviceStateName(state), reason, delivered, caps };
 }

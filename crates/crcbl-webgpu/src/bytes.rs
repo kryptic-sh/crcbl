@@ -10,13 +10,16 @@
 //!
 //! **Shared rather than copied.** A second reader written beside the first is
 //! two places for a bound to be wrong, and the two would be *nearly* identical,
-//! which is the shape that drifts without anyone noticing. What is not here is
-//! anything that knows a HAL type: [`reader`](crate::reader) and
-//! [`writer`](crate::writer) add their own descriptor-shaped methods to
-//! [`ByteReader`] and [`ByteWriter`] in their own modules, because those belong
-//! to the command stream and to nothing else.
+//! which is the shape that drifts without anyone noticing. The line is what a
+//! field *belongs* to rather than what it is made of: a handle and a
+//! [`Features`] word cross in both directions and live here, while
+//! [`reader`](crate::reader) and [`writer`](crate::writer) add their
+//! descriptor-shaped methods to [`ByteReader`] and [`ByteWriter`] in their own
+//! modules, because those belong to the command stream and to nothing else — as
+//! [`reply`](crate::reply)'s capability records belong to that direction.
 
 use crcbl_core::Handle;
+use crcbl_hal::Features;
 
 use crate::tag;
 
@@ -222,6 +225,19 @@ impl<'a> ByteReader<'a> {
         Ok(Handle::from_bits(self.read_u64()?))
     }
 
+    /// A [`Features`] word, through `from_bits` and never
+    /// `from_bits_truncate`.
+    ///
+    /// The house rule for bitflags, and it matters in both directions for the
+    /// same reason and opposite consequences: truncating a word from a build
+    /// with more flags would report a *lesser* device on the reply side, and
+    /// would quietly turn a required feature into one nobody asked for on the
+    /// command side. Neither is anything a log would show.
+    pub(crate) fn read_features(&mut self, field: &'static str) -> Result<Features, DecodeError> {
+        let bits = self.read_u64()?;
+        Features::from_bits(bits).ok_or(DecodeError::InvalidEnum { field, code: bits })
+    }
+
     fn read_len(&mut self, field: &'static str, cap: usize) -> Result<usize, DecodeError> {
         let len = self.read_u32()?;
         if len as usize > cap {
@@ -363,6 +379,11 @@ impl ByteWriter {
     /// documented as never zero, which is what the generation's niche was for.
     pub(crate) fn put_opt_handle<T>(&mut self, handle: Option<Handle<T>>) {
         self.put_u64(handle.map_or(0, Handle::to_bits));
+    }
+
+    /// The counterpart of [`ByteReader::read_features`].
+    pub(crate) fn put_features(&mut self, features: Features) {
+        self.put_u64(features.bits());
     }
 
     pub(crate) fn put_count(&mut self, count: usize) {

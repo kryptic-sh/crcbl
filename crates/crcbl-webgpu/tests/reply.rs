@@ -120,10 +120,10 @@ fn every_reply_has_its_own_name() {
         .collect();
     names.sort_unstable();
     names.dedup();
-    // The corpus holds two of several shapes — Adapters, NoAdapters,
-    // ReadbackReadys, QueryResults — so the distinct-name count is what the
-    // writer has methods for.
-    assert_eq!(names.len(), 5);
+    // The corpus holds two of several shapes — Adapters, NoAdapters, Devices,
+    // DeviceFaileds, ReadbackReadys, QueryResults — so the distinct-name count
+    // is what the writer has methods for.
+    assert_eq!(names.len(), 7);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 
@@ -514,6 +514,120 @@ fn a_device_type_code_no_variant_claims_is_refused_rather_than_read_as_other() {
         Err(DecodeError::InvalidEnum {
             field: "Adapter::device_type",
             code: 0xEE,
+        })
+    );
+}
+
+// ── The device record ─────────────────────────────────────────────────────────
+
+/// **A device reply is the capability half alone, and it is a different record
+/// from an adapter's.**
+///
+/// Both carry a [`DeviceCaps`], and the shared writer is what makes that cheap —
+/// so the thing worth asserting is that they do not decode as each other, and
+/// that the caps that come back are the ones that went in rather than a default.
+#[test]
+fn a_device_reply_carries_the_capabilities_it_was_given_and_is_not_an_adapter() {
+    let caps = DeviceCaps {
+        features: Features::COMPUTE | Features::DEBUG_MARKERS,
+        limits: Limits {
+            max_image_2d: 8192,
+            timestamp_period_ns: 0.0,
+            ..Limits::desktop()
+        },
+    };
+    let mut replies = ReplyWriter::new();
+    replies.device(12, &caps);
+    assert_eq!(
+        decode_replies(replies.bytes()),
+        Ok(vec![(12, Reply::Device { caps })])
+    );
+
+    // The same capabilities inside an adapter record are a different reply, and
+    // must not be decodable as this one.
+    let mut adapter = ReplyWriter::new();
+    adapter.adapter(
+        12,
+        &AdapterInfo {
+            caps,
+            ..adapter_info()
+        },
+    );
+    assert_ne!(adapter.bytes(), replies.bytes());
+}
+
+/// A device reply whose feature word has an unclaimed bit is refused, not
+/// truncated — [`Reply::Adapter`]'s rule, on the record a renderer selects its
+/// paths from.
+#[test]
+fn a_device_feature_bit_no_flag_claims_is_refused_rather_than_dropped() {
+    let mut replies = ReplyWriter::new();
+    replies.device(
+        2,
+        &DeviceCaps {
+            features: Features::COMPUTE,
+            limits: Limits::minimum(),
+        },
+    );
+    let mut bytes = replies.bytes().to_vec();
+    // The feature word opens the body, straight after the tag and sequence.
+    let at = tag::REPLY_HEADER_BYTES + 1 + 8;
+    let unclaimed = Features::all().bits() | (1 << 40);
+    bytes[at..at + 8].copy_from_slice(&unclaimed.to_le_bytes());
+    assert_eq!(
+        decode_replies(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "DeviceCaps::features",
+            code: unclaimed,
+        })
+    );
+}
+
+/// **The reason and the gap are independent halves**, and each has to survive
+/// on its own: a refusal that was not about features carries an empty word, and
+/// a browser that refused without saying why carries an empty string.
+#[test]
+fn a_device_failure_carries_its_reason_and_the_features_that_were_missing() {
+    let cases = [
+        ("gone", Features::TIMELINE_SEMAPHORE | Features::MESH_SHADER),
+        ("", Features::empty()),
+        ("no gap, just a refusal — ✱", Features::empty()),
+        ("", Features::all()),
+    ];
+    for (reason, unsupported) in cases {
+        let mut replies = ReplyWriter::new();
+        replies.device_failed(6, reason, unsupported);
+        assert_eq!(
+            decode_replies(replies.bytes()),
+            Ok(vec![(
+                6,
+                Reply::DeviceFailed {
+                    reason: reason.into(),
+                    unsupported,
+                }
+            )]),
+            "{reason:?} / {unsupported:?}"
+        );
+    }
+}
+
+/// The gap is a [`Features`] word on the wire, so an unclaimed bit in it is an
+/// error too — otherwise a drifted build's refusal would report a *different*
+/// missing feature from the one it meant.
+#[test]
+fn a_device_failures_missing_features_are_refused_when_a_bit_is_unclaimed() {
+    let mut replies = ReplyWriter::new();
+    replies.device_failed(6, "x", Features::empty());
+    let mut bytes = replies.bytes().to_vec();
+    // Tag, sequence, the reason's length prefix and its one byte, then the word.
+    let at = tag::REPLY_HEADER_BYTES + 1 + 8 + 4 + 1;
+    let unclaimed = 1u64 << 63;
+    bytes[at..at + 8].copy_from_slice(&unclaimed.to_le_bytes());
+    assert_eq!(
+        decode_replies(&bytes),
+        Err(DecodeError::InvalidEnum {
+            field: "DeviceFailed::unsupported",
+            code: unclaimed,
         })
     );
 }

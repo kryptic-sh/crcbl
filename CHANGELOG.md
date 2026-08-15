@@ -520,6 +520,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   falls back to another backend, because a fallback here would turn "not built"
   into a passing run on a different backend.
 
+- **A browser opens a device through the stream.** `Command::RequestDevice`,
+  `Reply::Device` and `Reply::DeviceFailed`, and a `crcbl_webgpu::device` module
+  whose `DeviceProbe` is the polled state between asking and opening.
+
+  The device's capabilities are the **device's**, not a copy of the adapter's —
+  WebGPU grants what was asked for, not everything the adapter has — and the
+  browser gate proves they differ by opening a device for itself with the same
+  descriptor and comparing.
+
+  A required feature with no WebGPU name **fails the request before the browser
+  is asked**, carrying the exact bits that could not be satisfied, rather than
+  being dropped so the engine receives a device lacking something it declared it
+  needed. Optional features are filtered to what the adapter has, because
+  `requestDevice` fails the whole request over one it lacks — which would turn
+  "nice to have" into fatal.
+
+  Neither wire version moved: this adds tags rather than changing a record, and
+  an unknown tag already fails loudly naming the byte, where a version bump
+  would refuse buffers the older half still decodes correctly.
+
 - **The adapter reply now carries the whole of `crcbl_hal::AdapterInfo`**,
   `DeviceCaps` included, so what a browser reports reaches the capability seam
   instead of an id and a name. `Reply::Adapter` holds an `AdapterInfo`,

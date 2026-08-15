@@ -321,6 +321,18 @@ if [ -z "$ROUND_TRIP" ]; then
     exit 1
 fi
 
+# The device half of group G, by name and separately, because it can stop
+# happening on its own: the adapter checks above pass on a build whose device
+# request is never encoded, so the group's presence says nothing about this. It
+# is also the slice's whole exit criterion — a browser opening a device and the
+# seam reporting what it has — and an exit criterion nothing checks is a claim.
+DEVICE_TRIP="$(grep -F 'the browser opened a device and wasm read its capabilities back' "${OUTPUT}.plain" || true)"
+if [ -z "$DEVICE_TRIP" ]; then
+    echo "crcbl web e2e: the driver never opened a device through the command stream;" >&2
+    echo "               crcbl-webgpu's device request is ungated in a real browser" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

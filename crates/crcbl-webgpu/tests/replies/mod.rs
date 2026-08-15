@@ -224,8 +224,70 @@ pub fn every_reply() -> Vec<(u64, Reply)> {
                 reason: String::new(),
             },
         ),
+        // **The device's own capabilities, and deliberately not the adapter's.**
+        // Every field below is a value `every_adapter_field` does not have —
+        // fewer features, a smaller `max_image_2d`, no timestamp period — so a
+        // replayer that answered a device request by copying its adapter record
+        // would produce different bytes here rather than the same ones.
+        (
+            7,
+            Reply::Device {
+                caps: DeviceCaps {
+                    features: DEVICE_GRANTED,
+                    limits: Limits {
+                        max_image_2d: 8192,
+                        timestamp_period_ns: 0.0,
+                        ..every_limit()
+                    },
+                },
+            },
+        ),
+        // A device that opened with nothing beyond the floor: the other end of
+        // the same shape, and the case where the feature word is empty rather
+        // than merely small.
+        (
+            19,
+            Reply::Device {
+                caps: DeviceCaps {
+                    features: Features::empty(),
+                    limits: Limits::minimum(),
+                },
+            },
+        ),
+        // The refusal, with the gap that caused it. `TIMELINE_SEMAPHORE` is the
+        // flag `DeviceDesc::for_adapter` requires and WebGPU has no answer for,
+        // so it is the refusal a browser actually produces.
+        (
+            3,
+            Reply::DeviceFailed {
+                reason: "no WebGPU feature satisfies Features(TIMELINE_SEMAPHORE) — ✱".into(),
+                unsupported: Features::TIMELINE_SEMAPHORE,
+            },
+        ),
+        // …and a failure that is not about features at all: `requestDevice`
+        // rejected, so the reason is the browser's and the word is empty. The
+        // two halves of this reply are independent and this is what says so.
+        (
+            29,
+            Reply::DeviceFailed {
+                reason: String::new(),
+                unsupported: Features::empty(),
+            },
+        ),
     ]
 }
+
+/// The features a device opened by `web/engine/gpu-replay.js` comes back with
+/// when nothing optional was asked for: the four core WebGPU grants outright.
+///
+/// A **subset** of [`WEBGPU_REACHABLE`] and that is the point — the adapter can
+/// have all eight, the device gets what the request named. `reply-encode.mjs`
+/// derives the same word from the production mapping over a device stub with no
+/// features at all.
+const DEVICE_GRANTED: Features = Features::COMPUTE
+    .union(Features::OCCLUSION_QUERY)
+    .union(Features::DEPTH_BIAS_CLAMP)
+    .union(Features::DEBUG_MARKERS);
 
 /// Encodes `reply` through the writer method it came from.
 ///
@@ -236,6 +298,11 @@ pub fn encode_reply(replies: &mut ReplyWriter, sequence: u64, reply: &Reply) {
     match reply {
         Reply::Adapter { info } => replies.adapter(sequence, info),
         Reply::NoAdapter { reason } => replies.no_adapter(sequence, reason),
+        Reply::Device { caps } => replies.device(sequence, caps),
+        Reply::DeviceFailed {
+            reason,
+            unsupported,
+        } => replies.device_failed(sequence, reason, *unsupported),
         Reply::ReadbackPending { readback } => replies.readback_pending(sequence, *readback),
         Reply::ReadbackReady { readback, data } => {
             replies.readback_ready(sequence, *readback, data);
