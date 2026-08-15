@@ -43,24 +43,6 @@ gap the WebGPU work surfaced rather than a WebGPU workaround, and it wants doing
 where every backend can use it. Recorded in `web/engine/gpu-replay.js` above
 `GPU_TEXTURE_USAGE` and on the probe's view descriptor.
 
-### The browser gate serves a stale site unless told to rebuild
-
-`web/run-browser-e2e.sh` runs `web/build.sh` only when given `--build` or when
-`target/site` is missing. So editing `web/engine/*.js` and running the gate
-tests the **previous** build, silently. This is not theoretical: it produced
-three false passes in one session before it was noticed, on sabotage runs that
-were supposed to go red.
-
-**CI is not affected** — `.github/workflows/pages.yml` runs `./web/build.sh`
-itself before any gate invocation, on a clean runner. The hazard is entirely
-local iteration, which is also where the gate is most useful.
-
-Not fixed here because the rebuild policy has other callers and a wrong change
-makes CI build twice on every job. The cheap version is a staleness _warning_
-rather than a policy change: if anything under `web/engine` or `web/tools` is
-newer than the built site, say so loudly and carry on. That keeps the fast path
-fast and makes the trap visible.
-
 ### `ImageDesc` and `ImageViewDesc` state contracts nothing enforces
 
 Three of them, found while putting both descriptors on the wire. Each is prose

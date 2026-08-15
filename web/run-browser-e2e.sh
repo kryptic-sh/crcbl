@@ -169,6 +169,33 @@ fi
 if [ "$BUILD" = "1" ] || [ ! -d "$SITE" ]; then
     echo "crcbl web e2e: building the site into $SITE"
     SITE_DIR="$SITE" "$REPO/web/build.sh"
+else
+    # **A REUSED SITE IS THE ONE WAY THIS HARNESS LIES.** Without `--build` the
+    # run drives whatever `target/site` already holds, so an edit to
+    # `web/engine/*.js` is tested in its previous form and the gate passes on
+    # code that is not the code under test. That is not theoretical: it produced
+    # three green runs in a row for edits deliberately made to fail.
+    #
+    # A warning rather than a rebuild, because CI already runs `web/build.sh`
+    # itself before calling this and would then pay for the build twice on every
+    # demo. `find -newer` against the copied entry point is the whole check: the
+    # engine modules and the driver tools are what a person iterates on, and the
+    # wasm has `build.sh`'s own staleness handling.
+    STAMP="$SITE/engine/demo.js"
+    if [ -f "$STAMP" ]; then
+        # `-newer` rather than a shell loop comparing timestamps: under `set -e`
+        # a loop whose last comparison is false exits non-zero and takes the
+        # whole run with it, silently, which is how this guard first shipped.
+        # The parentheses are load-bearing — without them `-newer` binds to the
+        # second `-name` alone and every `.js` file matches.
+        NEWER="$(find "$REPO/web/engine" "$REPO/web/tools" \
+            \( -name '*.js' -o -name '*.mjs' \) -newer "$STAMP")"
+        if [ -n "$NEWER" ]; then
+            echo "crcbl web e2e: WARNING — $SITE is older than these sources, so this run does not test them:" >&2
+            echo "$NEWER" | sed 's|^|  |' >&2
+            echo "crcbl web e2e: re-run with --build (or run ./web/build.sh) before believing the result" >&2
+        fi
+    fi
 fi
 
 # Which demo this run drives. One at a time, because the driver launches its own
