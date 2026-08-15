@@ -8,7 +8,8 @@
 // so it can be driven under node against a stub `navigator.gpu` with no wasm
 // instance anywhere. `web/tools/gpu-replay.mjs` does exactly that.
 //
-// TWO OF THE COMMANDS IT REPLAYS ASK THE BROWSER SOMETHING. `EnumerateAdapters`
+// TWO OF THE COMMANDS IT REPLAYS ASK THE BROWSER SOMETHING IT CANNOT ANSWER AT
+// ONCE — the two whose answer is a promise. `EnumerateAdapters`
 // calls `navigator.gpu.requestAdapter()` and answers with the whole of the
 // seam's `AdapterInfo` — the browser's name for it, its features and its limits
 // in the seam's vocabulary, and the documented absence for the four fields
@@ -38,6 +39,18 @@
 // waiting to be answered. Two things about them are decisions rather than
 // omissions, and each is argued where it is made: the context is deliberately
 // **not** configured, and a lookup that finds no canvas throws.
+//
+// AND `SurfaceCaps`, WHICH ANSWERS WITHIN THE CALL. It is the third command
+// with a reply and the only one whose answer is ready immediately: WebGPU has no
+// asynchronous capability query, and almost nothing it has at all — one string
+// from `getPreferredCanvasFormat()`, and a handful of facts the specification
+// fixes. So it queues its reply during `replay` rather than a frame later, and
+// the translation below `surfaceCapsFor` is where every field that has no
+// browser answer is named as such rather than filled in with a plausible number.
+// Its failures — a surface with no context here, an adapter no enumeration
+// granted — are answered with a `SurfaceCapsFailed` reply and never thrown,
+// because `Instance::surface_caps` is how adapter selection is done and a
+// refusal is an ordinary step of it rather than a reason to lose the frame.
 //
 // Every other command in the stream is *unimplemented*, and says so: `replay`
 // throws a `ReplayError` naming the command and the sequence that carried it,
@@ -70,7 +83,14 @@
 // is computed here rather than carried, which is why `replay` takes the base
 // alongside the list rather than the list alone.
 
-import { DEVICE_TYPE, ReplyWriter } from './gpu-reply.js';
+import {
+  COMPOSITE_ALPHA,
+  DEVICE_TYPE,
+  FORMAT,
+  PRESENT_MODE,
+  SURFACE_CAPS_FAILURE,
+  ReplyWriter,
+} from './gpu-reply.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WebGPU's vocabulary, in the seam's
@@ -478,6 +498,107 @@ export function halDeviceCapsFor(device) {
 }
 
 /**
+ * The formats a `GPUCanvasContext` may be configured with, and their seam codes.
+ *
+ * THE SPECIFICATION'S SET, not this browser's, because there is no query for the
+ * latter: `getPreferredCanvasFormat()` answers exactly one of these two and
+ * nothing anywhere reports the rest. Both are required of every WebGPU
+ * implementation — a canvas configured with either is valid by the specification
+ * — so listing both is a fact rather than a guess, and it is the same kind of
+ * fact as `MAX_SAMPLE_COUNT` above.
+ *
+ * `rgba16float` IS DELIBERATELY ABSENT. It is a supported context format in the
+ * current specification and was not always one, and nothing a browser reports
+ * distinguishes an implementation that takes it from one that does not. A
+ * `SurfaceCaps::formats` entry is a promise that a swapchain can be created with
+ * it, so an entry that might be refused at `configure()` is worse than a shorter
+ * list: the caller has no way to find out which it was.
+ */
+const CANVAS_FORMAT = Object.freeze({
+  bgra8unorm: FORMAT.BGRA8_UNORM,
+  rgba8unorm: FORMAT.RGBA8_UNORM,
+});
+
+/**
+ * The image count a WebGPU canvas offers, as a range of exactly one.
+ *
+ * `crcbl_hal::SurfaceCaps` records the decision this implements: the fields are
+ * WSI vocabulary and stay, and "a WebGPU backend reports the range its platform
+ * actually offers (`2..=2` for a WebGPU canvas, which has one implicit ring)".
+ * WebGPU exposes no swapchain image count at all, so this is not a number read
+ * off anything — it is the statement that there is exactly one configuration
+ * available and a caller's clamp has nothing to choose between. A wider range
+ * would offer a knob that does not exist.
+ */
+const CANVAS_IMAGE_COUNT = 2;
+
+/**
+ * What a canvas surface will accept, in the seam's vocabulary.
+ *
+ * FIELD BY FIELD, BECAUSE ONLY ONE OF THEM IS SOMETHING THE BROWSER SAYS:
+ *
+ *   * `formats` — `getPreferredCanvasFormat()` answers one format, and it is the
+ *     one to put first: `SurfaceCaps::formats` is documented best-first and
+ *     `preferred_format()` reads it that way, and the browser's preference is
+ *     exactly the "no extra copy on present" claim that ordering means. The
+ *     other member of {@link CANVAS_FORMAT} follows it, because a canvas can be
+ *     configured with either. None of them is sRGB, so `preferred_format()`
+ *     falls through to the first entry — which is the browser's own preference,
+ *     and the right answer.
+ *   * `presentModes` — `[FIFO]`, and WebGPU has **no present-mode concept at
+ *     all**. This is not a gap filled with a plausible value: a canvas presents
+ *     at the `requestAnimationFrame` boundary in lockstep with the display,
+ *     which is what `Fifo` describes, and `SurfaceCaps` promises `Fifo` is
+ *     always present. Reporting `Mailbox` or `Immediate` would offer a caller a
+ *     mode that cannot be selected and would silently be `Fifo` anyway.
+ *   * `compositeAlpha` — `GPUCanvasConfiguration.alphaMode` is `'opaque'` or
+ *     `'premultiplied'` and those are the two reported, in that order because
+ *     `'opaque'` is WebGPU's default and `CompositeAlpha::Opaque` is the
+ *     engine's. `PostMultiplied` and `Inherit` have no WebGPU spelling and are
+ *     never offered.
+ *   * `minImageCount` / `maxImageCount` — see {@link CANVAS_IMAGE_COUNT}. WebGPU
+ *     has no image count; this says there is one configuration, not that a ring
+ *     of two was measured.
+ *   * `currentExtent` — `null`, **and this is a field with no honest answer
+ *     here.** WebGPU has no `currentExtent` query. The canvas has `width` and
+ *     `height`, and they are the wrong thing twice over: the seam documents this
+ *     field as what the *surface* believes, "a cross-check, never the source of
+ *     truth", against the shell's own size — and a canvas's size is a number the
+ *     page itself set. Answering with it would hand the shell its own request
+ *     back as independent confirmation, which is the one thing a cross-check
+ *     must never be. Wayland reports nothing here for the same reason and the
+ *     seam already spells `None` as the answer for it.
+ *
+ * @param {GPU} gpu The `navigator.gpu` to ask.
+ * @returns {Parameters<ReplyWriter['surfaceCaps']>[0]}
+ * @throws {SurfaceCapsError} If the browser names a canvas format this seam has
+ *   no `crcbl_hal::Format` for — which is a query that failed, not a surface
+ *   that supports nothing.
+ */
+function surfaceCapsFor(gpu) {
+  const preferred = gpu.getPreferredCanvasFormat();
+  const preferredCode = CANVAS_FORMAT[preferred];
+  if (preferredCode === undefined) {
+    throw new SurfaceCapsError(
+      SURFACE_CAPS_FAILURE.BACKEND,
+      `getPreferredCanvasFormat() answered ${JSON.stringify(preferred)}, ` +
+        'which is not a canvas format this seam has a Format for'
+    );
+  }
+  return {
+    formats: [
+      preferredCode,
+      ...Object.values(CANVAS_FORMAT).filter((code) => code !== preferredCode),
+    ],
+    presentModes: [PRESENT_MODE.FIFO],
+    compositeAlpha: [COMPOSITE_ALPHA.OPAQUE, COMPOSITE_ALPHA.PRE_MULTIPLIED],
+    minImageCount: CANVAS_IMAGE_COUNT,
+    maxImageCount: CANVAS_IMAGE_COUNT,
+    currentExtent: null,
+  };
+}
+
+/**
  * The reason recorded when `requestAdapter()` grants nothing.
  *
  * A promise that resolves `null` carries no message of its own, and the reason
@@ -588,6 +709,35 @@ export class DeviceRequestError extends Error {
     this.name = 'DeviceRequestError';
     this.kind = kind;
     this.unsupported = unsupported;
+  }
+}
+
+/**
+ * A capability query that cannot be answered.
+ *
+ * NEITHER A `ReplayError` NOR A `SurfaceError`, and the difference from the
+ * second one is the interesting half. A `CreateSurface` that cannot resolve its
+ * canvas throws out of `replay`, because that command has no reply on this
+ * channel and there is no way to tell the far side at all. This one *does* have
+ * a reply, so throwing would be choosing to lose the frame over an answer wasm
+ * is waiting for — and `Instance::surface_caps` is the call adapter selection is
+ * made of, where "no" is a routine answer rather than a fault. So this is thrown
+ * only inside `#surfaceCaps` and never out of it: it is caught there and becomes
+ * the `cause` of a `SurfaceCapsFailed` reply.
+ *
+ * `code` is one of `SURFACE_CAPS_FAILURE`, which is what the far side turns into
+ * a `HalError` — and the distinction it carries is one a caller acts on:
+ * `UNSUPPORTED` means "try the next adapter" and the rest do not.
+ */
+export class SurfaceCapsError extends Error {
+  /**
+   * @param {number} code One of `SURFACE_CAPS_FAILURE`.
+   * @param {string} message
+   */
+  constructor(code, message) {
+    super(message);
+    this.name = 'SurfaceCapsError';
+    this.code = code;
   }
 }
 
@@ -777,6 +927,9 @@ export class Replayer {
           break;
         case 'DestroySurface':
           this.#destroySurface(command);
+          break;
+        case 'SurfaceCaps':
+          this.#surfaceCaps(sequence, command);
           break;
         default:
           throw new ReplayError(String(command.name), sequence);
@@ -993,6 +1146,65 @@ export class Replayer {
    */
   #destroySurface(command) {
     this.#surfaces.delete(command.surface.index);
+  }
+
+  /**
+   * Answers what a surface will accept on an adapter, or why it cannot.
+   *
+   * ANSWERED WITHIN THE CALL, unlike the two commands that make a round trip:
+   * nothing here is a promise, so deferring would only make the answer arrive a
+   * frame later than it has to. The reply still names the sequence, and the
+   * buffer still goes to wasm at the frame boundary.
+   *
+   * BOTH IDS ARE CHECKED, AND NEITHER FAILURE THROWS. A surface this replayer
+   * has no context for is `InvalidHandle`; an adapter id outside what an
+   * enumeration granted is `NoSuchAdapter`. Both are the `Err` half of a call
+   * whose `Err` half is ordinary — see {@link SurfaceCapsError} — so both are
+   * replies. Every path below queues exactly one, including the one where the
+   * *reply writer* refuses a field: a record that will not encode is rolled back
+   * whole by the writer and answered as a `Backend` failure instead, so nothing
+   * half-written can reach the buffer.
+   *
+   * THE ADAPTER IS VALIDATED AND OTHERWISE UNUSED, which is worth stating
+   * because it looks like an oversight. `surface_caps` is per-adapter on this
+   * seam because Vulkan's is: presentation support is a property of a
+   * queue family. WebGPU has no per-adapter surface query at all — the canvas
+   * formats come from `navigator.gpu` and are the same whichever adapter is
+   * named — so the id's only job here is that a command naming one nothing
+   * granted must not be answered as though it had.
+   *
+   * @param {bigint} sequence
+   * @param {{ surface: { index: number, generation: number }, adapter: number }} command
+   */
+  #surfaceCaps(sequence, command) {
+    try {
+      if (!this.#surfaces.has(command.surface.index)) {
+        throw new SurfaceCapsError(
+          SURFACE_CAPS_FAILURE.INVALID_HANDLE,
+          `no surface ${command.surface.index} is live in this replayer`
+        );
+      }
+      if (!this.#adapters[command.adapter]) {
+        throw new SurfaceCapsError(
+          SURFACE_CAPS_FAILURE.NO_SUCH_ADAPTER,
+          `no adapter ${command.adapter} has been enumerated`
+        );
+      }
+      this.#replies.surfaceCaps(sequence, surfaceCapsFor(this.#gpu));
+    } catch (error) {
+      this.#replies.surfaceCapsFailed(
+        sequence,
+        String(error).slice(0, MAX_REASON_CHARS),
+        // Anything this file did not anticipate — a browser with no
+        // `navigator.gpu`, a reply the writer refused — is `Backend`: the cause
+        // that promises nothing, which is the only honest thing to say about a
+        // failure nobody wrote a branch for.
+        error instanceof SurfaceCapsError
+          ? error.code
+          : SURFACE_CAPS_FAILURE.BACKEND
+      );
+    }
+    this.#queued = true;
   }
 
   /**

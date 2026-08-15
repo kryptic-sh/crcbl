@@ -76,6 +76,12 @@ and a second buffer with a second lifetime buys nothing. What is built:
    `query_results`. `crcbl-webgpu`'s `reply`, and `web/engine/gpu-reply.js` on
    the far side.
 
+   **The transport is what defers an answer, not always the browser.**
+   `surface_caps` is the case that shows the difference: WebGPU has no
+   asynchronous capability query and the replayer answers it inside the call it
+   was replayed by, and it is still a reply — the frame boundary sits between
+   the two halves of every call on this seam whatever the browser can do.
+
 They share their byte primitives — one bounds-checked reader, one writer, one
 error type, in `crcbl-webgpu`'s `bytes` module — because they are one format,
 and two near-identical readers are two places for a bound to be wrong.

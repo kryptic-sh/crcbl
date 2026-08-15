@@ -49,6 +49,7 @@ import {
   DEVICE_TYPE,
   FORMAT,
   PRESENT_MODE,
+  SURFACE_CAPS_FAILURE,
   ReplyEncodeError,
   ReplyWriter,
 } from '../engine/gpu-reply.js';
@@ -355,6 +356,30 @@ function encodeCanonicalReplies(replies) {
     maxImageCount: 0,
     currentExtent: [0, 0],
   });
+  // **One per cause, and that is the point of having four.** Every other
+  // consumer of this table agrees with itself by construction — the replayer's
+  // own checks read the same `SURFACE_CAPS_FAILURE` the writer does — so these
+  // four bytes against a fixture Rust wrote are the only thing holding the two
+  // languages' failure codes together. The reason and the cause are independent
+  // halves, so two of them carry no reason.
+  replies.surfaceCapsFailed(
+    47n,
+    'surface 63 is not live in this replayer — ✱',
+    SURFACE_CAPS_FAILURE.INVALID_HANDLE
+  );
+  replies.surfaceCapsFailed(53n, '', SURFACE_CAPS_FAILURE.NO_SUCH_ADAPTER);
+  // **Not a browser's answer.** One adapter, and a canvas that gave up a context
+  // can present on it, so `UNSUPPORTED` is what a Vulkan backend says routinely
+  // and this side never does. The wire carries it because the far side decodes
+  // what it is sent rather than what a browser could have sent.
+  replies.surfaceCapsFailed(
+    59n,
+    'the adapter cannot present to this surface',
+    SURFACE_CAPS_FAILURE.UNSUPPORTED
+  );
+  // The highest code the table claims, so an off-by-one at the end of it is a
+  // byte difference here.
+  replies.surfaceCapsFailed(61n, '', SURFACE_CAPS_FAILURE.BACKEND);
 }
 
 /**
@@ -662,6 +687,67 @@ async function main() {
     check(
       zero.bytes.length === absent.bytes.length + 8,
       `a zero extent is present and an absent one is not (${absent.bytes.length} vs ${zero.bytes.length} bytes)`
+    );
+  }
+
+  // ---- and so does the refusal that answers the same query ----------------
+  // Its cause is one byte, and every value of it is legal, so a code that never
+  // arrived would be written as `0` — `UNSUPPORTED`, the one value that tells a
+  // caller to go on to the next adapter. That is the worst of the four for a
+  // mistake to spell, which is why the check is here rather than left to the
+  // far side.
+  checkRefused(
+    'a failure with no cause is refused rather than written as UNSUPPORTED',
+    'NotANumber',
+    // @ts-expect-error — the mistake this check exists for.
+    () => new ReplyWriter().surfaceCapsFailed(1n, 'stale surface')
+  );
+  checkRefused(
+    'a failure cause that is not a byte is refused',
+    'NotANumber',
+    () => new ReplyWriter().surfaceCapsFailed(1n, 'stale surface', 256)
+  );
+  checkRefused(
+    'a failure reason past the field cap is refused here too',
+    'InvalidLength',
+    () =>
+      new ReplyWriter().surfaceCapsFailed(
+        1n,
+        'x'.repeat(MAX_FIELD_BYTES + 1),
+        SURFACE_CAPS_FAILURE.BACKEND
+      )
+  );
+  // **And a refused one leaves no bytes behind.** This reply is the one whose
+  // caller has the least room to recover: it is already the answer to a query
+  // that failed, so a caller that caught a throw from it has nothing left to
+  // send but a shorter version of the same refusal — and would be appending it
+  // to a reason and a tag already in the buffer. The rollback is what makes that
+  // second attempt land in a buffer wasm can still decode.
+  {
+    const replies = new ReplyWriter();
+    replies.readbackPending(1n, handle(1, 1));
+    const good = replies.bytes.slice();
+    let thrown = null;
+    try {
+      // The reason encodes, the cause does not — so the throw lands after the
+      // tag, the sequence and a length-prefixed string are already written.
+      replies.surfaceCapsFailed(2n, 'half a refusal', undefined);
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown instanceof ReplyEncodeError,
+      `a half-written refusal was refused (${String(thrown)})`
+    );
+    check(
+      firstDifference(good, replies.bytes) === -1 &&
+        replies.bytes.length === good.length,
+      `and the buffer is byte for byte what it was before it (${good.length} vs ${replies.bytes.length} bytes)`
+    );
+    replies.surfaceCapsFailed(2n, '', SURFACE_CAPS_FAILURE.BACKEND);
+    check(
+      replies.bytes.length > good.length,
+      'and the refusal written in its place still lands'
     );
   }
 

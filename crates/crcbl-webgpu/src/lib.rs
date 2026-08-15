@@ -141,5 +141,5 @@ pub use command::Command;
 pub use device::DeviceProbe;
 pub use instance::AdapterProbe;
 pub use reader::{StreamReader, decode_stream};
-pub use reply::{Reply, ReplyReader, ReplyWriter, decode_replies};
+pub use reply::{Reply, ReplyReader, ReplyWriter, SurfaceCapsFailure, decode_replies};
 pub use writer::StreamWriter;

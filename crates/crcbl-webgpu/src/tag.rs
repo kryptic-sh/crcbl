@@ -25,6 +25,8 @@
 
 use crcbl_hal::{CompositeAlpha, DeviceType, Format, LoadOp, MemoryLocation, PresentMode, StoreOp};
 
+use crate::reply::SurfaceCapsFailure;
+
 // ── Header ────────────────────────────────────────────────────────────────────
 
 /// Magic bytes at the head of every stream buffer.
@@ -309,6 +311,13 @@ pub const DEVICE_FAILED_REPLY_TAG: u8 = 0x03;
 /// answers, not because a surface is involved: the reply table is grouped by
 /// the family of *call*, exactly as the command table is.
 pub const SURFACE_CAPS_REPLY_TAG: u8 = 0x04;
+/// [`Reply::SurfaceCapsFailed`](crate::Reply::SurfaceCapsFailed).
+///
+/// A *new tag* rather than a new [`REPLY_VERSION`], which is the distinction
+/// that constant's own docs draw: an older decoder meeting this byte answers
+/// [`DecodeError::UnknownTag`](crate::DecodeError::UnknownTag) naming it, while
+/// every reply it does know still decodes.
+pub const SURFACE_CAPS_FAILED_REPLY_TAG: u8 = 0x05;
 /// [`Reply::ReadbackPending`](crate::Reply::ReadbackPending).
 pub const READBACK_PENDING_REPLY_TAG: u8 = 0x10;
 /// [`Reply::ReadbackReady`](crate::Reply::ReadbackReady).
@@ -697,6 +706,66 @@ pub const fn composite_alpha_from_code(code: u8) -> Option<CompositeAlpha> {
     }
 }
 
+// ── SurfaceCapsFailure ────────────────────────────────────────────────────────
+//
+// The one code table on this seam whose enum is **this crate's own** rather than
+// `crcbl-hal`'s, and it is not a shortcut: every [`HalError`] variant a failed
+// capability query can produce carries data — `NoSuchAdapter(u32)`,
+// `InvalidHandle { kind, bits }` — that the *command* already said, so putting a
+// `HalError` on the wire would be sending back the arguments alongside the
+// answer. What crosses is which error to build, and the impl that builds it has
+// the surface and the adapter it asked with.
+//
+// The tags are written out for the same reason every other table here is: a
+// variant added to [`SurfaceCapsFailure`] stops [`surface_caps_failure_code`]
+// compiling, which is the moment the number beside it is impossible to miss.
+//
+// **A browser never sends [`SURFACE_CAPS_FAILURE_UNSUPPORTED`]**, which is the
+// interesting one: `requestAdapter()` grants at most one adapter and a canvas
+// that gave up a `webgpu` context can present on it, so "this adapter cannot
+// present to this surface" — the answer a Vulkan backend gives routinely, and
+// the whole reason [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps)
+// is how adapter selection is done — has no way to happen there. It has a code
+// because the wire form must be total, exactly as [`DEVICE_TYPE_DISCRETE`] does.
+
+/// [`SurfaceCapsFailure::Unsupported`] — and the code a browser never sends.
+pub const SURFACE_CAPS_FAILURE_UNSUPPORTED: u8 = 0x00;
+/// [`SurfaceCapsFailure::InvalidHandle`].
+pub const SURFACE_CAPS_FAILURE_INVALID_HANDLE: u8 = 0x01;
+/// [`SurfaceCapsFailure::NoSuchAdapter`].
+pub const SURFACE_CAPS_FAILURE_NO_SUCH_ADAPTER: u8 = 0x02;
+/// [`SurfaceCapsFailure::Backend`].
+pub const SURFACE_CAPS_FAILURE_BACKEND: u8 = 0x03;
+
+/// The wire code for a [`SurfaceCapsFailure`].
+#[must_use]
+pub const fn surface_caps_failure_code(cause: SurfaceCapsFailure) -> u8 {
+    match cause {
+        SurfaceCapsFailure::Unsupported => SURFACE_CAPS_FAILURE_UNSUPPORTED,
+        SurfaceCapsFailure::InvalidHandle => SURFACE_CAPS_FAILURE_INVALID_HANDLE,
+        SurfaceCapsFailure::NoSuchAdapter => SURFACE_CAPS_FAILURE_NO_SUCH_ADAPTER,
+        SurfaceCapsFailure::Backend => SURFACE_CAPS_FAILURE_BACKEND,
+    }
+}
+
+/// The [`SurfaceCapsFailure`] a wire code names, or `None` if it names none.
+///
+/// **Never [`SurfaceCapsFailure::Backend`] as a catch-all**, tempting though a
+/// "something went wrong" arm is: it is the one cause that promises nothing, so
+/// a drifted table answering with it would be indistinguishable from a real
+/// backend error — and it would turn the two causes a caller must tell apart,
+/// "try the next adapter" and "your handle is stale", into the same answer.
+#[must_use]
+pub const fn surface_caps_failure_from_code(code: u8) -> Option<SurfaceCapsFailure> {
+    match code {
+        SURFACE_CAPS_FAILURE_UNSUPPORTED => Some(SurfaceCapsFailure::Unsupported),
+        SURFACE_CAPS_FAILURE_INVALID_HANDLE => Some(SurfaceCapsFailure::InvalidHandle),
+        SURFACE_CAPS_FAILURE_NO_SUCH_ADAPTER => Some(SurfaceCapsFailure::NoSuchAdapter),
+        SURFACE_CAPS_FAILURE_BACKEND => Some(SurfaceCapsFailure::Backend),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,7 +797,7 @@ mod tests {
 
     /// Every reply tag this slice defines, with the family its name claims.
     /// Spelled out for the reason [`TAGS`] is.
-    const REPLY_TAGS: [(&str, u8, u8); 8] = [
+    const REPLY_TAGS: [(&str, u8, u8); 9] = [
         ("Adapter", ADAPTER_REPLY_TAG, REPLY_FAMILY_INSTANCE),
         ("NoAdapter", NO_ADAPTER_REPLY_TAG, REPLY_FAMILY_INSTANCE),
         ("Device", DEVICE_REPLY_TAG, REPLY_FAMILY_INSTANCE),
@@ -738,6 +807,11 @@ mod tests {
             REPLY_FAMILY_INSTANCE,
         ),
         ("SurfaceCaps", SURFACE_CAPS_REPLY_TAG, REPLY_FAMILY_INSTANCE),
+        (
+            "SurfaceCapsFailed",
+            SURFACE_CAPS_FAILED_REPLY_TAG,
+            REPLY_FAMILY_INSTANCE,
+        ),
         (
             "ReadbackPending",
             READBACK_PENDING_REPLY_TAG,
@@ -933,6 +1007,28 @@ mod tests {
                 Some(mode)
             );
         }
+
+        let causes = [
+            SurfaceCapsFailure::Unsupported,
+            SurfaceCapsFailure::InvalidHandle,
+            SurfaceCapsFailure::NoSuchAdapter,
+            SurfaceCapsFailure::Backend,
+        ];
+        let codes: Vec<u8> = causes
+            .iter()
+            .map(|c| surface_caps_failure_code(*c))
+            .collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two SurfaceCapsFailures share a code"
+        );
+        for cause in causes {
+            assert_eq!(
+                surface_caps_failure_from_code(surface_caps_failure_code(cause)),
+                Some(cause)
+            );
+        }
     }
 
     #[test]
@@ -944,12 +1040,17 @@ mod tests {
         assert_eq!(format_from_code(0xFF), None);
         assert_eq!(present_mode_from_code(0xFF), None);
         assert_eq!(composite_alpha_from_code(0xFF), None);
+        assert_eq!(surface_caps_failure_from_code(0xFF), None);
         // The one directly above the last claimed code, which is where an
         // off-by-one in either table lands and where `0xFF` never would.
         assert_eq!(device_type_from_code(DEVICE_TYPE_OTHER + 1), None);
         assert_eq!(format_from_code(FORMAT_BC7_RGBA_UNORM_SRGB + 1), None);
         assert_eq!(present_mode_from_code(PRESENT_MODE_IMMEDIATE + 1), None);
         assert_eq!(composite_alpha_from_code(COMPOSITE_ALPHA_INHERIT + 1), None);
+        assert_eq!(
+            surface_caps_failure_from_code(SURFACE_CAPS_FAILURE_BACKEND + 1),
+            None
+        );
     }
 
     fn distinct(codes: &[u8]) -> usize {

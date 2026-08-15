@@ -79,6 +79,7 @@ const NO_ADAPTER_REPLY_TAG = 0x01;
 const DEVICE_REPLY_TAG = 0x02;
 const DEVICE_FAILED_REPLY_TAG = 0x03;
 const SURFACE_CAPS_REPLY_TAG = 0x04;
+const SURFACE_CAPS_FAILED_REPLY_TAG = 0x05;
 const READBACK_PENDING_REPLY_TAG = 0x10;
 const READBACK_READY_REPLY_TAG = 0x11;
 const QUERY_RESULTS_REPLY_TAG = 0x18;
@@ -187,6 +188,31 @@ export const COMPOSITE_ALPHA = Object.freeze({
   PRE_MULTIPLIED: 0x01,
   POST_MULTIPLIED: 0x02,
   INHERIT: 0x03,
+});
+
+/**
+ * `tag::SURFACE_CAPS_FAILURE_*` — why a capability query answered nothing.
+ *
+ * THE HALF OF A REFUSAL A CALLER MAY BRANCH ON, and the reason a refusal is a
+ * reply at all rather than a throw: `Instance::surface_caps` is the only call
+ * that says whether an adapter can present to a window, so its own docs oblige a
+ * caller doing adapter selection to treat a failure as "try the next adapter".
+ * That is `UNSUPPORTED`, and it is the only one of these that means it — the
+ * other three will answer identically for every adapter the caller goes on to
+ * try, so collapsing them into one flag would make an endless selection loop
+ * look exactly like a real refusal.
+ *
+ * A REPLAYER READING `navigator.gpu` NEVER SENDS `UNSUPPORTED`: `requestAdapter()`
+ * grants at most one adapter and a canvas that gave up a `webgpu` context can
+ * present on it. It exists here because the wire form has to be total, as
+ * `DEVICE_TYPE`'s unused four do; `gpu-replay.js` is where the three a browser
+ * does send are chosen.
+ */
+export const SURFACE_CAPS_FAILURE = Object.freeze({
+  UNSUPPORTED: 0x00,
+  INVALID_HANDLE: 0x01,
+  NO_SUCH_ADAPTER: 0x02,
+  BACKEND: 0x03,
 });
 
 // ── Errors ───────────────────────────────────────────────────────────────────
@@ -818,6 +844,33 @@ export class ReplyWriter {
     this.#atomic(() => {
       this.#open(SURFACE_CAPS_REPLY_TAG, sequence);
       this.#writer.putSurfaceCaps(caps);
+    });
+  }
+
+  /**
+   * No capabilities, with the reason and which failure it was.
+   *
+   * `cause` is one of {@link SURFACE_CAPS_FAILURE} — the machine-readable half
+   * of `reason`, and the field an `impl Instance` turns into the matching
+   * `HalError`. It goes through `putU8`, so a code that came out of a misspelled
+   * lookup is `undefined` and refused here rather than written as `0`, which is
+   * `UNSUPPORTED` — the one value that tells a caller to go on to the next
+   * adapter, and therefore the worst possible thing for a mistake to spell.
+   *
+   * A REFUSAL IS AN ORDINARY ANSWER, not an error path. `surface_caps` is how
+   * adapter selection is done, so a caller asks it about adapters expecting some
+   * of them to say no — which is why this reply exists instead of the replayer
+   * throwing and taking the frame with it.
+   *
+   * @param {bigint} sequence
+   * @param {string} reason
+   * @param {number} cause One of {@link SURFACE_CAPS_FAILURE}.
+   */
+  surfaceCapsFailed(sequence, reason, cause) {
+    this.#atomic(() => {
+      this.#open(SURFACE_CAPS_FAILED_REPLY_TAG, sequence);
+      this.#writer.putString(reason, 'SurfaceCapsFailed::reason');
+      this.#writer.putU8(cause, 'SurfaceCapsFailed::cause');
     });
   }
 

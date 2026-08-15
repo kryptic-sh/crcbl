@@ -32,6 +32,18 @@
 // failure this seam has no reply channel for, and the check below is that it
 // throws rather than carrying on with a handle wasm believes in.
 //
+// THE CAPABILITY QUERY IS THE THIRD COMMAND WITH A REPLY, and the only one
+// answered inside the call — WebGPU has no asynchronous capability query, and
+// hardly a synchronous one either. So almost every field of that record is a
+// decision about what a browser can honestly claim rather than something it
+// said, and each is read back out of the buffer and compared against a number
+// spelled out here. The one field WebGPU does answer is checked against two
+// different stub browsers, because a list written out as a constant cannot move
+// when the browser's answer moves. Its two refusals — a surface with no context
+// here, an adapter no enumeration granted — are checked to be *replies*: a throw
+// would lose the frame over what `Instance::surface_caps` calls an ordinary step
+// of adapter selection.
+//
 // THE OTHER CLAIM THIS SECTION MAKES is that a device's capabilities are the
 // device's. The stub adapter's limits and the stub device's differ in every
 // member and their feature sets differ too, so a replayer that built its reply
@@ -132,14 +144,28 @@ function settle() {
 /**
  * A `navigator.gpu` that answers however the test needs.
  *
+ * `canvasFormat` IS DELIBERATELY THE LESS COMMON ONE. Most browsers on most
+ * machines prefer `'bgra8unorm'`, and a replayer that wrote its format list out
+ * as a constant would almost certainly write that one first — so the stub says
+ * `'rgba8unorm'`, and the expected list below has it first. A hardcoded answer
+ * fails rather than passing by resemblance.
+ *
  * @param {() => Promise<object | null>} answer
+ * @param {object} [options]
+ * @param {string} [options.canvasFormat] What `getPreferredCanvasFormat()` says.
  */
-function stubGpu(answer) {
+function stubGpu(answer, { canvasFormat = 'rgba8unorm' } = {}) {
   const stub = {
     calls: 0,
+    /** How many times the replayer asked which format the canvas prefers. */
+    formatCalls: 0,
     requestAdapter() {
       stub.calls += 1;
       return answer();
+    },
+    getPreferredCanvasFormat() {
+      stub.formatCalls += 1;
+      return canvasFormat;
     },
   };
   return stub;
@@ -237,16 +263,22 @@ function stubAdapter(info, features = []) {
 }
 
 /**
- * The two commands this file dispatches on, taken from the committed fixture by
+ * The commands this file dispatches on, taken from the committed fixture by
  * `main` before anything below runs.
  *
  * From the fixture rather than written out here, so what is replayed is a
  * command the Rust encoder really wrote — the same reason the expected fields
  * in `stream-decode.mjs` are *not* taken from a decoder.
  *
- * @type {{ enumerate: object, requestDevice: object }}
+ * @type {{ enumerate: object, requestDevice: object, createSurface: object,
+ *          surfaceCaps: object }}
  */
-const FROM_FIXTURE = { enumerate: null, requestDevice: null };
+const FROM_FIXTURE = {
+  enumerate: null,
+  requestDevice: null,
+  createSurface: null,
+  surfaceCaps: null,
+};
 
 /** A one-command frame carrying `command` at `sequence`. */
 function frameOf(command, sequence) {
@@ -344,6 +376,46 @@ async function openDevice(adapter, command, sequence) {
 }
 
 /**
+ * A replayer that has enumerated one adapter and holds the fixture's surface.
+ *
+ * The two-step is the seam's own shape and not scaffolding, as `openDevice`'s
+ * is: a capability query names a surface `create_surface` made and an adapter an
+ * enumeration numbered, so a replayer with neither has nothing to answer about.
+ * The enumeration's reply is cleared in between, so what comes back afterwards
+ * is the capability answer alone.
+ *
+ * @param {object} [options]
+ * @param {string} [options.canvasFormat] What the stub browser prefers.
+ */
+async function readyForCaps({ canvasFormat } = {}) {
+  const gpu = stubGpu(async () => openingAdapter(), { canvasFormat });
+  const canvases = new Map([
+    [FROM_FIXTURE.createSurface.canvasId, stubCanvas('caps')],
+  ]);
+  const replayer = new Replayer({ gpu, canvases });
+  replayer.replay(frameOf(FROM_FIXTURE.enumerate, 0n));
+  await settle();
+  replayer.replay(frameOf(FROM_FIXTURE.createSurface, 1n));
+  replayer.clear();
+  return { replayer, gpu };
+}
+
+/**
+ * How long a whole `SurfaceCapsFailed` reply is, for a given reason.
+ *
+ * The header, the tag, the sequence, the reason's length prefix and its bytes,
+ * and the cause. What it is for is the buffer *around* the reply: a writer that
+ * left a half-written record behind before answering would produce a longer
+ * buffer holding one decodable reply, and every check that decodes the first
+ * reply would still pass.
+ *
+ * @param {string} reason
+ */
+function failureReplyBytes(reason) {
+  return 10 + 1 + 8 + 4 + new TextEncoder().encode(reason).length + 1;
+}
+
+/**
  * @param {number} index
  * @param {number} generation
  */
@@ -364,24 +436,54 @@ function handle(index, generation) {
  * are read out and asserted, and the wording is only ever checked for the part
  * that has to be actionable.
  *
- * Only the two device replies are understood; anything else is a bug in the
- * check that called this. Of a `Device` it reads the feature word and the first
- * limit, which are the two the checks below are about — and reading them *out
- * of the buffer* is what makes those checks about the replayer rather than
- * about the mapping function they would otherwise call twice.
+ * Only the two device replies and the two surface-capability ones are
+ * understood; anything else is a bug in the check that called this. Of a
+ * `Device` it reads the feature word and the first limit, which are the two the
+ * checks below are about — and reading them *out of the buffer* is what makes
+ * those checks about the replayer rather than about the mapping function they
+ * would otherwise call twice. The capability record is read whole for the same
+ * reason and a sharper one: every field of it is a decision this replayer made
+ * about what a browser can honestly answer, and comparing against numbers spelled
+ * out below is what says those are the decisions it made.
+ *
+ * A BUFFER WITH NO REPLY IN IT IS `undefined`, not a crash. "Nothing came back"
+ * is a real outcome and the one several checks below exist to rule out — a
+ * replayer that threw instead of answering leaves exactly this — so it has to
+ * arrive at the check that asserts on it rather than as a `RangeError` from a
+ * `DataView` three frames up, which names nothing and stops the run.
  *
  * @param {Uint8Array} bytes A whole reply buffer, header included.
  * @returns {{ tag: string, sequence: bigint, features?: bigint,
- *             maxImage2d?: number, reason?: string, unsupported?: bigint }}
+ *             maxImage2d?: number, reason?: string, unsupported?: bigint,
+ *             caps?: object, cause?: number } | undefined}
  */
 function decodeOneReply(bytes) {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   // The header is the magic and the version word; every reply then opens with
   // its tag and the sequence it answers.
+  if (bytes.length <= 10) return undefined;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let at = 10;
   const tag = view.getUint8(at);
   const sequence = view.getBigUint64(at + 1, true);
   at += 9;
+  /** A `u32` count, then that many one-byte enum codes. */
+  const enumList = () => {
+    const count = view.getUint32(at, true);
+    at += 4;
+    const codes = [...bytes.subarray(at, at + count)];
+    at += count;
+    return codes;
+  };
+  /** A `u32` length prefix, then that many UTF-8 bytes. */
+  const string = () => {
+    const length = view.getUint32(at, true);
+    at += 4;
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(
+      bytes.subarray(at, at + length)
+    );
+    at += length;
+    return text;
+  };
   if (tag === 0x02) {
     return {
       tag: 'Device',
@@ -392,18 +494,52 @@ function decodeOneReply(bytes) {
       maxImage2d: view.getUint32(at + 8, true),
     };
   }
-  if (tag !== 0x03) {
+  if (tag === 0x03) {
+    const reason = string();
+    return {
+      tag: 'DeviceFailed',
+      sequence,
+      reason,
+      unsupported: view.getBigUint64(at, true),
+    };
+  }
+  if (tag === 0x04) {
+    // `SurfaceCaps` in declaration order: three counted lists of codes, two
+    // counts, then an extent behind a presence byte. Spelled out one statement
+    // at a time rather than as an object literal, so that reading the lists
+    // before the counts is stated rather than left to evaluation order.
+    const formats = enumList();
+    const presentModes = enumList();
+    const compositeAlpha = enumList();
+    const minImageCount = view.getUint32(at, true);
+    const maxImageCount = view.getUint32(at + 4, true);
+    at += 8;
+    const currentExtent =
+      view.getUint8(at) === 1
+        ? [view.getUint32(at + 1, true), view.getUint32(at + 5, true)]
+        : null;
+    return {
+      tag: 'SurfaceCaps',
+      sequence,
+      caps: {
+        formats,
+        presentModes,
+        compositeAlpha,
+        minImageCount,
+        maxImageCount,
+        currentExtent,
+      },
+    };
+  }
+  if (tag !== 0x05) {
     throw new Error(`decodeOneReply does not read tag 0x${tag.toString(16)}`);
   }
-  const length = view.getUint32(at, true);
-  const reason = new TextDecoder('utf-8', { fatal: true }).decode(
-    bytes.subarray(at + 4, at + 4 + length)
-  );
+  const reason = string();
   return {
-    tag: 'DeviceFailed',
+    tag: 'SurfaceCapsFailed',
     sequence,
     reason,
-    unsupported: view.getBigUint64(at + 4 + length, true),
+    cause: view.getUint8(at),
   };
 }
 
@@ -495,6 +631,20 @@ async function main() {
     createSurface !== undefined && destroySurface !== undefined,
     'the committed stream carries a CreateSurface and a DestroySurface'
   );
+  FROM_FIXTURE.createSurface = createSurface;
+
+  // The capability query, from the fixture for the same reason again: its
+  // surface handle and its adapter id are the ones the Rust encoder wrote, and
+  // neither names anything a replayer has — which is what the two refusals
+  // below are made of.
+  const surfaceCaps = commands.find(
+    (command) => command.name === 'SurfaceCaps'
+  );
+  check(
+    surfaceCaps !== undefined,
+    'the committed stream carries a SurfaceCaps'
+  );
+  FROM_FIXTURE.surfaceCaps = surfaceCaps;
 
   // ---- the answer is not available on the frame that asked ----------------
   // The whole shape of this seam. `replay` returns having *started* the work;
@@ -670,6 +820,7 @@ async function main() {
       'RequestDevice',
       'CreateSurface',
       'DestroySurface',
+      'SurfaceCaps',
     ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;
@@ -1074,6 +1225,174 @@ async function main() {
         thrown.canvasId === createSurface.canvasId &&
         replayer.surfaces.size === 0,
       `a canvas with no webgpu context throws rather than recording nothing quietly (${String(thrown)})`
+    );
+  }
+
+  // ---- the capability query ------------------------------------------------
+  //
+  // The third command with a reply and the only one answered inside the call:
+  // WebGPU has no asynchronous capability query and almost nothing synchronous
+  // either, so most of this record is what the replayer decided a browser can
+  // honestly claim. Every field is therefore read back **out of the buffer** and
+  // compared against a number spelled out here — a check that called the
+  // translation again would agree with whatever it produced.
+  //
+  // AND BOTH REFUSALS ARE REPLIES. `Instance::surface_caps` is the only call
+  // that says whether an adapter can present to a window, so its docs oblige a
+  // caller doing selection to treat a failure as "try the next adapter". A
+  // replayer that threw would take the frame down over an ordinary step of that.
+  {
+    const { replayer, gpu } = await readyForCaps();
+    const live = {
+      ...surfaceCaps,
+      surface: createSurface.surface,
+      adapter: 0,
+    };
+    replayer.replay(frameOf(live, 11n));
+    check(
+      replayer.hasReplies && replayer.inFlight === 0,
+      `the answer is queued inside the call, with nothing left in flight (queued ${replayer.hasReplies}, in flight ${replayer.inFlight})`
+    );
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      answered?.tag === 'SurfaceCaps' && answered?.sequence === 11n,
+      `the reply is a SurfaceCaps naming the command that asked (${answered?.tag} answering ${answered?.sequence})`
+    );
+    checkEqual(
+      answered?.caps,
+      {
+        // The stub prefers `rgba8unorm` (0x02), so that is what comes first —
+        // `formats` is best-first and the browser's preference is what "best"
+        // means here. `bgra8unorm` (0x04) follows, because a canvas can be
+        // configured with either.
+        formats: [0x02, 0x04],
+        // FIFO, and only FIFO: WebGPU has no present-mode concept, and a canvas
+        // presents at the `requestAnimationFrame` boundary.
+        presentModes: [0x00],
+        // `GPUCanvasConfiguration.alphaMode` is `'opaque' | 'premultiplied'`,
+        // and nothing else in WebGPU spells the other two.
+        compositeAlpha: [0x00, 0x01],
+        // One implicit ring, so a range of exactly one — the answer
+        // `crcbl_hal::SurfaceCaps`'s own decision note prescribes for a canvas.
+        minImageCount: 2,
+        maxImageCount: 2,
+        // **The field with no browser answer.** There is no `currentExtent`
+        // query, and the canvas's own size is a number the page set — handing it
+        // back as a cross-check on the shell's size would confirm nothing.
+        currentExtent: null,
+      },
+      'every capability field is what the browser said or the documented absence'
+    );
+    check(
+      gpu.formatCalls === 1,
+      `and the format list came from asking the browser (${gpu.formatCalls} calls)`
+    );
+  }
+  {
+    // **The same replayer against a different browser.** The one field WebGPU
+    // does answer has to move when the browser's answer moves; a list written
+    // out as a constant cannot.
+    const { replayer } = await readyForCaps({ canvasFormat: 'bgra8unorm' });
+    replayer.replay(
+      frameOf(
+        { ...surfaceCaps, surface: createSurface.surface, adapter: 0 },
+        12n
+      )
+    );
+    const answered = decodeOneReply(replayer.replies);
+    checkEqual(
+      answered?.caps?.formats,
+      [0x04, 0x02],
+      'a browser preferring bgra8unorm is answered with bgra8unorm first'
+    );
+    checkEqual(
+      answered?.caps?.presentModes,
+      [0x00],
+      'and Fifo is still the mode offered, which is the promise SurfaceCaps makes'
+    );
+  }
+  {
+    // **A surface this replayer has no context for.** The fixture's own command
+    // names surface 63, and this replayer holds a different one — so a check
+    // that merely counted surfaces would pass here and this one cannot.
+    const { replayer } = await readyForCaps();
+    let thrown = null;
+    try {
+      replayer.replay(frameOf(surfaceCaps, 13n));
+    } catch (error) {
+      thrown = error;
+    }
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      thrown === null &&
+        answered?.tag === 'SurfaceCapsFailed' &&
+        answered?.sequence === 13n &&
+        answered?.cause === 0x01,
+      `a stale surface is an InvalidHandle refusal rather than a throw (${String(thrown)}, ${answered?.tag} cause ${answered?.cause})`
+    );
+    check(
+      String(answered?.reason).includes(String(surfaceCaps.surface.index)),
+      `and the reason names the handle it could not resolve (${answered?.reason})`
+    );
+  }
+  {
+    // **An adapter no enumeration granted.** The surface is live, so this is the
+    // second id being checked rather than the first failing again — and the
+    // fixture's adapter id is 65, which nothing this replayer answered with
+    // could have been.
+    const { replayer } = await readyForCaps();
+    let thrown = null;
+    try {
+      replayer.replay(
+        frameOf({ ...surfaceCaps, surface: createSurface.surface }, 14n)
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      thrown === null &&
+        answered?.tag === 'SurfaceCapsFailed' &&
+        answered?.sequence === 14n &&
+        answered?.cause === 0x02,
+      `an unenumerated adapter is a NoSuchAdapter refusal rather than a throw (${String(thrown)}, ${answered?.tag} cause ${answered?.cause})`
+    );
+    check(
+      String(answered?.reason).includes(String(surfaceCaps.adapter)),
+      `and the reason names the id nothing granted (${answered?.reason})`
+    );
+  }
+  {
+    // **A browser naming a canvas format this seam has no `Format` for.** The
+    // one thing the replayer actually asks WebGPU is the one thing that can come
+    // back unusable, and the honest answer is that the query failed — not a
+    // format list with a plausible guess in it.
+    const { replayer } = await readyForCaps({ canvasFormat: 'rgba32float' });
+    let thrown = null;
+    try {
+      replayer.replay(
+        frameOf(
+          { ...surfaceCaps, surface: createSurface.surface, adapter: 0 },
+          15n
+        )
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    const answered = decodeOneReply(replayer.replies);
+    check(
+      thrown === null &&
+        answered?.tag === 'SurfaceCapsFailed' &&
+        answered?.cause === 0x03 &&
+        String(answered?.reason).includes('rgba32float'),
+      `an unknown canvas format is a Backend refusal naming it (${String(thrown)}, ${answered?.tag} cause ${answered?.cause}: ${answered?.reason})`
+    );
+    // …and the refusal is the *whole* of what is in the buffer. A record
+    // abandoned part-way through and then answered again would leave a decodable
+    // reply behind a stub of one, which every check above would still pass.
+    check(
+      replayer.replies.length === failureReplyBytes(answered?.reason),
+      `and nothing else reached the buffer (${replayer.replies.length} bytes, ${failureReplyBytes(answered?.reason)} expected)`
     );
   }
 

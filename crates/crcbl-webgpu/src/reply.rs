@@ -5,8 +5,17 @@
 //! [`poll_readback`](crcbl_hal::Device::poll_readback),
 //! [`query_results`](crcbl_hal::Device::query_results). The command stream
 //! cannot carry one: it is written during a frame and replayed when the frame
-//! ends, and by then the call has long since returned. **This is the channel
-//! that carries the answer back**, and it is the same format read the other way:
+//! ends, and by then the call has long since returned.
+//!
+//! **The transport is what defers them, not always the browser.**
+//! [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) is the reply
+//! this distinction arrived with: WebGPU has no asynchronous capability query
+//! and the replayer answers it inside the call it was replayed by — and it is
+//! still a reply, because the frame boundary sits between the two halves of
+//! every call on this seam whatever the browser can do.
+//!
+//! **This is the channel that carries the answer back**, and it is the same
+//! format read the other way:
 //! a magic and version header, a tag byte per reply, `u32` length prefixes, the
 //! same caps, and the same bounds-checked reader, shared with the command
 //! stream rather than written twice.
@@ -64,12 +73,15 @@
 //! that is neither a handle nor a string. Both are settled in this module's own
 //! `put_surface_caps` and in [`tag`]'s three new code tables.
 //!
-//! Not here, and needed before the HAL can be implemented over this channel:
-//! the *failure* half of a surface-capability query.
-//! [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) answers
-//! [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported) for an adapter
-//! that cannot present to the surface, which is
-//! [`Reply::DeviceFailed`]'s shape again and is not encoded yet.
+//! [`Reply::SurfaceCapsFailed`] is the fourth, and brought no shape at all — a
+//! string and an enum code is [`Reply::DeviceFailed`] again. What it brought is
+//! the observation that a *refusal* can be the ordinary answer:
+//! [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) is the only
+//! call that says whether an adapter can present to a window, so its docs
+//! oblige a caller doing selection to treat an `Err` as "try the next adapter",
+//! and a channel with nowhere to put one would have to throw the frame away
+//! over it. Its `cause` is where the two replies differ, and
+//! [`SurfaceCapsFailure`] says why a feature word would not have done.
 //!
 //! # There is no "still pending" reply, and there must not be
 //!
@@ -367,6 +379,61 @@ impl ByteReader<'_> {
     }
 }
 
+// ── SurfaceCapsFailure ────────────────────────────────────────────────────────
+
+/// Why a surface-capability query answered nothing, as
+/// [`Reply::SurfaceCapsFailed`] carries it.
+///
+/// **The machine-readable half of that reply**, and the field an
+/// `impl Instance` turns into a [`HalError`](crcbl_hal::HalError) — the same job
+/// [`Reply::DeviceFailed::unsupported`](Reply::DeviceFailed) does for a device
+/// request, with a different shape because a capability query fails in more than
+/// one way and *the ways are not interchangeable*:
+/// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) obliges a caller
+/// doing adapter selection to treat [`Unsupported`](Self::Unsupported) as "try
+/// the next adapter" rather than as fatal, and the other three are not that —
+/// they are bugs that will answer identically for every adapter the caller goes
+/// on to try. A single "it failed" flag would make an infinite selection loop and
+/// a real refusal look the same.
+///
+/// **Not a [`HalError`](crcbl_hal::HalError) on the wire**, which would be the
+/// obvious alternative: every variant that could appear carries data the
+/// *command* already said — the adapter index, the surface's handle bits — so
+/// sending one back would be quoting the question inside the answer. This says
+/// which error to build; the impl that builds it has the arguments it asked
+/// with. [`tag`] holds the codes.
+///
+/// **The reason string is never a substitute for this.** It comes from another
+/// vendor's runtime by way of a replayer, and is for a log or a banner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SurfaceCapsFailure {
+    /// The adapter cannot present to this surface —
+    /// [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported), and the only
+    /// one of these that means "try the next adapter".
+    ///
+    /// Routine on a desktop backend — a discrete GPU under an X server with no
+    /// DRI3, the second GPU of a hybrid laptop — and unreachable from a browser,
+    /// where there is one adapter and a canvas that gave up a context can
+    /// present on it. See [`tag`] for why it has a code regardless.
+    Unsupported,
+    /// The surface handle did not resolve: destroyed, never created, or from
+    /// another instance — [`HalError::InvalidHandle`](crcbl_hal::HalError::InvalidHandle).
+    InvalidHandle,
+    /// No adapter was ever enumerated at that index —
+    /// [`HalError::NoSuchAdapter`](crcbl_hal::HalError::NoSuchAdapter).
+    NoSuchAdapter,
+    /// The query itself failed — [`HalError::Backend`](crcbl_hal::HalError::Backend),
+    /// the arm `surface_caps`'s own docs end with.
+    ///
+    /// **The arm that promises nothing**, and the reason the other three exist
+    /// separately: a caller can act on each of those, and this one only says the
+    /// answer is not available. It is what a replayer answers when something it
+    /// did not anticipate went wrong — the browser reporting a canvas format
+    /// this seam has no [`Format`](crcbl_hal::Format) for, say — because the one
+    /// thing it may never do is leave the command unanswered.
+    Backend,
+}
+
 // ── Reply ─────────────────────────────────────────────────────────────────────
 
 /// One decoded reply, with every borrowed field owned.
@@ -505,15 +572,36 @@ pub enum Reply {
     /// [`preferred_format`](SurfaceCaps::preferred_format) reads it that way, so
     /// the order is a value rather than a presentation detail.
     ///
-    /// **There is no failure arm yet**, and the gap is deliberate rather than
-    /// overlooked: `surface_caps` answers
-    /// [`HalError::Unsupported`](crcbl_hal::HalError::Unsupported) for an
-    /// adapter that cannot present to the surface, and that is a second reply —
-    /// the shape [`Reply::DeviceFailed`] has — which nothing on this side can
-    /// wait for until an `impl Instance` exists to ask.
+    /// The query's other outcome is [`Reply::SurfaceCapsFailed`], and it is not
+    /// an exceptional one: `surface_caps` is how adapter selection is done, so a
+    /// refusal is an ordinary step of it.
     SurfaceCaps {
         /// What the surface will accept.
         caps: SurfaceCaps,
+    },
+    /// [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) answering
+    /// nothing, with the reason and the kind of failure behind it.
+    ///
+    /// **A refusal here is a step of adapter selection, not a catastrophe.**
+    /// `surface_caps` is the only call that says whether an adapter can present
+    /// to a window, so its docs oblige a caller doing selection to treat an
+    /// `Err` as "try the next adapter" — which is why this is a reply rather
+    /// than something a replayer throws over. A replayer that threw would kill
+    /// the frame over the answer the seam asked for.
+    ///
+    /// [`Reply::DeviceFailed`]'s shape, and the same division of labour: a
+    /// string for a person, and beside it the one field a caller may branch on.
+    /// The difference is what that field is — a device request has exactly one
+    /// thing to be refused *for*, so it carries the feature gap, while a
+    /// capability query has four ways to fail that a caller must tell apart.
+    /// [`SurfaceCapsFailure`] carries the argument.
+    SurfaceCapsFailed {
+        /// What the browser said, or what the replayer refused to ask. For a log
+        /// or a banner; never a code to branch on.
+        reason: String,
+        /// Which failure, and therefore which
+        /// [`HalError`](crcbl_hal::HalError) an `impl Instance` builds.
+        cause: SurfaceCapsFailure,
     },
     /// [`query_results`](crcbl_hal::Device::query_results).
     QueryResults {
@@ -540,6 +628,7 @@ impl Reply {
             Self::Device { .. } => "Device",
             Self::DeviceFailed { .. } => "DeviceFailed",
             Self::SurfaceCaps { .. } => "SurfaceCaps",
+            Self::SurfaceCapsFailed { .. } => "SurfaceCapsFailed",
             Self::ReadbackPending { .. } => "ReadbackPending",
             Self::ReadbackReady { .. } => "ReadbackReady",
             Self::QueryResults { .. } => "QueryResults",
@@ -641,6 +730,18 @@ impl ReplyWriter {
     pub fn surface_caps(&mut self, sequence: u64, caps: &SurfaceCaps) {
         self.open(tag::SURFACE_CAPS_REPLY_TAG, sequence);
         self.bytes.put_surface_caps(caps);
+    }
+
+    /// [`Reply::SurfaceCapsFailed`].
+    ///
+    /// The reason first and the cause after it, which is
+    /// [`device_failed`](Self::device_failed)'s order rather than a fresh
+    /// decision: the two replies are the same shape and a reader who has seen
+    /// one should not have to check the other.
+    pub fn surface_caps_failed(&mut self, sequence: u64, reason: &str, cause: SurfaceCapsFailure) {
+        self.open(tag::SURFACE_CAPS_FAILED_REPLY_TAG, sequence);
+        self.bytes.put_bytes(reason.as_bytes());
+        self.bytes.put_u8(tag::surface_caps_failure_code(cause));
     }
 
     /// [`Reply::ReadbackPending`].
@@ -761,6 +862,16 @@ impl<'a> ReplyReader<'a> {
             tag::SURFACE_CAPS_REPLY_TAG => Reply::SurfaceCaps {
                 caps: r.read_surface_caps()?,
             },
+            tag::SURFACE_CAPS_FAILED_REPLY_TAG => {
+                let reason = r.read_string("SurfaceCapsFailed::reason")?;
+                let code = r.read_u8()?;
+                let cause =
+                    tag::surface_caps_failure_from_code(code).ok_or(DecodeError::InvalidEnum {
+                        field: "SurfaceCapsFailed::cause",
+                        code: code.into(),
+                    })?;
+                Reply::SurfaceCapsFailed { reason, cause }
+            }
             tag::READBACK_PENDING_REPLY_TAG => Reply::ReadbackPending {
                 readback: r.read_handle("ReadbackPending::readback")?,
             },
