@@ -8756,20 +8756,3 @@ drive — but it would have to become `crates/crcbl/src/web/` with `mod.rs` and
 `#[doc(inline)] pub use` in the module makes `crcbl::web::web_exports!` work
 too. The samples all call it as `crcbl::web_exports!`. Nothing enforces that; a
 future sample writing the longer path is not wrong, just inconsistent.
-
-### Unrelated: the browser gate crashes instead of reporting a bad argument
-
-Found while verifying this move, and nothing to do with it.
-`web/tools/browser-e2e.mjs` declares `const running` **after** the argument
-parsing that can call `fail`, and `fail` calls `stopEverything`, which reads
-`running`. So a mistyped invocation prints its real message and then dies in the
-temporal dead zone with
-`ReferenceError: Cannot access 'running' before initialization`, followed by
-`the driver reported no checks — the gate is not gating`. The diagnosis is
-buried under a stack trace that points at the wrong thing entirely.
-
-Reproduced by passing a positional demo name — the demo is selected by
-`CRCBL_WEB_E2E_DEMO`, not by an argument, which is an easy mistake to make from
-the script's own `--build` usage. Hoisting the `running` declaration above the
-argument parsing is the whole fix. **Not done here** because it is a drive-by in
-a file this task did not otherwise touch.

@@ -87,6 +87,26 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // Arguments and environment
 // ---------------------------------------------------------------------------
 
+/**
+ * Every browser this process started and has not stopped.
+ *
+ * A leaked Chromium is not a tidiness problem: it holds a GPU context and a
+ * profile directory, and a developer who runs the harness a few times ends up
+ * with several of them. [`fail`] and the exit hook below close over this so
+ * that no exit path can skip the kill.
+ *
+ * **Declared here, above the argument parsing, and that placement is the fix
+ * for a real bug.** `fail` calls `stopEverything`, which reads this; `fail` and
+ * `stopEverything` are function declarations and hoist, but a `const` does not.
+ * With this further down the file, every argument-parsing failure printed its
+ * real message and then died in the temporal dead zone with
+ * `ReferenceError: Cannot access 'running' before initialization`, burying the
+ * diagnosis under a stack trace pointing at the cleanup path.
+ *
+ * @type {Set<{ stop: () => void }>}
+ */
+const running = new Set();
+
 /** @type {Record<string, string>} */
 const args = {};
 for (let i = 2; i < process.argv.length; i += 1) {
@@ -483,18 +503,6 @@ const CONTROL_RGB = [0, 51, 204];
 
 /** Where the harness's own control page lives on its server. */
 const CONTROL_PATH = '/__crcbl-readback-control__';
-
-/**
- * Every browser this process started and has not stopped.
- *
- * A leaked Chromium is not a tidiness problem: it holds a GPU context and a
- * profile directory, and a developer who runs the harness a few times ends up
- * with several of them. [`fail`] and the exit hook below close over this so
- * that no exit path can skip the kill.
- *
- * @type {Set<{ stop: () => void }>}
- */
-const running = new Set();
 
 function stopEverything() {
   for (const browser of running) browser.stop();
