@@ -7508,7 +7508,9 @@ room produced. `docs/plan/sample/13-lumen.md` carries the status.
   because no device in this tree clamps any of the three effects. It is the same
   shape as the shadow-atlas rule considered and declined below: the arm exists
   and nothing can reach it here.
-- **The Pages web demo**, whose six-place checklist is the entry below.
+- **The Pages web demo shipped**, and what is left of it is one thing: the
+  browser gate cannot run on a software adapter. See "lumen's browser gate needs
+  a real GPU" below.
 - **Sound.** Rule 8 says no sample ships silent after P4A. lumen has no audio at
   all, and it is not obvious it should: it is an acceptance fixture with no
   events, and `hud` — the other fixture — is the precedent for a sample with no
@@ -7979,35 +7981,83 @@ fixed, and not obviously ours to fix** — if it recurs, the question to answer 
 whether the gate should demand a software GL/Vulkan fallback explicitly rather
 than taking whatever the image offers.
 
-## The lumen web demo is deferred, and what naming a new demo costs
+## The draw-argument pass exceeds WebGPU's per-stage storage-buffer budget (2026-08-15)
 
-Native first, deliberately: the sample's job is to make the lighting visible and
-tunable, and a wasm build multiplies the surface before anyone has looked at the
-picture. Recorded so the next slice does not re-derive the checklist —
-`web/README.md`'s "Adding a demo" is the authority and lists six things, not the
-five that get remembered:
+`apps/lumen` shipped as the sixth Pages demo and it is the only one
+`.github/workflows/pages.yml` does **not** render in a browser. The step is
+missing on purpose, and a comment where it would go says so.
 
-1. a row in `web/build.sh`'s `DEMOS` and a line in `web/build-pages.py`'s
-   `DEMOS`;
-2. `web/pages/lumen.html` — metadata, the sample's own prose, and the three
-   `<!--include …-->` directives every demo page carries;
-3. `web/demos/lumen/main.js` binding this sample's `__crcbl_lumen_*` exports;
-4. `web/demos/lumen/assets/manifest.json`, even with empty `keys`;
-5. an entry in `web/tools/browser-e2e.mjs`'s `EXPECTATIONS` — the two assertions
-   that are about the sample rather than the browser, which the gate refuses to
-   run without;
-6. a step in `.github/workflows/pages.yml`, because the gate reads one canvas
-   and therefore runs once per demo.
+**The measurement.** `crcbl-render`'s draw-argument pass — `draw_gen.rs`'s
+`gen_layout`, labelled `draw args` — binds one uniform and **fourteen** storage
+buffers in a single compute stage. Chrome's SwiftShader adapter reports a
+per-stage ceiling of ten, so Dawn refuses the bind group layout and every
+pipeline, bind group and submit built on it:
 
-Plus the sample's own `src/web.rs` — which is no longer a copy of anything. It
-is a `crcbl::web_exports!` invocation naming lumen's ten symbols, plus its
-`crcbl::web::WebPending` impl; `apps/hud/src/web.rs` is the shortest example to
-follow. lumen would be the sixth demo and the first written against the macro
-rather than migrated to it.
+```text
+The number of storage buffers (14) in the Compute stage exceeds the maximum
+per-stage limit (10).
+ - While validating [BindGroupLayoutDescriptor ""draw args""]
+ - While calling [Device "lumen"].CreateBindGroupLayout(…)
+```
 
-Note the shape it would be a demo _of_: the browser runs
-`LightingPath:: Rasterised` by construction, which is the whole reason the
-charter wants the page. That argument is unaffected by the deferral and stays.
+The demo reaches `STATUS_RUNNING`, draws nothing, and the run ends in
+`STATUS_FAILED`. Measured on Chromium under Xvfb with
+`--use-webgpu-adapter=swiftshader`, which is the configuration a GitHub runner
+with no GPU takes: 21 of 33 checks passed. The same artifact on the same machine
+against the real adapter (`--headless --hardware`, amd rdna-3) passes **33 of
+33**, including both of the `EXPECTATIONS` claims that are lumen's own.
+
+**Whose problem it is.** Not lumen's — nothing in `apps/lumen` chooses the
+binding count, and every geometry path (`MeshShader`, `IndirectCount`,
+`IndirectPerBatch`) goes through the same pass. `ForwardRenderer` builds a
+`DrawGen` unconditionally, so this is the first time any consumer of it has run
+on the wgpu backend against an adapter with WebGPU's ordinary ceilings. The
+engine does not check the limit either: `crcbl_wgpu::hal_limits_for` maps no
+per-stage storage-buffer count into `DeviceCaps::limits`, so nothing above the
+seam can refuse cleanly or select a smaller pass — the failure arrives as a Dawn
+error on the device callback, which `wgpu` does not turn into a `Result`.
+
+**What would fix it**, in increasing order of cost:
+
+- Pack the pass's buffers so the stage binds ten or fewer. Four of the fourteen
+  are `docs/plan/25-lod.md`'s selection tables and the hysteresis state, which a
+  `Geometry::Flat` scene never uses; merging pairs, or splitting the LOD half
+  into its own dispatch, are the two shapes. Either touches `draw_gen.slang` and
+  therefore the SHA-pinned SPIR-V, plus `crcbl-vk`'s draw-gen end-to-end.
+- Surface the limit through `DeviceCaps::limits` and fail at
+  `ForwardRenderer::new` with a message naming it, so a device that cannot host
+  the pass says so instead of drawing black. Cheap, and worth doing whichever
+  way the first bullet goes.
+
+**Then add the step back** — one line, and the `EXPECTATIONS` row it needs is
+already in `web/tools/browser-e2e.mjs`:
+
+```yaml
+- name: Render lumen in a real browser
+  run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
+```
+
+Two pieces of prose also claim the exception and want deleting with it:
+`web/pages/lumen.html`'s "This one wants a real GPU" note, and the clause on
+`web/pages/index.html` that excuses lumen from "every build is loaded in a real
+headless browser".
+
+**Not measured:** how slow lumen is under SwiftShader. The pipeline never
+builds, so there is no frame time to compare against the other five demos, and
+the timing question the CI step would have answered is still open.
+
+**Do not read this as "it needs a real GPU", which is the heading this entry
+first carried.** What is established is narrower and worse: it needs an adapter
+that permits **more than ten** storage buffers in one stage. One adapter allows
+it (this machine's amd rdna-3) and one refuses (SwiftShader), and nothing here
+establishes where a conforming baseline WebGPU implementation sits — the
+guaranteed minimum is a number in the specification that nobody has looked up,
+and it is at or below SwiftShader's ten rather than above it. So the untested
+population is not "runners without GPUs", it is **every browser and device whose
+adapter reports a ceiling this pass does not fit**, which plausibly includes
+mobile hardware with a real GPU. Anyone picking this up should read the limit
+out of the specification first and record it here, because it decides whether
+the first fix above is a nicety or the browser tier's only path to 3D.
 
 ## The pinned shader compilers ARE installed here (2026-08-14)
 

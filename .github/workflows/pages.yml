@@ -170,6 +170,25 @@ jobs:
       - name: Render hud in a real browser
         run: CRCBL_WEB_E2E_DEMO=hud ./web/run-browser-e2e.sh
 
+      # THERE IS NO `lumen` STEP HERE, AND ITS ABSENCE IS DELIBERATE.
+      #
+      # lumen is the sixth demo and the only one this job does not render. It is
+      # not slowness and it is not lumen's code: `crcbl-render`'s draw-argument
+      # pass binds fourteen storage buffers in one compute stage, and Chrome's
+      # SwiftShader adapter — the only WebGPU adapter a runner with no GPU has —
+      # reports a ceiling of ten, so the pipeline is never created and the canvas
+      # stays black. On real hardware the same artifact passes all 33 checks.
+      #
+      # A step here would therefore be a red CI on every commit, and one that
+      # blamed the wrong thing. `docs/backlog.md`'s "lumen's browser gate needs a
+      # real GPU" carries the measurement, the Dawn error verbatim and the one
+      # line to add back the moment the pass fits. Everything else in this job
+      # does cover lumen: `build.sh` builds its wasm, checks its export contract
+      # and smoke-runs it under node.
+      #
+      #     - name: Render lumen in a real browser
+      #       run: CRCBL_WEB_E2E_DEMO=lumen ./web/run-browser-e2e.sh
+
       # The canvas as a PNG and the page's whole log. On a failure these are the
       # first two things anyone will ask for, and neither can be reconstructed
       # from the step log.

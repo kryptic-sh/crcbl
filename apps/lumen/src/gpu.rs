@@ -20,7 +20,7 @@
 
 pub use crcbl::engine::{FrameOutcome, GpuError};
 
-use crcbl::engine::{GpuContext, GpuContextDesc, GpuOptions, Pacing};
+use crcbl::engine::{GpuContext, GpuContextDesc, GpuOptions, Pacing, PendingGpuContext};
 use crcbl::hal::{
     BindingModel, CommandEncoderDesc, DeviceCaps, Features, GeometryPath, LightingPath, downgrades,
 };
@@ -250,6 +250,50 @@ pub struct Gpu {
     last_dump: String,
 }
 
+/// What both [`Gpu::open`] and [`Gpu::request_open`] ask the engine for.
+///
+/// One value rather than two copies, for the reason every sample gives: the two
+/// bring-up paths must open the *same* device, or a feature only one of them
+/// requested is a bug nobody sees until the other path runs. Here that is more
+/// than a tidiness argument — [`Forced::optional_features`] is how this sample
+/// forces a lesser path at all, so a path that asked for a different set would
+/// draw the room through different selectors.
+fn desc(gpu: GpuOptions, forced: Forced) -> GpuContextDesc<'static> {
+    GpuContextDesc {
+        label: "lumen",
+        optional_features: forced.optional_features(),
+        ..GpuContextDesc::from(gpu)
+    }
+}
+
+/// A [`Gpu`] being opened one poll at a time.
+///
+/// It carries `forced` and `effects` because the device request outlives the
+/// call that started it: both are read again by [`Gpu::from_context`] once the
+/// device arrives, and neither is anything the engine's polled bring-up knows
+/// about.
+#[derive(Debug)]
+pub struct PendingGpu {
+    pending: PendingGpuContext,
+    forced: Forced,
+    effects: RenderEffects,
+}
+
+impl PendingGpu {
+    /// Advances the open. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the device request failed, or if a renderer refused the
+    /// device it produced.
+    pub fn poll(&mut self) -> Result<Option<Gpu>, GpuError> {
+        match self.pending.poll()? {
+            Some(ctx) => Gpu::from_context(ctx, self.forced, self.effects).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
 impl Gpu {
     /// Opens the join and builds the forward renderer on [`room::room`].
     ///
@@ -273,18 +317,48 @@ impl Gpu {
         forced: Forced,
         effects: RenderEffects,
     ) -> Result<Self, GpuError> {
-        let optional_features = forced.optional_features();
-        let ctx = GpuContext::open(
-            shell,
-            window,
-            extent,
-            &GpuContextDesc {
-                label: "lumen",
-                optional_features,
-                ..GpuContextDesc::from(gpu)
-            },
-        )?;
+        Self::from_context(
+            GpuContext::open(shell, window, extent, &desc(gpu, forced))?,
+            forced,
+            effects,
+        )
+    }
 
+    /// Starts opening the same thing without blocking — the browser's half of
+    /// [`Gpu::open`].
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the registry has no such backend or the window went away
+    /// before its surface could be described.
+    pub fn request_open<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        gpu: GpuOptions,
+        forced: Forced,
+        effects: RenderEffects,
+    ) -> Result<PendingGpu, GpuError> {
+        Ok(PendingGpu {
+            pending: GpuContext::request_open(shell, window, extent, &desc(gpu, forced))?,
+            forced,
+            effects,
+        })
+    }
+
+    /// Builds the renderer, the room and the two UI passes on an already-open
+    /// context — everything both bring-up paths share once the device exists.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the room's description is one the pools it asks for
+    /// cannot hold, or if any HAL call fails.
+    fn from_context(
+        ctx: GpuContext,
+        forced: Forced,
+        effects: RenderEffects,
+    ) -> Result<Self, GpuError> {
+        let optional_features = forced.optional_features();
         let caps = ctx.device().caps();
         // Topic 39's "every downgrade is logged once, at device creation,
         // naming the feature and the path it selected" — including the ones
@@ -597,6 +671,44 @@ impl Gpu {
         }
         self.renderer.destroy(self.ctx.device());
         self.ctx.destroy()
+    }
+}
+
+/// Lets [`crcbl::engine::PolledBoot`] drive this bundle's arrival.
+///
+/// The extent and the resize are [`crcbl::engine::GpuSurface`]'s, because a
+/// running loop asks the same two.
+///
+/// **Where the flags go.** [`Gpu::request_open`] takes the two this sample adds
+/// to a device request and the trait's `request` does not, so this forwards
+/// what [`Options`](crate::Options)'s `Default` gives — read off the defaults
+/// rather than spelled again, so the two cannot drift. That is the whole truth
+/// about the polled path and not a shortcut: it exists for the browser, a page
+/// has no argv, and `--force-geometry` and the `--no-*` flags therefore have no
+/// source there. A caller that has flags to honour has the blocking
+/// [`Gpu::open`], which takes both.
+impl crcbl::engine::PolledGpu for Gpu {
+    type Pending = PendingGpu;
+
+    fn request<S: Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        gpu: GpuOptions,
+    ) -> Result<Self::Pending, GpuError> {
+        let defaults = crate::args::Options::default();
+        Self::request_open(
+            shell,
+            window,
+            extent,
+            gpu,
+            defaults.forced,
+            defaults.effects,
+        )
+    }
+
+    fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError> {
+        pending.poll()
     }
 }
 

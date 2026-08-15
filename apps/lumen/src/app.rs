@@ -22,7 +22,7 @@
 //! [`HostedGame::debug_sections`] is handed a panel and `&self`, and no GPU:
 //! the panel is gathered before the frame runs, and the bundle is the loop's to
 //! hold. So [`Lumen`] keeps the [`Paths`] the device resolved, copied once from
-//! [`Gpu::paths`] at [`with_shell`] — which is also what puts them in
+//! [`Gpu::paths`] in `assemble` — which is also what puts them in
 //! [`Summary`], where a headless run can print them.
 //!
 //! The pause menu's effect rows are the same shape and the same reason:
@@ -39,7 +39,7 @@ use crcbl::engine::{
 use crcbl::prelude::*;
 use crcbl::render::{EffectRequest, RenderEffects};
 use crcbl::shell::{
-    DisplayMode, LogicalSize, ShellBackend as Backend, WindowDesc, open, open_backend,
+    DisplayMode, LogicalSize, ShellBackend as Backend, WindowDesc, WindowId, open, open_backend,
 };
 use crcbl::ui::draw_list::DrawList;
 
@@ -48,6 +48,12 @@ use crate::camera::Flyer;
 use crate::gpu::{Gpu, Paths, Unbuilt};
 use crate::menu::{self, CameraMode, LumenAction, Menus};
 use crate::room;
+
+/// How often [`Lumen::log_heartbeat`] logs, in ticks.
+///
+/// A second of simulated time at [`crate::DEFAULT_TICK_HZ`], which is what every
+/// other sample's heartbeat is spaced at.
+const HEARTBEAT_TICKS: u64 = 60;
 
 /// What a completed run did.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,6 +122,8 @@ pub struct Lumen {
     /// The values the pause panel was last built for — `None` until the first
     /// pause, so the panel is always rebuilt once with the real ones.
     shown: Option<(CameraMode, EffectRequest)>,
+    /// Fixed steps run, for [`Lumen::log_heartbeat`]'s cadence.
+    ticks: u64,
 }
 
 impl Lumen {
@@ -136,7 +144,51 @@ impl Lumen {
             effect_request: effects,
             device_effects,
             shown: None,
+            ticks: 0,
         }
+    }
+
+    /// The `[HUD]` line, on the cadence breakout, flappy, asteroids, horde and
+    /// hud use: every [`HEARTBEAT_TICKS`] steps, which is a second of simulated
+    /// time at the default rate.
+    ///
+    /// The one thing this fixture logs from inside the tick, and it is there for
+    /// the browser gate — `web/tools/browser-e2e.mjs` reads two claims out of
+    /// it, neither of which anything else in the page can answer.
+    ///
+    /// The first is which lighting path the frame is being drawn through. On the
+    /// web that is the whole point of publishing this sample: a browser has no
+    /// ray query, so [`crcbl::hal::LightingPath::Rasterised`] is what a page
+    /// takes **by construction** — and a line that names it is what tells a
+    /// rasterised room from a page that opened some other device.
+    ///
+    /// The second is that the fixture is advancing on its own. `lamp x` is the
+    /// value for it: the orbiting light is the only thing in the room that
+    /// moves, [`crate::room::lamp`] is a pure function of the seconds
+    /// [`Gpu::advance`] has accumulated, and those seconds accumulate here — in
+    /// the tick — so a frame loop that was presenting without ticking would
+    /// leave it standing still.
+    fn log_heartbeat(&self, gpu: &Gpu) {
+        if !self.ticks.is_multiple_of(HEARTBEAT_TICKS) {
+            return;
+        }
+        let crcbl::render::Light::Point(lamp) = room::lamp(gpu.elapsed()) else {
+            // `room::lamp` returns a point light and this sample's own
+            // `the_lamp_orbits_inside_the_room` pins that; there is no position
+            // to report if it ever stops being one.
+            return;
+        };
+        crcbl::log::info!(
+            "[HUD] tick: {}  lighting: {:?}  geometry: {:?}  binding: {:?}  camera: {}  \
+             effects: {}  lamp x: {:.2}",
+            self.ticks,
+            self.paths.lighting,
+            self.paths.geometry,
+            self.paths.binding,
+            self.camera.label(),
+            self.paths.effects_row(),
+            lamp.position.x,
+        );
     }
 
     /// Which camera the next frame is drawn from.
@@ -197,7 +249,11 @@ pub fn start(options: &Options) -> Result<Loop, LumenError> {
     with_shell(shell, options)
 }
 
-/// Builds the loop on an already-open shell.
+/// Builds the loop on an already-open shell, blocking on both waits.
+///
+/// The browser cannot use this — a main thread may not sit in
+/// [`wait_for_configure`] — and takes [`PendingLoop`] instead. What the two
+/// share is everything after the waiting, which is `assemble`.
 ///
 /// # Errors
 ///
@@ -207,23 +263,7 @@ pub fn with_shell<S: Shell + ?Sized>(
     options: &Options,
 ) -> Result<Loop<S>, LumenError> {
     let clock_source = Clock::new(options.common.headless);
-    let window = open_window(
-        shell.as_mut(),
-        &clock_source,
-        &WindowDesc {
-            title: "Crucible — lumen",
-            app_id: "sh.kryptic.crcbl.lumen",
-            // 4:3, so a windowed frame and a golden are the same framing: the
-            // fixed camera's field of view is vertical, and a different aspect
-            // crops or reveals the room's side walls.
-            size: options
-                .common
-                .size
-                .map_or(LogicalSize::new(960.0, 720.0), |size| size.to_logical(1.0)),
-            mode: options.common.display_mode(),
-            ..WindowDesc::default()
-        },
-    )?;
+    let window = open_the_window(shell.as_mut(), &clock_source, options)?;
 
     let mut events = 0;
     let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
@@ -237,13 +277,8 @@ pub fn with_shell<S: Shell + ?Sized>(
         options.forced,
         options.effects,
     )?;
-    // All three read before the bundle moves into `Booted`: what the flags asked
-    // for, resolved into a request, and what this device permits.
-    let paths = gpu.paths();
-    let effects = gpu.effect_request();
-    let device_effects = gpu.device_effects();
 
-    Ok(Loop::new(
+    Ok(assemble(
         Booted {
             shell,
             window,
@@ -251,9 +286,56 @@ pub fn with_shell<S: Shell + ?Sized>(
             clock_source,
             events,
         },
+        options,
+    ))
+}
+
+/// Creates the one window this sample has: its title, its app id, its size.
+///
+/// # Errors
+///
+/// [`LumenError`] if the shell refused it.
+fn open_the_window<S: Shell + ?Sized>(
+    shell: &mut S,
+    clock_source: &Clock,
+    options: &Options,
+) -> Result<WindowId, LumenError> {
+    Ok(open_window(
+        shell,
+        clock_source,
+        &WindowDesc {
+            title: "Crucible — lumen",
+            app_id: "sh.kryptic.crcbl.lumen",
+            // 4:3, so a windowed frame and a golden are the same framing: the
+            // fixed camera's field of view is vertical, and a different aspect
+            // crops or reveals the room's side walls.
+            size: options
+                .common
+                .size
+                .map_or(LogicalSize::new(960.0, 720.0), |size| size.to_logical(1.0)),
+            mode: options.common.display_mode(),
+            ..WindowDesc::default()
+        },
+    )?)
+}
+
+/// The half of start-up that is the same however the GPU arrived.
+///
+/// [`Booted`] is what both bring-up paths hand over, so the fixture is built and
+/// the loop assembled in one place rather than one per path — a second copy is
+/// how the browser build would come to run a subtly different sample.
+fn assemble<S: Shell + ?Sized>(booted: Booted<S, Gpu>, options: &Options) -> Loop<S> {
+    // All three read before the bundle moves into the loop: what the flags asked
+    // for, resolved into a request, and what this device permits.
+    let paths = booted.gpu.paths();
+    let effects = booted.gpu.effect_request();
+    let device_effects = booted.gpu.device_effects();
+
+    Loop::new(
+        booted,
         Lumen::new(options.camera, paths, effects, device_effects),
         options.common.loop_config(),
-    ))
+    )
 }
 
 impl HostedGame for Lumen {
@@ -274,6 +356,7 @@ impl HostedGame for Lumen {
     fn tick(&mut self, gpu: &mut Gpu, tick_dt: f64) {
         #[allow(clippy::cast_possible_truncation)]
         let dt = tick_dt as f32;
+        self.ticks += 1;
         // The camera integrates whether or not it is the one being drawn from:
         // a reviewer who swaps to the golden pose, walks, and swaps back should
         // arrive where the keys took them.
@@ -282,6 +365,7 @@ impl HostedGame for Lumen {
         // renders a bit-reproducible room on every machine — which is what makes
         // a golden image of it evidence rather than a coincidence.
         gpu.advance(dt);
+        self.log_heartbeat(gpu);
     }
 
     /// Every key the loop's own three did not claim goes to the camera.
@@ -428,6 +512,62 @@ impl crcbl::ui::DebugModule for Lumen {
                 "golden"
             },
         );
+    }
+}
+
+// ---- polled start-up ---------------------------------------------------------
+
+/// A [`Loop`] being started one poll at a time, for a caller that may not
+/// block — which on a browser main thread is every caller.
+///
+/// The state machine, the pump and the resize-during-start-up race are
+/// [`crcbl::engine::PolledBoot`]'s; all that is left here is this sample's
+/// `Options` and the `assemble` call the engine deliberately stops short of.
+#[derive(Debug)]
+pub struct PendingLoop<S: Shell + ?Sized = dyn Shell> {
+    boot: crcbl::engine::PolledBoot<S, Gpu>,
+    options: Options,
+}
+
+impl<S: Shell + ?Sized> PendingLoop<S> {
+    /// Creates the window and starts the wait, without blocking on either half.
+    ///
+    /// `clock_source` is the caller's because the browser's cannot be
+    /// [`Clock::new`]'s: `std::time::Instant::now` panics on
+    /// `wasm32-unknown-unknown`, so a page drives the loop from
+    /// `performance.now()` instead.
+    ///
+    /// # Errors
+    ///
+    /// [`LumenError`] if the shell refused the window.
+    pub fn request(
+        mut shell: Box<S>,
+        options: &Options,
+        clock_source: Clock,
+    ) -> Result<Self, LumenError> {
+        let window = open_the_window(shell.as_mut(), &clock_source, options)?;
+        Ok(Self {
+            boot: crcbl::engine::PolledBoot::request(
+                shell,
+                window,
+                clock_source,
+                options.common.gpu(),
+            ),
+            options: options.clone(),
+        })
+    }
+
+    /// Advances start-up. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`LumenError`] if the window went away before it had a size, or if the
+    /// device request failed.
+    pub fn poll(&mut self) -> Result<Option<Loop<S>>, LumenError> {
+        let Some(booted) = self.boot.poll::<LumenError>()? else {
+            return Ok(None);
+        };
+        Ok(Some(assemble(booted, &self.options)))
     }
 }
 

@@ -20,8 +20,8 @@
 //!
 //! # What is not here, and where it is written down
 //!
-//! Ray tracing, the render-to-texture monitor camera and the Pages web demo are
-//! out of scope for this milestone and recorded in `docs/backlog.md`. One thing
+//! Ray tracing and the render-to-texture monitor camera are out of scope for
+//! this milestone and recorded in `docs/backlog.md`. One thing
 //! is visible in the picture rather than merely absent from it: **a fully
 //! metallic surface has no ambient term, so a reflection is the whole of what
 //! lights it**. Both halves of `docs/plan/18-render-features.md`'s probe design
@@ -50,12 +50,15 @@
 //! No `.crpix` art. The charter exempts this sample explicitly: the subject is
 //! 3D lighting, and pixel art in front of it would be showing the wrong system.
 //!
-//! # One library, one binary
+//! # One library, two front ends
 //!
 //! `src/main.rs` is argv and an exit code; everything else is here, so
-//! `tests/golden.rs` can render the same room the binary does. The browser entry
-//! point the charter's Scope also asks for is deferred, and the six places a new
-//! demo has to be named are listed in `docs/backlog.md`.
+//! `tests/golden.rs` can render the same room the binary does. `src/web.rs` is
+//! the second front end — compiled only on `wasm32`, which is why it is not
+//! linked on a host build — and what it publishes is the charter's reason for
+//! wanting it: a browser has no ray query, so the page draws the room through
+//! [`crcbl::hal::LightingPath::Rasterised`] by construction and is the one place
+//! that path can be looked at without building anything.
 
 mod app;
 mod args;
@@ -65,7 +68,10 @@ mod gpu;
 mod menu;
 pub mod room;
 
-pub use app::{Loop, Lumen, LumenError, Summary, run, start, with_shell};
+#[cfg(target_arch = "wasm32")]
+pub mod web;
+
+pub use app::{Loop, Lumen, LumenError, PendingLoop, Summary, run, start, with_shell};
 pub use args::{
     DEFAULT_TICK_HZ, Invocation, Options, USAGE, binding_from_name, geometry_from_name, parse,
 };

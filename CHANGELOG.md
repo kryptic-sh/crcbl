@@ -423,6 +423,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`apps/lumen` runs in a browser.** The sixth demo on the Pages site, and the
+  first written against `crcbl::web_exports!` rather than migrated onto it:
+  `apps/lumen/src/web.rs` is the macro invocation naming the ten
+  `__crcbl_lumen_*` symbols plus a `crcbl::web::WebPending` impl, and nothing
+  else. The package is a `cdylib` now, `apps/lumen/src/gpu.rs` implements
+  `crcbl::engine::PolledGpu` — the browser's non-blocking device request — and
+  `crcbl_lumen::PendingLoop` is its polled start-up.
+
+  It is worth publishing for one reason: WebGPU exposes no ray query, so the
+  page draws the room through `LightingPath::Rasterised` **by construction**,
+  and it is the one place that path can be looked at without building anything.
+
+  **It needs a real GPU**, which no other demo here does. The draw-argument pass
+  binds fourteen storage buffers in one compute stage and Chrome's SwiftShader
+  adapter caps a stage at ten, so on a software adapter the pipeline is never
+  created and the canvas stays black. The page says so, and `docs/backlog.md`
+  carries the measurement — including why `.github/workflows/pages.yml` has no
+  browser-gate step for this one demo.
+
+  `Lumen` also logs a `[HUD]` heartbeat from inside the tick, the same shape and
+  cadence every other sample uses: the lighting path the frame took, and the
+  orbiting lamp's position. Those are the two things
+  `web/tools/browser-e2e.mjs`'s new `lumen` row asserts.
+
 - **`crcbl::web_exports!`: a sample's browser entry point, written once.** The
   ten `#[unsafe(no_mangle)] extern "C"` symbols a demo's JS shim calls —
   `prepare`, `log_level`, `boot`, `frame`, `status`, `shutdown`, `error_ptr`,

@@ -133,13 +133,17 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * strings inline, which is the shape that only ever works once.
  *
  * `key` is **nullable**, and a row that sets it to `null` is saying the demo has
- * no input at all rather than that nobody got round to writing the checks. Group
- * C skips its start-key half for such a demo — there is no waiting state to
- * leave, so a dispatched key and an assertion about what it did would be a check
- * wired to nothing — and keeps the half that is about the simulation advancing,
- * which is the claim every demo can make. `started`, `startedLabel` and
- * `startedFailure` are then unused and left out. `waiting` and `moving` are
+ * no key that *starts* it rather than that nobody got round to writing the
+ * checks. Group C skips its start-key half for such a demo — there is no waiting
+ * state to leave, so a dispatched key and an assertion about what it did would be
+ * a check wired to nothing — and keeps the half that is about the simulation
+ * advancing, which is the claim every demo can make. `started`, `startedLabel`
+ * and `startedFailure` are then unused and left out. `waiting` and `moving` are
  * required of every row.
+ *
+ * Two rows use it and they are `null` for different reasons: hud takes no input
+ * at all, and lumen takes plenty but has no run to begin — which is why this
+ * says "no start key" rather than "no input".
  */
 const EXPECTATIONS = {
   breakout: {
@@ -245,6 +249,36 @@ const EXPECTATIONS = {
     waiting: (line) => line.includes('[HUD] tick: 1  wave: 1'),
     moving: /rolls: (\d+)/,
     movingLabel: 'the ticker rolls new numbers under its own steam',
+  },
+  // **The other demo with no start key.** `apps/lumen` is a lighting fixture
+  // rather than a game: there is no run to begin, so there is no waiting state
+  // and nothing for a `Space` to leave. It does take input — the arrows and WASD
+  // fly the free camera — but the page opens on the fixed pose the goldens are
+  // taken from, and swapping to the other camera is a pause-menu row rather than
+  // a key. `key: null` says all of that; what it never says is that a row was
+  // left half-written.
+  //
+  // `waiting` is this sample's own claim and it is the reason the page exists.
+  // A browser has **no ray query**, so `LightingPath::Rasterised` is the arm the
+  // selector resolves to by construction, and the first heartbeat naming it is
+  // what separates a rasterised room from a page that opened some other device
+  // or fell over before the first tick. `Lumen::log_heartbeat` prints the
+  // selector's own `Debug`, which is a deliberate coupling to
+  // `crates/crcbl-hal/src/caps.rs`: a renamed variant fails here loudly.
+  //
+  // `moving` is the orbiting lamp's x. It is the only thing in the room that
+  // moves, `room::lamp` is a pure function of the seconds `Gpu::advance`
+  // accumulates, and those seconds accumulate in the tick — so a page that was
+  // presenting frames without ticking, or one stuck on the first tick, leaves it
+  // standing still. `room::LAMP_PERIOD` is slow enough to read as a moving light
+  // and still quick enough that consecutive heartbeats differ far above the two
+  // decimal places the line prints them to.
+  lumen: {
+    key: null,
+    waiting: (line) =>
+      line.includes('[HUD] tick: 60') && line.includes('lighting: Rasterised'),
+    moving: /lamp x: (-?[\d.]+)/,
+    movingLabel: 'the lamp keeps orbiting under its own steam',
   },
 };
 
