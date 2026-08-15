@@ -1612,10 +1612,26 @@ be present in some of them.** Two surveys of `apps/*` produced the slices below.
    the shape: "the trait is what lets the loop above call them". `web_exports!`
    is the precedent, and a mistake cannot ship silently.
 
-3. **The `desc`/`PendingGpu`/`open`/`request_open` block** — 30 lines of code
-   identical across five samples; every differing line is a comment. **This is
-   the one the hud bug came from**, so the seam would make that class
-   unrepresentable rather than tested for in four places out of six.
+3. **The `desc`/`PendingGpu`/`open`/`request_open` block** — `PendingGpu` and
+   its `poll` are identical across five samples once the game name is
+   normalised, and `open`/`request_open` with them.
+
+   **Re-verified 2026-08-15, and the safety half of this entry is now spent.**
+   It was ranked here because the hud bug came from `desc` and only four of six
+   samples tested for it. All six do now: lumen was the gap and was the sample
+   that most needed one, being the only one that _deliberately_ overrides
+   `optional_features` — withholding a flag is how it forces a lesser path. Its
+   check is containment rather than equality for that reason.
+
+   So what is left is DRY on ~30 lines of mechanism, not a bug class. **Weigh
+   before starting:** a macro that generated `desc` would make the hud shape
+   unrepresentable for the five and would thereby make their five guard tests
+   vacuous — a check that cannot fail is not a check, so they would have to be
+   deleted and replaced by something asserting the macro, which is harder to
+   write than what it replaces. Lumen cannot take such a macro at all. The
+   cheaper shape is to generate `PendingGpu`/`poll`/`open`/`request_open` and
+   leave `desc` alone, which keeps the tests meaningful and still deletes most
+   of the copies.
 
 4. **`Record::open_for`** (`crcbl-store`) — `platform_backing` is four copies of
    one rule about the platform, not about any game. Verified with `cmp`:
