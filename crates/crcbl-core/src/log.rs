@@ -387,7 +387,7 @@ macro_rules! debug {
 
 /// Logs at [`Level::Trace`]: every step, for when nothing else has worked.
 ///
-/// **Shares a name with [`crate::trace`], the profiler module**, which is legal
+/// **Shares a name with [`mod@crate::trace`], the profiler module**, which is legal
 /// — they are in different namespaces — but means a doc link to either has to
 /// say which: `[mod@trace]` for the module, `[trace!]` for this. `use
 /// crcbl_core::trace;` imports the module and leaves this reachable as

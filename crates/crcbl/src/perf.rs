@@ -3,7 +3,7 @@
 //! `docs/plan/40-profiling.md`'s first missing piece: "Nothing measures the
 //! tick, the ECS schedule, physics, asset upload, culling's CPU half or the
 //! shell's frame. The GPU report says which pass cost what; nothing says whether
-//! the frame was GPU-bound at all." [`crcbl_core::trace`] is the mechanism;
+//! the frame was GPU-bound at all." [`mod@crcbl_core::trace`] is the mechanism;
 //! [`engine::Loop::frame`](crate::engine::Loop::frame) is the caller, and this
 //! module is the vocabulary the two agree on plus the one rule that reads a
 //! number back out.
