@@ -361,6 +361,20 @@ if [ -z "$CAPS_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the buffer, which is group J and is the first check anywhere
+# that watches this seam *make* something rather than ask a question. Everything
+# above passes on a build that never encodes a `CreateBuffer`, and the node suite
+# that does encode one hands it to a stub device whose `createBuffer` returns a
+# plain object built from the descriptor — so only this asks a real device for a
+# real `GPUBuffer` and reads its size back. Its absence means that stopped
+# happening rather than that this demo has no device to make one on.
+BUFFER_TRIP="$(grep -F 'a real GPUBuffer came back from the device with the size that was asked for' "${OUTPUT}.plain" || true)"
+if [ -z "$BUFFER_TRIP" ]; then
+    echo "crcbl web e2e: the driver never created a buffer on a real device;" >&2
+    echo "               crcbl-webgpu's CreateBuffer is ungated in a real browser" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

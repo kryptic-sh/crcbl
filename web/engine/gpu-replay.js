@@ -40,6 +40,24 @@
 // omissions, and each is argued where it is made: the context is deliberately
 // **not** configured, and a lookup that finds no canvas throws.
 //
+// AND THE BUFFER PAIR, WHICH RUNS AGAINST THE DEVICE AND ANSWERS NOTHING
+// EITHER. `CreateBuffer` translates a `crcbl_hal::BufferDesc` into a
+// `GPUBufferDescriptor` and calls `createBuffer` on the device `RequestDevice`
+// opened; `DestroyBuffer` calls `destroy()` on what it made and lets go of the
+// slot. Neither queues a reply, for `CreateSurface`'s reason — wasm allocated
+// the handle and moved on. The translation is `webgpuBufferUsageFor` and every
+// bit WebGPU cannot express is named there.
+//
+// SO A BUFFER THAT CANNOT BE MADE HAS NOWHERE TO BE REPORTED, and the answer is
+// the seam's own: `Device::take_error`, which `crcbl_hal` documents as existing
+// *for WebGPU* and which `docs/plan/41-webgpu-stream.md` has `Gpu::acquire`
+// draining at the top of every frame. This replayer keeps that queue — see
+// {@link Replayer#takeError} — and everything that can go wrong with a buffer
+// goes into it: the refusals this file makes before asking the browser, a
+// `createBuffer` that throws, and the errors the device reports asynchronously
+// through `uncapturederror`. Not a throw, and not a reply; that class argues
+// why.
+//
 // AND `SurfaceCaps`, WHICH ANSWERS WITHIN THE CALL. It is the third command
 // with a reply and the only one whose answer is ready immediately: WebGPU has no
 // asynchronous capability query, and almost nothing it has at all — one string
@@ -353,6 +371,145 @@ function featureBitIndices(word) {
     if ((word >> bit) & 1n) bits.push(Number(bit));
   }
   return bits;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A buffer's vocabulary, in WebGPU's
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// TWO SEAM FIELDS LAND ON ONE WEBGPU FIELD, which is the whole shape of this
+// translation. `crcbl_hal::BufferDesc` says both what a buffer is *for*
+// (`usage`) and where its memory *lives* (`memory`); `GPUBufferDescriptor` has
+// only `usage`, because WebGPU has no heap selection at all — an implementation
+// places a buffer from the uses it was declared with. So both seam fields
+// become usage bits, and the second one has almost nothing to become.
+
+/**
+ * The `GPUBufferUsage` bits, as the specification fixes them.
+ *
+ * Spelled out rather than read off `globalThis.GPUBufferUsage`, for the reason
+ * {@link MAX_SAMPLE_COUNT} is spelled out: these are constants of the format
+ * rather than facts about a browser, and node has no `GPUBufferUsage` to read
+ * them from — this file has to be drivable there. `web/tools/browser-e2e.mjs`
+ * holds them against the real namespace object in a real browser, which is
+ * where a wrong value would be caught.
+ */
+const GPU_BUFFER_USAGE = Object.freeze({
+  MAP_READ: 0x0001,
+  MAP_WRITE: 0x0002,
+  COPY_SRC: 0x0004,
+  COPY_DST: 0x0008,
+  INDEX: 0x0010,
+  VERTEX: 0x0020,
+  UNIFORM: 0x0040,
+  STORAGE: 0x0080,
+  INDIRECT: 0x0100,
+  QUERY_RESOLVE: 0x0200,
+});
+
+/**
+ * Every `crcbl_hal::BufferUsage` flag with a `GPUBufferUsage` bit, and the bit.
+ *
+ * Keyed by the names `gpu-stream.js` decodes a usage word into, so a flag this
+ * table does not list cannot be mapped by accident — it comes back from
+ * {@link webgpuBufferUsageFor} as unsatisfiable instead.
+ *
+ * THE ONE FLAG WITH NO WEBGPU BIT IS `DEVICE_ADDRESS`, and it is **refused
+ * rather than dropped**. WebGPU has no buffer device address, no bindless model
+ * and no raw GPU pointers — which is why `Features::BUFFER_DEVICE_ADDRESS` is
+ * on the never-set list above, and `crcbl_hal::BufferUsage::DEVICE_ADDRESS`
+ * documents itself as requiring that feature. So a buffer asking for it is a
+ * caller using a capability this device reported it does not have, and the two
+ * quieter answers are both worse: dropping the bit hands back a buffer whose
+ * address cannot be taken, and the failure then surfaces at whatever shader
+ * dereferences it, which is nowhere near the creation that was wrong.
+ *
+ * NOTHING GOES THE OTHER WAY, and one omission is worth naming: WebGPU's
+ * `VERTEX` has no seam flag, because this engine pulls vertices out of storage
+ * buffers rather than binding vertex buffers — `BufferUsage::STORAGE`'s own
+ * documentation says so. `MAP_READ` and `MAP_WRITE` are not usages on this seam
+ * either; they are what {@link MEMORY_LOCATION_USAGE} is about.
+ */
+const BUFFER_USAGE_MAP = Object.freeze({
+  TRANSFER_SRC: GPU_BUFFER_USAGE.COPY_SRC,
+  TRANSFER_DST: GPU_BUFFER_USAGE.COPY_DST,
+  UNIFORM: GPU_BUFFER_USAGE.UNIFORM,
+  STORAGE: GPU_BUFFER_USAGE.STORAGE,
+  INDEX: GPU_BUFFER_USAGE.INDEX,
+  INDIRECT: GPU_BUFFER_USAGE.INDIRECT,
+  QUERY_RESOLVE: GPU_BUFFER_USAGE.QUERY_RESOLVE,
+});
+
+/**
+ * What each `crcbl_hal::MemoryLocation` adds to a buffer's usage.
+ *
+ * WEBGPU HAS NO HEAP TO CHOOSE, so this is not a heap type under another name.
+ * The only mapping-related things `GPUBufferDescriptor` has are `MAP_READ` and
+ * `MAP_WRITE`, and the specification forbids either from being combined with
+ * anything but one copy usage: a buffer with `MAP_WRITE` may carry `COPY_SRC`
+ * and nothing else, and one with `MAP_READ` may carry `COPY_DST` and nothing
+ * else. That constraint is what decides all three rows.
+ *
+ *   * `DeviceLocal` adds **nothing**, and needs to: a buffer with no mapping
+ *     usage is the one an implementation is free to place in device-local
+ *     memory, which is exactly what this location asks for.
+ *   * `HostReadback` adds `MAP_READ`. This is the one location WebGPU can
+ *     express outright — `mapAsync(GPUMapMode.READ)` needs the bit at creation
+ *     and `Device::poll_readback` is the seam call that will need it — and the
+ *     combination the specification permits alongside it, `COPY_DST`, is
+ *     precisely what the seam's readback ring is: a copy destination the GPU
+ *     never writes through a shader. A descriptor that pairs this location with
+ *     some other usage is refused by the browser rather than quietly stripped
+ *     here, because a readback buffer that cannot be mapped is not the thing
+ *     that was asked for.
+ *   * `HostUpload` adds `COPY_DST`, **and this is the row WebGPU cannot
+ *     express.** The location means CPU-writable and GPU-readable, and the
+ *     buffers the engine puts there are uniform blocks and read-only storage
+ *     tables — none of which may carry `MAP_WRITE` at all under the rule above,
+ *     so the obvious mapping is one `createBuffer` would reject outright. What
+ *     WebGPU offers for the same job is `queue.writeBuffer`, which is what
+ *     `Device::write_buffer` becomes on this backend and which requires
+ *     `COPY_DST`. So the location becomes the usage that mechanism needs.
+ *     It **widens** what the buffer may be used for rather than narrowing it,
+ *     which can cost placement but never correctness, and it is written down
+ *     here because a reader comparing this row against Vulkan's memory
+ *     properties will otherwise read it as a mistake.
+ */
+const MEMORY_LOCATION_USAGE = Object.freeze({
+  DeviceLocal: 0,
+  HostUpload: GPU_BUFFER_USAGE.COPY_DST,
+  HostReadback: GPU_BUFFER_USAGE.MAP_READ,
+});
+
+/**
+ * The `GPUBufferUsage` word a decoded `BufferDesc`'s two fields amount to, and
+ * whatever in them WebGPU has no bit for.
+ *
+ * `unsatisfiable` is a list of seam names rather than a word, because it is for
+ * a message a person reads — the caller refuses the creation and says which
+ * flag did it. It is empty for every descriptor this backend can honour.
+ *
+ * @param {readonly string[]} usage `crcbl_hal::BufferUsage` flag names, as
+ *   `gpu-stream.js` decodes them.
+ * @param {string} memory A `crcbl_hal::MemoryLocation` variant name.
+ * @returns {{ bits: number, unsatisfiable: string[] }}
+ */
+export function webgpuBufferUsageFor(usage, memory) {
+  let bits = 0;
+  const unsatisfiable = [];
+  for (const name of usage) {
+    const bit = BUFFER_USAGE_MAP[name];
+    if (bit === undefined) unsatisfiable.push(`BufferUsage::${name}`);
+    else bits |= bit;
+  }
+  const located = MEMORY_LOCATION_USAGE[memory];
+  // A location this table does not know is a decoder that has grown a variant
+  // this file has not. Named rather than treated as `DeviceLocal`, which would
+  // be this file guessing about where memory the seam placed deliberately ought
+  // to live.
+  if (located === undefined) unsatisfiable.push(`MemoryLocation::${memory}`);
+  else bits |= located;
+  return { bits, unsatisfiable };
 }
 
 /**
@@ -767,6 +924,125 @@ function adapterName(adapter) {
 }
 
 /**
+ * One resource kind's live objects, keyed the way a `crcbl_core::Handle` is.
+ *
+ * ONE OF THESE PER KIND, NEVER ONE FOR ALL OF THEM. `crcbl-webgpu`'s crate docs
+ * and `docs/plan/41-webgpu-stream.md` both say why: a handle carries no kind, so
+ * a buffer and a surface can hold the same eight bytes, and the opcode is the
+ * only thing that says which table an id indexes. A single table keyed on handle
+ * bits would let two kinds stand on each other.
+ *
+ * A SLOT REMEMBERS THE GENERATION IT WAS FILLED AT, which is the half a plain
+ * `Map<index, object>` cannot do. A `Handle` is `{ index, generation }` precisely
+ * so that a stale one is detectable: an index is reissued when the resource it
+ * named is destroyed, and the generation is what distinguishes the new occupant
+ * from the old. So a destroy naming a stale handle finds a slot whose generation
+ * has moved on, and is the same no-op an empty slot already is — rather than
+ * releasing whatever now lives at that index, which is the failure this class
+ * exists to make impossible. A lookup answers `undefined` for the same reason.
+ *
+ * The rule the seam sets for the empty slot is in `crcbl-webgpu`'s crate docs:
+ * `crcbl-render` destroys the handle it pre-allocated even when the creation it
+ * belonged to failed, so a destroy naming an id nothing ever created is a legal
+ * stream op and not corruption. A stale generation is the same case one step
+ * later.
+ *
+ * @template {object} T
+ */
+export class HandleTable {
+  /**
+   * The occupied slots, by index.
+   *
+   * @type {Map<number, { generation: number, value: T }>}
+   */
+  #slots = new Map();
+
+  /**
+   * Files `value` under `handle`, replacing whatever that index held.
+   *
+   * Replacing rather than refusing, because a create naming an index that is
+   * already occupied is what an id pool does after a destroy this replayer never
+   * saw — a frame that was dropped, or a probe that asks twice — and the newer
+   * handle is by construction the newer generation.
+   *
+   * @param {{ index: number, generation: number }} handle
+   * @param {T} value
+   */
+  insert(handle, value) {
+    this.#slots.set(handle.index, {
+      generation: handle.generation,
+      value,
+    });
+  }
+
+  /**
+   * What `handle` names, or `undefined` if its slot is empty or has been
+   * reissued since.
+   *
+   * @param {{ index: number, generation: number }} handle
+   * @returns {T | undefined}
+   */
+  get(handle) {
+    const slot = this.#slots.get(handle.index);
+    if (slot === undefined || slot.generation !== handle.generation) {
+      return undefined;
+    }
+    return slot.value;
+  }
+
+  /**
+   * Takes what `handle` names out of the table and hands it back, or answers
+   * `undefined` and changes nothing.
+   *
+   * The `undefined` covers both no-ops at once — an empty slot and a stale
+   * generation — so a caller releasing a resource writes one `if` rather than
+   * two, and cannot release the live occupant of a reissued index by mistake.
+   *
+   * @param {{ index: number, generation: number }} handle
+   * @returns {T | undefined}
+   */
+  remove(handle) {
+    const slot = this.#slots.get(handle.index);
+    if (slot === undefined || slot.generation !== handle.generation) {
+      return undefined;
+    }
+    this.#slots.delete(handle.index);
+    return slot.value;
+  }
+
+  /** How many slots are occupied. */
+  get size() {
+    return this.#slots.size;
+  }
+
+  /**
+   * Every live object with the index it is filed under, in insertion order.
+   *
+   * The index alone and not the whole handle, because this is for a reader
+   * looking at what is *there* — a console, the browser gate — rather than for
+   * a lookup, and a lookup has {@link HandleTable#get}, which is the one that
+   * must be given a generation to check.
+   *
+   * @returns {IterableIterator<[number, T]>}
+   */
+  *entries() {
+    for (const [index, slot] of this.#slots) yield [index, slot.value];
+  }
+}
+
+/**
+ * How many out-of-band errors are held before the queue stops growing.
+ *
+ * Nothing drains it yet — the `take_error` command is a later slice — and
+ * `uncapturederror` can fire once a frame for as long as a page is open, so an
+ * unbounded queue is a leak on a page that is doing badly. The first errors are
+ * the ones worth keeping: what went wrong first is what caused the rest.
+ * Nothing past the cap is *lost* silently, though; see
+ * {@link Replayer#takeError}.
+ */
+const MAX_PENDING_ERRORS = 64;
+
+/**
  * Replays decoded command streams against WebGPU and collects the answers.
  *
  * One replayer for the life of a page, not one per frame: the reply buffer
@@ -816,16 +1092,38 @@ export class Replayer {
    */
   #canvases;
   /**
-   * The `GPUCanvasContext` behind each live surface, by the handle's index.
+   * The `GPUCanvasContext` behind each live surface.
    *
-   * One flat table for this resource kind and keyed on the index alone, which
-   * is what `crcbl-webgpu`'s crate docs require: handles are typed and each
-   * kind's indexes are its own, so a single table shared across kinds would let
-   * a buffer and a surface holding the same index stand on each other.
+   * One flat table for this resource kind, which is what `crcbl-webgpu`'s crate
+   * docs require: handles are typed and each kind's indexes are its own, so a
+   * single table shared across kinds would let a buffer and a surface holding
+   * the same index stand on each other. {@link HandleTable} is that table, and
+   * is the same one {@link Replayer#buffers} uses.
    *
-   * @type {Map<number, GPUCanvasContext>}
+   * @type {HandleTable<GPUCanvasContext>}
    */
-  #surfaces = new Map();
+  #surfaces = new HandleTable();
+  /**
+   * The `GPUBuffer` behind each live buffer handle.
+   *
+   * {@link Replayer#surfaces}'s twin in every respect, including the one that
+   * matters: it is a table of its own rather than a share of that one, because
+   * a buffer handle and a surface handle can carry identical bits.
+   *
+   * @type {HandleTable<GPUBuffer>}
+   */
+  #buffers = new HandleTable();
+  /**
+   * Errors the device reported out of band, oldest first.
+   *
+   * `Device::take_error`'s queue, on this side of the seam — see
+   * {@link Replayer#takeError}.
+   *
+   * @type {string[]}
+   */
+  #errors = [];
+  /** How many errors were refused for want of room in {@link #errors}. */
+  #errorsDropped = 0;
 
   /**
    * @param {object} [options]
@@ -860,19 +1158,78 @@ export class Replayer {
   }
 
   /**
-   * The contexts of the surfaces that are live right now, by handle index.
+   * The surfaces that are live right now.
    *
    * The live table rather than a copy, as `device` hands back the real device:
    * later slices read it to find the context a present or a swapchain names.
-   * For now the only reader is a test, and what it is there to see is the pair
-   * of things a surface command has to get right — that a `CreateSurface`
-   * resolved the canvas its `canvasId` named, and that a `DestroySurface` let
-   * go of it.
+   * For now the only readers are a test and the browser gate, and what they are
+   * there to see is the pair of things a surface command has to get right —
+   * that a `CreateSurface` resolved the canvas its `canvasId` named, and that a
+   * `DestroySurface` let go of it.
    *
-   * @type {Map<number, GPUCanvasContext>}
+   * @type {HandleTable<GPUCanvasContext>}
    */
   get surfaces() {
     return this.#surfaces;
+  }
+
+  /**
+   * The buffers that are live right now, on {@link Replayer#surfaces}'s terms.
+   *
+   * @type {HandleTable<GPUBuffer>}
+   */
+  get buffers() {
+    return this.#buffers;
+  }
+
+  /** How many out-of-band errors are waiting to be taken. */
+  get pendingErrors() {
+    return this.#errors.length;
+  }
+
+  /**
+   * The oldest error the device reported out of band, or `null`.
+   *
+   * `crcbl_hal::Device::take_error` seen from this side, and named for it:
+   * each error is reported once — taking it clears it — and
+   * `docs/plan/41-webgpu-stream.md` has `Gpu::acquire` draining this at the top
+   * of every frame once there is a command to carry it. There is no such
+   * command yet, so today's readers are `web/tools/gpu-replay.mjs` and the
+   * browser gate.
+   *
+   * **WHY A QUEUE AND NOT A THROW OR A REPLY.** A `CreateBuffer` that cannot be
+   * honoured has nowhere else to go, and the two alternatives are both wrong
+   * here rather than merely worse:
+   *
+   *   * A throw, as `#createSurface` makes for a canvas it cannot resolve,
+   *     abandons the rest of the frame — every command after the create,
+   *     including the draws that would have used it. That is right for a
+   *     surface, which fails once at start-up because a *page* is misconfigured
+   *     and which a person fixes by changing the canvas id; it is wrong for a
+   *     buffer, which fails mid-frame because a *device* ran out of room or was
+   *     asked for something invalid, and which WebGPU itself does not report by
+   *     throwing at all: `createBuffer` hands back a `GPUBuffer` and the reason
+   *     arrives later on the device's error channel.
+   *   * A reply would name a sequence nothing is waiting on. Identity here is
+   *     positional — wasm allocated the handle and moved on — so no wait is
+   *     registered, and `crcbl-webgpu`'s reader turns a reply for an unawaited
+   *     sequence into a `DecodeError::UnexpectedSequence` that refuses the
+   *     *whole frame's* replies, stranding every other answer in it.
+   *
+   * The last of these to come out, once the queue has been emptied, is a
+   * synthesised line naming how many were refused for want of room — so a page
+   * that produced more than {@link MAX_PENDING_ERRORS} learns that it did
+   * rather than being told the first few were all there was.
+   *
+   * @returns {string | null}
+   */
+  takeError() {
+    const error = this.#errors.shift();
+    if (error !== undefined) return error;
+    if (this.#errorsDropped === 0) return null;
+    const dropped = this.#errorsDropped;
+    this.#errorsDropped = 0;
+    return `and ${dropped} further device error(s) were dropped: this replayer holds ${MAX_PENDING_ERRORS} and nothing has been draining them`;
   }
 
   /**
@@ -931,6 +1288,12 @@ export class Replayer {
           break;
         case 'DestroySurface':
           this.#destroySurface(command);
+          break;
+        case 'CreateBuffer':
+          this.#createBuffer(sequence, command);
+          break;
+        case 'DestroyBuffer':
+          this.#destroyBuffer(command);
           break;
         case 'SurfaceCaps':
           this.#surfaceCaps(sequence);
@@ -998,10 +1361,22 @@ export class Replayer {
    * the caller did not.
    *
    * A DEVICE LOST LATER IS NOT THIS. `GPUDevice.lost` and `uncapturederror`
-   * report a device that opened and then failed, which is
-   * `Device::take_error`'s territory and has no reply on this channel yet;
-   * nothing below listens for either, and a `DeviceFailed` answers only the
-   * request itself.
+   * report a device that opened and then failed, and a `DeviceFailed` answers
+   * only the request itself. That is `Device::take_error`'s territory, and the
+   * listener registered below is where this replayer picks it up: WebGPU
+   * reports a validation failure or an allocation failure **on the device
+   * rather than to the call**, so a `createBuffer` whose descriptor the browser
+   * refuses looks like a success here and says so a turn of the event loop
+   * later. Registered once for the device's whole life rather than around each
+   * command — see {@link Replayer#takeError} — and unguarded, because a
+   * `GPUDevice` is an `EventTarget` in every implementation and a stub that is
+   * not one should fail loudly rather than quietly stop reporting errors.
+   *
+   * `GPUDevice.lost` is deliberately still not watched. It is a promise that
+   * settles once and means the device is gone rather than that a call failed,
+   * so what it wants is the seam's device-lost path, and there is none on this
+   * channel yet; adding it to this queue would report a dead device as one more
+   * error to log and carry on from.
    *
    * @param {bigint} sequence
    * @param {{ adapter: number, label: string | null, requiredFeatures: bigint,
@@ -1060,6 +1435,19 @@ export class Replayer {
         });
       })
       .then((device) => {
+        // Before the device is held, so that a device this replayer cannot
+        // listen to is a failed request rather than a live device with no error
+        // channel behind it.
+        device.addEventListener('uncapturederror', (event) => {
+          // `event.error` is a `GPUError`, whose `message` is the whole of what
+          // the browser has to say. Named as the device's own rather than
+          // attributed to a command: these arrive after the frame that caused
+          // them, in submission order rather than by sequence, so a number here
+          // would be a guess dressed as attribution.
+          this.#deviceError(
+            `the device reported ${String(event.error?.message ?? event.error)}`
+          );
+        });
         this.#device = device;
         this.#replies.device(sequence, halDeviceCapsFor(device));
         this.#queued = true;
@@ -1128,7 +1516,7 @@ export class Replayer {
         command.canvasId
       );
     }
-    this.#surfaces.set(command.surface.index, context);
+    this.#surfaces.insert(command.surface, context);
   }
 
   /**
@@ -1138,8 +1526,10 @@ export class Replayer {
    * stream's rule rather than this file's convenience: `crcbl-render` destroys
    * a resource whose creation returned an `Err` before it applies `?`, so an id
    * nothing ever created still arrives here. `crcbl-webgpu`'s own decoder
-   * consults no table for the same reason. `Map.delete` is already that
-   * behaviour, and the `if` a reader might expect to see is what is absent.
+   * consults no table for the same reason. {@link HandleTable#remove} is
+   * already that behaviour — and it is also the no-op for a handle whose index
+   * has been *reissued* since, which a table keyed on the index alone could not
+   * tell from the live occupant.
    *
    * Dropping the reference is the whole of the release. There is no
    * `unconfigure` to make because {@link Replayer#surfaces}'s contexts are
@@ -1149,7 +1539,111 @@ export class Replayer {
    * @param {{ surface: { index: number, generation: number } }} command
    */
   #destroySurface(command) {
-    this.#surfaces.delete(command.surface.index);
+    this.#surfaces.remove(command.surface);
+  }
+
+  /**
+   * Creates a buffer on the open device and files it under the handle wasm
+   * allocated.
+   *
+   * Synchronous, as the surface pair is: `createBuffer` answers in the call.
+   * There is no reply either — the handle came in with the command — so
+   * everything that can go wrong goes to {@link Replayer#takeError}, which is
+   * where that choice is argued. Four things can, and each is refused *before*
+   * the browser is asked except the last:
+   *
+   *   * no device. `Device::create_buffer` is a device method, so a stream that
+   *     carries one before its `RequestDevice` has settled is asking this
+   *     replayer for something it has not got. Recording it is what makes an
+   *     ordering bug visible at the command that was too early.
+   *   * a usage flag or a memory location with nothing behind it in WebGPU —
+   *     see {@link webgpuBufferUsageFor}, which names the flag.
+   *   * a size no `GPUSize64` can carry exactly. The wire's size is a `u64` and
+   *     WebGPU's is a JavaScript number, so anything past
+   *     `Number.MAX_SAFE_INTEGER` would be passed on rounded — a buffer of a
+   *     size nobody asked for, created successfully. Refused with the number
+   *     written out, rather than silently made a little smaller or larger.
+   *   * a `createBuffer` that throws. Most WebGPU failures do not throw — an
+   *     invalid usage combination or a size over `maxBufferSize` is reported
+   *     asynchronously, which is what the `uncapturederror` listener in
+   *     `#requestDevice` is for — but an allocation failure may, and a throw
+   *     out of `replay` here would take the frame down for the reason
+   *     {@link Replayer#takeError} says it must not.
+   *
+   * @param {bigint} sequence
+   * @param {{ buffer: { index: number, generation: number },
+   *           label: string | null, size: bigint, usage: string[],
+   *           memory: string }} command
+   */
+  #createBuffer(sequence, command) {
+    const named = `buffer ${command.buffer.index}.${command.buffer.generation} (command ${sequence})`;
+    if (!this.#device) {
+      this.#deviceError(`${named} was created before any device opened`);
+      return;
+    }
+    const usage = webgpuBufferUsageFor(command.usage, command.memory);
+    if (usage.unsatisfiable.length > 0) {
+      this.#deviceError(
+        `${named} asks for ${usage.unsatisfiable.join(', ')}, which WebGPU has no GPUBufferUsage bit for`
+      );
+      return;
+    }
+    if (command.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+      this.#deviceError(
+        `${named} asks for ${command.size} bytes, which is past the largest size a GPUSize64 carries exactly`
+      );
+      return;
+    }
+    let buffer;
+    try {
+      buffer = this.#device.createBuffer({
+        // A descriptor with no label passes none rather than an empty one, as
+        // `#requestDevice` does. WebGPU cannot tell the two apart afterwards —
+        // `GPUObjectBase.label` is `''` either way — but what is sent is still
+        // what the seam said.
+        ...(command.label === null ? {} : { label: command.label }),
+        size: Number(command.size),
+        usage: usage.bits,
+      });
+    } catch (error) {
+      this.#deviceError(`${named} could not be created: ${String(error)}`);
+      return;
+    }
+    this.#buffers.insert(command.buffer, buffer);
+  }
+
+  /**
+   * Destroys a buffer and lets go of its slot.
+   *
+   * `GPUBuffer.destroy()` is the release — it drops the allocation at once
+   * rather than waiting for the object to be collected, which is the whole
+   * point of an explicit destroy on this seam — and the slot goes with it so
+   * nothing can reach a destroyed buffer through its handle.
+   *
+   * A DESTROY THAT NAMES NOTHING LIVE IS A NO-OP, in both of the ways it can:
+   * an empty slot, which the crate docs make legal because `crcbl-render`
+   * destroys a handle whose creation returned an `Err`, and a slot holding a
+   * *different generation*, which is a handle whose index has since been
+   * reissued. {@link HandleTable#remove} answers `undefined` for both, which is
+   * why this reads as one branch rather than two.
+   *
+   * @param {{ buffer: { index: number, generation: number } }} command
+   */
+  #destroyBuffer(command) {
+    this.#buffers.remove(command.buffer)?.destroy();
+  }
+
+  /**
+   * Records an error the far side will take through `Device::take_error`.
+   *
+   * @param {string} message
+   */
+  #deviceError(message) {
+    if (this.#errors.length >= MAX_PENDING_ERRORS) {
+      this.#errorsDropped += 1;
+      return;
+    }
+    this.#errors.push(message);
   }
 
   /**

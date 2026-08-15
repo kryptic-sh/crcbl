@@ -32,6 +32,22 @@
 // failure this seam has no reply channel for, and the check below is that it
 // throws rather than carrying on with a handle wasm believes in.
 //
+// THE BUFFER PAIR ANSWERS NOTHING EITHER, and what is checked about it is what
+// reached the device: that a `BufferDesc`'s four fields become a
+// `GPUBufferDescriptor`'s three, that the usage word and the memory location
+// both land in `usage` and that the flags with no WebGPU bit are refused rather
+// than dropped, and that a destroy releases the `GPUBuffer` as well as the slot.
+// Where a creation cannot happen at all there is no reply to carry the reason,
+// so the reason goes to the replayer's `take_error` queue — and every way of
+// failing is driven below, because an error that goes nowhere is the same bug as
+// a dropped reply one seam over.
+//
+// AND THE TABLE UNDER BOTH PAIRS IS THE SAME ONE, which is what the generation
+// checks here are about. A handle is `{ index, generation }` so that a stale one
+// is detectable; the checks below produce a stale one deliberately — an index
+// reissued at a higher generation — and insist that a destroy naming it releases
+// nothing.
+//
 // THE CAPABILITY QUERY IS THE THIRD COMMAND WITH A REPLY, and the only one
 // answered inside the call — WebGPU has no asynchronous capability query, and
 // hardly a synchronous one either. So almost every field of that record is a
@@ -70,6 +86,7 @@ import { deepStrictEqual } from 'node:assert/strict';
 
 import { DEVICE_TYPE, ReplyWriter } from '../engine/gpu-reply.js';
 import {
+  HandleTable,
   ReplayError,
   Replayer,
   SurfaceError,
@@ -77,6 +94,7 @@ import {
   halDeviceCapsFor,
   halFeaturesFor,
   halLimitsFor,
+  webgpuBufferUsageFor,
   webgpuFeaturesFor,
 } from '../engine/gpu-replay.js';
 import { decodeStream } from '../engine/gpu-stream.js';
@@ -96,6 +114,31 @@ const NO_ADAPTER_REASON = 'navigator.gpu.requestAdapter() granted no adapter';
 
 /** `MAX_REASON_CHARS` in `web/engine/gpu-replay.js`, restated for that reason. */
 const MAX_REASON_CHARS = 512;
+
+/** `MAX_PENDING_ERRORS` in `web/engine/gpu-replay.js`, restated for that reason. */
+const MAX_PENDING_ERRORS = 64;
+
+/**
+ * The `GPUBufferUsage` bits, from the WebGPU specification.
+ *
+ * Spelled out here as well as in `gpu-replay.js` and deliberately not imported
+ * from it: every expected value in this file is written out, because one taken
+ * from the thing under test agrees with it whatever it says. These are the
+ * numbers a browser's own `GPUBufferUsage` holds, and `browser-e2e.mjs` is what
+ * holds this seam's mapping against that object in a real browser.
+ */
+const GPU_BUFFER_USAGE = Object.freeze({
+  MAP_READ: 0x0001,
+  MAP_WRITE: 0x0002,
+  COPY_SRC: 0x0004,
+  COPY_DST: 0x0008,
+  INDEX: 0x0010,
+  VERTEX: 0x0020,
+  UNIFORM: 0x0040,
+  STORAGE: 0x0080,
+  INDIRECT: 0x0100,
+  QUERY_RESOLVE: 0x0200,
+});
 
 /** @type {string[]} */
 const failures = [];
@@ -271,13 +314,14 @@ function stubAdapter(info, features = []) {
  * in `stream-decode.mjs` are *not* taken from a decoder.
  *
  * @type {{ enumerate: object, requestDevice: object, createSurface: object,
- *          surfaceCaps: object }}
+ *          surfaceCaps: object, createBuffer: object }}
  */
 const FROM_FIXTURE = {
   enumerate: null,
   requestDevice: null,
   createSurface: null,
   surfaceCaps: null,
+  createBuffer: null,
 };
 
 /** A one-command frame carrying `command` at `sequence`. */
@@ -315,13 +359,81 @@ function deviceLimits() {
 }
 
 /**
+ * A `GPUBuffer` as `createBuffer` answers one.
+ *
+ * The three members a real one reports back — `label`, `size` and `usage` — are
+ * read off the descriptor rather than stored beside it, because that is what a
+ * `GPUBuffer` does and because a check reading them back is then reading what
+ * was actually *asked for*. `label` defaults to `''` for the same reason: a
+ * descriptor with no label produces a buffer whose label is the empty string,
+ * which is why WebGPU cannot tell `None` from `Some("")`.
+ *
+ * @param {{ label?: string, size: number, usage: number }} desc
+ */
+function stubBuffer(desc) {
+  const buffer = {
+    label: desc.label ?? '',
+    size: desc.size,
+    usage: desc.usage,
+    /** How many times the replayer destroyed it. */
+    destroys: 0,
+    destroy() {
+      buffer.destroys += 1;
+    },
+  };
+  return buffer;
+}
+
+/**
  * A `GPUDevice` as `requestDevice()` resolves one: its own features, its own
- * limits, and nothing else this replayer reads.
+ * limits, the buffer creation this slice drives, and the error channel WebGPU
+ * reports asynchronous failures on.
+ *
+ * `addEventListener` is not optional and is not a courtesy to the replayer: a
+ * `GPUDevice` is an `EventTarget`, `uncapturederror` is the only way a browser
+ * says a `createBuffer` was invalid, and a stub without one would let a replayer
+ * that stopped listening pass here.
  *
  * @param {string[]} [features]
+ * @param {object} [options]
+ * @param {unknown} [options.refuseBuffers] What `createBuffer` throws instead of
+ *   answering — an allocation failure, which is the one buffer failure WebGPU
+ *   raises in the call rather than on the device.
  */
-function stubDevice(features = []) {
-  return { features: new Set(features), limits: deviceLimits() };
+function stubDevice(features = [], { refuseBuffers } = {}) {
+  const device = {
+    features: new Set(features),
+    limits: deviceLimits(),
+    /** @type {object[]} Every `GPUBufferDescriptor` it was handed, in order. */
+    created: [],
+    /** @type {Array<[string, Function]>} */
+    listeners: [],
+    /**
+     * @param {string} type
+     * @param {Function} listener
+     */
+    addEventListener(type, listener) {
+      device.listeners.push([type, listener]);
+    },
+    /**
+     * Reports an error the way a browser does: on the device, after the call
+     * that caused it has already returned a plausible object.
+     *
+     * @param {string} message
+     */
+    report(message) {
+      for (const [type, listener] of device.listeners) {
+        if (type === 'uncapturederror') listener({ error: { message } });
+      }
+    },
+    /** @param {{ label?: string, size: number, usage: number }} desc */
+    createBuffer(desc) {
+      device.created.push(desc);
+      if (refuseBuffers !== undefined) throw refuseBuffers;
+      return stubBuffer(desc);
+    },
+  };
+  return device;
 }
 
 /**
@@ -389,6 +501,26 @@ async function openDevice(adapter, command, sequence) {
  * @param {object} [options]
  * @param {string} [options.canvasFormat] What the stub browser prefers.
  */
+/**
+ * A replayer with a device open, which is what a buffer command needs.
+ *
+ * The enumeration and the device request are the fixture's own, and their
+ * replies are cleared in between so that what a buffer check then reads out of
+ * the buffer is a buffer command's doing. `Device::create_buffer` is a *device*
+ * method, so this two-step is the seam's shape rather than scaffolding: a
+ * `CreateBuffer` arriving before the device has opened is a real case and has
+ * its own check below.
+ *
+ * @param {object} [options]
+ * @param {object} [options.device] What `requestDevice` resolves to.
+ */
+async function readyForBuffers({ device = stubDevice() } = {}) {
+  const adapter = openingAdapter({ device });
+  const replayer = await openDevice(adapter, FROM_FIXTURE.requestDevice, 20n);
+  replayer.clear();
+  return { replayer, device };
+}
+
 async function readyForCaps({ canvasFormat } = {}) {
   const gpu = stubGpu(async () => openingAdapter(), { canvasFormat });
   const canvases = new Map([
@@ -648,6 +780,23 @@ async function main() {
   );
   FROM_FIXTURE.surfaceCaps = surfaceCaps;
 
+  // The buffer pair, from the fixture for the same reason again — and here it
+  // buys three descriptors rather than one: the corpus carries a labelled
+  // device-local buffer, an unlabelled host-upload one, and one whose size is
+  // `u64::MAX`, which is the size no `GPUSize64` can carry exactly. Every
+  // memory location and both label cases are therefore commands the Rust
+  // encoder really wrote.
+  const buffers = commands.filter((command) => command.name === 'CreateBuffer');
+  const destroyBuffer = commands.find(
+    (command) => command.name === 'DestroyBuffer'
+  );
+  check(
+    buffers.length === 3 && destroyBuffer !== undefined,
+    `the committed stream carries three CreateBuffers and a DestroyBuffer (${buffers.length} creates)`
+  );
+  const [deviceLocalBuffer, hostUploadBuffer, hostReadbackBuffer] = buffers;
+  FROM_FIXTURE.createBuffer = deviceLocalBuffer;
+
   // ---- the answer is not available on the frame that asked ----------------
   // The whole shape of this seam. `replay` returns having *started* the work;
   // the browser answers on its own schedule, and the sequence number is what
@@ -823,6 +972,8 @@ async function main() {
       'CreateSurface',
       'DestroySurface',
       'SurfaceCaps',
+      'CreateBuffer',
+      'DestroyBuffer',
     ];
     for (const [index, command] of commands.entries()) {
       if (implemented.includes(command.name)) continue;
@@ -1118,7 +1269,7 @@ async function main() {
     ]);
     const replayer = new Replayer({ gpu: stubGpu(async () => null), canvases });
     replayer.replay(frameOf(createSurface, 2n));
-    const held = replayer.surfaces.get(createSurface.surface.index);
+    const held = replayer.surfaces.get(createSurface.surface);
     check(
       held === wanted.context && other.asked.length === 0,
       `CreateSurface holds the context of the canvas its id named (${held?.label ?? 'nothing'},` +
@@ -1170,13 +1321,14 @@ async function main() {
     });
     replayer.replay(frameOf(createSurface, 4n));
     const held =
-      replayer.surfaces.get(createSurface.surface.index) === canvas.context;
+      replayer.surfaces.get(createSurface.surface) === canvas.context;
     replayer.replay(
       frameOf({ ...destroySurface, surface: createSurface.surface }, 5n)
     );
+    const still = replayer.surfaces.get(createSurface.surface) !== undefined;
     check(
-      held && !replayer.surfaces.has(createSurface.surface.index),
-      `DestroySurface releases the context its handle held (held ${held}, still there ${replayer.surfaces.has(createSurface.surface.index)})`
+      held && !still,
+      `DestroySurface releases the context its handle held (held ${held}, still there ${still})`
     );
   }
   {
@@ -1227,6 +1379,493 @@ async function main() {
         thrown.canvasId === createSurface.canvasId &&
         replayer.surfaces.size === 0,
       `a canvas with no webgpu context throws rather than recording nothing quietly (${String(thrown)})`
+    );
+  }
+
+  // ---- the handle table, which both pairs share ---------------------------
+  //
+  // A handle is `{ index, generation }` so that a stale one is detectable, and
+  // this is the only place that fact is checked on its own rather than through a
+  // command. What it is for: an index is reissued once the resource it named is
+  // destroyed, so a table keyed on the index alone answers a *stale* handle with
+  // whatever moved in — and a destroy carrying one would release a live
+  // resource somebody else is using.
+  {
+    const table = new HandleTable();
+    const live = handle(4, 2);
+    const stale = handle(4, 1);
+    const other = handle(5, 2);
+    table.insert(live, 'the live one');
+    check(
+      table.get(live) === 'the live one' && table.size === 1,
+      `a handle finds what was filed under it (${table.get(live)}, ${table.size} held)`
+    );
+    check(
+      table.get(stale) === undefined,
+      `a stale generation does not resolve to the live occupant (${table.get(stale)})`
+    );
+    check(
+      table.get(other) === undefined,
+      `and neither does another index (${table.get(other)})`
+    );
+    check(
+      table.remove(stale) === undefined &&
+        table.size === 1 &&
+        table.get(live) === 'the live one',
+      `removing a stale handle releases nothing (${table.size} held, ${table.get(live)})`
+    );
+    check(
+      table.remove(other) === undefined && table.size === 1,
+      `removing an empty slot releases nothing and does not throw (${table.size} held)`
+    );
+    checkEqual(
+      [...table.entries()],
+      [[4, 'the live one']],
+      'entries names the index a value is filed under'
+    );
+    check(
+      table.remove(live) === 'the live one' && table.size === 0,
+      `removing the live handle hands the value back (${table.size} held)`
+    );
+    // **One table per resource kind, never one keyed on handle bits.** Every
+    // HAL handle is the same eight bytes and the opcode is the only thing that
+    // says which table an id indexes, so two kinds holding identical bits must
+    // not see each other.
+    const buffers = new HandleTable();
+    const surfaces = new HandleTable();
+    const same = handle(7, 3);
+    buffers.insert(same, 'a buffer');
+    surfaces.insert(same, 'a surface');
+    check(
+      buffers.get(same) === 'a buffer' && surfaces.get(same) === 'a surface',
+      `two kinds may hold the same handle bits (${buffers.get(same)}, ${surfaces.get(same)})`
+    );
+    buffers.remove(same);
+    check(
+      surfaces.get(same) === 'a surface' && buffers.size === 0,
+      `and destroying one leaves the other alone (${surfaces.get(same)})`
+    );
+  }
+
+  // ---- the buffer pair -----------------------------------------------------
+  //
+  // The first commands that reach the *device* rather than the instance, and the
+  // first with a descriptor whose translation loses something. Neither has a
+  // reply — wasm allocated the handle and moved on — so what is checked is what
+  // reached `createBuffer`, what the table holds afterwards, and, where the
+  // creation could not happen, what went into the queue `Device::take_error`
+  // will drain.
+  {
+    // **The descriptor WebGPU is handed.** Four seam fields become three: the
+    // label passes through, the size narrows from a `u64` to a number, and
+    // `usage` and `memory` are both folded into one `GPUBufferUsage` word.
+    const { replayer, device } = await readyForBuffers();
+    replayer.replay(frameOf(deviceLocalBuffer, 21n));
+    checkEqual(
+      device.created,
+      [
+        {
+          label: 'instances',
+          size: 4096,
+          // COPY_DST (0x8) for TRANSFER_DST and STORAGE (0x80) for STORAGE.
+          // `DeviceLocal` adds nothing, because a buffer with no mapping usage
+          // is the one an implementation may place in device-local memory.
+          usage: 0x88,
+        },
+      ],
+      'a CreateBuffer reaches the device as one GPUBufferDescriptor'
+    );
+    const made = replayer.buffers.get(deviceLocalBuffer.buffer);
+    check(
+      made !== undefined && made.size === 4096 && made.usage === 0x88,
+      `and the buffer is findable at its handle with the size and usage asked for (${made?.size} bytes, usage 0x${made?.usage?.toString(16)})`
+    );
+    check(
+      replayer.buffers.get(
+        handle(
+          deviceLocalBuffer.buffer.index,
+          deviceLocalBuffer.buffer.generation + 1
+        )
+      ) === undefined,
+      'a lookup with a stale generation does not find the live occupant'
+    );
+    check(
+      !replayer.hasReplies &&
+        replayer.inFlight === 0 &&
+        replayer.pendingErrors === 0 &&
+        replayer.takeError() === null,
+      `a buffer command queues no reply, starts nothing and reports no error (queued ${replayer.hasReplies}, in flight ${replayer.inFlight}, errors ${replayer.pendingErrors})`
+    );
+  }
+  {
+    // **Both other memory locations**, from the fixture's own descriptors. This
+    // is the field WebGPU has nowhere to put — there is no heap to select — so
+    // each row is a decision `gpu-replay.js` argues and this is what says which
+    // decision it made.
+    const { replayer, device } = await readyForBuffers();
+    replayer.replay(frameOf(hostUploadBuffer, 22n));
+    checkEqual(
+      device.created,
+      [
+        {
+          size: 1,
+          // UNIFORM (0x40), plus the COPY_DST (0x8) `HostUpload` becomes:
+          // WebGPU's MAP_WRITE may be combined with COPY_SRC and nothing else,
+          // so a host-written uniform buffer cannot carry it, and
+          // `queue.writeBuffer` — which is what `Device::write_buffer` is here
+          // — needs COPY_DST instead.
+          usage: 0x48,
+        },
+      ],
+      'a HostUpload buffer is asked for as a copy destination, not as a mappable one'
+    );
+    check(
+      !('label' in (device.created[0] ?? {})),
+      `a descriptor with no label passes none rather than an empty one (${JSON.stringify(device.created[0]?.label)})`
+    );
+  }
+  {
+    // `HostReadback` is the one location WebGPU can express outright, and the
+    // size is put back inside the safe range because the fixture's own is
+    // `u64::MAX` — which is a refusal of its own, two checks below.
+    const { replayer, device } = await readyForBuffers();
+    replayer.replay(frameOf({ ...hostReadbackBuffer, size: 64n }, 23n));
+    checkEqual(
+      device.created,
+      [
+        {
+          label: '',
+          size: 64,
+          // COPY_SRC (0x4) for TRANSFER_SRC, and MAP_READ (0x1), which is what
+          // `mapAsync(GPUMapMode.READ)` needs at creation.
+          usage: 0x05,
+        },
+      ],
+      'a HostReadback buffer is asked for with MAP_READ, which is what a readback needs'
+    );
+    check(
+      'label' in (device.created[0] ?? {}),
+      'and an empty label is passed as one, because the seam distinguishes it from none'
+    );
+  }
+  {
+    // **A destroy releases the GPUBuffer as well as the slot.** Dropping the
+    // reference alone would leave the allocation alive until the object was
+    // collected, which is the whole reason this seam destroys explicitly.
+    const { replayer } = await readyForBuffers();
+    replayer.replay(frameOf(deviceLocalBuffer, 24n));
+    const made = replayer.buffers.get(deviceLocalBuffer.buffer);
+    replayer.replay(
+      frameOf({ ...destroyBuffer, buffer: deviceLocalBuffer.buffer }, 25n)
+    );
+    check(
+      made?.destroys === 1 &&
+        replayer.buffers.get(deviceLocalBuffer.buffer) === undefined &&
+        replayer.buffers.size === 0,
+      `DestroyBuffer destroys the buffer and lets go of the slot (${made?.destroys} destroys, ${replayer.buffers.size} held)`
+    );
+  }
+  {
+    // **A destroy of an empty slot.** The fixture's own destroy names a handle
+    // no create in it ever used, which is the legal stream op `crcbl-render`
+    // produces when it destroys the handle it pre-allocated for a creation that
+    // failed.
+    const { replayer } = await readyForBuffers();
+    let thrown = null;
+    try {
+      replayer.replay(frameOf(destroyBuffer, 26n));
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null && replayer.buffers.size === 0,
+      `DestroyBuffer for a handle nothing created is a no-op (${String(thrown)})`
+    );
+  }
+  {
+    // **A DESTROY NAMING A STALE GENERATION RELEASES NOTHING.** The case a
+    // table keyed on the index alone cannot see: the index is the live buffer's,
+    // the generation is the one it had before, and the live occupant must
+    // survive — with its `destroy()` never called, because a destroyed buffer
+    // that something still holds a handle to is worse than a leaked one.
+    const { replayer } = await readyForBuffers();
+    const reissued = handle(
+      deviceLocalBuffer.buffer.index,
+      deviceLocalBuffer.buffer.generation + 1
+    );
+    replayer.replay(frameOf({ ...deviceLocalBuffer, buffer: reissued }, 27n));
+    const live = replayer.buffers.get(reissued);
+    let thrown = null;
+    try {
+      // The stale handle: the same index at the generation the slot no longer
+      // holds.
+      replayer.replay(
+        frameOf({ ...destroyBuffer, buffer: deviceLocalBuffer.buffer }, 28n)
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    check(
+      thrown === null &&
+        live !== undefined &&
+        live.destroys === 0 &&
+        replayer.buffers.get(reissued) === live &&
+        replayer.buffers.size === 1,
+      `a destroy naming a stale generation is a no-op and leaves the live buffer alone (${String(thrown)}, ${live?.destroys} destroys, ${replayer.buffers.size} held)`
+    );
+  }
+  {
+    // The same claim for a surface, because the two share one table type and the
+    // migration is what this is guarding: the surface pair behaved this way by
+    // accident before — an index was never reissued — and has to behave this way
+    // on purpose now.
+    const canvas = stubCanvas('reissued');
+    const replayer = new Replayer({
+      gpu: stubGpu(async () => null),
+      canvases: new Map([[createSurface.canvasId, canvas]]),
+    });
+    const reissued = handle(
+      createSurface.surface.index,
+      createSurface.surface.generation + 1
+    );
+    replayer.replay(frameOf({ ...createSurface, surface: reissued }, 29n));
+    replayer.replay(
+      frameOf({ ...destroySurface, surface: createSurface.surface }, 30n)
+    );
+    check(
+      replayer.surfaces.get(reissued) === canvas.context &&
+        replayer.surfaces.size === 1,
+      `a DestroySurface naming a stale generation leaves the live surface alone (${replayer.surfaces.size} held)`
+    );
+  }
+  {
+    // **Two kinds, one set of handle bits, through the commands themselves.**
+    // The buffer takes the surface's own handle, and neither table may see the
+    // other — the opcode is the only thing that says which table an id indexes.
+    const canvas = stubCanvas('shared-bits');
+    const { replayer } = await readyForBuffers();
+    replayer.replay(frameOf(deviceLocalBuffer, 31n));
+    // A canvas the surface command can resolve, on the replayer that already
+    // has a device: the registry is fixed at construction, so this drives the
+    // surface against its own replayer and compares the tables' keys instead.
+    const surfaced = new Replayer({
+      gpu: stubGpu(async () => null),
+      canvases: new Map([[createSurface.canvasId, canvas]]),
+    });
+    surfaced.replay(
+      frameOf({ ...createSurface, surface: deviceLocalBuffer.buffer }, 32n)
+    );
+    check(
+      replayer.buffers.get(deviceLocalBuffer.buffer) !== undefined &&
+        replayer.surfaces.size === 0 &&
+        surfaced.surfaces.get(deviceLocalBuffer.buffer) === canvas.context &&
+        surfaced.buffers.size === 0,
+      `a buffer handle indexes the buffer table and nothing else (${replayer.surfaces.size} surfaces beside the buffer, ${surfaced.buffers.size} buffers beside the surface)`
+    );
+  }
+
+  // ---- where a buffer that cannot be created goes -------------------------
+  //
+  // There is no reply for `create_buffer` — identity is positional — so a
+  // failure has one place to go: the queue `Device::take_error` drains, which
+  // `crcbl_hal` documents as existing for WebGPU and which
+  // `docs/plan/41-webgpu-stream.md` has `Gpu::acquire` reading every frame.
+  // Every way of failing is driven here, because an error that goes nowhere is
+  // the same bug as a dropped reply one seam over.
+  {
+    // **A usage flag WebGPU has no bit for.** `DEVICE_ADDRESS` requires
+    // `Features::BUFFER_DEVICE_ADDRESS`, which this backend can never report —
+    // WebGPU has no raw GPU pointers — so the creation is refused rather than
+    // granted without it. Dropping the bit would hand back a buffer whose
+    // address cannot be taken and move the failure to whatever dereferences it.
+    const { replayer, device } = await readyForBuffers();
+    replayer.replay(
+      frameOf(
+        { ...deviceLocalBuffer, usage: ['STORAGE', 'DEVICE_ADDRESS'] },
+        33n
+      )
+    );
+    const reason = replayer.takeError();
+    check(
+      device.created.length === 0 &&
+        replayer.buffers.size === 0 &&
+        String(reason).includes('DEVICE_ADDRESS'),
+      `a usage flag with no GPUBufferUsage bit is refused and named (${device.created.length} created, ${JSON.stringify(reason)})`
+    );
+    check(
+      replayer.takeError() === null,
+      'and the queue is empty once that error has been taken'
+    );
+  }
+  {
+    // **A size no `GPUSize64` carries exactly.** The wire's size is a `u64` and
+    // WebGPU's is a JavaScript number, so the fixture's `u64::MAX` would be
+    // passed on rounded — a buffer of a size nobody asked for, created
+    // successfully. This is the fixture's third descriptor replayed exactly as
+    // it was written.
+    const { replayer, device } = await readyForBuffers();
+    replayer.replay(frameOf(hostReadbackBuffer, 34n));
+    const reason = replayer.takeError();
+    check(
+      device.created.length === 0 &&
+        replayer.buffers.size === 0 &&
+        String(reason).includes(String(hostReadbackBuffer.size)),
+      `a size past 2^53 is refused with the number written out (${device.created.length} created, ${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **A buffer command before any device opened.** `create_buffer` is a device
+    // method, so this is an ordering bug on the far side, and recording it is
+    // what makes it visible at the command that was too early rather than at
+    // whatever draws with the handle later.
+    const replayer = new Replayer({ gpu: stubGpu(async () => null) });
+    replayer.replay(frameOf(deviceLocalBuffer, 35n));
+    const reason = replayer.takeError();
+    check(
+      replayer.buffers.size === 0 &&
+        String(reason).includes('before any device opened'),
+      `a CreateBuffer with no device is refused and says so (${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **A `createBuffer` that throws.** Most WebGPU failures do not — they
+    // arrive on the device's error channel, which is the check below — but an
+    // allocation failure may, and a throw out of `replay` would abandon every
+    // command after it in the frame.
+    const device = stubDevice([], {
+      refuseBuffers: new Error('out of memory'),
+    });
+    const { replayer } = await readyForBuffers({ device });
+    let thrown = null;
+    try {
+      replayer.replay(frameOf(deviceLocalBuffer, 36n));
+    } catch (error) {
+      thrown = error;
+    }
+    const reason = replayer.takeError();
+    check(
+      thrown === null &&
+        replayer.buffers.size === 0 &&
+        String(reason).includes('out of memory'),
+      `a createBuffer that throws is recorded rather than thrown on (${String(thrown)}, ${JSON.stringify(reason)})`
+    );
+  }
+  {
+    // **What the browser says after the fact.** An invalid usage combination or
+    // a size over `maxBufferSize` is not raised in the call at all: WebGPU hands
+    // back a `GPUBuffer` and reports the reason on the device. A replayer that
+    // never listened would see nothing but success.
+    const { replayer, device } = await readyForBuffers();
+    replayer.replay(frameOf(deviceLocalBuffer, 37n));
+    device.report('Buffer usage (MAP_READ|STORAGE) is invalid');
+    const reason = replayer.takeError();
+    check(
+      String(reason).includes('MAP_READ|STORAGE'),
+      `an uncapturederror on the device reaches the take_error queue (${JSON.stringify(reason)})`
+    );
+    check(
+      replayer.takeError() === null,
+      'and each error is reported once, which is what take_error promises'
+    );
+  }
+  {
+    // **The queue is bounded, and says when it dropped something.** Nothing
+    // drains it yet — the `take_error` command is a later slice — and
+    // `uncapturederror` can fire every frame for as long as a page is open. The
+    // first errors are kept, because what went wrong first caused the rest; what
+    // must not happen is the rest disappearing silently.
+    const { replayer, device } = await readyForBuffers();
+    const over = 3;
+    for (let i = 0; i < MAX_PENDING_ERRORS + over; i += 1) {
+      device.report(`error ${i}`);
+    }
+    check(
+      replayer.pendingErrors === MAX_PENDING_ERRORS,
+      `the queue stops at ${MAX_PENDING_ERRORS} (${replayer.pendingErrors} held)`
+    );
+    const drained = [];
+    for (
+      let error = replayer.takeError();
+      error !== null;
+      error = replayer.takeError()
+    ) {
+      drained.push(error);
+    }
+    check(
+      drained.length === MAX_PENDING_ERRORS + 1 &&
+        // The oldest are the ones kept: what went wrong first caused the rest.
+        drained[0].endsWith('error 0') &&
+        drained[MAX_PENDING_ERRORS - 1].endsWith(
+          `error ${MAX_PENDING_ERRORS - 1}`
+        ) &&
+        drained[MAX_PENDING_ERRORS].includes(String(over)),
+      `and the last thing out of it names the ${over} it refused (${JSON.stringify(drained[drained.length - 1])})`
+    );
+    check(
+      replayer.takeError() === null,
+      'after which it is empty rather than repeating the summary'
+    );
+  }
+
+  // ---- the BufferUsage → GPUBufferUsage mapping, flag by flag -------------
+  //
+  // Spelled out here rather than compared against the table it is testing, for
+  // the reason the feature mapping below is: a check that imported the mapping
+  // would agree with whatever it says. Each flag on its own, so one wired to the
+  // wrong bit names itself instead of hiding inside a union.
+  {
+    for (const [name, bit, webgpu] of [
+      ['TRANSFER_SRC', GPU_BUFFER_USAGE.COPY_SRC, 'COPY_SRC'],
+      ['TRANSFER_DST', GPU_BUFFER_USAGE.COPY_DST, 'COPY_DST'],
+      ['UNIFORM', GPU_BUFFER_USAGE.UNIFORM, 'UNIFORM'],
+      ['STORAGE', GPU_BUFFER_USAGE.STORAGE, 'STORAGE'],
+      ['INDEX', GPU_BUFFER_USAGE.INDEX, 'INDEX'],
+      ['INDIRECT', GPU_BUFFER_USAGE.INDIRECT, 'INDIRECT'],
+      ['QUERY_RESOLVE', GPU_BUFFER_USAGE.QUERY_RESOLVE, 'QUERY_RESOLVE'],
+    ]) {
+      checkEqual(
+        webgpuBufferUsageFor([name], 'DeviceLocal'),
+        { bits: bit, unsatisfiable: [] },
+        `BufferUsage::${name} maps to GPUBufferUsage.${webgpu} and to nothing else`
+      );
+    }
+    // The one flag with nothing behind it. Named rather than dropped, and the
+    // bits that *did* map are still reported — the caller refuses the whole
+    // creation, so what matters is that the refusal can say which flag did it.
+    checkEqual(
+      webgpuBufferUsageFor(['STORAGE', 'DEVICE_ADDRESS'], 'DeviceLocal'),
+      {
+        bits: GPU_BUFFER_USAGE.STORAGE,
+        unsatisfiable: ['BufferUsage::DEVICE_ADDRESS'],
+      },
+      'BufferUsage::DEVICE_ADDRESS has no GPUBufferUsage bit and comes back unsatisfiable'
+    );
+    for (const [memory, bits, why] of [
+      [
+        'DeviceLocal',
+        0,
+        'nothing, which is what lets the buffer be device-local',
+      ],
+      [
+        'HostUpload',
+        GPU_BUFFER_USAGE.COPY_DST,
+        'COPY_DST, for queue.writeBuffer',
+      ],
+      ['HostReadback', GPU_BUFFER_USAGE.MAP_READ, 'MAP_READ, for mapAsync'],
+    ]) {
+      checkEqual(
+        webgpuBufferUsageFor([], memory),
+        { bits, unsatisfiable: [] },
+        `MemoryLocation::${memory} adds ${why}`
+      );
+    }
+    // A location this file does not know is a decoder that grew a variant, and
+    // it must not be quietly treated as device-local — that would place memory
+    // the seam placed deliberately somewhere else.
+    checkEqual(
+      webgpuBufferUsageFor([], 'HostSomethingElse'),
+      { bits: 0, unsatisfiable: ['MemoryLocation::HostSomethingElse'] },
+      'a memory location with no row is refused rather than read as DeviceLocal'
     );
   }
 

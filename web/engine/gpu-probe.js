@@ -230,6 +230,39 @@ export function startSurfaceProbe({ exports, canvasId }) {
 }
 
 /**
+ * Asks wasm to encode a buffer creation on the device it opened.
+ *
+ * **There is no `readBufferProbe`, for {@link startSurfaceProbe}'s reason:**
+ * `CreateBuffer` has no entry on the reply channel — wasm names the handle
+ * itself and moves on — so there is nothing to poll wasm for. What there is to
+ * see is on this side: `globalThis.crcbl.gpu.replayer.buffers` is the table the
+ * `GPUBuffer` lands in, once the demo's loop has replayed the frame.
+ *
+ * **And what could not be done is on this side too.** A creation that fails —
+ * a size the device will not allocate, a usage combination WebGPU refuses, a
+ * flag it has no bit for — has no reply to arrive in either, so the replayer
+ * queues the reason where `crcbl_hal::Device::take_error` will drain it:
+ * `crcbl.gpu.replayer.takeError()`. `gpu-replay.js` argues that choice where it
+ * is made.
+ *
+ * Unlike every other probe here this one needs a **device**, not just an
+ * adapter: `create_buffer` is a device method, so a `false` right after
+ * {@link startDeviceProbe} is that ordering rather than a failure — wait for
+ * {@link readDeviceProbe} to say `OPENED`.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {number} options.size How many bytes to ask for. The page's own
+ *   number, so that what it reads back off `GPUBuffer.size` is something it
+ *   chose rather than a constant wasm and the check share.
+ * @returns {boolean} Whether wasm encoded it. `false` is no device open yet,
+ *   the probe being re-entered, or another channel being installed.
+ */
+export function startBufferProbe({ exports, size }) {
+  return exports.__crcbl_web_gpu_probe_buffer(size) === 1;
+}
+
+/**
  * Asks wasm to encode a query for what a canvas surface will accept.
  *
  * The third command that makes a round trip, and the encode-and-return half of

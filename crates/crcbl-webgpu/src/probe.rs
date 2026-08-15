@@ -39,6 +39,7 @@
 //! | [`__crcbl_web_gpu_probe_device_features_hi`](shim::__crcbl_web_gpu_probe_device_features_hi) | `() -> i32` | High 32 bits of the same. |
 //! | [`__crcbl_web_gpu_probe_device_max_image_2d`](shim::__crcbl_web_gpu_probe_device_max_image_2d) | `() -> i32` | The opened device's [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d). |
 //! | [`__crcbl_web_gpu_probe_surface`](shim::__crcbl_web_gpu_probe_surface) | `(i32) -> i32` | Encode one [`CreateSurface`](crate::Command::CreateSurface) against [`PROBE_SURFACE`], naming the canvas that `canvas_id` is the page's registry key for. `1`, or `0` if the probe is re-entered or another channel is installed. |
+//! | [`__crcbl_web_gpu_probe_buffer`](shim::__crcbl_web_gpu_probe_buffer) | `(i32) -> i32` | Encode one [`CreateBuffer`](crate::Command::CreateBuffer) against [`PROBE_BUFFER`], of `size` bytes. `1`, or `0` if no device has opened, the probe is re-entered, or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps) | `() -> i32` | Encode one [`SurfaceCaps`](crate::Command::SurfaceCaps) and register its wait. `1`, or `0` if there was no room or another channel is installed. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_state`](shim::__crcbl_web_gpu_probe_surface_caps_state) | `() -> i32` | Drain, and answer one of the `CAPS_*` codes. |
 //! | [`__crcbl_web_gpu_probe_surface_caps_reason_ptr`](shim::__crcbl_web_gpu_probe_surface_caps_reason_ptr) | `() -> i32` | Where the reason the query answered nothing starts. Empty when it answered. |
@@ -91,6 +92,19 @@
 //! on, and there is nothing for a browser to send back. A state machine here
 //! would have one state and a poll would have nothing to poll for, so the honest
 //! shape is one call that encodes one command and answers whether it went.
+//!
+//! [`__crcbl_web_gpu_probe_buffer`](shim::__crcbl_web_gpu_probe_buffer) has the
+//! same shape for the same reason — [`CreateBuffer`](crate::Command::CreateBuffer)
+//! is answered by nothing either — with one difference that is the command's
+//! rather than this module's: **it is a device method, so it refuses until a
+//! device has opened.** That is [`__crcbl_web_gpu_probe_device`](shim::__crcbl_web_gpu_probe_device)'s
+//! ordering rule seen once further along, and it is a rule about what the
+//! *replayer* has rather than about what the descriptor names: nothing in a
+//! [`BufferDesc`] comes from the device, but the
+//! `createBuffer` call needs one, and a stream that asks before then is asking
+//! the page for something it has not got. `web/engine/gpu-replay.js` records
+//! exactly that as a `take_error`, which is where a buffer failure goes for
+//! want of a reply channel.
 //!
 //! Its neighbour [`__crcbl_web_gpu_probe_surface_caps`](shim::__crcbl_web_gpu_probe_surface_caps)
 //! is the opposite case and has the full awaited shape, because
@@ -194,7 +208,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crcbl_hal::{AdapterId, DeviceDesc, Features, SurfaceCaps, SurfaceHandle};
+use crcbl_hal::{
+    AdapterId, BufferDesc, BufferHandle, BufferUsage, DeviceDesc, Features, MemoryLocation,
+    SurfaceCaps, SurfaceHandle,
+};
 
 use crate::device::DeviceProbe;
 use crate::instance::AdapterProbe;
@@ -299,6 +316,46 @@ pub const PROBE_SURFACE: SurfaceHandle = match SurfaceHandle::from_bits(1 << 32)
     // expression being wrong rather than a case anything can reach.
     None => panic!("generation 1 is not zero"),
 };
+
+/// The buffer [`shim::__crcbl_web_gpu_probe_buffer`] creates, every time.
+///
+/// [`PROBE_SURFACE`]'s twin, on its terms and for its reasons — one fixed
+/// handle, index `0` and generation `1`, because identity on this stream is
+/// positional and this module has no pool to draw from. **Its bits are that
+/// surface's bits, deliberately.** A handle carries no kind, so a buffer and a
+/// surface may hold the same eight bytes; the opcode is what says which table an
+/// id indexes, and a page that files both under the same key would be a replayer
+/// with one table where the crate docs require two.
+pub const PROBE_BUFFER: BufferHandle = match BufferHandle::from_bits(1 << 32) {
+    Some(buffer) => buffer,
+    // Generation `1`, written into the high half above, so this arm is the
+    // expression being wrong rather than a case anything can reach.
+    None => panic!("generation 1 is not zero"),
+};
+
+/// The descriptor [`shim::__crcbl_web_gpu_probe_buffer`] asks with.
+///
+/// **Every field is one a browser can be held to**, which is what an
+/// observation point is for. `size` is the caller's, so a page passes a number
+/// and reads `GPUBuffer.size` back; the label reaches `GPUBuffer.label`; and the
+/// usage is two flags that map onto two different `GPUBufferUsage` bits, so a
+/// translation that dropped one or or-ed the wrong constant produces a number
+/// the page can see is wrong.
+///
+/// [`MemoryLocation::DeviceLocal`] because it is the location WebGPU expresses
+/// by adding *nothing* — the other two add a mapping usage — so what
+/// `GPUBuffer.usage` reports is the usage word alone, and the check on it stays
+/// about the flags rather than about the location. The locations are held by
+/// `web/tools/gpu-replay.mjs`, which drives all three.
+#[must_use]
+pub const fn probe_buffer_desc(size: u64) -> BufferDesc<'static> {
+    BufferDesc {
+        label: Some("crcbl-webgpu probe buffer"),
+        size,
+        usage: BufferUsage::STORAGE.union(BufferUsage::TRANSFER_DST),
+        memory: MemoryLocation::DeviceLocal,
+    }
+}
 
 /// One surface-capability query, from the frame that asked to the frame that
 /// was answered.
@@ -502,6 +559,32 @@ impl Probe {
         };
         channel
             .encode(|stream| stream.create_surface(PROBE_SURFACE, canvas_id))
+            .is_some()
+    }
+
+    /// Encode one [`CreateBuffer`](crate::Command::CreateBuffer) against
+    /// [`PROBE_BUFFER`], of `size` bytes.
+    ///
+    /// [`encode`](StreamChannel::encode) and never
+    /// [`encode_awaited`](StreamChannel::encode_awaited), for
+    /// [`request_surface`](Self::request_surface)'s reason: nothing answers this
+    /// command either.
+    ///
+    /// `false` until a device has opened, which is
+    /// [`request_device`](Self::request_device)'s ordering rule one step
+    /// further along — `create_buffer` is a device method, and the page has no
+    /// device to call it on until the request this probe made has come back.
+    fn request_buffer(&mut self, size: u32) -> bool {
+        if self.opened().is_none() {
+            return false;
+        }
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        channel
+            .encode(|stream| {
+                stream.create_buffer(PROBE_BUFFER, &probe_buffer_desc(u64::from(size)))
+            })
             .is_some()
     }
 
@@ -816,6 +899,33 @@ pub mod shim {
         })
     }
 
+    /// Ask the page to make a buffer of `size` bytes on the device it opened.
+    ///
+    /// `1` when one [`CreateBuffer`](crate::Command::CreateBuffer) is on the
+    /// stream; `0` when no device has opened yet, when the probe is re-entered,
+    /// or when another channel is already installed.
+    ///
+    /// **No `state` beside it**, on
+    /// [`__crcbl_web_gpu_probe_surface`]'s terms and for its reason: nothing
+    /// answers a creation, because wasm named the handle itself. What the page
+    /// got is the page's to report — `crcbl.gpu.replayer.buffers` is the table
+    /// the `GPUBuffer` lands in — and what it could *not* do arrives out of band
+    /// through `Device::take_error`, which is what
+    /// `web/engine/gpu-replay.js` queues it into.
+    ///
+    /// `size` is a parameter for [`__crcbl_web_gpu_probe_surface`]'s reason
+    /// turned around: the canvas id is a number only the page knows, and this is
+    /// a number only the page can *check* — a browser reports `GPUBuffer.size`,
+    /// so a size chosen here rather than there would be a check comparing a
+    /// constant against itself.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_buffer(size: u32) -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_buffer(size)),
+            Err(_) => 0,
+        })
+    }
+
     /// [`granted_u32`] for the device that opened, on the same terms: `0` is a
     /// legal value for each of these, so they are read only once
     /// [`__crcbl_web_gpu_probe_device_state`] has answered
@@ -1006,7 +1116,7 @@ mod tests {
     };
 
     use super::shim::{
-        __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_device,
+        __crcbl_web_gpu_probe_adapters, __crcbl_web_gpu_probe_buffer, __crcbl_web_gpu_probe_device,
         __crcbl_web_gpu_probe_device_features_hi, __crcbl_web_gpu_probe_device_features_lo,
         __crcbl_web_gpu_probe_device_max_image_2d, __crcbl_web_gpu_probe_device_reason_len,
         __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
@@ -1481,6 +1591,93 @@ mod tests {
                 canvas_id: 3,
             }]
         );
+    }
+
+    /// Grants an adapter, opens a device, and leaves the probe with both.
+    ///
+    /// What a buffer command needs on this side: `create_buffer` is a device
+    /// method, so the export refuses until the device request it made has been
+    /// answered.
+    fn open_device() {
+        grant(&granted("has a device"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(take_frame().len(), 1);
+        let mut replies = ReplyWriter::new();
+        replies.device(1, &device_caps());
+        deliver(replies.bytes());
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_OPENED);
+    }
+
+    /// The buffer half: one export, one command, and the descriptor this module
+    /// fixed — with the size the caller passed, which is the one field a browser
+    /// can be held to.
+    #[test]
+    fn the_buffer_export_encodes_one_create_buffer_with_the_size_it_was_given() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_buffer(4096), 1);
+        assert_eq!(
+            take_frame(),
+            vec![Command::CreateBuffer {
+                buffer: PROBE_BUFFER,
+                label: Some("crcbl-webgpu probe buffer".into()),
+                size: 4096,
+                usage: BufferUsage::STORAGE | BufferUsage::TRANSFER_DST,
+                memory: MemoryLocation::DeviceLocal,
+            }]
+        );
+    }
+
+    /// The size is the caller's rather than this module's, so a second call with
+    /// a different one has to move it — otherwise the browser gate is comparing
+    /// `GPUBuffer.size` against a constant.
+    #[test]
+    fn the_buffer_size_is_the_one_the_caller_asked_for() {
+        open_device();
+        assert_eq!(__crcbl_web_gpu_probe_buffer(64), 1);
+        let commands = take_frame();
+        let [Command::CreateBuffer { size, .. }] = commands.as_slice() else {
+            panic!("the frame carries one CreateBuffer: {commands:?}");
+        };
+        assert_eq!(*size, 64);
+    }
+
+    /// **Nothing waits on it**, which is the difference from the two answered
+    /// commands and the same shape `create_surface` has: a creation is answered
+    /// by nothing, so a registered wait would hold a slot for a reply that is
+    /// never coming.
+    #[test]
+    fn the_buffer_request_registers_no_wait_because_nothing_answers_it() {
+        open_device();
+        let before = waiting_replies();
+        assert_eq!(__crcbl_web_gpu_probe_buffer(64), 1);
+        assert_eq!(waiting_replies(), before);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// **A device has to have opened first**, and nothing may be encoded before
+    /// one has: `Device::create_buffer` is a device method, and a page with no
+    /// device has nothing to call `createBuffer` on.
+    #[test]
+    fn a_buffer_request_before_a_device_opens_is_refused_and_encodes_nothing() {
+        assert_eq!(__crcbl_web_gpu_probe_buffer(64), 0);
+        // Not even a channel: refusing before installing one is what keeps the
+        // "another channel is installed" answer meaningful.
+        assert_eq!(__crcbl_web_gpu_stream_len(), 0);
+
+        // …and it is still refused while the device request is in flight.
+        grant(&granted("no device yet"));
+        assert_eq!(__crcbl_web_gpu_probe_device(), 1);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_WAITING);
+        assert_eq!(__crcbl_web_gpu_probe_buffer(64), 0);
+        assert_eq!(take_frame().len(), 1);
+    }
+
+    /// A buffer handle and a surface handle may carry identical bits, and the
+    /// probe's two do — the opcode is what says which table an id indexes, so a
+    /// replayer with one table for both would file the second over the first.
+    #[test]
+    fn the_probes_buffer_and_surface_name_the_same_handle_bits() {
+        assert_eq!(PROBE_BUFFER.to_bits(), PROBE_SURFACE.to_bits());
     }
 
     /// The capabilities a browser answers with, as `gpu-replay.js` builds them:

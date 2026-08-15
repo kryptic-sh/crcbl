@@ -22,30 +22,6 @@ reaches its second iteration. Vulkan is what gates that loop: it is the only
 backend that asks a driver per call and the only one that can refuse a real
 pairing. Worth knowing before anyone reads a green browser gate as covering it.
 
-### The replayer's surface table is keyed on a handle's index and ignores its generation
-
-`Replayer`'s `#surfaces` in `web/engine/gpu-replay.js` maps a surface handle's
-**index** to its `GPUCanvasContext`, and `#destroySurface` deletes by that index
-alone. A `Handle` is `{ index, generation }` precisely so a stale one is
-detectable, and this table cannot detect one: a destroy naming an index whose
-slot has since been reused would silently release the current occupant instead
-of being the documented no-op.
-
-**Not reachable today, and that is why it was left.** Within one ordered stream
-the destroy of a handle always precedes the create that reuses its index, so
-producing the collision needs a duplicated or reordered destroy and nothing
-emits one. It was deliberately not fixed in place because the fix belongs to a
-shared handle-table helper rather than to this one table: slice 5 adds buffers,
-textures, samplers and bind groups, each with its own table and the same
-obligation, and a bespoke generation check here is either copied four times or
-refactored away two slices later.
-
-What it would take: store `{ context, generation }` per slot, have destroy
-compare before deleting, and treat a mismatch as the same no-op an empty slot
-already is. `docs/plan/41-webgpu-stream.md`'s Handles section is where the rule
-would be written down — it currently states only that each resource kind needs
-its own table, not what the key within a table has to be.
-
 ### `#requestDevice`'s `ForeignSurface` refusal now gives a reason that is no longer true
 
 `web/engine/gpu-replay.js` refuses a `RequestDevice` whose `compatibleSurface`

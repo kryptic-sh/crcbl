@@ -258,6 +258,14 @@ Two consequences:
   table an id indexes.** A replayer with one flat table per resource kind is
   correct; a single table keyed on handle bits is not.
 
+- **A slot remembers the generation it was filled at**, and a lookup or a
+  destroy naming a different one misses. This is the half the rule above does
+  not imply: the index alone says _where_, and only the generation says _which_.
+  Without it a destroy of a handle whose index has since been reused releases
+  the current occupant — the exact opposite of the no-op the destroy op is
+  specified to be, and silent. `web/engine/gpu-replay.js`'s `HandleTable` is
+  that mechanism and every resource kind goes through it.
+
 There is a trap the HAL already documents: a `Handle`'s bits cannot carry owner
 identity, because its index and generation are fully spoken for and two pools
 genuinely do issue identical bits. A backend is obliged to keep a side table
@@ -334,6 +342,21 @@ replayer keeps the sequence of the command it is currently executing; when an
 error surfaces it reports `(sequence, message)`. Wasm keeps a side map from
 sequence to opcode and to the `label` the descriptor carried, and renders the
 pair into the string `take_error` hands back.
+
+**That holds for the refusals the replayer makes itself, and not for the
+browser's own.** A refusal it raises — a usage flag with no WebGPU bit, a size
+past what a `Number` holds exactly — happens inside the call and carries the
+sequence and the handle. WebGPU's validation and out-of-memory failures do not:
+they surface on `uncapturederror` after `replay` has already returned, when
+there is no currently-executing command to name. Attributing those needs a
+`pushErrorScope`/`popErrorScope` pair per command, and the promise
+`popErrorScope` returns resolves a microtask later — so the attribution is still
+not synchronous with the failing call, while the cost is two nested scopes and
+four stack operations on every create in every frame. Errors a scope captures
+also never reach `uncapturederror`, so the two mechanisms are exclusive rather
+than complementary. What is built instead is one `uncapturederror` listener per
+device, feeding the same queue: the browser's errors are recorded as the
+device's, unattributed, rather than stamped with a guessed number.
 
 Positional rather than per-command because a `u32` field would restate what
 sequential decoding already implies, cost four bytes on every command of every

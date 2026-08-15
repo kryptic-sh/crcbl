@@ -555,6 +555,29 @@ const SEAM_FORMAT_CODE = Object.freeze({
 const FIFO_BIT = 1 << 0;
 
 /**
+ * How many bytes group J asks wasm to make a buffer of.
+ *
+ * **The driver's number rather than wasm's**, which is what makes the size check
+ * evidence: `__crcbl_web_gpu_probe_buffer` takes it as an argument, a browser
+ * reports `GPUBuffer.size` off the object it created, and the two are compared.
+ * A size fixed in `probe.rs` would be a constant checked against itself.
+ *
+ * Nothing about the value matters beyond being a size no default produces —
+ * `4096` is the fixture's, so this is deliberately not that either.
+ */
+const PROBE_BUFFER_BYTES = 12_288;
+
+/**
+ * The label `crates/crcbl-webgpu/src/probe.rs`'s `probe_buffer_desc` sets.
+ *
+ * Restated rather than exported through the ABI: it is a `&'static str` on the
+ * Rust side and the point of checking it is that the string *crossed* — a label
+ * the driver read out of wasm would agree with wasm whatever the replayer did
+ * with it.
+ */
+const PROBE_BUFFER_LABEL = 'crcbl-webgpu probe buffer';
+
+/**
  * How far above its starting height a flappy bird has to climb before the taps
  * are the only thing that can have put it there, in the units its HUD prints.
  *
@@ -3235,6 +3258,111 @@ try {
       ? `present modes 0b${capsAnswered.presentModes.toString(2)}, currentExtent ` +
           `${capsAnswered.hasExtent ? 'present' : 'absent'}`
       : `state ${capsAnswered?.name}, which carries no capabilities to read`
+  );
+
+  // **THE ONLY GATE ON A RESOURCE ACTUALLY BEING MADE.** Everything above this
+  // asks the browser questions — what it has, what it prefers, what it will
+  // grant. This is the first command that tells it to *do* something and keeps
+  // what came back: a `crcbl_hal::BufferDesc` encoded in wasm, replayed through
+  // the demo's own loop, and a real `GPUBuffer` on the real device at the end of
+  // it.
+  //
+  // `gpu-replay.mjs` drives the same two commands under node against a stub
+  // device whose `createBuffer` hands back a plain object built from the
+  // descriptor — so what it proves is the translation and the bookkeeping, and
+  // it would pass just as well against a replayer that never called a browser at
+  // all. What only a browser can establish is what is checked here: that
+  // `createBuffer` accepted the descriptor this seam builds, and that the object
+  // it answered reports the size, the label and the usage that were asked for.
+  // `GPUBuffer.usage` is the interesting one — it is the browser reading back a
+  // word two seam fields were folded into.
+  group('J — a buffer is created on the real device');
+
+  const bufferStart = await evaluate(
+    page,
+    `(async () => {
+       const { startBufferProbe } = await import('/engine/gpu-probe.js');
+       const { exports, gpu } = globalThis.crcbl;
+       const before = gpu.stats();
+       return {
+         started: startBufferProbe({ exports, size: ${PROBE_BUFFER_BYTES} }),
+         replayed: before.replayed,
+       };
+     })()`
+  );
+  const bufferProbe = bufferStart?.started
+    ? await until(async () =>
+        evaluate(
+          page,
+          `(() => {
+             const { gpu } = globalThis.crcbl;
+             const stats = gpu.stats();
+             if (stats.replayed <= ${bufferStart.replayed} && !stats.failure) {
+               return null;
+             }
+             const entries = [...gpu.replayer.buffers.entries()];
+             const last = entries[entries.length - 1];
+             const buffer = last ? last[1] : undefined;
+             return {
+               commands: stats.commands,
+               failure: stats.failure,
+               handle: last ? last[0] : null,
+               held: entries.length,
+               // The browser's own class, as group H asks of a canvas context.
+               // Node has no \`GPUBuffer\` binding at all, so this is what a
+               // silent fall back to a stub cannot survive.
+               isRealBuffer:
+                 typeof GPUBuffer === 'function' && buffer instanceof GPUBuffer,
+               size: buffer?.size,
+               label: buffer?.label,
+               usage: buffer?.usage,
+               // Built from the browser's own namespace object rather than from
+               // the seam's table, which is the whole point: STORAGE and
+               // TRANSFER_DST are what \`probe_buffer_desc\` asks for, and these
+               // are the bits this browser calls them.
+               expectedUsage:
+                 GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+               // A creation that failed has no reply to arrive in, so the reason
+               // is queued where \`Device::take_error\` will drain it. Read
+               // whatever the outcome, because it is the only thing that can say
+               // why a buffer is missing.
+               error: gpu.replayer.takeError(),
+             };
+           })()`
+        )
+      )
+    : null;
+  check(
+    'J',
+    'wasm encoded a buffer creation and the demo loop replayed it',
+    bufferProbe?.commands?.join(',') === 'CreateBuffer' &&
+      Number.isInteger(bufferProbe.handle),
+    bufferProbe
+      ? `the loop replayed [${bufferProbe.commands.join(', ')}] for buffer ${bufferProbe.handle}` +
+          `${bufferProbe.failure ? ` — ${bufferProbe.failure}` : ''}` +
+          `${bufferProbe.error ? ` — ${bufferProbe.error}` : ''}`
+      : bufferStart?.started
+        ? `the demo loop replayed nothing in ${TIMEOUT_MS} ms`
+        : 'wasm would not encode it — no device has opened, or another channel is installed'
+  );
+  check(
+    'J',
+    'a real GPUBuffer came back from the device with the size that was asked for',
+    bufferProbe?.isRealBuffer === true &&
+      bufferProbe?.size === PROBE_BUFFER_BYTES,
+    bufferProbe?.isRealBuffer
+      ? `an instance of this browser's GPUBuffer, of ${bufferProbe.size} bytes, of ${bufferProbe.held} held`
+      : `instanceof GPUBuffer: ${bufferProbe?.isRealBuffer}, size ${bufferProbe?.size}` +
+          ` (${PROBE_BUFFER_BYTES} asked for)` +
+          `${bufferProbe?.error ? ` — ${bufferProbe.error}` : ''}`
+  );
+  check(
+    'J',
+    'the browser gave that buffer the usage and the label the seam asked for',
+    bufferProbe?.usage === bufferProbe?.expectedUsage &&
+      bufferProbe?.label === PROBE_BUFFER_LABEL,
+    `usage 0x${bufferProbe?.usage?.toString(16)} against 0x${bufferProbe?.expectedUsage?.toString(16)}` +
+      ` from GPUBufferUsage, label ${JSON.stringify(bufferProbe?.label)}`
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and
