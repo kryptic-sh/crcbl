@@ -1640,30 +1640,27 @@ be present in some of them.** Two surveys of `apps/*` produced the slices below.
    made their five guard tests vacuous, and lumen could not have used a
    generated one at all. `desc` is passed in by name; all five tests still run.
 
-4. **`Record::open_for`** (`crcbl-store`) — `platform_backing` is four copies of
-   one rule about the platform, not about any game. Verified with `cmp`:
-   asteroids and flappy are identical, breakout differs _only_ in a log prefix,
-   horde only by its own truncation wrapper. The storage seam is otherwise
-   already closed and closed well — no sample touches `std::fs` at all.
+4. ~~**`Record::open_for`**~~ (`crcbl-store`) — **shipped** as
+   `Backing::platform`. `platform_backing` was four copies of a fact about the
+   platform, not about any game.
 
-   **Shape found 2026-08-15 (not started).** It is two halves, and the second is
-   the one with a decision in it.
+   **The decision this entry recorded turned out not to exist.** It was written
+   up as a choice between one signature whose arms each ignore an argument and a
+   signature per platform — because the survey said the browser arm would need
+   each game to hand its store in. It did not: `crcbl_store::web::opfs` already
+   held a `Weak` to the installed store for the `__crcbl_web_opfs_*` exports and
+   only lacked a getter. With `installed()`, the record and the entry points
+   read the same slot instead of two paths agreeing by convention, nothing is
+   threaded through, and the four `opfs_store` accessors over `web_exports!`'s
+   `STORAGE` cell went with the copies. `app_name` does stay in the signature
+   and means nothing in a browser — kept deliberately, because a signature per
+   platform pushes the `#[cfg]` back out to every caller.
 
-   _The accessor._ `opfs_store` and `asset_source` are the same two lines over
-   the `STORAGE` cell in four samples. `web_exports!` already creates that cell
-   unconditionally, so emitting the pair costs nothing; the macro's doc argues
-   against it — "a sample with no save file wants neither" — and that argument
-   is weaker now that the cell exists either way.
-
-   _The backing._ `Backing::config` is native-only and `Backing::Browser` is
-   wasm-only, so bridging them is what each sample's `platform_backing` does. A
-   `Backing::platform(app, browser)` with **one** signature on both platforms is
-   possible — `StorageSource` is not `cfg`-gated — but each arm then ignores one
-   of its two arguments. That is a real ignored-parameter smell, and it is the
-   thing to weigh: the alternative is a different signature per platform, which
-   pushes the `cfg` back out to every call site and is worse. Whichever way it
-   goes, this touches the browser storage path, so `web/run-browser-e2e.sh` is
-   part of the change and not an afterthought.
+   Verified in a real Chromium rather than by compiling, because the failure is
+   silent: had `installed()` answered `None`, scores would have stopped
+   persisting and every check would still have passed, since the gate asserts no
+   persistence. The evidence is that the page log carries
+   `record: no previous value`, a line only the `Backing::Browser` arm emits.
 
 5. **`open_shell_and_window`** (`crcbl::engine`) — `start`/`with_shell`/
    `open_the_window`, ~361 lines across six samples plus a seventh fused copy in
