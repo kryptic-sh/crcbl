@@ -187,7 +187,12 @@ const EXPECTED = [
     usage: ['TRANSFER_SRC'],
     memory: 'HostReadback',
   },
+  // The canvas key is its own field beside the handle, and its value differs
+  // from both halves of that handle: a decoder that read it where a handle half
+  // is, or dropped it, would not still compare equal here.
+  { name: 'CreateSurface', surface: handle(45, 46), canvasId: 19 },
   { name: 'DestroyBuffer', buffer: handle(17, 18) },
+  { name: 'DestroySurface', surface: handle(47, 48) },
   { name: 'BeginDebugLabel', label: 'gbuffer — ✱' },
   {
     name: 'BeginRenderPass',

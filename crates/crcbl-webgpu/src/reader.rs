@@ -199,8 +199,16 @@ impl<'a> StreamReader<'a> {
                     memory,
                 })
             }
+            tag::CREATE_SURFACE_TAG => {
+                let surface = r.read_handle("CreateSurface::surface")?;
+                let canvas_id = r.read_u32()?;
+                Ok(Command::CreateSurface { surface, canvas_id })
+            }
             tag::DESTROY_BUFFER_TAG => Ok(Command::DestroyBuffer {
                 buffer: r.read_handle("DestroyBuffer::buffer")?,
+            }),
+            tag::DESTROY_SURFACE_TAG => Ok(Command::DestroySurface {
+                surface: r.read_handle("DestroySurface::surface")?,
             }),
             tag::BEGIN_DEBUG_LABEL_TAG => Ok(Command::BeginDebugLabel {
                 label: r.read_string("BeginDebugLabel::label")?,

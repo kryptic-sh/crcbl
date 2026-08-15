@@ -149,6 +149,35 @@ fn an_empty_label_is_not_an_absent_one() {
     }
 }
 
+/// **The canvas key is a field of its own and not a second handle.** The surface
+/// pair is one method away from the buffer pair in the writer, so the mistake it
+/// invites is a body copied across with the trailing `u32` dropped or written
+/// where the handle goes. The numbers below are chosen so neither survives: the
+/// key differs from both halves of every handle here, so a transposition changes
+/// the decoded value rather than reproducing it.
+#[test]
+fn a_surface_carries_its_canvas_key_as_well_as_its_handle() {
+    let surface = handle(51, 52);
+    let canvas_id = 53;
+    let mut stream = StreamWriter::new();
+    stream.create_surface(surface, canvas_id);
+    stream.destroy_surface(handle(54, 55));
+
+    assert_eq!(
+        decode_stream(stream.bytes()),
+        Ok(vec![
+            Command::CreateSurface { surface, canvas_id },
+            Command::DestroySurface {
+                surface: handle(54, 55)
+            },
+        ])
+    );
+    assert!(
+        ![surface.index(), surface.generation()].contains(&canvas_id),
+        "the test would not notice the key written over a handle half otherwise"
+    );
+}
+
 /// The replayer's obligation seen from the decoder's side: the decode consults
 /// no table, so a destroy naming an id nothing created is a well-formed command
 /// rather than corruption. The replayer turns it into a no-op.
@@ -247,7 +276,7 @@ fn every_command_has_its_own_name() {
     // `every_command` holds three CreateBuffers and two each of
     // BeginRenderPass, BindGroup and RequestDevice, so the distinct-name count
     // is what the writer has methods for.
-    assert_eq!(names.len(), 10);
+    assert_eq!(names.len(), 12);
     assert!(names.iter().all(|name| !name.is_empty()));
 }
 

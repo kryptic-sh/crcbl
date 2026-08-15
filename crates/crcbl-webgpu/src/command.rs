@@ -43,6 +43,29 @@ pub enum Command {
         /// Where the memory lives.
         memory: MemoryLocation,
     },
+    /// [`Instance::create_surface`](crcbl_hal::Instance::create_surface), with
+    /// the handle the caller allocated for it.
+    ///
+    /// **Only the canvas key crosses, not a [`SurfaceTarget`](crcbl_core::SurfaceTarget).**
+    /// Four of that enum's six variants carry `NonNull` pointers to platform
+    /// objects, and a pointer must never be transmitted as an integer. So the
+    /// encoder takes the `u32` that `Web { canvas_id }` carries and the pointer
+    /// variants have nothing here to be encoded into at all.
+    ///
+    /// **`Offscreen` is the other browser-reachable variant and it is not this
+    /// command.** It has no canvas key, and a reserved id standing in for one
+    /// would be a magic number two decoders had to agree on. It gets its own
+    /// command when the parity gate needs to read frames back, because the
+    /// replayer's two jobs genuinely differ: this one configures a
+    /// `GPUCanvasContext`, that one rotates a ring of textures nothing presents.
+    CreateSurface {
+        /// Id the replayer stores the new object at.
+        surface: SurfaceHandle,
+        /// Registry key the shell's JS shim assigned the canvas — the whole of
+        /// [`SurfaceTarget::Web`](crcbl_core::SurfaceTarget::Web), and a number
+        /// rather than a name so no string crosses the boundary.
+        canvas_id: u32,
+    },
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
     ///
     /// A destroy naming an id whose slot holds nothing is a **no-op for the
@@ -50,6 +73,14 @@ pub enum Command {
     DestroyBuffer {
         /// Id to release.
         buffer: BufferHandle,
+    },
+    /// [`Instance::destroy_surface`](crcbl_hal::Instance::destroy_surface).
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroyBuffer`] is.
+    DestroySurface {
+        /// Id to release.
+        surface: SurfaceHandle,
     },
     /// [`begin_debug_label`](crcbl_hal::CommandEncoder::begin_debug_label).
     BeginDebugLabel {
@@ -152,7 +183,9 @@ impl Command {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::CreateBuffer { .. } => "CreateBuffer",
+            Self::CreateSurface { .. } => "CreateSurface",
             Self::DestroyBuffer { .. } => "DestroyBuffer",
+            Self::DestroySurface { .. } => "DestroySurface",
             Self::BeginDebugLabel { .. } => "BeginDebugLabel",
             Self::BeginRenderPass { .. } => "BeginRenderPass",
             Self::BindGraphicsPipeline { .. } => "BindGraphicsPipeline",

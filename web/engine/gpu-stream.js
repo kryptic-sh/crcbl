@@ -69,7 +69,9 @@ const MAX_ELEMENT_COUNT = 1 << 16;
 // ── Command tags ─────────────────────────────────────────────────────────────
 
 const CREATE_BUFFER_TAG = 0x00;
+const CREATE_SURFACE_TAG = 0x01;
 const DESTROY_BUFFER_TAG = 0x20;
+const DESTROY_SURFACE_TAG = 0x21;
 const BEGIN_DEBUG_LABEL_TAG = 0x40;
 const BEGIN_RENDER_PASS_TAG = 0x41;
 const BIND_GRAPHICS_PIPELINE_TAG = 0x42;
@@ -656,10 +658,24 @@ function decodeCommand(r) {
         usage: r.readFlags('BufferDesc::usage', BUFFER_USAGE),
         memory: r.readEnum('BufferDesc::memory', MEMORY_LOCATION),
       };
+    case CREATE_SURFACE_TAG:
+      // `canvasId` is a key into the shell's own canvas registry, not a handle
+      // and not a `GPUCanvasContext`: the shim assigned the number so that no
+      // string has to cross the boundary. A `u32`, so it stays a number.
+      return {
+        name: 'CreateSurface',
+        surface: r.readHandle('CreateSurface::surface'),
+        canvasId: r.readU32(),
+      };
     case DESTROY_BUFFER_TAG:
       return {
         name: 'DestroyBuffer',
         buffer: r.readHandle('DestroyBuffer::buffer'),
+      };
+    case DESTROY_SURFACE_TAG:
+      return {
+        name: 'DestroySurface',
+        surface: r.readHandle('DestroySurface::surface'),
       };
     case BEGIN_DEBUG_LABEL_TAG:
       return {

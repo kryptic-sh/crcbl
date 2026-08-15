@@ -31,9 +31,21 @@ Three things on the HAL seam look like they must cross and do not:
 - **`SurfaceTarget`.** Four of its six variants carry `NonNull` pointers to
   platform objects. In a browser only `Web { canvas_id: u32 }` and `Offscreen`
   are reachable, and `canvas_id` is already a registry key into the shell's
-  JS-side canvas table — chosen so no string crosses the boundary. **The encoder
-  rejects the four pointer variants with a hard error.** A pointer must never be
-  transmitted as a `u64`.
+  JS-side canvas table — chosen so no string crosses the boundary. A pointer
+  must never be transmitted as a `u64`, and the encoding is what enforces that:
+  `StreamWriter::create_surface` takes the `u32` rather than a `SurfaceTarget`,
+  so a pointer variant has nothing to be encoded into. **The refusal therefore
+  belongs to the `Instance` impl that unwraps the target**, not to the encoder —
+  an earlier draft of this document put it on the encoder, which by then had no
+  `SurfaceTarget` to refuse.
+
+  `Offscreen` is the second reachable variant and it is deliberately **not**
+  `CreateSurface`: it has no canvas key, and a reserved id standing in for one
+  would be a magic number both decoders had to agree on. It gets its own command
+  when the parity gate needs frames read back, because the replayer's two jobs
+  differ — one configures a `GPUCanvasContext`, the other rotates a ring of
+  textures nothing presents.
+
 - **Callbacks.** There are none. No method on `Instance`, `Device`,
   `PendingDevice` or `CommandEncoder` takes a closure, function pointer or trait
   object as a parameter, and the HAL has an object-safety regression test that
@@ -268,6 +280,14 @@ pre-allocated" has to be a valid stream op**, including for a handle whose
 creation will turn out to have failed. The replayer must therefore tolerate a
 destroy naming an id whose slot holds nothing, and treat it as a no-op rather
 than as stream corruption.
+
+That reasoning is drawn entirely from `Device::destroy_*` sites, and the rule it
+produces is wider than the sites that motivated it. `Instance::destroy_surface`
+was the first `destroy` to land that is not a `Device` method at all — its
+object is created before any of the `crcbl-render` code above runs — and it
+obeys the same rule for the same practical reason: a replayer that consults no
+table cannot tell a stale id from an unlucky one, so tolerating both is the only
+behaviour that needs no table.
 
 ## Error attribution
 

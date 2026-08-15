@@ -54,8 +54,17 @@ pub fn every_command() -> Vec<Command> {
             usage: BufferUsage::TRANSFER_SRC,
             memory: MemoryLocation::HostReadback,
         },
+        // The canvas key is the whole target, and it is `19` rather than `0` so
+        // a writer that dropped the field would not still compare equal.
+        Command::CreateSurface {
+            surface: handle(45, 46),
+            canvas_id: 19,
+        },
         Command::DestroyBuffer {
             buffer: handle(17, 18),
+        },
+        Command::DestroySurface {
+            surface: handle(47, 48),
         },
         Command::BeginDebugLabel {
             label: "gbuffer — ✱".into(),
@@ -195,7 +204,11 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
                 memory: *memory,
             },
         ),
+        Command::CreateSurface { surface, canvas_id } => {
+            stream.create_surface(*surface, *canvas_id)
+        }
         Command::DestroyBuffer { buffer } => stream.destroy_buffer(*buffer),
+        Command::DestroySurface { surface } => stream.destroy_surface(*surface),
         Command::BeginDebugLabel { label } => stream.begin_debug_label(label),
         Command::BeginRenderPass {
             label,

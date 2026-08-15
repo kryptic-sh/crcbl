@@ -220,8 +220,12 @@ pub const FAMILIES_END: u8 = FAMILY_INSTANCE_END;
 
 /// [`Command::CreateBuffer`](crate::Command::CreateBuffer).
 pub const CREATE_BUFFER_TAG: u8 = 0x00;
+/// [`Command::CreateSurface`](crate::Command::CreateSurface).
+pub const CREATE_SURFACE_TAG: u8 = 0x01;
 /// [`Command::DestroyBuffer`](crate::Command::DestroyBuffer).
 pub const DESTROY_BUFFER_TAG: u8 = 0x20;
+/// [`Command::DestroySurface`](crate::Command::DestroySurface).
+pub const DESTROY_SURFACE_TAG: u8 = 0x21;
 /// [`Command::BeginDebugLabel`](crate::Command::BeginDebugLabel).
 pub const BEGIN_DEBUG_LABEL_TAG: u8 = 0x40;
 /// [`Command::BeginRenderPass`](crate::Command::BeginRenderPass).
@@ -451,9 +455,11 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 10] = [
+    const TAGS: [(&str, u8, u8); 12] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
+        ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("DestroyBuffer", DESTROY_BUFFER_TAG, FAMILY_DESTROY),
+        ("DestroySurface", DESTROY_SURFACE_TAG, FAMILY_DESTROY),
         ("BeginDebugLabel", BEGIN_DEBUG_LABEL_TAG, FAMILY_ENCODER),
         ("BeginRenderPass", BEGIN_RENDER_PASS_TAG, FAMILY_ENCODER),
         (
@@ -533,8 +539,9 @@ mod tests {
 
     /// The ranges must tile without overlapping, and each must be big enough for
     /// the methods its family will eventually carry. The counts below are read
-    /// off `crcbl-hal` and are the reason the families are not nibbles: `Device`
-    /// declares seventeen `create_*` methods, which a nibble cannot hold.
+    /// off `crcbl-hal` and are the reason the families are not nibbles:
+    /// `Device`'s `create_*` methods alone outnumber what a nibble holds, and
+    /// `Instance`'s `create_surface` lands in the same family on top of them.
     #[test]
     fn the_family_ranges_tile_and_hold_what_the_hal_will_put_in_them() {
         let tile = |families: &[(u8, u8)], end_of_all: u8| {
@@ -554,10 +561,10 @@ mod tests {
 
         let room = |first: u8, end: u8| usize::from(end - first);
         assert!(
-            room(FAMILY_CREATE, FAMILY_CREATE_END) >= 17,
+            room(FAMILY_CREATE, FAMILY_CREATE_END) >= 18,
             "create_* methods"
         );
-        assert!(room(FAMILY_DESTROY, FAMILY_DESTROY_END) >= 16, "destroy_*");
+        assert!(room(FAMILY_DESTROY, FAMILY_DESTROY_END) >= 17, "destroy_*");
         assert!(
             room(FAMILY_ENCODER, FAMILY_ENCODER_END) >= 16,
             "encoder state"

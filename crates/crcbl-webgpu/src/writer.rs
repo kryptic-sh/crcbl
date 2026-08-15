@@ -5,6 +5,7 @@ use core::ops::Range;
 use crcbl_hal::{
     BindGroupHandle, BufferDesc, BufferHandle, ClearValue, ColorAttachment, DepthStencilAttachment,
     DeviceDesc, GraphicsPipelineHandle, PipelineLayoutHandle, Rect2d, RenderPassDesc, ShaderStages,
+    SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -162,12 +163,40 @@ impl StreamWriter {
         sequence
     }
 
+    /// [`Instance::create_surface`](crcbl_hal::Instance::create_surface), with
+    /// the handle the caller allocated for it.
+    ///
+    /// Identity is positional here for [`create_buffer`](Self::create_buffer)'s
+    /// reason, and the surface is created against the canvas `canvas_id` names
+    /// in the shell's JS-side registry.
+    ///
+    /// **The `u32` is the whole target.** A
+    /// [`SurfaceTarget`](crcbl_core::SurfaceTarget) is not taken and cannot be:
+    /// four of its variants carry `NonNull` pointers to platform objects, and a
+    /// pointer transmitted as an integer is the one thing this seam refuses
+    /// outright. Only `Web { canvas_id }` is reachable in a browser, so the
+    /// caller unwraps it and the pointer variants stop at the HAL boundary
+    /// rather than here.
+    pub fn create_surface(&mut self, surface: SurfaceHandle, canvas_id: u32) -> u64 {
+        let sequence = self.push_tag(tag::CREATE_SURFACE_TAG);
+        self.bytes.put_handle(surface);
+        self.bytes.put_u32(canvas_id);
+        sequence
+    }
+
     // ── Destruction ──────────────────────────────────────────────────────────
 
     /// [`Device::destroy_buffer`](crcbl_hal::Device::destroy_buffer).
     pub fn destroy_buffer(&mut self, buffer: BufferHandle) -> u64 {
         let sequence = self.push_tag(tag::DESTROY_BUFFER_TAG);
         self.bytes.put_handle(buffer);
+        sequence
+    }
+
+    /// [`Instance::destroy_surface`](crcbl_hal::Instance::destroy_surface).
+    pub fn destroy_surface(&mut self, surface: SurfaceHandle) -> u64 {
+        let sequence = self.push_tag(tag::DESTROY_SURFACE_TAG);
+        self.bytes.put_handle(surface);
         sequence
     }
 
