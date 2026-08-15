@@ -1604,34 +1604,41 @@ be present in some of them.** Two surveys of `apps/*` produced the slices below.
    been touched, which is the precondition the backlog sets for the
    `WorldRect`/`SheetUv` newtypes.
 
-2. **`crcbl::impl_game_gpu!`** — the `PolledGpu`/`GameGpu`/`GpuSurface` forward
-   blocks, 62 lines each and byte-identical across breakout, flappy, asteroids
-   and horde once the game name is normalised; hud and lumen differ only by a
-   doc paragraph and two threaded arguments. Pure `Self::method(self)`
-   delegation with no per-sample content. `engine.rs`'s own doc already concedes
-   the shape: "the trait is what lets the loop above call them". `web_exports!`
-   is the precedent, and a mistake cannot ship silently.
+2. ~~**`crcbl::impl_game_gpu!`**~~ — **shipped**, as `impl_game_gpu!` plus a
+   separate `impl_polled_gpu!`. `GameGpu` and `GpuSurface` were byte-identical
+   in all six samples and `PolledGpu` in five; lumen threads its own defaults
+   into `request_open`, so it takes the first and writes the second by hand.
 
-3. **The `desc`/`PendingGpu`/`open`/`request_open` block** — `PendingGpu` and
-   its `poll` are identical across five samples once the game name is
-   normalised, and `open`/`request_open` with them.
+   **The survey's claim that "a mistake cannot ship silently" was wrong, and
+   finding out why is most of what this slice cost.** Each forward is
+   `Self::method(self)`, which resolves to the _trait_ method when the bundle
+   has no inherent one — infinite recursion rather than a compile error.
+   Hand-written, rustc's `unconditional_recursion` catches that and this
+   workspace denies warnings; but **rustc suppresses its lints inside an
+   external macro's expansion**, so the move would have removed the only thing
+   catching it. Measured by deleting an inherent `counters`: it warns before the
+   move and compiles clean after. The expansion therefore opens with a `const _`
+   block coercing each inherent method to a function pointer in a scope where
+   neither trait is imported, so path syntax cannot reach the trait method and a
+   missing one is `E0599`. `docs/backlog.md` carries the general hazard, which
+   applies to any future forwarding macro.
 
-   **Re-verified 2026-08-15, and the safety half of this entry is now spent.**
-   It was ranked here because the hud bug came from `desc` and only four of six
-   samples tested for it. All six do now: lumen was the gap and was the sample
-   that most needed one, being the only one that _deliberately_ overrides
-   `optional_features` — withholding a flag is how it forces a lesser path. Its
-   check is containment rather than equality for that reason.
+3. ~~**The `desc`/`PendingGpu`/`open`/`request_open` block**~~ — **shipped** as
+   `impl_polled_bundle!`, and it is the entry that changed shape most between
+   being written and being done.
 
-   So what is left is DRY on ~30 lines of mechanism, not a bug class. **Weigh
-   before starting:** a macro that generated `desc` would make the hud shape
-   unrepresentable for the five and would thereby make their five guard tests
-   vacuous — a check that cannot fail is not a check, so they would have to be
-   deleted and replaced by something asserting the macro, which is harder to
-   write than what it replaces. Lumen cannot take such a macro at all. The
-   cheaper shape is to generate `PendingGpu`/`poll`/`open`/`request_open` and
-   leave `desc` alone, which keeps the tests meaningful and still deletes most
-   of the copies.
+   It was ranked third because the hud bug came from `desc` and only four of six
+   samples tested for it. That count was already stale, and the real gap was
+   **lumen** — no guard at all, in the sample that most needs one, since it is
+   the only one that _deliberately_ overrides `optional_features`. That test
+   landed first, as containment rather than equality, because an unforced run
+   asks for `TASK_SHADER` on top.
+
+   With all six guarded, the safety argument was spent and only the DRY one
+   remained, so the macro deliberately does **not** generate `desc`: doing so
+   would have made the hud shape unrepresentable for five samples and thereby
+   made their five guard tests vacuous, and lumen could not have used a
+   generated one at all. `desc` is passed in by name; all five tests still run.
 
 4. **`Record::open_for`** (`crcbl-store`) — `platform_backing` is four copies of
    one rule about the platform, not about any game. Verified with `cmp`:
