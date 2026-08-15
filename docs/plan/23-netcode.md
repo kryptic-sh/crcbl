@@ -20,6 +20,20 @@ network transport at all.
 encrypted — no plaintext mode exists on the wire, no "disable crypto" flag.
 InMemory is the sole plain path (it never touches a network).
 
+**Status (2026-08-15): the rule binds P13 and nothing has been built against it
+yet, because there is no network transport.** `Transport` is implemented by
+`InMemoryTransport` and by `crcbl_store`'s `FileTransport` — a process-local
+pair and a replay file, neither of which touches a socket. What _has_ shipped is
+`crcbl_net::auth`: per-session HMAC-SHA256 keyed with the handshake's resume
+token, truncated to 128 bits, plus a replay window. Its own header says it
+"authenticates _and_ orders; it does not encrypt". That is not a breach of the
+rule above — the rule is about network transports and there are none — but it
+does mean **no confidentiality exists anywhere in the tree today**, and
+`27-auth.md`'s opening premise, which describes itself as upgrading this
+document's encryption, is written against a baseline that has not been built.
+The key agreement and the AEAD arrive with the UDP layer, and that is where
+taking on crypto dependencies becomes a real question.
+
 Rejected: **TCP** (head-of-line blocking poisons the snapshot channel); **QUIC
 from scratch** (TLS 1.3 from scratch = the wrong own-all-bugs; if a native QUIC
 need ever materializes, `quinn` behind the seam is the sanctioned exception,
