@@ -1644,9 +1644,26 @@ be present in some of them.** Two surveys of `apps/*` produced the slices below.
    one rule about the platform, not about any game. Verified with `cmp`:
    asteroids and flappy are identical, breakout differs _only_ in a log prefix,
    horde only by its own truncation wrapper. The storage seam is otherwise
-   already closed and closed well — no sample touches `std::fs` at all. The
-   browser arm needs the sample to pass its OPFS handle in rather than the
-   engine reaching for it.
+   already closed and closed well — no sample touches `std::fs` at all.
+
+   **Shape found 2026-08-15 (not started).** It is two halves, and the second is
+   the one with a decision in it.
+
+   _The accessor._ `opfs_store` and `asset_source` are the same two lines over
+   the `STORAGE` cell in four samples. `web_exports!` already creates that cell
+   unconditionally, so emitting the pair costs nothing; the macro's doc argues
+   against it — "a sample with no save file wants neither" — and that argument
+   is weaker now that the cell exists either way.
+
+   _The backing._ `Backing::config` is native-only and `Backing::Browser` is
+   wasm-only, so bridging them is what each sample's `platform_backing` does. A
+   `Backing::platform(app, browser)` with **one** signature on both platforms is
+   possible — `StorageSource` is not `cfg`-gated — but each arm then ignores one
+   of its two arguments. That is a real ignored-parameter smell, and it is the
+   thing to weigh: the alternative is a different signature per platform, which
+   pushes the `cfg` back out to every call site and is worse. Whichever way it
+   goes, this touches the browser storage path, so `web/run-browser-e2e.sh` is
+   part of the change and not an afterthought.
 
 5. **`open_shell_and_window`** (`crcbl::engine`) — `start`/`with_shell`/
    `open_the_window`, ~361 lines across six samples plus a seventh fused copy in
