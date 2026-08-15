@@ -42,6 +42,20 @@ on the hot path.
 - Versioning: header carries format + per-system versions; serde defaults absorb
   additive change; a migration seam (`fn migrate(old_ver, bytes)`) exists from
   day one but stays empty in MVP.
+
+  **Neither half of that is in the tree yet.** `crates/crcbl-store/src/save.rs`
+  has no `migrate` and nothing else in the crate does either — the seam is owed,
+  not empty. And the container is narrower than the bullet above it describes:
+  the header is magic `CRCBLSVE`, a `format_version`, the server tick, playtime
+  and a sector count, followed by the sector entries and a real SHA-256 of
+  everything before it. `SaveHeader` accordingly carries only `tick` and
+  `playtime_secs`. No engine version, no scene ref or hash, no per-system
+  versions, no thumbnail. What the format _does_ have is the version discipline
+  those depend on — `SAVE_FORMAT_VERSION` was already bumped once, when the
+  checksum field turned out to be a `DefaultHasher` digest rather than the
+  SHA-256 it was documented as, which is exactly the situation a migration seam
+  is for.
+
 - Atomic writes always: write temp + fsync + rename. Corrupted-save protection
   is not optional. Keep last N autosaves (ring).
 
@@ -127,3 +141,11 @@ header (versions, scene ref+hash, tick, playtime)
 Single-sector games (every MVP sample) produce exactly the original format, so
 nothing gets more complex early — but the container is correct from P2 instead
 of being restructured after saves ship.
+
+> **The sector half landed; the rest of the header did not, 2026-08-15.**
+> `save.rs`'s container is a sector count and a `SectorEntry` per sector, each
+> keyed by a `[i64; 3]` sector id and holding the same snapshot bytes
+> replication uses — so the shape this correction insisted on is the shape that
+> shipped. What the header still lacks is the versions, the scene ref and its
+> hash; on-rails elements and per-system extension blocks have no place in the
+> format yet either. That is the remaining gap between this block and the tree.

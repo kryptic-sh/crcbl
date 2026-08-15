@@ -167,7 +167,11 @@ by the determinism rule.
   regressions visible as a red bar, not a vibe).
 - Ring overflow counters + mailbox staleness (consumer using an old state
   because producer is behind) surfaced in the inspector.
-- `crcbl sim --threads N` — run headless sim at any worker count.
+- A headless sim runnable at any worker count. **There is no `crcbl sim`
+  subcommand** — `crcbl-cli` does not parse the word, and the determinism
+  harness is `apps/sim`, whose flags are `--ticks`, `--tick-rate` and `--seed`.
+  A worker count is what it would gain to make the killer test below runnable;
+  nothing exposes one yet.
 
 ## Testing (topic 12)
 
@@ -183,20 +187,29 @@ by the determinism rule.
 
 ## Delivery
 
-| Slice                                                                                                                                                  | Phase                                                                   |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------- |
-| **Seams reserved**: ECS access declarations, mailbox between sim/client (exists as interpolation buffer), audio ring (exists), `tick(dt)` runner shape | P2 (design constraint, near-zero code)                                  |
-| **Tick-id protocol + client tick alignment** (lead + rate-based drift correction) — cheap now, misery to retrofit                                      | P2 (with the replication protocol)                                      |
-| Input thread + stacked `InputTickState` (accumulate-then-swap, last-N ring)                                                                            | P2 (with the action layer; single-thread runner inlines it on wasm)     |
-| `crcbl-jobs`: pool, `par_for` (both modes), mailbox/ring primitives + property tests                                                                   | P8 (horde is the forcing function — 10k bodies + 10k instances want it) |
-| ECS parallel schedule (startup DAG, debug access asserts)                                                                                              | P8                                                                      |
-| Pipeline-thread formalization (named threads, timeline profiler view)                                                                                  | P8                                                                      |
-| Physics/anim/VFX `par_for` adoption                                                                                                                    | P8 → wave 1 as each system scales                                       |
-| wasm-threads pool re-enable (SharedArrayBuffer)                                                                                                        | post-MVP                                                                |
+| Slice                                                                                                                                                  | Phase                                                                                   |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| **Seams reserved**: ECS access declarations, mailbox between sim/client (exists as interpolation buffer), audio ring (exists), `tick(dt)` runner shape | P2 (design constraint, near-zero code)                                                  |
+| **Tick-id protocol + client tick alignment** (lead + rate-based drift correction) — cheap now, misery to retrofit                                      | P2 (with the replication protocol)                                                      |
+| Input thread + stacked `InputTickState` (accumulate-then-swap, last-N ring)                                                                            | P2 (with the action layer; single-thread runner inlines it on wasm)                     |
+| `crcbl-jobs`: pool, `par_for` (both modes), mailbox/ring primitives + property tests                                                                   | **Built** at P5B — `spawn`, `pool`, `deque`, `mailbox`, `ring`; adopted by `apps/horde` |
+| ECS parallel schedule (startup DAG, debug access asserts)                                                                                              | P8                                                                                      |
+| Pipeline-thread formalization (named threads, timeline profiler view)                                                                                  | P8                                                                                      |
+| Physics/anim/VFX `par_for` adoption                                                                                                                    | P8 → wave 1 as each system scales                                                       |
+| wasm-threads pool re-enable (SharedArrayBuffer)                                                                                                        | post-MVP                                                                                |
 
 The P2 line matters most: it costs almost nothing and prevents the classic
-retrofit disaster. P8 is where threads actually switch on, with horde's numbers
-as before/after proof.
+retrofit disaster. P5B, not P8, is where threads actually switched on — the
+2026-08-03 correction moved it and the crate shipped there — with horde's
+numbers as before/after proof.
+
+**The Web Worker spawner is the one piece of this that is genuinely still
+missing.** `crcbl_jobs::spawn` is `#[cfg]`-split: native gets a real thread
+spawner, and `wasm32` gets `Inline`, which runs every task on the calling
+thread. That is the honest degradation this document's wasm section asks for
+rather than a stub reporting success — but it does mean a browser build has no
+parallelism at all today, and `default_spawner` is where a worker backend would
+arrive.
 
 ## Risks
 
@@ -361,7 +374,8 @@ gate is a gate.
   **The table is wrong as written.**
 - **The delivery table still says P8.** `crcbl-jobs` moved to **P5B** by the
   2026-08-03 correction at the top of this file, and the samples adopt it there.
-  The table below that correction was never updated.
+  The table below that correction was never updated. _(Fixed 2026-08-15; the
+  crate is built and the row says so.)_
 - **loom and TSAN are specified; Miri is what runs.** The testing section asks
   for loom-style exhaustive tests on the primitives and a TSAN job in scheduled
   CI. Neither exists. What exists is a **weekly**

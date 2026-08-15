@@ -50,9 +50,15 @@ clear.
   cleanly is reported **clear** and the renderer selects a lesser path; it is
   never emulated behind the seam and never resolved with backend-specific
   renderer code. See [39-capabilities.md](39-capabilities.md).
-- **CI**: macOS + Windows runners build + run graph-compile tests; on-hardware
-  smoke (render one frame, hash the readback) on self-hosted/manual runners —
-  compile-verified-only backends are a known trap (gpur lesson).
+- **CI**: **built, and further than this bullet asked.** No self-hosted or
+  manual runner was needed. `ci.yml`'s `mtl e2e` job runs on GitHub's
+  `macos-latest` and `dx12 e2e` on `windows-latest`, and neither is
+  graph-compile-only: each runs its backend's HAL suite and then draws a frame
+  through `ForwardRenderer` — `CRCBL_GPU: mtl` against the runner's GPU,
+  `CRCBL_GPU: dx12` pinned to WARP — comparing the result against the golden and
+  uploading the diff on failure. Metal's API validation layer and D3D12's debug
+  layer are both on and both gate. Compile-verified-only backends are a known
+  trap (gpur lesson), which is why neither of these is one.
 
 ## crcbl-mtl (Metal, via `objc2-metal`)
 
@@ -96,14 +102,16 @@ GPU-based validation) integration into the same log path as Vulkan validation.
 
 1. ~~MoltenVK spike + decision gate.~~ Cancelled; see the 2026-08-05 correction.
 2. Slang → MSL/DXIL build outputs + shader hash plumbing.
-3. `crcbl-mtl`: bring-up ladder (clear → triangle → sandbox → editor), then
-   tier-A features, then perf pass vs Vulkan baseline.
+3. `crcbl-mtl`: bring-up ladder (clear → triangle → sandbox → editor), then the
+   features the device reports and the renderer selects on — there are no tiers,
+   per the correction at the top — then perf pass vs Vulkan baseline.
 4. `crcbl-dx12`: same ladder.
 5. ~~Windowing: crcbl-shell Win32 + AppKit backends land here (topic 15).~~
    **Moved to P5C** (ROADMAP's 2026-08-04 correction) and shipped. What still
    waits for this phase is the sample-level pass — pressing F11 at a running
    game needs something to draw with.
-6. CI matrix + on-hardware smoke runs.
+6. ~~CI matrix + on-hardware smoke runs.~~ **Built** — the `mtl e2e` and
+   `dx12 e2e` jobs in `.github/workflows/ci.yml`; see the CI bullet above.
 7. Perf validation: stage 3 exit-criteria scene within ~15% of the Vulkan
    numbers on comparable hardware (flag, investigate, document if not).
 
@@ -173,6 +181,14 @@ is the only thing that runs there, at Tier B. Nothing about this phase's ladder
 changes, but its first two rungs — clear, then swapchain — are now the ones
 holding up the platform.
 
+> **Those two rungs are behind us, 2026-08-15.** `crcbl-mtl` presents:
+> `swapchain.rs` owns both surface targets — a `CAMetalLayer` whose images are
+> `CAMetalDrawable`s borrowed one at a time, and an offscreen ring with no
+> window — and `present.rs` answers a present wait from `addPresentedHandler:`,
+> which is the shape `Features::PRESENT_FEEDBACK` already named. macOS therefore
+> has a native GPU path, and `ci.yml`'s `mtl e2e` job draws a frame through
+> `ForwardRenderer` on it every run.
+
 ### The technical question the spike would have answered
 
 Worth keeping, because native Metal has to answer the same one. `crcbl-vk`
@@ -183,3 +199,13 @@ off `VkPhysicalDeviceVulkan12Features`. Metal has no native indirect-count draw
 indirect-command-buffer work in this phase's tier-A step is what moves it.
 MoltenVK would have met the same wall from the other side; the mapping table
 above already names ICBs as the closest fit.
+
+> **The vocabulary this paragraph uses is gone, 2026-08-15.** `TIER_A`, `TIER_B`
+> and `RendererTier` name nothing in the workspace — the only occurrence of the
+> string is a doc comment in `crcbl-shaders` recording the decision that retired
+> it. `crcbl-vk` no longer requires a bundle: its `adapter.rs` reports each flag
+> it finds, `DRAW_INDIRECT_COUNT` and `DESCRIPTOR_INDEXING` among them, and
+> `DeviceDesc::for_adapter` requires only compute and a timeline semaphore. The
+> wall itself is unchanged and is the part worth keeping: Metal still has no
+> indirect-count draw, so the flag is reported clear and a selector picks
+> another path. See [39-capabilities.md](39-capabilities.md).

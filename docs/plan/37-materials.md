@@ -1,23 +1,31 @@
 # Topic 37 — Material Authoring
 
-Stage 3 gave materials a runtime shape (a table row + bindless texture indices)
-and stage 6 fills it from glTF. What's missing is the **authoring layer**: how a
-material is defined, tuned, validated, and hot-reloaded as an asset — and how a
-_render_ material relates to the _surface_ properties the rest of the engine
-already reads.
+Stage 3 gave materials a runtime shape (a table row plus a texture reference —
+see the correction under "Templates and instances" for what that reference
+turned out to be) and stage 6 fills it from glTF. What's missing is the
+**authoring layer**: how a material is defined, tuned, validated, and
+hot-reloaded as an asset — and how a _render_ material would relate to the
+_surface_ properties the rest of the engine is planned to read, which nothing in
+the tree carries yet.
 
 ## Two materials, one link (the mess this prevents)
 
-The engine has grown two independent notions with the same name:
+The engine will grow two independent notions with the same name. **One of them
+exists today and the other does not**: the render material is
+`crcbl_shaders::mesh::GpuMaterial` and `crcbl_render::material_table`, while
+there is no surface material anywhere — no such type, and `crcbl-phys`'s
+`Collider` and its components carry no material field of any kind. So the row
+below is a forward reference, exactly as topics 13, 24, 28, 33 and 36 treat it,
+and none of those consumers reads one yet.
 
 | Kind                 | Lives on | Consumers                                                                                                            |
 | -------------------- | -------- | -------------------------------------------------------------------------------------------------------------------- |
 | **Render material**  | mesh     | shading, textures, transparency, decal receipt (33)                                                                  |
 | **Surface material** | collider | audio occlusion + footsteps (13), nav flags (24), ballistics (28), friction/restitution (36), decal/impact sets (33) |
 
-They're genuinely different (visual vs physical) but almost always correspond —
-a concrete wall should _look_ like concrete and _sound, stop bullets, and skid_
-like concrete. So:
+They would be genuinely different (visual vs physical) but almost always
+correspond — a concrete wall should _look_ like concrete and _sound, stop
+bullets, and skid_ like concrete. So:
 
 - **Linked, not merged**: a render material asset declares an optional
   `surface: "concrete_rough"` reference; the surface material remains its own
@@ -43,8 +51,21 @@ The Unreal material/material-instance split, minus the graph:
   parenting — child overrides a subset). This is what artists and designers
   author, and it **hot-reloads** through the stage 6 watcher.
 - Runtime: an instance resolves to one **material table row** (parameters
-  packed) + bindless texture indices — exactly the stage 3 layout, unchanged.
-  Authoring changed; the GPU path did not.
+  packed) plus its texture reference. Authoring changes; the GPU path does not.
+
+  **That reference is not a bindless index, and the difference matters here.**
+  `crates/crcbl-render/src/material_table.rs` says so directly:
+  `GpuMaterial::base_color_texture` is a **layer of the one `Texture2DArray`
+  `mesh.slang` binds** — an `ArrayPages` page — and deliberately not a
+  `BindingModel::Bindless` descriptor slot. A layer index needs nothing of a
+  device, whereas a descriptor array needs `DESCRIPTOR_INDEXING`, which
+  `crcbl-mtl` withdraws; so one column serves every backend and the table never
+  has to know which binding model the device it is bound on selected. An
+  authoring layer therefore resolves a texture reference to a **page**, and what
+  bounds it is the page's layer count — checked by
+  `ForwardRenderer::with_scene`, because the table itself stores an index and
+  cannot tell a valid layer from an out-of-range one.
+
 - `standard_pbr`'s first three parameters already exist in that row and are
   already shaded: `crcbl_shaders::mesh::GpuMaterial` carries `base_color`,
   `metallic` and `roughness`, and `mesh.slang` runs one GGX lobe on them — see

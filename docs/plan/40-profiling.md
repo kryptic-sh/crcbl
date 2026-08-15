@@ -28,16 +28,29 @@ afterwards that it worked.
   `Features::TIMESTAMP_QUERY` gets no timers and an empty report, which is what
   browsers actually do.
 - **`Features::DEBUG_MARKERS`** for capture tools.
-- **`crcbl-cli`** with `new` and `screenshot`, `--json` output, and a report
-  module.
+- **`crcbl-cli`** with the subcommands its `args.rs` parses — `new`, `run`,
+  `build`, `screenshot`, `replay`, `crpix`, `lod` — `--json` output, and a
+  report module.
 
 ## What is missing
 
-The GPU side is genuinely good and the rest is not there at all:
+Written when the GPU side was genuinely good and the rest was not there at all.
+Three of the eight have since been closed and say so below; the rest still
+stand.
 
-1. **No CPU-side spans.** Nothing measures the tick, the ECS schedule, physics,
-   asset upload, culling's CPU half or the shell's frame. The GPU report says
-   which pass cost what; nothing says whether the frame was GPU-bound at all.
+1. ~~**No CPU-side spans.** Nothing measures the tick, the ECS schedule,
+   physics, asset upload, culling's CPU half or the shell's frame. The GPU
+   report says which pass cost what; nothing says whether the frame was
+   GPU-bound at all.~~ **Built.** `crcbl_core::trace` is the mechanism — `span`,
+   `counter`, `drain` and `Snapshot`, always compiled and gated at runtime by
+   `CRCBL_TRACE`, exactly as the decision below prescribes — and `crcbl::perf`
+   is the vocabulary: the loop's phases as span names, opened by `Loop::frame`,
+   with `frame_cpu_time` subtracting the spans in which the loop was
+   deliberately blocked. `Loop::record_frame_cost` hands the result to
+   `crcbl_ui::budget` beside the GPU total, which is the frame CPU-vs-GPU row
+   below. The ECS schedule, physics and asset upload are still unspanned,
+   because they are not phases the engine's loop has — they live inside a game's
+   `tick`.
 2. **No benchmark harness.** `apps/horde` has ad-hoc flags (`--wall-clock`,
    `--fps 0`, `--tick-hz 1`, `--frames`, `--prefill`) and the numbers in
    [sample/03-horde.md](sample/03-horde.md) were produced by hand. There is no
@@ -51,10 +64,16 @@ The GPU side is genuinely good and the rest is not there at all:
 6. **No job-system instrumentation.** `crcbl-jobs` has a work-stealing deque and
    exposes no worker utilisation, steal counts or queue depth, so the phase that
    adopts it cannot show it helped.
-7. **Counters are piecemeal.** `SceneStats`, `visible_count` and each sample's
+7. ~~**Counters are piecemeal.** `SceneStats`, `visible_count` and each sample's
    own rows exist; there is no one place a frame's draw count, instance count,
-   cluster count or triangle count is reported.
-8. **The culling stats never leave the GPU.** An earlier draft of this file
+   cluster count or triangle count is reported.~~ **Built** as
+   `crcbl_render::counters`: `FrameCounters`, produced once by whichever
+   renderer wrote the draw and summed with `plus` the way the passes' timers
+   are. A count the CPU genuinely cannot know — an indirect pass's instances and
+   triangles — is `None` and prints as `indirect`, rather than a zero that reads
+   as "nothing was drawn". `crcbl::perf::sample_counters` puts the same numbers
+   on the trace beside the spans.
+8. ~~**The culling stats never leave the GPU.** An earlier draft of this file
    listed "the culling-stats readback on a delayed ring" under what already
    exists. It does not: `DrawGen::visible_count` is a `DeviceLocal` buffer with
    `TRANSFER_SRC`, and `crcbl-hal` has the poll-shaped
@@ -66,7 +85,12 @@ The GPU side is genuinely good and the rest is not there at all:
    `indirect` rather than a number wherever a `ForwardRenderer` is in the frame.
    Building it is its own slice: a `HostReadback` buffer per frame in flight, a
    copy the graph schedules rather than the hand-written barriers
-   `screenshot.rs` uses, and four-backend verification.
+   `screenshot.rs` uses, and four-backend verification.~~ **Built** as
+   `crcbl_render::cull_stats`: a `CullStatsRing` of host-readable slots, filled
+   by a copy pass the graph schedules and read a full turn of the ring later
+   through `request_readback`/`poll_readback`, so the latency is again the
+   synchronisation — no fence, no `wait_idle`. `latest()` is the consumer, via
+   `ForwardRenderer::counters`.
 
 ## Decisions (taken 2026-08-13, so they are not re-argued)
 
@@ -143,6 +167,12 @@ serialiser and a wire format big enough to want its own compile unit, moving it
 is a re-export away — which is not true of the dependency edge, and the
 dependency edge is the part that has to be right now.
 
+> **Built as specified, 2026-08-15.** The module is `crcbl_core::trace`, beside
+> `time` and `log`, and there is no `crcbl-trace` crate. The gate is runtime,
+> read from `CRCBL_TRACE` by `init_from_env` and off by default; there is no
+> Cargo feature, and the `--cfg crcbl_trace_off` switch is still unbuilt, which
+> is what the decision above asks for until there is a shipping build to serve.
+
 ## `crcbl bench`
 
 A CLI subcommand beside `screenshot`, headless, one scenario per invocation:
@@ -199,12 +229,12 @@ the wrong row.
 
 ## Delivery
 
-| Slice                                                                            | Phase                                                     |
-| -------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| CPU spans + counters + the always-on/runtime-gate decision; frame CPU vs GPU row | P7 (the GPU half already exists and is unmatched)         |
-| `crcbl bench` with fixed scenarios, warm-up, percentiles, JSON output            | P8 (the job system is the first thing that needs proving) |
-| Trace export (Chrome Trace JSON) + job-system tracks                             | P8                                                        |
-| Baseline storage + `--compare` + thresholds                                      | P8                                                        |
-| Memory/occupancy accounting and its rows                                         | P9 (assets and pools are what make it interesting)        |
-| The rest of the debug panel's perf rows; freeze toggle                           | P10 (with the UI slice that owns the panel)               |
-| Tracy or another external profiler, if wanted                                    | later, on demonstrated need and a dependency decision     |
+| Slice                                                                            | Phase                                                                                                   |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| CPU spans + counters + the always-on/runtime-gate decision; frame CPU vs GPU row | **Built** — `crcbl_core::trace`, `crcbl::perf`, `crcbl_render::counters` and `crcbl_render::cull_stats` |
+| `crcbl bench` with fixed scenarios, warm-up, percentiles, JSON output            | P8 (the job system is the first thing that needs proving)                                               |
+| Trace export (Chrome Trace JSON) + job-system tracks                             | P8                                                                                                      |
+| Baseline storage + `--compare` + thresholds                                      | P8                                                                                                      |
+| Memory/occupancy accounting and its rows                                         | P9 (assets and pools are what make it interesting)                                                      |
+| The rest of the debug panel's perf rows; freeze toggle                           | P10 (with the UI slice that owns the panel)                                                             |
+| Tracy or another external profiler, if wanted                                    | later, on demonstrated need and a dependency decision                                                   |

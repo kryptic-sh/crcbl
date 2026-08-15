@@ -4,8 +4,9 @@ The authenticated root that upgrades topic 23's encryption from "private against
 snooping" to "you know who you're talking to" — plus player identity, session
 tokens, and the ranked-integrity chain. Engine owns the **mechanisms and the
 token interface**; account systems stay backend territory (the consciously-out
-line holds — but the interface is specified here, and a reference mint ships as
-a dev tool).
+line holds — but the interface is specified here, and a reference mint is
+specified as a dev tool, though it is not built; see that section and the LAN
+correction).
 
 ## Trust tiers (a server runs exactly one)
 
@@ -80,12 +81,37 @@ hash — audited RustCrypto crates behind the existing seam; the _protocols_
 property-tested. No TLS stack in the engine (browsers bring their own; native
 uses the token/PSK constructions).
 
+**None of that inventory has been taken on yet, and what shipped instead is
+narrower.** `crates/crcbl-net/Cargo.toml` depends on `crcbl-core`,
+`crcbl-shaders` and `thiserror` — no RustCrypto crate, no signature scheme, no
+key agreement, no AEAD. `crates/crcbl-net/src/auth.rs` is what exists:
+per-session **message authentication**, keying HMAC-SHA256 with the 32-byte
+`ResumeToken` the handshake already exchanges, transmitting the MAC truncated
+beside a replay counter, and rejecting a replayed counter through a sliding
+`ReplayWindow`. The SHA-256 under it is the workspace's own, which is why the
+only dependency added was `crcbl-shaders`.
+
+**It authenticates and orders; it does not encrypt**, and its own header says so
+in as many words. Every payload — snapshots, inputs, acks — stays readable on
+the wire. So the opening sentence of this document is written against a topic 23
+that does not exist yet: there is no "private against snooping" baseline for
+tokens to upgrade, and confidentiality is a separate decision nobody has taken.
+Adding it is where the AEAD and the key agreement above arrive, and that is the
+point at which taking on the RustCrypto dependencies becomes a real question
+rather than a plan.
+
 ## Reference mint (`crcbl-mint`, dev tool not product)
 
-A minimal token-mint service ships in-repo: file-backed identities, mint +
-server-registry endpoints — enough to run tier 3 end-to-end in dev/CI and for
-small communities, and it _is_ the executable spec of the backend interface (a
-real backend reimplements its two endpoints). Explicitly not: accounts UI,
+**Nothing ships. This section describes a crate that does not exist**, and the
+LAN correction below is the reason: tier 3 has no deployment, so the mint has no
+consumer and is not scheduled. The design is kept on paper, which is what the
+correction says to do with it — so read the paragraph below as the specification
+it would be built from, not as something in the tree.
+
+_If built:_ a minimal token-mint service in-repo — file-backed identities,
+mint + server-registry endpoints — enough to run tier 3 end-to-end in dev/CI and
+for small communities, and it _is_ the executable spec of the backend interface
+(a real backend reimplements its two endpoints). Explicitly not: accounts UI,
 OAuth, scaling — that's the backend project.
 
 ## Testing (topic 12)

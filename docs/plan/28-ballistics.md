@@ -35,8 +35,12 @@ Round(
 
 ## Material model (the collider property block grows again)
 
-Colliders already carry surface properties (acoustic — 13; nav flags — 24).
-Ballistic fields join them, preset-based like acoustic materials:
+Colliders are **planned** to carry surface properties (acoustic — 13; nav flags
+— 24), and today they carry none: there is no surface-material type in the
+workspace and `crcbl-phys`'s `Collider` and its components have no material
+field. [37-materials.md](37-materials.md) is where that block is specified and
+it is a forward reference there too. Ballistic fields join it when it arrives,
+preset-based like acoustic materials:
 
 ```ron
 BallisticMaterial(

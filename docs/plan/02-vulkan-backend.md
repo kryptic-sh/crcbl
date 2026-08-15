@@ -42,6 +42,17 @@ clearly and exit. Fallbacks are post-MVP scope creep.
   than hand-rolling suballocation. Wrap it behind the HAL memory types
   (`DeviceLocal`, `HostVisible` upload, `Readback`).
 
+  **Not what shipped, and deliberately so.** `crates/crcbl-vk/src/mem.rs` cites
+  this line and defers it: `crcbl-vk` takes no dependency on `gpu-allocator`,
+  and does one `vkAllocateMemory` per resource. Its header gives the reason —
+  device bring-up only ever needs the offscreen swapchain's images and a staging
+  buffer, and a per-resource allocation has no fragmentation behaviour to get
+  wrong — and names the point it stops working: `maxMemoryAllocationCount` is
+  guaranteed to be only 4096, which is a ceiling the engine reaches as soon as
+  it allocates per mesh. Memory-type _selection_ is the part that is built and
+  tested. The suballocator itself is still owed, and this line is still the plan
+  for it.
+
 ### 2.2 Swapchain + frame loop
 
 - Swapchain with resize/out-of-date handling, mailbox preferred, FIFO fallback.
@@ -190,6 +201,39 @@ workaround. Recorded in `docs/backlog.md` rather than argued again here.
    currently covers two backends and one scene — **extend it to every engine
    shader and every backend**, which is also what sample rule 12 asks of the
    samples.
+
+> **Where the five rules stand, 2026-08-15.** The first four have landed; the
+> fifth is half done. Recorded here rather than by editing the rules, which are
+> the record of what was owed.
+>
+> 1. **Built.** Each `.slang` carries exactly one `// crcbl-targets:` line, and
+>    `tools/compile-shaders.sh` refuses a source with none or with more than
+>    one, refuses a target name it does not know, requires `spirv`, and records
+>    the declaration in the manifest as a `targets` key.
+> 2. **Built.** The script passes `CRCBL_TARGET_SPIRV`, `CRCBL_TARGET_WGSL`,
+>    `CRCBL_TARGET_MSL` and `CRCBL_TARGET_HLSL` on the respective invocations.
+> 3. **Built** as `crates/crcbl-shaders/src/declaration_order.rs`, which parses
+>    every `shaders/*.slang` and checks the order. Its header is worth reading
+>    for the reason it exists: nothing below the seam can catch this, because
+>    reflection names the shader's parameter names and a `BindGroupLayoutEntry`
+>    has none to compare them with — so up to that module a comment really was
+>    the only thing preventing a recurrence.
+> 4. **Built, by four different mechanisms.** `spirv-val` over the SPIR-V and
+>    naga over the WGSL (`crates/crcbl-shaders/tests/wgsl_validation.rs`, whose
+>    header records the `var<uniform>` with no binding decoration that shipped
+>    for months); `xcrun metal -c` over every committed `.metal` in `ci.yml`'s
+>    `mtl e2e` job, which counts what it compiled so an empty glob fails rather
+>    than passing; and for DXIL, a pinned `dxc` whose version is checked plus a
+>    per-artifact assertion that the container is **signed** — an unsigned one
+>    compiles, hashes and commits happily and is then refused by every real
+>    driver, WARP included. WARP does draw a frame, in `dx12 e2e`, so the
+>    "create a pipeline on WARP" half is covered by that job rather than by the
+>    script.
+> 5. **Half done.** The cross-backend script now defaults to the cube, sprite
+>    and UI scenes at every size in its list, each with its own colour floor. It
+>    is still `vk` against `wgpu`; Metal and D3D12 compare against a golden
+>    instead, so the divergence class stays undetected between _those_ two
+>    targets.
 
 ### Considered, and reopenable: SPIR-V as the single native IR
 

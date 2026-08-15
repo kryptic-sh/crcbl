@@ -326,9 +326,10 @@ Surfaces for instrumentation that already exists:
   in the exit criteria is about `crcbl-ui` not naming the renderer, which is
   unaffected.
 - **`crcbl_ui::hud` has no consumer and should be deleted rather than
-  extended.** `Hud`/`HudPanel` are used by nothing in the workspace; the four
-  samples each hand-roll a HUD because `Label` has no per-label colour and
-  `HudPanel` auto-sizes where a measured constant is wanted. Adding a `color`
-  field would build on the pre-CSS model this document replaces — colour is a
-  style property here, and panel sizing is flex layout. **Delete it when the
-  widget set lands**, and let the samples adopt the styled widgets instead.
+  extended.** `Hud`/`HudPanel` are used by nothing in the workspace — `lib.rs`
+  re-exports them and no other file names them; every sample hand-rolls its own
+  HUD instead, because `Label` has no per-label colour and `HudPanel` auto-sizes
+  where a measured constant is wanted. Adding a `color` field would build on the
+  pre-CSS model this document replaces — colour is a style property here, and
+  panel sizing is flex layout. **Delete it when the widget set lands**, and let
+  the samples adopt the styled widgets instead.

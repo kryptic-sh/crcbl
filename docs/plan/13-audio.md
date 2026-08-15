@@ -149,6 +149,14 @@ Grammar invariants (what makes it a learnable skill):
   std float transcendentals inside `crcbl-audio` (the same pattern as the
   `std::fs` deny), and no `mul_add`/FMA contraction.
 
+  **The `std::fs` deny it cites does not exist, 2026-08-15.** There is no
+  `clippy.toml` in the workspace and no `disallowed_methods` list anywhere; the
+  workspace's clippy configuration is `clippy::all` at `warn` and nothing else,
+  and no CI step greps for `std::fs` either. Whoever builds the transcendental
+  deny is building the first one of its kind rather than copying a pattern, so
+  the mechanism is part of that slice: a `clippy.toml` with `disallowed-methods`
+  is the shape, and it has to be shown to fail before it is trusted.
+
 ## Correction (2026-08-09)
 
 - **The bus graph is specified here and does not exist.** The architecture
@@ -173,3 +181,9 @@ Grammar invariants (what makes it a learnable skill):
   "**Listener** = one entity (client's view); grammar math happens in listener
   space each block" — so the gap is unbuilt work rather than an open design
   question, and the backlog entry that frames it as a design question is wrong.
+
+  **Closed, 2026-08-15.** `crcbl_audio::spatial` has a `Listener`, with
+  `Listener::ORIGIN` as the value a mixer starts at, and the `Mixer` owns one:
+  `Mixer::set_listener` is where a frame says where the ears are, and cues are
+  placed against it rather than against a position each caller passes in. Built
+  as this bullet argued — the architecture's answer, not a new one.

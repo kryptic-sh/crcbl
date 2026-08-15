@@ -11,7 +11,7 @@ is the e2e substrate: if it can't be tested without a GUI, it's built wrong.
 | Unit           | Pure logic in-crate: math, pools, rebase, graph compile, TOI solvers, replication encode/decode                                  | `cargo nextest`, per crate          |
 | Property       | Invariant-heavy code: `WorldPos` rebase, BVH after random churn, undo inverses, snapshot roundtrip                               | `proptest` or a seeded loop         |
 | Integration    | Crate pairs through public APIs: ECS↔net replication, scene→server instantiation, HAL graph on NullBackend                       | `tests/` dirs                       |
-| **Sim e2e**    | Full headless server+client, input scripts, N ticks, state-hash assert (`crcbl sim --hash`)                                      | nextest, headless — runs everywhere |
+| **Sim e2e**    | Full headless server+client, input scripts, N ticks, state-hash assert (`apps/sim`)                                              | nextest, headless — runs everywhere |
 | **Render e2e** | Offscreen render → readback → golden-image compare (`crcbl screenshot`)                                                          | needs GPU or software rasterizer    |
 | **Editor e2e** | Command sequences against headless editor server: edit → save → reload → verify; random-command + full-undo = initial-state-hash | nextest, headless                   |
 | Sample e2e     | Each sample's determinism script + golden frames — samples are test fixtures, not just demos                                     | CI per sample                       |
@@ -76,20 +76,33 @@ interesting part is the order of many.
   sourced guard is what catches it. nextest prints `<n> tests run:` for a
   complete run and `<ran>/<total> tests run:` for one it cancelled, so a guard
   matching the digits immediately before the words reads `2/15 tests run` as a
-  healthy fifteen — thirteen tests that never executed, reported as a pass. Five
-  of the eight bash harnesses did exactly that, and two more rejected it while
+  healthy fifteen — thirteen tests that never executed, reported as a pass. Most
+  of the bash harnesses did exactly that, and the rest rejected it while
   reporting "zero tests run" about a run that had run some, so one sourced
   helper — `tools/nextest-summary.sh` — now owns the whole of it: strip the
   colour, find the summary, name the cancelled shape, fail on zero. Every bash
-  harness sources it, and `tools/nextest-summary-test.sh` feeds it each shape —
-  complete, cancelled, zero, absent, colour-wrapped, repeated — and asserts what
-  it does with them, which is the thing eight inline copies could not have. The
-  PowerShell harnesses keep their own copies of the same logic, which
-  `docs/backlog.md` records as the remaining place it can drift.
+  harness **that drives nextest** sources it, and
+  `tools/nextest-summary-test.sh` feeds it each shape — complete, cancelled,
+  zero, absent, colour-wrapped, repeated — and asserts what it does with them,
+  which is the thing an inline copy per harness could not have. The PowerShell
+  harnesses keep their own copies of the same logic, which `docs/backlog.md`
+  records as the remaining place it can drift.
+- **The harness that drives no nextest guards on its own count instead, and that
+  is the right shape rather than a gap.**
+  `crates/crcbl/tests/run-cross-backend-e2e.sh` never invokes nextest: it drives
+  `crcbl screenshot` per scene per size and compares the pairs, so there is no
+  summary line to parse. What it guards is the number the run is _supposed_ to
+  produce — it refuses an empty scene list outright, computes the expected
+  comparison count from the scene and size lists, and fails when a scene
+  completed fewer comparisons than there are sizes. The property is the same one
+  `nextest-summary.sh` protects: a run that silently did less work than it
+  claimed cannot pass.
 - **Software GPU in CI**: render e2e runs on **lavapipe** (Vulkan) and wgpu's
   GL/software fallbacks — every commit exercises real render paths without
-  hardware runners. Hardware jobs (real GPU, later mac/win) are scheduled, not
-  per-commit.
+  hardware runners. The mac and Windows arms did not wait for a scheduled
+  hardware job in the end: `mtl e2e` on `macos-latest` and `dx12 e2e` on
+  `windows-latest` run per commit like everything else, the first against the
+  runner's real GPU and the second pinned to WARP.
 - **Golden images**: `crcbl screenshot` output vs checked-in references; compare
   with per-pixel tolerance + SSIM-style metric (rasterizers differ slightly);
   regenerate via `--bless` flag; diffs uploaded as CI artifacts on failure.
@@ -119,11 +132,11 @@ passes.
 (`crcbl-render`). Names that long are not decoration: a failing e2e run on a
 runner you cannot attach a debugger to gives you the name and a diff, and a name
 that is a sentence has already told you which half of the claim broke. The
-backend crates average roughly nine words per name; `crcbl-dx12`, `crcbl`,
-`crcbl-golden`, `crcbl-mtl` and `crcbl-shell` are all above nine. Six crates
-have drifted below the convention and are recorded here as known-drifted rather
-than left to be inferred: `crcbl-ecs` (over half its names are four words or
-fewer), `crcbl-net`, `crcbl-input`, `crcbl-phys`, `crcbl-audio` and
+backend crates carry the longest names, and `crcbl-dx12`, `crcbl`,
+`crcbl-golden`, `crcbl-mtl` and `crcbl-shell` are the longest of them. The
+crates that have drifted below the convention are recorded here as known-drifted
+rather than left to be inferred: `crcbl-ecs` (whose names run to a handful of
+words), `crcbl-net`, `crcbl-input`, `crcbl-phys`, `crcbl-audio` and
 `crcbl-store`. They are not wrong so much as terse, and nothing enforces the
 difference; renaming them is a task nobody has taken.
 
@@ -135,13 +148,13 @@ difference; renaming them is a task nobody has taken.
 `a_device_reports_metal_and_one_graphics_queue` against
 `a_device_reports_dx12_and_one_graphics_queue`. The convention exists where the
 claims genuinely differ per backend, and it is what makes a runner log legible.
-It was applied late: twenty-six names across `crcbl-vk`, `crcbl-mtl`,
-`crcbl-dx12` and `crcbl-wgpu` were once _verbatim identical_ in two or three of
-those crates at the same time, and the crate prefix in nextest's output was the
-only thing telling them apart — a prefix a grep, a bug report or a CI annotation
-usually does not carry. They now differ by the backend word alone, which is the
-property worth keeping: a search for one finds the other, and neither can be
-read as the wrong backend's result.
+It was applied late: names across `crcbl-vk`, `crcbl-mtl`, `crcbl-dx12` and
+`crcbl-wgpu` were once _verbatim identical_ in two or three of those crates at
+the same time, and the crate prefix in nextest's output was the only thing
+telling them apart — a prefix a grep, a bug report or a CI annotation usually
+does not carry. They now differ by the backend word alone, which is the property
+worth keeping: a search for one finds the other, and neither can be read as the
+wrong backend's result.
 
 The one name left deliberately bare is
 `a_device_outlives_the_instance_that_made_it` in
@@ -150,21 +163,21 @@ against the null backend. Once the three backend copies took prefixes, the
 unprefixed name belongs to the test that genuinely is about no backend.
 
 **A test that is deliberately backend-agnostic takes no prefix, and says so.**
-`crates/crcbl/tests/render_e2e.rs` is the exemplar: one test, opening whatever
-`crcbl::backend::open` selects, so `CRCBL_GPU` decides which backend draws and
-the file is the same test on all of them. Its header argues that explicitly
-rather than leaving it to look like an oversight — the point of one shared test
-is that a golden blessed on one backend keeps being re-derived on another, which
-a per-backend copy would not do. Absence of a prefix has to be readable as a
-decision, so write the sentence that makes it one.
+`crates/crcbl/tests/render_e2e.rs` is the exemplar: every test in it opens
+whatever `crcbl::backend::open` selects, so `CRCBL_GPU` decides which backend
+draws and the file is the same suite on all of them. Its header argues that
+explicitly rather than leaving it to look like an oversight — the point of one
+shared suite is that a golden blessed on one backend keeps being re-derived on
+another, which a per-backend copy would not do. Absence of a prefix has to be
+readable as a decision, so write the sentence that makes it one.
 
 **Placement follows what the test needs, not which directory looks tidier.** The
 rule the workspace actually holds to: _a test lives in `src/` if it can pass on
 a machine with no GPU and no loader; a test that needs a live device is
-`#[ignore]`d._ Measured rather than asserted — all 137 of `crcbl-vk`'s `src/`
-tests pass with `VK_DRIVER_FILES` pointed at a manifest that does not exist, and
-none of them carries `#[ignore]`. The converse is just as deliberate:
-`crates/crcbl-vk/tests/vk_e2e/` holds 74 tests and exactly one of them,
+`#[ignore]`d._ Measured rather than asserted — every one of `crcbl-vk`'s `src/`
+tests passes with `VK_DRIVER_FILES` pointed at a manifest that does not exist,
+and none of them carries `#[ignore]`. The converse is just as deliberate: across
+the whole of `crates/crcbl-vk/tests/vk_e2e/`, exactly one test,
 `the_rotation_frame_of_reference_agrees_with_the_shaders` in
 `vk_e2e/sprite/rotation.rs`, is not `#[ignore]`d. It is pure and could live in
 `src/`, and it stays in the e2e binary on purpose: it pins the frame of
@@ -177,13 +190,12 @@ particular, and a future reader should not "fix" them by moving files.
 `crcbl-dx12/src/lib.rs` re-exports exactly one item — `Dx12Instance`.
 `Dx12Device` is a `pub struct` inside the private `device` module and is never
 re-exported at all. `crcbl-mtl/src/lib.rs` re-exports two, `MetalDevice` and
-`MetalInstance`. All 171 of `crcbl-dx12`'s tests and all 119 of `crcbl-mtl`'s
-therefore live in `src/`, written against `pub(crate)` surface — over two
-hundred `pub(crate)` items in `crcbl-dx12` alone. Neither crate has a Rust
-target under `tests/`; those directories hold harness scripts only. Moving those
-suites out would mean widening two backends' public APIs for no reason but to
-host tests, which is the opposite of what `seam_from_outside.rs` exists to
-check.
+`MetalInstance`. Every one of `crcbl-dx12`'s tests and every one of
+`crcbl-mtl`'s therefore lives in `src/`, written against `pub(crate)` surface —
+a large private surface in `crcbl-dx12` alone. Neither crate has a Rust target
+under `tests/`; those directories hold harness scripts only. Moving those suites
+out would mean widening two backends' public APIs for no reason but to host
+tests, which is the opposite of what `seam_from_outside.rs` exists to check.
 
 **So those two crates keep the `#[ignore]` half of the rule instead of the
 directory half, and now they actually do.** Both once kept every test unmarked —
@@ -194,10 +206,10 @@ Every test whose body causes a real device, instance or adapter to be created is
 now `#[ignore]`d with a reason naming its harness, in the form `crcbl-vk` and
 `crcbl-wgpu` use; every test that passes with no GPU is not. The split was read
 off the bodies, tracing `instance::tests::open`, `device::tests::open_device`
-and `instance::tests::pinned_adapter` through each module's local helpers: in
-`crcbl-mtl` 71 tests open a device and 48 do not, and in `crcbl-dx12` 73 do and
-98 do not. Three calls that look like hardware and are not stayed on the pure
-side, each because it can pass on a machine with no GPU:
+and `instance::tests::pinned_adapter` through each module's local helpers, so in
+both crates the split falls out of what a test's body does rather than out of
+where the file sits. Calls that look like hardware and are not stayed on the
+pure side, each because it can pass on a machine with no GPU:
 `crcbl-mtl/src/fault.rs`'s two tests, which build a synthetic `NSError` and
 assert how the encoder states are worded; and
 `neither_caps_list_is_ever_empty_and_both_always_offer_fifo` in
@@ -322,10 +334,28 @@ validation-report assertion once, for all of them.
   black canvas. The rules that close it are in
   [02-vulkan-backend.md](02-vulkan-backend.md)'s shader-portability section;
   they belong to this topic's anchor list too.
+
+  **Closed, 2026-08-15 — all four are validated now.** `spirv-val` still runs on
+  the SPIR-V from `tools/compile-shaders.sh`;
+  `crates/crcbl-shaders/tests/wgsl_validation.rs` runs naga over every committed
+  `wgsl/*.wgsl`, and its header records the `var<uniform>` with no binding
+  decoration that shipped for months because nothing looked; the DXIL comes from
+  a pinned `dxc` whose version is checked and whose container is then asserted
+  to be **signed**, since an unsigned one commits happily and is refused by
+  every real driver; and the MSL is compiled with `xcrun metal -c` in `ci.yml`'s
+  `mtl e2e` job, which is the only place on the matrix that can — and which
+  counts what it compiled, so a glob matching nothing fails rather than exits 0.
+
 - **The cross-backend image compare is the only detector for a whole bug class**
   — a shader whose _semantics_ differ per target, which no lint can find. It
   currently covers two backends and one scene. Extending it to every engine
   shader and every backend is a testing deliverable, not a rendering one.
+
+  **Half closed, 2026-08-15.** `crates/crcbl/tests/run-cross-backend-e2e.sh`
+  defaults to the cube, sprite and UI scenes, each at every size in its size
+  list and each with its own colour floor. Still two backends: it drives `vk`
+  and `wgpu`, so the target-semantics bug class is unchecked on Metal and D3D12,
+  whose own jobs compare against a golden rather than against each other.
 
 ## Superseded (2026-08-10)
 
@@ -338,7 +368,7 @@ as a rule, and someone would eventually "restore" the code to it. What they used
 to say, and why the replacement won:
 
 - **"e2e suites feature-gated (`--features e2e`)."** There is no workspace-wide
-  `e2e` feature and there should not be one. Eight per-crate features name the
+  `e2e` feature and there should not be one. Per-crate features name the
   specific loader, compositor or GPU each suite needs, plus `crcbl-dx12` with
   none at all on the deliberate grounds that WARP ships with Windows. A single
   flag meaning "all of it" could never be true of a real machine.

@@ -189,6 +189,12 @@ produces; a scene _references_ assets, so the dependency runs `crcbl-scene` →
 Nothing depends on the crate yet, which it shares with the `crcbl-scene` stub
 and for the same reason.
 
+> **Both have consumers now, 2026-08-15.** `crates/crcbl-cli/Cargo.toml` depends
+> on `crcbl-scene` and `crcbl-assets` together: `crcbl lod` reads a glTF and
+> builds its cluster DAG through the scene crate, and the asset crate comes with
+> it as the IO seam underneath. The dependency direction is the one this note
+> argued for.
+
 - **`AssetId`** — 128 bits, `Display`/`Debug` as 32 hex digits, derived by
   `AssetId::from_path` as the leading 16 bytes of the SHA-256 of the canonical
   key (`crcbl_shaders::sha256`, already NIST-vector-tested and already reused by
@@ -236,6 +242,15 @@ had already claimed it.
 scene format, no hot reload, no `crcbl import`. Skins and animations are in the
 file and are not read: a type nothing fills is worse than no type, and the
 format choice already covers them.
+
+> **The crate outgrew that sentence, 2026-08-15.** Parsing is `gltf_import` and
+> `gltf_check`, and beside them the crate now carries a mesh **simplifier**
+> (`simplify`), a **meshlet** builder (`meshlet`), a **cluster DAG**
+> (`cluster_dag`) and LOD selection and resolution (`lod`, `lod_resolve`) — the
+> geometry pipeline topic 25 owns, reached from `crcbl lod`. What the list above
+> says is still absent is still absent: no GPU pool upload, no textures, no mip
+> generation, no RON scene format, no hot reload, no `crcbl import`, and skins
+> and animations are still deliberately unread.
 
 - **`import_gltf(&dyn AssetSource, &Path) -> Result<GltfScene, StorageError>`.**
   The document and every external `.bin` it names go through the seam, so a

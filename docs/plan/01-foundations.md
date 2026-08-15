@@ -10,7 +10,13 @@ Nothing draws yet; everything after this stage has a place to live.
 - `crcbl-hal` trait surface defined well enough that stage 2 (Vulkan) and stage
   9 (Metal/DX12) implement the same contract.
 - Window + event loop + swapchain-ready surface handle on Linux.
-- CI: fmt, clippy `-D warnings`, tests on Linux from day one.
+- CI: fmt, clippy `-D warnings`, tests on Linux from day one. It did not stay
+  that small — `.github/workflows/ci.yml` now also runs rustdoc, `cargo-deny`,
+  `cargo-machete`, coverage with a floor, a wasm32 build, a Windows and a macOS
+  build, a shader-artifact check, a decoder fuzz job, and a per-backend and
+  per-window-system e2e job apiece (`vk`, `wgpu`, `mtl`, `dx12`, Wayland, X11,
+  Win32, the CLI, and the cross-backend image compare). `cron.yml` and
+  `pages.yml` are the other two workflows.
 
 ## Platform matrix (canonical — settled 2026-08-05)
 
@@ -38,31 +44,56 @@ private crate and a devkit; Switch would likely run `crcbl-vk`).
 
 ## Workspace layout
 
+The skeleton this stage sketched has grown; what follows is the tree as it
+stands, so a reader does not go looking for a crate by a name it never had.
+
 ```
 crcbl/
 ├── Cargo.toml              # workspace root
 ├── crates/
-│   ├── crcbl-core/         # ids, handles, arenas, slotmaps, time, logging
+│   ├── crcbl-core/         # ids, handles, arenas, slotmaps, time, logging, trace
 │   ├── crcbl-shell/        # topic 15: windowing — own wire-protocol backends
 │   ├── crcbl-wl-scanner/   # topic 15: Wayland protocol codegen (build-time)
 │   ├── crcbl-hal/          # backend seam: traits + POD descriptors only
 │   ├── crcbl-vk/           # stage 2: ash implementation of the HAL
+│   ├── crcbl-mtl/          # stage 9: Metal — macOS
+│   ├── crcbl-dx12/         # stage 9: Direct3D 12 — Windows
+│   ├── crcbl-wgpu/         # stage 10: wgpu — native triage + WebGPU
+│   ├── crcbl-shaders/      # Slang sources and their committed artifacts
 │   ├── crcbl-render/       # render graph, frame loop, meshes, materials
+│   ├── crcbl-golden/       # golden-image comparison for render tests
+│   ├── crcbl-sprite/       # sprite sheets: frames, clips, nine-slice
 │   ├── crcbl-ecs/          # stage 4: system-owned arrays
 │   ├── crcbl-net/          # stage 4: transport seam, replication
+│   ├── crcbl-server/       # stage 4: authoritative fixed-tick simulation
+│   ├── crcbl-client/       # stage 4: interpolation, input send, snapshot apply
 │   ├── crcbl-phys/         # stage 5: physics — queries, forces, CCD
 │   ├── crcbl-scene/        # stage 6: scene format, glTF import
+│   ├── crcbl-assets/       # topic 6: asset ids, load states, the IO seam
 │   ├── crcbl-ui/           # stage 7: immediate-mode GUI
+│   ├── crcbl-input/        # topic 19: actions and bindings
 │   ├── crcbl-audio/        # topic 13: mixer + spatial cue grammar
-│   ├── crcbl-store/        # topic 14: saves, settings, profiles
+│   ├── crcbl-store/        # topic 14: saves, settings, profiles, replays
+│   ├── crcbl-jobs/         # topic 21: the seam every engine thread starts through
 │   ├── crcbl-cli/          # topic 11: `crcbl` binary — headless control
 │   └── crcbl/              # umbrella: re-exports, engine setup helpers
 ├── apps/
+│   ├── bare/               # the engine as a library, with its own loop
 │   ├── sandbox/            # dev playground, first window lives here
-│   └── editor/             # stage 8
-├── sdk/                    # topic 16: per-language guest SDKs + abi/ + conformance
+│   ├── sim/                # headless determinism harness
+│   ├── breakout/           # the samples, each a native front end and a wasm one
+│   ├── flappy/
+│   ├── asteroids/
+│   ├── horde/
+│   ├── hud/
+│   └── lumen/
 └── docs/plan/
 ```
+
+**There is no `apps/editor` and no `sdk/`.** The editor is stage 8 and
+unstarted, so its directory does not exist rather than sitting empty; topic 16's
+guest SDKs are the same. Both are still planned — this block is what the tree
+holds today, not a retraction of either.
 
 Empty crates are created in this stage with only their public seam types where
 those are already known (`crcbl-hal` especially). Don't stub speculative APIs

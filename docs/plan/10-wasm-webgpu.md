@@ -59,7 +59,9 @@ the GPU — the GPU-bound principle holds, only the draw-emission tail differs.
 - **Build**: `wasm32-unknown-unknown` + `wasm-bindgen`; a small `crcbl-web`
   crate for canvas setup, rAF loop driving `tick(dt)`, resize/DPI from the
   browser. crcbl-shell's canvas backend (topic 15, own JS shim) provides this —
-  if its canvas/rAF handling is solid, `crcbl-web` shrinks to glue.
+  if its canvas/rAF handling is solid, `crcbl-web` shrinks to glue. It did: what
+  shipped is `crcbl::web`, a module rather than a crate, plus the shim in
+  `web/`. See the deviation note below.
 - **Shaders**: Slang → WGSL (via SPIR-V → naga if Slang's WGSL target isn't
   clean at the time). Same shader-hash pipeline, third artifact format.
 - **Assets**: `FetchSource` (HTTP fetch → async decode). Asset packs matter more
@@ -121,11 +123,11 @@ Recorded here rather than discovered by whoever opens the URL.
 **What is built and checkable without a browser.** `apps/breakout` is a `cdylib`
 with an `extern "C"` entry point (`src/web.rs`); `web/` is the shim, in plain ES
 modules with no bundler and no npm; `.github/workflows/pages.yml` builds on PRs
-and deploys on main. The artifact builds and exports all 60 `__crcbl_*` symbols;
-the shim calls 56 of them and every one exists; the module imports nothing
-outside the `wasm-bindgen` glue. `web/tools/check-exports.mjs` asserts all three
-of those on every PR, and both of its failure directions were verified by
-deliberately breaking them.
+and deploys on main. The artifact builds and exports every `__crcbl_*` symbol
+the shim looks up, each one the shim calls exists, and the module imports
+nothing outside the `wasm-bindgen` glue. `web/tools/check-exports.mjs` asserts
+all three of those on every PR, and both of its failure directions were verified
+by deliberately breaking them.
 
 **What blocks it.** `naga` refuses every one of the engine's SPIR-V modules
 (`UnsupportedCapability(DrawParameters)`), so `crcbl-wgpu` cannot create a
@@ -162,6 +164,16 @@ before the graphics half had a working shader.
   crcbl-shell's canvas/rAF handling is solid". It is, and the glue that was left
   fitted in `apps/breakout/src/web.rs` and `web/engine/*.js`. A second sample is
   what will show which parts of that are engine and which are sample.
+
+  **The second sample came, and the split it forced is `crcbl::web`.** Still no
+  separate crate — the module lives in `crcbl` itself. It owns the protocol: the
+  status codes the page polls, the log queue the page drains, the asset base,
+  and a `web_exports!` macro that writes a sample's exports for it. What stays
+  in the sample is its `WebPending` impl, because the options a game boots with
+  and the error it fails with are the game's own. The _symbols_ still have to be
+  per-demo — two demos can be open in one browser and the shim looks each up by
+  name — but nothing behind them is, and every sample with a browser build now
+  goes through the macro.
 
 ## Status after P5.13 — exit criteria met
 

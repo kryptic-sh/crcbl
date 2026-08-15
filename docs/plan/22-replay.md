@@ -20,6 +20,23 @@ The server already emits, every tick: snapshot deltas + events, tick-id stamped
           (kills/goals/custom game markers), caster/POV metadata
 ```
 
+**What `crcbl-store` actually writes is the first version of that, and it is
+flatter.** `crates/crcbl-store/src/replay.rs` owns the format:
+
+```
+magic  b"CRBLREPL", format_version u16, tick_count u64, tick_rate u32, start_tick u64
+entries  TickEntry[tick_count]
+TickEntry  tick_id u64, msg_len u32, msg_data — one encoded ServerToClient message
+```
+
+So: no keyframe index, no seek table, no side-tracks, and **no deltas at all** —
+each entry carries the full server message for its tick. The header comment says
+delta compression against the previous tick is what a future format bump may
+add, which is the same versioning seam the sketch above assumes; the rest of
+this section's container — the index, the marker and POV tracks — is still the
+plan and nothing reads or writes it. Seeking, POV tracks and everything built on
+them therefore describe work not yet started.
+
 - **Keyframes** = full snapshots (the topic-14 save container, reused) every N
   ticks (~5 s): seeking = nearest keyframe + roll deltas forward.
 - **Playback is just a client**: a replay viewer connects the normal client
@@ -38,7 +55,12 @@ The server already emits, every tick: snapshot deltas + events, tick-id stamped
 - **Black box**: dev builds keep a rolling in-memory ring of the last ~30 s of
   stream; on panic/assert/`crcbl` signal it dumps a `.crpl` — every crash
   arrives with a replay of how it happened. Attach to bug reports; CI soak
-  failures auto-attach theirs.
+  failures auto-attach theirs. **The ring is built**, as
+  `crates/crcbl-store/src/crash_ring.rs`: `CrashRing::new(capacity)` keeps the
+  last N ticks and writes them out in the same `.crpl` shape, reusing
+  `replay.rs`'s magic and version constants rather than restating them. What is
+  not built is the automatic half — nothing installs it on a panic hook, and no
+  CI job attaches one.
 - **Time-scrub debugger** (generalizes the physics scrub): timeline UI in the
   debug tools — drag to any tick, inspector shows any entity's state _at that
   tick_, diff two ticks side-by-side (deterministic encoding makes diffs
@@ -50,6 +72,14 @@ The server already emits, every tick: snapshot deltas + events, tick-id stamped
   system**. This turns the determinism pillar from a promise into a tool.
 - `crcbl replay dump|diff|clip` — RON dump at tick, stream diffs, extract a
   tick-range into a standalone clip.
+
+**What the CLI has today is one verb and no subverbs.** `ReplayArgs` in
+`crates/crcbl-cli/src/args.rs` carries a file path and `--json`, and
+`crcbl replay <FILE>` reads the container and reports its metadata. `verify`,
+`dump`, `diff` and `clip` do not exist as words the parser knows — it rejects
+any option it is not given — and each needs machinery this format does not carry
+yet: `verify` needs the input side-track, `clip` needs the keyframe index. Those
+two bullets are the plan, not a description.
 
 ### 2. Gameplay replays
 
@@ -95,15 +125,15 @@ The server already emits, every tick: snapshot deltas + events, tick-id stamped
 
 ## Delivery
 
-| Slice                                                                | Phase                                                   |
-| -------------------------------------------------------------------- | ------------------------------------------------------- |
-| `.crpl` writer/reader, keyframes+index, `FileTransport` playback     | P2–P4 (rides the replication stream the week it exists) |
-| Black-box ring + crash dump; record-by-default in dev/editor         | P4                                                      |
-| `crcbl replay` CLI (record/play headless/dump/diff/clip/verify)      | P4 onward                                               |
-| Time-scrub debugger UI + marker track                                | P10 (with debug tools)                                  |
-| Replay browser screen; determinism verifier in CI (soak runs verify) | P10                                                     |
-| Live spectator relay + broadcast delay (rides dedicated server)      | P13 (towers marquee demo gains a spectator)             |
-| Esports observer polish (POV tracks, caster timeline), relay fan-out | post-MVP (arena era)                                    |
+| Slice                                                                | Phase                                                                                                    |
+| -------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `.crpl` writer/reader, keyframes+index, `FileTransport` playback     | Writer, reader and `FileTransport` **built** (`crcbl_store::replay`); keyframes and the index still owed |
+| Black-box ring + crash dump; record-by-default in dev/editor         | Ring **built** (`crcbl_store::crash_ring`); nothing installs it yet                                      |
+| `crcbl replay` CLI (record/play headless/dump/diff/clip/verify)      | Metadata report **built**; every subverb still owed                                                      |
+| Time-scrub debugger UI + marker track                                | P10 (with debug tools)                                                                                   |
+| Replay browser screen; determinism verifier in CI (soak runs verify) | P10                                                                                                      |
+| Live spectator relay + broadcast delay (rides dedicated server)      | P13 (towers marquee demo gains a spectator)                                                              |
+| Esports observer polish (POV tracks, caster timeline), relay fan-out | post-MVP (arena era)                                                                                     |
 
 ## Testing (topic 12)
 

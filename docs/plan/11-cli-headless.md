@@ -20,13 +20,35 @@ regression (same severity as a sample linking `crcbl-vk` directly).
 
 ## The `crcbl` CLI (`crates/crcbl-cli`, installed binary)
 
+**What the binary parses today** — `crates/crcbl-cli/src/args.rs`'s `Command` is
+the list, and it is not the one this section describes: `new`, `run`, `build`,
+`screenshot`, `replay`, `crpix` and `lod`. Three of those are not sketched
+anywhere below and are worth naming here:
+
+- `crcbl replay <FILE> [--json]` — read a `.crpl` recording and report its
+  metadata. Topic 22 owns it, and owns the subverbs it does not yet have.
+- `crcbl crpix <PNG>... -o <FILE>` — pack PNG frames into one `.crpix` sprite
+  sheet, each frame named for its file stem, with nine-slice insets, a sample
+  mode and an optional clip over every frame.
+- `crcbl lod stats|gen <FILE>` — report a glTF mesh's resolved LOD chain, saying
+  per level whether the geometry came from the file or the cluster DAG, or
+  generate one.
+
+Everything below that is not in that list — `scene`, `import`, `sim`, `phys`,
+`edit` — is unbuilt. They are kept as the specification they always were; the
+parser rejects those words today.
+
 Project lifecycle:
 
 - `crcbl new <name>` — scaffold a game project (workspace member or standalone)
   with sandbox-style main, scene dir, CI template.
 - `crcbl run [--headless] [--server-only] [--connect <addr>]` — run the project;
   headless = server + no client; server-only = dedicated server.
-- `crcbl build [--target wasm]` — build incl. the wasm/Pages bundle locally.
+- `crcbl build [--target wasm]` — build the project. **`--target wasm` is
+  recognized and refused**, pointing at `web/build.sh` instead: a browser bundle
+  is a Cargo build plus a version-matched `wasm-bindgen`, the shim, the shader
+  artifacts and the site layout, and a `crcbl build` that shelled out to Cargo
+  alone would exit 0 having produced something no page can load.
 
 Content pipeline (agent/CI workhorses):
 
@@ -62,9 +84,10 @@ Editor session control:
 - **Output is machine-readable by default flag**: `--json` on every subcommand;
   human tables otherwise. Exit codes are meaningful (0 ok, 1 command failed, 2
   bad invocation).
-- **Everything scriptable is testable**: sample CI uses `crcbl sim --hash` for
-  determinism runs and `crcbl screenshot` for golden-image smoke — the samples'
-  own test suites are built from the CLI.
+- **Everything scriptable is testable**: `crcbl screenshot` is the golden-image
+  smoke primitive and CI uses it, including in the cross-backend compare. The
+  determinism half is `apps/sim` rather than a `crcbl sim` verb — see the note
+  at the top of this section.
 - **Agent-friendly**: stdin batch mode, stable JSON schemas, no interactive
   prompts unless a TTY is detected (and never required).
 - Offscreen rendering rides the normal HAL (surface-less device + readback), so
@@ -74,8 +97,9 @@ Editor session control:
 
 | Slice                                                        | Roadmap phase |
 | ------------------------------------------------------------ | ------------- |
-| `crcbl-cli` scaffold: `new`, `run`, `build`                  | P0            |
-| Offscreen render + `screenshot`                              | P1            |
+| `crcbl-cli` scaffold: `new`, `run`, `build`                  | **Built**     |
+| Offscreen render + `screenshot`                              | **Built**     |
+| `replay` (metadata report), `crpix`, `lod stats`/`gen`       | **Built**     |
 | `sim`/`--hash` (headless server, input scripts)              | P2            |
 | `import`                                                     | P9            |
 | `scene` batch ops + `edit --serve` (editor command protocol) | P12           |
@@ -89,4 +113,6 @@ Editor session control:
 - The towers map is _modifiable_ from the CLI (spawn a tower plot, move a
   spawner) and the result opens correctly in the GUI editor with intact undo
   history.
-- All sample CI determinism + golden-image checks run through the CLI.
+- All sample CI determinism + golden-image checks run through the CLI. (The
+  golden-image half does; the determinism half runs `apps/sim`, and moving it
+  behind a `crcbl sim` verb is what closes this criterion.)

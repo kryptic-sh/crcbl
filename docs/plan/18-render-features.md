@@ -47,11 +47,15 @@ Rules that keep the two from diverging into two renderers:
 
 ## Many lights: the list and how it is gathered (decided 2026-08-13)
 
-The table above names shadows for spot and point lights, and **the engine has
-exactly one light** — a single `DirectionalLight` (direction, colour) in the
-frame block. There was no light list, no light culling and no count budget
-specified anywhere, so the shadow rows above were not implementable as written.
-This section is that missing half.
+The table above names shadows for spot and point lights, and when this section
+was written **the engine had exactly one light** — a single `DirectionalLight`
+(direction, colour) in the frame block. There was no light list, no light
+culling and no count budget specified anywhere, so the shadow rows above were
+not implementable as written. This section is that missing half, and it is
+built: `crcbl_render::light` turns a `DirectionalLight` and each `Light::Point`
+/ `Light::Spot` into `GpuLight` rows, and `crcbl_render::light_grid` runs the
+compute pass that assigns them to the froxel grid `mesh.slang`'s fragment stage
+indexes.
 
 ### Clustered forward
 
@@ -893,17 +897,17 @@ dispatches them cannot disagree.
 
 ## Delivery
 
-| Slice                                                                 | Phase    |
-| --------------------------------------------------------------------- | -------- |
-| HDR target + exposure/tonemap pass + FXAA                             | P7       |
-| Sun CSM (culling-integrated, PCF), cascade debug overlay              | P7       |
-| Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes   | P7B      |
-| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats` | P7C      |
-| Ray-traced shadows + AO                                               | P7C      |
-| Ray-traced reflections                                                | P7C      |
-| Ray-traced global illumination                                        | P7C      |
-| Bloom chain                                                           | P10      |
-| Auto-exposure, TAA (motion vectors), shadow atlases                   | post-MVP |
+| Slice                                                                 | Phase                                                     |
+| --------------------------------------------------------------------- | --------------------------------------------------------- |
+| HDR target + exposure/tonemap pass + FXAA                             | P7                                                        |
+| Sun CSM (culling-integrated, PCF), cascade debug overlay              | P7                                                        |
+| Rasterised twin: spot + point shadows, SSAO, SSR, irradiance probes   | P7B — irradiance probes **built** (`crcbl_render::probe`) |
+| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats` | P7C                                                       |
+| Ray-traced shadows + AO                                               | P7C                                                       |
+| Ray-traced reflections                                                | P7C                                                       |
+| Ray-traced global illumination                                        | P7C                                                       |
+| Bloom chain                                                           | P10                                                       |
+| Auto-exposure, TAA (motion vectors), shadow atlases                   | post-MVP                                                  |
 
 **P7B and P7C are new phases** carrying the raster twin and the ray-traced path
 respectively; the roadmap's phase table is authoritative for their ordering. The
@@ -930,8 +934,13 @@ under both paths side by side. Exit criteria of the other samples inherit
 ## Irradiance probes: the design (2026-08-14)
 
 The capability table's `Rasterised` twin of ray-traced global illumination, and
-P7B's last unbuilt row. Written before any of it is built; the slice plan and
-the decisions it still needs are in `docs/backlog.md`.
+what was P7B's last unbuilt row. **It is built now, as designed here** —
+`crcbl_render::probe` owns the `ProbeTable` and the `ProbeGrid` that rides in
+the frame uniforms, `crcbl_shaders::probe` fixes the row layout both sides
+write, `mesh.slang`'s `probe_irradiance` does the interpolation and the three
+dot products, `SceneDesc::probes` is where an application hands the volume over,
+and `apps/lumen`'s `bounce` module bakes the sun's first bounce into one. The
+paragraphs below describe what shipped rather than what was intended.
 
 ### A static grid of L1 spherical-harmonic probes, and no new pass
 

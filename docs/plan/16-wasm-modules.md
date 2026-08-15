@@ -39,10 +39,13 @@ The module interface is **the** game API — defined once, consumed two ways:
 | **Wasm**   | same interface over the FFI ABI, module loaded at runtime  | shipped game logic, mods, other languages           |
 
 Samples are written against the module API from breakout onward (static binding
-first); the wasm host later runs the _same_ breakout compiled to `.wasm` and the
-determinism hash must match the static build — that equivalence test is the
-ABI's acceptance criterion. Engine-internal systems (physics, render feed,
-audio) stay native forever; the module seam is for _game_ logic.
+first) — **and that half is built**: `crcbl_ecs::game_module::GameModule` is the
+static binding, with `name`, `register` and `tick`, and every sample implements
+it. Nothing else in this document is: there is no wasm host, no `sdk/`, no ABI
+and no `crcbl-abigen`. The wasm host later runs the _same_ breakout compiled to
+`.wasm` and the determinism hash must match the static build — that equivalence
+test is the ABI's acceptance criterion. Engine-internal systems (physics, render
+feed, audio) stay native forever; the module seam is for _game_ logic.
 
 ## ABI sketch
 
@@ -197,21 +200,21 @@ Rules:
 
 ## Delivery (interleaved — see ROADMAP)
 
-| Slice                                                                    | Roadmap phase |
-| ------------------------------------------------------------------------ | ------------- |
-| Module API (trait) + static binding — samples use it from the start      | P2            |
-| Component schema declaration + generic inspect/save/replicate            | P2–P4         |
-| `sdk/` scaffold: `abi/` source of truth + conformance suite + `sdk/rust` | **P6A**       |
-| `crcbl-abigen` core + Rust backend (full-SDK generation, CI drift check) | **P6A**       |
-| Wasm host (`wasmtime` seam, NaN canon, fuel), Rust guest SDK             | **P6A**       |
-| breakout-as-`.wasm` equivalence gate (hash == static build)              | P6A           |
-| Browser nested-module instantiation via JS shim                          | P7–P10 window |
-| `crcbl mod` CLI (build/check/sign-later), hot reload of modules          | P9–P10        |
-| C header (ABI reference — unlocks C/C++/Nim/D/Odin class)                | post-MVP #1   |
-| Zig SDK (idiomatic bindings + build.zig, conformance-tested)             | post-MVP #2   |
-| Lua VM module template (scripts = hot-reloadable assets)                 | post-MVP #3   |
-| C# SDK (NativeAOT-wasm when it settles)                                  | post-MVP #4   |
-| Modding polish (capability manifests, version negotiation, mod packs)    | post-MVP      |
+| Slice                                                                    | Roadmap phase                                                                    |
+| ------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| Module API (trait) + static binding — samples use it from the start      | **Built** — `crcbl_ecs::game_module`'s `GameModule`, implemented by every sample |
+| Component schema declaration + generic inspect/save/replicate            | P2–P4                                                                            |
+| `sdk/` scaffold: `abi/` source of truth + conformance suite + `sdk/rust` | **P6A**                                                                          |
+| `crcbl-abigen` core + Rust backend (full-SDK generation, CI drift check) | **P6A**                                                                          |
+| Wasm host (`wasmtime` seam, NaN canon, fuel), Rust guest SDK             | **P6A**                                                                          |
+| breakout-as-`.wasm` equivalence gate (hash == static build)              | P6A                                                                              |
+| Browser nested-module instantiation via JS shim                          | P7–P10 window                                                                    |
+| `crcbl mod` CLI (build/check/sign-later), hot reload of modules          | P9–P10                                                                           |
+| C header (ABI reference — unlocks C/C++/Nim/D/Odin class)                | post-MVP #1                                                                      |
+| Zig SDK (idiomatic bindings + build.zig, conformance-tested)             | post-MVP #2                                                                      |
+| Lua VM module template (scripts = hot-reloadable assets)                 | post-MVP #3                                                                      |
+| C# SDK (NativeAOT-wasm when it settles)                                  | post-MVP #4                                                                      |
+| Modding polish (capability manifests, version negotiation, mod packs)    | post-MVP                                                                         |
 
 ## Exit criteria (MVP)
 

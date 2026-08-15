@@ -126,6 +126,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 37    | [37-materials.md](37-materials.md)             | Material authoring: templates+instances, render↔surface link, lint        |
 | 38    | [38-weapons.md](38-weapons.md)                 | Weapon kit: attachments, server-authoritative fire, recoil patterns       |
 | 39    | [39-capabilities.md](39-capabilities.md)       | Device capabilities, graceful degradation, path selectors, feature matrix |
+| 40    | [40-profiling.md](40-profiling.md)             | Profiling, benchmarking: CPU/GPU spans, counters, trace export, perf rows |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before
@@ -138,8 +139,11 @@ baked in from the start — wasm is a first-class target, not a port.
 Each roadmap S-phase is proven by a **sample project** — small complete
 games/tools in `apps/`, numbered in build order: see
 [sample/00-samples-overview.md](sample/00-samples-overview.md) (breakout,
-asteroids, horde, viewer, orbit, flagship co-op tower defense, post-MVP arena).
-Every game sample ships as a browser demo on the Pages site.
+asteroids, flappy, horde, hud, lumen, viewer, orbit, flagship co-op tower
+defense, post-MVP arena). What is in `apps/` today is breakout, flappy,
+asteroids, horde, hud and lumen, beside the three that are not games — `bare`,
+`sandbox` and `sim`. Every game sample ships as a browser demo on the Pages
+site.
 
 ## MVP feature → stage map
 

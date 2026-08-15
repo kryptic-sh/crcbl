@@ -1,17 +1,20 @@
 # Topic 17 — Skeletal Animation (`crcbl-anim`)
 
 Skeletal animation as an engine system: skeletons and clips come from glTF
-(already the locked source format — skins/animations are parsed today and
-unused), cooked to engine curves, played back through blend trees and a
-data-driven state machine, skinned **on the GPU**. Scheduled post-MVP wave 1;
-the [puppet sample](sample/09-puppet.md) is its forcing function and acceptance
-test.
+(already the locked source format), cooked to engine curves, played back through
+blend trees and a data-driven state machine, skinned **on the GPU**. Scheduled
+post-MVP wave 1; the [puppet sample](sample/09-puppet.md) is its forcing
+function and acceptance test.
 
 ## Data pipeline
 
 - **Source**: glTF skins (joint hierarchy, inverse bind matrices) + animation
   channels (TRS curves, sampled). Import extends the stage 6 pipeline — no new
-  source format.
+  source format. **Nothing reads them yet**, and that is a decision rather than
+  an oversight: `crates/crcbl-scene/src/gltf_import.rs` quotes this document's
+  earlier "parsed but unused until the animation feature lands" and declines it,
+  on the grounds that a type nothing fills is worse than no type. So this slice
+  starts by adding the extraction, not by finding it already there.
 - **Cooked**: per-clip compressed curve tracks (fixed-rate resample +
   quantization; curve-fitting later if size demands), skeleton = flat joint
   array (parent indices, bind pose). `crcbl import` grows `--skeletons/--clips`;

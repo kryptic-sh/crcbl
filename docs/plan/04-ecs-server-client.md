@@ -93,8 +93,14 @@ crates/crcbl-net      — transport trait, in-memory impl, replication protocol
 
 - Sandbox: N moving entities server-simulated, client-rendered, smooth at
   mismatched tick/render rates.
-- `crcbl-server` compiles with no dependency on `crcbl-render`/`crcbl-vk`
-  (enforced in CI via `cargo tree` check).
+- `crcbl-server` compiles with no dependency on `crcbl-render`/`crcbl-vk`. **The
+  property holds and nothing enforces it**: its `Cargo.toml` names `crcbl-core`,
+  `crcbl-ecs`, `crcbl-net` and `getrandom` and no renderer, but there is no
+  `cargo tree` check in `ci.yml` — the only `cargo tree` in the workflows is a
+  comment in `cron.yml` about something else. So the guarantee is the
+  manifest's, which a future edit can break silently. Adding the check is what
+  would make this an exit criterion rather than an observation, and it has to be
+  shown to fail before it is trusted.
 - Tick determinism smoke test: same input script → same state hash over 1000
   ticks (foundation for future rollback/replay debugging).
 - Inspector registry lists all systems with live counts (consumed by stage 7

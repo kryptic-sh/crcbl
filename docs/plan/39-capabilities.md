@@ -29,13 +29,17 @@ refuses to start unless someone asked it to.
 bundled as `DeviceCaps`. A backend reports what the device actually has. This
 already exists and is the right shape; what changes is what sits on top.
 
-**`Features::TIER_A` is removed.** It is a composite — descriptor indexing,
-buffer device address, draw-indirect-count, multi-draw-indirect, compute and
-timeline semaphores — and `crcbl-vk` demands the whole set or refuses the
-device. That is all-or-nothing, it is the opposite of the rule above, and it is
-why Metal reports the lesser tier over one flag while having the rest.
+**`Features::TIER_A` is removed — and it is gone.** It was a composite —
+descriptor indexing, buffer device address, draw-indirect-count,
+multi-draw-indirect, compute and timeline semaphores — that `crcbl-vk` demanded
+whole or refused the device over. That was all-or-nothing, the opposite of the
+rule above, and why Metal reported the lesser tier over one flag while having
+the rest. `TIER_A`, `TIER_B` and `RendererTier` now name nothing in the
+workspace; what stands in its place is `Features::GPU_DRIVEN`, the data-layout
+bundle, which is asked for as _optional_ and never as required.
 
-New flags this topic adds, for the features moved into the MVP:
+New flags this topic adds, for the features moved into the MVP — **all built, in
+`crcbl_hal::caps`**, with `TASK_SHADER` beside `MESH_SHADER`:
 
 | Flag                     | What it gates                             |
 | ------------------------ | ----------------------------------------- |
@@ -50,7 +54,7 @@ A single tier cannot express the combinations, but the renderer does not need
 the whole capability set at each branch either — it needs to know which of a
 small number of paths to compile and record. Each selector is derived from
 `Features`, each is one shader-permutation axis, and each is one golden-image
-axis:
+axis. **All three are built, in `crcbl_hal::caps`:**
 
 | Selector       | Values                                                | Derived from                          |
 | -------------- | ----------------------------------------------------- | ------------------------------------- |
@@ -79,26 +83,37 @@ profile is a description after the fact, not an input.
 new type is needed — an earlier draft of this document proposed a
 `FeatureRequest` struct, which would have duplicated what is there.
 
-**What is wrong is the default.** `DeviceDesc::default()` sets
-`required_features: Features::TIER_A` — every caller demands descriptor
+**What was wrong was the default.** `DeviceDesc::default()` set
+`required_features: Features::TIER_A` — every caller demanded descriptor
 indexing, buffer device address, draw-indirect-count, multi-draw-indirect,
-compute and timeline semaphores, or gets no device at all. That is the
-all-or-nothing behaviour this topic exists to replace, and it is why Metal is
-refused over one absent flag while having the rest.
+compute and timeline semaphores, or got no device at all. That was the
+all-or-nothing behaviour this topic exists to replace, and why Metal was refused
+over one absent flag while having the rest.
 
 The default becomes **only what nothing can work without** — compute and a
 timeline semaphore — with everything else optional. A game whose whole look is
 ray traced puts `RAY_QUERY` in `required_features` and gets a named failure
 rather than a picture that is quietly a different game.
 
-Worth noting the samples already do the right thing: `apps/*/src/gpu.rs` pass
-`optional_features: Features::TIER_A`, so they degrade today. It is the seam's
-own default that does not.
+**Built as written.** `DeviceDesc::for_adapter` requires
+`Features::COMPUTE.union(Features::TIMELINE_SEMAPHORE)` and asks for
+`Features::GPU_DRIVEN` as optional, so the device opens on whatever the adapter
+has and the selectors decide what to record. The doc comment on
+`required_features` carries the ray-traced-game example above, so the rule is
+stated where a caller reads it rather than only here.
+
+The samples always did the right thing and still do: `GpuContextDesc::default`
+puts `GPU_DRIVEN`, `MESH_SHADER`, `TIMESTAMP_QUERY`, `DEBUG_MARKERS`,
+`PRESENT_FEEDBACK` and `PRESENT_TIMING` in `optional_features` and requires none
+of them, so they degrade. It was the seam's own default that did not.
 
 **Every downgrade is logged once, at device creation, naming the feature and the
 path it selected.** A silently absent feature reporting as success is the same
 defect class as an unimplemented hook returning `Ok` — see the verification
-rules in `12-testing.md`.
+rules in `12-testing.md`. Built: `crcbl_hal::downgrades` compares what was asked
+for against what the device **granted** — not against what the adapter could
+have given — and `GpuContext::open` logs the difference once, saying nothing
+when the device granted the lot.
 
 ## Toggles: three layers, one resolution point
 
@@ -159,16 +174,33 @@ reads as though the work is done:
 
 | Feature               | Vulkan     | Metal             | D3D12      | wgpu (native) | WebGPU   |
 | --------------------- | ---------- | ----------------- | ---------- | ------------- | -------- |
-| Compute               | yes / yes  | yes / yes         | yes / owed | yes / yes     | yes      |
-| Descriptor indexing   | yes / yes  | yes / withdrawn   | yes / owed | yes / —       | **no**   |
-| Buffer device address | yes / yes  | yes / —           | yes / —    | **no**        | **no**   |
-| Multi-draw-indirect   | yes / yes  | yes / yes         | yes / owed | yes / —       | **no**   |
-| Draw-indirect-count   | yes / yes  | **no**            | yes / owed | yes / —       | **no**   |
-| Mesh shaders          | yes / owed | yes / owed        | yes / owed | yes / —       | **no**   |
+| Compute               | yes / yes  | yes / yes         | yes / yes  | yes / yes     | yes      |
+| Descriptor indexing   | yes / yes  | yes / withdrawn   | yes / yes  | yes / —       | **no**   |
+| Buffer device address | yes / yes  | yes / —           | yes / yes  | **no**        | **no**   |
+| Multi-draw-indirect   | yes / yes  | yes / yes         | yes / yes  | yes / —       | **no**   |
+| Draw-indirect-count   | yes / yes  | **no**            | yes / yes  | yes / —       | **no**   |
+| Mesh shaders          | yes / yes  | yes / owed        | yes / owed | yes / —       | **no**   |
 | Ray query / RT        | yes / owed | yes / **blocked** | yes / owed | yes / —       | **no**   |
 | Timestamp query       | yes / yes  | refused           | yes / owed | yes / —       | yes      |
 | Push constants        | yes / yes  | yes / yes         | yes / owed | yes / —       | proposed |
 | Persistent mapping    | yes / yes  | yes / yes         | yes / yes  | **no**        | **no**   |
+
+The D3D12 column moved because `crcbl-dx12`'s `adapter.rs` now reports those
+flags — descriptor indexing on binding tier 3, and the rest unconditionally,
+each with its reason written on `features_of`. Its remaining `owed` cells are
+withheld deliberately and argued in the same place: timestamp query needs a
+`Limits::timestamp_period_ns` that only a queue can answer, push constants need
+the root-signature design to fix the budget, and mesh shaders are reported clear
+outright. **A withheld flag is not an oversight there, it is the rule of this
+document applied to a backend mid-build.**
+
+Vulkan's mesh-shader cell moved for the whole feature, not just the report:
+`crcbl-vk` reads `PhysicalDeviceMeshShaderFeaturesEXT`, `create_mesh_pipeline`
+refuses on a device without the flag, and `draw_mesh_tasks` is wired through the
+seam. Its ray-tracing cell stays `owed` for the opposite reason — the adapter
+reports `RAY_QUERY`, `RAY_TRACING_PIPELINE` and `ACCELERATION_STRUCTURE`, but
+`crcbl-hal` has no acceleration-structure API for anything to build one through,
+so nothing can use them yet.
 
 Three entries need their reasons stated rather than left as a cell:
 
@@ -249,18 +281,19 @@ contributing the target upstream is a legitimate option if it stalls.
 
 ## Delivery
 
-| Slice                                                                     | Phase |
-| ------------------------------------------------------------------------- | ----- |
-| Remove `Features::TIER_A` and `RendererTier`; fix `DeviceDesc::default()` | P7    |
-| Derived path selectors + the resolution point + downgrade logging         | P7    |
-| `MESH_SHADER` / `RAY_QUERY` / `ACCELERATION_STRUCTURE` flags reported     | P7    |
-| Toggle layering (settings ← camera stack ← programmatic)                  | P7    |
-| Settings-screen exposure of the video toggles                             | P10   |
+| Slice                                                                     | Phase                                                    |
+| ------------------------------------------------------------------------- | -------------------------------------------------------- |
+| Remove `Features::TIER_A` and `RendererTier`; fix `DeviceDesc::default()` | **Built** — `crcbl_hal::caps`, `DeviceDesc`              |
+| Derived path selectors + the resolution point + downgrade logging         | **Built** — `crcbl_hal::caps`, `crcbl_hal::downgrades`   |
+| `MESH_SHADER` / `RAY_QUERY` / `ACCELERATION_STRUCTURE` flags reported     | **Built** — `crcbl_hal::caps`, `crcbl-vk`'s `adapter.rs` |
+| Toggle layering (settings ← camera stack ← programmatic)                  | **Built** — `crcbl_render::effects`; see above           |
+| Settings-screen exposure of the video toggles                             | P10                                                      |
 
-**The timing is deliberate and it is now.** `RendererTier` is consumed by log
-lines, `Debug` impls, tests and one device request; nothing in the renderer
-branches on it, because P7 has not landed. Changing it before P7 is nearly free
-and changing it afterwards is not.
+**The timing was deliberate and it was then.** `RendererTier` was consumed by
+log lines, `Debug` impls, tests and one device request; nothing in the renderer
+branched on it, because P7 had not landed. Changing it before P7 was nearly free
+and changing it afterwards would not have been — which is why it was done first,
+and why no renderer code had to move with it.
 
 ## Risks
 
