@@ -519,6 +519,23 @@ const STATUS_RUNNING = 3;
 const STATUS_PAUSED = 6;
 
 /**
+ * The keys group H registers its two canvases under, in the registry it hands
+ * the replayer.
+ *
+ * `SurfaceTarget::Web` is an integer into the shell's JS-side canvas registry
+ * and nothing else, so these numbers are the page's to choose and mean nothing
+ * to wasm — the probe is told which one to name.
+ *
+ * **The decoy is why there are two.** With one canvas in the registry, a
+ * replayer that ignored the `canvasId` on the wire and took whatever it found
+ * would hand back the right context by accident, and no identity check could
+ * tell. It is registered *first*, so "the first entry" is also the wrong
+ * answer. `web/tools/gpu-replay.mjs` runs the same shape against a stub.
+ */
+const DECOY_CANVAS_ID = 6;
+const PROBE_CANVAS_ID = 7;
+
+/**
  * How far above its starting height a flappy bird has to climb before the taps
  * are the only thing that can have put it there, in the units its HUD prints.
  *
@@ -2597,14 +2614,28 @@ try {
   // Started in one evaluation, and inside it in one *synchronous* run: the
   // demo's frame loop calls `takeCommandStream` on every frame, so whichever of
   // the two drains the buffer first gets the command. See `gpu-probe.js`.
+  //
+  // The replayer is built here and kept on `globalThis.crcblProbe` for the rest
+  // of this group and for group H, which is why the canvas registry group H
+  // needs is handed over now: one replayer, one channel, one demo underneath.
+  // The adapter and device checks below do not read it.
   const probe = await evaluate(
     page,
     `(async () => {
        const { exports, memory } = globalThis.crcbl;
        const { Replayer } = await import('/engine/gpu-replay.js');
        const { startAdapterProbe } = await import('/engine/gpu-probe.js');
-       const replayer = new Replayer();
-       globalThis.crcblProbe = { exports, memory, replayer };
+       // The shell's canvas registry, standing in for one no shell has yet: the
+       // demo's own canvas under the key the surface probe will name, and a
+       // decoy registered ahead of it. See DECOY_CANVAS_ID.
+       const decoy = document.createElement('canvas');
+       const replayer = new Replayer({
+         canvases: new Map([
+           [${DECOY_CANVAS_ID}, decoy],
+           [${PROBE_CANVAS_ID}, document.getElementById('canvas')],
+         ]),
+       });
+       globalThis.crcblProbe = { exports, memory, replayer, decoy };
        return startAdapterProbe({ exports, memory, replayer });
      })()`
   );
@@ -2899,6 +2930,92 @@ try {
     'the demo kept running with a channel installed under it',
     survived === STATUS_RUNNING,
     `status ${survived}`
+  );
+
+  // **THE ONLY GATE ON A SURFACE.** `gpu-replay.mjs` drives the same two
+  // commands under node against a stub canvas whose `getContext` returns a plain
+  // object, so what it proves is the bookkeeping: that the `canvasId` on the
+  // wire is the key that gets looked up, and that a destroy lets go. What it
+  // cannot reach is the only thing a surface finally is — `getContext('webgpu')`
+  // on a real element, answering a real `GPUCanvasContext`. Nothing had ever run
+  // that: until group G started handing the replayer a registry, every
+  // `CreateSurface` in a browser would have thrown `NoSuchCanvas`.
+  //
+  // No poll and no second half, because `CreateSurface` makes no round trip:
+  // wasm names the handle and moves on, so everything there is to see is in the
+  // replayer's own table the moment the frame has been replayed. See
+  // `crates/crcbl-webgpu/src/probe.rs`.
+  group('H — a surface resolves to a real canvas context');
+
+  const surfaceProbe = await evaluate(
+    page,
+    `(async () => {
+       const { startSurfaceProbe } = await import('/engine/gpu-probe.js');
+       const { exports, memory, replayer, decoy } = globalThis.crcblProbe;
+       const canvas = document.getElementById('canvas');
+       try {
+         const started = startSurfaceProbe({
+           exports, memory, replayer, canvasId: ${PROBE_CANVAS_ID},
+         });
+         const context = replayer.surfaces.get(started.surface);
+         return {
+           started: started.started,
+           commands: started.commands,
+           surface: started.surface,
+           held: replayer.surfaces.size,
+           // Identity, not existence. \`GPUCanvasContext.canvas\` is the element
+           // the context came out of, so this is the only thing that separates
+           // "the right canvas answered" from "a canvas answered".
+           isTheCanvas: context?.canvas === canvas,
+           isTheDecoy: context?.canvas === decoy,
+           // …and that it is the browser's own class rather than something
+           // shaped like it. Node has no \`GPUCanvasContext\` binding at all, so
+           // this is what a silent fall back to a stub cannot survive.
+           isRealContext:
+             typeof GPUCanvasContext === 'function' &&
+             context instanceof GPUCanvasContext,
+           hasCurrentTexture: typeof context?.getCurrentTexture === 'function',
+         };
+       } catch (error) {
+         // A \`SurfaceError\` out of the replay is the page failing to resolve
+         // the canvas, and it is the one failure this group exists to catch.
+         // Caught here rather than left to abort the run, so it lands as a red
+         // check that names what threw.
+         return { started: false, threw: String(error) };
+       }
+     })()`
+  );
+  check(
+    'H',
+    'wasm encoded a surface creation and the shim decoded it back',
+    surfaceProbe?.started === true &&
+      surfaceProbe.commands.join(',') === 'CreateSurface' &&
+      Number.isInteger(surfaceProbe.surface),
+    surfaceProbe?.started
+      ? `the frame carried [${surfaceProbe.commands.join(', ')}] for surface ${surfaceProbe.surface}`
+      : (surfaceProbe?.threw ??
+          'wasm would not encode it — another channel is installed')
+  );
+  check(
+    'H',
+    'the surface resolved the canvas the page registered and not the decoy',
+    surfaceProbe?.isTheCanvas === true && surfaceProbe?.isTheDecoy === false,
+    surfaceProbe?.isTheCanvas
+      ? `surface ${surfaceProbe.surface} holds the context of canvas ${PROBE_CANVAS_ID}, of ${surfaceProbe.held} held`
+      : `the context under surface ${surfaceProbe?.surface} belongs to ` +
+          `${surfaceProbe?.isTheDecoy ? `the decoy at ${DECOY_CANVAS_ID}` : 'no canvas this page registered'}` +
+          `${surfaceProbe?.threw ? ` — ${surfaceProbe.threw}` : ''}`
+  );
+  check(
+    'H',
+    'a real GPUCanvasContext came from that canvas, not a stub of one',
+    surfaceProbe?.isRealContext === true &&
+      surfaceProbe?.hasCurrentTexture === true,
+    surfaceProbe?.isRealContext
+      ? 'the context is an instance of this browser GPUCanvasContext and has getCurrentTexture'
+      : `instanceof GPUCanvasContext: ${surfaceProbe?.isRealContext}, ` +
+          `getCurrentTexture: ${surfaceProbe?.hasCurrentTexture}` +
+          `${surfaceProbe?.threw ? ` — ${surfaceProbe.threw}` : ''}`
   );
 
   // Written whatever the outcome: a black PNG is the evidence for a failure and

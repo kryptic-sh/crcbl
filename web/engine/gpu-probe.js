@@ -1,6 +1,6 @@
 // The page's half of the adapter probe: the round trip, driven end to end.
 //
-// `crates/crcbl-webgpu/src/probe.rs` is the contract — four exports, the state
+// `crates/crcbl-webgpu/src/probe.rs` is the contract — the exports, the state
 // codes, and why the module exists at all. The short version: everything else
 // about this format is checked without a browser, against a committed fixture
 // and a synthetic `WebAssembly.Memory`, and **none of that can call
@@ -148,6 +148,53 @@ export function startDeviceProbe({ exports, memory, replayer }) {
   );
   replayer.replay(frame);
   return { started: true, commands };
+}
+
+/**
+ * Asks wasm to make a surface out of one of the page's canvases, and replays
+ * the frame that carries the ask.
+ *
+ * **There is no `pumpSurfaceProbe`, and that is the command rather than a gap.**
+ * `CreateSurface` has no entry on the reply channel — wasm names the handle
+ * itself and moves on — so there is nothing to poll for and nothing to deliver
+ * back. Everything this probe can report, it reports here.
+ *
+ * The same no-`await` rule as its two neighbours, for the same reason: the
+ * demo's frame loop drains the same buffer.
+ *
+ * `replayer` must have been built with a canvas registry that holds a canvas
+ * under `canvasId` — `new Replayer({ canvases })`. One that was not **throws a
+ * `SurfaceError` out of this call**, because the replay throws it: there is no
+ * reply channel to report it on, so the near side is told loudly instead of the
+ * far side being told wrongly. `gpu-replay.js` argues that choice where it is
+ * made.
+ *
+ * @param {object} options
+ * @param {Record<string, Function>} options.exports
+ * @param {WebAssembly.Memory} options.memory
+ * @param {Replayer} options.replayer
+ * @param {number} options.canvasId The registry key of the canvas to present
+ *   to. The page's own number: nothing in wasm knows what the shell registered.
+ * @returns {{ started: boolean, commands: string[], surface: number | null }}
+ *   `surface` is the handle index the command actually carried, read back off
+ *   the decoded frame rather than assumed — it is the key the replayer files
+ *   the context under, and `replayer.surfaces.get(surface)` is how to find it.
+ *   `null` when nothing was encoded.
+ */
+export function startSurfaceProbe({ exports, memory, replayer, canvasId }) {
+  if (exports.__crcbl_web_gpu_probe_surface(canvasId) !== 1) {
+    return { started: false, commands: [], surface: null };
+  }
+  // NO `await` BETWEEN THESE TWO. See the header.
+  const frame = takeCommandStream({ exports, memory });
+  const carried = frame?.commands ?? [];
+  const created = carried.find((command) => command.name === 'CreateSurface');
+  replayer.replay(frame);
+  return {
+    started: true,
+    commands: carried.map((command) => String(command.name)),
+    surface: created ? created.surface.index : null,
+  };
 }
 
 /**

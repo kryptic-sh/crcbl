@@ -333,6 +333,19 @@ if [ -z "$DEVICE_TRIP" ]; then
     exit 1
 fi
 
+# And once more for the surface, which is group H and is its own thing again:
+# every check above passes on a build that never encodes a `CreateSurface`, and
+# the node suite that does encode one resolves it against a stub canvas whose
+# `getContext` hands back a plain object. Only this group asks a real element
+# for a real `GPUCanvasContext`, so its absence means that stopped happening
+# rather than that this demo has no canvas to present to.
+SURFACE_TRIP="$(grep -F 'the surface resolved the canvas the page registered and not the decoy' "${OUTPUT}.plain" || true)"
+if [ -z "$SURFACE_TRIP" ]; then
+    echo "crcbl web e2e: the driver never resolved a surface against a real canvas;" >&2
+    echo "               crcbl-webgpu's CreateSurface is ungated in a real browser" >&2
+    exit 1
+fi
+
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl web e2e: $RAN checks ran and at least one failed" >&2
     echo "crcbl web e2e: the canvas and the page log are in target/web-e2e/" >&2

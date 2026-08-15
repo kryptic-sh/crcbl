@@ -17,7 +17,7 @@
 //! engine code calls [`install`] and the seven transport
 //! exports answer `0` on every frame of every demo. **When the backend arrives
 //! and installs its own channel, this module has done its job and goes**, taking
-//! its four exports with it — and it refuses rather than fights on the way,
+//! its exports with it — and it refuses rather than fights on the way,
 //! because [`install`] will not replace a live channel.
 //!
 //! # Exports
@@ -38,6 +38,7 @@
 //! | [`__crcbl_web_gpu_probe_device_features_lo`](shim::__crcbl_web_gpu_probe_device_features_lo) | `() -> i32` | Low 32 bits of the **opened device's** [`Features`]. |
 //! | [`__crcbl_web_gpu_probe_device_features_hi`](shim::__crcbl_web_gpu_probe_device_features_hi) | `() -> i32` | High 32 bits of the same. |
 //! | [`__crcbl_web_gpu_probe_device_max_image_2d`](shim::__crcbl_web_gpu_probe_device_max_image_2d) | `() -> i32` | The opened device's [`Limits::max_image_2d`](crcbl_hal::Limits::max_image_2d). |
+//! | [`__crcbl_web_gpu_probe_surface`](shim::__crcbl_web_gpu_probe_surface) | `(i32) -> i32` | Encode one [`CreateSurface`](crate::Command::CreateSurface) against [`PROBE_SURFACE`], naming the canvas that `canvas_id` is the page's registry key for. `1`, or `0` if the probe is re-entered or another channel is installed. |
 //!
 //! **`state` before `ptr`, always** — the log queue's rule and for its reason:
 //! a `state` call decodes a buffer and clones a string out of it, so it
@@ -72,6 +73,22 @@
 //! [`TIMELINE_SEMAPHORE`](crcbl_hal::Features::TIMELINE_SEMAPHORE), which WebGPU
 //! does not have, so it is the refusal case rather than the opening one. See
 //! [`crate::device`].
+//!
+//! # The surface probe is one export, and that is the command's shape
+//!
+//! [`__crcbl_web_gpu_probe_surface`](shim::__crcbl_web_gpu_probe_surface) has no
+//! `state`, no codes of its own and nothing to absorb, because
+//! [`CreateSurface`](crate::Command::CreateSurface) has **no entry on the reply
+//! channel**: identity is positional, so wasm names the handle itself and moves
+//! on, and there is nothing for a browser to send back. A state machine here
+//! would have one state and a poll would have nothing to poll for, so the honest
+//! shape is one call that encodes one command and answers whether it went.
+//!
+//! That also decides where a failure surfaces. A canvas id the page has not
+//! registered, or a canvas that will not give up a `webgpu` context, is a
+//! `SurfaceError` **thrown out of the replayer in JS** — the far side cannot be
+//! told, so the near side is. `web/engine/gpu-replay.js` argues that choice
+//! where it is made.
 //!
 //! # Why three numbers and not the whole of `AdapterInfo`
 //!
@@ -113,7 +130,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crcbl_hal::{AdapterId, DeviceDesc, Features};
+use crcbl_hal::{AdapterId, DeviceDesc, Features, SurfaceHandle};
 
 use crate::device::DeviceProbe;
 use crate::instance::AdapterProbe;
@@ -171,6 +188,23 @@ pub const fn probe_device_desc(adapter: AdapterId) -> DeviceDesc<'static> {
         compatible_surface: None,
     }
 }
+
+/// The surface [`shim::__crcbl_web_gpu_probe_surface`] creates, every time.
+///
+/// One fixed handle rather than one drawn from a pool, because the probe has no
+/// pool to draw from: it is an observation point, and identity on this stream is
+/// positional — wasm picks the id, JS files the context under it. Index `0` with
+/// generation `1`, the smallest bit pattern
+/// [`Handle::from_bits`](crcbl_core::Handle::from_bits) accepts.
+///
+/// Asking twice therefore names this same surface twice, and the replayer's
+/// table takes the second context in the first's place rather than growing.
+pub const PROBE_SURFACE: SurfaceHandle = match SurfaceHandle::from_bits(1 << 32) {
+    Some(surface) => surface,
+    // Generation `1`, written into the high half above, so this arm is the
+    // literal being wrong rather than a case a caller can reach.
+    None => panic!("generation 1 is not zero"),
+};
 
 thread_local! {
     /// The probe's own channel and its state. Thread-local for
@@ -256,6 +290,22 @@ impl Probe {
         self.device = state;
         self.reason.clear();
         true
+    }
+
+    /// Encode one [`CreateSurface`](crate::Command::CreateSurface) against
+    /// [`PROBE_SURFACE`], naming the canvas `canvas_id` is the page's key for.
+    ///
+    /// [`encode`](StreamChannel::encode) and never
+    /// [`encode_awaited`](StreamChannel::encode_awaited): nothing answers this
+    /// command, so a registered wait would hold a slot in a bounded set for a
+    /// reply that is never coming.
+    fn request_surface(&mut self, canvas_id: u32) -> bool {
+        let Some(channel) = self.channel() else {
+            return false;
+        };
+        channel
+            .encode(|stream| stream.create_surface(PROBE_SURFACE, canvas_id))
+            .is_some()
     }
 
     /// Drain what JS has committed and hand **both** probes their answers.
@@ -487,6 +537,33 @@ pub mod shim {
         granted_u32(|info| info.caps.limits.max_image_2d)
     }
 
+    /// Ask the page to make a surface out of one of its canvases.
+    ///
+    /// `1` when one [`CreateSurface`](crate::Command::CreateSurface) is on the
+    /// stream; `0` when the probe is re-entered, or when another channel is
+    /// already installed.
+    ///
+    /// **THE ONE EXPORT HERE WITH NO `state` BESIDE IT.** Its two neighbours ask
+    /// a question and poll for the answer; this one only tells. `create_surface`
+    /// makes no round trip — see the [module
+    /// docs](super#the-surface-probe-is-one-export-and-that-is-the-commands-shape)
+    /// — so `1` says the command was encoded and reached the shim's buffer, and
+    /// nothing more. **Whether the page could resolve the canvas is the page's
+    /// to report**, and it reports it by throwing out of the replay.
+    ///
+    /// `canvas_id` is a parameter rather than a constant of this module's
+    /// because the value is the page's fact and not wasm's:
+    /// [`SurfaceTarget::Web`](crcbl_core::SurfaceTarget) is an integer key into
+    /// the shell's JS-side canvas registry, and nothing here knows what the
+    /// shell registered.
+    #[cfg_attr(target_arch = "wasm32", unsafe(no_mangle))]
+    pub extern "C" fn __crcbl_web_gpu_probe_surface(canvas_id: u32) -> u32 {
+        PROBE.with(|probe| match probe.try_borrow_mut() {
+            Ok(mut probe) => u32::from(probe.request_surface(canvas_id)),
+            Err(_) => 0,
+        })
+    }
+
     /// [`granted_u32`] for the device that opened, on the same terms: `0` is a
     /// legal value for each of these, so they are read only once
     /// [`__crcbl_web_gpu_probe_device_state`] has answered
@@ -533,7 +610,8 @@ mod tests {
         __crcbl_web_gpu_probe_device_reason_ptr, __crcbl_web_gpu_probe_device_state,
         __crcbl_web_gpu_probe_features_hi, __crcbl_web_gpu_probe_features_lo,
         __crcbl_web_gpu_probe_max_image_2d, __crcbl_web_gpu_probe_state,
-        __crcbl_web_gpu_probe_text_len, __crcbl_web_gpu_probe_text_ptr,
+        __crcbl_web_gpu_probe_surface, __crcbl_web_gpu_probe_text_len,
+        __crcbl_web_gpu_probe_text_ptr,
     };
     use super::*;
     use crate::web::shim::{
@@ -918,6 +996,69 @@ mod tests {
 
         assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_UNDECODABLE);
         assert!(device_reason().contains("9999"), "{}", device_reason());
+    }
+
+    /// How many sequences the probe's own channel is still waiting on.
+    ///
+    /// Reached through the thread-local rather than through an export, because
+    /// there is no export for it: what it is here to observe is a *negative* —
+    /// see the test below.
+    fn waiting_replies() -> usize {
+        PROBE.with(|probe| {
+            probe
+                .borrow()
+                .channel
+                .as_ref()
+                .map_or(0, |channel| channel.waiting_replies())
+        })
+    }
+
+    /// The surface half, which is one export and one command: the page's canvas
+    /// id goes out and the handle wasm named goes with it.
+    #[test]
+    fn the_surface_export_encodes_one_create_surface_naming_the_canvas() {
+        assert_eq!(__crcbl_web_gpu_probe_surface(7), 1);
+        assert_eq!(
+            take_frame(),
+            vec![Command::CreateSurface {
+                surface: PROBE_SURFACE,
+                canvas_id: 7,
+            }]
+        );
+    }
+
+    /// **Nothing waits on it**, and that is the difference from its two
+    /// neighbours rather than an omission: `create_surface` has no reply, so a
+    /// registered wait would hold a slot in a bounded set for ever.
+    #[test]
+    fn the_surface_request_registers_no_wait_because_nothing_answers_it() {
+        assert_eq!(__crcbl_web_gpu_probe_surface(7), 1);
+        assert_eq!(waiting_replies(), 0);
+        assert_eq!(take_frame().len(), 1);
+
+        // The same channel, one command later, does register one — so the zero
+        // above is this command's shape and not a counter that never moves.
+        assert_eq!(__crcbl_web_gpu_probe_adapters(), 1);
+        assert_eq!(waiting_replies(), 1);
+        assert_eq!(take_frame(), vec![Command::EnumerateAdapters]);
+    }
+
+    /// It needs no adapter and no device, which is what lets the browser gate
+    /// drive it as its own group: `Instance::create_surface` is an instance
+    /// method, and the seam lets a caller make a surface before any device
+    /// exists.
+    #[test]
+    fn a_surface_request_needs_neither_an_adapter_nor_a_device() {
+        assert_eq!(__crcbl_web_gpu_probe_state(), PROBE_UNASKED);
+        assert_eq!(__crcbl_web_gpu_probe_device_state(), DEVICE_UNASKED);
+        assert_eq!(__crcbl_web_gpu_probe_surface(3), 1);
+        assert_eq!(
+            take_frame(),
+            vec![Command::CreateSurface {
+                surface: PROBE_SURFACE,
+                canvas_id: 3,
+            }]
+        );
     }
 
     /// The probe must not take a channel from an engine that has one, because

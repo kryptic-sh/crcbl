@@ -2133,11 +2133,18 @@ something trusted, and in a browser the only trusted renderer today is
      Group G of the browser gate compares the name wasm received against what
      the same page is told, with a named guard so the group cannot silently stop
      running.
-   - 4g — the rest of `AdapterInfo` on the wire, a frame loop the backend owns
-     rather than borrowing from `demo.js`, `request_device` with
-     `PendingDevice::poll`, and `create_surface` for `SurfaceTarget::Web`. Those
-     four are what stand between here and `crcbl::backend` accepting `webgpu`.
-     The probe module and its exports are deleted at that point.
+   - ~~4g — the rest of `AdapterInfo` on the wire, `request_device` with
+     `PendingDevice::poll`, and `create_surface` for `SurfaceTarget::Web`.~~ —
+     **shipped.** The surface pair encodes, both decoders read it, and group H
+     of the browser gate proves a real `GPUCanvasContext` came out of the canvas
+     the wire named rather than out of a decoy registered ahead of it.
+     `Offscreen` was decided along the way: it gets its own command rather than
+     a reserved canvas id, because a magic number both decoders had to agree on
+     is worse than a second opcode.
+   - 4h — a frame loop the backend owns rather than borrowing from `demo.js`,
+     and then `impl Instance`, `impl PendingDevice` and `impl Device`. That is
+     what stands between here and `crcbl::backend` accepting `webgpu`. The probe
+     module and its exports are deleted at that point.
 5. Buffers, textures, samplers, bind groups.
 6. Pipelines and WGSL modules — the artifacts are already committed and already
    validated.
