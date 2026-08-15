@@ -234,7 +234,7 @@ fn check_feature<T: FeatureQuery>(device: &ID3D12Device, mut data: T) -> Option<
     match result {
         Ok(()) => Some(data),
         Err(error) => {
-            log::debug!(
+            crcbl_core::log::debug!(
                 "crcbl-dx12: CheckFeatureSupport({:?}) refused: {error}",
                 T::FEATURE
             );
@@ -349,7 +349,9 @@ fn driver_string(adapter: &IDXGIAdapter1) -> String {
             )
         }
         Err(error) => {
-            log::debug!("crcbl-dx12: no user-mode driver version for this adapter: {error}");
+            crcbl_core::log::debug!(
+                "crcbl-dx12: no user-mode driver version for this adapter: {error}"
+            );
             "D3D12 (no user-mode driver version)".to_string()
         }
     }
@@ -720,7 +722,7 @@ pub(crate) fn describe(
     // assumed.
     let created = unsafe { D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, &mut device) };
     if let Err(error) = created {
-        log::debug!(
+        crcbl_core::log::debug!(
             "crcbl-dx12: DXGI lists \"{}\" but D3D12 will not open it: {error}",
             name_of(desc)
         );

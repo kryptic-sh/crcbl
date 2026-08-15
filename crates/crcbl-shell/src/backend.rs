@@ -298,14 +298,16 @@ fn open_auto() -> Result<Box<dyn Shell>, ShellError> {
         tried.push(entry.backend);
         match (entry.open)() {
             Ok(shell) => {
-                log::info!("opened the {} shell backend", entry.backend);
+                crcbl_core::log::info!("opened the {} shell backend", entry.backend);
                 return Ok(shell);
             }
             // A backend that is compiled in but cannot connect is the normal
             // case on a Wayland-only or X11-only session, so it is a debug line
             // rather than a warning — but it is never silent, because "why did
             // it pick X11?" is a question someone will ask.
-            Err(error) => log::debug!("{} shell backend unavailable: {error}", entry.backend),
+            Err(error) => {
+                crcbl_core::log::debug!("{} shell backend unavailable: {error}", entry.backend)
+            }
         }
     }
     Err(ShellError::NoBackend {

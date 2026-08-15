@@ -13,7 +13,6 @@ repository.workspace = true
 # same dependency for the same reason.
 crcbl-core = { workspace = true }
 crcbl-hal = { workspace = true }
-log = { workspace = true }
 
 # Test-only, and for one thing: the pipeline tests compile the engine's *own*
 # `msl/triangle.metal` into an `MTLLibrary` and look its entry points up by

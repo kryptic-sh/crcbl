@@ -36,7 +36,7 @@ impl Conn {
         // is.
         let (present, first_event) = unsafe { ((*query).present, (*query).first_event) };
         if present == 0 {
-            log::debug!("the X server has no RANDR extension");
+            crcbl_core::log::debug!("the X server has no RANDR extension");
             return None;
         }
 
@@ -54,7 +54,9 @@ impl Conn {
         // SAFETY: `reply` came from libxcb's `malloc` and is freed once.
         unsafe { ffi::free_reply(reply) };
         if major < 1 || (major == 1 && minor < 2) {
-            log::debug!("RANDR {major}.{minor} predates CRTCs; monitors will not be enumerated");
+            crcbl_core::log::debug!(
+                "RANDR {major}.{minor} predates CRTCs; monitors will not be enumerated"
+            );
             return None;
         }
 
@@ -104,7 +106,7 @@ impl Conn {
         // SAFETY: `query` is libxcb's cached reply.
         let (present, opcode) = unsafe { ((*query).present, (*query).major_opcode) };
         if present == 0 {
-            log::debug!("the X server has no XInputExtension");
+            crcbl_core::log::debug!("the X server has no XInputExtension");
             return None;
         }
 
@@ -121,7 +123,7 @@ impl Conn {
         // SAFETY: freed exactly once.
         unsafe { ffi::free_reply(reply) };
         if major < 2 {
-            log::debug!("the X server offers XInput {major} only; no raw motion");
+            crcbl_core::log::debug!("the X server offers XInput {major} only; no raw motion");
             return None;
         }
 
@@ -201,7 +203,7 @@ impl Conn {
             (xkb.use_extension_reply)(self.raw(), cookie, core::ptr::null_mut())
         };
         if reply.is_null() {
-            log::debug!("the X server has no XKB extension");
+            crcbl_core::log::debug!("the X server has no XKB extension");
             return false;
         }
         // SAFETY: `reply` is a live reply this call owns.
@@ -209,7 +211,7 @@ impl Conn {
         // SAFETY: freed exactly once.
         unsafe { ffi::free_reply(reply) };
         if supported == 0 {
-            log::debug!("the X server declined XKB 1.0");
+            crcbl_core::log::debug!("the X server declined XKB 1.0");
             return false;
         }
 
@@ -230,7 +232,7 @@ impl Conn {
             (xkb.per_client_flags_reply)(self.raw(), cookie, core::ptr::null_mut())
         };
         if reply.is_null() {
-            log::debug!("XkbPerClientFlags failed; auto-repeat stays undetectable");
+            crcbl_core::log::debug!("XkbPerClientFlags failed; auto-repeat stays undetectable");
             return false;
         }
         // The reply is read back rather than assumed: a server may answer
@@ -242,9 +244,11 @@ impl Conn {
         unsafe { ffi::free_reply(reply) };
         let enabled = value & ffi::value::XKB_DETECTABLE_AUTO_REPEAT != 0;
         if enabled {
-            log::debug!("detectable auto-repeat is on; a repeat is a press of a held key");
+            crcbl_core::log::debug!(
+                "detectable auto-repeat is on; a repeat is a press of a held key"
+            );
         } else {
-            log::debug!("the X server does not implement detectable auto-repeat");
+            crcbl_core::log::debug!("the X server does not implement detectable auto-repeat");
         }
         enabled
     }
@@ -272,7 +276,7 @@ impl Conn {
         let it_says = self.get_property_words(candidate, self.atoms.net_supporting_wm_check);
         let confirmed = it_says.first() == Some(&candidate);
         if !confirmed {
-            log::debug!(
+            crcbl_core::log::debug!(
                 "_NET_SUPPORTING_WM_CHECK on the root names window {candidate}, which does \
                  not confirm it — treating that as a window manager that died"
             );

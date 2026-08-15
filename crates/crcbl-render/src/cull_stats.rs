@@ -206,7 +206,7 @@ impl CullStatsRing {
                     readback: None,
                 }),
                 Err(error) => {
-                    log::debug!(
+                    crcbl_core::log::debug!(
                         "cull stats: readback buffer {index} refused ({error}); the culling \
                          counters stay on the GPU"
                     );
@@ -406,7 +406,9 @@ impl CullStatsRing {
             // to come back to. Last frame's report stands and says which frame
             // it is from.
             Ok(ReadbackState::Pending) => {
-                log::debug!("cull stats: frame {frame} was still not back after a whole ring");
+                crcbl_core::log::debug!(
+                    "cull stats: frame {frame} was still not back after a whole ring"
+                );
             }
             Err(error) => self.give_up(device, &format!("poll failed ({error})")),
         }
@@ -420,7 +422,7 @@ impl CullStatsRing {
     fn give_up(&mut self, device: &dyn Device, why: &str) {
         self.off = true;
         self.latest = None;
-        log::warn!("cull stats: {why}; the culling counters are off (said once)");
+        crcbl_core::log::warn!("cull stats: {why}; the culling counters are off (said once)");
         for slot in &mut self.slots {
             if let Some(readback) = slot.readback.take() {
                 device.destroy_readback(readback);

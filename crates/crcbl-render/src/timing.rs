@@ -233,14 +233,16 @@ impl PassTimers {
     #[must_use]
     pub fn new(device: &dyn Device, frames_in_flight: usize, max_passes: u32) -> Option<Self> {
         if !device.caps().features.contains(Features::TIMESTAMP_QUERY) {
-            log::debug!("graph: no TIMESTAMP_QUERY on this device; per-pass timing is off");
+            crcbl_core::log::debug!(
+                "graph: no TIMESTAMP_QUERY on this device; per-pass timing is off"
+            );
             return None;
         }
         // Two queries per pass, and the query index is a `u32` — so a capacity
         // above half the range would overflow every `capacity * 2` below and
         // reset a range shorter than the one it wrote.
         let Some(query_count) = max_passes.checked_mul(2) else {
-            log::debug!(
+            crcbl_core::log::debug!(
                 "graph: {max_passes} passes needs {} timestamp queries, more than a u32 index \
                  holds; per-pass timing is off",
                 u64::from(max_passes) * 2
@@ -265,7 +267,9 @@ impl PassTimers {
                     frame: 0,
                 }),
                 Err(error) => {
-                    log::debug!("graph: timestamp set {index} refused ({error}); timing is off");
+                    crcbl_core::log::debug!(
+                        "graph: timestamp set {index} refused ({error}); timing is off"
+                    );
                     for slot in &slots {
                         device.destroy_query_set(slot.set);
                     }
@@ -317,7 +321,7 @@ impl PassTimers {
         let used = passes.len().min(self.capacity as usize);
         if passes.len() > used && !self.warned {
             self.warned = true;
-            log::warn!(
+            crcbl_core::log::warn!(
                 "graph: {} passes but timers hold {}; the last {} are untimed (said once)",
                 passes.len(),
                 self.capacity,
@@ -363,7 +367,9 @@ impl PassTimers {
         }
         let mut raw = vec![0u64; slot.labels.len() * 2];
         if let Err(error) = device.query_results(slot.set, 0, &mut raw) {
-            log::debug!("graph: timestamp read failed ({error}); dropping this frame's timing");
+            crcbl_core::log::debug!(
+                "graph: timestamp read failed ({error}); dropping this frame's timing"
+            );
             return;
         }
         let passes = slot

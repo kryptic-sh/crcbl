@@ -154,13 +154,13 @@ pub(super) fn register_raw_input() -> bool {
             // SAFETY: reads this thread's last error code, set by the call
             // above.
             let error = unsafe { ffi::GetLastError() };
-            log::warn!(
+            crcbl_core::log::warn!(
                 "RegisterRawInputDevices for the mouse failed with Win32 error {error}; \
                  relative pointer motion will not be reported and RAW_POINTER_MOTION is clear"
             );
             return false;
         }
-        log::debug!("raw mouse input is registered for this process");
+        crcbl_core::log::debug!("raw mouse input is registered for this process");
         true
     })
 }
@@ -583,7 +583,7 @@ impl Win32Shell {
         // broken frame. Silence was the old behaviour and is what made the same
         // refusal invisible in `warp_to_client`.
         if let Err(why) = self.warp_to_client(window, centre_x, centre_y) {
-            log::warn!("the locked pointer was not recentred: {why}");
+            crcbl_core::log::warn!("the locked pointer was not recentred: {why}");
         }
     }
 
@@ -722,7 +722,9 @@ impl Win32Shell {
             // this is unreachable short of a corrupted `user32`. Leaving the
             // previous shape recorded is better than recording a null one, which
             // `WM_SETCURSOR` would set as "no cursor".
-            log::warn!("LoadCursorW returned null for {icon:?}; the cursor shape is unchanged");
+            crcbl_core::log::warn!(
+                "LoadCursorW returned null for {icon:?}; the cursor shape is unchanged"
+            );
             return Ok(());
         }
         self.shared().set_shape(Shape { hwnd: key, cursor });

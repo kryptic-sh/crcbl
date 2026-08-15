@@ -174,7 +174,7 @@ pub(crate) fn sweep(
     in_flight.retain(|command_buffer| match command_buffer.status() {
         MTLCommandBufferStatus::Error => {
             let text = describe(command_buffer);
-            log::error!("crcbl-mtl: a submitted command buffer failed: {text}");
+            crcbl_core::log::error!("crcbl-mtl: a submitted command buffer failed: {text}");
             faults.record(text);
             false
         }

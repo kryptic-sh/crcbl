@@ -555,7 +555,7 @@ const fn queue_index(kind: QueueKind) -> u32 {
 pub(crate) fn stamp<A, B>(owner: &impl Owner, handle: Handle<A>) -> Handle<B> {
     let index = handle.index();
     let tag = if index > POOL_INDEX_MASK {
-        log::error!(
+        crcbl_core::log::error!(
             "crcbl-mtl: pool index {index} is too large to carry an owner tag; issuing a handle \
              that resolves nowhere rather than one that might resolve to another device's object"
         );
@@ -704,7 +704,7 @@ impl MetalDevice {
         // environment variables set before the process started, so without a
         // line here a log gives a reader no way to tell a validated run from an
         // unvalidated one.
-        log::info!(
+        crcbl_core::log::info!(
             "crcbl-mtl: {}",
             crate::fault::ValidationReport::of(&raw, &crate::fault::FaultLog::default()).line()
         );
@@ -734,7 +734,7 @@ impl MetalDevice {
             tag: device_tag(id),
             state: Mutex::new(DeviceState::default()),
         });
-        log::info!(
+        crcbl_core::log::info!(
             "crcbl-mtl: opened {:?} (geometry {:?}, binding {:?}, lighting {:?})",
             record.info.name,
             caps.geometry_path(),
@@ -1455,7 +1455,7 @@ impl Device for MetalDevice {
                 .get(local)
                 .is_some_and(|entry| entry.owner == self.inner.id && entry.swapchain_owned)
         {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-mtl: destroy_image on a swapchain-owned image {image:?}; the swapchain owns \
                  its images and destroys them with itself, so this is ignored"
             );
@@ -1550,7 +1550,7 @@ impl Device for MetalDevice {
                 .get(local)
                 .is_some_and(|entry| entry.owner == self.inner.id && entry.swapchain_owned)
         {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-mtl: destroy_image_view on a swapchain-owned view {view:?}; the swapchain \
                  owns its views and reissues them on every reconfigure, so this is ignored"
             );

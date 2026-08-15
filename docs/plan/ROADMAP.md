@@ -1746,11 +1746,38 @@ is about duplicated _knowledge_, not duplicated shape.
   but 12 lines of pass-through **to delete**: `crcbl_ui::menu::MenuItem::new`
   already takes `impl Into<String>` and the wrapper adds nothing.
 
-## Structured logging: adopt `tracing` (2026-08-15)
+## Structured logging: the engine's own macros (2026-08-15)
 
-**Queued by the repo owner**, who has therefore already taken the new-dependency
-decision this needs. What follows is the survey, so the slice is planned against
-the tree rather than against an idea of it.
+**Done.** `tracing` was queued and then declined by the repo owner in favour of
+a minimal implementation inside the engine, which is what shipped:
+`crcbl_core`'s `error!`/`warn!`/`info!`/`debug!`/`trace!`, forwarding to one
+`log_at!`, with a wall-clock banner at start-up and seconds-since-start on every
+line — on the browser queue as well as on stderr.
+
+**Two things the work found that the plan had wrong.**
+
+The first question below — whether `tracing` would subsume `crcbl_core::trace` —
+turned out not to arise, but its answer still holds and is why the profiler was
+left alone: the trace ring is drained per frame into the debug panel, and the
+log is read by a person afterwards.
+
+**The dependency cannot be dropped, and the survey implied it could.** `wgpu`,
+`naga` and `gpu-allocator` all report through the `log` facade, and their
+diagnostics are the ones that have mattered — a shader naga refused, a device
+that would not open. So the sink still implements `log::Log`, and the macros
+dispatch through `log::logger()` rather than reaching for this crate's own
+static. That last part is not a style choice: `wasm32` installs `crcbl::web`'s
+queue instead of the stderr sink, and a version that bypassed the facade
+compiled everywhere while silently dropping every engine log line in the
+browser. `web/tools/smoke.mjs` caught it.
+
+What did change is that seven crates no longer name `log` at all (`crcbl-dx12`,
+`crcbl-mtl`, `crcbl-render`, `crcbl-shell`, `crcbl-store`, `crcbl-vk`,
+`crcbl-wgpu`), and `crcbl::log` is the engine's module rather than the facade
+re-exported — the call sites did not move, because the path is the same either
+way.
+
+The survey it was planned from follows.
 
 ### What logs today
 

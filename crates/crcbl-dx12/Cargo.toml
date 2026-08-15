@@ -8,7 +8,6 @@ repository.workspace = true
 
 [dependencies]
 crcbl-hal = { workspace = true }
-log = { workspace = true }
 
 # The generational `Pool` every resource table is built on, and the `Handle` the
 # seam's resource handles already are. Target-gated beside `windows` because off

@@ -388,7 +388,7 @@ fn hand_levels(
                 continue;
             }
             let Some(mesh) = other.mesh() else {
-                log::warn!(
+                crcbl_core::log::warn!(
                     "node {candidate} is named like LOD{level} of node {node} and draws no \
                      mesh, so it is not a level",
                 );

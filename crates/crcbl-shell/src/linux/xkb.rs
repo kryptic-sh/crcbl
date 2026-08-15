@@ -293,7 +293,7 @@ fn load_uncached() -> Option<Lib> {
         }
     }
     if handle.is_null() {
-        log::warn!(
+        crcbl_core::log::warn!(
             "libxkbcommon is not available: keys still map to KeyCode, but there \
              will be no keysyms and no text input"
         );
@@ -307,7 +307,7 @@ fn load_uncached() -> Option<Lib> {
             // NUL-terminated literal.
             let raw = unsafe { dlsym(handle, concat!($name, "\0").as_ptr().cast()) };
             if raw.is_null() {
-                log::warn!("libxkbcommon has no symbol {}; degrading", $name);
+                crcbl_core::log::warn!("libxkbcommon has no symbol {}; degrading", $name);
                 return None;
             }
             // SAFETY: `$ty` is the prototype `xkbcommon/xkbcommon.h` declares
@@ -351,7 +351,7 @@ fn load_x11_uncached() -> Option<X11Lib> {
         }
     }
     if handle.is_null() {
-        log::warn!(
+        crcbl_core::log::warn!(
             "libxkbcommon-x11 is not available: keys still map to KeyCode, but there \
              will be no keysyms and no text input on X11"
         );
@@ -365,7 +365,7 @@ fn load_x11_uncached() -> Option<X11Lib> {
             // NUL-terminated literal.
             let raw = unsafe { dlsym(handle, concat!($name, "\0").as_ptr().cast()) };
             if raw.is_null() {
-                log::warn!("libxkbcommon-x11 has no symbol {}; degrading", $name);
+                crcbl_core::log::warn!("libxkbcommon-x11 has no symbol {}; degrading", $name);
                 return None;
             }
             // SAFETY: `$ty` is the prototype `xkbcommon/xkbcommon-x11.h`
@@ -482,7 +482,7 @@ impl Keymap {
             .ok()
             .and_then(|metadata| usize::try_from(metadata.len()).ok())?;
         if actual < declared {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "the compositor declared a {declared}-byte keymap but sent a \
                  {actual}-byte file; ignoring it"
             );
@@ -533,13 +533,15 @@ impl Keymap {
             )
         };
         if ok == 0 {
-            log::warn!("the X server has no usable XKB extension; no keysyms this session");
+            crcbl_core::log::warn!(
+                "the X server has no usable XKB extension; no keysyms this session"
+            );
             return None;
         }
         // SAFETY: as above, and the extension is now set up.
         let device = unsafe { (x11.get_core_keyboard_device_id)(connection) };
         if device == -1 {
-            log::warn!("the X server reports no core keyboard device");
+            crcbl_core::log::warn!("the X server reports no core keyboard device");
             return None;
         }
 
@@ -554,7 +556,9 @@ impl Keymap {
             let keymap = (x11.keymap_new_from_device)(context, connection, device, 0);
             if keymap.is_null() {
                 (lib.context_unref)(context);
-                log::warn!("the X server's keymap did not compile; no keysyms this session");
+                crcbl_core::log::warn!(
+                    "the X server's keymap did not compile; no keysyms this session"
+                );
                 return None;
             }
             // `state_new_from_device` rather than `state_new`: it seeds the
@@ -607,7 +611,7 @@ impl Keymap {
         // the only permitted mapping.
         let mapped = unsafe { mmap(ptr::null_mut(), size, PROT_READ, MAP_PRIVATE, fd, 0) };
         if mapped == MAP_FAILED || mapped.is_null() {
-            log::warn!("cannot mmap the compositor's keymap ({size} bytes)");
+            crcbl_core::log::warn!("cannot mmap the compositor's keymap ({size} bytes)");
             return None;
         }
         // The compositor NUL-terminates the keymap and counts the terminator in
@@ -639,7 +643,9 @@ impl Keymap {
             );
             if keymap.is_null() {
                 (lib.context_unref)(context);
-                log::warn!("the compositor's keymap did not compile; no keysyms this session");
+                crcbl_core::log::warn!(
+                    "the compositor's keymap did not compile; no keysyms this session"
+                );
                 return Self::unmap(mapped, size, None);
             }
             let state = (lib.state_new)(keymap);

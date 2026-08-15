@@ -227,7 +227,7 @@ impl TransientPool {
                 return Err(error);
             }
         };
-        log::debug!(
+        crcbl_core::log::debug!(
             "graph: created a transient {}x{} {:?} image",
             desc.extent.0,
             desc.extent.1,
@@ -266,7 +266,7 @@ impl TransientPool {
             usage: desc.usage,
             memory: MemoryLocation::DeviceLocal,
         })?;
-        log::debug!("graph: created a transient {}-byte buffer", desc.size);
+        crcbl_core::log::debug!("graph: created a transient {}-byte buffer", desc.size);
         entries.push(PooledBuffer {
             buffer,
             idle_frames: 0,
@@ -389,7 +389,7 @@ impl TransientPool {
             }
         }
         if retired > 0 {
-            log::debug!("graph: retired {retired} transient(s)");
+            crcbl_core::log::debug!("graph: retired {retired} transient(s)");
         }
         retired
     }

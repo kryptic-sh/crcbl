@@ -450,7 +450,7 @@ pub(crate) fn cached_group(
             Some(group)
         }
         Err(error) => {
-            log::error!("graph: {label} bind group failed: {error}");
+            crcbl_core::log::error!("graph: {label} bind group failed: {error}");
             None
         }
     }

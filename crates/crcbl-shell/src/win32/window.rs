@@ -114,7 +114,9 @@ pub(super) fn register_class(instance: Handle) -> Result<(), ShellError> {
             // Another copy of this code, in another module of the same
             // process. The class it registered is ours, by name and by window
             // procedure, so creating windows against it is correct.
-            log::debug!("the {CLASS_NAME} class was already registered in this process");
+            crcbl_core::log::debug!(
+                "the {CLASS_NAME} class was already registered in this process"
+            );
             return Ok(());
         }
         Err(error)
@@ -165,7 +167,7 @@ impl Win32Shell {
             // Only reachable if the call rejected the style word. A zero frame
             // makes the window slightly smaller than asked rather than
             // refusing to create it.
-            log::debug!("AdjustWindowRectExForDpi refused style {:#x}", styles.style);
+            crcbl_core::log::debug!("AdjustWindowRectExForDpi refused style {:#x}", styles.style);
             return Frame::default();
         }
         Frame {

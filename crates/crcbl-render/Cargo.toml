@@ -16,7 +16,6 @@ crcbl-hal = { workspace = true }
 # The camera's projection matrices, and nothing else. §1.1 already lists glam as
 # a workspace dependency for exactly this.
 glam = { workspace = true }
-log = { workspace = true }
 # `crcbl-shaders` hands out `&[u32]` and entry-point names and depends on
 # nothing at all, so the forward pass can name the engine's own shaders without
 # this crate learning a backend.

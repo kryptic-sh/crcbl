@@ -98,7 +98,7 @@ fn untag<A, B>(handle: Handle<A>) -> Handle<B> {
 pub(crate) fn stamp<A, B>(owner: Owner, handle: Handle<A>) -> Handle<B> {
     let index = handle.index();
     let tag = if index > POOL_INDEX_MASK {
-        log::error!(
+        crcbl_core::log::error!(
             "crcbl-dx12: pool index {index} is too large to carry a device tag; issuing a handle \
              that resolves nowhere rather than one that might resolve to another device's object"
         );

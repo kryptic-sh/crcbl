@@ -572,7 +572,7 @@ impl UiRenderer {
                     // frame, as in the tonemap's bind-group path: the HUD
                     // vanishes for a frame, the log says why, the next frame
                     // retries.
-                    log::error!("graph: ui constants write failed: {error}");
+                    crcbl_core::log::error!("graph: ui constants write failed: {error}");
                     return;
                 }
                 let encoder = ctx.encoder();
@@ -614,7 +614,9 @@ impl UiRenderer {
 impl Drop for UiRenderer {
     fn drop(&mut self) {
         if !self.destroyed {
-            log::warn!("UiRenderer dropped without calling destroy() — GPU resources leaked");
+            crcbl_core::log::warn!(
+                "UiRenderer dropped without calling destroy() — GPU resources leaked"
+            );
         }
     }
 }

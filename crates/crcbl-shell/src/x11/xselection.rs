@@ -587,7 +587,9 @@ impl X11Shell {
                 return;
             }
             if ffi::monotonic_nanos() >= deadline {
-                log::warn!("the X server did not answer a timestamp probe; using CurrentTime");
+                crcbl_core::log::warn!(
+                    "the X server did not answer a timestamp probe; using CurrentTime"
+                );
                 return;
             }
             let _ = ffi::poll_readable(self.conn.fd, 5);
@@ -607,7 +609,7 @@ impl X11Shell {
         while index < self.reads.len() {
             if self.reads[index].is_stalled(now) {
                 let read = self.reads.remove(index);
-                log::warn!(
+                crcbl_core::log::warn!(
                     "clipboard {} stalled for {:?}; answering Unavailable",
                     read.request,
                     selection::TIMEOUT

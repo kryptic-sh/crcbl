@@ -20,7 +20,6 @@ repository.workspace = true
 [dependencies]
 bitflags = { workspace = true }
 crcbl-core = { workspace = true }
-log = { workspace = true }
 thiserror = { workspace = true }
 
 # Build-time only: turns `wayland-protocols/*.xml` into `wl_interface` tables,

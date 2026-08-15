@@ -8,11 +8,6 @@ repository.workspace = true
 
 [dependencies]
 crcbl-core = { workspace = true }
-# The logging facade every other engine crate reports through. `record.rs` is
-# the only user: a save that could not be written is worth a line, and
-# returning an error from `Record::set` instead would make every call site
-# handle a failure it can do nothing about.
-log = { workspace = true }
 crcbl-net = { workspace = true }
 # For `save`'s checksum. `crcbl-shaders` is dependency-free and already carries
 # a NIST-vector-tested SHA-256 (`crcbl_shaders::sha256`); duplicating it here

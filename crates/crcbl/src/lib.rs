@@ -82,6 +82,19 @@ pub use crcbl_client as client;
 /// crate only*, which is why this crate's own code uses `std::` paths
 /// throughout. Consumers get the name they want: `crcbl::core::FrameClock`.
 pub use crcbl_core as core;
+/// [`crcbl_core::log`]: the engine's own logging — the five level macros, the
+/// `CRCBL_LOG` filter, and the sink they reach.
+///
+/// `crcbl::log::info!(…)` is [`crcbl_core::info!`], which the module re-exports
+/// beside the sink; [`core::log::init_logging`] installs that sink. This used to
+/// re-export the `log` crate instead, and the call sites did not change when it
+/// stopped, because the path is the same either way.
+///
+/// The `log` crate is still underneath, and deliberately: `wgpu`, `naga` and
+/// `gpu-allocator` report through that facade, and the sink implements
+/// `log::Log` so their diagnostics land in the same stream as the engine's
+/// rather than nowhere.
+pub use crcbl_core::log;
 /// [`crcbl-ecs`](crcbl_ecs): the world, its components, its systems and the
 /// schedule that runs them.
 pub use crcbl_ecs as ecs;
@@ -172,13 +185,6 @@ pub use crcbl_store as store;
 /// same* `Mat4` — two versions of glam in one binary is a type error whose
 /// message names neither crate helpfully.
 pub use glam as math;
-/// [`log`]: the logging facade, so a game reports through the same one the
-/// engine does without naming it.
-///
-/// `log`'s macros resolve their own paths through `$crate`, so
-/// `crcbl::log::info!(…)` expands exactly as `log::info!(…)` would and needs no
-/// wrapper macro here. [`core::log::init_logging`] installs the sink they reach.
-pub use log;
 
 /// [`crcbl-ui`](crcbl_ui): immediate-mode UI toolkit — draw lists, glyph atlas,
 /// HUD skeleton, and widgets.

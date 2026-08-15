@@ -41,9 +41,10 @@
 //! cannot be used here, and neither can [`crate::core::log::init_logging`],
 //! which stamps its logger with an `Instant`. [`App::boot`] builds the loop on
 //! [`crate::engine::Clock::manual`] and tells it how far to step from the
-//! `performance.now()` the shim passes to [`App::frame`]; the logger is
-//! [`install_logger`]'s, which has no clock at all and lets the console
-//! timestamp the line.
+//! `performance.now()` the shim passes to [`App::frame`]. The logger is
+//! [`install_logger`]'s, and it reads that same `performance.now()` — kept by
+//! [`App::frame`] — so a queued line carries the seconds-since-start prefix the
+//! native sink writes, from the one clock this target has.
 //!
 //! # A sample's wasm module imports nothing of its own
 //!
@@ -60,7 +61,7 @@
 //! `wbg` module, so an accidental `extern "C" { fn … }` somewhere in the engine
 //! turns into a failed check rather than a `LinkError` in someone's browser.
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
 use crate::engine::GameLoop;
 
@@ -128,12 +129,50 @@ thread_local! {
     static LOG: RefCell<LogQueue> = RefCell::new(LogQueue::default());
 }
 
+thread_local! {
+    /// `performance.now()` at the first frame, and the most recent one.
+    ///
+    /// The browser's clock, kept here so a queued line can carry the same
+    /// seconds-since-start prefix the native sink writes. [`std::time::Instant`]
+    /// is not available on this target and `console.log` is not imported — but
+    /// the shim already hands `performance.now()` to [`App::frame`] every
+    /// `requestAnimationFrame`, so the number is in the module already and only
+    /// had to be kept.
+    static CLOCK: Cell<Option<(f64, f64)>> = const { Cell::new(None) };
+}
+
+/// Records `now_ms` as the browser's current time, and the run's start if this
+/// is the first one seen.
+fn note_frame_time(now_ms: f64) {
+    CLOCK.with(|clock| {
+        let started = clock.get().map_or(now_ms, |(started, _)| started);
+        clock.set(Some((started, now_ms)));
+    });
+}
+
+/// Seconds since the first frame, or zero before there has been one.
+///
+/// Zero is honest rather than a placeholder: a line logged before the first
+/// `requestAnimationFrame` — the whole of `prepare` and `boot` — really is at
+/// the start of the run.
+fn elapsed_seconds() -> f64 {
+    CLOCK
+        .with(Cell::get)
+        .map_or(0.0, |(started, now)| (now - started).max(0.0) / 1000.0)
+}
+
 /// A [`log::Log`] that queues lines for the shim instead of writing them.
 ///
-/// There is no `console.log` import and no timestamp: an import would be the
-/// only one in the module, and a timestamp would need [`std::time::Instant`],
-/// which this target does not have. The browser's console stamps the line when
-/// the shim prints it, which is within a frame of when it was written.
+/// There is no `console.log` import: it would be the only one in the module.
+/// The line is shaped exactly like the native sink's, so a browser log and a
+/// terminal log read the same and the gate's matchers — which look at the
+/// message, never the prefix — are indifferent to which produced them.
+///
+/// **No wall-clock banner here, unlike the native side.** `SystemTime::now`
+/// panics on this target as surely as `Instant::now` does, and getting a date
+/// would mean importing one from JS. The browser console stamps each line as
+/// the shim prints it, which is the same information from a source that already
+/// exists.
 struct WebLogger;
 
 impl log::Log for WebLogger {
@@ -158,10 +197,11 @@ impl log::Log for WebLogger {
                 queue.dropped = queue.dropped.saturating_add(1);
             }
             let mut line = format!(
-                "[{}] {}: {}",
-                record.level(),
-                record.target(),
-                record.args()
+                "[{elapsed:9.4}s {level:<5} {target}] {args}",
+                elapsed = elapsed_seconds(),
+                level = record.level(),
+                target = record.target(),
+                args = record.args(),
             );
             // Byte truncation would split a UTF-8 sequence; `char_indices` finds
             // the last boundary at or before the limit.
@@ -487,6 +527,9 @@ impl<P: WebPending> App<P> {
     ///
     /// `now_ms` is `performance.now()`.
     pub fn frame(&mut self, now_ms: f64) -> u32 {
+        // Before anything below can log, so a line written this frame is
+        // stamped with this frame's time and not the previous one's.
+        note_frame_time(now_ms);
         match core::mem::replace(&mut self.stage, Stage::Failed) {
             Stage::Booting(mut pending) => match pending.poll() {
                 Ok(Some(engine)) => {

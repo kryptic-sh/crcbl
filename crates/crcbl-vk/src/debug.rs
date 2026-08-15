@@ -2,7 +2,7 @@
 //! "zero validation errors" a **test result** rather than an aspiration.
 //!
 //! `docs/plan/02-vulkan-backend.md`'s P1 exit criteria say "zero validation
-//! errors/warnings". A messenger that only calls [`log::error!`] cannot enforce
+//! errors/warnings". A messenger that only calls [`crcbl_core::log::error!`] cannot enforce
 //! that: CI captures stderr and nobody reads it, so the criterion quietly
 //! becomes a manual eyeball. So every message the layer emits is *also* counted
 //! and kept here, and [`ValidationReport::assert_clean`] turns the count into a
@@ -373,10 +373,10 @@ unsafe fn messenger_body(
         "general"
     };
     match severity {
-        Severity::Error => log::error!("vk {kind}: {id}: {text}"),
-        Severity::Warning => log::warn!("vk {kind}: {id}: {text}"),
-        Severity::Info => log::info!("vk {kind}: {id}: {text}"),
-        Severity::Verbose => log::debug!("vk {kind}: {id}: {text}"),
+        Severity::Error => crcbl_core::log::error!("vk {kind}: {id}: {text}"),
+        Severity::Warning => crcbl_core::log::warn!("vk {kind}: {id}: {text}"),
+        Severity::Info => crcbl_core::log::info!("vk {kind}: {id}: {text}"),
+        Severity::Verbose => crcbl_core::log::debug!("vk {kind}: {id}: {text}"),
     }
 
     if !user_data.is_null() {

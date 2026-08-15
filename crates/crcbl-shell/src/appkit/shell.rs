@@ -332,13 +332,17 @@ impl AppKitShell {
             // A type identifier is an `NSString` built from a NUL-terminated
             // buffer, so an interior NUL would silently truncate it and read
             // some *other* format. Only `MimeType::Other` can carry one.
-            log::warn!("the pasteboard type for {mime} contains a NUL byte and cannot be named");
+            crcbl_core::log::warn!(
+                "the pasteboard type for {mime} contains a NUL byte and cannot be named"
+            );
             return ClipboardContent::Unavailable;
         }
         // SAFETY: the main thread — a `Shell` is not `Send` — inside the pool
         // the caller holds.
         let Some(board) = (unsafe { pasteboard::general() }) else {
-            log::warn!("+[NSPasteboard generalPasteboard] answered nil; nothing can be pasted");
+            crcbl_core::log::warn!(
+                "+[NSPasteboard generalPasteboard] answered nil; nothing can be pasted"
+            );
             return ClipboardContent::Unavailable;
         };
         // SAFETY: a live pasteboard, on the main thread with a pool in scope.
@@ -395,17 +399,17 @@ impl AppKitShell {
             DisplayMode::Windowed
         });
         if wanted == self.presentation {
-            log::debug!("presentation: already {wanted:#x}, nothing sent");
+            crcbl_core::log::debug!("presentation: already {wanted:#x}, nothing sent");
             return;
         }
         // **Printed before the send, not after.** `setPresentationOptions:`
         // raises on a combination it dislikes, and an Objective-C exception
         // unwinding into Rust aborts the process — so a line printed afterwards
         // is a line that never runs on the one occasion it is wanted. This
-        // backend has already paid for a `log::warn!` with no logger behind it
+        // backend has already paid for a `crcbl_core::log::warn!` with no logger behind it
         // and for a duration where a value belonged; a diagnostic that reports
         // only on the paths that did not fail is the same defect again.
-        log::debug!(
+        crcbl_core::log::debug!(
             "presentation: setting {wanted:#x} (was {:#x}), borderless windows {borderless}, \
              {} window(s)",
             self.presentation,
@@ -416,7 +420,7 @@ impl AppKitShell {
         // is one of the two combinations `geometry::presentation_options`
         // produces — never the menu-bar bit on its own, which would raise.
         unsafe { ffi::msg_set_usize(self.app, ffi::sel(c"setPresentationOptions:"), wanted) };
-        log::debug!("presentation: {wanted:#x} accepted");
+        crcbl_core::log::debug!("presentation: {wanted:#x} accepted");
     }
 
     /// Recomputes a window's configuration from AppKit and queues it if it
@@ -1478,7 +1482,9 @@ impl Shell for AppKitShell {
             .map(|offer| pasteboard::pasteboard_type(offer.mime))
             .filter(|kind| {
                 if kind.contains('\0') {
-                    log::warn!("the pasteboard type {kind:?} contains a NUL byte and is skipped");
+                    crcbl_core::log::warn!(
+                        "the pasteboard type {kind:?} contains a NUL byte and is skipped"
+                    );
                     return false;
                 }
                 true
@@ -1522,7 +1528,7 @@ impl Shell for AppKitShell {
                 // bytes in — an `NSData` under `public.utf8-plain-text` carries
                 // them verbatim — but a reader decoding it as UTF-8 will not
                 // get back what was copied, so it is said out loud.
-                log::warn!(
+                crcbl_core::log::warn!(
                     "a text/plain clipboard offer is not valid UTF-8; a reader decoding \
                      public.utf8-plain-text will not recover these bytes"
                 );

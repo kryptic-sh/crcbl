@@ -66,7 +66,7 @@ impl WgpuCommandEncoder {
     /// cause, and the ones after it are usually its consequences.
     fn fail(&mut self, error: HalError) {
         if self.deferred.is_none() {
-            log::error!("crcbl-wgpu: command recording failed: {error}");
+            crcbl_core::log::error!("crcbl-wgpu: command recording failed: {error}");
             self.deferred = Some(error);
         }
     }

@@ -1143,7 +1143,9 @@ impl SpriteRenderer {
 impl Drop for SpriteRenderer {
     fn drop(&mut self) {
         if !self.destroyed {
-            log::warn!("SpriteRenderer dropped without calling destroy() — GPU resources leaked");
+            crcbl_core::log::warn!(
+                "SpriteRenderer dropped without calling destroy() — GPU resources leaked"
+            );
         }
     }
 }

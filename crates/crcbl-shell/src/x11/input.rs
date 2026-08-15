@@ -139,7 +139,7 @@ impl X11Shell {
         if let Some(detail) = self.conn.has_error()
             && self.lost.is_none()
         {
-            log::error!("x11 connection lost: {detail}");
+            crcbl_core::log::error!("x11 connection lost: {detail}");
             self.lost = Some(detail);
         }
     }

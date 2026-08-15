@@ -519,7 +519,7 @@ pub(crate) fn enumerate(
     let physicals = match unsafe { instance.enumerate_physical_devices() } {
         Ok(physicals) => physicals,
         Err(error) => {
-            log::warn!("crcbl-vk: vkEnumeratePhysicalDevices failed: {error:?}");
+            crcbl_core::log::warn!("crcbl-vk: vkEnumeratePhysicalDevices failed: {error:?}");
             return Vec::new();
         }
     };
@@ -578,7 +578,9 @@ fn describe(
                 // Every optional extension then reads as absent, which is the safe
                 // direction: nothing is requested, `vkCreateDevice` still succeeds,
                 // and the capability is reported missing rather than promised.
-                log::warn!("crcbl-vk: vkEnumerateDeviceExtensionProperties failed: {error:?}");
+                crcbl_core::log::warn!(
+                    "crcbl-vk: vkEnumerateDeviceExtensionProperties failed: {error:?}"
+                );
                 Vec::new()
             }
         };
@@ -736,7 +738,7 @@ fn describe(
         maintenance4: vulkan_1_3.maintenance4 == vk::TRUE,
     };
     if !core_1_3.is_complete() {
-        log::warn!(
+        crcbl_core::log::warn!(
             "crcbl-vk: adapter {name} lacks {:?}; crcbl-vk cannot open it \
              (docs/plan/02-vulkan-backend.md: no fallback paths in the MVP)",
             core_1_3.missing()

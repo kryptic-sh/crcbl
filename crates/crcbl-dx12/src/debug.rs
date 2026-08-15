@@ -438,7 +438,7 @@ static DEBUG_LAYER: OnceLock<bool> = OnceLock::new();
 pub(crate) fn enable_debug_layer() -> bool {
     *DEBUG_LAYER.get_or_init(|| {
         if !validation_wanted() {
-            log::debug!(
+            crcbl_core::log::debug!(
                 "crcbl-dx12: the D3D12 debug layer is off; set {VALIDATION_ENV_VAR}=1 to turn it on"
             );
             return false;
@@ -449,7 +449,7 @@ pub(crate) fn enable_debug_layer() -> bool {
         // either succeeds or the call fails, and a failure leaves it `None`,
         // which is why it is read back rather than assumed.
         if let Err(error) = unsafe { D3D12GetDebugInterface(&mut debug) } {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-dx12: {VALIDATION_ENV_VAR} asked for the debug layer and this machine does \
                  not have it ({error}) — install the Graphics Tools optional feature. Validation \
                  errors will keep arriving one call late."
@@ -457,7 +457,9 @@ pub(crate) fn enable_debug_layer() -> bool {
             return false;
         }
         let Some(debug) = debug else {
-            log::warn!("crcbl-dx12: D3D12GetDebugInterface reported success and wrote no layer");
+            crcbl_core::log::warn!(
+                "crcbl-dx12: D3D12GetDebugInterface reported success and wrote no layer"
+            );
             return false;
         };
         // SAFETY: `debug` is the interface the call just returned. The method
@@ -465,7 +467,7 @@ pub(crate) fn enable_debug_layer() -> bool {
         // after this interface is dropped, which is what makes it sound to drop
         // it here.
         unsafe { debug.EnableDebugLayer() };
-        log::info!("crcbl-dx12: the D3D12 debug layer is on");
+        crcbl_core::log::info!("crcbl-dx12: the D3D12 debug layer is on");
         true
     })
 }
@@ -489,7 +491,7 @@ fn debug_layer_on() -> bool {
 pub(crate) fn attach(device: &ID3D12Device) {
     let Ok(queue) = device.cast::<ID3D12InfoQueue>() else {
         if debug_layer_on() {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-dx12: the debug layer is on and this device has no ID3D12InfoQueue, so no \
                  validation message can be read back"
             );
@@ -524,11 +526,13 @@ pub(crate) fn attach(device: &ID3D12Device) {
     // outlives the call. `PushStorageFilter` copies the filter it is given, so
     // neither has to outlive it.
     if let Err(error) = unsafe { queue.PushStorageFilter(&raw const filter) } {
-        log::debug!("crcbl-dx12: the info queue would not take a storage filter: {error}");
+        crcbl_core::log::debug!(
+            "crcbl-dx12: the info queue would not take a storage filter: {error}"
+        );
     }
     // SAFETY: as above. The call takes nothing and returns nothing.
     unsafe { queue.ClearStoredMessages() };
-    log::info!("crcbl-dx12: this device's validation messages are readable");
+    crcbl_core::log::info!("crcbl-dx12: this device's validation messages are readable");
 }
 
 /// The reason D3D12 gives for a device having been removed, or `None` while it

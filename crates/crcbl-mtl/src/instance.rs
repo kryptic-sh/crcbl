@@ -184,7 +184,7 @@ impl MetalInstance {
             .collect();
 
         if adapters.is_empty() {
-            log::warn!("crcbl-mtl: the system reports no Metal device");
+            crcbl_core::log::warn!("crcbl-mtl: the system reports no Metal device");
             return None;
         }
         let id = next_owner_id();

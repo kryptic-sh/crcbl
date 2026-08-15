@@ -193,7 +193,7 @@ impl Surfaces {
             return Some(entry.raw);
         }
         // Obligation 2: the handle is dead now, the object is not.
-        log::debug!(
+        crcbl_core::log::debug!(
             "crcbl-vk: {} surface handle destroyed with {} swapchain(s) still on it; \
              deferring the driver object",
             entry.platform,
@@ -302,7 +302,7 @@ impl Drop for InstanceInner {
         let mut surfaces = self.surfaces();
         let leaked = surfaces.live.len() + surfaces.zombies.len();
         if leaked > 0 {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-vk: {leaked} surface(s) still alive at instance teardown; \
                  the seam's teardown order is swapchain, surface, device, instance"
             );
@@ -450,7 +450,7 @@ impl VkInstance {
             // A warning, never a failure: a machine without the layers package
             // must still run the engine. The *tests* refuse a clean report from
             // a disabled layer, which is where the strictness belongs.
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-vk: {} was requested but is not installed; validation is off",
                 debug::VALIDATION_LAYER
             );
@@ -528,7 +528,7 @@ impl VkInstance {
             extensions.push(ext::validation_features::NAME.as_ptr());
             enabled_names.push(ext::validation_features::NAME);
         } else if want_sync_validation {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-vk: synchronisation validation was asked for but {} is absent from both \
                  the loader's extensions and {}'s",
                 ext::validation_features::NAME.to_string_lossy(),
@@ -539,9 +539,9 @@ impl VkInstance {
             // At info, not debug: "sync validation is on" is the fact that makes
             // a green run mean something, and a run where it is off must not
             // look identical in the log to one where it is on.
-            log::info!("crcbl-vk: synchronisation validation enabled");
+            crcbl_core::log::info!("crcbl-vk: synchronisation validation enabled");
         }
-        log::debug!(
+        crcbl_core::log::debug!(
             "crcbl-vk: instance extensions {:?}",
             enabled_names
                 .iter()
@@ -610,7 +610,9 @@ impl VkInstance {
             Some(debug_ext) => {
                 unsafe { debug_ext.create_debug_utils_messenger(&messenger_info, None) }
                     .unwrap_or_else(|error| {
-                        log::warn!("crcbl-vk: could not create the debug messenger: {error:?}");
+                        crcbl_core::log::warn!(
+                            "crcbl-vk: could not create the debug messenger: {error:?}"
+                        );
                         vk::DebugUtilsMessengerEXT::null()
                     })
             }
@@ -641,7 +643,7 @@ impl VkInstance {
             return Err(OpenError::NoAdapters);
         }
         for record in &adapters {
-            log::info!(
+            crcbl_core::log::info!(
                 "crcbl-vk: adapter {} — {} ({:?}), {}, geometry {:?}, binding {:?}, lighting {:?}",
                 record.info.id.0,
                 record.info.name,
@@ -787,7 +789,7 @@ impl Instance for VkInstance {
             platform: target.platform_name(),
             swapchains: 0,
         });
-        log::debug!(
+        crcbl_core::log::debug!(
             "crcbl-vk: created a {} surface {:?}",
             target.platform_name(),
             handle

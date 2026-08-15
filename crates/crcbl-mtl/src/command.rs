@@ -268,7 +268,7 @@ impl MetalCommandEncoder {
     /// Records the first failure and drops every later command.
     fn fail(&mut self, error: HalError) {
         if self.failed.is_none() {
-            log::error!("crcbl-mtl: command recording failed: {error}");
+            crcbl_core::log::error!("crcbl-mtl: command recording failed: {error}");
             self.failed = Some(error);
         }
     }

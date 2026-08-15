@@ -347,7 +347,6 @@ dependencies = [
  "crcbl-core",
  "crcbl-hal",
  "crcbl-shaders",
- "log",
  "windows",
 ]
 
@@ -396,7 +395,6 @@ dependencies = [
  "crcbl-core",
  "crcbl-hal",
  "crcbl-shaders",
- "log",
  "objc2",
  "objc2-core-foundation",
  "objc2-foundation",
@@ -434,7 +432,6 @@ dependencies = [
  "crcbl-sprite",
  "crcbl-ui",
  "glam",
- "log",
  "thiserror 2.0.19",
 ]
 
@@ -443,10 +440,10 @@ name = "crcbl-scene"
 version = "0.1.0"
 dependencies = [
  "crcbl-assets",
+ "crcbl-core",
  "crcbl-shaders",
  "glam",
  "gltf",
- "log",
  "tempfile",
  "thiserror 2.0.19",
 ]
@@ -480,7 +477,6 @@ dependencies = [
  "bitflags",
  "crcbl-core",
  "crcbl-wl-scanner",
- "log",
  "thiserror 2.0.19",
 ]
 
@@ -508,7 +504,6 @@ dependencies = [
  "crcbl-net",
  "crcbl-shaders",
  "dirs",
- "log",
  "serde",
  "tempfile",
  "thiserror 2.0.19",
@@ -535,7 +530,6 @@ dependencies = [
  "crcbl-render",
  "crcbl-shaders",
  "glam",
- "log",
  "thiserror 2.0.19",
 ]
 
@@ -546,7 +540,6 @@ dependencies = [
  "crcbl-core",
  "crcbl-hal",
  "crcbl-shaders",
- "log",
  "pollster",
  "raw-window-handle",
  "wgpu",

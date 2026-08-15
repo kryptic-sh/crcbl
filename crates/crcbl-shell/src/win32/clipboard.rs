@@ -348,7 +348,7 @@ mod system {
             // path where ownership does not pass to the system.
             let mem = unsafe { ffi::GlobalAlloc(value::GMEM_MOVEABLE, requested) };
             if mem.is_null() {
-                log::warn!("GlobalAlloc of {requested} bytes for the clipboard failed");
+                crcbl_core::log::warn!("GlobalAlloc of {requested} bytes for the clipboard failed");
                 return false;
             }
             // SAFETY: `mem` is a live `GMEM_MOVEABLE` handle this call owns.
@@ -360,7 +360,7 @@ mod system {
                 // SAFETY: freeing a block this call allocated and did not hand
                 // over.
                 unsafe { ffi::GlobalFree(mem) };
-                log::warn!("GlobalLock of a clipboard payload failed");
+                crcbl_core::log::warn!("GlobalLock of a clipboard payload failed");
                 return false;
             }
             // SAFETY: `locked` points at `allocated` writable bytes — the size
@@ -382,7 +382,9 @@ mod system {
                     ffi::GlobalFree(mem);
                     ffi::GetLastError()
                 };
-                log::warn!("SetClipboardData for format {format} failed with Win32 error {error}");
+                crcbl_core::log::warn!(
+                    "SetClipboardData for format {format} failed with Win32 error {error}"
+                );
                 return false;
             }
             true
@@ -412,7 +414,7 @@ mod system {
             // SAFETY: as above; the lock is released below.
             let locked = unsafe { ffi::GlobalLock(mem) };
             if locked.is_null() {
-                log::warn!("GlobalLock of clipboard format {format} failed");
+                crcbl_core::log::warn!("GlobalLock of clipboard format {format} failed");
                 return None;
             }
             // SAFETY: `locked` points at `size` readable bytes — the size the
@@ -455,7 +457,7 @@ mod system {
                 if id == 0 {
                     // SAFETY: reads this thread's last error, set above.
                     let error = unsafe { ffi::GetLastError() };
-                    log::warn!(
+                    crcbl_core::log::warn!(
                         "RegisterClipboardFormatW({name}) failed with Win32 error {error}; \
                          that format cannot be published or read"
                     );

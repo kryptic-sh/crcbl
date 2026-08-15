@@ -217,16 +217,16 @@ fn set_dpi_awareness() {
     // reads no memory of ours and cannot fail in a way that leaves state
     // half-changed.
     if unsafe { ffi::SetProcessDpiAwarenessContext(value::DPI_PER_MONITOR_AWARE_V2) } != 0 {
-        log::debug!("per-monitor-v2 DPI awareness is on");
+        crcbl_core::log::debug!("per-monitor-v2 DPI awareness is on");
         return;
     }
     // SAFETY: reads this thread's last error code, which the call above set.
     let error = unsafe { ffi::GetLastError() };
     if error == value::ERROR_ACCESS_DENIED {
-        log::debug!("the process DPI awareness was already set; leaving it alone");
+        crcbl_core::log::debug!("the process DPI awareness was already set; leaving it alone");
         return;
     }
-    log::warn!(
+    crcbl_core::log::warn!(
         "SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2) failed with Win32 error {error}; \
          window scale factors will still be reported, but a window dragged between monitors of \
          different scales will not be resized for the new one"
@@ -413,7 +413,7 @@ impl Win32Shell {
         let board = match Clipboard::open(hwnd) {
             Ok(board) => board,
             Err(refused) => {
-                log::warn!(
+                crcbl_core::log::warn!(
                     "the clipboard was not readable within {:?}: {refused:?}",
                     clipboard::OPEN_BUDGET
                 );
@@ -421,7 +421,9 @@ impl Win32Shell {
             }
         };
         if let Opened::After { attempts } = board.opened() {
-            log::debug!("the clipboard was held by another process for {attempts} attempts");
+            crcbl_core::log::debug!(
+                "the clipboard was held by another process for {attempts} attempts"
+            );
         }
         let Some(bytes) = board.get(format) else {
             // `GetClipboardData` answering null is "no such format on the
@@ -796,7 +798,7 @@ impl Win32Shell {
                         // without `WS_EX_ACCEPTFILES`, so this is the case
                         // where something outside this backend set the bit. The
                         // descriptor said no; that is the answer.
-                        log::debug!(
+                        crcbl_core::log::debug!(
                             "discarding a drop of {} file(s) on a window created without \
                              accept_drops",
                             dropped.paths.len()
@@ -1254,10 +1256,12 @@ impl Shell for Win32Shell {
         match self.wait(timeout) {
             Wake::TimedOut | Wake::Message => {}
             Wake::Failed { error } => {
-                log::warn!("MsgWaitForMultipleObjectsEx failed with error {error}; not sleeping");
+                crcbl_core::log::warn!(
+                    "MsgWaitForMultipleObjectsEx failed with error {error}; not sleeping"
+                );
             }
             Wake::Unexpected { outcome } => {
-                log::warn!(
+                crcbl_core::log::warn!(
                     "MsgWaitForMultipleObjectsEx returned {outcome}, which is not one of its documented answers"
                 );
             }
@@ -1364,7 +1368,7 @@ impl Shell for Win32Shell {
                 i32::try_from(size.width / 2).unwrap_or(0),
                 i32::try_from(size.height / 2).unwrap_or(0),
             ) {
-                log::warn!("the pointer lock could not start from the middle: {why}");
+                crcbl_core::log::warn!("the pointer lock could not start from the middle: {why}");
             }
         }
         Ok(())
@@ -1502,7 +1506,9 @@ impl Shell for Win32Shell {
             ))
         })?;
         if let Opened::After { attempts } = board.opened() {
-            log::debug!("the clipboard was held by another process for {attempts} attempts");
+            crcbl_core::log::debug!(
+                "the clipboard was held by another process for {attempts} attempts"
+            );
         }
         // Required before a write, and the whole of a release. It also makes
         // this process the clipboard's owner, which is what lets the system
@@ -1529,7 +1535,7 @@ impl Shell for Win32Shell {
                 // `CF_UNICODETEXT` cannot carry a byte that is not a character.
                 // Said out loud, because the replacement characters are
                 // otherwise found by whoever pastes.
-                log::warn!(
+                crcbl_core::log::warn!(
                     "a text/plain clipboard offer is not valid UTF-8; the invalid bytes will \
                      paste as replacement characters"
                 );

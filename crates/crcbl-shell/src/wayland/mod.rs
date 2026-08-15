@@ -3665,7 +3665,7 @@ impl WaylandShell {
                     // the whole wait, so there is nothing to read from and
                     // never was anything to report. `Unavailable`, not `Empty`
                     // — there may well be something on the clipboard.
-                    log::debug!(
+                    crcbl_core::log::debug!(
                         "{:?}: the clipboard never became readable; \
                          no window of this client had keyboard focus",
                         read.window
@@ -3811,7 +3811,9 @@ impl WaylandShell {
                     .and_then(|source| source.bytes_for(&mime))
                     .map(<[u8]>::to_vec);
                 let Some(bytes) = bytes else {
-                    log::debug!("a peer asked for {mime}, which this selection does not offer");
+                    crcbl_core::log::debug!(
+                        "a peer asked for {mime}, which this selection does not offer"
+                    );
                     return;
                 };
                 // Never written here: the peer may be reading slowly, or may be
@@ -4692,7 +4694,7 @@ impl Shell for WaylandShell {
         if self.lost.is_none()
             && let Err(error) = self.conn.drain(0, &[])
         {
-            log::error!("wayland connection lost: {error}");
+            crcbl_core::log::error!("wayland connection lost: {error}");
             self.lost = Some(error.to_string());
         }
         self.process_raw();
@@ -4745,7 +4747,7 @@ impl Shell for WaylandShell {
             c_int::try_from(deadline.as_millis()).unwrap_or(c_int::MAX)
         });
         if let Err(error) = self.conn.drain(timeout_ms, &aux) {
-            log::error!("wayland connection lost: {error}");
+            crcbl_core::log::error!("wayland connection lost: {error}");
             self.lost = Some(error.to_string());
         }
     }
@@ -5074,7 +5076,7 @@ impl Shell for WaylandShell {
                     mime: ReceivedMime::new(&spelling),
                 };
                 if let Err(error) = self.start_receive(offer, &spelling, delivery) {
-                    log::warn!("clipboard read could not be started: {error}");
+                    crcbl_core::log::warn!("clipboard read could not be started: {error}");
                     self.answer_read(
                         window,
                         request,
@@ -5169,9 +5171,9 @@ impl WaylandShell {
             return;
         };
         if mode == zxdg_toplevel_decoration_v1::mode::SERVER_SIDE {
-            log::debug!("{window:?}: the compositor draws this window's decorations");
+            crcbl_core::log::debug!("{window:?}: the compositor draws this window's decorations");
         } else {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "{window:?}: the compositor refused server-side decorations \
                  (xdg-decoration mode {mode}); this window has no title bar until \
                  the UI layer can draw one"

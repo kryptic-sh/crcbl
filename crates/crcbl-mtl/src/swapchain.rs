@@ -420,7 +420,7 @@ pub(crate) fn resolve_present_mode(requested: PresentMode, caps: &SurfaceCaps) -
     if caps.supports_present_mode(requested) {
         return requested;
     }
-    log::debug!(
+    crcbl_core::log::debug!(
         "crcbl-mtl: {requested:?} is not available on this surface; falling back to Fifo, which \
          always is"
     );
@@ -494,7 +494,7 @@ impl MetalInstance {
             kind,
         });
         let handle: SurfaceHandle = crate::device::stamp(&*self.inner, row);
-        log::debug!(
+        crcbl_core::log::debug!(
             "crcbl-mtl: created a {} surface {handle:?}",
             target.platform_name()
         );
@@ -703,7 +703,7 @@ impl MetalDevice {
             // one bad frame into a dead window. The unpresented drawable goes
             // back to Core Animation's pool when it drops.
             if drawable.take().is_some() {
-                log::warn!(
+                crcbl_core::log::warn!(
                     "crcbl-mtl: acquiring with a drawable already outstanding; the previous frame \
                      was never presented"
                 );
@@ -751,7 +751,7 @@ impl MetalDevice {
         // configured is the whole of it.
         let suboptimal = extent != configured;
         if suboptimal {
-            log::debug!(
+            crcbl_core::log::debug!(
                 "crcbl-mtl: the drawable came back {extent:?} for a swapchain configured at \
                  {configured:?}; reporting the frame suboptimal and the size that arrived"
             );
@@ -829,7 +829,7 @@ impl MetalDevice {
             // swapchain to the display, so the two are indistinguishable in a
             // frame time. `crcbl-vk` logs the same fact for the same reason.
             self.inner.first_present_wait.call_once(|| {
-                log::info!(
+                crcbl_core::log::info!(
                     "crcbl-mtl: present {present_id} reached its presented handler; \
                      the loop is closed"
                 );
@@ -931,7 +931,7 @@ impl MetalDevice {
             .present_id
             .filter(|present_id| presents.record_present(*present_id));
         if let (Some(present_id), None) = (present.present_id, numbered) {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-mtl: present id {present_id} does not follow this swapchain's last; \
                  presenting unnumbered"
             );
@@ -983,7 +983,7 @@ impl MetalDevice {
         }
         let extent = resolve_extent(desc.extent, self.inner.caps.limits.max_image_2d)?;
         if extent.clamped {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-mtl: swapchain extent {:?} clamped to {:?} by this device's texture limit",
                 desc.extent,
                 extent.configured
@@ -1013,7 +1013,7 @@ impl MetalDevice {
                 self.build_offscreen_ring(desc, extent.configured, image_count)?
             }
         };
-        log::info!(
+        crcbl_core::log::info!(
             "crcbl-mtl: swapchain {}x{} {:?}, {image_count} image(s), {present_mode:?}",
             extent.configured.0,
             extent.configured.1,

@@ -52,7 +52,7 @@ impl ErrorSink {
     /// only the newest text survives, which is the same trade `crcbl-vk`'s
     /// `ValidationSink` makes.
     pub(crate) fn record(&self, message: String) {
-        log::error!("crcbl-wgpu: the device reported an error: {message}");
+        crcbl_core::log::error!("crcbl-wgpu: the device reported an error: {message}");
         self.count.fetch_add(1, Ordering::Relaxed);
         *self.last.lock().unwrap() = Some(message);
     }

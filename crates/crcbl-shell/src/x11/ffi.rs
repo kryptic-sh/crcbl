@@ -1931,7 +1931,7 @@ fn load_uncached() -> Result<Lib, String> {
 fn load_randr() -> Option<RandrLib> {
     let handle = open_library(&RANDR_SONAMES);
     if handle.is_null() {
-        log::warn!(
+        crcbl_core::log::warn!(
             "libxcb-randr is not available: one monitor covering the whole screen, \
              and no refresh rate"
         );
@@ -1944,7 +1944,7 @@ fn load_randr() -> Option<RandrLib> {
             // NUL-terminated literal.
             let raw = unsafe { dlsym(handle, concat!($name, "\0").as_ptr().cast()) };
             if raw.is_null() {
-                log::warn!("libxcb-randr has no symbol {}; degrading", $name);
+                crcbl_core::log::warn!("libxcb-randr has no symbol {}; degrading", $name);
                 return None;
             }
             // SAFETY: `$ty` is the prototype `xcb/randr.h` declares for this
@@ -1956,7 +1956,7 @@ fn load_randr() -> Option<RandrLib> {
     // so the `dlsym` result is its address and is not transmuted to a function.
     let id = unsafe { dlsym(handle, c"xcb_randr_id".as_ptr()) } as usize;
     if id == 0 {
-        log::warn!("libxcb-randr has no xcb_randr_id; degrading");
+        crcbl_core::log::warn!("libxcb-randr has no xcb_randr_id; degrading");
         return None;
     }
     Some(RandrLib {
@@ -2012,7 +2012,7 @@ fn load_randr() -> Option<RandrLib> {
 fn load_xi() -> Option<XiLib> {
     let handle = open_library(&XI_SONAMES);
     if handle.is_null() {
-        log::warn!(
+        crcbl_core::log::warn!(
             "libxcb-xinput is not available: no unaccelerated pointer motion, so \
              ShellCaps::RAW_POINTER_MOTION stays clear"
         );
@@ -2025,7 +2025,7 @@ fn load_xi() -> Option<XiLib> {
             // NUL-terminated literal.
             let raw = unsafe { dlsym(handle, concat!($name, "\0").as_ptr().cast()) };
             if raw.is_null() {
-                log::warn!("libxcb-xinput has no symbol {}; degrading", $name);
+                crcbl_core::log::warn!("libxcb-xinput has no symbol {}; degrading", $name);
                 return None;
             }
             // SAFETY: `$ty` is the prototype `xcb/xinput.h` declares for this
@@ -2036,7 +2036,7 @@ fn load_xi() -> Option<XiLib> {
     // SAFETY: as for `xcb_randr_id` — a data symbol, taken by address.
     let id = unsafe { dlsym(handle, c"xcb_input_id".as_ptr()) } as usize;
     if id == 0 {
-        log::warn!("libxcb-xinput has no xcb_input_id; degrading");
+        crcbl_core::log::warn!("libxcb-xinput has no xcb_input_id; degrading");
         return None;
     }
     Some(XiLib {
@@ -2053,7 +2053,7 @@ fn load_xi() -> Option<XiLib> {
 fn load_xkb() -> Option<XkbLib> {
     let handle = open_library(&XKB_SONAMES);
     if handle.is_null() {
-        log::warn!(
+        crcbl_core::log::warn!(
             "libxcb-xkb is not available: auto-repeat falls back to the release/press \
              lookahead, which misreads a repeat whose two halves arrive in different reads"
         );
@@ -2066,7 +2066,7 @@ fn load_xkb() -> Option<XkbLib> {
             // NUL-terminated literal.
             let raw = unsafe { dlsym(handle, concat!($name, "\0").as_ptr().cast()) };
             if raw.is_null() {
-                log::warn!("libxcb-xkb has no symbol {}; degrading", $name);
+                crcbl_core::log::warn!("libxcb-xkb has no symbol {}; degrading", $name);
                 return None;
             }
             // SAFETY: `$ty` is the prototype `xcb/xkb.h` declares for this

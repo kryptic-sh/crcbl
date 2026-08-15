@@ -293,7 +293,7 @@ impl AppKitShell {
                     // registered, so this is the case the system cannot cover:
                     // something outside this backend registered our view. The
                     // descriptor said no; that is the answer.
-                    log::debug!(
+                    crcbl_core::log::debug!(
                         "discarding a drop of {} file(s) on a window created without accept_drops",
                         paths.len()
                     );
@@ -373,7 +373,7 @@ impl AppKitShell {
             // Not fatal and not silent: the mode is still recorded, the camera
             // still reads deltas, and what the player sees is a cursor that
             // keeps moving. Saying so is the only thing that can be done here.
-            log::warn!(
+            crcbl_core::log::warn!(
                 "CGAssociateMouseAndMouseCursorPosition({}) failed with CGError {error}; the \
                  pointer will keep moving while it is locked",
                 !wanted
@@ -432,7 +432,9 @@ impl AppKitShell {
         // cursor object, which AppKit owns for the life of the process.
         let cursor = unsafe { ffi::msg(class, ffi::sel(pointer::cursor_selector(icon))) };
         if cursor.is_null() {
-            log::warn!("+[NSCursor {icon:?}] returned nil; the cursor shape is unchanged");
+            crcbl_core::log::warn!(
+                "+[NSCursor {icon:?}] returned nil; the cursor shape is unchanged"
+            );
             return;
         }
         self.record_cursor(key, cursor as usize);
@@ -519,7 +521,7 @@ impl AppKitShell {
         // SAFETY: a live view of a live window, on the main thread.
         let bounds = unsafe { ffi::msg_rect(state.view, ffi::sel(c"bounds")) };
         if let Err(error) = self.warp_to_window(window, pointer::centre_of(bounds.size, scale)) {
-            log::debug!("could not centre the pointer before locking it: {error}");
+            crcbl_core::log::debug!("could not centre the pointer before locking it: {error}");
         }
     }
 }

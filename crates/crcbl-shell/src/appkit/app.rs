@@ -458,7 +458,9 @@ fn delegate_class() -> Result<Class, ShellError> {
                         .to_string(),
                 );
             };
-            log::debug!("the {DELEGATE_CLASS:?} class was already registered in this process");
+            crcbl_core::log::debug!(
+                "the {DELEGATE_CLASS:?} class was already registered in this process"
+            );
             return Ok(existing as usize);
         }
 
@@ -792,7 +794,7 @@ pub(super) fn bootstrap() -> Result<Bootstrap, ShellError> {
             ) != ffi::NO
         };
         if !accepted {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "setActivationPolicy:Regular was refused; this process cannot become \
                  frontmost, so its windows will open behind other applications and will not \
                  take the keyboard"

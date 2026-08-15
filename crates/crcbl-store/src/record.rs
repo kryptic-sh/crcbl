@@ -76,7 +76,7 @@ impl Backing {
         match crate::NativeStorage::config(app_name) {
             Ok(store) => Self::Native(store.root().to_path_buf()),
             Err(error) => {
-                log::warn!("record: no config dir ({error}); values will not persist");
+                crcbl_core::log::warn!("record: no config dir ({error}); values will not persist");
                 Self::None
             }
         }
@@ -106,7 +106,9 @@ impl Backing {
             match crate::web::opfs::installed() {
                 Some(store) => Self::Browser(store),
                 None => {
-                    log::warn!("record: no OPFS store installed; values will not persist");
+                    crcbl_core::log::warn!(
+                        "record: no OPFS store installed; values will not persist"
+                    );
                     Self::None
                 }
             }
@@ -150,7 +152,7 @@ impl Record {
                 Ok(data) => data,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
                 Err(error) => {
-                    log::warn!("record: read error ({error})");
+                    crcbl_core::log::warn!("record: read error ({error})");
                     return None;
                 }
             },
@@ -158,7 +160,7 @@ impl Record {
             Backing::Browser(store) => match store.read(Path::new(file)) {
                 Ok(data) => data,
                 Err(error) => {
-                    log::info!("record: no previous value ({error})");
+                    crcbl_core::log::info!("record: no previous value ({error})");
                     return None;
                 }
             },
@@ -167,7 +169,7 @@ impl Record {
         match <[u8; 4]>::try_from(data.as_slice()) {
             Ok(bytes) => Some(u32::from_le_bytes(bytes)),
             Err(_) => {
-                log::warn!("record: corrupt file ({} bytes)", data.len());
+                crcbl_core::log::warn!("record: corrupt file ({} bytes)", data.len());
                 None
             }
         }
@@ -214,13 +216,13 @@ impl Record {
             #[cfg(not(target_arch = "wasm32"))]
             Backing::Native(root) => {
                 if let Err(error) = crate::write_atomic(&root.join(&self.file), &bytes) {
-                    log::warn!("record: save failed ({error})");
+                    crcbl_core::log::warn!("record: save failed ({error})");
                 }
             }
             #[cfg(target_arch = "wasm32")]
             Backing::Browser(store) => {
                 if let Err(error) = store.write(Path::new(&self.file), &bytes) {
-                    log::warn!("record: save failed ({error})");
+                    crcbl_core::log::warn!("record: save failed ({error})");
                 }
             }
         }

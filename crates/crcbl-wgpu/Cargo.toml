@@ -10,7 +10,6 @@ repository.workspace = true
 [dependencies]
 crcbl-core = { workspace = true }
 crcbl-hal = { workspace = true }
-log = { workspace = true }
 wgpu = { version = "30", features = ["spirv"] }
 raw-window-handle = "0.6"
 

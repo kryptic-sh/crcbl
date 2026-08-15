@@ -279,7 +279,7 @@ fn check_extent(desc: &SwapchainDesc<'_>) -> Result<(u32, u32), HalError> {
     let ceiling = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;
     let extent = (desc.extent.0.min(ceiling), desc.extent.1.min(ceiling));
     if extent != desc.extent {
-        log::warn!(
+        crcbl_core::log::warn!(
             "crcbl-dx12: a swapchain was asked for at {:?} and clamped to {extent:?}, which is \
              D3D12's 2D ceiling; render at AcquiredFrame::extent",
             desc.extent
@@ -398,10 +398,12 @@ pub(crate) fn create(
     //
     // SAFETY: `factory` is live and `hwnd` is the caller's window, as above.
     if let Err(error) = unsafe { factory.MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER) } {
-        log::debug!("crcbl-dx12: DXGI kept its Alt+Enter handling on this window: {error}");
+        crcbl_core::log::debug!(
+            "crcbl-dx12: DXGI kept its Alt+Enter handling on this window: {error}"
+        );
     }
 
-    log::debug!(
+    crcbl_core::log::debug!(
         "crcbl-dx12: created a {buffers}-buffer {extent:?} {:?} swapchain, {present_mode:?}, \
          latency {latency}, tearing={tearing}",
         desc.format
@@ -674,7 +676,7 @@ mod tests {
             // SAFETY: `self.hwnd` is this object's own window, created on this
             // thread and not destroyed before now.
             if let Err(error) = unsafe { DestroyWindow(self.hwnd) } {
-                log::debug!("crcbl-dx12: a test window would not close: {error}");
+                crcbl_core::log::debug!("crcbl-dx12: a test window would not close: {error}");
             }
         }
     }

@@ -258,7 +258,7 @@ fn exact_refreshes() -> Vec<(String, u32)> {
         )
     };
     if status != value::ERROR_SUCCESS || path_count == 0 {
-        log::warn!(
+        crcbl_core::log::warn!(
             "win32: GetDisplayConfigBufferSizes failed ({status}); monitor refresh falls back to whole hertz"
         );
         return Vec::new();
@@ -278,7 +278,7 @@ fn exact_refreshes() -> Vec<(String, u32)> {
         )
     };
     if status != value::ERROR_SUCCESS {
-        log::warn!(
+        crcbl_core::log::warn!(
             "win32: QueryDisplayConfig failed ({status}); monitor refresh falls back to whole hertz"
         );
         return Vec::new();
@@ -327,7 +327,7 @@ fn exact_refreshes() -> Vec<(String, u32)> {
         if name.is_empty() {
             continue;
         }
-        log::info!("win32: exact refresh for {name}: {millihertz} mHz");
+        crcbl_core::log::info!("win32: exact refresh for {name}: {millihertz} mHz");
         refreshes.push((name, millihertz));
     }
     refreshes

@@ -973,7 +973,9 @@ pub(super) fn view_class() -> Result<Class, crate::ShellError> {
                         .to_string(),
                 );
             };
-            log::debug!("the {VIEW_CLASS:?} class was already registered in this process");
+            crcbl_core::log::debug!(
+                "the {VIEW_CLASS:?} class was already registered in this process"
+            );
             return Ok(existing as usize);
         }
         install(class)?;
@@ -1227,7 +1229,7 @@ fn add(class: Class, name: &CStr, imp: Imp, types: &CStr) -> Result<(), String> 
 /// in scope.
 pub(super) unsafe fn add_tracking_area(view: Id) {
     let Some(class) = ffi::class(c"NSTrackingArea") else {
-        log::warn!(
+        crcbl_core::log::warn!(
             "the Objective-C runtime has no NSTrackingArea; pointer enter and leave will not \
              be reported for this window"
         );
@@ -1248,7 +1250,9 @@ pub(super) unsafe fn add_tracking_area(view: Id) {
             ptr::null_mut(),
         );
         if area.is_null() {
-            log::warn!("-[NSTrackingArea initWithRect:options:owner:userInfo:] returned nil");
+            crcbl_core::log::warn!(
+                "-[NSTrackingArea initWithRect:options:owner:userInfo:] returned nil"
+            );
             return;
         }
         ffi::msg1_void(view, ffi::sel(c"addTrackingArea:"), area);
@@ -1280,7 +1284,7 @@ pub(super) unsafe fn add_tracking_area(view: Id) {
 /// in scope.
 pub(super) unsafe fn register_dragged_types(view: Id) {
     let Some(class) = ffi::class(c"NSArray") else {
-        log::warn!(
+        crcbl_core::log::warn!(
             "the Objective-C runtime has no NSArray; this window cannot register for file \
              drops and will receive none"
         );
@@ -1289,7 +1293,7 @@ pub(super) unsafe fn register_dragged_types(view: Id) {
     // SAFETY: an autoreleased string, valid for the caller's pool. `None` is a
     // type identifier with an interior NUL, which this constant is not.
     let Some(kind) = (unsafe { ffi::nsstring(pasteboard::FILE_URL) }) else {
-        log::warn!("the dragged-type identifier could not be made into an NSString");
+        crcbl_core::log::warn!("the dragged-type identifier could not be made into an NSString");
         return;
     };
     // SAFETY: `arrayWithObject:` returns an autoreleased array holding the type,

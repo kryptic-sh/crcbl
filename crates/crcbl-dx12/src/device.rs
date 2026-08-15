@@ -971,7 +971,7 @@ impl DeviceInner {
         // SAFETY: `event` is this call's handle and is not used again. Closed on
         // both paths, so a failed `SetEventOnCompletion` leaks nothing.
         if let Err(error) = unsafe { CloseHandle(event) } {
-            log::debug!("crcbl-dx12: could not close a fence wait event: {error}");
+            crcbl_core::log::debug!("crcbl-dx12: could not close a fence wait event: {error}");
         }
         armed.map_err(|error| {
             HalError::DeviceLost(format!(
@@ -1028,14 +1028,16 @@ impl Drop for DeviceInner {
     fn drop(&mut self) {
         let target = self.state().next_fence_value;
         if let Err(error) = self.wait_for(target) {
-            log::error!(
+            crcbl_core::log::error!(
                 "crcbl-dx12: a device was dropped without reaching fence {target}: {error}"
             );
         }
         let mut state = self.state();
         let pending = state.retire.pending();
         if pending > 0 {
-            log::debug!("crcbl-dx12: releasing {pending} retired batches at device teardown");
+            crcbl_core::log::debug!(
+                "crcbl-dx12: releasing {pending} retired batches at device teardown"
+            );
         }
         state.retire.drain_all();
     }
@@ -1070,7 +1072,7 @@ fn label_object(object: &ID3D12Object, label: &str) {
     // is dropped at the end of this function, after `SetName` has returned and
     // copied it.
     if let Err(error) = unsafe { object.SetName(PCWSTR::from_raw(wide.as_ptr())) } {
-        log::debug!("crcbl-dx12: could not name an object \"{label}\": {error}");
+        crcbl_core::log::debug!("crcbl-dx12: could not name an object \"{label}\": {error}");
     }
 }
 
@@ -1227,7 +1229,7 @@ impl Dx12Device {
             owner,
             state: Mutex::new(state),
         });
-        log::info!(
+        crcbl_core::log::info!(
             "crcbl-dx12: opened \"{}\" (geometry {:?}, binding {:?}, lighting {:?})",
             record.info.name,
             caps.geometry_path(),
@@ -1531,7 +1533,7 @@ impl Dx12Device {
             views,
             ledger: present::PresentLedger::default(),
         };
-        log::info!(
+        crcbl_core::log::info!(
             "crcbl-dx12: offscreen ring {}x{} {:?}, {count} image(s)",
             extent.0,
             extent.1,
@@ -3044,7 +3046,9 @@ impl Device for Dx12Device {
             (entry.images.clone(), entry.views.clone())
         };
         if let Err(error) = self.wait_idle() {
-            log::error!("crcbl-dx12: a swapchain was destroyed with the queue unfinished: {error}");
+            crcbl_core::log::error!(
+                "crcbl-dx12: a swapchain was destroyed with the queue unfinished: {error}"
+            );
         }
         for view in views {
             self.destroy_image_view(view);
@@ -3175,11 +3179,13 @@ impl Device for Dx12Device {
         let Ok(entry) =
             handle::lookup_mut(&mut state.swapchains, "swapchain", present.swapchain, owner)
         else {
-            log::debug!("crcbl-dx12: a swapchain went away during a present, so id {id} is lost");
+            crcbl_core::log::debug!(
+                "crcbl-dx12: a swapchain went away during a present, so id {id} is lost"
+            );
             return Ok(());
         };
         if !entry.ledger.record_present(id) {
-            log::debug!(
+            crcbl_core::log::debug!(
                 "crcbl-dx12: present id {id} does not follow this swapchain's last, so nothing \
                  will be able to wait for it"
             );

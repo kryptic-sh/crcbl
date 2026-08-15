@@ -69,7 +69,7 @@ const READBACK_DEADLINE: Duration = Duration::from_secs(30);
 ///
 /// It is also where the process gets a logger. Every `VkInstance` in this suite
 /// is opened through here, and without a sink the `log` facade drops the
-/// validation messenger's [`log::error!`] and [`log::warn!`] on the floor —
+/// validation messenger's [`crcbl_core::log::error!`] and [`crcbl_core::log::warn!`] on the floor —
 /// which is how a suite whose premise is "the layer is being listened to"
 /// produced a 66,836-line Windows job log with no VUID text anywhere in it.
 pub(crate) fn instance() -> VkInstance {

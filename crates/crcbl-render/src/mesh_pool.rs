@@ -439,7 +439,9 @@ impl MeshPool {
                 }
             }
         } else {
-            log::debug!("mesh pool: no timeline semaphores; draining uploads with wait_idle");
+            crcbl_core::log::debug!(
+                "mesh pool: no timeline semaphores; draining uploads with wait_idle"
+            );
             None
         };
 

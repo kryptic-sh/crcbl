@@ -13,7 +13,6 @@ repository.workspace = true
 ash = { workspace = true }
 crcbl-core = { workspace = true }
 crcbl-hal = { workspace = true }
-log = { workspace = true }
 thiserror = { workspace = true }
 
 # Test-only. `crcbl-shaders` supplies the SPIR-V and the geometry the triangle

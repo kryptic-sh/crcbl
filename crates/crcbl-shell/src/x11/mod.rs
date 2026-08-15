@@ -510,7 +510,7 @@ impl Conn {
             format = reply_format;
             let read = value.len();
             if bytes.len().saturating_add(read) > selection::MAX_BYTES {
-                log::warn!(
+                crcbl_core::log::warn!(
                     "property {property} on window {window:#x} is larger than \
                      {} bytes; treating it as absent",
                     selection::MAX_BYTES
@@ -592,7 +592,7 @@ impl Conn {
 /// undefined even on x86.
 pub(super) fn read_wire<T: Copy>(raw: &[u8]) -> Option<T> {
     if raw.len() < size_of::<T>() {
-        log::debug!(
+        crcbl_core::log::debug!(
             "an X11 event of {} bytes is too short for a {}-byte wire struct",
             raw.len(),
             size_of::<T>()

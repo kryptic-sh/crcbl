@@ -11,6 +11,7 @@ repository.workspace = true
 # crate's error type too — a glTF that will not parse is a `StorageError::Other`
 # rather than a second error enum for callers to match on twice.
 crcbl-assets = { workspace = true }
+crcbl-core = { workspace = true }
 # `GpuMaterial` is what a glTF PBR material's factors *are*: its
 # `base_color_factor` is linear RGBA and so is `GpuMaterial::base_color`, so the
 # importer produces the shader's own record rather than a parallel copy of it.
@@ -20,8 +21,6 @@ crcbl-shaders = { workspace = true }
 # product is the kind of transcription the workspace already has a dependency
 # for.
 glam = { workspace = true }
-# `log::warn!` for the plan's "unsupported features log-and-skip loudly".
-log = { workspace = true }
 # glTF 2.0 parsing. See `[workspace.dependencies]` for the argument about the
 # features set there. `extensions` is added here because it is this crate's
 # alone to want: it is the gate on `gltf_json::extensions::scene::Node::others`,

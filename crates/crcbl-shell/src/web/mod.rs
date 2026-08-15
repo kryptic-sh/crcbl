@@ -220,7 +220,7 @@ fn queue_for(canvas: u32, make: impl FnOnce(WindowId, &Bridge) -> ShellEvent) {
         // at when "the canvas never gets input": either the page started
         // pumping before `create_window`, or it is talking about a canvas this
         // shell was not opened for.
-        log::debug!(
+        crcbl_core::log::debug!(
             "web shim event for canvas {canvas} dropped: {}",
             if had_shell {
                 "no live window on that canvas"
@@ -627,7 +627,7 @@ pub(crate) mod shim {
         phase: u32,
     ) {
         let Some(phase) = touch_phase(phase) else {
-            log::debug!("web shim touch with unknown phase {phase} dropped");
+            crcbl_core::log::debug!("web shim touch with unknown phase {phase} dropped");
             return;
         };
         queue_for(canvas, |window, bridge| ShellEvent::Touch {

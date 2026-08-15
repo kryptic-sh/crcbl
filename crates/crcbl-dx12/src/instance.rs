@@ -325,7 +325,7 @@ impl Dx12Instance {
             match unsafe { CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS::default()) } {
                 Ok(factory) => factory,
                 Err(error) => {
-                    log::warn!("crcbl-dx12: DXGI would not start: {error}");
+                    crcbl_core::log::warn!("crcbl-dx12: DXGI would not start: {error}");
                     return None;
                 }
             };
@@ -351,17 +351,19 @@ impl Dx12Instance {
             // that answers `docs/backlog.md`'s question without anyone running a
             // test suite, and `info` is the level adapter enumeration belongs at
             // — this runs once per process and produces one line per adapter.
-            log::info!("{}", record.report());
+            crcbl_core::log::info!("{}", record.report());
             adapters.push(record);
             next_id += 1;
         }
 
         if adapters.is_empty() {
-            log::warn!("crcbl-dx12: DXGI lists no adapter D3D12 will open, not even WARP");
+            crcbl_core::log::warn!(
+                "crcbl-dx12: DXGI lists no adapter D3D12 will open, not even WARP"
+            );
             return None;
         }
         let allow_tearing = probe_tearing(&factory);
-        log::info!("crcbl-dx12: DXGI_FEATURE_PRESENT_ALLOW_TEARING={allow_tearing}");
+        crcbl_core::log::info!("crcbl-dx12: DXGI_FEATURE_PRESENT_ALLOW_TEARING={allow_tearing}");
         Some(Self {
             inner: Arc::new(InstanceInner {
                 factory,
@@ -448,7 +450,7 @@ fn candidates(factory: &IDXGIFactory4) -> Vec<(IDXGIAdapter1, DXGI_ADAPTER_DESC1
             // problem: every other failure is worth a log line.
             Err(error) if error.code() == DXGI_ERROR_NOT_FOUND => break,
             Err(error) => {
-                log::warn!("crcbl-dx12: EnumAdapters1({index}) failed: {error}");
+                crcbl_core::log::warn!("crcbl-dx12: EnumAdapters1({index}) failed: {error}");
                 break;
             }
         };
@@ -487,7 +489,7 @@ fn candidates(factory: &IDXGIFactory4) -> Vec<(IDXGIAdapter1, DXGI_ADAPTER_DESC1
                     .iter()
                     .any(|(_, seen)| seen.AdapterLuid == desc.AdapterLuid);
                 if duplicate {
-                    log::debug!(
+                    crcbl_core::log::debug!(
                         "crcbl-dx12: WARP is already in the list as an unflagged adapter; \
                          keeping the one entry"
                     );
@@ -499,7 +501,9 @@ fn candidates(factory: &IDXGIFactory4) -> Vec<(IDXGIAdapter1, DXGI_ADAPTER_DESC1
         // Loud, because this is the interesting failure: WARP ships in Windows,
         // so its absence is the answer to `docs/backlog.md`'s question rather
         // than a detail.
-        Err(error) => log::warn!("crcbl-dx12: this Windows reports no WARP adapter: {error}"),
+        Err(error) => {
+            crcbl_core::log::warn!("crcbl-dx12: this Windows reports no WARP adapter: {error}")
+        }
     }
     out
 }
@@ -522,7 +526,9 @@ fn client_extent(hwnd: HWND) -> Option<(u32, u32)> {
     // `create_surface`'s safety contract, and `rect` is a live local the call
     // writes through and which outlives it.
     if let Err(error) = unsafe { GetClientRect(hwnd, &mut rect) } {
-        log::debug!("crcbl-dx12: GetClientRect failed, so the surface reports no extent: {error}");
+        crcbl_core::log::debug!(
+            "crcbl-dx12: GetClientRect failed, so the surface reports no extent: {error}"
+        );
         return None;
     }
     // A client rect's origin is always (0, 0), so the far corner *is* the size;
@@ -551,7 +557,7 @@ fn probe_tearing(factory: &IDXGIFactory4) -> bool {
     let factory5 = match factory.cast::<IDXGIFactory5>() {
         Ok(factory5) => factory5,
         Err(error) => {
-            log::debug!("crcbl-dx12: no IDXGIFactory5, so no tearing: {error}");
+            crcbl_core::log::debug!("crcbl-dx12: no IDXGIFactory5, so no tearing: {error}");
             return false;
         }
     };
@@ -571,7 +577,7 @@ fn probe_tearing(factory: &IDXGIFactory4) -> bool {
         )
     };
     if let Err(error) = queried {
-        log::debug!("crcbl-dx12: the tearing query failed, so no tearing: {error}");
+        crcbl_core::log::debug!("crcbl-dx12: the tearing query failed, so no tearing: {error}");
         return false;
     }
     allowed.as_bool()
@@ -585,7 +591,7 @@ fn desc_of(raw_adapter: &IDXGIAdapter1) -> Option<DXGI_ADAPTER_DESC1> {
     match unsafe { raw_adapter.GetDesc1() } {
         Ok(desc) => Some(desc),
         Err(error) => {
-            log::warn!("crcbl-dx12: an adapter would not describe itself: {error}");
+            crcbl_core::log::warn!("crcbl-dx12: an adapter would not describe itself: {error}");
             None
         }
     }
@@ -679,7 +685,7 @@ impl Instance for Dx12Instance {
             });
             handle::stamp(self.inner.owner, slot)
         };
-        log::debug!(
+        crcbl_core::log::debug!(
             "crcbl-dx12: created a {} surface {handle:?} on HWND {hwnd:#x}",
             target.platform_name()
         );
@@ -697,7 +703,7 @@ impl Instance for Dx12Instance {
     fn destroy_surface(&self, surface: SurfaceHandle) {
         let mut surfaces = self.inner.surfaces();
         if let Some(entry) = handle::take_owned(&mut surfaces, surface, self.inner.owner) {
-            log::debug!(
+            crcbl_core::log::debug!(
                 "crcbl-dx12: destroyed a {} surface handle; the window is the caller's",
                 entry.platform
             );

@@ -22,7 +22,7 @@
 //! * [`rand`] — deterministic values from an index, for simulations that
 //!   replay. Deliberately not a generator; see the module docs for why every
 //!   sample independently arrived at the same shape.
-//! * [`trace`] — [`Span`](trace::Span) and [`counter`](trace::counter), the CPU
+//! * [`mod@trace`] — [`Span`](trace::Span) and [`counter`](trace::counter), the CPU
 //!   half of the profiler: scoped spans with static names, nesting freely and
 //!   carrying the thread they ran on, plus named `u64` counters. Compiled into
 //!   every build and gated at runtime; see the module docs for what that costs.

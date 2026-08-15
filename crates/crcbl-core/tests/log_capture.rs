@@ -68,3 +68,72 @@ fn capturing_twice_on_one_thread_is_a_bug() {
     let _outer = capture();
     let _inner = capture();
 }
+
+/// **The level macros reach the sink, at their own levels, with the calling
+/// module as the target.**
+///
+/// Here rather than beside the code for the reason this file's own header
+/// gives: asserting on them needs an installed logger, and `log.rs`'s
+/// idempotency test needs one that has not been installed yet.
+#[test]
+fn the_level_macros_arrive_at_their_own_levels() {
+    let logs = capture();
+    crcbl_core::error!("an error {}", 1);
+    crcbl_core::warn!("a warning");
+    crcbl_core::info!("some info");
+    crcbl_core::debug!("some detail");
+    crcbl_core::trace!("every step");
+
+    let records = logs.records();
+    assert_eq!(
+        records.iter().map(|r| r.level).collect::<Vec<_>>(),
+        [
+            log::Level::Error,
+            log::Level::Warn,
+            log::Level::Info,
+            log::Level::Debug,
+            log::Level::Trace,
+        ],
+    );
+    assert_eq!(records[0].message, "an error 1", "arguments are applied");
+    assert_eq!(
+        records[0].target, "log_capture",
+        "the target is the calling module's, not the sink's"
+    );
+}
+
+/// **A call the filter rejects never evaluates its argument expressions.**
+///
+/// This is what putting the level check in the macro buys, and it is narrower
+/// than it first looks. `format_args!` already defers the *formatting* — a
+/// `Display` impl that panicked would not run either way — so the thing the
+/// guard actually saves is evaluating the arguments at all. `explode()` below
+/// is called by `format_args!` before anything is written, so a macro without
+/// the check panics here and one with it does not.
+///
+/// Run on a thread that is *not* capturing, because capture deliberately widens
+/// the filter, and the claim is about a plain run.
+#[test]
+fn a_filtered_call_never_evaluates_its_arguments() {
+    fn explode() -> u32 {
+        panic!("an argument was evaluated for a call nothing would read");
+    }
+
+    // Installs the logger if nothing else has, so `__enabled` has a filter to
+    // answer from. Dropped before the worker starts, so the worker's thread is
+    // certainly not capturing.
+    drop(capture());
+
+    std::thread::spawn(|| {
+        // Guarded rather than assumed: with `CRCBL_LOG=trace` exported this
+        // call *would* run, and the test would be asserting nothing. Fail
+        // saying so instead.
+        assert!(
+            !crcbl_core::log::__enabled(log::Level::Trace, module_path!()),
+            "CRCBL_LOG has trace enabled, so this test cannot check the guard"
+        );
+        crcbl_core::trace!("{}", explode());
+    })
+    .join()
+    .expect("the worker must not panic");
+}

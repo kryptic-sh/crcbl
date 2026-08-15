@@ -511,7 +511,7 @@ fn build(
                 let at = format!("mesh {} primitive {}", mesh.index(), primitive.index());
                 primitives.push(read_primitive(&primitive, buffers, &at, key)?);
             } else {
-                log::warn!(
+                crcbl_core::log::warn!(
                     "{}: skipping primitive {} of mesh {:?}: {:?} is not a triangle list",
                     key.display(),
                     primitive.index(),

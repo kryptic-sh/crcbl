@@ -206,7 +206,7 @@ impl Reading {
                 Ok(0) => return (State::Done, moved),
                 Ok(read) => {
                     if self.buffer.len().saturating_add(read) > MAX_BYTES {
-                        log::warn!(
+                        crcbl_core::log::warn!(
                             "a clipboard transfer exceeded {MAX_BYTES} bytes and was abandoned"
                         );
                         return (State::Failed, moved);
@@ -216,7 +216,7 @@ impl Reading {
                 }
                 Err(error) if would_retry(&error) => break,
                 Err(error) => {
-                    log::debug!("clipboard read failed: {error}");
+                    crcbl_core::log::debug!("clipboard read failed: {error}");
                     return (State::Failed, moved);
                 }
             }
@@ -229,7 +229,7 @@ impl Reading {
 
     fn state_at(&self, now_nanos: u64) -> State {
         if now_nanos >= self.idle_deadline_nanos {
-            log::debug!("a clipboard transfer timed out with no data from the peer");
+            crcbl_core::log::debug!("a clipboard transfer timed out with no data from the peer");
             State::Failed
         } else {
             State::Pending
@@ -288,7 +288,7 @@ impl Writing {
                     // A peer that closed the descriptor before reading it all
                     // is ordinary — `head -c 4` on a paste does exactly that —
                     // so this is not a warning.
-                    log::debug!("clipboard write ended early: {error}");
+                    crcbl_core::log::debug!("clipboard write ended early: {error}");
                     return (State::Failed, moved);
                 }
             }
@@ -303,7 +303,7 @@ impl Writing {
             self.idle_deadline_nanos = now_nanos.saturating_add(deadline_nanos());
         }
         if now_nanos >= self.idle_deadline_nanos {
-            log::debug!("a clipboard transfer timed out with the peer not reading");
+            crcbl_core::log::debug!("a clipboard transfer timed out with the peer not reading");
             return (State::Failed, moved);
         }
         (State::Pending, moved)

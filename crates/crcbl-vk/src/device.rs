@@ -458,7 +458,7 @@ pub(crate) fn untag<A, B>(handle: Handle<A>) -> Handle<B> {
 pub(crate) fn stamp<A, B>(tag: u32, handle: Handle<A>, what: &str) -> Handle<B> {
     let index = handle.index();
     let tag = if index > POOL_INDEX_MASK {
-        log::error!(
+        crcbl_core::log::error!(
             "crcbl-vk: {what} pool index {index} is too large to carry an owner tag; issuing a \
              handle that resolves nowhere rather than one that might resolve to another owner's \
              object"
@@ -906,20 +906,20 @@ impl VkDevice {
         inner.set_object_name(inner.raw.handle(), desc.label);
         inner.set_object_name(retire_timeline, Some("crcbl retire timeline"));
         if present_feedback {
-            log::info!(
+            crcbl_core::log::info!(
                 "crcbl-vk: present feedback enabled ({} + {})",
                 khr::present_id::NAME.to_string_lossy(),
                 khr::present_wait::NAME.to_string_lossy(),
             );
         }
         if inner.present_timing_ext.is_some() {
-            log::info!(
+            crcbl_core::log::info!(
                 "crcbl-vk: present timing enabled ({} + {})",
                 present_timing::PRESENT_TIMING_NAME.to_string_lossy(),
                 present_timing::PRESENT_ID2_NAME.to_string_lossy(),
             );
         }
-        log::info!(
+        crcbl_core::log::info!(
             "crcbl-vk: opened {:?} (geometry {:?}, binding {:?}, lighting {:?}), \
              graphics family {graphics_family}, async compute {:?}, transfer {:?}",
             record.info.name,
@@ -1069,7 +1069,7 @@ impl DeviceInner {
         let completed = match completed {
             Ok(completed) => completed,
             Err(error) => {
-                log::error!(
+                crcbl_core::log::error!(
                     "crcbl-vk: vkGetSemaphoreCounterValue on the retire timeline failed \
                      ({error:?}); {} object(s) stay parked and nothing will be freed until it \
                      succeeds",
@@ -1201,7 +1201,7 @@ impl DeviceInner {
         // successful acquire on this swapchain.
         let waited = unsafe { self.raw.wait_for_fences(&pending, true, ACQUIRE_TIMEOUT_NS) };
         if let Err(error) = waited {
-            log::error!(
+            crcbl_core::log::error!(
                 "crcbl-vk: {} acquire fence(s) still pending after 5s while retiring a \
                  swapchain ({error:?}); destroying them anyway, which the driver may report",
                 pending.len()
@@ -1259,7 +1259,7 @@ impl DeviceInner {
             match unsafe { self.raw.allocate_memory(&info, None) } {
                 Ok(memory) => return Ok(memory),
                 Err(error) => {
-                    log::debug!(
+                    crcbl_core::log::debug!(
                         "crcbl-vk: memory type {index} could not satisfy a {} byte \
                          {location:?} allocation ({error:?})",
                         requirements.size
@@ -2624,7 +2624,7 @@ impl Device for VkDevice {
         let can_number = self.inner.present_wait_ext.is_some();
         let numbered = can_number && requested_id > entry.presented_id;
         if can_number && requested_id != 0 && !numbered {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-vk: present id {requested_id} does not follow {}; presenting unnumbered",
                 entry.presented_id
             );
@@ -2691,7 +2691,9 @@ impl Device for VkDevice {
         }
         let raw = entry.raw;
         self.inner.first_present_wait.call_once(|| {
-            log::info!("crcbl-vk: vkWaitForPresentKHR on present {present_id}; the loop is closed");
+            crcbl_core::log::info!(
+                "crcbl-vk: vkWaitForPresentKHR on present {present_id}; the loop is closed"
+            );
         });
         // SAFETY: `raw` is a live swapchain of this device and `present_id` was
         // chained onto a `vkQueuePresentKHR` this same object accepted.
@@ -2758,7 +2760,7 @@ impl Device for VkDevice {
             .swapchain_timing(raw)
             .map_err(|error| conv::surface_error("vkGetSwapchainTimingPropertiesEXT", error))?;
         self.inner.first_display_timing.call_once(|| {
-            log::info!("crcbl-vk: vkGetSwapchainTimingPropertiesEXT says {timing:?}");
+            crcbl_core::log::info!("crcbl-vk: vkGetSwapchainTimingPropertiesEXT says {timing:?}");
         });
         Ok(timing)
     }
@@ -2804,7 +2806,7 @@ impl VkDevice {
         // surface actually say?" is the first question every swapchain-sizing
         // bug raises — and the answer differs structurally between Wayland (no
         // opinion, wide range) and X11 (a real size, and a range pinned to it).
-        log::debug!(
+        crcbl_core::log::debug!(
             "crcbl-vk: surface extents — current {:?}, min {:?}, max {:?}; shell asked for {:?}",
             swapchain::resolve_current_extent(capabilities.current_extent),
             (
@@ -2825,7 +2827,7 @@ impl VkDevice {
             // range, and on X11 that range is `currentExtent` exactly. When
             // they disagree there is no legal swapchain at the requested size,
             // so the clamp is forced — and is never silent.
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-vk: the shell asked for {:?} but the surface permits only \
                  {:?}..={:?} (currentExtent {:?}); configuring at {:?}. The shell's \
                  size is authoritative per the seam, so this means the two are out \
@@ -2855,7 +2857,7 @@ impl VkDevice {
         } else {
             // The seam says the backend falls back to `Fifo`, which every
             // surface supports.
-            log::debug!(
+            crcbl_core::log::debug!(
                 "crcbl-vk: {:?} is unavailable on this surface; falling back to Fifo",
                 desc.present_mode
             );
@@ -2941,7 +2943,7 @@ impl VkDevice {
         };
         drop(state);
 
-        log::info!(
+        crcbl_core::log::info!(
             "crcbl-vk: swapchain {}x{} {:?} {present_mode:?}, {} image(s)",
             extent.configured.0,
             extent.configured.1,
@@ -3076,7 +3078,7 @@ impl VkDevice {
             };
         drop(state);
 
-        log::info!(
+        crcbl_core::log::info!(
             "crcbl-vk: offscreen ring {}x{} {:?}, {count} image(s)",
             extent.configured.0,
             extent.configured.1,
@@ -3285,7 +3287,7 @@ impl Drop for DeviceInner {
             + state.pipelines.len()
             + state.samplers.len();
         if live > 0 {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-vk: {live} object(s) still alive at device teardown, \
                  and {} still parked in the deletion queue",
                 state.trash.pending()

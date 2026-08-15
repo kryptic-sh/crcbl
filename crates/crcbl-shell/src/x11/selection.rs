@@ -251,7 +251,7 @@ impl Read {
             return Step::Done(ClipboardContent::Bytes(core::mem::take(&mut self.buffer)));
         }
         if self.buffer.len().saturating_add(value.len()) > MAX_BYTES {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "clipboard peer sent more than {MAX_BYTES} bytes for {}; abandoning",
                 self.request
             );

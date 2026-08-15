@@ -62,7 +62,7 @@ impl WgpuInstance {
         // non-wasm target — so this must stay behind the cfg.
         #[cfg(target_arch = "wasm32")]
         if !wgpu::util::is_browser_webgpu_supported().await {
-            log::warn!(
+            crcbl_core::log::warn!(
                 "crcbl-wgpu: this browser has navigator.gpu but requestAdapter() \
                  returned no adapter, so there is nothing to enumerate"
             );
@@ -96,7 +96,7 @@ impl WgpuInstance {
             .collect();
 
         if adapters.is_empty() {
-            log::warn!("crcbl-wgpu: no adapters found");
+            crcbl_core::log::warn!("crcbl-wgpu: no adapters found");
             return None;
         }
 
@@ -460,7 +460,7 @@ impl Instance for WgpuInstance {
     fn destroy_surface(&self, surface: SurfaceHandle) {
         let mut surfaces = self.surfaces.pool.lock().unwrap();
         if let Some(slot) = handle::remove(&mut surfaces, surface, self.surfaces.owner) {
-            log::debug!("crcbl-wgpu: destroyed the {} surface", slot.platform);
+            crcbl_core::log::debug!("crcbl-wgpu: destroyed the {} surface", slot.platform);
         }
     }
 

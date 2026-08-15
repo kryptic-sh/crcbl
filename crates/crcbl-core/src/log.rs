@@ -1,11 +1,45 @@
-//! Logging setup.
+//! The engine's logging: five macros, a filter, and the sink they write to.
 //!
-//! The engine logs through the [`log`] facade. This module supplies the
-//! one thing a facade needs and does not provide: a sink. It is deliberately a
-//! small `log::Log` implementation writing to stderr rather than a
-//! dependency on a logging framework — the engine needs level filtering and a
-//! readable line, and every framework that does more brings a runtime,
+//! ```
+//! crcbl_core::info!("shell: first configure at {}x{}", 960, 720);
+//! crcbl_core::warn!("no config dir; values will not persist");
+//! ```
+//!
+//! [`error!`], [`warn!`], [`info!`], [`debug!`] and [`trace!`] take `format!`
+//! arguments and tag each record with the calling module, which is what the
+//! filter below matches on. All five forward to [`log_at!`], so the target, the
+//! level check and the route to the sink are written once.
+//!
+//! It is deliberately small rather than a dependency on a logging framework:
+//! the engine needs level filtering, a readable line and a way for a test to
+//! read back what it said, and every framework that does more brings a runtime,
 //! a feature matrix, and opinions about async.
+//!
+//! # The `log` crate is underneath, and stays
+//!
+//! Not for the engine's own call sites — those go straight to the sink — but
+//! because `wgpu`, `naga` and `gpu-allocator` report through that facade, and
+//! their diagnostics have repeatedly been the ones that mattered: a shader
+//! naga refused, a device that would not open. The sink implements `log::Log`
+//! as well, so third-party records land in the same stream, at the same
+//! filter, in the same format. Dropping the facade would not remove the
+//! dependency — it would only stop us hearing from it.
+//!
+//! Both entry points meet at `StderrLogger::emit`, so there is one filter
+//! check, one capture point and one line format rather than one of each per
+//! path.
+//!
+//! # What a line looks like
+//!
+//! ```text
+//! [   0.0000s INFO  crcbl_core::log] run started 2026-08-15 05:20:07 UTC
+//! [   0.0081s INFO  crcbl::engine] shell: first configure at 960x720
+//! ```
+//!
+//! Seconds since start on every line, because "how long into the run" is the
+//! question a frame loop asks; the wall-clock date once, at start-up, so those
+//! seconds can be lined up against something outside the process without paying
+//! a date conversion per line.
 //!
 //! [`capture`] is the second thing that sink does: it hands a test the records
 //! the engine emitted, so a log line that is the only evidence of a decision
@@ -26,12 +60,33 @@
 
 use std::cell::RefCell;
 use std::env;
+use std::fmt;
 use std::io::Write as _;
 use std::marker::PhantomData;
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::Instant;
 
-use ::log::{Level, LevelFilter, Log, Metadata, Record, SetLoggerError};
+use ::log::{Log, Metadata, Record, SetLoggerError};
+
+/// The five levels, and the filter form of them.
+///
+/// Re-exported so a caller can name `crcbl_core::log::Level` without depending
+/// on the `log` crate directly — the macros expand to this path, and a macro
+/// that named a crate its caller had not taken would not compile there. They
+/// **are** `log`'s types rather than copies: the sink bridges third-party
+/// records from `wgpu`, `naga` and `gpu-allocator` into the same path, so a
+/// parallel enum would only be something to convert through.
+pub use ::log::{Level, LevelFilter};
+
+/// The level macros, reachable as `crcbl_core::log::info!` as well as at the
+/// crate root.
+///
+/// `#[macro_export]` puts a macro at the crate root and nowhere else, which
+/// would leave the macros and the sink they write to in two different places.
+/// Re-exporting them here means `log` is one module whichever half a caller
+/// wants — and it is the path the engine already used, so the crates calling
+/// `crcbl::log::info!` did not have to be rewritten to reach ours.
+pub use crate::{debug, error, info, log_at, trace, warn};
 
 /// Environment variable holding the filter directives.
 pub const ENV_VAR: &str = "CRCBL_LOG";
@@ -156,6 +211,33 @@ impl StderrLogger {
     fn permits(&self, metadata: &Metadata<'_>) -> bool {
         metadata.level() <= self.filter.level_for(metadata.target())
     }
+
+    /// Capture, filter and write one record.
+    ///
+    /// **The one path.** This module's own macros call it directly and the
+    /// [`Log`] impl below funnels third-party records into it, so there is a
+    /// single filter check, a single capture point and a single line format
+    /// rather than one of each per entry point.
+    fn emit(&self, level: Level, target: &str, args: fmt::Arguments<'_>) {
+        // Before the filter, for the reason `enabled` gives.
+        push_captured(level, target, args);
+        if !self.permits(&Metadata::builder().level(level).target(target).build()) {
+            return;
+        }
+        // Seconds since init, not a date: the useful question in a frame loop is
+        // "how long into the run". The wall-clock time the run *started* is
+        // written once by `init_logging`, which is what makes a line here
+        // correlatable with an outside log without paying date formatting per
+        // line — see `start_banner`.
+        let elapsed = self.start.elapsed().as_secs_f64();
+        let mut stderr = std::io::stderr().lock();
+        // A failed log write must never take the process down.
+        let _ = writeln!(
+            stderr,
+            "[{elapsed:9.4}s {level:<5} {target}] {args}",
+            level = level_name(level),
+        );
+    }
 }
 
 impl Log for StderrLogger {
@@ -168,29 +250,53 @@ impl Log for StderrLogger {
     }
 
     fn log(&self, record: &Record<'_>) {
-        // Before the filter, for the reason `enabled` gives.
-        push_captured(record);
-        if !self.permits(record.metadata()) {
-            return;
-        }
-        // Seconds since init rather than a wall-clock date: the useful question
-        // in a frame loop is "how long into the run", and it needs no time
-        // formatting dependency.
-        let elapsed = self.start.elapsed().as_secs_f64();
-        let mut stderr = std::io::stderr().lock();
-        // A failed log write must never take the process down.
-        let _ = writeln!(
-            stderr,
-            "[{elapsed:9.4}s {level:<5} {target}] {args}",
-            level = level_name(record.level()),
-            target = record.target(),
-            args = record.args(),
-        );
+        self.emit(record.level(), record.target(), *record.args());
     }
 
     fn flush(&self) {
         let _ = std::io::stderr().lock().flush();
     }
+}
+
+/// Emits one record through **whatever logger the process installed**.
+///
+/// Not public API: the macros expand to a call here. It is `#[doc(hidden)]`
+/// rather than private because a `macro_rules!` expands in the *caller's* crate
+/// and has to be able to name it.
+///
+/// **Dispatch goes through the `log` facade rather than straight to
+/// [`StderrLogger`], and that is load-bearing.** This crate's sink is not the
+/// only one: `wasm32` installs `crcbl::web`'s queue instead, because a browser
+/// has no stderr and `Instant::now` panics there. A version of this that
+/// reached for `LOGGER` directly compiles everywhere and silently drops every
+/// engine log line in the browser — which is exactly what the `web/` smoke test
+/// caught when it was written that way.
+///
+/// A process that installed no logger drops the record, which is what the
+/// facade already did.
+#[doc(hidden)]
+pub fn __emit(level: Level, target: &str, args: fmt::Arguments<'_>) {
+    ::log::logger().log(
+        &Record::builder()
+            .level(level)
+            .target(target)
+            .args(args)
+            .build(),
+    );
+}
+
+/// Whether a record at `level` from `target` would go anywhere.
+///
+/// The macros check this before their `format_args!`, so a filtered-out
+/// `debug!` never evaluates the expressions it was passed. Both halves are
+/// asked: `max_level` is the facade's cheap global gate, and `enabled` is the
+/// installed logger's own answer — which is what lets a capturing thread see
+/// records the filter would otherwise drop.
+#[doc(hidden)]
+#[must_use]
+pub fn __enabled(level: Level, target: &str) -> bool {
+    level <= ::log::max_level()
+        && ::log::logger().enabled(&Metadata::builder().level(level).target(target).build())
 }
 
 const fn level_name(level: Level) -> &'static str {
@@ -201,6 +307,98 @@ const fn level_name(level: Level) -> &'static str {
         Level::Debug => "DEBUG",
         Level::Trace => "TRACE",
     }
+}
+
+/// Logs at an explicit [`Level`], taking `format!` arguments.
+///
+/// The five level macros below forward to this, so the three things that are
+/// the same for all of them — where the target comes from, that the filter is
+/// asked before the arguments are built, and how a record reaches the sink —
+/// are written once.
+///
+/// **The target is the calling module's path**, which is what `CRCBL_LOG`'s
+/// per-module directives match against: `CRCBL_LOG=warn,crcbl_render=debug`.
+/// `module_path!` expands where the macro is *used*, so this is the caller's
+/// module and not this one.
+///
+/// **The argument expressions are not evaluated unless something would read
+/// them.** The level check comes first, so a filtered-out call costs a
+/// comparison rather than running whatever the caller passed. Narrower than it
+/// sounds: `format_args!` already defers the *formatting*, so a `Display` impl
+/// would not run either way — what the check saves is evaluating the arguments
+/// and calling into the sink at all.
+///
+/// ```
+/// crcbl_core::log_at!(crcbl_core::log::Level::Info, "one {} and {}", "value", 2);
+/// ```
+#[macro_export]
+macro_rules! log_at {
+    ($level:expr, $($arg:tt)+) => {{
+        let level = $level;
+        let target = ::core::module_path!();
+        if $crate::log::__enabled(level, target) {
+            $crate::log::__emit(level, target, ::core::format_args!($($arg)+));
+        }
+    }};
+}
+
+/// Logs at [`Level::Error`]: something the run could not do.
+///
+/// Takes `format!` arguments. See [`log_at!`] for the target and for when the
+/// arguments are built.
+///
+/// ```
+/// crcbl_core::error!("the device went away: {}", "no adapter");
+/// ```
+#[macro_export]
+macro_rules! error {
+    ($($arg:tt)+) => { $crate::log_at!($crate::log::Level::Error, $($arg)+) };
+}
+
+/// Logs at [`Level::Warn`]: something that will surprise someone later.
+///
+/// ```
+/// crcbl_core::warn!("no config dir; values will not persist");
+/// ```
+#[macro_export]
+macro_rules! warn {
+    ($($arg:tt)+) => { $crate::log_at!($crate::log::Level::Warn, $($arg)+) };
+}
+
+/// Logs at [`Level::Info`]: what the run is doing, at the default level.
+///
+/// ```
+/// crcbl_core::info!("shell: first configure at {}x{}", 960, 720);
+/// ```
+#[macro_export]
+macro_rules! info {
+    ($($arg:tt)+) => { $crate::log_at!($crate::log::Level::Info, $($arg)+) };
+}
+
+/// Logs at [`Level::Debug`]: detail for someone reading this subsystem.
+///
+/// ```
+/// crcbl_core::debug!("shell event: {:?}", "Resized");
+/// ```
+#[macro_export]
+macro_rules! debug {
+    ($($arg:tt)+) => { $crate::log_at!($crate::log::Level::Debug, $($arg)+) };
+}
+
+/// Logs at [`Level::Trace`]: every step, for when nothing else has worked.
+///
+/// **Shares a name with [`crate::trace`], the profiler module**, which is legal
+/// — they are in different namespaces — but means a doc link to either has to
+/// say which: `[mod@trace]` for the module, `[trace!]` for this. `use
+/// crcbl_core::trace;` imports the module and leaves this reachable as
+/// `crcbl_core::trace!`.
+///
+/// ```
+/// crcbl_core::trace!("pumped {} events", 3);
+/// ```
+#[macro_export]
+macro_rules! trace {
+    ($($arg:tt)+) => { $crate::log_at!($crate::log::Level::Trace, $($arg)+) };
 }
 
 /// The process-wide logger.
@@ -233,7 +431,73 @@ pub fn try_init_logging(filter: Filter) -> Result<(), SetLoggerError> {
     });
     ::log::set_logger(logger)?;
     ::log::set_max_level(logger.filter.max_level());
+    // Only the winner of the race writes it, so a second `init_logging` does not
+    // claim the run restarted.
+    logger.emit(
+        Level::Info,
+        "crcbl_core::log",
+        format_args!("run started {}", start_banner()),
+    );
     Ok(())
+}
+
+/// The wall-clock time the run started, as `YYYY-MM-DD HH:MM:SS UTC`.
+///
+/// **Written once, at start-up, and never per line.** Every line carries
+/// seconds-since-start instead, which is the question a frame loop asks; this
+/// is the one value that lets those seconds be lined up against something
+/// outside the process, and paying a date conversion for it once is the whole
+/// point of not putting it on every line.
+///
+/// UTC rather than local time, because a local one needs the platform's
+/// timezone database and the rules that go with it — exactly the kind of
+/// arithmetic that is someone else's solved problem. The civil-date conversion
+/// below is only the proleptic Gregorian calendar from a Unix timestamp, which
+/// is a closed form with no zone rules in it.
+///
+/// Falls back to naming the epoch offset if the system clock is before 1970,
+/// rather than guessing: a clock that far wrong is worth seeing.
+fn start_banner() -> String {
+    let Ok(since_epoch) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        return "at an unknown time (the system clock is before 1970)".to_owned();
+    };
+    let secs = since_epoch.as_secs();
+    let (year, month, day) = civil_from_days((secs / 86_400) as i64);
+    let time = secs % 86_400;
+    format!(
+        "{year:04}-{month:02}-{day:02} {h:02}:{m:02}:{s:02} UTC",
+        h = time / 3600,
+        m = (time % 3600) / 60,
+        s = time % 60,
+    )
+}
+
+/// Days since 1970-01-01 to a civil `(year, month, day)`.
+///
+/// Howard Hinnant's `civil_from_days`, the algorithm `<chrono>` is specified
+/// against — transcribed rather than invented, because calendar arithmetic is
+/// the classic place a plausible-looking version is wrong only on the days
+/// nobody tests. It shifts the era to start in March so the leap day lands at
+/// the end of a year and the month-length pattern becomes a closed form.
+///
+/// `days_from_civil_round_trips_every_day_for_four_centuries` checks it against
+/// a full 400-year cycle, which is the period the Gregorian calendar repeats on.
+const fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u32;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
 }
 
 /// Whether this module installed the process logger.
@@ -303,18 +567,18 @@ fn capturing() -> bool {
     CAPTURED.with(|slot| slot.borrow().is_some())
 }
 
-/// Adds `record` to the calling thread's buffer, if it has one.
-fn push_captured(record: &Record<'_>) {
+/// Adds a record to the calling thread's buffer, if it has one.
+fn push_captured(level: Level, target: &str, args: fmt::Arguments<'_>) {
     if !capturing() {
         return;
     }
-    // Rendered before the buffer is borrowed: `record.args()` runs the caller's
-    // own `Display` impls, and one of those logging in turn would re-enter here
-    // and panic on the outstanding `RefCell` borrow.
+    // Rendered before the buffer is borrowed: `args` runs the caller's own
+    // `Display` impls, and one of those logging in turn would re-enter here and
+    // panic on the outstanding `RefCell` borrow.
     let captured = CapturedRecord {
-        level: record.level(),
-        target: record.target().to_owned(),
-        message: record.args().to_string(),
+        level,
+        target: target.to_owned(),
+        message: args.to_string(),
     };
     CAPTURED.with(|slot| {
         if let Some(buffer) = slot.borrow_mut().as_mut() {
@@ -570,12 +834,72 @@ mod tests {
     fn a_thread_that_never_asked_captures_nothing() {
         assert!(!capturing());
         push_captured(
-            &Record::builder()
-                .args(format_args!("dropped on the floor"))
-                .target("crcbl_core")
-                .build(),
+            Level::Info,
+            "crcbl_core",
+            format_args!("dropped on the floor"),
         );
         assert!(!capturing());
+    }
+
+    /// **The calendar arithmetic, against dates taken from outside this
+    /// repository.**
+    ///
+    /// A transcription slip here passes every other test in the workspace and
+    /// is wrong only on the days nobody happens to run it. The values are the
+    /// well-known ones: the epoch, the two century rules that disagree (2000 is
+    /// a leap year, 1900 is not — so 2000-02-29 exists and the day counts
+    /// either side of it differ), and a leap day in a plain leap year.
+    #[test]
+    fn the_civil_date_matches_known_timestamps() {
+        // `date -u -d @<secs> +%F` produced each of these.
+        for (secs, want) in [
+            (0_i64, (1970, 1, 1)),
+            (86_399, (1970, 1, 1)),
+            (86_400, (1970, 1, 2)),
+            (951_782_400, (2000, 2, 29)), // the century leap year
+            (1_078_012_800, (2004, 2, 29)),
+            (1_709_164_800, (2024, 2, 29)),
+            (1_755_216_000, (2025, 8, 15)),
+            (4_102_444_800, (2100, 1, 1)), // 2100 is *not* a leap year
+        ] {
+            assert_eq!(
+                civil_from_days(secs / 86_400),
+                (want.0, want.1, want.2),
+                "{secs}"
+            );
+        }
+    }
+
+    /// Every day of a full Gregorian cycle round-trips, which is the period the
+    /// calendar repeats on — so a rule that is wrong for any day is wrong for
+    /// one of these.
+    #[test]
+    fn days_from_civil_round_trips_every_day_for_four_centuries() {
+        let mut previous = civil_from_days(0);
+        for day in 1..=146_097_i64 {
+            let (year, month, dom) = civil_from_days(day);
+            assert!((1..=12).contains(&month), "day {day} gave month {month}");
+            assert!((1..=31).contains(&dom), "day {day} gave day {dom}");
+            // Strictly increasing, so no day is skipped or repeated.
+            assert!(
+                (year, month, dom) > previous,
+                "day {day}: {previous:?} then {:?}",
+                (year, month, dom)
+            );
+            previous = (year, month, dom);
+        }
+    }
+
+    /// The banner is the one line that says when the run started, so it has to
+    /// be shaped the way a reader expects rather than merely non-empty.
+    #[test]
+    fn the_start_banner_names_a_date_and_a_time() {
+        let banner = start_banner();
+        assert!(banner.ends_with(" UTC"), "{banner}");
+        let (date, rest) = banner.split_once(' ').expect("date then time");
+        assert_eq!(date.len(), "YYYY-MM-DD".len(), "{banner}");
+        assert_eq!(date.matches('-').count(), 2, "{banner}");
+        assert_eq!(rest.split_once(' ').expect("time then zone").0.len(), 8);
     }
 
     #[test]

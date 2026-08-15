@@ -16,6 +16,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl::log` is the engine's own logging module now, not the `log` crate
+  re-exported.** `crcbl::log::info!(…)` and its four siblings are `crcbl_core`'s
+  macros, reachable both at the crate root (`crcbl_core::info!`) and beside the
+  sink (`crcbl_core::log::info!`). Call sites did not change — the path is the
+  same either way — but a crate that reached through `crcbl::log` for something
+  only the `log` crate has, such as `log::Log` or `log::set_logger`, now needs
+  to depend on `log` itself. `Level` and `LevelFilter` are still there,
+  re-exported.
+
+  **The `log` crate is still underneath and is not going away**: `wgpu`, `naga`
+  and `gpu-allocator` report through that facade, the sink still implements
+  `log::Log`, and the macros dispatch through `log::logger()` so whichever sink
+  a target installed receives them. That last part is why `wasm32` still logs at
+  all — the browser installs `crcbl::web`'s queue, not the stderr sink.
+
+  Seven crates dropped their direct `log` dependency as a result: `crcbl-dx12`,
+  `crcbl-mtl`, `crcbl-render`, `crcbl-shell`, `crcbl-store`, `crcbl-vk` and
+  `crcbl-wgpu`.
+
 - **`SceneDesc` and `Capacities` each gained a field**, so a struct literal
   spelling every one of them needs the new one: `probes: ProbeGrid::default()`
   and `probes: 0` are the values that change nothing. `..Default::default()`
@@ -430,6 +449,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   silence. Failures are now tracked per submission and logged as errors.
 
 ### Added
+
+- **Five logging macros in the engine — `error!`, `warn!`, `info!`, `debug!`,
+  `trace!`** — plus `log_at!`, which takes the level and which the other five
+  forward to so the target, the level check and the route to the sink are
+  written once. They take `format!` arguments and tag each record with the
+  calling module, which is what `CRCBL_LOG`'s per-module directives match.
+
+  A filtered-out call does not evaluate its argument expressions. That is
+  narrower than it sounds and the docs say so: `format_args!` already defers the
+  _formatting_, so what the level check saves is evaluating the arguments and
+  calling into the sink at all.
+
+- **A wall-clock start banner**, written once by `init_logging`:
+  `run started 2026-08-15 05:20:07 UTC`. Every other line still carries
+  seconds-since-start, which is the question a frame loop asks; the banner is
+  what lets those seconds be lined up against something outside the process
+  without paying a date conversion per line. The date arithmetic is Howard
+  Hinnant's `civil_from_days`, transcribed and checked against known timestamps
+  and a full four-century round trip.
+
+- **The browser log queue carries the same prefix as the native sink.** It had
+  none: `Instant::now` panics on `wasm32` and the module imports no
+  `console.log`. It reads the `performance.now()` the shim already hands to
+  `App::frame`, so the two formats are now one. No wall-clock banner there —
+  `SystemTime::now` panics on that target too, and the console stamps each line
+  as the shim prints it.
 
 - **`crcbl::engine::open_shell(headless)`**, which opens the headless backend by
   name or the platform's, and which all six samples now call instead of writing

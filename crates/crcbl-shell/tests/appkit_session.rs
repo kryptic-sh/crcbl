@@ -756,7 +756,7 @@ mod macos {
     /// `appkit::window::set_frame` reads the frame back after every placement
     /// and warns when the window did not go where it was put — and that warning
     /// was added, shipped, and **produced nothing**, because nothing in this
-    /// process had ever installed a logger. `log::warn!` with no logger behind it
+    /// process had ever installed a logger. `crcbl_core::log::warn!` with no logger behind it
     /// is a discarded string. A whole CI round trip was spent on a diagnostic
     /// that was structurally incapable of speaking, which is exactly the shape
     /// this suite keeps finding in assertions and had not thought to look for in

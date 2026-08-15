@@ -129,7 +129,7 @@
 //! fixed anything. The others were a corrupted `NSRect` argument, the event
 //! pump, a delegate callback, macOS state restoration, and an illegal
 //! presentation-options combination. The answer was the ordering rule above, and
-//! the `log::debug!` trail through [`AppKitShell::apply_mode`] and [`set_frame`]
+//! the `crcbl_core::log::debug!` trail through [`AppKitShell::apply_mode`] and [`set_frame`]
 //! is what eliminated every one of them; `docs/backlog.md` carries the trail.
 //!
 //! Unlike the Win32 backend there is no `WINDOWPLACEMENT` to save: AppKit's
@@ -228,7 +228,9 @@ fn window_class() -> Result<Class, ShellError> {
                         .to_string(),
                 );
             };
-            log::debug!("the {WINDOW_CLASS:?} class was already registered in this process");
+            crcbl_core::log::debug!(
+                "the {WINDOW_CLASS:?} class was already registered in this process"
+            );
             return Ok(existing as usize);
         }
 
@@ -516,7 +518,7 @@ impl AppKitShell {
         // SAFETY: a live window; `frame` returns an `NSRect`, `isRestorable`
         // answers `BOOL`, and `frameAutosaveName` an `NSString` the window owns.
         unsafe {
-            log::debug!(
+            crcbl_core::log::debug!(
                 "create: mode {:?} asked {:?} -> content {content:?}, mask {mask:#x}; screen \
                  frame {:?} visible {:?}; window frame {:?}, isRestorable {}, \
                  frameAutosaveName {:?}",
@@ -706,7 +708,7 @@ impl AppKitShell {
                     frame: ffi::msg_rect(window, ffi::sel(c"frame")),
                 }
             };
-            log::debug!("borderless: saved the windowed placement {captured:?}");
+            crcbl_core::log::debug!("borderless: saved the windowed placement {captured:?}");
             self.window_mut(handle)?.saved = Some(captured);
         }
 
@@ -773,7 +775,7 @@ impl AppKitShell {
             // The mask the window actually carries, the frame it moved to, and
             // whether the view still has the keyboard — this one call changes
             // all three, and each was a defect once.
-            log::debug!(
+            crcbl_core::log::debug!(
                 "apply_mode: after setStyleMask: asked {new_mask:#x}, carries {:#x}, frame {:?}, \
                  view has the keyboard {}",
                 ffi::msg_usize(window, ffi::sel(c"styleMask")),
@@ -787,7 +789,7 @@ impl AppKitShell {
         // `NSInvalidArgumentException` through Rust and aborted the process with
         // SIGTRAP, which is why there are three positions here rather than two.
         self.refresh_presentation();
-        log::debug!(
+        crcbl_core::log::debug!(
             "apply_mode: after refresh_presentation (options {:?}) the frame is {:?}",
             // SAFETY: the main thread, with `set_mode`'s pool in scope.
             unsafe { presentation_options() }.map(|options| format!("{options:#x}")),
@@ -858,7 +860,7 @@ impl AppKitShell {
         // agreement there localises a regression to the tail in one run.
         //
         // SAFETY: a live `NSWindow` this shell owns, on the main thread.
-        log::debug!(
+        crcbl_core::log::debug!(
             "apply_mode: {mode:?} done — frame {:?}, view has the keyboard {}",
             unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) },
             unsafe { view_has_focus(window) }
@@ -962,7 +964,7 @@ unsafe fn focus_content_view(window: Id) -> bool {
         make(window, ffi::sel(c"makeFirstResponder:"), view) != ffi::NO
     };
     if !taken {
-        log::warn!(
+        crcbl_core::log::warn!(
             "-[NSWindow makeFirstResponder:] refused the content view; this window will receive \
              no key events"
         );
@@ -1034,9 +1036,9 @@ unsafe fn set_frame(window: Id, frame: NSRect) {
     // SAFETY: as the read above.
     let applied = unsafe { ffi::msg_rect(window, ffi::sel(c"frame")) };
 
-    log::debug!("setFrame:display: from {before:?} asked {frame:?} landed {applied:?}");
+    crcbl_core::log::debug!("setFrame:display: from {before:?} asked {frame:?} landed {applied:?}");
     if applied != frame {
-        log::warn!(
+        crcbl_core::log::warn!(
             "-[NSWindow setFrame:display:] did not take: the window was at {before:?}, was asked \
              for {frame:?}, and is at {applied:?}. A landed size matching the asked size at the \
              *previous* origin means the origin was dropped or overruled — CrcblWindow overrides \
