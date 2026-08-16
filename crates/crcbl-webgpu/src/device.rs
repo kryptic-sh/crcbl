@@ -8,22 +8,18 @@
 //! HAL was designed for, and [`DeviceProbe`] is the state between the frame that
 //! asked and the frame that was answered.
 //!
-//! # Why there is no `impl PendingDevice` here
+//! # The probe is the state `impl PendingDevice` polls
 //!
-//! Because it could not be an honest one, and the reason is one type away.
+//! [`WebGpuPendingDevice`](crate::hal::WebGpuPendingDevice) now exists, in
+//! [`crate::hal`], and this probe is the state it holds:
 //! [`PendingDevice::poll`](crcbl_hal::PendingDevice::poll) answers
 //! [`DeviceRequestState`](crcbl_hal::DeviceRequestState), whose `Ready` arm
-//! carries a `Box<dyn Device>` — and [`Device`](crcbl_hal::Device) has forty-odd
-//! methods, none of which this crate implements. An impl written today could
-//! only ever answer `Pending`: a device request that is *never* ready, on a type
-//! whose whole contract is that it eventually is. That is a stub documented as
-//! working, and it would pass every test that polls it a few times and gives up.
-//!
-//! So the state machine is exposed directly, exactly as
-//! [`AdapterProbe`](crate::instance::AdapterProbe) is exposed instead of an
-//! `impl Instance`, and the trait arrives in the same slice as the device it
-//! needs. Nothing about the wire changes when it does: `poll` becomes
-//! [`absorb`](DeviceProbe::absorb) plus a match on this enum.
+//! carries a `Box<dyn Device>` — the [`WebGpuDevice`](crate::hal::WebGpuDevice)
+//! built around the caps [`Opened`](DeviceProbe::Opened) names. The state
+//! machine stayed exposed here rather than folding into the impl, exactly as
+//! [`AdapterProbe`](crate::instance::AdapterProbe) did: `poll` is
+//! [`absorb`](DeviceProbe::absorb) plus a match on this enum, and holding the
+//! two apart lets each be tested without the other.
 //!
 //! # The features the caller asked for, and what a browser can do with them
 //!

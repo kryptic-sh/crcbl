@@ -11,13 +11,15 @@
 //! surface pair, where a canvas key becomes a `GPUCanvasContext` and a
 //! capability query answers a [`SurfaceCaps`](crcbl_hal::SurfaceCaps) or says
 //! why it will not.
-//! There is still no [`Instance`](crcbl_hal::Instance),
+//! The [`Instance`](crcbl_hal::Instance),
 //! [`PendingDevice`](crcbl_hal::PendingDevice), [`Device`](crcbl_hal::Device)
-//! or [`CommandEncoder`](crcbl_hal::CommandEncoder) implementation — see
-//! [`instance`] and [`device`] for what exists instead of half-filled ones, and
-//! for why a `PendingDevice` without a `Device` behind it would be a stub
-//! documented as working — and those are later slices, encoding through
-//! [`StreamWriter`] and reading [`Reply`]s when they arrive.
+//! and [`CommandEncoder`](crcbl_hal::CommandEncoder) implementations now exist,
+//! in [`hal`]: each wraps a probe from [`instance`]/[`device`] and encodes
+//! through [`StreamWriter`], so `poll` is `drain` + `absorb` + a match. What is
+//! not built yet is the browser wiring — the JS shim and the registry entry
+//! that drive them in a page — which is a later slice; [`hal`] says which of a
+//! device's methods are wired, which WebGPU legitimately refuses, and which are
+//! loud stubs a later slice fills.
 //!
 //! Nothing but integers and buffers wasm owns crosses the boundary, which is
 //! the convention `crcbl-store`'s fetch ABI and the OPFS entry points already
@@ -136,6 +138,7 @@
 mod bytes;
 pub mod command;
 pub mod device;
+pub mod hal;
 pub mod instance;
 pub mod probe;
 pub mod reader;
@@ -147,6 +150,10 @@ pub mod writer;
 pub use bytes::DecodeError;
 pub use command::Command;
 pub use device::DeviceProbe;
+pub use hal::{
+    HandlePool, SharedChannel, WebGpuCommandEncoder, WebGpuDevice, WebGpuInstance,
+    WebGpuInstanceOpen, WebGpuPendingDevice,
+};
 pub use instance::AdapterProbe;
 pub use reader::{StreamReader, decode_stream};
 pub use reply::{Reply, ReplyReader, ReplyWriter, SurfaceCapsFailure, decode_replies};

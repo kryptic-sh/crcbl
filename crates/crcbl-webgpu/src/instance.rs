@@ -9,34 +9,25 @@
 //! is the state between those two moments — the sequence the request was
 //! assigned, and what eventually named it.
 //!
-//! # The trait is still not here, and this is not a step towards faking it
+//! # The probe is the state the `impl Instance` absorbs into
 //!
-//! **There is no `impl Instance` in this crate**, and there deliberately is not.
-//! What changed is the reason. The channel now carries the whole of
-//! [`AdapterInfo`], so
+//! [`WebGpuInstance`](crate::hal::WebGpuInstance) now exists, in
+//! [`crate::hal`], and this probe is the piece it is built from: the channel
+//! carries the whole of [`AdapterInfo`], so
 //! [`AdapterProbe::adapters`] answers `Vec<AdapterInfo>` — the real return type
-//! of [`Instance::adapters`](crcbl_hal::Instance::adapters) — rather than the
-//! pairs it could honestly manage before. What is missing is no longer the
-//! encodings: `backend` is answerable, `create_surface`, `destroy_surface`,
-//! `surface_caps` and `request_device` all have their commands, and every one of
-//! them but `destroy_surface` is driven end to end by the browser gate.
+//! of [`Instance::adapters`](crcbl_hal::Instance::adapters). The
+//! [open future](crate::hal::WebGpuInstanceOpen) drains the channel each frame
+//! and hands this probe the replies; when it settles `Granted`, the instance is
+//! assembled around the adapter it named.
 //!
-//! What is missing is a `Device`. Every answer's shape is settled: **the
-//! instance is what waits**, fetching what it cannot answer synchronously before
-//! it is handed over, which is already how
-//! [`Instance::adapters`](crcbl_hal::Instance::adapters) answers a
-//! `Vec<AdapterInfo>` over a promise. That is why
+//! **The instance is what waits**, fetching what it cannot answer synchronously
+//! before it is handed over — which is why
 //! [`Instance::surface_caps`](crcbl_hal::Instance::surface_caps) can be
-//! synchronous here at all — `crcbl::engine`'s open calls `create_surface` and
-//! then `surface_caps` on the next line with no frame between them, so a query
-//! at call time could not answer and an `Err` meaning "not yet" would send that
-//! caller to an adapter a browser does not have. `docs/plan/ROADMAP.md`'s slice
-//! 4i carries the whole argument.
-//!
-//! So what an impl still lacks is the far end: `request_device` has the polled
-//! half the seam gives it, and nothing to hand back from it. See [`crate::device`]
-//! for why a `PendingDevice` with no `Device` behind it is a stub that passes
-//! any test which polls a few times and gives up.
+//! synchronous once the instance exists: `crcbl::engine`'s open calls
+//! `create_surface` and then `surface_caps` on the next line with no frame
+//! between them, so a query at call time could not answer and an `Err` meaning
+//! "not yet" would send that caller to an adapter a browser does not have.
+//! `docs/plan/ROADMAP.md`'s slice 4i carries the whole argument.
 //!
 //! # What this reports is what the *browser* said, not what this crate can do
 //!

@@ -357,6 +357,34 @@ impl StreamChannel {
         let mut replies = self.replies.try_borrow_mut().ok()?;
         Some(replies.drain())
     }
+
+    /// Hand the channel a reply stream directly, from bytes already in
+    /// wasm-side memory.
+    ///
+    /// The in-process counterpart of the shim's
+    /// [`reply_buffer`](shim::__crcbl_web_gpu_reply_buffer) +
+    /// [`reply_commit`](shim::__crcbl_web_gpu_reply_commit) pair, which take a
+    /// pointer JS wrote through: this one is for a caller that holds the reply
+    /// bytes in Rust — a native replayer, and the tests that feed an
+    /// `impl Instance`/`impl Device` its answers with no browser in the loop.
+    ///
+    /// `false` on the same refusals [`reply_commit`](shim::__crcbl_web_gpu_reply_commit)
+    /// makes — a committed buffer still undrained, `bytes` past
+    /// [`MAX_REPLY_BYTES`](tag::MAX_REPLY_BYTES), or shorter than a reply
+    /// header — so a caller that gets it is told at the call rather than a frame
+    /// later at the decode. The bytes are decoded by
+    /// [`drain_replies`](Self::drain_replies), exactly as a shim-committed
+    /// buffer is.
+    pub fn commit_replies(&self, bytes: &[u8]) -> bool {
+        let Ok(mut replies) = self.replies.try_borrow_mut() else {
+            return false;
+        };
+        if replies.buffer(bytes.len()).is_none() {
+            return false;
+        }
+        replies.buf[..bytes.len()].copy_from_slice(bytes);
+        replies.commit(bytes.len())
+    }
 }
 
 // ---------------------------------------------------------------------------

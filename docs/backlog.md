@@ -3,6 +3,44 @@
 What was raised and not finished. A changelog says what shipped; this says what
 did not, and why. Delete an entry when it ships — `git log` is the history.
 
+### WebGPU HAL impls exist but are not driven in a browser yet
+
+`crate::hal` in `crcbl-webgpu` now holds the `Instance`, `PendingDevice`,
+`Device` and `CommandEncoder` impls (`WebGpuInstance`, `WebGpuPendingDevice`,
+`WebGpuDevice`, `WebGpuCommandEncoder`, opened through `WebGpuInstanceOpen`).
+What remains for the browser slices:
+
+- **Registry + JS shim wiring.** Nothing registers the backend or installs the
+  channel so the shim reaches it. `SharedChannel::install` is a real
+  `crate::web::install` on wasm and a no-op off it; the registry entry
+  (`backend.rs`'s `open: fn() -> InstanceFuture`) and the page that drives the
+  rAF poll loop are unbuilt. `SharedChannel` is a `Rc` on wasm (installable) and
+  an `Arc<Mutex>` off it (the `Send + Sync` the seam demands where the job
+  system runs) — the same split wgpu's web types make.
+- **`StreamChannel::commit_replies`** (added in `web.rs`) is the in-process
+  reply path the native HAL tests use in place of the shim's pointer pair. It is
+  also what a native replayer would call; it is not wasm-only.
+- **Loud-unsupported, needing a stream command (a later slice wires each).**
+  `Device`: `write_buffer`, `update_bind_group`, `create_query_set`,
+  `query_results` return `HalError::Unsupported`. `CommandEncoder` records the
+  op and fails at `finish`: `end_debug_label`, `insert_debug_marker`,
+  `set_viewport`, `set_scissor`, `set_stencil_reference`, `bind_index_buffer`,
+  `draw_indexed`, `draw_indirect`, `draw_indexed_indirect`,
+  `draw_indirect_count`, `draw_indexed_indirect_count`, `draw_mesh_tasks`,
+  `draw_mesh_tasks_indirect`, `dispatch_indirect`, `reset_query_set`,
+  `write_timestamp`, `resolve_query_set`. (`dispatch_indirect`'s deeper block is
+  its own entry below.)
+- **Legitimately refused, not a gap.** `create_mesh_pipeline` (WebGPU has no
+  mesh stage); the semaphore calls are no-ops (WebGPU auto-synchronises).
+- **`Device::take_error` returns `None`** — live-device error reporting
+  (`uncapturederror`, `GPUDevice.lost`) needs a reply variant this crate does
+  not have yet, and a device held long enough to lose. A named later slice.
+- **`acquire_next_frame` extent** is the size the device last configured the
+  swapchain at, remembered in `WebGpuDevice::swapchains`; it falls back to
+  `(0, 0)` for a swapchain this device never configured. Fine while acquire has
+  no reply, but revisit if a browser ever reports a pinned canvas size that
+  differs from the requested extent.
+
 ### `dispatch_indirect` has no command or replay yet
 
 `CommandEncoder::dispatch_indirect` (`crates/crcbl-hal/src/command.rs`, the HAL
