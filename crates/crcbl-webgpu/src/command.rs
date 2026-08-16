@@ -20,13 +20,14 @@ use core::ops::Range;
 use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle,
     BufferBarrier, BufferCopy, BufferHandle, BufferImageCopy, BufferUsage, ColorAttachment,
-    ColorTargetState, CommandBufferHandle, CompareOp, ComputePipelineHandle,
+    ColorTargetState, CommandBufferHandle, CompareOp, CompositeAlpha, ComputePipelineHandle,
     DepthStencilAttachment, DepthStencilState, Extent3d, Features, FilterMode, Format,
     GraphicsPipelineHandle, ImageBarrier, ImageCopy, ImageHandle, ImageSubresourceLayers,
     ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation,
-    MultisampleState, Offset3d, PipelineLayoutHandle, PrimitiveState, PushConstantRange,
-    QueueHandle, ReadbackHandle, Rect2d, SamplerAddressMode, SamplerHandle, SemaphoreSignal,
-    SemaphoreWait, ShaderModuleHandle, ShaderStages, SurfaceHandle,
+    MultisampleState, Offset3d, PipelineLayoutHandle, PresentMode, PrimitiveState,
+    PushConstantRange, QueueHandle, ReadbackHandle, Rect2d, SamplerAddressMode, SamplerHandle,
+    SemaphoreHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleHandle, ShaderStages,
+    SurfaceHandle, SwapchainHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -1018,6 +1019,97 @@ pub enum Command {
     /// without asking anyone — a refusal, not a question — and sending them
     /// would be quoting arguments the answer never reads.
     SurfaceCaps,
+    /// [`Device::create_swapchain`](crcbl_hal::Device::create_swapchain), with the
+    /// handle the caller allocated for it.
+    ///
+    /// The whole of [`SwapchainDesc`](crcbl_hal::SwapchainDesc), flattened as every
+    /// other descriptor here is, behind the caller-allocated handle. The replayer
+    /// resolves [`surface`](Self::CreateSwapchain::surface) to its
+    /// `GPUCanvasContext` and calls `configure` — swapchain creation on WebGPU is
+    /// a canvas configure, not an allocation.
+    ///
+    /// **[`image_count`](Self::CreateSwapchain::image_count) and
+    /// [`present_mode`](Self::CreateSwapchain::present_mode) cross and the replayer
+    /// drops them**, the way [`CreateComputePipeline`](Self::CreateComputePipeline)'s
+    /// `workgroup_size` crosses whole: a browser only offers `fifo` and manages its
+    /// own buffering, so neither has a `configure` knob. [`extent`](Self::CreateSwapchain::extent)
+    /// is informational — the canvas owns its size — but crosses whole for wire
+    /// fidelity. See `web/engine/gpu-replay.js`.
+    CreateSwapchain {
+        /// Id the replayer stores the configured swapchain at.
+        swapchain: SwapchainHandle,
+        /// Debug name, if the descriptor carried one.
+        label: Option<String>,
+        /// Surface to present to — resolved to the `GPUCanvasContext` that is
+        /// configured.
+        surface: SurfaceHandle,
+        /// Display format the canvas is configured with.
+        format: Format,
+        /// Requested size in pixels. Informational; the canvas owns its size.
+        extent: (u32, u32),
+        /// Requested image count. Carried and dropped — a browser manages its own
+        /// buffering.
+        image_count: u32,
+        /// Requested pacing. Carried and dropped — a browser only offers `fifo`.
+        present_mode: PresentMode,
+        /// Desktop compositing mode, mapped to the canvas `alphaMode`.
+        composite_alpha: CompositeAlpha,
+    },
+    /// [`Device::acquire_next_frame`](crcbl_hal::Device::acquire_next_frame) — the
+    /// frame `getCurrentTexture()` hands back, bound under the caller-allocated
+    /// image and view handles.
+    ///
+    /// **The image and view handles are the caller's, positional, as every
+    /// creation's are**: acquire is synchronous and deterministic on WebGPU —
+    /// `getCurrentTexture()` answers in the call — so the stream needs no reply,
+    /// and wasm allocates the two handles the acquired texture and its view are
+    /// filed under, exactly as [`create_surface`](Self::CreateSurface) takes a
+    /// caller-allocated handle. The replayer resolves the swapchain's context,
+    /// files the texture under [`image`](Self::AcquireNextFrame::image) and its
+    /// `createView()` under [`view`](Self::AcquireNextFrame::view).
+    AcquireNextFrame {
+        /// Which swapchain to acquire from.
+        swapchain: SwapchainHandle,
+        /// Id the replayer files the acquired texture under.
+        image: ImageHandle,
+        /// Id the replayer files the acquired texture's view under.
+        view: ImageViewHandle,
+    },
+    /// [`Device::present`](crcbl_hal::Device::present) — replayed as a **no-op**.
+    ///
+    /// The whole of [`PresentInfo`](crcbl_hal::PresentInfo). WebGPU has no explicit
+    /// present: the browser composites the configured canvas on its own
+    /// `requestAnimationFrame`, so there is nothing for the replayer to call and
+    /// the present touches nothing.
+    ///
+    /// **A non-empty [`waits`](Self::Present::waits) is refused**, exactly as a
+    /// [`Submit`](Self::Submit)'s `waits`/`signals` are: WebGPU has no semaphores,
+    /// so there is nothing to wait on, and silently dropping a wait is a
+    /// synchronisation bug. The list is carried whole so it round-trips in Rust
+    /// and so the replayer can name what it refuses.
+    /// [`present_id`](Self::Present::present_id) crosses whole and is dropped —
+    /// WebGPU has no present-completion query to number.
+    Present {
+        /// Swapchain to present.
+        swapchain: SwapchainHandle,
+        /// Semaphore waits before the present. Empty is the only case WebGPU maps;
+        /// a non-empty list is refused — see the variant docs.
+        waits: Vec<SemaphoreHandle>,
+        /// A number for this present. Carried and dropped — WebGPU has no
+        /// present-completion query.
+        present_id: Option<u64>,
+    },
+    /// [`Device::destroy_swapchain`](crcbl_hal::Device::destroy_swapchain) —
+    /// unconfigures the canvas context and releases the handle.
+    ///
+    /// A no-op for an id whose slot holds nothing, exactly as
+    /// [`Command::DestroySurface`] is. On WebGPU this is the `unconfigure` — the
+    /// counterpart of the `configure` [`CreateSwapchain`](Self::CreateSwapchain)
+    /// made.
+    DestroySwapchain {
+        /// Id to release.
+        swapchain: SwapchainHandle,
+    },
 }
 
 impl Command {
@@ -1078,6 +1170,10 @@ impl Command {
             Self::EnumerateAdapters => "EnumerateAdapters",
             Self::RequestDevice { .. } => "RequestDevice",
             Self::SurfaceCaps => "SurfaceCaps",
+            Self::CreateSwapchain { .. } => "CreateSwapchain",
+            Self::AcquireNextFrame { .. } => "AcquireNextFrame",
+            Self::Present { .. } => "Present",
+            Self::DestroySwapchain { .. } => "DestroySwapchain",
         }
     }
 }
