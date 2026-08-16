@@ -47,15 +47,6 @@ log = "0.4"
 # a dependency rather than a hand-rolled encoder.
 png = "0.18"
 proptest = "1.9"
-# Randomness seam (`crcbl-rand`). `rand_chacha` is the portable ChaCha PRNG
-# (ChaCha8 for the deterministic `Rng`, ChaCha20 for the wasm entropy CSPRNG);
-# `rand_core` is the `RngCore`/`SeedableRng` traits it plugs into. Pinned to the
-# 0.9 line the workspace already resolves transitively (via `rand`/`proptest`),
-# so this adds no second copy for `cargo deny`'s multiple-versions ban. Featured
-# minimally: `rand_core` keeps `os_rng` OFF so nothing drags `getrandom` onto
-# wasm32, which is the whole point of the seam.
-rand_chacha = { version = "0.9", default-features = false }
-rand_core = { version = "0.9", default-features = false }
 thiserror = "2.0"
 # Storage and persistence: serde for settings/save schemas, toml for settings
 # files, dirs for platform-standard config/data paths.
@@ -79,7 +70,6 @@ crcbl-client = { path = "crates/crcbl-client", version = "0.1.0" }
 crcbl-ecs = { path = "crates/crcbl-ecs", version = "0.1.0" }
 crcbl-net = { path = "crates/crcbl-net", version = "0.1.0" }
 crcbl-phys = { path = "crates/crcbl-phys", version = "0.1.0" }
-crcbl-rand = { path = "crates/crcbl-rand", version = "0.1.0" }
 crcbl-server = { path = "crates/crcbl-server", version = "0.1.0" }
 crcbl-dx12 = { path = "crates/crcbl-dx12", version = "0.1.0" }
 crcbl-mtl = { path = "crates/crcbl-mtl", version = "0.1.0" }
