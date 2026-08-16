@@ -204,10 +204,26 @@ jobs:
       # deploy ships, so it must stay the default (wgpu) build. A separate
       # directory keeps this gate from poisoning either.
       #
-      # Only breakout renders through WebGpu today; the other samples come in
-      # later slices, so only breakout is gated here.
+      # breakout builds the WebGpu site with `--build`; every WebGpu demo below
+      # reuses that one `target/site-webgpu` and drops `--build`, so CI links the
+      # backend and assembles the site once rather than once per demo. Each still
+      # launches its own browser, because the driver reads one canvas.
       - name: Render breakout through WebGpu in a real browser
         run: SITE_DIR=target/site-webgpu CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=breakout ./web/run-browser-e2e.sh --build
+
+      - name: Render flappy through WebGpu in a real browser
+        run: SITE_DIR=target/site-webgpu CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=flappy ./web/run-browser-e2e.sh
+
+      - name: Render asteroids through WebGpu in a real browser
+        run: SITE_DIR=target/site-webgpu CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=asteroids ./web/run-browser-e2e.sh
+
+      - name: Render horde through WebGpu in a real browser
+        run: SITE_DIR=target/site-webgpu CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=horde ./web/run-browser-e2e.sh
+
+      # hud takes no input through WebGpu either; the same ticker-cursor read the
+      # wgpu step relies on carries the "simulation is advancing" proof here.
+      - name: Render hud through WebGpu in a real browser
+        run: SITE_DIR=target/site-webgpu CRCBL_WEB_BACKEND=webgpu CRCBL_WEB_E2E_DEMO=hud ./web/run-browser-e2e.sh
 
       - name: Render flappy in a real browser
         run: CRCBL_WEB_E2E_DEMO=flappy ./web/run-browser-e2e.sh

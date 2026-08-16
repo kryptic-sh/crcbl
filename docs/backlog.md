@@ -37,8 +37,11 @@ What remains for the browser slices:
   deliberately not the default — `request_open` reads `CRCBL_GPU` via
   `std::env::var`, empty in a browser, so a JS-settable override is still needed
   before WebGpu can be selected at runtime without a rebuild. **(b) the other
-  samples** — only breakout renders through WebGpu today; flappy, asteroids,
-  horde, hud and lumen are later slices, so only breakout is gated.
+  samples** — breakout, flappy, asteroids, horde and hud all render through
+  WebGpu and are CI-gated, each reusing the one `target/site-webgpu` build; they
+  needed no new stream commands beyond breakout's five. lumen stays out for the
+  same reason it is out of the wgpu gate: its draw-argument compute stage binds
+  more storage buffers than a GPU-less runner's SwiftShader adapter allows.
 - **Loud-unsupported, needing a stream command (a later slice wires each).**
   `Device`: `update_bind_group`, `create_query_set`, `query_results` return
   `HalError::Unsupported`. `CommandEncoder` records the op and fails at
