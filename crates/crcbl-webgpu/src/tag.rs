@@ -29,8 +29,8 @@
 use crcbl_hal::{
     BindingKind, BindingResource, BlendFactor, BlendOp, CompareOp, CompositeAlpha, CullMode,
     DeviceType, FilterMode, Format, FrontFace, ImageType, ImageViewType, LoadOp, MemoryLocation,
-    PolygonMode, PresentMode, PrimitiveTopology, SampleType, SamplerAddressMode, StencilOp,
-    StoreOp,
+    PolygonMode, PresentMode, PrimitiveTopology, ResourceState, SampleType, SamplerAddressMode,
+    StencilOp, StoreOp,
 };
 
 use crate::reply::SurfaceCapsFailure;
@@ -391,6 +391,10 @@ pub const BEGIN_COMPUTE_PASS_TAG: u8 = 0x48;
 pub const END_COMPUTE_PASS_TAG: u8 = 0x49;
 /// [`Command::BindComputePipeline`](crate::Command::BindComputePipeline).
 pub const BIND_COMPUTE_PIPELINE_TAG: u8 = 0x4A;
+/// [`Command::PipelineBarrier`](crate::Command::PipelineBarrier) — the
+/// documented no-op. It carries the barrier lists for wire fidelity, but WebGPU
+/// tracks resource state itself so the replayer records nothing.
+pub const PIPELINE_BARRIER_TAG: u8 = 0x4B;
 /// [`Command::Draw`](crate::Command::Draw).
 pub const DRAW_TAG: u8 = 0x60;
 /// [`Command::Dispatch`](crate::Command::Dispatch) — the first tag of the
@@ -545,6 +549,82 @@ pub const fn load_op_from_code(code: u8) -> Option<LoadOp> {
         LOAD_OP_LOAD => Some(LoadOp::Load),
         LOAD_OP_CLEAR => Some(LoadOp::Clear),
         LOAD_OP_DONT_CARE => Some(LoadOp::DontCare),
+        _ => None,
+    }
+}
+
+// ── ResourceState ─────────────────────────────────────────────────────────────
+//
+// The barrier `from`/`to` states. Codes `0x00..=0x0C` follow the enum's
+// declaration order. The whole vocabulary crosses even though the replayer never
+// acts on it — a [`Command::PipelineBarrier`](crate::Command::PipelineBarrier) is
+// a no-op on WebGPU — so a state folded into a neighbour here would be a wire
+// infidelity nothing downstream could catch.
+
+/// [`ResourceState::Undefined`].
+pub const RESOURCE_STATE_UNDEFINED: u8 = 0x00;
+/// [`ResourceState::ShaderRead`].
+pub const RESOURCE_STATE_SHADER_READ: u8 = 0x01;
+/// [`ResourceState::ShaderWrite`].
+pub const RESOURCE_STATE_SHADER_WRITE: u8 = 0x02;
+/// [`ResourceState::ShaderReadWrite`].
+pub const RESOURCE_STATE_SHADER_READ_WRITE: u8 = 0x03;
+/// [`ResourceState::ColorAttachment`].
+pub const RESOURCE_STATE_COLOR_ATTACHMENT: u8 = 0x04;
+/// [`ResourceState::DepthStencilWrite`].
+pub const RESOURCE_STATE_DEPTH_STENCIL_WRITE: u8 = 0x05;
+/// [`ResourceState::DepthStencilRead`].
+pub const RESOURCE_STATE_DEPTH_STENCIL_READ: u8 = 0x06;
+/// [`ResourceState::TransferSrc`].
+pub const RESOURCE_STATE_TRANSFER_SRC: u8 = 0x07;
+/// [`ResourceState::TransferDst`].
+pub const RESOURCE_STATE_TRANSFER_DST: u8 = 0x08;
+/// [`ResourceState::IndirectArgument`].
+pub const RESOURCE_STATE_INDIRECT_ARGUMENT: u8 = 0x09;
+/// [`ResourceState::IndexBuffer`].
+pub const RESOURCE_STATE_INDEX_BUFFER: u8 = 0x0A;
+/// [`ResourceState::HostRead`].
+pub const RESOURCE_STATE_HOST_READ: u8 = 0x0B;
+/// [`ResourceState::Present`].
+pub const RESOURCE_STATE_PRESENT: u8 = 0x0C;
+
+/// The wire code for a [`ResourceState`].
+#[must_use]
+pub const fn resource_state_code(state: ResourceState) -> u8 {
+    match state {
+        ResourceState::Undefined => RESOURCE_STATE_UNDEFINED,
+        ResourceState::ShaderRead => RESOURCE_STATE_SHADER_READ,
+        ResourceState::ShaderWrite => RESOURCE_STATE_SHADER_WRITE,
+        ResourceState::ShaderReadWrite => RESOURCE_STATE_SHADER_READ_WRITE,
+        ResourceState::ColorAttachment => RESOURCE_STATE_COLOR_ATTACHMENT,
+        ResourceState::DepthStencilWrite => RESOURCE_STATE_DEPTH_STENCIL_WRITE,
+        ResourceState::DepthStencilRead => RESOURCE_STATE_DEPTH_STENCIL_READ,
+        ResourceState::TransferSrc => RESOURCE_STATE_TRANSFER_SRC,
+        ResourceState::TransferDst => RESOURCE_STATE_TRANSFER_DST,
+        ResourceState::IndirectArgument => RESOURCE_STATE_INDIRECT_ARGUMENT,
+        ResourceState::IndexBuffer => RESOURCE_STATE_INDEX_BUFFER,
+        ResourceState::HostRead => RESOURCE_STATE_HOST_READ,
+        ResourceState::Present => RESOURCE_STATE_PRESENT,
+    }
+}
+
+/// The [`ResourceState`] a wire code names, or `None` if it names none.
+#[must_use]
+pub const fn resource_state_from_code(code: u8) -> Option<ResourceState> {
+    match code {
+        RESOURCE_STATE_UNDEFINED => Some(ResourceState::Undefined),
+        RESOURCE_STATE_SHADER_READ => Some(ResourceState::ShaderRead),
+        RESOURCE_STATE_SHADER_WRITE => Some(ResourceState::ShaderWrite),
+        RESOURCE_STATE_SHADER_READ_WRITE => Some(ResourceState::ShaderReadWrite),
+        RESOURCE_STATE_COLOR_ATTACHMENT => Some(ResourceState::ColorAttachment),
+        RESOURCE_STATE_DEPTH_STENCIL_WRITE => Some(ResourceState::DepthStencilWrite),
+        RESOURCE_STATE_DEPTH_STENCIL_READ => Some(ResourceState::DepthStencilRead),
+        RESOURCE_STATE_TRANSFER_SRC => Some(ResourceState::TransferSrc),
+        RESOURCE_STATE_TRANSFER_DST => Some(ResourceState::TransferDst),
+        RESOURCE_STATE_INDIRECT_ARGUMENT => Some(ResourceState::IndirectArgument),
+        RESOURCE_STATE_INDEX_BUFFER => Some(ResourceState::IndexBuffer),
+        RESOURCE_STATE_HOST_READ => Some(ResourceState::HostRead),
+        RESOURCE_STATE_PRESENT => Some(ResourceState::Present),
         _ => None,
     }
 }
@@ -1675,7 +1755,7 @@ mod tests {
     /// Spelled out rather than derived from the constants: a table that builds
     /// each tag out of `FAMILY_X | n` cannot disagree with itself, so it would
     /// check nothing. This one can, and that is the point.
-    const TAGS: [(&str, u8, u8); 48] = [
+    const TAGS: [(&str, u8, u8); 49] = [
         ("CreateBuffer", CREATE_BUFFER_TAG, FAMILY_CREATE),
         ("CreateSurface", CREATE_SURFACE_TAG, FAMILY_CREATE),
         ("CreateImage", CREATE_IMAGE_TAG, FAMILY_CREATE),
@@ -1768,6 +1848,7 @@ mod tests {
             BIND_COMPUTE_PIPELINE_TAG,
             FAMILY_ENCODER,
         ),
+        ("PipelineBarrier", PIPELINE_BARRIER_TAG, FAMILY_ENCODER),
         ("Draw", DRAW_TAG, FAMILY_DRAW),
         ("Dispatch", DISPATCH_TAG, FAMILY_DISPATCH),
         ("CopyImageToBuffer", COPY_IMAGE_TO_BUFFER_TAG, FAMILY_COPY),
@@ -2271,6 +2352,37 @@ mod tests {
             );
         }
 
+        let resource_state = [
+            ResourceState::Undefined,
+            ResourceState::ShaderRead,
+            ResourceState::ShaderWrite,
+            ResourceState::ShaderReadWrite,
+            ResourceState::ColorAttachment,
+            ResourceState::DepthStencilWrite,
+            ResourceState::DepthStencilRead,
+            ResourceState::TransferSrc,
+            ResourceState::TransferDst,
+            ResourceState::IndirectArgument,
+            ResourceState::IndexBuffer,
+            ResourceState::HostRead,
+            ResourceState::Present,
+        ];
+        let codes: Vec<u8> = resource_state
+            .iter()
+            .map(|s| resource_state_code(*s))
+            .collect();
+        assert_eq!(
+            distinct(&codes),
+            codes.len(),
+            "two ResourceStates share a code"
+        );
+        for state in resource_state {
+            assert_eq!(
+                resource_state_from_code(resource_state_code(state)),
+                Some(state)
+            );
+        }
+
         // No distinctness assertion beside this one, unlike every table above:
         // `SurfaceCapsFailure` has a single variant, so a "no two share a code"
         // check over it would hold however the table were written and could
@@ -2287,6 +2399,7 @@ mod tests {
     #[test]
     fn a_code_no_variant_claims_decodes_to_nothing() {
         assert_eq!(load_op_from_code(0xFF), None);
+        assert_eq!(resource_state_from_code(0xFF), None);
         assert_eq!(store_op_from_code(0xFF), None);
         assert_eq!(memory_location_from_code(0xFF), None);
         assert_eq!(image_type_from_code(0xFF), None);
@@ -2310,6 +2423,7 @@ mod tests {
         // The one directly above the last claimed code, which is where an
         // off-by-one in either table lands and where `0xFF` never would.
         assert_eq!(image_type_from_code(IMAGE_TYPE_D3 + 1), None);
+        assert_eq!(resource_state_from_code(RESOURCE_STATE_PRESENT + 1), None);
         assert_eq!(image_view_type_from_code(IMAGE_VIEW_TYPE_D3 + 1), None);
         assert_eq!(filter_mode_from_code(FILTER_MODE_LINEAR + 1), None);
         assert_eq!(

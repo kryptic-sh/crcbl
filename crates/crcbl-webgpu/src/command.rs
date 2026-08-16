@@ -19,14 +19,14 @@ use core::ops::Range;
 
 use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle,
-    BufferCopy, BufferHandle, BufferImageCopy, BufferUsage, ColorAttachment, ColorTargetState,
-    CommandBufferHandle, CompareOp, ComputePipelineHandle, DepthStencilAttachment,
-    DepthStencilState, Extent3d, Features, FilterMode, Format, GraphicsPipelineHandle, ImageCopy,
-    ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
-    ImageViewHandle, ImageViewType, MemoryLocation, MultisampleState, Offset3d,
-    PipelineLayoutHandle, PrimitiveState, PushConstantRange, QueueHandle, ReadbackHandle, Rect2d,
-    SamplerAddressMode, SamplerHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleHandle,
-    ShaderStages, SurfaceHandle,
+    BufferBarrier, BufferCopy, BufferHandle, BufferImageCopy, BufferUsage, ColorAttachment,
+    ColorTargetState, CommandBufferHandle, CompareOp, ComputePipelineHandle,
+    DepthStencilAttachment, DepthStencilState, Extent3d, Features, FilterMode, Format,
+    GraphicsPipelineHandle, ImageBarrier, ImageCopy, ImageHandle, ImageSubresourceLayers,
+    ImageSubresourceRange, ImageType, ImageUsage, ImageViewHandle, ImageViewType, MemoryLocation,
+    MultisampleState, Offset3d, PipelineLayoutHandle, PrimitiveState, PushConstantRange,
+    QueueHandle, ReadbackHandle, Rect2d, SamplerAddressMode, SamplerHandle, SemaphoreSignal,
+    SemaphoreWait, ShaderModuleHandle, ShaderStages, SurfaceHandle,
 };
 
 /// A command decoded out of a stream buffer.
@@ -834,6 +834,35 @@ pub enum Command {
         /// The `u32` written into each word; only `0` is expressible on WebGPU.
         value: u32,
     },
+    /// [`pipeline_barrier`](crcbl_hal::CommandEncoder::pipeline_barrier) — the
+    /// documented no-op, recorded on the implicit-current encoder.
+    ///
+    /// **It carries the whole [`Barriers`](crcbl_hal::Barriers) batch for wire
+    /// fidelity, and the replayer records nothing.** WebGPU serialises its single
+    /// queue and inserts hazard barriers itself — the same reason a `Submit`'s
+    /// `waits`/`signals` have no home (see [`Submit`](Self::Submit)) — so there is
+    /// no transition for the encoder to record. `barrier()` was called out of
+    /// scope for exactly this on the seam's first rendered frame
+    /// (`docs/plan/ROADMAP.md`, group S), and this is where it lands: a faithful
+    /// transposition whose replay arm is empty on purpose. See
+    /// `web/engine/gpu-replay.js`.
+    ///
+    /// The [`Barriers`](crcbl_hal::Barriers) slices are owned as `Vec`s here, the
+    /// way [`BeginRenderPass`](Self::BeginRenderPass) owns its `color_attachments`:
+    /// the HAL passes them by borrow, and a decoded command outlives the buffer it
+    /// came from. Each [`BufferBarrier`] and [`ImageBarrier`] crosses whole, its
+    /// [`from`](crcbl_hal::BufferBarrier::from)/[`to`](crcbl_hal::BufferBarrier::to)
+    /// states and its optional
+    /// [`queue_transfer`](crcbl_hal::BufferBarrier::queue_transfer) included, so
+    /// the batch round-trips in Rust even though nothing acts on it.
+    PipelineBarrier {
+        /// Buffer transitions in the batch.
+        buffers: Vec<BufferBarrier>,
+        /// Image transitions in the batch.
+        images: Vec<ImageBarrier>,
+        /// The global execution+memory barrier flag.
+        global: bool,
+    },
     /// [`finish`](crcbl_hal::CommandEncoder::finish) — consumes the
     /// implicit-current encoder and produces the command buffer.
     ///
@@ -1039,6 +1068,7 @@ impl Command {
             Self::CopyBufferToImage { .. } => "CopyBufferToImage",
             Self::CopyImageToImage { .. } => "CopyImageToImage",
             Self::FillBuffer { .. } => "FillBuffer",
+            Self::PipelineBarrier { .. } => "PipelineBarrier",
             Self::Finish { .. } => "Finish",
             Self::Submit { .. } => "Submit",
             Self::RequestReadback { .. } => "RequestReadback",

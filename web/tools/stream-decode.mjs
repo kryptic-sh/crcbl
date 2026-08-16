@@ -1020,6 +1020,45 @@ const EXPECTED = [
     size: 256n,
     value: 0xdeadbeef,
   },
+  // The pipeline barrier, the documented no-op — carried whole for wire fidelity
+  // though the replayer records nothing. The empty case first: a global-only
+  // barrier with no transitions, pinning the two zero counts and the flag.
+  {
+    name: 'PipelineBarrier',
+    buffers: [],
+    images: [],
+    global: true,
+  },
+  // And the populated case: one buffer barrier with a `Some` queue transfer, one
+  // image barrier over a non-default subresource range with distinct from/to
+  // states. `global` is `false` so both flag values appear.
+  {
+    name: 'PipelineBarrier',
+    buffers: [
+      {
+        buffer: handle(190, 191),
+        from: 'ShaderWrite',
+        to: 'TransferSrc',
+        queueTransfer: { from: handle(192, 193), to: handle(194, 195) },
+      },
+    ],
+    images: [
+      {
+        image: handle(196, 197),
+        range: {
+          aspect: ['COLOR'],
+          baseMip: 1,
+          mipCount: 2,
+          baseLayer: 3,
+          layerCount: 4,
+        },
+        from: 'Undefined',
+        to: 'ColorAttachment',
+        queueTransfer: null,
+      },
+    ],
+    global: false,
+  },
   // Both feature words are `BigInt`, and the required one carries
   // `TIMELINE_SEMAPHORE` (1 << 9) — a flag WebGPU cannot satisfy, which crosses
   // anyway because the replayer is what refuses it.

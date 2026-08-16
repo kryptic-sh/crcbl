@@ -115,6 +115,9 @@ const FINISH_TAG = 0x47;
 const BEGIN_COMPUTE_PASS_TAG = 0x48;
 const END_COMPUTE_PASS_TAG = 0x49;
 const BIND_COMPUTE_PIPELINE_TAG = 0x4a;
+// The documented no-op: it carries the barrier lists for wire fidelity, but the
+// replayer records nothing because WebGPU tracks resource state itself.
+const PIPELINE_BARRIER_TAG = 0x4b;
 const DRAW_TAG = 0x60;
 // The dispatch family: the workgroup counts for a compute dispatch.
 const DISPATCH_TAG = 0x70;
@@ -148,6 +151,31 @@ const PRESENT = 1;
 
 /** `tag::LOAD_OP_*`. */
 const LOAD_OP = ['Load', 'Clear', 'DontCare'];
+
+/**
+ * `tag::RESOURCE_STATE_*`.
+ *
+ * A barrier's `from`/`to` states. The whole vocabulary crosses even though a
+ * `PipelineBarrier` is a no-op on WebGPU — the replayer records nothing, so a
+ * state folded into a neighbour here would be a wire infidelity nothing
+ * downstream could catch, and the `undefined` this table answers for an
+ * unclaimed code is the only place it surfaces.
+ */
+const RESOURCE_STATE = [
+  'Undefined',
+  'ShaderRead',
+  'ShaderWrite',
+  'ShaderReadWrite',
+  'ColorAttachment',
+  'DepthStencilWrite',
+  'DepthStencilRead',
+  'TransferSrc',
+  'TransferDst',
+  'IndirectArgument',
+  'IndexBuffer',
+  'HostRead',
+  'Present',
+];
 
 /** `tag::STORE_OP_*`. */
 const STORE_OP = ['Store', 'Discard'];
@@ -1025,6 +1053,57 @@ class ByteReader {
     return {
       semaphore: this.readHandle(field),
       value: this.readU64(),
+    };
+  }
+
+  /**
+   * A barrier's optional `crcbl_hal::QueueTransfer`: a presence byte, then the
+   * releasing and acquiring queue handles if present. `null` when absent. WebGPU
+   * has one implicit queue, so the replayer has none to honour a transfer with —
+   * but it decodes whole so the round trip holds.
+   *
+   * @returns {{ from: { index: number, generation: number },
+   *   to: { index: number, generation: number } } | null}
+   */
+  readQueueTransfer() {
+    if (!this.readPresent('QueueTransfer')) return null;
+    return {
+      from: this.readHandle('QueueTransfer::from'),
+      to: this.readHandle('QueueTransfer::to'),
+    };
+  }
+
+  /**
+   * A `crcbl_hal::BufferBarrier`: the buffer, its `from`/`to` states, then the
+   * optional queue transfer. Carried whole though a `PipelineBarrier` is a
+   * no-op — see {@link RESOURCE_STATE}.
+   *
+   * @returns {{ buffer: { index: number, generation: number }, from: string,
+   *   to: string, queueTransfer: object|null }}
+   */
+  readBufferBarrier() {
+    return {
+      buffer: this.readHandle('BufferBarrier::buffer'),
+      from: this.readEnum('BufferBarrier::from', RESOURCE_STATE),
+      to: this.readEnum('BufferBarrier::to', RESOURCE_STATE),
+      queueTransfer: this.readQueueTransfer(),
+    };
+  }
+
+  /**
+   * A `crcbl_hal::ImageBarrier`: the image, the subresource range it covers, its
+   * `from`/`to` states, then the optional queue transfer.
+   *
+   * @returns {{ image: { index: number, generation: number }, range: object,
+   *   from: string, to: string, queueTransfer: object|null }}
+   */
+  readImageBarrier() {
+    return {
+      image: this.readHandle('ImageBarrier::image'),
+      range: this.readSubresourceRange(),
+      from: this.readEnum('ImageBarrier::from', RESOURCE_STATE),
+      to: this.readEnum('ImageBarrier::to', RESOURCE_STATE),
+      queueTransfer: this.readQueueTransfer(),
     };
   }
 
@@ -2004,6 +2083,24 @@ function decodeCommand(r) {
       const size = r.readU64();
       const value = r.readU32();
       return { name: 'FillBuffer', buffer, offset, size, value };
+    }
+    case PIPELINE_BARRIER_TAG: {
+      // The `Barriers` batch: the counted buffer list, the counted image list,
+      // then the `global` flag. Decoded whole for wire fidelity — the replayer
+      // records nothing, because WebGPU tracks resource state itself. See
+      // `gpu-replay.js`.
+      const bufferCount = r.readCount('Barriers::buffers');
+      const buffers = [];
+      for (let i = 0; i < bufferCount; i += 1) {
+        buffers.push(r.readBufferBarrier());
+      }
+      const imageCount = r.readCount('Barriers::images');
+      const images = [];
+      for (let i = 0; i < imageCount; i += 1) {
+        images.push(r.readImageBarrier());
+      }
+      const global = r.readPresent('Barriers::global');
+      return { name: 'PipelineBarrier', buffers, images, global };
     }
     case DRAW_TAG: {
       // Spelled out rather than built inline: the two halves of each range are

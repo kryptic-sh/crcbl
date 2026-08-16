@@ -2780,6 +2780,9 @@ export class Replayer {
         case 'FillBuffer':
           this.#fillBuffer(sequence, command);
           break;
+        case 'PipelineBarrier':
+          this.#pipelineBarrier(sequence, command);
+          break;
         case 'Finish':
           this.#finish(sequence, command);
           break;
@@ -5092,6 +5095,30 @@ export class Replayer {
       Number(copy.dstOffset),
       Number(copy.size)
     );
+  }
+
+  /**
+   * The documented no-op: a pipeline barrier records NOTHING on the encoder.
+   *
+   * THIS IS THE ONE ARM WHOSE CORRECTNESS IS "DOES NOTHING, ON PURPOSE." WebGPU
+   * serialises its single implicit queue and inserts every hazard barrier itself
+   * — the same reason a `Submit`'s `waits`/`signals` have no home (see
+   * {@link Replayer#submit}) — so there is no transition for this to record and
+   * nothing for a `commandEncoder` to do with the barrier lists. wasm still sends
+   * them for wire fidelity (the barrier is a faithful transposition of the HAL
+   * call), and {@link decodeCommand} decodes them whole, but replay ends here.
+   *
+   * Unlike the copies and the fill, this does NOT route a missing encoder to the
+   * error queue: a barrier with no encoder open is still nothing to do, so there
+   * is no failure to report. It is recognised — reaching this method rather than
+   * the dispatch `default` throw is the whole point — and it returns having
+   * touched neither {@link Replayer#currentEncoder} nor the device.
+   *
+   * @param {bigint} _sequence
+   * @param {{ buffers: object[], images: object[], global: boolean }} _command
+   */
+  #pipelineBarrier(_sequence, _command) {
+    // Intentionally empty — see the doc comment above.
   }
 
   /**

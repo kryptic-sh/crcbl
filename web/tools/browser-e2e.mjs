@@ -4743,13 +4743,17 @@ try {
 
   // **THE COPY-CHAIN GATE, AND THE FIRST THAT PROVES A BUFFER→IMAGE AND AN
   // IMAGE→IMAGE COPY RAN.** wasm records a dispatch that fills a storage buffer
-  // with red (`0xFF0000FF` per texel), a `copyBufferToTexture` into a 64×64
-  // texture, a `copyTextureToTexture` to a second texture, a `copyTextureToBuffer`
-  // out to a host buffer, a submit and a readback; the demo's loop replays it; and
-  // the 16384 bytes that come back are asserted red in every texel. A fresh
-  // WebGPU texture is zero-initialised, so a stub that skips EITHER copy reads
-  // back zeros — only both copies running carries the red all the way out.
-  // `gpu-replay.mjs` cannot reach this: only a real device runs the copies.
+  // with red (`0xFF0000FF` per texel), a `pipeline_barrier` transitioning that
+  // buffer from `ShaderWrite` to `TransferSrc`, a `copyBufferToTexture` into a
+  // 64×64 texture, a `copyTextureToTexture` to a second texture, a
+  // `copyTextureToBuffer` out to a host buffer, a submit and a readback; the
+  // demo's loop replays it; and the 16384 bytes that come back are asserted red
+  // in every texel. A fresh WebGPU texture is zero-initialised, so a stub that
+  // skips EITHER copy reads back zeros — only both copies running carries the red
+  // all the way out. The `pipeline_barrier` is the documented no-op: it sits
+  // mid-frame between the dispatch and the first copy, and the red readback ALSO
+  // proves it did not disturb replay. `gpu-replay.mjs` cannot reach the copies:
+  // only a real device runs them.
   group('V — a buffer→image→image→buffer copy chain is read back red');
 
   const PROBE_COPYCHAIN_TEXELS = 64 * 64;
@@ -4807,7 +4811,7 @@ try {
     : null;
   check(
     'V',
-    'wasm encoded the copy-chain setup frame — dispatch, buffer→image, image→image, image→buffer, request',
+    'wasm encoded the copy-chain setup frame — dispatch, pipeline_barrier, buffer→image, image→image, image→buffer, request',
     copyChainStart?.started === true,
     copyChainStart?.started
       ? 'the copy-chain frame is on the stream'
@@ -4827,6 +4831,21 @@ try {
           `first wrong at byte ${copyChain.firstWrong} (sample ${JSON.stringify(copyChain.sample)} ` +
           `against [${PROBE_COPYCHAIN_PATTERN_BYTES.join(', ')}])` +
           `${copyChain.error ? ` — ${copyChain.error}` : ''}`
+  );
+  // The same readback, read for what it says about the no-op: the frame carries a
+  // `pipeline_barrier` between the dispatch and the first copy, and a red result
+  // means replay recognised it, recorded nothing, and carried on — a barrier that
+  // threw or corrupted the encoder would leave this red-everywhere check failing
+  // above. That it holds is the browser-frame evidence the barrier is inert.
+  check(
+    'V',
+    'the pipeline_barrier mid-frame did not disturb replay — the barriered frame is still red',
+    copyChain?.done === true &&
+      copyChain.allMatch === true &&
+      copyChain.len === PROBE_COPYCHAIN_TEXELS * 4,
+    copyChain?.allMatch === true
+      ? 'the frame with a pipeline_barrier in it read back red in every texel — the no-op is inert'
+      : 'the barriered frame did not come back red — see the copy-chain check above for the bytes'
   );
 
   // **THE FILL GATE, AND THE FIRST THAT PROVES `clearBuffer` ZEROES EXACTLY ITS

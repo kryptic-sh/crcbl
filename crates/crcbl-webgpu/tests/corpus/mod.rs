@@ -12,18 +12,19 @@
 
 use crcbl_core::Handle;
 use crcbl_hal::{
-    AdapterId, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    BindingFlags, BindingKind, BindingResource, BlendFactor, BlendOp, BlendState, BufferCopy,
-    BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment, ColorTargetState,
-    ColorWrites, CommandEncoderDesc, CompareOp, ComputePassDesc, ComputePipelineDesc, CullMode,
-    DepthBias, DepthStencilAttachment, DepthStencilState, DeviceDesc, Extent3d, Features,
-    FilterMode, Format, FrontFace, GraphicsPipelineDesc, ImageAspect, ImageCopy, ImageDesc,
-    ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewType, LoadOp, MemoryLocation, MultisampleState, Offset3d, PipelineLayoutDesc,
-    PolygonMode, PrimitiveState, PrimitiveTopology, PushConstantRange, ReadbackDesc, Rect2d,
-    RenderPassDesc, SampleType, SamplerAddressMode, SamplerDesc, SemaphoreSignal, SemaphoreWait,
-    ShaderEntry, ShaderModuleDesc, ShaderStages, StencilFaceState, StencilOp, StencilState,
-    StoreOp, SubmitInfo, depth,
+    AdapterId, Barriers, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
+    BindingFlags, BindingKind, BindingResource, BlendFactor, BlendOp, BlendState, BufferBarrier,
+    BufferCopy, BufferDesc, BufferImageCopy, BufferUsage, ClearValue, ColorAttachment,
+    ColorTargetState, ColorWrites, CommandEncoderDesc, CompareOp, ComputePassDesc,
+    ComputePipelineDesc, CullMode, DepthBias, DepthStencilAttachment, DepthStencilState,
+    DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace, GraphicsPipelineDesc,
+    ImageAspect, ImageBarrier, ImageCopy, ImageDesc, ImageSubresourceLayers, ImageSubresourceRange,
+    ImageType, ImageUsage, ImageViewDesc, ImageViewType, LoadOp, MemoryLocation, MultisampleState,
+    Offset3d, PipelineLayoutDesc, PolygonMode, PrimitiveState, PrimitiveTopology,
+    PushConstantRange, QueueTransfer, ReadbackDesc, Rect2d, RenderPassDesc, ResourceState,
+    SampleType, SamplerAddressMode, SamplerDesc, SemaphoreSignal, SemaphoreWait, ShaderEntry,
+    ShaderModuleDesc, ShaderStages, StencilFaceState, StencilOp, StencilState, StoreOp, SubmitInfo,
+    depth,
 };
 use crcbl_webgpu::{Command, StreamWriter};
 
@@ -1059,6 +1060,46 @@ pub fn every_command() -> Vec<Command> {
             size: 256,
             value: 0xDEAD_BEEF,
         },
+        // The pipeline barrier, the documented no-op — carried whole for wire
+        // fidelity though the replayer records nothing. The empty case first: a
+        // global-only barrier with no buffer or image transitions, which pins the
+        // two zero counts and the `global` flag on their own.
+        Command::PipelineBarrier {
+            buffers: Vec::new(),
+            images: Vec::new(),
+            global: true,
+        },
+        // And the populated case: one buffer barrier carrying a `Some`
+        // queue-transfer (the acquire/release WebGPU has no queue to honour), and
+        // one image barrier over a NON-default subresource range with DISTINCT
+        // `from`/`to` states, so a transposition among the states, handles or
+        // range fields is visible. `global` is `false` here so both flag values
+        // appear in the corpus.
+        Command::PipelineBarrier {
+            buffers: vec![BufferBarrier {
+                buffer: handle(190, 191),
+                from: ResourceState::ShaderWrite,
+                to: ResourceState::TransferSrc,
+                queue_transfer: Some(QueueTransfer {
+                    from: handle(192, 193),
+                    to: handle(194, 195),
+                }),
+            }],
+            images: vec![ImageBarrier {
+                image: handle(196, 197),
+                range: ImageSubresourceRange {
+                    aspect: ImageAspect::COLOR,
+                    base_mip: 1,
+                    mip_count: 2,
+                    base_layer: 3,
+                    layer_count: 4,
+                },
+                from: ResourceState::Undefined,
+                to: ResourceState::ColorAttachment,
+                queue_transfer: None,
+            }],
+            global: false,
+        },
         // **Every bit of both feature words crosses**, including the ones no
         // browser can satisfy: the replayer is what refuses them, and it can
         // only refuse what it was told. `TIMELINE_SEMAPHORE` is required here
@@ -1449,6 +1490,15 @@ pub fn encode(stream: &mut StreamWriter, command: &Command) -> u64 {
             size,
             value,
         } => stream.fill_buffer(*buffer, *offset, *size, *value),
+        Command::PipelineBarrier {
+            buffers,
+            images,
+            global,
+        } => stream.pipeline_barrier(&Barriers {
+            buffers,
+            images,
+            global: *global,
+        }),
         Command::EnumerateAdapters => stream.enumerate_adapters(),
         Command::SurfaceCaps => stream.surface_caps(),
         Command::CreateCommandEncoder { label, queue } => {

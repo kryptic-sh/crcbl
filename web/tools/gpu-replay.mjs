@@ -1775,6 +1775,9 @@ async function main() {
       // or draw with no pass open, a poll of a readback nothing requested) route
       // to the error queue, which is not a throw. `PushConstants` is refused on
       // the error queue too — WebGPU has none — rather than thrown.
+      // `PipelineBarrier` is the documented no-op: recognised, and it neither
+      // throws nor touches the encoder, error queue, or device — its own gate
+      // below observes that.
       'CreateCommandEncoder',
       'BeginRenderPass',
       'EndRenderPass',
@@ -1791,6 +1794,7 @@ async function main() {
       'CopyBufferToImage',
       'CopyImageToImage',
       'FillBuffer',
+      'PipelineBarrier',
       'Finish',
       'Submit',
       'RequestReadback',
@@ -6149,6 +6153,104 @@ async function main() {
     check(
       error !== null && error.includes('80.1'),
       `a fill of an unresolvable buffer names it on the error queue (${JSON.stringify(error)})`
+    );
+  }
+
+  // ---- the pipeline barrier: the documented no-op --------------------------
+  //
+  // `PipelineBarrier` is recognised (not the dispatch `default` throw) and does
+  // NOTHING: WebGPU tracks resource state itself, so there is no transition for
+  // the replayer to record. The evidence for a no-op is negative — no method
+  // reaches the encoder or its passes, no reply is queued, and no line lands on
+  // the device's error queue — so that is what these two gates read back. The
+  // populated barrier carries a non-empty buffer AND image list (with a `Some`
+  // queue transfer) precisely so a replay that quietly acted on them would show;
+  // the empty/global one pins the other shape.
+  {
+    // **A populated barrier, mid-frame after an encoder is open, touches
+    // nothing.** The encoder's every spy array stays empty, so no `copy*`,
+    // `clearBuffer`, `beginRenderPass` or `beginComputePass` was called; no reply
+    // is in flight and no error is queued; and the replay did not throw.
+    const { replayer, device } = await readyWithDevice();
+    replayer.replay(frameOf(encoderCommand, 700n));
+    let threw = null;
+    try {
+      replayer.replay(
+        frameOf(
+          {
+            name: 'PipelineBarrier',
+            buffers: [
+              {
+                buffer: handle(80, 1),
+                from: 'ShaderWrite',
+                to: 'TransferSrc',
+                queueTransfer: { from: handle(82, 1), to: handle(83, 1) },
+              },
+            ],
+            images: [
+              {
+                image: handle(90, 1),
+                range: {
+                  aspect: ['COLOR'],
+                  baseMip: 1,
+                  mipCount: 2,
+                  baseLayer: 3,
+                  layerCount: 4,
+                },
+                from: 'Undefined',
+                to: 'ColorAttachment',
+                queueTransfer: null,
+              },
+            ],
+            global: false,
+          },
+          701n
+        )
+      );
+    } catch (caught) {
+      threw = caught;
+    }
+    const encoder = device.createdEncoders.at(-1);
+    const untouched =
+      encoder.beganPasses.length === 0 &&
+      encoder.beganComputePasses.length === 0 &&
+      encoder.bufferCopies.length === 0 &&
+      encoder.bufferToImageCopies.length === 0 &&
+      encoder.imageCopies.length === 0 &&
+      encoder.bufferFills.length === 0;
+    check(
+      threw === null &&
+        untouched &&
+        !replayer.hasReplies &&
+        replayer.inFlight === 0 &&
+        replayer.pendingErrors === 0 &&
+        replayer.takeError() === null,
+      `a populated pipeline barrier records nothing on the encoder, queues no reply, and reports no error (threw ${String(threw)}, errors ${replayer.pendingErrors})`
+    );
+  }
+  {
+    // **A global-only barrier with empty lists is the same no-op**, exercised
+    // even with no encoder open — a barrier with nothing to record is still
+    // nothing to do, so it does not reach the error queue the copies would.
+    const { replayer } = await readyWithDevice();
+    let threw = null;
+    try {
+      replayer.replay(
+        frameOf(
+          { name: 'PipelineBarrier', buffers: [], images: [], global: true },
+          700n
+        )
+      );
+    } catch (caught) {
+      threw = caught;
+    }
+    check(
+      threw === null &&
+        !replayer.hasReplies &&
+        replayer.inFlight === 0 &&
+        replayer.pendingErrors === 0 &&
+        replayer.takeError() === null,
+      `a global-only pipeline barrier is a silent no-op with no encoder open (threw ${String(threw)}, errors ${replayer.pendingErrors})`
     );
   }
 

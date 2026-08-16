@@ -19,13 +19,14 @@
 
 use crcbl_hal::{
     AdapterId, BindGroupEntry, BindGroupLayoutEntry, BindingFlags, BindingKind, BindingResource,
-    BlendFactor, BlendOp, BlendState, BufferCopy, BufferImageCopy, BufferUsage, ClearValue,
-    ColorAttachment, ColorTargetState, ColorWrites, CompareOp, CullMode, DepthBias,
+    BlendFactor, BlendOp, BlendState, BufferBarrier, BufferCopy, BufferImageCopy, BufferUsage,
+    ClearValue, ColorAttachment, ColorTargetState, ColorWrites, CompareOp, CullMode, DepthBias,
     DepthStencilAttachment, DepthStencilState, Extent3d, FilterMode, Format, FrontFace,
-    ImageAspect, ImageCopy, ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
-    ImageViewType, LoadOp, MultisampleState, Offset3d, PolygonMode, PrimitiveState,
-    PrimitiveTopology, PushConstantRange, Rect2d, SampleType, SamplerAddressMode, SemaphoreSignal,
-    SemaphoreWait, ShaderStages, StencilFaceState, StencilOp, StencilState, StoreOp,
+    ImageAspect, ImageBarrier, ImageCopy, ImageSubresourceLayers, ImageSubresourceRange, ImageType,
+    ImageUsage, ImageViewType, LoadOp, MultisampleState, Offset3d, PolygonMode, PrimitiveState,
+    PrimitiveTopology, PushConstantRange, QueueTransfer, Rect2d, ResourceState, SampleType,
+    SamplerAddressMode, SemaphoreSignal, SemaphoreWait, ShaderStages, StencilFaceState, StencilOp,
+    StencilState, StoreOp,
 };
 
 use crate::bytes::{ByteReader, DecodeError};
@@ -44,6 +45,50 @@ impl ByteReader<'_> {
         tag::load_op_from_code(code).ok_or(DecodeError::InvalidEnum {
             field,
             code: code.into(),
+        })
+    }
+
+    fn read_resource_state(&mut self, field: &'static str) -> Result<ResourceState, DecodeError> {
+        let code = self.read_u8()?;
+        tag::resource_state_from_code(code).ok_or(DecodeError::InvalidEnum {
+            field,
+            code: code.into(),
+        })
+    }
+
+    /// A barrier's optional [`QueueTransfer`]: a presence byte, then the releasing
+    /// and acquiring queue handles if present.
+    fn read_queue_transfer(&mut self) -> Result<Option<QueueTransfer>, DecodeError> {
+        if self.read_present("QueueTransfer")? {
+            Ok(Some(QueueTransfer {
+                from: self.read_handle("QueueTransfer::from")?,
+                to: self.read_handle("QueueTransfer::to")?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// One [`BufferBarrier`]: the buffer, its `from`/`to` states, then the
+    /// optional queue transfer.
+    fn read_buffer_barrier(&mut self) -> Result<BufferBarrier, DecodeError> {
+        Ok(BufferBarrier {
+            buffer: self.read_handle("BufferBarrier::buffer")?,
+            from: self.read_resource_state("BufferBarrier::from")?,
+            to: self.read_resource_state("BufferBarrier::to")?,
+            queue_transfer: self.read_queue_transfer()?,
+        })
+    }
+
+    /// One [`ImageBarrier`]: the image, its subresource range, its `from`/`to`
+    /// states, then the optional queue transfer.
+    fn read_image_barrier(&mut self) -> Result<ImageBarrier, DecodeError> {
+        Ok(ImageBarrier {
+            image: self.read_handle("ImageBarrier::image")?,
+            range: self.read_subresource_range()?,
+            from: self.read_resource_state("ImageBarrier::from")?,
+            to: self.read_resource_state("ImageBarrier::to")?,
+            queue_transfer: self.read_queue_transfer()?,
         })
     }
 
@@ -1194,6 +1239,29 @@ impl<'a> StreamReader<'a> {
                     offset,
                     size,
                     value,
+                })
+            }
+            tag::PIPELINE_BARRIER_TAG => {
+                // The `Barriers` batch: the counted buffer list, the counted
+                // image list, then the `global` flag. Symmetric with
+                // `StreamWriter::pipeline_barrier`; the replayer does nothing with
+                // it, but it decodes whole so it round-trips. See
+                // `Command::PipelineBarrier`.
+                let buffer_count = r.read_count("Barriers::buffers")?;
+                let mut buffers = Vec::with_capacity(buffer_count);
+                for _ in 0..buffer_count {
+                    buffers.push(r.read_buffer_barrier()?);
+                }
+                let image_count = r.read_count("Barriers::images")?;
+                let mut images = Vec::with_capacity(image_count);
+                for _ in 0..image_count {
+                    images.push(r.read_image_barrier()?);
+                }
+                let global = r.read_bool("Barriers::global")?;
+                Ok(Command::PipelineBarrier {
+                    buffers,
+                    images,
+                    global,
                 })
             }
             tag::FINISH_TAG => Ok(Command::Finish {

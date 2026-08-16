@@ -3,17 +3,17 @@
 use core::ops::Range;
 
 use crcbl_hal::{
-    BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,
-    BindGroupLayoutHandle, BindingKind, BindingResource, BlendState, BufferCopy, BufferDesc,
-    BufferHandle, BufferImageCopy, ClearValue, ColorAttachment, ColorTargetState,
-    CommandBufferHandle, CommandEncoderDesc, ComputePassDesc, ComputePipelineDesc,
-    ComputePipelineHandle, DepthStencilAttachment, DepthStencilState, DeviceDesc, Extent3d,
-    GraphicsPipelineDesc, GraphicsPipelineHandle, ImageCopy, ImageDesc, ImageHandle,
-    ImageSubresourceLayers, ImageSubresourceRange, ImageViewDesc, ImageViewHandle,
-    MultisampleState, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PrimitiveState,
-    ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, SamplerDesc, SamplerHandle,
-    SemaphoreSignal, SemaphoreWait, ShaderModuleDesc, ShaderModuleHandle, ShaderStages,
-    StencilFaceState, SubmitInfo, SurfaceHandle,
+    Barriers, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
+    BindGroupLayoutEntry, BindGroupLayoutHandle, BindingKind, BindingResource, BlendState,
+    BufferBarrier, BufferCopy, BufferDesc, BufferHandle, BufferImageCopy, ClearValue,
+    ColorAttachment, ColorTargetState, CommandBufferHandle, CommandEncoderDesc, ComputePassDesc,
+    ComputePipelineDesc, ComputePipelineHandle, DepthStencilAttachment, DepthStencilState,
+    DeviceDesc, Extent3d, GraphicsPipelineDesc, GraphicsPipelineHandle, ImageBarrier, ImageCopy,
+    ImageDesc, ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageViewDesc,
+    ImageViewHandle, MultisampleState, Offset3d, PipelineLayoutDesc, PipelineLayoutHandle,
+    PrimitiveState, QueueTransfer, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc,
+    SamplerDesc, SamplerHandle, SemaphoreSignal, SemaphoreWait, ShaderModuleDesc,
+    ShaderModuleHandle, ShaderStages, StencilFaceState, SubmitInfo, SurfaceHandle,
 };
 
 use crate::bytes::ByteWriter;
@@ -93,6 +93,44 @@ impl ByteWriter {
     fn put_semaphore_signal(&mut self, signal: SemaphoreSignal) {
         self.put_handle(signal.semaphore);
         self.put_u64(signal.value);
+    }
+
+    /// A barrier's optional [`QueueTransfer`]: a presence byte, then the
+    /// releasing and acquiring queue handles if present. The house rule for an
+    /// optional field that is not a handle — a `Some` names a queue-family
+    /// transfer WebGPU has no queue to honour, but it crosses whole so the batch
+    /// round-trips, exactly as a [`ReadbackDesc::after`](crcbl_hal::ReadbackDesc::after)
+    /// semaphore does.
+    fn put_queue_transfer(&mut self, transfer: Option<QueueTransfer>) {
+        match transfer {
+            None => self.put_u8(tag::ABSENT),
+            Some(transfer) => {
+                self.put_u8(tag::PRESENT);
+                self.put_handle(transfer.from);
+                self.put_handle(transfer.to);
+            }
+        }
+    }
+
+    /// One [`BufferBarrier`]: the buffer, its `from`/`to` states as codes, then
+    /// the optional queue transfer.
+    fn put_buffer_barrier(&mut self, barrier: &BufferBarrier) {
+        self.put_handle(barrier.buffer);
+        self.put_u8(tag::resource_state_code(barrier.from));
+        self.put_u8(tag::resource_state_code(barrier.to));
+        self.put_queue_transfer(barrier.queue_transfer);
+    }
+
+    /// One [`ImageBarrier`]: the image, the subresource range it covers, its
+    /// `from`/`to` states as codes, then the optional queue transfer. The range
+    /// rides the same [`put_subresource_range`](Self::put_subresource_range) every
+    /// image command on this stream uses.
+    fn put_image_barrier(&mut self, barrier: &ImageBarrier) {
+        self.put_handle(barrier.image);
+        self.put_subresource_range(barrier.range);
+        self.put_u8(tag::resource_state_code(barrier.from));
+        self.put_u8(tag::resource_state_code(barrier.to));
+        self.put_queue_transfer(barrier.queue_transfer);
     }
 
     fn put_color_attachment(&mut self, attachment: &ColorAttachment) {
@@ -1239,6 +1277,29 @@ impl StreamWriter {
         self.bytes.put_u64(offset);
         self.bytes.put_u64(size);
         self.bytes.put_u32(value);
+        sequence
+    }
+
+    /// [`pipeline_barrier`](crcbl_hal::CommandEncoder::pipeline_barrier), on the
+    /// implicit-current encoder — the documented no-op.
+    ///
+    /// The whole [`Barriers`] batch crosses for wire fidelity: the counted
+    /// buffer and image lists, each element with its `from`/`to` states and its
+    /// optional queue transfer, then the `global` flag. WebGPU tracks resource
+    /// state itself, so the replayer records nothing — but a barrier is a faithful
+    /// transposition, so it must carry what it was told rather than resolve it
+    /// away. See [`Command::PipelineBarrier`](crate::Command::PipelineBarrier).
+    pub fn pipeline_barrier(&mut self, barriers: &Barriers<'_>) -> u64 {
+        let sequence = self.push_tag(tag::PIPELINE_BARRIER_TAG);
+        self.bytes.put_count(barriers.buffers.len());
+        for barrier in barriers.buffers {
+            self.bytes.put_buffer_barrier(barrier);
+        }
+        self.bytes.put_count(barriers.images.len());
+        for barrier in barriers.images {
+            self.bytes.put_image_barrier(barrier);
+        }
+        self.bytes.put_bool(barriers.global);
         sequence
     }
 

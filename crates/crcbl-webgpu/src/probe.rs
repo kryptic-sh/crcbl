@@ -308,19 +308,20 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crcbl_hal::{
-    AdapterId, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
+    AdapterId, Barriers, BindGroupDesc, BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc,
     BindGroupLayoutEntry, BindGroupLayoutHandle, BindingFlags, BindingKind, BindingResource,
-    BlendState, BufferCopy, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage, ClearValue,
-    ColorAttachment, ColorTargetState, ColorWrites, CommandBufferHandle, CommandEncoderDesc,
-    CompareOp, ComputePassDesc, ComputePipelineDesc, ComputePipelineHandle, CullMode, DepthBias,
-    DepthStencilState, DeviceDesc, Extent3d, Features, FilterMode, Format, FrontFace,
-    GraphicsPipelineDesc, GraphicsPipelineHandle, ImageAspect, ImageCopy, ImageDesc, ImageHandle,
-    ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage, ImageViewDesc,
-    ImageViewHandle, ImageViewType, LoadOp, MemoryLocation, MultisampleState, Offset3d,
-    PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PrimitiveState, PrimitiveTopology,
-    QueueHandle, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc, SampleType,
-    SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry, ShaderModuleDesc,
-    ShaderModuleHandle, ShaderStages, StoreOp, SubmitInfo, SurfaceCaps, SurfaceHandle,
+    BlendState, BufferBarrier, BufferCopy, BufferDesc, BufferHandle, BufferImageCopy, BufferUsage,
+    ClearValue, ColorAttachment, ColorTargetState, ColorWrites, CommandBufferHandle,
+    CommandEncoderDesc, CompareOp, ComputePassDesc, ComputePipelineDesc, ComputePipelineHandle,
+    CullMode, DepthBias, DepthStencilState, DeviceDesc, Extent3d, Features, FilterMode, Format,
+    FrontFace, GraphicsPipelineDesc, GraphicsPipelineHandle, ImageAspect, ImageCopy, ImageDesc,
+    ImageHandle, ImageSubresourceLayers, ImageSubresourceRange, ImageType, ImageUsage,
+    ImageViewDesc, ImageViewHandle, ImageViewType, LoadOp, MemoryLocation, MultisampleState,
+    Offset3d, PipelineLayoutDesc, PipelineLayoutHandle, PolygonMode, PrimitiveState,
+    PrimitiveTopology, QueueHandle, ReadbackDesc, ReadbackHandle, Rect2d, RenderPassDesc,
+    ResourceState, SampleType, SamplerAddressMode, SamplerDesc, SamplerHandle, ShaderEntry,
+    ShaderModuleDesc, ShaderModuleHandle, ShaderStages, StoreOp, SubmitInfo, SurfaceCaps,
+    SurfaceHandle,
 };
 
 use crate::device::DeviceProbe;
@@ -3784,8 +3785,9 @@ impl Probe {
     /// shape with three copies where that one has one. It records the two buffers,
     /// the two textures, the pipeline's four resources, a command encoder, a
     /// compute pass that binds, binds the storage group and dispatches
-    /// `64×1×1` (4096 invocations for the 4096 slots), the three copies, the
-    /// finish, the submit, and the `request_readback` under
+    /// `64×1×1` (4096 invocations for the 4096 slots), a `pipeline_barrier`
+    /// (the documented no-op) between the dispatch and the first copy, the three
+    /// copies, the finish, the submit, and the `request_readback` under
     /// [`PROBE_COPYCHAIN_READBACK`]. None is answered, so it is
     /// [`encode`](StreamChannel::encode); the poll is what is awaited.
     ///
@@ -3846,6 +3848,21 @@ impl Probe {
                 );
                 stream.dispatch(PROBE_COPYCHAIN_SIZE, 1, 1);
                 stream.end_compute_pass();
+                // The documented no-op, sitting at the natural seam: the storage
+                // buffer moves from the dispatch's `ShaderWrite` to the copy's
+                // `TransferSrc`. The replayer records nothing (WebGPU tracks state
+                // itself), so the readback still comes back red — which is what
+                // proves a barrier mid-frame does not disturb replay.
+                stream.pipeline_barrier(&Barriers {
+                    buffers: &[BufferBarrier {
+                        buffer: PROBE_COPYCHAIN_STORAGE_BUFFER,
+                        from: ResourceState::ShaderWrite,
+                        to: ResourceState::TransferSrc,
+                        queue_transfer: None,
+                    }],
+                    images: &[],
+                    global: false,
+                });
                 stream.copy_buffer_to_image(&probe_copychain_buffer_to_image());
                 stream.copy_image_to_image(&probe_copychain_image_to_image());
                 stream.copy_image_to_buffer(&probe_copychain_image_to_buffer());
@@ -6566,6 +6583,7 @@ mod tests {
                 "BindGroup",
                 "Dispatch",
                 "EndComputePass",
+                "PipelineBarrier",
                 "CopyBufferToImage",
                 "CopyImageToImage",
                 "CopyImageToBuffer",
@@ -6573,8 +6591,22 @@ mod tests {
                 "Submit",
                 "RequestReadback",
             ],
-            "the frame dispatches, then copies buffer→image→image→buffer and reads back"
+            "the frame dispatches, barriers the storage buffer, then copies \
+             buffer→image→image→buffer and reads back"
         );
+        // The no-op barrier sits at the seam between the dispatch (ShaderWrite)
+        // and the first copy (TransferSrc), carried whole though the replayer
+        // records nothing.
+        assert!(commands.contains(&Command::PipelineBarrier {
+            buffers: vec![BufferBarrier {
+                buffer: PROBE_COPYCHAIN_STORAGE_BUFFER,
+                from: ResourceState::ShaderWrite,
+                to: ResourceState::TransferSrc,
+                queue_transfer: None,
+            }],
+            images: Vec::new(),
+            global: false,
+        }));
         // The three copies, verbatim: the upload into the first texture, the
         // texture→texture copy, and the read-out into the host buffer.
         assert!(commands.contains(&Command::CopyBufferToImage {
